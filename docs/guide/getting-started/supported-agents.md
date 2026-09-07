@@ -15,6 +15,8 @@ Each agent integration intercepts CLI commands before execution and rewrites the
 
 All rewrite logic lives in the RTK binary (`rtk rewrite`). Agent hooks are thin delegates that parse the agent-specific JSON format and call `rtk rewrite` for the actual decision.
 
+`rtk rewrite` takes an optional `--host <HOST>` naming the agent whose permission rules apply (`claude`, `cursor`, `gemini`, `droid`, `vibe`, `openclaw`). It defaults to `claude`, so any hook that omits the flag behaves exactly as before. The flag must precede the command, as in `rtk rewrite --host openclaw git status`. Only OpenClaw currently passes it, because OpenClaw enforces its own exec policy on the rewritten command and an RTK-side prompt would be a second gate.
+
 ```
 Agent runs "cargo test"
   -> Hook intercepts (PreToolUse / plugin event)
@@ -156,7 +158,11 @@ Removes only the current or known historical stock OMP extension. If the file ha
 openclaw plugins install ./openclaw
 ```
 
-Plugin in the `openclaw/` directory. Uses the `before_tool_call` hook, delegates to `rtk rewrite`.
+Plugin in the `openclaw/` directory. Uses the `before_tool_call` hook, delegates to `rtk rewrite --host openclaw`.
+
+OpenClaw's exec policy is the sole authority over whether a rewritten command runs. `--host openclaw` tells RTK to decide only whether a command can be rewritten; `tools.exec.mode`, `security`, and `ask` decide whether it runs, and OpenClaw applies them after the hook returns. RTK reads no rule file for this host, so deny rules in `.claude/settings.json` do not apply to OpenClaw — put them in OpenClaw's own exec configuration instead. The plugin raises no approval prompt of its own; a deny verdict from RTK still blocks the tool call. See [#3908](https://github.com/rtk-ai/rtk/issues/3908).
+
+The plugin needs an rtk build that understands `rtk rewrite --host`. An older rtk absorbs the flag into the command string, matches nothing, and exits 1, so rewriting stops without blocking anything.
 
 ### Hermes
 

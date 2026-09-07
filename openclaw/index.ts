@@ -8,16 +8,36 @@
  * This plugin is a thin delegate — to add or change rules, edit the
  * Rust registry, not this file.
  *
- * Exit code protocol for `rtk rewrite`:
- *   0 + stdout  Allow — rewrite found, explicitly allowed → auto-apply
+ * Permission model: the plugin calls `rtk rewrite --host openclaw`, which tells
+ * RTK that OpenClaw is its own permission authority. RTK then decides whether a
+ * command can be *rewritten*; whether the result may *run* is decided by
+ * OpenClaw's own exec policy (`tools.exec.mode`, `security`, `ask`) after this
+ * hook returns. Without the flag RTK evaluates the command against Claude
+ * Code's settings files and asks for approval on anything they do not
+ * explicitly allow — a second gate, sourced from another agent's config, on a
+ * runtime that never opted into it. See issue #3908.
+ *
+ * Exit code protocol for `rtk rewrite --host openclaw`:
+ *   0 + stdout  Rewrite found → apply it, OpenClaw's exec policy decides the rest
  *   1           No RTK equivalent → pass through unchanged
  *   2           Deny rule matched → block the call
- *   3 + stdout  Ask rule matched (or default) → rewrite, require approval
+ *   3 + stdout  Not emitted for this host; treated as exit 0, matching the
+ *               convention the Pi, Hermes, and OpenCode adapters follow
+ *
+ * Requires an rtk build that understands `rtk rewrite --host` (see README).
+ * An older rtk swallows the flag into the command it is asked to rewrite, fails
+ * to match it, and exits 1 — rewriting stops and nothing is blocked or denied.
  *
  * See: src/hooks/rewrite_cmd.rs
  */
 
 import { execFileSync } from "node:child_process";
+
+/**
+ * Tells RTK that OpenClaw enforces its own exec policy on the rewritten
+ * command, so RTK must not add an approval gate of its own.
+ */
+const RTK_HOST = "openclaw";
 
 let rtkAvailable: boolean | null = null;
 
@@ -36,36 +56,35 @@ function checkRtk(): boolean {
  * Delegate to `rtk rewrite` and interpret the exit code.
  *
  * Returns a tuple `[rewritten, verdict?]`:
- *   [string]        — rewrite, auto-apply (exit 0)
- *   [string, "ask"] — rewrite, require user approval (exit 3)
+ *   [string]        — rewrite available, apply it (exit 0, or exit 3 from an
+ *                     rtk that still emits it)
  *   [null, "deny"]  — command matched a deny rule (exit 2)
  *   [null]          — no rewrite / passthrough (exit 1 or no change)
  */
-type RewriteVerdict = "ask" | "deny";
+type RewriteVerdict = "deny";
 
 function tryRewrite(
   command: string
 ): [string | null, RewriteVerdict?] {
   try {
-    const result = execFileSync("rtk", ["rewrite", command], {
+    const result = execFileSync("rtk", ["rewrite", "--host", RTK_HOST, command], {
       encoding: "utf-8",
       timeout: 2000,
     })
       .toString()
       .trim();
-    // Exit 0 — Allow: rewrite and auto-apply
+    // Exit 0 — rewrite available
     return [result && result !== command ? result : null];
   } catch (e: any) {
-    // Exit 3 — Ask: rewrite available but user must approve
-    if (e?.status === 3 && e.stdout) {
-      const result = e.stdout.toString().trim();
-      if (result && result !== command) return [result, "ask"];
-      // Exit 3 but no usable stdout — treat as passthrough
-      return [null];
-    }
     // Exit 2 — Deny: command matched a deny rule, block the call
     if (e?.status === 2) {
       return [null, "deny"];
+    }
+    // Exit 3 — an rtk that did not collapse ask/default for this host.
+    // Exit codes 0 and 3 both mean "rewrite"; the gate is OpenClaw's, not RTK's.
+    if (e?.status === 3 && e.stdout) {
+      const result = e.stdout.toString().trim();
+      return [result && result !== command ? result : null];
     }
     // Exit 1 or unknown — no rewrite, pass through
     return [null];
@@ -108,45 +127,14 @@ export default function register(api: any) {
       if (!rewritten) return;
 
       if (verbose) {
-        console.log(
-          `[rtk] ${command} -> ${rewritten}${verdict === "ask" ? " (approval required)" : ""}`
-        );
+        console.log(`[rtk] ${command} -> ${rewritten}`);
       }
 
-      const result: {
-        params: Record<string, unknown>;
-        requireApproval?: {
-          title: string;
-          description: string;
-          severity: "info";
-          timeoutBehavior: "deny";
-          allowedDecisions: Array<"allow-once" | "deny">;
-          onResolution?: (decision: string) => void;
-        };
-      } = {
+      // No `requireApproval`: OpenClaw's exec policy is the authority over
+      // whether the rewritten command runs, and it is applied after this hook.
+      return {
         params: { ...event.params, command: rewritten },
       };
-
-      // Exit 3 — Ask: rewrite but require user approval
-      if (verdict === "ask") {
-        result.requireApproval = {
-          title: "RTK rewrite suggestion",
-          description: `Rewrite: \`${command}\` → \`${rewritten}\``,
-          severity: "info",
-          timeoutBehavior: "deny",
-          // "allow-always" omitted: OpenClaw does not auto-persist approval
-          // for plugin hooks — see:
-          // https://docs.openclaw.ai/plugins/plugin-permission-requests#troubleshooting
-          allowedDecisions: ["allow-once", "deny"],
-          onResolution: (decision: string) => {
-            if (verbose) {
-              console.log(`[rtk] approval ${decision}: ${command} -> ${rewritten}`);
-            }
-          },
-        };
-      }
-
-      return result;
     },
     { priority: 10 }
   );

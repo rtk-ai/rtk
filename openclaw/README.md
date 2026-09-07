@@ -59,6 +59,29 @@ In `openclaw.json`:
 }
 ```
 
+## Permissions
+
+OpenClaw's own exec policy is the sole authority over whether a rewritten command runs.
+
+The plugin calls `rtk rewrite --host openclaw`. That flag tells RTK to decide only whether a command *can be rewritten* and to leave whether it *may run* to `tools.exec.mode`, `security`, and `ask`, which OpenClaw applies after the `before_tool_call` hook returns. RTK reads no rule file of its own for this host.
+
+Without the flag, RTK evaluates every command against Claude Code's four settings files (`.claude/settings.json`, `.claude/settings.local.json`, and the two under `~/.claude/`) and returns "ask" for anything they do not explicitly allow. The plugin turned that into a blocking approval prompt that denied on timeout, so a host running with `tools.exec.mode=full` still stopped on every rewritable command. See [#3908](https://github.com/rtk-ai/rtk/issues/3908).
+
+Two consequences of the change:
+
+- Deny rules in `.claude/settings.json` no longer apply to OpenClaw. If you were relying on them to gate OpenClaw, move the rules into OpenClaw's own exec configuration.
+- The plugin no longer raises an approval prompt of its own. Approval prompts you still see come from OpenClaw.
+
+RTK never rewrites a command containing a command substitution (`` ` ``, `$(...)`) or a redirect to a file, on any host. Those pass through unchanged.
+
+### Writing exec rules
+
+The plugin replaces `params.command` in `before_tool_call`, and OpenClaw folds hook adjustments into the parameters it passes to the exec tool. The tool therefore receives `rtk git push`, not `git push`. Write exec allow/deny rules against the `rtk` form. This was already true before the permission change.
+
+### rtk version requirement
+
+`rtk rewrite --host` needs an rtk build that carries [#3908](https://github.com/rtk-ai/rtk/issues/3908). On an older rtk, `--host` is absorbed into the command string RTK is asked to rewrite, nothing matches, and rtk exits 1: rewriting silently stops and no command is blocked or denied. If token savings disappear after installing this plugin, upgrade rtk.
+
 ## What gets rewritten
 
 Everything that `rtk rewrite` supports (30+ commands). See the [full command list](https://github.com/rtk-ai/rtk#commands).

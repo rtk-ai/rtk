@@ -903,6 +903,15 @@ enum Commands {
     /// Used by Claude Code, Gemini CLI, and other LLM hooks:
     ///   REWRITTEN=$(rtk rewrite "$CMD") || exit 0
     Rewrite {
+        /// Agent host whose permission rules decide the verdict (default: claude)
+        ///
+        /// One of: claude, cursor, gemini, droid, vibe, openclaw.
+        /// Must precede the command: `rtk rewrite --host openclaw git status`.
+        /// A host that enforces its own exec policy on the rewritten command
+        /// (openclaw) is never asked to prompt — it gets exit 0 where claude
+        /// gets exit 3. An unrecognized name warns and falls back to claude.
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
         /// Raw command to rewrite (e.g. "git status", "cargo test && git push")
         /// Accepts multiple args: `rtk rewrite ls -al` is equivalent to `rtk rewrite "ls -al"`
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -1703,6 +1712,31 @@ fn validate_pnpm_filters(filters: &[String], command: &PnpmCommands) -> Option<S
         }
         _ => None,
     }
+}
+
+/// Resolve `rtk rewrite --host <HOST>` to a [`hooks::permissions::Host`].
+///
+/// `None` (no flag) means `claude`, which is what every caller predating #3908
+/// gets, so their behavior is unchanged.
+///
+/// An unrecognized name warns and falls back to `claude` rather than aborting.
+/// Clap would signal a bad value by exiting 2, and the `rtk rewrite` exit-code
+/// protocol reserves 2 for "a deny rule matched" — the OpenClaw plugin blocks
+/// the tool call on it. A typo must not read as a deny, and falling back to the
+/// most restrictive host keeps the failure closed.
+fn resolve_rewrite_host(name: Option<&str>) -> hooks::permissions::Host {
+    use crate::hooks::permissions::{Host, HOST_NAMES};
+    let Some(name) = name else {
+        return Host::Claude;
+    };
+    Host::from_cli_name(name).unwrap_or_else(|| {
+        eprintln!(
+            "[rtk] warning: unknown --host '{}' (expected one of: {}); using claude permission rules",
+            name,
+            HOST_NAMES.join(", ")
+        );
+        Host::Claude
+    })
 }
 
 fn main() {
@@ -2703,9 +2737,9 @@ fn run_cli() -> Result<i32> {
             }
         },
 
-        Commands::Rewrite { args } => {
+        Commands::Rewrite { host, args } => {
             let cmd = args.join(" ");
-            hooks::rewrite_cmd::run(&cmd)?;
+            hooks::rewrite_cmd::run(&cmd, resolve_rewrite_host(host.as_deref()))?;
             0
         }
 
@@ -3690,7 +3724,7 @@ mod tests {
             );
             if let Ok(cli) = result {
                 match cli.command {
-                    Commands::Rewrite { ref args } => {
+                    Commands::Rewrite { ref args, .. } => {
                         assert!(args.len() >= 2, "rewrite args should capture all tokens");
                     }
                     _ => panic!("expected Rewrite command"),
@@ -3706,13 +3740,122 @@ mod tests {
         assert!(result.is_ok());
         if let Ok(cli) = result {
             match cli.command {
-                Commands::Rewrite { ref args } => {
+                Commands::Rewrite { ref args, .. } => {
                     assert_eq!(args.len(), 1);
                     assert_eq!(args[0], "git status");
                 }
                 _ => panic!("expected Rewrite command"),
             }
         }
+    }
+
+    /// #3908: `--host` is declared on a command whose positional is
+    /// `trailing_var_arg + allow_hyphen_values`. Clap still parses a known
+    /// option that appears before the first positional, exactly as it already
+    /// does for `rtk run -c` (see `test_run_command_with_dash_c`).
+    #[test]
+    fn test_rewrite_clap_host_option() {
+        let cases: Vec<(Vec<&str>, &str, Vec<&str>)> = vec![
+            (
+                vec!["rtk", "rewrite", "--host", "openclaw", "git", "status"],
+                "openclaw",
+                vec!["git", "status"],
+            ),
+            (
+                vec!["rtk", "rewrite", "--host=openclaw", "git status"],
+                "openclaw",
+                vec!["git status"],
+            ),
+            // The command keeps its own hyphenated flags after the option.
+            (
+                vec!["rtk", "rewrite", "--host", "openclaw", "ls", "-al"],
+                "openclaw",
+                vec!["ls", "-al"],
+            ),
+            (
+                vec!["rtk", "rewrite", "--host", "claude", "du", "-sh", "."],
+                "claude",
+                vec!["du", "-sh", "."],
+            ),
+        ];
+        for (argv, expected_host, expected_args) in &cases {
+            let cli = Cli::try_parse_from(argv.iter())
+                .unwrap_or_else(|e| panic!("{argv:?} should parse, got: {e}"));
+            match cli.command {
+                Commands::Rewrite { host, args } => {
+                    assert_eq!(host.as_deref(), Some(*expected_host), "argv: {argv:?}");
+                    assert_eq!(args, *expected_args, "argv: {argv:?}");
+                }
+                _ => panic!("expected Rewrite command"),
+            }
+        }
+    }
+
+    /// Backward compatibility: declaring `--host` must not change how the
+    /// pre-existing no-flag invocations parse. `rtk rewrite ls -al` is the case
+    /// KuSh reported and `head -50 file.txt` is the other hyphenated regression.
+    #[test]
+    fn test_rewrite_clap_without_host_is_unchanged() {
+        let cases: Vec<Vec<&str>> = vec![
+            vec!["rtk", "rewrite", "ls", "-al"],
+            vec!["rtk", "rewrite", "head", "-50", "file.txt"],
+            vec!["rtk", "rewrite", "du", "-sh", "."],
+            vec!["rtk", "rewrite", "git status"],
+        ];
+        for argv in &cases {
+            let cli = Cli::try_parse_from(argv.iter())
+                .unwrap_or_else(|e| panic!("{argv:?} should parse, got: {e}"));
+            match cli.command {
+                Commands::Rewrite { host, args } => {
+                    assert_eq!(host, None, "argv: {argv:?} defaults to claude");
+                    assert_eq!(args, argv[2..], "argv: {argv:?}");
+                }
+                _ => panic!("expected Rewrite command"),
+            }
+        }
+    }
+
+    /// `trailing_var_arg` swallows everything after the first positional, so a
+    /// `--host` written after the command is part of the command, not an option.
+    /// Pinned because it is the reason the flag is documented as leading — and
+    /// the reason a new plugin against an old rtk degrades to exit 1 passthrough
+    /// instead of erroring.
+    #[test]
+    fn test_rewrite_clap_host_after_command_is_part_of_the_command() {
+        let argv = ["rtk", "rewrite", "git", "status", "--host", "openclaw"];
+        let cli = Cli::try_parse_from(argv).unwrap();
+        match cli.command {
+            Commands::Rewrite { host, args } => {
+                assert_eq!(host, None);
+                assert_eq!(args, ["git", "status", "--host", "openclaw"]);
+            }
+            _ => panic!("expected Rewrite command"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_rewrite_host_defaults_to_claude() {
+        use crate::hooks::permissions::Host;
+        assert_eq!(resolve_rewrite_host(None), Host::Claude);
+    }
+
+    #[test]
+    fn test_resolve_rewrite_host_parses_known_names() {
+        use crate::hooks::permissions::Host;
+        assert_eq!(resolve_rewrite_host(Some("openclaw")), Host::OpenClaw);
+        assert_eq!(resolve_rewrite_host(Some("OpenClaw")), Host::OpenClaw);
+        assert_eq!(resolve_rewrite_host(Some("claude")), Host::Claude);
+        assert_eq!(resolve_rewrite_host(Some("vibe")), Host::Vibe);
+    }
+
+    /// An unknown host falls back to the most restrictive host instead of
+    /// aborting: a clap-level rejection exits 2, which the exit-code protocol
+    /// reserves for "deny rule matched".
+    #[test]
+    fn test_resolve_rewrite_host_unknown_falls_back_to_claude() {
+        use crate::hooks::permissions::Host;
+        assert_eq!(resolve_rewrite_host(Some("openclaw-typo")), Host::Claude);
+        assert_eq!(resolve_rewrite_host(Some("")), Host::Claude);
     }
 
     #[test]
