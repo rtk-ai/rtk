@@ -35,7 +35,7 @@ Three more details of the call:
 
 - **Read stdout only.** Stderr can carry advisory lines: a once-a-day "No hook installed" notice on machines where `~/.claude` exists without an RTK hook, or an `RTK_DISABLED=1 detected` message.
 - **Compare output with input.** A command that already starts with `rtk` comes back unchanged (still exit 3), and there is nothing to substitute.
-- **`RTK_DISABLED=1` is a prefix, not an environment variable.** `rtk rewrite "RTK_DISABLED=1 git status"` exits 1; setting the variable in the environment of the `rtk rewrite` process changes nothing. If you want an environment kill switch, check it in the host before calling rtk, as the Pi extension does.
+- **Check `RTK_DISABLED` yourself before spawning `rtk rewrite`**, as the Pi extension does. Releases up to 0.48.0 honor it only as an in-command prefix (`rtk rewrite "RTK_DISABLED=1 git status"` exits 1); [rtk-ai/rtk#3917](https://github.com/rtk-ai/rtk/pull/3917) makes `rtk rewrite` honor the exported variable as well.
 
 `rtk rewrite` does not run the command and does not open the savings database. Compound commands are handled (`cargo fmt --all && cargo test` becomes `rtk cargo fmt --all && rtk cargo test`); commands containing redirects or command substitution pass through with exit 1.
 
