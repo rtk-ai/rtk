@@ -7,7 +7,7 @@ sidebar:
 
 # Embedding rtk in your own agent harness
 
-This page is for people who build an agent harness and want the rewrite step inside their own bash tool, rather than installing one of the hooks listed in [Supported Agents](supported-agents.md). Every shipped hook is a thin delegate around one binary call, `rtk rewrite`, and that call is the whole integration surface. Everything below was verified against rtk 0.48.0.
+This page is for people who build an agent harness and want the rewrite step inside their own bash tool, rather than installing one of the hooks listed in [Supported Agents](supported-agents.md). The Pi, OpenCode and Hermes plugins and the legacy shell hooks are thin delegates around one binary call, `rtk rewrite`; the Rust-binary hooks that `rtk init` installs today (`rtk hook claude` and friends) run the same registry in-process. For a host of your own, `rtk rewrite` is the whole integration surface. Everything below was verified against rtk 0.48.0.
 
 ## What `rtk rewrite` returns
 
@@ -37,7 +37,7 @@ Three more details of the call:
 - **Compare output with input.** A command that already starts with `rtk` comes back unchanged (still exit 3), and there is nothing to substitute.
 - **Check `RTK_DISABLED` yourself before spawning `rtk rewrite`**, as the Pi extension does. Releases up to 0.48.0 honor it only as an in-command prefix (`rtk rewrite "RTK_DISABLED=1 git status"` exits 1); [rtk-ai/rtk#3917](https://github.com/rtk-ai/rtk/pull/3917) makes `rtk rewrite` honor the exported variable as well.
 
-`rtk rewrite` does not run the command and does not open the savings database. Compound commands are handled (`cargo fmt --all && cargo test` becomes `rtk cargo fmt --all && rtk cargo test`); commands containing redirects or command substitution pass through with exit 1.
+`rtk rewrite` does not run the command and does not open the savings database. Compound commands are handled (`cargo fmt --all && cargo test` becomes `rtk cargo fmt --all && rtk cargo test`); commands containing a file redirect (`> out.txt`) or command substitution pass through with exit 1; a file-descriptor duplication such as `2>&1` does not block the rewrite.
 
 ## Where the call goes
 
@@ -151,4 +151,4 @@ The figures from `rtk gain` measure bash output bytes, converted to tokens by es
 
 ## Verified against
 
-rtk 0.48.0 on macOS. Exit codes come from `src/hooks/rewrite_cmd.rs` and `hooks/pi/rtk.ts`, the `rtk gain` field names from `src/core/tracking.rs`, and every command above was run against that binary.
+rtk 0.48.0 on macOS. Exit codes come from `src/hooks/rewrite_cmd.rs` and `hooks/pi/rtk.ts`, the `rtk gain --format json` field names from `ExportSummary` in `src/analytics/gain.rs` (mirroring `GainSummary` in `src/core/tracking.rs`), and every command above was run against that binary.
