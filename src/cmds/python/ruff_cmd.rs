@@ -262,11 +262,32 @@ pub fn filter_ruff_format(output: &str) -> String {
     let mut files_to_format: Vec<String> = Vec::new();
     let mut files_checked = 0;
 
+    // ruff >= 0.16 splits a `format --check` finding across two lines:
+    //   unformatted: File would be reformatted
+    //    --> path/to/file.py:2:1
+    // with the path on the line after the marker. Track that pairing.
+    let mut after_unformatted = false;
+
     for line in output.lines() {
         let trimmed = line.trim();
         let lower = trimmed.to_lowercase();
 
-        // Count "would reformat" lines (check mode) - case insensitive
+        // New ruff (>= 0.16) per-file marker; the path follows on the `-->` line.
+        if lower.contains("unformatted:") {
+            after_unformatted = true;
+        } else if after_unformatted {
+            if let Some(rest) = trimmed.strip_prefix("-->") {
+                // "path/to/file.py:2:1" — keep the path, drop the location.
+                if let Some(path) = rest.trim().rsplitn(3, ':').last() {
+                    if !path.is_empty() {
+                        files_to_format.push(path.trim().to_string());
+                    }
+                }
+            }
+            after_unformatted = false;
+        }
+
+        // Pre-0.12 ruff: "Would reformat: path/to/file.py" (case insensitive).
         if lower.contains("would reformat:") {
             // Extract filename from "Would reformat: path/to/file.py"
             if let Some(filename) = trimmed.split(':').nth(1) {
@@ -274,14 +295,15 @@ pub fn filter_ruff_format(output: &str) -> String {
             }
         }
 
-        // Count total checked files - look for patterns like "3 files left unchanged"
-        if lower.contains("left unchanged") {
-            // Find "X file(s) left unchanged" pattern specifically
+        // Count total checked files - look for patterns like "3 files left
+        // unchanged" (pre-0.16) or "3 files already formatted" (ruff >= 0.16).
+        if lower.contains("left unchanged") || lower.contains("already formatted") {
+            // Find "X file(s) left unchanged" / "X file(s) already formatted"
             // Split by comma to handle "2 files would be reformatted, 3 files left unchanged"
             let parts: Vec<&str> = trimmed.split(',').collect();
             for part in parts {
                 let part_lower = part.to_lowercase();
-                if part_lower.contains("left unchanged") {
+                if part_lower.contains("left unchanged") || part_lower.contains("already formatted") {
                     let words: Vec<&str> = part.split_whitespace().collect();
                     // Look for number before "file" or "files"
                     for (i, word) in words.iter().enumerate() {
@@ -301,13 +323,15 @@ pub fn filter_ruff_format(output: &str) -> String {
     let output_lower = output.to_lowercase();
 
     // Check if all files are formatted
-    if files_to_format.is_empty() && output_lower.contains("left unchanged") {
+    if files_to_format.is_empty()
+        && (output_lower.contains("left unchanged") || output_lower.contains("already formatted"))
+    {
         return "Ruff format: All files formatted correctly".to_string();
     }
 
     let mut result = String::new();
 
-    if output_lower.contains("would reformat") {
+    if !files_to_format.is_empty() || output_lower.contains("would reformat") {
         // Check mode: show files that need formatting
         if files_to_format.is_empty() {
             result.push_str("Ruff format: All files formatted correctly\n");
@@ -482,6 +506,32 @@ Would reformat: tests/test_utils.py
         assert!(result.contains("main.py"));
         assert!(result.contains("test_utils.py"));
         assert!(result.contains("3 files already formatted"));
+    }
+
+    #[test]
+    fn test_filter_ruff_format_all_formatted_ruff_016_wording() {
+        // ruff >= 0.16 emits "already formatted" instead of "left unchanged".
+        let output = "5 files already formatted";
+        let result = filter_ruff_format(output);
+        assert!(result.contains("Ruff format"));
+        assert!(result.contains("All files formatted correctly"));
+    }
+
+    #[test]
+    fn test_filter_ruff_format_needs_formatting_ruff_016_wording() {
+        // ruff >= 0.16 emits "unformatted:" + a "--> path:row:col" pointer line
+        // instead of "Would reformat: path".
+        let output = r#"unformatted: File would be reformatted
+ --> src/main.py:2:1
+  |
+1 | import os, sys, re
+  |
+
+1 file would be reformatted"#;
+        let result = filter_ruff_format(output);
+        assert!(result.contains("1 files need formatting"));
+        assert!(result.contains("main.py"));
+        assert!(!result.contains("unformatted:"));
     }
 
     #[test]
