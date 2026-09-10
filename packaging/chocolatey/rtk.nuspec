@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Template. The release workflow replaces __VERSION__ before `choco pack`.
+  Keep it a template rather than a generated string: a nuspec is easier to
+  review in a diff than a here-string buried in YAML.
+-->
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>rtk</id>
+    <version>__VERSION__</version>
+    <title>RTK (Rust Token Killer)</title>
+    <authors>Patrick Szymkowiak</authors>
+    <owners>rtk-ai</owners>
+    <projectUrl>https://www.rtk-ai.app</projectUrl>
+    <packageSourceUrl>https://github.com/rtk-ai/rtk</packageSourceUrl>
+    <licenseUrl>https://github.com/rtk-ai/rtk/blob/master/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <tags>cli llm token filter productivity rust</tags>
+    <summary>High-performance CLI proxy to minimize LLM token consumption</summary>
+    <description>
+rtk filters and compresses command outputs before they reach your LLM context,
+saving 60-90% of tokens on builds, tests, git, package managers and more.
+
+Get started after install:
+
+    rtk init -g   # global hook-first setup (recommended)
+    rtk --help    # all commands
+    rtk gain      # measure your token savings
+    </description>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

@@ -56,6 +56,9 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             archive: zip
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
 
     steps:
       - name: Checkout
@@ -91,6 +94,80 @@ jobs:
           cd target/${{ matrix.target }}/release
           tar -czvf ../../../rtk-${{ matrix.target }}.${{ matrix.archive }} rtk
           cd ../../..
+
+      # --- Authenticode signing -------------------------------------------
+      # Unsigned rtk.exe trips SmartScreen on first run. Signing is optional:
+      # forks and secret-less runs skip it and still produce a working release.
+      - name: Detect signing method
+        id: signing
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_SIGNING_CLIENT_ID }}
+          PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+        run: |
+          if [ -n "$AZURE_CLIENT_ID" ]; then
+            echo "method=azure" >> "$GITHUB_OUTPUT"
+          elif [ -n "$PFX_BASE64" ]; then
+            echo "method=pfx" >> "$GITHUB_OUTPUT"
+          else
+            echo "method=none" >> "$GITHUB_OUTPUT"
+            echo "::warning::No code-signing secrets configured; rtk.exe will ship unsigned."
+          fi
+
+      # Preferred path: certificate never leaves Azure, which is what modern
+      # OV/EV issuance requires (private keys must stay in an HSM).
+      - name: Sign with Azure Trusted Signing
+        if: steps.signing.outputs.method == 'azure'
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_SIGNING_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_SIGNING_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_SIGNING_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_SIGNING_CERT_PROFILE }}
+          files-folder: target/${{ matrix.target }}/release
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      # Fallback for a self-managed .pfx (legacy or self-signed certificates).
+      - name: Sign with signtool
+        if: steps.signing.outputs.method == 'pfx'
+        shell: pwsh
+        env:
+          PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          PFX_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pfx = Join-Path $env:RUNNER_TEMP 'rtk-signing.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_BASE64))
+
+          # signtool is not on PATH on the hosted runner; take the newest SDK build.
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' |
+            Sort-Object { [version]$_.Directory.Parent.Name } |
+            Select-Object -Last 1
+          if (-not $signtool) { throw 'signtool.exe not found on the runner' }
+
+          try {
+            & $signtool.FullName sign `
+              /f $pfx /p $env:PFX_PASSWORD `
+              /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com `
+              "target/${{ matrix.target }}/release/rtk.exe"
+            if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit code $LASTEXITCODE" }
+          } finally {
+            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Verify signature
+        if: steps.signing.outputs.method != 'none' && matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature "target/${{ matrix.target }}/release/rtk.exe"
+          Write-Host "Status: $($sig.Status) / Signer: $($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne 'Valid') { throw "Signature is $($sig.Status), expected Valid" }
 
       - name: Package (Windows)
         if: matrix.os == 'windows-latest'
@@ -368,3 +445,228 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+  scoop:
+    name: Update Scoop manifest
+    needs: [release]
+    if: ${{ !inputs.prerelease }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get version
+        id: version
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          TAG="$INPUT_TAG"
+          if [ -z "$TAG" ]; then
+            TAG="$RELEASE_TAG"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=${TAG#v}" >> $GITHUB_OUTPUT
+
+      - name: Download checksums
+        run: |
+          gh release download "${{ steps.version.outputs.tag }}" \
+            --repo rtk-ai/rtk \
+            --pattern checksums.txt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Parse checksums
+        id: sha
+        run: |
+          echo "win_x64=$(grep x86_64-pc-windows-msvc.zip checksums.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "win_arm=$(grep aarch64-pc-windows-msvc.zip checksums.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
+
+      - name: Generate manifest
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          SHA64: ${{ steps.sha.outputs.win_x64 }}
+          SHAARM: ${{ steps.sha.outputs.win_arm }}
+        run: |
+          set -euo pipefail
+          BASE="https://github.com/rtk-ai/rtk/releases/download/$TAG"
+          # $version in the autoupdate block is Scoop's own placeholder and must
+          # survive into the manifest, so it is written literally here.
+          AUTO="https://github.com/rtk-ai/rtk/releases/download/v\$version"
+          jq -n \
+            --arg version "$VERSION" \
+            --arg url64 "$BASE/rtk-x86_64-pc-windows-msvc.zip" \
+            --arg urlarm "$BASE/rtk-aarch64-pc-windows-msvc.zip" \
+            --arg sha64 "$SHA64" \
+            --arg shaarm "$SHAARM" \
+            --arg auto "$AUTO" \
+            '{
+              version: $version,
+              description: "Rust Token Killer - High-performance CLI proxy to minimize LLM token consumption",
+              homepage: "https://www.rtk-ai.app",
+              license: "Apache-2.0",
+              architecture: {
+                "64bit": { url: $url64, hash: $sha64 },
+                "arm64": { url: $urlarm, hash: $shaarm }
+              },
+              bin: "rtk.exe",
+              notes: [
+                "Get started:",
+                "  rtk init -g   # global hook-first setup (recommended)",
+                "  rtk --help    # all commands",
+                "  rtk gain      # measure your token savings"
+              ],
+              checkver: { github: "https://github.com/rtk-ai/rtk" },
+              autoupdate: {
+                architecture: {
+                  "64bit": { url: ($auto + "/rtk-x86_64-pc-windows-msvc.zip") },
+                  "arm64": { url: ($auto + "/rtk-aarch64-pc-windows-msvc.zip") }
+                },
+                hash: { url: ($auto + "/checksums.txt") }
+              }
+            }' > rtk.json
+          cat rtk.json
+
+      - name: Push to scoop-bucket
+        env:
+          GH_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::SCOOP_BUCKET_TOKEN not set; skipping Scoop publish."
+            exit 0
+          fi
+          CONTENT=$(base64 -w 0 rtk.json)
+          SHA=$(gh api repos/rtk-ai/scoop-bucket/contents/bucket/rtk.json --jq '.sha' 2>/dev/null || echo "")
+          if [ -n "$SHA" ]; then
+            gh api -X PUT repos/rtk-ai/scoop-bucket/contents/bucket/rtk.json \
+              -f message="rtk ${{ steps.version.outputs.version }}" \
+              -f content="$CONTENT" \
+              -f sha="$SHA"
+          else
+            gh api -X PUT repos/rtk-ai/scoop-bucket/contents/bucket/rtk.json \
+              -f message="rtk ${{ steps.version.outputs.version }}" \
+              -f content="$CONTENT"
+          fi
+
+  winget:
+    name: Submit Winget manifest
+    needs: [release]
+    if: ${{ !inputs.prerelease }}
+    runs-on: windows-latest
+    steps:
+      - name: Get version
+        id: version
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          TAG="$INPUT_TAG"
+          if [ -z "$TAG" ]; then
+            TAG="$RELEASE_TAG"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=${TAG#v}" >> $GITHUB_OUTPUT
+
+      # wingetcreate opens a PR against microsoft/winget-pkgs from a fork owned
+      # by WINGET_TOKEN's account. The first submission must be made once by
+      # hand with `wingetcreate new` -- `update` only bumps an existing entry.
+      - name: Submit to winget-pkgs
+        shell: pwsh
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if (-not $env:WINGET_TOKEN) {
+            Write-Warning 'WINGET_TOKEN not set; skipping Winget submission.'
+            exit 0
+          }
+          $ErrorActionPreference = 'Stop'
+          $base = "https://github.com/rtk-ai/rtk/releases/download/$env:TAG"
+          Invoke-WebRequest -Uri https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          .\wingetcreate.exe update rtk-ai.rtk --version $env:VERSION --urls "$base/rtk-x86_64-pc-windows-msvc.zip|x64" "$base/rtk-aarch64-pc-windows-msvc.zip|arm64" --submit --token $env:WINGET_TOKEN
+          if ($LASTEXITCODE -ne 0) { throw "wingetcreate failed with exit code $LASTEXITCODE" }
+
+  chocolatey:
+    name: Publish Chocolatey package
+    needs: [release]
+    if: ${{ !inputs.prerelease }}
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          TAG="$INPUT_TAG"
+          if [ -z "$TAG" ]; then
+            TAG="$RELEASE_TAG"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=${TAG#v}" >> $GITHUB_OUTPUT
+
+      - name: Download checksums
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${{ steps.version.outputs.tag }}" \
+            --repo rtk-ai/rtk \
+            --pattern checksums.txt
+
+      # The package ships an install script, not the binary: it pulls the same
+      # signed release zip and verifies it against that release's checksums.
+      - name: Build package
+        shell: pwsh
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sums = Get-Content checksums.txt
+          function Get-Sum([string]$Name) {
+            $line = $sums | Where-Object { $_ -match [regex]::Escape($Name) } | Select-Object -First 1
+            if (-not $line) { throw "no checksum for $Name in checksums.txt" }
+            ($line -split '\s+')[0]
+          }
+          $base = "https://github.com/rtk-ai/rtk/releases/download/$env:TAG"
+
+          Copy-Item packaging/chocolatey -Destination choco -Recurse
+          $nuspec = 'choco/rtk.nuspec'
+          $script = 'choco/tools/chocolateyinstall.ps1'
+
+          (Get-Content $nuspec -Raw).Replace('__VERSION__', $env:VERSION) |
+            Set-Content $nuspec -Encoding utf8
+
+          (Get-Content $script -Raw).
+            Replace('__URL64__',  "$base/rtk-x86_64-pc-windows-msvc.zip").
+            Replace('__SHA64__',  (Get-Sum 'rtk-x86_64-pc-windows-msvc.zip')).
+            Replace('__URLARM__', "$base/rtk-aarch64-pc-windows-msvc.zip").
+            Replace('__SHAARM__', (Get-Sum 'rtk-aarch64-pc-windows-msvc.zip')) |
+            Set-Content $script -Encoding utf8
+
+          if (Select-String -Path $nuspec, $script -Pattern '__[A-Z0-9]+__' -Quiet) {
+            throw 'unsubstituted placeholder left in the Chocolatey package'
+          }
+
+          choco pack $nuspec --outputdirectory choco
+          if ($LASTEXITCODE -ne 0) { throw "choco pack failed with exit code $LASTEXITCODE" }
+
+      - name: Push to Chocolatey
+        shell: pwsh
+        env:
+          CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
+        run: |
+          if (-not $env:CHOCO_API_KEY) {
+            Write-Warning 'CHOCO_API_KEY not set; skipping Chocolatey publish.'
+            exit 0
+          }
+          $ErrorActionPreference = 'Stop'
+          $pkg = Get-ChildItem choco/*.nupkg | Select-Object -First 1
+          if (-not $pkg) { throw 'no .nupkg produced by choco pack' }
+          choco push $pkg.FullName --source https://push.chocolatey.org/ --api-key $env:CHOCO_API_KEY
+          if ($LASTEXITCODE -ne 0) { throw "choco push failed with exit code $LASTEXITCODE" }
