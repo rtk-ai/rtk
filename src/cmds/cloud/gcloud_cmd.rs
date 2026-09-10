@@ -89,16 +89,14 @@ pub fn run(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
     let mut all_args = vec![subcommand.to_string()];
     all_args.extend(crate::core::args_utils::restore_double_dash(args));
 
-    let command = SupportedCommand::find(&all_args);
-    if has_explicit_format(&all_args) || command.is_none() {
-        return crate::core::runner::run_passthrough(
+    match (has_explicit_format(&all_args), SupportedCommand::find(&all_args)) {
+        (false, Some(command)) => run_supported(&all_args, command, verbose),
+        _ => crate::core::runner::run_passthrough(
             "gcloud",
             &all_args.iter().map(Into::into).collect::<Vec<_>>(),
             verbose,
-        );
+        ),
     }
-
-    run_supported(&all_args, command.expect("checked above"), verbose)
 }
 
 fn run_supported(args: &[String], command: SupportedCommand, verbose: u8) -> Result<i32> {
@@ -124,6 +122,9 @@ fn run_supported(args: &[String], command: SupportedCommand, verbose: u8) -> Res
         print!("{stdout}");
         eprint!("{stderr}");
         if let Some(hint) = tee_and_hint(&raw, command.slug(), exit_code) {
+            if needs_hint_separator(&stdout, &stderr) {
+                eprintln!();
+            }
             eprintln!("{hint}");
         }
         timer.track(&label, &format!("rtk {label}"), &raw, &raw);
@@ -168,6 +169,11 @@ fn combine_output(stdout: &str, stderr: &str) -> String {
     }
 }
 
+fn needs_hint_separator(stdout: &str, stderr: &str) -> bool {
+    let last_output = if stderr.is_empty() { stdout } else { stderr };
+    !last_output.is_empty() && !last_output.ends_with('\n')
+}
+
 fn contains_words(args: &[&str], command: &[&str]) -> bool {
     args.windows(command.len()).any(|words| words == command)
 }
@@ -177,7 +183,8 @@ fn has_explicit_format(args: &[String]) -> bool {
 }
 
 fn filter_json(command: SupportedCommand, stdout: &str) -> Option<FilteredOutput> {
-    let items = serde_json::from_str::<Value>(stdout).ok()?.as_array()?.clone();
+    let parsed = serde_json::from_str::<Value>(stdout).ok()?;
+    let items = parsed.as_array()?;
     let max_items = match command {
         SupportedCommand::LoggingRead => MAX_LOG_EVENTS,
         _ => MAX_LIST_ITEMS,
@@ -322,11 +329,10 @@ fn filter_storage_transfer(stdout: &str) -> Option<FilteredOutput> {
     if let Some(progress) = last_progress {
         important.push(progress);
     }
-    Some(FilteredOutput {
-        text: important.join("\n"),
-        // A transfer's source/destination paths are multi-line progress, not a flat inventory.
-        recall: (important.join("\n") != stdout).then(|| Recall::Full(stdout.to_string())),
-    })
+    let text = important.join("\n");
+    // A transfer's source/destination paths are multi-line progress, not a flat inventory.
+    let recall = (text.trim_end() != stdout.trim_end()).then(|| Recall::Full(stdout.to_string()));
+    Some(FilteredOutput { text, recall })
 }
 
 #[cfg(test)]
@@ -455,6 +461,13 @@ mod tests {
     }
 
     #[test]
+    fn transfer_does_not_recall_for_a_trailing_newline_alone() {
+        let output = filter_storage_transfer("Completed 1 object\n").unwrap();
+        assert_eq!(output.text, "Completed 1 object");
+        assert!(output.recall.is_none());
+    }
+
+    #[test]
     fn guard_falls_back_when_a_hint_would_cost_more_than_raw() {
         assert_eq!(never_worse("[]", "\n[full output: rtk recall abc]"), "[]");
     }
@@ -462,5 +475,13 @@ mod tests {
     #[test]
     fn stderr_is_part_of_the_tracked_raw_output() {
         assert_eq!(combine_output("[]", "WARNING: redacted"), "[]\nWARNING: redacted");
+    }
+
+    #[test]
+    fn failure_hint_separator_respects_the_last_output_stream() {
+        assert!(needs_hint_separator("stdout", "stderr"));
+        assert!(needs_hint_separator("stdout", ""));
+        assert!(!needs_hint_separator("stdout\n", "stderr\n"));
+        assert!(!needs_hint_separator("", ""));
     }
 }
