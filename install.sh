@@ -30,9 +30,10 @@ error() {
 # Detect OS
 detect_os() {
     case "$(uname -s)" in
-        Linux*)  OS="linux";;
-        Darwin*) OS="darwin";;
-        *)       error "Unsupported operating system: $(uname -s)";;
+        Linux*)               OS="linux";;
+        Darwin*)              OS="darwin";;
+        MINGW*|MSYS*|CYGWIN*) OS="windows";;
+        *)                    error "Unsupported operating system: $(uname -s)";;
     esac
 }
 
@@ -80,7 +81,22 @@ get_target() {
         darwin)
             TARGET="${ARCH}-apple-darwin"
             ;;
+        windows)
+            case "$ARCH" in
+                x86_64) TARGET="x86_64-pc-windows-msvc";;
+                *)      error "Unsupported architecture for Windows: $ARCH";;
+            esac
+            ;;
     esac
+
+    # Windows releases ship as .zip with an .exe binary
+    if [ "$OS" = "windows" ]; then
+        ARCHIVE_EXT="zip"
+        BINARY_FILE="${BINARY_NAME}.exe"
+    else
+        ARCHIVE_EXT="tar.gz"
+        BINARY_FILE="${BINARY_NAME}"
+    fi
 }
 
 # Download and install
@@ -89,12 +105,12 @@ install() {
     info "Target: $TARGET"
     info "Version: $VERSION"
 
-    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY_NAME}-${TARGET}.tar.gz"
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY_NAME}-${TARGET}.${ARCHIVE_EXT}"
     CHECKSUMS_URL="https://github.com/${REPO}/releases/download/${VERSION}/checksums.txt"
     TEMP_DIR=$(mktemp -d)
-    ARCHIVE="${TEMP_DIR}/${BINARY_NAME}.tar.gz"
+    ARCHIVE="${TEMP_DIR}/${BINARY_NAME}.${ARCHIVE_EXT}"
     CHECKSUMS="${TEMP_DIR}/checksums.txt"
-    ASSET_NAME="${BINARY_NAME}-${TARGET}.tar.gz"
+    ASSET_NAME="${BINARY_NAME}-${TARGET}.${ARCHIVE_EXT}"
 
     info "Downloading from: $DOWNLOAD_URL"
     if ! curl -fsSL "$DOWNLOAD_URL" -o "$ARCHIVE"; then
@@ -128,30 +144,41 @@ install() {
         info "Checksum verified."
     fi
 
+    info "Verifying archive contents..."
+
+    LIST_CMD="tar -tzf"
+    if [ "$ARCHIVE_EXT" = "zip" ]; then
+        command -v unzip >/dev/null 2>&1 || error "unzip is required to install on Windows but was not found"
+        LIST_CMD="unzip -Z1"
+    fi
+
     # Verify archive contents before extraction (CWE-22 path traversal).
     # Reject any entry with an absolute path or a ".." component.
-    info "Verifying archive contents..."
-    if tar -tzf "$ARCHIVE" | grep -qE '^/|(^|/)\.\.(/|$)'; then
+    if $LIST_CMD "$ARCHIVE" | grep -qE '^/|(^|/)\.\.(/|$)'; then
         error "Archive contains unsafe paths (absolute or directory traversal) — refusing to extract"
     fi
 
     info "Extracting..."
-    tar -xzf "$ARCHIVE" -C "$TEMP_DIR"
+    if [ "$ARCHIVE_EXT" = "zip" ]; then
+        unzip -q "$ARCHIVE" -d "$TEMP_DIR"
+    else
+        tar -xzf "$ARCHIVE" -C "$TEMP_DIR"
+    fi
 
     mkdir -p "$INSTALL_DIR"
-    mv "${TEMP_DIR}/${BINARY_NAME}" "${INSTALL_DIR}/"
+    mv "${TEMP_DIR}/${BINARY_FILE}" "${INSTALL_DIR}/"
 
-    chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
+    chmod +x "${INSTALL_DIR}/${BINARY_FILE}"
 
     # Cleanup
     rm -rf "$TEMP_DIR"
 
-    info "Successfully installed ${BINARY_NAME} to ${INSTALL_DIR}/${BINARY_NAME}"
+    info "Successfully installed ${BINARY_NAME} to ${INSTALL_DIR}/${BINARY_FILE}"
 }
 
 # Verify installation
 verify() {
-    INSTALLED_BIN="${INSTALL_DIR}/${BINARY_NAME}"
+    INSTALLED_BIN="${INSTALL_DIR}/${BINARY_FILE}"
     if [ -x "$INSTALLED_BIN" ]; then
         info "Verification: $("$INSTALLED_BIN" --version)"
     else

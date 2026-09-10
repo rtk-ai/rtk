@@ -72,7 +72,7 @@ RTK が報告するトークン数は `バイト数 / 4` で見積もられて�
 brew install rtk
 ```
 
-### クイックインストール（Linux/macOS）
+### クイックインストール（Linux/macOS/Git for Windows）
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh

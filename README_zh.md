@@ -72,7 +72,7 @@ RTK 报告的 token 数量按 `字节数 / 4` 估算：RTK 不内置分词器，
 brew install rtk
 ```
 
-### 快速安装（Linux/macOS）
+### 快速安装（Linux/macOS/Git for Windows）
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh

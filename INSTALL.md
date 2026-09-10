@@ -41,7 +41,7 @@ If you accidentally installed Rust Type Kit:
 cargo uninstall rtk
 ```
 
-### Quick Install (Linux/macOS)
+### Quick Install (Linux/macOS/Git for Windows)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh

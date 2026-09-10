@@ -72,7 +72,7 @@ RTK가 보고하는 토큰 수는 `바이트 / 4`로 추정됩니다. RTK에는 
 brew install rtk
 ```
 
-### 빠른 설치 (Linux/macOS)
+### 빠른 설치 (Linux/macOS/Git for Windows)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
