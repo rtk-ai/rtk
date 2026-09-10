@@ -368,3 +368,69 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+  chocolatey:
+    name: Pack and push Chocolatey package
+    needs: [release]
+    if: ${{ !inputs.prerelease }}
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          TAG="$INPUT_TAG"
+          if [ -z "$TAG" ]; then
+            TAG="$RELEASE_TAG"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download checksums
+        shell: bash
+        run: |
+          gh release download "${{ steps.version.outputs.tag }}" \
+            --repo rtk-ai/rtk \
+            --pattern checksums.txt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Parse Windows checksum
+        id: sha
+        shell: bash
+        run: |
+          WIN_SHA=$(grep 'rtk-x86_64-pc-windows-msvc.zip' checksums.txt | head -1 | awk '{print $1}')
+          if [ -z "$WIN_SHA" ]; then
+            echo "Windows release zip not found in checksums.txt" >&2
+            exit 1
+          fi
+          echo "win=$WIN_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Patch install script checksum
+        shell: pwsh
+        run: |
+          $path = 'packaging/chocolatey/tools/chocolateyinstall.ps1'
+          $content = Get-Content $path -Raw
+          $content = $content -replace 'REPLACE_AT_RELEASE', '${{ steps.sha.outputs.win }}'
+          Set-Content -Path $path -Value $content -NoNewline
+
+      - name: Pack Chocolatey package
+        run: choco pack packaging/chocolatey/rtk.nuspec --version=${{ steps.version.outputs.version }}
+
+      - name: Push to Chocolatey Community
+        env:
+          CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
+        run: choco push rtk.${{ steps.version.outputs.version }}.nupkg --source https://push.chocolatey.org/ --api-key "$env:CHOCOLATEY_API_KEY"
+
+      - name: Upload nupkg artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtk-chocolatey
+          path: rtk.${{ steps.version.outputs.version }}.nupkg

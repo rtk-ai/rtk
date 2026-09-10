@@ -57,6 +57,16 @@ Download from [GitHub releases](https://github.com/rtk-ai/rtk/releases):
 
 **Windows users**: Extract the zip and place `rtk.exe` in a directory on your PATH. Run RTK from Command Prompt, PowerShell, or Windows Terminal — do not double-click the `.exe` (it prints usage and exits immediately). For full hook support, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) instead.
 
+## Chocolatey (Windows)
+
+```powershell
+choco install rtk
+rtk --version
+rtk init -g --agent cursor   # optional: register Cursor hook
+```
+
+Package source: `packaging/chocolatey/` in the repository. Pushed to [Chocolatey Community](https://community.chocolatey.org/) on stable release when `CHOCOLATEY_API_KEY` is configured.
+
 ## Verify installation
 
 ```bash
