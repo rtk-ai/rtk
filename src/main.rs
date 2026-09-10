@@ -19,7 +19,7 @@ use cmds::jvm::{gradlew_cmd, mvn_cmd};
 use cmds::php::{
     ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpt_cmd, phpunit_cmd, pint_cmd,
 };
-use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, uv_cmd};
+use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, sqlfluff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
@@ -471,7 +471,10 @@ enum Commands {
         /// Show parse failure log (commands that fell back to raw execution)
         #[arg(short = 'F', long)]
         failures: bool,
-        /// Reset all token savings stats to zero
+        /// Show recall efficiency per filter (elisions vs agent recalls)
+        #[arg(long)]
+        recalls: bool,
+        /// Reset token savings and recall stats to zero
         #[arg(long)]
         reset: bool,
         /// Skip confirmation prompt when resetting
@@ -498,11 +501,13 @@ enum Commands {
         format: String,
     },
 
-    /// Show or create configuration file
+    /// Show or modify configuration
     Config {
         /// Create default config file
         #[arg(long)]
         create: bool,
+        #[command(subcommand)]
+        action: Option<ConfigAction>,
     },
 
     /// Jest commands with compact output
@@ -685,6 +690,27 @@ enum Commands {
         args: Vec<OsString>,
     },
 
+    /// Recall output a filter elided, by content hash
+    Recall {
+        /// Hash from a recovery hint (a unique prefix is enough)
+        hash: Option<String>,
+        /// Return the complete output, not just the missed part
+        #[arg(long)]
+        full: bool,
+        /// Start from this 1-based line of the full output
+        #[arg(long)]
+        from: Option<usize>,
+        /// Return only the first N lines of the full output
+        #[arg(long, conflicts_with = "from")]
+        lines: Option<usize>,
+        /// Filter recalled lines by regex
+        #[arg(long)]
+        grep: Option<String>,
+        /// List stored entries
+        #[arg(long)]
+        list: bool,
+    },
+
     /// Read stdin, apply filter, print filtered output (Unix pipe mode)
     Pipe {
         /// Filter name (cargo-test, pytest, phpunit, phpstan, pint, grep, find, git-log, etc.)
@@ -722,6 +748,13 @@ enum Commands {
     /// Ruff linter/formatter with compact output
     Ruff {
         /// Ruff arguments (e.g., check, format --check)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// SQLFluff SQL linter with compact output
+    Sqlfluff {
+        /// SQLFluff arguments (e.g., lint models/, fix models/staging/)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1329,6 +1362,15 @@ enum GoCommands {
 }
 
 #[derive(Debug, Subcommand)]
+enum ConfigAction {
+    /// Show or set the recovery mode (sqlite | tee | disabled)
+    Recall {
+        /// New mode; omit to show the current one
+        mode: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum SbtCommands {
     /// Run tests with compact output (90% token reduction via ScalaTest filtering)
     Test {
@@ -1464,6 +1506,22 @@ fn run_bunx_tool(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
         "tsc" | "typescript" => tsc_cmd::run(Some("bunx"), &args[1..], verbose),
         "eslint" => lint_cmd::run(Some("bunx"), args, verbose),
         _ => bun_cmd::run_bunx(args, verbose, skip_env),
+    }
+}
+
+/// `awareness.level` for `rtk init`. A malformed config.toml falls back to `default` with a
+/// warning instead of silently installing the wrong awareness file.
+fn configured_awareness_level() -> core::config::AwarenessLevel {
+    match core::config::Config::load() {
+        Ok(config) => config.awareness.level,
+        Err(e) => {
+            let reason = e.to_string();
+            let first_line = reason.lines().next().unwrap_or("unreadable");
+            eprintln!(
+                "rtk: warning: could not read config.toml ({first_line}); using awareness.level = \"default\""
+            );
+            core::config::AwarenessLevel::default()
+        }
     }
 }
 
@@ -1799,6 +1857,16 @@ where
     }
 }
 
+fn is_native_test_expression(command: &[String]) -> bool {
+    match command.first().map(String::as_str) {
+        // `!` and `(` are shell syntax too, so they only mark a native
+        // expression when what they apply to is one.
+        Some("!") | Some("(") => is_native_test_expression(&command[1..]),
+        Some(arg) => arg.starts_with('-'),
+        None => false,
+    }
+}
+
 fn run_cli() -> Result<i32> {
     // Fire-and-forget telemetry ping (1/day, non-blocking)
     core::telemetry::maybe_ping();
@@ -2072,8 +2140,13 @@ fn run_cli() -> Result<i32> {
         }
 
         Commands::Test { command } => {
-            let cmd = command.join(" ");
-            runner::run_test(&cmd, cli.verbose)?
+            if is_native_test_expression(&command) {
+                let args: Vec<OsString> = command.into_iter().map(OsString::from).collect();
+                core::runner::run_passthrough("test", &args, cli.verbose)?
+            } else {
+                let cmd = command.join(" ");
+                runner::run_test(&cmd, cli.verbose)?
+            }
         }
 
         Commands::Json {
@@ -2233,6 +2306,11 @@ fn run_cli() -> Result<i32> {
             let ctx = hooks::init::InitContext {
                 verbose: cli.verbose,
                 dry_run,
+                awareness: if show || uninstall {
+                    core::config::AwarenessLevel::default()
+                } else {
+                    configured_awareness_level()
+                },
             };
             let patch_mode = if auto_patch {
                 hooks::init::PatchMode::Auto
@@ -2356,6 +2434,7 @@ fn run_cli() -> Result<i32> {
             all,
             format,
             failures,
+            recalls,
             reset,
             yes,
         } => {
@@ -2371,6 +2450,7 @@ fn run_cli() -> Result<i32> {
                 all,
                 &format,
                 failures,
+                recalls,
                 reset,
                 yes,
                 cli.verbose,
@@ -2389,12 +2469,32 @@ fn run_cli() -> Result<i32> {
             0
         }
 
-        Commands::Config { create } => {
-            if create {
-                let path = core::config::Config::create_default()?;
-                println!("Created: {}", path.display());
-            } else {
-                core::config::show_config()?;
+        Commands::Config { create, action } => {
+            match action {
+                Some(ConfigAction::Recall { mode: None }) => {
+                    core::config::show_recall_mode()?;
+                }
+                Some(ConfigAction::Recall { mode: Some(mode) }) => {
+                    use core::retriever::RecoveryMode;
+                    let parsed = match mode.as_str() {
+                        "sqlite" => RecoveryMode::Sqlite,
+                        "tee" => RecoveryMode::Tee,
+                        "disabled" => RecoveryMode::Disabled,
+                        other => anyhow::bail!(
+                            "unknown recall mode '{other}' (expected: sqlite, tee, disabled)"
+                        ),
+                    };
+                    let path = core::config::set_recall_mode(parsed)?;
+                    println!("recall mode set to {mode} in {}", path.display());
+                }
+                None => {
+                    if create {
+                        let path = core::config::Config::create_default()?;
+                        println!("Created: {}", path.display());
+                    } else {
+                        core::config::show_config()?;
+                    }
+                }
             }
             0
         }
@@ -2628,6 +2728,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Ruff { args } => ruff_cmd::run(&args, cli.verbose)?,
 
+        Commands::Sqlfluff { args } => sqlfluff_cmd::run(&args, cli.verbose)?,
+
         Commands::Pytest { args } => pytest_cmd::run(&args, cli.verbose)?,
 
         Commands::Mypy { args } => mypy_cmd::run(&args, cli.verbose)?,
@@ -2771,6 +2873,22 @@ fn run_cli() -> Result<i32> {
                 core::utils::exit_code_from_status(&status, "run")
             }
         }
+
+        Commands::Recall {
+            hash,
+            full,
+            from,
+            lines,
+            grep,
+            list,
+        } => core::retriever::run_recall(core::retriever::RecallArgs {
+            hash: hash.as_deref(),
+            full,
+            from,
+            lines,
+            grep: grep.as_deref(),
+            list,
+        })?,
 
         Commands::Proxy { args } => {
             use std::io::{Read, Write};
@@ -3031,6 +3149,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Npx { .. }
             | Commands::Curl { .. }
             | Commands::Ruff { .. }
+            | Commands::Sqlfluff { .. }
             | Commands::Pytest { .. }
             | Commands::Php { .. }
             | Commands::Phpunit { .. }
@@ -3280,6 +3399,7 @@ mod tests {
         let ctx = hooks::init::InitContext {
             verbose: 2,
             dry_run: true,
+            ..Default::default()
         };
 
         let result = uninstall_init_dispatch(
@@ -3395,6 +3515,30 @@ mod tests {
     }
 
     #[test]
+    fn test_dash_d_routes_to_native_test_expression() {
+        let command = vec!["-d".to_string(), "graphify-out".to_string()];
+        assert!(is_native_test_expression(&command));
+    }
+
+    #[test]
+    fn test_bang_before_command_is_not_a_native_expression() {
+        let command = vec!["!".to_string(), "false".to_string()];
+        assert!(!is_native_test_expression(&command));
+    }
+
+    #[test]
+    fn test_bang_before_operator_is_a_native_expression() {
+        let command = vec!["!".to_string(), "-d".to_string(), "dir".to_string()];
+        assert!(is_native_test_expression(&command));
+    }
+
+    #[test]
+    fn test_cargo_test_stays_test_runner() {
+        let command = vec!["cargo".to_string(), "test".to_string()];
+        assert!(!is_native_test_expression(&command));
+    }
+
+    #[test]
     fn test_try_parse_git_with_dash_c_succeeds() {
         let result = Cli::try_parse_from(["rtk", "git", "-C", "/path", "status"]);
         assert!(
@@ -3499,6 +3643,7 @@ mod tests {
             "npx",
             "curl",
             "ruff",
+            "sqlfluff",
             "pytest",
             "mypy",
             "rake",

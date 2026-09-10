@@ -284,6 +284,12 @@ pub fn fallback_tail(output: &str, label: &str, n: usize) -> String {
 }
 
 /// Create a directory owner-only (0700 on Unix), tightening one that already exists.
+/// Serializes tests across modules that mutate process-global recall env vars
+/// (`RTK_RECALL`, `RTK_TEE`): a static declared inside one test module is not
+/// shared with other modules, so those tests would not actually serialize.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn create_private_dir(path: &std::path::Path) -> std::io::Result<()> {
     fs::create_dir_all(path)?;
     set_owner_only(path, 0o700);

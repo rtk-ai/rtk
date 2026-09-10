@@ -215,6 +215,8 @@ count_find_names() {
     /^ext: /             { next }   # extension histogram footer
     /^\.\.\. \(/          { next }   # "... (8 filtered)" disclosure note
     /^\[see remaining: / { next }   # tee pointer for the disclosed entries
+    /^\[\+[0-9]+ hidden: / { next }   # sqlite recall pointer, same role
+    /^\[full output: /   { next }   # sqlite recall pointer for a whole capture
     NF == 0              { next }
     { n += NF - ($1 ~ /\/$/ ? 1 : 0) }   # grouped lines lead with "dir/"
     END { print n + 0 }
@@ -230,6 +232,8 @@ count_find_total() {
     /^ext: /             { next }
     /^\.\.\. \(/          { next }
     /^\[see remaining: / { next }
+    /^\[\+[0-9]+ hidden: / { next }
+    /^\[full output: /   { next }
     NF == 0              { next }
     { shown += NF - ($1 ~ /\/$/ ? 1 : 0) }
     END { print (total ? total : shown + more) + 0 }

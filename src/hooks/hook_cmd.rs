@@ -260,6 +260,7 @@ fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
     if verdict == PermissionVerdict::Deny {
         return HookDecision::Deny;
     }
+    crate::hooks::rewrite_cmd::track_tee_read(cmd);
     if crate::discover::lexer::contains_unattestable_construct(cmd) {
         return HookDecision::Defer;
     }
@@ -1748,6 +1749,17 @@ mod tests {
             .and_then(|c| c.as_str())
             .unwrap();
         assert_eq!(cmd, "cargo test | rtk grep FAILED");
+    }
+
+    #[test]
+    fn test_claude_pipeline_rewrites_producer_when_consumers_safe() {
+        let result = run_claude_inner(&claude_input("git log | tail -5")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk git log | tail -5");
     }
 
     #[test]

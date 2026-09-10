@@ -1,0 +1,10 @@
+diff --git a/😀.txt b/🙀.txt
+similarity index 50%
+rename from 😀.txt
+rename to 🙀.txt
+index ce01362..94954ab 100644
+--- a/😀.txt
++++ b/🙀.txt
+@@ -1 +1,2 @@
+ hello
++world

@@ -181,14 +181,14 @@ Savings by ecosystem:
 ### Module Breakdown
 
 - **Command Modules**: `src/cmds/` — organized by ecosystem (git, rust, js, python, go, dotnet, cloud, system, ruby). Each ecosystem README lists its files.
-- **Core Infrastructure**: `src/core/` — utils, filter, tracking, tee, config, toml_filter, display_helpers, telemetry
+- **Core Infrastructure**: `src/core/` — utils, filter, tracking, retriever (recall store), tee, tee_file, config, toml_filter, display_helpers, telemetry
 - **Hook System**: `src/hooks/` — init, rewrite, permissions, hook_cmd, hook_check, hook_audit, verify, trust, integrity
 - **Analytics**: `src/analytics/` — gain, cc_economics, ccusage, session_cmd
 
 ### Module Count Breakdown
 
 - **Command Modules**: 42 (directly exposed to users)
-- **Infrastructure Modules**: 22 (utils, filter, tracking, tee, config, init, gain, toml_filter, verify_cmd, etc.)
+- **Infrastructure Modules**: utils, filter, tracking, retriever, tee, tee_file, config, init, gain, toml_filter, verify_cmd, etc.
 - **Git Commands**: 7 operations (status, diff, log, add, commit, push, branch/checkout)
 - **JS/TS Tooling**: 8 modules (modern frontend/fullstack development)
 - **Python Tooling**: 3 modules (ruff, pytest, pip)
@@ -872,7 +872,7 @@ Modules with Exit Code Preservation:
 
 ### Configuration
 
-> For config file format, tee settings, tracking database path, and TOML filter tiers, see [src/core/README.md](src/core/README.md).
+> For config file format, recall/tee settings, tracking database path, and TOML filter tiers, see [src/core/README.md](src/core/README.md).
 
 Two tiers: **User settings** (`~/.config/rtk/config.toml`) and **LLM integration** (CLAUDE.md via `rtk init`).
 

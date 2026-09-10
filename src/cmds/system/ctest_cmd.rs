@@ -1773,7 +1773,10 @@ some unrelated tail
         assert_eq!(
             filtered
                 .lines()
-                .filter(|line| line.trim_start().starts_with("[see remaining:"))
+                .filter(|line| {
+                    let t = line.trim_start();
+                    t.starts_with("[see remaining:") || t.starts_with("[+")
+                })
                 .count(),
             1
         );
@@ -1801,7 +1804,7 @@ some unrelated tail
             MAX_FAILED_LIST_LINES
         );
         assert!(filtered.contains("  ... +5 more skipped"));
-        assert!(filtered.contains("  [see remaining:"));
+        assert!(filtered.contains("  [see remaining:") || filtered.contains("  [+"));
     }
 
     #[test]
