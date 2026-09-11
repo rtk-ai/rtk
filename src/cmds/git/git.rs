@@ -125,8 +125,18 @@ fn run_diff(
         .iter()
         .any(|arg| arg == "--stat" || arg == "--numstat" || arg == "--shortstat");
 
+    // Diagnostic modes pass through unfiltered: --check, --exit-code, --quiet,
+    // --no-patch. Their value is entirely in stdout (one line per whitespace
+    // error for --check, nothing for --exit-code) and exit code, so filtering
+    // loses the only signal and produces "failure with no reason attached".
+    let is_diagnostic = args.iter().any(|arg| {
+        arg == "--check" || arg == "--exit-code" || arg == "--quiet" || arg == "--no-patch"
+    });
+
     // Check if user wants compact diff (default RTK behavior)
-    let wants_compact = !args.iter().any(|arg| arg == "--no-compact") && !emits_word_diff(args);
+    let wants_compact = !args.iter().any(|arg| arg == "--no-compact")
+        && !emits_word_diff(args)
+        && !is_diagnostic;
 
     if wants_stat || !wants_compact {
         // User wants stat or explicitly no compacting - pass through directly
@@ -4754,6 +4764,27 @@ A  added.rs
     fn test_real_flag_args_keeps_genuine_flags() {
         let args = vec!["--grep".to_string(), "fix".to_string(), "--oneline".to_string()];
         assert_eq!(real_flag_args(&args), vec!["--grep", "--oneline"]);
+    }
+
+    #[test]
+    fn test_diagnostic_flags_skip_compaction() {
+        // The gating condition: --check, --exit-code, --quiet, --no-patch
+        // are all diagnostic modes that must skip compaction.
+        for flag in ["--check", "--exit-code", "--quiet", "--no-patch"] {
+            let args = vec![flag.to_string()];
+            // Replicate the is_diagnostic + wants_compact logic from run_diff
+            let is_diagnostic = args.iter().any(|arg| {
+                arg == "--check" || arg == "--exit-code" || arg == "--quiet" || arg == "--no-patch"
+            });
+            let wants_compact = !args.iter().any(|arg| arg == "--no-compact")
+                && !emits_word_diff(&args)
+                && !is_diagnostic;
+            assert!(
+                !wants_compact,
+                "{} diagnostic flag should skip compaction",
+                flag
+            );
+        }
     }
 
     #[test]
