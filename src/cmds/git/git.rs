@@ -2010,7 +2010,24 @@ fn run_pull(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
     Ok(0)
 }
 
+fn requests_raw_branch_output(args: &[String]) -> bool {
+    args.iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| arg == "--format" || arg.starts_with("--format="))
+}
+
 fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    let args = &args_utils::restore_double_dash(args);
+
+    // Custom formats can contain whitespace, colors, and NULs that the branch
+    // list filter cannot interpret. Keep Git's output and exit status intact.
+    if requests_raw_branch_output(args) {
+        let passthrough_args: Vec<OsString> = std::iter::once(OsString::from("branch"))
+            .chain(args.iter().map(OsString::from))
+            .collect();
+        return run_passthrough(&passthrough_args, global_args, verbose);
+    }
+
     let timer = tracking::TimedExecution::start();
 
     if verbose > 0 {
@@ -3416,6 +3433,28 @@ mod tests {
         assert!(!is_blob_show_arg("--pretty=format:%h"));
         assert!(!is_blob_show_arg("--format=short"));
         assert!(!is_blob_show_arg("HEAD"));
+    }
+
+    #[test]
+    fn test_branch_format_passthrough_respects_option_boundary() {
+        for args in [
+            vec!["--format=%(refname:short)"],
+            vec!["--format", "%(refname:short)"],
+            vec!["--list", "--format="],
+        ] {
+            let args: Vec<String> = args.into_iter().map(String::from).collect();
+            assert!(requests_raw_branch_output(&args));
+        }
+        for args in [
+            vec![],
+            vec!["--list"],
+            vec!["--formatting"],
+            vec!["--", "--format=%(refname:short)"],
+            vec!["--list", "--", "--format"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(String::from).collect();
+            assert!(!requests_raw_branch_output(&args));
+        }
     }
 
     #[test]
