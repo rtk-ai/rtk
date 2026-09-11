@@ -3,10 +3,40 @@
 //! with context flags (-A/-B/-C) and the safety-net passthrough for flags (some
 //! grep-only like -I, some rg-only like --heading/-p) that break the NUL reparse.
 
-use std::process::Command;
+use std::io::Write;
+use std::ops::{Deref, DerefMut};
+use std::process::{Command, Stdio};
 
-fn rtk() -> Command {
+struct IsolatedRtk {
+    _home: tempfile::TempDir,
+    command: Command,
+}
+
+impl Deref for IsolatedRtk {
+    type Target = Command;
+
+    fn deref(&self) -> &Self::Target {
+        &self.command
+    }
+}
+
+impl DerefMut for IsolatedRtk {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.command
+    }
+}
+
+fn raw_rtk() -> Command {
     Command::new(env!("CARGO_BIN_EXE_rtk"))
+}
+
+fn rtk() -> IsolatedRtk {
+    let home = tempfile::tempdir().expect("temp home");
+    let command = isolated_rtk(&home);
+    IsolatedRtk {
+        _home: home,
+        command,
+    }
 }
 
 fn rg_available() -> bool {
@@ -33,6 +63,191 @@ fn write_temp(content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     let path = dir.path().join("test.txt");
     std::fs::write(&path, content).expect("write");
     (dir, path)
+}
+
+fn isolated_rtk(home: &tempfile::TempDir) -> Command {
+    let mut command = raw_rtk();
+    command
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join("config"))
+        .env("XDG_DATA_HOME", home.path().join("data"));
+    command
+}
+
+fn rtk_with_grep_limit(limit: usize) -> (tempfile::TempDir, Command) {
+    let home = tempfile::tempdir().expect("temp home");
+    let xdg_config = home.path().join("config");
+    let macos_config = home.path().join("Library/Application Support");
+    for config_dir in [&xdg_config, &macos_config] {
+        let rtk_dir = config_dir.join("rtk");
+        std::fs::create_dir_all(&rtk_dir).expect("create config dir");
+        std::fs::write(
+            rtk_dir.join("config.toml"),
+            format!(
+                "[limits]\n\
+                 grep_max_results = {limit}\n\
+                 grep_max_per_file = 25\n\
+                 status_max_files = 15\n\
+                 status_max_untracked = 10\n\
+                 passthrough_max_chars = 2000\n"
+            ),
+        )
+        .expect("write config");
+    }
+
+    let command = isolated_rtk(&home);
+    (home, command)
+}
+
+fn matching_fixture() -> String {
+    (0..12).map(|i| format!("MATCH line {i}\n")).collect()
+}
+
+fn assert_match_cap(stdout: &str, expected_shown: usize, total: usize) {
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| line.contains("MATCH line"))
+            .count(),
+        expected_shown,
+        "unexpected number of displayed matches:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("+{} more", total - expected_shown)),
+        "elision output must reflect the effective cap:\n{stdout}"
+    );
+}
+
+#[test]
+fn grep_honors_configured_max_results() {
+    if !grep_available() {
+        return;
+    }
+    let (_fixture_dir, path) = write_temp(&matching_fixture());
+    let (_home, mut command) = rtk_with_grep_limit(3);
+    let out = command
+        .args(["grep", "MATCH", path.to_str().unwrap()])
+        .output()
+        .expect("rtk grep");
+    assert!(out.status.success());
+
+    assert_match_cap(&String::from_utf8_lossy(&out.stdout), 3, 12);
+}
+
+#[test]
+fn rg_honors_configured_max_results() {
+    if !rg_available() {
+        return;
+    }
+    let (_fixture_dir, path) = write_temp(&matching_fixture());
+    let (_home, mut command) = rtk_with_grep_limit(3);
+    let out = command
+        .args(["rg", "MATCH", path.to_str().unwrap()])
+        .output()
+        .expect("rtk rg");
+    assert!(out.status.success());
+
+    assert_match_cap(&String::from_utf8_lossy(&out.stdout), 3, 12);
+}
+
+#[test]
+fn grep_cli_max_overrides_configured_max_results() {
+    if !grep_available() {
+        return;
+    }
+    let (_fixture_dir, path) = write_temp(&matching_fixture());
+    let (_home, mut command) = rtk_with_grep_limit(3);
+    let out = command
+        .args(["grep", "--max", "5", "MATCH", path.to_str().unwrap()])
+        .output()
+        .expect("rtk grep");
+    assert!(out.status.success());
+
+    assert_match_cap(&String::from_utf8_lossy(&out.stdout), 5, 12);
+}
+
+#[test]
+fn piped_grep_honors_configured_max_results() {
+    if !grep_available() {
+        return;
+    }
+    let (_home, mut command) = rtk_with_grep_limit(3);
+    let mut child = command
+        .args(["grep", "MATCH"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rtk grep");
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(matching_fixture().as_bytes())
+        .expect("write piped fixture");
+    let out = child.wait_with_output().expect("rtk grep");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| line.contains("MATCH line"))
+            .count(),
+        3,
+        "streaming output must honor the configured cap:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("[rtk] output capped at 3 results"),
+        "streaming cap report must reflect the configured cap:\n{stdout}"
+    );
+}
+
+#[test]
+fn grep_without_config_keeps_default_max_results() {
+    if !grep_available() {
+        return;
+    }
+    let fixture_dir = tempfile::tempdir().expect("fixture dir");
+    for file_index in 0..9 {
+        let content: String = (0..30)
+            .map(|line_index| format!("MATCH {file_index}:{line_index} {}\n", "x".repeat(160)))
+            .collect();
+        std::fs::write(
+            fixture_dir.path().join(format!("{file_index}.txt")),
+            content,
+        )
+        .expect("write fixture");
+    }
+
+    let home = tempfile::tempdir().expect("temp home");
+    let out = isolated_rtk(&home)
+        .args(["grep", "-r", "MATCH", fixture_dir.path().to_str().unwrap()])
+        .output()
+        .expect("rtk grep");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| line.contains("MATCH "))
+            .count(),
+        200,
+        "missing config must retain the built-in 200-result cap:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("270 matches in 9 files"),
+        "fixture must exercise the global cap:\n{stdout}"
+    );
 }
 
 // --- context compression (the gain win) ---
