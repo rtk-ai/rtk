@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use super::ccusage::{self, CcusagePeriod, Granularity};
 use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
-use crate::core::utils::{format_cpt, format_tokens, format_usd};
+use crate::core::utils::{format_cpt, format_signed_tokens, format_tokens, format_usd};
 
 // ── Constants ──
 
@@ -36,7 +36,7 @@ pub struct PeriodEconomics {
     pub cc_cache_read_tokens: Option<u64>,
     // rtk metrics
     pub rtk_commands: Option<usize>,
-    pub rtk_saved_tokens: Option<usize>,
+    pub rtk_saved_tokens: Option<i64>,
     pub rtk_savings_pct: Option<f64>,
     // Primary metric (weighted input CPT)
     pub weighted_input_cpt: Option<f64>, // Derived input CPT using API ratios
@@ -103,7 +103,9 @@ impl PeriodEconomics {
         self.rtk_saved_tokens = Some(stats.saved_tokens);
         self.rtk_savings_pct = Some(if stats.input_tokens + stats.output_tokens > 0 {
             stats.saved_tokens as f64
-                / (stats.saved_tokens + stats.input_tokens + stats.output_tokens) as f64
+                / (stats.saved_tokens as f64
+                    + stats.input_tokens as f64
+                    + stats.output_tokens as f64)
                 * 100.0
         } else {
             0.0
@@ -167,7 +169,7 @@ struct Totals {
     cc_cache_create_tokens: u64,
     cc_cache_read_tokens: u64,
     rtk_commands: usize,
-    rtk_saved_tokens: usize,
+    rtk_saved_tokens: i64,
     rtk_avg_savings_pct: f64,
     weighted_input_cpt: Option<f64>,
     savings_weighted: Option<f64>,
@@ -469,7 +471,7 @@ fn display_summary(tracker: &Tracker, verbose: u8) -> Result<()> {
     println!("  RTK commands:                 {}", totals.rtk_commands);
     println!(
         "  Tokens saved:                 {}",
-        format_tokens(totals.rtk_saved_tokens)
+        format_signed_tokens(totals.rtk_saved_tokens)
     );
     println!();
 
@@ -599,7 +601,7 @@ fn print_period_table(periods: &[PeriodEconomics], verbose: u8) {
             let spent = p.cc_cost.map(format_usd).unwrap_or_else(|| "—".to_string());
             let saved = p
                 .rtk_saved_tokens
-                .map(format_tokens)
+                .map(format_signed_tokens)
                 .unwrap_or_else(|| "—".to_string());
             let weighted = p
                 .savings_weighted
@@ -638,7 +640,7 @@ fn print_period_table(periods: &[PeriodEconomics], verbose: u8) {
             let spent = p.cc_cost.map(format_usd).unwrap_or_else(|| "—".to_string());
             let saved = p
                 .rtk_saved_tokens
-                .map(format_tokens)
+                .map(format_signed_tokens)
                 .unwrap_or_else(|| "—".to_string());
             let weighted = p
                 .savings_weighted

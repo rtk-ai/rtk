@@ -103,7 +103,7 @@ pub struct CommandRecord {
     /// RTK command that was executed (e.g., "rtk ls")
     pub rtk_cmd: String,
     /// Number of tokens saved (input - output)
-    pub saved_tokens: usize,
+    pub saved_tokens: i64,
     /// Savings percentage ((saved / input) * 100)
     pub savings_pct: f64,
 }
@@ -195,7 +195,7 @@ pub struct GainSummary {
     /// Total output tokens across all commands
     pub total_output: usize,
     /// Total tokens saved (input - output)
-    pub total_saved: usize,
+    pub total_saved: i64,
     /// Average savings percentage across all commands
     pub avg_savings_pct: f64,
     /// Total execution time across all commands (milliseconds)
@@ -203,9 +203,9 @@ pub struct GainSummary {
     /// Average execution time per command (milliseconds)
     pub avg_time_ms: u64,
     /// Top 10 commands by tokens saved: (cmd, count, saved, avg_pct, avg_time_ms)
-    pub by_command: Vec<(String, usize, usize, f64, u64)>,
+    pub by_command: Vec<(String, usize, i64, f64, u64)>,
     /// Last 30 days of activity: (date, saved_tokens)
-    pub by_day: Vec<(String, usize)>,
+    pub by_day: Vec<(String, i64)>,
 }
 
 /// Daily statistics for token savings and execution metrics.
@@ -237,7 +237,7 @@ pub struct DayStats {
     /// Total output tokens for this day
     pub output_tokens: usize,
     /// Total tokens saved this day
-    pub saved_tokens: usize,
+    pub saved_tokens: i64,
     /// Savings percentage for this day
     pub savings_pct: f64,
     /// Total execution time for this day (milliseconds)
@@ -263,7 +263,7 @@ pub struct WeekStats {
     /// Total output tokens for this week
     pub output_tokens: usize,
     /// Total tokens saved this week
-    pub saved_tokens: usize,
+    pub saved_tokens: i64,
     /// Savings percentage for this week
     pub savings_pct: f64,
     /// Total execution time for this week (milliseconds)
@@ -286,7 +286,7 @@ pub struct MonthStats {
     /// Total output tokens for this month
     pub output_tokens: usize,
     /// Total tokens saved this month
-    pub saved_tokens: usize,
+    pub saved_tokens: i64,
     /// Savings percentage for this month
     pub savings_pct: f64,
     /// Total execution time for this month (milliseconds)
@@ -296,7 +296,7 @@ pub struct MonthStats {
 }
 
 /// Type alias for command statistics tuple: (command, count, saved_tokens, avg_savings_pct, avg_time_ms)
-type CommandStats = (String, usize, usize, f64, u64);
+type CommandStats = (String, usize, i64, f64, u64);
 
 /// Current tracking-DB schema version, stored in the SQLite `user_version` pragma.
 ///
@@ -515,7 +515,13 @@ impl Tracker {
         output_tokens: usize,
         exec_time_ms: u64,
     ) -> Result<()> {
-        let saved = input_tokens.saturating_sub(output_tokens);
+        let input_tokens = i64::try_from(input_tokens)
+            .context("Input token count exceeds SQLite INTEGER range")?;
+        let output_tokens = i64::try_from(output_tokens)
+            .context("Output token count exceeds SQLite INTEGER range")?;
+        let saved = input_tokens
+            .checked_sub(output_tokens)
+            .context("Saved token difference exceeds SQLite INTEGER range")?;
         let pct = if input_tokens > 0 {
             (saved as f64 / input_tokens as f64) * 100.0
         } else {
@@ -532,9 +538,9 @@ impl Tracker {
                 original_cmd,
                 rtk_cmd,
                 project_path, // added
-                input_tokens as i64,
-                output_tokens as i64,
-                saved as i64,
+                input_tokens,
+                output_tokens,
+                saved,
                 pct,
                 exec_time_ms as i64
             ],
@@ -824,7 +830,7 @@ impl Tracker {
         let mut total_commands = 0usize;
         let mut total_input = 0usize;
         let mut total_output = 0usize;
-        let mut total_saved = 0usize;
+        let mut total_saved = 0i64;
         let mut total_time_ms = 0u64;
 
         let mut stmt = self.conn.prepare(
@@ -838,7 +844,7 @@ impl Tracker {
             Ok((
                 row.get::<_, i64>(0)? as usize,
                 row.get::<_, i64>(1)? as usize,
-                row.get::<_, i64>(2)? as usize,
+                row.get::<_, i64>(2)?,
                 row.get::<_, i64>(3)? as u64,
             ))
         })?;
@@ -848,7 +854,9 @@ impl Tracker {
             total_commands += 1;
             total_input += input;
             total_output += output;
-            total_saved += saved;
+            total_saved = total_saved
+                .checked_add(saved)
+                .context("Total saved tokens exceeds SQLite INTEGER range")?;
             total_time_ms += time_ms;
         }
 
@@ -899,7 +907,7 @@ impl Tracker {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)? as usize,
-                row.get::<_, i64>(2)? as usize,
+                row.get::<_, i64>(2)?,
                 row.get::<_, f64>(3)?,
                 row.get::<_, f64>(4)? as u64,
             ))
@@ -911,7 +919,7 @@ impl Tracker {
     fn get_by_day(
         &self,
         project_path: Option<&str>, // added
-    ) -> Result<Vec<(String, usize)>> {
+    ) -> Result<Vec<(String, i64)>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
         let mut stmt = self.conn.prepare(
             "SELECT DATE(timestamp), SUM(saved_tokens)
@@ -924,7 +932,7 @@ impl Tracker {
 
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
             // added: params
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;
 
         let mut result: Vec<_> = rows.collect::<Result<Vec<_>, _>>()?;
@@ -974,7 +982,7 @@ impl Tracker {
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
             // added: params
             let input = row.get::<_, i64>(2)? as usize;
-            let saved = row.get::<_, i64>(4)? as usize;
+            let saved = row.get::<_, i64>(4)?;
             let commands = row.get::<_, i64>(1)? as usize;
             let total_time = row.get::<_, i64>(5)? as u64;
             let savings_pct = if input > 0 {
@@ -1048,7 +1056,7 @@ impl Tracker {
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
             // added: params
             let input = row.get::<_, i64>(3)? as usize;
-            let saved = row.get::<_, i64>(5)? as usize;
+            let saved = row.get::<_, i64>(5)?;
             let commands = row.get::<_, i64>(2)? as usize;
             let total_time = row.get::<_, i64>(6)? as u64;
             let savings_pct = if input > 0 {
@@ -1122,7 +1130,7 @@ impl Tracker {
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
             // added: params
             let input = row.get::<_, i64>(2)? as usize;
-            let saved = row.get::<_, i64>(4)? as usize;
+            let saved = row.get::<_, i64>(4)?;
             let commands = row.get::<_, i64>(1)? as usize;
             let total_time = row.get::<_, i64>(5)? as u64;
             let savings_pct = if input > 0 {
@@ -1202,7 +1210,7 @@ impl Tracker {
                         .map(|dt| dt.with_timezone(&Utc))
                         .unwrap_or_else(|_| Utc::now()),
                     rtk_cmd: row.get(1)?,
-                    saved_tokens: row.get::<_, i64>(2)? as usize,
+                    saved_tokens: row.get(2)?,
                     savings_pct: row.get(3)?,
                 })
             },
@@ -1849,6 +1857,81 @@ mod tests {
 
         assert_eq!(test_record.saved_tokens, 80);
         assert_eq!(test_record.savings_pct, 80.0);
+    }
+
+    #[test]
+    fn test_legacy_negative_saved_tokens_are_preserved() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+
+        tracker
+            .conn
+            .execute(
+                "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, input_tokens, output_tokens, saved_tokens, savings_pct)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    Utc::now().to_rfc3339(),
+                    "legacy command",
+                    "rtk legacy command",
+                    100i64,
+                    151i64,
+                    -51i64,
+                    -51.0f64,
+                ],
+            )
+            .expect("Failed to insert legacy row");
+
+        let summary = tracker.get_summary().expect("Failed to get summary");
+        assert_eq!(summary.total_saved, -51);
+        assert_eq!(summary.avg_savings_pct, -51.0);
+        assert_eq!(summary.by_command[0].2, -51);
+        assert_eq!(summary.by_day[0].1, -51);
+
+        let days = tracker.get_all_days().expect("Failed to get days");
+        assert_eq!(days[0].saved_tokens, -51);
+        assert_eq!(days[0].savings_pct, -51.0);
+        assert!(serde_json::to_string(&days)
+            .expect("Failed to serialize days")
+            .contains("\"saved_tokens\":-51"));
+
+        let weeks = tracker.get_by_week().expect("Failed to get weeks");
+        assert_eq!(weeks[0].saved_tokens, -51);
+        assert_eq!(weeks[0].savings_pct, -51.0);
+
+        let months = tracker.get_by_month().expect("Failed to get months");
+        assert_eq!(months[0].saved_tokens, -51);
+        assert_eq!(months[0].savings_pct, -51.0);
+
+        let recent = tracker
+            .get_recent(1)
+            .expect("Failed to get recent commands");
+        assert_eq!(recent[0].saved_tokens, -51);
+        assert_eq!(recent[0].savings_pct, -51.0);
+    }
+
+    #[test]
+    fn test_record_preserves_negative_saved_tokens() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+
+        tracker
+            .record("empty", "rtk empty", 0, 51, 10)
+            .expect("Failed to record command");
+
+        let saved: i64 = tracker
+            .conn
+            .query_row("SELECT saved_tokens FROM commands", [], |row| row.get(0))
+            .expect("Failed to read saved tokens");
+        assert_eq!(saved, -51);
+        assert_eq!(
+            tracker.get_recent(1).expect("Failed to get recent")[0].saved_tokens,
+            -51
+        );
+        assert_eq!(
+            tracker
+                .get_summary()
+                .expect("Failed to get summary")
+                .total_saved,
+            -51
+        );
     }
 
     // 4. track_passthrough doesn't dilute stats (input=0, output=0)

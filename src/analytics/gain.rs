@@ -2,7 +2,7 @@
 
 use crate::core::display_helpers::{format_duration, print_period_table};
 use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
-use crate::core::utils::{format_tokens, truncate};
+use crate::core::utils::{format_signed_tokens, format_tokens, truncate};
 use crate::hooks::hook_check;
 use anyhow::{Context, Result};
 use chrono::Local;
@@ -122,7 +122,7 @@ pub fn run(
             "Tokens saved",
             format!(
                 "{} ({:.1}%)",
-                format_tokens(summary.total_saved),
+                format_signed_tokens(summary.total_saved),
                 summary.avg_savings_pct
             ),
         );
@@ -192,7 +192,7 @@ pub fn run(
             let saved_width = summary
                 .by_command
                 .iter()
-                .map(|(_, _, saved, _, _)| format_tokens(*saved).len())
+                .map(|(_, _, saved, _, _)| format_signed_tokens(*saved).len())
                 .max()
                 .unwrap_or(5)
                 .max(5);
@@ -231,6 +231,7 @@ pub fn run(
                 .by_command
                 .iter()
                 .map(|(_, _, saved, _, _)| *saved)
+                .filter(|saved| *saved > 0)
                 .max()
                 .unwrap_or(1);
 
@@ -240,7 +241,7 @@ pub fn run(
                 let count_cell = format!("{:>count_width$}", count, count_width = count_width);
                 let saved_cell = format!(
                     "{:>saved_width$}",
-                    format_tokens(*saved),
+                    format_signed_tokens(*saved),
                     saved_width = saved_width
                 );
                 let pct_plain = format!("{:>6}", format!("{pct:.1}%"));
@@ -283,13 +284,18 @@ pub fn run(
                     } else {
                         "•"
                     };
+                    let savings_pct = if rec.savings_pct >= 0.0 {
+                        format!("-{:.0}%", rec.savings_pct)
+                    } else {
+                        format!("{:.0}%", rec.savings_pct)
+                    };
                     println!(
-                        "{} {} {:<25} -{:.0}% ({})",
+                        "{} {} {:<25} {} ({})",
                         time,
                         sign,
                         cmd_short,
-                        rec.savings_pct,
-                        format_tokens(rec.saved_tokens)
+                        savings_pct,
+                        format_signed_tokens(rec.saved_tokens)
                     );
                 }
                 println!();
@@ -314,7 +320,7 @@ pub fn run(
             print_kpi("Estimated monthly quota", format_tokens(quota_tokens));
             print_kpi(
                 "Tokens saved (lifetime)",
-                format_tokens(summary.total_saved),
+                format_signed_tokens(summary.total_saved),
             );
             print_kpi("Quota preserved", format!("{:.1}%", quota_pct));
             println!();
@@ -400,8 +406,8 @@ fn style_command_cell(cmd: &str) -> String {
 }
 
 /// Render a proportional bar chart segment (TTY-aware). // added
-fn mini_bar(value: usize, max: usize, width: usize) -> String {
-    if max == 0 || width == 0 {
+fn mini_bar(value: i64, max: i64, width: usize) -> String {
+    if value <= 0 || max <= 0 || width == 0 {
         return String::new();
     }
     let filled = ((value as f64 / max as f64) * width as f64).round() as usize;
@@ -575,18 +581,23 @@ fn shorten_path(path: &str) -> String {
     }
 }
 
-fn print_ascii_graph(data: &[(String, usize)]) {
+fn print_ascii_graph(data: &[(String, i64)]) {
     if data.is_empty() {
         return;
     }
 
-    let max_val = data.iter().map(|(_, v)| *v).max().unwrap_or(1);
+    let max_val = data
+        .iter()
+        .map(|(_, v)| *v)
+        .filter(|value| *value > 0)
+        .max()
+        .unwrap_or(1);
     let width = 40;
 
     for (date, value) in data {
         let date_short = if date.len() >= 10 { &date[5..10] } else { date };
 
-        let bar_len = if max_val > 0 {
+        let bar_len = if *value > 0 {
             ((*value as f64 / max_val as f64) * width as f64) as usize
         } else {
             0
@@ -600,7 +611,7 @@ fn print_ascii_graph(data: &[(String, usize)]) {
             date_short,
             bar,
             spaces,
-            format_tokens(*value)
+            format_signed_tokens(*value)
         );
     }
 }
@@ -642,7 +653,7 @@ struct ExportSummary {
     total_commands: usize,
     total_input: usize,
     total_output: usize,
-    total_saved: usize,
+    total_saved: i64,
     avg_savings_pct: f64,
     total_time_ms: u64,
     avg_time_ms: u64,

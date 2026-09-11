@@ -730,13 +730,11 @@ mod tests {
             Ok(t) => t,
             Err(_) => return, // No DB — skip
         };
-        let (cmds, top, pct, saved_24h, saved_total) = get_stats(&tracker);
+        let (cmds, top, pct, _saved_24h, _saved_total) = get_stats(&tracker);
         assert!(cmds >= 0);
         assert!(top.len() <= 5);
-        assert!(saved_24h >= 0);
-        assert!(saved_total >= 0);
         if let Some(p) = pct {
-            assert!((0.0..=100.0).contains(&p));
+            assert!(p.is_finite());
         }
     }
 
@@ -750,7 +748,7 @@ mod tests {
         assert!(stats.passthrough_top.len() <= 5);
         assert!(stats.parse_failures_24h >= 0);
         assert!(stats.low_savings_commands.len() <= 5);
-        assert!((0.0..=100.0).contains(&stats.avg_savings_per_command));
+        assert!(stats.avg_savings_per_command.is_finite());
         assert!(
             ["claude", "gemini", "codex", "cursor", "copilot", "vibe", "none", "unknown"]
                 .iter()

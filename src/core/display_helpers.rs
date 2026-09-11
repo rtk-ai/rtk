@@ -4,7 +4,7 @@
 //! a unified trait-based system for displaying daily/weekly/monthly data.
 
 use crate::core::tracking::{DayStats, MonthStats, WeekStats};
-use crate::core::utils::format_tokens;
+use crate::core::utils::{format_signed_tokens, format_tokens};
 
 /// Format duration in milliseconds to human-readable string
 pub fn format_duration(ms: u64) -> String {
@@ -40,7 +40,7 @@ pub trait PeriodStats {
     fn output_tokens(&self) -> usize;
 
     /// Saved tokens in this period
-    fn saved_tokens(&self) -> usize;
+    fn saved_tokens(&self) -> i64;
 
     /// Savings percentage
     fn savings_pct(&self) -> f64;
@@ -100,7 +100,7 @@ pub fn print_period_table<T: PeriodStats>(data: &[T]) {
             period.commands(),
             format_tokens(period.input_tokens()),
             format_tokens(period.output_tokens()),
-            format_tokens(period.saved_tokens()),
+            format_signed_tokens(period.saved_tokens()),
             period.savings_pct(),
             format_duration(period.avg_time_ms()),
             width = period_width
@@ -111,7 +111,7 @@ pub fn print_period_table<T: PeriodStats>(data: &[T]) {
     let total_cmds: usize = data.iter().map(|d| d.commands()).sum();
     let total_input: usize = data.iter().map(|d| d.input_tokens()).sum();
     let total_output: usize = data.iter().map(|d| d.output_tokens()).sum();
-    let total_saved: usize = data.iter().map(|d| d.saved_tokens()).sum();
+    let total_saved: i64 = data.iter().map(|d| d.saved_tokens()).sum();
     let total_time: u64 = data.iter().map(|d| d.total_time_ms()).sum();
     let avg_pct = if total_input > 0 {
         (total_saved as f64 / total_input as f64) * 100.0
@@ -131,7 +131,7 @@ pub fn print_period_table<T: PeriodStats>(data: &[T]) {
         total_cmds,
         format_tokens(total_input),
         format_tokens(total_output),
-        format_tokens(total_saved),
+        format_signed_tokens(total_saved),
         avg_pct,
         format_duration(avg_time),
         width = period_width
@@ -166,7 +166,7 @@ impl PeriodStats for DayStats {
         self.output_tokens
     }
 
-    fn saved_tokens(&self) -> usize {
+    fn saved_tokens(&self) -> i64 {
         self.saved_tokens
     }
 
@@ -226,7 +226,7 @@ impl PeriodStats for WeekStats {
         self.output_tokens
     }
 
-    fn saved_tokens(&self) -> usize {
+    fn saved_tokens(&self) -> i64 {
         self.saved_tokens
     }
 
@@ -276,7 +276,7 @@ impl PeriodStats for MonthStats {
         self.output_tokens
     }
 
-    fn saved_tokens(&self) -> usize {
+    fn saved_tokens(&self) -> i64 {
         self.saved_tokens
     }
 

@@ -128,6 +128,17 @@ pub fn format_tokens(n: usize) -> String {
     }
 }
 
+/// Formats a signed token delta with K/M suffixes while preserving its sign.
+pub fn format_signed_tokens(n: i64) -> String {
+    if n >= 1_000_000 || n <= -1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 || n <= -1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 /// Formats a USD amount with adaptive precision.
 ///
 /// # Arguments
@@ -946,6 +957,13 @@ mod tests {
     fn test_format_tokens_small() {
         assert_eq!(format_tokens(694), "694");
         assert_eq!(format_tokens(0), "0");
+    }
+
+    #[test]
+    fn test_format_signed_tokens() {
+        assert_eq!(format_signed_tokens(-51), "-51");
+        assert_eq!(format_signed_tokens(-59_234), "-59.2K");
+        assert_eq!(format_signed_tokens(i64::MIN), "-9223372036854.8M");
     }
 
     #[test]
