@@ -41,7 +41,7 @@ Agent runs "cargo test"
 | Factory Droid | Shell hook (`PreToolUse`, matcher `Execute`) | Yes |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
-| Codex CLI | AGENTS.md instructions | N/A |
+| Codex CLI | Shell hook (`PreToolUse`, matcher `Bash`) | Yes |
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rules file (prompt-level) | N/A |
 | Mistral Vibe | Rust binary (`pre_tool`) | Yes |
@@ -210,9 +210,18 @@ rtk init --global --agent windsurf    # creates .windsurfrules in current projec
 ### Codex CLI
 
 ```bash
-rtk init --codex           # project-scoped (AGENTS.md)
-rtk init --global --codex  # user-global (~/.codex/AGENTS.md)
+rtk init --codex           # project:  .codex/hooks.json + AGENTS.md
+rtk init --global --codex  # global:   $CODEX_HOME/hooks.json + ~/.codex/AGENTS.md
 ```
+
+Codex dispatches a `PreToolUse` lifecycle event before every shell tool call, and RTK's handler
+answers with the rewritten command, so interception does not depend on the model remembering
+anything. The `AGENTS.md` guidance stays installed as a fallback for sessions where the hook is
+disabled. Verify the engine is available with `codex features list | grep hooks`.
+
+Codex reviews hook definitions before running them and skips one that has not been trusted, so
+start Codex once after installing and approve RTK's hook in the `/hooks` review — otherwise the
+integration looks installed but never fires.
 
 ### Kilo Code
 
@@ -261,7 +270,7 @@ Strips only RTK's `[[hooks]]` block and the `~/.vibe/prompts/rtk.md` file. Any o
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
+Rules file integrations (Cline, Windsurf, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
 
 ## Windows support
 

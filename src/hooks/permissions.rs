@@ -38,6 +38,7 @@ pub enum Host {
     Gemini,
     Droid,
     Vibe,
+    Codex,
 }
 
 pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
@@ -58,6 +59,11 @@ pub(crate) fn load_rules_for(host: Host) -> (Vec<String>, Vec<String>, Vec<Strin
         Host::Gemini => load_gemini_rules(),
         Host::Droid => load_droid_rules(),
         Host::Vibe => (Vec::new(), Vec::new(), Vec::new()),
+        // Codex gates commands through `approval_policy` and `sandbox_mode` in
+        // `config.toml`, not through a Bash allow/deny list, and it applies
+        // them itself after the hook returns. There is nothing here for RTK to
+        // mirror — defer to the host, like `Host::Vibe`.
+        Host::Codex => (Vec::new(), Vec::new(), Vec::new()),
     }
 }
 

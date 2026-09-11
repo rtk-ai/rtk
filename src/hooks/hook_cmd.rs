@@ -3,7 +3,7 @@
 //! Uses `writeln!(stdout, ...)` instead of `println!` — accidental stdout/stderr
 //! corrupts the JSON protocol (Claude Code bug #4669 silently disables the hook).
 
-use super::constants::PRE_TOOL_USE_KEY;
+use super::constants::{CODEX_SHELL_TOOL, PRE_TOOL_USE_KEY};
 use super::permissions::{self, PermissionVerdict};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -467,6 +467,114 @@ fn run_gemini_inner_impl(
         }
         HookDecision::Defer => gemini_json("ask_user", None),
     })
+}
+
+// ── Codex hook ────────────────────────────────────────────────
+
+/// Run the Codex CLI `PreToolUse` hook.
+///
+/// Codex models its hooks on Claude Code's — same snake_case stdin
+/// (`tool_name` / `tool_input.command`) and the same `hookSpecificOutput`
+/// envelope — but it validates the response strictly, and two of its rules bite
+/// (error strings taken from the `codex` binary):
+///
+/// - "PreToolUse hook returned updatedInput without permissionDecision:allow"
+///   — a rewrite MUST carry `permissionDecision: "allow"`. `run_claude` omits
+///   that field on its Ask path, which is why `rtk hook claude` cannot simply
+///   be pointed at Codex.
+/// - "PreToolUse hook returned permissionDecision:deny without a non-empty
+///   permissionDecisionReason" — a deny MUST carry a reason.
+///
+/// `continue: false`, `stopReason` and `suppressOutput` are rejected as
+/// unsupported, so this handler never emits them.
+///
+/// Live payload captured from Codex 0.153.4 for `git status`:
+/// ```json
+/// {"tool_name":"Bash","tool_input":{"command":"git status"},
+///  "hook_event_name":"PreToolUse","tool_use_id":"exec-…","cwd":"…"}
+/// ```
+pub fn run_codex() -> Result<()> {
+    let input = read_stdin_limited()?;
+    if let Some(output) = run_codex_inner(&input) {
+        let _ = writeln!(io::stdout(), "{output}");
+    }
+    Ok(())
+}
+
+fn run_codex_inner(input: &str) -> Option<String> {
+    run_codex_inner_impl(input, |cmd| {
+        decide_hook_action(cmd, permissions::Host::Codex)
+    })
+}
+
+#[cfg(test)]
+fn run_codex_inner_with_rules(
+    input: &str,
+    deny: &[String],
+    ask: &[String],
+    allow: &[String],
+) -> Option<String> {
+    run_codex_inner_impl(input, |cmd| {
+        decide_from_verdict(
+            cmd,
+            permissions::check_command_with_rules(cmd, deny, ask, allow),
+        )
+    })
+}
+
+fn run_codex_inner_impl(input: &str, decide: impl Fn(&str) -> HookDecision) -> Option<String> {
+    let input = strip_leading_bom(input);
+    let json: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return None;
+        }
+    };
+
+    if json.get("tool_name").and_then(|v| v.as_str())? != CODEX_SHELL_TOOL {
+        return None;
+    }
+
+    let cmd = json
+        .pointer("/tool_input/command")
+        .and_then(|v| v.as_str())
+        .filter(|c| !c.is_empty())?;
+
+    match decide(cmd) {
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            Some(codex_json("deny", None))
+        }
+        // Codex only honours `updatedInput` alongside `permissionDecision:
+        // "allow"`, so an Ask verdict cannot be expressed as "rewrite, but let
+        // the host prompt". `allow` here means "RTK has no objection": Codex
+        // still applies its own `approval_policy` and sandbox to the rewritten
+        // call, so this cannot widen what the user granted.
+        HookDecision::AllowRewrite(ref rewritten) | HookDecision::AskRewrite(ref rewritten) => {
+            audit_log("rewrite", cmd, rewritten);
+            Some(codex_json("allow", Some(rewritten)))
+        }
+        // Staying silent lets Codex fall through to its native handling — the
+        // same shape `run_claude` and `run_vibe` use for a no-op.
+        HookDecision::Defer => None,
+    }
+}
+
+fn codex_json(decision: &str, rewrite: Option<&str>) -> String {
+    let mut hook_output = serde_json::json!({
+        "hookEventName": PRE_TOOL_USE_KEY,
+        "permissionDecision": decision,
+        "permissionDecisionReason": if rewrite.is_some() {
+            "RTK auto-rewrite"
+        } else {
+            "Blocked by RTK permission rule"
+        },
+    });
+    if let Some(cmd) = rewrite {
+        hook_output["updatedInput"] = serde_json::json!({ "command": cmd });
+    }
+    serde_json::json!({ "hookSpecificOutput": hook_output }).to_string()
 }
 
 // ── Vibe hook ─────────────────────────────────────────────────
@@ -2207,6 +2315,160 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(v["decision"], "deny");
+    }
+
+    // --- Codex CLI hook ---
+
+    /// The `PreToolUse` payload Codex 0.153.4 sent for `git status`, captured
+    /// from a live session (trimmed to the fields the handler reads). Keeping
+    /// the real shape here is what stops a refactor from quietly breaking the
+    /// integration.
+    fn codex_input(tool: &str, cmd: &str) -> String {
+        json!({
+            "session_id": "01a08578-4678-7731-a58c-af3972b3e51f",
+            "turn_id": "01a08578-4710-7941-ab83-aec9919cc5d7",
+            "cwd": "/tmp/workspace",
+            "hook_event_name": "PreToolUse",
+            "permission_mode": "bypassPermissions",
+            "tool_name": tool,
+            "tool_input": { "command": cmd },
+            "tool_use_id": "exec-7716f8ce-28f9-4d52-aba7-e76a06b3a138"
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_codex_rewrite_carries_permission_decision() {
+        // Codex rejects the response outright when `updatedInput` arrives
+        // without `permissionDecision: "allow"` ("PreToolUse hook returned
+        // updatedInput without permissionDecision:allow"). That is exactly the
+        // shape `run_claude` emits on its Ask path, which is why Codex needs
+        // its own handler rather than a reused `rtk hook claude`.
+        let out = run_codex_inner_with_rules(
+            &codex_input(CODEX_SHELL_TOOL, "git status"),
+            &[],
+            &[],
+            &all_allowed(),
+        )
+        .expect("a rewritable command must produce a response");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let hook = &v["hookSpecificOutput"];
+        assert_eq!(hook["hookEventName"], "PreToolUse");
+        assert_eq!(hook["permissionDecision"], "allow");
+        assert_eq!(hook["updatedInput"]["command"], "rtk git status");
+    }
+
+    #[test]
+    fn test_codex_rewrite_without_rules_still_decides() {
+        // `Host::Codex` carries no rules, so in practice every command lands on
+        // the Ask/Defer path. A rewrite must still be emitted with `allow`.
+        let out =
+            run_codex_inner_with_rules(&codex_input(CODEX_SHELL_TOOL, "git status"), &[], &[], &[])
+                .expect("a rewritable command must produce a response");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert_eq!(
+            v["hookSpecificOutput"]["updatedInput"]["command"],
+            "rtk git status"
+        );
+    }
+
+    #[test]
+    fn test_codex_deny_carries_reason() {
+        // "PreToolUse hook returned permissionDecision:deny without a
+        // non-empty permissionDecisionReason" — Codex rejects a bare deny.
+        let out = run_codex_inner_with_rules(
+            &codex_input(CODEX_SHELL_TOOL, "rm -rf /tmp/x"),
+            &["rm -rf".to_string()],
+            &[],
+            &[],
+        )
+        .expect("a denied command must produce a response");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let hook = &v["hookSpecificOutput"];
+        assert_eq!(hook["permissionDecision"], "deny");
+        assert!(!hook["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or("")
+            .is_empty());
+        assert!(hook.get("updatedInput").is_none());
+    }
+
+    #[test]
+    fn test_codex_ignores_other_tools() {
+        assert!(run_codex_inner_with_rules(
+            &json!({ "tool_name": "Read", "tool_input": { "file_path": "/x" } }).to_string(),
+            &[],
+            &[],
+            &all_allowed(),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn test_codex_passes_through_non_rewritable() {
+        // Silence lets Codex fall through to its native handling. Emitting a
+        // decision here would put RTK in the approval path for every command.
+        assert!(run_codex_inner_with_rules(
+            &codex_input(CODEX_SHELL_TOOL, "echo hi"),
+            &[],
+            &[],
+            &all_allowed(),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn test_codex_never_emits_unsupported_fields() {
+        // Codex rejects `continue: false`, `stopReason` and `suppressOutput`.
+        let out = run_codex_inner_with_rules(
+            &codex_input(CODEX_SHELL_TOOL, "git status"),
+            &[],
+            &[],
+            &all_allowed(),
+        )
+        .unwrap();
+        for field in ["continue", "stopReason", "suppressOutput"] {
+            assert!(!out.contains(field), "response must not carry {field}");
+        }
+    }
+
+    #[test]
+    fn test_codex_rewrite_is_idempotent() {
+        if let Some(out) = run_codex_inner_with_rules(
+            &codex_input(CODEX_SHELL_TOOL, "rtk git status"),
+            &[],
+            &[],
+            &all_allowed(),
+        ) {
+            let v: Value = serde_json::from_str(&out).unwrap();
+            let rewritten = v["hookSpecificOutput"]["updatedInput"]["command"]
+                .as_str()
+                .unwrap_or("");
+            assert!(
+                !rewritten.starts_with("rtk rtk"),
+                "double-prefixed command: {rewritten}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_codex_strips_utf8_bom() {
+        let with_bom = format!("\u{feff}{}", codex_input(CODEX_SHELL_TOOL, "git status"));
+        let out = run_codex_inner_with_rules(&with_bom, &[], &[], &all_allowed())
+            .expect("BOM-prefixed payload must parse");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v["hookSpecificOutput"]["updatedInput"]["command"],
+            "rtk git status"
+        );
+    }
+
+    #[test]
+    fn test_codex_malformed_json_is_silent() {
+        // A hook that prints garbage to stdout on bad input would wedge the
+        // tool call it is supposed to be transparent to.
+        assert!(run_codex_inner("not valid json {{{").is_none());
     }
 
     // --- Factory Droid hook ---

@@ -16,6 +16,11 @@ pub const CURSOR_HOOK_COMMAND: &str = "rtk hook cursor";
 pub const DROID_HOOK_COMMAND: &str = "rtk hook droid";
 /// Native Rust hook command for Mistral Vibe.
 pub const VIBE_HOOK_COMMAND: &str = "rtk hook vibe";
+/// Native Rust hook command for Codex CLI.
+pub const CODEX_HOOK_COMMAND: &str = "rtk hook codex";
+/// Codex's shell tool, as reported by `tool_name` in a live `PreToolUse`
+/// payload, and therefore the `matcher` its handlers key off.
+pub const CODEX_SHELL_TOOL: &str = "Bash";
 
 pub const CONFIG_DIR: &str = ".config";
 pub const OPENCODE_SUBDIR: &str = "opencode";
