@@ -295,7 +295,7 @@ pub struct MonthStats {
     pub avg_time_ms: u64,
 }
 
-/// Type alias for command statistics tuple: (command, count, saved_tokens, avg_savings_pct, avg_time_ms)
+/// Type alias for command statistics tuple: (command, count, saved_tokens, total_savings_pct, avg_time_ms)
 type CommandStats = (String, usize, usize, f64, u64);
 
 /// Current tracking-DB schema version, stored in the SQLite `user_version` pragma.
@@ -893,7 +893,9 @@ impl Tracker {
     ) -> Result<Vec<CommandStats>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
         let mut stmt = self.conn.prepare(
-            "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens), AVG(savings_pct), AVG(exec_time_ms)
+            "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens),
+                    COALESCE(100.0 * SUM(saved_tokens) / NULLIF(SUM(input_tokens), 0), 0.0),
+                    AVG(exec_time_ms)
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY rtk_cmd
@@ -2004,6 +2006,45 @@ mod tests {
         );
         // Upper bound still holds (a real saving never exceeds 100%).
         assert!(avg <= 100.0, "aggregate must never exceed 100, got {avg}");
+    }
+
+    #[test]
+    fn test_get_by_command_uses_total_savings_pct() {
+        // In-memory: isolated per-test DB, see test_tracker_record_and_recent.
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+
+        // A long-tailed pair: one huge command (90% savings) and one tiny
+        // command (10% savings) under the same rtk_cmd. The mean of
+        // percentages is 50%, but the total-based percentage is dominated by
+        // the huge command (~89.99%), matching the SUM(saved_tokens) in the
+        // same row.
+        tracker
+            .record("grep huge", "rtk grep", 1_000_000, 100_000, 50)
+            .expect("record huge");
+        tracker
+            .record("grep tiny", "rtk grep", 100, 90, 5)
+            .expect("record tiny");
+
+        let by_command = tracker.get_by_command(None).expect("get_by_command");
+
+        let (_cmd, count, saved, pct, _avg_time) = by_command
+            .iter()
+            .find(|(cmd, ..)| cmd == "rtk grep")
+            .expect("rtk grep row not found");
+
+        assert_eq!(*count, 2);
+        assert_eq!(*saved, 900_010);
+        // Total-based: 100 * (900_000 + 10) / (1_000_000 + 100). The old
+        // AVG(savings_pct) would report 50.0 here.
+        let expected = 100.0 * 900_010.0 / 1_000_100.0;
+        assert!(
+            (pct - expected).abs() < 0.01,
+            "expected total savings pct ~{expected:.2}, got {pct:.2}"
+        );
+        assert!(
+            (pct - 50.0).abs() > 1.0,
+            "mean-of-percentages regression: got {pct:.2}"
+        );
     }
 
     // 5. TimedExecution::track records with exec_time > 0
