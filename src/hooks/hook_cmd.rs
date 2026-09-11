@@ -684,6 +684,140 @@ fn log_hook_decision(v: &Value, cmd: &str, decision: HookOutcome, rewritten: Opt
     }
 }
 
+/// Run the Grok Build PreToolUse hook natively.
+///
+/// Grok's envelope is camelCase (`toolName` / `toolInput`) and the shell tool
+/// is `run_terminal_cmd` (alias `run_terminal_command`). Its schema requires
+/// `description` on `updatedInput`; emitting `{command}` only is a hook denial.
+/// Merge the rewritten command into the original `toolInput` and default
+/// `description` when the host omitted it. Do not set `permissionDecision`:
+/// Grok treats `updatedInput` alone as an allow+rewrite.
+pub fn run_grok() -> Result<()> {
+    let input = read_stdin_limited()?;
+
+    let input = strip_leading_bom(&input).trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    match process_grok_payload(&v) {
+        PayloadAction::Rewrite {
+            cmd,
+            rewritten,
+            decision,
+            output,
+        } => {
+            let _ = writeln!(io::stdout(), "{output}");
+            audit_log("rewrite", &cmd, &rewritten);
+            log_hook_decision(&v, &cmd, decision, Some(&rewritten));
+        }
+        PayloadAction::Skip { decision, cmd } => {
+            let audit_action = match decision {
+                HookOutcome::Deny => "skip:deny_rule",
+                HookOutcome::Defer => "skip:defer",
+                HookOutcome::Allow | HookOutcome::Ask => "skip",
+            };
+            audit_log(audit_action, &cmd, "");
+            log_hook_decision(&v, &cmd, decision, None);
+        }
+        PayloadAction::Ignore => {}
+    }
+
+    Ok(())
+}
+
+fn grok_shell_input(v: &Value) -> Option<(String, Value)> {
+    let tool = v
+        .get("toolName")
+        .or_else(|| v.get("tool_name"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+    if !matches!(
+        tool,
+        "run_terminal_cmd" | "run_terminal_command" | "Bash" | "bash"
+    ) {
+        return None;
+    }
+    let mut inp = match v.get("toolInput").or_else(|| v.get("tool_input")) {
+        Some(Value::String(s)) => serde_json::from_str(s).unwrap_or_else(|_| json!({})),
+        Some(obj) if obj.is_object() => obj.clone(),
+        _ => json!({}),
+    };
+    if !inp.is_object() {
+        inp = json!({});
+    }
+    let cmd = inp
+        .get("command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())?
+        .to_string();
+    Some((cmd, inp))
+}
+
+fn process_grok_payload(v: &Value) -> PayloadAction {
+    let Some((cmd, inp)) = grok_shell_input(v) else {
+        return PayloadAction::Ignore;
+    };
+    let synthetic = json!({ "tool_input": inp });
+    match process_claude_payload_from_decision(
+        &synthetic,
+        &cmd,
+        decide_hook_action(&cmd, permissions::Host::Claude),
+    ) {
+        PayloadAction::Rewrite {
+            mut output,
+            cmd,
+            rewritten,
+            decision,
+        } => {
+            if let Some(ui) = output.pointer_mut("/hookSpecificOutput/updatedInput") {
+                if let Some(obj) = ui.as_object_mut() {
+                    let missing = obj
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .map(|s| s.trim().is_empty())
+                        .unwrap_or(true);
+                    if missing {
+                        obj.insert("description".into(), json!("rtk rewrite"));
+                    }
+                }
+            }
+            if let Some(hso) = output.pointer_mut("/hookSpecificOutput") {
+                if let Some(obj) = hso.as_object_mut() {
+                    obj.remove("permissionDecision");
+                    obj.remove("permissionDecisionReason");
+                    obj.insert("hookEventName".into(), json!("PreToolUse"));
+                }
+            }
+            PayloadAction::Rewrite {
+                output,
+                cmd,
+                rewritten,
+                decision,
+            }
+        }
+        other => other,
+    }
+}
+
+#[cfg(test)]
+fn run_grok_inner(input: &str) -> Option<String> {
+    let input = strip_leading_bom(input);
+    let v: Value = serde_json::from_str(input).ok()?;
+    match process_grok_payload(&v) {
+        PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+        _ => None,
+    }
+}
+
 /// Run the Claude Code PreToolUse hook natively.
 pub fn run_claude() -> Result<()> {
     let input = read_stdin_limited()?;
@@ -1624,6 +1758,61 @@ mod tests {
     #[test]
     fn test_claude_passthrough_no_output() {
         assert!(run_claude_inner(&claude_input("htop")).is_none());
+    }
+
+    fn grok_input(tool: &str, cmd: &str, description: Option<&str>) -> String {
+        let mut inp = json!({ "command": cmd });
+        if let Some(d) = description {
+            inp["description"] = json!(d);
+        }
+        json!({
+            "toolName": tool,
+            "toolInput": inp,
+            "hookEventName": "pre_tool_use"
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_grok_rewrite_preserves_description() {
+        let result = run_grok_inner(&grok_input(
+            "run_terminal_cmd",
+            "git status",
+            Some("Inspect git status"),
+        ))
+        .unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let updated = &v["hookSpecificOutput"]["updatedInput"];
+        assert_eq!(updated["command"], "rtk git status");
+        assert_eq!(updated["description"], "Inspect git status");
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert!(
+            v["hookSpecificOutput"]
+                .as_object()
+                .unwrap()
+                .get("permissionDecision")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_grok_rewrite_defaults_description() {
+        let result = run_grok_inner(&grok_input("run_terminal_command", "git status", None)).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            v["hookSpecificOutput"]["updatedInput"]["description"],
+            "rtk rewrite"
+        );
+    }
+
+    #[test]
+    fn test_grok_ignores_non_shell_tools() {
+        let input = json!({
+            "toolName": "read_file",
+            "toolInput": { "target_file": "/tmp/x" }
+        })
+        .to_string();
+        assert!(run_grok_inner(&input).is_none());
     }
 
     #[test]
