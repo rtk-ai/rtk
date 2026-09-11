@@ -122,7 +122,8 @@ pnpm list > tests/fixtures/pnpm_list_raw.txt
 ### Savings Target
 
 There is a single enforced floor, not a per-filter table: **≥60% savings is the release
-blocker** (see CLAUDE.md's "Pre-commit Gate" / performance targets). Individual filters often
+blocker** (see [AGENTS.md](../../AGENTS.md)'s "Development Commands" for the pre-commit gate and
+performance-verification steps). Individual filters often
 exceed this by a wide margin, but don't assert specific per-command percentages (e.g. "87% for
 `gh pr view`") unless you've verified the actual number against that filter's own fixtures —
 asserted thresholds vary per filter and doc tables listing invented numbers rot immediately.

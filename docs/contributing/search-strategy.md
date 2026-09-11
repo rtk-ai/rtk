@@ -1,6 +1,11 @@
 # Search Strategy — RTK Codebase Navigation
 
-Efficient search patterns for RTK's Rust codebase.
+Efficient search patterns for RTK's Rust codebase. The tool names and call syntax below
+(`Grep`, `Glob`, `Read`, `Explore agent`) are Claude Code's own built-in search tools.
+The underlying strategy applies to any agent: targeted pattern search over full-file
+reads, file-name search over shelling out to `find`, minimize open-ended exploration.
+If you're a different agent, use your own equivalent (`rg`/`grep -r` for pattern search,
+`fd`/`find` for file discovery) in the same order.
 
 ## Priority Order
 
@@ -9,7 +14,9 @@ Efficient search patterns for RTK's Rust codebase.
 3. **Read** (full file) → only after locating the right file
 4. **Explore agent** (broad research) → last resort for >3 queries
 
-Never use Bash for search (`find`, `grep`, `rg`) — use dedicated tools.
+Claude Code: never use Bash for search (`find`, `grep`, `rg`), use the dedicated tools
+above. Other agents: prefer a dedicated search tool if your harness provides one, and
+minimize raw shell search the same way.
 
 ## RTK Module Map
 
