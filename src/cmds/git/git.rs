@@ -242,16 +242,23 @@ fn run_show(
         for arg in args {
             cmd.arg(arg);
         }
+        // https://github.com/rtk-ai/rtk/issues/1071
+        // git show <rev>:<path> cannot be filtered when blob is binary -> passthrough
+        // git show <rev> is still incorrectly filtered when it corresponds to a binary blob
+        if wants_blob_show {
+            let status = cmd.status().context("Failed to run git show")?;
+            timer.track_passthrough(
+                &format!("git show {}", args.join(" ")),
+                &format!("rtk git show {} (passthrough)", args.join(" ")),
+            );
+            return Ok(exit_code_from_status(&status, "git show"));
+        }
         let result = exec_capture(&mut cmd).context("Failed to run git show")?;
         if !result.success() {
             eprintln!("{}", result.stderr);
             return Ok(result.exit_code);
         }
-        if wants_blob_show {
-            print!("{}", result.stdout);
-        } else {
-            println!("{}", result.stdout.trim());
-        }
+        println!("{}", result.stdout.trim());
 
         timer.track(
             &format!("git show {}", args.join(" ")),
