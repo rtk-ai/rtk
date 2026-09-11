@@ -316,6 +316,12 @@ enum Commands {
     },
 
     /// Compact grep - strips whitespace, truncates, groups by file
+    // disable_help_flag: `-h` is grep's --no-filename, but clap's auto-generated
+    // help captured it before it could reach src/cmds/system/search.rs, so
+    // `rtk grep -h pattern file` printed rtk's help instead of searching. This
+    // removes clap's handling of BOTH `-h` and `--help`; run()'s own check in
+    // search.rs then forwards either form to the engine.
+    #[command(disable_help_flag = true)]
     Grep {
         // rtk's own options here are long-only: a short form shadows the native
         // grep/rg flag of the same letter and captures it before it can reach
@@ -349,6 +355,9 @@ enum Commands {
     },
 
     /// Compact ripgrep - runs rg natively, same output filter as grep
+    // disable_help_flag: same `-h` collision as Grep above (verified: clap
+    // intercepted `rtk rg -h` too).
+    #[command(disable_help_flag = true)]
     Rg {
         /// Pattern, path, and any rg flags (e.g. -v, -i, -t rust, --glob)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
