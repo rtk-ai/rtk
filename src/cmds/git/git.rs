@@ -128,6 +128,39 @@ fn run_diff(
     // Check if user wants compact diff (default RTK behavior)
     let wants_compact = !args.iter().any(|arg| arg == "--no-compact") && !emits_word_diff(args);
 
+    // Diagnostic modes whose entire signal is on stdout (--check, --exit-code,
+    // --quiet, --no-patch) must pass through unfiltered. They exit non-zero
+    // when they find problems, so dropping their stdout turns a whitespace
+    // report into a silent failure (issue #3984).
+    if wants_diagnostic_output(args) {
+        let mut cmd = git_cmd(global_args);
+        cmd.arg("diff");
+        for arg in args {
+            if arg == "--no-compact" {
+                continue; // RTK flag, not a git flag
+            }
+            cmd.arg(arg);
+        }
+
+        let result = exec_capture(&mut cmd).context("Failed to run git diff")?;
+
+        if !result.stdout.is_empty() {
+            print!("{}", result.stdout);
+        }
+        if !result.stderr.trim().is_empty() {
+            eprint!("{}", result.stderr);
+        }
+
+        timer.track(
+            &format!("git diff {}", args.join(" ")),
+            &format!("rtk git diff {} (diagnostic)", args.join(" ")),
+            &result.stdout,
+            &result.stdout,
+        );
+
+        return Ok(result.exit_code);
+    }
+
     if wants_stat || !wants_compact {
         // User wants stat or explicitly no compacting - pass through directly
         let mut cmd = git_cmd(global_args);
@@ -360,6 +393,14 @@ fn emits_word_diff(args: &[String]) -> bool {
         }
     }
     word_diff
+}
+
+/// Diagnostic diff modes that produce a whitespace/violation report on stdout
+/// and exit non-zero when problems are found. rtk must not filter these.
+fn wants_diagnostic_output(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg == "--check" || arg == "--exit-code" || arg == "--quiet" || arg == "--no-patch"
+    })
 }
 
 fn is_blob_show_arg(arg: &str) -> bool {
@@ -2711,6 +2752,24 @@ mod tests {
         let cmd = git_cmd(&global_args);
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(args, vec!["--no-pager", "--bare"]);
+    }
+
+    #[test]
+    fn test_wants_diagnostic_output_detects_diff_modes() {
+        for flag in ["--check", "--exit-code", "--quiet", "--no-patch"] {
+            assert!(
+                wants_diagnostic_output(&[flag.to_string()]),
+                "{flag} should be a diagnostic passthrough mode"
+            );
+        }
+    }
+
+    #[test]
+    fn test_wants_diagnostic_output_ignores_normal_diff_args() {
+        assert!(!wants_diagnostic_output(&["--stat".to_string()]));
+        assert!(!wants_diagnostic_output(&["--numstat".to_string()]));
+        assert!(!wants_diagnostic_output(&[]));
+        assert!(!wants_diagnostic_output(&["src/main.rs".to_string()]));
     }
 
     #[test]
