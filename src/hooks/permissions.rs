@@ -38,6 +38,7 @@ pub enum Host {
     Gemini,
     Droid,
     Vibe,
+    Antigravity,
 }
 
 pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
@@ -58,6 +59,12 @@ pub(crate) fn load_rules_for(host: Host) -> (Vec<String>, Vec<String>, Vec<Strin
         Host::Gemini => load_gemini_rules(),
         Host::Droid => load_droid_rules(),
         Host::Vibe => (Vec::new(), Vec::new(), Vec::new()),
+        // Antigravity keeps its own `permissions.allow` list in
+        // `~/.gemini/antigravity-cli/settings.json`, but it evaluates that list
+        // against the *rewritten* tool call (see `hooks/antigravity/README.md`),
+        // so mirroring the rules here would only ever double-check what the host
+        // is about to check itself. Defer to the host, like `Host::Vibe`.
+        Host::Antigravity => (Vec::new(), Vec::new(), Vec::new()),
     }
 }
 

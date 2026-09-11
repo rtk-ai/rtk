@@ -16,6 +16,20 @@ pub const CURSOR_HOOK_COMMAND: &str = "rtk hook cursor";
 pub const DROID_HOOK_COMMAND: &str = "rtk hook droid";
 /// Native Rust hook command for Mistral Vibe.
 pub const VIBE_HOOK_COMMAND: &str = "rtk hook vibe";
+/// Native Rust hook command for Google Antigravity.
+pub const ANTIGRAVITY_HOOK_COMMAND: &str = "rtk hook antigravity";
+/// Antigravity's shell tool, and therefore the `matcher` its `PreToolUse`
+/// handlers key off. Tool names are the step type lowercased with the
+/// `CORTEX_STEP_TYPE_` prefix removed.
+pub const ANTIGRAVITY_SHELL_TOOL: &str = "run_command";
+/// Top-level namespace RTK claims inside a shared `hooks.json`. Antigravity
+/// merges the named hooks of every entry, so anything under a different key
+/// (a user's own linter, another tool's install) must survive untouched.
+pub const ANTIGRAVITY_HOOK_NAME: &str = "rtk";
+/// Antigravity's global customization root, relative to `~/.gemini`.
+pub const ANTIGRAVITY_GLOBAL_SUBDIR: &str = "config";
+/// Antigravity's workspace customization root.
+pub const AGENTS_DIR: &str = ".agents";
 
 pub const CONFIG_DIR: &str = ".config";
 pub const OPENCODE_SUBDIR: &str = "opencode";

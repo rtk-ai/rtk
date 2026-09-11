@@ -3,7 +3,7 @@
 //! Uses `writeln!(stdout, ...)` instead of `println!` — accidental stdout/stderr
 //! corrupts the JSON protocol (Claude Code bug #4669 silently disables the hook).
 
-use super::constants::PRE_TOOL_USE_KEY;
+use super::constants::{ANTIGRAVITY_SHELL_TOOL, PRE_TOOL_USE_KEY};
 use super::permissions::{self, PermissionVerdict};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -467,6 +467,121 @@ fn run_gemini_inner_impl(
         }
         HookDecision::Defer => gemini_json("ask_user", None),
     })
+}
+
+// ── Antigravity hook ──────────────────────────────────────────
+
+/// Run the Google Antigravity CLI (`agy`) `PreToolUse` hook.
+///
+/// Antigravity hook contract (shipped inside the `agy` binary; reproduce with
+/// `strings $(which agy) | sed -n '/Lifecycle Hooks/,/PostInvocation Contract/p'`):
+/// - stdin: `{"toolCall": {"name": "run_command", "args": {"CommandLine": "…"}}, …}`
+///   — protojson, so every key is camelCase.
+/// - Rewrite: `{"decision":"allow","overwrite":{"CommandLine":"…"}}`. `overwrite` is a
+///   shallow, top-level merge into the tool call's arguments, and the merged call is
+///   what actually executes and gets recorded.
+/// - Deny: `{"decision":"deny","reason":"…"}`.
+/// - `decision` is required on every response; the accepted values are `allow`,
+///   `deny`, `ask` and `force_ask`.
+pub fn run_antigravity() -> Result<()> {
+    let input = read_stdin_limited()?;
+    let output = run_antigravity_inner(&input).context("Failed to parse hook input as JSON")?;
+    let _ = writeln!(io::stdout(), "{output}");
+    Ok(())
+}
+
+/// Parse the Antigravity `PreToolUse` stdin payload, decide, and render the
+/// response JSON — no stdin/stdout I/O. Used by `run_antigravity` itself (not
+/// just tests), so a regression here fails for real rather than only in a
+/// duplicate test copy. Mirrors `run_gemini_inner`.
+fn run_antigravity_inner(input: &str) -> serde_json::Result<String> {
+    run_antigravity_inner_impl(input, |cmd| {
+        decide_hook_action(cmd, permissions::Host::Antigravity)
+    })
+}
+
+/// Same parse/render path as `run_antigravity_inner`, but with the permission
+/// decision driven by explicit rule slices instead of whatever settings file
+/// happens to sit at HOME — lets tests exercise the real BOM-stripping/parsing
+/// logic without depending on (or being broken by) the machine they run on.
+#[cfg(test)]
+fn run_antigravity_inner_with_rules(
+    input: &str,
+    deny: &[String],
+    ask: &[String],
+    allow: &[String],
+) -> serde_json::Result<String> {
+    run_antigravity_inner_impl(input, |cmd| {
+        decide_from_verdict(
+            cmd,
+            permissions::check_command_with_rules(cmd, deny, ask, allow),
+        )
+    })
+}
+
+fn run_antigravity_inner_impl(
+    input: &str,
+    decide: impl Fn(&str) -> HookDecision,
+) -> serde_json::Result<String> {
+    let input = strip_leading_bom(input);
+    let json: Value = serde_json::from_str(input)?;
+
+    let tool_name = json
+        .pointer("/toolCall/name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if tool_name != ANTIGRAVITY_SHELL_TOOL {
+        return Ok(antigravity_json("allow", None));
+    }
+
+    let cmd = json
+        .pointer("/toolCall/args/CommandLine")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if cmd.is_empty() {
+        return Ok(antigravity_json("allow", None));
+    }
+
+    Ok(match decide(cmd) {
+        HookDecision::Deny => {
+            r#"{"decision":"deny","reason":"Blocked by RTK permission rule"}"#.to_string()
+        }
+        HookDecision::AllowRewrite(ref rewritten) => {
+            audit_log("rewrite", cmd, rewritten);
+            antigravity_json("allow", Some(rewritten))
+        }
+        // Everything RTK does not actively deny answers `allow`, meaning "RTK
+        // has no objection" — NOT "skip the approval prompt".
+        //
+        // Antigravity applies its own `permissions` rules to the tool call
+        // *after* this hook runs, and it enforces them regardless of what the
+        // hook answered: a headless run whose only allow-rule was
+        // `command(git status)` was still denied while this hook returned
+        // `allow`, because the rule no longer matched the rewritten
+        // `rtk git status`. So `allow` cannot widen the permissions the user
+        // granted, while `ask` would add an approval gate that did not exist
+        // before RTK was installed — every rewritten command would prompt
+        // interactively and hard-fail in headless/CI.
+        //
+        // This is where Antigravity parts ways with `run_gemini_inner_impl`,
+        // whose `ask_user` is the host's *default* path rather than an extra
+        // gate.
+        HookDecision::AskRewrite(ref rewritten) => {
+            audit_log("rewrite", cmd, rewritten);
+            antigravity_json("allow", Some(rewritten))
+        }
+        HookDecision::Defer => antigravity_json("allow", None),
+    })
+}
+
+/// Render an Antigravity `PreToolUse` response. The rewrite rides in a
+/// top-level `overwrite` object rather than Gemini's `hookSpecificOutput`.
+fn antigravity_json(decision: &str, rewrite: Option<&str>) -> String {
+    let mut output = serde_json::json!({ "decision": decision });
+    if let Some(cmd) = rewrite {
+        output["overwrite"] = serde_json::json!({ "CommandLine": cmd });
+    }
+    output.to_string()
 }
 
 // ── Vibe hook ─────────────────────────────────────────────────
@@ -2207,6 +2322,137 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(v["decision"], "deny");
+    }
+
+    // --- Google Antigravity hook ---
+
+    fn antigravity_input(tool: &str, cmd: &str) -> String {
+        json!({
+            "toolCall": { "name": tool, "args": { "CommandLine": cmd } },
+            "stepIdx": 12,
+            "conversationId": "ec33ebf9-0cba-4100-8142-c61503f6c587",
+            "workspacePaths": ["/tmp/workspace"],
+            "modelName": "auto"
+        })
+        .to_string()
+    }
+
+    fn antigravity_render(cmd: &str, deny: &[String], ask: &[String], allow: &[String]) -> String {
+        run_antigravity_inner_with_rules(
+            &antigravity_input(ANTIGRAVITY_SHELL_TOOL, cmd),
+            deny,
+            ask,
+            allow,
+        )
+        .expect("well-formed payload must parse")
+    }
+
+    #[test]
+    fn test_antigravity_allow_emits_overwrite() {
+        // The rewrite rides in a top-level `overwrite`, not Gemini's
+        // `hookSpecificOutput` — Antigravity shallow-merges it into the tool
+        // call's args, and the merged call is what actually runs.
+        let v: Value =
+            serde_json::from_str(&antigravity_render("git status", &[], &[], &all_allowed()))
+                .unwrap();
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(v["overwrite"]["CommandLine"], "rtk git status");
+    }
+
+    #[test]
+    fn test_antigravity_ignores_other_tools() {
+        let input = json!({
+            "toolCall": { "name": "view_file", "args": { "AbsolutePath": "/tmp/x" } }
+        })
+        .to_string();
+        let out = run_antigravity_inner_with_rules(&input, &[], &[], &all_allowed()).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["decision"], "allow");
+        assert!(v.get("overwrite").is_none());
+    }
+
+    #[test]
+    fn test_antigravity_empty_command_line() {
+        let input = json!({
+            "toolCall": { "name": ANTIGRAVITY_SHELL_TOOL, "args": {} }
+        })
+        .to_string();
+        let out = run_antigravity_inner_with_rules(&input, &[], &[], &all_allowed()).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["decision"], "allow");
+        assert!(v.get("overwrite").is_none());
+    }
+
+    #[test]
+    fn test_antigravity_rewrite_is_idempotent() {
+        // The hook runs again on its own output whenever a session replays a
+        // step; a second prefix would produce `rtk rtk git status`.
+        let v: Value = serde_json::from_str(&antigravity_render(
+            "rtk git status",
+            &[],
+            &[],
+            &all_allowed(),
+        ))
+        .unwrap();
+        let rewritten = v["overwrite"]["CommandLine"].as_str().unwrap_or("");
+        assert!(
+            !rewritten.starts_with("rtk rtk"),
+            "double-prefixed command: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn test_antigravity_deny_carries_reason() {
+        // Antigravity surfaces `reason` to the user; a bare deny reads as an
+        // unexplained block.
+        let v: Value = serde_json::from_str(&antigravity_render(
+            "rm -rf /tmp/x",
+            &["rm -rf".to_string()],
+            &[],
+            &[],
+        ))
+        .unwrap();
+        assert_eq!(v["decision"], "deny");
+        assert!(!v["reason"].as_str().unwrap_or("").is_empty());
+    }
+
+    #[test]
+    fn test_antigravity_never_adds_an_approval_gate() {
+        // With no RTK rules at all — the state every Antigravity user starts in,
+        // since `Host::Antigravity` defers permissions to the host — the hook
+        // must still answer `allow`. Answering `ask` here would prompt on every
+        // single rewritten command interactively and hard-fail headless runs.
+        let v: Value =
+            serde_json::from_str(&antigravity_render("git status", &[], &[], &[])).unwrap();
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(v["overwrite"]["CommandLine"], "rtk git status");
+
+        // Same for a command RTK has no rewrite for.
+        let v: Value = serde_json::from_str(&antigravity_render("echo hi", &[], &[], &[])).unwrap();
+        assert_eq!(v["decision"], "allow");
+        assert!(v.get("overwrite").is_none());
+    }
+
+    #[test]
+    fn test_antigravity_strips_utf8_bom() {
+        let with_bom = format!(
+            "\u{feff}{}",
+            antigravity_input(ANTIGRAVITY_SHELL_TOOL, "git status")
+        );
+        let out = run_antigravity_inner_with_rules(&with_bom, &[], &[], &all_allowed())
+            .expect("BOM-prefixed payload must parse");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["overwrite"]["CommandLine"], "rtk git status");
+    }
+
+    #[test]
+    fn test_antigravity_inner_preserves_serde_diagnostic() {
+        let err = run_antigravity_inner("not valid json {{{").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("line") && msg.contains("column"),
+            "expected serde_json's own parse diagnostic, got: {msg}"
+        );
     }
 
     // --- Factory Droid hook ---

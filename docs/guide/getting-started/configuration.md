@@ -80,8 +80,8 @@ level = "high"
 
 Re-run `rtk init -g` (or your agent's init command) to rewrite the file.
 
-Agents without a hook (Codex CLI, Cline, Windsurf, Kilo Code, Antigravity, Kimi) always get `full`,
-since the agent must type `rtk` itself. `rtk init` prints a note when it does this.
+Agents whose awareness ships as a rules file (Codex CLI, Cline, Windsurf, Kilo Code, Antigravity,
+Kimi) always get `full`, since the rules file has to stand on its own. `rtk init` prints a note when it does this.
 
 ## Environment variables
 

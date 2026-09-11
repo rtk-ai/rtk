@@ -963,6 +963,8 @@ enum HookCommands {
     Droid,
     /// Process Mistral Vibe CLI pre_tool hook (reads JSON from stdin)
     Vibe,
+    /// Process Google Antigravity PreToolUse hook (reads JSON from stdin)
+    Antigravity,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -2322,12 +2324,10 @@ fn run_cli() -> Result<i32> {
                 }
                 hooks::init::run_kilocode_mode(ctx)?;
             } else if agent == Some(AgentTarget::Antigravity) {
-                if global {
-                    anyhow::bail!(
-                        "Antigravity is project-scoped. Use: rtk init --agent antigravity"
-                    );
-                }
-                hooks::init::run_antigravity_mode(ctx)?;
+                // Antigravity reads a workspace customization root (`.agents/`)
+                // *and* a global one (`~/.gemini/config/`), so `-g` is meaningful
+                // here and installs the hook once for every workspace.
+                hooks::init::run_antigravity_mode_with_scope(global, ctx)?;
             } else if agent == Some(AgentTarget::Kimi) {
                 if global {
                     anyhow::bail!("Kimi AI is project-scoped. Use: rtk init --agent kimi");
@@ -2786,6 +2786,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Vibe => {
                 hooks::hook_cmd::run_vibe()?;
+                0
+            }
+            HookCommands::Antigravity => {
+                hooks::hook_cmd::run_antigravity()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {
