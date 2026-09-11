@@ -1656,7 +1656,7 @@ pub fn record_parse_failure_silent(raw_command: &str, error_message: &str, succe
 /// ```
 pub fn estimate_tokens(text: &str) -> usize {
     // ~4 chars per token on average
-    (text.len() as f64 / 4.0).ceil() as usize
+    text.chars().count().div_ceil(4)
 }
 
 /// Helper struct for timing command execution
@@ -1812,6 +1812,9 @@ mod tests {
         assert_eq!(estimate_tokens("abcde"), 2); // 5 chars = ceil(1.25) = 2
         assert_eq!(estimate_tokens("a"), 1); // 1 char = ceil(0.25) = 1
         assert_eq!(estimate_tokens("12345678"), 2); // 8 chars = 2 tokens
+        assert_eq!(estimate_tokens("你好"), 1); // 2 chars (6 bytes) = ceil(0.5) = 1
+        assert_eq!(estimate_tokens("😀😃😄😁😆"), 2); // 5 chars (20 bytes) = ceil(1.25) = 2
+        assert_eq!(estimate_tokens("hello你好🌍"), 2); // 8 chars (15 bytes) = 2 tokens
     }
 
     // 2. args_display — format OsString vec
