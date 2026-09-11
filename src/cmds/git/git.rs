@@ -4,7 +4,7 @@ use crate::core::args_utils;
 use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
 use crate::core::stream::{
-    self, exec_capture, exec_capture_stdin, CaptureResult, FilterMode, LineHandler,
+    self, exec_capture, CaptureResult, FilterMode, LineHandler,
     LineStreamFilter, StdinMode,
 };
 use crate::core::tracking;
@@ -1568,27 +1568,42 @@ fn build_commit_command(args: &[String], global_args: &[String]) -> Command {
 /// Handles: `[main abc1234def] message`, `[main (root-commit) abc1234def] msg`,
 /// localized variants, and multibyte branch names.
 fn parse_commit_output(line: &str) -> String {
-    // Locate the summary's own brackets rather than assuming the line starts
-    // with '['. git prints hook output before its summary, so the first line
-    // is often something else entirely; slicing from byte 1 panics outright
-    // when that line opens with a multi-byte character ("✅ lint passed]"),
-    // and a line decoded from non-UTF-8 bytes starts with a multi-byte U+FFFD.
-    // Both indices come from `find`, so both land on character boundaries.
-    let (Some(open), Some(bracket_end)) = (line.find('['), line.find(']')) else {
-        return "ok".to_string();
-    };
+    commit_summary_from_line(line).unwrap_or_else(|| "ok".to_string())
+}
+
+fn commit_summary_from_line(line: &str) -> Option<String> {
+    // Use indices returned by `find` so multibyte hook output cannot create an
+    // invalid byte slice. A closing bracket before the first opening bracket
+    // is not a Git summary.
+    let open = line.find('[')?;
+    let bracket_end = line.find(']')?;
     if open >= bracket_end {
-        return "ok".to_string();
+        return None;
+    }
+    let hash = line[open + 1..bracket_end]
+        .split_whitespace()
+        .next_back()
+        .filter(|hash| hash.len() >= 7 && hash.chars().all(|c| c.is_ascii_hexdigit()))?;
+    Some(format!("ok {}", hash.chars().take(7).collect::<String>()))
+}
+
+struct GitCommitLineHandler;
+
+impl LineHandler for GitCommitLineHandler {
+    fn should_skip(&mut self, line: &str) -> bool {
+        commit_summary_from_line(line.trim_end_matches(['\r', '\n'])).is_some()
     }
 
-    let bracket_content = &line[open + 1..bracket_end];
-    let hash = bracket_content.split_whitespace().next_back().unwrap_or("");
-    if hash.chars().count() >= 7 {
-        let short_hash: String = hash.chars().take(7).collect();
-        format!("ok {}", short_hash)
-    } else {
-        "ok".to_string()
+    fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
+        None
     }
+}
+
+fn compact_commit_summary(stdout: &str) -> String {
+    stdout
+        .lines()
+        .find_map(|line| commit_summary_from_line(line).map(|_| parse_commit_output(line)))
+        .unwrap_or_else(|| "ok".to_string())
 }
 
 fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
@@ -1600,29 +1615,22 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         eprintln!("{}", original_cmd);
     }
 
-    // stdin is inherited so an interactive editor, GPG passphrase prompt or
-    // credential helper still reaches the terminal.
-    let CaptureResult {
-        stdout,
-        stderr,
-        exit_code,
-    } = exec_capture_stdin(&mut build_commit_command(args, global_args))
-        .context("Failed to run git commit")?;
-    let raw_output = format!("{}\n{}", stdout, stderr);
 
-    match classify_commit_outcome(exit_code == 0, &stdout, exit_code) {
+    let result = stream::run_streaming(
+        &mut build_commit_command(args, global_args),
+        StdinMode::Inherit,
+        FilterMode::Streaming(Box::new(LineStreamFilter::new(GitCommitLineHandler))),
+    )?;
+    let raw_output = result.raw.clone();
+
+    match classify_commit_outcome(result.exit_code == 0, &result.raw_stdout, result.exit_code) {
+
         CommitOutcome::Ok(compact) => {
             println!("{}", compact);
             timer.track(&original_cmd, "rtk git commit", &raw_output, &compact);
             Ok(0)
         }
         CommitOutcome::Failed(code) => {
-            if !stderr.trim().is_empty() {
-                eprint!("{}", stderr);
-            }
-            if !stdout.trim().is_empty() {
-                eprint!("{}", stdout);
-            }
             timer.track(&original_cmd, "rtk git commit", &raw_output, &raw_output);
             Ok(code)
         }
@@ -1639,13 +1647,7 @@ enum CommitOutcome {
 /// Classify a `git commit` result.
 fn classify_commit_outcome(success: bool, stdout: &str, exit_code: i32) -> CommitOutcome {
     if success {
-        // Extract commit hash from output
-        let compact = stdout
-            .lines()
-            .next()
-            .map(parse_commit_output)
-            .unwrap_or_else(|| "ok".to_string());
-        CommitOutcome::Ok(compact)
+        CommitOutcome::Ok(compact_commit_summary(stdout))
     } else {
         CommitOutcome::Failed(exit_code)
     }
@@ -2655,6 +2657,7 @@ pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -
 
 #[cfg(test)]
 mod tests {
+    use crate::core::stream::StreamFilter;
     use super::*;
 
     #[test]
@@ -4257,6 +4260,41 @@ no changes added to commit (use "git add" and/or "git commit -a")
         // Hash shorter than 7 chars — treat as "ok" (no hash shown)
         let line = "[main abc12] message";
         assert_eq!(parse_commit_output(line), "ok");
+    }
+
+    #[test]
+    fn test_parse_commit_output_does_not_hide_bracketed_hook_output() {
+        assert_eq!(
+            parse_commit_output("[hook not-a-hash] validation output"),
+            "ok"
+        );
+    }
+
+    #[test]
+    fn test_commit_stream_preserves_hooks_and_drops_git_summary() {
+        let mut filter = LineStreamFilter::new(GitCommitLineHandler);
+        let mut output = String::new();
+        for line in [
+            "hook before",
+            "[main abc1234def] add feature",
+            "hook after",
+        ] {
+            if let Some(line) = filter.feed_line(line) {
+                output.push_str(&line);
+            }
+        }
+        assert_eq!(output, "hook before\nhook after\n");
+    }
+
+    #[test]
+    fn test_commit_stream_keeps_non_git_bracketed_output() {
+        let mut filter = LineStreamFilter::new(GitCommitLineHandler);
+        for line in [
+            "[hook not-a-hash] validation output",
+            "[hook prompt: answer",
+        ] {
+            assert_eq!(filter.feed_line(line), Some(format!("{line}\n")));
+        }
     }
 
     #[test]
