@@ -400,7 +400,7 @@ fn contains_substitution(cmd: &str) -> bool {
 
 // `>&N`/`>&-` (and `N>&M`) is fd-dup/close; bare `>&` before a word is
 // `>word 2>&1` — a file target.
-fn redirect_has_file_target(tokens: &[ParsedToken], i: usize) -> bool {
+pub(crate) fn redirect_has_file_target(tokens: &[ParsedToken], i: usize) -> bool {
     let value = &tokens[i].value;
     if let Some(pos) = value.find(">&") {
         let tail = &value[pos + 2..];

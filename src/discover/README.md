@@ -21,7 +21,7 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 → [Arg("cargo"), Arg("test"), Redirect("2>&1"), Operator("&&"), Arg("git"), Arg("status")]
 ```
 
-**Compound splitting** — The rewrite engine walks the tokens, splitting on `Operator` (`&&`, `||`, `;`) and typed `Pipe` tokens (`|`, `|&`). For normal pipelines, producers and intermediate stages stay raw, and only an argument-safe final stage marked `pipeline_final_safe` is rewritten. The initial safe set is ordinary `grep` and `rg` invocations; search pattern-file forms (`-f`/`--file`) defer because they can consume pipeline stdin as configuration. Stderr pipelines (`|&`) and pipelines containing opaque shell groups remain raw.
+**Compound splitting** — The rewrite engine walks the tokens, splitting on `Operator` (`&&`, `||`, `;`) and typed `Pipe` tokens (`|`, `|&`). For normal pipelines, intermediate stages stay raw. A final stage whose rule's `pipeline_safety` allows it (ordinary `grep` and `rg` invocations) is rewritten; search pattern-file forms (`-f`/`--file`) defer because they can consume pipeline stdin as configuration. The producer stage is rewritten when its rule's `pipeline_safety` allows it and every downstream stage is a display-only consumer (`cat`, `head`, non-following `tail`) with no file-target redirect (#3171). Stderr pipelines (`|&`) and pipelines containing opaque shell groups remain raw.
 
 **Per-segment rewriting** — Each segment goes through:
 
@@ -75,6 +75,32 @@ The `ENV_PREFIX` regex strips env variable assignments and `env` from the front 
 - Chained: `A="x y" B=1 env git status`
 
 The prefix is stripped twice: once in `classify_command()` to match the underlying command against rules, and again in `rewrite_segment()` to extract it for re-prepending to the rewritten command.
+
+## Process Wrapper Handling
+
+A process wrapper runs another command without changing which command runs, so
+the rewrite peels it, rewrites what it wraps, and re-prepends the wrapper text
+byte for byte: `timeout 300 cargo test` becomes `timeout 300 rtk cargo test`.
+`PROCESS_WRAPPERS` in `registry.rs` describes each wrapper's own arguments —
+options that take a value, options that do not, values that may be attached to
+their option, and any positional argument the wrapper consumes before the
+command (`timeout`'s duration).
+
+Two rules keep the peeling honest. An option the table does not describe drops
+the rewrite, because an unknown option may consume the following word and make
+the wrong token look like the command. Shell syntax before the command (a
+redirect, a subshell, a glob) does the same, because the wrapper's argv can no
+longer be read off the token list.
+
+`stdbuf` is deliberately not a wrapper here: it exists to make the wrapped
+command emit output incrementally, and routing through rtk buffers that output
+until the child exits, so rewriting it would remove the only reason to type it.
+
+Wrapping also changes who receives a signal. `timeout 300 rtk cargo test`
+signals rtk rather than cargo, so `core::stream` relays SIGINT/SIGTERM to the
+child and lets the normal filter-and-print path finish. Without that relay a
+killed run prints nothing at all, which is strictly worse than the unwrapped
+command.
 
 ## Adding a New Rewrite Rule
 

@@ -4,6 +4,7 @@
 //! corrupts the JSON protocol (Claude Code bug #4669 silently disables the hook).
 
 use super::constants::PRE_TOOL_USE_KEY;
+use super::decision::{self, HookDecision};
 use super::permissions::{self, PermissionVerdict};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -11,7 +12,6 @@ use std::io::{self, Read, Write};
 
 use crate::core::tracking::HookOutcome;
 use crate::core::utils::strip_leading_bom;
-use crate::discover::registry::{has_heredoc, rewrite_command};
 
 const STDIN_CAP: usize = 1_048_576; // 1 MiB
 
@@ -233,62 +233,16 @@ fn heal_legacy_hook_file(path: &std::path::Path) -> bool {
         .is_ok()
 }
 
-/// Claude Code's worktree-isolation guard only accepts git spelled plainly (or
-/// under the few launchers it models); a rewritten `rtk git …` is refused
-/// outright as "cannot be shown not to be git" (#3864). Its managed worktrees
-/// always live at `<repo>/.claude/worktrees/<name>`, so that path shape is the
-/// signal — the PreToolUse payload carries no isolation flag.
-fn in_claude_worktree(cwd: &str) -> bool {
-    let parts: Vec<&str> = std::path::Path::new(cwd)
-        .components()
-        .filter_map(|c| c.as_os_str().to_str())
-        .collect();
-    parts
-        .windows(3)
-        .any(|w| w[0] == ".claude" && w[1] == "worktrees")
-}
-
-/// `cwd` is the hook payload's working directory when the host reports one;
-/// inside a Claude Code managed worktree, git is left unrewritten (see
-/// [`in_claude_worktree`]).
-fn get_rewritten(cmd: &str, cwd: Option<&str>) -> Option<String> {
-    if has_heredoc(cmd) {
-        return None;
-    }
-
-    let (mut excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
-    if cwd.is_some_and(in_claude_worktree) {
-        excluded.push("git".to_string());
-    }
-
-    let rewritten = rewrite_command(cmd, &excluded, &transparent_prefixes)?;
-
-    if rewritten == cmd {
-        return None;
-    }
-
-    Some(rewritten)
-}
-
-enum HookDecision {
-    AllowRewrite(String),
-    AskRewrite(String),
-    Defer,
-    Deny,
-}
-
+/// The decision every hook applies -- [`decision::decide_for_agent_at`] -- plus
+/// the recall bookkeeping the hook path performs for any command it does not
+/// deny. `cwd` is the payload's working directory when the host reports one
+/// (only the Claude Code hook does; see #3864).
 fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict, cwd: Option<&str>) -> HookDecision {
     if verdict == PermissionVerdict::Deny {
         return HookDecision::Deny;
     }
-    if crate::discover::lexer::contains_unattestable_construct(cmd) {
-        return HookDecision::Defer;
-    }
-    match get_rewritten(cmd, cwd) {
-        Some(r) if verdict == PermissionVerdict::Allow => HookDecision::AllowRewrite(r),
-        Some(r) => HookDecision::AskRewrite(r),
-        None => HookDecision::Defer,
-    }
+    crate::hooks::rewrite_cmd::track_tee_read(cmd);
+    decision::decide_for_agent_at(cmd, verdict, cwd)
 }
 
 fn decide_hook_action(cmd: &str, host: permissions::Host, cwd: Option<&str>) -> HookDecision {
@@ -1041,6 +995,7 @@ fn run_droid_inner_with_rules(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::permissions::PermissionVerdict;
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         crate::discover::registry::rewrite_command(cmd, excluded, &[])
@@ -1152,26 +1107,6 @@ mod tests {
     #[test]
     fn test_detect_unknown_is_passthrough() {
         assert!(matches!(detect_format(&json!({})), HookFormat::PassThrough));
-    }
-
-    #[test]
-    fn test_get_rewritten_supported() {
-        assert!(get_rewritten("git status", None).is_some());
-    }
-
-    #[test]
-    fn test_get_rewritten_unsupported() {
-        assert!(get_rewritten("htop", None).is_none());
-    }
-
-    #[test]
-    fn test_get_rewritten_already_rtk() {
-        assert!(get_rewritten("rtk git status", None).is_none());
-    }
-
-    #[test]
-    fn test_get_rewritten_heredoc() {
-        assert!(get_rewritten("cat <<'EOF'\nhello\nEOF", None).is_none());
     }
 
     // --- VS Code Copilot Chat / Copilot CLI (PascalCase) handler ---
@@ -1509,35 +1444,8 @@ mod tests {
         assert_eq!(rewrite_command_no_prefixes("cat <<EOF", &[]), None);
     }
 
-    // --- #3864: Claude Code worktree isolation ---
-
-    #[test]
-    fn test_in_claude_worktree_path_shapes() {
-        assert!(in_claude_worktree("/repo/.claude/worktrees/feat-x"));
-        assert!(in_claude_worktree("/repo/.claude/worktrees/feat-x/src"));
-        assert!(!in_claude_worktree("/repo"));
-        assert!(!in_claude_worktree("/repo/.claude/worktrees"));
-        assert!(!in_claude_worktree("/repo/worktrees/feat-x"));
-    }
-
-    #[test]
-    fn test_claude_worktree_leaves_git_plain_but_rewrites_others() {
-        let wt = Some("/repo/.claude/worktrees/feat-x");
-        assert_eq!(get_rewritten("git status", wt), None);
-        assert_eq!(
-            get_rewritten("cargo test", wt),
-            Some("rtk cargo test".into())
-        );
-        assert_eq!(
-            get_rewritten("git status && cargo build", wt),
-            Some("git status && rtk cargo build".into())
-        );
-        assert_eq!(
-            get_rewritten("git status", Some("/repo")),
-            Some("rtk git status".into())
-        );
-    }
-
+    /// #3864: the Claude hook feeds the payload cwd into the decision, so a
+    /// git command from inside a managed worktree is left to Claude Code.
     #[test]
     fn test_claude_payload_cwd_in_worktree_skips_git_rewrite() {
         let v = claude_payload_with_ids(
@@ -1837,6 +1745,17 @@ mod tests {
     }
 
     #[test]
+    fn test_claude_pipeline_rewrites_producer_when_consumers_safe() {
+        let result = run_claude_inner(&claude_input("git log | tail -5")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk git log | tail -5");
+    }
+
+    #[test]
     fn test_claude_json_output_structure() {
         let result = run_claude_inner(&claude_input("git status")).unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
@@ -2099,11 +2018,6 @@ mod tests {
         assert_eq!(
             check_command_with_rules("cargo test", &deny, &[], &[]),
             PermissionVerdict::Deny
-        );
-        // Denied commands must not be rewritten — Gemini handler checks deny before rewrite
-        assert!(
-            get_rewritten("cargo test", None).is_some(),
-            "cargo test should be rewritable when not denied"
         );
     }
 

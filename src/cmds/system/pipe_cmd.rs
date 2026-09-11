@@ -27,6 +27,7 @@ pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
         "mypy" => Some(crate::cmds::python::mypy_cmd::filter_mypy_output),
         "ruff-check" => Some(crate::cmds::python::ruff_cmd::filter_ruff_check_json),
         "ruff-format" => Some(crate::cmds::python::ruff_cmd::filter_ruff_format),
+        "sqlfluff-lint" => Some(crate::cmds::python::sqlfluff_cmd::filter_sqlfluff_lint_json),
         "prettier" => Some(crate::cmds::js::prettier_cmd::filter_prettier_output),
         "phpunit" => Some(crate::cmds::php::phpunit_cmd::filter_phpunit_output),
         "pest" | "paratest" | "php-test" => {
@@ -269,7 +270,7 @@ pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
             anyhow::anyhow!(
                 "Unknown filter '{}'. Available: cargo-test, pytest, go-test, go-build, \
                  ctest, tsc, vitest, grep, rg, find, fd, git-log, git-diff, git-status, \
-                 log, mypy, ruff-check, ruff-format, prettier, phpunit, pest, \
+                 log, mypy, ruff-check, ruff-format, sqlfluff-lint, prettier, phpunit, pest, \
                  paratest, php-test, ecs, phpstan, pint",
                 name
             )
@@ -589,6 +590,11 @@ Total Test time (real) =   0.01 sec\n";
     #[test]
     fn test_resolve_filter_ruff_format() {
         assert!(resolve_filter("ruff-format").is_some());
+    }
+
+    #[test]
+    fn test_resolve_filter_sqlfluff_lint() {
+        assert!(resolve_filter("sqlfluff-lint").is_some());
     }
 
     #[test]

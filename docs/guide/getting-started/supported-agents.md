@@ -46,6 +46,11 @@ Agent runs "cargo test"
 | Google Antigravity | Rules file (prompt-level) | N/A |
 | Mistral Vibe | Rust binary (`pre_tool`) | Yes |
 
+Agents that rewrite transparently receive the awareness file selected by `awareness.level` in
+`config.toml` (`default` says nothing about RTK). Rules-file agents cannot rewrite, so the agent
+must prefix `rtk` itself; they always receive the `full` awareness file and `rtk init` says so.
+See [Configuration](configuration.md#awareness-level).
+
 ## Installation by agent
 
 ### Claude Code
