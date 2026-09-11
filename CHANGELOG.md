@@ -5,6 +5,73 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.49.0](https://github.com/rtk-ai/rtk/compare/v0.48.0...v0.49.0) (2026-09-11)
+
+
+### Features
+
+* add rtk sqlfluff lint command with JSON filter (~75% token reduction) ([b605716](https://github.com/rtk-ai/rtk/commit/b605716a9b2eca115dde4cb20a30e377a5fb11aa))
+* add rtk sqlfluff lint with JSON filter (~75% token reduction) ([a2d9f01](https://github.com/rtk-ai/rtk/commit/a2d9f01577b23c645ea722c69f8dee8dc4fa52c4))
+* **recall:** content-addressed recall store with selectable [retriever] mode ([a533731](https://github.com/rtk-ai/rtk/commit/a53373191d295dc3118a4995e516510faf248338))
+* **recall:** name an over-recalled filter, and clear its counters on gain --reset ([ddc2182](https://github.com/rtk-ai/rtk/commit/ddc2182609baefbc6e910d52b4061ca610bb5280))
+* **recall:** SQLite recall system ([77ba5c9](https://github.com/rtk-ai/rtk/commit/77ba5c9acac3682bf441e8c2248779e24a8321f2))
+* **recall:** tee_on_success restores legacy always behavior, accurate migration notices ([8969fa4](https://github.com/rtk-ai/rtk/commit/8969fa49c5881100518b8654fe641236b63efe4e))
+* **rewrite:** peel process wrapper prefixes ([b17dda3](https://github.com/rtk-ai/rtk/commit/b17dda3b69f3b0bb361a56ab4e497f1954ad3749))
+* **rewrite:** rewrite in pipe when consummer is safe ([b0d471e](https://github.com/rtk-ai/rtk/commit/b0d471eb5b0301e47093b2881ca4e9c2e08bc894))
+* **telemetry:** report recall efficiency counters per filter family ([b158152](https://github.com/rtk-ai/rtk/commit/b158152ef7ae76a95486e2afb3a6321775fdbe89))
+
+
+### Bug Fixes
+
+* **awareness:** slim awareness text ([d9a6dba](https://github.com/rtk-ai/rtk/commit/d9a6dba6fc2ad9f9aa7e8c282391ebefbc65d3ae))
+* **benchmark:** ignore the recall hints when counting find entries ([7c10f77](https://github.com/rtk-ai/rtk/commit/7c10f7791ceb312235f64ed5711f3553790b735e))
+* **ci:** keep hook payload line endings stable ([a083e05](https://github.com/rtk-ai/rtk/commit/a083e05000674362a3e70957be985b74ed677cd0))
+* **ci:** unbreak the golangci-lint benchmark row ([84f629d](https://github.com/rtk-ai/rtk/commit/84f629d7195ced9e5ce4422f5b2901422ae601a9))
+* **config:** merge legacy tee fields when a retriever section coexists ([c09d63e](https://github.com/rtk-ai/rtk/commit/c09d63eed83cfd50edff0dba4e6138449af59441))
+* **config:** single shared legacy-tee mapping for load and config recall ([9f37717](https://github.com/rtk-ai/rtk/commit/9f377173191938c095f16382c04d2bf1114c6441))
+* **diff:** align by LCS and name the cause of an invisible difference ([d4239ec](https://github.com/rtk-ai/rtk/commit/d4239ecb90bbb828ee7f43fc68e0d91db0243027))
+* **diff:** name the crossed `~` in the legend, and stop the byte refusal claiming non-membership ([501dd01](https://github.com/rtk-ai/rtk/commit/501dd01cec8f87eac2dff5e1246d4b5038fb5120))
+* **diff:** number both files on a crossed rewrite pairing, and name the cap a refusal hit ([8073112](https://github.com/rtk-ai/rtk/commit/8073112a3d407f453a30a31fea6f82a44b8cfc86))
+* **diff:** region parser for condense_unified_diff — budget-owned hunks, raw fallback ([ab0cf40](https://github.com/rtk-ai/rtk/commit/ab0cf40112540878d2e19f79b055eb261f6dd91b))
+* **diff:** round 7 -- no-newline marker placement, hg export region, dequoted renames ([9634a9a](https://github.com/rtk-ai/rtk/commit/9634a9a82b2df64c2feb98616484967fae392e5c))
+* **diff:** round 8 -- silent-loss and name-fidelity sweep across git, GNU diff, hg and svn ([27abf4a](https://github.com/rtk-ai/rtk/commit/27abf4ad7fff5a81fff951073154a5e44ab00d7b))
+* **diff:** stop reporting differing files as identical, and align by LCS ([9512e1a](https://github.com/rtk-ai/rtk/commit/9512e1ab5643b56285094aa04320436c0cd573db))
+* **grep:** free `-l` for GNU --files-with-matches instead of --max-len ([5681008](https://github.com/rtk-ai/rtk/commit/5681008ca95f2ad815b4c6aa919df6ea8d40ac45))
+* **grep:** put --max-len before positionals in bench; reuse assert_eq_grep ([74ec070](https://github.com/rtk-ai/rtk/commit/74ec07017fc37f812906c5189e8e86d8c302e083))
+* **init:** address review — local init honours awareness level, cleanup ([4bbf778](https://github.com/rtk-ai/rtk/commit/4bbf7788975165f77bc347b65bd58b99db11aa1d))
+* **license:** use a valid SPDX identifier in package and formula metadata ([5e10aa6](https://github.com/rtk-ai/rtk/commit/5e10aa6462f7ffbba1a779055d213f1631711def))
+* **license:** use a valid SPDX identifier in package and formula metadata ([ad8cc55](https://github.com/rtk-ai/rtk/commit/ad8cc55cd38baf8c05ef4bd19c73566c02563086))
+* **recall:** adapt upstream ctest/ls/tsc integration after rebase ([439c251](https://github.com/rtk-ai/rtk/commit/439c25164d70c47b19a834e0829dde268cb55a68))
+* **recall:** byte-faithful --grep, cached store connection, serialized env tests ([d93fd4f](https://github.com/rtk-ai/rtk/commit/d93fd4fff5c5fa403688e586d8454cb7dba03592))
+* **recall:** canonicalize stats keys across elision, recall and TOML paths ([bfc6309](https://github.com/rtk-ai/rtk/commit/bfc630995ff6050c286a18c31c20b36b7c040b72))
+* **recall:** evict by recency excluding the just-stored hash ([1dcb7ec](https://github.com/rtk-ai/rtk/commit/1dcb7ecd54315ea10584f81455d5aa5692c813a7))
+* **recall:** evict by rowid so same-second bursts keep the newest entry ([bdfdeea](https://github.com/rtk-ai/rtk/commit/bdfdeea37a4fc417fcbc1c4ec6b1114a9175cbe3))
+* **recall:** hidden-lines hint reflects what recall can actually return ([dd1c21a](https://github.com/rtk-ai/rtk/commit/dd1c21a4737b0591750fe86608e5139b28981184))
+* **recall:** honor kill switches in hook-side tee read tracking ([e7447e1](https://github.com/rtk-ai/rtk/commit/e7447e1f0604f3ef2d42032af6db24a71f779a96))
+* **recall:** keep legacy tee always semantics, sqlite stays failure driven ([a882419](https://github.com/rtk-ai/rtk/commit/a882419baca41097ca0c19205f954cb5d577527e))
+* **recall:** keep tee mode free of any sqlite artifact ([473edaf](https://github.com/rtk-ai/rtk/commit/473edaf2470f3a8fe8a5875b836f581660630f47))
+* **recall:** preserve recalled flag when identical output is re-stored ([6633d66](https://github.com/rtk-ai/rtk/commit/6633d66c5f77f82d37290c0a3d3fe6f634469846))
+* **recall:** read paths never create the database ([7c74344](https://github.com/rtk-ai/rtk/commit/7c743443ffe286b16b5f61aba4fa711afc731b56))
+* **recall:** review nits — literal-grep note, dead aws hint branch, doc drift, sorted families ([d8a80df](https://github.com/rtk-ai/rtk/commit/d8a80dfab5173dfa9c49544faa5008c976d88701))
+* **recall:** store NULL exit code on truncation paths instead of fake 0 ([817e230](https://github.com/rtk-ai/rtk/commit/817e230e97a1cc122a3e1fe0517becaf0b9c9ad0))
+* **recall:** store the hidden tail when the cap cannot hold the shown prefix ([2b13d80](https://github.com/rtk-ai/rtk/commit/2b13d80c372285a6a69441a2df7bfbb784b03420))
+* **rewrite:** PipelineSafety enum, quote-aware consumer args, fd-dup redirects, stage rewrite consolidation ([148e0d4](https://github.com/rtk-ai/rtk/commit/148e0d443ede77a2b7300456d37558bb1ba1a530))
+* **rewrite:** process wrapper prefixes ([52ed9fe](https://github.com/rtk-ai/rtk/commit/52ed9fe400825277df2e3339d5fb1862f755f692))
+* **rewrite:** stop rewriting sudo commands (pass them through) ([d20db46](https://github.com/rtk-ai/rtk/commit/d20db4691e9e2b0b2ff49737d28ff250dcaefcf5))
+* **ruff:** preserve non-check subcommands ([d701ad9](https://github.com/rtk-ai/rtk/commit/d701ad969054ce95811defad694e8a9378501ede))
+* **runner:** die by the relayed signal after flushing ([5b1d523](https://github.com/rtk-ai/rtk/commit/5b1d523ad2f21efcd833eb2b882620e2b71fe141))
+* **runner:** flush captured output when rtk is signalled ([9900d70](https://github.com/rtk-ai/rtk/commit/9900d70fd636ac0f28d8ac934bee4a02f8cbac88))
+* **runner:** keep an inherited SIG_IGN when relaying signals ([9418aa8](https://github.com/rtk-ai/rtk/commit/9418aa87a131f1bb54c2947c06b83685a8e75264))
+* **sqlfluff:** address round-3 review (violations section, early-exit, field aliases, README) ([0db62bd](https://github.com/rtk-ai/rtk/commit/0db62bd5cd532af8a307281e64f559bea551240c))
+* **sqlfluff:** always filter, and share one decision between both entry points ([ebf4cbf](https://github.com/rtk-ai/rtk/commit/ebf4cbf5399eed61c7e5f2730f82b01a4036bdd9))
+* **sqlfluff:** honor fallback rule, deterministic ordering, lint_cmd wiring ([f03d643](https://github.com/rtk-ai/rtk/commit/f03d643311f39962ca3dd1b3dbd338cdc4f78c2c))
+* **test:** treat `!` and `(` as native only when what follows is ([98e66e0](https://github.com/rtk-ai/rtk/commit/98e66e05409a7454a6beeb18501962534b357acf))
+
+
+### Reverts
+
+* **recall:** drop tee_on_success, recovery stays failure and truncation driven ([feb8aeb](https://github.com/rtk-ai/rtk/commit/feb8aeb644cacbb133b76805b33211a9eff35a83))
+
 ## [0.48.0](https://github.com/rtk-ai/rtk/compare/v0.47.0...v0.48.0) (2026-09-04)
 
 
