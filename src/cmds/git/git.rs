@@ -31,6 +31,7 @@ pub enum GitCommand {
     Fetch,
     Stash { subcommand: Option<String> },
     Worktree,
+    LsFiles,
 }
 
 /// Create a git Command with global options (e.g. -C, -c, --git-dir, --work-tree)
@@ -106,6 +107,7 @@ pub fn run(
             run_stash(subcommand.as_deref(), args, verbose, global_args)
         }
         GitCommand::Worktree => run_worktree(args, verbose, global_args),
+        GitCommand::LsFiles => run_ls_files(args, verbose, global_args),
     }
 }
 
@@ -2653,9 +2655,147 @@ pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -
     Ok(0)
 }
 
+/// Flags that change the shape of `git ls-files` output away from a plain
+/// path-per-line list. When any is present we pass the output through untouched
+/// so RTK never garbles a format the caller explicitly asked for.
+fn uses_plain_ls_files_output(args: &[String]) -> bool {
+    const SHAPE_FLAGS: &[&str] = &[
+        "-z",
+        "-s",
+        "--stage",
+        "-t",
+        "-u",
+        "--unmerged",
+        "--debug",
+        "--eol",
+        "--error-unmatch",
+    ];
+    !args.iter().any(|a| {
+        SHAPE_FLAGS.contains(&a.as_str())
+            || a.starts_with("--format")
+            || a.starts_with("--abbrev")
+    })
+}
+
+/// Collapse a plain `git ls-files` listing into per-directory counts.
+///
+/// Small listings are returned unchanged (nothing to gain). Larger ones become
+/// a total plus one `dir/ count` line per directory (most files first), capped
+/// with an overflow hint so the full picture stays recoverable.
+fn group_ls_files(raw: &str) -> String {
+    let files: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+    if files.len() <= CAP_LIST {
+        return raw.to_string();
+    }
+
+    // git always emits '/'-separated, repo-relative paths, so this is portable.
+    let mut by_dir: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for f in &files {
+        let dir = f.rsplit_once('/').map(|(d, _)| d).unwrap_or(".");
+        *by_dir.entry(dir).or_default() += 1;
+    }
+
+    let total = files.len();
+    let dir_count = by_dir.len();
+    let mut dirs: Vec<(&str, usize)> = by_dir.into_iter().collect();
+    dirs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+
+    let mut body = format!("{total} tracked files in {dir_count} dirs:\n\n");
+    let shown = dirs.len().min(CAP_LIST);
+    for (dir, count) in dirs.iter().take(shown) {
+        body.push_str(&format!("{dir}/ {count}\n"));
+    }
+    if shown < dir_count {
+        let hidden_dirs = dir_count - shown;
+        let hidden_files: usize = dirs.iter().skip(shown).map(|(_, c)| c).sum();
+        body.push_str(&format!("+{hidden_dirs} more dirs ({hidden_files} files)\n"));
+    }
+    body
+}
+
+fn run_ls_files(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("ls-files");
+    cmd.args(args);
+    let result = exec_capture(&mut cmd).context("Failed to run git ls-files")?;
+
+    let joined = args.join(" ");
+    let original = if joined.is_empty() {
+        "git ls-files".to_string()
+    } else {
+        format!("git ls-files {joined}")
+    };
+    let rtk = format!("rtk {original}");
+
+    if !result.success() {
+        if !result.stderr.trim().is_empty() {
+            eprint!("{}", result.stderr);
+        }
+        timer.track(&original, &rtk, &result.stdout, &result.stdout);
+        return Ok(result.exit_code);
+    }
+
+    if verbose > 0 || !result.stderr.is_empty() {
+        eprint!("{}", result.stderr);
+    }
+
+    let filtered = if uses_plain_ls_files_output(args) {
+        group_ls_files(&result.stdout)
+    } else {
+        result.stdout.clone()
+    };
+    let filtered = never_worse(&result.stdout, &filtered).to_string();
+    print!("{}", filtered);
+
+    timer.track(&original, &rtk, &result.stdout, &filtered);
+    Ok(result.exit_code)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ls_files_groups_a_large_listing_by_directory() {
+        // Real `git ls-files` output from this repo (398 tracked paths).
+        let raw = include_str!("../../../tests/fixtures/git_ls_files_raw.txt");
+        let out = group_ls_files(raw);
+
+        // Header carries the total and directory count.
+        let total = raw.lines().filter(|l| !l.trim().is_empty()).count();
+        assert!(out.starts_with(&format!("{total} tracked files in ")));
+        assert!(out.contains(" dirs:\n"));
+        // Per-directory count lines look like `path/ N`.
+        assert!(out.lines().any(|l| l.ends_with("/ 64"))); // src/filters has 64 files
+        // Overflow hint keeps the hidden directories recoverable.
+        assert!(out.contains("more dirs ("));
+
+        let raw_tokens = raw.split_whitespace().count();
+        let out_tokens = out.split_whitespace().count();
+        let savings = 100.0 - (out_tokens as f64 / raw_tokens as f64 * 100.0);
+        assert!(savings >= 60.0, "expected >=60% savings, got {savings:.1}%");
+    }
+
+    #[test]
+    fn ls_files_small_listing_passes_through_unchanged() {
+        let raw = "src/main.rs\nsrc/lib.rs\nCargo.toml\n";
+        assert_eq!(group_ls_files(raw), raw);
+    }
+
+    #[test]
+    fn ls_files_shape_flags_force_passthrough() {
+        assert!(uses_plain_ls_files_output(&[]));
+        assert!(uses_plain_ls_files_output(&["--cached".to_string()]));
+        assert!(uses_plain_ls_files_output(&["-m".to_string()]));
+        // Flags that change the output shape must not be grouped.
+        assert!(!uses_plain_ls_files_output(&["-s".to_string()]));
+        assert!(!uses_plain_ls_files_output(&["--stage".to_string()]));
+        assert!(!uses_plain_ls_files_output(&["-z".to_string()]));
+        assert!(!uses_plain_ls_files_output(&["--error-unmatch".to_string()]));
+        assert!(!uses_plain_ls_files_output(&["--format=%(path)".to_string()]));
+    }
 
     #[test]
     fn test_git_cmd_no_global_args() {
