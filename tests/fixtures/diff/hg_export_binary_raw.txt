@@ -1,0 +1,16 @@
+# HG changeset patch
+# User Ann <ann@example.com>
+# Date 1788745619 0
+#      Mon Sep 07 01:46:59 2026 +0000
+# Node ID f1f7989a6f4d00589a34bd914fcf84d1453f19a7
+# Parent  344a53e211f0a93d7eeac196afb81039b1cef608
+Fix the thing
+
+diff -r 344a53e211f0 -r f1f7989a6f4d bin.dat
+Binary file bin.dat has changed
+diff -r 344a53e211f0 -r f1f7989a6f4d f.txt
+--- a/f.txt	Mon Sep 07 01:46:59 2026 +0000
++++ b/f.txt	Mon Sep 07 01:46:59 2026 +0000
+@@ -1,1 +1,1 @@
+-old
++new

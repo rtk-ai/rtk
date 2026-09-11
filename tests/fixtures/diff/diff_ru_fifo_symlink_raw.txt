@@ -1,0 +1,10 @@
+Only in g1: a_only.txt
+File g1/b_fifo is a fifo while file g2/b_fifo is a regular file
+Symbolic links g1/b_link and g2/b_link differ
+diff -ru --no-dereference g1/c.txt g2/c.txt
+--- g1/c.txt	2026-09-07 01:47:46.772352890 +0000
++++ g2/c.txt	2026-09-07 01:47:46.772352890 +0000
+@@ -1,2 +1,2 @@
+ one
+-two
++TWO

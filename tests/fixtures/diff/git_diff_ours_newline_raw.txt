@@ -1,0 +1,25 @@
+* Unmerged path nl
+x.txt
+diff --git "a/nl\nx.txt" "b/nl\nx.txt"
+index 7c9a97f..4fa0cc8 100644
+--- "a/nl\nx.txt"
++++ "b/nl\nx.txt"
+@@ -1,2 +1,6 @@
+ one
++<<<<<<< HEAD
+ MAIN
++=======
++SIDE
++>>>>>>> side
+* Unmerged path plain.txt
+diff --git a/plain.txt b/plain.txt
+index 7c9a97f..4fa0cc8 100644
+--- a/plain.txt
++++ b/plain.txt
+@@ -1,2 +1,6 @@
+ one
++<<<<<<< HEAD
+ MAIN
++=======
++SIDE
++>>>>>>> side

@@ -96,13 +96,14 @@ impl BlockHandler for CargoBuildHandler {
         !(line.trim().is_empty() && block.len() > 3)
     }
 
-    fn format_summary(&self, exit_code: i32, _raw: &str) -> Option<String> {
+    fn format_summary(&self, exit_code: i32, raw: &str) -> Option<String> {
         if self.error_count == 0 && self.warnings == 0 && exit_code == 0 {
-            return Some(cargo_build_success_line(
+            let summary = cargo_build_success_line(
                 self.compiled,
                 self.finished_line.as_deref(),
                 self.label,
-            ));
+            );
+            return Some(crate::core::guard::never_worse(raw, &summary).to_string());
         }
         // The streamed path only runs for non-json build/check; error blocks are
         // emitted live, so the summary carries no rendered diagnostics.
@@ -136,6 +137,65 @@ impl CargoTestHandler {
             summary_lines: Vec::new(),
             has_compile_errors: false,
         }
+    }
+
+    /// Compacted `cargo test` summary, before the never-worse guard.
+    fn compute_test_summary(&self, raw: &str) -> Option<String> {
+        if self.summary_lines.is_empty() {
+            let json = extract_json_diagnostics(raw);
+            if self.has_compile_errors || !json.errors.is_empty() {
+                // Content-based (exit 0): a real compile error yields "cargo test: N
+                // errors"; a bare "could not compile" leaves the raw tail fallback.
+                let build_filtered = filter_cargo_build_labeled(raw, "test", 0);
+                if build_filtered.contains("cargo test:") {
+                    return Some(format!("{}\n", build_filtered));
+                }
+                // Fallback: last 5 meaningful lines
+                let meaningful: Vec<&str> = raw
+                    .lines()
+                    .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("Compiling"))
+                    .collect();
+                let last5: Vec<&str> = meaningful.iter().rev().take(5).rev().copied().collect();
+                return Some(format!("{}\n", last5.join("\n")));
+            }
+        }
+
+        // No failures emitted — aggregate pass results
+        let mut aggregated: Option<AggregatedTestResult> = None;
+        let mut all_parsed = true;
+
+        for line in &self.summary_lines {
+            if let Some(parsed) = AggregatedTestResult::parse_line(line) {
+                if let Some(ref mut agg) = aggregated {
+                    agg.merge(&parsed);
+                } else {
+                    aggregated = Some(parsed);
+                }
+            } else {
+                all_parsed = false;
+                break;
+            }
+        }
+
+        if all_parsed {
+            if let Some(agg) = aggregated {
+                if agg.suites > 0 {
+                    return Some(format!("{}\n", agg.format_compact()));
+                }
+            }
+        }
+
+        // Fallback: show raw summary lines
+        if !self.summary_lines.is_empty() {
+            let mut s = String::new();
+            for line in &self.summary_lines {
+                s.push_str(line);
+                s.push('\n');
+            }
+            return Some(s);
+        }
+
+        None
     }
 }
 
@@ -195,61 +255,12 @@ impl BlockHandler for CargoTestHandler {
     }
 
     fn format_summary(&self, _exit_code: i32, raw: &str) -> Option<String> {
-        if self.summary_lines.is_empty() {
-            let json = extract_json_diagnostics(raw);
-            if self.has_compile_errors || !json.errors.is_empty() {
-                // Content-based (exit 0): a real compile error yields "cargo test: N
-                // errors"; a bare "could not compile" leaves the raw tail fallback.
-                let build_filtered = filter_cargo_build_labeled(raw, "test", 0);
-                if build_filtered.contains("cargo test:") {
-                    return Some(format!("{}\n", build_filtered));
-                }
-                // Fallback: last 5 meaningful lines
-                let meaningful: Vec<&str> = raw
-                    .lines()
-                    .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("Compiling"))
-                    .collect();
-                let last5: Vec<&str> = meaningful.iter().rev().take(5).rev().copied().collect();
-                return Some(format!("{}\n", last5.join("\n")));
-            }
-        }
-
-        // No failures emitted — aggregate pass results
-        let mut aggregated: Option<AggregatedTestResult> = None;
-        let mut all_parsed = true;
-
-        for line in &self.summary_lines {
-            if let Some(parsed) = AggregatedTestResult::parse_line(line) {
-                if let Some(ref mut agg) = aggregated {
-                    agg.merge(&parsed);
-                } else {
-                    aggregated = Some(parsed);
-                }
-            } else {
-                all_parsed = false;
-                break;
-            }
-        }
-
-        if all_parsed {
-            if let Some(agg) = aggregated {
-                if agg.suites > 0 {
-                    return Some(format!("{}\n", agg.format_compact()));
-                }
-            }
-        }
-
-        // Fallback: show raw summary lines
-        if !self.summary_lines.is_empty() {
-            let mut s = String::new();
-            for line in &self.summary_lines {
-                s.push_str(line);
-                s.push('\n');
-            }
-            return Some(s);
-        }
-
-        None
+        // Same never-worse guard as CargoBuildHandler (#3430 review): if the
+        // compacted summary ends up larger than the raw output (e.g. a tiny
+        // `cargo test` run), keep the raw output instead of "compacting" it
+        // into something bigger.
+        let summary = self.compute_test_summary(raw)?;
+        Some(crate::core::guard::never_worse(raw, &summary).to_string())
     }
 }
 
@@ -988,7 +999,8 @@ fn filter_cargo_build_labeled(output: &str, label: &'static str, exit_code: i32)
     let (errors, warnings) = merge_diag_counts(handler.error_count, handler.warnings, &json);
 
     if errors == 0 && warnings == 0 && exit_code == 0 {
-        return cargo_build_success_line(handler.compiled, handler.finished_line.as_deref(), label);
+        let summary = cargo_build_success_line(handler.compiled, handler.finished_line.as_deref(), label);
+        return crate::core::guard::never_worse(output, &summary).to_string();
     }
 
     let mut result =
@@ -1437,6 +1449,9 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
+    const TINY_BUILD_SUCCESS_OUTPUT: &str =
+        "    Finished dev [unoptimized + debuginfo] target(s) in 0.01s\n";
+
     use super::*;
     use crate::core::args_utils::restore_double_dash_with_raw;
 
@@ -1555,6 +1570,42 @@ mod tests {
         let result = filter_cargo_build(output);
         assert!(result.contains("cargo build"));
         assert!(result.contains("3 crates compiled"));
+    }
+
+    #[test]
+    fn test_filter_cargo_build_success_uses_raw_when_summary_is_larger() {
+        let output = TINY_BUILD_SUCCESS_OUTPUT;
+        let result = filter_cargo_build(output);
+        assert_eq!(result, output);
+    }
+
+    #[test]
+    fn test_cargo_test_summary_uses_raw_when_summary_is_larger() {
+        // A one-line compile failure is already minimal: prefixing it with the
+        // "cargo test: N errors, ..." header emits more tokens than the raw
+        // output, so the never-worse guard must keep the raw output.
+        const CARGO_COMPILE_FAILURE_EXIT_CODE: i32 = 101;
+        let raw = "error[E0433]: failed to resolve: use of undeclared type `Foo`\n";
+
+        let mut handler = CargoTestHandler::new();
+        for line in raw.lines() {
+            handler.should_skip(line);
+        }
+
+        let unguarded = handler
+            .compute_test_summary(raw)
+            .expect("compile failure yields a summary");
+        assert!(
+            unguarded.len() > raw.len(),
+            "expected the compacted summary to be larger than the raw output, got {:?}",
+            unguarded
+        );
+        assert_eq!(
+            handler
+                .format_summary(CARGO_COMPILE_FAILURE_EXIT_CODE, raw)
+                .as_deref(),
+            Some(raw)
+        );
     }
 
     #[test]
@@ -2312,6 +2363,14 @@ error: test run failed
         assert!(result.contains("3 crates compiled"), "got: {}", result);
         assert!(result.contains("Finished"), "got: {}", result);
         assert!(!result.contains("Compiling"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_cargo_build_stream_success_uses_raw_when_summary_is_larger() {
+        let input = TINY_BUILD_SUCCESS_OUTPUT;
+        let mut f = BlockStreamFilter::new(CargoBuildHandler::with_label("build"));
+        let result = run_block_filter(&mut f, input, 0);
+        assert_eq!(result, input);
     }
 
     #[test]

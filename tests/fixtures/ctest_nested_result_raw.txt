@@ -1,0 +1,32 @@
+Test project /tmp/build
+    Start 1: wrapper
+1/3 Test #1: wrapper ..........................***Failed    0.00 sec
+delegating to inner suite
+    Start 1: inner_case
+1/1 Test #1: inner_case ......................   Passed    0.02 sec
+100% tests passed, 0 tests failed out of 1
+ASSERT FAILED: wrapper post-check
+
+    Start 2: wrapped_out
+2/3 Test #2: wrapped_out ......................***Failed    0.00 sec
+Test #99: phase begin
+L1
+L2
+L3
+L4
+L5
+L6
+phase done in 1.5 sec
+ASSERT FAILED: real
+
+    Start 3: ok_case
+3/3 Test #3: ok_case ..........................   Passed    0.00 sec
+
+33% tests passed, 2 tests failed out of 3
+
+Total Test time (real) =   0.01 sec
+
+The following tests FAILED:
+	  1 - wrapper (Failed)
+	  2 - wrapped_out (Failed)
+Errors while running CTest

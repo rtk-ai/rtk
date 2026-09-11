@@ -916,6 +916,11 @@ fn pr_merge(args: &[String], _verbose: u8) -> Result<i32> {
 
 /// Flags that change `gh pr diff` output from unified diff to a different format.
 /// When present, compact_diff would produce empty output since it expects diff headers.
+///
+/// `--patch` is here because GitHub's `.patch` is an mbox of `format-patch`
+/// output, not a unified diff: each patch carries a commit message, a bare
+/// `---` before the diffstat, and a `-- ` signature. Someone asking for a patch
+/// wants one that applies, so it passes through whole.
 fn has_non_diff_format_flag(args: &[String]) -> bool {
     args.iter().any(|a| {
         a == "--name-only"
@@ -923,6 +928,7 @@ fn has_non_diff_format_flag(args: &[String]) -> bool {
             || a == "--stat"
             || a == "--numstat"
             || a == "--shortstat"
+            || a == "--patch"
     })
 }
 
@@ -1385,6 +1391,12 @@ mod tests {
     #[test]
     fn test_non_diff_format_flag_shortstat() {
         assert!(has_non_diff_format_flag(&["--shortstat".into()]));
+    }
+
+    #[test]
+    fn test_has_non_diff_format_flag_patch() {
+        // `--patch` yields an mbox, which compact_diff has no business parsing.
+        assert!(has_non_diff_format_flag(&["--patch".into()]));
     }
 
     #[test]

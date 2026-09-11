@@ -51,6 +51,7 @@ RTK intercepts shell commands and compresses their output before your agent read
 | `git add/commit/push` | Confirmation line instead of full progress output |
 | `cargo test` / `npm test` | Failures only, passing tests collapsed to a count |
 | `ruff check` | Grouped by rule and file |
+| `sqlfluff lint` | Grouped by rule and file |
 | `pytest` | Failures only, traceback trimmed |
 | `go test` | NDJSON parsed, failures only |
 | `docker ps` | Essential fields only |
@@ -122,6 +123,7 @@ rtk init --agent kilocode       # Kilo Code
 rtk init --agent antigravity    # Google Antigravity
 rtk init --agent kimi           # Kimi AI
 rtk init -g --agent pi          # Pi
+rtk init --agent omp            # Oh My Pi (OMP)
 rtk init --agent hermes         # Hermes
 rtk init -g --agent droid       # Factory Droid
 rtk init -g --agent grok        # Grok CLI (xAI)
@@ -151,6 +153,8 @@ Four strategies applied per command type:
 2. **Grouping** - Aggregates similar items (files by directory, errors by type)
 3. **Truncation** - Keeps relevant context, cuts redundancy
 4. **Deduplication** - Collapses repeated log lines with counts
+
+> **Does RTK break Claude's prompt cache?** No. RTK filters output once per command. The result is stored in history and cached normally on subsequent API calls, so the cache keeps working as expected. Smaller outputs also mean cheaper cache writes and reads. See [Troubleshooting](docs/guide/resources/troubleshooting.md#does-rtk-break-claudes-prompt-cache) for details.
 
 ## Commands
 
@@ -192,6 +196,7 @@ rtk jest                        # Jest compact (failures only)
 rtk vitest                      # Vitest compact (failures only)
 rtk playwright test             # E2E results (failures only)
 rtk pytest                      # Python tests (-90%)
+rtk phpt                        # PHP .phpt tests (run-tests.php, -99%)
 rtk go test                     # Go tests (NDJSON, -90%)
 rtk cargo test                  # Cargo tests (-90%)
 rtk rake test                   # Ruby minitest (-90%)
@@ -204,6 +209,8 @@ rtk test <cmd>                  # Generic test wrapper - failures only (-90%)
 ```bash
 rtk lint                        # ESLint grouped by rule/file
 rtk lint biome                  # Supports other linters
+rtk sqlfluff lint               # SQL linting (JSON, -75%)
+rtk sqlfluff lint models/       # Lint a specific directory (pass path after `lint`)
 rtk tsc                         # TypeScript errors grouped by file
 rtk next build                  # Next.js build compact
 rtk prettier --check .          # Files needing formatting
@@ -212,6 +219,7 @@ rtk cargo clippy                # Cargo clippy (-80%)
 rtk ruff check                  # Python linting (JSON, -80%)
 rtk golangci-lint run           # Go linting (JSON, -85%)
 rtk rubocop                     # Ruby linting (JSON, -60%+)
+rtk mvnd verify                 # Maven Daemon (same filters as rtk mvn)
 rtk sbt test                    # ScalaTest output (-90%)
 rtk sbt compile                 # Compilation errors only (-75%)
 rtk sbt run                     # Strip SBT preamble noise
@@ -227,6 +235,17 @@ rtk bundle install              # Ruby gems (strip Using lines)
 rtk prisma generate             # Schema generation (no ASCII art)
 ```
 
+### Runtimes
+```bash
+rtk bun install                  # Strip progress and version lines
+rtk bun test                     # Failures only (-90%)
+rtk bun build                    # Errors only when writing to disk, else passthrough
+rtk bunx tsc                     # Smart routing to tsc filter
+rtk deno test                    # Failures only (-90%)
+rtk deno lint                    # Strip download lines + tee recovery
+rtk deno check                   # Strip download lines + tee recovery
+```
+
 ### AWS
 ```bash
 rtk aws sts get-caller-identity # One-line identity
@@ -236,7 +255,7 @@ rtk aws logs get-log-events     # Timestamped messages only
 rtk aws cloudformation describe-stack-events  # Failures first
 rtk aws dynamodb scan           # Unwraps type annotations
 rtk aws iam list-roles          # Strips policy documents
-rtk aws s3 ls                   # Truncated with tee recovery
+rtk aws s3 ls                   # Truncated with recall recovery
 ```
 
 ### Containers
@@ -344,6 +363,8 @@ rtk init --show             # Verify installation
 
 After install, **restart Claude Code**.
 
+By default `RTK.md` says nothing about RTK itself. Set `[awareness] level = "high"` in `config.toml` to let the agent know `rtk gain` / `rtk proxy`, or `"full"` for an agent without hook support (or not yet supported by RTK) so it prefixes `rtk` itself — see [Configuration](docs/guide/getting-started/configuration.md#awareness-level).
+
 ## Windows
 
 RTK works fully on native Windows. Since **v0.37.2** the auto-rewrite hook runs as a **native binary command** (`rtk hook claude`) — no Unix shell, bash, or jq required — so commands are rewritten transparently on Command Prompt, PowerShell, and Windows Terminal, just like on Linux and macOS.
@@ -382,7 +403,7 @@ rtk init -g
 
 ## Supported AI Tools
 
-RTK supports 16 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents, reducing the bash output the agent reads where the agent supports command interception.
+RTK supports 17 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents, reducing the bash output the agent reads where the agent supports command interception.
 
 | Tool | Install | Method |
 |------|---------|--------|
@@ -397,6 +418,7 @@ RTK supports 16 AI coding tools. Each integration rewrites shell commands to `rt
 | **OpenCode** | `rtk init -g --opencode` | Plugin TS (tool.execute.before) |
 | **OpenClaw** | `openclaw plugins install ./openclaw` | Plugin TS (before_tool_call) |
 | **Pi** | `rtk init -g --agent pi` (global) | TypeScript extension (tool_call) |
+| **Oh My Pi (OMP)** | `rtk init -g --agent omp` (global) / `rtk init --agent omp` (project) | TypeScript extension (tool_call, shared with Pi) |
 | **Hermes** | `rtk init --agent hermes` | Python plugin adapter (terminal command mutation via `rtk rewrite`) |
 | **Mistral Vibe** | `rtk init -g --agent vibe` | `pre_tool` hook (hooks.toml) |
 | **Kilo Code** | `rtk init --agent kilocode` | .kilocode/rules/rtk-rules.md (project-scoped) |
@@ -413,19 +435,20 @@ For per-agent setup details, override controls, and graceful degradation, see th
 
 ```toml
 [hooks]
-exclude_commands = ["curl", "playwright"]  # skip rewrite for these
+exclude_commands = ["curl", "playwright"]  # skip rewrite for these (matches `npx playwright` too)
 
-[tee]
-enabled = true          # save raw output on failure (default: true)
-mode = "failures"       # "failures", "always", or "never"
+[retriever]
+mode = "sqlite"         # sqlite (default) | tee (legacy files) | disabled
 ```
 
-When a command fails, RTK saves the full unfiltered output so the LLM can read it without re-executing:
+When a command fails, RTK saves the full unfiltered output so the LLM can recall it without re-executing:
 
 ```
 FAILED: 2/15 tests
-[full output: ~/.local/share/rtk/tee/1707753600_cargo_test.log]
+[full output: rtk recall 3f9c2a81d4e7]
 ```
+
+Legacy `[tee]` config sections are still honored: they map to `mode = "tee"` (file-based recovery on failure/truncation), or `mode = "disabled"` if you had `enabled = false`. The former `mode = "always"` keeps its behaviour and maps to `tee_on_success = true`, which archives successful runs too. The sqlite store stays failure/truncation-driven.
 
 For the full config reference (all sections, env vars, per-project filters), see the [Configuration guide](https://www.rtk-ai.app/guide/getting-started/configuration).
 

@@ -1,6 +1,6 @@
 [filters.liquibase]
 description = "Compact liquibase output — strip headers and generic info"
-match_command = "(?:^|/)liquibase(?:\\s|$)"
+match_command = "^liquibase(?:\\s|$)"
 strip_ansi = true
 filter_stderr = true
 strip_lines_matching = [

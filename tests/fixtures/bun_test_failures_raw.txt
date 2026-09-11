@@ -1,0 +1,48 @@
+bun test v1.2.20 (6ad208bc)
+
+fails.test.ts:
+1 | import { test, expect } from "bun:test";
+2 | test("t1 passes", () => { expect(1 + 1).toBe(2); });
+3 | test("t2 fails", () => { expect(1 + 1).toBe(3); });
+                                           ^
+error: expect(received).toBe(expected)
+
+Expected: 3
+Received: 2
+
+      at <anonymous> (/home/user/project/fails.test.ts:3:40)
+✗ t2 fails [0.13ms]
+error: logged between real failures
+3 | test("t2 fails", () => { expect(1 + 1).toBe(3); });
+4 | test("t3 logs an error line", () => {
+5 |   console.log("error: logged between real failures");
+6 |   expect(3).toBe(3);
+7 | });
+8 | test("t4 fails too", () => { expect([1, 2, 3].length).toBe(4); });
+                                                          ^
+error: expect(received).toBe(expected)
+
+Expected: 4
+Received: 3
+
+      at <anonymous> (/home/user/project/fails.test.ts:8:55)
+✗ t4 fails too [0.03ms]
+4 | test("t3 logs an error line", () => {
+5 |   console.log("error: logged between real failures");
+6 |   expect(3).toBe(3);
+7 | });
+8 | test("t4 fails too", () => { expect([1, 2, 3].length).toBe(4); });
+9 | test("t5 throws", () => { throw new Error("boom: connection refused"); });
+                                                                        ^
+error: boom: connection refused
+      at <anonymous> (/home/user/project/fails.test.ts:9:69)
+✗ t5 throws [0.02ms]
+error: Test "t6 times out" timed out after 150ms
+✗ t6 times out [150.10ms]
+
+ 2 pass
+ 1 skip
+ 1 todo
+ 4 fail
+ 4 expect() calls
+Ran 8 tests across 1 file. [157.00ms]

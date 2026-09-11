@@ -1,0 +1,2 @@
+[0m[1m[31merror[0m: Module not found "file:///home/user/project/does-not-exist.ts".
+    at [0m[36mfile:///home/user/project/deno_loadfail_test.ts[0m:[0m[33m1[0m:[0m[33m23[0m

@@ -16,6 +16,10 @@ pub struct ExtractedCommand {
     pub output_len: Option<usize>,
     #[allow(dead_code)]
     pub session_id: String,
+    /// The Claude Code `tool_use_id` for this Bash call — the same id the
+    /// PreToolUse hook receives, letting hook-decision logs join back to this
+    /// exact transcript entry.
+    pub tool_use_id: String,
     /// Actual output content (first ~1000 chars for error detection)
     pub output_content: Option<String>,
     /// Whether the tool_result indicated an error
@@ -60,9 +64,18 @@ impl ClaudeProvider {
             return Ok(Vec::new());
         }
 
+        // `days * 86400` can overflow u64 for a large user-supplied `--since` (same
+        // overflow class `core::utils::days_ago_cutoff` fixes for the hook_decisions
+        // query) — use checked_mul and fall back to the epoch, which for "days ago"
+        // naturally means "no lower bound", instead of panicking. Kept as its own
+        // SystemTime-based implementation rather than reusing days_ago_cutoff
+        // directly: this filters on file mtimes (SystemTime), not chrono
+        // DateTime<Utc>, and days_ago_cutoff's MIN_UTC fallback wouldn't convert to
+        // a valid SystemTime anyway. If this overflow-clamping logic needs a fix,
+        // check whether the same fix applies to days_ago_cutoff too.
         let cutoff = since_days.map(|days| {
-            SystemTime::now()
-                .checked_sub(Duration::from_secs(days * 86400))
+            days.checked_mul(86400)
+                .and_then(|secs| SystemTime::now().checked_sub(Duration::from_secs(secs)))
                 .unwrap_or(SystemTime::UNIX_EPOCH)
         });
 
@@ -117,15 +130,19 @@ impl ClaudeProvider {
 
     /// Encode a filesystem path to Claude Code's directory name format.
     ///
-    /// Claude Code replaces `/`, `.`, `_`, `\`, and any non-ASCII character
-    /// with `-` when computing the project directory slug under `~/.claude/projects/`.
+    /// Claude Code replaces `/`, `.`, `_`, `\`, `:`, ` `, `[`, `]`, and any
+    /// non-ASCII character with `-` when computing the project directory slug
+    /// under `~/.claude/projects/`.
     ///
     /// `/Users/foo/bar`          → `-Users-foo-bar`
     /// `/Users/first.last/bar`   → `-Users-first-last-bar`
     /// `/home/chris/2_project`   → `-home-chris-2-project`
-    /// `C:\Users\foo\bar`        → `C:-Users-foo-bar`
+    /// `C:\Users\foo\bar`        → `C--Users-foo-bar`
     pub fn encode_project_path(path: &str) -> String {
-        const SANITIZED_CHARS: &[char] = &['/', '.', '_', '\\', ' ', '[', ']'];
+        // The drive-letter `:` matters on Windows: every cwd carries one, and if
+        // it isn't sanitized the slug (`C:-...`) never matches Claude's real
+        // folder (`C--...`), so `rtk discover` finds zero sessions (#2919).
+        const SANITIZED_CHARS: &[char] = &['/', '.', '_', '\\', ' ', '[', ']', ':'];
 
         path.chars()
             .map(|c| {
@@ -257,6 +274,7 @@ impl SessionProvider for ClaudeProvider {
                 command,
                 output_len,
                 session_id: session_id.clone(),
+                tool_use_id: tool_id,
                 output_content,
                 is_error,
                 sequence_index,
@@ -403,10 +421,13 @@ mod tests {
 
     #[test]
     fn test_encode_project_path_windows() {
-        // Windows backslashes are also replaced with '-'
+        // Windows backslashes AND the drive-letter colon are replaced with '-'.
+        // A real `C:\Users\foo\bar` dir lands in ~/.claude/projects/C--Users-foo-bar,
+        // so keeping the colon (C:-...) made `rtk discover` find zero sessions on
+        // Windows (#2919).
         assert_eq!(
             ClaudeProvider::encode_project_path(r"C:\Users\foo\bar"),
-            "C:-Users-foo-bar"
+            "C--Users-foo-bar"
         );
     }
 

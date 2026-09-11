@@ -639,7 +639,7 @@ fn parse_global_json_mtp_mode(path: &Path) -> bool {
     let Ok(content) = std::fs::read_to_string(path) else {
         return false;
     };
-    let Ok(json) = serde_json::from_str::<Value>(&content) else {
+    let Ok(json) = crate::core::utils::from_json_str::<Value>(&content) else {
         return false;
     };
     json.get("test")

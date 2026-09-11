@@ -1,0 +1,23 @@
+[INFO] Scanning for projects...
+[multi-module-skeleton] [INFO] ---------------< com.example.rtk:multi-module-skeleton >----------------
+[multi-module-skeleton] [INFO] Building multi-module-skeleton 1.0.0-SNAPSHOT                      [1/3]
+[multi-module-skeleton] [INFO] Installing C:\work\multi-module-skeleton\pom.xml to C:\Users\dev\.m2\repository\com\example\rtk\multi-module-skeleton\1.0.0-SNAPSHOT\multi-module-skeleton-1.0.0-SNAPSHOT.pom
+[child-b] [INFO] ----------------------< com.example.rtk:child-b >-----------------------
+[child-b] [INFO] Building child-b 1.0.0-SNAPSHOT                                    [2/3]
+[child-a] [INFO] ----------------------< com.example.rtk:child-a >-----------------------
+[child-a] [INFO] Building child-a 1.0.0-SNAPSHOT                                    [3/3]
+[child-b] [INFO] Building jar: C:\work\multi-module-skeleton\child-b\target\child-b-1.0.0-SNAPSHOT.jar
+[child-a] [INFO] Building jar: C:\work\multi-module-skeleton\child-a\target\child-a-1.0.0-SNAPSHOT.jar
+[child-a] [INFO] Installing C:\work\multi-module-skeleton\child-a\pom.xml to C:\Users\dev\.m2\repository\com\example\rtk\child-a\1.0.0-SNAPSHOT\child-a-1.0.0-SNAPSHOT.pom
+[child-b] [INFO] Installing C:\work\multi-module-skeleton\child-b\pom.xml to C:\Users\dev\.m2\repository\com\example\rtk\child-b\1.0.0-SNAPSHOT\child-b-1.0.0-SNAPSHOT.pom
+[child-b] [INFO] Installing C:\work\multi-module-skeleton\child-b\target\child-b-1.0.0-SNAPSHOT.jar to C:\Users\dev\.m2\repository\com\example\rtk\child-b\1.0.0-SNAPSHOT\child-b-1.0.0-SNAPSHOT.jar
+[child-a] [INFO] Installing C:\work\multi-module-skeleton\child-a\target\child-a-1.0.0-SNAPSHOT.jar to C:\Users\dev\.m2\repository\com\example\rtk\child-a\1.0.0-SNAPSHOT\child-a-1.0.0-SNAPSHOT.jar
+[INFO] Reactor Summary for multi-module-skeleton 1.0.0-SNAPSHOT:
+[INFO] 
+[INFO] multi-module-skeleton .............................. SUCCESS [  0.070 s]
+[INFO] child-a ............................................ SUCCESS [  0.339 s]
+[INFO] child-b ............................................ SUCCESS [  0.333 s]
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] Total time:  0.481 s (Wall Clock)
+[INFO] Finished at: 2026-08-12T12:03:52-04:00

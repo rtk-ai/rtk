@@ -2,9 +2,10 @@
 
 use crate::core::guard::never_worse;
 use crate::core::runner;
+use crate::core::stream::{exec_capture, CaptureResult};
 use crate::core::tracking;
 use crate::core::truncate::CAP_ERRORS;
-use crate::core::utils::{exit_code_from_output, resolved_command, truncate};
+use crate::core::utils::{resolved_command, truncate};
 use crate::golangci_cmd;
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -149,16 +150,12 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
         eprintln!("Running: go {} ...", subcommand);
     }
 
-    let output = cmd
-        .output()
+    let captured = exec_capture(&mut cmd)
         .with_context(|| format!("Failed to run go {}", subcommand))?;
+    let raw = format!("{}\n{}", captured.stdout, captured.stderr);
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    print!("{}", stdout);
-    eprint!("{}", stderr);
+    print!("{}", captured.stdout);
+    eprint!("{}", captured.stderr);
 
     timer.track(
         &format!("go {}", subcommand),
@@ -167,26 +164,21 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
         &raw, // No filtering for unsupported commands
     );
 
-    Ok(exit_code_from_output(&output, "go"))
+    Ok(captured.exit_code)
 }
 
 /// Detect golangci-lint major version when invoked via `go tool`.
 /// Returns 1 on any failure (safe fallback — v1 behaviour).
 fn detect_go_tool_golangci_version() -> u32 {
-    let output = resolved_command("go")
-        .arg("tool")
-        .arg("golangci-lint")
-        .arg("--version")
-        .output();
+    let mut cmd = resolved_command("go");
+    cmd.arg("tool").arg("golangci-lint").arg("--version");
 
-    match output {
-        Ok(o) => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            let version_text = if stdout.trim().is_empty() {
-                &*stderr
+    match exec_capture(&mut cmd) {
+        Ok(captured) => {
+            let version_text = if captured.stdout.trim().is_empty() {
+                &captured.stderr
             } else {
-                &*stdout
+                &captured.stdout
             };
             golangci_cmd::parse_major_version(version_text)
         }
@@ -265,12 +257,11 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
         }
     }
 
-    let output = cmd
-        .output()
-        .context("Failed to run go tool golangci-lint")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let CaptureResult {
+        stdout,
+        stderr,
+        exit_code,
+    } = exec_capture(&mut cmd).context("Failed to run go tool golangci-lint")?;
     let raw = format!("{}\n{}", stdout, stderr);
 
     // v2 outputs JSON on first line + trailing text; v1 outputs just JSON
@@ -295,7 +286,6 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
         shown,
     );
 
-    let exit_code = exit_code_from_output(&output, "go tool golangci-lint");
     // golangci-lint: exit 0 = clean, exit 1 = lint issues found (not an error),
     // exit 2+ = config/build error, None = killed by signal (OOM, SIGKILL)
     Ok(if exit_code == 1 { 0 } else { exit_code })

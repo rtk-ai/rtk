@@ -1,0 +1,101 @@
+[INFO] Processing build on daemon 94a4d17c
+[INFO] Scanning for projects...
+[INFO] BuildTimeEventSpy is registered.
+[INFO] ------------------------------------------------------------------------
+[INFO] Reactor Build Order:
+[INFO] 
+[INFO] multi-module-skeleton                                              [pom]
+[INFO] child-a                                                            [jar]
+[INFO] child-b                                                            [jar]
+[INFO] 
+[INFO] Using the SmartBuilder implementation with a thread count of 17
+[multi-module-skeleton] [INFO] 
+[multi-module-skeleton] [INFO] ---------------< com.example.rtk:multi-module-skeleton >----------------
+[multi-module-skeleton] [INFO] Building multi-module-skeleton 1.0.0-SNAPSHOT                      [1/3]
+[multi-module-skeleton] [INFO]   from pom.xml
+[multi-module-skeleton] [INFO] --------------------------------[ pom ]---------------------------------
+[multi-module-skeleton] [INFO] 
+[multi-module-skeleton] [INFO] --- clean:3.2.0:clean (default-clean) @ multi-module-skeleton ---
+[multi-module-skeleton] [INFO] 
+[multi-module-skeleton] [INFO] --- install:3.1.4:install (default-install) @ multi-module-skeleton ---
+[multi-module-skeleton] [INFO] Installing C:\work\multi-module-skeleton\pom.xml to C:\Users\dev\.m2\repository\com\example\rtk\multi-module-skeleton\1.0.0-SNAPSHOT\multi-module-skeleton-1.0.0-SNAPSHOT.pom
+[child-b] [INFO] 
+[child-b] [INFO] ----------------------< com.example.rtk:child-b >-----------------------
+[child-b] [INFO] Building child-b 1.0.0-SNAPSHOT                                    [2/3]
+[child-a] [INFO] 
+[child-b] [INFO]   from child-b\pom.xml
+[child-a] [INFO] ----------------------< com.example.rtk:child-a >-----------------------
+[child-b] [INFO] --------------------------------[ jar ]---------------------------------
+[child-a] [INFO] Building child-a 1.0.0-SNAPSHOT                                    [3/3]
+[child-a] [INFO]   from child-a\pom.xml
+[child-a] [INFO] --------------------------------[ jar ]---------------------------------
+[child-a] [INFO] 
+[child-b] [INFO] 
+[child-a] [INFO] --- clean:3.2.0:clean (default-clean) @ child-a ---
+[child-b] [INFO] --- clean:3.2.0:clean (default-clean) @ child-b ---
+[child-a] [INFO] Deleting C:\work\multi-module-skeleton\child-a\target
+[child-b] [INFO] Deleting C:\work\multi-module-skeleton\child-b\target
+[child-b] [INFO] 
+[child-b] [INFO] --- resources:3.4.0:resources (default-resources) @ child-b ---
+[child-a] [INFO] 
+[child-a] [INFO] --- resources:3.4.0:resources (default-resources) @ child-a ---
+[child-a] [INFO] skip non existing resourceDirectory C:\work\multi-module-skeleton\child-a\src\main\resources
+[child-b] [INFO] skip non existing resourceDirectory C:\work\multi-module-skeleton\child-b\src\main\resources
+[child-a] [INFO] 
+[child-a] [INFO] --- compiler:3.15.0:compile (default-compile) @ child-a ---
+[child-b] [INFO] 
+[child-b] [INFO] --- compiler:3.15.0:compile (default-compile) @ child-b ---
+[child-a] [INFO] Recompiling the module because of changed source code.
+[child-a] [INFO] Compiling 1 source file with javac [debug target 21] to target\classes
+[child-b] [INFO] Recompiling the module because of changed source code.
+[child-b] [INFO] Compiling 1 source file with javac [debug target 21] to target\classes
+[child-b] [INFO] 
+[child-b] [INFO] --- resources:3.4.0:testResources (default-testResources) @ child-b ---
+[child-a] [INFO] 
+[child-a] [INFO] --- resources:3.4.0:testResources (default-testResources) @ child-a ---
+[child-a] [INFO] skip non existing resourceDirectory C:\work\multi-module-skeleton\child-a\src\test\resources
+[child-b] [INFO] skip non existing resourceDirectory C:\work\multi-module-skeleton\child-b\src\test\resources
+[child-b] [INFO] 
+[child-a] [INFO] 
+[child-a] [INFO] --- compiler:3.15.0:testCompile (default-testCompile) @ child-a ---
+[child-b] [INFO] --- compiler:3.15.0:testCompile (default-testCompile) @ child-b ---
+[child-b] [INFO] No sources to compile
+[child-b] [INFO] 
+[child-b] [INFO] --- surefire:3.5.4:test (default-test) @ child-b ---
+[child-a] [INFO] No sources to compile
+[child-a] [INFO] 
+[child-a] [INFO] --- surefire:3.5.4:test (default-test) @ child-a ---
+[child-a] [INFO] No tests to run.
+[child-b] [INFO] No tests to run.
+[child-a] [INFO] 
+[child-b] [INFO] 
+[child-a] [INFO] --- jar:3.5.0:jar (default-jar) @ child-a ---
+[child-b] [INFO] --- jar:3.5.0:jar (default-jar) @ child-b ---
+[child-b] [INFO] Building jar: C:\work\multi-module-skeleton\child-b\target\child-b-1.0.0-SNAPSHOT.jar
+[child-a] [INFO] Building jar: C:\work\multi-module-skeleton\child-a\target\child-a-1.0.0-SNAPSHOT.jar
+[child-a] [INFO] 
+[child-b] [INFO] 
+[child-b] [INFO] --- install:3.1.4:install (default-install) @ child-b ---
+[child-a] [INFO] --- install:3.1.4:install (default-install) @ child-a ---
+[child-a] [INFO] Installing C:\work\multi-module-skeleton\child-a\pom.xml to C:\Users\dev\.m2\repository\com\example\rtk\child-a\1.0.0-SNAPSHOT\child-a-1.0.0-SNAPSHOT.pom
+[child-b] [INFO] Installing C:\work\multi-module-skeleton\child-b\pom.xml to C:\Users\dev\.m2\repository\com\example\rtk\child-b\1.0.0-SNAPSHOT\child-b-1.0.0-SNAPSHOT.pom
+[child-b] [INFO] Installing C:\work\multi-module-skeleton\child-b\target\child-b-1.0.0-SNAPSHOT.jar to C:\Users\dev\.m2\repository\com\example\rtk\child-b\1.0.0-SNAPSHOT\child-b-1.0.0-SNAPSHOT.jar
+[child-a] [INFO] Installing C:\work\multi-module-skeleton\child-a\target\child-a-1.0.0-SNAPSHOT.jar to C:\Users\dev\.m2\repository\com\example\rtk\child-a\1.0.0-SNAPSHOT\child-a-1.0.0-SNAPSHOT.jar
+[INFO] ------------------------------------------------------------------------
+[INFO] Average project wall time: 0.00s
+[INFO] Total concurrency: 11%
+[INFO] Bottleneck projects that decrease concurrency: (run build with -Dsmartbuilder.profiling=true for further details)
+[INFO] 	- com.example.rtk:multi-module-skeleton:1.0.0-SNAPSHOT
+[INFO] 	- com.example.rtk:child-a:1.0.0-SNAPSHOT
+[INFO] ------------------------------------------------------------------------
+[INFO] Reactor Summary for multi-module-skeleton 1.0.0-SNAPSHOT:
+[INFO] 
+[INFO] multi-module-skeleton .............................. SUCCESS [  0.070 s]
+[INFO] child-a ............................................ SUCCESS [  0.339 s]
+[INFO] child-b ............................................ SUCCESS [  0.333 s]
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  0.481 s (Wall Clock)
+[INFO] Finished at: 2026-08-12T12:03:52-04:00
+[INFO] ------------------------------------------------------------------------

@@ -1,0 +1,30 @@
+[INFO] Scanning for projects...
+[multi-module-fail-skeleton] [INFO] -------------< com.example.rtk:multi-module-fail-skeleton >-------------
+[multi-module-fail-skeleton] [INFO] Building multi-module-fail-skeleton 1.0.0-SNAPSHOT                 [1/3]
+[child-b] [INFO] ----------------------< com.example.rtk:child-b >-----------------------
+[child-b] [INFO] Building child-b 1.0.0-SNAPSHOT                                    [2/3]
+[child-a] [INFO] ----------------------< com.example.rtk:child-a >-----------------------
+[child-a] [INFO] Building child-a 1.0.0-SNAPSHOT                                    [3/3]
+[child-a] [INFO] Running com.example.rtk.ParallelFailTest
+[child-a] [ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 0.153 s <<< FAILURE! -- in com.example.rtk.ParallelFailTest
+[child-a] [ERROR] com.example.rtk.ParallelFailTest.reactorDiagnostic -- Time elapsed: 0.098 s <<< FAILURE!
+org.opentest4j.AssertionFailedError: parallel reactor diagnostic ==> expected: <1> but was: <2>
+	at com.example.rtk.ParallelFailTest.reactorDiagnostic(ParallelFailTest.java:10)
+[child-a] [INFO] Results:
+[child-b] [INFO] Results:
+[child-a] [ERROR] Failures: 
+[child-b] [INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0
+[child-a] [ERROR]   ParallelFailTest.reactorDiagnostic:10 parallel reactor diagnostic ==> expected: <1> but was: <2>
+[child-a] [ERROR] Tests run: 3, Failures: 1, Errors: 0, Skipped: 0
+[INFO] Reactor Summary for multi-module-fail-skeleton 1.0.0-SNAPSHOT:
+[INFO] 
+[INFO] multi-module-fail-skeleton ......................... SUCCESS [  0.030 s]
+[INFO] child-a ............................................ FAILURE [  3.230 s]
+[INFO] child-b ............................................ SUCCESS [  3.230 s]
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD FAILURE
+[INFO] Total time:  3.363 s (Wall Clock)
+[INFO] Finished at: 2026-08-13T09:18:03-04:00
+[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.5.5:test (default-test) on project child-a: There are test failures.
+[ERROR] After correcting the problems, you can resume the build with the command
+[ERROR]   mvn <args> -r
