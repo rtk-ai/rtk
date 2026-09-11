@@ -260,14 +260,19 @@ fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
     if verdict == PermissionVerdict::Deny {
         return HookDecision::Deny;
     }
-    crate::hooks::rewrite_cmd::track_tee_read(cmd);
     if crate::discover::lexer::contains_unattestable_construct(cmd) {
         return HookDecision::Defer;
     }
     match get_rewritten(cmd) {
-        Some(r) if verdict == PermissionVerdict::Allow => HookDecision::AllowRewrite(r),
+        Some(r) if verdict == PermissionVerdict::Allow => {
+            crate::hooks::rewrite_cmd::track_tee_read(cmd);
+            HookDecision::AllowRewrite(r)
+        }
         Some(r) => HookDecision::AskRewrite(r),
-        None => HookDecision::Defer,
+        None => {
+            crate::hooks::rewrite_cmd::track_tee_read(cmd);
+            HookDecision::Defer
+        }
     }
 }
 

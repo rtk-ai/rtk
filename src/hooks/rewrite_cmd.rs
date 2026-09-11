@@ -75,7 +75,7 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
     let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
 
     let outcome = evaluate(cmd, &excluded, &transparent_prefixes);
-    if !matches!(outcome, RewriteOutcome::Deny) {
+    if should_track_tee_read_for_outcome(&outcome) {
         track_tee_read(cmd);
     }
     match outcome {
@@ -104,6 +104,13 @@ enum RewriteOutcome {
 
 fn evaluate(cmd: &str, excluded: &[String], transparent_prefixes: &[String]) -> RewriteOutcome {
     evaluate_with_verdict(cmd, check_command(cmd), excluded, transparent_prefixes)
+}
+
+fn should_track_tee_read_for_outcome(outcome: &RewriteOutcome) -> bool {
+    matches!(
+        outcome,
+        RewriteOutcome::Allow(_) | RewriteOutcome::Passthrough
+    )
 }
 
 /// Decision logic for [`evaluate`] with the permission verdict supplied by the
@@ -221,6 +228,45 @@ mod tests {
             rewrite_command_no_prefixes("rtk git status"),
             Some("rtk git status".into())
         );
+    }
+
+    #[test]
+    fn test_tee_read_tracking_skips_commands_that_still_need_approval() {
+        let ask = evaluate_with_verdict(
+            "cat /tmp/1755590000_build.log",
+            PermissionVerdict::Default,
+            &[],
+            &[],
+        );
+        assert!(matches!(ask, RewriteOutcome::Ask(_)));
+        assert!(!should_track_tee_read_for_outcome(&ask));
+
+        let allow = evaluate_with_verdict(
+            "cat /tmp/1755590000_build.log",
+            PermissionVerdict::Allow,
+            &[],
+            &[],
+        );
+        assert!(matches!(allow, RewriteOutcome::Allow(_)));
+        assert!(should_track_tee_read_for_outcome(&allow));
+
+        let passthrough = evaluate_with_verdict(
+            "tail /tmp/1755590000_build.log",
+            PermissionVerdict::Allow,
+            &["tail".into()],
+            &[],
+        );
+        assert_eq!(passthrough, RewriteOutcome::Passthrough);
+        assert!(should_track_tee_read_for_outcome(&passthrough));
+
+        let deny = evaluate_with_verdict(
+            "cat /tmp/1755590000_build.log",
+            PermissionVerdict::Deny,
+            &[],
+            &[],
+        );
+        assert_eq!(deny, RewriteOutcome::Deny);
+        assert!(!should_track_tee_read_for_outcome(&deny));
     }
 
     /// The verdict still drives the outcome: an allow rule yields `Allow`.
