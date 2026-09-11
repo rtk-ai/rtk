@@ -1,6 +1,6 @@
 [package]
 name = "rtk"
-version = "0.48.0"
+version = "0.49.0"
 edition = "2021"
 rust-version = "1.91"
 authors = ["Patrick Szymkowiak"]
