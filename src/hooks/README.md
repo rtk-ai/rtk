@@ -99,6 +99,38 @@ Rules are loaded from all Claude Code `settings.json` files (project + global, i
 - `rewrite_cmd.rs` — maps verdict to exit code (consumed by shell hook)
 - `hook_cmd.rs` — maps verdict to JSON `permissionDecision` field (Copilot/Gemini)
 
+### Claude Code event: PreToolUse vs PermissionRequest
+
+`rtk hook claude` reads `hook_event_name` and emits the matching JSON shape, so the
+same command can be registered on either Claude Code event:
+
+| Event | Output shape | Honors `updatedInput`? |
+|-------|--------------|------------------------|
+| `PreToolUse` (default) | `hookSpecificOutput.updatedInput` + `permissionDecision` | Yes — but **currently ignored by Claude Code** ([anthropics/claude-code#15897](https://github.com/anthropics/claude-code/issues/15897)) |
+| `PermissionRequest` | `hookSpecificOutput.decision.{behavior, updatedInput}` | Yes |
+
+`PermissionRequest` is a fallback for #15897. It only fires when Claude Code is about to
+prompt the user, so its rewrite uses `decision.behavior: "allow"` (the only form that
+carries `updatedInput`). Unlike `PreToolUse`'s `permissionDecision: "allow"`, this does
+**not** unconditionally run the command — Claude Code re-evaluates the *rewritten* command
+against the user's ask/deny rules, so an `ask` rule covering `Bash(rtk:*)` still prompts the
+user, preserving least-privilege.
+
+Registration is event-specific and not yet wired into `rtk init` (the emission primitive
+ships first; auto-registration + the `Bash(rtk:*)` ask rule are a planned follow-up). To opt
+in manually, add to `settings.json`:
+
+```json
+{
+  "permissions": { "ask": ["Bash(rtk:*)"] },
+  "hooks": {
+    "PermissionRequest": [
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "rtk hook claude" }] }
+    ]
+  }
+}
+```
+
 ## Exit Code Contract
 
 Hook processors in `hook_cmd.rs` must return `Ok(())` on every path — success, no-match, parse error, and unexpected input. Returning `Err` propagates to `main()` and exits non-zero, which blocks the agent's command from executing. This violates the non-blocking guarantee documented in `hooks/README.md`.
