@@ -1107,6 +1107,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking Changes
+
+* **hooks:** `rtk init --agent pi` and `rtk init --agent omp` now ask before overwriting modified or unrelated extensions; non-interactive upgrades must pass `--auto-patch` to approve the overwrite, or handle the nonzero refusal.
+
 ### ⚠️ Migration Required
 
 **Hook must be updated after upgrading** (`rtk init --global`).

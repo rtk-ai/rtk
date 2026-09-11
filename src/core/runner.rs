@@ -160,6 +160,19 @@ where
 }
 
 pub fn run(
+    cmd: Command,
+    tool_name: &str,
+    args_display: &str,
+    mode: RunMode<'_>,
+    opts: RunOptions<'_>,
+) -> Result<i32> {
+    let result = run_inner(cmd, tool_name, args_display, mode, opts);
+    // #2375
+    stream::die_by_relayed_signal();
+    result
+}
+
+fn run_inner(
     mut cmd: Command,
     tool_name: &str,
     args_display: &str,

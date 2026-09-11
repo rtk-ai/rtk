@@ -1,0 +1,7 @@
+diff -ru "Kyle's old/f.txt" "Kyle's new/f.txt"
+--- "Kyle's old/f.txt"	2026-09-07 09:04:54.735038000 -0400
++++ "Kyle's new/f.txt"	2026-09-07 09:04:54.736755100 -0400
+@@ -1 +1 @@
+-a
++b
+Only in "Kyle's new": only.txt

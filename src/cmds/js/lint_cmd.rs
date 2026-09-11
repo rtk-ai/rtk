@@ -5,6 +5,7 @@ use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::{CAP_ERRORS, CAP_WARNINGS};
 use crate::core::utils::{resolved_command, tool_exec, truncate, MissingTool};
+use crate::cmds::python::sqlfluff_cmd;
 use crate::mypy_cmd;
 use crate::ruff_cmd;
 use anyhow::{Context, Result};
@@ -54,7 +55,7 @@ struct PylintDiagnostic {
 
 /// Check if a linter is Python-based (uses pip/pipx, not npm/pnpm)
 fn is_python_linter(linter: &str) -> bool {
-    matches!(linter, "ruff" | "pylint" | "mypy" | "flake8")
+    matches!(linter, "ruff" | "pylint" | "mypy" | "flake8" | "sqlfluff")
 }
 
 /// Strip package manager prefixes (npx, bunx, pnpm, pnpm exec, yarn) from args.
@@ -106,7 +107,12 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
 
     let (linter, explicit) = detect_linter(effective_args);
 
-    // Python linters use resolved_command() directly (they're on PATH via pip/pipx)
+    // sqlfluff owns its own argv and its own rendering: routing, format-flag
+    // detection and failure handling live in `sqlfluff_cmd::plan` so this entry
+    // point and `rtk sqlfluff ...` cannot drift apart.
+    let sqlfluff = (linter == "sqlfluff").then(|| sqlfluff_cmd::plan(&effective_args[1..]));
+
+    // Python linter use resolved_command() directly (they're on PATH via pip/pipx)
     // JS linters use package_manager_exec (npx/pnpm exec)
     let mut cmd = if is_python_linter(linter) {
         resolved_command(linter)
@@ -127,6 +133,8 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
         "pylint" if !effective_args.contains(&"--output-format".to_string()) => {
             cmd.arg("--output-format=json2");
         }
+        // sqlfluff's full argv comes from the plan below, flags included.
+        "sqlfluff" => {}
         "mypy" => {
             // mypy uses default text output (no special flags)
         }
@@ -149,15 +157,20 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
         1
     };
 
-    for arg in &effective_args[start_idx..] {
-        // Skip --output-format if we already added it
-        if linter == "ruff" && arg.starts_with("--output-format") {
-            continue;
+    if let Some(plan) = &sqlfluff {
+        // sqlfluff's argv is planned whole, subcommand and format flags included.
+        cmd.args(&plan.args);
+    } else {
+        for arg in &effective_args[start_idx..] {
+            // Skip --output-format if we already added it
+            if linter == "ruff" && arg.starts_with("--output-format") {
+                continue;
+            }
+            if linter == "pylint" && arg.starts_with("--output-format") {
+                continue;
+            }
+            cmd.arg(arg);
         }
-        if linter == "pylint" && arg.starts_with("--output-format") {
-            continue;
-        }
-        cmd.arg(arg);
     }
 
     // Default to current directory if no path specified (for ruff/pylint/mypy/eslint)
@@ -195,19 +208,23 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
     let raw = format!("{}\n{}", result.stdout, result.stderr);
 
     // Dispatch to appropriate filter based on linter
-    let filtered = match linter {
-        "eslint" => filter_eslint_json(&result.stdout),
-        "ruff" => {
-            // Reuse ruff_cmd's JSON parser
-            if !result.stdout.trim().is_empty() {
-                ruff_cmd::filter_ruff_check_json(&result.stdout)
-            } else {
-                "Ruff: No issues found".to_string()
+    let filtered = if let Some(plan) = &sqlfluff {
+        plan.render(&result.stdout, result.exit_code)
+    } else {
+        match linter {
+            "eslint" => filter_eslint_json(&result.stdout),
+            "ruff" => {
+                // Reuse ruff_cmd's JSON parser
+                if !result.stdout.trim().is_empty() {
+                    ruff_cmd::filter_ruff_check_json(&result.stdout)
+                } else {
+                    "Ruff: No issues found".to_string()
+                }
             }
+            "pylint" => filter_pylint_json(&result.stdout),
+            "mypy" => mypy_cmd::filter_mypy_output(&raw),
+            _ => filter_generic_lint(&raw),
         }
-        "pylint" => filter_pylint_json(&result.stdout),
-        "mypy" => mypy_cmd::filter_mypy_output(&raw),
-        _ => filter_generic_lint(&raw),
     };
 
     let hint = crate::core::tee::tee_and_hint(&raw, "lint", result.exit_code);
@@ -716,6 +733,7 @@ mod tests {
         assert!(is_python_linter("pylint"));
         assert!(is_python_linter("mypy"));
         assert!(is_python_linter("flake8"));
+        assert!(is_python_linter("sqlfluff"));
         assert!(!is_python_linter("eslint"));
         assert!(!is_python_linter("biome"));
         assert!(!is_python_linter("unknown"));

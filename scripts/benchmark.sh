@@ -215,6 +215,8 @@ count_find_names() {
     /^ext: /             { next }   # extension histogram footer
     /^\.\.\. \(/          { next }   # "... (8 filtered)" disclosure note
     /^\[see remaining: / { next }   # tee pointer for the disclosed entries
+    /^\[\+[0-9]+ hidden: / { next }   # sqlite recall pointer, same role
+    /^\[full output: /   { next }   # sqlite recall pointer for a whole capture
     NF == 0              { next }
     { n += NF - ($1 ~ /\/$/ ? 1 : 0) }   # grouped lines lead with "dir/"
     END { print n + 0 }
@@ -230,6 +232,8 @@ count_find_total() {
     /^ext: /             { next }
     /^\.\.\. \(/          { next }
     /^\[see remaining: / { next }
+    /^\[\+[0-9]+ hidden: / { next }
+    /^\[full output: /   { next }
     NF == 0              { next }
     { shown += NF - ($1 ~ /\/$/ ? 1 : 0) }
     END { print (total ? total : shown + more) + 0 }
@@ -679,10 +683,15 @@ module bench
 go 1.21
 GOEOF
 
+  # The ignored error returns are deliberate: this row only measures the filter
+  # if errcheck has findings to compress.
   cat > main.go << 'GOEOF'
 package main
 
-import "fmt"
+import (
+    "fmt"
+    "os"
+)
 
 func Add(a, b int) int {
     return a + b
@@ -692,9 +701,40 @@ func Multiply(a, b int) int {
     return a * b
 }
 
+func readConfig() {
+    f, _ := os.Open("config.yml")
+    defer f.Close()
+    fmt.Println(f != nil)
+}
+
+func writeCache() {
+    os.Remove("cache.tmp")
+    os.Chmod("cache.tmp", 0o600)
+}
+
+func exportEnv() {
+    os.Setenv("BENCH_MODE", "on")
+    os.Unsetenv("BENCH_DEBUG")
+}
+
+func reportStatus() {
+    fmt.Fprintf(os.Stderr, "status: %s\n", "ok")
+    fmt.Fprintln(os.Stderr, "done")
+}
+
+func rotateLogs() {
+    os.Truncate("bench.log", 0)
+    os.Rename("bench.log", "bench.log.1")
+}
+
 func main() {
     fmt.Println(Add(2, 3))
     fmt.Println(Multiply(4, 5))
+    readConfig()
+    writeCache()
+    exportEnv()
+    reportStatus()
+    rotateLogs()
 }
 GOEOF
 

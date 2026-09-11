@@ -1,0 +1,1 @@
+Files g1/c.txt and g2/c.txt differ

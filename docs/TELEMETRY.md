@@ -64,6 +64,8 @@ This data directly drives our roadmap. For example, if telemetry shows that 40% 
 | `parse_failures_24h` | `3` | Filter fragility — high count means filters are breaking |
 | `low_savings_commands` | `["rtk docker ps:25%"]` | Commands averaging <30% savings — filters to improve |
 | `avg_savings_per_command` | `68.5` | Unweighted average (vs global which is volume-biased) |
+| `recall_mode` | `sqlite` | Which recovery mode is active (`sqlite`/`tee`/`disabled`) |
+| `recall_stats` | `[{"filter":"grep","mode":"sqlite","elisions":142,"recalls":9}]` | Per-filter counters: how often elided output is retrieved — calibrates filter caps. Filter names come from a fixed allowlist of rtk filter families; anything else is folded into `other`. No hashes, no paths, no command arguments, no output content. |
 
 ### Ecosystem distribution
 
