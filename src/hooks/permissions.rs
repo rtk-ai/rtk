@@ -72,7 +72,7 @@ pub(crate) fn check_command_with_rules(
 
     // Deny takes highest priority and pre-empts every other construct.
     for segment in &segments {
-        let segment = segment.trim();
+        let segment = normalize_for_matching(segment.trim());
         for pattern in deny_rules {
             if command_matches_pattern(segment, pattern) {
                 return PermissionVerdict::Deny;
@@ -93,7 +93,7 @@ pub(crate) fn check_command_with_rules(
     let mut saw_segment = false;
 
     for segment in &segments {
-        let segment = segment.trim();
+        let segment = normalize_for_matching(segment.trim());
         if segment.is_empty() {
             continue;
         }
@@ -394,6 +394,20 @@ pub(crate) fn extract_bash_pattern(rule: &str) -> &str {
         }
     }
     rule
+}
+
+/// Strips a leading `rtk ` invocation from a permission-check segment.
+///
+/// Permission rules (e.g. `Bash(grep *)`) are written against the
+/// underlying tool the user actually typed, but once an agent host has
+/// seen RTK's rewritten form it sometimes issues `rtk grep …` directly on
+/// a later turn — a segment that no longer looks like the original tool
+/// invocation to either RTK's own matcher or the host's native one, so
+/// deny/ask/allow rules alike silently stop applying (rtk-ai/rtk#3152).
+/// Normalizing here — right before matching — keeps the deny/ask/allow
+/// checks meaningful regardless of which form the command arrives in.
+fn normalize_for_matching(segment: &str) -> &str {
+    segment.strip_prefix("rtk ").unwrap_or(segment)
 }
 
 /// Check if `cmd` matches a Claude Code permission pattern.
@@ -1252,6 +1266,61 @@ mod tests {
         let mut out = Vec::new();
         append_wrapped_rules(Some(&v), &["run_shell_command(", "ShellTool("], &mut out);
         assert_eq!(out, vec!["git", "npm test", "*"]);
+    }
+
+    // --- Regression tests for #3152 ---
+    // Allow/ask/deny rules are written against the underlying tool (e.g.
+    // `Bash(grep *)`), but Claude sometimes issues the already-rewritten
+    // `rtk grep …` form directly on a later turn. Rules must still apply.
+
+    #[test]
+    fn test_already_rtk_matches_allow_rule() {
+        let allow = vec!["grep *".to_string(), "ls *".to_string()];
+        assert_eq!(
+            check_command_with_rules("rtk grep -n foo bar.py", &[], &[], &allow),
+            PermissionVerdict::Allow
+        );
+        assert_eq!(
+            check_command_with_rules("rtk ls -la", &[], &[], &allow),
+            PermissionVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn test_already_rtk_still_matches_deny_rule() {
+        // A deny rule must not be bypassable just because the command
+        // arrives pre-rewritten — this is the security-relevant half of #3152.
+        let deny = vec!["rm:*".to_string()];
+        let allow = vec!["*".to_string()];
+        assert_eq!(
+            check_command_with_rules("rtk rm -rf /", &deny, &[], &allow),
+            PermissionVerdict::Deny
+        );
+    }
+
+    #[test]
+    fn test_already_rtk_still_matches_ask_rule() {
+        let ask = vec!["git push".to_string()];
+        assert_eq!(
+            check_command_with_rules("rtk git push origin main", &[], &ask, &[]),
+            PermissionVerdict::Ask
+        );
+    }
+
+    #[test]
+    fn test_already_rtk_compound_all_segments_checked() {
+        // Mirrors #1213's per-segment requirement: every segment of an
+        // already-rtk compound command must independently match.
+        let allow = vec!["git status *".to_string(), "git status".to_string()];
+        assert_eq!(
+            check_command_with_rules("rtk git status && rtk git add .", &[], &[], &allow),
+            PermissionVerdict::Default,
+            "unallowed second segment must demote the whole chain, even pre-rewritten"
+        );
+        assert_eq!(
+            check_command_with_rules("rtk git status && rtk git status -s", &[], &[], &allow),
+            PermissionVerdict::Allow
+        );
     }
 
     #[test]
