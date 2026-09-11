@@ -143,7 +143,17 @@ fn parse_subset(paths: &[String], expr: &[String]) -> Option<FindArgs> {
 /// token starting with `-`, `!` or a parenthesis, exactly like find.
 /// RTK syntax: `find <pattern> [path] [-m max] [-t type]` — used when the first
 /// token contains `*` or `?`, or is not an existing directory.
+/// GNU find spells its usage request `-help` or `--help` (`-h` is not a
+/// find flag). The compress path reads find's output as an inventory, which
+/// once rendered the usage text as `1F 1D:`; usage runs verbatim.
+fn requests_help(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "-help" || arg == "--help")
+}
+
 fn dispatch(original: &[String]) -> Result<Dispatch> {
+    if requests_help(original) {
+        return Ok(Dispatch::Verbatim(original.to_vec()));
+    }
     let (args, max, file_type) = peel_trailing_rtk_flags(original);
     let legacy = !args.is_empty()
         && !is_expression_token(&args[0])
@@ -748,6 +758,22 @@ mod tests {
     /// Convert string slices to Vec<String> for test convenience.
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn help_request_dispatches_verbatim() {
+        for flag in ["--help", "-help"] {
+            match dispatch(&args(&[flag])).expect("dispatch") {
+                Dispatch::Verbatim(a) => assert_eq!(a, args(&[flag])),
+                _ => panic!("find {flag} must run verbatim"),
+            }
+        }
+        match dispatch(&args(&[".", "-name", "*.rs", "--help"])).expect("dispatch") {
+            Dispatch::Verbatim(a) => assert_eq!(a, args(&[".", "-name", "*.rs", "--help"])),
+            _ => panic!("--help anywhere in a find argv is a usage request"),
+        }
+        // `-h` is not a find flag and must not be mistaken for one.
+        assert!(!requests_help(&args(&["-h"])));
     }
 
     fn parse_find_args(a: &[String]) -> Result<FindArgs> {

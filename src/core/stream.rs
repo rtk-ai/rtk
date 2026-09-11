@@ -701,12 +701,19 @@ impl CaptureResult {
     }
 }
 
+/// Run `cmd` with stdin closed and capture what it wrote.
+///
+/// A `--help`/`-h` request (see [`crate::core::runner::requests_help`]) is
+/// not captured: the usage is shown as the tool prints it and the process
+/// exits with the tool's code, because no caller here can read usage as the
+/// output it filters. Internal probes must not pass those flags.
 pub fn exec_capture(cmd: &mut Command) -> Result<CaptureResult> {
     cmd.stdin(Stdio::null());
     capture(cmd)
 }
 
-/// Like [`exec_capture`] but inherits stdin so a wrapped engine can read a piped stdin.
+/// Like [`exec_capture`] but inherits stdin so a wrapped engine can read a
+/// piped stdin. Same `--help` contract.
 pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
     cmd.stdin(Stdio::inherit());
     capture(cmd)
@@ -721,6 +728,19 @@ pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
 /// used as the label so no call site has to pass one.
 fn capture(cmd: &mut Command) -> Result<CaptureResult> {
     let program = cmd.get_program().to_string_lossy().into_owned();
+    // `--help` asks the tool for its usage, and no caller here can read usage
+    // as the output it filters (see `runner::requests_help`). The usage is
+    // shown as the tool prints it and the process ends with the tool's code:
+    // there is no captured output to hand back, and formatting an empty
+    // capture would append a false summary under it.
+    if super::runner::requests_help(cmd) {
+        let status = cmd
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .with_context(|| format!("Failed to execute {program}"))?;
+        std::process::exit(super::utils::exit_code_from_status(&status, &program));
+    }
     let output = cmd.output().context("Failed to execute command")?;
     let exit_code = super::utils::exit_code_from_output(&output, &program);
     Ok(CaptureResult {

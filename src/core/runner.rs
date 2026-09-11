@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use regex::Regex;
+use std::ffi::OsStr;
 use std::process::Command;
 use std::sync::LazyLock;
 
@@ -159,6 +160,44 @@ where
     Ok(exit_code)
 }
 
+/// Tools that define `-h` as something other than help: `psql -h host`,
+/// `ls`/`tree -h` (human sizes), `grep -h` (no filename). Everywhere else a
+/// bare `-h` is the usage request it is for cargo, go, dotnet, git, rg, …
+const DASH_H_IS_NOT_HELP: &[&str] = &["psql", "ls", "tree", "grep"];
+
+/// `--help` (or `-h`, unless the tool defines it) before any `--` asks the
+/// tool for its usage. A filter models the tool's normal output, so it reads
+/// that usage as an empty run: `cargo build --help` summarised as "0 crates
+/// compiled", `cargo test --help` as nothing. Usage is not a filtering job; it
+/// goes through the passthrough verbatim.
+///
+/// A Node tool that is not on PATH runs through its package runner
+/// (`utils::tool_exec`): `pnpm exec -- <tool>`, `yarn exec -- <tool>`,
+/// `npx [--no-install] -- <tool>`. That `--` is rtk's own and is skipped; the
+/// tool's argv starts after it.
+///
+/// The flag is read by position only: `git log --grep -h` runs verbatim
+/// (correct output, no filtering), since the tool, not rtk, knows which
+/// options take a value.
+pub fn requests_help(cmd: &Command) -> bool {
+    let stem = std::path::Path::new(cmd.get_program())
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    let dash_h_is_help = !DASH_H_IS_NOT_HELP.contains(&stem);
+    let args: Vec<&OsStr> = cmd.get_args().collect();
+    let runner_prefix = match (stem, args.as_slice()) {
+        ("pnpm" | "yarn", [exec, sep, ..]) if *exec == "exec" && *sep == "--" => 2,
+        ("npx", [flag, sep, ..]) if *flag == "--no-install" && *sep == "--" => 2,
+        ("npx", [sep, ..]) if *sep == "--" => 1,
+        _ => 0,
+    };
+    args[runner_prefix..]
+        .iter()
+        .take_while(|arg| **arg != "--")
+        .any(|arg| *arg == "--help" || (dash_h_is_help && *arg == "-h"))
+}
+
 pub fn run(
     cmd: Command,
     tool_name: &str,
@@ -179,6 +218,11 @@ fn run_inner(
     mode: RunMode<'_>,
     opts: RunOptions<'_>,
 ) -> Result<i32> {
+    let mode = if requests_help(&cmd) {
+        RunMode::Passthrough
+    } else {
+        mode
+    };
     let timer = tracking::TimedExecution::start();
     let cmd_label = format!("{} {}", tool_name, args_display);
 
@@ -904,6 +948,86 @@ fn is_bun_count_line(trimmed: &str) -> bool {
 #[cfg(test)]
 mod err_test_runner_tests {
     use super::*;
+
+    #[test]
+    fn test_requests_help_reads_only_the_tools_own_flags() {
+        let build = |args: &[&str]| {
+            let mut c = Command::new("tool");
+            c.args(args);
+            c
+        };
+        assert!(requests_help(&build(&["--help"])));
+        assert!(requests_help(&build(&["build", "--release", "--help"])));
+        assert!(!requests_help(&build(&[])));
+        assert!(!requests_help(&build(&["build", "--release"])));
+        // `--help` after `--` is an operand.
+        assert!(!requests_help(&build(&["--", "--help"])));
+    }
+
+    #[test]
+    fn test_requests_help_skips_rtks_own_package_runner_prefix() {
+        let build = |program: &str, args: &[&str]| {
+            // nosemgrep: dynamic-command-execution
+            let mut c = Command::new(program);
+            c.args(args);
+            c
+        };
+        // The `--` after the runner is rtk's (utils::tool_exec), not the user's.
+        assert!(requests_help(&build(
+            "npx",
+            &["--no-install", "--", "eslint", "-f", "json", "--help", "."]
+        )));
+        assert!(requests_help(&build(
+            "npx",
+            &["--", "playwright", "test", "-h"]
+        )));
+        assert!(requests_help(&build(
+            "pnpm.cmd",
+            &["exec", "--", "vitest", "run", "--help"]
+        )));
+        assert!(requests_help(&build(
+            "yarn",
+            &["exec", "--", "jest", "--help"]
+        )));
+        // The user's own `--` after the tool still ends the scan.
+        assert!(!requests_help(&build(
+            "pnpm",
+            &["exec", "--", "vitest", "run", "--", "--help"]
+        )));
+        assert!(!requests_help(&build(
+            "npx",
+            &["--", "eslint", "-f", "json", "."]
+        )));
+        // `pnpm --help` itself, and `pnpm run -- --help`, are not the runner prefix.
+        assert!(requests_help(&build("pnpm", &["--help"])));
+        assert!(!requests_help(&build("pnpm", &["run", "--", "--help"])));
+    }
+
+    #[test]
+    fn test_requests_help_dash_h_belongs_to_the_tools_that_define_it() {
+        let build = |program: &str, args: &[&str]| {
+            // nosemgrep: dynamic-command-execution
+            let mut c = Command::new(program);
+            c.args(args);
+            c
+        };
+        // cargo, go, dotnet, …: `-h` is help.
+        assert!(requests_help(&build("cargo", &["build", "-h"])));
+        assert!(requests_help(&build("/usr/bin/go", &["-h"])));
+        // psql host, ls human sizes, grep no-filename: `-h` is theirs.
+        assert!(!requests_help(&build(
+            "psql",
+            &["-h", "localhost", "-c", "select 1"]
+        )));
+        assert!(!requests_help(&build("C:\\tools\\ls.exe", &["-lh"])));
+        assert!(!requests_help(&build("ls", &["-h"])));
+        assert!(!requests_help(&build("tree", &["-h", "-L", "2"])));
+        assert!(!requests_help(&build("grep", &["-h", "pattern", "a", "b"])));
+        // ripgrep's no-filename flag is `-I`; its `-h` is short help.
+        assert!(requests_help(&build("rg.exe", &["-h"])));
+        // …but `--help` is help for them too.
+        assert!(requests_help(&build("psql", &["--help"])));
+    }
 
     #[test]
     fn test_filter_errors() {

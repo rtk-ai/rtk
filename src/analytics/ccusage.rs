@@ -103,6 +103,8 @@ fn build_command() -> Option<Command> {
 
     // Fallback: try npx
     eprintln!("[info] ccusage not installed globally, fetching via npx...");
+    // Stays on `.status()`: `core::stream::exec_capture` shows a `--help`
+    // request verbatim and exits the process (see `runner::requests_help`).
     let npx_check = resolved_command("npx")
         .arg("--yes")
         .arg("ccusage")
