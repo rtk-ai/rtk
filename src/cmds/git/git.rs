@@ -195,7 +195,7 @@ fn run_diff(
     let diff_result = exec_capture(&mut diff_cmd).context("Failed to run git diff")?;
 
     let printed = if !diff_result.stdout.is_empty() {
-        let compacted = compact_diff(&diff_result.stdout, max_lines.unwrap_or(500));
+        let compacted = compact_diff_throttled(&diff_result.stdout, max_lines.unwrap_or(500));
         format!("{}\n\nChanges:\n{}", result.stdout.trim(), compacted)
     } else {
         result.stdout.trim().to_string()
@@ -312,7 +312,7 @@ fn run_show(
         if verbose > 0 {
             printed.push_str("\n\nChanges:");
         }
-        let compacted = compact_diff(diff_text, max_lines.unwrap_or(500));
+        let compacted = compact_diff_throttled(diff_text, max_lines.unwrap_or(500));
         printed.push('\n');
         printed.push_str(&compacted);
     }
@@ -643,6 +643,42 @@ fn flush_leading_context(
         result.push(ctx);
     }
     *total += keep;
+}
+
+/// Fidelity floor for diff compaction: at or below this many raw diff lines
+/// the diff passes through VERBATIM. Small diffs are where agents do precision
+/// work (matching context, editing hunks) and where compaction savings are
+/// pennies; a silently rewritten small diff misleads far more than it saves.
+/// Override with RTK_COMPACT_MIN_LINES (0 = always compact, the previous
+/// behavior).
+const COMPACT_MIN_LINES: usize = 200;
+
+fn compact_min_lines() -> usize {
+    std::env::var("RTK_COMPACT_MIN_LINES")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(COMPACT_MIN_LINES)
+}
+
+/// The throttled entry every production call site uses: small diffs verbatim,
+/// big diffs compacted — and when compaction DOES engage, the output OPENS
+/// with a stamp naming the loss and the verbatim recovery, so filtered output
+/// can never be mistaken for the raw diff. `compact_diff` itself stays pure.
+pub(crate) fn compact_diff_throttled(diff: &str, max_lines: usize) -> String {
+    compact_diff_throttled_with_floor(diff, max_lines, compact_min_lines())
+}
+
+fn compact_diff_throttled_with_floor(diff: &str, max_lines: usize, floor: usize) -> String {
+    let raw_lines = diff.lines().count();
+    if raw_lines <= floor {
+        return diff.trim_end().to_string();
+    }
+    let compacted = compact_diff(diff, max_lines);
+    let out_lines = compacted.lines().count();
+    format!(
+        "[rtk] compacted diff: {} -> {} lines (verbatim: --no-compact or rtk proxy)\n{}",
+        raw_lines, out_lines, compacted
+    )
 }
 
 pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
@@ -2340,7 +2376,7 @@ fn run_stash(
             }
 
             let filtered = if patch_mode && !emits_word_diff(args) {
-                compact_diff(&result.stdout, 100)
+                compact_diff_throttled(&result.stdout, 100)
             } else if patch_mode {
                 result.stdout.clone()
             } else {
@@ -2807,6 +2843,42 @@ mod tests {
         let result = compact_diff(diff, 100);
         assert!(result.contains("foo.rs"));
         assert!(result.contains("+"));
+    }
+
+    #[test]
+    fn test_throttle_small_diff_passes_verbatim() {
+        // Fidelity floor: at or below the floor the diff is BYTE-IDENTICAL
+        // (minus trailing newline) — no format rewrite, no dropped context.
+        let diff = "diff --git a/x.rs b/x.rs\n--- a/x.rs\n+++ b/x.rs\n@@ -1,3 +1,3 @@\n context\n-old\n+new\n";
+        let out = compact_diff_throttled_with_floor(diff, 500, 200);
+        assert_eq!(out, diff.trim_end());
+        assert!(!out.contains("[rtk]"), "no stamp on verbatim output");
+    }
+
+    #[test]
+    fn test_throttle_stamp_opens_compacted_output() {
+        // When compaction engages, the FIRST line names the loss and the
+        // verbatim recovery — filtered output must never look raw.
+        let diff = "diff --git a/x.rs b/x.rs\n--- a/x.rs\n+++ b/x.rs\n@@ -1,3 +1,3 @@\n context\n-old\n+new\n";
+        let out = compact_diff_throttled_with_floor(diff, 500, 0);
+        let first = out.lines().next().unwrap_or("");
+        assert!(
+            first.starts_with("[rtk] compacted diff: ") && first.contains("verbatim"),
+            "stamp must open compacted output, got: {first}"
+        );
+    }
+
+    #[test]
+    fn test_throttle_big_diff_compacts_with_stamp_and_recovery() {
+        let mut diff = String::from(
+            "diff --git a/large.rs b/large.rs\n--- a/large.rs\n+++ b/large.rs\n@@ -1,300 +1,300 @@\n",
+        );
+        for i in 0..300 {
+            diff.push_str(&format!("+line {}\n", i));
+        }
+        let out = compact_diff_throttled_with_floor(&diff, 500, 200);
+        assert!(out.starts_with("[rtk] compacted diff: 304 -> "));
+        assert!(out.contains("[full diff: rtk git diff --no-compact]"));
     }
 
     #[test]
