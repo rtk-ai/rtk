@@ -1451,7 +1451,7 @@ fn categorize_command(rtk_cmd: &str) -> String {
     let parts: Vec<&str> = rtk_cmd.split_whitespace().collect();
     let tool = parts.get(1).copied().unwrap_or("other");
     match tool {
-        "git" | "gh" | "gt" => "git",
+        "git" | "gh" | "gt" | "svn" => "git",
         "cargo" => "cargo",
         "npm" | "npx" | "pnpm" | "bun" | "bunx" | "deno" | "vitest" | "tsc" | "lint"
         | "prettier" | "next" | "playwright" | "prisma" => "js",
@@ -1823,6 +1823,11 @@ mod tests {
 
         let single = vec![OsString::from("log")];
         assert_eq!(args_display(&single), "log");
+    }
+
+    #[test]
+    fn test_svn_is_categorized_as_vcs() {
+        assert_eq!(categorize_command("rtk svn log"), "git");
     }
 
     // 3. Tracker::record + get_recent — round-trip DB

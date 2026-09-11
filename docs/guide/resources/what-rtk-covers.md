@@ -25,6 +25,14 @@ Every percentage below measures **bash output bytes removed** — the only thing
 | `git show` | 70% | Same as diff |
 | `git stash list` | 75% | Compact one-line per entry |
 
+## Subversion
+
+| Command | Bash output reduction | What changes |
+|---------|----------------------|--------------|
+| `svn log` | ~38% on the SVN 1.14 fixture | Latest 10 revisions by default; separators removed; displayed headers and messages preserved |
+
+The default-limit output includes a recovery hint to add an explicit `-l` or `--limit` and show more through RTK. Explicit `-r`/`--revision` and `-c`/`--change` windows are also preserved without an added limit. Search, detailed, and structured log shapes remain native passthrough and are not hook-rewritten. `svn status`, `svn diff`, and other SVN subcommands are also available through `rtk svn` as exact passthrough, but are not automatically rewritten by the hook. This keeps native seven-column status details, property changes, binary notices, authentication prompts, and exit codes intact while dedicated filters are evaluated.
+
 ## GitHub CLI
 
 | Command | Bash output reduction | What changes |
