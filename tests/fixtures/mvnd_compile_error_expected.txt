@@ -1,0 +1,10 @@
+[INFO] Scanning for projects...
+[INFO] -----------------< com.example.rtk:multifail-skeleton >-----------------
+[INFO] Building multifail-skeleton 1.0.0-SNAPSHOT
+[ERROR] COMPILATION ERROR : 
+[ERROR] /C:/work/multifail-skeleton/src/main/java/com/example/rtk/Calc.java:[5,21] ';' expected
+[INFO] BUILD FAILURE
+[INFO] Total time:  0.188 s (Wall Clock)
+[INFO] Finished at: 2026-08-12T12:04:59-04:00
+[ERROR] Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin:3.15.0:compile (default-compile) on project multifail-skeleton: Compilation failure
+[ERROR] /C:/work/multifail-skeleton/src/main/java/com/example/rtk/Calc.java:[5,21] ';' expected

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::borrow::Cow;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -47,6 +48,12 @@ pub trait StreamFilter {
 }
 
 pub trait BlockHandler {
+    /// Rewrite a raw line before it is matched or emitted — the place to
+    /// strip ANSI escapes for tools that colour by default. Identity unless
+    /// a handler opts in, so the rest of the pipeline sees raw bytes.
+    fn normalize_line<'a>(&self, line: &'a str) -> Cow<'a, str> {
+        Cow::Borrowed(line)
+    }
     fn should_skip(&mut self, line: &str) -> bool;
     fn is_block_start(&mut self, line: &str) -> bool;
     fn is_block_continuation(&mut self, line: &str, block: &[String]) -> bool;
@@ -83,6 +90,8 @@ impl<H: BlockHandler> BlockStreamFilter<H> {
 
 impl<H: BlockHandler> StreamFilter for BlockStreamFilter<H> {
     fn feed_line(&mut self, line: &str) -> Option<String> {
+        let line = self.handler.normalize_line(line);
+        let line = line.as_ref();
         if self.handler.should_skip(line) {
             return None;
         }
@@ -283,6 +292,137 @@ fn command_label(cmd: &Command) -> String {
         .into_owned()
 }
 
+// #2375
+#[cfg(unix)]
+mod signal_relay {
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    const POLL: Duration = Duration::from_millis(25);
+    const KILL_GRACE: Duration = Duration::from_millis(750);
+    const EXIT_GRACE: Duration = Duration::from_millis(750);
+
+    static CHILD_PID: AtomicU32 = AtomicU32::new(0);
+    static RELAYED: AtomicI32 = AtomicI32::new(0);
+    static FINISHED: AtomicBool = AtomicBool::new(false);
+
+    #[allow(unsafe_code)]
+    unsafe extern "C" fn relay(sig: libc::c_int) {
+        let pid = CHILD_PID.load(Ordering::SeqCst);
+        if pid == 0 || RELAYED.swap(sig, Ordering::SeqCst) != 0 {
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+            return;
+        }
+        libc::kill(pid as libc::pid_t, sig);
+    }
+
+    fn escalate(pid: u32) {
+        thread::sleep(KILL_GRACE);
+        if FINISHED.load(Ordering::SeqCst) {
+            return;
+        }
+        #[allow(unsafe_code)]
+        // nosemgrep: unsafe-block
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+        thread::sleep(EXIT_GRACE);
+        if FINISHED.load(Ordering::SeqCst) {
+            return;
+        }
+        let sig = RELAYED.load(Ordering::SeqCst);
+        #[allow(unsafe_code)]
+        // nosemgrep: unsafe-block
+        unsafe {
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+    }
+
+    pub fn relayed() -> Option<libc::c_int> {
+        match RELAYED.load(Ordering::SeqCst) {
+            0 => None,
+            sig => Some(sig),
+        }
+    }
+
+    pub struct Relay;
+
+    impl Relay {
+        pub fn install(pid: u32) -> Self {
+            CHILD_PID.store(pid, Ordering::SeqCst);
+            RELAYED.store(0, Ordering::SeqCst);
+            FINISHED.store(false, Ordering::SeqCst);
+            #[allow(unsafe_code)]
+            // nosemgrep: unsafe-block
+            unsafe {
+                for sig in [libc::SIGINT, libc::SIGTERM] {
+                    let previous = libc::signal(sig, relay as *const () as libc::sighandler_t);
+                    if previous == libc::SIG_IGN {
+                        libc::signal(sig, libc::SIG_IGN);
+                    }
+                }
+            }
+            thread::spawn(move || {
+                while !FINISHED.load(Ordering::SeqCst) {
+                    if RELAYED.load(Ordering::SeqCst) != 0 {
+                        escalate(pid);
+                        return;
+                    }
+                    thread::sleep(POLL);
+                }
+            });
+            Relay
+        }
+    }
+
+    impl Drop for Relay {
+        fn drop(&mut self) {
+            FINISHED.store(true, Ordering::SeqCst);
+            CHILD_PID.store(0, Ordering::SeqCst);
+            #[allow(unsafe_code)]
+            // nosemgrep: unsafe-block
+            unsafe {
+                for sig in [libc::SIGINT, libc::SIGTERM] {
+                    if libc::signal(sig, libc::SIG_DFL) == libc::SIG_IGN {
+                        libc::signal(sig, libc::SIG_IGN);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+mod signal_relay {
+    pub struct Relay;
+
+    impl Relay {
+        pub fn install(_pid: u32) -> Self {
+            Relay
+        }
+    }
+}
+
+// #2375
+#[cfg(unix)]
+pub fn die_by_relayed_signal() {
+    let Some(sig) = signal_relay::relayed() else {
+        return;
+    };
+    #[allow(unsafe_code)]
+    // nosemgrep: unsafe-block
+    unsafe {
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
+    }
+}
+
+#[cfg(not(unix))]
+pub fn die_by_relayed_signal() {}
+
 // ISSUE #897: ChildGuard RAII prevents zombie processes that caused kernel panic
 pub const RAW_CAP: usize = 10_485_760; // 10 MiB
 
@@ -334,6 +474,7 @@ pub fn run_streaming(
     let is_streaming = matches!(stdout_mode, FilterMode::Streaming(_));
 
     let mut child = ChildGuard(cmd.spawn().context("Failed to spawn process")?);
+    let _signal_relay = signal_relay::Relay::install(child.0.id());
 
     let stdin_thread: Option<std::thread::JoinHandle<()>> = match stdin_mode {
         StdinMode::Filter(mut filter) => {
@@ -1010,6 +1151,34 @@ pub(crate) mod tests {
             output.push_str(&post);
         }
         output
+    }
+
+    struct UpperHandler;
+
+    impl BlockHandler for UpperHandler {
+        fn normalize_line<'a>(&self, line: &'a str) -> Cow<'a, str> {
+            Cow::Owned(line.to_uppercase())
+        }
+        fn should_skip(&mut self, _line: &str) -> bool {
+            false
+        }
+        fn is_block_start(&mut self, line: &str) -> bool {
+            line.starts_with("ERR")
+        }
+        fn is_block_continuation(&mut self, line: &str, _block: &[String]) -> bool {
+            line.starts_with("  ")
+        }
+        fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
+            None
+        }
+    }
+
+    #[test]
+    fn block_handler_normalize_line_feeds_matching_and_emission() {
+        // Both the match and the emitted block see the normalized line.
+        let mut f = BlockStreamFilter::new(UpperHandler);
+        let out = run_block_filter(&mut f, "err: one\n  detail\nnoise\n", 0);
+        assert_eq!(out, "ERR: ONE\n  DETAIL\n");
     }
 
     struct TestHandler;

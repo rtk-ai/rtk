@@ -1,0 +1,10 @@
+[0m[32mCheck[0m typ_test.ts
+[0m[1mTS2322 [0m[ERROR]: Type 'string' is not assignable to type 'number'.
+const n: number = "oops";
+[0m[31m      ^[0m
+    at [0m[36mfile:///home/user/project/typ_test.ts[0m:[0m[33m1[0m:[0m[33m7[0m
+
+[0m[1m[31merror[0m: Type checking failed.
+
+  [33minfo:[39m The program failed type-checking, but it still might work correctly.
+  [36mhint:[39m Re-run with [4m--no-check[24m to skip type-checking.

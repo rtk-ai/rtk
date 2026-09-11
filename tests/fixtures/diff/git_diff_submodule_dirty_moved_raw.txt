@@ -1,0 +1,11 @@
+diff --git a/o.txt b/o.txt
+index b68fde2..1611241 100644
+--- a/o.txt
++++ b/o.txt
+@@ -1 +1 @@
+-k
++k2
+Submodule sub contains untracked content
+Submodule sub contains modified content
+Submodule sub 7470085..66e6a8c:
+  > s2

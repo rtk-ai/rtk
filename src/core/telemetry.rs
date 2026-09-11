@@ -17,11 +17,22 @@ const TELEMETRY_URL: Option<&str> = option_env!("RTK_TELEMETRY_URL");
 const TELEMETRY_TOKEN: Option<&str> = option_env!("RTK_TELEMETRY_TOKEN");
 const PING_INTERVAL_SECS: u64 = 23 * 3600; // 23 hours
 
+/// The telemetry endpoint compiled into this build, if any.
+///
+/// Single source of truth for "can this build talk to the collector at all",
+/// shared by the ping path and `rtk telemetry status` so the two cannot
+/// disagree. Empty is treated as unset: release builds pass the URL through a
+/// CI `env:` block, which exports an empty string when the repository variable
+/// is not configured.
+pub fn endpoint_url() -> Option<&'static str> {
+    TELEMETRY_URL.filter(|&u| crate::core::utils::env_is_some(Some(u)))
+}
+
 /// Send a telemetry ping if enabled and not already sent today.
 /// Fire-and-forget: errors are silently ignored.
 pub fn maybe_ping() {
     // No URL compiled in → telemetry disabled
-    if TELEMETRY_URL.is_none() {
+    if endpoint_url().is_none() {
         return;
     }
 
@@ -69,7 +80,7 @@ pub fn maybe_ping() {
 }
 
 fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
-    let url = TELEMETRY_URL.ok_or("no telemetry URL")?;
+    let url = endpoint_url().ok_or("no telemetry URL")?;
     let device_hash = generate_device_hash();
     let version = env!("CARGO_PKG_VERSION").to_string();
     let os = std::env::consts::OS.to_string();
@@ -139,6 +150,11 @@ fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
         "projects_count": enriched.projects_count,
         // Meta-commands: feature adoption
         "meta_usage": enriched.meta_usage,
+        // Recall efficiency: which filter caps to tune (counters per filter family only)
+        "recall_mode": recall_mode_label(),
+        "recall_stats": build_recall_stats(
+            &crate::core::retriever::stats_snapshot().unwrap_or_default()
+        ),
     });
 
     let mut req = ureq::post(url).set("Content-Type", "application/json");
@@ -320,6 +336,107 @@ fn get_enriched_stats(tracker: &tracking::Tracker) -> EnrichedStats {
 }
 
 /// Build meta-command usage counts (gain, discover, proxy, verify, learn, init).
+fn recall_mode_label() -> &'static str {
+    use crate::core::retriever::RecoveryMode;
+    match crate::core::config::Config::load()
+        .unwrap_or_default()
+        .retriever
+        .mode
+    {
+        RecoveryMode::Sqlite => "sqlite",
+        RecoveryMode::Tee => "tee",
+        RecoveryMode::Disabled => "disabled",
+    }
+}
+
+const RECALL_FAMILIES: &[&str] = &[
+    "artisan",
+    "aws",
+    "cargo",
+    "compose",
+    "curl",
+    "docker",
+    "dotnet",
+    "ecs",
+    "err",
+    "eslint",
+    "gh",
+    "git",
+    "glab",
+    "go",
+    "gradlew",
+    "grep",
+    "gt",
+    "jest",
+    "kubectl",
+    "lint",
+    "mvn",
+    "mypy",
+    "next",
+    "npm",
+    "npx",
+    "paratest",
+    "pest",
+    "php",
+    "phpstan",
+    "phpunit",
+    "pint",
+    "pip",
+    "playwright",
+    "pnpm",
+    "prettier",
+    "prisma",
+    "pylint",
+    "pytest",
+    "rake",
+    "rspec",
+    "rubocop",
+    "ruff",
+    "run",
+    "sbt",
+    "test",
+    "tsc",
+    "uv",
+    "vitest",
+    "wget",
+];
+
+fn recall_slug_is_public(slug: &str) -> bool {
+    slug.len() <= 32
+        && slug
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+        && RECALL_FAMILIES.contains(&slug.split(['_', '-']).next().unwrap_or(""))
+}
+
+fn build_recall_stats(stats: &[crate::core::retriever::RecallStat]) -> serde_json::Value {
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    let mut other: std::collections::BTreeMap<&str, (i64, i64)> = std::collections::BTreeMap::new();
+    for s in stats {
+        if recall_slug_is_public(&s.slug) {
+            rows.push(serde_json::json!({
+                "filter": s.slug,
+                "mode": s.mode,
+                "elisions": s.elisions,
+                "recalls": s.recalls,
+            }));
+        } else {
+            let e = other.entry(s.mode.as_str()).or_insert((0, 0));
+            e.0 += s.elisions;
+            e.1 += s.recalls;
+        }
+    }
+    for (mode, (elisions, recalls)) in other {
+        rows.push(serde_json::json!({
+            "filter": "other",
+            "mode": mode,
+            "elisions": elisions,
+            "recalls": recalls,
+        }));
+    }
+    serde_json::Value::Array(rows)
+}
+
 fn build_meta_usage(tracker: &tracking::Tracker) -> serde_json::Value {
     let meta_cmds = ["gain", "discover", "proxy", "verify", "learn", "init"];
     let mut usage = serde_json::Map::new();
@@ -452,6 +569,64 @@ fn touch_marker(path: &PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stat(
+        slug: &str,
+        mode: &str,
+        elisions: i64,
+        recalls: i64,
+    ) -> crate::core::retriever::RecallStat {
+        crate::core::retriever::RecallStat {
+            slug: slug.to_string(),
+            mode: mode.to_string(),
+            elisions,
+            recalls,
+        }
+    }
+
+    #[test]
+    fn test_recall_stats_known_families_pass_named() {
+        let stats = vec![
+            stat("grep", "sqlite", 142, 9),
+            stat("cargo_test", "sqlite", 12, 4),
+            stat("docker-images", "tee", 6, 1),
+        ];
+        let v = build_recall_stats(&stats);
+        let arr = v.as_array().expect("array");
+        let names: Vec<&str> = arr.iter().map(|e| e["filter"].as_str().unwrap()).collect();
+        assert!(names.contains(&"grep"));
+        assert!(names.contains(&"cargo_test"));
+        assert!(names.contains(&"docker-images"));
+    }
+
+    #[test]
+    fn test_recall_stats_unknown_or_suspicious_slugs_fold_into_other_per_mode() {
+        let stats = vec![
+            stat("mysecretproject", "sqlite", 3, 1),
+            stat("grep__tmpEz7w0", "sqlite", 2, 0),
+            stat("a/b/path", "tee", 1, 0),
+            stat(&"x".repeat(40), "sqlite", 1, 1),
+        ];
+        let v = build_recall_stats(&stats);
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 2, "one other row per mode, never mixed: {v}");
+        let sqlite = arr.iter().find(|e| e["mode"] == "sqlite").unwrap();
+        let tee = arr.iter().find(|e| e["mode"] == "tee").unwrap();
+        assert_eq!(sqlite["filter"], "other");
+        assert_eq!(sqlite["elisions"], 6);
+        assert_eq!(sqlite["recalls"], 2);
+        assert_eq!(tee["elisions"], 1);
+    }
+
+    #[test]
+    fn test_recall_stats_payload_has_only_expected_keys() {
+        let stats = vec![stat("grep", "sqlite", 1, 1)];
+        let v = build_recall_stats(&stats);
+        let obj = v.as_array().unwrap()[0].as_object().unwrap();
+        let mut keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["elisions", "filter", "mode", "recalls"]);
+    }
 
     #[test]
     fn test_device_hash_is_stable() {

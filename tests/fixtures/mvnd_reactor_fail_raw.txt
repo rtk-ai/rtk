@@ -1,0 +1,133 @@
+[INFO] Processing build on daemon c7ac26cb
+[INFO] Scanning for projects...
+[INFO] BuildTimeEventSpy is registered.
+[INFO] ------------------------------------------------------------------------
+[INFO] Reactor Build Order:
+[INFO] 
+[INFO] multi-module-fail-skeleton                                         [pom]
+[INFO] child-a                                                            [jar]
+[INFO] child-b                                                            [jar]
+[INFO] 
+[multi-module-fail-skeleton] [INFO] Using the SmartBuilder implementation with a thread count of 17
+[multi-module-fail-skeleton] [INFO] 
+[multi-module-fail-skeleton] [INFO] -------------< com.example.rtk:multi-module-fail-skeleton >-------------
+[multi-module-fail-skeleton] [INFO] Building multi-module-fail-skeleton 1.0.0-SNAPSHOT                 [1/3]
+[multi-module-fail-skeleton] [INFO]   from pom.xml
+[multi-module-fail-skeleton] [INFO] --------------------------------[ pom ]---------------------------------
+[multi-module-fail-skeleton] [INFO] 
+[multi-module-fail-skeleton] [INFO] --- clean:3.2.0:clean (default-clean) @ multi-module-fail-skeleton ---
+[multi-module-fail-skeleton] [INFO] Deleting C:\work\multi-module-fail-skeleton\target
+[child-b] [INFO] 
+[child-b] [INFO] ----------------------< com.example.rtk:child-b >-----------------------
+[child-b] [INFO] Building child-b 1.0.0-SNAPSHOT                                    [2/3]
+[child-a] [INFO] 
+[child-a] [INFO] ----------------------< com.example.rtk:child-a >-----------------------
+[child-a] [INFO] Building child-a 1.0.0-SNAPSHOT                                    [3/3]
+[child-b] [INFO]   from child-b\pom.xml
+[child-b] [INFO] --------------------------------[ jar ]---------------------------------
+[child-a] [INFO]   from child-a\pom.xml
+[child-a] [INFO] --------------------------------[ jar ]---------------------------------
+[child-a] [INFO] 
+[child-a] [INFO] --- clean:3.2.0:clean (default-clean) @ child-a ---
+[child-b] [INFO] 
+[child-b] [INFO] --- clean:3.2.0:clean (default-clean) @ child-b ---
+[child-a] [INFO] Deleting C:\work\multi-module-fail-skeleton\child-a\target
+[child-b] [INFO] Deleting C:\work\multi-module-fail-skeleton\child-b\target
+[child-a] [INFO] 
+[child-a] [INFO] --- resources:3.4.0:resources (default-resources) @ child-a ---
+[child-b] [INFO] 
+[child-b] [INFO] --- resources:3.4.0:resources (default-resources) @ child-b ---
+[child-a] [INFO] skip non existing resourceDirectory C:\work\multi-module-fail-skeleton\child-a\src\main\resources
+[child-b] [INFO] skip non existing resourceDirectory C:\work\multi-module-fail-skeleton\child-b\src\main\resources
+[child-a] [INFO] 
+[child-a] [INFO] --- compiler:3.15.0:compile (default-compile) @ child-a ---
+[child-b] [INFO] 
+[child-b] [INFO] --- compiler:3.15.0:compile (default-compile) @ child-b ---
+[child-a] [INFO] No sources to compile
+[child-b] [INFO] No sources to compile
+[child-a] [INFO] 
+[child-b] [INFO] 
+[child-a] [INFO] --- resources:3.4.0:testResources (default-testResources) @ child-a ---
+[child-b] [INFO] --- resources:3.4.0:testResources (default-testResources) @ child-b ---
+[child-b] [INFO] skip non existing resourceDirectory C:\work\multi-module-fail-skeleton\child-b\src\test\resources
+[child-a] [INFO] skip non existing resourceDirectory C:\work\multi-module-fail-skeleton\child-a\src\test\resources
+[child-a] [INFO] 
+[child-a] [INFO] --- compiler:3.15.0:testCompile (default-testCompile) @ child-a ---
+[child-b] [INFO] 
+[child-b] [INFO] --- compiler:3.15.0:testCompile (default-testCompile) @ child-b ---
+[child-b] [INFO] Recompiling the module because of changed source code.
+[child-b] [INFO] Compiling 2 source files with javac [debug target 21] to target\test-classes
+[child-a] [INFO] Recompiling the module because of changed source code.
+[child-a] [INFO] Compiling 2 source files with javac [debug target 21] to target\test-classes
+[child-a] [INFO] 
+[child-b] [INFO] 
+[child-b] [INFO] --- surefire:3.5.5:test (default-test) @ child-b ---
+[child-a] [INFO] --- surefire:3.5.5:test (default-test) @ child-a ---
+[child-b] [INFO] Using auto detected provider org.apache.maven.surefire.junitplatform.JUnitPlatformProvider
+[child-a] [INFO] Using auto detected provider org.apache.maven.surefire.junitplatform.JUnitPlatformProvider
+[child-b] [INFO] 
+[child-b] [INFO] -------------------------------------------------------
+[child-b] [INFO]  T E S T S
+[child-b] [INFO] -------------------------------------------------------
+[child-a] [INFO] 
+[child-a] [INFO] -------------------------------------------------------
+[child-a] [INFO]  T E S T S
+[child-a] [INFO] -------------------------------------------------------
+[child-a] [INFO] Running com.example.rtk.ParallelFailTest
+[child-b] [INFO] Running com.example.rtk.PassBetaTest
+[child-b] [INFO] Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.157 s -- in com.example.rtk.PassBetaTest
+[child-b] [INFO] Running com.example.rtk.PassGammaTest
+[child-a] [ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 0.153 s <<< FAILURE! -- in com.example.rtk.ParallelFailTest
+[child-a] [ERROR] com.example.rtk.ParallelFailTest.reactorDiagnostic -- Time elapsed: 0.098 s <<< FAILURE!
+org.opentest4j.AssertionFailedError: parallel reactor diagnostic ==> expected: <1> but was: <2>
+	at org.junit.jupiter.api.AssertionFailureBuilder.build(AssertionFailureBuilder.java:151)
+	at org.junit.jupiter.api.AssertionFailureBuilder.buildAndThrow(AssertionFailureBuilder.java:132)
+	at org.junit.jupiter.api.AssertEquals.failNotEqual(AssertEquals.java:197)
+	at org.junit.jupiter.api.AssertEquals.assertEquals(AssertEquals.java:150)
+	at org.junit.jupiter.api.Assertions.assertEquals(Assertions.java:563)
+	at com.example.rtk.ParallelFailTest.reactorDiagnostic(ParallelFailTest.java:10)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+[child-a] [INFO] Running com.example.rtk.PassAlphaTest
+[child-b] [INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.009 s -- in com.example.rtk.PassGammaTest
+[child-a] [INFO] Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.026 s -- in com.example.rtk.PassAlphaTest
+[child-a] [INFO] 
+[child-b] [INFO] 
+[child-a] [INFO] Results:
+[child-b] [INFO] Results:
+[child-a] [INFO] 
+[child-a] [ERROR] Failures: 
+[child-b] [INFO] 
+[child-b] [INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0
+[child-a] [ERROR]   ParallelFailTest.reactorDiagnostic:10 parallel reactor diagnostic ==> expected: <1> but was: <2>
+[child-a] [INFO] 
+[child-a] [ERROR] Tests run: 3, Failures: 1, Errors: 0, Skipped: 0
+[child-b] [INFO] 
+[child-a] [INFO] 
+[INFO] ------------------------------------------------------------------------
+[INFO] Reactor Summary for multi-module-fail-skeleton 1.0.0-SNAPSHOT:
+[INFO] 
+[INFO] multi-module-fail-skeleton ......................... SUCCESS [  0.030 s]
+[INFO] child-a ............................................ FAILURE [  3.230 s]
+[INFO] child-b ............................................ SUCCESS [  3.230 s]
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD FAILURE
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  3.363 s (Wall Clock)
+[INFO] Finished at: 2026-08-13T09:18:03-04:00
+[INFO] ------------------------------------------------------------------------
+[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.5.5:test (default-test) on project child-a: There are test failures.
+[ERROR] 
+[ERROR] See C:\work\multi-module-fail-skeleton\child-a\target\surefire-reports for the individual test results.
+[ERROR] See dump files (if any exist) [date].dump, [date]-jvmRun[N].dump and [date].dumpstream.
+[ERROR] -> [Help 1]
+[ERROR] 
+[ERROR] To see the full stack trace of the errors, re-run Maven with the -e switch.
+[ERROR] Re-run Maven using the -X switch to enable full debug logging.
+[ERROR] 
+[ERROR] For more information about the errors and possible solutions, please read the following articles:
+[ERROR] [Help 1] http://cwiki.apache.org/confluence/display/MAVEN/MojoFailureException
+[ERROR] 
+[ERROR] After correcting the problems, you can resume the build with the command
+[ERROR]   mvn <args> -r

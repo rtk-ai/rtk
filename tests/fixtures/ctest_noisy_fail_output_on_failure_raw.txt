@@ -1,0 +1,134 @@
+Test project /tmp/build
+    Start  1: pass_fast
+1/2 Test  #1: pass_fast ........................   Passed    0.00 sec
+    Start 10: noisy_fail
+2/2 Test #10: noisy_fail .......................***Failed    0.01 sec
+noise line 1
+noise line 2
+noise line 3
+noise line 4
+noise line 5
+noise line 6
+noise line 7
+noise line 8
+noise line 9
+noise line 10
+noise line 11
+noise line 12
+noise line 13
+noise line 14
+noise line 15
+noise line 16
+noise line 17
+noise line 18
+noise line 19
+noise line 20
+noise line 21
+noise line 22
+noise line 23
+noise line 24
+noise line 25
+noise line 26
+noise line 27
+noise line 28
+noise line 29
+noise line 30
+noise line 31
+noise line 32
+noise line 33
+noise line 34
+noise line 35
+noise line 36
+noise line 37
+noise line 38
+noise line 39
+noise line 40
+noise line 41
+noise line 42
+noise line 43
+noise line 44
+noise line 45
+noise line 46
+noise line 47
+noise line 48
+noise line 49
+noise line 50
+noise line 51
+noise line 52
+noise line 53
+noise line 54
+noise line 55
+noise line 56
+noise line 57
+noise line 58
+noise line 59
+noise line 60
+noise line 61
+noise line 62
+noise line 63
+noise line 64
+noise line 65
+noise line 66
+noise line 67
+noise line 68
+noise line 69
+noise line 70
+noise line 71
+noise line 72
+noise line 73
+noise line 74
+noise line 75
+noise line 76
+noise line 77
+noise line 78
+noise line 79
+noise line 80
+noise line 81
+noise line 82
+noise line 83
+noise line 84
+noise line 85
+noise line 86
+noise line 87
+noise line 88
+noise line 89
+noise line 90
+noise line 91
+noise line 92
+noise line 93
+noise line 94
+noise line 95
+noise line 96
+noise line 97
+noise line 98
+noise line 99
+noise line 100
+noise line 101
+noise line 102
+noise line 103
+noise line 104
+noise line 105
+noise line 106
+noise line 107
+noise line 108
+noise line 109
+noise line 110
+noise line 111
+noise line 112
+noise line 113
+noise line 114
+noise line 115
+noise line 116
+noise line 117
+noise line 118
+noise line 119
+noise line 120
+
+
+50% tests passed, 1 tests failed out of 2
+
+Total Test time (real) =   0.01 sec
+
+The following tests FAILED:
+	 10 - noisy_fail (Failed)
+Errors while running CTest

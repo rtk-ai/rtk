@@ -121,9 +121,16 @@ assert_ok       "rtk read --max-lines 10"       rtk read --max-lines 10 "$ARISTO
 
 section "Grep"
 
-assert_ok       "rtk grep import"               rtk grep "import" "$ARISTOTE/src"
-assert_ok       "rtk grep with type filter"     rtk grep "useState" "$ARISTOTE/src" -t tsx
-assert_contains "rtk grep finds components"     "import" rtk grep "import" "$ARISTOTE/src"
+# `grep PATTERN <dir>` without -r exits 2 ("Is a directory").
+assert_ok       "rtk grep import"               rtk grep -r "import" "$ARISTOTE/src"
+assert_contains "rtk grep finds components"     "import" rtk grep -r "import" "$ARISTOTE/src"
+
+# `-t` is rg-only, so the type filter belongs to the rg engine.
+if command -v rg >/dev/null 2>&1; then
+    assert_ok   "rtk rg with type filter"       rtk rg "useState" "$ARISTOTE/src" -t tsx
+else
+    skip_test   "rtk rg with type filter"       "rg not installed"
+fi
 
 # ── 4. Git ───────────────────────────────────────────
 

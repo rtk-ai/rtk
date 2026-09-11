@@ -1,6 +1,7 @@
 //! Compares RTK-routed vs raw commands in a coding session.
 
 use crate::core::utils::format_tokens;
+use crate::discover::is_already_rtk;
 use crate::discover::provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
 use crate::discover::registry::{classify_command, split_command_chain, Classification};
 use anyhow::{Context, Result};
@@ -27,7 +28,9 @@ impl SessionSummary {
 
 /// Count RTK-covered commands from extracted commands.
 /// A command is "covered" if it either:
-/// - starts with "rtk " (explicit rtk invocation), or
+/// - is an explicit rtk invocation, excluding `rtk proxy` (see `is_already_rtk` —
+///   proxy deliberately runs the raw command unfiltered, so it must not count as
+///   adopted usage), or
 /// - would be rewritten by the hook (classify_command returns Supported)
 ///
 /// Chained commands (e.g. "cd ./path && rtk ls") are split so each part
@@ -39,7 +42,7 @@ fn count_rtk_commands(cmds: &[ExtractedCommand]) -> (usize, usize, usize) {
         let parts = split_command_chain(&c.command);
         for part in &parts {
             total += 1;
-            if part.starts_with("rtk ")
+            if is_already_rtk(part)
                 || matches!(classify_command(part), Classification::Supported { .. })
             {
                 rtk += 1;
@@ -200,6 +203,7 @@ mod tests {
             command: command.to_string(),
             output_len,
             session_id: "test".to_string(),
+            tool_use_id: "toolu_test".to_string(),
             output_content: None,
             is_error: false,
             sequence_index: 0,
@@ -270,6 +274,20 @@ mod tests {
         let (total, rtk, _) = count_rtk_commands(&cmds);
         assert_eq!(total, 3);
         assert_eq!(rtk, 0);
+    }
+
+    #[test]
+    fn test_count_rtk_proxy_not_counted_as_adopted() {
+        // `rtk proxy <cmd>` deliberately runs the raw command unfiltered — it must
+        // not count as adopted rtk usage, or the session report would flatter
+        // itself via its own escape hatch (mirrors discover::is_already_rtk).
+        let cmds = vec![
+            make_cmd("rtk proxy git log -20", Some(2000)),
+            make_cmd("rtk git status", Some(200)),
+        ];
+        let (total, rtk, _) = count_rtk_commands(&cmds);
+        assert_eq!(total, 2);
+        assert_eq!(rtk, 1, "only the explicit non-proxy rtk invocation counts");
     }
 
     #[test]
