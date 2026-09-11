@@ -816,14 +816,14 @@ fn process_codex_payload(v: &Value) -> PayloadAction {
     // for missing or future modes instead of assuming their approval semantics.
     if !is_supported_codex_permission_mode(v) {
         return PayloadAction::Skip {
-            reason: "skip:unsupported_permission_mode",
+            decision: HookOutcome::Defer,
             cmd: cmd.to_string(),
         };
     }
 
     if crate::discover::lexer::contains_unattestable_construct(cmd) {
         return PayloadAction::Skip {
-            reason: "skip:defer",
+            decision: HookOutcome::Defer,
             cmd: cmd.to_string(),
         };
     }
@@ -832,7 +832,7 @@ fn process_codex_payload(v: &Value) -> PayloadAction {
         Some(rewritten) => rewritten,
         None => {
             return PayloadAction::Skip {
-                reason: "skip:no_rewrite",
+                decision: HookOutcome::Defer,
                 cmd: cmd.to_string(),
             }
         }
@@ -849,6 +849,7 @@ fn process_codex_payload(v: &Value) -> PayloadAction {
     PayloadAction::Rewrite {
         cmd: cmd.to_string(),
         output: pre_tool_use_rewrite_output(v, &rewritten, Some("allow")),
+        decision: HookOutcome::Allow,
         rewritten,
     }
 }
@@ -880,11 +881,12 @@ pub fn run_codex() -> Result<()> {
             cmd,
             rewritten,
             output,
+            ..
         } => {
             audit_log("rewrite", &cmd, &rewritten);
             let _ = writeln!(io::stdout(), "{output}");
         }
-        PayloadAction::Skip { reason, cmd } => audit_log(reason, &cmd, ""),
+        PayloadAction::Skip { cmd, .. } => audit_log("skip:defer", &cmd, ""),
         PayloadAction::Ignore => {}
     }
 

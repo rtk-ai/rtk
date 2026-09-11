@@ -14,14 +14,14 @@ use crate::hooks::constants::{
 };
 
 use super::constants::{
-    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CODEX_HOOK_COMMAND, CURSOR_HOOK_COMMAND, DROID_DIR,
-    DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR,
-    DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
-    HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
-    HOOKS_SUBDIR, OMP_DIR, OMP_LOCAL_DIR, PI_AGENT_STATE_FILE, PI_CODING_AGENT_DIR_ENV, PI_DIR,
-    PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
-    SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR, VIBE_HOOKS_FILE, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME,
-    VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
+    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CODEX_HOOK_COMMAND,
+    CURSOR_HOOK_COMMAND, DROID_DIR, DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOKS_FILE,
+    DROID_HOOKS_SUBDIR, DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR,
+    HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE,
+    HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR, OMP_DIR, OMP_LOCAL_DIR, PI_AGENT_STATE_FILE,
+    PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
+    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR, VIBE_HOOKS_FILE,
+    VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
 };
 use super::integrity;
 use super::{is_claude_hook_command, is_codex_hook_command};
@@ -630,11 +630,12 @@ fn read_json_file(path: &Path) -> Result<Option<serde_json::Value>> {
 
     let content =
         fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let content = strip_leading_bom(&content);
     if content.trim().is_empty() {
         return Ok(Some(serde_json::json!({})));
     }
 
-    serde_json::from_str(&content)
+    from_json_str(content)
         .map(Some)
         .with_context(|| format!("Failed to parse {} as JSON", path.display()))
 }
@@ -1179,7 +1180,9 @@ fn uninstall_codex_with_paths(
     rtk_md_refs: &[&str],
     ctx: InitContext,
 ) -> Result<Vec<String>> {
-    let InitContext { verbose, dry_run, .. } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let mut removed = Vec::new();
 
     if remove_codex_hook_from_file(hooks_json_path, ctx)? {
@@ -2740,11 +2743,10 @@ fn run_codex_mode_with_paths(
         RTK_MD_REF.to_string()
     };
 
-    write_if_changed(&rtk_md_path, RTK_AWARENESS_FULL, RTK_MD, ctx)?;
+    write_if_changed(&rtk_md_path, awareness_content(ctx.awareness), RTK_MD, ctx)?;
     let added_ref = patch_agents_md(&agents_md_path, &rtk_md_ref, ctx)?;
     let hook_added = patch_codex_hooks_json(&hooks_json_path, ctx)?;
 
-    print_rules_only_awareness_note("Codex CLI", ctx);
     if !dry_run {
         println!("\nRTK configured for Codex CLI.\n");
         println!("  RTK.md:    {}", rtk_md_path.display());
@@ -2776,9 +2778,40 @@ fn run_codex_mode_with_paths(
         println!(
             "\n  Restart Codex. For a project hook, approve it when Codex asks you to trust it."
         );
+        match crate::core::tracking::get_db_path().and_then(|path| codex_tracking_config(&path)) {
+            Ok(config) => {
+                println!("\n  Optional: if history recording fails with SQLITE_CANTOPEN in the");
+                println!(
+                    "  workspace-write sandbox, grant write access to the tracking directory:"
+                );
+                println!("\n{config}");
+                println!(
+                    "  Merge this into Codex config.toml only if you want persistent history."
+                );
+                println!("  Keep existing writable_roots; do not add a duplicate table.");
+                println!("  This grants access to the directory, including SQLite sidecar files.");
+                println!("  No Codex permission settings have been changed.");
+            }
+            Err(error) => eprintln!("rtk: warning: could not prepare tracking guidance: {error:#}"),
+        }
     }
 
     Ok(())
+}
+
+fn codex_tracking_config(db_path: &Path) -> Result<String> {
+    let absolute = std::path::absolute(db_path).context("Failed to resolve RTK database path")?;
+    let parent = absolute
+        .parent()
+        .context("RTK database path has no parent")?;
+    let directory = fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+    let directory = directory
+        .to_str()
+        .context("RTK database directory is not valid UTF-8")?;
+    let quoted = toml::Value::String(directory.to_string());
+    Ok(format!(
+        "sandbox_mode = \"workspace-write\"\n\n[sandbox_workspace_write]\nwritable_roots = [{quoted}]\n"
+    ))
 }
 
 fn codex_hook_already_present(root: &serde_json::Value) -> bool {
@@ -2793,7 +2826,9 @@ fn codex_hook_already_present(root: &serde_json::Value) -> bool {
 }
 
 fn patch_codex_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let mut root = read_json_file(path)?.unwrap_or_else(|| serde_json::json!({}));
 
     if codex_hook_already_present(&root) {
@@ -2864,7 +2899,9 @@ fn remove_codex_hook_from_json(root: &mut serde_json::Value) -> bool {
 }
 
 fn remove_codex_hook_from_file(path: &Path, ctx: InitContext) -> Result<bool> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let Some(mut root) = read_json_file(path)? else {
         return Ok(false);
     };
@@ -4786,7 +4823,9 @@ fn install_cursor_hooks(ctx: InitContext) -> Result<()> {
 /// Patch ~/.cursor/hooks.json to add RTK preToolUse hook.
 /// Returns true if the file was modified.
 fn patch_cursor_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
-    let InitContext { verbose, dry_run, .. } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let mut root = read_json_file(path)?.unwrap_or_else(|| serde_json::json!({ "version": 1 }));
 
     // Check idempotency
@@ -4876,7 +4915,9 @@ fn insert_cursor_hook_entry(root: &mut serde_json::Value) -> Result<()> {
 /// Remove only legacy `rtk-rewrite.sh` entries from Cursor hooks.json.
 /// Preserves any existing `rtk hook cursor` entries (new format).
 fn remove_legacy_cursor_hooks_json_entries(path: &Path, ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run, .. } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let Some(mut root) = read_json_file(path)? else {
         return Ok(());
     };
@@ -4934,7 +4975,9 @@ fn remove_cursor_hooks(ctx: InitContext) -> Result<Vec<String>> {
 }
 
 fn remove_cursor_hooks_at(cursor_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
-    let InitContext { verbose, dry_run, .. } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let mut removed = Vec::new();
 
     // 1. Remove hook script
@@ -6774,7 +6817,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rules_only_agents_get_full_awareness_at_every_level() {
+    fn test_agents_get_appropriate_awareness_at_every_level() {
         for level in [
             AwarenessLevel::Default,
             AwarenessLevel::High,
@@ -6811,10 +6854,17 @@ mod tests {
             let codex_agents = temp.path().join("codex").join(AGENTS_MD);
             let codex_rtk = temp.path().join("codex").join(RTK_MD);
             fs::create_dir_all(temp.path().join("codex")).unwrap();
-            run_codex_mode_with_paths(codex_agents, codex_rtk.clone(), false, ctx).unwrap();
+            run_codex_mode_with_paths(
+                codex_agents,
+                codex_rtk.clone(),
+                temp.path().join("codex/hooks.json"),
+                false,
+                ctx,
+            )
+            .unwrap();
             assert_eq!(
                 fs::read_to_string(&codex_rtk).unwrap(),
-                RTK_AWARENESS_FULL,
+                awareness_content(level),
                 "codex with level {level}"
             );
         }
@@ -7426,7 +7476,7 @@ mod tests {
         .unwrap();
 
         assert!(rtk_md.exists());
-        assert_eq!(fs::read_to_string(&rtk_md).unwrap(), RTK_AWARENESS_FULL);
+        assert_eq!(fs::read_to_string(&rtk_md).unwrap(), RTK_AWARENESS_DEFAULT);
         assert_eq!(
             fs::read_to_string(&agents_md).unwrap(),
             format!("{}\n", codex_rtk_md_ref(temp.path()))
@@ -7434,6 +7484,40 @@ mod tests {
         let hooks: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&hooks_json).unwrap()).unwrap();
         assert!(codex_hook_already_present(&hooks));
+    }
+
+    #[test]
+    fn test_codex_tracking_config_limits_root_to_database_parent() {
+        let temp = TempDir::new().unwrap();
+        let directory = temp.path().join("tracking data");
+        fs::create_dir(&directory).unwrap();
+        let config = codex_tracking_config(&directory.join("custom.db")).unwrap();
+        let parsed: toml::Value = toml::from_str(&config).unwrap();
+        assert_eq!(parsed["sandbox_mode"].as_str(), Some("workspace-write"));
+        let roots = parsed["sandbox_workspace_write"]["writable_roots"]
+            .as_array()
+            .unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(
+            roots[0].as_str().unwrap(),
+            fs::canonicalize(&directory).unwrap().to_str().unwrap()
+        );
+        assert!(!directory.join("custom.db").exists());
+    }
+
+    #[test]
+    fn test_codex_tracking_config_escapes_paths_without_creating_files() {
+        let temp = TempDir::new().unwrap();
+        let directory = temp.path().join("quoted \"directory\"");
+        let config = codex_tracking_config(&directory.join("history.db")).unwrap();
+        let parsed: toml::Value = toml::from_str(&config).unwrap();
+        assert_eq!(
+            parsed["sandbox_workspace_write"]["writable_roots"][0]
+                .as_str()
+                .unwrap(),
+            directory.to_str().unwrap()
+        );
+        assert!(!directory.exists());
     }
 
     #[test]

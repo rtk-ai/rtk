@@ -17,37 +17,13 @@ fn is_rtk_binary(binary: &str) -> bool {
     matches!(binary_name, "rtk" | "rtk.exe")
 }
 
-fn raw_first_token(command: &str) -> Option<&str> {
-    let command = command.trim_start();
-    let quote = match command.as_bytes().first() {
-        Some(b'"') => Some('"'),
-        Some(b'\'') => Some('\''),
-        Some(_) => return command.split_whitespace().next(),
-        None => return None,
-    }?;
-
-    let quoted = &command[1..];
-    let end = quoted.find(quote)?;
-    let suffix = &quoted[end + quote.len_utf8()..];
-    if suffix.chars().next().is_some_and(|ch| !ch.is_whitespace()) {
-        return None;
-    }
-    Some(&quoted[..end])
-}
-
 fn is_rtk_hook_command(command: &str, agent: &str) -> bool {
     let parts = crate::discover::lexer::shell_split(command);
     let [parsed_binary, hook, target] = parts.as_slice() else {
         return false;
     };
 
-    // Prefer the shell-parsed token so POSIX escaped spaces are resolved.
-    // Fall back to the raw token because shell_split treats Windows path
-    // backslashes as escapes.
-    let has_rtk_binary =
-        is_rtk_binary(parsed_binary) || raw_first_token(command).is_some_and(is_rtk_binary);
-
-    has_rtk_binary && hook == "hook" && target == agent
+    is_rtk_binary(parsed_binary) && hook == "hook" && target == agent
 }
 
 pub fn is_claude_hook_command(command: &str) -> bool {
