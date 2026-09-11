@@ -114,13 +114,16 @@ LLM Agent: "cargo fmt --all && cargo test 2>&1 | tail -20"
   |  On failure (jq missing, rtk missing, old version): exit 0 (passthrough)
   |
   v
-rewrite_cmd::run(cmd)                              [src/hooks/rewrite_cmd.rs]
+rewrite_cmd::run(cmd, host)                        [src/hooks/rewrite_cmd.rs]
+  |  host comes from `rtk rewrite --host` and defaults to Host::Claude
   |  1. Load config → hooks.exclude_commands
-  |  2. check_command(cmd) → Deny → exit(2)
+  |  2. check_command_for(cmd, host) → Deny → exit(2)
   |  3. registry::rewrite_command(cmd, excluded)
   |     → None → exit(1)          (no RTK equivalent, passthrough)
   |     → Some + Allow → print, exit(0)
   |     → Some + Ask   → print, exit(3)
+  |                      (a host that is its own permission authority —
+  |                       Host::OpenClaw — prints and exits 0 here instead)
   |
   v
 rewrite_command(cmd, excluded)                     [src/discover/registry.rs]
