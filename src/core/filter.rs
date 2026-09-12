@@ -9,6 +9,23 @@ pub enum FilterLevel {
     None,
     Minimal,
     Aggressive,
+    /// Automatically select filter based on file size:
+    /// <100 lines → None, 100-500 → Minimal, >500 → Aggressive
+    Auto,
+}
+
+impl FilterLevel {
+    /// Resolve Auto to a concrete level given the number of lines in a file.
+    pub fn resolve(self, line_count: usize) -> FilterLevel {
+        match self {
+            FilterLevel::Auto => match line_count {
+                0..=99 => FilterLevel::None,
+                100..=500 => FilterLevel::Minimal,
+                _ => FilterLevel::Aggressive,
+            },
+            other => other,
+        }
+    }
 }
 
 impl FromStr for FilterLevel {
@@ -19,6 +36,7 @@ impl FromStr for FilterLevel {
             "none" => Ok(FilterLevel::None),
             "minimal" => Ok(FilterLevel::Minimal),
             "aggressive" => Ok(FilterLevel::Aggressive),
+            "auto" => Ok(FilterLevel::Auto),
             _ => Err(format!("Unknown filter level: {}", s)),
         }
     }
@@ -30,6 +48,7 @@ impl std::fmt::Display for FilterLevel {
             FilterLevel::None => write!(f, "none"),
             FilterLevel::Minimal => write!(f, "minimal"),
             FilterLevel::Aggressive => write!(f, "aggressive"),
+            FilterLevel::Auto => write!(f, "auto"),
         }
     }
 }
@@ -311,7 +330,7 @@ impl FilterStrategy for AggressiveFilter {
 
 pub fn get_filter(level: FilterLevel) -> Box<dyn FilterStrategy> {
     match level {
-        FilterLevel::None => Box::new(NoFilter),
+        FilterLevel::None | FilterLevel::Auto => Box::new(NoFilter),
         FilterLevel::Minimal => Box::new(MinimalFilter),
         FilterLevel::Aggressive => Box::new(AggressiveFilter),
     }
@@ -373,6 +392,45 @@ mod tests {
             FilterLevel::from_str("aggressive").unwrap(),
             FilterLevel::Aggressive
         );
+        assert_eq!(FilterLevel::from_str("auto").unwrap(), FilterLevel::Auto);
+    }
+
+    #[test]
+    fn test_filter_level_display_roundtrip() {
+        for level in [
+            FilterLevel::None,
+            FilterLevel::Minimal,
+            FilterLevel::Aggressive,
+            FilterLevel::Auto,
+        ] {
+            assert_eq!(FilterLevel::from_str(&level.to_string()).unwrap(), level);
+        }
+    }
+
+    #[test]
+    fn test_auto_resolve_scales_with_file_size() {
+        // Small files: no filtering (the LLM needs to see everything)
+        assert_eq!(FilterLevel::Auto.resolve(0), FilterLevel::None);
+        assert_eq!(FilterLevel::Auto.resolve(99), FilterLevel::None);
+        // Medium files: minimal filtering
+        assert_eq!(FilterLevel::Auto.resolve(100), FilterLevel::Minimal);
+        assert_eq!(FilterLevel::Auto.resolve(500), FilterLevel::Minimal);
+        // Large files: aggressive filtering
+        assert_eq!(FilterLevel::Auto.resolve(501), FilterLevel::Aggressive);
+        assert_eq!(FilterLevel::Auto.resolve(5000), FilterLevel::Aggressive);
+    }
+
+    #[test]
+    fn test_resolve_is_identity_for_explicit_levels() {
+        // Non-Auto levels are returned unchanged regardless of line count
+        for level in [
+            FilterLevel::None,
+            FilterLevel::Minimal,
+            FilterLevel::Aggressive,
+        ] {
+            assert_eq!(level.resolve(10), level);
+            assert_eq!(level.resolve(10_000), level);
+        }
     }
 
     #[test]

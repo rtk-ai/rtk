@@ -36,8 +36,15 @@ pub fn run(
         eprintln!("Detected language: {:?}", lang);
     }
 
+    // Resolve Auto to a concrete level based on file size (opt-in via --level auto)
+    let line_count = content.lines().count();
+    let resolved = level.resolve(line_count);
+    if verbose > 0 && level == FilterLevel::Auto && resolved != FilterLevel::None {
+        eprintln!("rtk: auto-filter: {} lines → {}", line_count, resolved);
+    }
+
     // Apply filter
-    let filter = filter::get_filter(level);
+    let filter = filter::get_filter(resolved);
     let mut filtered = filter.filter(&content, &lang);
 
     // Safety: if filter emptied a non-empty file, fall back to raw content
