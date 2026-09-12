@@ -172,6 +172,14 @@ pub(crate) fn coalesce_words<'a>(cmd: &'a str, tokens: &[ParsedToken]) -> Vec<(&
     words
 }
 
+/// A command's words (quote-aware, see [`coalesce_words`]) split from their byte offsets in
+/// `cmd`. Callers that hand the words to `core::arg_tokenizer` keep the offsets alongside:
+/// `Token::source_index` indexes the words, so `spans[token.source_index]` is the way back to a
+/// slice of the original command string.
+pub(crate) fn words_and_spans(cmd: &str) -> (Vec<&str>, Vec<usize>) {
+    coalesce_words(cmd, &tokenize(cmd)).into_iter().unzip()
+}
+
 fn tokenize_inner(input: &str, newline_mode: NewlineMode) -> Vec<ParsedToken> {
     let mut tokens = Vec::new();
     let mut current = String::new();

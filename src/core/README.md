@@ -183,6 +183,8 @@ Gradle gets no preset: its parser is `org.gradle.cli` (`gradle:jdk21` ships `gra
 
 `src/core/arg_tokenizer/frozen.rs` is the pre-axes implementation, kept as the oracle for the differential test in `differential.rs`: every arg vector up to four tokens over an alphabet covering each construct the scanner branches on, asserted token-for-token identical under `Posix` and `Msbuild`. Never edit `frozen.rs` to match new behaviour — a diff against it is the only proof the presets have not moved.
 
+**Tokenizing a shell string, not an argv.** `discover` starts from a raw command line, one layer below: shell string → `discover::lexer::words_and_spans` (quote-aware words plus each word's byte offset) → argv words → `tokenize_grammar`. Keep the span vector alongside the words — `Token::source_index` indexes the words you passed in, so `spans[token.source_index]` is the way back down to a slice of the original string (`discover::registry::parse_golangci_run_parts`). Note that `discover::lexer::TokenKind` and `arg_tokenizer::TokenKind` are different types with the same name.
+
 ## Consumer Contracts
 
 Core provides infrastructure that `cmds/` and other components consume. These contracts define expected usage.
