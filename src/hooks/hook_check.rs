@@ -1,11 +1,16 @@
 //! Detects whether RTK hooks are installed and warns if they are outdated.
 
-use super::constants::{HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON};
+use super::constants::{
+    CODEX_DIR, CONFIG_DIR, CURSOR_DIR, CURSOR_HOOK_COMMAND, GEMINI_DIR, GEMINI_HOOK_FILE,
+    HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE,
+    HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR,
+    PLUGIN_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+};
 use super::init::resolve_claude_dir;
 use super::is_claude_hook_command;
 use crate::core::constants::RTK_DATA_DIR;
 use crate::core::utils::from_json_str;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const CURRENT_HOOK_VERSION: u8 = 3;
 const WARN_INTERVAL_SECS: u64 = 24 * 3600;
@@ -46,7 +51,7 @@ pub fn status() -> HookStatus {
 
     // Fall back to legacy script file check
     let Some(hook_path) = hook_installed_path() else {
-        return HookStatus::Missing;
+        return status_with_other_integration(HookStatus::Missing, other_integration_installed());
     };
     let Ok(content) = std::fs::read_to_string(&hook_path) else {
         return HookStatus::Outdated; // exists but unreadable — treat as needs-update
@@ -93,12 +98,8 @@ pub fn maybe_warn() {
 
 /// Single source of truth: delegates to `status()` then rate-limits the warning.
 fn check_and_warn() -> Option<()> {
-    let warning = match status() {
-        HookStatus::Ok => return Some(()),
-        HookStatus::Missing => {
-            "[rtk] /!\\ No hook installed — run `rtk init -g` for automatic token savings"
-        }
-        HookStatus::Outdated => "[rtk] /!\\ Hook outdated — run `rtk init -g` to update",
+    let Some(warning) = warning_for_status(status()) else {
+        return Some(());
     };
 
     // Rate limit: warn once per day
@@ -118,6 +119,16 @@ fn check_and_warn() -> Option<()> {
     let _ = std::fs::write(&marker, b"");
 
     Some(())
+}
+
+fn warning_for_status(status: HookStatus) -> Option<&'static str> {
+    match status {
+        HookStatus::Ok => None,
+        HookStatus::Missing => {
+            Some("[rtk] /!\\ No hook installed — run `rtk init -g` for automatic token savings")
+        }
+        HookStatus::Outdated => Some("[rtk] /!\\ Hook outdated — run `rtk init -g` to update"),
+    }
 }
 
 pub fn parse_hook_version(content: &str) -> u8 {
@@ -142,6 +153,124 @@ fn hook_installed_path() -> Option<PathBuf> {
     }
 }
 
+fn status_with_other_integration(status: HookStatus, has_other_integration: bool) -> HookStatus {
+    if status == HookStatus::Missing && has_other_integration {
+        HookStatus::Ok
+    } else {
+        status
+    }
+}
+
+/// Return whether a global executable non-Claude integration is configured with
+/// RTK. Codex is retained as the established instruction-only exception. Project
+/// integrations and alternate global homes are checked separately.
+///
+/// This only suppresses a missing Claude warning; an outdated Claude hook is
+/// still reported so users can complete its migration.
+fn other_integration_installed() -> bool {
+    dirs::home_dir().is_some_and(|home| other_integration_installed_at(&home))
+}
+
+fn other_integration_installed_at(home: &Path) -> bool {
+    opencode_plugin_registered(
+        &home
+            .join(CONFIG_DIR)
+            .join(OPENCODE_SUBDIR)
+            .join(PLUGIN_SUBDIR)
+            .join(OPENCODE_PLUGIN_FILE),
+    ) || cursor_hook_registered(&home.join(CURSOR_DIR).join(HOOKS_JSON))
+        || codex_instructions_registered(&home.join(CODEX_DIR))
+        || gemini_hook_registered(&home.join(GEMINI_DIR))
+        || hermes_plugin_registered(&home.join(HERMES_DIR))
+}
+
+fn opencode_plugin_registered(path: &Path) -> bool {
+    read_file(path).is_some_and(|content| {
+        content.contains("export const RtkOpenCodePlugin") && content.contains("rtk rewrite")
+    })
+}
+
+fn cursor_hook_registered(path: &Path) -> bool {
+    read_json(path).is_some_and(|root| {
+        root.get("hooks")
+            .and_then(|hooks| hooks.get("preToolUse"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry
+                        .get("command")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|command| command == CURSOR_HOOK_COMMAND)
+                })
+            })
+    })
+}
+
+fn codex_instructions_registered(codex_dir: &Path) -> bool {
+    let agents_path = codex_dir.join("AGENTS.md");
+    let rtk_md_path = codex_dir.join("RTK.md");
+    let rtk_md_ref = format!("@{}", rtk_md_path.display());
+    rtk_md_path.exists()
+        && read_file(&agents_path).is_some_and(|content| {
+            content
+                .lines()
+                .map(str::trim)
+                .any(|line| line == "@RTK.md" || line == rtk_md_ref)
+        })
+}
+
+fn gemini_hook_registered(gemini_dir: &Path) -> bool {
+    let hook_path = gemini_dir.join(HOOKS_SUBDIR).join(GEMINI_HOOK_FILE);
+    let hook_command = hook_path.to_string_lossy();
+    read_file(&hook_path).is_some_and(|content| content.contains("rtk hook gemini"))
+        && read_json(&gemini_dir.join(SETTINGS_JSON)).is_some_and(|root| {
+            root.get("hooks")
+                .and_then(|hooks| hooks.get("BeforeTool"))
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|entries| {
+                    entries.iter().any(|entry| {
+                        entry
+                            .get("hooks")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|hooks| {
+                                hooks.iter().any(|hook| {
+                                    hook.get("command").and_then(serde_json::Value::as_str)
+                                        == Some(hook_command.as_ref())
+                                })
+                            })
+                    })
+                })
+        })
+}
+
+fn hermes_plugin_registered(hermes_dir: &Path) -> bool {
+    let plugin_dir = hermes_dir
+        .join(HERMES_PLUGINS_SUBDIR)
+        .join(HERMES_PLUGIN_NAME);
+    read_file(&plugin_dir.join(HERMES_PLUGIN_MANIFEST_FILE)).is_some_and(|content| {
+        content
+            .lines()
+            .any(|line| line.trim() == "name: rtk-rewrite")
+    }) && read_file(&plugin_dir.join(HERMES_PLUGIN_INIT_FILE))
+        .is_some_and(|content| content.contains("rtk rewrite"))
+        && read_file(&hermes_dir.join("config.yaml")).is_some_and(|content| {
+            content
+                .lines()
+                .any(|line| line.trim().trim_matches(['\'', '"']) == "- rtk-rewrite")
+        })
+}
+
+fn read_file(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path).ok()
+}
+
+fn read_json(path: &Path) -> Option<serde_json::Value> {
+    let content = read_file(path)?;
+    (!content.trim().is_empty())
+        .then(|| from_json_str(&content).ok())
+        .flatten()
+}
+
 fn warn_marker_path() -> Option<PathBuf> {
     let data_dir = dirs::data_local_dir()?.join(RTK_DATA_DIR);
     Some(data_dir.join(".hook_warn_last"))
@@ -150,32 +279,6 @@ fn warn_marker_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hooks::constants::{
-        CODEX_DIR, CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, HERMES_DIR,
-        HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME,
-        OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
-    };
-
-    fn other_integration_installed(home: &std::path::Path) -> bool {
-        let paths = [
-            home.join(CONFIG_DIR)
-                .join(OPENCODE_SUBDIR)
-                .join(PLUGIN_SUBDIR)
-                .join(OPENCODE_PLUGIN_FILE),
-            home.join(CURSOR_DIR)
-                .join(HOOKS_SUBDIR)
-                .join(REWRITE_HOOK_FILE),
-            home.join(CODEX_DIR).join("AGENTS.md"),
-            home.join(GEMINI_DIR)
-                .join(HOOKS_SUBDIR)
-                .join(GEMINI_HOOK_FILE),
-            home.join(HERMES_DIR)
-                .join(HERMES_PLUGINS_SUBDIR)
-                .join(HERMES_PLUGIN_NAME)
-                .join(HERMES_PLUGIN_MANIFEST_FILE),
-        ];
-        paths.iter().any(|p| p.exists())
-    }
 
     #[test]
     fn test_parse_hook_version_present() {
@@ -237,7 +340,13 @@ mod tests {
     #[test]
     fn test_other_integration_none() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        assert!(!other_integration_installed(tmp.path()));
+        assert_eq!(
+            status_with_other_integration(
+                HookStatus::Missing,
+                other_integration_installed_at(tmp.path())
+            ),
+            HookStatus::Missing
+        );
     }
 
     #[test]
@@ -250,21 +359,77 @@ mod tests {
             .join(PLUGIN_SUBDIR)
             .join(OPENCODE_PLUGIN_FILE);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"plugin").unwrap();
-        assert!(other_integration_installed(tmp.path()));
+        std::fs::write(&path, "export const RtkOpenCodePlugin = () => rtk rewrite").unwrap();
+        assert_eq!(
+            status_with_other_integration(
+                HookStatus::Missing,
+                other_integration_installed_at(tmp.path())
+            ),
+            HookStatus::Ok
+        );
+    }
+
+    #[test]
+    fn test_other_integration_does_not_hide_outdated_claude_hook() {
+        assert_eq!(
+            status_with_other_integration(HookStatus::Outdated, true),
+            HookStatus::Outdated
+        );
+    }
+
+    #[test]
+    fn test_warning_for_status_is_hermetic() {
+        assert_eq!(warning_for_status(HookStatus::Ok), None);
+        assert_eq!(
+            warning_for_status(HookStatus::Missing),
+            Some("[rtk] /!\\ No hook installed — run `rtk init -g` for automatic token savings")
+        );
+        assert_eq!(
+            warning_for_status(HookStatus::Outdated),
+            Some("[rtk] /!\\ Hook outdated — run `rtk init -g` to update")
+        );
+    }
+
+    #[test]
+    fn test_other_integration_rejects_unrecognized_artifacts() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = [
+            tmp.path()
+                .join(CONFIG_DIR)
+                .join(OPENCODE_SUBDIR)
+                .join(PLUGIN_SUBDIR)
+                .join(OPENCODE_PLUGIN_FILE),
+            tmp.path().join(CURSOR_DIR).join(HOOKS_JSON),
+            tmp.path().join(CODEX_DIR).join("AGENTS.md"),
+            tmp.path()
+                .join(GEMINI_DIR)
+                .join(HOOKS_SUBDIR)
+                .join(GEMINI_HOOK_FILE),
+            tmp.path()
+                .join(HERMES_DIR)
+                .join(HERMES_PLUGINS_SUBDIR)
+                .join(HERMES_PLUGIN_NAME)
+                .join(HERMES_PLUGIN_MANIFEST_FILE),
+        ];
+        for path in paths {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"not an RTK integration").unwrap();
+        }
+
+        assert!(!other_integration_installed_at(tmp.path()));
     }
 
     #[test]
     fn test_other_integration_cursor() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp
-            .path()
-            .join(CURSOR_DIR)
-            .join(HOOKS_SUBDIR)
-            .join(REWRITE_HOOK_FILE);
+        let path = tmp.path().join(CURSOR_DIR).join(HOOKS_JSON);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"hook").unwrap();
-        assert!(other_integration_installed(tmp.path()));
+        std::fs::write(
+            &path,
+            format!(r#"{{"hooks":{{"preToolUse":[{{"command":"{CURSOR_HOOK_COMMAND}"}}]}}}}"#),
+        )
+        .unwrap();
+        assert!(other_integration_installed_at(tmp.path()));
     }
 
     #[test]
@@ -272,8 +437,13 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join(CODEX_DIR).join("AGENTS.md");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"agents").unwrap();
-        assert!(other_integration_installed(tmp.path()));
+        std::fs::write(&path, "@RTK.md").unwrap();
+        std::fs::write(
+            tmp.path().join(CODEX_DIR).join("RTK.md"),
+            "RTK instructions",
+        )
+        .unwrap();
+        assert!(other_integration_installed_at(tmp.path()));
     }
 
     #[test]
@@ -285,22 +455,39 @@ mod tests {
             .join(HOOKS_SUBDIR)
             .join(GEMINI_HOOK_FILE);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"hook").unwrap();
-        assert!(other_integration_installed(tmp.path()));
+        std::fs::write(&path, "exec rtk hook gemini").unwrap();
+        std::fs::write(
+            tmp.path().join(GEMINI_DIR).join(SETTINGS_JSON),
+            serde_json::json!({
+                "hooks": { "BeforeTool": [{ "hooks": [{ "command": path }] }] }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(other_integration_installed_at(tmp.path()));
     }
 
     #[test]
     fn test_other_integration_hermes() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp
+        let plugin_dir = tmp
             .path()
             .join(HERMES_DIR)
             .join(HERMES_PLUGINS_SUBDIR)
-            .join(HERMES_PLUGIN_NAME)
-            .join(HERMES_PLUGIN_MANIFEST_FILE);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"plugin").unwrap();
-        assert!(other_integration_installed(tmp.path()));
+            .join(HERMES_PLUGIN_NAME);
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join(HERMES_PLUGIN_MANIFEST_FILE),
+            "name: rtk-rewrite",
+        )
+        .unwrap();
+        std::fs::write(plugin_dir.join(HERMES_PLUGIN_INIT_FILE), "rtk rewrite").unwrap();
+        std::fs::write(
+            tmp.path().join(HERMES_DIR).join("config.yaml"),
+            "enabled:\n  - rtk-rewrite",
+        )
+        .unwrap();
+        assert!(other_integration_installed_at(tmp.path()));
     }
 
     #[test]
@@ -316,7 +503,7 @@ mod tests {
                 .join(HERMES_PLUGIN_NAME),
         )
         .unwrap();
-        assert!(!other_integration_installed(tmp.path()));
+        assert!(!other_integration_installed_at(tmp.path()));
     }
 
     #[test]
