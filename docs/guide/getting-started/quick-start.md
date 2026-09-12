@@ -46,7 +46,7 @@ Every would-be file create/update/patch is printed with a `[dry-run] would ...` 
 rtk init --global --dry-run -v
 ```
 
-`--dry-run` works for every init flavour (`--agent cursor`, `--gemini`, `--codex`, `--copilot`, `--uninstall`, ...). It cannot be combined with `--show`.
+`--dry-run` works for every init flavour (`--agent cursor`, `--agent grok`, `--gemini`, `--codex`, `--copilot`, `--uninstall`, ...). It cannot be combined with `--show`.
 
 ## Step 2: Use your tools normally
 
