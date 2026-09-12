@@ -31,6 +31,28 @@ Three-tier filter lookup (first match wins):
 2. `~/.config/rtk/filters.toml` (user-global)
 3. Built-in filters concatenated by `build.rs` at compile time
 
+## Source File Comment Stripping
+
+`src/core/filter.rs` is a separate engine from the TOML DSL: it filters *source
+files* (used by `rtk read`) rather than command output. At `-l minimal` it
+strips comments using the per-language delimiters in
+`Language::comment_patterns()`.
+
+Python does not use that walk. It has no block comments — `"""` opens a
+*string*, which may be a docstring or an ordinary value — so it gets a
+string-aware path that removes `#` comments and leaves string contents alone.
+Matching `"""` as a block delimiter misread both of these:
+
+```python
+QUERY = """          # contains """ without starting with it
+SELECT 1
+"""
+
+"""Module doc."""    # opens and closes on one line
+```
+
+Docstrings are kept at `minimal`; `aggressive` is what drops them.
+
 ## Tracking Database Schema
 
 ```sql
