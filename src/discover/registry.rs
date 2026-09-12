@@ -47,6 +47,7 @@ pub fn category_avg_tokens(category: &str, subcmd: &str) -> usize {
         "GitHub" => 200,
         "GitLab" => 200,
         "PackageManager" => 150,
+        "Elixir" => 400,
         _ => 150,
     }
 }
