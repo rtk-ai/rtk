@@ -3,6 +3,7 @@
 use crate::binlog::{FailedTest, TestSummary};
 use chrono::{DateTime, FixedOffset};
 use quick_xml::events::{BytesStart, Event};
+use quick_xml::XmlVersion;
 use quick_xml::Reader;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -21,7 +22,7 @@ fn extract_attr_value(
             continue;
         }
 
-        if let Ok(value) = attr.decode_and_unescape_value(reader.decoder()) {
+        if let Ok(value) = attr.decoded_and_normalized_value(XmlVersion::default(), reader.decoder()) {
             return Some(value.into_owned());
         }
     }
