@@ -296,6 +296,13 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
     let mut packages: HashMap<String, PackageResult> = HashMap::new();
     let mut current_test_output: HashMap<(String, String), Vec<String>> = HashMap::new(); // (package, test) -> outputs
     let mut build_output: HashMap<String, Vec<String>> = HashMap::new(); // import_path -> error lines
+    // Non-JSON lines that look like Go runtime fatal output (panic, fatal error,
+    // goroutine dumps, etc.). These typically arrive when `go test -json` is run
+    // with stderr merged into stdout and the runtime aborts with a non-test-framed
+    // fatal (for example `fatal error: checkptr ...`). The JSON parser would
+    // otherwise drop them silently and the failure cause would only survive in the
+    // raw tee file. See https://github.com/rtk-ai/rtk/issues/1882.
+    let mut runtime_failure_lines: Vec<String> = Vec::new();
 
     for line in output.lines() {
         let trimmed = line.trim();
@@ -305,7 +312,12 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
 
         let event: GoTestEvent = match serde_json::from_str(trimmed) {
             Ok(e) => e,
-            Err(_) => continue, // Skip non-JSON lines
+            Err(_) => {
+                if is_go_runtime_failure_line(line) {
+                    runtime_failure_lines.push(line.to_string());
+                }
+                continue;
+            }
         };
 
         // Handle build-output/build-fail events (use ImportPath, no Package)
@@ -475,6 +487,22 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
             pkg_result.fail
         ));
 
+        // When a package has both test-level failures AND package-level fatal
+        // output (e.g. a runtime panic occurred during one of the tests), the
+        // package-level output is normally skipped by the "package-level failures
+        // first" loop above (because that loop excludes packages with
+        // `fail > 0`). Surface the package-level lines here so panic/timeout
+        // context is visible alongside the failed tests. See #1882.
+        if pkg_result.package_failed {
+            for line in &pkg_result.package_fail_output {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || is_go_package_fail_noise_line(trimmed) {
+                    continue;
+                }
+                result.push_str(&format!("  {}\n", truncate(trimmed, 120)));
+            }
+        }
+
         for (test, outputs) in &pkg_result.failed_tests {
             result.push_str(&format!("  [FAIL] {}\n", test));
 
@@ -484,7 +512,54 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
         }
     }
 
+    // Surface non-JSON runtime failure lines (out-of-band stderr from the Go
+    // runtime). Cap at 15 lines so a long goroutine dump does not swamp the
+    // summary; the LLM can read the tee file for the full trace if needed.
+    if !runtime_failure_lines.is_empty() {
+        result.push_str("\nRuntime output:\n");
+        let cap = 15;
+        for line in runtime_failure_lines.iter().take(cap) {
+            result.push_str(&format!("  {}\n", truncate(line.trim_end(), 120)));
+        }
+        if runtime_failure_lines.len() > cap {
+            result.push_str(&format!(
+                "  ... {} more runtime line(s) in tee file\n",
+                runtime_failure_lines.len() - cap
+            ));
+        }
+    }
+
     result.trim().to_string()
+}
+
+/// Returns true if a non-JSON line from `go test -json` output looks like Go
+/// runtime fatal output that an LLM would want to see (panic, fatal error,
+/// goroutine dump, signal kill, etc.).
+fn is_go_runtime_failure_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let lower = trimmed.to_lowercase();
+    lower.starts_with("panic:")
+        || lower.starts_with("fatal error:")
+        || lower.starts_with("runtime:")
+        || lower.starts_with("runtime error:")
+        || lower.starts_with("goroutine ")
+        || lower.starts_with("signal:")
+        || trimmed.starts_with("***")
+        // Goroutine stack frames are tab-indented and end in `.go:N` or `+0xNN`.
+        // Match the original (pre-trim) line so the leading whitespace is part
+        // of the signal.
+        || (line.starts_with('\t') && (line.contains(".go:") || line.contains(" +0x")))
+}
+
+/// Returns true if a package-level fail-output line is just the terminal
+/// boilerplate (`FAIL\t<pkg>\t<elapsed>` or `ok  \t<pkg>\t<elapsed>` or `?   \t<pkg>\t[no test files]`)
+/// that duplicates the summary header and should be skipped when surfacing
+/// panic/timeout context.
+fn is_go_package_fail_noise_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("FAIL\t")
+        || trimmed.starts_with("ok  \t")
+        || trimmed.starts_with("?   \t")
 }
 
 fn select_go_test_failure_lines(outputs: &[String]) -> Vec<String> {
@@ -861,6 +936,76 @@ mod tests {
         assert!(
             result.contains("Test killed with quit"),
             "Should show the timeout message, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_surfaces_runtime_fatal_from_non_json_stderr() {
+        // Regression test for https://github.com/rtk-ai/rtk/issues/1882:
+        // when `go test -json` runs with stderr merged into stdout and the Go
+        // runtime aborts with a non-test-framed fatal (e.g. `fatal error:
+        // checkptr ...`), the panic + stack trace arrive as non-JSON lines
+        // interleaved with the JSON stream. They were previously dropped
+        // silently; surface them inline so the LLM can diagnose without
+        // reading the tee file.
+        let output = "{\"Action\":\"run\",\"Package\":\"example.com/pkg\",\"Test\":\"TestX\"}\n\
+fatal error: checkptr: pointer arithmetic computed bad pointer value\n\
+\n\
+goroutine 7 [running]:\n\
+runtime.throw({0x123, 0x10})\n\
+\truntime/panic.go:1101 +0x71\n\
+example.com/pkg.TestX(0xc0000b6e00)\n\
+\t/src/pkg/x_test.go:42 +0x9c\n\
+{\"Action\":\"fail\",\"Package\":\"example.com/pkg\",\"Elapsed\":0.5}";
+        let result = filter_go_test_json(output);
+        assert!(
+            result.contains("Runtime output:"),
+            "Expected 'Runtime output:' header, got: {}",
+            result
+        );
+        assert!(
+            result.contains("fatal error: checkptr"),
+            "Expected the fatal-error message inline, got: {}",
+            result
+        );
+        assert!(
+            result.contains("x_test.go:42"),
+            "Expected the goroutine stack frame inline, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_surfaces_panic_alongside_test_failure() {
+        // When a test fails (test-level fail event) AND the package also has
+        // package-level panic output, the package-level output was being
+        // dropped because the per-package section's outer loop excluded
+        // packages with `fail > 0`. Surface that context alongside the failed
+        // test. See #1882.
+        let output = "{\"Action\":\"run\",\"Package\":\"example.com/pkg\",\"Test\":\"TestBoom\"}\n\
+{\"Action\":\"output\",\"Package\":\"example.com/pkg\",\"Test\":\"TestBoom\",\"Output\":\"=== RUN   TestBoom\\n\"}\n\
+{\"Action\":\"fail\",\"Package\":\"example.com/pkg\",\"Test\":\"TestBoom\",\"Elapsed\":0.1}\n\
+{\"Action\":\"output\",\"Package\":\"example.com/pkg\",\"Output\":\"panic: runtime error: integer divide by zero [recovered]\\n\"}\n\
+{\"Action\":\"output\",\"Package\":\"example.com/pkg\",\"Output\":\"\\tpanic.go:1101 +0x71\\n\"}\n\
+{\"Action\":\"output\",\"Package\":\"example.com/pkg\",\"Output\":\"FAIL\\texample.com/pkg\\t0.5s\\n\"}\n\
+{\"Action\":\"fail\",\"Package\":\"example.com/pkg\",\"Elapsed\":0.5}";
+        let result = filter_go_test_json(output);
+        assert!(
+            result.contains("TestBoom"),
+            "Expected the failed test name, got: {}",
+            result
+        );
+        assert!(
+            result.contains("panic: runtime error: integer divide by zero"),
+            "Expected the panic line surfaced alongside TestBoom, got: {}",
+            result
+        );
+        // The boilerplate FAIL\tpkg\telapsed line should be filtered (we already
+        // emit our own [FAIL] header).
+        assert!(
+            !result.contains("FAIL\texample.com/pkg\t0.5s"),
+            "FAIL boilerplate should be filtered, got: {}",
             result
         );
     }
