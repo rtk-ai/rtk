@@ -515,7 +515,12 @@ impl Tracker {
         output_tokens: usize,
         exec_time_ms: u64,
     ) -> Result<()> {
-        let saved = input_tokens.saturating_sub(output_tokens);
+        // Signed, so a command that emitted MORE than the wrapped command records the
+        // truth (a negative saving / negative pct) instead of `saturating_sub` clamping
+        // to 0 and reporting a fake "0% — did nothing". SQLite INTEGER/REAL both hold
+        // negatives. Aggregate readers clamp these to 0 for their unsigned token-count
+        // API, but per-command `savings_pct` keeps the honest negative.
+        let saved = input_tokens as i64 - output_tokens as i64;
         let pct = if input_tokens > 0 {
             (saved as f64 / input_tokens as f64) * 100.0
         } else {
@@ -534,7 +539,7 @@ impl Tracker {
                 project_path, // added
                 input_tokens as i64,
                 output_tokens as i64,
-                saved as i64,
+                saved,
                 pct,
                 exec_time_ms as i64
             ],
@@ -838,7 +843,9 @@ impl Tracker {
             Ok((
                 row.get::<_, i64>(0)? as usize,
                 row.get::<_, i64>(1)? as usize,
-                row.get::<_, i64>(2)? as usize,
+                // saved_tokens may be negative (a command that worsened output); clamp
+                // to 0 for the unsigned aggregate so it never wraps to a huge usize.
+                row.get::<_, i64>(2)?.max(0) as usize,
                 row.get::<_, i64>(3)? as u64,
             ))
         })?;
@@ -899,7 +906,8 @@ impl Tracker {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)? as usize,
-                row.get::<_, i64>(2)? as usize,
+                // SUM(saved_tokens): clamp a net-negative group to 0 (unsigned field).
+                row.get::<_, i64>(2)?.max(0) as usize,
                 row.get::<_, f64>(3)?,
                 row.get::<_, f64>(4)? as u64,
             ))
@@ -924,7 +932,11 @@ impl Tracker {
 
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
             // added: params
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+            // SUM(saved_tokens) per day: clamp a net-negative day to 0 (unsigned field).
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?.max(0) as usize,
+            ))
         })?;
 
         let mut result: Vec<_> = rows.collect::<Result<Vec<_>, _>>()?;
@@ -974,7 +986,7 @@ impl Tracker {
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
             // added: params
             let input = row.get::<_, i64>(2)? as usize;
-            let saved = row.get::<_, i64>(4)? as usize;
+            let saved = row.get::<_, i64>(4)?.max(0) as usize; // clamp net-negative group
             let commands = row.get::<_, i64>(1)? as usize;
             let total_time = row.get::<_, i64>(5)? as u64;
             let savings_pct = if input > 0 {
@@ -1048,7 +1060,7 @@ impl Tracker {
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
             // added: params
             let input = row.get::<_, i64>(3)? as usize;
-            let saved = row.get::<_, i64>(5)? as usize;
+            let saved = row.get::<_, i64>(5)?.max(0) as usize; // clamp net-negative group
             let commands = row.get::<_, i64>(2)? as usize;
             let total_time = row.get::<_, i64>(6)? as u64;
             let savings_pct = if input > 0 {
@@ -1122,7 +1134,7 @@ impl Tracker {
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
             // added: params
             let input = row.get::<_, i64>(2)? as usize;
-            let saved = row.get::<_, i64>(4)? as usize;
+            let saved = row.get::<_, i64>(4)?.max(0) as usize; // clamp net-negative group
             let commands = row.get::<_, i64>(1)? as usize;
             let total_time = row.get::<_, i64>(5)? as u64;
             let savings_pct = if input > 0 {
@@ -1202,7 +1214,7 @@ impl Tracker {
                         .map(|dt| dt.with_timezone(&Utc))
                         .unwrap_or_else(|_| Utc::now()),
                     rtk_cmd: row.get(1)?,
-                    saved_tokens: row.get::<_, i64>(2)? as usize,
+                    saved_tokens: row.get::<_, i64>(2)?.max(0) as usize, // clamp negative
                     savings_pct: row.get(3)?,
                 })
             },
@@ -1318,6 +1330,12 @@ impl Tracker {
     }
 
     /// Average savings percentage per command (unweighted — each command name counts once).
+    ///
+    /// Keeps the honest signed value: a command whose filter consistently emits
+    /// more than it saves yields a negative average, mirroring `overall_savings_pct`
+    /// and the signed per-command `savings_pct` (see `record`). Only the upper end is
+    /// bounded (a real saving never exceeds 100%); telemetry consumers assert on that,
+    /// not on a `0..=100` floor.
     pub fn avg_savings_per_command(&self) -> Result<f64> {
         let avg: f64 = self.conn.query_row(
             "SELECT COALESCE(AVG(avg_sav), 0.0) FROM (
@@ -1499,7 +1517,7 @@ pub(crate) fn get_db_path() -> Result<PathBuf> {
     // `config::cached_config`), not a fresh `Config::load()`: this runs inside
     // `Tracker::new()`, which `log_hook_decision` now calls on every single
     // PreToolUse hook invocation — `hook_rewrite_params()` (called earlier in the
-    // same hook invocation, via `get_rewritten`) already reads config too, so
+    // same hook invocation, via `hooks::decision::decide`) already reads config too, so
     // without caching that's two full disk-read-plus-TOML-parse round trips per
     // Bash tool call instead of one.
     if let Some(db_path) = crate::core::config::cached_config()
@@ -1655,8 +1673,14 @@ pub fn record_parse_failure_silent(raw_command: &str, error_message: &str, succe
 /// assert_eq!(estimate_tokens("hello world"), 3); // 11 chars = ceil(2.75) = 3
 /// ```
 pub fn estimate_tokens(text: &str) -> usize {
-    // ~4 chars per token on average
-    (text.len() as f64 / 4.0).ceil() as usize
+    estimate_tokens_from_len(text.len())
+}
+
+/// Token estimate from a raw byte length, for callers that hold a byte count rather
+/// than a `&str` (e.g. non-UTF-8 captured output). Same ~4-chars-per-token model as
+/// [`estimate_tokens`].
+pub fn estimate_tokens_from_len(len: usize) -> usize {
+    (len as f64 / 4.0).ceil() as usize
 }
 
 /// Helper struct for timing command execution
@@ -1729,6 +1753,27 @@ impl TimedExecution {
     pub fn track(&self, original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
         let elapsed_ms = self.start.elapsed().as_millis() as u64;
         let input_tokens = estimate_tokens(input);
+        let output_tokens = estimate_tokens(output);
+
+        if let Ok(tracker) = Tracker::new() {
+            let _ = tracker.record(
+                original_cmd,
+                rtk_cmd,
+                input_tokens,
+                output_tokens,
+                elapsed_ms,
+            );
+        }
+    }
+
+    /// Like [`track`](Self::track), but the input size is supplied as a raw byte
+    /// count instead of a `&str`. For callers whose captured input is non-UTF-8
+    /// bytes (e.g. a Latin-1 blob): measuring the decoded string would count the
+    /// transcoded (inflated) length rather than what the wrapped command emitted,
+    /// overstating the reduction.
+    pub fn track_bytes(&self, original_cmd: &str, rtk_cmd: &str, input_len: usize, output: &str) {
+        let elapsed_ms = self.start.elapsed().as_millis() as u64;
+        let input_tokens = estimate_tokens_from_len(input_len);
         let output_tokens = estimate_tokens(output);
 
         if let Ok(tracker) = Tracker::new() {
@@ -1892,6 +1937,73 @@ mod tests {
 
         // This validates that passthrough (0 input, 0 output) doesn't dilute stats
         // because the savings calculation is correct for both cases
+    }
+
+    // record() must reflect a REGRESSION (output larger than the wrapped command's)
+    // as a negative saving, not saturate it to 0 and report a fake "0% — did nothing".
+    #[test]
+    fn test_record_reflects_worsening_not_zero() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        // Emitted 150 tokens where plain git emitted 100: a real regression.
+        tracker
+            .record("cmd", "rtk cmd worse", 100, 150, 5)
+            .expect("Failed to record worsening command");
+
+        // The DB stores the honest negative saving (isolated in-memory DB, one row).
+        assert_eq!(
+            tracker.total_tokens_saved().expect("sum saved"),
+            -50,
+            "worsening must be stored as a negative saving, not saturated to 0"
+        );
+
+        // The per-command savings_pct is negative, not the old fake 0%.
+        let recent = tracker.get_recent(10).expect("Failed to get recent");
+        let rec = recent
+            .iter()
+            .find(|r| r.rtk_cmd == "rtk cmd worse")
+            .expect("worsening record not found");
+        assert!(
+            (rec.savings_pct - (-50.0)).abs() < 1e-9,
+            "expected -50% savings, got {}",
+            rec.savings_pct
+        );
+
+        // Aggregate telemetry also reflects the regression as negative, and the unsigned
+        // summary counter clamps rather than wrapping to a huge usize.
+        assert!(
+            tracker.overall_savings_pct().expect("overall pct") < 0.0,
+            "overall savings must be negative for a net regression"
+        );
+        let summary = tracker.get_summary().expect("summary");
+        assert_eq!(
+            summary.total_saved, 0,
+            "unsigned aggregate clamps a negative saving to 0 (never wraps)"
+        );
+    }
+
+    // avg_savings_per_command keeps the honest signed value: a command whose filter
+    // consistently emits more than it saves yields a negative average (mirroring
+    // overall_savings_pct), never saturated to a fake 0. This is the aggregate that
+    // feeds the telemetry payload, so this pins that telemetry can carry a negative
+    // savings signal instead of hiding a regressing filter behind 0%.
+    #[test]
+    fn test_avg_savings_per_command_reflects_negative() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        // 100 tokens in, 150 out: the filter made things worse => -50% per-command.
+        tracker
+            .record("cmd", "rtk worse", 100, 150, 5)
+            .expect("Failed to record worsening command");
+
+        // Single command group, AVG(savings_pct) == -50%: the aggregate stays negative.
+        let avg = tracker
+            .avg_savings_per_command()
+            .expect("avg_savings_per_command");
+        assert!(
+            (avg - (-50.0)).abs() < 1e-9,
+            "expected honest -50% aggregate, got {avg}"
+        );
+        // Upper bound still holds (a real saving never exceeds 100%).
+        assert!(avg <= 100.0, "aggregate must never exceed 100, got {avg}");
     }
 
     // 5. TimedExecution::track records with exec_time > 0

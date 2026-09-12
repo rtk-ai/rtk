@@ -487,15 +487,9 @@ pub fn run_stdin(_verbose: u8) -> Result<()> {
     Ok(())
 }
 
-/// Filter a piped stream: parse strictly (the parser reads structure through
-/// an ANSI-stripped view, so a `git diff --color` stream parses instead of
-/// condensing to silence, while content lines keep their bytes) and apply
-/// the never-worse check — inlined rather than via `guard::never_worse`,
-/// which hands back the winning `&str`, where this path needs `None` to
-/// mean byte-exact fallback. `None` means the caller must emit its exact
-/// input bytes — including for non-UTF-8 input, where filtering would
-/// rewrite the user's content bytes to U+FFFD (byte fidelity outranks
-/// savings here).
+/// Filter a piped stream. `None` means the caller emits its input bytes
+/// exactly: non-UTF-8 input takes that path, so content that is not valid
+/// UTF-8 survives byte for byte.
 fn condense_stdin(bytes: &[u8]) -> Option<String> {
     let input = std::str::from_utf8(bytes).ok()?;
     // PowerShell 5.1's `>` writes a BOM; without this the first `diff
@@ -1839,6 +1833,24 @@ fn shared_tail(x: &str, y: &str) -> Option<usize> {
     tail.find('/').map(|p| n - p).filter(|&m| m > 1)
 }
 
+/// Record the roots GNU diff was given, taken from a pair of paths it printed
+/// for the same file. What precedes the shared tail is that side's root; an
+/// `Only in <dir>: <file>` line later splits on whichever of these it starts
+/// with, which is how a directory holding `: ` keeps its name. A root already
+/// held is not recorded twice, and a pair with no root above the shared tail
+/// records nothing.
+fn record_gnu_roots(set: &mut Vec<String>, x: &str, y: &str) {
+    let Some(n) = shared_tail(x, y) else {
+        return;
+    };
+    for side in [x, y] {
+        let root = side[..side.len() - n].trim_end_matches('/');
+        if !root.is_empty() && !set.iter().any(|r| r == root) {
+            set.push(root.to_string());
+        }
+    }
+}
+
 /// Parse `@@ -a[,b] +c[,d] @@ ...` (and `@@@ -a,b -c,d +e,f @@@ ...` with one
 /// `-` range per parent) into per-parent old-line budgets and the new-line
 /// budget. Omitted counts default to 1 per the unified-diff spec.
@@ -2480,14 +2492,7 @@ fn condense_unified_diff_strict(diff: &str) -> Option<String> {
                     if gnu_roots && !hg_stream {
                         // The roots GNU diff was given, for `Only in` (rule 6).
                         let (x, y) = (dequote(minus), dequote(plus));
-                        if let Some(n) = shared_tail(&x, &y) {
-                            for side in [&x, &y] {
-                                let root = side[..side.len() - n].trim_end_matches('/');
-                                if !root.is_empty() && !gnu_root_set.iter().any(|r| r == root) {
-                                    gnu_root_set.push(root.to_string());
-                                }
-                            }
-                        }
+                        record_gnu_roots(&mut gnu_root_set, &x, &y);
                     }
                     match current.as_mut().filter(|e| e.header_only()) {
                         // `rename to`/`copy to` is git's exact path; the pair
@@ -2639,14 +2644,7 @@ fn condense_unified_diff_strict(diff: &str) -> Option<String> {
                         std::borrow::Cow::Borrowed(pair),
                         std::borrow::Cow::Borrowed(pair),
                     ));
-                if let Some(n) = shared_tail(&x, &y) {
-                    for side in [&x, &y] {
-                        let root = side[..side.len() - n].trim_end_matches('/');
-                        if !root.is_empty() && !gnu_root_set.iter().any(|r| r == root) {
-                            gnu_root_set.push(root.to_string());
-                        }
-                    }
-                }
+                record_gnu_roots(&mut gnu_root_set, &x, &y);
                 let name = header_name(&x, &y, Some(("", "")));
                 flush(&mut entries, &mut current)?;
                 entries.push(FileEntry {
@@ -4674,6 +4672,84 @@ mod tests {
         assert_eq!(code, 1);
     }
 
+    /// git's `index` and `similarity index` lines are structure, not prose.
+    /// Counting one as a dropped line costs nothing on a git-only stream —
+    /// nothing consults the drop until a GNU echo has been seen — but a stream
+    /// carrying both producers then bails to raw on a section that parses.
+    #[test]
+    fn git_index_lines_are_structural_in_a_gnu_stream() {
+        let mixed = "diff -ru a/z.txt b/z.txt\n\
+                     --- a/z.txt\t2026-09-08 00:00:00.000000000 +0000\n\
+                     +++ b/z.txt\t2026-09-08 00:00:00.000000000 +0000\n\
+                     @@ -1 +1 @@\n\
+                     -one\n\
+                     +two\n\
+                     diff --git a/g.txt b/g.txt\n\
+                     index 1234567..89abcde 100644\n\
+                     --- a/g.txt\n\
+                     +++ b/g.txt\n\
+                     @@ -1 +1 @@\n\
+                     -old\n\
+                     +new\n";
+        let out = condense_unified_diff_strict(mixed).expect("both sections parse");
+        assert!(out.contains("[file] b/z.txt"), "GNU section: {out}");
+        assert!(out.contains("[file] g.txt"), "git section: {out}");
+    }
+
+    /// The roots GNU diff was given are what an `Only in <dir>: <file>` line
+    /// splits on, so a directory holding `: ` keeps its name. Recorded once
+    /// each, and only when the pair has a root above its shared tail.
+    #[test]
+    fn gnu_roots_are_recorded_once_and_never_empty() {
+        let mut set = Vec::new();
+        record_gnu_roots(&mut set, "cd1/d: x/f.txt", "cd2/e: y/f.txt");
+        assert_eq!(set, ["cd1/d: x", "cd2/e: y"]);
+
+        // Same roots again from a sibling file: still one entry each.
+        record_gnu_roots(&mut set, "cd1/d: x/g.txt", "cd2/e: y/g.txt");
+        assert_eq!(set, ["cd1/d: x", "cd2/e: y"]);
+
+        // A bare pair has no root above the shared tail, and a trailing slash
+        // is not a root of its own.
+        let mut bare = Vec::new();
+        record_gnu_roots(&mut bare, "f.txt", "f.txt");
+        record_gnu_roots(&mut bare, "/f.txt", "/f.txt");
+        assert!(bare.is_empty(), "{bare:?}");
+    }
+
+    /// Every fixture is a real capture, so the detectors only ever see
+    /// well-formed lines there. These are the near misses they must reject:
+    /// a line one edit away from the shape, which prose can reach.
+    #[test]
+    fn detectors_reject_near_misses() {
+        assert!(is_hg_echo("diff -r 0123456789ab -r 0123456789cd f.txt"));
+        assert!(is_hg_echo("diff -r 0123456789ab f.txt"));
+        assert!(!is_hg_echo("diff -r zzzzzzzzzzzz -r 0123456789cd f.txt"));
+        assert!(!is_hg_echo("diff -r 0123456789ab -r zzzzzzzzzzzz f.txt"));
+        assert!(!is_hg_echo("diff -r 0123456789abcd -r 0123456789cd f.txt"));
+
+        let sha1 = "a".repeat(40);
+        assert!(is_mbox_from(&format!("From {sha1} Mon Sep 17 00:00:00 2001")));
+        assert!(is_mbox_from(&format!(
+            "From {} Mon Sep 17 00:00:00 2001",
+            "b".repeat(64)
+        )));
+        assert!(!is_mbox_from(&format!(
+            "From {} Mon Sep 17 00:00:00 2001",
+            "z".repeat(40)
+        )));
+        assert!(!is_mbox_from(&format!("From {sha1}")));
+        assert!(!is_mbox_from(
+            "From the reporter's description this looked like a parser bug, but"
+        ));
+
+        assert!(is_submodule_range("Submodule sub 0123456..89abcde:"));
+        assert!(is_submodule_range("Submodule sub 0123456..89abcde (rewind):"));
+        assert!(!is_submodule_range("Submodule sub zzzzzzz..89abcde:"));
+        assert!(!is_submodule_range("Submodule sub 0123456..zzzzzzz:"));
+        assert!(!is_submodule_range("Submodule sub 01234..89abcde:"));
+        assert!(!is_submodule_range("Submodule sub contains modified content"));
+    }
     // --- condense_unified_diff ---
 
     #[test]
@@ -7187,4 +7263,3 @@ diff --git a/b.rs b/b.rs
         );
     }
 }
-

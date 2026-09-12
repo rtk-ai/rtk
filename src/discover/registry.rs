@@ -1275,6 +1275,58 @@ const ROUTABLE_WRAPPER_PREFIXES: &[&str] = &["uv run"];
 /// not spawnable, so they must never fall through: `rtk exec foo` cannot run.
 const SHELL_KEYWORD_PREFIXES: &[&str] = &["noglob", "command", "builtin", "exec", "nocorrect"];
 
+struct ProcessWrapper {
+    name: &'static str,
+    value_opts: &'static [&'static str],
+    flag_opts: &'static [&'static str],
+    attached_opts: &'static [&'static str],
+    positionals: usize,
+    numeric_opts: bool,
+}
+
+const PROCESS_WRAPPERS: &[ProcessWrapper] = &[
+    ProcessWrapper {
+        name: "timeout",
+        value_opts: &["-s", "-k", "--signal", "--kill-after"],
+        flag_opts: &["--preserve-status", "--foreground", "-v", "--verbose"],
+        attached_opts: &["-s", "-k"],
+        positionals: 1,
+        numeric_opts: false,
+    },
+    ProcessWrapper {
+        name: "time",
+        value_opts: &["-f", "-o", "--format", "--output"],
+        flag_opts: &[
+            "-p",
+            "-a",
+            "-v",
+            "--append",
+            "--verbose",
+            "--portability",
+            "--quiet",
+        ],
+        attached_opts: &["-f", "-o"],
+        positionals: 0,
+        numeric_opts: false,
+    },
+    ProcessWrapper {
+        name: "nice",
+        value_opts: &["-n", "--adjustment"],
+        flag_opts: &[],
+        attached_opts: &["-n"],
+        positionals: 0,
+        numeric_opts: true,
+    },
+    ProcessWrapper {
+        name: "nohup",
+        value_opts: &[],
+        flag_opts: &[],
+        attached_opts: &[],
+        positionals: 0,
+        numeric_opts: false,
+    },
+];
+
 struct SafePipeConsumer {
     name: &'static str,
     unsafe_flags: &'static [&'static str],
@@ -1498,6 +1550,12 @@ fn rewrite_segment_inner(
         }
     }
 
+    // #2375
+    if let Some((prefix, rest)) = strip_process_wrapper_prefix(trimmed) {
+        return rewrite_segment_inner(rest, excluded, transparent_prefixes, context, depth + 1)
+            .map(|rewritten| format!("{} {}", prefix, rewritten));
+    }
+
     // User-configured wrapper prefixes (e.g. `docker exec mycontainer`). These
     // never fall through: an unmatched inner command drops the rewrite.
     for prefix in transparent_prefixes {
@@ -1707,6 +1765,104 @@ fn tool_form(cmd_clean: &str, rtk_equivalent: &str) -> String {
             })
         })
         .unwrap_or(normalized)
+}
+
+fn strip_process_wrapper_prefix(cmd: &str) -> Option<(&str, &str)> {
+    let tokens = tokenize(cmd);
+    let first = tokens.first()?;
+    if first.kind != TokenKind::Arg {
+        return None;
+    }
+    let wrapper = PROCESS_WRAPPERS
+        .iter()
+        .find(|candidate| candidate.name == command_basename(&first.value))?;
+    let inner = wrapper_inner_command(wrapper, &tokens)?;
+    if tokens[..inner_index(&tokens, inner)]
+        .iter()
+        .any(|token| token.value == "rtk")
+    {
+        return None;
+    }
+    let prefix = cmd[..inner.offset].trim_end();
+    let rest = cmd[inner.offset..].trim_start();
+    if prefix.is_empty() || rest.is_empty() {
+        return None;
+    }
+    Some((prefix, rest))
+}
+
+fn inner_index(tokens: &[ParsedToken], inner: &ParsedToken) -> usize {
+    tokens
+        .iter()
+        .position(|token| token.offset == inner.offset)
+        .unwrap_or(tokens.len())
+}
+
+fn command_basename(command: &str) -> &str {
+    command.rsplit('/').next().unwrap_or(command)
+}
+
+fn wrapper_inner_command<'a>(
+    wrapper: &ProcessWrapper,
+    tokens: &'a [ParsedToken],
+) -> Option<&'a ParsedToken> {
+    let mut idx = 1;
+    let mut options_done = false;
+    let mut positionals = wrapper.positionals;
+
+    loop {
+        let token = arg_token(tokens, idx)?;
+        let arg = token.value.as_str();
+
+        if !options_done && arg == "--" {
+            options_done = true;
+            idx += 1;
+            continue;
+        }
+        if !options_done && wrapper.numeric_opts && is_numeric_option(arg) {
+            idx += 1;
+            continue;
+        }
+        if !options_done && arg.starts_with('-') && arg != "-" {
+            if wrapper.flag_opts.contains(&arg) || takes_attached_value(wrapper, arg) {
+                idx += 1;
+                continue;
+            }
+            if wrapper.value_opts.contains(&arg) {
+                arg_token(tokens, idx + 1)?;
+                idx += 2;
+                continue;
+            }
+            return None;
+        }
+        if positionals > 0 {
+            positionals -= 1;
+            idx += 1;
+            continue;
+        }
+        return Some(token);
+    }
+}
+
+fn arg_token(tokens: &[ParsedToken], idx: usize) -> Option<&ParsedToken> {
+    tokens.get(idx).filter(|token| token.kind == TokenKind::Arg)
+}
+
+fn is_numeric_option(arg: &str) -> bool {
+    let Some(digits) = arg.strip_prefix('-').or_else(|| arg.strip_prefix('+')) else {
+        return false;
+    };
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+}
+
+fn takes_attached_value(wrapper: &ProcessWrapper, arg: &str) -> bool {
+    if let Some((name, _)) = arg.split_once('=') {
+        return wrapper.value_opts.contains(&name);
+    }
+    wrapper
+        .attached_opts
+        .iter()
+        .any(|opt| arg.len() > opt.len() && arg.starts_with(opt))
 }
 
 /// Strip a command prefix with word-boundary check.
@@ -6266,6 +6422,166 @@ mod tests {
     }
 
     #[test]
+    fn test_process_wrapper_rewrites_inner_command() {
+        for (input, expected) in [
+            ("timeout 300 cargo test", "timeout 300 rtk cargo test"),
+            ("time cargo build", "time rtk cargo build"),
+            ("nice -n 10 cargo test", "nice -n 10 rtk cargo test"),
+            ("nohup cargo build", "nohup rtk cargo build"),
+            (
+                "/usr/bin/timeout 300 cargo test",
+                "/usr/bin/timeout 300 rtk cargo test",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                Some(expected.into()),
+                "{}",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_process_wrapper_option_forms() {
+        for (input, expected) in [
+            (
+                "timeout -k 5s 300 cargo test",
+                "timeout -k 5s 300 rtk cargo test",
+            ),
+            (
+                "timeout -k5s 300 cargo test",
+                "timeout -k5s 300 rtk cargo test",
+            ),
+            (
+                "timeout --kill-after=5s 300 cargo test",
+                "timeout --kill-after=5s 300 rtk cargo test",
+            ),
+            (
+                "timeout --preserve-status 300 cargo test",
+                "timeout --preserve-status 300 rtk cargo test",
+            ),
+            ("timeout -- 300 cargo test", "timeout -- 300 rtk cargo test"),
+            ("timeout 300 -- cargo test", "timeout 300 -- rtk cargo test"),
+            ("time -p cargo build", "time -p rtk cargo build"),
+            ("time -f %e cargo build", "time -f %e rtk cargo build"),
+            ("nice -n10 cargo test", "nice -n10 rtk cargo test"),
+            ("nice -10 cargo test", "nice -10 rtk cargo test"),
+            ("nice +5 cargo test", "nice +5 rtk cargo test"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                Some(expected.into()),
+                "{}",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_process_wrapper_unknown_option_is_passthrough() {
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout --unknown 300 cargo test", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("nice --unknown cargo test", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_process_wrapper_with_unsupported_inner_command_is_passthrough() {
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout 300 mycustombinary --flag", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_process_wrapper_never_doubles_rtk() {
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout rtk cargo test", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_process_wrapper_without_inner_command_is_passthrough() {
+        assert_eq!(rewrite_command_no_prefixes("timeout 300", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("time", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("timeout -k 5s", &[]), None);
+    }
+
+    #[test]
+    fn test_process_wrapper_refuses_shell_syntax() {
+        for input in [
+            "time (cargo build)",
+            "timeout 300 >out.log cargo test",
+            "timeout 300 $(which cargo) test",
+            "timeout 300 */bin/cargo test",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(input, &[]), None, "{}", input);
+        }
+    }
+
+    #[test]
+    fn test_stdbuf_is_not_a_process_wrapper() {
+        assert_eq!(
+            rewrite_command_no_prefixes("stdbuf -oL cargo test", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_process_wrapper_composes_with_prefixes_and_compounds() {
+        assert_eq!(
+            rewrite_command_no_prefixes("CI=1 timeout 300 cargo test", &[]),
+            Some("CI=1 timeout 300 rtk cargo test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("nice -n 10 timeout 300 cargo test", &[]),
+            Some("nice -n 10 timeout 300 rtk cargo test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout 300 cargo test && time git status", &[]),
+            Some("timeout 300 rtk cargo test && time rtk git status".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("command timeout 300 git status", &[]),
+            Some("command timeout 300 rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_process_wrapper_rewrite_is_idempotent() {
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout 300 rtk cargo test", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_process_wrapper_keeps_pipeline_context() {
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout 300 git log | head -5", &[]),
+            Some("timeout 300 rtk git log | head -5".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test | timeout 5 grep error", &[]),
+            Some("cargo test | timeout 5 rtk grep error".into())
+        );
+    }
+
+    #[test]
+    fn test_process_wrapper_respects_exclusions() {
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout 300 cargo test", &["cargo test".to_string()]),
+            None
+        );
+    }
+
+    #[test]
     fn test_transparent_prefix_multiple_configured() {
         let prefixes = vec!["shadowenv exec --".to_string(), "direnv exec .".to_string()];
         assert_eq!(
@@ -6792,19 +7108,21 @@ mod tests {
     /// `jj` is covered only by a TOML filter, never by the native RULES table,
     /// so the bare case pins the TOML branch of the rewrite path and keeps the
     /// wrapper assertions below from passing vacuously when TOML is disabled.
+    /// #2375: wrappers are peeled before matching; `is_fully_anchored` in
+    /// `core::toml_filter` is what keeps a filter off the wrapper itself.
     #[test]
-    fn test_toml_filter_rewrites_bare_command_but_not_wrapped_invocations() {
+    fn test_toml_filter_rewrites_bare_and_wrapped_invocations() {
         assert_eq!(
             rewrite_command_no_prefixes("jj log", &[]),
             Some("rtk jj log".into()),
         );
         assert_eq!(
             rewrite_command_no_prefixes("timeout 5 /usr/bin/jj log", &[]),
-            None,
+            Some("timeout 5 rtk /usr/bin/jj log".into()),
         );
         assert_eq!(
             rewrite_command_no_prefixes("nohup /opt/tools/jj log", &[]),
-            None,
+            Some("nohup rtk /opt/tools/jj log".into()),
         );
     }
 
