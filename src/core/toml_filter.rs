@@ -14,14 +14,21 @@
 ///   - `RTK_TOML_DEBUG=1`  — print which filter matched and line counts to stderr
 ///
 /// Pipeline stages (applied in order):
-///   1. strip_ansi           — remove ANSI escape codes
-///   2. replace              — regex substitutions, line-by-line, chainable
-///   3. match_output         — short-circuit: if blob matches a pattern, return message immediately
-///   4. strip/keep_lines     — filter lines by regex
-///   5. truncate_lines_at    — truncate each line to N chars
-///   6. head/tail_lines      — keep first/last N lines
-///   7. max_lines            — absolute line cap
-///   8. on_empty             — message if result is empty
+///    1. strip_ansi              — remove ANSI escape codes
+///    2. replace                 — regex substitutions, line-by-line, chainable
+///    3. match_output            — short-circuit: if blob matches a pattern, return message immediately
+///    4. strip/keep_lines        — filter lines by regex
+///    5. squeeze_whitespace      — collapse intra-line space/tab runs to one space (lossless)
+///    6. collapse_table_padding  — collapse padded-column gaps to one separator (lossless)
+///    7. fold_repeats            — collapse consecutive identical lines to `line ×N` (lossless)
+///    8. truncate_lines_at       — truncate each line to N chars
+///    9. head/tail_lines         — keep first/last N lines
+///   10. max_lines               — absolute line cap
+///   11. on_empty                — message if result is empty
+///
+/// Stages 5-7 are lossless: every original line is recoverable from the output
+/// (squeeze/collapse lose only exact whitespace geometry; fold_repeats keeps the
+/// exact repeat count in the `×N` suffix). All three default to `false`.
 use super::constants::RTK_META_COMMANDS;
 use regex::{Regex, RegexSet};
 use serde::Deserialize;
@@ -97,6 +104,19 @@ struct TomlFilterDef {
     strip_lines_matching: Vec<String>,
     #[serde(default)]
     keep_lines_matching: Vec<String>,
+    /// Collapse runs of spaces/tabs inside a line to a single space and strip
+    /// trailing whitespace. Leading indentation is preserved verbatim. Lossless.
+    #[serde(default)]
+    squeeze_whitespace: bool,
+    /// Collapse padded-column gaps (2+ spaces, or `|`-separated with padding) to
+    /// a single separator (two spaces, or ` | `), keeping every cell verbatim.
+    /// Lossless.
+    #[serde(default)]
+    collapse_table_padding: bool,
+    /// Collapse runs of consecutive identical lines into one line suffixed with
+    /// ` ×N`. Lossless — the repeat count is preserved in the suffix.
+    #[serde(default)]
+    fold_repeats: bool,
     truncate_lines_at: Option<usize>,
     head_lines: Option<usize>,
     tail_lines: Option<usize>,
@@ -144,6 +164,9 @@ pub struct CompiledFilter {
     replace: Vec<CompiledReplaceRule>,
     match_output: Vec<CompiledMatchOutputRule>,
     line_filter: LineFilter,
+    squeeze_whitespace: bool,
+    collapse_table_padding: bool,
+    fold_repeats: bool,
     truncate_lines_at: Option<usize>,
     head_lines: Option<usize>,
     tail_lines: Option<usize>,
@@ -393,6 +416,9 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
         replace,
         match_output,
         line_filter,
+        squeeze_whitespace: def.squeeze_whitespace,
+        collapse_table_padding: def.collapse_table_padding,
+        fold_repeats: def.fold_repeats,
         truncate_lines_at: def.truncate_lines_at,
         head_lines: def.head_lines,
         tail_lines: def.tail_lines,
@@ -553,16 +579,133 @@ pub fn find_filter_in<'a>(
 /// Apply a compiled filter pipeline to raw stdout. Pure String -> String.
 ///
 /// Pipeline stages (in order):
-///   1. strip_ansi           — remove ANSI escape codes
-///   2. replace              — regex substitutions, line-by-line, chainable
-///   3. match_output         — short-circuit if blob matches a pattern
-///   4. strip/keep_lines     — filter lines by regex
-///   5. truncate_lines_at    — truncate each line to N chars
-///   6. head/tail_lines      — keep first/last N lines
-///   7. max_lines            — absolute line cap
-///   8. on_empty             — message if result is empty
+///    1. strip_ansi              — remove ANSI escape codes
+///    2. replace                 — regex substitutions, line-by-line, chainable
+///    3. match_output            — short-circuit if blob matches a pattern
+///    4. strip/keep_lines        — filter lines by regex
+///    5. squeeze_whitespace      — collapse intra-line space/tab runs (lossless)
+///    6. collapse_table_padding  — collapse padded-column gaps (lossless)
+///    7. fold_repeats            — collapse consecutive identical lines (lossless)
+///    8. truncate_lines_at       — truncate each line to N chars
+///    9. head/tail_lines         — keep first/last N lines
+///   10. max_lines               — absolute line cap
+///   11. on_empty                — message if result is empty
 pub fn apply_filter(filter: &CompiledFilter, stdout: &str) -> String {
     apply_filter_with_info(filter, stdout).0
+}
+
+// ---------------------------------------------------------------------------
+// Lossless transforms (squeeze_whitespace, collapse_table_padding, fold_repeats)
+// ---------------------------------------------------------------------------
+
+/// Collapse runs of spaces/tabs in `line` to a single space and strip trailing
+/// whitespace. Leading indentation (spaces/tabs at the start of the line) is
+/// left untouched, so alignment inside a code/log block survives.
+fn squeeze_whitespace_line(line: &str) -> String {
+    let indent_len = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let (indent, rest) = line.split_at(indent_len);
+    let rest = rest.trim_end_matches([' ', '\t']);
+
+    let mut out = String::with_capacity(indent_len + rest.len());
+    out.push_str(indent);
+    let mut in_run = false;
+    for c in rest.chars() {
+        if c == ' ' || c == '\t' {
+            if !in_run {
+                out.push(' ');
+                in_run = true;
+            }
+        } else {
+            out.push(c);
+            in_run = false;
+        }
+    }
+    out
+}
+
+/// A line qualifies for table-padding collapse when it has an internal gap of
+/// 2+ spaces flanked by non-space content, or a `|` adjacent to whitespace
+/// (markdown/psql-style pipe tables). Lines without that shape are left as-is.
+static SPACE_GAP_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\S {2,}\S").expect("static regex"));
+static PIPE_PADDING_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[ \t]\||\|[ \t]").expect("static regex"));
+static SPACE_RUN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r" {2,}").expect("static regex"));
+
+/// Collapse a `|`-delimited row: split on `|`, trim padding from each cell,
+/// rejoin with ` | `. A leading/trailing `|` (as in `| a | b |`) is preserved
+/// as a bare delimiter rather than growing an extra empty cell.
+fn collapse_pipe_line(line: &str) -> String {
+    let indent_len = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let (indent, rest) = line.split_at(indent_len);
+    let rest = rest.trim_end_matches([' ', '\t']);
+
+    let has_leading = rest.starts_with('|');
+    let core = if has_leading { &rest[1..] } else { rest };
+    let has_trailing = core.ends_with('|') && !core.is_empty();
+    let core = if has_trailing {
+        &core[..core.len() - 1]
+    } else {
+        core
+    };
+
+    let cells: Vec<&str> = core.split('|').map(str::trim).collect();
+    let mut out = String::with_capacity(indent_len + rest.len());
+    out.push_str(indent);
+    if has_leading {
+        out.push_str("| ");
+    }
+    out.push_str(&cells.join(" | "));
+    if has_trailing {
+        out.push_str(" |");
+    }
+    out
+}
+
+/// Collapse a plain space-padded row: split on runs of 2+ spaces, rejoin each
+/// cell with exactly two spaces. Leading indentation is preserved verbatim.
+fn collapse_space_line(line: &str) -> String {
+    let indent_len = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let (indent, rest) = line.split_at(indent_len);
+    let rest = rest.trim_end_matches([' ', '\t']);
+
+    let cells: Vec<&str> = SPACE_RUN_RE.split(rest).collect();
+    format!("{indent}{}", cells.join("  "))
+}
+
+/// Collapse padded-column gaps in `line` to a single separator, keeping every
+/// cell verbatim. Pipe-delimited rows take precedence over plain space-padded
+/// rows when a line has both.
+fn collapse_table_padding_line(line: &str) -> String {
+    if PIPE_PADDING_RE.is_match(line) {
+        collapse_pipe_line(line)
+    } else if SPACE_GAP_RE.is_match(line) {
+        collapse_space_line(line)
+    } else {
+        line.to_string()
+    }
+}
+
+/// Collapse consecutive identical lines into one line suffixed with ` ×N`
+/// (N >= 2). A single occurrence is left unchanged — folding is a no-op on
+/// non-repeating input.
+fn fold_repeat_lines(lines: Vec<String>) -> Vec<String> {
+    let mut out = Vec::with_capacity(lines.len());
+    let mut iter = lines.into_iter().peekable();
+    while let Some(line) = iter.next() {
+        let mut count = 1usize;
+        while iter.peek() == Some(&line) {
+            iter.next();
+            count += 1;
+        }
+        if count >= 2 {
+            out.push(format!("{line} ×{count}"));
+        } else {
+            out.push(line);
+        }
+    }
+    out
 }
 
 #[derive(Debug, PartialEq)]
@@ -627,7 +770,28 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
         LineFilter::None => {}
     }
 
-    // 5. truncate_lines_at — uses utils::truncate (unicode-safe)
+    // 5. squeeze_whitespace — collapse intra-line space/tab runs (lossless)
+    if filter.squeeze_whitespace {
+        lines = lines
+            .into_iter()
+            .map(|l| squeeze_whitespace_line(&l))
+            .collect();
+    }
+
+    // 6. collapse_table_padding — collapse padded-column gaps (lossless)
+    if filter.collapse_table_padding {
+        lines = lines
+            .into_iter()
+            .map(|l| collapse_table_padding_line(&l))
+            .collect();
+    }
+
+    // 7. fold_repeats — collapse consecutive identical lines (lossless)
+    if filter.fold_repeats {
+        lines = fold_repeat_lines(lines);
+    }
+
+    // 8. truncate_lines_at — uses utils::truncate (unicode-safe)
     let mut intra_line_loss = false;
     if let Some(max_chars) = filter.truncate_lines_at {
         lines = lines
@@ -647,7 +811,7 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
         && (filter.head_lines.is_some() || filter.max_lines.is_some());
     let pre_cut = snapshot_for_tail.then(|| lines.clone());
 
-    // 6. head + tail
+    // 9. head + tail
     let total = lines.len();
     let mut noncontiguous_drop = false;
     let mut head_cut: Option<usize> = None;
@@ -674,7 +838,7 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
         }
     }
 
-    // 7. max_lines — absolute cap applied after head/tail (includes omit messages)
+    // 10. max_lines — absolute cap applied after head/tail (includes omit messages)
     let mut max_cut: Option<usize> = None;
     if let Some(max) = filter.max_lines {
         if lines.len() > max {
@@ -685,7 +849,7 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
         }
     }
 
-    // 8. on_empty
+    // 11. on_empty
     let result = lines.join("\n");
     if result.trim().is_empty() {
         if let Some(ref msg) = filter.on_empty {
@@ -1215,7 +1379,7 @@ on_empty = "nothing left"
 
     #[test]
     fn test_full_pipeline_order() {
-        // Verify all 8 stages fire in order on a single input
+        // Verify the core stages fire in order on a single input
         let f = first_filter(
             r#"
 schema_version = 1
@@ -1236,6 +1400,350 @@ on_empty = "empty"
         assert!(out.contains("red line"));
         assert!(!out.contains("noise skip"));
         assert!(out.contains("lines omitted") || out.contains("lines truncated"));
+    }
+
+    // --- squeeze_whitespace ---
+
+    #[test]
+    fn test_squeeze_whitespace_collapses_runs_and_trims_trailing() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+squeeze_whitespace = true
+"#,
+        );
+        let out = apply_filter(&f, "a    b\tc  \nfine");
+        assert_eq!(out, "a b c\nfine");
+    }
+
+    #[test]
+    fn test_squeeze_whitespace_preserves_leading_indentation() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+squeeze_whitespace = true
+"#,
+        );
+        let out = apply_filter(&f, "    indented   value   here");
+        assert_eq!(out, "    indented value here");
+    }
+
+    #[test]
+    fn test_squeeze_whitespace_is_idempotent() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+squeeze_whitespace = true
+"#,
+        );
+        let input = "  a    b   c\td   \nplain line";
+        let once = apply_filter(&f, input);
+        let twice = apply_filter(&f, &once);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn test_squeeze_whitespace_default_off() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+"#,
+        );
+        let out = apply_filter(&f, "a    b");
+        assert_eq!(out, "a    b");
+    }
+
+    // --- fold_repeats ---
+
+    #[test]
+    fn test_fold_repeats_collapses_consecutive_duplicates_with_count() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+fold_repeats = true
+"#,
+        );
+        let out = apply_filter(&f, "same\nsame\nsame\ndifferent");
+        assert_eq!(out, "same ×3\ndifferent");
+    }
+
+    #[test]
+    fn test_fold_repeats_single_line_is_no_op() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+fold_repeats = true
+"#,
+        );
+        let out = apply_filter(&f, "only once");
+        assert_eq!(out, "only once");
+    }
+
+    #[test]
+    fn test_fold_repeats_non_adjacent_duplicates_not_folded() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+fold_repeats = true
+"#,
+        );
+        // Duplicates separated by a different line are NOT consecutive — no folding.
+        let out = apply_filter(&f, "a\nb\na");
+        assert_eq!(out, "a\nb\na");
+    }
+
+    #[test]
+    fn test_fold_repeats_count_correct_for_two() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+fold_repeats = true
+"#,
+        );
+        let out = apply_filter(&f, "x\nx");
+        assert_eq!(out, "x ×2");
+    }
+
+    #[test]
+    fn test_fold_repeats_default_off() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+"#,
+        );
+        let out = apply_filter(&f, "same\nsame");
+        assert_eq!(out, "same\nsame");
+    }
+
+    // --- collapse_table_padding ---
+
+    #[test]
+    fn test_collapse_table_padding_space_style_keeps_cells_verbatim() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+collapse_table_padding = true
+"#,
+        );
+        let out = apply_filter(&f, "NAME       STATUS      AGE\nweb-1      Running     3d");
+        assert_eq!(out, "NAME  STATUS  AGE\nweb-1  Running  3d");
+    }
+
+    #[test]
+    fn test_collapse_table_padding_pipe_style_keeps_cells_verbatim() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+collapse_table_padding = true
+"#,
+        );
+        // Leading indentation (like leading whitespace elsewhere in the pipeline)
+        // is preserved verbatim; only inter-cell padding is collapsed.
+        let out = apply_filter(&f, " id | name  | value \n  1 | alice |    10");
+        assert_eq!(out, " id | name | value\n  1 | alice | 10");
+    }
+
+    #[test]
+    fn test_collapse_table_padding_pipe_style_preserves_edge_pipes() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+collapse_table_padding = true
+"#,
+        );
+        let out = apply_filter(&f, "| a   | b |");
+        assert_eq!(out, "| a | b |");
+    }
+
+    #[test]
+    fn test_collapse_table_padding_ignores_non_table_lines() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+collapse_table_padding = true
+"#,
+        );
+        // No 2+ space gap and no padded pipe — left untouched.
+        let out = apply_filter(&f, "a single line with normal spacing");
+        assert_eq!(out, "a single line with normal spacing");
+    }
+
+    #[test]
+    fn test_collapse_table_padding_is_idempotent() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+collapse_table_padding = true
+"#,
+        );
+        let input = "NAME       STATUS      AGE\n id | name  | value ";
+        let once = apply_filter(&f, input);
+        let twice = apply_filter(&f, &once);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn test_collapse_table_padding_default_off() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+"#,
+        );
+        let input = "NAME       STATUS      AGE";
+        assert_eq!(apply_filter(&f, input), input);
+    }
+
+    // --- combined order: squeeze_whitespace -> collapse_table_padding -> fold_repeats ---
+
+    #[test]
+    fn test_combined_lossless_transforms_apply_in_documented_order() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+squeeze_whitespace = true
+collapse_table_padding = true
+fold_repeats = true
+"#,
+        );
+        // Two identical padded rows: squeeze first normalizes runs to single
+        // spaces, collapse_table_padding then has nothing left to widen (no more
+        // 2+ space runs), so both rows end up byte-identical and fold_repeats
+        // merges them — proving squeeze really does run before fold.
+        let out = apply_filter(&f, "a    b\na    b");
+        assert_eq!(out, "a b ×2");
+    }
+
+    #[test]
+    fn test_combined_transforms_pipe_table_then_fold() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+collapse_table_padding = true
+fold_repeats = true
+"#,
+        );
+        // Two rows that only become identical after collapse_table_padding
+        // normalizes their pipe spacing — proving collapse runs before fold.
+        let out = apply_filter(&f, "a |  b\na | b");
+        assert_eq!(out, "a | b ×2");
+    }
+
+    #[test]
+    fn test_filters_readme_psql_example_matches_documented_output() {
+        // Pinned to the before/after example in src/filters/README.md
+        // ("Lossless whitespace/repeat transforms") — keep both in sync.
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+squeeze_whitespace = true
+collapse_table_padding = true
+fold_repeats = true
+"#,
+        );
+        let input = " id | name    | status\n----+---------+--------\n  1 | alice   | active\n  2 | bob     | active\n  2 | bob     | active";
+        let out = apply_filter(&f, input);
+        assert_eq!(
+            out,
+            " id | name | status\n----+---------+--------\n  1 | alice | active\n  2 | bob | active ×2"
+        );
+    }
+
+    #[test]
+    fn test_embedded_example_filter_all_three_lossless_transforms() {
+        // A full [[tests.*]] example filter, run through the same
+        // collect_test_outcomes machinery `rtk verify` uses — proves the
+        // schema and pipeline order work end-to-end, not just via apply_filter.
+        let toml = r#"
+schema_version = 1
+
+[filters.lossless-demo]
+description = "demonstrates squeeze_whitespace + collapse_table_padding + fold_repeats"
+match_command = "^lossless-demo\\b"
+squeeze_whitespace = true
+collapse_table_padding = true
+fold_repeats = true
+
+[[tests.lossless-demo]]
+name = "squeeze collapses runs, collapse tidies pipes, fold merges duplicate rows"
+input = """
+NAME       STATUS      AGE
+web-1      Running     3d
+web-1      Running     3d
+id |  name  | value
+1  |  alice |   10
+"""
+expected = """
+NAME STATUS AGE
+web-1 Running 3d ×2
+id | name | value
+1 | alice | 10
+"""
+"#;
+        let mut outcomes = Vec::new();
+        let mut all_names = Vec::new();
+        let mut tested_names = std::collections::HashSet::new();
+        collect_test_outcomes(toml, None, &mut outcomes, &mut all_names, &mut tested_names);
+
+        assert_eq!(outcomes.len(), 1);
+        assert!(
+            outcomes[0].passed,
+            "lossless-demo test failed: actual={:?} expected={:?}",
+            outcomes[0].actual, outcomes[0].expected
+        );
+        assert!(tested_names.contains("lossless-demo"));
+    }
+
+    #[test]
+    fn test_lossless_transforms_do_not_mark_lossiness() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+squeeze_whitespace = true
+collapse_table_padding = true
+fold_repeats = true
+"#,
+        );
+        let (out, loss) = apply_filter_with_info(&f, "a   b\na   b\nc |  d");
+        assert_eq!(out, "a b ×2\nc | d");
+        assert_eq!(loss, Lossiness::None);
     }
 
     // --- Validation ---
