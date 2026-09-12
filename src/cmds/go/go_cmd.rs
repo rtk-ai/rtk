@@ -478,8 +478,16 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
         for (test, outputs) in &pkg_result.failed_tests {
             result.push_str(&format!("  [FAIL] {}\n", test));
 
+            // Trace-mode (panic/fatal) needs wider lines for full stack frame
+            // paths -- truncating to 100 chars would chop the file the user
+            // actually wrote. Assertion-mode keeps the original 100-char cap.
+            let trace_mode = outputs
+                .iter()
+                .any(|line| is_go_trace_marker(line.trim()));
+            let line_cap = if trace_mode { 160 } else { 100 };
+
             for line in select_go_test_failure_lines(outputs) {
-                result.push_str(&format!("     {}\n", truncate(&line, 100)));
+                result.push_str(&format!("     {}\n", truncate(&line, line_cap)));
             }
         }
     }
@@ -487,7 +495,96 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
     result.trim().to_string()
 }
 
+/// Maximum lines of trace context to keep per failed test in panic/fatal mode.
+/// Big enough to show the user-code frames of a Go stack trace, small enough
+/// that the tee file remains the authoritative recovery point.
+const GO_TEST_TRACE_MAX_LINES: usize = 50;
+
+/// Maximum lines kept for plain assertion failures (no panic/fatal/goroutine).
+const GO_TEST_ASSERT_MAX_LINES: usize = 8;
+
+fn is_go_trace_marker(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    lower.starts_with("panic:")
+        || lower.starts_with("fatal error:")
+        || lower.starts_with("goroutine ")
+        || (lower.starts_with("--- fail:")) // explicit subtest failure header
+}
+
+fn is_go_test_skippable_header(line: &str) -> bool {
+    line.starts_with("=== RUN")
+        || line.starts_with("=== PAUSE")
+        || line.starts_with("=== CONT")
+        || line.starts_with("=== NAME")
+        || line.starts_with("--- PASS")
+}
+
 fn select_go_test_failure_lines(outputs: &[String]) -> Vec<String> {
+    // Step 1: detect whether any output line is a panic / fatal / goroutine
+    // header. If so we switch into "trace mode" and preserve the contiguous
+    // block verbatim — losing user-code stack frames defeats the point of
+    // having any diagnostic at all (see issue #1882).
+    let trace_mode = outputs
+        .iter()
+        .any(|line| is_go_trace_marker(line.trim()));
+
+    if trace_mode {
+        return collect_trace_lines(outputs);
+    }
+
+    collect_assertion_lines(outputs)
+}
+
+/// Trace mode: keep contiguous diagnostic lines (panic message + goroutine +
+/// stack frames) up to GO_TEST_TRACE_MAX_LINES. Skips only purely cosmetic
+/// `=== RUN` / `--- PASS` headers and blank lines, so file:line frames and
+/// function-name lines are all preserved together.
+fn collect_trace_lines(outputs: &[String]) -> Vec<String> {
+    let mut relevant: Vec<String> = Vec::new();
+    let mut started = false;
+    let mut truncated = false;
+
+    for line in outputs {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if is_go_test_skippable_header(trimmed) {
+            continue;
+        }
+
+        // Don't start emitting until we see a meaningful line (skip any pre-`--- FAIL:` noise).
+        if !started {
+            started = true;
+        }
+
+        if relevant.len() >= GO_TEST_TRACE_MAX_LINES {
+            truncated = true;
+            break;
+        }
+        relevant.push(trimmed.to_string());
+    }
+
+    if truncated {
+        let remaining = outputs
+            .iter()
+            .filter(|l| {
+                let t = l.trim();
+                !t.is_empty() && !is_go_test_skippable_header(t)
+            })
+            .count()
+            .saturating_sub(relevant.len());
+        if remaining > 0 {
+            relevant.push(format!("… +{} more trace lines (see tee file)", remaining));
+        }
+    }
+
+    relevant
+}
+
+/// Assertion mode (no panic/fatal): keep file:line locations, their follow-up
+/// context lines, and any obvious error / mismatch lines, up to a small cap.
+fn collect_assertion_lines(outputs: &[String]) -> Vec<String> {
     let mut relevant = Vec::new();
     let mut keep_next_context_line = false;
 
@@ -513,7 +610,7 @@ fn select_go_test_failure_lines(outputs: &[String]) -> Vec<String> {
             keep_next_context_line = false;
         }
 
-        if relevant.len() >= 5 {
+        if relevant.len() >= GO_TEST_ASSERT_MAX_LINES {
             break;
         }
     }
@@ -738,6 +835,10 @@ fn compact_package_name(package: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn count_tokens(s: &str) -> usize {
+        s.split_whitespace().count()
+    }
 
     #[test]
     fn test_filter_go_test_all_pass() {
@@ -1040,6 +1141,145 @@ pattern ./...: directory prefix . does not contain modules listed in go.work or 
         assert!(result.contains("Go build: failed (exit 1)"));
         assert!(result.contains(output));
         assert!(!result.contains("Success"));
+    }
+
+    #[test]
+    fn test_filter_go_test_panic_preserves_full_trace() {
+        // Regression test for issue #1882: a panic in a Go test should surface
+        // its message and user-code stack frames inline, not just a one-line summary.
+        let input = include_str!("../../../tests/fixtures/go_test_panic_json.txt");
+        let result = filter_go_test_json(input);
+
+        // Panic message must appear verbatim.
+        assert!(
+            result.contains("panic: runtime error: index out of range [3] with length 2"),
+            "panic message must be inline, got:\n{}",
+            result
+        );
+
+        // User code frame (the actual bug site) must be preserved.
+        assert!(
+            result.contains("classifier_test.go:58"),
+            "user-code stack frame must be preserved, got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("model.go:142"),
+            "panic origin frame must be preserved, got:\n{}",
+            result
+        );
+
+        // At least one goroutine header should appear so the LLM sees this is a panic trace.
+        assert!(
+            result.contains("goroutine 17 [running]:"),
+            "goroutine header must be preserved, got:\n{}",
+            result
+        );
+
+        // Summary must still be accurate.
+        assert!(
+            result.starts_with("Go test: 3 passed, 1 failed, 1 skipped in 2 packages"),
+            "Expected summary header, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_panic_caps_stack_trace_size() {
+        // Even on a panic, we must not unconditionally dump everything --
+        // each failure's trace is capped (~50 lines) so it stays diagnostic
+        // without blowing past tee territory.
+        let input = include_str!("../../../tests/fixtures/go_test_panic_json.txt");
+        let result = filter_go_test_json(input);
+        let body_lines = result.lines().count();
+        assert!(
+            body_lines <= 80,
+            "Filtered output should be capped (≤80 lines), got {} lines:\n{}",
+            body_lines,
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_panic_still_saves_meaningful_bytes() {
+        // Failures legitimately inflate output but RTK should still strip the
+        // verbose NDJSON envelope. Bytes are the right metric here because the
+        // raw stream packs long JSON keys (e.g. `"Package":"github.com/..."`)
+        // into single whitespace tokens, which deflates a token-based ratio.
+        let input = include_str!("../../../tests/fixtures/go_test_panic_json.txt");
+        let result = filter_go_test_json(input);
+        let raw_bytes = input.len();
+        let filtered_bytes = result.len();
+        let savings = 100.0 - (filtered_bytes as f64 / raw_bytes as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "Expected ≥60% byte savings on failing fixture, got {:.1}% ({}->{} bytes)",
+            savings,
+            raw_bytes,
+            filtered_bytes
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_all_pass_remains_compact() {
+        // Passing-only output must stay tiny (≥60% token savings, the RTK promise).
+        let input = include_str!("../../../tests/fixtures/go_test_pass_json.txt");
+        let result = filter_go_test_json(input);
+
+        // Must summarize, not dump per-test lines.
+        assert!(
+            result.starts_with("Go test: 336 passed in 2 packages"),
+            "Passing summary mismatch, got: {}",
+            result
+        );
+
+        let raw_tokens = count_tokens(input);
+        let filtered_tokens = count_tokens(&result);
+        let savings = 100.0 - (filtered_tokens as f64 / raw_tokens as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "Expected ≥60% savings on passing fixture, got {:.1}% ({}->{} tokens)",
+            savings,
+            raw_tokens,
+            filtered_tokens
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_panic_shape() {
+        // Output shape check: header line + classifier block, with the panic
+        // body sandwiched between the test header and a fallback tee hint.
+        let input = include_str!("../../../tests/fixtures/go_test_panic_json.txt");
+        let result = filter_go_test_json(input);
+
+        // The classifier block must contain the failing test name.
+        assert!(
+            result.contains("[FAIL] TestClassify"),
+            "Failing test name must appear, got:\n{}",
+            result
+        );
+
+        // The panic trace must include at least one /usr/local/go/ stack frame
+        // (the runtime context the LLM needs to recognize this is a Go panic).
+        assert!(
+            result.contains("/usr/local/go/"),
+            "Runtime stack frame must be preserved, got:\n{}",
+            result
+        );
+
+        // Skipped tests should still be counted.
+        assert!(
+            result.contains("1 skipped"),
+            "Skipped count must remain, got:\n{}",
+            result
+        );
+
+        // Passing-only package must NOT have per-test details printed.
+        assert!(
+            !result.contains("TestDecode"),
+            "Passing-only package must not list tests, got:\n{}",
+            result
+        );
     }
 
     #[test]
