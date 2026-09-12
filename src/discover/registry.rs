@@ -5300,6 +5300,49 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_aube_command() {
+        for command in [
+            "install",
+            "i",
+            "ci",
+            "test",
+            "list",
+            "ls",
+            "run",
+            "run-script",
+            "exec",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(format!("aube {command}").as_str(), &[]),
+                Some(format!("rtk aube {command}")),
+                "Failed for command: aube {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_aubr_and_aubx() {
+        assert_eq!(
+            rewrite_command_no_prefixes("aubr test", &[]),
+            Some("rtk aubr test".into())
+        );
+        // aubx/aube exec route inner tools to specialized filters (like pnpm dlx)
+        assert_eq!(
+            rewrite_command_no_prefixes("aubx vitest", &[]),
+            Some("rtk vitest".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("aube exec vitest", &[]),
+            Some("rtk vitest".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("aubx tsc --noEmit", &[]),
+            Some("rtk tsc --noEmit".into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_npm_bare_subcommand() {
         let commands = vec!["exec", "run", "run-script", "x"];
         for command in commands {

@@ -61,7 +61,7 @@ fn is_python_linter(linter: &str) -> bool {
 /// Strip package manager prefixes (npx, bunx, pnpm, pnpm exec, yarn) from args.
 /// Returns the number of args to skip.
 fn strip_pm_prefix(args: &[String]) -> usize {
-    let pm_names = ["npx", "bunx", "pnpm", "yarn"];
+    let pm_names = ["npx", "bunx", "aubx", "pnpm", "aube", "yarn"];
     let mut skip = 0;
     for arg in args {
         if pm_names.contains(&arg.as_str()) || arg == "exec" {

@@ -385,7 +385,8 @@ pub fn count_tokens(text: &str) -> usize {
 /// ```no_run
 /// use rtk::utils::detect_package_manager;
 /// let pm = detect_package_manager();
-/// // "pnpm" for pnpm-lock.yaml, "yarn" for yarn.lock, "bun" for bun.lock(b), else "npm"
+/// // "aube" for aube-lock.yaml, "pnpm" for pnpm-lock.yaml, "yarn" for yarn.lock,
+/// // "bun" for bun.lock(b), else "npm"
 /// ```
 #[allow(dead_code)]
 pub fn detect_package_manager() -> &'static str {
@@ -395,7 +396,9 @@ pub fn detect_package_manager() -> &'static str {
 /// Lockfile detection against an explicit directory, so callers (and tests) do
 /// not have to move the process's current directory to ask the question.
 pub fn detect_package_manager_in(dir: &std::path::Path) -> &'static str {
-    if dir.join("pnpm-lock.yaml").exists() {
+    if dir.join("aube-lock.yaml").exists() {
+        "aube"
+    } else if dir.join("pnpm-lock.yaml").exists() {
         "pnpm"
     } else if dir.join("yarn.lock").exists() {
         "yarn"
@@ -459,6 +462,11 @@ pub fn tool_exec(runner: Option<&str>, tool: &str, missing: MissingTool) -> Comm
         match exec_runner(runner, missing) {
             "pnpm" => {
                 let mut c = resolved_command("pnpm");
+                c.arg("exec").arg("--").arg(tool);
+                c
+            }
+            "aube" => {
+                let mut c = resolved_command("aube");
                 c.arg("exec").arg("--").arg(tool);
                 c
             }
@@ -1006,7 +1014,7 @@ mod tests {
         // In the test environment (rtk repo), there's no JS lockfile
         // so it should default to "npm"
         let pm = detect_package_manager();
-        assert!(["pnpm", "yarn", "bun", "npm"].contains(&pm));
+        assert!(["aube", "pnpm", "yarn", "bun", "npm"].contains(&pm));
     }
 
     #[test]
@@ -1645,6 +1653,30 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("bun.lockb"), "").expect("write lockfile");
         assert_eq!(detect_package_manager_in(dir.path()), "bun");
+    }
+
+    #[test]
+    fn test_detect_package_manager_recognizes_aube() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("aube-lock.yaml"), "").expect("write lockfile");
+        assert_eq!(detect_package_manager_in(dir.path()), "aube");
+    }
+
+    #[test]
+    fn test_detect_package_manager_aube_before_pnpm() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("aube-lock.yaml"), "").expect("write aube lockfile");
+        std::fs::write(dir.path().join("pnpm-lock.yaml"), "").expect("write pnpm lockfile");
+        assert_eq!(detect_package_manager_in(dir.path()), "aube");
+    }
+
+    #[test]
+    fn test_tool_exec_aube_uses_exec() {
+        let args: Vec<String> = tool_exec(Some("aube"), "vitest", MissingTool::Fail)
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["exec", "--", "vitest"]);
     }
 
     #[test]
