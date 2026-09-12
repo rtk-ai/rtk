@@ -1,0 +1,25 @@
+[filters.cat]
+description = "Compact cat output — limit total lines, truncate wide content"
+match_command = "^cat(\\s|$)"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+]
+max_lines = 100
+truncate_lines_at = 200
+on_empty = "cat: ok"
+
+[[tests.cat]]
+name = "file content preserved up to limit"
+input = "line 1\nline 2\nline 3\nline 4\nline 5"
+expected = "line 1\nline 2\nline 3\nline 4\nline 5"
+
+[[tests.cat]]
+name = "trailing blank lines stripped"
+input = "some content\n\n\n"
+expected = "some content"
+
+[[tests.cat]]
+name = "empty input passes through"
+input = ""
+expected = "cat: ok"
