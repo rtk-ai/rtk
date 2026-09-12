@@ -8,6 +8,7 @@ use crate::core::truncate::CAP_LIST;
 use crate::core::utils::resolved_command;
 use anyhow::Result;
 use regex::Regex;
+use std::process::Command;
 use std::sync::LazyLock;
 
 const MAX_TABLE_ROWS: usize = CAP_LIST;
@@ -20,15 +21,24 @@ static ROW_COUNT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\(\d+ rows?\)
 static RECORD_HEADER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^-\[ RECORD (\d+) \]-").unwrap());
 
+fn build_psql_command(args: &[String]) -> Command {
+    let mut cmd = resolved_command("psql");
+    if !args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "-X" | "--no-psqlrc"))
+    {
+        cmd.arg("-X");
+    }
+    cmd.args(args);
+    cmd
+}
+
 // Edge cases vs previous manual implementation:
 // - On failure: stderr is no longer eprinted on the success path (only on failure via early_exit)
 // - On success: tracking raw includes stderr (previously stdout-only, but stderr is empty on success)
 // - Tee hint uses merged stdout+stderr as raw (was stdout-only)
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("psql");
-    for arg in args {
-        cmd.arg(arg);
-    }
+    let cmd = build_psql_command(args);
 
     if verbose > 0 {
         eprintln!("Running: psql {}", args.join(" "));
@@ -210,6 +220,17 @@ mod tests {
     fn test_is_table_format_detects_separator() {
         let input = " id | name\n----+------\n  1 | foo\n(1 row)\n";
         assert!(is_table_format(input));
+    }
+
+    #[test]
+    fn test_build_psql_command_disables_startup_file() {
+        let cmd = build_psql_command(&["-U".to_string(), "postgres".to_string()]);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["-X", "-U", "postgres"]);
+
+        let cmd = build_psql_command(&["--no-psqlrc".to_string()]);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["--no-psqlrc"]);
     }
 
     #[test]
