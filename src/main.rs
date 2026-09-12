@@ -111,11 +111,16 @@ enum Commands {
         /// Filter: none (default, full content), minimal, aggressive
         #[arg(short, long, default_value = "none")]
         level: core::filter::FilterLevel,
-        /// Max lines
-        #[arg(short, long, conflicts_with = "tail_lines")]
+        /// Structural preview capped at N lines (keeps signatures and imports;
+        /// not the first N lines — use --head-lines for that)
+        #[arg(short, long, conflicts_with_all = ["head_lines", "tail_lines"])]
         max_lines: Option<usize>,
+        /// Keep only the first N lines (byte-exact at the default --level none
+        /// with -n off; --level and -n still transform the window)
+        #[arg(long, conflicts_with_all = ["max_lines", "tail_lines"])]
+        head_lines: Option<usize>,
         /// Keep only last N lines
-        #[arg(long, conflicts_with = "max_lines")]
+        #[arg(long, conflicts_with_all = ["max_lines", "head_lines"])]
         tail_lines: Option<usize>,
         /// Show line numbers
         #[arg(short = 'n', long)]
@@ -1870,6 +1875,7 @@ fn run_cli() -> Result<i32> {
             files,
             level,
             max_lines,
+            head_lines,
             tail_lines,
             line_numbers,
         } => {
@@ -1882,12 +1888,20 @@ fn run_cli() -> Result<i32> {
                         continue;
                     }
                     stdin_seen = true;
-                    read::run_stdin(level, max_lines, tail_lines, line_numbers, cli.verbose)
+                    read::run_stdin(
+                        level,
+                        max_lines,
+                        head_lines,
+                        tail_lines,
+                        line_numbers,
+                        cli.verbose,
+                    )
                 } else {
                     read::run(
                         file,
                         level,
                         max_lines,
+                        head_lines,
                         tail_lines,
                         line_numbers,
                         cli.verbose,

@@ -84,6 +84,63 @@ static GIT_GLOBAL_OPT: LazyLock<Regex> = LazyLock::new(|| {
 static HEAD_N: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^head\s+-(\d+)\s+(\S+)$").unwrap());
 static HEAD_LINES: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^head\s+--lines=(\d+)\s+(\S+)$").unwrap());
+// `-n N` and `--lines N` are the spellings `tail` already accepted below; `head`
+// silently fell through to no rewrite at all without them.
+static HEAD_N_SPACE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^head\s+-n\s+(\d+)\s+(\S+)$").unwrap());
+static HEAD_LINES_SPACE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^head\s+--lines\s+(\d+)\s+(\S+)$").unwrap());
+// Bare `head FILE` means ten lines, not the whole file. Restricted to a single
+// operand: multi-file and optioned forms stay with the native binary.
+static HEAD_BARE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^head\s+(\S+)$").unwrap());
+
+/// Re-attach a trailing redirect to a rewritten head/tail command.
+///
+/// `head -n 1 f>out` strips to a suffix with no leading space, and these
+/// rewrites end in a bare number, so plain concatenation yields
+/// `--head-lines 1>out` — which the shell reads as an fd-1 redirect, leaving
+/// `--head-lines` with no value. A separating space keeps the flag intact.
+///
+/// Deliberately not applied to the shared prefix rewrites: those keep the
+/// original argument/redirect boundary, where inserting a space could split a
+/// descriptor-duplication form such as `1>&2` and demote the descriptor number
+/// into an argument.
+fn join_redirect_suffix(rewritten: &str, redirect_suffix: &str) -> String {
+    if redirect_suffix.is_empty() || redirect_suffix.starts_with(char::is_whitespace) {
+        format!("{}{}", rewritten, redirect_suffix)
+    } else {
+        format!("{} {}", rewritten, redirect_suffix)
+    }
+}
+
+/// Whether an operand is safe to hand to `rtk read` as one concrete file.
+///
+/// One whitespace-delimited token is not one shell operand: `*.rs`, `{a,b}` and
+/// `$FILES` each expand to several at execution time, and `rtk read`
+/// concatenates files where `head`/`tail` print `==> name <==` banners.
+///
+/// The token is raw shell source, not the argument the callee receives, so
+/// character-class blocklists kept missing cases: `'--'` and `\--help` hide an
+/// option behind a quote or backslash, and a leading `#` opens a comment that
+/// swallows the flags this rewrite appends. Hence an allowlist: only characters
+/// that cannot change the operand's word count or turn it into an option are
+/// accepted, and anything else is left to the native binary. `~` is the one
+/// shell-active character kept, because tilde expansion yields exactly one word
+/// and the operand is passed through unchanged. Unicode alphanumerics stay
+/// eligible so non-ASCII filenames still route.
+///
+/// The cost is deliberate: a quoted literal like `'literal*.txt'` also stays
+/// native even though the quoting would prevent expansion. Losing a rewrite is
+/// recoverable; changing what the user's command does is not.
+fn is_single_file_operand(operand: &str) -> bool {
+    if operand.is_empty() || operand.starts_with('-') {
+        return false;
+    }
+    operand.chars().all(|c| {
+        c.is_alphanumeric()
+            || matches!(c, '.' | '_' | '/' | '-' | '~' | '+' | '@' | ':' | ',' | '=')
+    })
+}
 static TAIL_N: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^tail\s+-(\d+)\s+(\S+)$").unwrap());
 static TAIL_N_SPACE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^tail\s+-n\s+(\d+)\s+(\S+)$").unwrap());
@@ -1242,14 +1299,23 @@ fn rewrite_compound(
 }
 
 fn rewrite_line_range(cmd: &str) -> Option<String> {
-    for re in [&*HEAD_N, &*HEAD_LINES] {
+    for re in [&*HEAD_N, &*HEAD_LINES, &*HEAD_N_SPACE, &*HEAD_LINES_SPACE] {
         if let Some(caps) = re.captures(cmd) {
             let n = caps.get(1)?.as_str();
             let file = caps.get(2)?.as_str();
-            return Some(format!("rtk read {} --max-lines {}", file, n));
+            if is_single_file_operand(file) {
+                return Some(format!("rtk read {} --head-lines {}", file, n));
+            }
+            return None;
         }
     }
-    if cmd.starts_with("head -") {
+    if let Some(caps) = HEAD_BARE.captures(cmd) {
+        let file = caps.get(1)?.as_str();
+        if is_single_file_operand(file) {
+            return Some(format!("rtk read {} --head-lines 10", file));
+        }
+    }
+    if cmd.starts_with("head") {
         return None;
     }
     for re in [
@@ -1261,7 +1327,10 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
         if let Some(caps) = re.captures(cmd) {
             let n = caps.get(1)?.as_str();
             let file = caps.get(2)?.as_str();
-            return Some(format!("rtk read {} --tail-lines {}", file, n));
+            if is_single_file_operand(file) {
+                return Some(format!("rtk read {} --tail-lines {}", file, n));
+            }
+            return None;
         }
     }
     None
@@ -1578,7 +1647,9 @@ fn rewrite_segment_inner(
     }
 
     if context == RewriteContext::Normal
-        && (cmd_part.starts_with("head -") || cmd_part.starts_with("tail "))
+        && (cmd_part.starts_with("head -")
+            || cmd_part.starts_with("head ")
+            || cmd_part.starts_with("tail "))
     {
         // head/tail rewrite to `rtk read`, so honour exclude_commands here too:
         // this branch returns before the checks below. Any env prefix has already
@@ -1586,7 +1657,7 @@ fn rewrite_segment_inner(
         if is_excluded(cmd_part, excluded) {
             return None;
         }
-        return rewrite_line_range(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
+        return rewrite_line_range(cmd_part).map(|r| join_redirect_suffix(&r, redirect_suffix));
     }
 
     // Most cat flags (-v, -A, -e, -t, -s, -b, --show-all, etc.) have different
@@ -3831,7 +3902,7 @@ mod tests {
         // A non-excluded inner command still rewrites through the wrapper.
         assert_eq!(
             rewrite_command_no_prefixes("uv run head -20 src/main.rs", &["cat".to_string()]),
-            Some("uv run rtk read src/main.rs --max-lines 20".into())
+            Some("uv run rtk read src/main.rs --head-lines 20".into())
         );
     }
 
@@ -3839,33 +3910,211 @@ mod tests {
     fn test_head_tail_rewrite_when_not_excluded() {
         assert_eq!(
             rewrite_command_no_prefixes("head -20 src/main.rs", &["cat".to_string()]),
-            Some("rtk read src/main.rs --max-lines 20".into())
+            Some("rtk read src/main.rs --head-lines 20".into())
         );
     }
 
     #[test]
     fn test_rewrite_head_numeric_flag() {
-        // head -20 file → rtk read file --max-lines 20 (not rtk read -20 file)
+        // head -20 file → rtk read file --head-lines 20 (not rtk read -20 file)
         assert_eq!(
             rewrite_command_no_prefixes("head -20 src/main.rs", &[]),
-            Some("rtk read src/main.rs --max-lines 20".into())
+            Some("rtk read src/main.rs --head-lines 20".into())
         );
+    }
+
+    /// A single token that the shell expands into several operands must stay
+    /// native: `rtk read` concatenates files, losing `head`'s `==> name <==`
+    /// banners. Covers the newly added `-n N` / `--lines N` routes, which had
+    /// no matcher at all before and so were native by accident.
+    #[test]
+    fn test_rewrite_head_expanding_operand_stays_native() {
+        for cmd in [
+            "head src/core/*.rs",
+            "head -1 src/core/*.rs",
+            "head -n 1 src/core/*.rs",
+            "head --lines 1 src/core/*.rs",
+            "head --lines=1 src/core/*.rs",
+            "head -n 1 src/core/{a,b}.rs",
+            "head -n 1 $FILES",
+            "head -n 1 src/core/?.rs",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                None,
+                "expanding operand must stay native: {}",
+                cmd
+            );
+        }
+    }
+
+    /// `head -n 1 --help` must reach `head`, not print `rtk read`'s help. The
+    /// quoted and escaped spellings matter as much as the bare one: the matcher
+    /// sees shell source, so `'--'` and `\--help` slip past a leading-`-` test
+    /// while still reaching the tool as options.
+    #[test]
+    fn test_rewrite_head_option_operand_stays_native() {
+        for cmd in [
+            "head -n 1 --help",
+            "head --lines 1 --version",
+            "head --help",
+            "head -n 1 '--'",
+            "head -n 1 \"--\"",
+            "head -n 1 '--help'",
+            "head -n 1 \"--help\"",
+            "head -n 1 \\--help",
+            "head '--'",
+            "head -n 1 #comment",
+            "head #comment",
+            "head -n 1 a|b",
+            "head -n 1 (x)",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                None,
+                "option-like operand must stay native: {}",
+                cmd
+            );
+        }
+    }
+
+    /// The same expansion hazard applied to `tail`, which shared the code path.
+    #[test]
+    fn test_rewrite_tail_expanding_operand_stays_native() {
+        for cmd in [
+            "tail -20 src/core/*.rs",
+            "tail -n 20 src/core/*.rs",
+            "tail --lines 20 $FILES",
+            "tail -n 1 '--'",
+            "tail -n 1 \\--help",
+            "tail -n 1 #comment",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                None,
+                "expanding operand must stay native: {}",
+                cmd
+            );
+        }
+    }
+
+    /// `;` and `&` are operators the lexer splits on before the operand is ever
+    /// examined, so the trailing text is a separate command and the real operand
+    /// is just `f`. These rewrite, and should: the allowlist only has to judge
+    /// characters that survive segmentation.
+    #[test]
+    fn test_rewrite_head_operand_after_operator_split() {
+        assert_eq!(
+            rewrite_command_no_prefixes("head -n 1 f;rm", &[]),
+            Some("rtk read f --head-lines 1; rm".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("head -n 1 a&b", &[]),
+            Some("rtk read a --head-lines 1 & b".into())
+        );
+    }
+
+    /// A trailing redirect is stripped before the operand is judged, so `a>b`
+    /// rewrites with operand `a` — but the suffix must not fuse onto the numeric
+    /// flag value, or the shell reads `1>b` as an fd-1 redirect and
+    /// `--head-lines` loses its argument.
+    #[test]
+    fn test_rewrite_head_redirect_suffix_keeps_flag_value() {
+        assert_eq!(
+            rewrite_command_no_prefixes("head -n 1 a>b", &[]),
+            Some("rtk read a --head-lines 1 >b".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("tail -n 1 a>b", &[]),
+            Some("rtk read a --tail-lines 1 >b".into())
+        );
+        // An already-spaced suffix must not gain a second space.
+        assert_eq!(
+            rewrite_command_no_prefixes("head -n 1 a > b", &[]),
+            Some("rtk read a --head-lines 1 > b".into())
+        );
+    }
+
+    /// Shapes the allowlist must keep accepting, including a non-ASCII name.
+    #[test]
+    fn test_rewrite_head_accepts_ordinary_paths() {
+        for (cmd, want) in [
+            (
+                "head -10 /tmp/seq.txt",
+                "rtk read /tmp/seq.txt --head-lines 10",
+            ),
+            ("head ./a-b_c.txt", "rtk read ./a-b_c.txt --head-lines 10"),
+            ("head ~/x.txt", "rtk read ~/x.txt --head-lines 10"),
+            (
+                "head /tmp/a.b.c-d_e.txt",
+                "rtk read /tmp/a.b.c-d_e.txt --head-lines 10",
+            ),
+            (
+                "head src/日本語.rs",
+                "rtk read src/日本語.rs --head-lines 10",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(want.into()),
+                "must still rewrite: {}",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_tail_plain_operand_still_rewrites() {
+        assert_eq!(
+            rewrite_command_no_prefixes("tail -20 src/main.rs", &[]),
+            Some("rtk read src/main.rs --tail-lines 20".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_head_n_space_flag() {
+        assert_eq!(
+            rewrite_command_no_prefixes("head -n 50 src/lib.rs", &[]),
+            Some("rtk read src/lib.rs --head-lines 50".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_head_lines_space_flag() {
+        assert_eq!(
+            rewrite_command_no_prefixes("head --lines 50 src/lib.rs", &[]),
+            Some("rtk read src/lib.rs --head-lines 50".into())
+        );
+    }
+
+    /// Multi-file and optioned bare forms stay native: the rewrite emits one
+    /// path (see `is_single_file_operand`), and `head` prints `==> name <==`
+    /// banners for several files, which a concatenated read cannot reproduce.
+    #[test]
+    fn test_rewrite_head_bare_multifile_stays_native() {
+        assert_eq!(rewrite_command_no_prefixes("head a.txt b.txt", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_head_unsupported_option_stays_native() {
+        assert_eq!(rewrite_command_no_prefixes("head -c 10 f.bin", &[]), None);
     }
 
     #[test]
     fn test_rewrite_head_lines_long_flag() {
         assert_eq!(
             rewrite_command_no_prefixes("head --lines=50 src/lib.rs", &[]),
-            Some("rtk read src/lib.rs --max-lines 50".into())
+            Some("rtk read src/lib.rs --head-lines 50".into())
         );
     }
 
     #[test]
     fn test_rewrite_head_no_flag_still_rewrites() {
-        // plain `head file` → `rtk read file` (no numeric flag)
+        // plain `head file` means ten lines, so the rewrite must bound the read
+        // rather than dumping the whole file.
         assert_eq!(
             rewrite_command_no_prefixes("head src/main.rs", &[]),
-            Some("rtk read src/main.rs".into())
+            Some("rtk read src/main.rs --head-lines 10".into())
         );
     }
 
@@ -3925,7 +4174,8 @@ mod tests {
 
     // --- Issue #1362: head/tail with multiple files falls back to native command ---
     //
-    // `rtk read <file> --max-lines N` only accepts a single positional file path in
+    // The head/tail rewrite emits a single positional path (see
+    // `is_single_file_operand`), even though `rtk read` itself accepts several, in
     // a shape that maps cleanly to `head -N`. Rewriting `head -N a b c` to
     // `rtk read a b c --max-lines N` previously produced a command where `rtk read`
     // would concatenate the files without the `==> name <==` banners that native
