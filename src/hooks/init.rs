@@ -3124,7 +3124,7 @@ fn resolve_claude_dir_from(
         .context("Cannot determine Claude config directory. Set $CLAUDE_CONFIG_DIR or $HOME.")
 }
 
-fn resolve_codex_dir() -> Result<PathBuf> {
+pub(crate) fn resolve_codex_dir() -> Result<PathBuf> {
     resolve_codex_dir_from(
         std::env::var_os("CODEX_HOME").map(PathBuf::from),
         dirs::home_dir(),
@@ -3144,7 +3144,7 @@ fn resolve_codex_dir_from(
         .context("Cannot determine Codex config directory. Set $CODEX_HOME or $HOME.")
 }
 
-fn resolve_hermes_home() -> Result<PathBuf> {
+pub(crate) fn resolve_hermes_home() -> Result<PathBuf> {
     resolve_hermes_home_from_env(dirs::home_dir(), std::env::var_os("HERMES_HOME"))
 }
 
@@ -3302,6 +3302,25 @@ fn resolve_droid_install_target(droid_dir: &Path) -> Result<DroidHookFile> {
         path: live_hooks_json.unwrap_or(root),
         layout: DroidLayout::Root,
     })
+}
+
+/// Return whether Droid's effective `PreToolUse` configuration registers `command`.
+pub(crate) fn droid_hook_command_registered(droid_dir: &Path, command: &str) -> bool {
+    let Ok(target) = resolve_droid_install_target(droid_dir) else {
+        return false;
+    };
+    let Ok(Some(root)) = read_droid_json(&target.path) else {
+        return false;
+    };
+
+    droid_events(&root, target.layout)
+        .get(PRE_TOOL_USE_KEY)
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("hooks").and_then(serde_json::Value::as_array))
+        .flatten()
+        .any(|hook| hook.get("command").and_then(serde_json::Value::as_str) == Some(command))
 }
 
 /// Install Factory Droid PreToolUse hook.
