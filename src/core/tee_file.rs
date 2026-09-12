@@ -2,7 +2,6 @@
 //! sqlite recall store (`[retriever] mode = "sqlite"`); see retriever.rs.
 
 use crate::core::config::Config;
-use crate::core::constants::RTK_DATA_DIR;
 use crate::core::retriever::RetrieverConfig;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -95,14 +94,21 @@ pub(crate) fn resolved_tee_dir() -> Option<PathBuf> {
     get_tee_dir(&cfg)
 }
 
+/// In a test build only `RTK_TEE_DIR` is honoured, and anything else resolves
+/// under `constants::data_dir`: the config is the developer's own, so obeying
+/// `tee_directory` here would rotate the spool they keep recovered output in.
+/// `resolve_db_path` draws the same line.
 fn get_tee_dir(cfg: &RetrieverConfig) -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("RTK_TEE_DIR") {
         return Some(PathBuf::from(dir));
     }
+    #[cfg(not(test))]
     if let Some(ref dir) = cfg.tee_directory {
         return Some(dir.clone());
     }
-    dirs::data_local_dir().map(|d| d.join(RTK_DATA_DIR).join("tee"))
+    #[cfg(test)]
+    let _ = cfg;
+    super::constants::data_dir().map(|d| d.join("tee"))
 }
 
 fn cleanup_old_files(dir: &Path, max_files: usize) {

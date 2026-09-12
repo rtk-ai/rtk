@@ -5,8 +5,10 @@
 
 use std::process::Command;
 
+mod common;
+
 fn rtk(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_rtk"))
+    common::rtk_command()
         .env("LC_ALL", "C")
         .args(args)
         .output()
