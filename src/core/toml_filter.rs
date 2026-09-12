@@ -264,6 +264,7 @@ const RUST_HANDLED_COMMANDS: &[&str] = &[
     "git",
     "gh",
     "aws",
+    "gcloud",
     "psql",
     "pnpm",
     "err",
@@ -2051,7 +2052,6 @@ match_command = "^make\\b"
             "dotnet-build",
             "du",
             "fail2ban-client",
-            "gcloud",
             "hadolint",
             "helm",
             "iptables",
@@ -2103,8 +2103,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            63,
-            "Expected exactly 63 built-in filters, got {}. \
+            62,
+            "Expected exactly 62 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
@@ -2210,11 +2210,11 @@ expected = "output line 1\noutput line 2"
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
         let filters = make_filters(&combined);
 
-        // All 63 existing filters still present + 1 new = 64
+        // All 62 existing filters still present + 1 new = 63
         assert_eq!(
             filters.len(),
-            64,
-            "Expected 64 filters after concat (63 built-in + 1 new)"
+            63,
+            "Expected 63 filters after concat (62 built-in + 1 new)"
         );
 
         // New filter is discoverable

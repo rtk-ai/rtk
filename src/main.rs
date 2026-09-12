@@ -7,7 +7,7 @@ mod learn;
 mod parser;
 
 // Re-export command modules for routing
-use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
+use cmds::cloud::{aws_cmd, container, curl_cmd, gcloud_cmd, psql_cmd, wget_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
@@ -201,6 +201,17 @@ enum Commands {
         /// AWS service subcommand (e.g., sts, s3, ec2, ecs, rds, cloudformation)
         subcommand: String,
         /// Additional arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Google Cloud CLI with compact output for supported list commands
+    #[command(disable_help_flag = true)]
+    Gcloud {
+        /// First gcloud token. This can be a global flag such as --project.
+        #[arg(allow_hyphen_values = true)]
+        subcommand: String,
+        /// Remaining gcloud arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2069,6 +2080,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Aws { subcommand, args } => aws_cmd::run(&subcommand, &args, cli.verbose)?,
 
+        Commands::Gcloud { subcommand, args } => gcloud_cmd::run(&subcommand, &args, cli.verbose)?,
+
         Commands::Psql { args } => psql_cmd::run(&args, cli.verbose)?,
 
         Commands::Pnpm { filter, command } => {
@@ -3594,6 +3607,7 @@ mod tests {
             "gh",
             "glab",
             "aws",
+            "gcloud",
             "psql",
             "pnpm",
             "err",
@@ -4346,6 +4360,27 @@ mod tests {
                 command: DenoCommands::Compile { args },
             } => assert_eq!(args, vec!["main.ts"]),
             _ => panic!("Expected Deno Compile command"),
+        }
+    }
+
+    #[test]
+    fn gcloud_global_flags_remain_gcloud_arguments() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "gcloud",
+            "--project",
+            "redacted-project",
+            "compute",
+            "instances",
+            "list",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Gcloud { subcommand, args } => {
+                assert_eq!(subcommand, "--project");
+                assert_eq!(args, ["redacted-project", "compute", "instances", "list"]);
+            }
+            _ => panic!("Expected Gcloud command"),
         }
     }
 }
