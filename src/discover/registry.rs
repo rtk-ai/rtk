@@ -1,5 +1,7 @@
 //! Matches shell commands against known RTK rewrite rules to decide how to handle them.
 
+// A tool's flag grammar lives with its filter, next to the `run` grammar defined as its superset,
+// so discover borrows golangci-lint's table from `cmds` rather than moving it into `core`.
 use crate::cmds::go::golangci_cmd;
 use crate::cmds::system::search::{Engine, is_bare_file_list};
 use crate::core::arg_tokenizer::{self, Dialect, TokenKind as ArgTokenKind, ValueSpec};
