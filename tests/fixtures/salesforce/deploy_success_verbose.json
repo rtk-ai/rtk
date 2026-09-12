@@ -1,0 +1,668 @@
+{
+  "status": 0,
+  "result": {
+    "checkOnly": true,
+    "completedDate": "2026-07-30T20:12:48.000Z",
+    "createdBy": "005XXXXXXXXXXXX",
+    "createdByName": "Test User",
+    "createdDate": "2026-07-30T20:12:42.000Z",
+    "details": {
+      "componentSuccesses": [
+        {
+          "changed": false,
+          "componentType": "ApexClass",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:46.000Z",
+          "deleted": false,
+          "fileName": "classes/SetupHelper.cls",
+          "fullName": "SetupHelper",
+          "id": "01pXXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": false,
+          "componentType": "ApexClass",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "classes/LeadService.cls",
+          "fullName": "LeadService",
+          "id": "01pXXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": false,
+          "componentType": "ApexClass",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "classes/LeadServiceTest.cls",
+          "fullName": "LeadServiceTest",
+          "id": "01pXXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": false,
+          "componentType": "ApexClass",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "classes/ContactService.cls",
+          "fullName": "ContactService",
+          "id": "01pXXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": false,
+          "componentType": "ApexClass",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "classes/ContactServiceTest.cls",
+          "fullName": "ContactServiceTest",
+          "id": "01pXXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": false,
+          "componentType": "ApexClass",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "classes/AccountService.cls",
+          "fullName": "AccountService",
+          "id": "01pXXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": false,
+          "componentType": "ApexClass",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "classes/AccountServiceTest.cls",
+          "fullName": "AccountServiceTest",
+          "id": "01pXXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": true,
+          "componentType": "LightningComponentBundle",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "lwc/AuditPanel",
+          "fullName": "AuditPanel",
+          "id": "0RbXXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": true,
+          "componentType": "LightningComponentBundle",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "lwc/AuditApp",
+          "fullName": "AuditApp",
+          "id": "0RbXXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": true,
+          "componentType": "LightningComponentBundle",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "lwc/EventApp",
+          "fullName": "EventApp",
+          "id": "0RbXXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": true,
+          "componentType": "LightningComponentBundle",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "lwc/EventRow",
+          "fullName": "EventRow",
+          "id": "0RbXXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": true,
+          "componentType": "LightningComponentBundle",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "lwc/EventPanel",
+          "fullName": "EventPanel",
+          "id": "0RbXXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": true,
+          "componentType": "LightningComponentBundle",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "lwc/ContactPanel",
+          "fullName": "ContactPanel",
+          "id": "0RbXXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": true,
+          "componentType": "LightningComponentBundle",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "lwc/ContactApp",
+          "fullName": "ContactApp",
+          "id": "0RbXXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": true,
+          "componentType": "LightningComponentBundle",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "lwc/HomePage",
+          "fullName": "HomePage",
+          "id": "0RbXXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": true,
+          "componentType": "LightningComponentBundle",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "lwc/AccountApp",
+          "fullName": "AccountApp",
+          "id": "0RbXXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": true,
+          "componentType": "LightningComponentBundle",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "lwc/AccountTab",
+          "fullName": "AccountTab",
+          "id": "0RbXXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": false,
+          "componentType": "FlexiPage",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "flexipages/Home_Default.flexipage",
+          "fullName": "Home_Default",
+          "id": "0M0XXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": false,
+          "componentType": "FlexiPage",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "flexipages/SomeUtilityBar.flexipage",
+          "fullName": "SomeUtilityBar",
+          "id": "0M0XXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": false,
+          "componentType": "CustomTab",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "tabs/Audit_Tab.tab",
+          "fullName": "Audit_Tab",
+          "id": "01rXXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": false,
+          "componentType": "CustomTab",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "tabs/Events_Tab.tab",
+          "fullName": "Events_Tab",
+          "id": "01rXXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": false,
+          "componentType": "CustomTab",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "tabs/Fields_Tab.tab",
+          "fullName": "Fields_Tab",
+          "id": "01rXXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": false,
+          "componentType": "CustomTab",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "tabs/Records_Tab.tab",
+          "fullName": "Records_Tab",
+          "id": "01rXXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": false,
+          "componentType": "CustomApplication",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "applications/SfApp.app",
+          "fullName": "SfApp",
+          "id": "02uXXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": false,
+          "componentType": "PermissionSet",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "permissionsets/UserPermSetName.permissionset",
+          "fullName": "UserPermSetName",
+          "id": "0PSXXXXXXXXXXXXXXX",
+          "success": true
+        },
+        {
+          "changed": true,
+          "componentType": "",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "package.xml",
+          "fullName": "package.xml",
+          "success": true
+        },
+        {
+          "changed": false,
+          "componentType": "ApexClass",
+          "created": false,
+          "createdDate": "2026-07-30T20:12:47.000Z",
+          "deleted": false,
+          "fileName": "classes/SetupHelperTest.cls",
+          "fullName": "SetupHelperTest",
+          "id": "01pXXXXXXXXXXXXXXX",
+          "success": true
+        }
+      ],
+      "runTestResult": {
+        "numFailures": 0,
+        "numTestsRun": 0,
+        "totalTime": 0,
+        "codeCoverage": [],
+        "codeCoverageWarnings": [],
+        "failures": [],
+        "flowCoverage": [],
+        "flowCoverageWarnings": [],
+        "successes": []
+      },
+      "componentFailures": []
+    },
+    "done": true,
+    "id": "0AfXXXXXXXXXXXXXXX",
+    "ignoreWarnings": false,
+    "lastModifiedDate": "2026-07-30T20:12:48.000Z",
+    "numberComponentErrors": 0,
+    "numberComponentsDeployed": 26,
+    "numberComponentsTotal": 26,
+    "numberFiles": "71",
+    "numberTestErrors": 0,
+    "numberTestsCompleted": 0,
+    "numberTestsTotal": 0,
+    "rollbackOnError": true,
+    "runTestsEnabled": false,
+    "startDate": "2026-07-30T20:12:42.000Z",
+    "status": "Succeeded",
+    "success": true,
+    "zipSize": 30123,
+    "files": [
+      {
+        "fullName": "LeadService",
+        "type": "ApexClass",
+        "state": "Unchanged",
+        "filePath": "/project/sfdx/force-app/auditPkg/classes/LeadService.cls"
+      },
+      {
+        "fullName": "LeadService",
+        "type": "ApexClass",
+        "state": "Unchanged",
+        "filePath": "/project/sfdx/force-app/auditPkg/classes/LeadService.cls-meta.xml"
+      },
+      {
+        "fullName": "LeadServiceTest",
+        "type": "ApexClass",
+        "state": "Unchanged",
+        "filePath": "/project/sfdx/force-app/auditPkg/classes/LeadServiceTest.cls"
+      },
+      {
+        "fullName": "LeadServiceTest",
+        "type": "ApexClass",
+        "state": "Unchanged",
+        "filePath": "/project/sfdx/force-app/auditPkg/classes/LeadServiceTest.cls-meta.xml"
+      },
+      {
+        "fullName": "ContactService",
+        "type": "ApexClass",
+        "state": "Unchanged",
+        "filePath": "/project/sfdx/force-app/contactPkg/default/classes/ContactService.cls"
+      },
+      {
+        "fullName": "ContactService",
+        "type": "ApexClass",
+        "state": "Unchanged",
+        "filePath": "/project/sfdx/force-app/contactPkg/default/classes/ContactService.cls-meta.xml"
+      },
+      {
+        "fullName": "ContactServiceTest",
+        "type": "ApexClass",
+        "state": "Unchanged",
+        "filePath": "/project/sfdx/force-app/contactPkg/default/classes/ContactServiceTest.cls"
+      },
+      {
+        "fullName": "ContactServiceTest",
+        "type": "ApexClass",
+        "state": "Unchanged",
+        "filePath": "/project/sfdx/force-app/contactPkg/default/classes/ContactServiceTest.cls-meta.xml"
+      },
+      {
+        "fullName": "SetupHelper",
+        "type": "ApexClass",
+        "state": "Unchanged",
+        "filePath": "/project/sfdx/force-app/installer/classes/SetupHelper.cls"
+      },
+      {
+        "fullName": "SetupHelper",
+        "type": "ApexClass",
+        "state": "Unchanged",
+        "filePath": "/project/sfdx/force-app/installer/classes/SetupHelper.cls-meta.xml"
+      },
+      {
+        "fullName": "SetupHelperTest",
+        "type": "ApexClass",
+        "state": "Unchanged",
+        "filePath": "/project/sfdx/force-app/installer/classes/SetupHelperTest.cls"
+      },
+      {
+        "fullName": "SetupHelperTest",
+        "type": "ApexClass",
+        "state": "Unchanged",
+        "filePath": "/project/sfdx/force-app/installer/classes/SetupHelperTest.cls-meta.xml"
+      },
+      {
+        "fullName": "AccountService",
+        "type": "ApexClass",
+        "state": "Unchanged",
+        "filePath": "/project/sfdx/force-app/accountPkg/default/classes/AccountService.cls"
+      },
+      {
+        "fullName": "AccountService",
+        "type": "ApexClass",
+        "state": "Unchanged",
+        "filePath": "/project/sfdx/force-app/accountPkg/default/classes/AccountService.cls-meta.xml"
+      },
+      {
+        "fullName": "AccountServiceTest",
+        "type": "ApexClass",
+        "state": "Unchanged",
+        "filePath": "/project/sfdx/force-app/accountPkg/default/classes/AccountServiceTest.cls"
+      },
+      {
+        "fullName": "AccountServiceTest",
+        "type": "ApexClass",
+        "state": "Unchanged",
+        "filePath": "/project/sfdx/force-app/accountPkg/default/classes/AccountServiceTest.cls-meta.xml"
+      },
+      {
+        "fullName": "SfApp",
+        "type": "CustomApplication",
+        "state": "Unchanged",
+        "filePath": "/project/sfdx/force-app/eventPkg/default/applications/SfApp.app-meta.xml"
+      },
+      {
+        "fullName": "Audit_Tab",
+        "type": "CustomTab",
+        "state": "Unchanged",
+        "filePath": "/project/sfdx/force-app/main/default/tabs/Audit_Tab.tab-meta.xml"
+      },
+      {
+        "fullName": "Events_Tab",
+        "type": "CustomTab",
+        "state": "Unchanged",
+        "filePath": "/project/sfdx/force-app/main/default/tabs/Events_Tab.tab-meta.xml"
+      },
+      {
+        "fullName": "Fields_Tab",
+        "type": "CustomTab",
+        "state": "Unchanged",
+        "filePath": "/project/sfdx/force-app/main/default/tabs/Fields_Tab.tab-meta.xml"
+      },
+      {
+        "fullName": "Records_Tab",
+        "type": "CustomTab",
+        "state": "Unchanged",
+        "filePath": "/project/sfdx/force-app/main/default/tabs/Records_Tab.tab-meta.xml"
+      },
+      {
+        "fullName": "SomeUtilityBar",
+        "type": "FlexiPage",
+        "state": "Unchanged",
+        "filePath": "/project/sfdx/force-app/eventPkg/default/flexipages/SomeUtilityBar.flexipage-meta.xml"
+      },
+      {
+        "fullName": "Home_Default",
+        "type": "FlexiPage",
+        "state": "Unchanged",
+        "filePath": "/project/sfdx/force-app/main/default/flexipages/Home_Default.flexipage-meta.xml"
+      },
+      {
+        "fullName": "AuditPanel",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/auditPkg/lwc/auditPkg/AuditPanel.html"
+      },
+      {
+        "fullName": "AuditPanel",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/auditPkg/lwc/auditPkg/AuditPanel.js"
+      },
+      {
+        "fullName": "AuditPanel",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/auditPkg/lwc/auditPkg/AuditPanel.js-meta.xml"
+      },
+      {
+        "fullName": "AuditApp",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/auditPkg/lwc/AuditApp/AuditApp.html"
+      },
+      {
+        "fullName": "AuditApp",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/auditPkg/lwc/AuditApp/AuditApp.js"
+      },
+      {
+        "fullName": "AuditApp",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/auditPkg/lwc/AuditApp/AuditApp.js-meta.xml"
+      },
+      {
+        "fullName": "EventApp",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/eventPkg/default/lwc/EventApp/EventApp.html"
+      },
+      {
+        "fullName": "EventApp",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/eventPkg/default/lwc/EventApp/EventApp.js"
+      },
+      {
+        "fullName": "EventApp",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/eventPkg/default/lwc/EventApp/EventApp.js-meta.xml"
+      },
+      {
+        "fullName": "EventRow",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/eventPkg/default/lwc/EventRow/EventRow.html"
+      },
+      {
+        "fullName": "EventRow",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/eventPkg/default/lwc/EventRow/EventRow.js"
+      },
+      {
+        "fullName": "EventRow",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/eventPkg/default/lwc/EventRow/EventRow.js-meta.xml"
+      },
+      {
+        "fullName": "EventPanel",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/eventPkg/default/lwc/EventPanel/EventPanel.html"
+      },
+      {
+        "fullName": "EventPanel",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/eventPkg/default/lwc/EventPanel/EventPanel.js"
+      },
+      {
+        "fullName": "EventPanel",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/eventPkg/default/lwc/EventPanel/EventPanel.js-meta.xml"
+      },
+      {
+        "fullName": "ContactPanel",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/contactPkg/default/lwc/contactPkg/ContactPanel.html"
+      },
+      {
+        "fullName": "ContactPanel",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/contactPkg/default/lwc/contactPkg/ContactPanel.js"
+      },
+      {
+        "fullName": "ContactPanel",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/contactPkg/default/lwc/contactPkg/ContactPanel.js-meta.xml"
+      },
+      {
+        "fullName": "ContactApp",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/contactPkg/default/lwc/ContactApp/ContactApp.html"
+      },
+      {
+        "fullName": "ContactApp",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/contactPkg/default/lwc/ContactApp/ContactApp.js"
+      },
+      {
+        "fullName": "ContactApp",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/contactPkg/default/lwc/ContactApp/ContactApp.js-meta.xml"
+      },
+      {
+        "fullName": "HomePage",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/main/default/lwc/HomePage/HomePage.html"
+      },
+      {
+        "fullName": "HomePage",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/main/default/lwc/HomePage/HomePage.js"
+      },
+      {
+        "fullName": "HomePage",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/main/default/lwc/HomePage/HomePage.js-meta.xml"
+      },
+      {
+        "fullName": "AccountApp",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/accountPkg/default/lwc/AccountApp/AccountApp.html"
+      },
+      {
+        "fullName": "AccountApp",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/accountPkg/default/lwc/AccountApp/AccountApp.js"
+      },
+      {
+        "fullName": "AccountApp",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/accountPkg/default/lwc/AccountApp/AccountApp.js-meta.xml"
+      },
+      {
+        "fullName": "AccountTab",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/accountPkg/default/lwc/AccountTab/AccountTab.html"
+      },
+      {
+        "fullName": "AccountTab",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/accountPkg/default/lwc/AccountTab/AccountTab.js"
+      },
+      {
+        "fullName": "AccountTab",
+        "type": "LightningComponentBundle",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/accountPkg/default/lwc/AccountTab/AccountTab.js-meta.xml"
+      },
+      {
+        "fullName": "UserPermSetName",
+        "type": "PermissionSet",
+        "state": "Unchanged",
+        "filePath": "/project/sfdx/force-app/main/default/permissionsets/UserPermSetName.permissionset-meta.xml"
+      }
+    ],
+    "zipFileCount": 55,
+    "deployUrl": "https://scratch.example.my.salesforce.com/lightning/setup/DeployStatus/page?address=%2Fchangemgmt%2FmonitorDeploymentsDetails.apexp%3FasyncId%3D0AfXXXXXXXXXXXXXXX%26retURL%3D%252Fchangemgmt%252FmonitorDeployment.apexp"
+  },
+  "warnings": []
+}
