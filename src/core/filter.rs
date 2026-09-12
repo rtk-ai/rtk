@@ -169,8 +169,10 @@ impl FilterStrategy for MinimalFilter {
 
             // Handle block comments
             if let (Some(start), Some(end)) = (patterns.block_start, patterns.block_end) {
+                // starts_with, not contains: `/*` inside a string literal or
+                // glob (e.g. "src/*.rs") must not open a comment block (#2385)
                 if !in_docstring
-                    && trimmed.contains(start)
+                    && trimmed.starts_with(start)
                     && !trimmed.starts_with(patterns.doc_block_start.unwrap_or("###"))
                 {
                     in_block_comment = true;
@@ -465,6 +467,75 @@ fn main() {
         let result = filter.filter(code, &Language::Rust);
         assert!(!result.contains("// This is a comment"));
         assert!(result.contains("fn main()"));
+    }
+
+    // --- block comment detection (#2385) ---
+
+    #[test]
+    fn test_minimal_keeps_code_with_inline_block_marker() {
+        let code = "let glob = \"src/*.rs\";\nfn bar() {}\nfn baz() {}";
+        let filter = MinimalFilter;
+        let result = filter.filter(code, &Language::Rust);
+        assert!(
+            result.contains("let glob = \"src/*.rs\";"),
+            "line with /* in string literal must be kept, got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("fn bar()") && result.contains("fn baz()"),
+            "block-comment state must not leak past a non-comment line, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_minimal_same_line_block_comment_no_state_leak() {
+        let code = "/* inline comment */\nfn foo() {}";
+        let filter = MinimalFilter;
+        let result = filter.filter(code, &Language::Rust);
+        assert!(
+            !result.contains("inline comment"),
+            "comment-only line is dropped"
+        );
+        assert!(
+            result.contains("fn foo()"),
+            "code after same-line block comment must be kept, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_minimal_still_drops_multiline_block_comment() {
+        let code = "/* start\nstill comment\n*/\nfn after() {}";
+        let filter = MinimalFilter;
+        let result = filter.filter(code, &Language::Rust);
+        assert!(!result.contains("still comment"));
+        assert!(result.contains("fn after()"));
+    }
+
+    #[test]
+    fn test_minimal_keeps_python_inline_triple_quote_assignment() {
+        let code = "x = \"\"\"inline\"\"\"\ndef f():\n    pass";
+        let filter = MinimalFilter;
+        let result = filter.filter(code, &Language::Python);
+        assert!(
+            result.contains("x = "),
+            "assignment with inline triple-quote must be kept, got:\n{}",
+            result
+        );
+        assert!(result.contains("def f():"));
+    }
+
+    #[test]
+    fn test_minimal_keeps_url_with_trailing_line_comment() {
+        let code = "const API: &str = \"http://example.com/v1\";  // endpoint\nfn foo() {}";
+        let filter = MinimalFilter;
+        let result = filter.filter(code, &Language::Rust);
+        assert!(
+            result.contains("http://example.com/v1"),
+            "URL line must be kept, got:\n{}",
+            result
+        );
     }
 
     // --- truncation accuracy ---
