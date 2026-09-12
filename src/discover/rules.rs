@@ -806,7 +806,10 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^dotnet\s+build\b",
+        // DotnetCommands already has Test, Restore and Format variants with
+        // their own filters (trx parsing, binlog, format report); only build was
+        // ever routed here.
+        pattern: r"^dotnet\s+(build|test|restore|format)\b",
         rtk_cmd: "rtk dotnet",
         pipeline_safety: PipelineSafety::ProducerOnly,
         rewrite_prefixes: &["dotnet"],
