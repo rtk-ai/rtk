@@ -1,0 +1,282 @@
+[
+  {
+    "id": "3f1c9a7b2d4e6f8a0b1c3d5e7f9a1b3c5d7e9f0a",
+    "individual_note": true,
+    "notes": [
+      {
+        "id": 987651,
+        "type": "",
+        "body": "<!-- release-linkback -->\n<details>\n<summary><a href=\"https://gitlab.example.com/acme/toolkit/-/releases/v2.1.0\">Release v2.1.0 — 14 commits, 3 fixes</a></summary>\n<p>\n\n## Highlights\n\n* `parser`: accept trailing commas in list literals\n* `cli`: `--quiet` now silences progress bars as well\n* `config`: warn instead of failing on an unknown key\n\n## Fixes\n\n| Ref | Area | Summary |\n| -- | -- | -- |\n| !318 | parser | off-by-one on empty input |\n| !321 | cli | exit code lost when piped |\n| !324 | config | default path ignored on Windows |\n\nGenerated diff of the version bump:\n\n```diff\n-version = \"2.0.3\"\n+version = \"2.1.0\"\n```\n\nFull changelog is attached to the release.\n\n</p>\n</details>",
+        "attachment": "",
+        "title": "",
+        "file_name": "",
+        "author": {
+          "id": 9,
+          "username": "release-bot",
+          "email": "",
+          "name": "Release Bot",
+          "state": "active",
+          "avatar_url": null,
+          "web_url": null
+        },
+        "system": false,
+        "created_at": "2026-08-06T16:02:53.775+02:00",
+        "updated_at": "2026-08-06T16:02:53.775+02:00",
+        "expires_at": null,
+        "commit_id": "",
+        "position": null,
+        "noteable_id": 1042,
+        "noteable_type": "MergeRequest",
+        "project_id": 77,
+        "noteable_iid": 42,
+        "resolvable": false,
+        "resolved": false,
+        "resolved_at": null,
+        "resolved_by": {
+          "id": 0,
+          "username": "",
+          "email": "",
+          "name": "",
+          "state": "",
+          "avatar_url": null,
+          "web_url": null
+        },
+        "internal": false,
+        "confidential": false
+      }
+    ]
+  },
+  {
+    "id": "5a2d8e1f4b7c0d3e6f9a2b5c8d1e4f7a0b3c6d9e",
+    "individual_note": true,
+    "notes": [
+      {
+        "id": 987652,
+        "type": "",
+        "body": "changed the description",
+        "attachment": "",
+        "title": "",
+        "file_name": "",
+        "author": {
+          "id": 2,
+          "username": "alice_dev",
+          "email": "",
+          "name": "Alice Developer",
+          "state": "active",
+          "avatar_url": null,
+          "web_url": null
+        },
+        "system": true,
+        "created_at": "2026-08-06T16:03:11.342+02:00",
+        "updated_at": "2026-08-06T16:03:11.351+02:00",
+        "expires_at": null,
+        "commit_id": "",
+        "position": null,
+        "noteable_id": 1042,
+        "noteable_type": "MergeRequest",
+        "project_id": 77,
+        "noteable_iid": 42,
+        "resolvable": false,
+        "resolved": false,
+        "resolved_at": null,
+        "resolved_by": {
+          "id": 0,
+          "username": "",
+          "email": "",
+          "name": "",
+          "state": "",
+          "avatar_url": null,
+          "web_url": null
+        },
+        "internal": false,
+        "confidential": false
+      },
+      {
+        "id": 987653,
+        "type": "",
+        "body": "mentioned in commit a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+        "attachment": "",
+        "title": "",
+        "file_name": "",
+        "author": {
+          "id": 2,
+          "username": "alice_dev",
+          "email": "",
+          "name": "Alice Developer",
+          "state": "active",
+          "avatar_url": null,
+          "web_url": null
+        },
+        "system": true,
+        "created_at": "2026-08-06T16:04:02.118+02:00",
+        "updated_at": "2026-08-06T16:04:02.118+02:00",
+        "expires_at": null,
+        "commit_id": "",
+        "position": null,
+        "noteable_id": 1042,
+        "noteable_type": "MergeRequest",
+        "project_id": 77,
+        "noteable_iid": 42,
+        "resolvable": false,
+        "resolved": false,
+        "resolved_at": null,
+        "resolved_by": {
+          "id": 0,
+          "username": "",
+          "email": "",
+          "name": "",
+          "state": "",
+          "avatar_url": null,
+          "web_url": null
+        },
+        "internal": false,
+        "confidential": false
+      }
+    ]
+  },
+  {
+    "id": "7c4e0a3d6f9b2e5a8d1c4f7b0e3a6d9c2f5b8e1a",
+    "individual_note": false,
+    "notes": [
+      {
+        "id": 987654,
+        "type": "DiffNote",
+        "body": "This `unwrap()` panics when the note has no author. Fall back to a placeholder like the sibling formatter does, otherwise a malformed API response takes the whole command down.",
+        "attachment": "",
+        "title": "",
+        "file_name": "",
+        "author": {
+          "id": 3,
+          "username": "bob_dev",
+          "email": "",
+          "name": "Bob Reviewer",
+          "state": "active",
+          "avatar_url": null,
+          "web_url": null
+        },
+        "system": false,
+        "created_at": "2026-08-07T09:14:27.503+02:00",
+        "updated_at": "2026-08-07T09:14:27.503+02:00",
+        "expires_at": null,
+        "commit_id": "",
+        "position": {
+          "base_sha": "0f1e2d3c4b5a69788796a5b4c3d2e1f001234567",
+          "start_sha": "1a2b3c4d5e6f708192a3b4c5d6e7f80912345678",
+          "head_sha": "2b3c4d5e6f708192a3b4c5d6e7f8091234567890",
+          "old_path": "src/parser/lexer.rs",
+          "new_path": "src/parser/lexer.rs",
+          "position_type": "text",
+          "old_line": null,
+          "new_line": 128,
+          "line_range": null
+        },
+        "noteable_id": 1042,
+        "noteable_type": "MergeRequest",
+        "project_id": 77,
+        "noteable_iid": 42,
+        "resolvable": true,
+        "resolved": false,
+        "resolved_at": null,
+        "resolved_by": {
+          "id": 0,
+          "username": "",
+          "email": "",
+          "name": "",
+          "state": "",
+          "avatar_url": null,
+          "web_url": null
+        },
+        "internal": false,
+        "confidential": false
+      }
+    ]
+  },
+  {
+    "id": "9e6a2c5f8b1d4e7a0c3f6b9d2e5a8c1f4b7d0e3a",
+    "individual_note": false,
+    "notes": [
+      {
+        "id": 987655,
+        "type": "DiscussionNote",
+        "body": "The cap here is a bare literal. Bind it to a `CAP_*` from `core::truncate` so it follows the global policy, and add the one-line reason if you deviate.",
+        "attachment": "",
+        "title": "",
+        "file_name": "",
+        "author": {
+          "id": 3,
+          "username": "bob_dev",
+          "email": "",
+          "name": "Bob Reviewer",
+          "state": "active",
+          "avatar_url": null,
+          "web_url": null
+        },
+        "system": false,
+        "created_at": "2026-08-07T09:21:44.902+02:00",
+        "updated_at": "2026-08-07T09:21:44.902+02:00",
+        "expires_at": null,
+        "commit_id": "",
+        "position": null,
+        "noteable_id": 1042,
+        "noteable_type": "MergeRequest",
+        "project_id": 77,
+        "noteable_iid": 42,
+        "resolvable": true,
+        "resolved": true,
+        "resolved_at": "2026-08-07T10:02:18.441+02:00",
+        "resolved_by": {
+          "id": 2,
+          "username": "alice_dev",
+          "email": "",
+          "name": "Alice Developer",
+          "state": "active",
+          "avatar_url": null,
+          "web_url": null
+        },
+        "internal": false,
+        "confidential": false
+      },
+      {
+        "id": 987656,
+        "type": "DiscussionNote",
+        "body": "Bound to `CAP_LIST` with the deviation commented. Thanks.",
+        "attachment": "",
+        "title": "",
+        "file_name": "",
+        "author": {
+          "id": 2,
+          "username": "alice_dev",
+          "email": "",
+          "name": "Alice Developer",
+          "state": "active",
+          "avatar_url": null,
+          "web_url": null
+        },
+        "system": false,
+        "created_at": "2026-08-07T10:02:18.441+02:00",
+        "updated_at": "2026-08-07T10:02:18.441+02:00",
+        "expires_at": null,
+        "commit_id": "",
+        "position": null,
+        "noteable_id": 1042,
+        "noteable_type": "MergeRequest",
+        "project_id": 77,
+        "noteable_iid": 42,
+        "resolvable": true,
+        "resolved": true,
+        "resolved_at": "2026-08-07T10:02:18.441+02:00",
+        "resolved_by": {
+          "id": 2,
+          "username": "alice_dev",
+          "email": "",
+          "name": "Alice Developer",
+          "state": "active",
+          "avatar_url": null,
+          "web_url": null
+        },
+        "internal": false,
+        "confidential": false
+      }
+    ]
+  }
+]
