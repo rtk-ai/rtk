@@ -3,13 +3,20 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
-    #[cfg(windows)]
-    {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         // Clap + the full command graph can exceed the default 1 MiB Windows
         // main-thread stack during process startup. Reserve a larger stack for
         // the CLI binary so `rtk.exe --version`, `--help`, and hook entry
         // points start reliably without requiring ad-hoc RUSTFLAGS.
-        println!("cargo:rustc-link-arg=/STACK:8388608");
+        //
+        // MSVC's linker and the GNU (MinGW) linker take this flag in
+        // different syntaxes; `/STACK:` alone breaks the build on the
+        // x86_64-pc-windows-gnu target (`ld.exe: cannot find /STACK:8388608`).
+        if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+            println!("cargo:rustc-link-arg=/STACK:8388608");
+        } else {
+            println!("cargo:rustc-link-arg=-Wl,--stack,8388608");
+        }
     }
 
     let filters_dir = Path::new("src/filters");
