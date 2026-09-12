@@ -45,11 +45,33 @@ struct PackageResult {
     package_fail_output: Vec<String>,         // output lines collected before the package fail
 }
 
+/// Whether rtk must NOT inject its own `-json` into `go test`.
+///
+/// It stays out of the way when the caller already asked for JSON (`-json`) or
+/// is running benchmarks (`-bench`, `-benchmem`, `-benchtime`, …). Injecting
+/// `-json` for a benchmark run routes the plain-text benchmark output through
+/// the JSON test filter, which drops every measurement and reports
+/// "No tests found".
+fn skip_json_injection(args: &[String]) -> bool {
+    // Go's flag package accepts `-flag` and `--flag` identically, so match both
+    // dash forms — `a.starts_with("-bench")` alone misses `--bench=.` and lets
+    // `-json` slip through (issue #3428). Require a leading dash first so a
+    // dashless positional package path like `benchmark/pkg` is not mistaken for
+    // a `-bench…` flag.
+    args.iter().any(|a| {
+        let Some(flag) = a.strip_prefix('-') else {
+            return false;
+        };
+        let flag = flag.strip_prefix('-').unwrap_or(flag); // optional second dash
+        flag == "json" || flag.starts_with("bench")
+    })
+}
+
 pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("go");
     cmd.arg("test");
 
-    let skip_json = args.iter().any(|a| a == "-json" || a.starts_with("-bench"));
+    let skip_json = skip_json_injection(args);
 
     if !skip_json {
         cmd.arg("-json");
@@ -738,6 +760,63 @@ fn compact_package_name(package: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- skip_json_injection: -bench guard must accept both dash forms (issue #3428) ---
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_skip_json_single_dash_bench() {
+        // Baseline: the single-dash form was always caught.
+        assert!(skip_json_injection(&args(&["-bench=.", "./..."])));
+    }
+
+    #[test]
+    fn test_skip_json_double_dash_bench() {
+        // Go's flag package treats `-bench` and `--bench` identically. The
+        // double-dash form must also suppress `-json` injection, otherwise
+        // benchmark output is routed through the JSON test filter and every
+        // measurement is dropped ("No tests found"). See issue #3428.
+        assert!(skip_json_injection(&args(&["--bench=.", "./..."])));
+        assert!(skip_json_injection(&args(&["--bench", "."])));
+    }
+
+    #[test]
+    fn test_skip_json_bench_variants() {
+        // Prefix match still covers -benchmem / -benchtime in either dash form.
+        assert!(skip_json_injection(&args(&["--benchmem"])));
+        assert!(skip_json_injection(&args(&["-benchtime=2s"])));
+    }
+
+    #[test]
+    fn test_skip_json_explicit_json() {
+        assert!(skip_json_injection(&args(&["-json"])));
+    }
+
+    #[test]
+    fn test_no_skip_for_plain_test_run() {
+        // A normal `go test ./...` must still get `-json` injected.
+        assert!(!skip_json_injection(&args(&["./...", "-v"])));
+        assert!(!skip_json_injection(&args(&[])));
+    }
+
+    #[test]
+    fn test_no_skip_for_dashless_bench_package_path() {
+        // A positional package path starting with "bench" is NOT a flag and
+        // must not suppress `-json` injection. Requiring a leading dash first
+        // is what prevents this false positive.
+        assert!(!skip_json_injection(&args(&["benchmark/pkg"])));
+        assert!(!skip_json_injection(&args(&["benchtools", "./..."])));
+    }
+
+    #[test]
+    fn test_no_skip_for_run_benchmark_filter() {
+        // `-run=BenchmarkX` selects a test by name; it is not `-bench` and must
+        // still go through the JSON filter.
+        assert!(!skip_json_injection(&args(&["-run=BenchmarkParse", "./..."])));
+    }
 
     #[test]
     fn test_filter_go_test_all_pass() {
