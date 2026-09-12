@@ -1,0 +1,82 @@
+schema_version = 1
+
+[filters.bru]
+description = "Bruno CLI (@usebruno/cli) — requests, tests, summary"
+match_command = "\\bbru\\b"
+strip_ansi = true
+keep_lines_matching = [
+  "^[A-Za-z][A-Za-z0-9_/\\-]+ \\([0-9]{3}",
+  "^\\s*[✓✗×]",
+  "^📊 Execution Summary",
+  "^│ (Status|Requests|Tests|Assertions|Duration)",
+  "Failed",
+  "Passed",
+  "Requests",
+]
+max_lines = 80
+on_empty = "bru: ok"
+
+[[tests.bru]]
+name = "single request pass"
+input = """
+Identity/Token (200 OK) - 29988 ms
+Tests
+   ✓ Status code is 200
+   ✓ Token DTO fields exist
+
+📊 Execution Summary
+┌───────────────┬──────────────┐
+│ Metric        │    Result    │
+├───────────────┼──────────────┤
+│ Status        │    ✓ PASS    │
+├───────────────┼──────────────┤
+│ Requests      │ 1 (1 Passed) │
+└───────────────┴──────────────┘
+"""
+expected = """
+Identity/Token (200 OK) - 29988 ms
+   ✓ Status code is 200
+   ✓ Token DTO fields exist
+📊 Execution Summary
+│ Status        │    ✓ PASS    │
+│ Requests      │ 1 (1 Passed) │
+"""
+
+[[tests.bru]]
+name = "multi request mixed results"
+input = """
+Identity/Token (200 OK) - 120 ms
+Tests
+   ✓ Status code is 200
+
+Identity/RefreshToken (500 Internal Server Error) - 45 ms
+Tests
+   ✗ Status code is 200
+
+Identity/TokenByCode (406 Not Acceptable) - 33 ms
+Tests
+   ✗ Status code is 200
+
+📊 Execution Summary
+┌───────────────┬──────────────────────────┐
+│ Metric        │         Result           │
+├───────────────┼──────────────────────────┤
+│ Status        │         ✗ FAIL           │
+├───────────────┼──────────────────────────┤
+│ Requests      │ 3 (1 Passed, 2 Failed)   │
+├───────────────┼──────────────────────────┤
+│ Tests         │ 3 (1 Passed, 2 Failed)   │
+└───────────────┴──────────────────────────┘
+"""
+expected = """
+Identity/Token (200 OK) - 120 ms
+   ✓ Status code is 200
+Identity/RefreshToken (500 Internal Server Error) - 45 ms
+   ✗ Status code is 200
+Identity/TokenByCode (406 Not Acceptable) - 33 ms
+   ✗ Status code is 200
+📊 Execution Summary
+│ Status        │         ✗ FAIL           │
+│ Requests      │ 3 (1 Passed, 2 Failed)   │
+│ Tests         │ 3 (1 Passed, 2 Failed)   │
+"""
