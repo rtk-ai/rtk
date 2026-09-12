@@ -9,8 +9,9 @@ pub mod rules;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
+use std::path::PathBuf;
 
-use provider::{ClaudeProvider, SessionProvider};
+use provider::{ClaudeProvider, PiProvider, SessionProvider};
 use registry::{
     category_avg_tokens, classify_command, split_command_chain, strip_disabled_prefix,
     Classification, ExcludePattern,
@@ -263,27 +264,46 @@ pub fn run(
     format: &str,
     verbose: u8,
 ) -> Result<()> {
-    let provider = ClaudeProvider;
+    let claude_provider = ClaudeProvider;
+    let pi_provider = PiProvider;
 
-    // Determine project filter
-    let project_filter = if all {
-        None
+    // Determine provider-specific project filters.
+    let (claude_project_filter, pi_project_filter) = if all {
+        (None, None)
     } else if let Some(p) = project {
-        Some(p.to_string())
+        (Some(p.to_string()), Some(p.to_string()))
     } else {
         // Default: current working directory
         let cwd = std::env::current_dir()?;
         let cwd_str = cwd.to_string_lossy().to_string();
-        let encoded = ClaudeProvider::encode_project_path(&cwd_str);
-        Some(encoded)
+        (
+            Some(ClaudeProvider::encode_project_path(&cwd_str)),
+            Some(PiProvider::encode_project_path(&cwd_str)),
+        )
     };
 
-    let sessions = provider.discover_sessions(project_filter.as_deref(), Some(since_days))?;
+    let mut sessions: Vec<(&dyn SessionProvider, PathBuf)> = Vec::new();
+    for path in
+        claude_provider.discover_sessions(claude_project_filter.as_deref(), Some(since_days))?
+    {
+        sessions.push((&claude_provider, path));
+    }
+    match pi_provider.discover_sessions(pi_project_filter.as_deref(), Some(since_days)) {
+        Ok(paths) => {
+            for path in paths {
+                sessions.push((&pi_provider, path));
+            }
+        }
+        Err(error) if verbose > 0 => {
+            eprintln!("Warning: could not scan Pi sessions: {error}");
+        }
+        Err(_) => {}
+    }
 
     if verbose > 0 {
         eprintln!("Scanning {} session files...", sessions.len());
-        for s in &sessions {
-            eprintln!("  {}", s.display());
+        for (_, path) in &sessions {
+            eprintln!("  {}", path.display());
         }
     }
 
@@ -360,7 +380,7 @@ pub fn run(
     let mut supported_map: HashMap<&'static str, SupportedBucket> = HashMap::new();
     let mut unsupported_map: HashMap<String, UnsupportedBucket> = HashMap::new();
 
-    for session_path in &sessions {
+    for (provider, session_path) in &sessions {
         let extracted = match provider.extract_commands(session_path) {
             Ok(cmds) => cmds,
             Err(e) => {

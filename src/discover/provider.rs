@@ -1,6 +1,6 @@
-//! Reads Claude Code session logs from disk and streams their command history.
+//! Reads AI coding-agent session logs from disk and extracts command history.
 
-use crate::hooks::init::resolve_claude_dir;
+use crate::hooks::init::{resolve_claude_dir, resolve_pi_dir};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs;
@@ -44,6 +44,7 @@ pub trait SessionProvider {
 }
 
 pub struct ClaudeProvider;
+pub struct PiProvider;
 
 impl ClaudeProvider {
     /// Get the base directory for Claude Code projects.
@@ -282,6 +283,193 @@ impl SessionProvider for ClaudeProvider {
         }
 
         Ok(commands)
+    }
+}
+
+impl PiProvider {
+    fn sessions_dir() -> Result<PathBuf> {
+        let pi_dir = resolve_pi_dir().context("could not determine Pi directory")?;
+        Ok(pi_dir.join("sessions"))
+    }
+
+    fn discover_sessions_in_sessions_dir(
+        sessions_dir: &Path,
+        project_filter: Option<&str>,
+        since_days: Option<u64>,
+    ) -> Result<Vec<PathBuf>> {
+        ClaudeProvider::discover_sessions_in_projects_dir(sessions_dir, project_filter, since_days)
+    }
+
+    /// Encode a cwd using Pi's `--<path>--` session-directory convention.
+    pub fn encode_project_path(path: &str) -> String {
+        let normalized = path
+            .strip_prefix('/')
+            .or_else(|| path.strip_prefix('\\'))
+            .unwrap_or(path);
+        let encoded = normalized
+            .chars()
+            .map(|c| {
+                if matches!(c, '/' | '\\' | ':') {
+                    '-'
+                } else {
+                    c
+                }
+            })
+            .collect::<String>();
+        format!("--{encoded}--")
+    }
+
+    fn extract_current_commands(&self, path: &Path) -> Result<Option<Vec<ExtractedCommand>>> {
+        let file =
+            fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        let reader = BufReader::new(file);
+        let session_id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let mut saw_current_format = false;
+        let mut pending_tool_uses: Vec<(String, String, usize)> = Vec::new();
+        let mut tool_results: HashMap<String, (usize, String, bool)> = HashMap::new();
+        let mut sequence_counter = 0;
+
+        for line in reader.lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(_) => continue,
+            };
+            if !line.contains("\"type\":\"message\"") && !line.contains("\"type\": \"message\"") {
+                continue;
+            }
+
+            let entry: serde_json::Value = match serde_json::from_str(&line) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            if entry.get("type").and_then(serde_json::Value::as_str) != Some("message") {
+                continue;
+            }
+            saw_current_format = true;
+
+            let message = match entry.get("message") {
+                Some(message) => message,
+                None => continue,
+            };
+            match message.get("role").and_then(serde_json::Value::as_str) {
+                Some("assistant") => {
+                    let Some(content) =
+                        message.get("content").and_then(serde_json::Value::as_array)
+                    else {
+                        continue;
+                    };
+                    for block in content {
+                        let is_bash_call = block.get("type").and_then(serde_json::Value::as_str)
+                            == Some("toolCall")
+                            && block
+                                .get("name")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|name| name.eq_ignore_ascii_case("bash"));
+                        if !is_bash_call {
+                            continue;
+                        }
+                        if let (Some(id), Some(command)) = (
+                            block.get("id").and_then(serde_json::Value::as_str),
+                            block
+                                .pointer("/arguments/command")
+                                .and_then(serde_json::Value::as_str),
+                        ) {
+                            pending_tool_uses.push((
+                                id.to_string(),
+                                command.to_string(),
+                                sequence_counter,
+                            ));
+                            sequence_counter += 1;
+                        }
+                    }
+                }
+                Some("toolResult") => {
+                    let is_bash_result = message
+                        .get("toolName")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|name| name.eq_ignore_ascii_case("bash"));
+                    if !is_bash_result {
+                        continue;
+                    }
+                    let Some(id) = message
+                        .get("toolCallId")
+                        .and_then(serde_json::Value::as_str)
+                    else {
+                        continue;
+                    };
+                    let output = message
+                        .get("content")
+                        .map(pi_content_text)
+                        .unwrap_or_default();
+                    let preview = output.chars().take(1000).collect::<String>();
+                    let is_error = message
+                        .get("isError")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    tool_results.insert(id.to_string(), (output.len(), preview, is_error));
+                }
+                _ => {}
+            }
+        }
+
+        if !saw_current_format {
+            return Ok(None);
+        }
+
+        let commands = pending_tool_uses
+            .into_iter()
+            .map(|(tool_id, command, sequence_index)| {
+                let (output_len, output_content, is_error) = tool_results
+                    .get(&tool_id)
+                    .map(|(len, content, error)| (Some(*len), Some(content.clone()), *error))
+                    .unwrap_or((None, None, false));
+                ExtractedCommand {
+                    command,
+                    output_len,
+                    session_id: session_id.clone(),
+                    output_content,
+                    is_error,
+                    sequence_index,
+                }
+            })
+            .collect();
+        Ok(Some(commands))
+    }
+}
+
+impl SessionProvider for PiProvider {
+    fn discover_sessions(
+        &self,
+        project_filter: Option<&str>,
+        since_days: Option<u64>,
+    ) -> Result<Vec<PathBuf>> {
+        let sessions_dir = Self::sessions_dir()?;
+        Self::discover_sessions_in_sessions_dir(&sessions_dir, project_filter, since_days)
+    }
+
+    fn extract_commands(&self, path: &Path) -> Result<Vec<ExtractedCommand>> {
+        match self.extract_current_commands(path)? {
+            Some(commands) => Ok(commands),
+            None => ClaudeProvider.extract_commands(path),
+        }
+    }
+}
+
+fn pi_content_text(content: &serde_json::Value) -> String {
+    match content {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(blocks) => blocks
+            .iter()
+            .filter(|block| block.get("type").and_then(serde_json::Value::as_str) == Some("text"))
+            .filter_map(|block| block.get("text").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
     }
 }
 
@@ -550,5 +738,75 @@ mod tests {
         assert_eq!(cmds[0].command, "first");
         assert_eq!(cmds[1].command, "second");
         assert_eq!(cmds[2].command, "third");
+    }
+
+    #[test]
+    fn test_pi_encode_project_path() {
+        assert_eq!(
+            PiProvider::encode_project_path("/Users/foo/project"),
+            "--Users-foo-project--"
+        );
+        assert_eq!(
+            PiProvider::encode_project_path(r"C:\Users\foo\project"),
+            "--C--Users-foo-project--"
+        );
+    }
+
+    #[test]
+    fn test_pi_discover_sessions_applies_project_filter() {
+        let sessions_dir = tempfile::tempdir().unwrap();
+        let matching_project = sessions_dir.path().join("--Users-test-rtk--");
+        let other_project = sessions_dir.path().join("--Users-test-other--");
+        std::fs::create_dir_all(&matching_project).unwrap();
+        std::fs::create_dir_all(&other_project).unwrap();
+        std::fs::write(matching_project.join("matching.jsonl"), "").unwrap();
+        std::fs::write(other_project.join("other.jsonl"), "").unwrap();
+
+        let sessions =
+            PiProvider::discover_sessions_in_sessions_dir(sessions_dir.path(), Some("rtk"), None)
+                .unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].file_name().and_then(|name| name.to_str()),
+            Some("matching.jsonl")
+        );
+    }
+
+    #[test]
+    fn test_pi_extract_current_session_format() {
+        let jsonl = make_jsonl(&[
+            r#"{"type":"session","version":3,"id":"session-1","cwd":"/tmp/project"}"#,
+            r#"{"type":"message","id":"a1","parentId":null,"message":{"role":"assistant","content":[{"type":"toolCall","id":"call-1","name":"bash","arguments":{"command":"rtk git status"}}]}}"#,
+            r#"{"type":"message","id":"a2","parentId":"a1","message":{"role":"toolResult","toolCallId":"call-1","toolName":"bash","content":[{"type":"text","text":"On branch main"},{"type":"text","text":"clean"}],"isError":false}}"#,
+        ]);
+
+        let commands = PiProvider.extract_commands(jsonl.path()).unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].command, "rtk git status");
+        assert_eq!(commands[0].output_len, Some("On branch main\nclean".len()));
+        assert_eq!(
+            commands[0].output_content.as_deref(),
+            Some("On branch main\nclean")
+        );
+        assert!(!commands[0].is_error);
+    }
+
+    #[test]
+    fn test_pi_extract_error_and_legacy_formats() {
+        let current = make_jsonl(&[
+            r#"{"type":"message","id":"a1","parentId":null,"message":{"role":"assistant","content":[{"type":"toolCall","id":"call-1","name":"bash","arguments":{"command":"false"}}]}}"#,
+            r#"{"type":"message","id":"a2","parentId":"a1","message":{"role":"toolResult","toolCallId":"call-1","toolName":"bash","content":[{"type":"text","text":"failed"}],"isError":true}}"#,
+        ]);
+        let current_commands = PiProvider.extract_commands(current.path()).unwrap();
+        assert!(current_commands[0].is_error);
+
+        let legacy = make_jsonl(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"git diff"}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"diff output"}]}}"#,
+        ]);
+        let legacy_commands = PiProvider.extract_commands(legacy.path()).unwrap();
+        assert_eq!(legacy_commands.len(), 1);
+        assert_eq!(legacy_commands[0].command, "git diff");
     }
 }
