@@ -441,12 +441,17 @@ fn run_cargo_streamed(
 /// check` rejects both).
 fn cargo_takes_value(subcommand: &str, kind: TokenKind, name: &str) -> Option<ValueSpec> {
     // `-j`/`--jobs` is the one cargo flag that swallows a literal `--`, because it accepts
-    // negative job counts and so allows hyphen-leading values.
+    // negative job counts and so allows hyphen-leading values. Not under clippy: the separate
+    // `cargo-clippy` wrapper splits argv on the first `--` before cargo's parser sees it.
     if matches!(
         (kind, name),
         (TokenKind::Long, "jobs") | (TokenKind::Short, "j")
     ) {
-        return Some(ValueSpec::value().claiming_dash_dash());
+        let spec = ValueSpec::value();
+        return Some(match subcommand {
+            "clippy" => spec,
+            _ => spec.claiming_dash_dash(),
+        });
     }
 
     let shared = match kind {
@@ -489,8 +494,9 @@ fn has_json_message_format(subcommand: &str, args: &[String]) -> bool {
         &|kind, name| cargo_takes_value(subcommand, kind, name),
         Dialect::Posix,
     );
-    // Last occurrence wins, matching clap's own override semantics. No `before_dashdash` slice
-    // needed: `Dialect::Posix` already ends option parsing at the boundary.
+    // Cargo rejects two conflicting kinds outright and merges modifiers, so last-wins only has
+    // to agree with it on whether json was asked for at all — every json spelling contains
+    // "json". No `before_dashdash` slice: `Dialect::Posix` ends option parsing at the boundary.
     let values = arg_tokenizer::double_dash_flag_values(&tokens, Dialect::Posix, "message-format");
     values.last().is_some_and(|value| value.contains("json"))
 }
@@ -3308,6 +3314,17 @@ error: aborting due to 1 previous error
             "check",
             &["--explain", "--message-format=json"]
         ));
+    }
+
+    #[test]
+    fn test_json_format_jobs_dash_dash_is_clippy_only_boundary() {
+        // `cargo clippy -j --` reports a missing --jobs value, `cargo build -j --` reports an
+        // unparseable one: only clippy's wrapper claims the `--` first.
+        assert!(!json_format(
+            "clippy",
+            &["-j", "--", "--message-format=json"]
+        ));
+        assert!(json_format("build", &["-j", "--", "--message-format=json"]));
     }
 
     #[test]
