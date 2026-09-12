@@ -167,17 +167,20 @@ impl FilterStrategy for MinimalFilter {
         for line in content.lines() {
             let trimmed = line.trim();
 
-            // Handle block comments
+            // Handle full-line block comments.
             if let (Some(start), Some(end)) = (patterns.block_start, patterns.block_end) {
-                if !in_docstring
-                    && trimmed.contains(start)
-                    && !trimmed.starts_with(patterns.doc_block_start.unwrap_or("###"))
-                {
-                    in_block_comment = true;
-                }
                 if in_block_comment {
                     if trimmed.contains(end) {
                         in_block_comment = false;
+                    }
+                    continue;
+                }
+                if !in_docstring
+                    && trimmed.starts_with(start)
+                    && !trimmed.starts_with(patterns.doc_block_start.unwrap_or("###"))
+                {
+                    if !trimmed.contains(end) {
+                        in_block_comment = true;
                     }
                     continue;
                 }
@@ -465,6 +468,44 @@ fn main() {
         let result = filter.filter(code, &Language::Rust);
         assert!(!result.contains("// This is a comment"));
         assert!(result.contains("fn main()"));
+    }
+
+    #[test]
+    fn test_minimal_filter_preserves_comment_markers_inside_code() {
+        let code = r#"
+const API: &str = "http://example.com/v1";  // endpoint
+let re = regex::Regex::new(r"https?://\w+").unwrap();
+let glob = "packages/*";
+let inline = call(/* keep this expression line */);
+fn foo() {}
+"#;
+        let filter = MinimalFilter;
+        let result = filter.filter(code, &Language::Rust);
+
+        assert!(result.contains(r#"const API: &str = "http://example.com/v1";"#));
+        assert!(result.contains(r#"let re = regex::Regex::new(r"https?://\w+").unwrap();"#));
+        assert!(result.contains(r#"let glob = "packages/*";"#));
+        assert!(result.contains("let inline = call(/* keep this expression line */);"));
+        assert!(result.contains("fn foo() {}"));
+    }
+
+    #[test]
+    fn test_minimal_filter_removes_full_line_block_comments_only() {
+        let code = r#"
+fn before() {}
+/* single-line block comment */
+/*
+ * multi-line block comment
+ */
+fn after() {}
+"#;
+        let filter = MinimalFilter;
+        let result = filter.filter(code, &Language::Rust);
+
+        assert!(result.contains("fn before() {}"));
+        assert!(result.contains("fn after() {}"));
+        assert!(!result.contains("single-line block comment"));
+        assert!(!result.contains("multi-line block comment"));
     }
 
     // --- truncation accuracy ---
