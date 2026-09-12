@@ -101,15 +101,29 @@ fn new_gradle_command(args: &[String]) -> Command {
 }
 
 /// `StreamFilter` for build mode: keeps lines for which `filter_build_line` returns true.
-struct BuildLineFilter;
+///
+/// Collapses runs of consecutive blank lines in the emitted output to a single
+/// blank. `filter_build_line` intentionally preserves blanks as section
+/// separators, but on real kotlin/JVM builds this preserves hundreds of blanks
+/// between groups of `w:` compiler warnings — overwhelming the signal.
+/// Tracking `last_emitted_was_blank` keeps the separator intent while killing
+/// the pathological case.
+#[derive(Default)]
+struct BuildLineFilter {
+    last_emitted_was_blank: bool,
+}
 
 impl StreamFilter for BuildLineFilter {
     fn feed_line(&mut self, line: &str) -> Option<String> {
-        if filter_build_line(line) {
-            Some(format!("{}\n", line))
-        } else {
-            None
+        if !filter_build_line(line) {
+            return None; // dropped — state unchanged
         }
+        let is_blank = line.trim().is_empty();
+        if is_blank && self.last_emitted_was_blank {
+            return None; // collapse consecutive blanks
+        }
+        self.last_emitted_was_blank = is_blank;
+        Some(format!("{}\n", line))
     }
 
     fn flush(&mut self) -> String {
@@ -136,7 +150,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             cmd,
             tool,
             &args_display,
-            Box::new(BuildLineFilter),
+            Box::new(BuildLineFilter::default()),
             RunOptions::with_tee("gradlew_build"),
         ),
         GradlewTask::Test => runner::run_filtered(
@@ -746,6 +760,58 @@ Publishing build scan...
 https://gradle.com/s/abc123"#;
         let filtered: Vec<&str> = input.lines().filter(|l| filter_build_line(l)).collect();
         assert!(filtered.iter().any(|l| l.contains("gradle.com/s/")));
+    }
+
+    /// Feed an input stream to `BuildLineFilter` line-by-line and return the
+    /// concatenated emitted output (matches what the streaming runner does).
+    fn run_build_filter(input: &str) -> String {
+        use crate::core::stream::StreamFilter;
+        let mut f = BuildLineFilter::default();
+        let mut out = String::new();
+        for line in input.lines() {
+            if let Some(emitted) = f.feed_line(line) {
+                out.push_str(&emitted);
+            }
+        }
+        out.push_str(&f.flush());
+        out
+    }
+
+    #[test]
+    fn test_build_filter_collapses_consecutive_blanks() {
+        // Three back-to-back kotlin warnings each followed by blanks should
+        // produce one blank between warnings, not the full run.
+        let input = "w: warning1\n\n\n\nw: warning2\n\n\n\nw: warning3\n";
+        let out = run_build_filter(input);
+        assert_eq!(out, "w: warning1\n\nw: warning2\n\nw: warning3\n");
+    }
+
+    #[test]
+    fn test_build_filter_preserves_single_blank_separator() {
+        // Single blanks between kept lines are preserved (section separators).
+        let input = "w: warning1\n\nw: warning2\n";
+        let out = run_build_filter(input);
+        assert_eq!(out, "w: warning1\n\nw: warning2\n");
+    }
+
+    #[test]
+    fn test_build_filter_collapse_survives_dropped_lines_between_blanks() {
+        // If a non-kept line is sandwiched between blanks, the surviving
+        // blanks are still consecutive in the output and should collapse.
+        let input = "w: warn\n\n> Task :foo:compile\n\nBUILD SUCCESSFUL in 1s\n";
+        let out = run_build_filter(input);
+        // `> Task :…` is dropped (TASK_LINE strip), so the blank before and
+        // the two blanks after become a run of 3 in the emitted stream — must
+        // collapse to one.
+        assert_eq!(out, "w: warn\n\nBUILD SUCCESSFUL in 1s\n");
+    }
+
+    #[test]
+    fn test_build_filter_leading_blanks_collapsed() {
+        // A run of blanks at the start of the stream collapses to one blank.
+        let input = "\n\n\nBUILD SUCCESSFUL in 1s\n";
+        let out = run_build_filter(input);
+        assert_eq!(out, "\nBUILD SUCCESSFUL in 1s\n");
     }
 
     // ── TEST FILTER ───────────────────────────────────────────────────────────
