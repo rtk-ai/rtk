@@ -1,8 +1,10 @@
 name: rtk-rewrite
 version: "0.1.0"
-description: Rewrite Hermes terminal commands through RTK before execution.
+description: Rewrite terminal commands and filter tool outputs through RTK.
 author: RTK Contributors
 hooks:
   - pre_tool_call
+  - transform_tool_result
 provides_hooks:
   - pre_tool_call
+  - transform_tool_result
