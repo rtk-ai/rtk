@@ -1,4 +1,4 @@
-//! Filters find results by grouping files by directory.
+//! Filters find results while preserving complete paths.
 
 use crate::core::tracking;
 use crate::core::truncate::CAP_INVENTORY;
@@ -306,6 +306,7 @@ fn run_compress(
         let raw_output = files.join("\n");
         render(
             files,
+            None,
             max_results,
             max_explicit,
             &[],
@@ -350,11 +351,7 @@ fn group_by_dir(files: &[String]) -> HashMap<String, Vec<String>> {
             .map(|d| d.to_string_lossy().to_string())
             .unwrap_or_else(|| ".".to_string());
         let dir = if dir.is_empty() { ".".to_string() } else { dir };
-        let filename = p
-            .file_name()
-            .map(|f| f.to_string_lossy().to_string())
-            .unwrap_or_else(|| file.clone());
-        by_dir.entry(dir).or_default().push(filename);
+        by_dir.entry(dir).or_default().push(file.clone());
     }
     by_dir
 }
@@ -365,13 +362,7 @@ fn display_ordered(files: &[String]) -> Vec<String> {
     dirs.sort();
     let mut ordered = Vec::with_capacity(files.len());
     for dir in &dirs {
-        for filename in &by_dir[dir] {
-            if dir == "." {
-                ordered.push(filename.clone());
-            } else {
-                ordered.push(format!("{}/{}", dir, filename));
-            }
-        }
+        ordered.extend(by_dir[dir].iter().cloned());
     }
     ordered
 }
@@ -388,6 +379,16 @@ fn build_capped_listing(files: &[String], max_results: usize) -> String {
     }
     listing.push('\n');
     listing
+}
+
+fn qualify_paths(files: &[String], root: Option<&str>) -> Vec<String> {
+    files
+        .iter()
+        .map(|file| match root {
+            Some(root) => Path::new(root).join(file).to_string_lossy().into_owned(),
+            None => file.clone(),
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -426,13 +427,16 @@ pub fn run(
         true,
     );
 
+    // File-root entries already contain the requested path.
+    let root = (path != "." && Path::new(path).is_dir()).then_some(path);
     let raw_output = {
         let mut sorted = files.clone();
         sorted.sort();
-        sorted.join("\n")
+        qualify_paths(&sorted, root).join("\n")
     };
     render(
         files,
+        root,
         max_results,
         max_explicit,
         &filtered,
@@ -617,8 +621,10 @@ fn filtered_hint(filtered: &[String]) -> Option<String> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render(
     mut files: Vec<String>,
+    root: Option<&str>,
     max_results: usize,
     max_explicit: bool,
     filtered: &[String],
@@ -638,87 +644,10 @@ fn render(
         return shown;
     }
 
-    let ordered = display_ordered(&files);
-
-    let by_dir = group_by_dir(&files);
-    let mut dirs: Vec<_> = by_dir.keys().cloned().collect();
-    dirs.sort();
-    let dirs_count = dirs.len();
+    // Qualify after grouping so restoring the root does not change cap selection.
+    let ordered = qualify_paths(&display_ordered(&files), root);
+    let displayed = files.len().min(max_results);
     let total_files = files.len();
-
-    let mut body = String::new();
-    body.push_str(&format!("{}F {}D:\n", total_files, dirs_count));
-    body.push('\n');
-
-    // Display with proper --max limiting (count individual files)
-    let mut displayed = 0;
-    for dir in &dirs {
-        if displayed >= max_results {
-            break;
-        }
-
-        let files_in_dir = &by_dir[dir];
-        let dir_display = if dir.chars().count() > 50 {
-            let tail: String = dir
-                .chars()
-                .rev()
-                .take(47)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-            format!("...{}", tail)
-        } else {
-            dir.clone()
-        };
-
-        let remaining_budget = max_results - displayed;
-        if files_in_dir.len() <= remaining_budget {
-            body.push_str(&format!("{}/ {}\n", dir_display, files_in_dir.join(" ")));
-            displayed += files_in_dir.len();
-        } else {
-            // Partial display: show only what fits in budget
-            let partial: Vec<_> = files_in_dir
-                .iter()
-                .take(remaining_budget)
-                .cloned()
-                .collect();
-            body.push_str(&format!("{}/ {}\n", dir_display, partial.join(" ")));
-            displayed += partial.len();
-            break;
-        }
-    }
-
-    if displayed < total_files {
-        body.push_str(&format!("+{} more\n", total_files - displayed));
-    }
-
-    // Extension summary
-    let mut by_ext: HashMap<String, usize> = HashMap::new();
-    for file in &files {
-        let ext = Path::new(file)
-            .extension()
-            .map(|e| e.to_string_lossy().to_string())
-            .unwrap_or_else(|| "none".to_string());
-        *by_ext.entry(ext).or_default() += 1;
-    }
-
-    if by_ext.len() > 1 {
-        body.push('\n');
-        let mut exts: Vec<_> = by_ext.iter().collect();
-        exts.sort_by(|a, b| b.1.cmp(a.1));
-        let ext_str: Vec<String> = exts
-            .iter()
-            .take(5)
-            .map(|(e, c)| format!(".{}({})", e, c))
-            .collect();
-        let ext_line = format!("ext: {}", ext_str.join(" "));
-        body.push_str(&format!("{}\n", ext_line));
-    }
-
-    if let Some(note) = &note {
-        body.push_str(&format!("{}\n", note));
-    }
 
     let capped_raw = build_capped_listing(&ordered, max_results);
     let hint = if displayed < total_files && !max_explicit {
@@ -735,8 +664,7 @@ fn render(
         baseline.push('\n');
         baseline.push_str(note);
     }
-    let shown =
-        crate::core::runner::emit_guarded(body.trim_end_matches('\n'), hint.as_deref(), &baseline);
+    let shown = crate::core::runner::emit_guarded(&baseline, None, &baseline);
     timer.track(track_cmd, "rtk find", raw_output, &shown);
     shown
 }
@@ -744,6 +672,25 @@ fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rendered_paths_preserve_long_prefixes_and_spaces() {
+        let files: Vec<String> = (0..12)
+            .map(|i| format!("project with spaces/very long directory prefix/another nested directory/日本語/file {i:02}.txt"))
+            .collect();
+        let raw = files.join("\n");
+        let shown = render(
+            files.clone(),
+            None,
+            50,
+            false,
+            &[],
+            "find regression",
+            &raw,
+            &tracking::TimedExecution::start(),
+        );
+        assert_eq!(shown, raw);
+    }
 
     /// Convert string slices to Vec<String> for test convenience.
     fn args(values: &[&str]) -> Vec<String> {
@@ -1413,6 +1360,7 @@ mod tests {
         let timer = tracking::TimedExecution::start();
         let shown = render(
             vec!["visible.txt".to_string()],
+            None,
             50,
             false,
             &["secret.txt".to_string()],
@@ -1423,6 +1371,7 @@ mod tests {
         assert!(shown.contains("(1 filtered"), "{shown}");
         let shown = render(
             vec![],
+            None,
             50,
             false,
             &["secret.txt".to_string()],
