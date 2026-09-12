@@ -49,6 +49,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let is_check = is_check_invocation(args);
 
     let is_format = args.iter().any(|a| a == "format");
+    let is_analyze_graph = is_analyze_graph_invocation(args);
 
     let mut cmd = resolved_command("ruff");
 
@@ -106,11 +107,23 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             } else if is_format {
                 filter_ruff_format(stdout)
             } else {
-                truncate(stdout.trim(), config::limits().passthrough_max_chars)
+                filter_passthrough_output(stdout, is_analyze_graph)
             }
         },
         runner::RunOptions::stdout_only(),
     )
+}
+
+fn is_analyze_graph_invocation(args: &[String]) -> bool {
+    matches!(args, [subcommand, action, ..] if subcommand == "analyze" && action == "graph")
+}
+
+fn filter_passthrough_output(stdout: &str, is_analyze_graph: bool) -> String {
+    if is_analyze_graph {
+        stdout.trim().to_string()
+    } else {
+        truncate(stdout.trim(), config::limits().passthrough_max_chars)
+    }
 }
 
 fn is_check_invocation(args: &[String]) -> bool {
@@ -414,6 +427,22 @@ mod tests {
     fn top_level_flags_are_not_misclassified_as_paths() {
         assert!(!is_check_invocation(&["--version".to_string()]));
         assert!(!is_check_invocation(&["--help".to_string()]));
+    }
+
+    #[test]
+    fn analyze_graph_preserves_large_json_output() {
+        let entries: Vec<_> = (0..200)
+            .map(|i| format!(r#""module_{i}.py": {{"imports": []}}"#))
+            .collect();
+        let raw = format!("{{{}}}", entries.join(","));
+        assert!(raw.len() > config::limits().passthrough_max_chars);
+
+        let args = ["analyze".to_string(), "graph".to_string()];
+        let result = filter_passthrough_output(&raw, is_analyze_graph_invocation(&args));
+
+        assert_eq!(result, raw);
+        serde_json::from_str::<serde_json::Value>(&result)
+            .expect("analyze graph output must remain valid JSON");
     }
 
     #[test]
