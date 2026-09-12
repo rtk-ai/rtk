@@ -175,9 +175,10 @@ pub(crate) fn coalesce_words<'a>(cmd: &'a str, tokens: &[ParsedToken]) -> Vec<(&
 /// A command's words (quote-aware, see [`coalesce_words`]) split from their byte offsets in
 /// `cmd`. The words are *unresolved*: they are slices of `cmd` with quote characters and
 /// backslash escapes still literal, so `--config "a path/x.yml"` yields the word
-/// `"a path/x.yml"` with its quotes. A caller that reads a word as a value -- rather than
-/// comparing it to a keyword or slicing `cmd` by offset -- must put it through
-/// [`resolve_word_text`] first; [`shell_split`] resolves but drops the offsets.
+/// `"a path/x.yml"` with its quotes. A caller that reads a word as a value must put it through
+/// [`resolve_word_text`] first; [`shell_split`] resolves but drops the offsets. Comparing an
+/// unresolved word to a keyword matches only the unquoted spelling -- fine when the miss means
+/// passthrough, not when it means a wrong rewrite.
 ///
 /// Callers that hand the words to `core::arg_tokenizer` keep the offsets alongside:
 /// `Token::source_index` indexes the words, so `spans[token.source_index]` is the way back to a
@@ -1741,9 +1742,9 @@ mod tests {
     #[test]
     fn test_shell_split_coalesces_unquoted_glob_next_to_quoted_segment() {
         // An unquoted metacharacter directly adjacent to a quoted segment
-        // (no space between them) must stay one word — the same
-        // token-coalescing gap that split_token_spans needed for golangci-lint,
-        // now exercised through shell_split's output shape (quotes stripped).
+        // (no space between them) must stay one word — the token-coalescing gap
+        // `coalesce_words` closes, here through shell_split's output shape
+        // (quotes stripped).
         assert_eq!(
             shell_split(r#"echo *.yml"quoted end""#),
             vec!["echo", "*.ymlquoted end"]

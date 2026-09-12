@@ -6302,15 +6302,25 @@ mod tests {
     #[test]
     fn test_classify_golangci_lint_with_quoted_value_flag_before_run() {
         // A quoted global-flag value containing a space (`--config "a path/x.yml"`)
-        // must not be split at the space inside the quotes — split_token_spans
-        // (whitespace-only, quote-blind) used to mis-split this into "\"a" and
-        // "path/x.yml\"", which made parse_golangci_run_parts miss `run` entirely.
+        // must not be split at the space inside the quotes: a whitespace-only,
+        // quote-blind split yields "\"a" and "path/x.yml\"", which makes
+        // parse_golangci_run_parts miss `run` entirely.
         assert!(matches!(
             classify_command(r#"golangci-lint --config "a path/x.yml" run ./..."#),
             Classification::Supported {
                 rtk_equivalent: "rtk golangci-lint run",
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn test_classify_golangci_lint_quoted_subcommand_is_not_rewritten() {
+        // The lexer's words keep their quotes, so a quoted `run` never equals the
+        // keyword. Passthrough (unfiltered but correct), not a misrewrite.
+        assert!(!matches!(
+            classify_command(r#"golangci-lint "run" ./..."#),
+            Classification::Supported { .. }
         ));
     }
 
