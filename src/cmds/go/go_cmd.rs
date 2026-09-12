@@ -45,11 +45,88 @@ struct PackageResult {
     package_fail_output: Vec<String>,         // output lines collected before the package fail
 }
 
+fn go_test_verbose_requested(args: &[String]) -> bool {
+    let mut verbose = false;
+    let mut args = args.iter();
+    // Go stops interpreting its own flags at -args/--. Repeated boolean flags
+    // use the last value, including aliases such as -test.v and --v.
+    while let Some(arg) = args.next() {
+        if matches!(arg.as_str(), "-args" | "--args" | "--") {
+            break;
+        }
+        let Some(flag) = arg.strip_prefix("--").or_else(|| arg.strip_prefix('-')) else {
+            continue;
+        };
+        let (name, value) = flag.split_once('=').unwrap_or((flag, "true"));
+        if matches!(name, "v" | "test.v") {
+            verbose = !matches!(value, "0" | "f" | "F" | "false" | "False" | "FALSE");
+        } else if !flag.contains('=') && go_test_flag_takes_value(name) {
+            args.next();
+        }
+    }
+    verbose
+}
+
+fn go_test_flag_takes_value(name: &str) -> bool {
+    // Test selectors, output paths and build flag values may themselves look
+    // like -v or -args. Consume them before interpreting verbosity flags.
+    matches!(
+        name.strip_prefix("test.").unwrap_or(name),
+        "C" | "o"
+            | "exec"
+            | "vet"
+            | "bench"
+            | "benchtime"
+            | "blockprofile"
+            | "blockprofilerate"
+            | "count"
+            | "cpu"
+            | "cpuprofile"
+            | "fuzz"
+            | "fuzztime"
+            | "fuzzminimizetime"
+            | "list"
+            | "memprofile"
+            | "memprofilerate"
+            | "mutexprofile"
+            | "mutexprofilefraction"
+            | "outputdir"
+            | "parallel"
+            | "run"
+            | "shuffle"
+            | "skip"
+            | "timeout"
+            | "trace"
+            | "covermode"
+            | "coverpkg"
+            | "coverprofile"
+            | "p"
+            | "asmflags"
+            | "buildmode"
+            | "compiler"
+            | "gccgoflags"
+            | "gcflags"
+            | "installsuffix"
+            | "ldflags"
+            | "mod"
+            | "modfile"
+            | "overlay"
+            | "pgo"
+            | "pkgdir"
+            | "tags"
+            | "toolexec"
+            | "debug-actiongraph"
+            | "debug-runtime-trace"
+            | "debug-trace"
+    )
+}
+
 pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("go");
     cmd.arg("test");
 
-    let skip_json = args.iter().any(|a| a == "-json" || a.starts_with("-bench"));
+    let passthrough = go_test_verbose_requested(args);
+    let skip_json = passthrough || args.iter().any(|a| a == "-json" || a.starts_with("-bench"));
 
     if !skip_json {
         cmd.arg("-json");
@@ -64,6 +141,16 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
             "Running: go test {}{}",
             if !skip_json { "-json " } else { "" },
             args.join(" ")
+        );
+    }
+
+    if passthrough {
+        return runner::run(
+            cmd,
+            "go test",
+            &args.join(" "),
+            runner::RunMode::Passthrough,
+            runner::RunOptions::default(),
         );
     }
 
@@ -738,6 +825,47 @@ fn compact_package_name(package: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_go_test_verbose_flag_forms() {
+        for prefix in ["-v", "--v", "-test.v", "--test.v"] {
+            for value in ["", "=1", "=t", "=T", "=true", "=True", "=TRUE", "=test2json"] {
+                let args = vec!["./...".to_string(), format!("{prefix}{value}")];
+                assert!(go_test_verbose_requested(&args), "args: {args:?}");
+            }
+            for value in ["0", "f", "F", "false", "False", "FALSE"] {
+                let args = vec!["-v".to_string(), format!("{prefix}={value}")];
+                assert!(!go_test_verbose_requested(&args), "args: {args:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_go_test_verbose_flag_scope() {
+        let cases: &[(&[&str], bool)] = &[
+            (&[], false),
+            (&["./...", "-run", "TestPass"], false),
+            (&["-v=false", "-test.v"], true),
+            (&["--test.v", "--v=0"], false),
+            (&["-args", "-v"], false),
+            (&["--args", "-test.v"], false),
+            (&["--", "-v"], false),
+            (&["-v", "-args", "-v=false"], true),
+            (&["-v", "--", "-test.v=false"], true),
+            (&["-run=-v", "-vmodule=2", "-verbose"], false),
+            (&["-run", "-v"], false),
+            (&["-v", "-o", "-v=false"], true),
+            (&["-v", "-test.run", "-v=false"], true),
+            (&["-v", "-coverprofile", "-v=false"], true),
+            (&["-run", "-args", "-v"], true),
+            (&["-race", "-v"], true),
+            (&["-v", "-race", "-test.v=false"], false),
+        ];
+        for (args, expected) in cases {
+            let args: Vec<_> = args.iter().map(|arg| arg.to_string()).collect();
+            assert_eq!(go_test_verbose_requested(&args), *expected, "args: {args:?}");
+        }
+    }
 
     #[test]
     fn test_filter_go_test_all_pass() {
