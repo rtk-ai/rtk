@@ -177,10 +177,12 @@ impl SessionProvider for ClaudeProvider {
             .unwrap_or("unknown")
             .to_string();
 
-        // First pass: collect all tool_use Bash commands with their IDs and sequence
-        // Second pass (same loop): collect tool_result output lengths, content, and error status
+        // Collect Bash tool uses, their results, and any RTK PreToolUse rewrite recorded by
+        // Claude Code. Matching happens after the scan because attachments and results follow
+        // the assistant tool_use entry in the transcript.
         let mut pending_tool_uses: Vec<(String, String, usize)> = Vec::new(); // (tool_use_id, command, sequence)
         let mut tool_results: HashMap<String, (usize, String, bool)> = HashMap::new(); // (len, content, is_error)
+        let mut rewritten_commands: HashMap<String, String> = HashMap::new();
         let mut commands = Vec::new();
         let mut sequence_counter = 0;
 
@@ -190,8 +192,11 @@ impl SessionProvider for ClaudeProvider {
                 Err(_) => continue,
             };
 
-            // Pre-filter: skip lines that can't contain Bash tool_use or tool_result
-            if !line.contains("\"Bash\"") && !line.contains("\"tool_result\"") {
+            // Pre-filter: skip lines that can't contain a Bash tool_use/result or hook record.
+            if !line.contains("\"Bash\"")
+                && !line.contains("\"tool_result\"")
+                && !line.contains("\"hook_success\"")
+            {
                 continue;
             }
 
@@ -259,16 +264,57 @@ impl SessionProvider for ClaudeProvider {
                         }
                     }
                 }
+                "attachment" => {
+                    let Some(attachment) = entry.get("attachment") else {
+                        continue;
+                    };
+                    if attachment.get("type").and_then(|v| v.as_str()) != Some("hook_success")
+                        || attachment.get("hookName").and_then(|v| v.as_str())
+                            != Some("PreToolUse:Bash")
+                    {
+                        continue;
+                    }
+                    let (Some(tool_id), Some(stdout)) = (
+                        attachment.get("toolUseID").and_then(|v| v.as_str()),
+                        attachment.get("stdout").and_then(|v| v.as_str()),
+                    ) else {
+                        continue;
+                    };
+                    let Ok(output) = serde_json::from_str::<serde_json::Value>(stdout) else {
+                        continue;
+                    };
+                    let Some(hook_output) = output.get("hookSpecificOutput") else {
+                        continue;
+                    };
+                    if hook_output.get("hookEventName").and_then(|v| v.as_str())
+                        != Some("PreToolUse")
+                        || hook_output
+                            .get("permissionDecisionReason")
+                            .and_then(|v| v.as_str())
+                            != Some("RTK auto-rewrite")
+                    {
+                        continue;
+                    }
+                    if let Some(command) = hook_output
+                        .pointer("/updatedInput/command")
+                        .and_then(|v| v.as_str())
+                    {
+                        rewritten_commands.insert(tool_id.to_string(), command.to_string());
+                    }
+                }
                 _ => {}
             }
         }
 
         // Match tool_uses with their results
-        for (tool_id, command, sequence_index) in pending_tool_uses {
+        for (tool_id, original_command, sequence_index) in pending_tool_uses {
             let (output_len, output_content, is_error) = tool_results
                 .get(&tool_id)
                 .map(|(len, content, err)| (Some(*len), Some(content.clone()), *err))
                 .unwrap_or((None, None, false));
+            let command = rewritten_commands
+                .remove(&tool_id)
+                .unwrap_or(original_command);
 
             commands.push(ExtractedCommand {
                 command,
@@ -349,6 +395,100 @@ mod tests {
         assert_eq!(cmds.len(), 2);
         assert_eq!(cmds[0].command, "git status");
         assert_eq!(cmds[1].command, "git diff");
+    }
+
+    #[test]
+    fn test_extract_uses_rtk_hook_updated_command() {
+        let tool_use = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_rtk",
+                    "name": "Bash",
+                    "input": { "command": "git status" }
+                }]
+            }
+        })
+        .to_string();
+        let unrelated_hook = serde_json::json!({
+            "type": "attachment",
+            "attachment": {
+                "type": "hook_success",
+                "hookName": "PreToolUse:Bash",
+                "toolUseID": "toolu_rtk",
+                "stdout": "{}\n"
+            }
+        })
+        .to_string();
+        let rtk_hook_output = serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": "RTK auto-rewrite",
+                "updatedInput": { "command": "rtk git status" }
+            }
+        })
+        .to_string();
+        let rtk_hook = serde_json::json!({
+            "type": "attachment",
+            "attachment": {
+                "type": "hook_success",
+                "hookName": "PreToolUse:Bash",
+                "toolUseID": "toolu_rtk",
+                "stdout": rtk_hook_output
+            }
+        })
+        .to_string();
+        let jsonl = make_jsonl(&[&tool_use, &unrelated_hook, &rtk_hook]);
+
+        let provider = ClaudeProvider;
+        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].command, "rtk git status");
+    }
+
+    #[test]
+    fn test_extract_ignores_non_rtk_hook_updated_command() {
+        let tool_use = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_other",
+                    "name": "Bash",
+                    "input": { "command": "git status" }
+                }]
+            }
+        })
+        .to_string();
+        let other_hook_output = serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": "another hook",
+                "updatedInput": { "command": "custom-wrapper git status" }
+            }
+        })
+        .to_string();
+        let other_hook = serde_json::json!({
+            "type": "attachment",
+            "attachment": {
+                "type": "hook_success",
+                "hookName": "PreToolUse:Bash",
+                "toolUseID": "toolu_other",
+                "stdout": other_hook_output
+            }
+        })
+        .to_string();
+        let jsonl = make_jsonl(&[&tool_use, &other_hook]);
+
+        let provider = ClaudeProvider;
+        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].command, "git status");
     }
 
     #[test]
