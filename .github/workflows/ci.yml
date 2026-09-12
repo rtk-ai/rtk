@@ -48,6 +48,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets
 
+  rustdoc:
+    name: rustdoc
+    needs: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps
+
   # ─── Parallel gates (all need code to compile) ───
 
   test:

@@ -643,7 +643,7 @@ const BUN_POLICY: BlockPolicy = BlockPolicy {
     },
 };
 
-/// Deno's type-check diagnostics, "TS2322 [ERROR]: Type 'string' is not
+/// Deno's type-check diagnostics, "TS2322 `[ERROR]`: Type 'string' is not
 /// assignable to type 'number'." They are not introduced by an `error:` line and
 /// carry no ERRORS section, so nothing else in the deno policy would keep them.
 static DENO_TS_ERROR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^TS\d+ \[ERROR\]:").unwrap());

@@ -136,6 +136,8 @@ enum Commands {
 
     /// Git commands with compact output
     Git {
+        // Backticks would leak into clap's --help text, so silence rustdoc here instead.
+        #[allow(rustdoc::invalid_html_tags)]
         /// Change to directory before executing (like git -C <path>, can be repeated)
         #[arg(short = 'C', action = clap::ArgAction::Append)]
         directory: Vec<String>,

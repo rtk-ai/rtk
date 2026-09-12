@@ -286,7 +286,7 @@ fn extract_outdated_text(output: &str) -> Option<DependencyState> {
     }
 }
 
-/// Format a dependency listing with grouped [prod]/[dev] sections.
+/// Format a dependency listing with grouped `[prod]`/`[dev]` sections.
 /// `cap = true` for plain `pnpm list` (both categories present, may truncate).
 /// `cap = false` for `pnpm list --prod` / `pnpm list --dev` (hint targets,
 /// must show every package so the LLM can find what was hidden by the cap).

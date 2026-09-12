@@ -5561,7 +5561,7 @@ fn resolve_vibe_dir() -> Result<PathBuf> {
 /// Entry point for `rtk init -g --agent vibe`.
 ///
 /// Installs a `pre_tool` hook into `~/.vibe/hooks.toml` (Vibe CLI's hook
-/// registry, see https://docs.mistral.ai/vibe/code/cli/hooks) that routes
+/// registry, see <https://docs.mistral.ai/vibe/code/cli/hooks>) that routes
 /// bash tool calls through the native `rtk hook vibe` binary. When not
 /// `hook_only`, also drops an `~/.vibe/prompts/rtk.md` system prompt file
 /// as a belt-and-suspenders fallback if the hook is disabled.
@@ -5731,7 +5731,7 @@ fn patch_vibe_hooks_toml(
 }
 
 /// TOML entry emitted for the Vibe pre_tool hook. Mirrors the shape documented
-/// at https://docs.mistral.ai/vibe/code/cli/hooks.
+/// at <https://docs.mistral.ai/vibe/code/cli/hooks>.
 fn vibe_hook_entry() -> String {
     format!(
         r#"[[hooks]]

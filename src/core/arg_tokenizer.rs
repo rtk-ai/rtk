@@ -200,7 +200,7 @@ fn is_double_dash_flag(t: &Token<'_>, dialect: Dialect, name: &str) -> bool {
     t.kind == TokenKind::Long && t.double_dash && flag_name_matches(t.text, name, dialect)
 }
 
-/// Which CLI's flag grammar to apply. See [`tokenize_dialect`].
+/// Which CLI's flag grammar to apply. See [`tokenize_grammar`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dialect {
     /// MSBuild/dotnet-CLI-ish. `-flag`, `--flag`, and `/flag` are all one atomic flag name —

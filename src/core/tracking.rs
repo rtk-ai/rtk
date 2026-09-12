@@ -1687,7 +1687,7 @@ pub fn estimate_tokens_from_len(len: usize) -> usize {
 /// Helper for timing command execution and tracking results.
 ///
 /// Preferred API for tracking commands. Automatically measures execution time
-/// and records token savings. Use instead of the deprecated [`track`] function.
+/// and records token savings.
 ///
 /// # Examples
 ///

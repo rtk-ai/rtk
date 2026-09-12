@@ -1817,7 +1817,7 @@ fn real_flag_args(args: &[String]) -> Vec<&str> {
 
 /// True for git log flags that change the *shape* of git's raw output (patch text, diffstat,
 /// name lists) in a way incompatible with RTK's injected `--pretty=format` markers, requiring
-/// the raw passthrough path instead (see [`requests_raw_log_output`]). `diff`/`show` use the
+/// the raw passthrough path instead. `diff`/`show` use the
 /// narrower [`diff_wants_raw_shape`]/[`show_wants_raw_shape`] instead.
 fn log_wants_raw_shape(token: &Token<'_>, tokens: &[Token<'_>]) -> bool {
     // Every `--diff-merges` format but `off`/`none` emits a patch (git 2.53), and log's
@@ -2166,7 +2166,7 @@ fn extract_state_header(raw: &str) -> Option<String> {
 
 /// Porcelain `-b` collapses a detached HEAD to the opaque `## HEAD (no branch)`, which can be
 /// misread as a branch literally named `HEAD`. Extracts the explicit "HEAD detached at/from
-/// <ref>" line from plain `git status` output instead. `None` if HEAD is on a branch.
+/// `<ref>` line from plain `git status` output instead. `None` if HEAD is on a branch.
 fn extract_detached_head(raw: &str) -> Option<String> {
     raw.lines()
         .map(str::trim)
@@ -3128,7 +3128,7 @@ fn run_fetch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32
 
 /// Format status message for stash operations.
 /// - For create operations (push/save): checks for "No local changes"
-/// - For other operations: uses "ok stash <subcommand>" format
+/// - For other operations: uses `ok stash <subcommand>` format
 fn format_stash_message(subcommand: Option<&str>, result: &CaptureResult) -> String {
     match subcommand {
         None | Some("push") | Some("save") => {
