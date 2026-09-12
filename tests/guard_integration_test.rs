@@ -599,3 +599,65 @@ fn git_show_quiet_loses_to_a_patch_request_from_either_side() {
         );
     }
 }
+
+/// A repo whose `big.txt` is comfortably over the 8 KiB blob-window budget, so
+/// `rtk git show HEAD:big.txt` windows it and any misrouting is visible in the output.
+fn repo_with_a_large_blob() -> tempfile::TempDir {
+    let dir = init_git_repo();
+    let body: String = (0..600).map(|i| format!("line {i} a:b url:1\n")).collect();
+    std::fs::write(dir.path().join("big.txt"), &body).expect("write big.txt");
+    git_in_dir(dir.path(), &["add", "-A"]);
+    git_in_dir(dir.path(), &["commit", "-qm", "big blob"]);
+    dir
+}
+
+const BLOB_HINT: &str = "[see remaining: git show 'HEAD:big.txt' | tail -n +";
+
+#[test]
+fn git_show_cluster_flag_value_is_not_mistaken_for_the_blob_object() {
+    // `-wG a:b HEAD:big.txt`: `a:b` is `-G`'s value, not a second object. Counting it as a
+    // positional makes `can_window` false and dumps the whole file instead of windowing it.
+    let dir = repo_with_a_large_blob();
+
+    let (stdout, stderr, code) =
+        rtk_output_in_dir(dir.path(), &["git", "show", "-wG", "a:b", "HEAD:big.txt"]);
+
+    assert_eq!(code, Some(0), "rtk stderr: {stderr}");
+    assert!(
+        stdout.contains(BLOB_HINT),
+        "-wG a:b should still window the blob: {stdout:?}"
+    );
+}
+
+#[test]
+fn git_show_rename_limit_clusters_under_diffs_grammar_not_logs() {
+    // `git show -wl 100` is diff-family: `-l` is the rename limit and consumes the `100` even
+    // when clustered. Under `git log`'s grammar `-l` is solo-only, which would leave `100` as a
+    // second positional and drop the blob window.
+    let dir = repo_with_a_large_blob();
+
+    let (stdout, stderr, code) =
+        rtk_output_in_dir(dir.path(), &["git", "show", "-wl", "100", "HEAD:big.txt"]);
+
+    assert_eq!(code, Some(0), "rtk stderr: {stderr}");
+    assert!(
+        stdout.contains(BLOB_HINT),
+        "-wl 100 should still window the blob: {stdout:?}"
+    );
+}
+
+#[test]
+fn git_show_blob_spec_after_double_dash_is_a_pathspec_not_an_object() {
+    // Past `--` even a string `cat-file` resolves to a blob is a pathspec: git matches it
+    // against no file and prints the bare commit, so RTK must not dump the blob instead.
+    let dir = repo_with_a_large_blob();
+
+    let (stdout, stderr, code) =
+        rtk_output_in_dir(dir.path(), &["git", "show", "HEAD", "--", "HEAD:big.txt"]);
+
+    assert_eq!(code, Some(0), "rtk stderr: {stderr}");
+    assert!(
+        !stdout.contains(BLOB_HINT) && !stdout.contains("line 0 a:b"),
+        "pathspec past -- must not be windowed as a blob: {stdout:?}"
+    );
+}
