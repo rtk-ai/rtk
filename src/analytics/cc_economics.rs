@@ -101,13 +101,7 @@ impl PeriodEconomics {
     fn set_rtk_from_month(&mut self, stats: &MonthStats) {
         self.rtk_commands = Some(stats.commands);
         self.rtk_saved_tokens = Some(stats.saved_tokens);
-        self.rtk_savings_pct = Some(if stats.input_tokens + stats.output_tokens > 0 {
-            stats.saved_tokens as f64
-                / (stats.saved_tokens + stats.input_tokens + stats.output_tokens) as f64
-                * 100.0
-        } else {
-            0.0
-        });
+        self.rtk_savings_pct = Some(stats.savings_pct);
     }
 
     fn compute_weighted_metrics(&mut self) {
@@ -846,6 +840,25 @@ mod tests {
         assert_eq!(p.label, "2026-01");
         assert!(p.cc_cost.is_none());
         assert!(p.rtk_commands.is_none());
+    }
+
+    #[test]
+    fn test_set_rtk_from_month_uses_tracked_savings_pct() {
+        let mut period = PeriodEconomics::new("2026-01");
+        let stats = MonthStats {
+            month: "2026-01".to_string(),
+            commands: 1,
+            input_tokens: 100,
+            output_tokens: 20,
+            saved_tokens: 80,
+            savings_pct: 80.0,
+            total_time_ms: 0,
+            avg_time_ms: 0,
+        };
+
+        period.set_rtk_from_month(&stats);
+        assert_eq!(period.rtk_saved_tokens, Some(80));
+        assert_eq!(period.rtk_savings_pct, Some(80.0));
     }
 
     #[test]
