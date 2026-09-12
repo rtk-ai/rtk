@@ -11,10 +11,8 @@
 /// What kind of unit a [`Token`] represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
-    /// The literal `--` separator. Emitted exactly once, for the first `--` encountered. Under
-    /// [`Dialect::Posix`] it ends option parsing (everything after is `Positional`); under
-    /// [`Dialect::Msbuild`] it's an argument-*forwarding* boundary instead, so classification
-    /// continues normally past it, with only its position recorded.
+    /// The literal `--` separator. Emitted exactly once, for the first `--` encountered. What it
+    /// does to the arguments after it is the dialect's [`DashDashRole`] axis.
     DashDash,
     /// `--name` (see `Token::text` for the name, without the leading `--`).
     Long,
@@ -51,12 +49,12 @@ pub struct Token<'a> {
     /// as one cluster or two separate flags) do so without re-scanning `args` itself.
     pub source_index: usize,
     /// True if a `Long` token was written with a literal `--` prefix, as opposed to `-flag` or
-    /// `/flag` under [`Dialect::Msbuild`] (all three tokenize uniformly as `Long` there, but
-    /// they are *not* uniformly valid dotnet CLI syntax — see [`has_flag`] vs
-    /// [`has_double_dash_flag`]). Always `true` for `Long` under [`Dialect::Posix`] (its `Long`
-    /// is always `--`); always `false` for `Short`/`Positional`/`DashDash`.
+    /// `/flag` (which tokenize uniformly as `Long` under [`SingleDash::Atomic`], but are *not*
+    /// uniformly valid dotnet CLI syntax — see [`has_flag`] vs [`has_double_dash_flag`]). Also
+    /// true for `-flag` under [`SingleDash::AtomicAliasingLong`], where the two spellings are
+    /// one flag. Always `false` for `Short`/`Positional`/`DashDash`.
     pub double_dash: bool,
-    /// True for the `/flag` spelling under [`Dialect::Msbuild`], which is MSBuild's own switch
+    /// True for the `/flag` spelling (dialects with `slash_flags`), which is MSBuild's own switch
     /// syntax rather than dotnet's CLI syntax -- `/l:` is MSBuild's logger-assembly switch, not
     /// dotnet's `-l`/`--logger`. Always `false` otherwise.
     pub slash: bool,
@@ -98,13 +96,11 @@ pub fn is_digit_run(text: &str) -> bool {
     !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// True if `text` (a `Long` token's name) matches `name` under `dialect`'s naming rules: exact
-/// for [`Dialect::Posix`], ASCII case-insensitive for [`Dialect::Msbuild`] (MSBuild-ecosystem
-/// tools fold case broadly, e.g. `/nologo` and `/NoLogo` are equally valid).
+/// True if `text` (a `Long` token's name) matches `name` under `dialect`'s [`NameCase`] axis.
 fn flag_name_matches(text: &str, name: &str, dialect: Dialect) -> bool {
-    match dialect {
-        Dialect::Msbuild => text.eq_ignore_ascii_case(name),
-        Dialect::Posix => text == name,
+    match dialect.name_case {
+        NameCase::Folded => text.eq_ignore_ascii_case(name),
+        NameCase::Sensitive => text == name,
     }
 }
 
@@ -115,10 +111,11 @@ pub fn dashdash_index(tokens: &[Token<'_>]) -> Option<usize> {
     tokens.iter().position(|t| t.kind == TokenKind::DashDash)
 }
 
-/// The tokens before the `--` boundary, or all of them when there is none. Under
-/// [`Dialect::Msbuild`] classification continues past `--` (it forwards arguments rather than
-/// ending option parsing), so a lookup for the tool's *own* flags has to slice here first --
-/// otherwise it reads what the user forwarded to the test runner as if dotnet had seen it.
+/// The tokens before the `--` boundary, or all of them when there is none. Every
+/// [`DashDashRole`] except `EndsOptions` keeps classifying past `--`, so a lookup for the flags
+/// the tool reads *globally* has to slice here first -- otherwise it reads what the user
+/// forwarded to the test runner, or typed as a gradle task option, as if the tool had seen it
+/// as a global flag.
 pub fn before_dashdash<'t, 'a>(tokens: &'t [Token<'a>]) -> &'t [Token<'a>] {
     match dashdash_index(tokens) {
         Some(index) => &tokens[..index],
@@ -126,9 +123,10 @@ pub fn before_dashdash<'t, 'a>(tokens: &'t [Token<'a>]) -> &'t [Token<'a>] {
     }
 }
 
-/// Where RTK's own flags have to be spliced into `args`: before the user's `--`, since
-/// anything past the boundary is a pathspec or an argument forwarded to another program, not
-/// an option the tool will read. `args_len` when there is no boundary.
+/// Where RTK's own flags have to be spliced into `args`: before the user's `--`, since no
+/// [`DashDashRole`] lets the tool read a *global* option past the boundary -- it is a pathspec,
+/// an argument forwarded to another program, or a task's own option. `args_len` when there is
+/// no boundary.
 ///
 /// Takes the **whole** token vec, never a slice: `dashdash_index` on a slice whose `--` was
 /// cut off reports "no boundary" and this returns `args_len`, which would splice RTK's flags
@@ -200,18 +198,127 @@ fn is_double_dash_flag(t: &Token<'_>, dialect: Dialect, name: &str) -> bool {
     t.kind == TokenKind::Long && t.double_dash && flag_name_matches(t.text, name, dialect)
 }
 
-/// Which CLI's flag grammar to apply. See [`tokenize_dialect`].
+/// What a single-dash multi-character argument (`-abc`) means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Dialect {
-    /// MSBuild/dotnet-CLI-ish. `-flag`, `--flag`, and `/flag` are all one atomic flag name —
-    /// there is no short-flag clustering — and a value can attach via either `=` or `:`
-    /// (`--logger:trx` and `--logger=trx` are both valid). Every atomic flag is tagged
-    /// `TokenKind::Long` regardless of which prefix introduced it; `TokenKind::Short` is never
-    /// produced in this dialect.
-    Msbuild,
-    /// GNU/POSIX-ish: git, cargo, rg, golangci-lint. `-xyz` is a cluster of short flags,
-    /// scanned char by char; only `=` attaches a value to a long flag.
-    Posix,
+pub enum SingleDash {
+    /// A cluster of one-character flags, scanned char by char (`-rn` is `-r -n`). A run of only
+    /// digits is exempt — see [`TokenKind::Short`]. git, cargo, rg, golangci-lint, gradle.
+    Cluster,
+    /// One atomic flag name, distinct from its `--` spelling. dotnet's legacy MSBuild switches,
+    /// maven's `-pl`/`-gs`/`-amd`. Tagged `TokenKind::Long` despite the single dash — these are
+    /// "short options" only in their own tool's vocabulary — so `takes_value` is asked about
+    /// them as `Long`, and `Short` is never produced under this value or the next.
+    Atomic,
+    /// One atomic flag name, and the same flag as its `--` spelling — the token carries
+    /// `double_dash: true` whichever prefix was typed. Go's `flag` package.
+    AtomicAliasingLong,
+}
+
+/// Which separator attaches a value to a flag name (`--flag=v`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attach {
+    /// `=` only.
+    Equals,
+    /// `=` or `:`, whichever comes first — `--logger:trx` and `--logger=trx` are both valid
+    /// dotnet CLI syntax.
+    EqualsOrColon,
+}
+
+/// What a literal `--` does to the arguments after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DashDashRole {
+    /// Ends option parsing: everything after it is a `Positional`. git, cargo, rg, maven.
+    EndsOptions,
+    /// Forwards the tail to another program. Classification continues past it, so a lookup for
+    /// the tool's *own* flags has to slice with [`before_dashdash`] first. dotnet.
+    Forwards,
+    /// Ends the tool's *global* option region only; tasks past it, and their own options, keep
+    /// the same grammar. gradle.
+    ///
+    /// Tokenizes identically to `Forwards` — both keep classifying — and differs only in what
+    /// the tail belongs to, which decides what a caller may read from it: a `Forwards` tail is
+    /// another program's, so reading a flag out of it is always wrong, while this tail is still
+    /// the tool's own, just not its global region.
+    #[allow(dead_code)] // No in-tree caller yet: gradlew still parses its args by hand.
+    EndsGlobalOptions,
+}
+
+/// Whether flag names are matched exactly or ASCII case-insensitively.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameCase {
+    /// Exact. git, cargo, rg, gradle, go, and maven (which distinguishes `-b` from `-B`).
+    Sensitive,
+    /// ASCII case-insensitive — MSBuild-ecosystem tools fold broadly (`/nologo` == `/NoLogo`).
+    Folded,
+}
+
+/// One tool's flag grammar, as independent axes.
+///
+/// A preset ([`Dialect::Posix`] and friends) names a grammar *family* several tools can share —
+/// a parser library or a real convention — so the name answers "can my tool reuse this?". A
+/// single tool's bespoke parser composes its axes at the call site instead; that is what keeps
+/// this list from growing one preset per tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Dialect {
+    pub single_dash: SingleDash,
+    pub attach: Attach,
+    pub dash_dash: DashDashRole,
+    pub name_case: NameCase,
+    /// Whether `/flag` is a switch spelling (MSBuild's own) rather than a path.
+    pub slash_flags: bool,
+}
+
+// Presets read as grammar names at their call sites, not as constants.
+#[allow(non_upper_case_globals)]
+impl Dialect {
+    /// GNU/POSIX-ish: git, cargo, rg, golangci-lint.
+    pub const Posix: Self = Self {
+        single_dash: SingleDash::Cluster,
+        attach: Attach::Equals,
+        dash_dash: DashDashRole::EndsOptions,
+        name_case: NameCase::Sensitive,
+        slash_flags: false,
+    };
+
+    /// MSBuild/dotnet-CLI-ish. `-flag`, `--flag` and `/flag` are all one atomic flag name, so
+    /// every flag is tagged `TokenKind::Long` and `TokenKind::Short` is never produced here.
+    pub const Msbuild: Self = Self {
+        single_dash: SingleDash::Atomic,
+        attach: Attach::EqualsOrColon,
+        dash_dash: DashDashRole::Forwards,
+        name_case: NameCase::Folded,
+        slash_flags: true,
+    };
+
+    /// Apache commons-cli: POSIX, except that a short option is a whole multi-character word
+    /// (`-pl`, `-am`, `-gs`, `-emp`), so `-abc` never clusters. Maven is the first consumer.
+    ///
+    /// Does **not** model commons-cli's Java-property options: `-DskipTests=true` tokenizes as
+    /// the flag `DskipTests`, not `D` with the value `skipTests=true`. A caller that reads `-D`
+    /// values has to split the name itself; one that only needs "this is not a positional" does
+    /// not care.
+    #[allow(dead_code)] // No in-tree caller yet: mvn still parses its args by hand.
+    pub const CommonsCli: Self = Self {
+        single_dash: SingleDash::Atomic,
+        ..Self::Posix
+    };
+
+    /// Go's `flag` package: atomic single-dash options, with `-flag` and `--flag` equivalent.
+    #[allow(dead_code)] // No in-tree caller yet: go still parses its args by hand.
+    pub const GoFlag: Self = Self {
+        single_dash: SingleDash::AtomicAliasingLong,
+        ..Self::Posix
+    };
+
+    /// Whether arguments are still classified as flags after the `--` boundary.
+    const fn classifies_past_dash_dash(self) -> bool {
+        !matches!(self.dash_dash, DashDashRole::EndsOptions)
+    }
+
+    /// Whether a single-dash multi-character argument is one atomic flag name.
+    const fn single_dash_is_atomic(self) -> bool {
+        !matches!(self.single_dash, SingleDash::Cluster)
+    }
 }
 
 /// How a flag's value may be written. The tokenizer branches on this; a caller states it once,
@@ -314,8 +421,8 @@ struct Scanner<'a, 'p, T> {
 }
 
 impl<'a, 'p, T: AsRef<str>> Scanner<'a, 'p, T> {
-    /// Pushes one atomic (non-clustering) flag token — used for `--flag` in both dialects, and
-    /// for `-flag`/`/flag` in [`Dialect::Msbuild`]. `rest` is the flag text with its prefix
+    /// Pushes one atomic (non-clustering) flag token — used for `--flag` in every dialect, and
+    /// for `-flag`/`/flag` where the dialect says so. `rest` is the flag text with its prefix
     /// already stripped; `prefix` records which one it was. Only the `/flag` spelling is barred
     /// from consuming a separate value: an MSBuild switch attaches its value with `:`
     /// (`/bl:x.binlog`), so `/r` (MSBuild's `restore`) must not swallow the token after it the
@@ -381,9 +488,7 @@ fn tokenize_scan<'a, T: AsRef<str>>(
     while scanner.i < scanner.args.len() {
         let arg = scanner.args[scanner.i].as_ref();
 
-        // Posix stops classifying at `--`; Msbuild's `--` is a forwarding boundary, so it keeps
-        // classifying flags past it (see TokenKind::DashDash).
-        if scanner.emitted_dash_dash && scanner.dialect == Dialect::Posix {
+        if scanner.emitted_dash_dash && !scanner.dialect.classifies_past_dash_dash() {
             scanner.tokens.push(positional(arg, scanner.i));
             scanner.i += 1;
             continue;
@@ -392,7 +497,7 @@ fn tokenize_scan<'a, T: AsRef<str>>(
         if arg == "--" {
             if scanner.emitted_dash_dash {
                 // A second (or later) literal "--" is never itself the boundary — it's just
-                // ordinary text at this point, in both dialects.
+                // ordinary text at this point, under every dialect.
                 scanner.tokens.push(positional(arg, scanner.i));
             } else {
                 scanner
@@ -409,7 +514,7 @@ fn tokenize_scan<'a, T: AsRef<str>>(
             continue;
         }
 
-        if scanner.dialect == Dialect::Msbuild {
+        if scanner.dialect.slash_flags {
             if let Some(rest) = arg.strip_prefix('/') {
                 // A real MSBuild switch name never contains another '/' -- without this guard,
                 // an absolute Unix path would misclassify as a Long flag (e.g. "tmp/results").
@@ -417,17 +522,26 @@ fn tokenize_scan<'a, T: AsRef<str>>(
                 // genuine switch by structure alone; this pure function has no I/O to resolve it
                 // the way real MSBuild does (a filesystem check), but the impact is narrow --
                 // only the loose flag lookup ([`has_flag`]) is affected.
-                let name_part = rest.split(['=', ':']).next().unwrap_or(rest);
+                let (name_part, _) = split_attached(rest, scanner.dialect);
                 if !rest.is_empty() && !name_part.contains('/') {
                     scanner.push_atomic_flag(rest, FlagPrefix::Slash);
                     continue;
                 }
             }
-            if arg.len() > 1 && arg.starts_with('-') {
-                scanner.push_atomic_flag(&arg[1..], FlagPrefix::Dash);
+        }
+
+        if arg.len() > 1 && arg.starts_with('-') {
+            if scanner.dialect.single_dash_is_atomic() {
+                // Under `AtomicAliasingLong` the single-dash spelling *is* the `--` flag, so it
+                // has to answer to `has_double_dash_flag` as well.
+                let prefix = match scanner.dialect.single_dash {
+                    SingleDash::AtomicAliasingLong => FlagPrefix::DashDash,
+                    SingleDash::Cluster | SingleDash::Atomic => FlagPrefix::Dash,
+                };
+                scanner.push_atomic_flag(&arg[1..], prefix);
                 continue;
             }
-        } else if arg.len() > 1 && arg.starts_with('-') {
+
             let cluster = &arg[1..];
 
             if is_digit_run(cluster) {
@@ -488,13 +602,12 @@ fn tokenize_scan<'a, T: AsRef<str>>(
     scanner.tokens
 }
 
-/// Splits `s` into `(name, attached_value)` on the first dialect-appropriate separator:
-/// `=` only for [`Dialect::Posix`], `=` or `:` (whichever comes first) for
-/// [`Dialect::Msbuild`] (`--logger:trx` and `--logger=trx` are both valid dotnet CLI syntax).
+/// Splits `s` into `(name, attached_value)` on the first separator allowed by the dialect's
+/// [`Attach`] axis.
 fn split_attached(s: &str, dialect: Dialect) -> (&str, Option<&str>) {
-    let sep_pos = match dialect {
-        Dialect::Posix => s.find('='),
-        Dialect::Msbuild => s.find(['=', ':']),
+    let sep_pos = match dialect.attach {
+        Attach::Equals => s.find('='),
+        Attach::EqualsOrColon => s.find(['=', ':']),
     };
     match sep_pos {
         Some(pos) => (&s[..pos], Some(&s[pos + 1..])),
@@ -516,9 +629,9 @@ fn token(kind: TokenKind, text: &str, source_index: usize, prefix: FlagPrefix) -
     }
 }
 
-/// How a flag was spelled. Under [`Dialect::Msbuild`] all three tokenize as `Long`, but they
-/// are not interchangeable: MSBuild's `/flag` attaches its value with `:` and never consumes
-/// the next argument, while dotnet's own `-flag`/`--flag` do.
+/// How a flag was spelled. All three can tokenize as `Long`, but they are not interchangeable:
+/// MSBuild's `/flag` attaches its value with `:` and never consumes the next argument, while
+/// dotnet's own `-flag`/`--flag` do.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FlagPrefix {
     DashDash,
@@ -529,6 +642,12 @@ enum FlagPrefix {
 fn positional(text: &str, source_index: usize) -> Token<'_> {
     token(TokenKind::Positional, text, source_index, FlagPrefix::Dash)
 }
+
+#[cfg(test)]
+mod frozen;
+
+#[cfg(test)]
+mod differential;
 
 #[cfg(test)]
 mod tests {
@@ -1178,5 +1297,154 @@ mod tests {
         let values: Vec<&str> =
             double_dash_flag_values(&tokens, Dialect::Msbuild, "logger").collect();
         assert_eq!(values, vec!["console;verbosity=normal", "trx"]);
+    }
+
+    // --- Dialect::CommonsCli ---
+
+    #[test]
+    fn slash_flag_guard_follows_the_attach_axis_not_a_fixed_separator_set() {
+        // `slash_flags` and `attach` are independent, so a `/`-prefixed path must stay a path
+        // when `:` is not an attach separator -- splitting on a fixed `['=', ':']` would hide
+        // the second `/` and promote `/opt:a/b` to a flag.
+        let dialect = Dialect {
+            slash_flags: true,
+            ..Dialect::Posix
+        };
+        let args = owned(&["/opt:a/b"]);
+        let tokens = tokenize_grammar(&args, &|_, _| None, dialect);
+        assert!(tokens[0].is_free_positional());
+        assert_eq!(tokens[0].text, "/opt:a/b");
+    }
+
+    #[test]
+    fn commons_cli_short_options_are_atomic_words_not_clusters() {
+        // `mvn -Bo validate` is an error against the real binary; `-pl` could not exist if
+        // single-dash args clustered.
+        let args = owned(&["-pl", "core", "test"]);
+        // Asked about as `Long`, not `Short`: a predicate keyed on `Short` would never fire and
+        // `-pl` would silently stop claiming its value.
+        let takes = |kind: TokenKind, name: &str| {
+            (kind == TokenKind::Long && name == "pl").then(ValueSpec::value)
+        };
+        let tokens = tokenize_grammar(&args, &takes, Dialect::CommonsCli);
+
+        assert_eq!(tokens[0].kind, TokenKind::Long);
+        assert_eq!(tokens[0].text, "pl");
+        assert_eq!(tokens[0].value(&tokens), Some("core"));
+        assert_eq!(tokens[2].text, "test");
+        assert!(tokens[2].is_free_positional());
+    }
+
+    #[test]
+    fn commons_cli_java_property_is_one_flag_name_not_a_d_with_a_value() {
+        // The documented limit of the preset: `-D` is a commons-cli Java-property option, which
+        // no axis models. Pinned so a caller reading `-D` values sees it must split the name.
+        let args = owned(&["-DskipTests=true", "test"]);
+        let takes = |_: TokenKind, name: &str| (name == "D").then(ValueSpec::value);
+        let tokens = tokenize_grammar(&args, &takes, Dialect::CommonsCli);
+
+        assert_eq!(tokens[0].text, "DskipTests");
+        assert_eq!(tokens[0].attached, Some("true"));
+        assert!(!has_flag(&tokens, Dialect::CommonsCli, "D"));
+        // Still not a positional, which is all goal/task detection needs.
+        assert!(!tokens[0].is_free_positional());
+        assert!(tokens[1].is_free_positional());
+    }
+
+    #[test]
+    fn commons_cli_flag_names_are_case_sensitive_unlike_msbuild() {
+        let args = owned(&["-B"]);
+        let tokens = tokenize_grammar(&args, &|_, _| None, Dialect::CommonsCli);
+        assert!(has_flag(&tokens, Dialect::CommonsCli, "B"));
+        assert!(!has_flag(&tokens, Dialect::CommonsCli, "b"));
+    }
+
+    #[test]
+    fn commons_cli_dashdash_ends_option_parsing() {
+        let args = owned(&["--", "-pl", "core"]);
+        let takes = |_: TokenKind, name: &str| (name == "pl").then(ValueSpec::value);
+        let tokens = tokenize_grammar(&args, &takes, Dialect::CommonsCli);
+
+        assert_eq!(tokens[0].kind, TokenKind::DashDash);
+        assert!(tokens[1..].iter().all(|t| t.is_free_positional()));
+    }
+
+    #[test]
+    fn commons_cli_slash_prefixed_path_is_never_a_flag() {
+        let args = owned(&["/opt/build"]);
+        let tokens = tokenize_grammar(&args, &|_, _| None, Dialect::CommonsCli);
+        assert!(tokens[0].is_free_positional());
+    }
+
+    // --- DashDashRole::EndsGlobalOptions ---
+
+    /// Gradle's parser is `org.gradle.cli`, shared with nothing, so it gets no preset: a caller
+    /// composes it from `Posix` at its own call site. This is that composition.
+    const GRADLE: Dialect = Dialect {
+        dash_dash: DashDashRole::EndsGlobalOptions,
+        ..Dialect::Posix
+    };
+
+    #[test]
+    fn ends_global_options_still_clusters_short_flags_like_posix() {
+        // `gradle -qi tasks` is accepted; `gradle -qp /w` is not, hence solo_only on `p`.
+        let args = owned(&["-qi", "tasks"]);
+        let takes = |_: TokenKind, name: &str| (name == "p").then(ValueSpec::solo_only);
+        let tokens = tokenize_grammar(&args, &takes, GRADLE);
+
+        assert_eq!(tokens[0].text, "q");
+        assert_eq!(tokens[1].text, "i");
+        assert_eq!(tokens[0].source_index, tokens[1].source_index);
+        assert_eq!(tokens[2].text, "tasks");
+    }
+
+    #[test]
+    fn ends_global_options_keeps_parsing_tasks_and_their_options() {
+        // Gradle's `--` ends the *global* option region only: `test --tests X` past it is still
+        // a task plus its own value-taking option, not three bare positionals.
+        let args = owned(&["--", "test", "--tests", "com.example.Foo"]);
+        let takes = |_: TokenKind, name: &str| (name == "tests").then(ValueSpec::value);
+        let tokens = tokenize_grammar(&args, &takes, GRADLE);
+
+        assert_eq!(tokens[1].text, "test");
+        assert!(tokens[1].is_free_positional());
+        assert_eq!(tokens[2].kind, TokenKind::Long);
+        assert_eq!(tokens[2].value(&tokens), Some("com.example.Foo"));
+        assert!(!tokens[3].is_free_positional());
+    }
+
+    // --- Dialect::GoFlag ---
+
+    #[test]
+    fn goflag_single_and_double_dash_are_the_same_flag() {
+        let takes = |_: TokenKind, name: &str| (name == "run").then(ValueSpec::value);
+        for spelling in ["-run", "--run"] {
+            let args = owned(&[spelling, "TestFoo"]);
+            let tokens = tokenize_grammar(&args, &takes, Dialect::GoFlag);
+            assert_eq!(tokens[0].kind, TokenKind::Long);
+            assert!(tokens[0].double_dash, "for {spelling}");
+            assert_eq!(
+                double_dash_flag_value(&tokens, Dialect::GoFlag, "run"),
+                Some("TestFoo"),
+                "for {spelling}"
+            );
+        }
+    }
+
+    #[test]
+    fn goflag_single_dash_word_is_one_flag_not_a_cluster() {
+        let args = owned(&["-count=1"]);
+        let tokens = tokenize_grammar(&args, &|_, _| None, Dialect::GoFlag);
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].text, "count");
+        assert_eq!(tokens[0].attached, Some("1"));
+    }
+
+    #[test]
+    fn goflag_positionals_never_claim_the_double_dash_spelling() {
+        let args = owned(&["./...", "--", "-v"]);
+        let tokens = tokenize_grammar(&args, &|_, _| None, Dialect::GoFlag);
+        assert!(tokens.iter().all(|t| t.kind != TokenKind::Long));
+        assert!(tokens.iter().all(|t| !t.double_dash));
     }
 }
