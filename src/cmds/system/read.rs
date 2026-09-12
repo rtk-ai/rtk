@@ -37,17 +37,14 @@ pub fn run(
     }
 
     // Apply filter
-    let filter = filter::get_filter(level);
-    let mut filtered = filter.filter(&content, &lang);
+    let (mut filtered, fell_back) = filter_content(&content, &lang, level);
 
-    // Safety: if filter emptied a non-empty file, fall back to raw content
-    if filtered.trim().is_empty() && !content.trim().is_empty() {
+    if fell_back {
         eprintln!(
             "rtk: warning: filter produced empty output for {} ({} bytes), showing raw content",
             file.display(),
             content.len()
         );
-        filtered = content.clone();
     }
 
     if verbose > 0 {
@@ -115,8 +112,14 @@ pub fn run_stdin(
     }
 
     // Apply filter
-    let filter = filter::get_filter(level);
-    let mut filtered = filter.filter(&content, &lang);
+    let (mut filtered, fell_back) = filter_content(&content, &lang, level);
+
+    if fell_back {
+        eprintln!(
+            "rtk: warning: filter produced empty output for stdin ({} bytes), showing raw content",
+            content.len()
+        );
+    }
 
     if verbose > 0 {
         let original_lines = content.lines().count();
@@ -147,6 +150,21 @@ pub fn run_stdin(
 
     timer.track("cat - (stdin)", "rtk read -", &raw, shown);
     Ok(())
+}
+
+fn filter_content(
+    content: &str,
+    lang: &Language,
+    level: FilterLevel,
+) -> (String, bool) {
+    let filtered = filter::get_filter(level).filter(content, lang);
+    let fell_back = filtered.trim().is_empty() && !content.trim().is_empty();
+
+    if fell_back {
+        (content.to_string(), true)
+    } else {
+        (filtered, false)
+    }
 }
 
 fn format_with_line_numbers(content: &str) -> String {
@@ -190,6 +208,37 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_filter_content_falls_back_for_non_empty_stdin_content() {
+        let content = "// only comment\n";
+
+        let (output, fell_back) =
+            filter_content(content, &Language::Unknown, FilterLevel::Minimal);
+
+        assert!(fell_back);
+        assert_eq!(output, content);
+    }
+
+    #[test]
+    fn test_filter_content_keeps_genuinely_empty_content_empty() {
+        let (output, fell_back) =
+            filter_content("", &Language::Unknown, FilterLevel::Minimal);
+
+        assert!(!fell_back);
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn test_filter_content_preserves_normal_filtered_output() {
+        let content = "// comment\nfn main() {}\n";
+
+        let (output, fell_back) =
+            filter_content(content, &Language::Rust, FilterLevel::Minimal);
+
+        assert!(!fell_back);
+        assert_eq!(output, "fn main() {}");
+    }
 
     #[test]
     fn test_read_rust_file() -> Result<()> {
