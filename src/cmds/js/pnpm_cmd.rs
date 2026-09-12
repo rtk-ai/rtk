@@ -487,6 +487,7 @@ fn run_install(args: &[String], verbose: u8) -> Result<i32> {
     let result = exec_capture(&mut cmd).context("Failed to run pnpm install")?;
 
     if !result.success() {
+        print!("{}", result.stdout);
         eprint!("{}", result.stderr);
         return Ok(result.exit_code);
     }
