@@ -45,6 +45,19 @@ detect_arch() {
     esac
 }
 
+# Detect C library (glibc vs musl)
+# Alpine and other lightweight distros use musl; the glibc binaries fail there
+# with "Error relocating ... symbol not found". Default to gnu, switch to musl
+# only when musl is detected.
+detect_libc() {
+    LIBC="gnu"
+    if [ -f /lib/ld-musl-x86_64.so.1 ] || [ -f /lib/ld-musl-aarch64.so.1 ]; then
+        LIBC="musl"
+    elif ldd --version 2>&1 | grep -qi musl; then
+        LIBC="musl"
+    fi
+}
+
 # Get latest release version
 # Primary: parse the 302 redirect on /releases/latest (no API call, no rate limit).
 # Fallback: the GitHub REST API (subject to 60 req/hour anonymous limit).
@@ -74,7 +87,13 @@ get_target() {
         linux)
             case "$ARCH" in
                 x86_64)  TARGET="x86_64-unknown-linux-musl";;
-                aarch64) TARGET="aarch64-unknown-linux-gnu";;
+                aarch64)
+                    if [ "$LIBC" = "musl" ]; then
+                        TARGET="aarch64-unknown-linux-musl"
+                    else
+                        TARGET="aarch64-unknown-linux-gnu"
+                    fi
+                    ;;
             esac
             ;;
         darwin)
@@ -168,6 +187,7 @@ main() {
 
     detect_os
     detect_arch
+    detect_libc
     get_target
     if [ -n "$RTK_VERSION" ]; then
         VERSION="$RTK_VERSION"
