@@ -706,7 +706,7 @@ fn render(
     if by_ext.len() > 1 {
         body.push('\n');
         let mut exts: Vec<_> = by_ext.iter().collect();
-        exts.sort_by(|a, b| b.1.cmp(a.1));
+        exts.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
         let ext_str: Vec<String> = exts
             .iter()
             .take(5)
@@ -1453,5 +1453,24 @@ mod tests {
         assert!(filtered_hint(&[]).is_none());
         let h = filtered_hint(&["secret.txt".to_string(), ".hidden/h.txt".to_string()]).unwrap();
         assert!(h.starts_with("... (2 filtered"), "{h}");
+    }
+
+    #[test]
+    fn deterministic_extension_summary_ordering_on_tied_counts() {
+        let timer = tracking::TimedExecution::start();
+        let mut files = Vec::new();
+        for dir in ["d1", "d2", "d3", "d4", "d5"] {
+            for ext in ["rs", "py", "js", "md", "json", "toml"] {
+                files.push(format!("{}/file_{}.{}", dir, ext, ext));
+            }
+        }
+        let shown1 = render(files.clone(), 50, false, &[], "find", "raw", &timer);
+        let shown2 = render(files, 50, false, &[], "find", "raw", &timer);
+        assert_eq!(shown1, shown2);
+        // Equal counts (5 each). Alphabetical tie-break: .js(5) .json(5) .md(5) .py(5) .rs(5)
+        assert!(
+            shown1.contains("ext: .js(5) .json(5) .md(5) .py(5) .rs(5)"),
+            "unexpected ext line: {shown1}"
+        );
     }
 }
