@@ -1,5 +1,6 @@
 //! Compares RTK-routed vs raw commands in a coding session.
 
+use crate::analytics::codex;
 use crate::core::utils::format_tokens;
 use crate::discover::is_already_rtk;
 use crate::discover::provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
@@ -187,6 +188,68 @@ pub fn run(_verbose: u8) -> Result<()> {
     };
     println!("Average adoption: {:.0}%", avg_adoption);
     println!("Tip: Run `rtk discover` to find missed RTK opportunities");
+
+    show_codex_sessions(_verbose)
+}
+
+fn show_codex_sessions(_verbose: u8) -> Result<()> {
+    let mut paths = codex::discover_sessions(Some(30));
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    paths.truncate(10);
+
+    let mut rows = Vec::new();
+    for path in &paths {
+        if let Ok(s) = codex::parse_session(path) {
+            if s.total_cmds > 0 || s.total_tokens > 0 {
+                rows.push(s);
+            }
+        }
+    }
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    println!();
+    println!("Codex RTK Adoption (last 10)");
+    println!("{}", "-".repeat(70));
+    println!(
+        "{:<12} {:<12} {:>5} {:>5} {:>9} {:<7} {:>8}",
+        "Session", "Date", "Cmds", "RTK", "Adoption", "", "Tokens"
+    );
+    println!("{}", "-".repeat(70));
+
+    let mut total_cmds: usize = 0;
+    let mut total_rtk: usize = 0;
+
+    for s in &rows {
+        let pct = s.adoption_pct();
+        let bar = progress_bar(pct, 5);
+        total_cmds += s.total_cmds;
+        total_rtk += s.rtk_cmds;
+        println!(
+            "{:<12} {:<12} {:>5} {:>5} {:>8.0}% {:<7} {:>8}",
+            s.id,
+            s.date,
+            s.total_cmds,
+            s.rtk_cmds,
+            pct,
+            bar,
+            format_tokens(s.total_tokens as usize),
+        );
+    }
+
+    println!("{}", "-".repeat(70));
+
+    let avg_adoption = if total_cmds > 0 {
+        total_rtk as f64 / total_cmds as f64 * 100.0
+    } else {
+        0.0
+    };
+    println!("Average adoption: {:.0}%", avg_adoption);
 
     Ok(())
 }
