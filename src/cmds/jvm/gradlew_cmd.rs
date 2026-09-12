@@ -1,3 +1,8 @@
+use crate::core::arg_tokenizer::{
+    self, before_dashdash, dashdash_index, has_double_dash_flag, Dialect, Token, TokenKind,
+    ValueSpec,
+};
+use crate::core::args_utils;
 use crate::core::runner::{self, RunOptions};
 use crate::core::stream::StreamFilter;
 use crate::core::truncate::CAP_LIST;
@@ -28,15 +33,109 @@ enum GradlewTask {
     Other,
 }
 
+/// Gradle's option grammar: the global table from `gradle --help`, plus the value-taking task
+/// options whose value would otherwise read as a task name (`test --tests X`).
+///
+/// Shorts are `solo_only`: gradle rejects a clustered value-taker, `-mx compileJava` errors
+/// with "No argument was provided for command-line option '-x'".
+fn gradlew_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    match kind {
+        TokenKind::Long => matches!(
+            name,
+            "build-file"
+                | "configuration-cache-problems"
+                | "console"
+                | "console-unicode"
+                | "dependency-verification"
+                | "develocity-plugin-version"
+                | "develocity-url"
+                | "exclude-task"
+                | "gradle-user-home"
+                | "include-build"
+                | "init-script"
+                | "max-workers"
+                | "priority"
+                | "project-cache-dir"
+                | "project-dir"
+                | "project-prop"
+                | "settings-file"
+                | "system-prop"
+                | "update-locks"
+                | "warning-mode"
+                | "write-verification-metadata"
+                // Task options. Plugins define these freely, so the list covers the built-in
+                // tasks rtk routes on rather than being exhaustive.
+                | "args"
+                | "configuration"
+                | "dependency"
+                | "dsl"
+                | "group"
+                | "groups"
+                | "insecure-protocol"
+                | "into"
+                | "java-version"
+                | "package"
+                | "project-name"
+                | "task"
+                | "test-framework"
+                | "tests"
+                | "type"
+        )
+        .then(ValueSpec::value),
+        TokenKind::Short => {
+            matches!(name, "b" | "c" | "D" | "F" | "g" | "I" | "M" | "P" | "p" | "x")
+                .then(ValueSpec::solo_only)
+        }
+        _ => None,
+    }
+}
+
+fn tokenize_gradlew_args(args: &[String]) -> Vec<Token<'_>> {
+    arg_tokenizer::tokenize_grammar(args, &gradlew_takes_value, Dialect::Posix)
+}
+
+/// The task names in `args`, in order. Gradle's `--` ends *built-in* option parsing only —
+/// tasks and their options keep being parsed past it — so the tail gets the same grammar
+/// instead of degrading to bare positionals.
+fn task_names(args: &[String]) -> Vec<&str> {
+    let tokens = tokenize_gradlew_args(args);
+    let mut names: Vec<&str> = free_positionals(before_dashdash(&tokens));
+
+    if let Some(index) = dashdash_index(&tokens) {
+        let tail_start = tokens[index].source_index + 1;
+        if let Some(tail) = args.get(tail_start..) {
+            names.extend(free_positionals(&tokenize_gradlew_args(tail)));
+        }
+    }
+
+    names
+}
+
+fn free_positionals<'a>(tokens: &[Token<'a>]) -> Vec<&'a str> {
+    tokens
+        .iter()
+        .filter(|t| t.is_free_positional())
+        .map(|t| t.text)
+        .collect()
+}
+
 fn detect_task(args: &[String]) -> GradlewTask {
+    let names = task_names(args);
+
+    // No task at all (`gradlew`, `gradlew -p ../other`): gradle runs its default task, whose
+    // output is not build output — the build filter would swallow it.
+    if names.is_empty() {
+        return GradlewTask::Other;
+    }
+
     // Use the last non-flag, non-clean task to determine the filter.
     // Example: `clean assembleDebug` → Build (last non-clean task).
     // Note: for mixed-task invocations like `test assemble`, last wins.
-    let task = args
+    let task = names
         .iter()
-        .filter(|a| !a.starts_with('-') && a.to_lowercase() != "clean")
-        .map(|s| s.to_lowercase())
-        .next_back()
+        .rev()
+        .find(|name| !name.eq_ignore_ascii_case("clean"))
+        .map(|name| name.to_lowercase())
         .unwrap_or_default();
 
     if task.contains("connected") {
@@ -117,12 +216,28 @@ impl StreamFilter for BuildLineFilter {
     }
 }
 
-pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    // Verbose flags bypass filtering — user wants full output
-    if args
+/// True if the user asked gradle for verbose logging, in either spelling (`--info` / `-i`).
+/// Scoped to the built-in region: gradle rejects its own options after `--`.
+fn wants_verbose_logging(args: &[String]) -> bool {
+    let tokens = tokenize_gradlew_args(args);
+    let builtin = before_dashdash(&tokens);
+
+    ["stacktrace", "full-stacktrace", "info", "debug"]
         .iter()
-        .any(|a| a == "--stacktrace" || a == "--info" || a == "--debug" || a == "--full-stacktrace")
-    {
+        .any(|name| has_double_dash_flag(builtin, Dialect::Posix, name))
+        || builtin
+            .iter()
+            .any(|t| t.kind == TokenKind::Short && matches!(t.text, "s" | "S" | "i" | "d"))
+}
+
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+    // Gradle's `--` is meaningful (it restricts what follows to tasks), so hand back the one
+    // clap strips rather than silently dropping a token the user typed.
+    let args = args_utils::restore_double_dash(args);
+    let args = args.as_slice();
+
+    // Verbose flags bypass filtering — user wants full output
+    if wants_verbose_logging(args) {
         let osargs: Vec<OsString> = args.iter().map(OsString::from).collect();
         return runner::run_passthrough(gradlew_binary(), &osargs, verbose);
     }
@@ -658,6 +773,91 @@ mod tests {
         // :app:dependencies → contains "dependencies"
         let args = vec![":app:dependencies".to_string()];
         assert_eq!(detect_task(&args), GradlewTask::Dependencies);
+    }
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn test_detect_tests_filter_value_is_not_the_task() {
+        let args = strings(&["test", "--tests", "com.example.Foo"]);
+        assert_eq!(detect_task(&args), GradlewTask::Test);
+    }
+
+    #[test]
+    fn test_detect_tests_filter_value_past_double_dash() {
+        let args = strings(&["--", "test", "--tests", "com.example.Foo"]);
+        assert_eq!(detect_task(&args), GradlewTask::Test);
+    }
+
+    #[test]
+    fn test_detect_project_dir_value_is_not_the_task() {
+        let args = strings(&["assembleDebug", "-p", "../other"]);
+        assert_eq!(detect_task(&args), GradlewTask::Build);
+    }
+
+    #[test]
+    fn test_detect_exclude_task_value_is_not_the_task() {
+        let args = strings(&["lint", "--exclude-task", "assembleDebug"]);
+        assert_eq!(detect_task(&args), GradlewTask::Lint);
+    }
+
+    #[test]
+    fn test_detect_configuration_value_is_not_the_task() {
+        let args = strings(&["dependencies", "--configuration", "testRuntimeClasspath"]);
+        assert_eq!(detect_task(&args), GradlewTask::Dependencies);
+    }
+
+    #[test]
+    fn test_detect_attached_project_prop_is_not_the_task() {
+        let args = strings(&["-Pandroid.testInstrumentationRunnerArguments.class=Foo", "test"]);
+        assert_eq!(detect_task(&args), GradlewTask::Test);
+    }
+
+    #[test]
+    fn test_detect_group_value_is_not_the_task() {
+        let args = strings(&["tasks", "--group", "build"]);
+        assert_eq!(detect_task(&args), GradlewTask::Other);
+    }
+
+    #[test]
+    fn test_detect_init_test_framework_value_is_not_the_task() {
+        let args = strings(&["init", "--type", "java-library", "--test-framework", "testng"]);
+        assert_eq!(detect_task(&args), GradlewTask::Other);
+    }
+
+    #[test]
+    fn test_detect_flags_without_a_task_is_not_a_build() {
+        let args = strings(&["-p", "../other"]);
+        assert_eq!(detect_task(&args), GradlewTask::Other);
+    }
+
+    #[test]
+    fn test_detect_no_args_is_not_a_build() {
+        assert_eq!(detect_task(&[]), GradlewTask::Other);
+    }
+
+    #[test]
+    fn test_detect_last_task_still_wins() {
+        let args = strings(&["clean", "test", "assembleDebug"]);
+        assert_eq!(detect_task(&args), GradlewTask::Build);
+    }
+
+    #[test]
+    fn test_verbose_short_spelling_detected() {
+        assert!(wants_verbose_logging(&strings(&["build", "-i"])));
+        assert!(wants_verbose_logging(&strings(&["build", "-s"])));
+        assert!(!wants_verbose_logging(&strings(&["build", "-I", "init.gradle"])));
+    }
+
+    #[test]
+    fn test_verbose_flag_as_another_flags_value_is_not_verbose() {
+        assert!(!wants_verbose_logging(&strings(&[
+            "build",
+            "--exclude-task",
+            "--info"
+        ])));
     }
 
     // ── BUILD FILTER ──────────────────────────────────────────────────────────
@@ -1334,18 +1534,15 @@ BUILD SUCCESSFUL in 1s"#;
 
     #[test]
     fn test_verbose_flag_detection() {
-        // Verify that verbose flags are detected correctly
-        let stacktrace_args = ["assembleDebug".to_string(), "--stacktrace".to_string()];
-        assert!(stacktrace_args.iter().any(|a| a == "--stacktrace"
-            || a == "--info"
-            || a == "--debug"
-            || a == "--full-stacktrace"));
-
-        let info_args = ["testDebugUnitTest".to_string(), "--info".to_string()];
-        assert!(info_args.iter().any(|a| a == "--stacktrace"
-            || a == "--info"
-            || a == "--debug"
-            || a == "--full-stacktrace"));
+        assert!(wants_verbose_logging(&strings(&[
+            "assembleDebug",
+            "--stacktrace"
+        ])));
+        assert!(wants_verbose_logging(&strings(&[
+            "testDebugUnitTest",
+            "--info"
+        ])));
+        assert!(!wants_verbose_logging(&strings(&["assembleDebug"])));
     }
 
     #[test]
