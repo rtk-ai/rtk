@@ -1031,6 +1031,74 @@ fn rewrite_pipeline_final_stage(
     })
 }
 
+/// Extract individual stage texts from a pipeline (producer + downstream).
+/// Returns `(producer_end_offset, vec_of_downstream_stage_boundaries)`.
+fn extract_pipeline_stages(
+    tokens: &[ParsedToken],
+    segment_start: usize,
+    end_offset: usize,
+) -> (usize, Vec<(usize, usize)>) {
+    let mut boundaries = Vec::new();
+    let mut stage_start = segment_start;
+
+    for token in tokens {
+        if token.offset < segment_start || token.offset >= end_offset {
+            continue;
+        }
+        if let TokenKind::Pipe(_) = token.kind {
+            boundaries.push((stage_start, token.offset));
+            stage_start = token.offset + token.value.len();
+        }
+    }
+    boundaries.push((stage_start, end_offset));
+
+    let first_end = boundaries.first().map_or(end_offset, |b| b.1);
+    let downstream: Vec<(usize, usize)> = boundaries.into_iter().skip(1).collect();
+    (first_end, downstream)
+}
+
+/// Attempt to rewrite the *producer* of a pipeline when all downstream stages
+/// are safe display trimmers and the producer does not request machine-readable
+/// output.  Returns `None` if the conditions aren't met or the producer has no
+/// RTK equivalent.
+fn rewrite_pipeline_producer(
+    cmd: &str,
+    tokens: &[ParsedToken],
+    segment_start: usize,
+    analysis: PipelineAnalysis,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+) -> Option<String> {
+    let _ = analysis.final_stage_start?; // pipeline must be structurally valid
+
+    let (producer_end, downstream) =
+        extract_pipeline_stages(tokens, segment_start, analysis.end_offset);
+
+    let producer = cmd[segment_start..producer_end].trim();
+    if producer.is_empty() {
+        return None;
+    }
+
+    // Collect downstream stage texts
+    let downstream_texts: Vec<&str> = downstream.iter().map(|&(s, e)| cmd[s..e].trim()).collect();
+
+    if !all_downstream_are_display_trimmers(&downstream_texts) {
+        return None;
+    }
+    if producer_has_machine_readable_output(producer) {
+        return None;
+    }
+
+    // Try rewriting the producer
+    rewrite_segment(producer, excluded, transparent_prefixes)
+        .filter(|rewritten| rewritten != producer)
+        .map(|rewritten_producer| {
+            // Preserve the original downstream portion byte-for-byte (pipes, spaces, redirects)
+            let after_producer = cmd[producer_end..analysis.end_offset].trim_end();
+            format!("{} {}", rewritten_producer, after_producer)
+        })
+}
+
 /// Rewrite a compound command (with `&&`, `||`, `;`, `|`) by rewriting each segment.
 fn rewrite_compound(
     cmd: &str,
@@ -1084,13 +1152,26 @@ fn rewrite_compound(
             TokenKind::Pipe(_) => {
                 let analysis = analyze_pipeline(cmd, &tokens, seg_start, tok.offset);
                 let pipeline = cmd[seg_start..analysis.end_offset].trim();
+
+                // Try final-stage rewrite first (existing behavior), then
+                // producer rewrite (#3722: piped commands like `git log | head`).
                 let rewritten_pipeline = rewrite_pipeline_final_stage(
                     cmd,
                     seg_start,
                     analysis,
                     excluded,
                     transparent_prefixes,
-                );
+                )
+                .or_else(|| {
+                    rewrite_pipeline_producer(
+                        cmd,
+                        &tokens,
+                        seg_start,
+                        analysis,
+                        excluded,
+                        transparent_prefixes,
+                    )
+                });
 
                 if let Some(rewritten) = rewritten_pipeline {
                     any_changed = true;
@@ -1211,6 +1292,94 @@ fn search_uses_pattern_file(cmd: &str) -> bool {
 
 fn pipeline_final_command_is_safe(rtk_cmd: &str, cmd: &str) -> bool {
     !matches!(rtk_cmd, "rtk grep" | "rtk rg") || !search_uses_pattern_file(cmd)
+}
+
+/// Commands that merely trim or filter display lines without transforming the
+/// data structure.  When every downstream pipe stage is one of these, rewriting
+/// the *producer* is safe because the consumer only truncates/selects lines.
+const DISPLAY_TRIMMER_COMMANDS: &[&str] =
+    &["head", "tail", "cat", "less", "more", "grep", "egrep", "fgrep"];
+
+/// Grep flags that change the output structure (counts, file names, etc.).
+/// When a downstream grep uses one of these, it is no longer a "display trimmer".
+const GREP_STRUCTURE_FLAGS: &[&str] = &[
+    "-c",
+    "--count",
+    "-l",
+    "--files-with-matches",
+    "-L",
+    "--files-without-match",
+    "-o",
+    "--only-matching",
+    "-Z",
+    "--null",
+];
+
+/// Returns `true` when every downstream stage in a pipeline is a bare display
+/// trimmer (`head`, `tail`, `grep` without structure-changing flags).
+fn all_downstream_are_display_trimmers(stages: &[&str]) -> bool {
+    if stages.is_empty() {
+        return false;
+    }
+    for stage in stages {
+        let words = shell_split(stage.trim());
+        let base = match words.first() {
+            Some(w) => w.as_str(),
+            None => return false,
+        };
+        if !DISPLAY_TRIMMER_COMMANDS.contains(&base) {
+            return false;
+        }
+        // grep with structure-changing flags is not a safe trimmer
+        if matches!(base, "grep" | "egrep" | "fgrep") {
+            for arg in &words[1..] {
+                if arg == "--" {
+                    break;
+                }
+                if GREP_STRUCTURE_FLAGS.contains(&arg.as_str()) {
+                    return false;
+                }
+                // Short flag bundles: `-cln` contains `-c`
+                if arg.starts_with('-')
+                    && !arg.starts_with("--")
+                    && arg.len() > 1
+                    && arg
+                        .chars()
+                        .skip(1)
+                        .any(|c| matches!(c, 'c' | 'l' | 'L' | 'o' | 'Z'))
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Flags on the *producer* command that signal machine-readable / structured
+/// output.  Rewriting through RTK would corrupt that structure.
+const MACHINE_READABLE_FLAGS: &[&str] = &[
+    "--json",
+    "--jq",
+    "--template",
+    "--porcelain",
+    "--name-only",
+    "--name-status",
+    "--raw",
+    "-z",
+    "--null",
+];
+
+/// Returns `true` when the producer command requests machine-readable output
+/// that an RTK filter would corrupt.
+fn producer_has_machine_readable_output(producer: &str) -> bool {
+    let words = shell_split(producer.trim());
+    words.iter().skip(1).any(|arg| {
+        MACHINE_READABLE_FLAGS.contains(&arg.as_str())
+            || arg.starts_with("--format=")
+            || arg.starts_with("--pretty=")
+            || arg.starts_with("--output=")
+    })
 }
 
 enum ExcludePattern {
@@ -1726,10 +1895,13 @@ mod tests {
         }
 
         #[test]
-        fn test_cross_line_pipeline_unsafe_final_stage_passes_through() {
+        fn test_cross_line_pipeline_unsafe_final_stage_rewrites_producer() {
+            // #3722: final-stage rewrite blocked (grep -f is unsafe for final
+            // stage), but producer rewrite fires because grep is still a
+            // display trimmer (it outputs matching lines).
             assert_eq!(
                 rewrite_command_no_prefixes("git log |\ngrep -f patterns.txt", &[]),
-                None
+                Some("rtk git log |\ngrep -f patterns.txt".into())
             );
         }
 
@@ -2631,9 +2803,10 @@ mod tests {
 
     #[test]
     fn test_rewrite_pipe_unsafe_final_stage_stays_raw() {
+        // cargo test | tail -50: producer rewrite fires (#3722)
         assert_eq!(
             rewrite_command_no_prefixes("cargo test | tail -50", &[]),
-            None
+            Some("rtk cargo test | tail -50".into())
         );
         assert_eq!(
             rewrite_command_no_prefixes("find . | xargs grep TODO", &[]),
@@ -2671,6 +2844,115 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("find . -name '*.rs'", &[]),
             Some("rtk find . -name '*.rs'".into())
+        );
+    }
+
+    // --- #3722: Producer rewrite for piped commands ---
+
+    #[test]
+    fn test_rewrite_pipe_producer_with_head() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git log --oneline -5 | head -3", &[]),
+            Some("rtk git log --oneline -5 | head -3".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_producer_with_tail() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git status | tail -25", &[]),
+            Some("rtk git status | tail -25".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_producer_with_redirect() {
+        assert_eq!(
+            rewrite_command_no_prefixes("ruff check foo.py 2>&1 | tail -15", &[]),
+            Some("rtk ruff check foo.py 2>&1 | tail -15".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_producer_chained_trimmers() {
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -rn foo . | head -20 | tail -5", &[]),
+            Some("rtk grep -rn foo . | head -20 | tail -5".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_producer_blocked_by_wc() {
+        // wc is not a display trimmer — output semantics change
+        assert_eq!(rewrite_command_no_prefixes("ls -la | wc -l", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_pipe_producer_blocked_by_jq() {
+        // jq parses structure — not a safe trimmer
+        assert_eq!(
+            rewrite_command_no_prefixes("gh pr list | jq '.[]'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_producer_blocked_by_json_flag() {
+        // --json signals machine-readable output
+        assert_eq!(
+            rewrite_command_no_prefixes("gh pr list --json number | head -3", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_producer_blocked_by_porcelain() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git status --porcelain | head -5", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_producer_blocked_by_format() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git log --format='%H' | head -5", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_producer_blocked_by_grep_count() {
+        // grep -c changes output to count — not a safe display trimmer for
+        // producer rewrite, but the *final-stage* rewrite can still fire
+        // because rtk grep is pipeline_final_safe.
+        assert_eq!(
+            rewrite_command_no_prefixes("git log | grep -c feat", &[]),
+            Some("git log | rtk grep -c feat".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_producer_blocked_by_grep_files_only() {
+        // Same: final-stage rewrite fires for rtk grep.
+        assert_eq!(
+            rewrite_command_no_prefixes("git log | grep -l pattern", &[]),
+            Some("git log | rtk grep -l pattern".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_producer_unsupported_command() {
+        // htop is not an RTK-supported command
+        assert_eq!(rewrite_command_no_prefixes("htop | head -5", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_pipe_producer_with_compound() {
+        // Producer rewrite in a compound command (&&)
+        assert_eq!(
+            rewrite_command_no_prefixes("git log | head -5 && git status", &[]),
+            Some("rtk git log | head -5 && rtk git status".into())
         );
     }
 
@@ -5291,17 +5573,19 @@ mod tests {
 
     #[test]
     fn test_rewrite_pipe_then_and() {
+        // #3722: producer rewrite fires for `git log | head -5`
         assert_eq!(
             rewrite_command_no_prefixes("git log | head -5 && git stash", &[]),
-            Some("git log | head -5 && rtk git stash".into())
+            Some("rtk git log | head -5 && rtk git stash".into())
         );
     }
 
     #[test]
     fn test_rewrite_pipe_then_semicolon() {
+        // #3722: producer rewrite fires for `cargo test | head`
         assert_eq!(
             rewrite_command_no_prefixes("cargo test | head; git status", &[]),
-            Some("cargo test | head; rtk git status".into())
+            Some("rtk cargo test | head; rtk git status".into())
         );
     }
 
@@ -5334,9 +5618,10 @@ mod tests {
 
     #[test]
     fn test_rewrite_multi_pipe_then_and() {
+        // #3722: producer rewrite fires — head and tail are both safe trimmers
         assert_eq!(
             rewrite_command_no_prefixes("git log | head | tail && git status", &[]),
-            Some("git log | head | tail && rtk git status".into())
+            Some("rtk git log | head | tail && rtk git status".into())
         );
     }
 
