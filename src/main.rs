@@ -12,7 +12,7 @@ use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
-    bun_cmd, deno_cmd, lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd,
+    aube_cmd, bun_cmd, deno_cmd, lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd,
     prisma_cmd, tsc_cmd, vitest_cmd,
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
@@ -609,6 +609,24 @@ enum Commands {
     /// bunx with passthrough + auto-filter
     Bunx {
         /// bunx arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// aube package manager commands with compact output
+    Aube {
+        #[command(subcommand)]
+        command: AubeCommands,
+    },
+
+    /// aubr shim (`aube run`) with passthrough
+    Aubr {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// aubx shim (`aube dlx`) with passthrough + auto-filter
+    Aubx {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1446,6 +1464,28 @@ enum BunPmCommands {
 }
 
 #[derive(Debug, Subcommand)]
+enum AubeCommands {
+    /// Install dependencies (filter progress noise)
+    Install {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Clean install with frozen lockfile
+    Ci {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Run the test script with compact output
+    Test {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough: runs any unsupported aube subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Debug, Subcommand)]
 enum DenoCommands {
     /// Run a script
     Run {
@@ -1497,6 +1537,18 @@ fn run_bunx_tool(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
         "tsc" | "typescript" => tsc_cmd::run(Some("bunx"), &args[1..], verbose),
         "eslint" => lint_cmd::run(Some("bunx"), args, verbose),
         _ => bun_cmd::run_bunx(args, verbose, skip_env),
+    }
+}
+
+/// Route `aubx <tool>` to the matching tool filter, like bunx/npx.
+fn run_aubx_tool(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
+    if args.is_empty() {
+        anyhow::bail!("aubx requires a command argument");
+    }
+    match args[0].as_str() {
+        "tsc" | "typescript" => tsc_cmd::run(Some("aubx"), &args[1..], verbose),
+        "eslint" => lint_cmd::run(Some("aubx"), args, verbose),
+        _ => aube_cmd::run_aubx(args, verbose, skip_env),
     }
 }
 
@@ -2562,6 +2614,17 @@ fn run_cli() -> Result<i32> {
         },
 
         Commands::Bunx { args } => run_bunx_tool(&args, cli.verbose, cli.skip_env)?,
+
+        Commands::Aube { command } => match command {
+            AubeCommands::Install { args } => aube_cmd::run_install(&args, cli.verbose)?,
+            AubeCommands::Ci { args } => aube_cmd::run_ci(&args, cli.verbose)?,
+            AubeCommands::Test { args } => aube_cmd::run_test(&args, cli.verbose)?,
+            AubeCommands::Other(args) => aube_cmd::run_passthrough(&args, cli.verbose)?,
+        },
+
+        Commands::Aubr { args } => aube_cmd::run_aubr(&args, cli.verbose)?,
+
+        Commands::Aubx { args } => run_aubx_tool(&args, cli.verbose, cli.skip_env)?,
 
         Commands::Deno { command } => match command {
             DenoCommands::Test { args } => deno_cmd::run_test(&args, cli.verbose)?,

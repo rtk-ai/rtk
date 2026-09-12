@@ -107,6 +107,35 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^aube\s+(ci|exec|i|install|list|ls|outdated|run|run-script|test|add|remove)\b",
+        rtk_cmd: "rtk aube",
+        rewrite_prefixes: &["aube"],
+        category: "PackageManager",
+        savings_pct: 80.0,
+        subcmd_savings: &[("test", 70.0), ("install", 70.0), ("list", 70.0), ("ls", 70.0)],
+        subcmd_status: &[
+            ("run", RtkStatus::Passthrough),
+            ("exec", RtkStatus::Passthrough),
+        ],
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^aubr\s+",
+        rtk_cmd: "rtk aubr",
+        rewrite_prefixes: &["aubr"],
+        category: "PackageManager",
+        savings_pct: 70.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^aubx\s+",
+        rtk_cmd: "rtk aubx",
+        rewrite_prefixes: &["aubx"],
+        category: "PackageManager",
+        savings_pct: 70.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^npm\s+(exec|run|run-script|rum|urn|x)(\s|$)",
         rtk_cmd: "rtk npm",
         rewrite_prefixes: &["npm"],
@@ -166,7 +195,7 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?tsc(\s|$)",
+        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx|aube\s+(exec|dlx)|aubx)\s+)?tsc(\s|$)",
         rtk_cmd: "rtk tsc",
         rewrite_prefixes: &[
             "npm exec tsc",
@@ -178,7 +207,10 @@ pub const RULES: &[RtkRule] = &[
             "npm x tsc",
             "npx tsc",
             "pnpm dlx tsc",
+            "aube dlx tsc",
             "pnpm exec tsc",
+            "aubx tsc",
+            "aube exec tsc",
             "pnpm run tsc",
             "pnpm run-script tsc",
             "pnpm tsc",
@@ -190,7 +222,7 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?(biome|eslint|lint)(\s|$)",
+        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx|aube\s+(exec|dlx)|aubx)\s+)?(biome|eslint|lint)(\s|$)",
         rtk_cmd: "rtk lint",
         pipeline_safety: PipelineSafety::ProducerOnly,
         rewrite_prefixes: &[
@@ -221,10 +253,16 @@ pub const RULES: &[RtkRule] = &[
             "npx lint",
             "pnpm biome",
             "pnpm dlx biome",
+            "aube dlx biome",
             "pnpm dlx eslint",
+            "aube dlx eslint",
             "pnpm eslint",
             "pnpm exec biome",
+            "aubx biome",
+            "aube exec biome",
             "pnpm exec eslint",
+            "aubx eslint",
+            "aube exec eslint",
             "pnpm lint",
             "pnpm run biome",
             "pnpm run eslint",
@@ -241,7 +279,7 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?prettier",
+        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx|aube\s+(exec|dlx)|aubx)\s+)?prettier",
         rtk_cmd: "rtk prettier",
         pipeline_safety: PipelineSafety::ProducerOnly,
         rewrite_prefixes: &[
@@ -254,7 +292,10 @@ pub const RULES: &[RtkRule] = &[
             "npm x prettier",
             "npx prettier",
             "pnpm dlx prettier",
+            "aube dlx prettier",
             "pnpm exec prettier",
+            "aubx prettier",
+            "aube exec prettier",
             "pnpm prettier",
             "pnpm run prettier",
             "pnpm run-script prettier",
@@ -266,7 +307,7 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?next\s+build",
+        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx|aube\s+(exec|dlx)|aubx)\s+)?next\s+build",
         rtk_cmd: "rtk next",
         pipeline_safety: PipelineSafety::ProducerOnly,
         rewrite_prefixes: &[
@@ -280,7 +321,10 @@ pub const RULES: &[RtkRule] = &[
             "npm x next build",
             "npx next build",
             "pnpm dlx next build",
+            "aube dlx next build",
             "pnpm exec next build",
+            "aubx next build",
+            "aube exec next build",
             "pnpm next build",
             "pnpm run next build",
             "pnpm run-script next build",
@@ -291,7 +335,7 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?jest(\s+run)?(\s|$)",
+        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx|aube\s+(exec|dlx)|aubx)\s+)?jest(\s+run)?(\s|$)",
         rtk_cmd: "rtk jest",
         rewrite_prefixes: &[
             "jest run",
@@ -313,9 +357,15 @@ pub const RULES: &[RtkRule] = &[
             "npx jest run",
             "npx jest",
             "pnpm dlx jest run",
+            "aube dlx jest run",
             "pnpm dlx jest",
+            "aube dlx jest",
             "pnpm exec jest run",
+            "aubx jest run",
+            "aube exec jest run",
             "pnpm exec jest",
+            "aubx jest",
+            "aube exec jest",
             "pnpm jest run",
             "pnpm jest",
             "pnpm run jest run",
@@ -330,7 +380,7 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?vitest(\s+run)?(\s|$)",
+        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx|aube\s+(exec|dlx)|aubx)\s+)?vitest(\s+run)?(\s|$)",
         rtk_cmd: "rtk vitest",
         rewrite_prefixes: &[
             "npm exec vitest run",
@@ -350,9 +400,15 @@ pub const RULES: &[RtkRule] = &[
             "npx vitest run",
             "npx vitest",
             "pnpm dlx vitest run",
+            "aube dlx vitest run",
             "pnpm dlx vitest",
+            "aube dlx vitest",
             "pnpm exec vitest run",
+            "aubx vitest run",
+            "aube exec vitest run",
             "pnpm exec vitest",
+            "aubx vitest",
+            "aube exec vitest",
             "pnpm run vitest run",
             "pnpm run vitest",
             "pnpm run-script vitest run",
@@ -377,7 +433,7 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?playwright",
+        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx|aube\s+(exec|dlx)|aubx)\s+)?playwright",
         rtk_cmd: "rtk playwright",
         rewrite_prefixes: &[
             "npm exec playwright",
@@ -390,7 +446,10 @@ pub const RULES: &[RtkRule] = &[
             "npx playwright",
             "playwright",
             "pnpm dlx playwright",
+            "aube dlx playwright",
             "pnpm exec playwright",
+            "aubx playwright",
+            "aube exec playwright",
             "pnpm playwright",
             "pnpm run playwright",
             "pnpm run-script playwright",
@@ -401,7 +460,7 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?prisma",
+        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx|aube\s+(exec|dlx)|aubx)\s+)?prisma",
         rtk_cmd: "rtk prisma",
         rewrite_prefixes: &[
             "npm exec prisma",
@@ -413,7 +472,10 @@ pub const RULES: &[RtkRule] = &[
             "npm x prisma",
             "npx prisma",
             "pnpm dlx prisma",
+            "aube dlx prisma",
             "pnpm exec prisma",
+            "aubx prisma",
+            "aube exec prisma",
             "pnpm prisma",
             "pnpm run prisma",
             "pnpm run-script prisma",
