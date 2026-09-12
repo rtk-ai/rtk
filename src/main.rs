@@ -59,6 +59,8 @@ pub enum AgentTarget {
     Droid,
     /// Mistral Vibe CLI
     Vibe,
+    /// MiniMax Code / MiMoCode plugin-compatible agent
+    Mimocode,
     /// Oh My Pi (OMP)
     Omp,
 }
@@ -364,6 +366,10 @@ enum Commands {
         /// Install OpenCode plugin (in addition to Claude Code)
         #[arg(long)]
         opencode: bool,
+
+        /// Install the MiniMax Code plugin
+        #[arg(long = "mimocode")]
+        mimocode: bool,
 
         /// Initialize for Gemini CLI instead of Claude Code
         #[arg(long)]
@@ -1786,7 +1792,7 @@ fn main() {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
+fn uninstall_init_dispatch<UninstallHermes, UninstallMimocode, UninstallStandard>(
     agent: Option<AgentTarget>,
     global: bool,
     gemini: bool,
@@ -1794,10 +1800,12 @@ fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
     patch_mode: hooks::init::PatchMode,
     ctx: hooks::init::InitContext,
     uninstall_hermes: UninstallHermes,
+    uninstall_mimocode: UninstallMimocode,
     uninstall_standard: UninstallStandard,
 ) -> Result<()>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
+    UninstallMimocode: FnOnce(bool, hooks::init::InitContext) -> Result<()>,
     UninstallStandard: FnOnce(
         bool,
         bool,
@@ -1811,6 +1819,8 @@ where
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
+    } else if agent == Some(AgentTarget::Mimocode) {
+        uninstall_mimocode(global, ctx)
     } else if agent == Some(AgentTarget::Droid) {
         hooks::init::uninstall_droid(global, ctx)
     } else if agent == Some(AgentTarget::Vibe) {
@@ -2255,6 +2265,7 @@ fn run_cli() -> Result<i32> {
         Commands::Init {
             global,
             opencode,
+            mimocode,
             gemini,
             agent,
             show,
@@ -2302,6 +2313,7 @@ fn run_cli() -> Result<i32> {
                     patch_mode,
                     ctx,
                     hooks::init::uninstall_hermes,
+                    hooks::init::uninstall_mimocode,
                     hooks::init::uninstall_with_patch_mode,
                 )?;
             } else if gemini {
@@ -2339,6 +2351,13 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_droid_mode(global, ctx)?;
             } else if agent == Some(AgentTarget::Vibe) {
                 hooks::init::run_vibe_mode(global, hook_only, patch_mode, ctx)?;
+            } else if mimocode || agent == Some(AgentTarget::Mimocode) {
+                if !global {
+                    anyhow::bail!(
+                        "MiniMax Code plugin is global-only. Use: rtk init -g --mimocode"
+                    );
+                }
+                hooks::init::run_mimocode_mode(global, ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -3375,6 +3394,21 @@ mod tests {
     }
 
     #[test]
+    fn test_try_parse_init_mimocode_variants() {
+        let flag = Cli::try_parse_from(["rtk", "init", "--mimocode"]).unwrap();
+        match flag.command {
+            Commands::Init { mimocode, .. } => assert!(mimocode),
+            _ => panic!("Expected Init command"),
+        }
+
+        let agent = Cli::try_parse_from(["rtk", "init", "--agent", "mimocode"]).unwrap();
+        match agent.command {
+            Commands::Init { agent, .. } => assert_eq!(agent, Some(AgentTarget::Mimocode)),
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
     fn test_init_uninstall_dispatch_routes_hermes_to_hermes_cleanup() {
         let hermes_called = Cell::new(false);
         let standard_called = Cell::new(false);
@@ -3397,6 +3431,7 @@ mod tests {
                 assert!(ctx.dry_run);
                 Ok(())
             },
+            |_, _| Ok(()),
             |_, _, _, _, _, _, _, _| {
                 standard_called.set(true);
                 Ok(())
@@ -3455,6 +3490,7 @@ mod tests {
                 hermes_called.set(true);
                 Ok(())
             },
+            |_, _| Ok(()),
             |global, _, _, _, _, omp, patch_mode, _| {
                 standard_called.set(true);
                 assert!(global);
