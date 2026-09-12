@@ -149,7 +149,7 @@ pub(crate) fn is_crlf_at(bytes: &[u8], i: usize) -> bool {
 /// into single words — e.g. `*.yml` tokenizes as `Shellism("*")` +
 /// `Arg(".yml")` but is one bash word. For callers that only need "was there
 /// a space here", not full shell-operator awareness.
-pub(crate) fn coalesce_words<'a>(cmd: &'a str, tokens: &[ParsedToken]) -> Vec<(&'a str, usize)> {
+fn coalesce_words<'a>(cmd: &'a str, tokens: &[ParsedToken]) -> Vec<(&'a str, usize)> {
     let mut words = Vec::new();
     let mut run_start: Option<usize> = None;
     let mut run_end: usize = 0;

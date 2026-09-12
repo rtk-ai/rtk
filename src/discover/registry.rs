@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use super::lexer::{
-    ParsedToken, PipeKind, QuoteScan, TokenKind, ansi_c_quote_defeats_lexer, coalesce_words,
+    ParsedToken, PipeKind, QuoteScan, TokenKind, ansi_c_quote_defeats_lexer,
     contains_unattestable_construct_in, is_crlf_at, redirect_has_file_target, resolve_word_text,
     shell_split, split_on_operators, tokenize, tokenize_with_newlines, words_and_spans,
 };
@@ -460,16 +460,15 @@ fn normalize_cargo_command(cmd: &str) -> String {
         .strip_prefix("cargo")
         .is_some_and(|tail| tail.starts_with([' ', '\t']))
     {
-        let tokens = tokenize(cmd);
-        let raw_words = coalesce_words(cmd, &tokens);
+        let (raw_words, starts) = words_and_spans(cmd);
         let words: Vec<_> = raw_words[1..]
             .iter()
-            .map(|(word, _)| resolve_word_text(word))
+            .map(|word| resolve_word_text(word))
             .collect();
         if let Some((command, index)) = crate::cmds::rust::cargo_cmd::CargoCommand::parse(&words) {
             // Preserve the raw suffix so argument-specific exclusions still see its
             // original quoting and spacing after the canonical command name.
-            let (word, offset) = raw_words[index + 1];
+            let (word, offset) = (raw_words[index + 1], starts[index + 1]);
             return format!("cargo {}{}", command.as_str(), &cmd[offset + word.len()..]);
         }
     }
