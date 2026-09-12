@@ -52,6 +52,18 @@ windows-sys = { version = "0.59", features = [
     "Win32_Globalization",
 ] }
 
+[features]
+# PTY capture for interactive builders (e.g. `ng build`) that hang when their
+# output is an ordinary pipe (see docs/pr_briefs/001-pipe-eof-grandchild-hang).
+# Kept optional to preserve rtk's zero-dependency default build philosophy; even
+# when built in, PTY only runs for tools that opt in via `[[tools]] capture = "pty"`.
+default = ["pty"]
+pty = ["dep:portable-pty"]
+
+[dependencies.portable-pty]
+version = "0.9"
+optional = true
+
 [build-dependencies]
 toml = "0.8"
 

@@ -7,6 +7,8 @@ pub mod constants;
 pub mod display_helpers;
 pub mod filter;
 pub mod guard;
+#[cfg(feature = "pty")]
+pub mod pty_capture;
 pub mod retriever;
 pub mod runner;
 pub mod stream;
