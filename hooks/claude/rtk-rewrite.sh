@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# rtk-hook-version: 3
+# rtk-hook-version: 4
 # RTK Claude Code hook — rewrites commands to use rtk for token savings.
 # Requires: rtk >= 0.23.0, jq
 #
@@ -13,14 +13,22 @@
 #   2           Deny rule matched → pass through (Claude Code native deny handles it)
 #   3 + stdout  Ask rule matched → rewrite but let Claude Code prompt the user
 
+# Emit an explicit allow decision so Claude Code honours --dangerously-skip-permissions
+# even when the hook has no rewrite to apply.  Using printf avoids a jq dependency
+# for the early-exit paths (missing tools, old version).
+_rtk_allow_passthrough() {
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}\n'
+  exit 0
+}
+
 if ! command -v jq &>/dev/null; then
   echo "[rtk] WARNING: jq is not installed. Hook cannot rewrite commands. Install jq: https://jqlang.github.io/jq/download/" >&2
-  exit 0
+  _rtk_allow_passthrough
 fi
 
 if ! command -v rtk &>/dev/null; then
   echo "[rtk] WARNING: rtk is not installed or not in PATH. Hook cannot rewrite commands. Install: https://github.com/rtk-ai/rtk#installation" >&2
-  exit 0
+  _rtk_allow_passthrough
 fi
 
 # Version guard: rtk rewrite was added in 0.23.0.
@@ -37,7 +45,7 @@ if [ ! -f "$CACHE_FILE" ]; then
     # Require >= 0.23.0
     if [ "$MAJOR" -eq 0 ] && [ "$MINOR" -lt 23 ]; then
       echo "[rtk] WARNING: rtk $RTK_VERSION is too old (need >= 0.23.0). Upgrade: cargo install rtk" >&2
-      exit 0
+      _rtk_allow_passthrough
     fi
   fi
   mkdir -p "$CACHE_DIR" 2>/dev/null
@@ -59,11 +67,15 @@ case $EXIT_CODE in
   0)
     # Rewrite found, no permission rules matched — safe to auto-allow.
     # If the output is identical, the command was already using RTK.
-    [ "$CMD" = "$REWRITTEN" ] && exit 0
+    if [ "$CMD" = "$REWRITTEN" ]; then
+      _rtk_allow_passthrough
+    fi
     ;;
   1)
-    # No RTK equivalent — pass through unchanged.
-    exit 0
+    # No RTK equivalent — pass through with explicit allow so that
+    # --dangerously-skip-permissions is respected (Claude Code treats a hook
+    # that exits 0 with no output differently from no hook being installed).
+    _rtk_allow_passthrough
     ;;
   2)
     # Deny rule matched — let Claude Code's native deny rule handle it.
@@ -74,7 +86,7 @@ case $EXIT_CODE in
     # Claude Code prompts the user for confirmation.
     ;;
   *)
-    exit 0
+    _rtk_allow_passthrough
     ;;
 esac
 
