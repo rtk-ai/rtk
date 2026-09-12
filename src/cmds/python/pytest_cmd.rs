@@ -165,7 +165,69 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
     }
 
     // Build compact output
-    build_pytest_summary(&summary_line, &test_files, &failures, &xfail_lines)
+    let summary = build_pytest_summary(&summary_line, &test_files, &failures, &xfail_lines);
+    // #1417: when the summary collapses to the terse "No tests collected"
+    // line (pytest -q's "no tests ran" never matched any of our summary
+    // regexes), surface pytest's own collection-time diagnostics — rootdir,
+    // configfile, testpaths, collected count, collection errors — so the
+    // user can see *why* pytest found nothing instead of guessing whether
+    // it was a cwd / config / RTK bug.
+    if summary == "Pytest: No tests collected" {
+        if let Some(diag) = diagnose_no_tests(output) {
+            return diag;
+        }
+    }
+    summary
+}
+
+/// Extracts pytest's collection-time diagnostic lines (rootdir, configfile,
+/// testpaths, collected count, collection errors, the `no tests ran` summary)
+/// from the raw pytest output. Returns `None` if no recognisable "no tests"
+/// marker is present — in that case callers should keep the terse default
+/// summary rather than echoing arbitrary noise.
+fn diagnose_no_tests(raw: &str) -> Option<String> {
+    let has_marker = raw.contains("no tests ran")
+        || raw.contains("no tests collected")
+        || raw.contains("ERROR collecting")
+        || raw.contains("errors during collection");
+    if !has_marker {
+        return None;
+    }
+
+    let mut diag_lines: Vec<&str> = Vec::new();
+    for line in raw.lines() {
+        let t = line.trim();
+        if t.starts_with("rootdir:")
+            || t.starts_with("configfile:")
+            || t.starts_with("testpaths:")
+            || t.starts_with("collected ")
+            || t.contains("no tests ran")
+            || t.contains("no tests collected")
+            || t.contains("ERROR")
+            || t.contains("errors during collection")
+        {
+            diag_lines.push(t);
+        }
+    }
+
+    if diag_lines.is_empty() {
+        return None;
+    }
+
+    const MAX_DIAG_LINES: usize = 15;
+    let mut out = String::from("Pytest: no tests collected\n");
+    out.push_str("═══════════════════════════════════════\n");
+    for l in diag_lines.iter().take(MAX_DIAG_LINES) {
+        out.push_str(l);
+        out.push('\n');
+    }
+    if diag_lines.len() > MAX_DIAG_LINES {
+        out.push_str(&format!(
+            "… +{} more diagnostic lines\n",
+            diag_lines.len() - MAX_DIAG_LINES
+        ));
+    }
+    Some(out.trim_end().to_string())
 }
 
 #[derive(Default)]
@@ -332,6 +394,67 @@ fn parse_summary_line(summary: &str) -> PytestCounts {
 mod tests {
     use super::*;
 
+    // --- #1417: pytest with no tests must surface diagnostic, not a bare
+    // "No tests collected" line that leaves the user guessing why ---
+
+    #[test]
+    fn test_filter_no_tests_quiet_mode_falls_back_to_terse() {
+        // pytest -q's output for an empty collection is literally just
+        // "no tests ran in 0.05s" — no rootdir or configfile to surface, so
+        // there's nothing to add and the terse default stays.
+        let output = "no tests ran in 0.05s\n";
+        let result = filter_pytest_output(output);
+        // diagnose_no_tests has nothing to anchor on without rootdir/configfile,
+        // so we keep the original short verdict. Just guard the verdict.
+        assert!(
+            result.contains("no tests"),
+            "want a no-tests verdict, got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_filter_no_tests_verbose_surfaces_rootdir_and_configfile() {
+        // Full pytest output for an empty collection (no `-q`) carries the
+        // diagnostic lines the user actually needs to debug WHY pytest found
+        // nothing. They must reach the LLM verbatim.
+        let output = r#"============================= test session starts ==============================
+platform darwin -- Python 3.11.0, pytest-7.4.0, pluggy-1.3.0
+rootdir: /Users/x/proj
+configfile: pyproject.toml
+testpaths: tests, integration
+collected 0 items
+
+============================ no tests ran in 0.05s ============================="#;
+        let result = filter_pytest_output(output);
+        assert!(result.contains("rootdir: /Users/x/proj"), "diagnostic missing rootdir, got: {result}");
+        assert!(result.contains("configfile: pyproject.toml"), "diagnostic missing configfile, got: {result}");
+        assert!(result.contains("testpaths: tests, integration"), "diagnostic missing testpaths, got: {result}");
+        assert!(result.contains("collected 0 items"), "diagnostic missing collected count, got: {result}");
+        assert!(result.contains("no tests ran"), "diagnostic missing summary, got: {result}");
+    }
+
+    #[test]
+    fn test_filter_no_tests_collection_error_surfaced() {
+        // Collection errors (typos in conftest.py, missing imports) leave
+        // pytest with zero collected tests AND an ERROR line. Don't bury
+        // that in a generic "No tests collected" — the ERROR is exactly
+        // what the LLM needs to act on.
+        let output = r#"============================= test session starts ==============================
+rootdir: /proj
+collected 0 items / 1 error
+
+==================================== ERRORS ====================================
+__________________ ERROR collecting tests/test_broken.py ___________________
+ImportError while importing test module '/proj/tests/test_broken.py'.
+=========================== short test summary info ============================
+ERROR tests/test_broken.py
+errors during collection
+============================== no tests ran in 0.05s ==========================="#;
+        let result = filter_pytest_output(output);
+        assert!(result.contains("ERROR"), "collection error must be surfaced, got: {result}");
+        assert!(result.contains("rootdir: /proj"), "rootdir should be surfaced, got: {result}");
+    }
+
     #[test]
     fn test_filter_pytest_all_pass() {
         let output = r#"=== test session starts ===
@@ -402,13 +525,28 @@ FAILED tests/test_foo.py::test_three - KeyError
 
     #[test]
     fn test_filter_pytest_no_tests() {
+        // #1417: pytest output containing `collected 0 items` + `no tests
+        // ran` now surfaces both diagnostic lines instead of collapsing to
+        // a single terse verdict. Keeps the verdict header for grep-ability,
+        // but the collected/no-tests-ran context goes through verbatim.
         let output = r#"=== test session starts ===
 collected 0 items
 
 === no tests ran in 0.00s ==="#;
 
         let result = filter_pytest_output(output);
-        assert!(result.contains("No tests collected"));
+        assert!(
+            result.to_lowercase().contains("no tests collected"),
+            "verdict header missing, got: {result}"
+        );
+        assert!(
+            result.contains("collected 0 items"),
+            "collection count must be surfaced, got: {result}"
+        );
+        assert!(
+            result.contains("no tests ran"),
+            "pytest's own summary must be surfaced, got: {result}"
+        );
     }
 
     #[test]
