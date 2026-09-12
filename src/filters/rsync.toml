@@ -7,8 +7,11 @@ strip_lines_matching = [
   "^sending incremental file list",
   "^sent \\d",
 ]
+# "DRY RUN" in unless: GNU rsync appends "(DRY RUN)" to the summary line on
+# -n runs — never report a dry run as synced. (openrsync prints no marker;
+# dry-run-rsync.toml catches those by command flags before this filter.)
 match_output = [
-  { pattern = "total size is", message = "ok (synced)", unless = "error|failed|No such file" },
+  { pattern = "total size is", message = "ok (synced)", unless = "error|failed|No such file|DRY RUN" },
 ]
 max_lines = 20
 
@@ -34,6 +37,18 @@ rsync error: error in file system (code 11) at receiver.c(741) [Receiver=3.2.7]
 """
 expected = """rsync: [Receiver] mkdir "/remote/path" failed: Permission denied (13)
 rsync error: error in file system (code 11) at receiver.c(741) [Receiver=3.2.7]"""
+
+[[tests.rsync]]
+name = "GNU dry-run marker blocks the synced short-circuit"
+input = """
+sending incremental file list
+file1.txt
+
+sent 1,234 bytes  received 42 bytes  2,552.00 bytes/sec
+total size is 98,765  speedup is 77.31 (DRY RUN)
+"""
+expected = """file1.txt
+total size is 98,765  speedup is 77.31 (DRY RUN)"""
 
 [[tests.rsync]]
 name = "errors not swallowed when total size present"
