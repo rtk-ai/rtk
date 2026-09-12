@@ -215,6 +215,11 @@ fn pi_dry_run_modified_extension_previews_confirmation_without_error() {
         std::fs::read_to_string(extension).unwrap(),
         include_str!("../hooks/pi/rtk.ts")
     );
+    assert_eq!(
+        std::fs::read_to_string(extension_dir.join("rtk.ts.bak")).unwrap(),
+        original,
+        "an approved overwrite must preserve what it replaced"
+    );
 }
 
 #[test]
@@ -355,24 +360,43 @@ fn preexisting_shared_extension_without_sidecar_stays_uncertain() {
         "OMP install failed: {}",
         stderr(&install)
     );
-    assert!(stderr(&install).contains("pre-existing extension has no ownership record"));
-    assert!(
-        !ownership.exists(),
-        "a pre-existing extension without ownership must not become OMP-only"
+    // RTK did not install the file that was already there and cannot know who
+    // did, so the marker keeps the other agent's ownership an open question.
+    assert_eq!(
+        std::fs::read_to_string(&ownership).unwrap(),
+        "omp\nunknown-prior\n",
+        "a pre-existing extension must be recorded as partially owned, not OMP-only"
     );
 
-    let uninstall = run_rtk(
+    // OMP is a recorded owner, so removing the file as Pi is a known conflict
+    // and must be protected even though the record is partial.
+    let pi_uninstall = run_rtk(
         project.path(),
         &agent_dir,
         &["init", "--agent", "pi", "--global", "--uninstall"],
     );
     assert!(
-        uninstall.status.success(),
-        "uncertain legacy uninstall should proceed: {}",
-        stderr(&uninstall)
+        !pi_uninstall.status.success(),
+        "recorded OMP ownership must protect the shared file"
     );
-    assert!(stderr(&uninstall).contains("could not confirm both agents' ownership"));
+    assert!(stderr(&pi_uninstall).contains("share the global extension path"));
+    assert!(extension.exists());
+
+    // The reverse direction is the uncertain one: Pi is not recorded, but the
+    // marker says the record predates RTK, so this warns instead of blocking.
+    let omp_uninstall = run_rtk(
+        project.path(),
+        &agent_dir,
+        &["init", "--agent", "omp", "--global", "--uninstall"],
+    );
+    assert!(
+        omp_uninstall.status.success(),
+        "uncertain ownership should warn and proceed: {}",
+        stderr(&omp_uninstall)
+    );
+    assert!(stderr(&omp_uninstall).contains("could not confirm both agents' ownership"));
     assert!(!extension.exists());
+    assert!(!ownership.exists());
 }
 
 #[test]
@@ -427,7 +451,7 @@ fn unreadable_ownership_sidecar_warns_without_erasing_state() {
 }
 
 #[test]
-fn relocated_install_reconciles_stale_ownership_after_manual_delete() {
+fn relocated_install_preserves_other_agent_ownership_after_manual_delete() {
     let project = TempDir::new().unwrap();
     let agent_dir = project.path().join("omp-agent");
     let extension = agent_dir.join("extensions/rtk.ts");
@@ -458,7 +482,10 @@ fn relocated_install_reconciles_stale_ownership_after_manual_delete() {
         "Pi reinstall failed: {}",
         stderr(&reinstall)
     );
-    assert_eq!(std::fs::read_to_string(&ownership).unwrap(), "pi\n");
+    // Deleting the file does not unconfigure OMP: it still resolves to this
+    // path, and reinstalling for Pi restores the integration for both agents.
+    // The recorded ownership therefore survives the delete.
+    assert_eq!(std::fs::read_to_string(&ownership).unwrap(), "omp\npi\n");
 
     let uninstall = run_rtk(
         project.path(),
@@ -466,11 +493,29 @@ fn relocated_install_reconciles_stale_ownership_after_manual_delete() {
         &["init", "--agent", "pi", "--global", "--uninstall"],
     );
     assert!(
-        uninstall.status.success(),
-        "stale OMP ownership still blocked Pi uninstall: {}",
-        stderr(&uninstall)
+        !uninstall.status.success(),
+        "recorded OMP ownership must still protect the shared file"
     );
-    assert!(!stderr(&uninstall).contains("share the global extension path"));
+    assert!(stderr(&uninstall).contains("share the global extension path"));
+    assert!(extension.exists());
+
+    let approved = run_rtk(
+        project.path(),
+        &agent_dir,
+        &[
+            "init",
+            "--agent",
+            "pi",
+            "--global",
+            "--uninstall",
+            "--auto-patch",
+        ],
+    );
+    assert!(
+        approved.status.success(),
+        "approved shared uninstall failed: {}",
+        stderr(&approved)
+    );
     assert!(!extension.exists());
     assert!(!ownership.exists());
 }
@@ -502,7 +547,9 @@ fn pi_modified_uninstall_dry_run_is_non_failing_preview() {
         "Pi uninstall dry-run failed: {}",
         stderr(&output)
     );
-    assert!(stdout(&output).contains("[dry-run] would refuse to remove Pi extension"));
+    assert!(
+        stdout(&output).contains("[dry-run] would prompt before removing modified Pi extension")
+    );
     assert!(stdout(&output).contains("[dry-run] Nothing written."));
     assert!(extension.exists());
 }
@@ -534,7 +581,9 @@ fn omp_modified_uninstall_dry_run_is_non_failing_preview() {
         "OMP uninstall dry-run failed: {}",
         stderr(&output)
     );
-    assert!(stdout(&output).contains("[dry-run] would refuse to remove OMP extension"));
+    assert!(
+        stdout(&output).contains("[dry-run] would prompt before removing modified OMP extension")
+    );
     assert!(stdout(&output).contains("[dry-run] Nothing written."));
     assert!(extension.exists());
 }
@@ -729,7 +778,10 @@ fn symlinked_global_agent_directories_are_detected_as_shared() {
         "OMP install through a symlinked agent directory failed: {}",
         stderr(&install)
     );
-    assert!(stderr(&install).contains("resolve to the same global extension path"));
+    assert!(
+        !stderr(&install).contains("could not confirm both agents' ownership"),
+        "a first install on an empty path must not warn about unknown ownership"
+    );
     assert_eq!(std::fs::read_to_string(&ownership).unwrap(), "omp\n");
 
     let uninstall = run_rtk_without_agent_dir(
@@ -813,9 +865,12 @@ fn symlinked_global_extension_files_share_one_ownership_state() {
     assert!(stderr(&omp_uninstall).contains("changes a path used by the other agent"));
     assert!(!omp_extension.exists(), "the OMP symlink should be removed");
     assert!(pi_extension.exists(), "the real Pi file should survive");
-    assert!(
-        !pi_ownership.exists(),
-        "the canonical ownership state should be removed after symlink uninstall"
+    // Only the symlink was removed; Pi still owns the surviving file, so its
+    // claim must outlive OMP's uninstall or the shared-file protection is lost.
+    assert_eq!(
+        std::fs::read_to_string(&pi_ownership).unwrap(),
+        "pi\n",
+        "the surviving owner's record must be kept, minus the uninstalled agent"
     );
 }
 
@@ -837,7 +892,10 @@ fn symlinked_project_agent_directories_are_detected_as_shared() {
         "project-local OMP install through a symlink failed: {}",
         stderr(&omp_install)
     );
-    assert!(stderr(&omp_install).contains("resolve to the same project extension path"));
+    assert!(
+        !stderr(&omp_install).contains("could not confirm both agents' ownership"),
+        "a first install on an empty path must not warn about unknown ownership"
+    );
 
     let pi_install = run_rtk_without_agent_dir(project.path(), &["init", "--agent", "pi"]);
     assert!(
@@ -858,4 +916,398 @@ fn symlinked_project_agent_directories_are_detected_as_shared() {
     );
     assert!(stderr(&pi_uninstall).contains("share the project extension path"));
     assert!(pi_extension.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_symlink_alias_is_detected_and_preserved() {
+    let project = TempDir::new().unwrap();
+    let pi_extension = project.path().join(".pi/extensions/rtk.ts");
+    let omp_extension = project.path().join(".omp/extensions/rtk.ts");
+    let ownership = pi_extension.with_file_name(".rtk-agents");
+
+    // Only the link's own directory exists: the target directory is created by
+    // the install, which must follow the link to decide where to write.
+    std::fs::create_dir_all(omp_extension.parent().unwrap()).unwrap();
+    symlink(&pi_extension, &omp_extension).unwrap();
+
+    let install = run_rtk_without_agent_dir(project.path(), &["init", "--agent", "omp"]);
+    assert!(
+        install.status.success(),
+        "OMP install through a dangling symlink failed: {}",
+        stderr(&install)
+    );
+
+    assert!(
+        std::fs::symlink_metadata(&omp_extension)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the user's symlink must survive the install"
+    );
+    assert!(
+        pi_extension.exists(),
+        "the extension must be written through the link to its target"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&ownership).unwrap(),
+        "omp\n",
+        "ownership must be recorded once, at the canonical location"
+    );
+
+    let pi_uninstall =
+        run_rtk_without_agent_dir(project.path(), &["init", "--agent", "pi", "--uninstall"]);
+    assert!(
+        !pi_uninstall.status.success(),
+        "Pi uninstall should protect the aliased extension"
+    );
+    assert!(pi_extension.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_directory_symlink_alias_installs_into_the_target() {
+    let project = TempDir::new().unwrap();
+    let pi_dir = project.path().join(".pi/extensions");
+    let omp_dir = project.path().join(".omp/extensions");
+
+    // The alias is on an ancestor directory, and its target does not exist yet.
+    symlink(project.path().join(".pi"), project.path().join(".omp")).unwrap();
+
+    let install = run_rtk_without_agent_dir(project.path(), &["init", "--agent", "omp"]);
+    assert!(
+        install.status.success(),
+        "OMP install through a dangling directory symlink failed: {}",
+        stderr(&install)
+    );
+    assert!(
+        std::fs::symlink_metadata(project.path().join(".omp"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the user's directory symlink must survive the install"
+    );
+    assert!(pi_dir.join("rtk.ts").exists());
+    assert!(omp_dir.join("rtk.ts").exists(), "both paths must resolve");
+}
+
+#[cfg(unix)]
+#[test]
+fn unaliased_paths_do_not_report_on_ownership_state() {
+    let project = TempDir::new().unwrap();
+    let extension_dir = project.path().join(".pi/extensions");
+    std::fs::create_dir_all(&extension_dir).unwrap();
+    // A stray record at a path only Pi resolves to: no ownership decision is
+    // made here, so its contents must not be announced.
+    std::fs::write(extension_dir.join(".rtk-agents"), "garbage-entry\n").unwrap();
+
+    let install = run_rtk_without_agent_dir(project.path(), &["init", "--agent", "pi"]);
+    assert!(install.status.success(), "{}", stderr(&install));
+    assert!(
+        !stderr(&install).contains("ownership state"),
+        "unaliased install must not report on ownership state: {}",
+        stderr(&install)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn repeated_auto_patch_reuses_an_identical_backup() {
+    let project = TempDir::new().unwrap();
+    let extension_dir = project.path().join(".pi/extensions");
+    std::fs::create_dir_all(&extension_dir).unwrap();
+    let extension = extension_dir.join("rtk.ts");
+    let patched = format!("{}\n// local patch\n", include_str!("../hooks/pi/rtk.ts"));
+
+    for _ in 0..3 {
+        std::fs::write(&extension, &patched).unwrap();
+        let install =
+            run_rtk_without_agent_dir(project.path(), &["init", "--agent", "pi", "--auto-patch"]);
+        assert!(install.status.success(), "{}", stderr(&install));
+    }
+
+    assert_eq!(
+        std::fs::read_to_string(extension_dir.join("rtk.ts.bak")).unwrap(),
+        patched
+    );
+    assert!(
+        !extension_dir.join("rtk.ts.bak.1").exists(),
+        "re-applying the same patch must not consume another backup slot"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_last_backup_slot_is_usable() {
+    let project = TempDir::new().unwrap();
+    let extension_dir = project.path().join(".pi/extensions");
+    std::fs::create_dir_all(&extension_dir).unwrap();
+    let extension = extension_dir.join("rtk.ts");
+    std::fs::write(
+        &extension,
+        format!("{}\n// local patch\n", include_str!("../hooks/pi/rtk.ts")),
+    )
+    .unwrap();
+
+    // Occupy every slot but the last, each with distinct content so none of
+    // them can be reused by the identical-content shortcut.
+    std::fs::write(extension_dir.join("rtk.ts.bak"), "0").unwrap();
+    for slot in 1..=8 {
+        std::fs::write(
+            extension_dir.join(format!("rtk.ts.bak.{slot}")),
+            format!("{slot}"),
+        )
+        .unwrap();
+    }
+
+    let install =
+        run_rtk_without_agent_dir(project.path(), &["init", "--agent", "pi", "--auto-patch"]);
+    assert!(
+        install.status.success(),
+        "the final backup slot must be usable: {}",
+        stderr(&install)
+    );
+    assert!(extension_dir.join("rtk.ts.bak.9").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn crlf_extension_is_not_reported_as_up_to_date() {
+    let project = TempDir::new().unwrap();
+    let extension_dir = project.path().join(".pi/extensions");
+    std::fs::create_dir_all(&extension_dir).unwrap();
+    // Still stock content, but byte-different, so the next install rewrites it.
+    std::fs::write(
+        extension_dir.join("rtk.ts"),
+        include_str!("../hooks/pi/rtk.ts")
+            .replace("\r\n", "\n")
+            .replace('\n', "\r\n"),
+    )
+    .unwrap();
+
+    let show = run_rtk_without_agent_dir(project.path(), &["init", "--show", "--agent", "pi"]);
+    assert!(show.status.success(), "{}", stderr(&show));
+    assert!(
+        !stdout(&show).contains("(up to date)"),
+        "a file the next install rewrites must not be reported as up to date: {}",
+        stdout(&show)
+    );
+    assert!(stdout(&show).contains("stock version"));
+}
+
+#[test]
+fn unrecognised_sidecar_entry_still_protects_recorded_agents() {
+    let project = TempDir::new().unwrap();
+    let agent_dir = project.path().join("omp-agent");
+    let extension = agent_dir.join("extensions/rtk.ts");
+    let ownership = agent_dir.join("extensions/.rtk-agents");
+
+    for agent in ["pi", "omp"] {
+        let install = run_rtk(
+            project.path(),
+            &agent_dir,
+            &["init", "--agent", agent, "--global"],
+        );
+        assert!(install.status.success(), "{agent} install failed");
+    }
+    // As a newer RTK that knows a third agent would have written it.
+    std::fs::write(&ownership, "omp\npi\nzed\n").unwrap();
+
+    let uninstall = run_rtk(
+        project.path(),
+        &agent_dir,
+        &["init", "--agent", "pi", "--global", "--uninstall"],
+    );
+    assert!(
+        !uninstall.status.success(),
+        "an unparsable entry must not discard the recorded owners"
+    );
+    assert!(extension.exists());
+
+    let install = run_rtk(
+        project.path(),
+        &agent_dir,
+        &["init", "--agent", "pi", "--global"],
+    );
+    assert!(install.status.success(), "Pi reinstall failed");
+    assert!(
+        std::fs::read_to_string(&ownership).unwrap().contains("zed"),
+        "entries from a newer RTK must survive a rewrite"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cyclic_symlink_at_managed_path_does_not_abort() {
+    let project = TempDir::new().unwrap();
+    let extension_dir = project.path().join(".pi/extensions");
+    std::fs::create_dir_all(&extension_dir).unwrap();
+    // Self-referential link: `canonicalize` reports ELOOP, so following the
+    // chain by hand is the only thing standing between this and an abort.
+    symlink("rtk.ts", extension_dir.join("rtk.ts")).unwrap();
+
+    let install = run_rtk_without_agent_dir(project.path(), &["init", "--agent", "pi"]);
+    assert!(
+        install.status.code().is_some(),
+        "install was killed by a signal instead of terminating: {}",
+        stderr(&install)
+    );
+    // An unresolvable link is still something the user put there, so it gets
+    // the same confirmation as any other non-stock content rather than being
+    // replaced silently.
+    assert!(
+        !install.status.success(),
+        "a cyclic link must not be replaced without confirmation: {}",
+        stdout(&install)
+    );
+    assert!(
+        std::fs::symlink_metadata(extension_dir.join("rtk.ts"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link must survive a declined overwrite"
+    );
+
+    let dry_run =
+        run_rtk_without_agent_dir(project.path(), &["init", "--agent", "pi", "--dry-run"]);
+    assert!(
+        dry_run.status.code().is_some(),
+        "dry-run was killed by a signal instead of terminating: {}",
+        stderr(&dry_run)
+    );
+
+    let approved =
+        run_rtk_without_agent_dir(project.path(), &["init", "--agent", "pi", "--auto-patch"]);
+    assert!(
+        approved.status.success(),
+        "--auto-patch should replace a cyclic link: {}",
+        stderr(&approved)
+    );
+    assert_eq!(
+        std::fs::read_to_string(extension_dir.join("rtk.ts")).unwrap(),
+        include_str!("../hooks/pi/rtk.ts")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn shared_uninstall_dry_run_matches_the_real_run() {
+    let project = TempDir::new().unwrap();
+    let agent_dir = project.path().join("shared-agent");
+    let ownership = agent_dir.join("extensions/.rtk-agents");
+
+    for agent in ["pi", "omp"] {
+        let install = run_rtk(
+            project.path(),
+            &agent_dir,
+            &["init", "--agent", agent, "--global"],
+        );
+        assert!(install.status.success(), "{agent} install failed");
+    }
+    assert_eq!(std::fs::read_to_string(&ownership).unwrap(), "omp\npi\n");
+
+    let preview = run_rtk(
+        project.path(),
+        &agent_dir,
+        &[
+            "init",
+            "--agent",
+            "pi",
+            "--global",
+            "--uninstall",
+            "--dry-run",
+            "--auto-patch",
+        ],
+    );
+    assert!(preview.status.success(), "{}", stderr(&preview));
+
+    let real = run_rtk(
+        project.path(),
+        &agent_dir,
+        &[
+            "init",
+            "--agent",
+            "pi",
+            "--global",
+            "--uninstall",
+            "--auto-patch",
+        ],
+    );
+    assert!(real.status.success(), "{}", stderr(&real));
+
+    // The real run removes the file itself, so the record goes with it. The
+    // preview must have said so rather than describing a rewrite.
+    assert!(!ownership.exists());
+    assert!(
+        stdout(&preview).contains("would remove RTK extension ownership state"),
+        "dry-run described a different outcome than the real run: {}",
+        stdout(&preview)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn modified_extension_uninstall_is_recoverable_with_auto_patch() {
+    let project = TempDir::new().unwrap();
+    let extension_dir = project.path().join(".pi/extensions");
+    std::fs::create_dir_all(&extension_dir).unwrap();
+    let extension = extension_dir.join("rtk.ts");
+    // RTK content, but hand-edited so it matches no known stock revision.
+    std::fs::write(
+        &extension,
+        format!("{}\n// local tweak\n", include_str!("../hooks/pi/rtk.ts")),
+    )
+    .unwrap();
+
+    let refused =
+        run_rtk_without_agent_dir(project.path(), &["init", "--agent", "pi", "--uninstall"]);
+    assert!(
+        !refused.status.success(),
+        "modified RTK content must not be removed without approval"
+    );
+    assert!(stderr(&refused).contains("--auto-patch"));
+    assert!(extension.exists());
+
+    let approved = run_rtk_without_agent_dir(
+        project.path(),
+        &["init", "--agent", "pi", "--uninstall", "--auto-patch"],
+    );
+    assert!(
+        approved.status.success(),
+        "--auto-patch should approve removing modified RTK content: {}",
+        stderr(&approved)
+    );
+    assert!(
+        !extension.exists(),
+        "approved uninstall must remove the modified extension"
+    );
+    assert_eq!(
+        std::fs::read_to_string(extension_dir.join("rtk.ts.bak")).unwrap(),
+        format!("{}\n// local tweak\n", include_str!("../hooks/pi/rtk.ts")),
+        "the user's edits must survive an approved removal"
+    );
+
+    let second_edit = format!(
+        "{}\n// a different tweak\n",
+        include_str!("../hooks/pi/rtk.ts")
+    );
+    std::fs::write(&extension, &second_edit).unwrap();
+    let again = run_rtk_without_agent_dir(
+        project.path(),
+        &["init", "--agent", "pi", "--uninstall", "--auto-patch"],
+    );
+    assert!(
+        again.status.success(),
+        "second uninstall failed: {}",
+        stderr(&again)
+    );
+    assert_eq!(
+        std::fs::read_to_string(extension_dir.join("rtk.ts.bak")).unwrap(),
+        format!("{}\n// local tweak\n", include_str!("../hooks/pi/rtk.ts")),
+        "the first backup must be preserved"
+    );
+    assert_eq!(
+        std::fs::read_to_string(extension_dir.join("rtk.ts.bak.1")).unwrap(),
+        second_edit
+    );
 }
