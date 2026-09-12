@@ -233,6 +233,29 @@ class RtkRewritePluginTest(unittest.TestCase):
         self.assertEqual({"command": "git status"}, args)
         self.assertEqual("rtk: hermes plugin warning: boom\n", stderr.getvalue())
 
+    def test_conductor_twist_env_var_brands_warning_without_blocking_command(self):
+        module, callback = self.load_callback()
+        args = {"command": "git status"}
+
+        with mock.patch.dict(os.environ, {"RTK_HERMES_CONDUCTOR": "1"}):
+            with mock.patch.object(module.subprocess, "run", side_effect=RuntimeError("boom")):
+                with mock.patch.object(module.sys, "stderr", new_callable=io.StringIO) as stderr:
+                    callback(tool_name="terminal", args=args)
+
+        self.assertEqual({"command": "git status"}, args)
+        self.assertEqual("rtk: The Conductor warning: boom\n", stderr.getvalue())
+
+    def test_conductor_twist_env_var_accepts_true_and_yes(self):
+        module = load_plugin_module()
+
+        for value in ("true", "TRUE", "yes", "YES", "on", "ON"):
+            with self.subTest(value=value):
+                with mock.patch.dict(os.environ, {"RTK_HERMES_CONDUCTOR": value}):
+                    with mock.patch.object(module.sys, "stderr", new_callable=io.StringIO) as stderr:
+                        module._warn("baton ready")
+
+                self.assertEqual("rtk: The Conductor warning: baton ready\n", stderr.getvalue())
+
     def test_non_terminal_tool_is_noop(self):
         module, callback = self.load_callback()
         args = {"command": "git status"}
