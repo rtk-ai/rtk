@@ -152,13 +152,10 @@ fn run_filtered(
         opts = opts.inherit_stdin();
     }
 
-    runner::run_filtered(
-        cmd,
-        name,
-        &args_display,
-        filter_npm_output,
-        opts,
-    )
+    if runner::is_watch_mode(args) {
+        return runner::run(cmd, name, &args_display, runner::RunMode::Passthrough, opts);
+    }
+    runner::run_filtered(cmd, name, &args_display, filter_npm_output, opts)
 }
 
 /// Filter npm run output - strip boilerplate, progress bars, npm WARN
