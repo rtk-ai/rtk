@@ -183,7 +183,11 @@ Gradle gets no preset: its parser is `org.gradle.cli` (`gradle:jdk21` ships `gra
 
 `src/core/arg_tokenizer/frozen.rs` is the pre-axes implementation, kept as the oracle for the differential test in `differential.rs`: every arg vector up to four tokens over an alphabet covering each construct the scanner branches on, asserted token-for-token identical under `Posix` and `Msbuild`. Never edit `frozen.rs` to match new behaviour — a diff against it is the only proof the presets have not moved.
 
-**Tokenizing a shell string, not an argv.** `discover` starts from a raw command line, one layer below: shell string → `discover::lexer::words_and_spans` (quote-aware words plus each word's byte offset) → argv words → `tokenize_grammar`. Keep the span vector alongside the words — `Token::source_index` indexes the words you passed in, so `spans[token.source_index]` is the way back down to a slice of the original string (`discover::registry::parse_golangci_run_parts`). Note that `discover::lexer::TokenKind` and `arg_tokenizer::TokenKind` are different types with the same name.
+**Tokenizing a shell string, not an argv.** `discover` starts from a raw command line, one layer below: shell string → `discover::lexer::words_and_spans` (quote-aware words plus each word's byte offset) → `tokenize_grammar`.
+
+Those words are **unresolved shell words, not an argv**: word splitting has happened, but each word is still a slice of the original string with its quote characters and backslash escapes literal. `--config "a path/x.yml"` is one word, and that word is `"a path/x.yml"` — quotes included; `--config=a\ b` stays `--config=a\ b`. So `Token::text`, `Token::attached` and `Token::value()` carry the quoting too. Comparing a token against a keyword (`"run"`) or slicing `cmd` by offset is safe; **reading a token as a value is not** — put it through `discover::lexer::resolve_word_text` first, or a `--config` path is looked up with literal quote characters in it. `shell_split` returns a real argv but discards the offsets, so it is not a substitute when you need both.
+
+Keep the span vector alongside the words — `Token::source_index` indexes the words you passed in, so `spans[token.source_index]` is the way back down to a slice of the original string (`discover::registry::parse_golangci_run_parts`). Note that `discover::lexer::TokenKind` and `arg_tokenizer::TokenKind` are different types with the same name.
 
 ## Consumer Contracts
 

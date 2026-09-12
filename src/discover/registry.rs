@@ -528,8 +528,11 @@ fn golangci_global_takes_value(kind: ArgTokenKind, name: &str) -> Option<ValueSp
 /// Parse supported golangci-lint invocations with optional global flags before `run`.
 ///
 /// The words come from the shell lexer (quote-aware, so `--config "a path/x.yml"` stays one
-/// word) and are then classified as an argv by the shared tokenizer, under golangci-lint's own
-/// global flag grammar; `spans` maps the `run` token back to a byte offset in `cmd`.
+/// word) and are then classified by the shared tokenizer under golangci-lint's own global flag
+/// grammar; `spans` maps the `run` token back to a byte offset in `cmd`.
+///
+/// Those words keep their quotes and escapes, so no flag's value is read here -- only the
+/// `run` keyword is compared, and the segments are re-sliced out of `cmd` by offset.
 fn parse_golangci_run_parts(cmd: &str) -> Option<GolangciRunParts<'_>> {
     let (words, spans) = words_and_spans(cmd);
     let binary = *words.first()?;

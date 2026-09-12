@@ -173,7 +173,13 @@ pub(crate) fn coalesce_words<'a>(cmd: &'a str, tokens: &[ParsedToken]) -> Vec<(&
 }
 
 /// A command's words (quote-aware, see [`coalesce_words`]) split from their byte offsets in
-/// `cmd`. Callers that hand the words to `core::arg_tokenizer` keep the offsets alongside:
+/// `cmd`. The words are *unresolved*: they are slices of `cmd` with quote characters and
+/// backslash escapes still literal, so `--config "a path/x.yml"` yields the word
+/// `"a path/x.yml"` with its quotes. A caller that reads a word as a value -- rather than
+/// comparing it to a keyword or slicing `cmd` by offset -- must put it through
+/// [`resolve_word_text`] first; [`shell_split`] resolves but drops the offsets.
+///
+/// Callers that hand the words to `core::arg_tokenizer` keep the offsets alongside:
 /// `Token::source_index` indexes the words, so `spans[token.source_index]` is the way back to a
 /// slice of the original command string.
 pub(crate) fn words_and_spans(cmd: &str) -> (Vec<&str>, Vec<usize>) {
@@ -990,6 +996,19 @@ mod tests {
             .map(|(w, _)| w)
             .collect();
         assert_eq!(words, vec!["golangci-lint", "--config", "*.yml", "run"]);
+    }
+
+    #[test]
+    fn test_words_and_spans_keeps_words_unresolved() {
+        let cmd = r#"golangci-lint --config "a path/x.yml" run"#;
+        let (words, _) = words_and_spans(cmd);
+        assert_eq!(words[2], r#""a path/x.yml""#);
+        assert_eq!(resolve_word_text(words[2]), "a path/x.yml");
+
+        let escaped = r"golangci-lint --config=a\ b run";
+        let (words, _) = words_and_spans(escaped);
+        assert_eq!(words[1], r"--config=a\ b");
+        assert_eq!(resolve_word_text(words[1]), "--config=a b");
     }
 
     #[test]
