@@ -31,6 +31,38 @@ Three-tier filter lookup (first match wins):
 2. `~/.config/rtk/filters.toml` (user-global)
 3. Built-in filters concatenated by `build.rs` at compile time
 
+## Source Code Filter Levels
+
+`src/core/filter.rs` is a separate engine from the TOML DSL: it filters *source
+files* (used by `rtk read`) rather than command output. Three levels:
+
+| Level | Keeps |
+|-------|-------|
+| `none` | Everything |
+| `minimal` | Everything except comments; blank runs collapsed |
+| `aggressive` | A skeleton: imports, type/function signatures, and declarations |
+
+`aggressive` walks brace depth to find implementation bodies, which does not
+work for indentation-scoped languages. `Language::is_indentation_based()` routes
+those to a separate walk that keeps class- and module-level bindings and
+decorators, and elides only statements nested inside a function body:
+
+```python
+class SaleOrder(models.Model):
+    _inherit = "sale.order"                       # kept: declares the model
+    policy = fields.Selection([...])              # kept: declares the model
+
+    @api.depends("order_line")                    # kept: drives recompute
+    def _compute_total(self):
+        # ... implementation                      # elided
+```
+
+Elision markers use the target language's own comment syntax, so filtered output
+stays a valid subset of the file (Transparency, see CONTRIBUTING.md).
+
+Data formats (`Language::Data`: JSON, YAML, TOML, XML, ...) are never
+code-filtered — `aggressive` falls back to `minimal` for them.
+
 ## Tracking Database Schema
 
 ```sql

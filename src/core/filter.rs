@@ -76,6 +76,12 @@ impl Language {
         }
     }
 
+    /// Bodies are scoped by indentation rather than braces or block keywords.
+    /// The brace-depth walk in `AggressiveFilter` is blind to these languages.
+    pub fn is_indentation_based(&self) -> bool {
+        matches!(self, Language::Python)
+    }
+
     pub fn comment_patterns(&self) -> CommentPatterns {
         match self {
             Language::Rust => CommentPatterns {
@@ -237,6 +243,227 @@ static FUNC_SIGNATURE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .unwrap()
 });
+static PY_DEF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(async\s+)?def\s+\w+").unwrap());
+static PY_CLASS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^class\s+\w+").unwrap());
+
+/// Statement keywords that can never open a binding, so a `=` after one is a
+/// default argument or a comparison rather than an assignment we want to keep.
+const PY_STATEMENT_KEYWORDS: [&str; 22] = [
+    "if", "elif", "else", "while", "for", "return", "assert", "yield", "raise", "del", "import",
+    "from", "lambda", "not", "and", "or", "in", "is", "await", "global", "nonlocal", "with",
+];
+
+/// The elision marker uses the target language's own comment syntax. Emitting a
+/// C-style `//` into Python or Ruby breaks the Transparency rule: filtered
+/// output must read as a shorter version of the real file, not a new format.
+fn elision_marker(lang: &Language, indent: usize) -> String {
+    let comment = lang.comment_patterns().line.unwrap_or("//");
+    format!(
+        "{:indent$}{} ... implementation\n",
+        "",
+        comment,
+        indent = indent
+    )
+}
+
+/// Net bracket nesting introduced by a line, ignoring brackets inside string
+/// literals and trailing comments. A positive result means the statement
+/// continues onto the following lines.
+fn bracket_delta(line: &str) -> i32 {
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    for ch in line.chars() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '#' => break,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    depth
+}
+
+/// Whether the text left of the assignment operator names a binding target.
+fn is_binding_target(left: &str) -> bool {
+    let head = left.split(':').next().unwrap_or("").trim();
+    let head = head
+        .trim_end_matches(['+', '-', '*', '/', '%', '&', '|', '^', '>', '<', '@'])
+        .trim();
+    let ident = match head.find(['[', '(', '.']) {
+        Some(pos) => head[..pos].trim(),
+        None => head,
+    };
+
+    let mut chars = ident.chars();
+    let first_is_name_start = chars.next().is_some_and(|c| c.is_alphabetic() || c == '_');
+
+    first_is_name_start
+        && chars.all(|c| c.is_alphanumeric() || c == '_')
+        && !PY_STATEMENT_KEYWORDS.contains(&ident)
+}
+
+/// True for bindings such as `_inherit = "sale.order"`, `total: int = 0` or
+/// `count += 1`. Comparisons and keyword statements are rejected.
+fn is_assignment(trimmed: &str) -> bool {
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut prev = ' ';
+    let mut chars = trimmed.char_indices().peekable();
+
+    while let Some((idx, ch)) = chars.next() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == q {
+                quote = None;
+            }
+            prev = ch;
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            '#' => return false,
+            '=' if depth == 0 => {
+                let next = chars.peek().map(|&(_, c)| c).unwrap_or(' ');
+                let is_comparison = next == '=' || matches!(prev, '=' | '!' | '<' | '>');
+                return !is_comparison && is_binding_target(trimmed[..idx].trim_end());
+            }
+            _ => {}
+        }
+        prev = ch;
+    }
+    false
+}
+
+/// The triple-quote delimiter a line leaves open, if any. The two quote kinds
+/// are tracked separately: a `'''` inside a `"""` block is text, not a close.
+fn unterminated_triple_quote(line: &str) -> Option<&'static str> {
+    let bytes = line.as_bytes();
+    let mut open: Option<&'static str> = None;
+    let mut i = 0;
+
+    while i + 3 <= bytes.len() {
+        let delim = match &bytes[i..i + 3] {
+            b"\"\"\"" => Some("\"\"\""),
+            b"'''" => Some("'''"),
+            _ => None,
+        };
+
+        match (open, delim) {
+            (Some(current), Some(found)) if current == found => {
+                open = None;
+                i += 3;
+            }
+            (None, Some(found)) => {
+                open = Some(found);
+                i += 3;
+            }
+            _ => i += 1,
+        }
+    }
+    open
+}
+
+/// Skeletonizes an indentation-scoped language: keeps imports, `class`/`def`
+/// signatures, decorators and every module- or class-level binding, and elides
+/// only the statements nested inside a function body.
+///
+/// Class-level bindings are the point of this path. For ORM-style frameworks
+/// the field declarations *are* the model, so dropping them (as the brace-depth
+/// walk did) leaves output that describes nothing.
+fn filter_indentation_based(minimal: &str, lang: &Language) -> String {
+    let mut result = String::with_capacity(minimal.len() / 2);
+    let mut def_indent: Option<usize> = None;
+    let mut body_elided = false;
+    let mut open_brackets = 0i32;
+    // Delimiter of the multi-line string being consumed, and whether its
+    // contents belong to a line we kept.
+    let mut open_string: Option<(&'static str, bool)> = None;
+
+    for line in minimal.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Inside a multi-line string every line is opaque text. Examining it as
+        // code would let a docstring sentence be mistaken for a declaration.
+        if let Some((delim, keep_contents)) = open_string {
+            if keep_contents {
+                result.push_str(line);
+                result.push('\n');
+            }
+            if line.contains(delim) {
+                open_string = None;
+            }
+            continue;
+        }
+
+        let keep;
+
+        if open_brackets > 0 {
+            // A kept statement left brackets open; dropping the remainder would
+            // emit syntactically invalid output.
+            keep = true;
+            open_brackets += bracket_delta(trimmed);
+        } else {
+            let indent = line.len() - line.trim_start().len();
+
+            if let Some(body_indent) = def_indent {
+                if indent > body_indent {
+                    if !body_elided {
+                        result.push_str(&elision_marker(lang, body_indent + 4));
+                        body_elided = true;
+                    }
+                    open_string = unterminated_triple_quote(line).map(|d| (d, false));
+                    continue;
+                }
+                def_indent = None;
+            }
+
+            let is_def = PY_DEF.is_match(trimmed);
+            keep = is_def
+                || IMPORT_PATTERN.is_match(trimmed)
+                || PY_CLASS.is_match(trimmed)
+                || trimmed.starts_with('@')
+                || is_assignment(trimmed);
+
+            if keep {
+                open_brackets = bracket_delta(trimmed).max(0);
+                if is_def {
+                    def_indent = Some(indent);
+                    body_elided = false;
+                }
+            }
+        }
+
+        if keep {
+            result.push_str(line);
+            result.push('\n');
+        }
+        open_string = unterminated_triple_quote(line).map(|d| (d, keep));
+    }
+
+    result.trim().to_string()
+}
 
 impl FilterStrategy for AggressiveFilter {
     fn filter(&self, content: &str, lang: &Language) -> String {
@@ -246,6 +473,11 @@ impl FilterStrategy for AggressiveFilter {
         }
 
         let minimal = MinimalFilter.filter(content, lang);
+
+        if lang.is_indentation_based() {
+            return filter_indentation_based(&minimal, lang);
+        }
+
         let mut result = String::with_capacity(minimal.len() / 2);
         let mut brace_depth = 0;
         let mut in_impl_body = false;
@@ -287,7 +519,7 @@ impl FilterStrategy for AggressiveFilter {
                 if brace_depth <= 0 {
                     in_impl_body = false;
                     if !trimmed.is_empty() && trimmed != "}" {
-                        result.push_str("    // ... implementation\n");
+                        result.push_str(&elision_marker(lang, 4));
                     }
                 }
                 continue;
@@ -465,6 +697,269 @@ fn main() {
         let result = filter.filter(code, &Language::Rust);
         assert!(!result.contains("// This is a comment"));
         assert!(result.contains("fn main()"));
+    }
+
+    // --- aggressive filtering of indentation-scoped languages ---
+
+    const ORM_MODEL: &str = r#"from odoo import api, fields, models
+
+
+class SaleOrder(models.Model):
+    """Sales order."""
+
+    _inherit = "sale.order"
+    __slots__ = ()
+
+    picking_policy = fields.Selection(
+        [("direct", "ASAP"), ("one", "When ready")],
+        string="Shipping Policy",
+    )
+
+    @api.depends("order_line.move_ids")
+    def _compute_reservation(self):
+        for order in self:
+            order.count = len(order.order_line)
+
+    def action_confirm(self):
+        if self.state == "draft":
+            return super().action_confirm()
+        return False
+"#;
+
+    #[test]
+    fn test_python_aggressive_keeps_class_level_fields() {
+        let result = AggressiveFilter.filter(ORM_MODEL, &Language::Python);
+
+        assert!(
+            result.contains(r#"_inherit = "sale.order""#),
+            "class-level binding dropped:\n{}",
+            result
+        );
+        assert!(
+            result.contains("picking_policy = fields.Selection("),
+            "field declaration dropped:\n{}",
+            result
+        );
+        assert!(
+            result.contains("__slots__ = ()"),
+            "dunder attribute dropped:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_python_aggressive_keeps_decorators() {
+        let result = AggressiveFilter.filter(ORM_MODEL, &Language::Python);
+        assert!(
+            result.contains(r#"@api.depends("order_line.move_ids")"#),
+            "decorator dropped:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_python_aggressive_keeps_multiline_field_intact() {
+        let result = AggressiveFilter.filter(ORM_MODEL, &Language::Python);
+        // A field whose continuation lines are dropped is invalid syntax.
+        assert!(
+            result.contains(r#"string="Shipping Policy","#),
+            "continuation line dropped:\n{}",
+            result
+        );
+        assert!(
+            result.contains("    )"),
+            "closing paren dropped:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_python_aggressive_still_elides_function_bodies() {
+        let result = AggressiveFilter.filter(ORM_MODEL, &Language::Python);
+
+        assert!(result.contains("def _compute_reservation(self):"));
+        assert!(
+            !result.contains("order.count = len(order.order_line)"),
+            "function body kept, savings lost:\n{}",
+            result
+        );
+        assert!(
+            !result.contains(r#"if self.state == "draft":"#),
+            "function body kept, savings lost:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("Sales order."),
+            "docstring kept in aggressive skeleton:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_python_aggressive_uses_python_comment_marker() {
+        let result = AggressiveFilter.filter(ORM_MODEL, &Language::Python);
+        assert!(
+            result.contains("# ... implementation"),
+            "expected a Python comment marker:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("// ... implementation"),
+            "C-style marker emitted into Python:\n{}",
+            result
+        );
+    }
+
+    fn count_tokens(text: &str) -> usize {
+        text.split_whitespace().count()
+    }
+
+    #[test]
+    fn test_python_aggressive_savings_on_body_heavy_module() {
+        // Bodies are what aggressive mode exists to remove, so a module whose
+        // bulk is implementation must clear the project's 60% floor.
+        let module = r#"import logging
+
+LOGGER = logging.getLogger(__name__)
+
+
+class ReportBuilder:
+    """Builds aggregated reports."""
+
+    DEFAULT_LIMIT = 100
+
+    def collect(self, rows, limit=None):
+        limit = limit or self.DEFAULT_LIMIT
+        seen = set()
+        result = []
+        for row in rows:
+            key = (row.get("id"), row.get("kind"))
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(row)
+            if len(result) >= limit:
+                LOGGER.debug("hit limit %s", limit)
+                break
+        return result
+
+    def summarize(self, rows):
+        totals = {}
+        for row in rows:
+            kind = row.get("kind", "unknown")
+            totals.setdefault(kind, 0)
+            totals[kind] += row.get("amount", 0)
+        ordered = sorted(totals.items(), key=lambda item: item[1], reverse=True)
+        return [{"kind": k, "total": v} for k, v in ordered]
+"#;
+
+        let result = AggressiveFilter.filter(module, &Language::Python);
+        let savings = 100.0 - (count_tokens(&result) as f64 / count_tokens(module) as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "expected >=60% savings, got {:.1}%:\n{}",
+            savings,
+            result
+        );
+    }
+
+    #[test]
+    fn test_python_aggressive_still_compresses_field_heavy_model() {
+        // A model that is mostly field declarations cannot reach the 60% floor,
+        // because those declarations are the content the agent came for. Assert
+        // only that the skeleton stays materially smaller than the source.
+        let result = AggressiveFilter.filter(ORM_MODEL, &Language::Python);
+        assert!(
+            count_tokens(&result) < count_tokens(ORM_MODEL),
+            "aggressive output must be smaller than the source:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_brace_language_aggressive_keeps_c_style_marker() {
+        let code = r#"fn main() {
+    let x = compute();
+    println!("{}", x);
+}
+"#;
+        let result = AggressiveFilter.filter(code, &Language::Rust);
+        assert!(result.contains("fn main()"));
+        assert!(
+            result.contains("// ... implementation"),
+            "Rust must keep the C-style marker:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_is_assignment_accepts_bindings() {
+        assert!(is_assignment(r#"_inherit = "sale.order""#));
+        assert!(is_assignment("total: int = 0"));
+        assert!(is_assignment("count += 1"));
+        assert!(is_assignment("MAPPING = {'a': 1}"));
+        assert!(is_assignment("obj.attr = 3"));
+    }
+
+    #[test]
+    fn test_is_assignment_rejects_non_bindings() {
+        assert!(!is_assignment(r#"if self.state == "draft":"#));
+        assert!(!is_assignment("assert a != b"));
+        assert!(!is_assignment("return value"));
+        assert!(!is_assignment("check(threshold=3)"));
+        assert!(!is_assignment("while count <= limit:"));
+        assert!(!is_assignment(r#"raise ValueError("x = 1")"#));
+    }
+
+    #[test]
+    fn test_python_aggressive_docstring_does_not_swallow_following_code() {
+        // A ''' inside a """ block is text. Closing on either delimiter made the
+        // filter lose track and eat the class that followed.
+        let module = r#""""Module docstring.
+
+Example: value = compute('''x''')
+"""
+
+class Config:
+    name = "x"
+"#;
+        let result = AggressiveFilter.filter(module, &Language::Python);
+
+        assert!(
+            result.contains("class Config:"),
+            "class after docstring was swallowed:\n{}",
+            result
+        );
+        assert!(
+            result.contains(r#"name = "x""#),
+            "class body after docstring was swallowed:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("Example:"),
+            "docstring prose leaked into the skeleton:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_unterminated_triple_quote() {
+        assert_eq!(unterminated_triple_quote(r#"x = """"#), Some("\"\"\""));
+        assert_eq!(unterminated_triple_quote("x = '''"), Some("'''"));
+        assert_eq!(unterminated_triple_quote(r#"x = """one line""""#), None);
+        // The inner delimiter is text, so the outer string is still open.
+        assert_eq!(
+            unterminated_triple_quote(r#""""outer '''inner'''"#),
+            Some("\"\"\"")
+        );
+        assert_eq!(unterminated_triple_quote("plain = 1"), None);
+    }
+
+    #[test]
+    fn test_bracket_delta_ignores_strings_and_comments() {
+        assert_eq!(bracket_delta("x = f("), 1);
+        assert_eq!(bracket_delta("x = f()"), 0);
+        assert_eq!(bracket_delta(r#"x = "((("  # )))"#), 0);
     }
 
     // --- truncation accuracy ---
