@@ -5,9 +5,17 @@ use crate::core::runner;
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
+use regex::Regex;
+use std::sync::LazyLock;
 
 const MAX_XFAIL: usize = CAP_WARNINGS;
 const MAX_PYTEST_FAILURES: usize = CAP_WARNINGS;
+static PYTEST_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^(?:=+\s*)?\d+ (?:passed|failed|skipped|xfailed|xpassed|deselected|errors?|warnings?)(?:, \d+ (?:passed|failed|skipped|xfailed|xpassed|deselected|errors?|warnings?))* in \d+(?:\.\d+)?s(?:\s*=+)?$",
+    )
+    .expect("valid pytest summary regex")
+});
 
 #[derive(Debug, PartialEq)]
 enum ParseState {
@@ -98,23 +106,9 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
                 current_failure.clear();
             }
             continue;
-        } else if trimmed.starts_with("===")
-            && (trimmed.contains("passed")
-                || trimmed.contains("failed")
-                || trimmed.contains("skipped"))
-        {
-            summary_line = trimmed.to_string();
-            continue;
-        // quiet mode (-q): bare summary without === wrapper, e.g. "5 failed, 1698 passed, 2 skipped in 108.89s"
-        } else if summary_line.is_empty()
-            && !trimmed.starts_with("===")
-            && !trimmed.starts_with("FAILED")
-            && !trimmed.starts_with("ERROR")
-            && (trimmed.contains(" passed")
-                || trimmed.contains(" failed")
-                || trimmed.contains(" skipped"))
-            && trimmed.contains(" in ")
-        {
+        // Accept wrapped and quiet-mode summaries, and keep the last match so
+        // traceback source cannot override pytest's trailing result line.
+        } else if PYTEST_SUMMARY_RE.is_match(trimmed) {
             summary_line = trimmed.to_string();
             continue;
         }
@@ -511,6 +505,15 @@ FAILED tests/test_foo.py::test_something - AssertionError
             "Should show actual test counts. Got: {}",
             result
         );
+    }
+
+    #[test]
+    fn test_filter_pytest_uses_trailing_summary_not_traceback_source() {
+        let output = r#"assert x in out  # counted failed
+1 failed, 40 passed in 12.15s"#;
+
+        let result = filter_pytest_output(output);
+        assert_eq!(result, "Pytest: 40 passed, 1 failed");
     }
 
     #[test]
