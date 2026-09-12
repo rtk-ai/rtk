@@ -2052,20 +2052,15 @@ fn run_cli() -> Result<i32> {
             repo,
             group,
             subcommand,
-            mut args,
-        } => {
-            // Append -R / -g flags at end so they don't interfere with
-            // subcommand dispatch (args[0] must be the sub-subcommand like "list")
-            if let Some(r) = repo {
-                args.push("-R".to_string());
-                args.push(r);
-            }
-            if let Some(g) = group {
-                args.push("-g".to_string());
-                args.push(g);
-            }
-            glab_cmd::run(&subcommand, &args, cli.verbose, cli.ultra_compact)?
-        }
+            args,
+        } => glab_cmd::run(
+            &subcommand,
+            &args,
+            repo.as_deref(),
+            group.as_deref(),
+            cli.verbose,
+            cli.ultra_compact,
+        )?,
 
         Commands::Aws { subcommand, args } => aws_cmd::run(&subcommand, &args, cli.verbose)?,
 

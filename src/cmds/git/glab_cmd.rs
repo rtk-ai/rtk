@@ -11,6 +11,8 @@
 //! - Pipeline: `head_pipeline.status` (not `statusCheckRollup`)
 
 use super::git;
+use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
+use crate::core::args_utils;
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{ok_confirmation, resolved_command, strip_ansi, truncate};
@@ -165,69 +167,139 @@ fn extract_mr_number(text: &str) -> Option<String> {
         .map(|m| m.as_str().to_string())
 }
 
-/// Extract the first positional identifier (MR/issue number or URL) from args,
-/// skipping glab flags that take a value. Returns the identifier and remaining args.
-fn extract_identifier_and_extra_args(args: &[String]) -> Option<(String, Vec<String>)> {
-    if args.is_empty() {
-        return None;
-    }
-
-    // Known glab flags that take a value — skip these and their values
-    let flags_with_value = [
-        "-R",
-        "--repo",
-        "-g",
-        "--group",
-        "-F",
-        "--output",
-        "-m",
-        "--message",
-    ];
-    let mut identifier = None;
-    let mut extra = Vec::new();
-    let mut skip_next = false;
-
-    for arg in args {
-        if skip_next {
-            extra.push(arg.clone());
-            skip_next = false;
-            continue;
-        }
-        if flags_with_value.contains(&arg.as_str()) {
-            extra.push(arg.clone());
-            skip_next = true;
-            continue;
-        }
-        if arg.starts_with('-') {
-            extra.push(arg.clone());
-            continue;
-        }
-        // First non-flag arg is the identifier (number/URL)
-        if identifier.is_none() {
-            identifier = Some(arg.clone());
-        } else {
-            extra.push(arg.clone());
-        }
-    }
-
-    identifier.map(|id| (id, extra))
+/// pflag reads a literal `--` as the value of a value-taking flag rather than as the
+/// end-of-options boundary: `glab mr view --page -- 5` rejects `--` as the page number.
+fn glab_value() -> ValueSpec {
+    ValueSpec::value().claiming_dash_dash()
 }
 
-/// Like `extract_identifier_and_extra_args` but yields `(None, args.to_vec())` when no
-/// positional identifier is present, so callers can defer the "id required" decision
-/// to `glab` itself (e.g. `glab mr view` defaults to the current branch's MR).
-fn parse_optional_identifier(args: &[String]) -> (Option<String>, Vec<String>) {
-    match extract_identifier_and_extra_args(args) {
-        Some((id, extra)) => (Some(id), extra),
-        None => (None, args.to_vec()),
+/// glab's inherited flags, available on every subcommand. `--group` is only glab's own on the
+/// list/search family, but rtk's `Commands::Glab` injects it into any subcommand's args, so it
+/// has to be classified everywhere or its value is read as the identifier.
+fn inherited_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    match kind {
+        TokenKind::Long => matches!(name, "repo" | "group").then(glab_value),
+        TokenKind::Short => matches!(name, "R" | "g").then(glab_value),
+        _ => None,
     }
+}
+
+/// `glab mr view` and `glab issue view` share one grammar — their value-taking flag sets are
+/// identical on both glab 1.36 and 1.117. The table is the union over those two: 1.117 added
+/// `--jq` and `-F/--output` to the `-p/-P/-R` set 1.36 had.
+fn view_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    let own = match kind {
+        TokenKind::Long => matches!(name, "jq" | "output" | "page" | "per-page").then(glab_value),
+        TokenKind::Short => matches!(name, "F" | "p" | "P").then(glab_value),
+        _ => None,
+    };
+    own.or_else(|| inherited_takes_value(kind, name))
+}
+
+/// `glab mr merge`: `-s` is the boolean `--squash` here but the value-taking `--sha` on
+/// `glab mr approve`, so the two cannot share a table.
+fn mr_merge_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    let own = match kind {
+        TokenKind::Long => matches!(name, "message" | "sha" | "squash-message").then(glab_value),
+        TokenKind::Short => (name == "m").then(glab_value),
+        _ => None,
+    };
+    own.or_else(|| inherited_takes_value(kind, name))
+}
+
+/// `glab mr approve`: `-s/--sha` is its only own value-taking flag.
+fn mr_approve_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    let own = match kind {
+        TokenKind::Long => (name == "sha").then(glab_value),
+        TokenKind::Short => (name == "s").then(glab_value),
+        _ => None,
+    };
+    own.or_else(|| inherited_takes_value(kind, name))
+}
+
+/// `glab mr note`: `-m/--message` carries the comment body. 1.117 moved it onto the
+/// `note create` sub-subcommand; 1.36 still takes it here, so the table keeps both.
+fn mr_note_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    let own = match kind {
+        TokenKind::Long => (name == "message").then(glab_value),
+        TokenKind::Short => (name == "m").then(glab_value),
+        _ => None,
+    };
+    own.or_else(|| inherited_takes_value(kind, name))
+}
+
+/// `glab mr update`: nearly every flag takes a value, so a missing entry turns a label, a
+/// title or a username into the MR number.
+fn mr_update_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    let own = match kind {
+        TokenKind::Long => matches!(
+            name,
+            "assignee"
+                | "attach"
+                | "description"
+                | "description-file"
+                | "label"
+                | "milestone"
+                | "reviewer"
+                | "target-branch"
+                | "title"
+                | "unlabel"
+        )
+        .then(glab_value),
+        TokenKind::Short => matches!(name, "a" | "d" | "l" | "m" | "t" | "u").then(glab_value),
+        _ => None,
+    };
+    own.or_else(|| inherited_takes_value(kind, name))
+}
+
+/// Splits `args` into the MR/issue identifier — the first free positional under `takes_value` —
+/// and everything else, verbatim and in order. glab keeps reading positionals past `--`
+/// (`glab mr view -- 42` views MR 42), so the search reaches past the boundary, but only while
+/// the boundary escapes a lone token that is not itself flag-shaped.
+fn split_identifier(
+    args: &[String],
+    takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
+) -> (Option<String>, Vec<String>) {
+    let tokens = arg_tokenizer::tokenize_grammar(args, takes_value, Dialect::Posix);
+
+    // Re-emitting the identifier in front of the `--` unescapes it along with whatever else
+    // trailed it, so reach past the boundary only where that is a no-op: one token, still read
+    // as a positional once unescaped. Anything else glab rejects on arity whatever rtk sends.
+    let searchable = match arg_tokenizer::dashdash_index(&tokens) {
+        Some(index) if !escapes_a_bare_positional(args, &tokens[index + 1..]) => &tokens[..index],
+        _ => &tokens[..],
+    };
+
+    let id_index = searchable
+        .iter()
+        .find(|t| t.is_free_positional())
+        .map(|t| t.source_index);
+    let extra = args
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| Some(*i) != id_index)
+        .map(|(_, arg)| arg.clone())
+        .collect();
+    (id_index.map(|i| args[i].clone()), extra)
+}
+
+/// Whether `escaped`, the tokens behind a `--`, is a single argument that stays a positional
+/// once the boundary no longer shields it.
+fn escapes_a_bare_positional(args: &[String], escaped: &[arg_tokenizer::Token<'_>]) -> bool {
+    let [only] = escaped else { return false };
+    let i = only.source_index;
+    arg_tokenizer::tokenize(&args[i..=i])
+        .first()
+        .is_some_and(|t| t.kind == TokenKind::Positional)
 }
 
 /// Check if user explicitly requested JSON/custom output format.
-/// When present, passthrough to avoid double JSON injection.
+/// When present, passthrough to avoid double JSON injection. `--jq` counts: its result is the
+/// user's own projection, and reformatting it as an MR would print a summary of fields the
+/// projection does not have.
 fn has_output_flag(args: &[String]) -> bool {
     args.iter()
-        .any(|a| a == "--output" || a == "-F" || a == "--json")
+        .any(|a| a == "--output" || a == "-F" || a == "--json" || a == "--jq")
 }
 
 /// Check if view subcommand should passthrough (--web, --comments, etc.).
@@ -258,8 +330,54 @@ where
     )
 }
 
-/// Run a glab command with token-optimized output.
-pub fn run(subcommand: &str, args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
+/// Run a glab command with token-optimized output. `repo` and `group` are rtk's own `-R`/`-g`
+/// options, which it forwards to glab.
+pub fn run(
+    subcommand: &str,
+    args: &[String],
+    repo: Option<&str>,
+    group: Option<&str>,
+    verbose: u8,
+    ultra_compact: bool,
+) -> Result<i32> {
+    // clap carves `subcommand` out of the same trailing region as `args`, so the stripped `--`
+    // has to be restored over the whole region — over `args` alone it lands one token off.
+    let mut region: Vec<String> = Vec::with_capacity(args.len() + 1);
+    region.push(subcommand.to_string());
+    region.extend_from_slice(args);
+    let mut region = args_utils::restore_double_dash(&region);
+
+    // Only rtk's own terminator reaches the head of that region — trailing_var_arg keeps every
+    // later `--` — and glab never saw it: `glab mr -- view 42` prints the `mr` help instead of
+    // dispatching, and `glab api -- projects/1 --paginate` is `Accepts 1 arg(s), received 2`.
+    let rtk_terminator = arg_tokenizer::tokenize(&region)
+        .into_iter()
+        .find(|t| t.kind == TokenKind::DashDash && t.source_index <= 1)
+        .map(|t| t.source_index);
+    if let Some(index) = rtk_terminator {
+        region.remove(index);
+    }
+
+    // glab reads everything past `--` as a positional, so -R/-g go in ahead of the boundary.
+    let mut injected: Vec<String> = Vec::new();
+    if let Some(r) = repo {
+        injected.extend(["-R".to_string(), r.to_string()]);
+    }
+    if let Some(g) = group {
+        injected.extend(["-g".to_string(), g.to_string()]);
+    }
+    if !injected.is_empty() {
+        // Grammar-less: the sub-subcommand that picks a `takes_value` table is only known after
+        // the split below, so a `--` that is some flag's own value reads as the boundary here.
+        let at = arg_tokenizer::injection_point(&arg_tokenizer::tokenize(&region), region.len());
+        region.splice(at..at, injected);
+    }
+
+    // Nothing to dispatch on — forward the region verbatim and let glab answer.
+    let Some((subcommand, args)) = split_glab_region(&region) else {
+        return run_passthrough_with_extra("glab", &[], &region);
+    };
+
     // If the user explicitly requests a specific output format, passthrough unchanged.
     if has_output_flag(args) {
         return run_passthrough("glab", subcommand, args);
@@ -275,6 +393,18 @@ pub fn run(subcommand: &str, args: &[String], verbose: u8, ultra_compact: bool) 
     }
 }
 
+/// Splits a restored `glab` region back into subcommand and remainder, the way clap did before
+/// the `--` came back: a leading token that is neither a flag nor the boundary.
+fn split_glab_region(region: &[String]) -> Option<(&str, &[String])> {
+    let tokens = arg_tokenizer::tokenize(region);
+    match tokens.first() {
+        Some(token) if token.kind == TokenKind::Positional => {
+            Some((region[0].as_str(), &region[1..]))
+        }
+        _ => None,
+    }
+}
+
 // ── MR subcommands ──────────────────────────────────────────────────────
 
 fn run_mr(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
@@ -286,11 +416,23 @@ fn run_mr(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
         "list" => mr_list(&args[1..], verbose, ultra_compact),
         "view" => mr_view(&args[1..], verbose, ultra_compact),
         "create" => mr_create(&args[1..], verbose),
-        "merge" => mr_action("merge", "merged", &args[1..], verbose),
-        "approve" => mr_action("approve", "approved", &args[1..], verbose),
+        "merge" => mr_action("merge", "merged", &args[1..], verbose, &mr_merge_takes_value),
+        "approve" => mr_action(
+            "approve",
+            "approved",
+            &args[1..],
+            verbose,
+            &mr_approve_takes_value,
+        ),
         "diff" => mr_diff(&args[1..], verbose),
-        "note" => mr_action("note", "noted", &args[1..], verbose),
-        "update" => mr_action("update", "updated", &args[1..], verbose),
+        "note" => mr_action("note", "noted", &args[1..], verbose, &mr_note_takes_value),
+        "update" => mr_action(
+            "update",
+            "updated",
+            &args[1..],
+            verbose,
+            &mr_update_takes_value,
+        ),
         _ => run_passthrough("glab", "mr", args),
     }
 }
@@ -421,7 +563,7 @@ fn format_mr_view(json: &Value, ultra_compact: bool) -> String {
 
 fn mr_view(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
     // `glab mr view` without an identifier defaults to the MR for the current branch.
-    let (mr_number_opt, extra_args) = parse_optional_identifier(args);
+    let (mr_number_opt, extra_args) = split_identifier(args, &view_takes_value);
 
     // Passthrough for --web, --comments, or explicit output format
     if should_passthrough_view(&extra_args) {
@@ -494,18 +636,25 @@ fn mr_diff(args: &[String], _verbose: u8) -> Result<i32> {
     )
 }
 
-/// Generic MR action handler for merge/approve/note/update.
-/// Uses extract_identifier_and_extra_args to correctly find the MR number
-/// even when it appears after flags (e.g. `glab mr note -m "msg" 42`).
-fn mr_action(subcmd: &str, label: &str, args: &[String], _verbose: u8) -> Result<i32> {
+/// Generic MR action handler for merge/approve/note/update. Each takes its own `takes_value`
+/// table: the MR number is only reported, but reading it out of a flag's value would put a
+/// commit message or a label in the confirmation line.
+fn mr_action(
+    subcmd: &str,
+    label: &str,
+    args: &[String],
+    _verbose: u8,
+    takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
+) -> Result<i32> {
     let mut cmd = resolved_command("glab");
     cmd.args(["mr", subcmd]);
     for arg in args {
         cmd.arg(arg);
     }
 
-    let mr_num = extract_identifier_and_extra_args(args)
-        .map(|(id, _)| format!("!{}", id))
+    let mr_num = split_identifier(args, takes_value)
+        .0
+        .map(|id| format!("!{}", id))
         .unwrap_or_default();
     let label = label.to_string();
     runner::run_filtered(
@@ -623,7 +772,7 @@ fn format_issue_view(json: &Value) -> String {
 
 fn issue_view(args: &[String], _verbose: u8) -> Result<i32> {
     // Let glab emit its own error message when the identifier is missing rather than pre-rejecting.
-    let (issue_number_opt, extra_args) = parse_optional_identifier(args);
+    let (issue_number_opt, extra_args) = split_identifier(args, &view_takes_value);
 
     if should_passthrough_view(&extra_args) {
         let mut base: Vec<&str> = vec!["issue", "view"];
@@ -1215,78 +1364,140 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_identifier_simple() {
+    fn test_split_identifier_simple() {
         let args: Vec<String> = vec!["42".into()];
-        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
-        assert_eq!(id, "42");
+        let (id, extra) = split_identifier(&args, &view_takes_value);
+        assert_eq!(id.as_deref(), Some("42"));
         assert!(extra.is_empty());
     }
 
     #[test]
-    fn test_extract_identifier_with_repo_flag_before() {
+    fn test_split_identifier_with_repo_flag_before() {
         // glab mr view -R group/project 42
         let args: Vec<String> = vec!["-R".into(), "group/project".into(), "42".into()];
-        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
-        assert_eq!(id, "42");
+        let (id, extra) = split_identifier(&args, &view_takes_value);
+        assert_eq!(id.as_deref(), Some("42"));
         assert_eq!(extra, vec!["-R", "group/project"]);
     }
 
     #[test]
-    fn test_extract_identifier_with_repo_flag_after() {
+    fn test_split_identifier_with_repo_flag_after() {
         // glab mr view 42 -R group/project
         let args: Vec<String> = vec!["42".into(), "-R".into(), "group/project".into()];
-        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
-        assert_eq!(id, "42");
+        let (id, extra) = split_identifier(&args, &view_takes_value);
+        assert_eq!(id.as_deref(), Some("42"));
         assert_eq!(extra, vec!["-R", "group/project"]);
     }
 
     #[test]
-    fn test_extract_identifier_with_group_flag() {
+    fn test_split_identifier_with_group_flag() {
         let args: Vec<String> = vec!["-g".into(), "mygroup".into(), "7".into()];
-        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
-        assert_eq!(id, "7");
+        let (id, extra) = split_identifier(&args, &view_takes_value);
+        assert_eq!(id.as_deref(), Some("7"));
         assert_eq!(extra, vec!["-g", "mygroup"]);
     }
 
     #[test]
-    fn test_extract_identifier_empty() {
-        let args: Vec<String> = vec![];
-        assert!(extract_identifier_and_extra_args(&args).is_none());
-    }
-
-    #[test]
-    fn test_extract_identifier_only_flags() {
-        let args: Vec<String> = vec!["-R".into(), "group/project".into()];
-        assert!(extract_identifier_and_extra_args(&args).is_none());
-    }
-
-    // ── parse_optional_identifier tests ─────────────────────────────────
-
-    #[test]
-    fn test_parse_optional_identifier_empty_yields_no_id() {
+    fn test_split_identifier_empty_yields_no_id() {
         // `glab mr view` (no args) must surface as (None, []) so the caller
         // hands the request to glab, which resolves the current branch's MR.
-        let (id, extra) = parse_optional_identifier(&[]);
+        let (id, extra) = split_identifier(&[], &view_takes_value);
         assert!(id.is_none());
         assert!(extra.is_empty());
     }
 
     #[test]
-    fn test_parse_optional_identifier_only_flags_preserves_flags() {
+    fn test_split_identifier_only_flags_preserves_flags() {
         // Regression: `glab mr view -R group/project` previously triggered
         // "MR number required". Now flags must round-trip into `extra`.
         let args: Vec<String> = vec!["-R".into(), "group/project".into()];
-        let (id, extra) = parse_optional_identifier(&args);
+        let (id, extra) = split_identifier(&args, &view_takes_value);
         assert!(id.is_none());
         assert_eq!(extra, vec!["-R", "group/project"]);
     }
 
+    // ── regressions: a flag's value is never the identifier ─────────────
+
     #[test]
-    fn test_parse_optional_identifier_with_id_matches_extract() {
-        let args: Vec<String> = vec!["-R".into(), "group/project".into(), "42".into()];
-        let (id, extra) = parse_optional_identifier(&args);
+    fn test_view_pagination_values_are_not_the_identifier() {
+        for flag in ["-p", "--page", "-P", "--per-page"] {
+            let args: Vec<String> = vec![flag.into(), "2".into()];
+            let (id, extra) = split_identifier(&args, &view_takes_value);
+            assert!(id.is_none(), "{} swallowed its value as the id", flag);
+            assert_eq!(extra, vec![flag, "2"]);
+        }
+    }
+
+    #[test]
+    fn test_view_jq_expression_is_not_the_identifier() {
+        let args: Vec<String> = vec!["--jq".into(), ".iid".into()];
+        let (id, _) = split_identifier(&args, &view_takes_value);
+        assert!(id.is_none());
+    }
+
+    #[test]
+    fn test_view_identifier_past_double_dash() {
+        // `glab mr view -- 42` views MR 42: `--` ends flag parsing, not positional parsing.
+        let args: Vec<String> = vec!["--".into(), "42".into()];
+        let (id, extra) = split_identifier(&args, &view_takes_value);
         assert_eq!(id.as_deref(), Some("42"));
-        assert_eq!(extra, vec!["-R", "group/project"]);
+        assert_eq!(extra, vec!["--"]);
+    }
+
+    #[test]
+    fn test_mr_merge_message_is_not_the_mr_number() {
+        // glab mr merge -m "ship it" previously confirmed "ok merged !ship it".
+        for flag in ["-m", "--message", "--squash-message"] {
+            let args: Vec<String> = vec![flag.into(), "ship it".into()];
+            let (id, _) = split_identifier(&args, &mr_merge_takes_value);
+            assert!(id.is_none(), "{} swallowed its value as the MR number", flag);
+        }
+    }
+
+    #[test]
+    fn test_mr_merge_squash_is_boolean_but_approve_sha_is_not() {
+        // -s is --squash on merge and --sha on approve: one shared table would break one of them.
+        let args: Vec<String> = vec!["-s".into(), "42".into()];
+        assert_eq!(
+            split_identifier(&args, &mr_merge_takes_value).0.as_deref(),
+            Some("42")
+        );
+        assert!(split_identifier(&args, &mr_approve_takes_value).0.is_none());
+    }
+
+    #[test]
+    fn test_mr_update_label_is_not_the_mr_number() {
+        // glab mr update --add a label: -l/-t/-a values are not identifiers.
+        for flag in ["-l", "--label", "-t", "--title", "-a", "--assignee"] {
+            let args: Vec<String> = vec![flag.into(), "bug".into()];
+            let (id, _) = split_identifier(&args, &mr_update_takes_value);
+            assert!(id.is_none(), "{} swallowed its value as the MR number", flag);
+        }
+    }
+
+    #[test]
+    fn test_mr_update_keeps_an_explicit_mr_number() {
+        let args: Vec<String> = vec!["--label".into(), "bug".into(), "42".into()];
+        let (id, _) = split_identifier(&args, &mr_update_takes_value);
+        assert_eq!(id.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn test_mr_note_message_is_not_the_mr_number() {
+        let args: Vec<String> = vec!["-m".into(), "looks good".into()];
+        let (id, _) = split_identifier(&args, &mr_note_takes_value);
+        assert!(id.is_none());
+    }
+
+    #[test]
+    fn test_split_glab_region_rejects_a_leading_boundary() {
+        let region: Vec<String> = vec!["--".into(), "mr".into(), "view".into()];
+        assert!(split_glab_region(&region).is_none());
+
+        let region: Vec<String> = vec!["mr".into(), "view".into(), "42".into()];
+        let (subcommand, args) = split_glab_region(&region).expect("leading positional");
+        assert_eq!(subcommand, "mr");
+        assert_eq!(args, ["view", "42"]);
     }
 
     // ── has_output_flag tests ───────────────────────────────────────────
@@ -1332,11 +1543,11 @@ mod tests {
     // ── mr_action identifier extraction ─────────────────────────────────
 
     #[test]
-    fn test_extract_identifier_with_message_flag() {
+    fn test_split_identifier_with_message_flag() {
         // glab mr note -m "comment" 42 — number should be 42, not "comment"
         let args: Vec<String> = vec!["-m".into(), "comment".into(), "42".into()];
-        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
-        assert_eq!(id, "42");
+        let (id, extra) = split_identifier(&args, &mr_note_takes_value);
+        assert_eq!(id.as_deref(), Some("42"));
         assert_eq!(extra, vec!["-m", "comment"]);
     }
 
