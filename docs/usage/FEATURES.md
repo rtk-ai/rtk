@@ -238,6 +238,21 @@ src/ls.rs:25:fn run_tree(...)                src/ls.rs
 
 ---
 
+### `rtk ast-grep` -- Recherche structurelle (AST)
+
+**Objectif :** Remplace `ast-grep` avec une sortie groupee par fichier, plafonnee.
+
+**Syntaxe :**
+```bash
+rtk ast-grep run -p '<pattern>' [chemin] [options]
+```
+
+Regroupe les correspondances par fichier, plafonnees a 5 par fichier et 50 au total ; le surplus est remplace par une note de comptage ("N more matches in X" / "N more file(s) not shown"). Sur une recherche reelle dans ce depot, ~85% de reduction.
+
+`--json` n'est pas filtre -- une demande explicite de sortie structuree passe telle quelle, sans compression.
+
+---
+
 ### `rtk diff` -- Diff condense
 
 **Objectif :** Diff ultra-condense entre deux fichiers (uniquement les lignes modifiees).
@@ -1276,6 +1291,7 @@ rtk verify
 | `cargo test/build/clippy/check` | `rtk cargo ...` |
 | `cat/head/tail <fichier>` | `rtk read <fichier>` |
 | `rg/grep <pattern>` | `rtk grep <pattern>` |
+| `ast-grep run -p <pattern>` | `rtk ast-grep run -p <pattern>` |
 | `ls` | `rtk ls` |
 | `tree` | `rtk tree` |
 | `wc` | `rtk wc` |
@@ -1448,7 +1464,7 @@ Octets de sortie bash supprimes (voir [A propos de la reduction de sortie bash](
 
 | Categorie | Commandes | Reduction sortie bash |
 |-----------|-----------|-------------------|
-| **Fichiers** | ls, tree, read, find, grep, diff | 60-80% |
+| **Fichiers** | ls, tree, read, find, grep, ast-grep, diff | 60-85% |
 | **Git** | status, log, diff, show, add, commit, push, pull | 75-92% |
 | **GitHub** | pr, issue, run, api | 79-87% |
 | **Tests** | cargo test, vitest, playwright, pytest, go test | 90-99% |

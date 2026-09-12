@@ -45,6 +45,7 @@ RTK intercepts shell commands and compresses their output before your agent read
 | `ls` / `tree` | Tree format with file counts instead of one line per entry |
 | `cat` / `read` | Smart file reading: signatures and structure over full bodies |
 | `grep` / `rg` | Truncates long lines, groups matches by file |
+| `ast-grep` | Groups structural matches by file, caps overflow |
 | `git status` | Compact stat format, grouped by state |
 | `git diff` | Reduced context, headers stripped |
 | `git log` | Hash, author and subject only |
