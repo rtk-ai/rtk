@@ -69,9 +69,8 @@ impl Language {
             "rb" => Language::Ruby,
             "sh" | "bash" | "zsh" => Language::Shell,
             "json" | "jsonc" | "json5" | "yaml" | "yml" | "toml" | "xml" | "csv" | "tsv"
-            | "graphql" | "gql" | "sql" | "md" | "markdown" | "txt" | "env" | "lock" => {
-                Language::Data
-            }
+            | "graphql" | "gql" | "sql" | "md" | "markdown" | "txt" | "env" | "lock" | "tf"
+            | "tfvars" | "hcl" => Language::Data,
             _ => Language::Unknown,
         }
     }
@@ -317,10 +316,23 @@ pub fn get_filter(level: FilterLevel) -> Box<dyn FilterStrategy> {
     }
 }
 
-pub fn smart_truncate(content: &str, max_lines: usize, _lang: &Language) -> String {
+pub fn smart_truncate(content: &str, max_lines: usize, lang: &Language) -> String {
     let lines: Vec<&str> = content.lines().collect();
     if lines.len() <= max_lines {
         return content.to_string();
+    }
+
+    if max_lines == 0 {
+        return format!("[{} more lines]", lines.len());
+    }
+
+    if *lang == Language::Data {
+        let mut result = lines[..max_lines]
+            .iter()
+            .map(|line| (*line).to_string())
+            .collect::<Vec<_>>();
+        result.push(format!("[{} more lines]", lines.len() - max_lines));
+        return result.join("\n");
     }
 
     let mut result = Vec::with_capacity(max_lines + 1);
@@ -392,6 +404,9 @@ mod tests {
         assert_eq!(Language::from_extension("csv"), Language::Data);
         assert_eq!(Language::from_extension("md"), Language::Data);
         assert_eq!(Language::from_extension("lock"), Language::Data);
+        assert_eq!(Language::from_extension("tf"), Language::Data);
+        assert_eq!(Language::from_extension("tfvars"), Language::Data);
+        assert_eq!(Language::from_extension("hcl"), Language::Data);
     }
 
     #[test]
@@ -528,6 +543,23 @@ fn main() {
         assert!(output.contains("[9 more lines]"));
         // Only the first line is kept (plain-text, no important signatures)
         assert!(output.starts_with("line1\n"));
+    }
+
+    #[test]
+    fn test_smart_truncate_data_keeps_contiguous_prefix() {
+        let input = (0..10)
+            .map(|i| format!("resource line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let output = smart_truncate(&input, 5, &Language::Data);
+
+        assert!(
+            output.contains("resource line 4"),
+            "data truncation should keep the requested prefix:\n{output}"
+        );
+        assert!(!output.contains("resource line 5"));
+        assert!(output.contains("[5 more lines]"));
     }
 
     #[test]
