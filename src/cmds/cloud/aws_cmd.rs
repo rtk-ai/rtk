@@ -260,7 +260,7 @@ fn run_generic(subcommand: &str, args: &[String], verbose: u8, full_sub: &str) -
         return Ok(exit_code);
     }
 
-    let filtered = match json_cmd::filter_json_compact(&raw, JSON_COMPRESS_DEPTH) {
+    let filtered = match json_cmd::filter_compact(&raw, JSON_COMPRESS_DEPTH) {
         Ok(compact) => {
             let compact = never_worse(&raw, &compact).to_string();
             println!("{}", compact);
@@ -2746,8 +2746,8 @@ upload: file10.txt to s3://bucket/file10.txt
         let fixture = include_str!(
             "../../../tests/fixtures/aws_backup_describe_global_settings.json"
         );
-        let output = json_cmd::filter_json_compact(fixture, JSON_COMPRESS_DEPTH)
-            .expect("filter_json_compact must not error on valid AWS JSON");
+        let output = json_cmd::filter_compact(fixture, JSON_COMPRESS_DEPTH)
+            .expect("filter_compact must not error on valid AWS JSON");
 
         assert!(
             output.contains("\"false\""),

@@ -216,13 +216,13 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
             "ruff" => {
                 // Reuse ruff_cmd's JSON parser
                 if !result.stdout.trim().is_empty() {
-                    ruff_cmd::filter_ruff_check_json(&result.stdout)
+                    ruff_cmd::filter_check_json(&result.stdout)
                 } else {
                     "Ruff: No issues found".to_string()
                 }
             }
             "pylint" => filter_pylint_json(&result.stdout),
-            "mypy" => mypy_cmd::filter_mypy_output(&raw),
+            "mypy" => mypy_cmd::filter_output(&raw),
             _ => filter_generic_lint(&raw),
         }
     };

@@ -5,7 +5,7 @@ use anyhow::Result;
 use std::ffi::OsString;
 
 /// Filter deno output: strip ANSI codes, download lines, and empty lines.
-pub fn filter_deno_output(output: &str) -> String {
+pub fn filter_output(output: &str) -> String {
     let cleaned = strip_ansi(output);
     let filtered: Vec<&str> = cleaned
         .lines()
@@ -39,7 +39,7 @@ fn run_filtered_subcmd(subcmd: &str, args: &[String], verbose: u8) -> Result<i32
         cmd,
         "deno",
         display.trim_end(),
-        filter_deno_output,
+        filter_output,
         crate::core::runner::RunOptions::with_tee(&tee_label),
     )
 }
@@ -105,7 +105,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_filter_deno_output_savings_on_real_output() {
+    fn test_filter_output_savings_on_real_output() {
         // deno colorizes even when piped, and the filter keeps every
         // diagnostic, so the reduction is in bytes rather than in content.
         for (name, raw, floor) in [
@@ -120,7 +120,7 @@ mod tests {
                 50.0,
             ),
         ] {
-            let out = filter_deno_output(raw);
+            let out = filter_output(raw);
             let savings = 100.0 - (out.len() as f64 / raw.len() as f64 * 100.0);
             assert!(
                 savings >= floor,
@@ -132,7 +132,7 @@ mod tests {
     #[test]
     fn test_filter_deno_lint_keeps_every_diagnostic() {
         let raw = include_str!("../../../tests/fixtures/deno_lint_raw.txt");
-        let out = filter_deno_output(raw);
+        let out = filter_output(raw);
         for rule in [
             "no-var",
             "no-unused-vars",
@@ -143,48 +143,48 @@ mod tests {
         }
     }
     #[test]
-    fn test_filter_deno_output_strips_download() {
+    fn test_filter_output_strips_download() {
         let input = r#"Download https://deno.land/std@0.200.0/path/mod.ts
 Download https://deno.land/x/oak@v12.6.1/mod.ts
 error: Expected ';' at main.ts:5:10
 some warning here"#;
 
-        let result = filter_deno_output(input);
+        let result = filter_output(input);
         assert!(!result.contains("Download "));
         assert!(result.contains("error: Expected ';' at main.ts:5:10"));
         assert!(result.contains("some warning here"));
     }
 
     #[test]
-    fn test_filter_deno_output_strips_download_lines() {
+    fn test_filter_output_strips_download_lines() {
         // Download lines appear only on a cold cache; the diagnostics that
         // follow them are the point of the run and must survive.
         let input = "Download https://deno.land/std@0.200.0/path/mod.ts\n\
 Download https://deno.land/x/oak@v12.6.1/mod.ts\n\
 Check file:///project/main.ts\n\
 error: Expected ';' at main.ts:5:10\n";
-        let output = filter_deno_output(input);
+        let output = filter_output(input);
         assert!(!output.contains("Download "), "{output}");
         assert!(output.contains("error: Expected ';'"), "{output}");
         assert!(output.contains("Check file:///project/main.ts"), "{output}");
     }
 
     #[test]
-    fn test_filter_deno_output_empty() {
+    fn test_filter_output_empty() {
         let input = r#"Download https://deno.land/std@0.200.0/path/mod.ts
 
 Download https://deno.land/x/oak@v12.6.1/mod.ts
 
 "#;
 
-        let result = filter_deno_output(input);
+        let result = filter_output(input);
         assert_eq!(result, "ok");
     }
 
     #[test]
     fn test_filter_deno_strips_ansi() {
         let input = "\x1b[33mDownload https://deno.land/std@0.200.0/path/mod.ts\x1b[0m\n\x1b[31merror: something\x1b[0m\n";
-        let result = filter_deno_output(input);
+        let result = filter_output(input);
         assert!(!result.contains("Download"));
         assert!(result.contains("error: something"));
     }
@@ -192,7 +192,7 @@ Download https://deno.land/x/oak@v12.6.1/mod.ts
     #[test]
     fn test_filter_deno_preserves_check_lines() {
         let input = "Check file:///project/main.ts\n";
-        let result = filter_deno_output(input);
+        let result = filter_output(input);
         assert!(result.contains("Check"));
     }
 
@@ -201,7 +201,7 @@ Download https://deno.land/x/oak@v12.6.1/mod.ts
         let input = r#"Download https://deno.land/std@0.210.0/path/mod.ts
 error: Module not found "https://deno.land/x/nonexistent/mod.ts"
 "#;
-        let result = filter_deno_output(input);
+        let result = filter_output(input);
         assert!(result.contains("error:"));
         assert!(result.contains("Module not found"));
         assert!(!result.contains("Download"));
