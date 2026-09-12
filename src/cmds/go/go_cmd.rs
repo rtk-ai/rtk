@@ -676,6 +676,7 @@ fn is_go_build_error_line(line: &str) -> bool {
         "go: error ",
         "error: ",
         "pattern ",
+        "go: pattern ",
         "go: updates to go.mod needed",
         "go: inconsistent vendoring",
         "no go files in ",
