@@ -17,7 +17,7 @@
 <p align="center">
   <a href="https://www.rtk-ai.app">웹사이트</a> &bull;
   <a href="#설치">설치</a> &bull;
-  <a href="docs/TROUBLESHOOTING.md">문제 해결</a> &bull;
+  <a href="https://www.rtk-ai.app/guide/troubleshooting">문제 해결</a> &bull;
   <a href="docs/contributing/ARCHITECTURE.md">아키텍처</a> &bull;
   <a href="https://discord.gg/RySmvNF5kF">Discord</a>
 </p>
