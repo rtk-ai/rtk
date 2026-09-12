@@ -55,6 +55,22 @@ fn detect_formatter_in_dir(args: &[String], dir: &Path) -> String {
     "ruff".to_string()
 }
 
+fn formatter_prefix_args(formatter: &str, user_args: &[String]) -> Vec<&'static str> {
+    match formatter {
+        "black" if !user_args.iter().any(|arg| arg == "--check" || arg == "--diff") => {
+            vec!["--check"]
+        }
+        "ruff" if user_args.is_empty() || !user_args[0].starts_with("format") => {
+            let mut args = vec!["format"];
+            if !user_args.iter().any(|arg| arg == "--check" || arg == "--diff") {
+                args.push("--check");
+            }
+            args
+        }
+        _ => Vec::new(),
+    }
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -84,16 +100,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     // Add formatter-specific flags
     let user_args = args[start_idx..].to_vec();
 
-    match formatter.as_str() {
-        // Inject --check if not present for check mode
-        "black" if !user_args.iter().any(|a| a == "--check" || a == "--diff") => {
-            cmd.arg("--check");
-        }
-        // Add "format" subcommand if not present
-        "ruff" if user_args.is_empty() || !user_args[0].starts_with("format") => {
-            cmd.arg("format");
-        }
-        _ => {}
+    for arg in formatter_prefix_args(&formatter, &user_args) {
+        cmd.arg(arg);
     }
 
     // Add user arguments
@@ -302,6 +310,16 @@ mod tests {
         let args = vec!["ruff".to_string(), "format".to_string()];
         let formatter = detect_formatter(&args);
         assert_eq!(formatter, "ruff");
+    }
+
+    #[test]
+    fn test_ruff_defaults_to_check_mode() {
+        assert_eq!(formatter_prefix_args("ruff", &[]), ["format", "--check"]);
+        assert_eq!(
+            formatter_prefix_args("ruff", &["--diff".to_string()]),
+            ["format"]
+        );
+        assert!(formatter_prefix_args("ruff", &["format".to_string()]).is_empty());
     }
 
     #[test]
