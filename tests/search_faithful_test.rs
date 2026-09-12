@@ -8,8 +8,12 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
+/// grep/rg error text (e.g. "Is a directory") is localized; pin it so
+/// assertions on that text mean the same thing in every contributor's shell.
 fn rtk() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rtk"));
+    cmd.env("LC_ALL", "C");
+    cmd
 }
 
 /// Run rtk with `input` fed on stdin; returns (stdout, exit_code).
@@ -74,6 +78,7 @@ fn assert_streams_before_stdin_closes(args: &[&str], expected: &str) {
 
 fn rg_available() -> bool {
     Command::new("rg")
+        .env("LC_ALL", "C")
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -186,6 +191,7 @@ fn bulky_rg_yields_token_savings() {
     let (_dir, path) = write_temp(&content);
 
     let raw = Command::new("rg")
+        .env("LC_ALL", "C")
         .args(["-nH", "MATCH", path.to_str().unwrap()])
         .output()
         .expect("rg");
