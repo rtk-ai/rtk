@@ -56,7 +56,7 @@ impl Default for RtkRule {
 
 pub const RULES: &[RtkRule] = &[
     RtkRule {
-        pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|checkout|push|pull|branch|fetch|stash|worktree)",
+        pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|checkout|push|pull|branch|fetch|stash|worktree|ls-tree|ls-files)",
         rtk_cmd: "rtk git",
         pipeline_safety: PipelineSafety::ProducerOnly,
         rewrite_prefixes: &["git", "yadm"],
@@ -67,6 +67,11 @@ pub const RULES: &[RtkRule] = &[
             ("show", 80.0),
             ("add", 59.0),
             ("commit", 59.0),
+            // Passthrough: output is script-facing (one path per line), so rtk
+            // reshapes nothing and saves nothing. A non-zero figure here would
+            // make `rtk discover` overstate the value of wrapping them.
+            ("ls-tree", 0.0),
+            ("ls-files", 0.0),
         ],
         ..RtkRule::DEFAULT
     },
