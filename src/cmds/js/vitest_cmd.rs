@@ -94,6 +94,30 @@ impl OutputParser for VitestParser {
     }
 }
 
+/// Drop stack frames that point into dependencies or the runtime.
+///
+/// Vitest's `failureMessages` carry the full stack, which for a typical failure is
+/// ~10 frames inside `node_modules/@vitest/runner` and 1-2 in the user's own test.
+/// Only the latter are actionable, and the noise is what drives users to re-run the
+/// command unfiltered.
+fn strip_internal_frames(message: &str) -> String {
+    static INTERNAL_FRAME: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^\s*at\s+.*(node_modules|node:internal|\(<anonymous>\))").unwrap()
+    });
+
+    let kept: Vec<&str> = message
+        .lines()
+        .filter(|line| !INTERNAL_FRAME.is_match(line))
+        .collect();
+
+    // Never return an empty message: if every line looked internal, keep the original.
+    if kept.iter().any(|l| !l.trim().is_empty()) {
+        kept.join("\n")
+    } else {
+        message.to_string()
+    }
+}
+
 /// Extract failures from JSON structure
 fn extract_failures_from_json(json: &VitestJsonOutput) -> Vec<TestFailure> {
     let mut failures = Vec::new();
@@ -101,7 +125,7 @@ fn extract_failures_from_json(json: &VitestJsonOutput) -> Vec<TestFailure> {
     for file in &json.test_results {
         for test in &file.assertion_results {
             if test.status == "failed" {
-                let error_message = test.failure_messages.join("\n");
+                let error_message = strip_internal_frames(&test.failure_messages.join("\n"));
                 failures.push(TestFailure {
                     test_name: test.full_name.clone(),
                     file_path: file.name.clone(),
@@ -416,6 +440,29 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn test_strip_internal_frames_keeps_user_code() {
+        let message = "AssertionError: expected 1 to equal 2\n    at /home/u/app/src/foo.test.ts:4:56\n    at file:///home/u/app/node_modules/@vitest/runner/dist/index.js:145:11\n    at new Promise (<anonymous>)\n    at runTest (file:///home/u/app/node_modules/@vitest/runner/dist/index.js:1653:12)";
+        let cleaned = strip_internal_frames(message);
+        assert_eq!(
+            cleaned,
+            "AssertionError: expected 1 to equal 2\n    at /home/u/app/src/foo.test.ts:4:56"
+        );
+    }
+
+    #[test]
+    fn test_strip_internal_frames_preserves_message_without_frames() {
+        let message = "Error: kaboom";
+        assert_eq!(strip_internal_frames(message), message);
+    }
+
+    #[test]
+    fn test_strip_internal_frames_falls_back_when_all_internal() {
+        // Defensive: never hand back an empty failure message.
+        let message = "    at file:///app/node_modules/vitest/dist/index.js:1:1";
+        assert_eq!(strip_internal_frames(message), message);
     }
 
     #[test]
