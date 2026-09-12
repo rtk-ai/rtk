@@ -164,24 +164,26 @@ fn filter_rspec_output(output: &str) -> String {
         return "RSpec: No output".to_string();
     }
 
-    // Try parsing as JSON first (happy path when --format json is injected)
-    if let Ok(rspec) = serde_json::from_str::<RspecOutput>(output) {
-        return build_rspec_summary(&rspec);
-    }
+    let trimmed = output.trim();
 
-    // Strip noise (Spring, SimpleCov, etc.) and retry JSON parse
-    let stripped = strip_noise(output);
-    match serde_json::from_str::<RspecOutput>(&stripped) {
-        Ok(rspec) => return build_rspec_summary(&rspec),
-        Err(e) => {
-            eprintln!(
-                "[rtk] rspec: JSON parse failed ({}), using text fallback",
-                e
-            );
+    // Only attempt JSON parsing if output looks like JSON (starts with '{')
+    if trimmed.starts_with('{') {
+        // Try parsing as JSON first (happy path when --format json is injected)
+        if let Ok(rspec) = serde_json::from_str::<RspecOutput>(trimmed) {
+            return build_rspec_summary(&rspec);
         }
+
+        // Strip noise (Spring, SimpleCov, etc.) and retry JSON parse
+        let stripped = strip_noise(output);
+        if let Ok(rspec) = serde_json::from_str::<RspecOutput>(&stripped) {
+            return build_rspec_summary(&rspec);
+        }
+
+        // JSON parse failed even though output looked like JSON; fall through
     }
 
-    filter_rspec_text(&stripped)
+    // Not JSON or JSON parsing failed: use text fallback
+    filter_rspec_text(&strip_noise(output))
 }
 
 fn build_rspec_summary(rspec: &RspecOutput) -> String {
@@ -764,6 +766,16 @@ Failures:
         let garbage = "not json at all { broken";
         let result = filter_rspec_output(garbage);
         assert!(!result.is_empty(), "should not panic on invalid JSON");
+    }
+
+    #[test]
+    fn test_filter_rspec_text_output_no_warning() {
+        // Plain text rspec output (default progress formatter, no --format json)
+        let text = "..F...\nFailures:\n\n  1) User is valid\n     Failure/Error: expect(user).to be_valid\n       expected true got false\n     # ./spec/models/user_spec.rb:5\n\n4 examples, 1 failure\n";
+        let result = filter_rspec_output(text);
+        assert!(result.contains("RSpec:"));
+        assert!(result.contains("4 examples, 1 failure"));
+        assert!(result.contains("❌"));
     }
 
     // ── Noise stripping tests ────────────────────────────────────────────────
