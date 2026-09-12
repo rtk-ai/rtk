@@ -1032,6 +1032,14 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^xcodebuild\b",
+        rtk_cmd: "rtk xcodebuild",
+        rewrite_prefixes: &["xcodebuild"],
+        category: "Build",
+        savings_pct: 85.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^systemctl\s+status\b",
         rtk_cmd: "rtk systemctl",
         pipeline_safety: PipelineSafety::ProducerOnly,
