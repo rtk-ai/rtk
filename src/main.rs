@@ -25,7 +25,7 @@ use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
 use cmds::system::{
     ctest_cmd, deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd,
-    read, search, summary, tree, wc_cmd,
+    pwd_cmd, read, search, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -262,6 +262,9 @@ enum Commands {
         #[arg(short, long)]
         filter: Option<String>,
     },
+
+    /// Show physical cwd + git worktree/branch context (validate where commands execute)
+    Pwd,
 
     /// Find files with compact tree output (accepts native find flags like -name, -type)
     Find {
@@ -2135,6 +2138,11 @@ fn run_cli() -> Result<i32> {
 
         Commands::Env { filter } => {
             env_cmd::run(filter.as_deref(), cli.verbose)?;
+            0
+        }
+
+        Commands::Pwd => {
+            pwd_cmd::run(cli.verbose)?;
             0
         }
 
