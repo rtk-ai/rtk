@@ -894,6 +894,25 @@ Auto-detecte : `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`, `Gemfil
 
 ---
 
+### `rtk nix` -- Nix
+
+| Commande | Description | Reduction sortie bash |
+|----------|-------------|-----------|
+| `rtk nix build` | Progres groupe en compteurs, chemins store raccourcis | ~90% |
+| `rtk nix develop/shell/run -c <cmd>` | Commande enwrappee deleguee a son filtre rtk | selon la commande |
+| `rtk nix flake <sub>` | Traces d'evaluation supprimees, listes store en compteur | varie |
+| `rtk nix-build` / `rtk nix-shell` / `rtk nix-env` | Meme filtrage pour les commandes historiques | ~90% |
+
+- Les chemins `/nix/store/<hash>-` sont raccourcis (`abcdefg...-`)
+- Telechargements et copies comptes en resume (`[downloaded N]`, `[copied N]`)
+- Les traces d'evaluation sont supprimees ; erreurs et avertissements sont conserves
+
+Commande enwrappee : `nix develop -c cargo test` relance via un rtk imbrique afin que la
+commande interne soit filtree par son propre module, tout en s'executant dans l'environnement
+nix. La couche externe reste en passthrough ; le rtk interne fait le filtrage et le suivi.
+
+---
+
 ## Conteneurs et orchestration
 
 ### `rtk docker` -- Docker
@@ -1296,6 +1315,8 @@ rtk verify
 | `kubectl get/logs` | `rtk kubectl ...` |
 | `curl` | `rtk curl` |
 | `pnpm list/outdated` | `rtk pnpm ...` |
+| `nix build/develop/flake/shell` | `rtk nix ...` |
+| `nix-build/nix-shell/nix-env` | `rtk nix-build/...` |
 
 ### Exclusion de commandes
 
@@ -1455,6 +1476,7 @@ Octets de sortie bash supprimes (voir [A propos de la reduction de sortie bash](
 | **Build/Lint** | cargo build, tsc, eslint, prettier, next, ruff, clippy | 70-87% |
 | **Paquets** | pnpm, npm, pip, deps, prisma | 60-80% |
 | **Conteneurs** | docker, kubectl | 70-80% |
+| **Nix** | nix build, develop, shell, flake, nix-build | 90% |
 | **Donnees** | json, env, log, curl, wget | 60-80% |
 | **Analytique** | gain, discover, learn, cc-economics | N/A (meta) |
 
@@ -1462,4 +1484,4 @@ Octets de sortie bash supprimes (voir [A propos de la reduction de sortie bash](
 
 ## Nombre total de commandes
 
-RTK supporte **45+ commandes** reparties en 9 categories, avec passthrough automatique pour les sous-commandes non reconnues. Cela en fait un proxy universel : il est toujours sur a utiliser en prefixe.
+RTK supporte **45+ commandes** reparties en 10 categories, avec passthrough automatique pour les sous-commandes non reconnues. Cela en fait un proxy universel : il est toujours sur a utiliser en prefixe.

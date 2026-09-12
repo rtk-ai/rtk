@@ -1986,6 +1986,25 @@ mod tests {
                 Some("rtk git status 2>&1 && rtk cargo build".into())
             );
         }
+
+        #[test]
+        fn test_rewrite_nix_wrapped_commands_route_to_rtk_nix() {
+            // Bare nix-wrapped invocations route through the `rtk nix*` rules so
+            // the hook produces `rtk nix …`, where the nix module nests the inner
+            // rtk around the wrapped command.
+            assert_eq!(
+                rewrite_command_no_prefixes("nix develop -c cargo test", &[]),
+                Some("rtk nix develop -c cargo test".into())
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes("nix-shell --run 'cargo test'", &[]),
+                Some("rtk nix-shell --run 'cargo test'".into())
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes("nix build", &[]),
+                Some("rtk nix build".into())
+            );
+        }
     }
 
     mod multiline_blocks {

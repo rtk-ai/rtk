@@ -16,6 +16,7 @@ use cmds::js::{
     prisma_cmd, tsc_cmd, vitest_cmd,
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
+use cmds::nix::nix_cmd;
 use cmds::php::{
     ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpt_cmd, phpunit_cmd, pint_cmd,
 };
@@ -916,6 +917,37 @@ enum Commands {
     #[command(name = "mvnd")]
     Mvnd {
         /// Maven goals and arguments (e.g., clean install, -DskipTests test, -X)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Nix commands with compact output (build, develop, flake, shell, etc.)
+    Nix {
+        /// Nix arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// nix-build (legacy) with compact output
+    #[command(name = "nix-build")]
+    NixBuild {
+        /// nix-build arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// nix-shell (legacy) with compact output
+    #[command(name = "nix-shell")]
+    NixShell {
+        /// nix-shell arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// nix-env (legacy) with compact output
+    #[command(name = "nix-env")]
+    NixEnv {
+        /// nix-env arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2758,6 +2790,14 @@ fn run_cli() -> Result<i32> {
 
         Commands::Mvnd { args } => mvn_cmd::run_daemon(&args, cli.verbose)?,
 
+        Commands::Nix { args } => nix_cmd::run(&args, cli.verbose)?,
+
+        Commands::NixBuild { args } => nix_cmd::run_legacy("nix-build", &args, cli.verbose)?,
+
+        Commands::NixShell { args } => nix_cmd::run_legacy("nix-shell", &args, cli.verbose)?,
+
+        Commands::NixEnv { args } => nix_cmd::run_legacy("nix-env", &args, cli.verbose)?,
+
         Commands::HookAudit { since } => {
             hooks::hook_audit_cmd::run(since, cli.verbose)?;
             0
@@ -3651,6 +3691,10 @@ mod tests {
             "bun",
             "bunx",
             "deno",
+            "nix",
+            "nix-build",
+            "nix-shell",
+            "nix-env",
         ];
 
         let unclassified: Vec<String> = Cli::command()
