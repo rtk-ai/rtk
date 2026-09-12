@@ -1,0 +1,23 @@
+[filters.pgrep]
+description = "Compact pgrep output — truncate wide process lines"
+match_command = "^pgrep\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+]
+max_lines = 50
+truncate_lines_at = 160
+
+[[tests.pgrep]]
+name = "process matches pass through"
+input = """
+1234 scrcpy --serial R9ABC123 --turn-screen-off
+
+2345 /usr/bin/bash ./start-scrcpy.sh
+"""
+expected = "1234 scrcpy --serial R9ABC123 --turn-screen-off\n2345 /usr/bin/bash ./start-scrcpy.sh"
+
+[[tests.pgrep]]
+name = "empty input passes through"
+input = ""
+expected = ""

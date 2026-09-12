@@ -2044,9 +2044,11 @@ match_command = "^make\\b"
             filters.iter().map(|f| f.name.as_str()).collect();
 
         let expected = [
+            "adb",
             "ansible-playbook",
             "brew-install",
             "composer-install",
+            "crontab",
             "df",
             "dotnet-build",
             "du",
@@ -2062,8 +2064,11 @@ match_command = "^make\\b"
             "mix-format",
             "ping",
             "pio-run",
+            "pactl",
             "poetry-install",
             "pre-commit",
+            "pgrep",
+            "pkill",
             "ps",
             "pulumi-destroy",
             "pulumi-preview",
@@ -2075,6 +2080,7 @@ match_command = "^make\\b"
             "shellcheck",
             "shopify-theme",
             "sops",
+            "ssh",
             "swift-build",
             "systemctl-status",
             "terraform-plan",
@@ -2084,6 +2090,8 @@ match_command = "^make\\b"
             "tofu-validate",
             "trunk-build",
             "uv-sync",
+            "python3",
+            "xrandr",
             "yamllint",
         ];
 
@@ -2103,8 +2111,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            63,
-            "Expected exactly 63 built-in filters, got {}. \
+            70,
+            "Expected exactly 70 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
@@ -2210,11 +2218,11 @@ expected = "output line 1\noutput line 2"
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
         let filters = make_filters(&combined);
 
-        // All 63 existing filters still present + 1 new = 64
+        // All 70 existing filters still present + 1 new = 71
         assert_eq!(
             filters.len(),
-            64,
-            "Expected 64 filters after concat (63 built-in + 1 new)"
+            71,
+            "Expected 71 filters after concat (70 built-in + 1 new)"
         );
 
         // New filter is discoverable

@@ -1,0 +1,24 @@
+[filters.pkill]
+description = "Compact pkill output — strip blanks from matched-process output"
+match_command = "^pkill\\b"
+strip_ansi = true
+filter_stderr = true
+strip_lines_matching = [
+  "^\\s*$",
+]
+max_lines = 50
+truncate_lines_at = 160
+
+[[tests.pkill]]
+name = "diagnostic output strips blanks"
+input = """
+pkill: killing pid 1234 failed: Operation not permitted
+
+pkill: killing pid 2345 failed: Operation not permitted
+"""
+expected = "pkill: killing pid 1234 failed: Operation not permitted\npkill: killing pid 2345 failed: Operation not permitted"
+
+[[tests.pkill]]
+name = "empty input passes through"
+input = ""
+expected = ""
