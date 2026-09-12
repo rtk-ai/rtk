@@ -10,8 +10,8 @@ use crate::core::tracking;
 use crate::core::utils::{package_manager_exec, strip_ansi};
 use crate::parser::{
     emit_degradation_warning, emit_passthrough_warning, extract_json_object, truncate_output,
-    truncate_passthrough, FormatMode, OutputParser, ParseResult, TestFailure, TestResult,
-    TokenFormatter,
+    passthrough_warning_reason, truncate_passthrough, FormatMode, OutputParser, ParseResult,
+    TestFailure, TestResult, TokenFormatter,
 };
 use crate::Commands;
 
@@ -245,6 +245,7 @@ pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32>
         framework,
         &result.stdout,
         &combined,
+        result.exit_code,
         passthrough_requested,
         verbose,
     );
@@ -326,6 +327,7 @@ fn format_test_output(
     framework: &str,
     stdout: &str,
     combined: &str,
+    exit_code: i32,
     passthrough_requested: bool,
     verbose: u8,
 ) -> FormattedTestOutput {
@@ -349,8 +351,10 @@ fn format_test_output(
             FormattedTestOutput::new(data.format(mode))
         }
         ParseResult::Passthrough(_) => {
-            emit_passthrough_warning(framework, "All parsing tiers failed");
-            format_passthrough_output(stdout)
+            if let Some(reason) = passthrough_warning_reason(exit_code) {
+                emit_passthrough_warning(framework, reason);
+            }
+            format_passthrough_output(combined)
         }
     }
 }
@@ -569,12 +573,56 @@ Scope: all 6 workspace projects
    Duration  450ms
 "#;
 
-        let filtered = format_test_output("vitest", output, output, true, 0);
+        let filtered = format_test_output("vitest", output, output, 0, true, 0);
 
         assert!(filtered.text.contains("keeps docs path"));
         assert!(filtered.text.contains("keeps app path"));
         assert!(filtered.text.contains("Tests  2 passed"));
         assert!(!filtered.truncated);
+    }
+
+    #[test]
+    fn test_vitest_successful_json_ignores_combined_stderr() {
+        let stdout = r#"{
+            "numTotalTests": 2,
+            "numPassedTests": 2,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "testResults": []
+        }"#;
+        let combined = format!("{stdout}\nWARN noisy stderr line\n");
+
+        let filtered = format_test_output("vitest", stdout, &combined, 0, false, 0);
+
+        assert!(filtered.text.contains("PASS (2) FAIL (0)"));
+        assert!(!filtered.text.contains("noisy stderr"));
+        assert!(!filtered.truncated);
+    }
+
+    #[test]
+    fn test_vitest_failed_command_passthrough_includes_stderr() {
+        let stdout = "";
+        let combined =
+            "ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL Command \"vitest\" not found\n";
+
+        let filtered = format_test_output("vitest", stdout, combined, 1, false, 0);
+
+        assert_eq!(filtered.text, combined);
+        assert!(!filtered.truncated);
+        assert_eq!(passthrough_warning_reason(1), None);
+    }
+
+    #[test]
+    fn test_vitest_successful_unparseable_output_reports_parser_gap() {
+        let output = "30.1.2\n";
+
+        let filtered = format_test_output("jest", output, output, 0, false, 0);
+
+        assert_eq!(filtered.text, output);
+        assert_eq!(
+            passthrough_warning_reason(0),
+            Some("All parsing tiers failed")
+        );
     }
 
     #[test]
