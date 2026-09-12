@@ -3,15 +3,29 @@ name: PR Target Branch Check
 on:
   pull_request_target:
     types: [opened, edited]
+    # Base branch, so this is the wrong-target case itself. Without it every PR
+    # to develop starts a run that only evaluates the `if` below and skips, and
+    # this workflow holds a pull-requests:write app token on an untrusted
+    # trigger -- there is no reason to hand it a run it cannot act on.
+    branches: [master]
 
 jobs:
   check-target:
     runs-on: ubuntu-latest
     permissions: {}
-    # Skip develop→master PRs (maintainer releases)
+    # Two maintainer routes reach master and neither is a mistake: the
+    # develop->master promotion, and release-please's version bump, which this
+    # check used to label wrong-base and tell to target develop on every
+    # release. Both are keyed by branch because the account behind them is not
+    # stable -- the promotion has been opened by a human and by two different
+    # apps over the repo's history.
+    #
+    # Head branch names are the contributor's to choose on a fork, so the two
+    # exemptions only apply to a branch in this repo; both routes are.
     if: >-
-      github.event.pull_request.base.ref == 'master' &&
-      github.event.pull_request.head.ref != 'develop'
+      github.event.pull_request.head.repo.full_name != github.repository ||
+      (github.event.pull_request.head.ref != 'develop' &&
+       !startsWith(github.event.pull_request.head.ref, 'release-please--'))
     steps:
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: app-token
