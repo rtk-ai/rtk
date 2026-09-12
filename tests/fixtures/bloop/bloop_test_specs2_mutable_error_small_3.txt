@@ -1,0 +1,32 @@
+Compiling root (1 Scala source)
+Compiled root (1453ms)
+Compiling root-test (1 Scala source)
+Compiled root-test (1159ms)
+CalculatorSpec
+ 
+Calculator should
+  + add returns the sum
+  + sub returns the difference
+  + mul returns the product
+  ! div returns the quotient
+[E]    java.lang.ArithmeticException: / by zero (Calculator.scala:8)example.Calculator$.div(Calculator.scala:8)
+[E] example.CalculatorSpec.$init$$$anonfun$1$$anonfun$4$$anonfun$1(CalculatorSpec.scala:17)
+[E] example.CalculatorSpec.$init$$$anonfun$1$$anonfun$4(CalculatorSpec.scala:17)
+[E]  
+ 
+ 
+Total for specification CalculatorSpec
+Finished in 74 ms
+4 examples, 0 failure, 1 error
+ 
+Execution took 38ms
+4 tests, 3 passed, 1 errors
+
+====================================================================================================
+Total duration: 38ms
+1 failed
+
+Failed:
+- example.CalculatorSpec:
+  * Calculator should::div returns the quotient - java.lang.ArithmeticException: / by zero
+====================================================================================================

@@ -1,0 +1,59 @@
+Compiling root (1 Scala source)
+Compiled root (1122ms)
+Compiling root-test (1 Scala source)
+Compiled root-test (1181ms)
++ Calculator
+  + additive
+    + add returns the sum
+    - sub returns the difference
+      ✗ 6 was not equal to 7
+      result == 7
+      result = 6
+      at /tmp/workspace/ziotest-nested-fail-small/src/test/scala/example/CalculatorSpec.scala:14 
+
+  + multiplicative
+    + mul returns the product
+    - div returns the quotient
+      ✗ 5 was not equal to 4
+      result == 4
+      result = 5
+      at /tmp/workspace/ziotest-nested-fail-small/src/test/scala/example/CalculatorSpec.scala:24 
+
+Execution took 0.11s
+2 tests passed. 2 tests failed. 0 tests ignored.
+
+
+    - Calculator / additive / sub returns the difference
+      ✗ 6 was not equal to 7
+4 tests, 2 passed, 2 failed
+      result == 7
+      result = 6
+      at /tmp/workspace/ziotest-nested-fail-small/src/test/scala/example/CalculatorSpec.scala:14 
+
+    - Calculator / multiplicative / div returns the quotient
+      ✗ 5 was not equal to 4
+      result == 4
+      result = 5
+      at /tmp/workspace/ziotest-nested-fail-small/src/test/scala/example/CalculatorSpec.scala:24 
+
+Executed in 207 ms
+
+
+The test execution was successfully closed.
+====================================================================================================
+Total duration: 0.11s
+1 failed
+
+Failed:
+- example.CalculatorSpec:
+  * Calculator - additive - sub returns the difference -     - sub returns the difference
+      ✗ 6 was not equal to 7
+      result == 7
+      result = 6
+      at /tmp/workspace/ziotest-nested-fail-small/src/test/scala/example/CalculatorSpec.scala:14 
+  * Calculator - multiplicative - div returns the quotient -     - div returns the quotient
+      ✗ 5 was not equal to 4
+      result == 4
+      result = 5
+      at /tmp/workspace/ziotest-nested-fail-small/src/test/scala/example/CalculatorSpec.scala:24 
+====================================================================================================

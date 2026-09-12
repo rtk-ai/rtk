@@ -554,7 +554,7 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 85.0,
         ..RtkRule::DEFAULT
     },
-    // Scala/SBT
+    // Scala (sbt, bloop)
     RtkRule {
         pattern: r#"^sbt\s+["']?(testOnly|testQuick|test|compile|run|clean|assembly|package)(?:[\s"']|$)"#,
         rtk_cmd: "rtk sbt",
@@ -562,6 +562,15 @@ pub const RULES: &[RtkRule] = &[
         category: "Build",
         savings_pct: 80.0,
         subcmd_savings: &[("test", 90.0), ("testOnly", 90.0), ("compile", 75.0)],
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^bloop\s+(test|compile|run)(?:\s|$)",
+        rtk_cmd: "rtk bloop",
+        rewrite_prefixes: &["bloop"],
+        category: "Build",
+        savings_pct: 85.0,
+        subcmd_savings: &[("test", 90.0), ("compile", 65.0)],
         ..RtkRule::DEFAULT
     },
     RtkRule {

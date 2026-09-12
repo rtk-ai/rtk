@@ -1,0 +1,18 @@
+Compiling root (1 Scala source)
+Compiled root (1462ms)
+Compiling root-test (1 Scala source)
+Compiled root-test (711ms)
+Test run example.CalculatorSuite started
+==> i example.CalculatorSuite.sub returns the difference ignored 0.0s
+==> i example.CalculatorSuite.div returns the quotient ignored 0.0s
+example.CalculatorSuite: finished 0.042s
+Test run example.CalculatorSuite finished: 0 failed, 2 ignored, 2 total 0.056s
+Execution took 12ms
+4 tests, 2 passed, 2 ignored
+All tests in example.CalculatorSuite passed
+
+The test execution was successfully closed.
+===========================================================================================================================================================================
+Total duration: 12ms
+All 1 test suites passed.
+===========================================================================================================================================================================
