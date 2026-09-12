@@ -3,6 +3,8 @@
 //! Provides token-optimized alternatives to verbose `gh` commands.
 //! Focuses on extracting essential information from JSON outputs.
 
+use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
+use crate::core::args_utils;
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::CAP_LIST;
 use crate::core::utils::{ok_confirmation, resolved_command, truncate};
@@ -112,63 +114,133 @@ fn has_json_flag(args: &[String]) -> bool {
     args.iter().any(|a| a == "--json")
 }
 
-/// Extract a positional identifier (PR/issue number) from args, returning it
-/// separately from the remaining extra flags (like -R, --repo, etc.).
-/// Handles both `view 123 -R owner/repo` and `view -R owner/repo 123`.
-fn extract_identifier_and_extra_args(args: &[String]) -> Option<(String, Vec<String>)> {
-    if args.is_empty() {
-        return None;
-    }
-
-    // Known gh flags that take a value — skip these and their values
-    let flags_with_value = [
-        "-R",
-        "--repo",
-        "-q",
-        "--jq",
-        "-t",
-        "--template",
-        "--job",
-        "--attempt",
-    ];
-    let mut identifier = None;
-    let mut extra = Vec::new();
-    let mut skip_next = false;
-
-    for arg in args {
-        if skip_next {
-            extra.push(arg.clone());
-            skip_next = false;
-            continue;
-        }
-        if flags_with_value.contains(&arg.as_str()) {
-            extra.push(arg.clone());
-            skip_next = true;
-            continue;
-        }
-        if arg.starts_with('-') {
-            extra.push(arg.clone());
-            continue;
-        }
-        // First non-flag arg is the identifier (number/URL)
-        if identifier.is_none() {
-            identifier = Some(arg.clone());
-        } else {
-            extra.push(arg.clone());
-        }
-    }
-
-    identifier.map(|id| (id, extra))
+/// Every value-taking gh flag swallows a following literal `--` as its value rather than
+/// treating it as the end-of-options boundary (`gh run view --job -- 1` queries job "--"),
+/// and a value-taking shorthand is legal inside a cluster (`gh run view -vj 1`).
+fn gh_value() -> ValueSpec {
+    ValueSpec::value().claiming_dash_dash()
 }
 
-/// Like `extract_identifier_and_extra_args` but yields `(None, args.to_vec())` when no
-/// positional identifier is present, so callers can defer the "id required" decision
-/// to `gh` itself (e.g. `gh pr view` defaults to the current branch's PR).
-fn parse_optional_identifier(args: &[String]) -> (Option<String>, Vec<String>) {
-    match extract_identifier_and_extra_args(args) {
-        Some((id, extra)) => (Some(id), extra),
-        None => (None, args.to_vec()),
+/// gh's inherited flags, available on every subcommand. `--help` takes no value.
+fn inherited_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    match kind {
+        TokenKind::Long => (name == "repo").then(gh_value),
+        TokenKind::Short => (name == "R").then(gh_value),
+        _ => None,
     }
+}
+
+/// `gh pr view` and `gh issue view` share one grammar — their `--help` flag sets are identical.
+/// Each table here is the union over gh 2.46 (still distro-shipped) through 2.100, which kept
+/// adding flags to these subcommands.
+fn view_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    let own = match kind {
+        TokenKind::Long => matches!(name, "jq" | "json" | "template").then(gh_value),
+        TokenKind::Short => matches!(name, "q" | "t").then(gh_value),
+        _ => None,
+    };
+    own.or_else(|| inherited_takes_value(kind, name))
+}
+
+/// `gh pr checks`: a strict superset of the view grammar, adding `-i/--interval`.
+fn pr_checks_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    let own = match kind {
+        TokenKind::Long => (name == "interval").then(gh_value),
+        TokenKind::Short => (name == "i").then(gh_value),
+        _ => None,
+    };
+    own.or_else(|| view_takes_value(kind, name))
+}
+
+/// `gh run view`: a strict superset of the view grammar, adding `-a/--attempt` and `-j/--job`.
+/// `-v` is `--verbose` here, not a value-taking flag.
+fn run_view_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    let own = match kind {
+        TokenKind::Long => matches!(name, "attempt" | "job").then(gh_value),
+        TokenKind::Short => matches!(name, "a" | "j").then(gh_value),
+        _ => None,
+    };
+    own.or_else(|| view_takes_value(kind, name))
+}
+
+/// `gh pr comment`: `--attach`, `-b/--body` and `-F/--body-file`. It has none of the JSON
+/// flags, so it does not build on the view grammar.
+fn pr_comment_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    let own = match kind {
+        TokenKind::Long => matches!(name, "attach" | "body" | "body-file").then(gh_value),
+        TokenKind::Short => matches!(name, "b" | "F").then(gh_value),
+        _ => None,
+    };
+    own.or_else(|| inherited_takes_value(kind, name))
+}
+
+/// `gh pr edit`: nearly every flag takes a value, so a missing entry turns a label or a login
+/// into the PR number. `--remove-milestone` is the one boolean.
+fn pr_edit_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    let own = match kind {
+        TokenKind::Long => matches!(
+            name,
+            "add-assignee"
+                | "add-label"
+                | "add-project"
+                | "add-reviewer"
+                | "attach"
+                | "base"
+                | "body"
+                | "body-file"
+                | "milestone"
+                | "remove-assignee"
+                | "remove-label"
+                | "remove-project"
+                | "remove-reviewer"
+                | "title"
+        )
+        .then(gh_value),
+        TokenKind::Short => matches!(name, "B" | "b" | "F" | "m" | "t").then(gh_value),
+        _ => None,
+    };
+    own.or_else(|| inherited_takes_value(kind, name))
+}
+
+/// Splits `args` into the PR/issue/run identifier — the first free positional under
+/// `takes_value` — and everything else, verbatim and in order. `gh` keeps reading positionals
+/// past `--` (`gh pr view -- 42` views PR 42), so the search reaches past the boundary, but only
+/// while the boundary escapes a lone token that is not itself flag-shaped.
+fn split_identifier(
+    args: &[String],
+    takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
+) -> (Option<String>, Vec<String>) {
+    let tokens = arg_tokenizer::tokenize_grammar(args, takes_value, Dialect::Posix);
+
+    // Re-emitting the identifier in front of the `--` unescapes it along with whatever else
+    // trailed it, so reach past the boundary only where that is a no-op: one token, still read as
+    // a positional once unescaped. Anything else gh rejects on arity whatever rtk sends.
+    let searchable = match arg_tokenizer::dashdash_index(&tokens) {
+        Some(index) if !escapes_a_bare_positional(args, &tokens[index + 1..]) => &tokens[..index],
+        _ => &tokens[..],
+    };
+
+    let id_index = searchable
+        .iter()
+        .find(|t| t.is_free_positional())
+        .map(|t| t.source_index);
+    let extra = args
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| Some(*i) != id_index)
+        .map(|(_, arg)| arg.clone())
+        .collect();
+    (id_index.map(|i| args[i].clone()), extra)
+}
+
+/// Whether `escaped`, the tokens behind a `--`, is a single argument that stays a positional once
+/// the boundary no longer shields it.
+fn escapes_a_bare_positional(args: &[String], escaped: &[arg_tokenizer::Token<'_>]) -> bool {
+    let [only] = escaped else { return false };
+    let i = only.source_index;
+    arg_tokenizer::tokenize(&args[i..=i])
+        .first()
+        .is_some_and(|t| t.kind == TokenKind::Positional)
 }
 
 fn run_gh_json<F>(cmd: Command, label: &str, filter_fn: F) -> Result<i32>
@@ -190,6 +262,29 @@ where
 }
 
 pub fn run(subcommand: &str, args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
+    // clap carves `subcommand` out of the same trailing region as `args`, so the stripped `--`
+    // has to be restored over the whole region — over `args` alone it lands one token off.
+    let mut region: Vec<String> = Vec::with_capacity(args.len() + 1);
+    region.push(subcommand.to_string());
+    region.extend_from_slice(args);
+    let mut region = args_utils::restore_double_dash(&region);
+
+    // Only rtk's own terminator reaches the head of that region — trailing_var_arg keeps every
+    // later `--` — and gh rejects one it never got: `gh -- pr view` and `gh api -- r --jq .n`.
+    let rtk_terminator = arg_tokenizer::tokenize(&region)
+        .into_iter()
+        .find(|t| t.kind == TokenKind::DashDash && t.source_index <= 1)
+        .map(|t| t.source_index);
+    if let Some(index) = rtk_terminator {
+        region.remove(index);
+    }
+
+    // A second `--` still ahead of the subcommand leaves nothing to dispatch on: forward the
+    // region verbatim and let gh answer.
+    let Some((subcommand, args)) = split_gh_region(&region) else {
+        return run_passthrough_with_extra("gh", &[], &region);
+    };
+
     // When user explicitly passes --json, they want raw gh JSON output, not RTK filtering
     if has_json_flag(args) {
         return run_passthrough("gh", subcommand, args);
@@ -208,6 +303,18 @@ pub fn run(subcommand: &str, args: &[String], verbose: u8, ultra_compact: bool) 
     }
 }
 
+/// Splits a restored `gh` region back into subcommand and remainder, the way clap did before the
+/// `--` came back: a leading token that is neither a flag nor the boundary.
+fn split_gh_region(region: &[String]) -> Option<(&str, &[String])> {
+    let tokens = arg_tokenizer::tokenize(region);
+    match tokens.first() {
+        Some(token) if token.kind == TokenKind::Positional => {
+            Some((region[0].as_str(), &region[1..]))
+        }
+        _ => None,
+    }
+}
+
 fn run_pr(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
     if args.is_empty() {
         return run_passthrough("gh", "pr", args);
@@ -221,8 +328,8 @@ fn run_pr(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
         "create" => pr_create(&args[1..], verbose),
         "merge" => pr_merge(&args[1..], verbose),
         "diff" => pr_diff(&args[1..], verbose),
-        "comment" => pr_action("commented", args, verbose),
-        "edit" => pr_action("edited", args, verbose),
+        "comment" => pr_action("commented", args, verbose, &pr_comment_takes_value),
+        "edit" => pr_action("edited", args, verbose, &pr_edit_takes_value),
         _ => run_passthrough("gh", "pr", args),
     }
 }
@@ -329,7 +436,7 @@ fn pr_status_json_fields() -> &'static str {
 
 fn view_pr(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
     // `gh pr view` without an identifier defaults to the PR for the current branch.
-    let (pr_number_opt, extra_args) = parse_optional_identifier(args);
+    let (pr_number_opt, extra_args) = split_identifier(args, &view_takes_value);
     if should_passthrough_pr_view(&extra_args) {
         let mut base: Vec<&str> = vec!["pr", "view"];
         if let Some(id) = pr_number_opt.as_deref() {
@@ -444,7 +551,7 @@ fn format_pr_view(json: &Value, ultra_compact: bool) -> String {
 
 fn pr_checks(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<i32> {
     // `gh pr checks` without an identifier defaults to the PR for the current branch.
-    let (pr_number_opt, extra_args) = parse_optional_identifier(args);
+    let (pr_number_opt, extra_args) = split_identifier(args, &pr_checks_takes_value);
     let mut cmd = resolved_command("gh");
     cmd.args(["pr", "checks"]);
     if let Some(id) = pr_number_opt.as_deref() {
@@ -645,7 +752,7 @@ fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
 
 fn view_issue(args: &[String], _verbose: u8) -> Result<i32> {
     // Let gh emit its own error message when the identifier is missing rather than pre-rejecting.
-    let (issue_number_opt, extra_args) = parse_optional_identifier(args);
+    let (issue_number_opt, extra_args) = split_identifier(args, &view_takes_value);
     if should_passthrough_issue_view(&extra_args) {
         let mut base: Vec<&str> = vec!["issue", "view"];
         if let Some(id) = issue_number_opt.as_deref() {
@@ -779,7 +886,7 @@ fn should_passthrough_run_view(extra_args: &[String]) -> bool {
 
 fn view_run(args: &[String], _verbose: u8) -> Result<i32> {
     // `gh run view` without an identifier opens an interactive picker — defer to gh.
-    let (run_id_opt, extra_args) = parse_optional_identifier(args);
+    let (run_id_opt, extra_args) = split_identifier(args, &run_view_takes_value);
     if should_passthrough_run_view(&extra_args) {
         let mut base: Vec<&str> = vec!["run", "view"];
         if let Some(id) = run_id_opt.as_deref() {
@@ -962,13 +1069,26 @@ fn pr_diff(args: &[String], _verbose: u8) -> Result<i32> {
     )
 }
 
-fn pr_action(action: &str, args: &[String], _verbose: u8) -> Result<i32> {
+/// The `#<number>` detail of a `gh pr comment`/`gh pr edit` confirmation line. Empty when the
+/// user gave no identifier and let gh resolve the current branch's PR.
+fn action_target(
+    args: &[String],
+    takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
+) -> String {
+    match split_identifier(args, takes_value).0 {
+        Some(id) => format!("#{}", id),
+        None => String::new(),
+    }
+}
+
+fn pr_action(
+    action: &str,
+    args: &[String],
+    _verbose: u8,
+    takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
+) -> Result<i32> {
     let subcmd = &args[0];
-    let pr_num = args[1..]
-        .iter()
-        .find(|a| !a.starts_with('-'))
-        .map(|s| format!("#{}", s))
-        .unwrap_or_default();
+    let pr_num = action_target(&args[1..], takes_value);
     let mut cmd = resolved_command("gh");
     cmd.arg("pr");
     for arg in args {
@@ -1075,86 +1195,60 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_identifier_simple() {
+    fn test_split_identifier_simple() {
         let args: Vec<String> = vec!["123".into()];
-        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
-        assert_eq!(id, "123");
+        let (id, extra) = split_identifier(&args, &view_takes_value);
+        assert_eq!(id.as_deref(), Some("123"));
         assert!(extra.is_empty());
     }
 
     #[test]
-    fn test_extract_identifier_with_repo_flag_after() {
+    fn test_split_identifier_with_repo_flag_after() {
         // gh issue view 185 -R rtk-ai/rtk
         let args: Vec<String> = vec!["185".into(), "-R".into(), "rtk-ai/rtk".into()];
-        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
-        assert_eq!(id, "185");
+        let (id, extra) = split_identifier(&args, &view_takes_value);
+        assert_eq!(id.as_deref(), Some("185"));
         assert_eq!(extra, vec!["-R", "rtk-ai/rtk"]);
     }
 
     #[test]
-    fn test_extract_identifier_with_repo_flag_before() {
+    fn test_split_identifier_with_repo_flag_before() {
         // gh issue view -R rtk-ai/rtk 185
         let args: Vec<String> = vec!["-R".into(), "rtk-ai/rtk".into(), "185".into()];
-        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
-        assert_eq!(id, "185");
+        let (id, extra) = split_identifier(&args, &view_takes_value);
+        assert_eq!(id.as_deref(), Some("185"));
         assert_eq!(extra, vec!["-R", "rtk-ai/rtk"]);
     }
 
     #[test]
-    fn test_extract_identifier_with_long_repo_flag() {
+    fn test_split_identifier_with_long_repo_flag() {
         let args: Vec<String> = vec!["42".into(), "--repo".into(), "owner/repo".into()];
-        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
-        assert_eq!(id, "42");
+        let (id, extra) = split_identifier(&args, &view_takes_value);
+        assert_eq!(id.as_deref(), Some("42"));
         assert_eq!(extra, vec!["--repo", "owner/repo"]);
     }
 
     #[test]
-    fn test_extract_identifier_empty() {
-        let args: Vec<String> = vec![];
-        assert!(extract_identifier_and_extra_args(&args).is_none());
-    }
-
-    #[test]
-    fn test_extract_identifier_only_flags() {
-        // No positional identifier, only flags
-        let args: Vec<String> = vec!["-R".into(), "rtk-ai/rtk".into()];
-        assert!(extract_identifier_and_extra_args(&args).is_none());
-    }
-
-    // --- parse_optional_identifier tests ---
-
-    #[test]
-    fn test_parse_optional_identifier_empty_yields_no_id() {
-        // `gh pr view` (no args) must surface as (None, []) so the caller
-        // hands the request to gh, which resolves the current branch's PR.
-        let (id, extra) = parse_optional_identifier(&[]);
+    fn test_split_identifier_empty() {
+        let (id, extra) = split_identifier(&[], &view_takes_value);
         assert!(id.is_none());
         assert!(extra.is_empty());
     }
 
     #[test]
-    fn test_parse_optional_identifier_only_flags_preserves_flags() {
-        // Regression: `gh pr view -R rtk-ai/rtk` previously triggered
-        // "PR number required". Now flags must round-trip into `extra`.
+    fn test_split_identifier_only_flags() {
+        // Regression: `gh pr view -R rtk-ai/rtk` previously triggered "PR number required".
         let args: Vec<String> = vec!["-R".into(), "rtk-ai/rtk".into()];
-        let (id, extra) = parse_optional_identifier(&args);
+        let (id, extra) = split_identifier(&args, &view_takes_value);
         assert!(id.is_none());
         assert_eq!(extra, vec!["-R", "rtk-ai/rtk"]);
     }
 
     #[test]
-    fn test_parse_optional_identifier_with_id_matches_extract() {
-        let args: Vec<String> = vec!["-R".into(), "rtk-ai/rtk".into(), "42".into()];
-        let (id, extra) = parse_optional_identifier(&args);
-        assert_eq!(id.as_deref(), Some("42"));
-        assert_eq!(extra, vec!["-R", "rtk-ai/rtk"]);
-    }
-
-    #[test]
-    fn test_extract_identifier_with_web_flag() {
+    fn test_split_identifier_with_web_flag() {
         let args: Vec<String> = vec!["123".into(), "--web".into()];
-        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
-        assert_eq!(id, "123");
+        let (id, extra) = split_identifier(&args, &view_takes_value);
+        assert_eq!(id.as_deref(), Some("123"));
         assert_eq!(extra, vec!["--web"]);
     }
 
@@ -1202,25 +1296,25 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_identifier_with_job_flag_after() {
+    fn test_split_identifier_with_job_flag_after() {
         // gh run view 12345 --job 67890
         let args: Vec<String> = vec!["12345".into(), "--job".into(), "67890".into()];
-        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
-        assert_eq!(id, "12345");
+        let (id, extra) = split_identifier(&args, &run_view_takes_value);
+        assert_eq!(id.as_deref(), Some("12345"));
         assert_eq!(extra, vec!["--job", "67890"]);
     }
 
     #[test]
-    fn test_extract_identifier_with_job_flag_before() {
+    fn test_split_identifier_with_job_flag_before() {
         // gh run view --job 67890 12345
         let args: Vec<String> = vec!["--job".into(), "67890".into(), "12345".into()];
-        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
-        assert_eq!(id, "12345");
+        let (id, extra) = split_identifier(&args, &run_view_takes_value);
+        assert_eq!(id.as_deref(), Some("12345"));
         assert_eq!(extra, vec!["--job", "67890"]);
     }
 
     #[test]
-    fn test_extract_identifier_with_job_and_log_failed() {
+    fn test_split_identifier_with_job_and_log_failed() {
         // gh run view --log-failed --job 67890 12345
         let args: Vec<String> = vec![
             "--log-failed".into(),
@@ -1228,18 +1322,115 @@ mod tests {
             "67890".into(),
             "12345".into(),
         ];
-        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
-        assert_eq!(id, "12345");
+        let (id, extra) = split_identifier(&args, &run_view_takes_value);
+        assert_eq!(id.as_deref(), Some("12345"));
         assert_eq!(extra, vec!["--log-failed", "--job", "67890"]);
     }
 
     #[test]
-    fn test_extract_identifier_with_attempt_flag() {
+    fn test_split_identifier_with_attempt_flag() {
         // gh run view 12345 --attempt 3
         let args: Vec<String> = vec!["12345".into(), "--attempt".into(), "3".into()];
-        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
-        assert_eq!(id, "12345");
+        let (id, extra) = split_identifier(&args, &run_view_takes_value);
+        assert_eq!(id.as_deref(), Some("12345"));
         assert_eq!(extra, vec!["--attempt", "3"]);
+    }
+
+    // --- regressions: a flag's value is never the identifier ---
+
+    #[test]
+    fn test_pr_checks_interval_value_is_not_the_pr_number() {
+        // gh pr checks -i 30 / --interval 30
+        for flag in ["-i", "--interval"] {
+            let args: Vec<String> = vec![flag.into(), "30".into()];
+            let (id, extra) = split_identifier(&args, &pr_checks_takes_value);
+            assert!(id.is_none(), "{} swallowed its value as the PR number", flag);
+            assert_eq!(extra, vec![flag, "30"]);
+        }
+    }
+
+    #[test]
+    fn test_run_view_short_job_and_attempt_values_are_not_the_run_id() {
+        // gh run view -j 12345 / -a 2
+        for (flag, value) in [("-j", "12345"), ("-a", "2")] {
+            let args: Vec<String> = vec![flag.into(), value.into()];
+            let (id, extra) = split_identifier(&args, &run_view_takes_value);
+            assert!(id.is_none(), "{} swallowed its value as the run id", flag);
+            assert_eq!(extra, vec![flag, value]);
+        }
+    }
+
+    #[test]
+    fn test_run_view_clustered_job_takes_the_next_arg() {
+        // gh run view -vj 12345 — pflag lets a value-taking shorthand sit inside a cluster.
+        let args: Vec<String> = vec!["-vj".into(), "12345".into()];
+        let (id, _) = split_identifier(&args, &run_view_takes_value);
+        assert!(id.is_none());
+    }
+
+    #[test]
+    fn test_pr_checks_inherits_the_json_flags() {
+        // gh 2.46's `pr checks` had no JSON flags; 2.100's has all three.
+        let args: Vec<String> = vec!["-q".into(), ".[0].name".into()];
+        let (id, _) = split_identifier(&args, &pr_checks_takes_value);
+        assert!(id.is_none());
+    }
+
+    #[test]
+    fn test_pr_action_attach_value_is_not_the_pr_number() {
+        let args: Vec<String> = vec!["--attach".into(), "shot.png#alt".into()];
+        for takes_value in [
+            &pr_comment_takes_value as &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
+            &pr_edit_takes_value,
+        ] {
+            assert_eq!(action_target(&args, takes_value), "");
+        }
+    }
+
+    #[test]
+    fn test_view_identifier_past_double_dash() {
+        // gh pr view -- 42 views PR 42: `--` ends flag parsing, not positional parsing.
+        let args: Vec<String> = vec!["--".into(), "42".into()];
+        let (id, extra) = split_identifier(&args, &view_takes_value);
+        assert_eq!(id.as_deref(), Some("42"));
+        assert_eq!(extra, vec!["--"]);
+    }
+
+    #[test]
+    fn test_view_jq_expression_is_not_the_identifier() {
+        // gh pr view -q .number
+        let args: Vec<String> = vec!["-q".into(), ".number".into()];
+        let (id, _) = split_identifier(&args, &view_takes_value);
+        assert!(id.is_none());
+    }
+
+    #[test]
+    fn test_pr_edit_label_is_not_the_pr_number() {
+        // gh pr edit --add-label bug previously confirmed "ok edited #bug".
+        let args: Vec<String> = vec!["--add-label".into(), "bug".into()];
+        assert_eq!(
+            ok_confirmation("edited", &action_target(&args, &pr_edit_takes_value)),
+            "ok edited"
+        );
+    }
+
+    #[test]
+    fn test_pr_edit_keeps_explicit_pr_number() {
+        let args: Vec<String> = vec!["42".into(), "--add-label".into(), "bug".into()];
+        assert_eq!(
+            ok_confirmation("edited", &action_target(&args, &pr_edit_takes_value)),
+            "ok edited #42"
+        );
+    }
+
+    #[test]
+    fn test_pr_comment_body_is_not_the_pr_number() {
+        // gh pr comment -b "hello" previously confirmed "ok commented #hello".
+        let args: Vec<String> = vec!["-b".into(), "hello".into()];
+        assert_eq!(
+            ok_confirmation("commented", &action_target(&args, &pr_comment_takes_value)),
+            "ok commented"
+        );
     }
 
     // --- should_passthrough_pr_view tests ---
