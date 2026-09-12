@@ -35,19 +35,26 @@ jobs:
         id: tag
         run: |
           LATEST_TAG=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | grep -v '-' | head -1)
-          if [ -z "$LATEST_TAG" ]; then
-            echo "::error::No stable release tag found"
-            exit 1
+          if [ -n "$LATEST_TAG" ]; then
+            LATEST_VERSION="${LATEST_TAG#v}"
+            COMMITS_RANGE="${LATEST_TAG}..HEAD"
+            echo "Latest release: $LATEST_TAG"
+          else
+            LATEST_VERSION=$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)
+            if [ -z "$LATEST_VERSION" ]; then
+              echo "::error::Could not determine the initial version from Cargo.toml"
+              exit 1
+            fi
+            COMMITS_RANGE="HEAD"
+            echo "::notice::No stable release tag found; using Cargo.toml version $LATEST_VERSION"
           fi
-          LATEST_VERSION="${LATEST_TAG#v}"
-          echo "Latest release: $LATEST_TAG"
 
           # ── Analyse conventional commits since that tag ──
-          COMMITS=$(git log "${LATEST_TAG}..HEAD" --format="%s")
+          COMMITS=$(git log "$COMMITS_RANGE" --format="%s")
           HAS_BREAKING=$(echo "$COMMITS" | grep -cE '^[a-z]+(\(.+\))?!:' || true)
           HAS_FEAT=$(echo "$COMMITS"    | grep -cE '^feat(\(.+\))?:'     || true)
           HAS_FIX=$(echo "$COMMITS"     | grep -cE '^fix(\(.+\))?:'      || true)
-          echo "Commits since ${LATEST_TAG} — breaking=$HAS_BREAKING feat=$HAS_FEAT fix=$HAS_FIX"
+          echo "Commits since ${LATEST_TAG:-initial release} — breaking=$HAS_BREAKING feat=$HAS_FEAT fix=$HAS_FIX"
 
           # ── Compute next version (matches release-please observed behaviour) ──
           # Pre-1.0 with bump-minor-pre-major: breaking → minor, feat → minor, fix → patch
