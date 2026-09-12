@@ -48,6 +48,14 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         cmd.arg("--format=json");
     }
 
+    // Pint only includes `appliedFixers`/`fixers` in verbose mode; without -v
+    // the JSON lists file names with no rule data, so the filter has nothing
+    // to report. Inject it unless the caller already asked for a verbosity
+    // level, so `rtk pint -vv` etc. still passes through untouched.
+    if !has_format && !is_utility_cmd && !has_verbose_flag(args) {
+        cmd.arg("-v");
+    }
+
     for arg in args {
         cmd.arg(arg);
     }
@@ -71,6 +79,10 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         filter,
         runner::RunOptions::stdout_only().tee("pint"),
     )
+}
+
+fn has_verbose_flag(args: &[String]) -> bool {
+    args.iter().any(|a| matches!(a.as_str(), "-v" | "-vv" | "-vvv"))
 }
 
 pub(crate) fn filter_pint_json(output: &str) -> String {
@@ -217,6 +229,38 @@ mod tests {
         let result = filter_pint_json(json);
         assert!(result.contains("0 changes in 1 files"), "got: {}", result);
         assert!(result.contains("x.php (0)"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_pint_non_verbose_real_output_loses_rule_data() {
+        // Real `pint --format=json` output WITHOUT -v: Pint only includes
+        // fixers when run verbosely, so files that were changed still show
+        // up with no rule names. This is the exact shape that motivated
+        // injecting -v in run() — without it, every real invocation of
+        // `rtk pint` reports "0 changes" even when files were reformatted.
+        let json = include_str!("../../../tests/fixtures/pint_json_non_verbose.txt");
+        let result = filter_pint_json(json);
+        assert!(result.contains("0 changes in 2 files"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_pint_verbose_real_output_preserves_rule_data() {
+        // Same run with -v: fixers are populated, so rtk can actually report
+        // which rules fired per file.
+        let json = include_str!("../../../tests/fixtures/pint_json_verbose.txt");
+        let result = filter_pint_json(json);
+        assert!(result.contains("changes in 2 files"), "got: {}", result);
+        assert!(!result.contains("0 changes in 2 files"), "got: {}", result);
+        assert!(result.contains("no_unused_imports"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_has_verbose_flag() {
+        assert!(has_verbose_flag(&["-v".to_string()]));
+        assert!(has_verbose_flag(&["-vv".to_string()]));
+        assert!(has_verbose_flag(&["-vvv".to_string()]));
+        assert!(!has_verbose_flag(&["--dirty".to_string()]));
+        assert!(!has_verbose_flag(&[]));
     }
 
     #[test]
