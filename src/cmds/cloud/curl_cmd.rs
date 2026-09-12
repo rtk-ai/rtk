@@ -23,14 +23,16 @@ const MAX_RESPONSE_SIZE: usize = 500;
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
     let mut cmd = resolved_command("curl");
-    cmd.arg("-s"); // Silent mode (no progress bar)
+    // -s silences the progress bar but ALSO suppresses error messages; -S
+    // re-enables them so a failure still says why (DNS, refused, TLS, ...).
+    cmd.arg("-sS");
 
     for arg in args {
         cmd.arg(arg);
     }
 
     if verbose > 0 {
-        eprintln!("Running: curl -s {}", args.join(" "));
+        eprintln!("Running: curl -sS {}", args.join(" "));
     }
 
     // Capture stdout as raw bytes (not UTF-8 String) so binary downloads
