@@ -7,6 +7,7 @@ use anyhow::Result;
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = package_manager_exec("prettier");
+    let mode = PrettierMode::from_args(args);
 
     for arg in args {
         cmd.arg(arg);
@@ -16,17 +17,62 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: prettier {}", args.join(" "));
     }
 
-    runner::run_filtered(
+    let args_display = args.join(" ");
+    if mode == PrettierMode::Passthrough {
+        return runner::run(
+            cmd,
+            "prettier",
+            &args_display,
+            runner::RunMode::Passthrough,
+            RunOptions::default(),
+        );
+    }
+
+    runner::run_filtered_with_exit(
         cmd,
         "prettier",
-        &args.join(" "),
-        filter_prettier_output,
-        RunOptions::stdout_only(),
+        &args_display,
+        move |output, exit_code| filter_prettier_invocation(output, exit_code, mode),
+        RunOptions::default(),
     )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrettierMode {
+    Check,
+    ListDifferent,
+    Passthrough,
+}
+
+impl PrettierMode {
+    fn from_args(args: &[String]) -> Self {
+        if args.iter().any(|arg| arg == "--check" || arg == "-c") {
+            Self::Check
+        } else if args
+            .iter()
+            .any(|arg| arg == "--list-different" || arg == "-l")
+        {
+            Self::ListDifferent
+        } else {
+            Self::Passthrough
+        }
+    }
+}
+
+fn filter_prettier_invocation(output: &str, exit_code: i32, mode: PrettierMode) -> String {
+    match mode {
+        PrettierMode::Check => filter_prettier_check_output(output, exit_code),
+        PrettierMode::ListDifferent => filter_prettier_list_different_output(output, exit_code),
+        PrettierMode::Passthrough => output.trim().to_string(),
+    }
 }
 
 /// Filter Prettier output - show only files that need formatting
 pub fn filter_prettier_output(output: &str) -> String {
+    filter_prettier_check_output(output, 0)
+}
+
+fn filter_prettier_check_output(output: &str, exit_code: i32) -> String {
     // #221: empty or whitespace-only output means prettier didn't run
     if output.trim().is_empty() {
         return "Error: prettier produced no output".to_string();
@@ -38,6 +84,7 @@ pub fn filter_prettier_output(output: &str) -> String {
 
     for line in output.lines() {
         let trimmed = line.trim();
+        let path = trimmed.strip_prefix("[warn] ").unwrap_or(trimmed);
 
         // Detect check mode vs write mode
         if trimmed.contains("Checking formatting") {
@@ -49,18 +96,10 @@ pub fn filter_prettier_output(output: &str) -> String {
             && !trimmed.starts_with("Checking")
             && !trimmed.starts_with("All matched")
             && !trimmed.starts_with("Code style")
-            && !trimmed.contains("[warn]")
             && !trimmed.contains("[error]")
-            && (trimmed.ends_with(".ts")
-                || trimmed.ends_with(".tsx")
-                || trimmed.ends_with(".js")
-                || trimmed.ends_with(".jsx")
-                || trimmed.ends_with(".json")
-                || trimmed.ends_with(".md")
-                || trimmed.ends_with(".css")
-                || trimmed.ends_with(".scss"))
+            && has_prettier_extension(path)
         {
-            files_to_format.push(trimmed.to_string());
+            files_to_format.push(path.to_string());
         }
 
         // Count total files checked
@@ -74,8 +113,13 @@ pub fn filter_prettier_output(output: &str) -> String {
     }
 
     // Check if all files are formatted
-    if files_to_format.is_empty() && output.contains("All matched files use Prettier") {
+    if exit_code == 0 && files_to_format.is_empty() && output.contains("All matched files use Prettier")
+    {
         return "Prettier: All files formatted correctly".to_string();
+    }
+
+    if exit_code != 0 && files_to_format.is_empty() {
+        return output.trim().to_string();
     }
 
     // Check if files were written (write mode)
@@ -88,7 +132,7 @@ pub fn filter_prettier_output(output: &str) -> String {
     if is_check_mode {
         // Check mode: show files that need formatting
         if files_to_format.is_empty() {
-            result.push_str("Prettier: All files formatted correctly\n");
+            result.push_str(output.trim());
         } else {
             result.push_str(&format!(
                 "Prettier: {} files need formatting\n",
@@ -125,6 +169,26 @@ pub fn filter_prettier_output(output: &str) -> String {
     result.trim().to_string()
 }
 
+fn filter_prettier_list_different_output(output: &str, exit_code: i32) -> String {
+    if output.trim().is_empty() {
+        return if exit_code == 0 {
+            "Prettier: All files formatted correctly".to_string()
+        } else {
+            "Error: prettier produced no output".to_string()
+        };
+    }
+
+    filter_prettier_check_output(output, exit_code)
+}
+
+fn has_prettier_extension(path: &str) -> bool {
+    [
+        ".ts", ".tsx", ".js", ".jsx", ".json", ".md", ".css", ".scss",
+    ]
+    .iter()
+    .any(|suffix| path.ends_with(suffix))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,6 +220,21 @@ Code style issues found in the above file(s). Forgot to run Prettier?
     }
 
     #[test]
+    fn test_filter_warn_prefixed_files_need_formatting() {
+        let output = r#"
+Checking formatting...
+[warn] src/components/ui/button.tsx
+[warn] src/lib/auth/session.ts
+[warn] Code style issues found in 2 files. Forgot to run Prettier?
+        "#;
+        let result = filter_prettier_check_output(output, 1);
+        assert!(result.contains("2 files need formatting"));
+        assert!(result.contains("button.tsx"));
+        assert!(result.contains("session.ts"));
+        assert!(!result.contains("All files formatted"));
+    }
+
+    #[test]
     fn test_filter_many_files() {
         let mut output = String::from("Checking formatting...\n");
         for i in 0..15 {
@@ -180,5 +259,44 @@ Code style issues found in the above file(s). Forgot to run Prettier?
         let result = filter_prettier_output("   \n\n  ");
         assert!(result.contains("Error"));
         assert!(!result.contains("All files formatted"));
+    }
+
+    #[test]
+    fn test_non_check_invocation_passes_output_through() {
+        let result = filter_prettier_invocation("3.8.4\n", 0, PrettierMode::Passthrough);
+        assert_eq!(result, "3.8.4");
+    }
+
+    #[test]
+    fn test_check_failure_without_files_passes_error_through() {
+        let output = r#"[ERR_PNPM_NO_PKG_MANIFEST] No package.json found
+pnpm: Command failed with exit code 1"#;
+        let result = filter_prettier_invocation(output, 1, PrettierMode::Check);
+        assert!(result.contains("ERR_PNPM_NO_PKG_MANIFEST"));
+        assert!(!result.contains("All files formatted"));
+    }
+
+    #[test]
+    fn test_list_different_clean_empty_output_is_success() {
+        let result = filter_prettier_invocation("", 0, PrettierMode::ListDifferent);
+        assert_eq!(result, "Prettier: All files formatted correctly");
+    }
+
+    #[test]
+    fn test_mode_from_args() {
+        let check_args = vec!["--check".to_string(), "src/**/*.tsx".to_string()];
+        assert_eq!(PrettierMode::from_args(&check_args), PrettierMode::Check);
+
+        let list_args = vec!["--list-different".to_string(), ".".to_string()];
+        assert_eq!(
+            PrettierMode::from_args(&list_args),
+            PrettierMode::ListDifferent
+        );
+
+        let version_args = vec!["--version".to_string()];
+        assert_eq!(
+            PrettierMode::from_args(&version_args),
+            PrettierMode::Passthrough
+        );
     }
 }
