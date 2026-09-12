@@ -156,6 +156,7 @@ If a command isn't in the list above, RTK runs it through passthrough — the ou
 
 ```bash
 rtk proxy make install    # runs make install, tracks usage, no filtering
+rtk proxy "GOFLAGS=-mod=mod go test ./... 2>&1 | tail -20"   # env assignments and shell syntax run as written
 ```
 
 To check which commands were missed opportunities: `rtk discover`.
