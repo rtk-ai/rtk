@@ -124,44 +124,32 @@ class RtkRewritePluginTest(unittest.TestCase):
 
         which.assert_called_once_with("rtk")
 
-    def test_rewrite_success_mutates_same_terminal_args_dict(self):
-        module, callback = self.load_callback()
-        args = {"command": "git status"}
+    def test_rewrite_returns_modify_directive_without_mutating_terminal_args(self):
+        for returncode in (0, 3):
+            with self.subTest(returncode=returncode):
+                module, callback = self.load_callback()
+                args = {"command": "git status", "workdir": "/repo", "timeout": 30}
 
-        with mock.patch.object(
-            module.subprocess,
-            "run",
-            return_value=FakeCompletedProcess(stdout="rtk git status\n"),
-        ):
-            callback(tool_name="terminal", args=args)
+                with mock.patch.object(
+                    module.subprocess,
+                    "run",
+                    return_value=FakeCompletedProcess(
+                        returncode=returncode, stdout="rtk git status\n"
+                    ),
+                ):
+                    directive = callback(tool_name="terminal", args=args)
 
-        self.assertEqual({"command": "rtk git status"}, args)
-
-    def test_rewrite_returncode_three_mutates_same_terminal_args_dict(self):
-        module, callback = self.load_callback()
-        args = {"command": "git status"}
-
-        with mock.patch.object(
-            module.subprocess,
-            "run",
-            return_value=FakeCompletedProcess(returncode=3, stdout="rtk git status\n"),
-        ):
-            callback(tool_name="terminal", args=args)
-
-        self.assertEqual({"command": "rtk git status"}, args)
-
-    def test_rewrite_returncode_zero_mutates_when_rewrite_changes_command(self):
-        module, callback = self.load_callback()
-        args = {"command": "git status"}
-
-        with mock.patch.object(
-            module.subprocess,
-            "run",
-            return_value=FakeCompletedProcess(stdout="rtk git status\n"),
-        ):
-            callback(tool_name="terminal", args=args)
-
-        self.assertEqual({"command": "rtk git status"}, args)
+                self.assertEqual(
+                    {
+                        "action": "modify",
+                        "args": {"command": "rtk git status", "workdir": "/repo", "timeout": 30},
+                    },
+                    directive,
+                )
+                self.assertIsNot(args, directive["args"])
+                self.assertEqual(
+                    {"command": "git status", "workdir": "/repo", "timeout": 30}, args
+                )
 
     def test_expected_passthrough_returncodes_do_not_warn_or_mutate(self):
         for returncode in (1, 2):
@@ -179,7 +167,7 @@ class RtkRewritePluginTest(unittest.TestCase):
                     ),
                 ):
                     with mock.patch.object(module.sys, "stderr", new_callable=io.StringIO) as stderr:
-                        callback(tool_name="terminal", args=args)
+                        self.assertIsNone(callback(tool_name="terminal", args=args))
 
                 self.assertEqual({"command": "git status"}, args)
                 self.assertEqual("", stderr.getvalue())
@@ -194,7 +182,7 @@ class RtkRewritePluginTest(unittest.TestCase):
             return_value=FakeCompletedProcess(returncode=4, stdout="rtk git status\n", stderr="bad news"),
         ):
             with mock.patch.object(module.sys, "stderr", new_callable=io.StringIO) as stderr:
-                callback(tool_name="terminal", args=args)
+                self.assertIsNone(callback(tool_name="terminal", args=args))
 
         self.assertEqual({"command": "git status"}, args)
         self.assertEqual("rtk: hermes plugin warning: rtk rewrite failed with exit 4: bad news\n", stderr.getvalue())
@@ -206,7 +194,7 @@ class RtkRewritePluginTest(unittest.TestCase):
         timeout = subprocess.TimeoutExpired(cmd=["rtk", "rewrite", "git status"], timeout=2)
         with mock.patch.object(module.subprocess, "run", side_effect=timeout):
             with mock.patch.object(module.sys, "stderr", new_callable=io.StringIO) as stderr:
-                callback(tool_name="terminal", args=args)
+                self.assertIsNone(callback(tool_name="terminal", args=args))
 
         self.assertEqual({"command": "git status"}, args)
         self.assertEqual("rtk: hermes plugin warning: rtk rewrite timed out\n", stderr.getvalue())
@@ -217,7 +205,7 @@ class RtkRewritePluginTest(unittest.TestCase):
 
         with mock.patch.object(module.subprocess, "run", side_effect=FileNotFoundError):
             with mock.patch.object(module.sys, "stderr", new_callable=io.StringIO) as stderr:
-                callback(tool_name="terminal", args=args)
+                self.assertIsNone(callback(tool_name="terminal", args=args))
 
         self.assertEqual({"command": "git status"}, args)
         self.assertIn("rtk: hermes plugin warning:", stderr.getvalue())
@@ -228,7 +216,7 @@ class RtkRewritePluginTest(unittest.TestCase):
 
         with mock.patch.object(module.subprocess, "run", side_effect=RuntimeError("boom")):
             with mock.patch.object(module.sys, "stderr", new_callable=io.StringIO) as stderr:
-                callback(tool_name="terminal", args=args)
+                self.assertIsNone(callback(tool_name="terminal", args=args))
 
         self.assertEqual({"command": "git status"}, args)
         self.assertEqual("rtk: hermes plugin warning: boom\n", stderr.getvalue())
@@ -238,7 +226,7 @@ class RtkRewritePluginTest(unittest.TestCase):
         args = {"command": "git status"}
 
         with mock.patch.object(module.subprocess, "run") as run:
-            callback(tool_name="read_file", args=args)
+            self.assertIsNone(callback(tool_name="read_file", args=args))
 
         run.assert_not_called()
         self.assertEqual({"command": "git status"}, args)
@@ -248,7 +236,7 @@ class RtkRewritePluginTest(unittest.TestCase):
         args = {}
 
         with mock.patch.object(module.subprocess, "run") as run:
-            callback(tool_name="terminal", args=args)
+            self.assertIsNone(callback(tool_name="terminal", args=args))
 
         run.assert_not_called()
         self.assertEqual({}, args)
@@ -258,7 +246,7 @@ class RtkRewritePluginTest(unittest.TestCase):
         args = {"command": ["git", "status"]}
 
         with mock.patch.object(module.subprocess, "run") as run:
-            callback(tool_name="terminal", args=args)
+            self.assertIsNone(callback(tool_name="terminal", args=args))
 
         run.assert_not_called()
         self.assertEqual({"command": ["git", "status"]}, args)
@@ -270,7 +258,7 @@ class RtkRewritePluginTest(unittest.TestCase):
                 args = {"command": command}
 
                 with mock.patch.object(module.subprocess, "run") as run:
-                    callback(tool_name="terminal", args=args)
+                    self.assertIsNone(callback(tool_name="terminal", args=args))
 
                 run.assert_not_called()
                 self.assertEqual({"command": command}, args)
@@ -286,7 +274,7 @@ class RtkRewritePluginTest(unittest.TestCase):
                     "run",
                     return_value=FakeCompletedProcess(stdout=stdout),
                 ):
-                    callback(tool_name="terminal", args=args)
+                    self.assertIsNone(callback(tool_name="terminal", args=args))
 
                 self.assertEqual({"command": "git status"}, args)
 
@@ -343,9 +331,12 @@ class InstalledRtkRewritePluginTest(unittest.TestCase):
                 callback = ctx.hooks["pre_tool_call"]
 
                 args = {"command": "git status"}
-                callback(tool_name="terminal", args=args)
+                directive = callback(tool_name="terminal", args=args)
 
-            self.assertEqual({"command": "rtk git status"}, args)
+            self.assertEqual(
+                {"action": "modify", "args": {"command": "rtk git status"}}, directive
+            )
+            self.assertEqual({"command": "git status"}, args)
 
 
 if __name__ == "__main__":
