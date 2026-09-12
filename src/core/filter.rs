@@ -249,9 +249,23 @@ impl FilterStrategy for AggressiveFilter {
         let mut result = String::with_capacity(minimal.len() / 2);
         let mut brace_depth = 0;
         let mut in_impl_body = false;
+        let mut in_template_literal = false;
 
         for line in minimal.lines() {
             let trimmed = line.trim();
+            let backtick_count = line.matches('`').count();
+            let toggles_template_literal = backtick_count % 2 == 1;
+
+            if in_template_literal || toggles_template_literal {
+                result.push_str(line);
+                result.push('\n');
+
+                if toggles_template_literal {
+                    in_template_literal = !in_template_literal;
+                }
+
+                continue;
+            }
 
             // Always keep imports
             if IMPORT_PATTERN.is_match(trimmed) {
@@ -465,6 +479,61 @@ fn main() {
         let result = filter.filter(code, &Language::Rust);
         assert!(!result.contains("// This is a comment"));
         assert!(result.contains("fn main()"));
+    }
+
+    #[test]
+    fn test_aggressive_filter_preserves_multiline_template_literal() {
+        let code = r#"
+const prompt = `
+# Heading
+This line should stay even without code syntax.
+`;
+"#;
+        let filter = AggressiveFilter;
+        let result = filter.filter(code, &Language::TypeScript);
+
+        assert!(result.contains("const prompt = `"));
+        assert!(result.contains("# Heading"));
+        assert!(result.contains("This line should stay even without code syntax."));
+        assert!(result.contains("`;"));
+    }
+
+    #[test]
+    fn test_aggressive_filter_preserves_template_literal_expressions() {
+        let code = r#"
+const message = `
+Hello ${name}
+Value: ${items.map((item) => item.label).join(", ")}
+`;
+"#;
+        let filter = AggressiveFilter;
+        let result = filter.filter(code, &Language::JavaScript);
+
+        assert!(result.contains("const message = `"));
+        assert!(result.contains("Hello ${name}"));
+        assert!(result.contains("Value: ${items.map((item) => item.label).join(\", \")}"));
+        assert!(result.contains("`;"));
+    }
+
+    #[test]
+    fn test_aggressive_filter_preserves_multiple_template_literals() {
+        let code = r#"
+const first = `
+alpha
+`;
+
+const second = `
+beta
+`;
+"#;
+        let filter = AggressiveFilter;
+        let result = filter.filter(code, &Language::TypeScript);
+
+        assert!(result.contains("const first = `"));
+        assert!(result.contains("alpha"));
+        assert!(result.contains("`;"));
+        assert!(result.contains("const second = `"));
+        assert!(result.contains("beta"));
     }
 
     // --- truncation accuracy ---
