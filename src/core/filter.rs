@@ -169,15 +169,45 @@ impl FilterStrategy for MinimalFilter {
 
             // Handle block comments
             if let (Some(start), Some(end)) = (patterns.block_start, patterns.block_end) {
+                if in_block_comment {
+                    if let Some(end_idx) = line.find(end) {
+                        in_block_comment = false;
+                        let after = line[end_idx + end.len()..].trim();
+                        if !after.is_empty() {
+                            result.push_str(after);
+                            result.push('\n');
+                        }
+                    }
+                    continue;
+                }
                 if !in_docstring
                     && trimmed.contains(start)
                     && !trimmed.starts_with(patterns.doc_block_start.unwrap_or("###"))
                 {
-                    in_block_comment = true;
-                }
-                if in_block_comment {
-                    if trimmed.contains(end) {
-                        in_block_comment = false;
+                    if let Some(start_idx) = line.find(start) {
+                        let before = line[..start_idx].trim_end();
+                        let after_start = &line[start_idx + start.len()..];
+                        if let Some(end_idx) = after_start.find(end) {
+                            let after = after_start[end_idx + end.len()..].trim();
+                            if !before.is_empty() || !after.is_empty() {
+                                if !before.is_empty() {
+                                    result.push_str(before);
+                                }
+                                if !after.is_empty() {
+                                    if !before.is_empty() {
+                                        result.push(' ');
+                                    }
+                                    result.push_str(after);
+                                }
+                                result.push('\n');
+                            }
+                        } else {
+                            in_block_comment = true;
+                            if !before.is_empty() {
+                                result.push_str(before);
+                                result.push('\n');
+                            }
+                        }
                     }
                     continue;
                 }
@@ -543,5 +573,49 @@ fn main() {
         let input = "a\nb\nc";
         let output = smart_truncate(input, 3, &Language::Unknown);
         assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_inline_block_comment_preserves_code() {
+        let filter = MinimalFilter;
+        let input = "int x = 5; /* inline comment */\nint y = 10;\n";
+        let output = filter.filter(input, &Language::C);
+        assert!(
+            output.contains("int x = 5;"),
+            "code before inline block comment must be kept, got: {output}"
+        );
+        assert!(
+            output.contains("int y = 10;"),
+            "subsequent code must be kept"
+        );
+        assert!(
+            !output.contains("inline comment"),
+            "comment text must be stripped"
+        );
+    }
+
+    #[test]
+    fn test_multiline_block_comment_closing_preserves_code_after() {
+        let filter = MinimalFilter;
+        let input = "/* multi-line\n   comment */ int z = 3;\nint w = 4;\n";
+        let output = filter.filter(input, &Language::C);
+        assert!(
+            output.contains("int z = 3;"),
+            "code after closing */ must be kept, got: {output}"
+        );
+        assert!(
+            output.contains("int w = 4;"),
+            "subsequent code must be kept"
+        );
+    }
+
+    #[test]
+    fn test_full_line_block_comment_still_stripped() {
+        let filter = MinimalFilter;
+        let input = "int a = 1;\n/* full line comment */\nint b = 2;\n";
+        let output = filter.filter(input, &Language::C);
+        assert!(output.contains("int a = 1;"));
+        assert!(output.contains("int b = 2;"));
+        assert!(!output.contains("full line comment"));
     }
 }
