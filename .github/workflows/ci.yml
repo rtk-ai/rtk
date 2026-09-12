@@ -36,6 +36,16 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  opencode-plugin:
+    name: OpenCode plugin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.7
+      - run: bun test hooks/opencode/rtk.test.ts
+
   clippy:
     name: clippy
     needs: fmt
