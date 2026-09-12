@@ -15,16 +15,17 @@ Core infrastructure shared by all RTK command modules. Every filter, tracker, an
 
 ## TOML Filter Pipeline
 
-The TOML DSL applies 8 stages in order:
+The TOML DSL applies 9 stages in order:
 
 1. **strip_ansi**: Remove ANSI escape codes if enabled
 2. **replace**: Line-by-line regex substitutions (chainable, supports backreferences)
 3. **match_output**: Short-circuit rules (if output matches pattern, return message; `unless` field prevents swallowing errors)
 4. **strip/keep_lines**: Filter lines by regex (mutually exclusive)
 5. **truncate_lines_at**: Truncate each line to N chars (unicode-safe)
-6. **head/tail_lines**: Keep first N or last N lines (with omit message)
-7. **max_lines**: Absolute line cap applied after head/tail
-8. **on_empty**: Return message if result is empty after all stages
+6. **collapse_repeats**: Keep the first occurrence of each distinct line, append `(×N)` to repeats (opt-in, `keep_tail` lines exempt)
+7. **head/tail_lines**: Keep first N or last N lines (with omit message)
+8. **max_lines**: Absolute line cap applied after head/tail
+9. **on_empty**: Return message if result is empty after all stages
 
 Three-tier filter lookup (first match wins):
 1. `.rtk/filters.toml` (project-local, requires `rtk trust`)

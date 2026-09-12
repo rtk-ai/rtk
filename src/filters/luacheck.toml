@@ -1,0 +1,48 @@
+[filters.luacheck]
+description = "Drop luacheck's per-file OK lines, keep every diagnostic and the Total footer"
+match_command = "^luacheck\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^Checking\\s+\\S.*\\bOK\\s*$",
+  "^\\s*$",
+]
+
+[[tests.luacheck]]
+name = "clean files dropped, warnings and footer kept"
+input = """
+Checking AutoLog.lua                              OK
+Checking BuffChecker.lua                          2 warnings
+
+    BuffChecker.lua:12:11: unused variable 'ctx'
+    BuffChecker.lua:20:1: line contains trailing whitespace
+
+Checking Core.lua                                 OK
+
+Total: 2 warnings / 0 errors in 3 files
+"""
+expected = "Checking BuffChecker.lua                          2 warnings\n    BuffChecker.lua:12:11: unused variable 'ctx'\n    BuffChecker.lua:20:1: line contains trailing whitespace\nTotal: 2 warnings / 0 errors in 3 files"
+
+[[tests.luacheck]]
+name = "clean project collapses to the footer"
+input = """
+Checking a.lua                                    OK
+Checking b.lua                                    OK
+
+Total: 0 warnings / 0 errors in 2 files
+"""
+expected = "Total: 0 warnings / 0 errors in 2 files"
+
+[[tests.luacheck]]
+name = "syntax errors are kept"
+input = """
+Checking a.lua                                    OK
+Checking broken.lua                               Syntax error
+
+Total: 0 warnings / 1 error in 2 files
+"""
+expected = "Checking broken.lua                               Syntax error\nTotal: 0 warnings / 1 error in 2 files"
+
+[[tests.luacheck]]
+name = "empty input passes through"
+input = ""
+expected = ""

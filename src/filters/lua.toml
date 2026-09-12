@@ -1,0 +1,39 @@
+[filters.lua]
+description = "Collapse repeated lines in lua/luajit program output, keeping the last lines verbatim"
+match_command = "^(luajit|lua)[0-9.]*\\s+\\S"
+collapse_repeats = { keep_tail = 5 }
+
+[[tests.lua]]
+name = "repeated chatter collapses, trailing summary survives"
+input = """
+[trace] gc cycle
+[trace] gc cycle
+[trace] gc cycle
+[trace] gc cycle
+loading fixtures
+[trace] gc cycle
+[trace] gc cycle
+running suite 1
+running suite 2
+running suite 3
+
+3211 assertions, 0 failures
+"""
+expected = "[trace] gc cycle (×6)\nloading fixtures\nrunning suite 1\nrunning suite 2\nrunning suite 3\n\n3211 assertions, 0 failures"
+
+[[tests.lua]]
+name = "output without repeats is unchanged"
+input = """
+opening db
+seeding 40 rows
+running migrations
+checking indexes
+vacuuming
+done
+"""
+expected = "opening db\nseeding 40 rows\nrunning migrations\nchecking indexes\nvacuuming\ndone"
+
+[[tests.lua]]
+name = "empty input passes through"
+input = ""
+expected = ""
