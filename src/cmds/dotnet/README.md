@@ -5,5 +5,7 @@
 ## Specifics
 
 - `dotnet_cmd.rs` uses `DotnetCommands` sub-enum in main.rs
+- `dotnet ef` is routed through the Rust module because the top-level `dotnet`
+  command is already Clap-handled; TOML fallback filters never see it.
 - Internal helper modules (`dotnet_trx.rs`, `dotnet_format_report.rs`, `binlog.rs`) are only used by `dotnet_cmd.rs` -- they parse specialized .NET output formats (TRX XML, binary logs, format reports)
-- Test fixtures are in `tests/fixtures/dotnet/` (JSON and text formats)
+- Test fixtures are in `tests/fixtures/dotnet/` (JSON and text formats, plus EF CLI text output)
