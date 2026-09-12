@@ -170,7 +170,7 @@ impl FilterStrategy for MinimalFilter {
             // Handle block comments
             if let (Some(start), Some(end)) = (patterns.block_start, patterns.block_end) {
                 if !in_docstring
-                    && trimmed.contains(start)
+                    && trimmed.starts_with(start)
                     && !trimmed.starts_with(patterns.doc_block_start.unwrap_or("###"))
                 {
                     in_block_comment = true;
@@ -464,6 +464,25 @@ fn main() {
         let filter = MinimalFilter;
         let result = filter.filter(code, &Language::Rust);
         assert!(!result.contains("// This is a comment"));
+        assert!(result.contains("fn main()"));
+    }
+
+    #[test]
+    fn test_minimal_filter_preserves_comment_markers_in_code() {
+        let code = r#"
+const API: &str = "http://example.com/v1"; // endpoint
+let pattern = "/* not a comment */";
+let value = 1; /* trailing comment */
+/* single-line block comment */
+fn main() {}
+"#;
+        let filter = MinimalFilter;
+        let result = filter.filter(code, &Language::Rust);
+
+        assert!(result.contains("http://example.com/v1"));
+        assert!(result.contains("\"/* not a comment */\""));
+        assert!(result.contains("let value = 1;"));
+        assert!(!result.contains("single-line block comment"));
         assert!(result.contains("fn main()"));
     }
 
