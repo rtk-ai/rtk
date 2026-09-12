@@ -953,6 +953,8 @@ enum Commands {
 enum HookCommands {
     /// Process Claude Code PreToolUse hook (reads JSON from stdin)
     Claude,
+    /// Process Grok Build PreToolUse hook (reads JSON from stdin)
+    Grok,
     /// Process Cursor Agent hook (reads JSON from stdin)
     Cursor,
     /// Process Gemini CLI BeforeTool hook (reads JSON from stdin)
@@ -2766,6 +2768,10 @@ fn run_cli() -> Result<i32> {
         Commands::Hook { command } => match command {
             HookCommands::Claude => {
                 hooks::hook_cmd::run_claude()?;
+                0
+            }
+            HookCommands::Grok => {
+                hooks::hook_cmd::run_grok()?;
                 0
             }
             HookCommands::Cursor => {
