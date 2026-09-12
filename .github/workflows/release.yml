@@ -48,7 +48,8 @@ jobs:
             os: ubuntu-latest
             archive: tar.gz
             musl: true
-          - target: aarch64-unknown-linux-gnu
+          # Use cross for aarch64 musl so the Linux ARM binary is statically linked.
+          - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             archive: tar.gz
             cross: true
@@ -66,12 +67,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross-compilation tools
+      - name: Install cross
         if: matrix.cross
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+        run: cargo install cross --version 0.2.5 --locked
 
       - name: Install musl tools
         if: matrix.musl
@@ -79,7 +77,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
-      - name: Build
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }}
+        env:
+          RTK_TELEMETRY_URL: ${{ vars.RTK_TELEMETRY_URL }}
+          RTK_TELEMETRY_TOKEN: ${{ secrets.RTK_TELEMETRY_TOKEN }}
+
+      - name: Build (cargo)
+        if: ${{ ! matrix.cross }}
         run: cargo build --release --target ${{ matrix.target }}
         env:
           RTK_TELEMETRY_URL: ${{ vars.RTK_TELEMETRY_URL }}
@@ -290,7 +296,7 @@ jobs:
         run: |
           echo "mac_arm=$(grep aarch64-apple-darwin.tar.gz checksums.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
           echo "mac_intel=$(grep x86_64-apple-darwin.tar.gz checksums.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
-          echo "linux_arm=$(grep aarch64-unknown-linux-gnu.tar.gz checksums.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "linux_arm=$(grep aarch64-unknown-linux-musl.tar.gz checksums.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
           echo "linux_intel=$(grep x86_64-unknown-linux-musl.tar.gz checksums.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
 
       - name: Generate formula
@@ -309,7 +315,7 @@ jobs:
               url "https://github.com/rtk-ai/rtk/releases/download/TAG_PLACEHOLDER/rtk-x86_64-apple-darwin.tar.gz"
               sha256 "SHA_MAC_INTEL_PLACEHOLDER"
             elsif OS.linux? && Hardware::CPU.arm?
-              url "https://github.com/rtk-ai/rtk/releases/download/TAG_PLACEHOLDER/rtk-aarch64-unknown-linux-gnu.tar.gz"
+              url "https://github.com/rtk-ai/rtk/releases/download/TAG_PLACEHOLDER/rtk-aarch64-unknown-linux-musl.tar.gz"
               sha256 "SHA_LINUX_ARM_PLACEHOLDER"
             elsif OS.linux? && Hardware::CPU.intel?
               url "https://github.com/rtk-ai/rtk/releases/download/TAG_PLACEHOLDER/rtk-x86_64-unknown-linux-musl.tar.gz"
