@@ -118,6 +118,15 @@ pub fn run_stdin(
     let filter = filter::get_filter(level);
     let mut filtered = filter.filter(&content, &lang);
 
+    // Safety: if filter emptied non-empty stdin, fall back to raw content
+    if filtered.trim().is_empty() && !content.trim().is_empty() {
+        eprintln!(
+            "rtk: warning: filter produced empty output for stdin ({} bytes), showing raw content",
+            content.len()
+        );
+        filtered = content.clone();
+    }
+
     if verbose > 0 {
         let original_lines = content.lines().count();
         let filtered_lines = filtered.lines().count();
@@ -302,6 +311,46 @@ fn main() {{
         assert!(
             stderr.contains("stdin specified more than once"),
             "should warn about duplicate stdin, got stderr: {}",
+            stderr
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn test_read_stdin_falls_back_when_filter_empties_input() {
+        use std::io::Write as _;
+        use std::process::Stdio;
+
+        let bin = rtk_bin();
+        assert!(bin.exists(), "Run `cargo build` first");
+
+        let mut child = std::process::Command::new(&bin)
+            .args(["read", "-", "-l", "minimal"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn rtk read");
+
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"// only comment\n")
+            .unwrap();
+
+        let output = child.wait_with_output().expect("failed to wait on rtk read");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(
+            stdout.contains("only comment"),
+            "expected raw-content fallback, got empty/filtered stdout: {:?}",
+            stdout
+        );
+        assert!(
+            stderr.contains("showing raw content"),
+            "expected fallback warning on stderr, got: {}",
             stderr
         );
     }
