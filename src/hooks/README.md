@@ -30,6 +30,7 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 | Windsurf | `rtk init -g --agent windsurf` | `.windsurfrules` | -- |
 | Cline | `rtk init --agent cline` | `.clinerules` | -- |
 | Codex | `rtk init --codex` | RTK.md in `$CODEX_HOME` or `~/.codex` | AGENTS.md |
+| DeepSeek Harness | `rtk init --agent dsh` (or `-g`) | Inline instructions | Current AGENTS.md or `$DSH_HOME/AGENTS.md` (default `~/.dsh`) |
 | Cursor | `rtk init -g --agent cursor` | Cursor hook | hooks.json |
 | Pi | `rtk init --agent pi` | `.pi/extensions/rtk.ts` | -- |
 | Oh My Pi (OMP) | `rtk init --agent omp` | `.omp/extensions/rtk.ts` (shared Pi extension) | -- |

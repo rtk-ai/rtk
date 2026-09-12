@@ -42,6 +42,7 @@ Agent runs "cargo test"
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
 | Codex CLI | AGENTS.md instructions | N/A |
+| DeepSeek Harness (DSH) | Inline AGENTS.md instructions | N/A |
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rules file (prompt-level) | N/A |
 | Mistral Vibe | Rust binary (`pre_tool`) | Yes |
@@ -213,6 +214,18 @@ rtk init --global --agent windsurf    # creates .windsurfrules in current projec
 rtk init --codex           # project-scoped (AGENTS.md)
 rtk init --global --codex  # user-global (~/.codex/AGENTS.md)
 ```
+
+### DeepSeek Harness (DSH)
+
+```bash
+rtk init --agent dsh           # current directory's AGENTS.md
+rtk init --global --agent dsh  # $DSH_HOME/AGENTS.md, default ~/.dsh/AGENTS.md
+```
+
+DSH does not expand `@path` imports. RTK writes a marked inline instruction block
+and preserves existing content. Start a new DSH session after installation.
+This is model-followed guidance, not automatic rewriting. Use `--show` to inspect,
+`--dry-run` to preview, and `--uninstall` with the same scope to remove the block.
 
 ### Kilo Code
 

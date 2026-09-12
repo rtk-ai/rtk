@@ -113,6 +113,7 @@ const KNOWN_PI_PLUGIN_HASHES: &[&str] = &[
 const RTK_AWARENESS_DEFAULT: &str = include_str!("../../hooks/rtk-awareness.md");
 const RTK_AWARENESS_HIGH: &str = include_str!("../../hooks/rtk-awareness-high.md");
 const RTK_AWARENESS_FULL: &str = include_str!("../../hooks/rtk-awareness-full.md");
+const RTK_DSH: &str = include_str!("../../hooks/dsh/rtk-awareness.md");
 
 /// Template written by `rtk init` when no filters.toml exists yet.
 const FILTERS_TEMPLATE: &str = r#"# Project-local RTK filters — commit this file with your repo.
@@ -2180,6 +2181,114 @@ pub fn uninstall_hermes(ctx: InitContext) -> Result<()> {
         print_dry_run_footer();
     }
 
+    Ok(())
+}
+
+/// Install or remove inline instructions: DSH does not interpret @path imports.
+pub fn run_dsh_mode(global: bool, uninstall: bool, show: bool, ctx: InitContext) -> Result<()> {
+    let base = if global {
+        match std::env::var("DSH_HOME") {
+            Ok(value) if !value.trim().is_empty() => {
+                let value = value.as_str();
+                if value == "~" || value.starts_with("~/") || value.starts_with("~\\") {
+                    let home = dirs::home_dir().context("Could not determine home directory")?;
+                    if value == "~" {
+                        home
+                    } else {
+                        home.join(&value[2..])
+                    }
+                } else {
+                    PathBuf::from(value)
+                }
+            }
+            _ => dirs::home_dir()
+                .context("Could not determine home directory")?
+                .join(".dsh"),
+        }
+    } else {
+        std::env::current_dir()?
+    };
+    let path = base.join(AGENTS_MD);
+    let existing = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(error).with_context(|| format!("Failed to read {}", path.display()))
+        }
+    };
+    if show {
+        println!("DSH instructions: {}", path.display());
+        println!("{}", existing);
+        return Ok(());
+    }
+
+    // Separate markers keep other agents' RTK blocks outside DSH ownership.
+    let start_marker = "<!-- rtk-dsh-instructions -->";
+    let end_marker = "<!-- /rtk-dsh-instructions -->";
+    let start = existing.find(start_marker);
+    let end = existing.find(end_marker);
+    let mut updated = existing.clone();
+    match (start, end) {
+        (Some(start), Some(end))
+            if end > start
+                && existing.matches(start_marker).count() == 1
+                && existing.matches(end_marker).count() == 1 =>
+        {
+            updated.replace_range(
+                start..end + end_marker.len(),
+                if uninstall { "" } else { RTK_DSH.trim_end() },
+            );
+        }
+        (None, None) if !uninstall => {
+            if !updated.is_empty() && !updated.ends_with('\n') {
+                updated.push('\n');
+            }
+            if !updated.is_empty() {
+                updated.push('\n');
+            }
+            updated.push_str(RTK_DSH);
+        }
+        (None, None) => {}
+        _ => anyhow::bail!(
+            "Refusing to modify malformed or duplicate DSH instruction markers in {}",
+            path.display()
+        ),
+    }
+    if updated != existing {
+        if ctx.dry_run {
+            println!(
+                "[dry-run] would {} DSH instructions in {}",
+                if uninstall { "remove" } else { "write" },
+                path.display()
+            );
+            if ctx.verbose > 0 {
+                println!("{updated}");
+            }
+        } else {
+            fs::create_dir_all(&base)?;
+            if path.exists() {
+                atomic_write(&path.with_extension("md.bak"), &existing)?;
+            }
+            // Keep the file even when empty: it may be a user-owned symlink.
+            atomic_write(&path, &updated)?;
+        }
+    }
+    if ctx.dry_run {
+        print_dry_run_footer();
+    } else {
+        println!(
+            "DSH instructions {}: {}",
+            if uninstall {
+                "removed (if installed)"
+            } else {
+                "configured"
+            },
+            path.display()
+        );
+        if !uninstall {
+            println!("Start a new DSH session to load the instructions. This is prompt guidance, not automatic command rewriting.");
+        }
+    }
     Ok(())
 }
 

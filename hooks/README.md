@@ -63,6 +63,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | Cline / Roo Code | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Windsurf | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Codex CLI | AGENTS.md / instructions | Prompt-level guidance | N/A |
+| DeepSeek Harness (DSH) | Inline AGENTS.md instructions | Prompt-level guidance | N/A |
 | OpenCode | TypeScript plugin (`tool.execute.before`) | In-place mutation | Yes |
 | Pi | TypeScript extension (`tool_call` event) | In-place mutation | Yes |
 | Oh My Pi (OMP) | TypeScript extension (`tool_call` event, shared with Pi) | In-place mutation | Yes |

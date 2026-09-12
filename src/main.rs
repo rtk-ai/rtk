@@ -51,6 +51,8 @@ pub enum AgentTarget {
     Antigravity,
     /// Kimi AI
     Kimi,
+    /// DeepSeek Harness (AGENTS.md instructions)
+    Dsh,
     /// Pi coding agent
     Pi,
     /// Hermes CLI
@@ -2285,7 +2287,22 @@ fn run_cli() -> Result<i32> {
             } else {
                 hooks::init::PatchMode::Ask
             };
-            if show {
+            if agent == Some(AgentTarget::Dsh) {
+                if opencode
+                    || gemini
+                    || codex
+                    || copilot
+                    || claude_md
+                    || hook_only
+                    || auto_patch
+                    || no_patch
+                    || trust_filters
+                    || no_trust_filters
+                {
+                    anyhow::bail!("--agent dsh supports --global, --show, --uninstall and --dry-run; hook, patch and filter flags do not apply");
+                }
+                hooks::init::run_dsh_mode(global, uninstall, show, ctx)?;
+            } else if show {
                 hooks::init::show_config(codex, agent == Some(AgentTarget::Omp))?;
             } else if uninstall && copilot {
                 if global {
