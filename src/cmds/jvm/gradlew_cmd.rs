@@ -63,41 +63,38 @@ fn detect_task(args: &[String]) -> GradlewTask {
     }
 }
 
-/// Returns the Gradle executable: prefers `./gradlew` (wrapper), falls back to `gradle`.
-fn gradlew_binary() -> &'static str {
-    if cfg!(windows) {
-        if std::path::Path::new(".\\gradlew.bat").exists() {
-            ".\\gradlew.bat"
-        } else {
-            "gradle"
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GradleExecutable {
+    Wrapper,
+    System,
+}
+
+impl GradleExecutable {
+    fn binary(self) -> &'static str {
+        match self {
+            Self::Wrapper if cfg!(windows) => ".\\gradlew.bat",
+            Self::Wrapper => "./gradlew",
+            Self::System => "gradle",
         }
-    } else if std::path::Path::new("./gradlew").exists() {
-        "./gradlew"
-    } else {
-        "gradle"
+    }
+
+    fn command(self, args: &[String]) -> Command {
+        let mut cmd = match self {
+            Self::Wrapper if cfg!(windows) => Command::new(".\\gradlew.bat"),
+            Self::Wrapper => Command::new("./gradlew"),
+            Self::System => resolved_command("gradle"),
+        };
+        cmd.args(args);
+        cmd
     }
 }
 
 /// Builds a Gradle `Command`.
 ///
-/// Local wrappers (`./gradlew`, `gradlew.bat`) are passed as string literals so
-/// semgrep's `dynamic-command-execution` rule stays happy. The `gradle` system
-/// binary is resolved via `resolved_command("gradle")` for PATHEXT support on
-/// Windows (`.CMD`/`.BAT` shims) — matches how cargo, golangci-lint, etc. do it.
-fn new_gradle_command(args: &[String]) -> Command {
-    let mut cmd = if cfg!(windows) {
-        if std::path::Path::new(".\\gradlew.bat").exists() {
-            Command::new(".\\gradlew.bat")
-        } else {
-            resolved_command("gradle")
-        }
-    } else if std::path::Path::new("./gradlew").exists() {
-        Command::new("./gradlew")
-    } else {
-        resolved_command("gradle")
-    };
-    cmd.args(args);
-    cmd
+/// Wrapper paths are string literals so semgrep's `dynamic-command-execution`
+/// rule stays happy. System Gradle uses `resolved_command` for PATHEXT support.
+fn new_gradle_command(args: &[String], executable: GradleExecutable) -> Command {
+    executable.command(args)
 }
 
 /// `StreamFilter` for build mode: keeps lines for which `filter_build_line` returns true.
@@ -118,18 +115,27 @@ impl StreamFilter for BuildLineFilter {
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+    run_tool(args, verbose, GradleExecutable::Wrapper)
+}
+
+pub fn run_system(args: &[String], verbose: u8) -> Result<i32> {
+    run_tool(args, verbose, GradleExecutable::System)
+}
+
+fn run_tool(args: &[String], verbose: u8, executable: GradleExecutable) -> Result<i32> {
+    let tool = executable.binary();
+
     // Verbose flags bypass filtering — user wants full output
     if args
         .iter()
         .any(|a| a == "--stacktrace" || a == "--info" || a == "--debug" || a == "--full-stacktrace")
     {
         let osargs: Vec<OsString> = args.iter().map(OsString::from).collect();
-        return runner::run_passthrough(gradlew_binary(), &osargs, verbose);
+        return runner::run_passthrough(tool, &osargs, verbose);
     }
 
-    let cmd = new_gradle_command(args);
+    let cmd = new_gradle_command(args, executable);
     let args_display = args.join(" ");
-    let tool = gradlew_binary();
 
     match detect_task(args) {
         GradlewTask::Build => runner::run_streamed(
@@ -169,7 +175,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         ),
         GradlewTask::Other => {
             let osargs: Vec<OsString> = args.iter().map(OsString::from).collect();
-            runner::run_passthrough(gradlew_binary(), &osargs, verbose)
+            runner::run_passthrough(tool, &osargs, verbose)
         }
     }
 }
@@ -541,6 +547,34 @@ mod tests {
     }
 
     // ── TASK DETECTION ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_wrapper_binary_never_falls_back_to_system_gradle() {
+        #[cfg(windows)]
+        assert_eq!(GradleExecutable::Wrapper.binary(), ".\\gradlew.bat");
+
+        #[cfg(not(windows))]
+        assert_eq!(GradleExecutable::Wrapper.binary(), "./gradlew");
+
+        assert_eq!(GradleExecutable::System.binary(), "gradle");
+    }
+
+    #[test]
+    fn test_new_gradle_command_preserves_executable_choice() {
+        let args = vec!["build".to_string()];
+        let wrapper = new_gradle_command(&args, GradleExecutable::Wrapper);
+        let system = new_gradle_command(&args, GradleExecutable::System);
+
+        assert_eq!(
+            wrapper.get_program(),
+            std::ffi::OsStr::new(GradleExecutable::Wrapper.binary())
+        );
+        assert_ne!(system.get_program(), wrapper.get_program());
+        assert_eq!(
+            wrapper.get_args().collect::<Vec<_>>(),
+            system.get_args().collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn test_detect_connected_wins_over_test() {
