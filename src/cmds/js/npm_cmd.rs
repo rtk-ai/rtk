@@ -1,9 +1,16 @@
 //! Filters npm output and auto-injects the "run" subcommand when appropriate.
 
-use std::io::IsTerminal;
 use crate::core::runner;
 use crate::core::utils::resolved_command;
 use anyhow::Result;
+use regex::Regex;
+use std::io::IsTerminal;
+use std::sync::LazyLock;
+
+static JEST_FOOTER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^[ \t]*(Test Suites|Tests):[ \t]+(?:[0-9]+ (?:failed|passed|skipped|todo),[ \t]+)*[0-9]+ total[ \t]*\r?$")
+        .expect("valid Jest footer regex")
+});
 
 /// Known npm subcommands that should NOT get "run" injected.
 /// Shared between production code and tests to avoid drift.
@@ -161,8 +168,38 @@ fn run_filtered(
     )
 }
 
+/// Scripts may invoke any runner. Remove passing-suite headers only when both
+/// Jest count footers are present; preserve all other bytes, including diagnostics.
+fn compact_script_tests(output: &str) -> Option<String> {
+    let clean = crate::core::utils::strip_ansi(output);
+    let mut suites = false;
+    let mut tests = false;
+    for capture in JEST_FOOTER.captures_iter(&clean) {
+        suites |= &capture[1] == "Test Suites";
+        tests |= &capture[1] == "Tests";
+    }
+    if !suites || !tests {
+        return None;
+    }
+    Some(
+        output
+            .split_inclusive('\n')
+            .filter(|line| {
+                !crate::core::utils::strip_ansi(line)
+                    .trim_start()
+                    .starts_with("PASS ")
+            })
+            .collect(),
+    )
+}
+
 /// Filter npm run output - strip boilerplate, progress bars, npm WARN
 fn filter_npm_output(output: &str) -> String {
+    if let Some(compact) = compact_script_tests(output) {
+        // Generic boilerplate rules can eat blank lines and ellipses in Jest
+        // assertion diffs. Recognized test output must not go through them.
+        return compact;
+    }
     let mut result = Vec::new();
 
     for line in output.lines() {
@@ -199,6 +236,35 @@ fn filter_npm_output(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jest_script_output_keeps_every_non_passing_suite_line() {
+        for raw in [
+            "PASS good.test.ts\nFAIL bad.test.ts\n  Expected: 1\n  Received: 2\n  ...\n\n  at bad.test.ts:12:3\nTest Suites: 1 failed, 1 passed, 2 total\nTests: 1 failed, 1 passed, 2 total\n",
+            "\x1b[32mPASS\x1b[0m good.test.ts\r\n\x1b[31mFAIL\x1b[0m bad.test.ts\r\nTest Suites: 1 failed, 1 passed, 2 total\r\nTests: 1 failed, 1 passed, 2 total\r\n",
+            include_str!("../../../tests/fixtures/script_jest_obsolete_snapshots_raw.txt"),
+        ] {
+            let expected: String = raw.split_inclusive('\n')
+                .filter(|line| !crate::core::utils::strip_ansi(line).trim_start().starts_with("PASS "))
+                .collect();
+            assert_eq!(filter_npm_output(raw), expected);
+        }
+    }
+
+    #[test]
+    fn unknown_script_output_does_not_lose_pass_lines() {
+        for raw in [
+            "PASS custom validation\nimportant output",
+            "PASS good.test.ts\nTest Suites: 1 passed, 1 total",
+            "PASS custom validation\nTest Suites: custom\nTests: custom",
+            "PASS custom validation\nTest Suites: custom total\nTests: custom total",
+            "12 passing (1s)",
+            "No tests found",
+            "error TS2353: invalid property",
+        ] {
+            assert_eq!(filter_npm_output(raw), raw);
+        }
+    }
 
     #[test]
     fn test_filter_npm_output() {

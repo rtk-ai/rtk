@@ -1,0 +1,70 @@
+PASS example-app src/features/example/components/component1.test.tsx
+PASS example-app src/features/example/components/component2.test.tsx
+PASS example-app src/features/example/components/component3.test.tsx
+PASS example-app src/features/example/components/component4.test.tsx
+PASS example-app src/features/example/components/component5.test.tsx
+PASS example-app src/features/example/components/component6.test.tsx
+PASS example-app src/features/example/components/component7.test.tsx
+PASS example-app src/features/example/components/component8.test.tsx
+PASS example-app src/features/example/components/component9.test.tsx
+ › 4 snapshots obsolete.
+   • getStatusIcon status=%s falls back 1
+   • getStatusIcon status=%s falls back 2
+   • getStatusIcon typeName=%s falls back to unknown icon 1
+   • getStatusIcon typeName=%s falls back to unknown icon 2
+PASS example-app src/features/example/components/component10.test.tsx
+PASS example-app src/features/example/components/component11.test.tsx
+PASS example-app src/features/example/components/component12.test.tsx
+PASS example-app src/features/example/components/component13.test.tsx
+PASS example-app src/features/example/components/component14.test.tsx
+PASS example-app src/features/example/components/component15.test.tsx
+PASS example-app src/features/example/components/component16.test.tsx
+PASS example-app src/features/example/components/component17.test.tsx
+PASS example-app src/features/example/components/component18.test.tsx
+PASS example-app src/features/example/components/component19.test.tsx
+PASS example-app src/features/example/components/component20.test.tsx
+PASS example-app src/features/example/components/component21.test.tsx
+PASS example-app src/features/example/components/component22.test.tsx
+PASS example-app src/features/example/components/component23.test.tsx
+PASS example-app src/features/example/components/component24.test.tsx
+PASS example-app src/features/example/components/component25.test.tsx
+PASS example-app src/features/example/components/component26.test.tsx
+PASS example-app src/features/example/components/component27.test.tsx
+PASS example-app src/features/example/components/component28.test.tsx
+PASS example-app src/features/example/components/component29.test.tsx
+PASS example-app src/features/example/components/component30.test.tsx
+PASS example-app src/features/example/components/component31.test.tsx
+PASS example-app src/features/example/components/component32.test.tsx
+PASS example-app src/features/example/components/component33.test.tsx
+PASS example-app src/features/example/components/component34.test.tsx
+PASS example-app src/features/example/components/component35.test.tsx
+PASS example-app src/features/example/components/component36.test.tsx
+PASS example-app src/features/example/components/component37.test.tsx
+PASS example-app src/features/example/components/component38.test.tsx
+PASS example-app src/features/example/components/component39.test.tsx
+PASS example-app src/features/example/components/component40.test.tsx
+PASS example-app src/features/example/components/component41.test.tsx
+PASS example-app src/features/example/components/component42.test.tsx
+PASS example-app src/features/example/components/component43.test.tsx
+PASS example-app src/features/example/components/component44.test.tsx
+PASS example-app src/features/example/components/component45.test.tsx
+PASS example-app src/features/example/components/component46.test.tsx
+PASS example-app src/features/example/components/component47.test.tsx
+PASS example-app src/features/example/components/component48.test.tsx
+PASS example-app src/features/example/components/component49.test.tsx
+PASS example-app src/features/example/components/component50.test.tsx
+PASS example-app src/features/example/components/component51.test.tsx
+PASS example-app src/features/example/components/component52.test.tsx
+
+Snapshot Summary
+ › 4 snapshots obsolete from 1 test suite. To remove them all, re-run jest with `-u`.
+   ↳ src/features/example/components/component9.test.tsx
+       • getStatusIcon status=%s falls back 1
+       • getStatusIcon status=%s falls back 2
+       • getStatusIcon typeName=%s falls back to unknown icon 1
+       • getStatusIcon typeName=%s falls back to unknown icon 2
+
+Test Suites: 52 passed, 52 total
+Tests:       386 passed, 386 total
+Snapshots:   4 obsolete, 11 passed, 11 total
+Time:        9.462 s
