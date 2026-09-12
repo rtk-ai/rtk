@@ -71,6 +71,12 @@ struct RspecSummary {
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = ruby_exec("rspec");
 
+    // A `--version` query short-circuits inside rspec before any formatter runs,
+    // so it always prints plain text ("RSpec 3.x …"), never the JSON report — even
+    // if we inject `--format json`. Detect it up front and pass the output through
+    // untouched instead of trying to parse it as a test report (#1946).
+    let is_version = is_version_query(args);
+
     let has_format = args.iter().any(|a| {
         a == "--format"
             || a == "-f"
@@ -78,14 +84,18 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             || (a.starts_with("-f") && a.len() > 2 && !a.starts_with("--"))
     });
 
-    if !has_format {
+    if !has_format && !is_version {
         cmd.arg("--format").arg("json");
     }
 
     cmd.args(args);
 
     if verbose > 0 {
-        let injected = if has_format { "" } else { " --format json" };
+        let injected = if has_format || is_version {
+            ""
+        } else {
+            " --format json"
+        };
         eprintln!("Running: rspec{} {}", injected, args.join(" "));
     }
 
@@ -94,7 +104,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         "rspec",
         &args.join(" "),
         move |stdout| {
-            if has_format {
+            if is_version {
+                stdout.trim_end().to_string()
+            } else if has_format {
                 let stripped = strip_noise(stdout);
                 filter_rspec_text(&stripped)
             } else {
@@ -103,6 +115,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         },
         runner::RunOptions::stdout_only().tee("rspec"),
     )
+}
+
+/// True when args are an rspec `--version`/`-v` query. These print plain text and
+/// must bypass JSON-report parsing (#1946).
+fn is_version_query(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--version" || a == "-v")
 }
 
 // ── Noise stripping ─────────────────────────────────────────────────────────
@@ -1020,5 +1038,14 @@ rspec ./spec/models/user_spec.rb:5 # User is valid
     fn test_has_format_flag_equals() {
         let args = ["--format=json".to_string()];
         assert!(args.iter().any(|a| a.starts_with("--format=")));
+    }
+
+    #[test]
+    fn test_is_version_query_rspec() {
+        assert!(is_version_query(&["--version".to_string()]));
+        assert!(is_version_query(&["-v".to_string()]));
+        assert!(is_version_query(&["spec/foo_spec.rb".to_string(), "--version".to_string()]));
+        assert!(!is_version_query(&["spec/foo_spec.rb".to_string()]));
+        assert!(!is_version_query(&["--format".to_string(), "json".to_string()]));
     }
 }
