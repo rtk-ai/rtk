@@ -3169,7 +3169,7 @@ fn resolve_hermes_home_from_env(
 /// `.factory` onto it (verified against Droid v0.164.0).
 /// - Global: `$FACTORY_HOME_OVERRIDE/.factory` or `~/.factory`.
 /// - Project: caller passes `.factory` relative to project root.
-fn resolve_droid_dir() -> Result<PathBuf> {
+pub(crate) fn resolve_droid_dir() -> Result<PathBuf> {
     resolve_droid_dir_from_env(dirs::home_dir(), std::env::var_os(DROID_HOME_ENV))
 }
 
@@ -3660,7 +3660,7 @@ fn pi_plugin_path(pi_dir: &Path) -> PathBuf {
 /// Return the Pi extension install path for the given scope.
 /// global=true  → `$PI_CODING_AGENT_DIR/extensions/rtk.ts`
 /// global=false → `./.pi/extensions/rtk.ts`
-fn pi_plugin_path_for_scope(global: bool) -> Result<PathBuf> {
+pub(crate) fn pi_plugin_path_for_scope(global: bool) -> Result<PathBuf> {
     if global {
         Ok(pi_plugin_path(&resolve_pi_dir()?))
     } else {
@@ -3750,7 +3750,7 @@ fn is_current_pi_plugin(content: &str) -> bool {
         == normalize_pi_plugin_line_endings(PI_PLUGIN).trim_end()
 }
 
-fn looks_like_rtk_pi_plugin(content: &str) -> bool {
+pub(crate) fn looks_like_rtk_pi_plugin(content: &str) -> bool {
     content.contains(PI_PLUGIN_REWRITE_MARKER)
 }
 
@@ -4346,7 +4346,7 @@ fn remove_opencode_plugin(ctx: InitContext) -> Result<Vec<PathBuf>> {
 //   global=false -> `.omp/extensions/rtk.ts`
 
 /// Return the OMP extension install path for the given scope.
-fn omp_extension_path_for_scope(global: bool) -> Result<PathBuf> {
+pub(crate) fn omp_extension_path_for_scope(global: bool) -> Result<PathBuf> {
     if global {
         Ok(resolve_omp_dir()?
             .join(PI_EXTENSIONS_SUBDIR)

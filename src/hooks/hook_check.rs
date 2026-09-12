@@ -1,12 +1,18 @@
 //! Detects whether RTK hooks are installed and warns if they are outdated.
 
 use super::constants::{
-    CODEX_DIR, CONFIG_DIR, CURSOR_DIR, CURSOR_HOOK_COMMAND, GEMINI_DIR, GEMINI_HOOK_FILE,
-    HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE,
-    HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR,
-    PLUGIN_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    CODEX_DIR, CONFIG_DIR, COPILOT_HOOK_FILE, CURSOR_DIR, CURSOR_HOOK_COMMAND, DROID_DIR,
+    DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR, DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_DIR,
+    GEMINI_HOOK_FILE, GITHUB_DIR, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
+    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR, OMP_LOCAL_DIR,
+    OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
+    PLUGIN_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_DIR, VIBE_HOOKS_FILE,
+    VIBE_HOOK_COMMAND, VIBE_HOOK_NAME,
 };
-use super::init::resolve_claude_dir;
+use super::init::{
+    copilot_user_dir, omp_extension_path_for_scope, pi_plugin_path_for_scope, resolve_claude_dir,
+    resolve_droid_dir,
+};
 use super::is_claude_hook_command;
 use crate::core::constants::RTK_DATA_DIR;
 use crate::core::utils::from_json_str;
@@ -161,14 +167,18 @@ fn status_with_other_integration(status: HookStatus, has_other_integration: bool
     }
 }
 
-/// Return whether a global executable non-Claude integration is configured with
-/// RTK. Codex is retained as the established instruction-only exception. Project
-/// integrations and alternate global homes are checked separately.
+/// Return whether an executable non-Claude integration is configured with RTK.
+/// Codex is retained as the established instruction-only exception; the other
+/// instruction-only install targets are deliberately not inferred here.
 ///
 /// This only suppresses a missing Claude warning; an outdated Claude hook is
 /// still reported so users can complete its migration.
 fn other_integration_installed() -> bool {
     dirs::home_dir().is_some_and(|home| other_integration_installed_at(&home))
+        || pi_or_omp_global_integration_installed()
+        || droid_global_integration_installed()
+        || copilot_global_integration_installed()
+        || std::env::current_dir().is_ok_and(|cwd| project_integration_installed_at(&cwd))
 }
 
 fn other_integration_installed_at(home: &Path) -> bool {
@@ -182,6 +192,40 @@ fn other_integration_installed_at(home: &Path) -> bool {
         || codex_instructions_registered(&home.join(CODEX_DIR))
         || gemini_hook_registered(&home.join(GEMINI_DIR))
         || hermes_plugin_registered(&home.join(HERMES_DIR))
+        || vibe_hook_registered(&home.join(VIBE_DIR).join(VIBE_HOOKS_FILE))
+}
+
+fn pi_or_omp_global_integration_installed() -> bool {
+    [
+        pi_plugin_path_for_scope(true),
+        omp_extension_path_for_scope(true),
+    ]
+    .into_iter()
+    .filter_map(Result::ok)
+    .any(|path| pi_extension_registered(&path))
+}
+
+fn droid_global_integration_installed() -> bool {
+    resolve_droid_dir().is_ok_and(|dir| droid_hook_registered_in(&dir))
+}
+
+fn copilot_global_integration_installed() -> bool {
+    copilot_user_dir().is_ok_and(|dir| copilot_hook_registered(&dir.join(HOOKS_SUBDIR)))
+}
+
+fn project_integration_installed_at(project_dir: &Path) -> bool {
+    pi_extension_registered(
+        &project_dir
+            .join(PI_LOCAL_DIR)
+            .join(PI_EXTENSIONS_SUBDIR)
+            .join(PI_PLUGIN_FILE),
+    ) || pi_extension_registered(
+        &project_dir
+            .join(OMP_LOCAL_DIR)
+            .join(PI_EXTENSIONS_SUBDIR)
+            .join(PI_PLUGIN_FILE),
+    ) || droid_hook_registered_in(&project_dir.join(DROID_DIR))
+        || copilot_hook_registered(&project_dir.join(GITHUB_DIR).join(HOOKS_SUBDIR))
 }
 
 fn opencode_plugin_registered(path: &Path) -> bool {
@@ -258,6 +302,60 @@ fn hermes_plugin_registered(hermes_dir: &Path) -> bool {
                 .lines()
                 .any(|line| line.trim().trim_matches(['\'', '"']) == "- rtk-rewrite")
         })
+}
+
+fn pi_extension_registered(path: &Path) -> bool {
+    read_file(path).is_some_and(|content| super::init::looks_like_rtk_pi_plugin(&content))
+}
+
+fn droid_hook_registered_in(droid_dir: &Path) -> bool {
+    [
+        droid_dir.join(DROID_HOOKS_FILE),
+        droid_dir.join(DROID_HOOKS_SUBDIR).join(DROID_HOOKS_FILE),
+        droid_dir.join(DROID_SETTINGS_FILE),
+    ]
+    .iter()
+    .any(|path| droid_hook_registered(path))
+}
+
+fn droid_hook_registered(path: &Path) -> bool {
+    read_json(path).is_some_and(|root| {
+        [
+            root.get(PRE_TOOL_USE_KEY),
+            root.get("hooks")
+                .and_then(|hooks| hooks.get(PRE_TOOL_USE_KEY)),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_array)
+        .flatten()
+        .filter_map(|entry| entry.get("hooks").and_then(serde_json::Value::as_array))
+        .flatten()
+        .any(|hook| {
+            hook.get("command").and_then(serde_json::Value::as_str) == Some(DROID_HOOK_COMMAND)
+        })
+    })
+}
+
+fn vibe_hook_registered(path: &Path) -> bool {
+    read_file(path).is_some_and(|content| {
+        content.contains(&format!(r#"name = "{VIBE_HOOK_NAME}""#))
+            && content.contains(&format!(r#"command = "{VIBE_HOOK_COMMAND}""#))
+    })
+}
+
+fn copilot_hook_registered(hooks_dir: &Path) -> bool {
+    read_json(&hooks_dir.join(COPILOT_HOOK_FILE)).is_some_and(|root| {
+        root.get("hooks")
+            .and_then(|hooks| hooks.get(PRE_TOOL_USE_KEY))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry.get("command").and_then(serde_json::Value::as_str)
+                        == Some("rtk hook copilot")
+                })
+            })
+    })
 }
 
 fn read_file(path: &Path) -> Option<String> {
@@ -433,6 +531,20 @@ mod tests {
     }
 
     #[test]
+    fn test_other_integration_rejects_legacy_cursor_script_reference() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join(CURSOR_DIR).join(HOOKS_JSON);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"hooks":{"preToolUse":[{"command":"/tmp/rtk-rewrite.sh"}]}}"#,
+        )
+        .unwrap();
+
+        assert!(!other_integration_installed_at(tmp.path()));
+    }
+
+    #[test]
     fn test_other_integration_codex() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join(CODEX_DIR).join("AGENTS.md");
@@ -488,6 +600,103 @@ mod tests {
         )
         .unwrap();
         assert!(other_integration_installed_at(tmp.path()));
+    }
+
+    #[test]
+    fn test_project_pi_and_omp_integrations() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for agent_dir in [PI_LOCAL_DIR, OMP_LOCAL_DIR] {
+            let path = tmp
+                .path()
+                .join(agent_dir)
+                .join(PI_EXTENSIONS_SUBDIR)
+                .join(PI_PLUGIN_FILE);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "pi.exec(\"rtk\", [\"rewrite\", command])").unwrap();
+            assert!(project_integration_installed_at(tmp.path()));
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_droid_integrations_include_root_and_nested_config() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for path in [
+            tmp.path().join(DROID_HOOKS_FILE),
+            tmp.path().join(DROID_SETTINGS_FILE),
+        ] {
+            let root = if path.file_name().and_then(|name| name.to_str())
+                == Some(DROID_SETTINGS_FILE)
+            {
+                serde_json::json!({
+                    "hooks": { PRE_TOOL_USE_KEY: [{ "hooks": [{ "command": DROID_HOOK_COMMAND }] }] }
+                })
+            } else {
+                serde_json::json!({
+                    PRE_TOOL_USE_KEY: [{ "hooks": [{ "command": DROID_HOOK_COMMAND }] }]
+                })
+            };
+            std::fs::write(&path, root.to_string()).unwrap();
+            assert!(droid_hook_registered_in(tmp.path()));
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_project_droid_and_copilot_integrations() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let droid = tmp.path().join(DROID_DIR).join(DROID_HOOKS_FILE);
+        std::fs::create_dir_all(droid.parent().unwrap()).unwrap();
+        std::fs::write(
+            &droid,
+            serde_json::json!({
+                PRE_TOOL_USE_KEY: [{ "hooks": [{ "command": DROID_HOOK_COMMAND }] }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(project_integration_installed_at(tmp.path()));
+        std::fs::remove_file(droid).unwrap();
+
+        let copilot = tmp
+            .path()
+            .join(GITHUB_DIR)
+            .join(HOOKS_SUBDIR)
+            .join(COPILOT_HOOK_FILE);
+        std::fs::create_dir_all(copilot.parent().unwrap()).unwrap();
+        std::fs::write(
+            &copilot,
+            serde_json::json!({
+                "hooks": { PRE_TOOL_USE_KEY: [{ "command": "rtk hook copilot" }] }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(project_integration_installed_at(tmp.path()));
+    }
+
+    #[test]
+    fn test_vibe_and_copilot_global_hook_artifacts() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let vibe = tmp.path().join(VIBE_HOOKS_FILE);
+        std::fs::write(
+            &vibe,
+            format!(r#"name = "{VIBE_HOOK_NAME}"\ncommand = "{VIBE_HOOK_COMMAND}""#),
+        )
+        .unwrap();
+        assert!(vibe_hook_registered(&vibe));
+
+        let hooks_dir = tmp.path().join(HOOKS_SUBDIR);
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        std::fs::write(
+            hooks_dir.join(COPILOT_HOOK_FILE),
+            serde_json::json!({
+                "hooks": { PRE_TOOL_USE_KEY: [{ "command": "rtk hook copilot" }] }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(copilot_hook_registered(&hooks_dir));
     }
 
     #[test]
