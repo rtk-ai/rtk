@@ -178,7 +178,7 @@ fn filter_npm_output(output: &str) -> String {
             continue;
         }
         // Skip progress indicators
-        if line.contains("⸩") || line.contains("⸨") || line.contains("...") && line.len() < 10 {
+        if (line.contains("⸩") || line.contains("⸨") || line.contains("...")) && line.len() < 10 {
             continue;
         }
         // Skip empty lines
@@ -255,6 +255,18 @@ npm notice
 
         // Explicit "run" should NOT inject another "run"
         assert!(!needs_run_injection(&["run", "build"]));
+    }
+
+    #[test]
+    fn test_progress_indicator_preserves_long_lines() {
+        let output = "⸨loader⸩ Building module completed successfully\n⸨⸩\n...ok\n";
+        let result = filter_npm_output(output);
+        assert!(
+            result.contains("Building module completed successfully"),
+            "Long line with progress chars should be preserved, got: {result}"
+        );
+        assert!(!result.contains("⸨⸩"), "Short progress indicator should be filtered");
+        assert!(!result.contains("...ok"), "Short ellipsis line should be filtered");
     }
 
     #[test]
