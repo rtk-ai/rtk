@@ -4,6 +4,10 @@ match_command = "^du\\b"
 strip_lines_matching = ["^\\s*$"]
 truncate_lines_at = 120
 max_lines = 40
+# Every row of `du -s` (and depth-limited output) is an independent answer for
+# its own root; a line cap would hide the largest consumers while reporting a
+# confident total. Run those shapes raw instead of truncating the answer.
+pass_through_if_args = ["-s", "--summarize", "-d", "--max-depth"]
 
 [[tests.du]]
 name = "preserves sizes, strips blank lines"
