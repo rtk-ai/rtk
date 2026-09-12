@@ -565,6 +565,23 @@ pub(crate) fn filter_go_build(output: &str) -> String {
     filter_go_build_with_exit(output, 0)
 }
 
+fn has_unrecognized_output(output: &str) -> bool {
+    output.lines().any(|l| {
+        let t = l.trim();
+        if t.is_empty() || t.starts_with('#') {
+            return false;
+        }
+        let lower = t.to_lowercase();
+        if lower.starts_with("go: downloading ")
+            || lower.starts_with("go: finding ")
+            || lower.starts_with("go: extracting ")
+        {
+            return false;
+        }
+        !is_go_build_error_line(t)
+    })
+}
+
 fn filter_go_build_with_exit(output: &str, exit_code: i32) -> String {
     let mut errors: Vec<String> = Vec::new();
 
@@ -576,6 +593,9 @@ fn filter_go_build_with_exit(output: &str, exit_code: i32) -> String {
     }
 
     if errors.is_empty() {
+        if has_unrecognized_output(output) {
+            return format_go_build_failure(output, exit_code);
+        }
         return if exit_code == 0 {
             "Go build: Success".to_string()
         } else {
@@ -1040,6 +1060,31 @@ pattern ./...: directory prefix . does not contain modules listed in go.work or 
         assert!(result.contains("Go build: failed (exit 1)"));
         assert!(result.contains(output));
         assert!(!result.contains("Success"));
+    }
+
+    #[test]
+    fn test_filter_go_build_unrecognized_error_not_swallowed() {
+        let output = "stat /some/path/cmd/orator: directory not found\n";
+
+        let result = filter_go_build(output);
+        assert!(
+            result.contains("failed"),
+            "Should report failure, got: {}",
+            result
+        );
+        assert!(
+            result.contains("directory not found"),
+            "Should preserve raw error, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_go_build_download_lines_still_success() {
+        let output = "go: downloading github.com/foo/bar v1.0.0\n";
+
+        let result = filter_go_build(output);
+        assert!(result.contains("Success"));
     }
 
     #[test]
