@@ -178,7 +178,7 @@ fn other_integration_installed_at(home: &Path) -> bool {
             .join(OPENCODE_SUBDIR)
             .join(PLUGIN_SUBDIR)
             .join(OPENCODE_PLUGIN_FILE),
-    ) || cursor_hook_registered(&home.join(CURSOR_DIR).join(HOOKS_JSON))
+    ) || cursor_hook_registered(&home.join(CURSOR_DIR))
         || codex_instructions_registered(&home.join(CODEX_DIR))
         || gemini_hook_registered(&home.join(GEMINI_DIR))
         || hermes_plugin_registered(&home.join(HERMES_DIR))
@@ -190,8 +190,10 @@ fn opencode_plugin_registered(path: &Path) -> bool {
     })
 }
 
-fn cursor_hook_registered(path: &Path) -> bool {
-    read_json(path).is_some_and(|root| {
+fn cursor_hook_registered(cursor_dir: &Path) -> bool {
+    let legacy_hook = cursor_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+    let legacy_command = format!("./{HOOKS_SUBDIR}/{REWRITE_HOOK_FILE}");
+    read_json(&cursor_dir.join(HOOKS_JSON)).is_some_and(|root| {
         root.get("hooks")
             .and_then(|hooks| hooks.get("preToolUse"))
             .and_then(serde_json::Value::as_array)
@@ -200,7 +202,10 @@ fn cursor_hook_registered(path: &Path) -> bool {
                     entry
                         .get("command")
                         .and_then(serde_json::Value::as_str)
-                        .is_some_and(|command| command == CURSOR_HOOK_COMMAND)
+                        .is_some_and(|command| {
+                            command == CURSOR_HOOK_COMMAND
+                                || (legacy_hook.is_file() && command == legacy_command)
+                        })
                 })
             })
     })
@@ -430,6 +435,38 @@ mod tests {
         )
         .unwrap();
         assert!(other_integration_installed_at(tmp.path()));
+    }
+
+    #[test]
+    fn test_other_integration_cursor_legacy_script() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cursor_dir = tmp.path().join(CURSOR_DIR);
+        let hook = cursor_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "#!/usr/bin/env bash\nrtk rewrite \"$@\"").unwrap();
+        std::fs::write(
+            cursor_dir.join(HOOKS_JSON),
+            r#"{"hooks":{"preToolUse":[{"command":"./hooks/rtk-rewrite.sh"}]}}"#,
+        )
+        .unwrap();
+
+        assert!(other_integration_installed_at(tmp.path()));
+    }
+
+    #[test]
+    fn test_other_integration_cursor_rejects_legacy_script_substring() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cursor_dir = tmp.path().join(CURSOR_DIR);
+        let hook = cursor_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "#!/usr/bin/env bash\nrtk rewrite \"$@\"").unwrap();
+        std::fs::write(
+            cursor_dir.join(HOOKS_JSON),
+            r#"{"hooks":{"preToolUse":[{"command":"echo ./hooks/rtk-rewrite.sh"}]}}"#,
+        )
+        .unwrap();
+
+        assert!(!other_integration_installed_at(tmp.path()));
     }
 
     #[test]
