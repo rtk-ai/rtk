@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report.xsd" name="com.example.PassingTest" time="0.532" tests="3" errors="0" skipped="0" failures="0">
+  <testcase name="shouldAddNumbers" classname="com.example.PassingTest" time="0.123"/>
+  <testcase name="shouldSubtractNumbers" classname="com.example.PassingTest" time="0.201"/>
+  <testcase name="shouldMultiplyNumbers" classname="com.example.PassingTest" time="0.208"/>
+</testsuite>
