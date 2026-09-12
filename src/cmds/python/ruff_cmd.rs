@@ -48,7 +48,7 @@ struct RuffDiagnostic {
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let is_check = is_check_invocation(args);
 
-    let is_format = args.iter().any(|a| a == "format");
+    let is_format = is_format_invocation(args);
 
     let mut cmd = resolved_command("ruff");
 
@@ -117,6 +117,10 @@ fn is_check_invocation(args: &[String]) -> bool {
     args.first().is_none_or(|arg| {
         arg == "check" || (!arg.starts_with('-') && !RUFF_SUBCOMMANDS.contains(&arg.as_str()))
     })
+}
+
+fn is_format_invocation(args: &[String]) -> bool {
+    args.first().is_some_and(|a| a == "format")
 }
 
 /// Filter ruff check JSON output - group by rule and file
@@ -414,6 +418,12 @@ mod tests {
     fn top_level_flags_are_not_misclassified_as_paths() {
         assert!(!is_check_invocation(&["--version".to_string()]));
         assert!(!is_check_invocation(&["--help".to_string()]));
+    }
+
+    #[test]
+    fn test_ruff_format_routing_requires_first_argument() {
+        assert!(is_format_invocation(&["format".to_string(), "--check".to_string()]));
+        assert!(!is_format_invocation(&["help".to_string(), "format".to_string()]));
     }
 
     #[test]
