@@ -124,13 +124,25 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
             ParseState::Header => {
                 if trimmed.starts_with("collected") {
                     state = ParseState::TestProgress;
+                } else if is_pure_progress_line(trimmed) {
+                    // Real quiet-mode (-q) output on a recent pytest can omit
+                    // both the "=== test session starts ===" banner and the
+                    // "collected N items" line entirely — the first thing on
+                    // stdout is the dot-progress line itself. Without this,
+                    // the parser never leaves Header and silently drops the
+                    // one signal that proves tests actually ran.
+                    state = ParseState::TestProgress;
+                    test_files.push(trimmed.to_string());
                 }
             }
             ParseState::TestProgress => {
-                // Lines like "tests/test_foo.py ....  [ 40%]"
+                // Lines like "tests/test_foo.py ....  [ 40%]", or just
+                // "....  [ 40%]" / "...." with no file-path prefix.
                 if !trimmed.is_empty()
                     && !trimmed.starts_with("===")
-                    && (trimmed.contains(".py") || trimmed.contains("%]"))
+                    && (trimmed.contains(".py")
+                        || trimmed.contains("%]")
+                        || is_pure_progress_line(trimmed))
                 {
                     test_files.push(trimmed.to_string());
                 }
@@ -179,11 +191,40 @@ struct PytestCounts {
 
 fn build_pytest_summary(
     summary: &str,
-    _test_files: &[String],
+    test_files: &[String],
     failures: &[String],
     xfail_lines: &[String],
 ) -> String {
-    let counts = parse_summary_line(summary);
+    let mut counts = parse_summary_line(summary);
+    let mut used_progress_fallback = false;
+
+    // pytest can crash while reporting a session (e.g. a teardown error in
+    // pytest_sessionfinish, such as Windows' tmp_path cleanup raising
+    // PermissionError) after every test already ran but *before* it prints
+    // its own final summary footer. When that happens `summary` is empty
+    // and every count here is zero even though tests genuinely ran — fall
+    // back to tallying the per-test progress indicators (".", "F", "E",
+    // "s", "x", "X") already captured from the test-progress lines rather
+    // than trusting the absence of a footer (or a non-zero exit code) as
+    // proof nothing ran.
+    if counts.passed == 0
+        && counts.failed == 0
+        && counts.skipped == 0
+        && counts.xfailed == 0
+        && counts.xpassed == 0
+    {
+        let derived = count_progress_chars(test_files);
+        if derived.passed > 0
+            || derived.failed > 0
+            || derived.skipped > 0
+            || derived.xfailed > 0
+            || derived.xpassed > 0
+        {
+            counts = derived;
+            used_progress_fallback = true;
+        }
+    }
+
     let PytestCounts {
         passed,
         failed,
@@ -196,10 +237,16 @@ fn build_pytest_summary(
         return PYTEST_NO_TESTS.to_string();
     }
 
+    let fallback_note = if used_progress_fallback {
+        " (derived, no summary footer)"
+    } else {
+        ""
+    };
+
     let extras_present = skipped > 0 || xfailed > 0 || xpassed > 0 || !xfail_lines.is_empty();
 
     if failed == 0 && passed > 0 && !extras_present {
-        return format!("Pytest: {} passed", passed);
+        return format!("Pytest: {} passed{}", passed, fallback_note);
     }
 
     let mut result = String::new();
@@ -232,7 +279,7 @@ fn build_pytest_summary(
     }
 
     if failures.is_empty() {
-        return result.trim().to_string();
+        return format!("{}{}", result.trim(), fallback_note);
     }
 
     // Show failures (limit to key information)
@@ -294,7 +341,87 @@ fn build_pytest_summary(
         }
     }
 
-    result.trim().to_string()
+    format!("{}{}", result.trim(), fallback_note)
+}
+
+/// True when `trimmed` is (optionally "<path> " prefixed, optionally
+/// " [ NN%]" suffixed) nothing but pytest's per-test result characters
+/// (`.` pass, `F` fail, `E` error, `s` skip, `x` xfail, `X` xpass,
+/// `!` internal error). Lets the parser recognize a bare quiet-mode
+/// progress line even when no path prefix or percentage marker is present.
+fn is_pure_progress_line(trimmed: &str) -> bool {
+    let without_pct = match (trimmed.rfind('['), trimmed.ends_with(']')) {
+        (Some(idx), true) => trimmed[..idx].trim_end(),
+        _ => trimmed,
+    };
+    let candidate = match without_pct.rfind(' ') {
+        Some(idx) => &without_pct[idx + 1..],
+        None => without_pct,
+    };
+
+    !candidate.is_empty()
+        && candidate
+            .chars()
+            .all(|c| matches!(c, '.' | 'F' | 'E' | 's' | 'x' | 'X' | '!'))
+}
+
+/// Tally per-test result indicators from pytest's quiet-mode progress lines
+/// (e.g. `"tests/test_foo.py .....F.. [100%]"`) when no final summary
+/// footer was captured. Recognizes both the dot-per-test quiet format and
+/// verbose-mode `PASSED`/`FAILED`/... lines.
+fn count_progress_chars(test_files: &[String]) -> PytestCounts {
+    let mut counts = PytestCounts::default();
+
+    for line in test_files {
+        let upper_has_verbose_marker = line.contains("PASSED")
+            || line.contains("FAILED")
+            || line.contains("ERROR")
+            || line.contains("SKIPPED")
+            || line.contains("XFAIL")
+            || line.contains("XPASS");
+
+        if upper_has_verbose_marker {
+            // Verbose mode: one status keyword per line, e.g.
+            // "tests/test_foo.py::test_bar PASSED [ 20%]".
+            if line.contains("XPASS") {
+                counts.xpassed += 1;
+            } else if line.contains("XFAIL") {
+                counts.xfailed += 1;
+            } else if line.contains("PASSED") {
+                counts.passed += 1;
+            } else if line.contains("FAILED") || line.contains("ERROR") {
+                counts.failed += 1;
+            } else if line.contains("SKIPPED") {
+                counts.skipped += 1;
+            }
+            continue;
+        }
+
+        // Quiet mode: strip the leading "<path>.py" token and the
+        // trailing "[ NN%]" progress marker, leaving just the run
+        // characters (padded with spaces).
+        let without_pct = match line.rfind('[') {
+            Some(idx) => &line[..idx],
+            None => line.as_str(),
+        };
+        let chars_part = match without_pct.find(".py") {
+            Some(idx) => &without_pct[idx + 3..],
+            None => without_pct,
+        };
+
+        for ch in chars_part.chars() {
+            match ch {
+                '.' => counts.passed += 1,
+                'F' | 'E' => counts.failed += 1,
+                's' => counts.skipped += 1,
+                'x' => counts.xfailed += 1,
+                'X' => counts.xpassed += 1,
+                _ => {}
+            }
+        }
+    }
+
+    counts
 }
 
 fn parse_summary_line(summary: &str) -> PytestCounts {
@@ -527,5 +654,63 @@ collected 3 items
             "Should not say 'No tests collected' when tests were skipped. Got: {}",
             result
         );
+    }
+
+    #[test]
+    fn test_filter_pytest_teardown_crash_before_summary() {
+        // Reproduces a real bug: on Windows, pytest_sessionfinish teardown
+        // (e.g. tmp_path cleanup) can raise PermissionError *after* every
+        // test already ran but *before* the "=== N passed in Ys ===" footer
+        // prints. rtk only ever filters stdout (RunOptions::stdout_only());
+        // the crash traceback lands on stderr and never reaches this
+        // function. What's left on stdout, confirmed against a real
+        // pytest 9.1.1 -q run on Windows, is nothing but the bare dot
+        // progress line — no "=== test session starts ===" banner, no
+        // "collected N items" line, no final summary footer, and (for a
+        // single target file) not even a file-path prefix.
+        let output = ".....                                                                    [100%]";
+
+        let result = filter_pytest_output(output);
+        assert!(
+            !result.contains("No tests collected"),
+            "Should not report 'No tests collected' when the progress line shows 5/5 passed. Got: {}",
+            result
+        );
+        assert!(
+            result.contains("5 passed"),
+            "Should derive the true count from the progress line. Got: {}",
+            result
+        );
+        assert!(
+            result.contains("derived, no summary footer"),
+            "Should flag that counts were derived, not read from a real footer. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_pytest_teardown_crash_with_path_prefix() {
+        // Same scenario, but with the file-path prefix pytest sometimes
+        // includes ahead of the dots (also seen in the wild for this bug).
+        let output = "interface\\tests\\test_chat_session.py .....                               [100%]";
+
+        let result = filter_pytest_output(output);
+        assert!(
+            !result.contains("No tests collected"),
+            "Got: {}",
+            result
+        );
+        assert!(result.contains("5 passed"), "Got: {}", result);
+    }
+
+    #[test]
+    fn test_count_progress_chars_mixed_quiet_mode() {
+        let lines = vec!["test_foo.py ..F..sxX                    [100%]".to_string()];
+        let counts = count_progress_chars(&lines);
+        assert_eq!(counts.passed, 4);
+        assert_eq!(counts.failed, 1);
+        assert_eq!(counts.skipped, 1);
+        assert_eq!(counts.xfailed, 1);
+        assert_eq!(counts.xpassed, 1);
     }
 }
