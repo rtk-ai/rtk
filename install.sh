@@ -27,6 +27,17 @@ error() {
     exit 1
 }
 
+# Compute sha256 of a file, portable across GNU (sha256sum) and BSD/macOS (shasum).
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        error "No sha256 tool found on system (need sha256sum or shasum)"
+    fi
+}
+
 # Detect OS
 detect_os() {
     case "$(uname -s)" in
@@ -101,6 +112,25 @@ install() {
         error "Failed to download binary"
     fi
 
+    # Verify the downloaded tarball against the release's published checksums.
+    # Without this check, a tampered release asset or a MITM on the download
+    # would be installed silently.
+    CHECKSUMS_URL="https://github.com/${REPO}/releases/download/${VERSION}/checksums.txt"
+    CHECKSUMS_FILE="${TEMP_DIR}/checksums.txt"
+    info "Downloading checksums..."
+    if ! curl -fsSL "$CHECKSUMS_URL" -o "$CHECKSUMS_FILE"; then
+        error "Failed to download checksums.txt for ${VERSION}"
+    fi
+    ARCHIVE_NAME="${BINARY_NAME}-${TARGET}.tar.gz"
+    EXPECTED=$(awk -v f="$ARCHIVE_NAME" '{sub(/^\*/, "", $2); if ($2 == f) print $1}' "$CHECKSUMS_FILE")
+    if [ -z "$EXPECTED" ]; then
+        error "No checksum found for ${ARCHIVE_NAME} in checksums.txt"
+    fi
+    ACTUAL=$(sha256_of "$ARCHIVE")
+    if [ "$EXPECTED" != "$ACTUAL" ]; then
+        error "Checksum mismatch for ${ARCHIVE_NAME}: expected ${EXPECTED}, got ${ACTUAL}"
+    fi
+    info "Checksum verified (sha256)"
     info "Downloading checksums..."
     if ! curl -fsSL "$CHECKSUMS_URL" -o "$CHECKSUMS"; then
         error "Failed to download checksums.txt — refusing to install unverified binary (set RTK_SKIP_CHECKSUM=1 to bypass at your own risk)"
