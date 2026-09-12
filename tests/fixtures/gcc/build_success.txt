@@ -1,0 +1,7 @@
+src/utils.c: In function 'init_buffer':
+src/utils.c:14:5: warning: ignoring return value of 'fgets' declared with attribute 'warn_unused_result' [-Wunused-result]
+   14 |     fgets(buf, sizeof(buf), stdin);
+      |     ^~~~~~
+src/main.c:88:32: warning: comparison between pointer and integer [-Wpointer-compare]
+   88 |     if (result != NULL && result != 0) {
+      |                                ^~
