@@ -233,18 +233,20 @@ fn heal_legacy_hook_file(path: &std::path::Path) -> bool {
         .is_ok()
 }
 
-/// The decision every hook applies -- [`decision::decide_for_agent`] -- plus the
-/// recall bookkeeping the hook path performs for any command it does not deny.
-fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
+/// The decision every hook applies -- [`decision::decide_for_agent_at`] -- plus
+/// the recall bookkeeping the hook path performs for any command it does not
+/// deny. `cwd` is the payload's working directory when the host reports one
+/// (only the Claude Code hook does; see #3864).
+fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict, cwd: Option<&str>) -> HookDecision {
     if verdict == PermissionVerdict::Deny {
         return HookDecision::Deny;
     }
     crate::hooks::rewrite_cmd::track_tee_read(cmd);
-    decision::decide_for_agent(cmd, verdict)
+    decision::decide_for_agent_at(cmd, verdict, cwd)
 }
 
-fn decide_hook_action(cmd: &str, host: permissions::Host) -> HookDecision {
-    decide_from_verdict(cmd, permissions::check_command_for(cmd, host))
+fn decide_hook_action(cmd: &str, host: permissions::Host, cwd: Option<&str>) -> HookDecision {
+    decide_from_verdict(cmd, permissions::check_command_for(cmd, host), cwd)
 }
 
 fn handle_vscode(cmd: &str) -> Result<()> {
@@ -255,7 +257,10 @@ fn handle_vscode(cmd: &str) -> Result<()> {
 }
 
 fn vscode_response(cmd: &str) -> Option<Value> {
-    vscode_response_from_decision(decide_hook_action(cmd, permissions::Host::Claude), cmd)
+    vscode_response_from_decision(
+        decide_hook_action(cmd, permissions::Host::Claude, None),
+        cmd,
+    )
 }
 
 /// Build the VS Code Copilot Chat / Copilot CLI (PascalCase compat) hook response.
@@ -298,9 +303,10 @@ fn handle_copilot_cli(cmd: &str, args: &Value) -> Result<()> {
 }
 
 fn handle_copilot_ide(cmd: &str) -> Result<()> {
-    if let Some(response) =
-        copilot_ide_response_from_decision(decide_hook_action(cmd, permissions::Host::Claude), cmd)
-    {
+    if let Some(response) = copilot_ide_response_from_decision(
+        decide_hook_action(cmd, permissions::Host::Claude, None),
+        cmd,
+    ) {
         let _ = writeln!(io::stdout(), "{response}");
     }
     Ok(())
@@ -328,7 +334,7 @@ fn copilot_ide_response_from_decision(decision: HookDecision, cmd: &str) -> Opti
 fn copilot_cli_response(cmd: &str, args: &Value) -> Option<Value> {
     copilot_cli_response_from_decision(
         args,
-        decide_hook_action(cmd, permissions::Host::Claude),
+        decide_hook_action(cmd, permissions::Host::Claude, None),
         cmd,
     )
 }
@@ -382,7 +388,7 @@ pub fn run_gemini() -> Result<()> {
 /// duplicate test copy.
 fn run_gemini_inner(input: &str) -> serde_json::Result<String> {
     run_gemini_inner_impl(input, |cmd| {
-        decide_hook_action(cmd, permissions::Host::Gemini)
+        decide_hook_action(cmd, permissions::Host::Gemini, None)
     })
 }
 
@@ -401,6 +407,7 @@ fn run_gemini_inner_with_rules(
         decide_from_verdict(
             cmd,
             permissions::check_command_with_rules(cmd, deny, ask, allow),
+            None,
         )
     })
 }
@@ -481,7 +488,7 @@ fn run_vibe_inner(input: &str) -> Option<String> {
         return None;
     }
 
-    match decide_hook_action(cmd, permissions::Host::Vibe) {
+    match decide_hook_action(cmd, permissions::Host::Vibe, None) {
         HookDecision::Deny => {
             audit_log("deny", cmd, "");
             Some(r#"{"decision":"deny","reason":"Blocked by RTK permission rule"}"#.to_string())
@@ -579,7 +586,12 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
         None => return PayloadAction::Ignore,
     };
 
-    process_claude_payload_from_decision(v, cmd, decide_hook_action(cmd, permissions::Host::Claude))
+    let cwd = v.get("cwd").and_then(Value::as_str);
+    process_claude_payload_from_decision(
+        v,
+        cmd,
+        decide_hook_action(cmd, permissions::Host::Claude, cwd),
+    )
 }
 
 /// Pure core of `process_claude_payload`, taking the hook decision directly so the
@@ -787,7 +799,7 @@ pub fn run_cursor() -> Result<()> {
         }
     };
 
-    let output = match decide_hook_action(&cmd, permissions::Host::Cursor) {
+    let output = match decide_hook_action(&cmd, permissions::Host::Cursor, None) {
         HookDecision::AllowRewrite(rewritten) => {
             audit_log("rewrite", &cmd, &rewritten);
             cursor_allow(&rewritten)
@@ -853,7 +865,7 @@ fn run_cursor_inner_with_rules(
     };
 
     let verdict = permissions::check_command_with_rules(&cmd, deny_rules, ask_rules, allow_rules);
-    match decide_from_verdict(&cmd, verdict) {
+    match decide_from_verdict(&cmd, verdict, None) {
         HookDecision::AllowRewrite(rewritten) => cursor_allow(&rewritten),
         HookDecision::AskRewrite(rewritten) => cursor_ask(&rewritten),
         _ => "{}".to_string(),
@@ -869,7 +881,11 @@ fn run_cursor_inner_with_rules(
 
 fn process_droid_payload(v: &Value) -> Option<Value> {
     let cmd = droid_execute_command(v)?;
-    droid_response_from_decision(v, cmd, decide_hook_action(cmd, permissions::Host::Droid))
+    droid_response_from_decision(
+        v,
+        cmd,
+        decide_hook_action(cmd, permissions::Host::Droid, None),
+    )
 }
 
 /// Extract the shell command when the payload targets Droid's Execute tool.
@@ -972,7 +988,8 @@ fn run_droid_inner_with_rules(
     let v: Value = droid_payload(input).ok().flatten()?;
     let cmd = droid_execute_command(&v)?;
     let verdict = permissions::check_command_with_rules(cmd, deny_rules, ask_rules, allow_rules);
-    droid_response_from_decision(&v, cmd, decide_from_verdict(cmd, verdict)).map(|o| o.to_string())
+    droid_response_from_decision(&v, cmd, decide_from_verdict(cmd, verdict, None))
+        .map(|o| o.to_string())
 }
 
 #[cfg(test)]
@@ -1311,7 +1328,11 @@ mod tests {
             &[],
             &["Bash(git:*)".to_string()],
         );
-        copilot_cli_response_from_decision(&cli_args(cmd), decide_from_verdict(cmd, verdict), cmd)
+        copilot_cli_response_from_decision(
+            &cli_args(cmd),
+            decide_from_verdict(cmd, verdict, None),
+            cmd,
+        )
     }
 
     #[test]
@@ -1421,6 +1442,25 @@ mod tests {
             Some("rtk git status".into())
         );
         assert_eq!(rewrite_command_no_prefixes("cat <<EOF", &[]), None);
+    }
+
+    /// #3864: the Claude hook feeds the payload cwd into the decision, so a
+    /// git command from inside a managed worktree is left to Claude Code.
+    #[test]
+    fn test_claude_payload_cwd_in_worktree_skips_git_rewrite() {
+        let v = claude_payload_with_ids(
+            "git status",
+            "sess-1",
+            "toolu_01ABC",
+            "/repo/.claude/worktrees/feat-x",
+        );
+        assert!(matches!(
+            process_claude_payload(&v),
+            PayloadAction::Skip {
+                decision: HookOutcome::Defer,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1990,7 +2030,7 @@ mod tests {
         allow: &[String],
     ) -> HookDecision {
         let verdict = permissions::check_command_with_rules(cmd, deny, ask, allow);
-        decide_from_verdict(cmd, verdict)
+        decide_from_verdict(cmd, verdict, None)
     }
 
     fn all_allowed() -> Vec<String> {

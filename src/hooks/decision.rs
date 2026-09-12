@@ -102,7 +102,45 @@ pub(crate) fn decide_with_params(
 /// which is what the `rtk rewrite` CLI renders. Every hook entry point goes
 /// through here so they cannot drift apart.
 pub(crate) fn decide_for_agent(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
-    suppress_identity(cmd, decide(cmd, verdict))
+    decide_for_agent_at(cmd, verdict, None)
+}
+
+/// [`decide_for_agent`] for a hook whose payload reports the command's working
+/// directory: inside a Claude Code managed worktree, `git` is left unrewritten.
+///
+/// Claude Code's worktree-isolation guard runs on the command *after* the hook
+/// has rewritten it, and it only accepts git spelled plainly (or under the few
+/// launchers it models). A rewritten `rtk git …` is refused outright as
+/// "cannot be shown not to be git", so no git command could run from an
+/// isolated session (#3864). The payload carries no isolation flag, but the
+/// managed worktrees always live at `<repo>/.claude/worktrees/<name>`, so that
+/// path shape is the signal (see [`in_claude_worktree`]). The rest of a chain
+/// is still rewritten: `git status && cargo build` → `git status && rtk cargo build`.
+pub(crate) fn decide_for_agent_at(
+    cmd: &str,
+    verdict: PermissionVerdict,
+    cwd: Option<&str>,
+) -> HookDecision {
+    let (mut excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
+    if cwd.is_some_and(in_claude_worktree) {
+        excluded.push("git".to_string());
+    }
+    suppress_identity(
+        cmd,
+        decide_with_params(cmd, verdict, &excluded, &transparent_prefixes),
+    )
+}
+
+/// Whether `cwd` is inside a worktree Claude Code manages
+/// (`<repo>/.claude/worktrees/<name>`, or deeper).
+pub(crate) fn in_claude_worktree(cwd: &str) -> bool {
+    let parts: Vec<&str> = std::path::Path::new(cwd)
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    parts
+        .windows(3)
+        .any(|w| w[0] == ".claude" && w[1] == "worktrees")
 }
 
 /// Turn a rewrite that changed nothing into a [`HookDecision::Defer`].
@@ -248,6 +286,34 @@ impl AgentPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- #3864: Claude Code worktree isolation ---
+
+    #[test]
+    fn in_claude_worktree_matches_only_managed_worktree_paths() {
+        assert!(in_claude_worktree("/repo/.claude/worktrees/feat-x"));
+        assert!(in_claude_worktree("/repo/.claude/worktrees/feat-x/src"));
+        assert!(!in_claude_worktree("/repo"));
+        assert!(!in_claude_worktree("/repo/.claude/worktrees"));
+        assert!(!in_claude_worktree("/repo/worktrees/feat-x"));
+    }
+
+    #[test]
+    fn claude_worktree_leaves_git_plain_but_rewrites_the_rest() {
+        let wt = Some("/repo/.claude/worktrees/feat-x");
+        assert_eq!(
+            decide_for_agent_at("git status", PermissionVerdict::Default, wt),
+            HookDecision::Defer
+        );
+        assert_eq!(
+            decide_for_agent_at("git status && cargo build", PermissionVerdict::Allow, wt),
+            HookDecision::AllowRewrite("git status && rtk cargo build".into())
+        );
+        assert_eq!(
+            decide_for_agent_at("git status", PermissionVerdict::Allow, Some("/repo")),
+            HookDecision::AllowRewrite("rtk git status".into())
+        );
+    }
 
     /// A rewritable command with no rule matching it is an ask-rewrite, never
     /// an allow-rewrite (#1155).
