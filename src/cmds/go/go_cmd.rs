@@ -43,6 +43,7 @@ struct PackageResult {
     failed_tests: Vec<(String, Vec<String>)>, // (test_name, output_lines)
     package_failed: bool,                     // package-level failure (timeout, signal, etc.)
     package_fail_output: Vec<String>,         // output lines collected before the package fail
+    coverage: Vec<String>,                    // per-package coverage lines from go test -cover
 }
 
 pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
@@ -377,7 +378,11 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
                         // Package-level output (timeout messages, signal info, etc.)
                         let trimmed = output_text.trim();
                         if !trimmed.is_empty() {
-                            pkg_result.package_fail_output.push(trimmed.to_string());
+                            if trimmed.starts_with("coverage:") {
+                                pkg_result.coverage.push(trimmed.to_string());
+                            } else {
+                                pkg_result.package_fail_output.push(trimmed.to_string());
+                            }
                         }
                     }
                 }
@@ -407,10 +412,19 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
     }
 
     if !has_failures {
-        return format!(
-            "Go test: {} passed in {} packages",
-            total_pass, total_packages
-        );
+        let has_coverage = packages.values().any(|p| !p.coverage.is_empty());
+        if !has_coverage {
+            return format!("Go test: {} passed in {} packages", total_pass, total_packages);
+        }
+        let mut result = format!("Go test: {} passed in {} packages\n", total_pass, total_packages);
+        let mut sorted_pkgs: Vec<(&String, &PackageResult)> = packages.iter().collect();
+        sorted_pkgs.sort_by_key(|(name, _)| name.as_str());
+        for (package, pkg_result) in &sorted_pkgs {
+            for line in &pkg_result.coverage {
+                result.push_str(&format!("  {}: {}\n", compact_package_name(package), line));
+            }
+        }
+        return result.trim().to_string();
     }
 
     let mut result = String::new();
@@ -750,6 +764,25 @@ mod tests {
         assert!(result.contains("Go test"));
         assert!(result.contains("1 passed"));
         assert!(result.contains("1 packages"));
+    }
+
+    #[test]
+    fn test_filter_go_test_cover_output_preserved() {
+        // go test -cover -json emits coverage as a package-level output event.
+        // Previously this was silently dropped on passing runs (issue #1765).
+        let output = r#"{"Time":"2024-01-01T10:00:00Z","Action":"run","Package":"example.com/foo","Test":"TestBar"}
+{"Time":"2024-01-01T10:00:01Z","Action":"output","Package":"example.com/foo","Test":"TestBar","Output":"=== RUN   TestBar\n"}
+{"Time":"2024-01-01T10:00:02Z","Action":"pass","Package":"example.com/foo","Test":"TestBar","Elapsed":0.5}
+{"Time":"2024-01-01T10:00:02Z","Action":"output","Package":"example.com/foo","Output":"coverage: 80.1% of statements\n"}
+{"Time":"2024-01-01T10:00:02Z","Action":"pass","Package":"example.com/foo","Elapsed":0.5}"#;
+
+        let result = filter_go_test_json(output);
+        assert!(result.contains("1 passed"), "should show pass count");
+        assert!(
+            result.contains("coverage: 80.1% of statements"),
+            "coverage line must be preserved, got: {result}"
+        );
+        assert!(result.contains("foo"), "should show package name");
     }
 
     #[test]
