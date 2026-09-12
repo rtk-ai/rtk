@@ -147,7 +147,7 @@ schema_version = 1
 
 const RTK_MD: &str = "RTK.md";
 const CLAUDE_MD: &str = "CLAUDE.md";
-const AGENTS_MD: &str = "AGENTS.md";
+pub(super) const AGENTS_MD: &str = "AGENTS.md";
 const RTK_MD_REF: &str = "@RTK.md";
 const GEMINI_MD: &str = "GEMINI.md";
 
