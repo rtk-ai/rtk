@@ -1,7 +1,7 @@
 //! Filters git output — log, status, diff, and more — keeping just the essential info.
 
 use crate::core::arg_tokenizer::{
-    self, is_digit_run, Attachment, Dialect, Token, TokenKind, ValueSpec,
+    self, is_digit_run, Dialect, Token, TokenKind, ValueSpec,
 };
 use crate::core::args_utils;
 use crate::core::guard::never_worse;
@@ -467,7 +467,7 @@ fn run_show(
     // `0xF1` becomes the `U+FFFD` replacement char — verified).
     let (route, blob_objects) = match show_route(args) {
         ShowRoute::Blob => {
-            let blobs: Vec<&String> = blob_candidates(args)
+            let blobs: Vec<&str> = blob_candidates(args)
                 .into_iter()
                 .filter(|c| probe_is_blob(global_args, c))
                 .collect();
@@ -780,95 +780,27 @@ fn is_blob_show_arg(arg: &str) -> bool {
         && arg.chars().any(|c| c != ':')
 }
 
-/// The positional (non-option) arguments of a `git show` — its objects. Options and
-/// the value tokens they consume (`-S 'url:1'`, `-L 1,2:file`) are dropped via git's
-/// own flag/value grammar ([`flag_token_consumes_next`]), so an option operand that
-/// happens to contain a colon is never mistaken for a blob and truncated. This handles
-/// short-flag CLUSTERS too (`-wG a:b`, `-pS a:b`), whose value-flag tail git re-parses.
-/// Args after a `--` are pathspecs, never objects, so a colon in a filename there
-/// (`-- weird:name`) is excluded by scanning only the args before the first `--`; a
-/// trailing `-- <path>` beside a real object arg is thus ignored (git still dumps the
-/// blob) rather than emptying the list.
-fn show_positionals(args: &[String]) -> Vec<&String> {
-    let rev_args = match args.iter().position(|a| a == "--") {
-        Some(sep) => &args[..sep],
-        None => args,
-    };
-    let mut positionals = Vec::new();
-    let mut iter = rev_args.iter();
-    while let Some(arg) = iter.next() {
-        if arg.starts_with('-') {
-            if flag_token_consumes_next(arg) {
-                iter.next(); // skip this flag's value token
-            }
-            continue;
-        }
-        positionals.push(arg);
-    }
-    positionals
-}
-
-/// Whether `arg` is a flag that consumes the following argument as its value.
+/// The positional (non-option) arguments of a `git show` — its objects. A flag's own value
+/// operand (`-S 'url:1'`, the `-G` value in a `-wG a:b` cluster) and everything past `--`
+/// are excluded, so a colon in either is never mistaken for a `<rev>:<path>` blob. A
+/// trailing `-- <path>` beside a real object is thus ignored rather than emptying the list.
 ///
-/// Delegates to [`log_takes_value`] so git's flag/value grammar lives in one table rather than
-/// two that can drift: the same predicate the tokenizer folds with. `AttachedOnly` flags are
-/// excluded because they never take a separate token (`-M50` attaches, `-M 50` does not), and
-/// the cluster-position rule for solo-only flags is applied by the caller below.
-fn consumes_next_token_as_value(arg: &str) -> bool {
-    let (kind, name) = match arg.strip_prefix("--") {
-        Some(rest) => (TokenKind::Long, rest),
-        None => match arg.strip_prefix('-') {
-            Some(rest) => (TokenKind::Short, rest),
-            None => return false,
-        },
-    };
-    log_takes_value(kind, name).is_some_and(|spec| spec.attachment != Attachment::AttachedOnly)
-}
-
-/// Whether a flag token consumes the NEXT arg as its value (so `show_positionals` must
-/// skip it). Handles long flags (`--grep foo`) via [`consumes_next_token_as_value`] and
-/// short-flag CLUSTERS (`-wG foo`, `-pS bar`), which git re-parses char by char.
-///
-/// Inside a cluster, the first value-taking short flag (`-S -G -I -L -O -l -n`) takes
-/// the REST of the cluster as an INLINE value when more chars follow it (`-Sfoo` == `-S
-/// foo`, so it does NOT consume the next arg), or the NEXT arg when it is the cluster's
-/// last char (`-wG` == `-w -G`, consuming the next arg). Any earlier char is a boolean
-/// flag we skip over. This reuses the single flag/value table rather than re-tokenizing
-/// git's whole grammar, so `git show -wG x:y HEAD:big` correctly treats `x:y` as `-G`'s
-/// value and `HEAD:big` as the object.
-//
-// TODO(after #3681): replace this short-cluster walk with the ValueSpec factorization;
-// the per-char logic here is exactly what a ValueSpec table subsumes.
-fn flag_token_consumes_next(arg: &str) -> bool {
-    // A short cluster is a single leading `-` followed by non-empty flag chars (not the
-    // `--long` form and not the bare `-` stdin sentinel). Everything else (`--foo`, `-`)
-    // uses the exact-match table directly.
-    match arg.strip_prefix('-') {
-        Some(cluster) if !cluster.is_empty() && !cluster.starts_with('-') => {
-            for (i, c) in cluster.char_indices() {
-                if is_short_value_flag(c) {
-                    // Consumes the next arg only if no inline value follows in-cluster.
-                    return i + c.len_utf8() == cluster.len();
-                }
-            }
-            false
-        }
-        _ => consumes_next_token_as_value(arg),
-    }
-}
-
-/// Whether a single-letter short flag takes a value (`-S`, `-G`, `-L`, …). Derived from
-/// [`consumes_next_token_as_value`] so the flag/value table stays the single source of
-/// truth and no parallel list can drift out of sync.
-fn is_short_value_flag(c: char) -> bool {
-    c.is_ascii() && consumes_next_token_as_value(format!("-{c}").as_str())
+/// Uses `diff`'s grammar, not `log`'s: `git show -wl 100` consumes the `100` as the rename
+/// limit, where log's `-l` is solo-only and would leave it looking like a second object.
+fn show_positionals(args: &[String]) -> Vec<&str> {
+    let tokens = tokenize_git_diff_args(args);
+    arg_tokenizer::before_dashdash(&tokens)
+        .iter()
+        .filter(|t| t.is_free_positional())
+        .map(|t| t.text)
+        .collect()
 }
 
 /// The `git show` positionals that look like `<rev>:<path>` blob objects — the
 /// windowing candidates. ALL of them are returned (not just the first) so `run_show`
 /// can `cat-file`-probe every one: a value operand a missed exotic cluster might leave
 /// behind is rejected by the probe, while the real blob elsewhere on the line is found.
-fn blob_candidates(args: &[String]) -> Vec<&String> {
+fn blob_candidates(args: &[String]) -> Vec<&str> {
     show_positionals(args)
         .into_iter()
         .filter(|a| is_blob_show_arg(a))
@@ -958,9 +890,6 @@ fn commit_or_stat_route(args: &[String]) -> ShowRoute {
 /// requirement the recovery hint has. Only called on the path where the arg already
 /// looks like `rev:path` (the `show_route` pre-filter), so the ~1 ms subprocess never
 /// runs on an ordinary commit show.
-///
-// TODO(after #3681): once ValueSpec factorization lands, a flag pre-filter can avoid
-// the cat-file probe on the common path.
 fn probe_is_blob(global_args: &[String], arg: &str) -> bool {
     let mut cmd = git_cmd(global_args);
     cmd.args(["cat-file", "-t", arg]);
@@ -1817,8 +1746,8 @@ fn real_flag_args(args: &[String]) -> Vec<&str> {
 
 /// True for git log flags that change the *shape* of git's raw output (patch text, diffstat,
 /// name lists) in a way incompatible with RTK's injected `--pretty=format` markers, requiring
-/// the raw passthrough path instead (see [`requests_raw_log_output`]). `diff`/`show` use the
-/// narrower [`diff_wants_raw_shape`]/[`show_wants_raw_shape`] instead.
+/// the raw passthrough path instead. `diff`/`show` use the narrower
+/// [`diff_wants_raw_shape`]/[`show_wants_raw_shape`] instead.
 fn log_wants_raw_shape(token: &Token<'_>, tokens: &[Token<'_>]) -> bool {
     // Every `--diff-merges` format but `off`/`none` emits a patch (git 2.53), and log's
     // one-line-per-commit compaction cannot represent one -- the same reason `-p` is listed
