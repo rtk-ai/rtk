@@ -38,16 +38,16 @@ pub fn run(
 
     // Apply filter
     let filter = filter::get_filter(level);
-    let mut filtered = filter.filter(&content, &lang);
+    let filtered = filter.filter(&content, &lang);
 
     // Safety: if filter emptied a non-empty file, fall back to raw content
-    if filtered.trim().is_empty() && !content.trim().is_empty() {
+    let (filtered, fell_back) = preserve_nonempty_input(&content, filtered);
+    if fell_back {
         eprintln!(
             "rtk: warning: filter produced empty output for {} ({} bytes), showing raw content",
             file.display(),
             content.len()
         );
-        filtered = content.clone();
     }
 
     if verbose > 0 {
@@ -64,15 +64,16 @@ pub fn run(
         );
     }
 
-    filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
-
     let (raw, rtk_output) = if line_numbers {
         (
             format_with_line_numbers(&content),
-            format_with_line_numbers(&filtered),
+            apply_numbered_line_window(&filtered, max_lines, tail_lines, &lang),
         )
     } else {
-        (content.clone(), filtered.clone())
+        (
+            content.clone(),
+            apply_line_window(&filtered, max_lines, tail_lines, &lang),
+        )
     };
     let shown = never_worse(&raw, &rtk_output);
     print!("{}", shown);
@@ -116,7 +117,14 @@ pub fn run_stdin(
 
     // Apply filter
     let filter = filter::get_filter(level);
-    let mut filtered = filter.filter(&content, &lang);
+    let filtered = filter.filter(&content, &lang);
+    let (filtered, fell_back) = preserve_nonempty_input(&content, filtered);
+    if fell_back {
+        eprintln!(
+            "rtk: warning: filter produced empty output for stdin ({} bytes), showing raw content",
+            content.len()
+        );
+    }
 
     if verbose > 0 {
         let original_lines = content.lines().count();
@@ -132,21 +140,30 @@ pub fn run_stdin(
         );
     }
 
-    filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
-
     let (raw, rtk_output) = if line_numbers {
         (
             format_with_line_numbers(&content),
-            format_with_line_numbers(&filtered),
+            apply_numbered_line_window(&filtered, max_lines, tail_lines, &lang),
         )
     } else {
-        (content.clone(), filtered.clone())
+        (
+            content.clone(),
+            apply_line_window(&filtered, max_lines, tail_lines, &lang),
+        )
     };
     let shown = never_worse(&raw, &rtk_output);
     print!("{}", shown);
 
     timer.track("cat - (stdin)", "rtk read -", &raw, shown);
     Ok(())
+}
+
+fn preserve_nonempty_input(content: &str, filtered: String) -> (String, bool) {
+    if filtered.trim().is_empty() && !content.trim().is_empty() {
+        (content.to_string(), true)
+    } else {
+        (filtered, false)
+    }
 }
 
 fn format_with_line_numbers(content: &str) -> String {
@@ -183,6 +200,33 @@ fn apply_line_window(
     }
 
     content.to_string()
+}
+
+fn apply_numbered_line_window(
+    content: &str,
+    max_lines: Option<usize>,
+    tail_lines: Option<usize>,
+    lang: &Language,
+) -> String {
+    if let Some(tail) = tail_lines {
+        if tail == 0 {
+            return String::new();
+        }
+        let lines: Vec<&str> = content.lines().collect();
+        let start = lines.len().saturating_sub(tail);
+        let width = lines.len().to_string().len();
+        let mut output = String::new();
+        for (index, line) in lines.iter().enumerate().skip(start) {
+            output.push_str(&format!("{:>width$} │ {}\n", index + 1, line));
+        }
+        return output;
+    }
+
+    if let Some(max) = max_lines {
+        return filter::smart_truncate_numbered(content, max, lang);
+    }
+
+    format_with_line_numbers(content)
 }
 
 #[cfg(test)]
@@ -233,7 +277,54 @@ fn main() {{
         let input = "a\nb\nc\nd\n";
         let output = apply_line_window(input, Some(2), None, &Language::Unknown);
         assert!(output.starts_with("a\n"));
-        assert!(output.contains("more lines"));
+        assert!(output.contains("lines omitted"));
+    }
+
+    #[test]
+    fn test_numbered_truncation_preserves_source_line_numbers() {
+        let input = r#"fn can_admin(user: &User) -> bool {
+    if !user.is_admin {
+        return false;
+    }
+    if user.is_banned {
+        return false;
+    }
+    if user.mfa_ok {
+        return true;
+    }
+    false
+}
+fn wipe_database() {
+    drop_all();
+}"#;
+
+        let output = apply_numbered_line_window(input, Some(10), None, &Language::Rust);
+
+        assert!(output.contains(" 5 │     if user.is_banned {"));
+        assert!(output.contains("   │ [1 line omitted]"));
+        assert!(output.contains(" 7 │     }"));
+        assert!(!output.contains(" 6 │     }"));
+    }
+
+    #[test]
+    fn test_numbered_tail_uses_source_line_numbers() {
+        let output =
+            apply_numbered_line_window("a\nb\nc\nd\n", None, Some(2), &Language::Unknown);
+        assert_eq!(output, "3 │ c\n4 │ d\n");
+    }
+
+    #[test]
+    fn test_nonempty_input_falls_back_from_empty_filter_output() {
+        let (output, fell_back) = preserve_nonempty_input("// build failed\n", String::new());
+        assert!(fell_back);
+        assert_eq!(output, "// build failed\n");
+    }
+
+    #[test]
+    fn test_empty_input_does_not_invent_fallback_output() {
+        let (output, fell_back) = preserve_nonempty_input("", String::new());
+        assert!(!fell_back);
+        assert!(output.is_empty());
     }
 
     fn rtk_bin() -> std::path::PathBuf {

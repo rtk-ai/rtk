@@ -317,45 +317,129 @@ pub fn get_filter(level: FilterLevel) -> Box<dyn FilterStrategy> {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum TruncatedLine<'a> {
+    Source { number: usize, text: &'a str },
+    Omitted { count: usize },
+}
+
+fn is_structurally_important(line: &str) -> bool {
+    let trimmed = line.trim();
+    FUNC_SIGNATURE.is_match(trimmed)
+        || IMPORT_PATTERN.is_match(trimmed)
+        || trimmed.starts_with("pub ")
+        || trimmed.starts_with("export ")
+        || trimmed == "}"
+        || trimmed == "{"
+}
+
+fn select_truncated_lines<'a>(lines: &'a [&'a str], max_lines: usize) -> Vec<TruncatedLine<'a>> {
+    if max_lines == 0 || lines.is_empty() {
+        return Vec::new();
+    }
+
+    let prefix_len = (max_lines / 2)
+        .min(max_lines.saturating_sub(1))
+        .min(lines.len());
+    let mut selected: Vec<usize> = (0..prefix_len).collect();
+    let mut gap_count = 0;
+
+    for (index, line) in lines.iter().enumerate().skip(prefix_len) {
+        if !is_structurally_important(line) {
+            continue;
+        }
+
+        let adds_gap = selected
+            .last()
+            .map_or(index > 0, |previous| index > previous + 1);
+        let needs_tail_marker = index + 1 < lines.len();
+        let rendered_len =
+            selected.len() + 1 + gap_count + usize::from(adds_gap) + usize::from(needs_tail_marker);
+
+        if rendered_len <= max_lines {
+            selected.push(index);
+            gap_count += usize::from(adds_gap);
+        }
+    }
+
+    if selected.is_empty() {
+        return vec![TruncatedLine::Omitted { count: lines.len() }];
+    }
+
+    let mut result = Vec::with_capacity(max_lines);
+    let mut next_source_index = 0;
+    for index in selected {
+        if index > next_source_index {
+            result.push(TruncatedLine::Omitted {
+                count: index - next_source_index,
+            });
+        }
+        result.push(TruncatedLine::Source {
+            number: index + 1,
+            text: lines[index],
+        });
+        next_source_index = index + 1;
+    }
+    if next_source_index < lines.len() {
+        result.push(TruncatedLine::Omitted {
+            count: lines.len() - next_source_index,
+        });
+    }
+    result
+}
+
+fn omission_marker(count: usize) -> String {
+    let noun = if count == 1 { "line" } else { "lines" };
+    format!("[{count} {noun} omitted]")
+}
+
+fn render_truncated(lines: &[TruncatedLine<'_>]) -> String {
+    lines
+        .iter()
+        .map(|line| match line {
+            TruncatedLine::Source { text, .. } => (*text).to_string(),
+            TruncatedLine::Omitted { count } => omission_marker(*count),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn smart_truncate(content: &str, max_lines: usize, _lang: &Language) -> String {
     let lines: Vec<&str> = content.lines().collect();
     if lines.len() <= max_lines {
         return content.to_string();
     }
+    render_truncated(&select_truncated_lines(&lines, max_lines))
+}
 
-    let mut result = Vec::with_capacity(max_lines + 1);
-    let mut kept_lines = 0;
+pub(crate) fn smart_truncate_numbered(content: &str, max_lines: usize, _lang: &Language) -> String {
+    let source_lines: Vec<&str> = content.lines().collect();
+    let width = source_lines.len().to_string().len();
+    let lines = if source_lines.len() <= max_lines {
+        source_lines
+            .iter()
+            .enumerate()
+            .map(|(index, text)| TruncatedLine::Source {
+                number: index + 1,
+                text,
+            })
+            .collect()
+    } else {
+        select_truncated_lines(&source_lines, max_lines)
+    };
 
-    for line in &lines {
-        let trimmed = line.trim();
-
-        // Prioritize structurally important lines so the visible window stays useful.
-        // The old approach interleaved "// ... N lines omitted" markers which AI agents
-        // treated as code, causing parsing confusion and extra retry loops.
-        let is_important = FUNC_SIGNATURE.is_match(trimmed)
-            || IMPORT_PATTERN.is_match(trimmed)
-            || trimmed.starts_with("pub ")
-            || trimmed.starts_with("export ")
-            || trimmed == "}"
-            || trimmed == "{";
-
-        if is_important || kept_lines < max_lines / 2 {
-            result.push((*line).to_string());
-            kept_lines += 1;
-        }
-        // Non-important lines beyond max_lines/2 are silently skipped —
-        // no inline markers that could be mistaken for file content.
-
-        if kept_lines >= max_lines - 1 {
-            break;
+    let mut output = String::new();
+    for line in lines {
+        match line {
+            TruncatedLine::Source { number, text } => {
+                output.push_str(&format!("{number:>width$} │ {text}\n"));
+            }
+            TruncatedLine::Omitted { count } => {
+                output.push_str(&format!("{:width$} │ {}\n", "", omission_marker(count)));
+            }
         }
     }
-
-    // Single end-of-output marker: not code syntax, unambiguous to AI agents.
-    // Invariant: kept_lines + N == lines.len() (N = lines not shown)
-    result.push(format!("[{} more lines]", lines.len() - kept_lines));
-
-    result.join("\n")
+    output
 }
 
 #[cfg(test)]
@@ -473,8 +557,7 @@ fn main() {
     fn test_smart_truncate_overflow_count_exact() {
         // 200 plain-text lines (no function signatures/imports) with max_lines=20.
         // Smart selection keeps up to max_lines/2=10 non-important lines then stops.
-        // The overflow message "[N more lines]" must satisfy:
-        //   kept_count + N == total_lines
+        // Omission markers must account for every source line not shown.
         let total_lines = 200usize;
         let max_lines = 20usize;
         let content: String = (0..total_lines)
@@ -484,31 +567,29 @@ fn main() {
 
         let output = smart_truncate(&content, max_lines, &Language::Rust);
 
-        // Extract the overflow message
-        let overflow_line = output
+        let reported_omitted: usize = output
             .lines()
-            .find(|l| l.contains("more lines"))
-            .unwrap_or_else(|| panic!("No overflow message found in:\n{}", output));
-
-        // Parse "[N more lines]"
-        let reported_more: usize = overflow_line
-            .trim()
-            .strip_prefix('[')
-            .and_then(|s| s.split_whitespace().next())
-            .and_then(|n| n.parse().ok())
-            .unwrap_or_else(|| panic!("Could not parse overflow count from: {}", overflow_line));
+            .filter(|line| line.contains("omitted"))
+            .map(|line| {
+                line.trim()
+                    .strip_prefix('[')
+                    .and_then(|value| value.split_whitespace().next())
+                    .and_then(|count| count.parse::<usize>().ok())
+                    .unwrap_or_else(|| panic!("Could not parse omission count from: {line}"))
+            })
+            .sum();
 
         let kept_count = output
             .lines()
-            .filter(|l| !l.contains("more lines") && !l.contains("omitted"))
+            .filter(|line| !line.contains("omitted"))
             .count();
 
         assert_eq!(
-            kept_count + reported_more,
+            kept_count + reported_omitted,
             total_lines,
-            "kept ({}) + reported_more ({}) must equal total ({})",
+            "kept ({}) + reported_omitted ({}) must equal total ({})",
             kept_count,
-            reported_more,
+            reported_omitted,
             total_lines
         );
     }
@@ -524,8 +605,8 @@ fn main() {
             !output.contains("// ..."),
             "smart_truncate must not insert synthetic comment annotations"
         );
-        // Must contain clean end-of-output marker (1 kept + 9 omitted = 10 total)
-        assert!(output.contains("[9 more lines]"));
+        // Must contain a non-code omission marker (1 kept + 9 omitted = 10 total)
+        assert!(output.contains("[9 lines omitted]"));
         // Only the first line is kept (plain-text, no important signatures)
         assert!(output.starts_with("line1\n"));
     }
@@ -543,5 +624,49 @@ fn main() {
         let input = "a\nb\nc";
         let output = smart_truncate(input, 3, &Language::Unknown);
         assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_smart_truncate_marks_each_discontinuity() {
+        let input = r#"fn can_admin(user: &User) -> bool {
+    if !user.is_admin {
+        return false;
+    }
+    if user.is_banned {
+        return false;
+    }
+    if user.mfa_ok {
+        return true;
+    }
+    false
+}
+fn wipe_database() {
+    drop_all();
+}"#;
+
+        let output = smart_truncate(input, 10, &Language::Rust);
+
+        assert!(output.contains("    if user.is_banned {\n[1 line omitted]\n    }"));
+        assert!(
+            !output.contains("    if user.is_banned {\n    }"),
+            "a removed guard body must never look like an empty source block"
+        );
+    }
+
+    #[test]
+    fn test_smart_truncate_zero_lines_is_empty() {
+        assert_eq!(smart_truncate("first\nsecond\n", 0, &Language::Unknown), "");
+    }
+
+    #[test]
+    fn test_smart_truncate_never_exceeds_line_budget() {
+        let input = "plain one\nplain two\nplain three\nfn final_item() {}";
+        for max_lines in 0..=3 {
+            let output = smart_truncate(input, max_lines, &Language::Rust);
+            assert!(
+                output.lines().count() <= max_lines,
+                "max_lines={max_lines} produced {output:?}"
+            );
+        }
     }
 }
