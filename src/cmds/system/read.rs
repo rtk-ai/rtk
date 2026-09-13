@@ -188,6 +188,7 @@ fn apply_line_window(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::test_isolation::rtk_command;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -236,25 +237,16 @@ fn main() {{
         assert!(output.contains("more lines"));
     }
 
-    fn rtk_bin() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("debug")
-            .join("rtk")
-    }
-
     #[test]
     #[ignore]
     fn test_read_two_valid_files_concatenated() {
-        let bin = rtk_bin();
-        assert!(bin.exists(), "Run `cargo build` first");
 
         let mut f1 = NamedTempFile::with_suffix(".txt").unwrap();
         let mut f2 = NamedTempFile::with_suffix(".txt").unwrap();
         writeln!(f1, "alpha\nbravo").unwrap();
         writeln!(f2, "charlie\ndelta").unwrap();
 
-        let output = std::process::Command::new(&bin)
+        let output = rtk_command()
             .args(["read", &f1.path().to_string_lossy(), &f2.path().to_string_lossy()])
             .output()
             .expect("failed to run rtk read");
@@ -268,13 +260,11 @@ fn main() {{
     #[test]
     #[ignore]
     fn test_read_valid_and_nonexistent() {
-        let bin = rtk_bin();
-        assert!(bin.exists(), "Run `cargo build` first");
 
         let mut f1 = NamedTempFile::with_suffix(".txt").unwrap();
         writeln!(f1, "valid content").unwrap();
 
-        let output = std::process::Command::new(&bin)
+        let output = rtk_command()
             .args(["read", &f1.path().to_string_lossy(), "/tmp/rtk_nonexistent_file.txt"])
             .output()
             .expect("failed to run rtk read");
@@ -289,10 +279,8 @@ fn main() {{
     #[test]
     #[ignore]
     fn test_read_stdin_dedup_warning() {
-        let bin = rtk_bin();
-        assert!(bin.exists(), "Run `cargo build` first");
 
-        let output = std::process::Command::new(&bin)
+        let output = rtk_command()
             .args(["read", "-", "-"])
             .stdin(std::process::Stdio::piped())
             .output()
