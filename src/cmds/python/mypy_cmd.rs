@@ -30,7 +30,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         &args.join(" "),
         |raw, exit_code| {
             let clean = strip_ansi(raw);
-            let filtered = filter_mypy_output(&clean);
+            let filtered = filter_output(&clean);
             // Nothing recognised on a failed run means mypy never type-checked.
             if exit_code != 0 && filtered == MYPY_CLEAN {
                 return clean.trim().to_string();
@@ -51,7 +51,7 @@ struct MypyError {
     context_lines: Vec<String>,
 }
 
-pub fn filter_mypy_output(output: &str) -> String {
+pub fn filter_output(output: &str) -> String {
     // file.py:12: error: Message [error-code]
     // file.py:12:5: error: Message [error-code]
     static MYPY_DIAG: LazyLock<Regex> = LazyLock::new(|| {
@@ -234,7 +234,7 @@ src/models/user.py:10: error: Incompatible types in assignment  [assignment]
 src/models/user.py:20: error: Missing return statement  [return]
 Found 5 errors in 2 files (checked 10 source files)
 ";
-        let result = filter_mypy_output(output);
+        let result = filter_output(output);
         assert!(result.contains("mypy: 5 errors in 2 files"));
         // user.py has 3 errors, auth.py has 2 -- user.py should come first
         let user_pos = result.find("user.py").unwrap();
@@ -252,7 +252,7 @@ Found 5 errors in 2 files (checked 10 source files)
         let output = "\
 src/api.py:10:5: error: Incompatible return value type  [return-value]
 ";
-        let result = filter_mypy_output(output);
+        let result = filter_output(output);
         assert!(result.contains("L10:"));
         assert!(result.contains("[return-value]"));
         assert!(result.contains("Incompatible return value type"));
@@ -268,7 +268,7 @@ b.py:1: error: Error four  [name-defined]
 c.py:1: error: Error five  [arg-type]
 Found 5 errors in 3 files
 ";
-        let result = filter_mypy_output(output);
+        let result = filter_output(output);
         assert!(result.contains("Top codes:"));
         assert!(result.contains("return-value (3x)"));
         assert!(result.contains("name-defined (1x)"));
@@ -283,7 +283,7 @@ a.py:2: error: Error two  [return-value]
 b.py:1: error: Error three  [return-value]
 Found 3 errors in 2 files
 ";
-        let result = filter_mypy_output(output);
+        let result = filter_output(output);
         assert!(
             !result.contains("Top codes:"),
             "Top codes should not appear with only one distinct code"
@@ -297,7 +297,7 @@ src/api.py:10: error: Type \"str\" not assignable to \"int\"  [assignment]
 src/api.py:20: error: Missing return statement  [return]
 src/api.py:30: error: Name \"bar\" is not defined  [name-defined]
 ";
-        let result = filter_mypy_output(output);
+        let result = filter_output(output);
         assert!(result.contains("Type \"str\" not assignable to \"int\""));
         assert!(result.contains("Missing return statement"));
         assert!(result.contains("Name \"bar\" is not defined"));
@@ -314,7 +314,7 @@ src/app.py:10: note: Expected type \"int\"
 src/app.py:10: note: Got type \"str\"
 src/app.py:20: error: Missing return statement  [return]
 ";
-        let result = filter_mypy_output(output);
+        let result = filter_output(output);
         assert!(result.contains("Incompatible types in assignment"));
         assert!(result.contains("Expected type \"int\""));
         assert!(result.contains("Got type \"str\""));
@@ -329,7 +329,7 @@ mypy: error: No module named 'nonexistent'
 src/api.py:10: error: Name \"foo\" is not defined  [name-defined]
 Found 1 error in 1 file
 ";
-        let result = filter_mypy_output(output);
+        let result = filter_output(output);
         // File-less error should appear verbatim before grouped output
         assert!(result.contains("mypy: error: No module named 'nonexistent'"));
         assert!(result.contains("api.py (1 error"));
@@ -344,7 +344,7 @@ Found 1 error in 1 file
     #[test]
     fn test_filter_mypy_no_errors() {
         let output = "Success: no issues found in 5 source files\n";
-        let result = filter_mypy_output(output);
+        let result = filter_output(output);
         assert_eq!(result, "mypy: No issues found");
     }
 
@@ -358,7 +358,7 @@ Found 1 error in 1 file
             ));
         }
         output.push_str("Found 15 errors in 15 files\n");
-        let result = filter_mypy_output(&output);
+        let result = filter_output(&output);
         assert!(result.contains("15 errors in 15 files"));
         for i in 1..=15 {
             assert!(

@@ -1,6 +1,6 @@
 //! PHP command filter: syntax-check summaries and generic cleanup.
 
-use super::artisan_cmd::{filter_artisan_output, filter_artisan_test_output};
+use super::artisan_cmd::{filter_output, filter_test_output};
 use super::utils::{detect_php_test_runner, strip_ansi_and_controls, PhpTestRunner};
 use crate::core::runner;
 use crate::core::utils::resolved_command;
@@ -38,10 +38,10 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
                 return filter_php_lint_output(raw);
             }
             if is_artisan_test {
-                return filter_artisan_test_output(raw, detected_runner);
+                return filter_test_output(raw, detected_runner);
             }
             if is_artisan {
-                return filter_artisan_output(raw);
+                return filter_output(raw);
             }
             filter_php_output(raw)
         },

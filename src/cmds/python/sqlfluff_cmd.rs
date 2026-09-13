@@ -154,7 +154,7 @@ const MAX_RULES_PER_FILE: usize = 3;
 ///
 /// Used where no exit code is available (pipes, direct re-entry); any parse
 /// failure is then a genuine filter failure.
-pub fn filter_sqlfluff_lint_json(output: &str) -> String {
+pub fn filter_lint_json(output: &str) -> String {
     render_lint_json(output, 0)
 }
 
@@ -490,7 +490,7 @@ mod tests {
         // sqlfluff emits in path order, so the worst file is exactly the one a
         // truncation over raw order drops. V2_JSON holds 50 single-violation
         // files followed by zzz_worst.sql with 22.
-        let out = filter_sqlfluff_lint_json(V2_JSON);
+        let out = filter_lint_json(V2_JSON);
         let section = out
             .split("Violations:\n")
             .nth(1)
@@ -512,7 +512,7 @@ mod tests {
 
     #[test]
     fn test_violations_section_ranking_matches_top_files() {
-        let out = filter_sqlfluff_lint_json(V2_JSON);
+        let out = filter_lint_json(V2_JSON);
         let top_file = out
             .split("Top files:\n")
             .nth(1)
@@ -537,7 +537,7 @@ mod tests {
         let input = r#"[{"filepath": "models/a.sql", "violations": [
             {"code": "PRS", "description": "Unparsable section."}
         ]}]"#;
-        let out = filter_sqlfluff_lint_json(input);
+        let out = filter_lint_json(input);
         assert!(
             !out.contains(":0"),
             "a missing position must be omitted, not rendered as line 0:\n{out}"
@@ -550,13 +550,13 @@ mod tests {
         let input = r#"[{"filepath": "models/a.sql", "violations": [
             {"code": "PRS", "description": "Unparsable section.", "line_no": 7}
         ]}]"#;
-        let out = filter_sqlfluff_lint_json(input);
+        let out = filter_lint_json(input);
         assert!(out.contains("models/a.sql:7 PRS"), "got:\n{out}");
     }
 
     #[test]
     fn test_violation_renders_full_coordinates_when_reported() {
-        let out = filter_sqlfluff_lint_json(V4_JSON);
+        let out = filter_lint_json(V4_JSON);
         assert!(
             out.contains("models/orders.sql:1:1 LT09"),
             "got:\n{out}"
@@ -567,7 +567,7 @@ mod tests {
 
     #[test]
     fn test_v4_reports_a_fixable_count() {
-        let out = filter_sqlfluff_lint_json(V4_JSON);
+        let out = filter_lint_json(V4_JSON);
         assert!(out.contains("(2 fixable)"), "got:\n{out}");
         assert!(out.contains("sqlfluff fix"), "got:\n{out}");
     }
@@ -577,7 +577,7 @@ mod tests {
         // sqlfluff 2.x emits no `fixes` key at all, so an absent count means
         // "unknown", not "nothing is fixable". Suppressing the hint would lose
         // a capability the tool still has.
-        let out = filter_sqlfluff_lint_json(V2_JSON);
+        let out = filter_lint_json(V2_JSON);
         assert!(
             out.contains("sqlfluff fix"),
             "2.x must still surface the fix hint:\n{out}"
@@ -641,7 +641,7 @@ mod tests {
 
     #[test]
     fn test_filter_no_violations_empty_array() {
-        let result = filter_sqlfluff_lint_json("[]");
+        let result = filter_lint_json("[]");
         assert!(result.contains("✓ SQLFluff"), "expected success tick");
         assert!(result.contains("No violations found"));
     }
@@ -649,7 +649,7 @@ mod tests {
     #[test]
     fn test_filter_no_violations_all_clean_files() {
         let input = r#"[{"filepath": "models/staging/stg_orders.sql", "violations": []}]"#;
-        let result = filter_sqlfluff_lint_json(input);
+        let result = filter_lint_json(input);
         assert!(result.contains("✓ SQLFluff"));
         assert!(result.contains("No violations found"));
     }
@@ -671,7 +671,7 @@ mod tests {
     ]
   }
 ]"#;
-        let result = filter_sqlfluff_lint_json(input);
+        let result = filter_lint_json(input);
         assert!(result.contains("3 violations"), "should show 3 violations");
         assert!(result.contains("2 files"), "should show 2 files");
         assert!(result.contains("1 fixable"), "should count 1 fixable");
@@ -703,7 +703,7 @@ mod tests {
     ]
   }
 ]"#;
-        let result = filter_sqlfluff_lint_json(input);
+        let result = filter_lint_json(input);
         assert!(
             result.contains("sqlfluff fix"),
             "should suggest fix command"
@@ -720,7 +720,7 @@ mod tests {
     ]
   }
 ]"#;
-        let result = filter_sqlfluff_lint_json(input);
+        let result = filter_lint_json(input);
         assert!(
             !result.contains("sqlfluff fix"),
             "should NOT show fix hint when nothing is fixable"
@@ -735,7 +735,7 @@ mod tests {
         // Fields are start_line_no/start_line_pos, NOT line_no/line_pos.
         // statistics and timings fields at file level must be tolerated.
         let input = r#"[{"filepath": "models/intermediate/mariadb/int_mariadb_announces.sql", "violations": [{"start_line_no": 183, "start_line_pos": 9, "code": "RF01", "description": "Reference 'level_id' refers to table/view not found in the FROM clause or found in ancestor statement.", "name": "references.from", "warning": false, "fixes": [], "start_file_pos": 4449, "end_line_no": 183, "end_line_pos": 17, "end_file_pos": 4457}, {"start_line_no": 185, "start_line_pos": 9, "code": "RF01", "description": "Reference 'level_name' refers to table/view not found in the FROM clause or found in ancestor statement.", "name": "references.from", "warning": false, "fixes": [], "start_file_pos": 4486, "end_line_no": 185, "end_line_pos": 19, "end_file_pos": 4496}], "statistics": {"source_chars": 9356, "templated_chars": 9507}, "timings": {"templating": 0.93}}]"#;
-        let result = filter_sqlfluff_lint_json(input);
+        let result = filter_lint_json(input);
         assert!(
             !result.contains("JSON parse failed"),
             "should parse real sqlfluff JSON without error"
@@ -758,7 +758,7 @@ mod tests {
         // surface sample locations for them too.
         let input =
             r#"[{"filepath": "models/core/dim_users.sql", "violations": [{"line_no": 7, "line_pos": 2, "code": "LT09", "description": "Select wildcard.", "fixes": []}]}]"#;
-        let result = filter_sqlfluff_lint_json(input);
+        let result = filter_lint_json(input);
         assert!(
             result.contains("models/core/dim_users.sql:7"),
             "legacy line_no should surface a location, got: {result}"
@@ -770,7 +770,7 @@ mod tests {
     #[test]
     fn test_filter_json_parse_error_passes_raw_through() {
         let input = "sqlfluff diagnostics: raw line\nanother raw line";
-        let result = filter_sqlfluff_lint_json(input);
+        let result = filter_lint_json(input);
         assert_eq!(
             result, input,
             "raw output must pass through unchanged on parse failure"
@@ -787,7 +787,7 @@ mod tests {
         // fallback contract says raw output unchanged, never truncated.
         let input =
             std::iter::repeat_n("line of human sqlfluff output\n", 2000).collect::<String>();
-        let result = filter_sqlfluff_lint_json(&input);
+        let result = filter_lint_json(&input);
         assert_eq!(result, input, "large raw output must pass through unchanged");
     }
 
@@ -812,7 +812,7 @@ mod tests {
     ]
   }
 ]"#;
-        let result = filter_sqlfluff_lint_json(input);
+        let result = filter_lint_json(input);
         assert!(
             result.contains("LT01 (3x, first at models/staging/stg_customers.sql:1)"),
             "first location must come from original output order, got: {result}"
@@ -832,7 +832,7 @@ mod tests {
     ]
   }
 ]"#;
-        let result = filter_sqlfluff_lint_json(input);
+        let result = filter_lint_json(input);
         let lt02 = result
             .find("LT02")
             .expect("LT02 should be listed");
@@ -859,7 +859,7 @@ mod tests {
     "violations": [{"code": "LT01", "start_line_no": 1, "fixes": []}]
   }
 ]"#;
-        let result = filter_sqlfluff_lint_json(input);
+        let result = filter_lint_json(input);
         let files_sec = result
             .find("Top files:")
             .expect("report should have a Top files section");
@@ -960,7 +960,7 @@ mod tests {
     ]
   }
 ]"#;
-        let result = filter_sqlfluff_lint_json(input);
+        let result = filter_lint_json(input);
         let input_tokens = count_tokens(input);
         let output_tokens = count_tokens(&result);
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);

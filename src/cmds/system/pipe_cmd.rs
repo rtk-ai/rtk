@@ -24,11 +24,11 @@ pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
         "git-diff" => Some(git_diff_wrapper),
         "git-status" => Some(git_status_wrapper),
         "log" => Some(crate::cmds::system::log_cmd::run_stdin_str),
-        "mypy" => Some(crate::cmds::python::mypy_cmd::filter_mypy_output),
-        "ruff-check" => Some(crate::cmds::python::ruff_cmd::filter_ruff_check_json),
-        "ruff-format" => Some(crate::cmds::python::ruff_cmd::filter_ruff_format),
-        "sqlfluff-lint" => Some(crate::cmds::python::sqlfluff_cmd::filter_sqlfluff_lint_json),
-        "prettier" => Some(crate::cmds::js::prettier_cmd::filter_prettier_output),
+        "mypy" => Some(crate::cmds::python::mypy_cmd::filter_output),
+        "ruff-check" => Some(crate::cmds::python::ruff_cmd::filter_check_json),
+        "ruff-format" => Some(crate::cmds::python::ruff_cmd::filter_format),
+        "sqlfluff-lint" => Some(crate::cmds::python::sqlfluff_cmd::filter_lint_json),
+        "prettier" => Some(crate::cmds::js::prettier_cmd::filter_output),
         "phpunit" => Some(crate::cmds::php::phpunit_cmd::filter_phpunit_output),
         "pest" | "paratest" | "php-test" => {
             Some(crate::cmds::php::test_output::filter_test_runner_output)
@@ -199,7 +199,7 @@ pub fn auto_detect_filter(input: &str) -> fn(&str) -> String {
     }
 
     if first_1k.contains(": error:") && first_1k.contains(".py:") {
-        return crate::cmds::python::mypy_cmd::filter_mypy_output;
+        return crate::cmds::python::mypy_cmd::filter_output;
     }
 
     // grep/rg: lines matching file:number:content
