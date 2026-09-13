@@ -13,7 +13,7 @@ Our goal is to keep the codebase consistent and easy to extend. PRs that deviate
 New to RTK? The fastest path to a mergeable first PR:
 
 1. **Read the flow once.** Start at [`CONTRIBUTING.md`](../../CONTRIBUTING.md), then skim [`docs/contributing/TECHNICAL.md`](TECHNICAL.md) to see how a command flows from `main.rs` → a `*_cmd.rs` filter → tracking → stdout.
-2. **Look at a good example.** [`src/cmds/git/git.rs`](../../src/cmds/git/git.rs) is a representative filter — it shows the `run()` entry point, `LazyLock` regex setup, filter helpers, and embedded tests all in one file.
+2. **Look at a good example.** [`src/cmds/git/git_cmd.rs`](../../src/cmds/git/git_cmd.rs) is a representative filter — it shows the `run()` entry point, `LazyLock` regex setup, filter helpers, and embedded tests all in one file.
 3. **Know the shared helpers before reimplementing.** Two files cover most of what you need:
    - [`src/core/runner.rs`](../../src/core/runner.rs) — command execution wrappers: `run_filtered()` (run a command, then apply your filter function), `run_passthrough()` (run unfiltered but tracked), `run_streamed()` (streaming filter).
    - [`src/core/utils.rs`](../../src/core/utils.rs) — shared utilities: `resolved_command()`, `strip_ansi()`, `truncate()`, `count_tokens()`, and more.
@@ -81,7 +81,7 @@ Use explicit, descriptive names for variables, just like for functions.
 
 Do not hardcode repetitive patterns or values that control behavior — extract them into named constants at the top of the file. For anything a user might want to tune (thresholds, limits, display cutoffs), use `config::limits()` so it flows through `~/.config/rtk/config.toml`.
 
-Example from `src/cmds/git/git.rs`:
+Example from `src/cmds/git/git_cmd.rs`:
 
 ```rust
 let limits = config::limits();

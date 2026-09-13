@@ -10,7 +10,7 @@ use std::path::Path;
 /// RTK support status for a command.
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
 pub enum RtkStatus {
-    /// Dedicated handler with filtering (e.g., git status → git.rs:run_status())
+    /// Dedicated handler with filtering (e.g., git status → git_cmd.rs:run_status())
     Existing,
     /// Works via external_subcommand passthrough, no filtering (e.g., cargo fmt → Other)
     Passthrough,

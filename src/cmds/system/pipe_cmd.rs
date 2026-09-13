@@ -45,15 +45,15 @@ fn go_test_wrapper(input: &str) -> String {
 }
 
 fn git_status_wrapper(input: &str) -> String {
-    crate::cmds::git::git::format_status_output(input)
+    crate::cmds::git::git_cmd::format_status_output(input)
 }
 
 fn git_log_wrapper(input: &str) -> String {
-    crate::cmds::git::git::filter_log_output(input, 50, false, false)
+    crate::cmds::git::git_cmd::filter_log_output(input, 50, false, false)
 }
 
 fn git_diff_wrapper(input: &str) -> String {
-    crate::cmds::git::git::compact_diff(input, 200)
+    crate::cmds::git::git_cmd::compact_diff(input, 200)
 }
 
 fn phpstan_wrapper(input: &str) -> String {

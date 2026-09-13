@@ -9,7 +9,7 @@ mod parser;
 // Re-export command modules for routing
 use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
-use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
+use cmds::git::{diff_cmd, gh_cmd, git_cmd, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
     bun_cmd, deno_cmd, lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd,
@@ -1953,90 +1953,100 @@ fn run_cli() -> Result<i32> {
             }
 
             match command {
-                GitCommands::Diff { args } => git::run(
-                    git::GitCommand::Diff,
+                GitCommands::Diff { args } => git_cmd::run(
+                    git_cmd::GitCommand::Diff,
                     &args,
                     None,
                     cli.verbose,
                     &global_args,
                 )?,
-                GitCommands::Log { args } => {
-                    git::run(git::GitCommand::Log, &args, None, cli.verbose, &global_args)?
+                GitCommands::Log { args } => git_cmd::run(
+                    git_cmd::GitCommand::Log,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Status { args } => git_cmd::run(
+                    git_cmd::GitCommand::Status,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Show { args } => git_cmd::run(
+                    git_cmd::GitCommand::Show,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Add { args } => git_cmd::run(
+                    git_cmd::GitCommand::Add,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Commit { args } => git_cmd::run(
+                    git_cmd::GitCommand::Commit,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Checkout { args } => git_cmd::run(
+                    git_cmd::GitCommand::Checkout,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Push { args } => git_cmd::run(
+                    git_cmd::GitCommand::Push,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Pull { args } => git_cmd::run(
+                    git_cmd::GitCommand::Pull,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Branch { args } => git_cmd::run(
+                    git_cmd::GitCommand::Branch,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Fetch { args } => git_cmd::run(
+                    git_cmd::GitCommand::Fetch,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Stash { subcommand, args } => git_cmd::run(
+                    git_cmd::GitCommand::Stash { subcommand },
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Worktree { args } => git_cmd::run(
+                    git_cmd::GitCommand::Worktree,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Other(args) => {
+                    git_cmd::run_passthrough(&args, &global_args, cli.verbose)?
                 }
-                GitCommands::Status { args } => git::run(
-                    git::GitCommand::Status,
-                    &args,
-                    None,
-                    cli.verbose,
-                    &global_args,
-                )?,
-                GitCommands::Show { args } => git::run(
-                    git::GitCommand::Show,
-                    &args,
-                    None,
-                    cli.verbose,
-                    &global_args,
-                )?,
-                GitCommands::Add { args } => {
-                    git::run(git::GitCommand::Add, &args, None, cli.verbose, &global_args)?
-                }
-                GitCommands::Commit { args } => git::run(
-                    git::GitCommand::Commit,
-                    &args,
-                    None,
-                    cli.verbose,
-                    &global_args,
-                )?,
-                GitCommands::Checkout { args } => git::run(
-                    git::GitCommand::Checkout,
-                    &args,
-                    None,
-                    cli.verbose,
-                    &global_args,
-                )?,
-                GitCommands::Push { args } => git::run(
-                    git::GitCommand::Push,
-                    &args,
-                    None,
-                    cli.verbose,
-                    &global_args,
-                )?,
-                GitCommands::Pull { args } => git::run(
-                    git::GitCommand::Pull,
-                    &args,
-                    None,
-                    cli.verbose,
-                    &global_args,
-                )?,
-                GitCommands::Branch { args } => git::run(
-                    git::GitCommand::Branch,
-                    &args,
-                    None,
-                    cli.verbose,
-                    &global_args,
-                )?,
-                GitCommands::Fetch { args } => git::run(
-                    git::GitCommand::Fetch,
-                    &args,
-                    None,
-                    cli.verbose,
-                    &global_args,
-                )?,
-                GitCommands::Stash { subcommand, args } => git::run(
-                    git::GitCommand::Stash { subcommand },
-                    &args,
-                    None,
-                    cli.verbose,
-                    &global_args,
-                )?,
-                GitCommands::Worktree { args } => git::run(
-                    git::GitCommand::Worktree,
-                    &args,
-                    None,
-                    cli.verbose,
-                    &global_args,
-                )?,
-                GitCommands::Other(args) => git::run_passthrough(&args, &global_args, cli.verbose)?,
             }
         }
 

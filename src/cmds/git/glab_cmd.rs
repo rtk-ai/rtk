@@ -10,7 +10,7 @@
 //! - Merge status: `merge_status` ("can_be_merged") (not `mergeable`)
 //! - Pipeline: `head_pipeline.status` (not `statusCheckRollup`)
 
-use super::git;
+use super::git_cmd;
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{ok_confirmation, resolved_command, strip_ansi, truncate};
@@ -489,7 +489,7 @@ fn mr_diff(args: &[String], _verbose: u8) -> Result<i32> {
             if stdout.trim().is_empty() {
                 "No diff\n".to_string()
             } else {
-                git::compact_diff(stdout, 500)
+                git_cmd::compact_diff(stdout, 500)
             }
         },
         RunOptions::stdout_only().early_exit_on_failure(),

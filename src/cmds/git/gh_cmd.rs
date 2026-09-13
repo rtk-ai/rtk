@@ -6,7 +6,7 @@
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::CAP_LIST;
 use crate::core::utils::{ok_confirmation, resolved_command, truncate};
-use crate::git;
+use crate::git_cmd;
 use anyhow::Result;
 use regex::Regex;
 use serde_json::Value;
@@ -964,7 +964,7 @@ fn pr_diff(args: &[String], _verbose: u8) -> Result<i32> {
             if raw.trim().is_empty() {
                 "No diff".to_string()
             } else {
-                git::compact_diff(raw, 500)
+                git_cmd::compact_diff(raw, 500)
             }
         },
         RunOptions::stdout_only().early_exit_on_failure(),

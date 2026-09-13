@@ -1,1 +1,2 @@
-automod::dir!(pub "src/cmds/rust");
+pub mod cargo_cmd;
+pub mod runner;
