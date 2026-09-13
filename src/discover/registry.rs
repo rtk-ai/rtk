@@ -3163,6 +3163,89 @@ mod tests {
     }
 
     #[test]
+    fn test_subcommand_rules_require_token_boundaries() {
+        // The pnpm case is covered separately. The sbt rule is included here
+        // because it is already boundary-safe and guards the full issue family
+        // against future regressions.
+        let false_positives = [
+            "git branchless status",
+            "gh prs",
+            "glab mrs",
+            "cargo builder",
+            "prettierish",
+            "next builder",
+            "playwrighting",
+            "prismax",
+            "docker psql",
+            "kubectl getall",
+            "oc status-check",
+            "ruff checker",
+            "sqlfluff linting",
+            "pip installer",
+            "uv pip installer",
+            "go vetting",
+            "sbt tester",
+            "rake tester",
+            "rails tester",
+            "pio runner",
+            "quarto renderer",
+            "shopify themepark",
+            "terraform planner",
+            "trunk builder",
+        ];
+
+        for command in false_positives {
+            assert!(
+                matches!(
+                    classify_command(command),
+                    Classification::Unsupported { .. }
+                ),
+                "{command} must not classify as a supported command"
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                None,
+                "{command} must not be rewritten"
+            );
+        }
+
+        let valid_commands = [
+            ("git branch status", "rtk git"),
+            ("gh pr list", "rtk gh"),
+            ("glab mr list", "rtk glab"),
+            ("cargo build --release", "rtk cargo"),
+            ("prettier --check .", "rtk prettier"),
+            ("next build --turbo", "rtk next"),
+            ("playwright test", "rtk playwright"),
+            ("prisma migrate status", "rtk prisma"),
+            ("docker ps", "rtk docker"),
+            ("kubectl get pods", "rtk kubectl"),
+            ("oc status", "rtk oc"),
+            ("ruff check .", "rtk ruff"),
+            ("sqlfluff lint .", "rtk sqlfluff"),
+            ("pip install flask", "rtk pip"),
+            ("uv pip install flask", "rtk uv"),
+            ("go test ./...", "rtk go"),
+            ("sbt test", "rtk sbt"),
+            ("rake test", "rtk rake"),
+            ("pio run", "rtk pio"),
+            ("quarto render docs", "rtk quarto"),
+            ("shopify theme push", "rtk shopify"),
+            ("terraform plan", "rtk terraform"),
+            ("trunk build", "rtk trunk"),
+        ];
+
+        for (command, expected_rtk_command) in valid_commands {
+            match classify_command(command) {
+                Classification::Supported { rtk_equivalent, .. } => {
+                    assert_eq!(rtk_equivalent, expected_rtk_command, "{command}");
+                }
+                classification => panic!("{command} classified as {classification:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn test_rewrite_playwright() {
         let commands = vec![
             "npm exec playwright",

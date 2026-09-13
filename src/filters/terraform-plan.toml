@@ -1,6 +1,6 @@
 [filters.terraform-plan]
 description = "Compact Terraform plan output"
-match_command = "^terraform\\s+plan"
+match_command = "^terraform\\s+plan(\\s|$|[;|&()<>])"
 strip_ansi = true
 strip_lines_matching = [
   "^Refreshing state",

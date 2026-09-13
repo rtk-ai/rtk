@@ -1,6 +1,6 @@
 [filters.shopify-theme]
 description = "Compact shopify theme push/pull output"
-match_command = "^shopify\\s+theme\\s+(push|pull)"
+match_command = "^shopify\\s+theme\\s+(push|pull)(\\s|$|[;|&()<>])"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",
