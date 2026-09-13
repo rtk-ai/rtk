@@ -75,6 +75,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Test logged command status propagation
+        run: bash scripts/run-with-log.sh --self-test
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
@@ -87,16 +90,21 @@ jobs:
           echo "## Security Scan Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Dependency Vulnerabilities" >> $GITHUB_STEP_SUMMARY
-          if cargo audit 2>&1 | tee audit.log; then
+          set +e
+          bash scripts/run-with-log.sh audit.log cargo audit
+          audit_status=$?
+          set -e
+          if [ "$audit_status" -eq 0 ]; then
             echo "No known vulnerabilities detected" >> $GITHUB_STEP_SUMMARY
           else
             echo "Vulnerabilities found:" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
             cat audit.log >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
-            echo "::warning::Dependency vulnerabilities detected - review required"
+            echo "::error::Dependency vulnerabilities detected - review required"
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
+          exit "$audit_status"
 
       - name: Critical files check
         run: |
@@ -162,15 +170,22 @@ jobs:
       - name: Clippy security lints
         run: |
           echo "### Clippy Security Lints" >> $GITHUB_STEP_SUMMARY
-          if cargo clippy --all-targets -- -W clippy::unwrap_used -W clippy::panic -W clippy::expect_used 2>&1 | tee clippy.log | grep -E "warning:|error:"; then
+          set +e
+          bash scripts/run-with-log.sh clippy.log cargo clippy --all-targets -- -D clippy::unwrap_used -D clippy::panic -D clippy::expect_used
+          clippy_status=$?
+          set -e
+          if grep -Eq "warning:|error:" clippy.log; then
             echo "Security-related lints triggered:" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
             grep -E "warning:|error:" clippy.log | head -20 >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
-            echo "::warning::Clippy security lints failed"
           else
             echo "All security lints passed" >> $GITHUB_STEP_SUMMARY
           fi
+          if [ "$clippy_status" -ne 0 ]; then
+            echo "::error::Clippy security lints failed"
+          fi
+          exit "$clippy_status"
 
       - name: Summary verdict
         run: |
