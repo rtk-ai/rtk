@@ -1008,12 +1008,12 @@ fn has_format_flag<T: AsRef<str>>(engine: Engine, extra_args: &[T]) -> bool {
 fn clean_line(line: &str, max_len: usize, context_re: Option<&Regex>, pattern: &str) -> String {
     let trimmed = line.trim();
 
-    if let Some(re) = context_re {
-        if let Some(m) = re.find(trimmed) {
-            let matched = m.as_str();
-            if matched.len() <= max_len {
-                return matched.to_string();
-            }
+    if let Some(re) = context_re
+        && let Some(m) = re.find(trimmed)
+    {
+        let matched = m.as_str();
+        if matched.len() <= max_len {
+            return matched.to_string();
         }
     }
 

@@ -187,10 +187,8 @@ fn program_output(text: &str, tee_slug: &str) -> String {
 
     if capped.len() <= CAP_INVENTORY {
         let out = capped.join("\n");
-        if line_was_cut {
-            if let Some(hint) = crate::core::tee::force_tee_hint(&clean, tee_slug) {
-                return format!("{out}\n{hint}");
-            }
+        if line_was_cut && let Some(hint) = crate::core::tee::force_tee_hint(&clean, tee_slug) {
+            return format!("{out}\n{hint}");
         }
         return out;
     }

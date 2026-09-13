@@ -172,21 +172,21 @@ fn dispatch(original: &[String]) -> Result<Dispatch> {
         };
         return Ok(Dispatch::Verbatim(verbatim));
     }
-    if options.is_empty() {
-        if let Some(mut parsed) = parse_subset(&paths, &expr) {
-            let repeated_max = max.is_some() && parsed.max_explicit;
-            let repeated_type =
-                file_type.is_some() && parsed.file_type != FindArgs::default().file_type;
-            if !repeated_max && !repeated_type {
-                if let Some(n) = max {
-                    parsed.max_results = n;
-                    parsed.max_explicit = true;
-                }
-                if let Some(t) = file_type {
-                    parsed.file_type = t;
-                }
-                return Ok(Dispatch::Native(parsed));
+    if options.is_empty()
+        && let Some(mut parsed) = parse_subset(&paths, &expr)
+    {
+        let repeated_max = max.is_some() && parsed.max_explicit;
+        let repeated_type =
+            file_type.is_some() && parsed.file_type != FindArgs::default().file_type;
+        if !repeated_max && !repeated_type {
+            if let Some(n) = max {
+                parsed.max_results = n;
+                parsed.max_explicit = true;
             }
+            if let Some(t) = file_type {
+                parsed.file_type = t;
+            }
+            return Ok(Dispatch::Native(parsed));
         }
     }
     Ok(Dispatch::Compress {

@@ -432,17 +432,17 @@ fn format_pr_view(json: &Value, ultra_compact: bool) -> String {
 
     out.push_str(&format!("  {}\n", url));
 
-    if let Some(body) = json["body"].as_str() {
-        if !body.is_empty() {
-            let body_filtered = filter_markdown_body(body);
-            if !body_filtered.is_empty() {
-                out.push('\n');
-                for line in body_filtered.lines() {
-                    out.push_str(&format!("  {}\n", line));
-                }
-            } else {
-                out.push_str("\n  (body contained only badges/images/comments)\n");
+    if let Some(body) = json["body"].as_str()
+        && !body.is_empty()
+    {
+        let body_filtered = filter_markdown_body(body);
+        if !body_filtered.is_empty() {
+            out.push('\n');
+            for line in body_filtered.lines() {
+                out.push_str(&format!("  {}\n", line));
             }
+        } else {
+            out.push_str("\n  (body contained only badges/images/comments)\n");
         }
     }
 
@@ -696,17 +696,17 @@ fn format_issue_view(json: &Value) -> String {
     out.push_str(&format!("  Status: {}\n", state));
     out.push_str(&format!("  URL: {}\n", url));
 
-    if let Some(body) = json["body"].as_str() {
-        if !body.is_empty() {
-            let body_filtered = filter_markdown_body(body);
-            if !body_filtered.is_empty() {
-                out.push_str("\n  Description:\n");
-                for line in body_filtered.lines() {
-                    out.push_str(&format!("    {}\n", line));
-                }
-            } else {
-                out.push_str("\n  Description: (body contained only badges/images/comments)\n");
+    if let Some(body) = json["body"].as_str()
+        && !body.is_empty()
+    {
+        let body_filtered = filter_markdown_body(body);
+        if !body_filtered.is_empty() {
+            out.push_str("\n  Description:\n");
+            for line in body_filtered.lines() {
+                out.push_str(&format!("    {}\n", line));
             }
+        } else {
+            out.push_str("\n  Description: (body contained only badges/images/comments)\n");
         }
     }
     out

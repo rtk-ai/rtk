@@ -281,10 +281,10 @@ fn docker_images(_verbose: u8) -> Result<i32> {
                 if let Ok(n) = size_str.replace("GB", "").trim().parse::<f64>() {
                     total_size_mb += n * 1024.0;
                 }
-            } else if size_str.contains("MB") {
-                if let Ok(n) = size_str.replace("MB", "").trim().parse::<f64>() {
-                    total_size_mb += n;
-                }
+            } else if size_str.contains("MB")
+                && let Ok(n) = size_str.replace("MB", "").trim().parse::<f64>()
+            {
+                total_size_mb += n;
             }
         }
     }
@@ -401,11 +401,11 @@ fn format_kubectl_pods(json: &Value) -> String {
             _ => {
                 if let Some(containers) = pod["status"]["containerStatuses"].as_array() {
                     for c in containers {
-                        if let Some(w) = c["state"]["waiting"]["reason"].as_str() {
-                            if w.contains("CrashLoop") || w.contains("Error") {
-                                failed += 1;
-                                issues.push(format!("{}/{} {}", ns, name, w));
-                            }
+                        if let Some(w) = c["state"]["waiting"]["reason"].as_str()
+                            && (w.contains("CrashLoop") || w.contains("Error"))
+                        {
+                            failed += 1;
+                            issues.push(format!("{}/{} {}", ns, name, w));
                         }
                     }
                 }
@@ -649,13 +649,13 @@ pub fn format_compose_build(raw: &str) -> String {
     // find('[') returns byte offset — use byte slicing throughout
     // '[' and ']' are single-byte ASCII, so byte arithmetic is safe
     for line in raw.lines() {
-        if let Some(start) = line.find('[') {
-            if let Some(end) = line[start + 1..].find(']') {
-                let bracket = &line[start + 1..start + 1 + end];
-                let svc = bracket.split_whitespace().next().unwrap_or("");
-                if !svc.is_empty() && svc != "+" && !services.contains(&svc.to_string()) {
-                    services.push(svc.to_string());
-                }
+        if let Some(start) = line.find('[')
+            && let Some(end) = line[start + 1..].find(']')
+        {
+            let bracket = &line[start + 1..start + 1 + end];
+            let svc = bracket.split_whitespace().next().unwrap_or("");
+            if !svc.is_empty() && svc != "+" && !services.contains(&svc.to_string()) {
+                services.push(svc.to_string());
             }
         }
     }

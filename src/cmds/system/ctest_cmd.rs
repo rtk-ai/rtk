@@ -614,10 +614,10 @@ fn format_failed_section(
 ) -> String {
     let section = build_failed_section(lines, failed_tests, framing_lines);
     let mut rendered = section.rendered;
-    if section.truncated {
-        if let Some(hint) = crate::core::tee::force_tee_hint(&section.full, "ctest-failed") {
-            rendered.push_str(&format!("\n  {hint}"));
-        }
+    if section.truncated
+        && let Some(hint) = crate::core::tee::force_tee_hint(&section.full, "ctest-failed")
+    {
+        rendered.push_str(&format!("\n  {hint}"));
     }
     rendered
 }

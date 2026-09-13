@@ -341,13 +341,12 @@ fn normalize_php_tool_path(path: &str) -> String {
         normalized = stripped.to_string();
     }
 
-    if let Some((stem, ext)) = normalized.rsplit_once('.') {
-        if ["bat", "cmd", "exe", "ps1"]
+    if let Some((stem, ext)) = normalized.rsplit_once('.')
+        && ["bat", "cmd", "exe", "ps1"]
             .iter()
             .any(|candidate| ext.eq_ignore_ascii_case(candidate))
-        {
-            normalized = stem.to_string();
-        }
+    {
+        normalized = stem.to_string();
     }
 
     normalized
@@ -408,10 +407,10 @@ fn parse_golangci_run_parts(cmd: &str) -> Option<GolangciRunParts<'_>> {
             return None;
         }
 
-        if let Some(flag) = split_golangci_flag_name(token) {
-            if golangci_flag_takes_separate_value(token, flag) {
-                i += 1;
-            }
+        if let Some(flag) = split_golangci_flag_name(token)
+            && golangci_flag_takes_separate_value(token, flag)
+        {
+            i += 1;
         }
 
         i += 1;
@@ -3619,10 +3618,10 @@ mod tests {
             .ok()
             .and_then(|p| std::fs::metadata(p).ok())
             .and_then(|m| m.modified().ok());
-        if let (Some(rtk_t), Some(test_t)) = (rtk_mtime, test_mtime) {
-            if rtk_t < test_t {
-                return;
-            }
+        if let (Some(rtk_t), Some(test_t)) = (rtk_mtime, test_mtime)
+            && rtk_t < test_t
+        {
+            return;
         }
 
         let output = std::process::Command::new(&rtk_bin)

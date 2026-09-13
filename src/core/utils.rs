@@ -344,10 +344,10 @@ fn set_owner_only(path: &std::path::Path, mode: u32) {
     // Falls through to chmod on any metadata-read failure, erring toward
     // enforcing the permission rather than silently skipping it.
     //
-    if let Ok(meta) = fs::metadata(path) {
-        if mode_already_correct(meta.permissions().mode(), mode) {
-            return;
-        }
+    if let Ok(meta) = fs::metadata(path)
+        && mode_already_correct(meta.permissions().mode(), mode)
+    {
+        return;
     }
     let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode));
 }

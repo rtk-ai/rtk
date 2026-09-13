@@ -647,25 +647,23 @@ impl<'a> SurefireBlock<'a> {
         }
 
         if self.in_block {
-            if keyed {
-                if let Some(caps) = CLOSE.captures(core) {
-                    let fail = caps.get(1).map(|m| m.as_str() != "0").unwrap_or(false);
-                    let err = caps.get(2).map(|m| m.as_str() != "0").unwrap_or(false);
-                    if fail || err {
-                        let lines = std::mem::take(&mut self.block_lines);
-                        let running = self.block_running.take();
-                        self.in_block = false;
-                        return SurefireStep::FailingClose {
-                            running,
-                            lines,
-                            close: line,
-                        };
-                    }
-                    self.block_lines.clear();
-                    self.block_running = None;
+            if keyed && let Some(caps) = CLOSE.captures(core) {
+                let fail = caps.get(1).map(|m| m.as_str() != "0").unwrap_or(false);
+                let err = caps.get(2).map(|m| m.as_str() != "0").unwrap_or(false);
+                if fail || err {
+                    let lines = std::mem::take(&mut self.block_lines);
+                    let running = self.block_running.take();
                     self.in_block = false;
-                    return SurefireStep::Consumed;
+                    return SurefireStep::FailingClose {
+                        running,
+                        lines,
+                        close: line,
+                    };
                 }
+                self.block_lines.clear();
+                self.block_running = None;
+                self.in_block = false;
+                return SurefireStep::Consumed;
             }
             self.block_lines.push(line);
             return SurefireStep::Consumed;
@@ -1253,10 +1251,8 @@ fn drive_surefire_line<'a>(
     // repetition (cold-preclear finding, upstream PR #3199, third review
     // round: that inference silently shared Surefire's leftover budget with
     // a module whose only failures were integration-test ones).
-    if keyed {
-        if let Some(caps) = TEST_PLUGIN_BANNER.captures(core) {
-            summary.observe_plugin_banner(caps.get(1).map_or("", |m| m.as_str()));
-        }
+    if keyed && let Some(caps) = TEST_PLUGIN_BANNER.captures(core) {
+        summary.observe_plugin_banner(caps.get(1).map_or("", |m| m.as_str()));
     }
 
     let step = lanes

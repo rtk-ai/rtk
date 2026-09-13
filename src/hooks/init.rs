@@ -1502,10 +1502,10 @@ fn migrate_old_hook_script(ctx: InitContext) {
                     eprintln!("  [ok] Removed old hook script: {}", old_hook.display());
                 }
                 // Clean up the stale settings.json entry that pointed to the deleted script
-                if let Err(e) = remove_legacy_settings_entries(ctx) {
-                    if verbose > 0 {
-                        eprintln!("  [warn] Failed to clean legacy settings.json entry: {e}");
-                    }
+                if let Err(e) = remove_legacy_settings_entries(ctx)
+                    && verbose > 0
+                {
+                    eprintln!("  [warn] Failed to clean legacy settings.json entry: {e}");
                 }
             }
         }
@@ -1839,10 +1839,11 @@ fn run_claude_md_mode_with(
         PathBuf::from(CLAUDE_MD)
     };
 
-    if global && !dry_run {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+    if global
+        && !dry_run
+        && let Some(parent) = path.parent()
+    {
+        fs::create_dir_all(parent)?;
     }
 
     if verbose > 0 {
@@ -2350,10 +2351,10 @@ fn ensure_previous_yaml_line_ends_with_newline(lines: &mut [String], insert_idx:
         return;
     }
 
-    if let Some(previous) = lines.get_mut(insert_idx - 1) {
-        if !previous.ends_with('\n') {
-            previous.push('\n');
-        }
+    if let Some(previous) = lines.get_mut(insert_idx - 1)
+        && !previous.ends_with('\n')
+    {
+        previous.push('\n');
     }
 }
 
@@ -2653,15 +2654,16 @@ fn run_codex_mode_with_paths(
     ctx: InitContext,
 ) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
-    if global && !dry_run {
-        if let Some(parent) = agents_md_path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "Failed to create Codex config directory: {}",
-                    parent.display()
-                )
-            })?;
-        }
+    if global
+        && !dry_run
+        && let Some(parent) = agents_md_path.parent()
+    {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create Codex config directory: {}",
+                parent.display()
+            )
+        })?;
     }
 
     // ISSUE #892: In global mode, use absolute path so @RTK.md resolves
@@ -3280,24 +3282,23 @@ fn resolve_droid_install_target(droid_dir: &Path) -> Result<DroidHookFile> {
         None
     };
 
-    if let Some(path) = &live_hooks_json {
-        if let Some(json) = read_droid_json(path)? {
-            if droid_has_pre_tool_use(&json, DroidLayout::Root) {
-                return Ok(DroidHookFile {
-                    path: path.clone(),
-                    layout: DroidLayout::Root,
-                });
-            }
-        }
+    if let Some(path) = &live_hooks_json
+        && let Some(json) = read_droid_json(path)?
+        && droid_has_pre_tool_use(&json, DroidLayout::Root)
+    {
+        return Ok(DroidHookFile {
+            path: path.clone(),
+            layout: DroidLayout::Root,
+        });
     }
 
-    if let Some(json) = read_droid_json(&settings)? {
-        if droid_has_pre_tool_use(&json, DroidLayout::Nested) {
-            return Ok(DroidHookFile {
-                path: settings,
-                layout: DroidLayout::Nested,
-            });
-        }
+    if let Some(json) = read_droid_json(&settings)?
+        && droid_has_pre_tool_use(&json, DroidLayout::Nested)
+    {
+        return Ok(DroidHookFile {
+            path: settings,
+            layout: DroidLayout::Nested,
+        });
     }
 
     Ok(DroidHookFile {
@@ -3468,14 +3469,14 @@ fn insert_droid_hook_entry(root: &mut serde_json::Value, layout: DroidLayout) ->
             .get("matcher")
             .and_then(|m| m.as_str())
             .unwrap_or_default();
-        if matcher == DROID_EXECUTE_MATCHER {
-            if let Some(hook_array) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) {
-                hook_array.push(serde_json::json!({
-                    "type": "command",
-                    "command": DROID_HOOK_COMMAND
-                }));
-                return Ok(());
-            }
+        if matcher == DROID_EXECUTE_MATCHER
+            && let Some(hook_array) = entry.get_mut("hooks").and_then(|h| h.as_array_mut())
+        {
+            hook_array.push(serde_json::json!({
+                "type": "command",
+                "command": DROID_HOOK_COMMAND
+            }));
+            return Ok(());
         }
     }
 
@@ -3625,10 +3626,9 @@ fn remove_droid_hook_from_json(root: &mut serde_json::Value, layout: DroidLayout
             .get("hooks")
             .and_then(|h| h.as_object())
             .is_some_and(|o| o.is_empty())
+        && let Some(obj) = root.as_object_mut()
     {
-        if let Some(obj) = root.as_object_mut() {
-            obj.remove("hooks");
-        }
+        obj.remove("hooks");
     }
 
     modified
@@ -3646,10 +3646,10 @@ fn resolve_opencode_dir() -> Result<PathBuf> {
 
 /// Resolve Pi config directory, honouring `PI_CODING_AGENT_DIR` override.
 fn resolve_pi_dir() -> Result<PathBuf> {
-    if let Ok(dir) = std::env::var(PI_CODING_AGENT_DIR_ENV) {
-        if !dir.is_empty() {
-            return Ok(PathBuf::from(dir));
-        }
+    if let Ok(dir) = std::env::var(PI_CODING_AGENT_DIR_ENV)
+        && !dir.is_empty()
+    {
+        return Ok(PathBuf::from(dir));
     }
     resolve_home_subdir(PI_DIR)
 }
@@ -4295,15 +4295,13 @@ fn prepare_opencode_plugin_path() -> Result<PathBuf> {
 fn ensure_opencode_plugin_installed(path: &Path, ctx: InitContext) -> Result<bool> {
     let InitContext { dry_run, .. } = ctx;
     // Ensure parent dir exists (skip in dry-run)
-    if !dry_run {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "Failed to create OpenCode plugin directory: {}",
-                    parent.display()
-                )
-            })?;
-        }
+    if !dry_run && let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create OpenCode plugin directory: {}",
+                parent.display()
+            )
+        })?;
     }
     write_if_changed(path, OPENCODE_PLUGIN, "OpenCode plugin", ctx)
 }
@@ -4360,10 +4358,10 @@ fn omp_extension_path_for_scope(global: bool) -> Result<PathBuf> {
 /// `PI_CODING_AGENT_DIR` for this relocation, so RTK follows the same
 /// override instead of introducing a second path configuration.
 fn resolve_omp_dir() -> Result<PathBuf> {
-    if let Ok(dir) = std::env::var(PI_CODING_AGENT_DIR_ENV) {
-        if !dir.is_empty() {
-            return Ok(PathBuf::from(dir));
-        }
+    if let Ok(dir) = std::env::var(PI_CODING_AGENT_DIR_ENV)
+        && !dir.is_empty()
+    {
+        return Ok(PathBuf::from(dir));
     }
     resolve_home_subdir(OMP_DIR)
 }
@@ -4574,10 +4572,10 @@ fn install_cursor_hooks(ctx: InitContext) -> Result<()> {
         }
         // Clean stale hooks.json entry pointing to the deleted script
         let hooks_json_path = cursor_dir.join(HOOKS_JSON);
-        if let Err(e) = remove_legacy_cursor_hooks_json_entries(&hooks_json_path, ctx) {
-            if verbose > 0 {
-                eprintln!("  [warn] Failed to clean legacy Cursor hooks.json entry: {e}");
-            }
+        if let Err(e) = remove_legacy_cursor_hooks_json_entries(&hooks_json_path, ctx)
+            && verbose > 0
+        {
+            eprintln!("  [warn] Failed to clean legacy Cursor hooks.json entry: {e}");
         }
     }
 
@@ -4812,29 +4810,28 @@ fn remove_cursor_hooks(ctx: InitContext) -> Result<Vec<String>> {
             .with_context(|| format!("Failed to read {}", hooks_json_path.display()))?;
         let content = strip_leading_bom(&content);
 
-        if !content.trim().is_empty() {
-            if let Ok(mut root) = from_json_str::<serde_json::Value>(content) {
-                if remove_cursor_hook_from_json(&mut root) {
-                    if dry_run {
-                        println!(
-                            "[dry-run] would remove RTK entry from Cursor hooks.json: {}",
-                            hooks_json_path.display()
-                        );
-                    } else {
-                        let backup_path = hooks_json_path.with_extension("json.bak");
-                        fs::copy(&hooks_json_path, &backup_path).ok();
+        if !content.trim().is_empty()
+            && let Ok(mut root) = from_json_str::<serde_json::Value>(content)
+            && remove_cursor_hook_from_json(&mut root)
+        {
+            if dry_run {
+                println!(
+                    "[dry-run] would remove RTK entry from Cursor hooks.json: {}",
+                    hooks_json_path.display()
+                );
+            } else {
+                let backup_path = hooks_json_path.with_extension("json.bak");
+                fs::copy(&hooks_json_path, &backup_path).ok();
 
-                        let serialized = serde_json::to_string_pretty(&root)
-                            .context("Failed to serialize hooks.json")?;
-                        atomic_write(&hooks_json_path, &serialized)?;
+                let serialized = serde_json::to_string_pretty(&root)
+                    .context("Failed to serialize hooks.json")?;
+                atomic_write(&hooks_json_path, &serialized)?;
 
-                        if verbose > 0 {
-                            eprintln!("Removed RTK hook from Cursor hooks.json");
-                        }
-                    }
-                    removed.push("Cursor hooks.json: removed RTK entry".to_string());
+                if verbose > 0 {
+                    eprintln!("Removed RTK hook from Cursor hooks.json");
                 }
             }
+            removed.push("Cursor hooks.json: removed RTK entry".to_string());
         }
     }
 
@@ -5392,19 +5389,18 @@ fn patch_gemini_settings(
     };
 
     let before_tool_pointer = format!("/hooks/{}", BEFORE_TOOL_KEY);
-    if let Some(hooks) = settings.pointer(&before_tool_pointer) {
-        if let Some(arr) = hooks.as_array() {
-            if arr.iter().any(|h| {
-                h.pointer("/hooks/0/command")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|c| c.contains("rtk"))
-            }) {
-                if verbose > 0 {
-                    eprintln!("Gemini settings.json already has RTK hook");
-                }
-                return Ok(false);
-            }
+    if let Some(hooks) = settings.pointer(&before_tool_pointer)
+        && let Some(arr) = hooks.as_array()
+        && arr.iter().any(|h| {
+            h.pointer("/hooks/0/command")
+                .and_then(|v| v.as_str())
+                .is_some_and(|c| c.contains("rtk"))
+        })
+    {
+        if verbose > 0 {
+            eprintln!("Gemini settings.json already has RTK hook");
         }
+        return Ok(false);
     }
 
     // Ask user before patching

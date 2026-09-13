@@ -144,11 +144,11 @@ fn strip_noise(output: &str) -> String {
         }
 
         // Capybara screenshots: keep only the path
-        if let Some(caps) = RE_SCREENSHOT.captures(trimmed) {
-            if let Some(path) = caps.get(1) {
-                result.push(format!("[screenshot: {}]", path.as_str().trim()));
-                continue;
-            }
+        if let Some(caps) = RE_SCREENSHOT.captures(trimmed)
+            && let Some(path) = caps.get(1)
+        {
+            result.push(format!("[screenshot: {}]", path.as_str().trim()));
+            continue;
         }
 
         result.push(line.to_string());

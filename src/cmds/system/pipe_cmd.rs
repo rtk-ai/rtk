@@ -93,14 +93,14 @@ fn grep_wrapper(input: &str) -> String {
 
     for line in input.lines() {
         let parts: Vec<&str> = line.splitn(3, ':').collect();
-        if parts.len() == 3 {
-            if let Ok(_line_num) = parts[1].parse::<usize>() {
-                total += 1;
-                by_file
-                    .entry(parts[0])
-                    .or_default()
-                    .push((parts[1], parts[2]));
-            }
+        if parts.len() == 3
+            && let Ok(_line_num) = parts[1].parse::<usize>()
+        {
+            total += 1;
+            by_file
+                .entry(parts[0])
+                .or_default()
+                .push((parts[1], parts[2]));
         }
     }
 

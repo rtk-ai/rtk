@@ -5320,12 +5320,11 @@ diff --git a/b.rs b/b.rs
                     }
                     continue;
                 }
-                if line.starts_with("@@") {
-                    if let Some(b) = parse_hunk_header(line) {
-                        if !(b.1 == 0 && b.0.iter().all(|&n| n == 0)) {
-                            budget = Some(b);
-                        }
-                    }
+                if line.starts_with("@@")
+                    && let Some(b) = parse_hunk_header(line)
+                    && !(b.1 == 0 && b.0.iter().all(|&n| n == 0))
+                {
+                    budget = Some(b);
                 }
             }
             assert!(

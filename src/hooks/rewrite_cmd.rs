@@ -9,15 +9,15 @@ const TEE_READERS: &[&str] = &[
 ];
 
 fn expand_home(token: &str) -> String {
-    if let Some(rest) = token.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).to_string_lossy().into_owned();
-        }
+    if let Some(rest) = token.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest).to_string_lossy().into_owned();
     }
-    if let Some(rest) = token.strip_prefix("$HOME/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).to_string_lossy().into_owned();
-        }
+    if let Some(rest) = token.strip_prefix("$HOME/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest).to_string_lossy().into_owned();
     }
     token.to_string()
 }
@@ -39,10 +39,12 @@ fn tee_read_slug(cmd: &str, tee_dir: &std::path::Path) -> Option<(String, String
             continue;
         }
         let stem = path.file_stem()?.to_str()?;
-        if let Some((epoch, slug)) = stem.split_once('_') {
-            if !epoch.is_empty() && epoch.chars().all(|c| c.is_ascii_digit()) && !slug.is_empty() {
-                return Some((slug.to_string(), expanded));
-            }
+        if let Some((epoch, slug)) = stem.split_once('_')
+            && !epoch.is_empty()
+            && epoch.chars().all(|c| c.is_ascii_digit())
+            && !slug.is_empty()
+        {
+            return Some((slug.to_string(), expanded));
         }
     }
     None

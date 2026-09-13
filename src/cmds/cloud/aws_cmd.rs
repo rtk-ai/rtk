@@ -874,22 +874,22 @@ fn filter_lambda_get(json_str: &str) -> Option<FilterResult> {
 
     // Show layer names if present
     // Layer ARNs use colons: arn:aws:lambda:region:acct:layer:name:version
-    if let Some(layers) = config["Layers"].as_array() {
-        if !layers.is_empty() {
-            let layer_names: Vec<String> = layers
-                .iter()
-                .filter_map(|l| {
-                    let arn = l["Arn"].as_str()?;
-                    let parts: Vec<&str> = arn.rsplitn(3, ':').collect();
-                    if parts.len() >= 2 {
-                        Some(format!("{}:{}", parts[1], parts[0]))
-                    } else {
-                        Some(arn.to_string())
-                    }
-                })
-                .collect();
-            text.push_str(&format!("\n  layers: {}", layer_names.join(", ")));
-        }
+    if let Some(layers) = config["Layers"].as_array()
+        && !layers.is_empty()
+    {
+        let layer_names: Vec<String> = layers
+            .iter()
+            .filter_map(|l| {
+                let arn = l["Arn"].as_str()?;
+                let parts: Vec<&str> = arn.rsplitn(3, ':').collect();
+                if parts.len() >= 2 {
+                    Some(format!("{}:{}", parts[1], parts[0]))
+                } else {
+                    Some(arn.to_string())
+                }
+            })
+            .collect();
+        text.push_str(&format!("\n  layers: {}", layer_names.join(", ")));
     }
 
     Some(FilterResult::new(text))
@@ -1014,69 +1014,69 @@ fn unwrap_dynamodb_value(val: &Value, depth: usize) -> Value {
     }
 
     if let Some(obj) = val.as_object() {
-        if obj.len() == 1 {
-            if let Some((key, inner)) = obj.iter().next() {
-                match key.as_str() {
-                    "S" | "B" => return inner.clone(),
-                    "N" => {
-                        if let Some(s) = inner.as_str() {
-                            // Try i64 first, then f64
-                            if let Ok(n) = s.parse::<i64>() {
-                                return Value::Number(n.into());
-                            }
-                            if let Ok(f) = s.parse::<f64>() {
-                                if let Some(n) = serde_json::Number::from_f64(f) {
-                                    return Value::Number(n);
-                                }
-                            }
-                            return Value::String(s.to_string());
+        if obj.len() == 1
+            && let Some((key, inner)) = obj.iter().next()
+        {
+            match key.as_str() {
+                "S" | "B" => return inner.clone(),
+                "N" => {
+                    if let Some(s) = inner.as_str() {
+                        // Try i64 first, then f64
+                        if let Ok(n) = s.parse::<i64>() {
+                            return Value::Number(n.into());
                         }
-                        return inner.clone();
-                    }
-                    "BOOL" => return inner.clone(),
-                    "NULL" => return Value::Null,
-                    "L" => {
-                        if let Some(arr) = inner.as_array() {
-                            return Value::Array(
-                                arr.iter()
-                                    .map(|v| unwrap_dynamodb_value(v, depth + 1))
-                                    .collect(),
-                            );
+                        if let Ok(f) = s.parse::<f64>()
+                            && let Some(n) = serde_json::Number::from_f64(f)
+                        {
+                            return Value::Number(n);
                         }
+                        return Value::String(s.to_string());
                     }
-                    "M" => {
-                        if let Some(map) = inner.as_object() {
-                            let unwrapped: serde_json::Map<String, Value> = map
-                                .iter()
-                                .map(|(k, v)| (k.clone(), unwrap_dynamodb_value(v, depth + 1)))
-                                .collect();
-                            return Value::Object(unwrapped);
-                        }
-                    }
-                    "SS" => return inner.clone(),
-                    "NS" => {
-                        // Parse NS set: try i64 first, then f64
-                        if let Some(arr) = inner.as_array() {
-                            let nums: Vec<Value> = arr
-                                .iter()
-                                .filter_map(|v| {
-                                    let s = v.as_str()?;
-                                    if let Ok(n) = s.parse::<i64>() {
-                                        Some(Value::Number(n.into()))
-                                    } else if let Ok(f) = s.parse::<f64>() {
-                                        serde_json::Number::from_f64(f).map(Value::Number)
-                                    } else {
-                                        Some(Value::String(s.to_string()))
-                                    }
-                                })
-                                .collect();
-                            return Value::Array(nums);
-                        }
-                        return inner.clone();
-                    }
-                    "BS" => return inner.clone(),
-                    _ => {}
+                    return inner.clone();
                 }
+                "BOOL" => return inner.clone(),
+                "NULL" => return Value::Null,
+                "L" => {
+                    if let Some(arr) = inner.as_array() {
+                        return Value::Array(
+                            arr.iter()
+                                .map(|v| unwrap_dynamodb_value(v, depth + 1))
+                                .collect(),
+                        );
+                    }
+                }
+                "M" => {
+                    if let Some(map) = inner.as_object() {
+                        let unwrapped: serde_json::Map<String, Value> = map
+                            .iter()
+                            .map(|(k, v)| (k.clone(), unwrap_dynamodb_value(v, depth + 1)))
+                            .collect();
+                        return Value::Object(unwrapped);
+                    }
+                }
+                "SS" => return inner.clone(),
+                "NS" => {
+                    // Parse NS set: try i64 first, then f64
+                    if let Some(arr) = inner.as_array() {
+                        let nums: Vec<Value> = arr
+                            .iter()
+                            .filter_map(|v| {
+                                let s = v.as_str()?;
+                                if let Ok(n) = s.parse::<i64>() {
+                                    Some(Value::Number(n.into()))
+                                } else if let Ok(f) = s.parse::<f64>() {
+                                    serde_json::Number::from_f64(f).map(Value::Number)
+                                } else {
+                                    Some(Value::String(s.to_string()))
+                                }
+                            })
+                            .collect();
+                        return Value::Array(nums);
+                    }
+                    return inner.clone();
+                }
+                "BS" => return inner.clone(),
+                _ => {}
             }
         }
         // Not a DynamoDB type wrapper — unwrap each field as a potential item
@@ -1103,10 +1103,10 @@ fn filter_dynamodb_items(json_str: &str) -> Option<FilterResult> {
     lines.push(format!("Count: {}/{}", count, scanned));
 
     // Show ConsumedCapacity if present
-    if let Some(capacity) = v["ConsumedCapacity"].as_object() {
-        if let Some(units) = capacity["CapacityUnits"].as_f64() {
-            lines.push(format!("Capacity: {} RCU", units));
-        }
+    if let Some(capacity) = v["ConsumedCapacity"].as_object()
+        && let Some(units) = capacity["CapacityUnits"].as_f64()
+    {
+        lines.push(format!("Capacity: {} RCU", units));
     }
 
     // Show pagination status if LastEvaluatedKey exists
@@ -1364,10 +1364,10 @@ fn filter_dynamodb_get_item(json_str: &str) -> Option<FilterResult> {
     }
 
     // Show ConsumedCapacity if present
-    if let Some(capacity) = v["ConsumedCapacity"].as_object() {
-        if let Some(units) = capacity["CapacityUnits"].as_f64() {
-            lines.push(format!("Capacity: {} RCU", units));
-        }
+    if let Some(capacity) = v["ConsumedCapacity"].as_object()
+        && let Some(units) = capacity["CapacityUnits"].as_f64()
+    {
+        lines.push(format!("Capacity: {} RCU", units));
     }
 
     if lines.is_empty() {

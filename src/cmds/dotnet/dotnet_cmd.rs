@@ -69,10 +69,8 @@ pub fn run_format(args: &[String], verbose: u8) -> Result<i32> {
         shown,
     );
 
-    if cleanup_report_path {
-        if let Some(path) = report_path.as_deref() {
-            cleanup_temp_file(path);
-        }
+    if cleanup_report_path && let Some(path) = report_path.as_deref() {
+        cleanup_temp_file(path);
     }
 
     Ok(result.exit_code)
@@ -259,10 +257,8 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
     );
 
     cleanup_temp_file(&binlog_path);
-    if cleanup_trx_results_dir {
-        if let Some(dir) = trx_results_dir.as_deref() {
-            cleanup_temp_dir(dir);
-        }
+    if cleanup_trx_results_dir && let Some(dir) = trx_results_dir.as_deref() {
+        cleanup_temp_dir(dir);
     }
 
     if verbose > 0 {
@@ -334,11 +330,11 @@ fn build_effective_dotnet_format_args(
     if !force_write_mode && !has_verify_no_changes_arg(tokens) {
         injected.push("--verify-no-changes".to_string());
     }
-    if !has_report_arg(tokens) {
-        if let Some(path) = report_path {
-            injected.push("--report".to_string());
-            injected.push(path.display().to_string());
-        }
+    if !has_report_arg(tokens)
+        && let Some(path) = report_path
+    {
+        injected.push("--report".to_string());
+        injected.push(path.display().to_string());
     }
 
     // Injected flags go before the user's own `--`: dotnet parks everything past it in
@@ -494,10 +490,10 @@ fn merge_test_summary_from_trx(
         }
     }
 
-    if trx_summary.is_none() {
-        if let Some(trx) = fallback_trx_path {
-            trx_summary = dotnet_trx::parse_trx_file_since(&trx, command_started_at);
-        }
+    if trx_summary.is_none()
+        && let Some(trx) = fallback_trx_path
+    {
+        trx_summary = dotnet_trx::parse_trx_file_since(&trx, command_started_at);
     }
 
     let Some(trx_summary) = trx_summary else {
@@ -557,11 +553,11 @@ fn build_effective_dotnet_args(
                     effective.push("--logger".to_string());
                     effective.push("trx".to_string());
                 }
-                if !has_results_directory_arg(tokens, runner_mode) {
-                    if let Some(results_dir) = trx_results_dir {
-                        effective.push("--results-directory".to_string());
-                        effective.push(results_dir.display().to_string());
-                    }
+                if !has_results_directory_arg(tokens, runner_mode)
+                    && let Some(results_dir) = trx_results_dir
+                {
+                    effective.push("--results-directory".to_string());
+                    effective.push(results_dir.display().to_string());
                 }
                 effective.extend(args.iter().cloned());
             }
@@ -648,10 +644,10 @@ fn scan_mtp_kind_in_file(path: &Path) -> MtpProjectKind {
                 );
             }
             Ok(Event::Text(e)) if inside_mtp_element => {
-                if let Ok(text) = e.unescape() {
-                    if text.trim().eq_ignore_ascii_case("true") {
-                        return MtpProjectKind::VsTestBridge;
-                    }
+                if let Ok(text) = e.unescape()
+                    && text.trim().eq_ignore_ascii_case("true")
+                {
+                    return MtpProjectKind::VsTestBridge;
                 }
             }
             Ok(Event::End(_)) => inside_mtp_element = false,

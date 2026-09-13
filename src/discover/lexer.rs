@@ -80,11 +80,11 @@ pub(crate) fn coalesce_words<'a>(cmd: &'a str, tokens: &[ParsedToken]) -> Vec<(&
     let mut run_end: usize = 0;
 
     for tok in tokens {
-        if let Some(start) = run_start {
-            if tok.offset != run_end {
-                words.push((&cmd[start..run_end], start));
-                run_start = None;
-            }
+        if let Some(start) = run_start
+            && tok.offset != run_end
+        {
+            words.push((&cmd[start..run_end], start));
+            run_start = None;
         }
         if run_start.is_none() {
             run_start = Some(tok.offset);

@@ -60,14 +60,12 @@ pub fn maybe_ping() {
 
     // Check last ping time
     let marker = telemetry_marker_path();
-    if let Ok(metadata) = std::fs::metadata(&marker) {
-        if let Ok(modified) = metadata.modified() {
-            if let Ok(elapsed) = modified.elapsed() {
-                if elapsed.as_secs() < PING_INTERVAL_SECS {
-                    return;
-                }
-            }
-        }
+    if let Ok(metadata) = std::fs::metadata(&marker)
+        && let Ok(modified) = metadata.modified()
+        && let Ok(elapsed) = modified.elapsed()
+        && elapsed.as_secs() < PING_INTERVAL_SECS
+    {
+        return;
     }
 
     // Touch marker file immediately (before sending) to avoid double-ping
@@ -506,23 +504,23 @@ fn count_custom_toml_filters() -> usize {
     let mut count = 0;
 
     // Project-local: .rtk/filters/*.toml
-    if let Ok(cwd) = std::env::current_dir() {
-        if let Ok(entries) = std::fs::read_dir(cwd.join(".rtk/filters")) {
-            count += entries
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "toml"))
-                .count();
-        }
+    if let Ok(cwd) = std::env::current_dir()
+        && let Ok(entries) = std::fs::read_dir(cwd.join(".rtk/filters"))
+    {
+        count += entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "toml"))
+            .count();
     }
 
     // Global: ~/.config/rtk/filters/*.toml
-    if let Some(config_dir) = dirs::config_dir() {
-        if let Ok(entries) = std::fs::read_dir(config_dir.join("rtk/filters")) {
-            count += entries
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "toml"))
-                .count();
-        }
+    if let Some(config_dir) = dirs::config_dir()
+        && let Ok(entries) = std::fs::read_dir(config_dir.join("rtk/filters"))
+    {
+        count += entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "toml"))
+            .count();
     }
 
     count

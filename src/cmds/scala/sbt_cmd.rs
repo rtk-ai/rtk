@@ -277,12 +277,11 @@ fn filter_sbt_test(output: &str) -> String {
                         // Keep Mockito "-> at" pointers and ScalaMock locations
                         // (they include the file:line reference).
                         let is_stack_frame = detail.starts_with("at ") || detail.starts_with("...");
-                        if !is_stack_frame {
-                            if let Some(block) = failures.last_mut() {
-                                if block.details.len() < 4 {
-                                    block.details.push(detail.to_string());
-                                }
-                            }
+                        if !is_stack_frame
+                            && let Some(block) = failures.last_mut()
+                            && block.details.len() < 4
+                        {
+                            block.details.push(detail.to_string());
                         }
                     }
                     continue;

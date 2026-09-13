@@ -1,4 +1,3 @@
-#![allow(clippy::collapsible_if)]
 mod analytics;
 mod cmds;
 mod core;
