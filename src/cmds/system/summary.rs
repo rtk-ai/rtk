@@ -258,7 +258,10 @@ fn summarize_json(output: &str, result: &mut Vec<String>) {
                     result.push(format!("   • {}", key));
                 }
                 if obj.len() > MAX_SUMMARY_KEYS {
-                    result.push(format!("   ... +{} more keys", obj.len() - MAX_SUMMARY_KEYS));
+                    result.push(format!(
+                        "   ... +{} more keys",
+                        obj.len() - MAX_SUMMARY_KEYS
+                    ));
                 }
             }
             _ => {

@@ -162,7 +162,11 @@ pub(crate) fn parse_major_version(version_output: &str) -> u32 {
     // would send it `--out-format=json`, a flag v2 removed.
     for word in version_output.split_whitespace() {
         let version = word.strip_prefix('v').unwrap_or(word);
-        if let Some(major) = version.split('.').next().and_then(|s| s.parse::<u32>().ok()) {
+        if let Some(major) = version
+            .split('.')
+            .next()
+            .and_then(|s| s.parse::<u32>().ok())
+        {
             if version.contains('.') {
                 return major;
             }
@@ -531,7 +535,9 @@ mod tests {
     #[test]
     fn test_parse_version_v2_format() {
         assert_eq!(
-            parse_major_version("golangci-lint has version 2.10.0 built with go1.26.0 from 95dcb68a on 2026-02-17T13:05:51Z"),
+            parse_major_version(
+                "golangci-lint has version 2.10.0 built with go1.26.0 from 95dcb68a on 2026-02-17T13:05:51Z"
+            ),
             2
         );
     }
@@ -607,12 +613,7 @@ mod tests {
         // -c takes a separate-token value; its value ("foo.yml") must not be mistaken for
         // the subcommand.
         assert_eq!(
-            classify_invocation(&[
-                "-c".into(),
-                "foo.yml".into(),
-                "run".into(),
-                "./...".into(),
-            ]),
+            classify_invocation(&["-c".into(), "foo.yml".into(), "run".into(), "./...".into(),]),
             Invocation::FilteredRun(RunInvocation {
                 global_args: vec!["-c".into(), "foo.yml".into()],
                 run_args: vec!["./...".into()],
@@ -759,7 +760,10 @@ mod tests {
             "--disable".to_string(),
             "errcheck".to_string(),
         ]));
-        assert!(!has_output_flag(&["--timeout".to_string(), "30s".to_string()]));
+        assert!(!has_output_flag(&[
+            "--timeout".to_string(),
+            "30s".to_string()
+        ]));
     }
 
     #[test]
@@ -771,7 +775,10 @@ mod tests {
         assert_eq!(find_subcommand_index(&args), Some(1));
 
         // Solo, it still takes its value -- that spelling golangci-lint does accept.
-        let args: Vec<String> = ["-c", "cfg.yml", "run"].iter().map(|a| a.to_string()).collect();
+        let args: Vec<String> = ["-c", "cfg.yml", "run"]
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
         assert_eq!(find_subcommand_index(&args), Some(2));
 
         // And the attached spelling is untouched by the solo-only rule.
@@ -785,7 +792,10 @@ mod tests {
         // unlinked Positional.
         let args = vec!["--out-format".to_string(), "json".to_string()];
         let tokens = arg_tokenizer::tokenize_grammar(&args, &run_takes_value, Dialect::Posix);
-        assert!(tokens[0].linked.is_some(), "\"json\" must link to --out-format");
+        assert!(
+            tokens[0].linked.is_some(),
+            "\"json\" must link to --out-format"
+        );
     }
 
     #[test]
@@ -958,7 +968,11 @@ mod tests {
         let filtered_tokens = estimate_tokens(&filtered) as f64;
         let savings = 100.0 - (filtered_tokens / raw_tokens * 100.0);
 
-        assert!(savings >= 60.0, "expected >=60% savings, got {:.1}%", savings);
+        assert!(
+            savings >= 60.0,
+            "expected >=60% savings, got {:.1}%",
+            savings
+        );
     }
 
     /// The filter always has something to say about its input. Whether that is worth

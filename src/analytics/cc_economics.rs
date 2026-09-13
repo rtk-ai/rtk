@@ -727,7 +727,9 @@ fn export_csv(
     all: bool,
 ) -> Result<()> {
     // Header (new columns: input_tokens, output_tokens, cache_create, cache_read, weighted_savings)
-    println!("period,spent,input_tokens,output_tokens,cache_create,cache_read,active_tokens,total_tokens,saved_tokens,weighted_savings,active_savings,blended_savings,rtk_commands");
+    println!(
+        "period,spent,input_tokens,output_tokens,cache_create,cache_read,active_tokens,total_tokens,saved_tokens,weighted_savings,active_savings,blended_savings,rtk_commands"
+    );
 
     if all || daily {
         let cc = ccusage::fetch(Granularity::Daily)

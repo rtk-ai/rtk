@@ -31,7 +31,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -2409,10 +2409,12 @@ mod tests {
     fn test_earliest_hook_decision_timestamp() {
         let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
 
-        assert!(tracker
-            .earliest_hook_decision_timestamp()
-            .expect("query failed")
-            .is_none());
+        assert!(
+            tracker
+                .earliest_hook_decision_timestamp()
+                .expect("query failed")
+                .is_none()
+        );
 
         tracker
             .record_hook_decision(
@@ -2426,10 +2428,12 @@ mod tests {
             )
             .expect("Failed to record hook decision");
 
-        assert!(tracker
-            .earliest_hook_decision_timestamp()
-            .expect("query failed")
-            .is_some());
+        assert!(
+            tracker
+                .earliest_hook_decision_timestamp()
+                .expect("query failed")
+                .is_some()
+        );
     }
 
     #[test]
@@ -2450,10 +2454,12 @@ mod tests {
 
         tracker.reset_all().expect("Failed to reset");
 
-        assert!(tracker
-            .earliest_hook_decision_timestamp()
-            .expect("query failed")
-            .is_none());
+        assert!(
+            tracker
+                .earliest_hook_decision_timestamp()
+                .expect("query failed")
+                .is_none()
+        );
     }
 
     // rtk-ai/rtk#3206 review: hook_decisions grows unbounded for a user whose

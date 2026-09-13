@@ -6,10 +6,10 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use super::lexer::{
-    advance_quote_state, coalesce_words, is_crlf_at, redirect_has_file_target, shell_split,
-    split_on_operators, tokenize, tokenize_with_newlines, ParsedToken, PipeKind, TokenKind,
+    ParsedToken, PipeKind, TokenKind, advance_quote_state, coalesce_words, is_crlf_at,
+    redirect_has_file_target, shell_split, split_on_operators, tokenize, tokenize_with_newlines,
 };
-use super::rules::{RtkRule, IGNORED_EXACT, IGNORED_PREFIXES, RULES};
+use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 
 const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
 
@@ -961,11 +961,7 @@ fn rewrite_multiline_block(
         i = end + 1;
     }
 
-    if any_changed {
-        Some(result)
-    } else {
-        None
-    }
+    if any_changed { Some(result) } else { None }
 }
 
 /// Pipeline boundaries used to rewrite its final stage.
@@ -1234,11 +1230,7 @@ fn rewrite_compound(
     }
     result.push_str(&rewritten);
 
-    if any_changed {
-        Some(result)
-    } else {
-        None
-    }
+    if any_changed { Some(result) } else { None }
 }
 
 fn rewrite_line_range(cmd: &str) -> Option<String> {
@@ -5848,11 +5840,13 @@ mod tests {
             );
         }
         // A different PHP tool is untouched.
-        assert!(rewrite_command_no_prefixes(
-            "php vendor/bin/phpstan analyse src",
-            &["phpunit".to_string()]
-        )
-        .is_some());
+        assert!(
+            rewrite_command_no_prefixes(
+                "php vendor/bin/phpstan analyse src",
+                &["phpunit".to_string()]
+            )
+            .is_some()
+        );
     }
 
     #[test]

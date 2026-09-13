@@ -1,7 +1,7 @@
 //! PHP command filter: syntax-check summaries and generic cleanup.
 
 use super::artisan_cmd::{filter_artisan_output, filter_artisan_test_output};
-use super::utils::{detect_php_test_runner, strip_ansi_and_controls, PhpTestRunner};
+use super::utils::{PhpTestRunner, detect_php_test_runner, strip_ansi_and_controls};
 use crate::core::runner;
 use crate::core::utils::resolved_command;
 use anyhow::Result;

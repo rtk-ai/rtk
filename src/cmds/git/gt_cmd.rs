@@ -2,7 +2,7 @@
 
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
-use crate::core::truncate::{reduced, CAP_LIST};
+use crate::core::truncate::{CAP_LIST, reduced};
 use crate::core::utils::{ok_confirmation, resolved_command, strip_ansi, truncate};
 use anyhow::{Context, Result};
 use regex::Regex;

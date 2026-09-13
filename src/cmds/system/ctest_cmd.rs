@@ -28,8 +28,7 @@ static TEST_RE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("invalid ctest result regex")
 });
 static RESULT_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^\s*(?:\d+/\d+\s+)?Test\s+#\d+:")
-        .expect("invalid ctest result prefix regex")
+    Regex::new(r"^\s*(?:\d+/\d+\s+)?Test\s+#\d+:").expect("invalid ctest result prefix regex")
 });
 static RESULT_TERMINATOR_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"[\d.]+\s+sec\s*$").expect("invalid ctest result terminator regex")
@@ -136,9 +135,9 @@ fn dashboard_action_changes_output(args: &[String]) -> bool {
     let mut index = 0;
     while index < args.len() {
         let arg = args[index].as_str();
-        let (flag, inline_value) = arg.split_once('=').map_or((arg, None), |(flag, value)| {
-            (flag, Some(value))
-        });
+        let (flag, inline_value) = arg
+            .split_once('=')
+            .map_or((arg, None), |(flag, value)| (flag, Some(value)));
         match flag {
             "-T" | "--test-action" => {
                 match inline_value.map(str::to_string).or_else(|| {
@@ -201,17 +200,11 @@ pub(crate) fn filter_ctest_output(output: &str) -> String {
 
     let lines = build_logical_lines(&clean);
     let parsed_tests = parse_tests(&lines);
-    let framing_lines = collect_framing_line_indices(
-        &lines,
-        &parsed_tests.tests,
-        &parsed_tests.result_lines,
-    );
+    let framing_lines =
+        collect_framing_line_indices(&lines, &parsed_tests.tests, &parsed_tests.result_lines);
     let tests = parsed_tests.tests;
     let summary = find_run_summary(&lines, &tests, &framing_lines, parsed_tests.run_total);
-    let total_time = lines
-        .iter()
-        .rev()
-        .find_map(|line| parse_total_time(line));
+    let total_time = lines.iter().rev().find_map(|line| parse_total_time(line));
 
     if tests.is_empty() && summary.is_none() {
         if let Some(index) = lines.iter().rposition(|line| is_no_tests_line(line)) {
@@ -294,7 +287,10 @@ fn build_logical_lines(output: &str) -> Vec<String> {
 /// lines behind it are kept: on their own, `ctest: no tests found` reads as a
 /// benign outcome for a run that actually failed.
 fn format_no_tests(rest: &[String]) -> String {
-    let mut trailer: Vec<String> = rest.iter().map(|line| line.trim_end().to_string()).collect();
+    let mut trailer: Vec<String> = rest
+        .iter()
+        .map(|line| line.trim_end().to_string())
+        .collect();
     trim_blank_edges(&mut trailer);
 
     let mut out = String::from("ctest: no tests found");
@@ -331,9 +327,10 @@ fn parse_tests(lines: &[String]) -> ParsedTests {
         })
     }) {
         result_lines.push(test.line_index);
-        if let Some(existing) = tests.iter_mut().find(|existing| {
-            existing.number == test.number && existing.name == test.name
-        }) {
+        if let Some(existing) = tests
+            .iter_mut()
+            .find(|existing| existing.number == test.number && existing.name == test.name)
+        {
             *existing = test;
         } else {
             tests.push(test);
@@ -371,10 +368,7 @@ fn split_status_reason(raw: &str) -> (String, Option<String>) {
         return (raw.to_string(), None);
     };
 
-    let reason = reason
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let reason = reason.split_whitespace().collect::<Vec<_>>().join(" ");
     let reason = match reason.strip_suffix(" ]") {
         Some(head) => format!("{head}]"),
         None => reason,
@@ -546,11 +540,7 @@ fn format_failure(
     out.push_str(&format_meta(total_time));
     if !failed_tests.is_empty() {
         out.push('\n');
-        out.push_str(&format_failed_section(
-            lines,
-            &failed_tests,
-            framing_lines,
-        ));
+        out.push_str(&format_failed_section(lines, &failed_tests, framing_lines));
     }
     if !unparsed_failed_entries.is_empty() {
         out.push('\n');
@@ -768,10 +758,7 @@ fn collect_unparsed_failed_entries(
     let Some(start) = failed_trailer_start(lines, framing_lines) else {
         return Vec::new();
     };
-    let parsed_numbers: HashSet<u32> = parsed_failed_tests
-        .iter()
-        .map(|test| test.number)
-        .collect();
+    let parsed_numbers: HashSet<u32> = parsed_failed_tests.iter().map(|test| test.number).collect();
 
     lines[start + 1..]
         .iter()
@@ -788,10 +775,8 @@ fn collect_unparsed_failed_entries(
 }
 
 fn format_unparsed_failed_section(entries: &[String]) -> String {
-    let formatted_entries: Vec<String> = entries
-        .iter()
-        .map(|entry| format!("    {entry}"))
-        .collect();
+    let formatted_entries: Vec<String> =
+        entries.iter().map(|entry| format!("    {entry}")).collect();
     let mut section = String::from("failed (unparsed, raw):");
     for entry in formatted_entries.iter().take(MAX_FAILED_LIST_LINES) {
         section.push('\n');
@@ -1090,7 +1075,10 @@ Total Test time (real) =   0.01 sec
             vec!["-T", "Test", "--output-on-failure"],
         ] {
             let args: Vec<String> = filtered.iter().map(ToString::to_string).collect();
-            assert!(!should_passthrough(&args), "{filtered:?} should be filtered");
+            assert!(
+                !should_passthrough(&args),
+                "{filtered:?} should be filtered"
+            );
         }
 
         for passthrough in [
@@ -1124,8 +1112,7 @@ Total Test time (real) =   0.01 sec
             .lines()
             .filter(|line| {
                 let trimmed = line.trim_start();
-                !trimmed.starts_with("[full output:")
-                    && !trimmed.starts_with("[see remaining:")
+                !trimmed.starts_with("[full output:") && !trimmed.starts_with("[see remaining:")
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -1134,11 +1121,8 @@ Total Test time (real) =   0.01 sec
     fn failed_section_parts(input: &str) -> (String, String, bool) {
         let lines = build_logical_lines(input);
         let parsed_tests = parse_tests(&lines);
-        let framing_lines = collect_framing_line_indices(
-            &lines,
-            &parsed_tests.tests,
-            &parsed_tests.result_lines,
-        );
+        let framing_lines =
+            collect_framing_line_indices(&lines, &parsed_tests.tests, &parsed_tests.result_lines);
         let failed_tests: Vec<&TestCase> = parsed_tests
             .tests
             .iter()
@@ -1376,9 +1360,8 @@ extra 3
 
     #[test]
     fn keeps_failure_output_that_mentions_no_tests_found() {
-        let input = include_str!(
-            "../../../tests/fixtures/ctest_discovery_fail_output_on_failure_raw.txt"
-        );
+        let input =
+            include_str!("../../../tests/fixtures/ctest_discovery_fail_output_on_failure_raw.txt");
 
         assert_eq!(
             filter_ctest_output(input),

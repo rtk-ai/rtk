@@ -1,14 +1,14 @@
 //! Filters git output — log, status, diff, and more — keeping just the essential info.
 
 use crate::core::arg_tokenizer::{
-    self, is_digit_run, Attachment, Dialect, Token, TokenKind, ValueSpec,
+    self, Attachment, Dialect, Token, TokenKind, ValueSpec, is_digit_run,
 };
 use crate::core::args_utils;
 use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
 use crate::core::stream::{
-    self, exec_capture, exec_capture_stdin, CaptureResult, FilterMode, LineHandler,
-    LineStreamFilter, StdinMode,
+    self, CaptureResult, FilterMode, LineHandler, LineStreamFilter, StdinMode, exec_capture,
+    exec_capture_stdin,
 };
 use crate::core::tracking;
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
@@ -177,8 +177,7 @@ fn body_is_suppressed(tokens: &[Token<'_>]) -> bool {
     // side -- `--quiet -p` and `-p --quiet` both print the diff -- and only suppresses when
     // nothing else asked for output. Treating it as a third spelling of `-s` dropped a patch
     // the user had asked for.
-    suppressed
-        || (tokens.iter().any(is_quiet_flag) && !tokens.iter().any(requests_patch_output))
+    suppressed || (tokens.iter().any(is_quiet_flag) && !tokens.iter().any(requests_patch_output))
 }
 
 /// `--quiet`, which is `--exit-code`'s companion rather than a shape flag. Only `run_diff`
@@ -521,13 +520,19 @@ fn run_show(
         let label = format!("git show {}", args.join(" "));
         let rtk_label = format!("rtk git show {}", args.join(" "));
         if !result.success() {
-            eprint!("{}", crate::core::utils::decode_process_output(&result.stderr));
+            eprint!(
+                "{}",
+                crate::core::utils::decode_process_output(&result.stderr)
+            );
             return Ok(result.exit_code);
         }
         // git can warn on stderr (e.g. CRLF / autocrlf notices) while still exiting 0;
         // surface it instead of swallowing it just because the command succeeded.
         if !result.stderr.is_empty() {
-            eprint!("{}", crate::core::utils::decode_process_output(&result.stderr));
+            eprint!(
+                "{}",
+                crate::core::utils::decode_process_output(&result.stderr)
+            );
         }
         // Fidelity invariant: "byte-identical unless we successfully windowed."
         //
@@ -1719,49 +1724,49 @@ fn run_log(
 fn shared_long_takes_value(name: &str) -> bool {
     matches!(
         name,
-            "after"
-                | "anchored"
-                | "author"
-                | "before"
-                | "color-moved-ws"
-                | "committer"
-                | "date"
-                | "decorate-refs"
-                | "decorate-refs-exclude"
-                | "diff-algorithm"
-                | "diff-filter"
-                | "diff-merges"
-                | "dst-prefix"
-                | "encoding"
-                | "exclude"
-                | "find-object"
-                | "glob"
-                | "grep"
-                | "grep-reflog"
-                | "ignore-matching-lines"
-                | "inter-hunk-context"
-                | "line-prefix"
-                | "max-age"
-                | "max-count"
-                | "max-depth"
-                | "min-age"
-                | "output"
-                | "output-indicator-context"
-                | "output-indicator-new"
-                | "output-indicator-old"
-                | "rotate-to"
-                | "since"
-                | "since-as-filter"
-                | "skip"
-                | "skip-to"
-                | "src-prefix"
-                | "stat-count"
-                | "stat-graph-width"
-                | "stat-name-width"
-                | "stat-width"
-                | "until"
-                | "word-diff-regex"
-                | "ws-error-highlight"
+        "after"
+            | "anchored"
+            | "author"
+            | "before"
+            | "color-moved-ws"
+            | "committer"
+            | "date"
+            | "decorate-refs"
+            | "decorate-refs-exclude"
+            | "diff-algorithm"
+            | "diff-filter"
+            | "diff-merges"
+            | "dst-prefix"
+            | "encoding"
+            | "exclude"
+            | "find-object"
+            | "glob"
+            | "grep"
+            | "grep-reflog"
+            | "ignore-matching-lines"
+            | "inter-hunk-context"
+            | "line-prefix"
+            | "max-age"
+            | "max-count"
+            | "max-depth"
+            | "min-age"
+            | "output"
+            | "output-indicator-context"
+            | "output-indicator-new"
+            | "output-indicator-old"
+            | "rotate-to"
+            | "since"
+            | "since-as-filter"
+            | "skip"
+            | "skip-to"
+            | "src-prefix"
+            | "stat-count"
+            | "stat-graph-width"
+            | "stat-name-width"
+            | "stat-width"
+            | "until"
+            | "word-diff-regex"
+            | "ws-error-highlight"
     )
 }
 
@@ -2623,11 +2628,7 @@ fn quoted_suffix<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
 }
 
 fn pluralize<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
-    if count == 1 {
-        singular
-    } else {
-        plural
-    }
+    if count == 1 { singular } else { plural }
 }
 
 fn filter_checkout_failure(raw: &str) -> String {
@@ -3485,7 +3486,11 @@ fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<
         let result = exec_capture(&mut cmd).context("Failed to run git worktree")?;
         let combined = result.combined();
 
-        let said = if asked_for_report { combined.trim() } else { "" };
+        let said = if asked_for_report {
+            combined.trim()
+        } else {
+            ""
+        };
         // Track what RTK prints, not what git said: on success that is the report or "ok".
         let msg = if !result.success() {
             combined.as_str()
@@ -3807,7 +3812,11 @@ mod tests {
         let removed: Vec<&str> = result.lines().filter(|l| l.starts_with('-')).collect();
         let added: Vec<&str> = result.lines().filter(|l| l.starts_with('+')).collect();
 
-        assert_eq!(removed, vec!["-DELETED_A", "-DELETED_B"], "`^-` must anchor");
+        assert_eq!(
+            removed,
+            vec!["-DELETED_A", "-DELETED_B"],
+            "`^-` must anchor"
+        );
         assert_eq!(added, vec!["+ADDED"], "`^+` must anchor");
 
         // rtk's own tally stays indented so these same greps never count it as
@@ -3848,7 +3857,11 @@ mod tests {
             "added `++i;` must survive, got:\n{}",
             result
         );
-        assert!(result.contains("  +1 -1"), "tally must count both, got:\n{}", result);
+        assert!(
+            result.contains("  +1 -1"),
+            "tally must count both, got:\n{}",
+            result
+        );
     }
 
     #[test]
@@ -3867,7 +3880,11 @@ mod tests {
         let ctx = result.lines().filter(|l| l.starts_with(" ctx")).count();
         let dels = result.lines().filter(|l| l.starts_with("-del")).count();
         assert_eq!(ctx, 3, "leading context is capped, got:\n{}", result);
-        assert_eq!(dels, 100, "every change must still be shown, got:\n{}", result);
+        assert_eq!(
+            dels, 100,
+            "every change must still be shown, got:\n{}",
+            result
+        );
         assert!(
             !result.contains("truncated"),
             "no change was dropped, got:\n{}",
@@ -3971,7 +3988,11 @@ mod tests {
             "mbox envelope must stay out of the body, got:\n{}",
             result
         );
-        assert!(result.contains("  +1 -1"), "tally counts real changes only, got:\n{}", result);
+        assert!(
+            result.contains("  +1 -1"),
+            "tally counts real changes only, got:\n{}",
+            result
+        );
     }
 
     #[test]
@@ -4018,10 +4039,7 @@ mod tests {
             diff_header_path(r#"diff --git "a/Ã©tÃ©.txt" "b/Ã©tÃ©.txt""#),
             r"Ã©tÃ©.txt"
         );
-        assert_eq!(
-            diff_header_path(r#"diff --cc "Ã©tÃ©.txt""#),
-            r"Ã©tÃ©.txt"
-        );
+        assert_eq!(diff_header_path(r#"diff --cc "Ã©tÃ©.txt""#), r"Ã©tÃ©.txt");
         // A rename quotes each side on its own.
         assert_eq!(
             diff_header_path(r#"diff --git a/plain.txt "b/Ã©t.txt""#),
@@ -4132,7 +4150,10 @@ mod tests {
     fn test_compact_diff_extra_range_does_not_strand_a_hunk() {
         // With the third range untracked, `--x` left it at 1 forever, so the
         // hunk never closed and the mbox signature became its content.
-        let out = compact_diff("diff --cc f\n@@@ -1 -1 -1 +0,0 @@@\n--x\n-- \n2.40.0\n", 100);
+        let out = compact_diff(
+            "diff --cc f\n@@@ -1 -1 -1 +0,0 @@@\n--x\n-- \n2.40.0\n",
+            100,
+        );
         assert!(out.contains("--x"), "got:\n{}", out);
         assert!(!out.contains("2.40.0"), "got:\n{}", out);
         assert!(!out.contains("-- "), "got:\n{}", out);
@@ -4168,7 +4189,10 @@ mod tests {
         assert_eq!(diff_header_path("diff --git i/f.txt w/f.txt"), "f.txt");
         // A rename's halves disagree past their first component, so the ` b/`
         // split still names the destination.
-        assert_eq!(diff_header_path("diff --git a/old.txt b/new.txt"), "new.txt");
+        assert_eq!(
+            diff_header_path("diff --git a/old.txt b/new.txt"),
+            "new.txt"
+        );
     }
 
     #[test]
@@ -4183,7 +4207,10 @@ mod tests {
     #[test]
     fn test_parse_hunk_header_counts() {
         let h = parse_hunk_header("@@ -10,3 +10,4 @@ fn ctx() {").expect("unified header");
-        assert_eq!((h.parents.as_slice(), h.new, h.prefix_width), (&[3][..], 4, 1));
+        assert_eq!(
+            (h.parents.as_slice(), h.new, h.prefix_width),
+            (&[3][..], 4, 1)
+        );
 
         // Omitted counts mean one line.
         let h = parse_hunk_header("@@ -1 +1 @@").expect("single-line header");
@@ -4275,8 +4302,7 @@ mod tests {
             }
             diff
         };
-        let count_changes =
-            |out: &str| out.lines().filter(|l| l.starts_with("-del")).count();
+        let count_changes = |out: &str| out.lines().filter(|l| l.starts_with("-del")).count();
 
         let without = compact_diff(&build(false), 500);
         let with = compact_diff(&build(true), 500);
@@ -4472,7 +4498,10 @@ mod tests {
         assert!(blob_candidates(&args).is_empty());
         // A real blob still routes as a blob even with a preceding value flag.
         let args = show_args(&["-S", "needle", "HEAD:src/main.rs"]);
-        assert_eq!(blob_candidates(&args), vec![&"HEAD:src/main.rs".to_string()]);
+        assert_eq!(
+            blob_candidates(&args),
+            vec![&"HEAD:src/main.rs".to_string()]
+        );
         // A value operand that IS a valid-looking blob (`-S 'HEAD:real'`) is the pickaxe
         // value, not an object: the walker excludes it, so only the trailing commit
         // remains and nothing is offered as a windowing candidate.
@@ -4626,8 +4655,7 @@ mod tests {
             s.push_str(&format!("line number {i} with a bit of content here\n"));
         }
         s.pop(); // drop the final newline
-        let (head, remaining, offset) =
-            blob_truncation(&s, MAX_BLOB_BYTES).expect("should window");
+        let (head, remaining, offset) = blob_truncation(&s, MAX_BLOB_BYTES).expect("should window");
         assert_eq!(offset, head.lines().count() + 1);
         assert_eq!(remaining, s.lines().count() - head.lines().count());
     }
@@ -4638,14 +4666,17 @@ mod tests {
         // so it works at any size (N2) and quotes a path with a space for safe paste.
         let mut s = String::new();
         for i in 0..2000 {
-            s.push_str(&format!("line {i} with enough content to exceed the byte budget\n"));
+            s.push_str(&format!(
+                "line {i} with enough content to exceed the byte budget\n"
+            ));
         }
-        let offset = blob_truncation(&s, MAX_BLOB_BYTES).expect("should window").2;
+        let offset = blob_truncation(&s, MAX_BLOB_BYTES)
+            .expect("should window")
+            .2;
         let out = compact_blob_show(&s, "HEAD:my dir/big.lock", &[]);
         assert!(out.len() < s.len(), "windowing must shrink the output");
-        let expected = format!(
-            "[see remaining: git show 'HEAD:my dir/big.lock' | tail -n +{offset}]"
-        );
+        let expected =
+            format!("[see remaining: git show 'HEAD:my dir/big.lock' | tail -n +{offset}]");
         assert!(out.contains(&expected), "hint missing/unquoted: {out:?}");
         assert!(!out.contains("tail -n +0"));
 
@@ -4654,7 +4685,10 @@ mod tests {
         let out_q = compact_blob_show(&s, "HEAD:it's/a.lock", &[]);
         let expected_q =
             format!("[see remaining: git show 'HEAD:it'\\''s/a.lock' | tail -n +{offset}]");
-        assert!(out_q.contains(&expected_q), "single-quote path unescaped: {out_q:?}");
+        assert!(
+            out_q.contains(&expected_q),
+            "single-quote path unescaped: {out_q:?}"
+        );
     }
 
     #[test]
@@ -4671,9 +4705,13 @@ mod tests {
         // each shell-quoted, so the recovery command targets the same repo.
         let mut s = String::new();
         for i in 0..2000 {
-            s.push_str(&format!("line {i} with enough content to exceed the byte budget\n"));
+            s.push_str(&format!(
+                "line {i} with enough content to exceed the byte budget\n"
+            ));
         }
-        let offset = blob_truncation(&s, MAX_BLOB_BYTES).expect("should window").2;
+        let offset = blob_truncation(&s, MAX_BLOB_BYTES)
+            .expect("should window")
+            .2;
         let globals = vec![
             "-C".to_string(),
             "/tmp/my repo".to_string(),
@@ -4936,7 +4974,11 @@ mod tests {
         assert!(!report(&["add", "/tmp/w", "-b", "topic"]));
         assert!(!report(&["prune"]));
         assert!(!report(&["remove", "/tmp/w"]));
-        for spelling in [&["prune", "-n"][..], &["prune", "--dry-run"][..], &["prune", "-v"][..]] {
+        for spelling in [
+            &["prune", "-n"][..],
+            &["prune", "--dry-run"][..],
+            &["prune", "-v"][..],
+        ] {
             assert!(report(spelling), "{spelling:?} asks for a report");
         }
         // A worktree path spelled like the flag is a path, not a request.
@@ -5265,7 +5307,8 @@ A  added.rs
             let args = vec![flag.to_string()];
             let tokens = tokenize_git_log_args(&args);
             assert!(
-                !tokens.iter().any(|t| show_wants_raw_shape(t, &tokens)) && !tokens.iter().any(|t| diff_wants_raw_shape(t, &tokens)),
+                !tokens.iter().any(|t| show_wants_raw_shape(t, &tokens))
+                    && !tokens.iter().any(|t| diff_wants_raw_shape(t, &tokens)),
                 "{flag} must stay on diff/show's compact path, not the raw passthrough path"
             );
         }
@@ -5288,7 +5331,8 @@ A  added.rs
             let args = vec![flag.to_string()];
             let tokens = tokenize_git_log_args(&args);
             assert!(
-                tokens.iter().any(|t| show_wants_raw_shape(t, &tokens)) && tokens.iter().any(|t| diff_wants_raw_shape(t, &tokens)),
+                tokens.iter().any(|t| show_wants_raw_shape(t, &tokens))
+                    && tokens.iter().any(|t| diff_wants_raw_shape(t, &tokens)),
                 "{flag} changes output shape and should still request the raw passthrough path"
             );
         }
@@ -5429,7 +5473,10 @@ A  added.rs
         assert_eq!(rebuild(&["-wU2"]), vec!["-w"]);
         assert_eq!(rebuild(&["-p"]), Vec::<String>::new());
         // Nothing to strip: flags and positionals pass through untouched.
-        assert_eq!(rebuild(&["-w", "HEAD~1", "f.txt"]), vec!["-w", "HEAD~1", "f.txt"]);
+        assert_eq!(
+            rebuild(&["-w", "HEAD~1", "f.txt"]),
+            vec!["-w", "HEAD~1", "f.txt"]
+        );
         assert_eq!(rebuild(&["--author", "-p"]), vec!["--author", "-p"]);
     }
 
@@ -5445,7 +5492,10 @@ A  added.rs
         for flag in ["-p", "-u", "--patch", "-U5", "-W", "--function-context"] {
             let args = vec![flag.to_string()];
             let tokens = tokenize_git_diff_args(&args);
-            assert!(args_without_patch_shape(&args, &tokens).is_empty(), "{flag}");
+            assert!(
+                args_without_patch_shape(&args, &tokens).is_empty(),
+                "{flag}"
+            );
         }
         // A flag that only tunes the diff must survive into the header.
         let args = vec!["-w".to_string()];
@@ -5480,7 +5530,10 @@ A  added.rs
         // `-s`/`--no-patch` compact. Claiming it for show raw-passed that header.
         let args = vec!["--quiet".to_string()];
         let tokens = tokenize_git_diff_args(&args);
-        assert!(tokens.iter().any(|t| diff_wants_raw_shape(t, &tokens)), "diff needs the exit code");
+        assert!(
+            tokens.iter().any(|t| diff_wants_raw_shape(t, &tokens)),
+            "diff needs the exit code"
+        );
         assert!(
             !tokens.iter().any(|t| show_wants_raw_shape(t, &tokens)),
             "show's --quiet is -s, which suppresses_diff_body renders as the summary"
@@ -5493,7 +5546,10 @@ A  added.rs
         let built = |args: &[&str]| {
             let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
             let tokens = tokenize_git_log_args(&owned);
-            assert!(tokens.iter().any(|t| log_wants_raw_shape(t, &tokens)), "{args:?} must route raw");
+            assert!(
+                tokens.iter().any(|t| log_wants_raw_shape(t, &tokens)),
+                "{args:?} must route raw"
+            );
             raw_log_passthrough_args(&owned, raw_log_is_capped(&tokens))
                 .iter()
                 .map(|a| a.to_string_lossy().into_owned())
@@ -5565,11 +5621,7 @@ A  added.rs
         for (args, expected) in cases {
             let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
             let tokens = tokenize_git_diff_args(&owned);
-            assert_eq!(
-                body_is_suppressed(&tokens),
-                expected,
-                "{args:?}"
-            );
+            assert_eq!(body_is_suppressed(&tokens), expected, "{args:?}");
         }
     }
 
@@ -5637,22 +5689,46 @@ A  added.rs
 
         for fmt in ["c", "cc", "combined", "dense-combined"] {
             // Combined: raw for both -- compact_diff reads the two marker columns as one.
-            assert_eq!(route(&[&format!("--diff-merges={fmt}")]), (true, true), "={fmt}");
+            assert_eq!(
+                route(&[&format!("--diff-merges={fmt}")]),
+                (true, true),
+                "={fmt}"
+            );
             // git takes the value as the next token too, and that spelling must route alike.
-            assert_eq!(route(&["--diff-merges", fmt]), (true, true), "separate {fmt}");
+            assert_eq!(
+                route(&["--diff-merges", fmt]),
+                (true, true),
+                "separate {fmt}"
+            );
         }
 
         for fmt in ["1", "first-parent", "m", "on", "r", "remerge", "separate"] {
             // A single-column patch: log still cannot represent one, show's default already is
             // one, so the two subcommands disagree here on purpose.
-            assert_eq!(route(&[&format!("--diff-merges={fmt}")]), (true, false), "={fmt}");
-            assert_eq!(route(&["--diff-merges", fmt]), (true, false), "separate {fmt}");
+            assert_eq!(
+                route(&[&format!("--diff-merges={fmt}")]),
+                (true, false),
+                "={fmt}"
+            );
+            assert_eq!(
+                route(&["--diff-merges", fmt]),
+                (true, false),
+                "separate {fmt}"
+            );
         }
 
         for fmt in ["none", "off"] {
             // No patch at all, so nothing to escape the compact path for.
-            assert_eq!(route(&[&format!("--diff-merges={fmt}")]), (false, false), "={fmt}");
-            assert_eq!(route(&["--diff-merges", fmt]), (false, false), "separate {fmt}");
+            assert_eq!(
+                route(&[&format!("--diff-merges={fmt}")]),
+                (false, false),
+                "={fmt}"
+            );
+            assert_eq!(
+                route(&["--diff-merges", fmt]),
+                (false, false),
+                "separate {fmt}"
+            );
         }
 
         // No value is a git error either way; RTK must not read it as a patch request.
@@ -5671,13 +5747,19 @@ A  added.rs
                 tokens.iter().any(|t| show_wants_raw_shape(t, &tokens)),
                 "{flag} must take show's raw route"
             );
-            assert!(tokens.iter().any(|t| diff_wants_raw_shape(t, &tokens)), "{flag} for diff too");
+            assert!(
+                tokens.iter().any(|t| diff_wants_raw_shape(t, &tokens)),
+                "{flag} for diff too"
+            );
         }
         // The other short flags stay on the compact path: they only restate the default.
         for flag in ["-p", "-u", "-U3"] {
             let args = vec![flag.to_string()];
             let tokens = tokenize_git_diff_args(&args);
-            assert!(!tokens.iter().any(|t| show_wants_raw_shape(t, &tokens)), "{flag}");
+            assert!(
+                !tokens.iter().any(|t| show_wants_raw_shape(t, &tokens)),
+                "{flag}"
+            );
         }
     }
 
@@ -5734,7 +5816,10 @@ A  added.rs
         // separator has to be ignored wherever it sits, not only when it is the only token.
         assert!(uses_compact_status_path(&[]));
         assert!(uses_compact_status_path(&["--".to_string()]));
-        assert!(uses_compact_status_path(&["-sb".to_string(), "--".to_string()]));
+        assert!(uses_compact_status_path(&[
+            "-sb".to_string(),
+            "--".to_string()
+        ]));
         assert!(uses_compact_status_path(&[
             "-s".to_string(),
             "-b".to_string(),
@@ -5753,9 +5838,7 @@ A  added.rs
     fn test_split_stash_region_keeps_the_boundary_out_of_the_subcommand() {
         // `git stash -- -p` is a pathspec, not interactive patch mode: the restored region
         // starts at the boundary, so nothing is taken as the subcommand.
-        let owned = |args: &[&str]| -> Vec<String> {
-            args.iter().map(|a| a.to_string()).collect()
-        };
+        let owned = |args: &[&str]| -> Vec<String> { args.iter().map(|a| a.to_string()).collect() };
 
         let (subcommand, rest) = split_stash_region(&owned(&["--", "-p"]));
         assert_eq!(subcommand, None);

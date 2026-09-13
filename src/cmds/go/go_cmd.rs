@@ -2,7 +2,7 @@
 
 use crate::core::guard::never_worse;
 use crate::core::runner;
-use crate::core::stream::{exec_capture, CaptureResult};
+use crate::core::stream::{CaptureResult, exec_capture};
 use crate::core::tracking;
 use crate::core::truncate::CAP_ERRORS;
 use crate::core::utils::{resolved_command, truncate};
@@ -150,8 +150,8 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
         eprintln!("Running: go {} ...", subcommand);
     }
 
-    let captured = exec_capture(&mut cmd)
-        .with_context(|| format!("Failed to run go {}", subcommand))?;
+    let captured =
+        exec_capture(&mut cmd).with_context(|| format!("Failed to run go {}", subcommand))?;
     let raw = format!("{}\n{}", captured.stdout, captured.stderr);
 
     print!("{}", captured.stdout);
@@ -592,9 +592,14 @@ fn filter_go_build_with_exit(output: &str, exit_code: i32) -> String {
     }
 
     if errors.len() > MAX_GO_BUILD_ERRORS {
-        result.push_str(&format!("\n… +{} more errors\n", errors.len() - MAX_GO_BUILD_ERRORS));
+        result.push_str(&format!(
+            "\n… +{} more errors\n",
+            errors.len() - MAX_GO_BUILD_ERRORS
+        ));
         let all_errors = errors.join("\n");
-        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_errors, "go-build", MAX_GO_BUILD_ERRORS + 1) {
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_errors, "go-build", MAX_GO_BUILD_ERRORS + 1)
+        {
             result.push_str(&format!("  {}\n", hint));
         }
     }
@@ -715,9 +720,14 @@ fn filter_go_vet(output: &str) -> String {
     }
 
     if issues.len() > MAX_GO_VET_ISSUES {
-        result.push_str(&format!("\n… +{} more issues\n", issues.len() - MAX_GO_VET_ISSUES));
+        result.push_str(&format!(
+            "\n… +{} more issues\n",
+            issues.len() - MAX_GO_VET_ISSUES
+        ));
         let all_issues = issues.join("\n");
-        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_issues, "go-vet", MAX_GO_VET_ISSUES + 1) {
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_issues, "go-vet", MAX_GO_VET_ISSUES + 1)
+        {
             result.push_str(&format!("  {}\n", hint));
         }
     }

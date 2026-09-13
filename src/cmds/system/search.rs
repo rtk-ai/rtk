@@ -5,7 +5,7 @@
 
 use crate::core::arg_tokenizer::{self, Dialect, Token, TokenKind, ValueSpec};
 use crate::core::stream::{
-    self, exec_capture, exec_capture_stdin, CaptureResult, FilterMode, StdinMode, StreamFilter,
+    self, CaptureResult, FilterMode, StdinMode, StreamFilter, exec_capture, exec_capture_stdin,
 };
 use crate::core::tracking;
 use crate::core::utils::{resolved_command, strip_ansi};
@@ -291,7 +291,10 @@ fn extract_pattern_path<T: AsRef<str>>(
                         recursive = true;
                     }
                 }
-                if cluster.iter().any(|c| is_context_token(engine, c.kind, c.text)) {
+                if cluster
+                    .iter()
+                    .any(|c| is_context_token(engine, c.kind, c.text))
+                {
                     context = true;
                 }
                 let (bool_chars, value_char) = match cluster.split_last() {
@@ -595,10 +598,12 @@ pub fn run(
     // scoped before the boundary, because `rtk grep -- --version` searches *for* that string.
     // `-h` is engine-specific: rg's is --help, grep's is --no-filename.
     let help_tokens = tokenize_search_args(args, engine);
-    let asks_for_help = arg_tokenizer::before_dashdash(&help_tokens).iter().any(|t| {
-        (t.kind == TokenKind::Long && matches!(t.text, "version" | "help"))
-            || (t.kind == TokenKind::Short && t.text == "h" && engine == Engine::Rg)
-    });
+    let asks_for_help = arg_tokenizer::before_dashdash(&help_tokens)
+        .iter()
+        .any(|t| {
+            (t.kind == TokenKind::Long && matches!(t.text, "version" | "help"))
+                || (t.kind == TokenKind::Short && t.text == "h" && engine == Engine::Rg)
+        });
     let dangling_value_flag = help_tokens.iter().any(|t| {
         matches!(t.kind, TokenKind::Long | TokenKind::Short)
             && search_takes_value(engine, t.kind, t.text).is_some()
@@ -876,7 +881,9 @@ fn is_format_flag_token(engine: Engine, kind: TokenKind, text: &str) -> bool {
         // grep's `--initial-tab` pads and tabs every match line, so RTK's own `-H --null -n`
         // parse reads nothing back and leaked the injected flags into the output. ripgrep has
         // no such flag, and its `-T` is `--type-not`, a value-taking flag (see rg_takes_value).
-        TokenKind::Long => LONG.contains(&text) || (engine == Engine::Grep && text == "initial-tab"),
+        TokenKind::Long => {
+            LONG.contains(&text) || (engine == Engine::Grep && text == "initial-tab")
+        }
         // -c count, -l/-L lists, -o only-matching, -q quiet, -b byte-offset, -Z NUL are shared;
         // -L/-T/-z mean something unrelated to output shape for rg specifically (see above).
         TokenKind::Short => match text {
@@ -1081,8 +1088,6 @@ mod tests {
         assert!(compact.len() <= 60);
     }
 
-
-
     #[test]
     fn streaming_search_preserves_native_shape() {
         let mut filter = SearchStreamFilter {
@@ -1227,8 +1232,7 @@ mod tests {
         assert_eq!(detected.show_file, Some(false));
         assert!(!flags.iter().any(|f| f == "--no-filename"));
 
-        let (_, _, flags, _, detected) =
-            extract_pattern_path(&["-ih", "x", "a.txt"], Engine::Grep);
+        let (_, _, flags, _, detected) = extract_pattern_path(&["-ih", "x", "a.txt"], Engine::Grep);
         assert_eq!(detected.show_file, Some(false));
         assert_eq!(flags, vec!["-i"], "the rest of the cluster survives");
 
@@ -1708,7 +1712,10 @@ mod tests {
         // Same for show_file's -H/-r/-R and show_line's -n/-N letters.
         let (_, _, _, _, detected) =
             extract_pattern_path(&["--replace", "-Hart", "pattern", "src"], Engine::Rg);
-        assert_eq!(detected.show_file, None, "--replace's value must not trigger -H");
+        assert_eq!(
+            detected.show_file, None,
+            "--replace's value must not trigger -H"
+        );
 
         let (_, _, _, _, detected) =
             extract_pattern_path(&["--replace", "-normal", "pattern", "src"], Engine::Rg);
@@ -1874,8 +1881,14 @@ mod tests {
         for negation in ["-N", "--no-line-number"] {
             let (_, _, flags, _, detected) =
                 extract_pattern_path(&["pattern", "-n", negation], Engine::Grep);
-            assert!(detected.show_line, "{negation} is not grep's, so -n still stands");
-            assert!(flags.iter().any(|f| f == negation), "{negation} must reach grep");
+            assert!(
+                detected.show_line,
+                "{negation} is not grep's, so -n still stands"
+            );
+            assert!(
+                flags.iter().any(|f| f == negation),
+                "{negation} must reach grep"
+            );
         }
     }
 

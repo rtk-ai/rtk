@@ -9,8 +9,8 @@ use serde::Deserialize;
 use std::sync::LazyLock;
 
 use crate::parser::{
-    emit_degradation_warning, emit_passthrough_warning, truncate_passthrough, FormatMode,
-    OutputParser, ParseResult, TestFailure, TestResult, TokenFormatter,
+    FormatMode, OutputParser, ParseResult, TestFailure, TestResult, TokenFormatter,
+    emit_degradation_warning, emit_passthrough_warning, truncate_passthrough,
 };
 
 /// Matches real Playwright JSON reporter output (suites → specs → tests → results)

@@ -3,10 +3,10 @@
 use super::constants::RECALL_DB;
 use crate::core::config::Config;
 use anyhow::{Context, Result};
+use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
-use flate2::Compression;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::PathBuf;

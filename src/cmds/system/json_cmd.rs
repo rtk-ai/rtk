@@ -3,7 +3,7 @@
 use crate::core::guard::never_worse;
 use crate::core::tracking;
 use crate::core::utils::{from_json_str, strip_leading_bom};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use std::borrow::Cow;
 use std::fs;
@@ -90,11 +90,7 @@ pub fn run_stdin(max_depth: usize, schema_only: bool, verbose: u8) -> Result<()>
 /// Returns `Cow` rather than an owned `String`: the raw-fallback case can
 /// then stay a zero-copy borrow of `content` instead of paying for another
 /// full copy of the (potentially large) input on every fallback.
-fn render_json<'a>(
-    content: &'a str,
-    max_depth: usize,
-    schema_only: bool,
-) -> Result<Cow<'a, str>> {
+fn render_json<'a>(content: &'a str, max_depth: usize, schema_only: bool) -> Result<Cow<'a, str>> {
     let content = strip_leading_bom(content);
     let output = if schema_only {
         filter_json_string(content, max_depth)?
@@ -117,8 +113,7 @@ fn render_json<'a>(
 /// Parse a JSON string and return compact representation with values preserved.
 /// Long strings are truncated, arrays are summarized.
 pub fn filter_json_compact(json_str: &str, max_depth: usize) -> Result<String> {
-    let value: Value =
-        from_json_str(json_str).context("Failed to parse JSON")?;
+    let value: Value = from_json_str(json_str).context("Failed to parse JSON")?;
     Ok(compact_json(&value, 0, max_depth))
 }
 
@@ -209,8 +204,7 @@ fn compact_json(value: &Value, depth: usize, max_depth: usize) -> String {
 /// Parse a JSON string and return its schema representation (types only, no values).
 /// Useful for piping JSON from other commands (e.g., `gh api`, `curl`).
 pub fn filter_json_string(json_str: &str, max_depth: usize) -> Result<String> {
-    let value: Value =
-        from_json_str(json_str).context("Failed to parse JSON")?;
+    let value: Value = from_json_str(json_str).context("Failed to parse JSON")?;
     Ok(extract_schema(&value, 0, max_depth))
 }
 

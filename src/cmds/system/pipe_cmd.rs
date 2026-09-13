@@ -96,7 +96,10 @@ fn grep_wrapper(input: &str) -> String {
         if parts.len() == 3 {
             if let Ok(_line_num) = parts[1].parse::<usize>() {
                 total += 1;
-                by_file.entry(parts[0]).or_default().push((parts[1], parts[2]));
+                by_file
+                    .entry(parts[0])
+                    .or_default()
+                    .push((parts[1], parts[2]));
             }
         }
     }
@@ -242,11 +245,12 @@ fn identity_filter(input: &str) -> String {
 }
 
 fn apply_filter(filter_fn: fn(&str) -> String, input: &str) -> String {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| filter_fn(input)))
-        .unwrap_or_else(|_| {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| filter_fn(input))).unwrap_or_else(
+        |_| {
             eprintln!("[rtk] warning: filter panicked — passing through raw output");
             input.to_string()
-        })
+        },
+    )
 }
 
 pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
@@ -317,7 +321,11 @@ mod tests {
     fn test_resolve_filter_cargo_test() {
         let f = resolve_filter("cargo-test").expect("cargo-test filter must exist");
         let out = f("test result: ok. 5 passed; 0 failed");
-        assert!(out.contains("passed") || out.contains("PASS"), "out={}", out);
+        assert!(
+            out.contains("passed") || out.contains("PASS"),
+            "out={}",
+            out
+        );
     }
 
     #[test]
@@ -633,7 +641,9 @@ Total Test time (real) =   0.01 sec\n";
         assert!(
             savings >= 40.0, // TODO: grep pipe filter below 60% target — improve grouping
             "grep filter: expected ≥40% savings, got {:.1}% (in={}, out={})",
-            savings, count_tokens(&input), count_tokens(&output)
+            savings,
+            count_tokens(&input),
+            count_tokens(&output)
         );
     }
 
@@ -654,7 +664,9 @@ Total Test time (real) =   0.01 sec\n";
         assert!(
             savings >= 40.0, // TODO: find pipe filter below 60% target — improve grouping
             "find filter: expected ≥40% savings, got {:.1}% (in={}, out={})",
-            savings, count_tokens(&input), count_tokens(&output)
+            savings,
+            count_tokens(&input),
+            count_tokens(&output)
         );
     }
 

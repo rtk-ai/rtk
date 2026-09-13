@@ -15,13 +15,13 @@ use crate::hooks::constants::{
 
 use super::constants::{
     BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND, DROID_DIR,
-    DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR,
-    DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
-    HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
+    DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOK_COMMAND, DROID_HOOKS_FILE,
+    DROID_HOOKS_SUBDIR, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGIN_INIT_FILE,
+    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HERMES_PLUGINS_SUBDIR, HOOKS_JSON,
     HOOKS_SUBDIR, OMP_DIR, OMP_LOCAL_DIR, PI_AGENT_STATE_FILE, PI_CODING_AGENT_DIR_ENV, PI_DIR,
     PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
-    SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR, VIBE_HOOKS_FILE, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME,
-    VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
+    SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_HOOKS_FILE,
+    VIBE_PROMPT_FILE, VIBE_PROMPTS_SUBDIR,
 };
 use super::integrity;
 use super::is_claude_hook_command;
@@ -911,7 +911,9 @@ pub fn uninstall_with_patch_mode(
     }
 
     if !global {
-        anyhow::bail!("Uninstall only works with --global flag. For local projects, manually remove RTK from CLAUDE.md");
+        anyhow::bail!(
+            "Uninstall only works with --global flag. For local projects, manually remove RTK from CLAUDE.md"
+        );
     }
 
     let claude_dir = resolve_claude_dir()?;
@@ -3989,11 +3991,7 @@ fn extension_share_status(
 }
 
 fn extension_scope_name(global: bool) -> &'static str {
-    if global {
-        "global"
-    } else {
-        "project"
-    }
+    if global { "global" } else { "project" }
 }
 
 fn warn_if_extension_shared_on_install(
@@ -5143,7 +5141,10 @@ fn show_claude_config() -> Result<()> {
 
             #[cfg(not(unix))]
             {
-                println!("[warn] Cursor hook: {} (legacy script — run `rtk init -g --agent cursor` to upgrade)", cursor_hook.display());
+                println!(
+                    "[warn] Cursor hook: {} (legacy script — run `rtk init -g --agent cursor` to upgrade)",
+                    cursor_hook.display()
+                );
             }
         } else {
             println!("[--] Cursor hook: not found");
@@ -5161,7 +5162,9 @@ fn show_claude_config() -> Result<()> {
     println!("  rtk init -g --claude-md     # Legacy: full injection into ~/.claude/CLAUDE.md");
     println!("  rtk init -g --hook-only     # Hook only, no RTK.md");
     println!("  rtk init --codex            # Configure local AGENTS.md + RTK.md");
-    println!("  rtk init -g --codex         # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
+    println!(
+        "  rtk init -g --codex         # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)"
+    );
     println!("  rtk init -g --opencode      # OpenCode plugin only");
     println!("  rtk init -g --agent cursor  # Install Cursor Agent hooks");
 
@@ -5218,7 +5221,9 @@ fn show_codex_config() -> Result<()> {
 
     println!("\nUsage:");
     println!("  rtk init --codex              # Configure local AGENTS.md + RTK.md");
-    println!("  rtk init -g --codex           # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
+    println!(
+        "  rtk init -g --codex           # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)"
+    );
     println!("  rtk init -g --codex --uninstall  # Remove global Codex RTK artifacts");
 
     Ok(())
@@ -5315,7 +5320,9 @@ pub fn run_gemini(
             println!("  GEMINI.md: {}", gemini_dir.join(GEMINI_MD).display());
         }
         if settings_parse_failed {
-            println!("  settings.json: NOT patched (existing file could not be parsed; see warning above)");
+            println!(
+                "  settings.json: NOT patched (existing file could not be parsed; see warning above)"
+            );
         }
         println!("  Restart Gemini CLI. Test with: git status\n");
     }
@@ -6387,13 +6394,15 @@ mod tests {
         let rtk_md_path = temp.path().join("RTK.md");
 
         let default_ctx = InitContext::default();
-        assert!(write_if_changed(
-            &rtk_md_path,
-            awareness_content(default_ctx.awareness),
-            RTK_MD,
-            default_ctx
-        )
-        .unwrap());
+        assert!(
+            write_if_changed(
+                &rtk_md_path,
+                awareness_content(default_ctx.awareness),
+                RTK_MD,
+                default_ctx
+            )
+            .unwrap()
+        );
         assert_eq!(
             fs::read_to_string(&rtk_md_path).unwrap(),
             RTK_AWARENESS_DEFAULT
@@ -6403,25 +6412,29 @@ mod tests {
             awareness: AwarenessLevel::High,
             ..Default::default()
         };
-        assert!(write_if_changed(
-            &rtk_md_path,
-            awareness_content(high_ctx.awareness),
-            RTK_MD,
-            high_ctx
-        )
-        .unwrap());
+        assert!(
+            write_if_changed(
+                &rtk_md_path,
+                awareness_content(high_ctx.awareness),
+                RTK_MD,
+                high_ctx
+            )
+            .unwrap()
+        );
         assert_eq!(
             fs::read_to_string(&rtk_md_path).unwrap(),
             RTK_AWARENESS_HIGH
         );
 
-        assert!(!write_if_changed(
-            &rtk_md_path,
-            awareness_content(high_ctx.awareness),
-            RTK_MD,
-            high_ctx
-        )
-        .unwrap());
+        assert!(
+            !write_if_changed(
+                &rtk_md_path,
+                awareness_content(high_ctx.awareness),
+                RTK_MD,
+                high_ctx
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -7879,11 +7892,13 @@ mod tests {
 
         // Should create full structure
         assert!(json_content.get("hooks").is_some());
-        assert!(json_content
-            .get("hooks")
-            .unwrap()
-            .get("PreToolUse")
-            .is_some());
+        assert!(
+            json_content
+                .get("hooks")
+                .unwrap()
+                .get("PreToolUse")
+                .is_some()
+        );
 
         let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(pre_tool_use.len(), 1);
@@ -9372,9 +9387,11 @@ mod tests {
             KNOWN_PI_PLUGIN_HASHES.len() >= 8,
             "historical Pi extension hashes must not be removed"
         );
-        assert!(KNOWN_PI_PLUGIN_HASHES
-            .iter()
-            .all(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())));
+        assert!(
+            KNOWN_PI_PLUGIN_HASHES
+                .iter()
+                .all(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        );
 
         let current_hash = integrity::compute_hash_bytes(
             normalize_pi_plugin_line_endings(PI_PLUGIN)
@@ -10500,10 +10517,12 @@ mod tests {
         run_vibe_mode_at(&vibe_dir, true, PatchMode::Auto, InitContext::default()).unwrap();
 
         assert!(vibe_dir.join(VIBE_HOOKS_FILE).exists());
-        assert!(!vibe_dir
-            .join(VIBE_PROMPTS_SUBDIR)
-            .join(VIBE_PROMPT_FILE)
-            .exists());
+        assert!(
+            !vibe_dir
+                .join(VIBE_PROMPTS_SUBDIR)
+                .join(VIBE_PROMPT_FILE)
+                .exists()
+        );
     }
 
     #[test]
@@ -10515,20 +10534,24 @@ mod tests {
         fs::write(vibe_dir.join(VIBE_HOOKS_FILE), user_hook).unwrap();
 
         run_vibe_mode_at(&vibe_dir, false, PatchMode::Auto, InitContext::default()).unwrap();
-        assert!(vibe_dir
-            .join(VIBE_PROMPTS_SUBDIR)
-            .join(VIBE_PROMPT_FILE)
-            .exists());
+        assert!(
+            vibe_dir
+                .join(VIBE_PROMPTS_SUBDIR)
+                .join(VIBE_PROMPT_FILE)
+                .exists()
+        );
 
         let removed_first = uninstall_vibe_at(&vibe_dir, InitContext::default()).unwrap();
         let removed_second = uninstall_vibe_at(&vibe_dir, InitContext::default()).unwrap();
 
         assert_eq!(removed_first.len(), 2);
         assert!(removed_second.is_empty());
-        assert!(!vibe_dir
-            .join(VIBE_PROMPTS_SUBDIR)
-            .join(VIBE_PROMPT_FILE)
-            .exists());
+        assert!(
+            !vibe_dir
+                .join(VIBE_PROMPTS_SUBDIR)
+                .join(VIBE_PROMPT_FILE)
+                .exists()
+        );
 
         let remaining = fs::read_to_string(vibe_dir.join(VIBE_HOOKS_FILE)).unwrap();
         assert!(remaining.contains(r#"name = "user-audit""#));

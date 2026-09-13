@@ -766,9 +766,11 @@ mod tests {
             stats.avg_savings_per_command
         );
         assert!(
-            ["claude", "gemini", "codex", "cursor", "copilot", "vibe", "none", "unknown"]
-                .iter()
-                .any(|&h| stats.hook_type.starts_with(h)),
+            [
+                "claude", "gemini", "codex", "cursor", "copilot", "vibe", "none", "unknown"
+            ]
+            .iter()
+            .any(|&h| stats.hook_type.starts_with(h)),
             "Unexpected hook type: {}",
             stats.hook_type
         );
@@ -778,8 +780,10 @@ mod tests {
     fn test_detect_hook_type_returns_known() {
         let ht = detect_hook_type();
         assert!(
-            ["claude", "gemini", "codex", "cursor", "copilot", "vibe", "none", "unknown"]
-                .contains(&ht.as_str()),
+            [
+                "claude", "gemini", "codex", "cursor", "copilot", "vibe", "none", "unknown"
+            ]
+            .contains(&ht.as_str()),
             "Unexpected hook type: {}",
             ht
         );

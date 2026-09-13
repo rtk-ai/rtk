@@ -4,13 +4,12 @@
 //! Specialized filters for high-frequency commands (STS, S3, EC2, ECS, RDS, CloudFormation).
 
 use crate::core::guard::never_worse;
-use crate::core::stream::{exec_capture, CaptureResult};
+use crate::core::stream::{CaptureResult, exec_capture};
 use crate::core::tee::force_tee_hint;
 use crate::core::tracking;
 use crate::core::truncate::{CAP_INVENTORY, CAP_LIST};
 use crate::core::utils::{
-    human_bytes, join_with_overflow,
-    resolved_command, shorten_arn, truncate_iso_date,
+    human_bytes, join_with_overflow, resolved_command, shorten_arn, truncate_iso_date,
 };
 use crate::json_cmd;
 use anyhow::{Context, Result};
@@ -1555,9 +1554,11 @@ mod tests {
         let result = filter_ec2_instances(json).unwrap();
         assert!(result.text.contains("EC2: 2 instances"));
         assert!(result.text.contains("i-0a1b2c3d4e5f00001 running t3.micro 10.0.1.10 pub:54.1.2.3 vpc:vpc-123 subnet:subnet-a sg:[sg-001] (web-server-1)"));
-        assert!(result
-            .text
-            .contains("i-0a1b2c3d4e5f00002 stopped t3.large 10.0.2.20"));
+        assert!(
+            result
+                .text
+                .contains("i-0a1b2c3d4e5f00002 stopped t3.large 10.0.2.20")
+        );
         assert!(!result.truncated);
     }
 
@@ -1706,7 +1707,10 @@ mod tests {
             }]
         }"#;
         let result = filter_rds_instances(json).unwrap();
-        assert_eq!(result.text, "mydb postgres 15.4 db.t3.micro available mydb.cluster-abc.us-east-1.rds.amazonaws.com:5432");
+        assert_eq!(
+            result.text,
+            "mydb postgres 15.4 db.t3.micro available mydb.cluster-abc.us-east-1.rds.amazonaws.com:5432"
+        );
     }
 
     #[test]
@@ -1725,9 +1729,11 @@ mod tests {
         }"#;
         let result = filter_cfn_list_stacks(json).unwrap();
         assert!(result.text.contains("my-stack CREATE_COMPLETE 2024-01-15"));
-        assert!(result
-            .text
-            .contains("other-stack UPDATE_COMPLETE 2024-02-20"));
+        assert!(
+            result
+                .text
+                .contains("other-stack UPDATE_COMPLETE 2024-02-20")
+        );
     }
 
     #[test]
@@ -1997,9 +2003,11 @@ mod tests {
         }"#;
         let result = filter_lambda_list(json).unwrap();
         assert!(result.text.contains("my-api python3.12 512MB 30s Active"));
-        assert!(result
-            .text
-            .contains("my-worker nodejs20.x 256MB 60s Active"));
+        assert!(
+            result
+                .text
+                .contains("my-worker nodejs20.x 256MB 60s Active")
+        );
         // SECURITY: secrets must NOT appear
         assert!(!result.text.contains("SECRET_KEY"));
         assert!(!result.text.contains("s3cr3t"));
@@ -2047,9 +2055,11 @@ mod tests {
             "Tags": {"Team": "backend"}
         }"#;
         let result = filter_lambda_get(json).unwrap();
-        assert!(result
-            .text
-            .contains("my-api python3.12 app.handler 512MB 30s Active 2024-01-15"));
+        assert!(
+            result
+                .text
+                .contains("my-api python3.12 app.handler 512MB 30s Active 2024-01-15")
+        );
         assert!(result.text.contains("layers: my-layer:5, common-utils:3"));
         // SECURITY
         assert!(!result.text.contains("SECRET"));
@@ -2098,12 +2108,16 @@ mod tests {
             ]
         }"#;
         let result = filter_iam_roles(json).unwrap();
-        assert!(result
-            .text
-            .contains("admin-role 2024-01-15 [Admin access] assume:[lambda.amazonaws.com]"));
-        assert!(result
-            .text
-            .contains("lambda-exec 2024-02-20 assume:[lambda.amazonaws.com]"));
+        assert!(
+            result
+                .text
+                .contains("admin-role 2024-01-15 [Admin access] assume:[lambda.amazonaws.com]")
+        );
+        assert!(
+            result
+                .text
+                .contains("lambda-exec 2024-02-20 assume:[lambda.amazonaws.com]")
+        );
         // Full policy JSON should NOT appear, only extracted principals
         assert!(!result.text.contains("Statement"));
         assert!(!result.text.contains("Version"));
@@ -2225,15 +2239,21 @@ mod tests {
             ]
         }"#;
         let result = filter_ecs_tasks(json).unwrap();
-        assert!(result
-            .text
-            .contains("abc123def456 RUNNING containers:[web:RUNNING, sidecar:RUNNING]"));
-        assert!(result
-            .text
-            .contains("def789ghi012 STOPPED containers:[worker:STOPPED(exit:1)]"));
-        assert!(result
-            .text
-            .contains("reason:Essential container in task exited"));
+        assert!(
+            result
+                .text
+                .contains("abc123def456 RUNNING containers:[web:RUNNING, sidecar:RUNNING]")
+        );
+        assert!(
+            result
+                .text
+                .contains("def789ghi012 STOPPED containers:[worker:STOPPED(exit:1)]")
+        );
+        assert!(
+            result
+                .text
+                .contains("reason:Essential container in task exited")
+        );
         // Attachments and overrides should NOT appear
         assert!(!result.text.contains("ElasticNetworkInterface"));
         assert!(!result.text.contains("containerOverrides"));
@@ -2332,9 +2352,11 @@ mod tests {
             }
         }"#;
         let result = filter_eks_cluster(json).unwrap();
-        assert!(result
-            .text
-            .contains("my-cluster ACTIVE k8s/1.28 https://ABC123.gr7.us-east-1.eks.amazonaws.com"));
+        assert!(
+            result.text.contains(
+                "my-cluster ACTIVE k8s/1.28 https://ABC123.gr7.us-east-1.eks.amazonaws.com"
+            )
+        );
         // certificateAuthority should NOT appear
         assert!(!result.text.contains("LS0tLS1CRUdJTi"));
         assert!(!result.text.contains("VERY_LONG"));
@@ -2491,9 +2513,11 @@ upload: file10.txt to s3://bucket/file10.txt
         }"#;
         let result = filter_secrets_get(json).unwrap();
         assert!(result.text.contains("Name: my-secret"));
-        assert!(result
-            .text
-            .contains(r#"{"username":"admin","password":"secret123"}"#));
+        assert!(
+            result
+                .text
+                .contains(r#"{"username":"admin","password":"secret123"}"#)
+        );
         assert!(!result.text.contains("ARN"));
         assert!(!result.text.contains("VersionId"));
     }
@@ -2631,13 +2655,17 @@ upload: file10.txt to s3://bucket/file10.txt
             {"Timestamp": "2024-01-15T10:29:00Z", "LogicalResourceId": "VPC", "ResourceType": "AWS::EC2::VPC", "ResourceStatus": "CREATE_COMPLETE"}
         ]}"#;
         let result = filter_cfn_events(json).unwrap();
-        assert!(result
-            .text
-            .starts_with("CloudFormation: 2 events (1 failed, 1 successful)"));
+        assert!(
+            result
+                .text
+                .starts_with("CloudFormation: 2 events (1 failed, 1 successful)")
+        );
         assert!(result.text.contains("--- FAILURES ---"));
-        assert!(result
-            .text
-            .contains("Bucket S3::Bucket CREATE_FAILED REASON: Already exists"));
+        assert!(
+            result
+                .text
+                .contains("Bucket S3::Bucket CREATE_FAILED REASON: Already exists")
+        );
     }
 
     // === Empty collection edge cases ===
@@ -2743,9 +2771,8 @@ upload: file10.txt to s3://bucket/file10.txt
     // type names. Calls the primitive used at aws_cmd.rs run_generic line 259.
     #[test]
     fn test_aws_unsupported_subcommand_json_preserves_values() {
-        let fixture = include_str!(
-            "../../../tests/fixtures/aws_backup_describe_global_settings.json"
-        );
+        let fixture =
+            include_str!("../../../tests/fixtures/aws_backup_describe_global_settings.json");
         let output = json_cmd::filter_json_compact(fixture, JSON_COMPRESS_DEPTH)
             .expect("filter_json_compact must not error on valid AWS JSON");
 

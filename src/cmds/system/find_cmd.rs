@@ -907,7 +907,9 @@ mod tests {
     #[test]
     fn rtk_flags_mid_expression_reach_find_untouched() {
         assert_eq!(
-            class(&[".", "-name", "*.rs", "-m", "5", "-exec", "grep", "-m", "1", "x", "{}", ";"]),
+            class(&[
+                ".", "-name", "*.rs", "-m", "5", "-exec", "grep", "-m", "1", "x", "{}", ";"
+            ]),
             "verbatim"
         );
         match dispatch(&args(&[".", "-m", "5", "-mtime", "-7"])).unwrap() {

@@ -334,7 +334,9 @@ fn format_mr_list(json: &Value, ultra_compact: bool) -> String {
     if all_lines.len() > MAX_LIST {
         filtered.push_str(&format!("  … +{} more\n", all_lines.len() - MAX_LIST));
         let all_text = all_lines.join("\n");
-        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_text, "glab-mrs", MAX_LIST + 1) {
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_text, "glab-mrs", MAX_LIST + 1)
+        {
             filtered.push_str(&format!("  {}\n", hint));
         }
     }
@@ -567,7 +569,9 @@ fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
     if all_lines.len() > MAX_LIST {
         filtered.push_str(&format!("  … +{} more\n", all_lines.len() - MAX_LIST));
         let all_text = all_lines.join("\n");
-        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_text, "glab-issues", MAX_LIST + 1) {
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_text, "glab-issues", MAX_LIST + 1)
+        {
             filtered.push_str(&format!("  {}\n", hint));
         }
     }

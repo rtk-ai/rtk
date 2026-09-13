@@ -404,7 +404,11 @@ mod tests {
         let s = |v: &[&str]| v.iter().map(|a| a.to_string()).collect::<Vec<_>>();
         // Unrelated --show-* flags don't produce diffs, so they must not suppress
         // our injected --show-diff.
-        assert!(!args_already_show_diff(&s(&["--show-slow", "1000", "ext/standard/"])));
+        assert!(!args_already_show_diff(&s(&[
+            "--show-slow",
+            "1000",
+            "ext/standard/"
+        ])));
         assert!(!args_already_show_diff(&s(&["ext/standard/"])));
         // The two flags that do produce diffs suppress the injection.
         assert!(args_already_show_diff(&s(&["--show-diff"])));

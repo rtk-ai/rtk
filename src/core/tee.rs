@@ -2,7 +2,7 @@
 
 use crate::core::config::Config;
 pub(crate) use crate::core::retriever::MIN_FAILURE_BYTES as MIN_TEE_SIZE;
-use crate::core::retriever::{self, RecoveryMode, RetrieverConfig, Stored, MIN_FAILURE_BYTES};
+use crate::core::retriever::{self, MIN_FAILURE_BYTES, RecoveryMode, RetrieverConfig, Stored};
 
 fn active() -> Option<(RecoveryMode, RetrieverConfig)> {
     if retriever::recovery_disabled_by_env() {

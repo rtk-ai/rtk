@@ -220,9 +220,17 @@ pub fn run(
             println!("{}", "─".repeat(table_width));
             println!(
                 "{:>3}  {:<cmd_width$}  {:>count_width$}  {:>saved_width$}  {:>6}  {:>time_width$}  {:<impact_width$}",
-                "#", "Command", "Count", "Saved", "Avg%", "Time", "Impact",
-                cmd_width = cmd_width, count_width = count_width,
-                saved_width = saved_width, time_width = time_width,
+                "#",
+                "Command",
+                "Count",
+                "Saved",
+                "Avg%",
+                "Time",
+                "Impact",
+                cmd_width = cmd_width,
+                count_width = count_width,
+                saved_width = saved_width,
+                time_width = time_width,
                 impact_width = impact_width
             );
             println!("{}", "─".repeat(table_width));
@@ -704,7 +712,9 @@ fn export_csv(
     if all || daily {
         let days = tracker.get_all_days_filtered(project_scope)?; // changed: use filtered
         println!("# Daily Data");
-        println!("date,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms");
+        println!(
+            "date,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms"
+        );
         for day in days {
             println!(
                 "{},{},{},{},{},{:.2},{},{}",
@@ -747,7 +757,9 @@ fn export_csv(
     if all || monthly {
         let months = tracker.get_by_month_filtered(project_scope)?; // changed: use filtered
         println!("# Monthly Data");
-        println!("month,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms");
+        println!(
+            "month,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms"
+        );
         for month in months {
             println!(
                 "{},{},{},{},{},{:.2},{},{}",
@@ -866,7 +878,9 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
 fn confirm_reset() -> Result<bool> {
     use std::io::{self, BufRead, IsTerminal, Write};
 
-    eprint!("This will permanently delete all tracking data and recall counters (stored outputs are kept). Continue? [y/N] ");
+    eprint!(
+        "This will permanently delete all tracking data and recall counters (stored outputs are kept). Continue? [y/N] "
+    );
     io::stderr().flush().ok();
 
     if !io::stdin().is_terminal() {

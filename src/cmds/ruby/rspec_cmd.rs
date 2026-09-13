@@ -6,7 +6,7 @@
 //! fails to parse.
 
 use crate::core::runner;
-use crate::core::truncate::{reduced, CAP_WARNINGS};
+use crate::core::truncate::{CAP_WARNINGS, reduced};
 use crate::core::utils::{fallback_tail, ruby_exec, truncate};
 use anyhow::Result;
 use regex::Regex;

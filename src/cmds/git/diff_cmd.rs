@@ -694,9 +694,9 @@ fn format_diff_changes(diff: &DiffResult) -> String {
                 } if crossed => {
                     out.push_str(&format!("~{:4}→{} {} → {}\n", line1, line2, old, new))
                 }
-                DiffChange::Modified { line1, old, new, .. } => {
-                    out.push_str(&format!("~{:4} {} → {}\n", line1, old, new))
-                }
+                DiffChange::Modified {
+                    line1, old, new, ..
+                } => out.push_str(&format!("~{:4} {} → {}\n", line1, old, new)),
             }
         }
     }
@@ -1548,9 +1548,9 @@ fn is_submodule_range(line: &str) -> bool {
 fn is_mbox_from(line: &str) -> bool {
     line.strip_prefix("From ").is_some_and(|rest| {
         let b = rest.as_bytes();
-        [40usize, 64].iter().any(|&n| {
-            b.len() > n && b[..n].iter().all(|c| c.is_ascii_hexdigit()) && b[n] == b' '
-        })
+        [40usize, 64]
+            .iter()
+            .any(|&n| b.len() > n && b[..n].iter().all(|c| c.is_ascii_hexdigit()) && b[n] == b' ')
     })
 }
 
@@ -2167,8 +2167,7 @@ fn condense_unified_diff_strict(diff: &str) -> Option<String> {
             // fold when the fact is the head of the decoded section name.
             let same_file = |p: &FileEntry| {
                 p.name == e.name
-                    || e
-                        .name
+                    || e.name
                         .strip_prefix('"')
                         .and_then(|q| q.strip_suffix('"'))
                         .and_then(|inner| decode_backslashes(inner, false))
@@ -2281,8 +2280,7 @@ fn condense_unified_diff_strict(diff: &str) -> Option<String> {
         // `hg export` changeset header, or `hg log -p`'s `changeset:` line,
         // opens the same kind of message region: hg's headers and message
         // precede its `diff -r` echo.
-        if is_mbox_from(line) || line == "# HG changeset patch" || line.starts_with("changeset:")
-        {
+        if is_mbox_from(line) || line == "# HG changeset patch" || line.starts_with("changeset:") {
             // Rule 8's shape check: the region this separator closes is judged.
             if region_exempt_nonprose && !region_reached_body {
                 return None;
@@ -2304,7 +2302,10 @@ fn condense_unified_diff_strict(diff: &str) -> Option<String> {
             .or_else(|| line.strip_prefix("diff --combined "))
         {
             // An svn `Index:` line names the same file this header opens.
-            if current.as_ref().is_some_and(|e| e.from_index && e.is_empty()) {
+            if current
+                .as_ref()
+                .is_some_and(|e| e.from_index && e.is_empty())
+            {
                 current = None;
             }
             flush(&mut entries, &mut current)?;
@@ -2344,10 +2345,7 @@ fn condense_unified_diff_strict(diff: &str) -> Option<String> {
                             head.split('/').next().unwrap_or("").to_string()
                         };
                         let (px, py) = (root(&x), root(&y));
-                        (
-                            header_name(&x, &y, Some((&px, &py))),
-                            Some((px, py)),
-                        )
+                        (header_name(&x, &y, Some((&px, &py))), Some((px, py)))
                     }
                     None => {
                         // A rename (`rename to` names it exactly) or two
@@ -2357,7 +2355,9 @@ fn condense_unified_diff_strict(diff: &str) -> Option<String> {
                             .rfind(" b/")
                             .or_else(|| rest.rfind(" \"b/"))
                             .or_else(|| rest.rfind(' '))
-                            .map_or(std::borrow::Cow::Borrowed(rest), |p| dequote(&rest[p + 1..]));
+                            .map_or(std::borrow::Cow::Borrowed(rest), |p| {
+                                dequote(&rest[p + 1..])
+                            });
                         (strip_quoted_prefix(&y, "b"), None)
                     }
                 }
@@ -2497,9 +2497,10 @@ fn condense_unified_diff_strict(diff: &str) -> Option<String> {
                     match current.as_mut().filter(|e| e.header_only()) {
                         // `rename to`/`copy to` is git's exact path; the pair
                         // under `--no-prefix` would re-derive it wrongly.
-                        Some(e) if e.notes.iter().any(|n| {
-                            n.starts_with("renamed from ") || n.starts_with("copied from ")
-                        }) => {}
+                        Some(e)
+                            if e.notes.iter().any(|n| {
+                                n.starts_with("renamed from ") || n.starts_with("copied from ")
+                            }) => {}
                         Some(e) => {
                             let p = e.prefixes.as_ref().map(|(x, y)| (x.as_str(), y.as_str()));
                             e.name = header_name(minus, plus, p);
@@ -3009,11 +3010,10 @@ mod tests {
         let result = compute_diff(&a, &b);
         assert_eq!(result.added, 1);
         assert_eq!(result.modified, 1);
-        assert!(result
-            .changes()
-            .iter()
-            .any(|c| matches!(c, DiffChange::Modified { line1: 3, line2: 4, old, new }
-                if *old == "let x = 1;" && *new == "let x = 2;")));
+        assert!(result.changes().iter().any(
+            |c| matches!(c, DiffChange::Modified { line1: 3, line2: 4, old, new }
+                if *old == "let x = 1;" && *new == "let x = 2;")
+        ));
     }
 
     #[test]
@@ -3135,7 +3135,10 @@ mod tests {
                 aligned += 1;
             }
         }
-        assert!(aligned > 0 && positional > 0, "both branches must be covered");
+        assert!(
+            aligned > 0 && positional > 0,
+            "both branches must be covered"
+        );
     }
 
     #[test]
@@ -3220,7 +3223,11 @@ mod tests {
             "region must be stated as line bounds, got:\n{}",
             out
         );
-        assert!(!out.contains("spans"), "no span-shaped figure, got:\n{}", out);
+        assert!(
+            !out.contains("spans"),
+            "no span-shaped figure, got:\n{}",
+            out
+        );
     }
 
     #[test]
@@ -3303,7 +3310,9 @@ mod tests {
 
     /// Deterministic pseudo-random source, so a failure reproduces exactly.
     fn lcg(state: &mut u64) -> u64 {
-        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *state >> 33
     }
 
@@ -3728,8 +3737,12 @@ mod tests {
     #[test]
     fn test_render_added_only_needs_no_frame_legend() {
         // Every listed line comes from file2. One frame, no note.
-        let (out, _) =
-            render_file_diff(Path::new("a.txt"), Path::new("b.txt"), "a\nb\n", "a\nNEW\nb\n");
+        let (out, _) = render_file_diff(
+            Path::new("a.txt"),
+            Path::new("b.txt"),
+            "a\nb\n",
+            "a\nNEW\nb\n",
+        );
 
         assert!(out.contains("+   2 NEW"), "got:\n{}", out);
         assert!(
@@ -4034,10 +4047,27 @@ mod tests {
             render_file_diff(Path::new("a.txt"), Path::new("b.txt"), &content1, &content2);
 
         assert_eq!(code, 1);
-        assert!(out.contains("~   5 line 4 → line 4 EDITED"), "got:\n{}", out);
-        assert!(out.contains("~2095 line 2094 → line 2094 EDITED"), "got:\n{}", out);
-        assert_eq!(out.lines().count(), 2, "two changes, nothing else, got:\n{}", out);
-        assert!(!out.contains("2091"), "region size must not appear, got:\n{}", out);
+        assert!(
+            out.contains("~   5 line 4 → line 4 EDITED"),
+            "got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("~2095 line 2094 → line 2094 EDITED"),
+            "got:\n{}",
+            out
+        );
+        assert_eq!(
+            out.lines().count(),
+            2,
+            "two changes, nothing else, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("2091"),
+            "region size must not appear, got:\n{}",
+            out
+        );
     }
 
     #[test]
@@ -4132,8 +4162,12 @@ mod tests {
     fn test_describe_invisible_difference_never_prints_equal_byte_counts() {
         // Same CRLF count on both sides, different placement. The old fallback
         // printed "5 vs 5 bytes", which reads as "no difference at all".
-        let (out, code) =
-            render_file_diff(Path::new("a.txt"), Path::new("b.txt"), "a\r\nb\n", "a\nb\r\n");
+        let (out, code) = render_file_diff(
+            Path::new("a.txt"),
+            Path::new("b.txt"),
+            "a\r\nb\n",
+            "a\nb\r\n",
+        );
 
         assert_eq!(code, 1);
         assert!(!out.contains("5 vs 5 bytes"), "got:\n{}", out);
@@ -4157,7 +4191,10 @@ mod tests {
         let shown = select_file_diff_output(&comparison, &fallback, "", &rendered);
 
         assert_eq!(code, 1);
-        assert!(rendered.len() > fallback.len(), "fixture must make classic the smaller output");
+        assert!(
+            rendered.len() > fallback.len(),
+            "fixture must make classic the smaller output"
+        );
         assert_eq!(shown, "1a2,4\n> new 1\n> new 2\n> new 3\n");
     }
 
@@ -4167,7 +4204,9 @@ mod tests {
         // "< " / "> " markers, so it is bigger than a plain dump. Measuring
         // against the dump used to record negative savings.
         let content1: String = (0..40).map(|i| format!("old line {i}\n")).collect();
-        let content2: String = (0..40).map(|i| format!("brand new content {i}\n")).collect();
+        let content2: String = (0..40)
+            .map(|i| format!("brand new content {i}\n"))
+            .collect();
         let both_files = format!("{}\n---\n{}", content1, content2);
 
         let comparison = compare_files(&content1, &content2);
@@ -4364,7 +4403,11 @@ mod tests {
             "got:\n{}",
             listed
         );
-        assert!(listed.contains(&format!("+   2 {}", inserted)), "got:\n{}", listed);
+        assert!(
+            listed.contains(&format!("+   2 {}", inserted)),
+            "got:\n{}",
+            listed
+        );
     }
 
     #[test]
@@ -4385,7 +4428,10 @@ mod tests {
         // deletion sitting second. Greedy-by-score pairs each with its own
         // rewrite; positional pairing would have crossed them.
         let pairs = pair_rewrites(
-            &["let alpha = 1;".to_string(), "fn beta_gamma() {}".to_string()],
+            &[
+                "let alpha = 1;".to_string(),
+                "fn beta_gamma() {}".to_string(),
+            ],
             &[
                 "fn beta_gamma_delta() {}".to_string(),
                 "let alpha = 2;".to_string(),
@@ -4405,7 +4451,9 @@ mod tests {
         // 17 x 17 is over the cap. Every line pairs with its positional twin,
         // which is right for an in-place rewrite of a block.
         let old: Vec<String> = (0..17).map(|i| format!("line {} = {};", i, i)).collect();
-        let new: Vec<String> = (0..17).map(|i| format!("line {} = {};", i, i + 1)).collect();
+        let new: Vec<String> = (0..17)
+            .map(|i| format!("line {} = {};", i, i + 1))
+            .collect();
         assert!(old.len() * new.len() > PAIRING_CELL_CAP);
         let pairs = pair_rewrites(&old, &new);
         assert_eq!(pairs, (0..17).map(|i| (i, i)).collect::<Vec<_>>());
@@ -4429,7 +4477,11 @@ mod tests {
         let Ok(Aligned::Script(ops)) = myers_ops(&a[10..99_991], &b[10..99_991]) else {
             panic!("three rewrites must align");
         };
-        assert!(ops.len() <= 8, "script must not scale with the file, got {}", ops.len());
+        assert!(
+            ops.len() <= 8,
+            "script must not scale with the file, got {}",
+            ops.len()
+        );
         let kept: usize = ops
             .iter()
             .map(|op| match op {
@@ -4481,8 +4533,12 @@ mod tests {
         // The framing cost more than the change list saved on agent-sized
         // diffs: the header echoed two paths the caller typed, the blank line
         // bought nothing. What is left is the counts line and the listing.
-        let (out, code) =
-            render_file_diff(Path::new("a.txt"), Path::new("b.txt"), "a\nb\n", "a\nNEW\nb\n");
+        let (out, code) = render_file_diff(
+            Path::new("a.txt"),
+            Path::new("b.txt"),
+            "a\nb\n",
+            "a\nNEW\nb\n",
+        );
         assert_eq!(code, 1);
         assert_eq!(out, "+   2 NEW\n");
     }
@@ -4514,11 +4570,18 @@ mod tests {
         let content1: String = (0..100).map(|i| format!("line {}\n", i)).collect();
         let short = content1.replace("line 5\n", "line 5 EDITED\n");
         let (out, _) = render_file_diff(Path::new("a.txt"), Path::new("b.txt"), &content1, &short);
-        assert!(!out.contains("modified\n"), "one change needs no summary, got:\n{}", out);
+        assert!(
+            !out.contains("modified\n"),
+            "one change needs no summary, got:\n{}",
+            out
+        );
 
         let mut long = content1.clone();
         for i in 0..COUNTS_MIN_LISTED_LINES {
-            long = long.replace(&format!("line {}\n", i * 3), &format!("line {} EDITED\n", i * 3));
+            long = long.replace(
+                &format!("line {}\n", i * 3),
+                &format!("line {} EDITED\n", i * 3),
+            );
         }
         let (out, _) = render_file_diff(Path::new("a.txt"), Path::new("b.txt"), &content1, &long);
         assert!(
@@ -4533,8 +4596,7 @@ mod tests {
 
     #[test]
     fn test_render_invisible_difference_is_one_line() {
-        let (out, code) =
-            render_file_diff(Path::new("a.txt"), Path::new("b.txt"), "x\n", "x\r\n");
+        let (out, code) = render_file_diff(Path::new("a.txt"), Path::new("b.txt"), "x\n", "x\r\n");
         assert_eq!(code, 1);
         assert_eq!(
             out,
@@ -4598,7 +4660,11 @@ mod tests {
             out
         );
         assert_eq!(code, 1);
-        assert!(out.contains("trailing newline: present vs absent"), "got: {}", out);
+        assert!(
+            out.contains("trailing newline: present vs absent"),
+            "got: {}",
+            out
+        );
     }
 
     #[test]
@@ -4618,7 +4684,9 @@ mod tests {
     fn test_render_partial_crlf_matches_reported_repro() {
         // The shape actually observed: a 200-line file where a Windows editor
         // touched 24 lines. Text identical, bytes differ, `cmp` exits 1.
-        let plain: String = (0..200).map(|i| format!("line {} content here\n", i)).collect();
+        let plain: String = (0..200)
+            .map(|i| format!("line {} content here\n", i))
+            .collect();
         let mixed: String = (0..200)
             .map(|i| {
                 if (50..74).contains(&i) {
@@ -4729,7 +4797,9 @@ mod tests {
         assert!(!is_hg_echo("diff -r 0123456789abcd -r 0123456789cd f.txt"));
 
         let sha1 = "a".repeat(40);
-        assert!(is_mbox_from(&format!("From {sha1} Mon Sep 17 00:00:00 2001")));
+        assert!(is_mbox_from(&format!(
+            "From {sha1} Mon Sep 17 00:00:00 2001"
+        )));
         assert!(is_mbox_from(&format!(
             "From {} Mon Sep 17 00:00:00 2001",
             "b".repeat(64)
@@ -4744,11 +4814,15 @@ mod tests {
         ));
 
         assert!(is_submodule_range("Submodule sub 0123456..89abcde:"));
-        assert!(is_submodule_range("Submodule sub 0123456..89abcde (rewind):"));
+        assert!(is_submodule_range(
+            "Submodule sub 0123456..89abcde (rewind):"
+        ));
         assert!(!is_submodule_range("Submodule sub zzzzzzz..89abcde:"));
         assert!(!is_submodule_range("Submodule sub 0123456..zzzzzzz:"));
         assert!(!is_submodule_range("Submodule sub 01234..89abcde:"));
-        assert!(!is_submodule_range("Submodule sub contains modified content"));
+        assert!(!is_submodule_range(
+            "Submodule sub contains modified content"
+        ));
     }
     // --- condense_unified_diff ---
 
@@ -4811,8 +4885,7 @@ diff --git a/b.rs b/b.rs
         assert!(
             !result.lines().any(|l| {
                 let trimmed = l.trim_start();
-                trimmed.len() != l.len()
-                    && (trimmed.starts_with('+') || trimmed.starts_with('-'))
+                trimmed.len() != l.len() && (trimmed.starts_with('+') || trimmed.starts_with('-'))
             }),
             "change lines must not be indented:\n{}",
             result
@@ -5209,10 +5282,11 @@ diff --git a/b.rs b/b.rs
         for (name, fixture) in CORPUS {
             let out = condense_unified_diff(fixture);
             let out_lines: std::collections::HashMap<&str, usize> =
-                out.split('\n').fold(std::collections::HashMap::new(), |mut m, l| {
-                    *m.entry(l).or_default() += 1;
-                    m
-                });
+                out.split('\n')
+                    .fold(std::collections::HashMap::new(), |mut m, l| {
+                        *m.entry(l).or_default() += 1;
+                        m
+                    });
             let mut expected: std::collections::HashMap<&str, usize> =
                 std::collections::HashMap::new();
             let mut budget: Option<(Vec<usize>, usize)> = None;
@@ -5361,11 +5435,13 @@ diff --git a/b.rs b/b.rs
         // Reproducer 3 + the round-5 lesson: the `-- ` signature is not a
         // removal, and unindented `- ` commit-message bullets (mbox prose)
         // neither count nor trigger the fallback.
-        let fixture =
-            include_str!("../../../tests/fixtures/diff/git_format_patch_single_raw.txt");
+        let fixture = include_str!("../../../tests/fixtures/diff/git_format_patch_single_raw.txt");
         let out = condense_unified_diff(fixture);
         assert_ne!(out, fixture, "format-patch fell back to raw");
-        assert!(!out.contains("-- \n"), "signature counted as content:\n{out}");
+        assert!(
+            !out.contains("-- \n"),
+            "signature counted as content:\n{out}"
+        );
         assert!(
             !out.contains("- remove the"),
             "mbox prose bullet leaked into output:\n{out}"
@@ -5517,27 +5593,26 @@ diff --git a/b.rs b/b.rs
         // `git diff` (also `--submodule=log`) reports a dirty submodule as a
         // sha-less `Submodule <path> contains modified content` line; with
         // a condensed sibling in the stream it used to be dropped as prose.
-        let fixture =
-            include_str!("../../../tests/fixtures/diff/git_diff_submodule_dirty_raw.txt");
+        let fixture = include_str!("../../../tests/fixtures/diff/git_diff_submodule_dirty_raw.txt");
         let out = condense_unified_diff_strict(fixture).expect("real git diff must parse");
         assert!(out.contains("[file] other.txt (+1 -0)"), "got:\n{out}");
         assert!(
             out.contains("[file] sub (submodule, modified content)"),
             "dirty-submodule fact vanished:\n{out}"
         );
-        let out = condense_unified_diff_strict(
-            &fixture.replace("modified content", "untracked content"),
-        )
-        .expect("must parse");
-        assert!(out.contains("(submodule, untracked content)"), "got:\n{out}");
+        let out =
+            condense_unified_diff_strict(&fixture.replace("modified content", "untracked content"))
+                .expect("must parse");
+        assert!(
+            out.contains("(submodule, untracked content)"),
+            "got:\n{out}"
+        );
         // A submodule path containing `..` keeps its name: the range is
         // the LAST token holding `..`.
-        let out = condense_unified_diff_strict(
-            &fixture.replace(
-                "Submodule sub contains modified content",
-                "Submodule a..b e139196..b0ac9b1 (rewind):",
-            ),
-        )
+        let out = condense_unified_diff_strict(&fixture.replace(
+            "Submodule sub contains modified content",
+            "Submodule a..b e139196..b0ac9b1 (rewind):",
+        ))
         .expect("must parse");
         assert!(
             out.contains("[file] a..b (submodule, e139196..b0ac9b1 rewind)"),
@@ -5569,18 +5644,12 @@ diff --git a/b.rs b/b.rs
         // on every header line; the prefix strip has to see through them.
         let diff = "diff --git \"a/caf\\303\\251.txt\" \"b/caf\\303\\251.txt\"\nindex 587be6b..975fbec 100644\n--- \"a/caf\\303\\251.txt\"\n+++ \"b/caf\\303\\251.txt\"\n@@ -1 +1 @@\n-x\n+y\n";
         let out = condense_unified_diff_strict(diff).expect("must parse");
-        assert!(
-            out.contains("[file] café.txt (+1 -1)"),
-            "got:\n{out}"
-        );
+        assert!(out.contains("[file] café.txt (+1 -1)"), "got:\n{out}");
         // The `diff --git` fallback name (no `+++` follows a binary section)
         // dequotes the same way.
         let bin = "diff --git \"a/caf\\303\\251.bin\" \"b/caf\\303\\251.bin\"\nindex 587be6b..975fbec 100644\nBinary files \"a/caf\\303\\251.bin\" and \"b/caf\\303\\251.bin\" differ\n";
         let out = condense_unified_diff_strict(bin).expect("must parse");
-        assert!(
-            out.contains("[file] café.bin (binary)"),
-            "got:\n{out}"
-        );
+        assert!(out.contains("[file] café.bin (binary)"), "got:\n{out}");
         // `rename to` / `copy to` name the entry directly and are quoted the
         // same way; otherwise one file gets two spellings across a stream.
         let ren = "diff --git \"a/caf\\303\\251.txt\" \"b/na\\303\\257ve.txt\"\nsimilarity index 100%\nrename from \"caf\\303\\251.txt\"\nrename to \"na\\303\\257ve.txt\"\n";
@@ -5626,8 +5695,7 @@ diff --git a/b.rs b/b.rs
         // SHA-256 repos emit 64-hex `From` separators; without accepting
         // them the whole stream fell back raw (the signature never earned
         // its rule-7 tolerance).
-        let fixture =
-            include_str!("../../../tests/fixtures/diff/git_format_patch_sha256_raw.txt");
+        let fixture = include_str!("../../../tests/fixtures/diff/git_format_patch_sha256_raw.txt");
         let out = condense_unified_diff(fixture);
         assert_ne!(out, fixture, "sha256 format-patch fell back to raw");
         assert!(out.contains("[file] f.txt (+1 -1)"), "got:\n{out}");
@@ -5693,9 +5761,10 @@ diff --git a/b.rs b/b.rs
         let colored = "\u{1b}[1mdiff --git a/x b/x\u{1b}[m\n\u{1b}[1m--- a/x\u{1b}[m\n\u{1b}[1m+++ b/x\u{1b}[m\n\u{1b}[36m@@ -1 +1 @@\u{1b}[m\n\u{1b}[31m-old_line_content\u{1b}[m\n\u{1b}[32m+new_line_content\u{1b}[m\n";
         let out = condense_stdin(colored.as_bytes()).expect("colored diff must parse");
         assert!(out.contains("[file] x (+1 -1)"), "got:\n{out}");
-        assert!(out
-            .lines()
-            .any(|l| l == "\u{1b}[31m-old_line_content\u{1b}[m"));
+        assert!(
+            out.lines()
+                .any(|l| l == "\u{1b}[31m-old_line_content\u{1b}[m")
+        );
         // GNU `diff -u --color=always`: a bare header pair whose `@@` is
         // coloured, so rule 4's opens-a-hunk lookahead must read through
         // the stripped view too.
@@ -5720,7 +5789,10 @@ diff --git a/b.rs b/b.rs
         // counts as the line's CR for structural purposes.
         let crlf = "--- a/s\n+++ b/s\n@@ -1 +1 @@\n-x\u{1b}[0m\r\n+y\u{1b}[0m\r\n";
         let out = condense_unified_diff(crlf);
-        assert!(out.split('\n').any(|l| l == "-x\u{1b}[0m\r"), "got:\n{out:?}");
+        assert!(
+            out.split('\n').any(|l| l == "-x\u{1b}[0m\r"),
+            "got:\n{out:?}"
+        );
     }
 
     #[test]
@@ -5920,12 +5992,14 @@ diff --git a/b.rs b/b.rs
         // A symlink turned regular file is two sections for one path, as
         // git prints it.
         assert!(out.contains("[file] link (deleted) (+0 -1)"), "got:\n{out}");
-        assert!(out.contains("[file] link (new file) (+1 -0)"), "got:\n{out}");
+        assert!(
+            out.contains("[file] link (new file) (+1 -0)"),
+            "got:\n{out}"
+        );
         // `--src-prefix=old/ --dst-prefix=new/`: the `diff --git X Y` line
         // settles the prefixes, whatever they are, and they are stripped
         // exactly — the same way git's own `diff_header_path` reads them.
-        let custom =
-            include_str!("../../../tests/fixtures/diff/git_diff_custom_prefix_raw.txt");
+        let custom = include_str!("../../../tests/fixtures/diff/git_diff_custom_prefix_raw.txt");
         let out = condense_unified_diff_strict(custom).expect("must parse");
         assert!(out.contains("[file] f.txt (+1 -1)"), "got:\n{out}");
         assert!(out.contains("[file] x b/y.bin (binary)"), "got:\n{out}");
@@ -5936,14 +6010,16 @@ diff --git a/b.rs b/b.rs
         let mnemonic = include_str!("../../../tests/fixtures/diff/git_diff_mnemonic_raw.txt");
         let out = condense_unified_diff_strict(mnemonic).expect("must parse");
         assert!(out.contains("[file] indented.py (+1 -1)"), "got:\n{out}");
-        let ours =
-            include_str!("../../../tests/fixtures/diff/git_diff_ours_mnemonic_raw.txt");
+        let ours = include_str!("../../../tests/fixtures/diff/git_diff_ours_mnemonic_raw.txt");
         let out = condense_unified_diff_strict(ours).expect("must parse");
         assert!(
             out.contains("[file] b/inb.txt (unmerged) (+4 -0)"),
             "got:\n{out}"
         );
-        assert!(out.contains("[file] café.txt (unmerged) (+4 -0)"), "got:\n{out}");
+        assert!(
+            out.contains("[file] café.txt (unmerged) (+4 -0)"),
+            "got:\n{out}"
+        );
         assert!(out.contains("[file] b/blob.bin (unmerged)"), "got:\n{out}");
         assert_eq!(out.matches("[file] b/inb.txt").count(), 1, "got:\n{out}");
     }
@@ -6038,7 +6114,10 @@ diff --git a/b.rs b/b.rs
             out.contains("[file] doomed.txt (deleted) (+0 -3)\n-line a\r\n"),
             "CRLF content bytes must survive:\n{out}"
         );
-        assert!(out.contains("(renamed from renamed_src.txt)"), "got:\n{out}");
+        assert!(
+            out.contains("(renamed from renamed_src.txt)"),
+            "got:\n{out}"
+        );
     }
 
     #[test]
@@ -6070,8 +6149,14 @@ diff --git a/b.rs b/b.rs
         assert_eq!(shared_tail("f", "f"), Some(1));
         assert_eq!(shared_tail("x.bin", "y.bin"), None);
         assert_eq!(shared_tail("b.bin", "a and b.bin"), None);
-        assert_eq!(strip_timestamp("g1/ta\tb.txt\t2026-09-07 09:04:54 -0400"), "g1/ta\tb.txt");
-        assert_eq!(strip_timestamp("a/tab\there.txt\tMon Sep 07 12:55:24 2026 +0000"), "a/tab\there.txt");
+        assert_eq!(
+            strip_timestamp("g1/ta\tb.txt\t2026-09-07 09:04:54 -0400"),
+            "g1/ta\tb.txt"
+        );
+        assert_eq!(
+            strip_timestamp("a/tab\there.txt\tMon Sep 07 12:55:24 2026 +0000"),
+            "a/tab\there.txt"
+        );
         assert_eq!(strip_timestamp("t.txt\t(revision 1)"), "t.txt");
         assert_eq!(strip_timestamp("a/sp ace.txt\t"), "a/sp ace.txt");
         assert_eq!(strip_timestamp("a/tab\tb.txt"), "a/tab\tb.txt");
@@ -6135,8 +6220,7 @@ diff --git a/b.rs b/b.rs
         );
         // Inside an mbox message the strict `<hex>..<hex>:` shape is a fact
         // too: `format-patch --submodule=log` puts it where a section goes.
-        let patch =
-            include_str!("../../../tests/fixtures/diff/git_format_patch_submodule_raw.txt");
+        let patch = include_str!("../../../tests/fixtures/diff/git_format_patch_submodule_raw.txt");
         let out = condense_unified_diff_strict(patch).expect("must parse");
         assert!(
             out.contains("[file] sub (submodule, e1269cf..4ef7e41)"),
@@ -6166,8 +6250,7 @@ diff --git a/b.rs b/b.rs
         // while file Y is a regular file`, a fifo line) may come BEFORE the
         // first `Only in` / `Files` line, and `-q` streams never carry an
         // echo, so those arms are the only thing that can settle it.
-        let dir_vs_file =
-            include_str!("../../../tests/fixtures/diff/diff_ru_dir_vs_file_raw.txt");
+        let dir_vs_file = include_str!("../../../tests/fixtures/diff/diff_ru_dir_vs_file_raw.txt");
         assert!(condense_unified_diff_strict(dir_vs_file).is_none());
         let fifo_first = include_str!("../../../tests/fixtures/diff/diff_rq_fifo_first_raw.txt");
         assert!(condense_unified_diff_strict(fifo_first).is_none());
@@ -6279,8 +6362,14 @@ diff --git a/b.rs b/b.rs
         // U+FFFD spelling. git's C-quoted form is kept whole instead.
         let fixture = include_str!("../../../tests/fixtures/diff/git_diff_latin1_raw.txt");
         let out = condense_unified_diff_strict(fixture).expect("must parse");
-        assert!(out.contains("[file] \"caf\\350.txt\" (+1 -1)"), "got:\n{out}");
-        assert!(out.contains("[file] \"caf\\351.txt\" (+1 -1)"), "got:\n{out}");
+        assert!(
+            out.contains("[file] \"caf\\350.txt\" (+1 -1)"),
+            "got:\n{out}"
+        );
+        assert!(
+            out.contains("[file] \"caf\\351.txt\" (+1 -1)"),
+            "got:\n{out}"
+        );
         assert!(!out.contains('\u{FFFD}'), "got:\n{out}");
     }
 
@@ -6346,8 +6435,7 @@ diff --git a/b.rs b/b.rs
         assert!(condense_unified_diff_strict(lost).is_none());
         // `format-patch --interdiff`: the interdiff block is indented and
         // stays prose; `diff -u --label OLD --label NEW` names by label.
-        let inter =
-            include_str!("../../../tests/fixtures/diff/git_format_patch_interdiff_raw.txt");
+        let inter = include_str!("../../../tests/fixtures/diff/git_format_patch_interdiff_raw.txt");
         let out = condense_unified_diff_strict(inter).expect("must parse");
         assert_eq!(out, "[file] v.txt (new file) (+1 -0)\n+v2");
         let label = include_str!("../../../tests/fixtures/diff/diff_u_label_raw.txt");
@@ -6400,8 +6488,7 @@ diff --git a/b.rs b/b.rs
         // is bare, so `e: y: only.txt` is ambiguous on its own; the echo,
         // the header pair and the `Binary files` line already named the
         // roots, and the split follows them.
-        let fixture =
-            include_str!("../../../tests/fixtures/diff/diff_ru_310_colon_dirs_raw.txt");
+        let fixture = include_str!("../../../tests/fixtures/diff/diff_ru_310_colon_dirs_raw.txt");
         let out = condense_unified_diff_strict(fixture).expect("must parse");
         for label in [
             "[file] e: y/b.bin (binary)",
@@ -6440,7 +6527,10 @@ diff --git a/b.rs b/b.rs
             "got:\n{out}"
         );
         assert!(!out.contains("[file] nl "), "phantom entry:\n{out}");
-        assert!(!out.contains("[file] \"b/nl"), "prefix left inside the quotes:\n{out}");
+        assert!(
+            !out.contains("[file] \"b/nl"),
+            "prefix left inside the quotes:\n{out}"
+        );
     }
 
     #[test]
@@ -6449,20 +6539,34 @@ diff --git a/b.rs b/b.rs
         // name, a newline name, a `"`-leading name and a backslash name:
         // the retained quoted spelling never carries the prefix inside the
         // quotes, so `rename to` and the header pair agree.
-        let fixture =
-            include_str!("../../../tests/fixtures/diff/git_log_p_quoted_renames_raw.txt");
+        let fixture = include_str!("../../../tests/fixtures/diff/git_log_p_quoted_renames_raw.txt");
         let out = condense_unified_diff_strict(fixture).expect("must parse");
         assert!(
             out.contains("(renamed from \"caf\\351.txt\")"),
             "got:\n{out}"
         );
-        assert!(out.contains("[file] \"caf\\351.txt\" (+1 -1)"), "got:\n{out}");
+        assert!(
+            out.contains("[file] \"caf\\351.txt\" (+1 -1)"),
+            "got:\n{out}"
+        );
         assert!(out.contains("(renamed from \"nl\\nx.txt\")"), "got:\n{out}");
-        assert!(out.contains("[file] back\\slash2.txt (renamed from back\\slash.txt)"), "got:\n{out}");
+        assert!(
+            out.contains("[file] back\\slash2.txt (renamed from back\\slash.txt)"),
+            "got:\n{out}"
+        );
         // The file that really lives under `b/` keeps exactly one `b/`.
-        assert!(out.contains("[file] \"b/caf\\351.txt\" (+1 -1)"), "got:\n{out}");
-        assert!(!out.contains("\"b/b/"), "prefix left inside the quotes:\n{out}");
-        assert!(!out.contains("\"a/"), "prefix left inside the quotes:\n{out}");
+        assert!(
+            out.contains("[file] \"b/caf\\351.txt\" (+1 -1)"),
+            "got:\n{out}"
+        );
+        assert!(
+            !out.contains("\"b/b/"),
+            "prefix left inside the quotes:\n{out}"
+        );
+        assert!(
+            !out.contains("\"a/"),
+            "prefix left inside the quotes:\n{out}"
+        );
     }
 
     #[test]
@@ -6474,14 +6578,18 @@ diff --git a/b.rs b/b.rs
             include_str!("../../../tests/fixtures/diff/git_format_patch_no_stat_cover_raw.txt");
         assert_eq!(
             condense_unified_diff_strict(no_stat).as_deref(),
-            Some("[file] bin.dat (binary)\n[file] dst.txt (renamed from src.txt) (+1 -0)\n+three\n[file] f.txt (+1 -1)\n-b\n+B\n[file] f.txt (+1 -1)\n-c\n+C")
+            Some(
+                "[file] bin.dat (binary)\n[file] dst.txt (renamed from src.txt) (+1 -0)\n+three\n[file] f.txt (+1 -1)\n-b\n+B\n[file] f.txt (+1 -1)\n-c\n+C"
+            )
         );
         // `git diff --cached --color=always`: git colours the marker and
         // the content separately; content lines keep their own bytes.
         let color = include_str!("../../../tests/fixtures/diff/git_diff_color_raw.txt");
         assert_eq!(
             condense_unified_diff_strict(color).as_deref(),
-            Some("[file] bin.dat (binary)\n[file] dst.txt (renamed from src.txt) (+1 -0)\n\u{1b}[32m+\u{1b}[m\u{1b}[32mthree\u{1b}[m\n[file] f.txt (+1 -1)\n\u{1b}[31m-b\u{1b}[m\n\u{1b}[32m+\u{1b}[m\u{1b}[32mB\u{1b}[m")
+            Some(
+                "[file] bin.dat (binary)\n[file] dst.txt (renamed from src.txt) (+1 -0)\n\u{1b}[32m+\u{1b}[m\u{1b}[32mthree\u{1b}[m\n[file] f.txt (+1 -1)\n\u{1b}[31m-b\u{1b}[m\n\u{1b}[32m+\u{1b}[m\u{1b}[32mB\u{1b}[m"
+            )
         );
         // `git diff --cached -M --no-prefix`: `diff --git src.txt dst.txt`
         // shares no tail; `rename to` names it and the pair may not.
@@ -6495,7 +6603,9 @@ diff --git a/b.rs b/b.rs
         let sd = include_str!("../../../tests/fixtures/diff/git_diff_submodule_diff_raw.txt");
         assert_eq!(
             condense_unified_diff_strict(sd).as_deref(),
-            Some("[file] o.txt (+1 -1)\n-k\n+k2\n[file] sub (submodule, 0641fef..19e2e29)\n[file] sub/s.txt (+1 -1)\n-s\n+s2\n[file] sub/sb.bin (binary)")
+            Some(
+                "[file] o.txt (+1 -1)\n-k\n+k2\n[file] sub (submodule, 0641fef..19e2e29)\n[file] sub/s.txt (+1 -1)\n-s\n+s2\n[file] sub/sb.bin (binary)"
+            )
         );
         // `git log --numstat -p`: `-<TAB>-<TAB>b.bin` before the diff.
         let ns = include_str!("../../../tests/fixtures/diff/git_log_numstat_p_raw.txt");
@@ -6513,7 +6623,9 @@ diff --git a/b.rs b/b.rs
         let fr = include_str!("../../../tests/fixtures/diff/diff_u_fr_no_newline_raw.txt");
         assert_eq!(
             condense_unified_diff_strict(fr).as_deref(),
-            Some("[file] n2 (+1 -1)\n-x\n\\ Pas de fin de ligne à la fin du fichier\n+y\n\\ Pas de fin de ligne à la fin du fichier")
+            Some(
+                "[file] n2 (+1 -1)\n-x\n\\ Pas de fin de ligne à la fin du fichier\n+y\n\\ Pas de fin de ligne à la fin du fichier"
+            )
         );
         // A git binary section followed by another producer's header pair
         // (two streams concatenated): the pair opens its own section
@@ -6544,7 +6656,10 @@ diff --git a/b.rs b/b.rs
         let fake_stat = "From 0e7632a01b00c70cbc9dafcf1f23c71fa6b10de1 Mon Sep 17 00:00:00 2001\nSubject: [PATCH] x\n\n rows | 3\n---\n g | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n\ndiff --git a/g b/g\n--- a/g\n+++ b/g\n@@ -1 +1 @@\n-p\n+q\n-- \n2.54.0\n";
         let out = condense_unified_diff_strict(fake_stat).expect("noise, not raw");
         assert!(out.contains("[file] g (+1 -1)"), "got:\n{out}");
-        assert!(condense_unified_diff_strict(&fake_stat.replace(" rows | 3\n", " rows | 3\n-lost\n")).is_none());
+        assert!(
+            condense_unified_diff_strict(&fake_stat.replace(" rows | 3\n", " rows | 3\n-lost\n"))
+                .is_none()
+        );
         // Rule 8: a bodyless `--no-stat` region whose prose wraps a short
         // option to column 0 falls back raw.
         let short = "From aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa Mon Sep 17 00:00:00 2001\nSubject: [PATCH 1/2] one\n\nPass\n-p\nto it.\n-- \n2.54.0\n\nFrom bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb Mon Sep 17 00:00:00 2001\nSubject: [PATCH 2/2] two\n\ndiff --git a/y.txt b/y.txt\n--- a/y.txt\n+++ b/y.txt\n@@ -1 +1 @@\n-p\n+q\n-- \n2.54.0\n";
@@ -6601,7 +6716,11 @@ diff --git a/b.rs b/b.rs
                 condense_unified_diff_strict(fixture).is_none(),
                 "{name}: must fall back raw"
             );
-            assert_eq!(condense_unified_diff(fixture), fixture, "{name}: not byte-exact");
+            assert_eq!(
+                condense_unified_diff(fixture),
+                fixture,
+                "{name}: not byte-exact"
+            );
         }
     }
 
@@ -6691,7 +6810,8 @@ diff --git a/b.rs b/b.rs
         // Reproducer 12 (first half): `trim_start_matches("b/")` stripped
         // repeatedly, so `b/b/x.rs` (a file in a literal `b/` directory)
         // became `x.rs`.
-        let diff = "diff --git a/b/x.rs b/b/x.rs\n--- a/b/x.rs\n+++ b/b/x.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let diff =
+            "diff --git a/b/x.rs b/b/x.rs\n--- a/b/x.rs\n+++ b/b/x.rs\n@@ -1 +1 @@\n-old\n+new\n";
         let out = condense_unified_diff(diff);
         assert!(out.contains("[file] b/x.rs (+1 -1)"), "got:\n{out}");
     }
@@ -6715,7 +6835,10 @@ diff --git a/b.rs b/b.rs
             "[file] b/x.rs (+1 -1)",
             "[file] b/z.rs (new file) (+1 -0)",
         ] {
-            assert!(out.lines().any(|l| l == want), "missing {want:?} in:\n{out}");
+            assert!(
+                out.lines().any(|l| l == want),
+                "missing {want:?} in:\n{out}"
+            );
         }
         // A prefixed pair with no `diff --git` line still strips once, an
         // unprefixed pair (`diff -u` of two files in a `b/` directory)
@@ -6723,7 +6846,8 @@ diff --git a/b.rs b/b.rs
         // is still two distinct halves.
         let bare_prefixed = "--- a/b/x.rs\n+++ b/b/x.rs\n@@ -1 +1 @@\n-old\n+new\n";
         assert!(condense_unified_diff(bare_prefixed).contains("[file] b/x.rs (+1 -1)"));
-        let bare_plain = "--- b/x.rs\t2026-01-01\n+++ b/x.rs\t2026-01-02\n@@ -1 +1 @@\n-old\n+new\n";
+        let bare_plain =
+            "--- b/x.rs\t2026-01-01\n+++ b/x.rs\t2026-01-02\n@@ -1 +1 @@\n-old\n+new\n";
         assert!(condense_unified_diff(bare_plain).contains("[file] b/x.rs (+1 -1)"));
         let spaced = "diff --git a/foo bar b/foo bar\n--- a/foo bar\t\n+++ b/foo bar\t\n@@ -1 +1 @@\n-old\n+new\n";
         assert!(condense_unified_diff(spaced).contains("[file] foo bar (+1 -1)"));
@@ -6807,9 +6931,10 @@ diff --git a/b.rs b/b.rs
             " {a => b}/file.txt            |   2 +-",
             " a | b.txt                    |   2 +-",
         ] {
-            let lost = base
-                .replace("STAT", stat)
-                .replace("\ndiff --git a/x.txt b/x.txt\n--- a/x.txt\n+++ b/x.txt\n@@ -1 +1 @@\n", "\n");
+            let lost = base.replace("STAT", stat).replace(
+                "\ndiff --git a/x.txt b/x.txt\n--- a/x.txt\n+++ b/x.txt\n@@ -1 +1 @@\n",
+                "\n",
+            );
             assert!(
                 condense_unified_diff_strict(&lost).is_none(),
                 "marked line past the diffstat `{stat}` was dropped"
@@ -7190,12 +7315,17 @@ diff --git a/b.rs b/b.rs
             }
         }
 
-        let mut stream = a.iter().enumerate().filter(|(i, _)| !removed[*i]).map(|(i, l)| {
-            rewritten[i].clone().unwrap_or_else(|| (*l).to_string())
-        });
+        let mut stream = a
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !removed[*i])
+            .map(|(i, l)| rewritten[i].clone().unwrap_or_else(|| (*l).to_string()));
         let out: Vec<String> = fixed
             .into_iter()
-            .map(|slot| slot.or_else(|| stream.next()).expect("listing shorter than file2"))
+            .map(|slot| {
+                slot.or_else(|| stream.next())
+                    .expect("listing shorter than file2")
+            })
             .collect();
         assert!(stream.next().is_none(), "listing longer than file2");
         out
@@ -7232,7 +7362,10 @@ diff --git a/b.rs b/b.rs
                 "listing misstates file2:\n{listing}\nfile1: {a:?}\nfile2: {b:?}"
             );
         }
-        assert!(crossed > 100, "the generator must exercise crossings, saw {crossed}");
+        assert!(
+            crossed > 100,
+            "the generator must exercise crossings, saw {crossed}"
+        );
     }
 
     #[test]

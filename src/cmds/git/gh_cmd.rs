@@ -267,7 +267,13 @@ fn format_pr_list(json: &Value, ultra_compact: bool) -> String {
             let state = pr["state"].as_str().unwrap_or("???");
             let author = pr["author"]["login"].as_str().unwrap_or("???");
             let icon = state_icon(state, ultra_compact);
-            format!("  {} #{} {} ({})", icon, number, truncate(title, 60), author)
+            format!(
+                "  {} #{} {} ({})",
+                icon,
+                number,
+                truncate(title, 60),
+                author
+            )
         })
         .collect();
     const MAX_LIST: usize = CAP_LIST;
@@ -277,7 +283,8 @@ fn format_pr_list(json: &Value, ultra_compact: bool) -> String {
     if all_lines.len() > MAX_LIST {
         out.push_str(&format!("  … +{} more\n", all_lines.len() - MAX_LIST));
         let all_text = all_lines.join("\n");
-        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_text, "gh-prs", MAX_LIST + 1) {
+        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_text, "gh-prs", MAX_LIST + 1)
+        {
             out.push_str(&format!("  {}\n", hint));
         }
     }
@@ -636,7 +643,9 @@ fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
     if all_lines.len() > MAX_LIST {
         out.push_str(&format!("  … +{} more\n", all_lines.len() - MAX_LIST));
         let all_text = all_lines.join("\n");
-        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_text, "gh-issues", MAX_LIST + 1) {
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_text, "gh-issues", MAX_LIST + 1)
+        {
             out.push_str(&format!("  {}\n", hint));
         }
     }
@@ -1023,7 +1032,7 @@ mod tests {
         // Emoji: 🚀 = 4 bytes, 1 char
         assert_eq!(truncate("🚀🎉🔥abc", 6), "🚀🎉🔥abc"); // 6 chars, fits
         assert_eq!(truncate("🚀🎉🔥abcdef", 8), "🚀🎉🔥ab..."); // 10 chars > 8
-                                                                // Edge case: all multibyte
+        // Edge case: all multibyte
         assert_eq!(truncate("🚀🎉🔥🌟🎯", 5), "🚀🎉🔥🌟🎯"); // exact fit
         assert_eq!(truncate("🚀🎉🔥🌟🎯x", 5), "🚀🎉..."); // 6 chars > 5
     }

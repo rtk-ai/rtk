@@ -135,11 +135,7 @@ pub fn parse_hook_version(content: &str) -> u8 {
 fn hook_installed_path() -> Option<PathBuf> {
     let claude_dir = resolve_claude_dir().ok()?;
     let path = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
-    if path.exists() {
-        Some(path)
-    } else {
-        None
-    }
+    if path.exists() { Some(path) } else { None }
 }
 
 fn warn_marker_path() -> Option<PathBuf> {
@@ -152,7 +148,7 @@ mod tests {
     use super::*;
     use crate::hooks::constants::{
         CODEX_DIR, CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, HERMES_DIR,
-        HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME,
+        HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HERMES_PLUGINS_SUBDIR,
         OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
     };
 

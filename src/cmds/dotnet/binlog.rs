@@ -1145,8 +1145,8 @@ fn is_likely_diagnostic_code(code: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flate2::write::GzEncoder;
     use flate2::Compression;
+    use flate2::write::GzEncoder;
     use std::io::Write;
 
     fn write_7bit_i32(buf: &mut Vec<u8>, value: i32) {
@@ -1263,9 +1263,11 @@ Switch: /tmp/nonexistent.csproj
         assert_eq!(summary.errors.len(), 1);
         assert_eq!(summary.errors[0].code, "MSB1009");
         assert_eq!(summary.errors[0].file, "MSBUILD");
-        assert!(summary.errors[0]
-            .message
-            .contains("Project file does not exist"));
+        assert!(
+            summary.errors[0]
+                .message
+                .contains("Project file does not exist")
+        );
     }
 
     #[test]
@@ -1286,9 +1288,11 @@ Failed!  - Failed:     2, Passed:   245, Skipped:     0, Total:   247, Duration:
         assert_eq!(summary.failed, 2);
         assert_eq!(summary.total, 247);
         assert_eq!(summary.failed_tests.len(), 2);
-        assert!(summary.failed_tests[0]
-            .name
-            .contains("CalculatorTests.Add_ShouldReturnSum"));
+        assert!(
+            summary.failed_tests[0]
+                .name
+                .contains("CalculatorTests.Add_ShouldReturnSum")
+        );
     }
 
     #[test]
@@ -1596,9 +1600,11 @@ Time Elapsed 00:00:00.12
         assert_eq!(summary.passed, 0);
         assert_eq!(summary.total, 1);
         assert_eq!(summary.failed_tests.len(), 1);
-        assert!(summary.failed_tests[0]
-            .name
-            .contains("RtkDotnetSmoke.UnitTest1.Test1"));
+        assert!(
+            summary.failed_tests[0]
+                .name
+                .contains("RtkDotnetSmoke.UnitTest1.Test1")
+        );
     }
 
     #[test]

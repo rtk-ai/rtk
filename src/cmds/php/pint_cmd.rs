@@ -188,10 +188,7 @@ mod tests {
     fn test_pint_file_truncation() {
         let mut files = Vec::new();
         for i in 1..=20 {
-            files.push(format!(
-                r#"{{"name":"f{}.php","appliedFixers":["x"]}}"#,
-                i
-            ));
+            files.push(format!(r#"{{"name":"f{}.php","appliedFixers":["x"]}}"#, i));
         }
         let json = format!(r#"{{"files":[{}]}}"#, files.join(","));
         let result = filter_pint_json(&json);

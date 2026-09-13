@@ -7,7 +7,7 @@ use super::constants::PRE_TOOL_USE_KEY;
 use super::decision::{self, HookDecision};
 use super::permissions::{self, PermissionVerdict};
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::{self, Read, Write};
 
 use crate::core::tracking::HookOutcome;
@@ -596,13 +596,13 @@ fn process_claude_payload_from_decision(
             return PayloadAction::Skip {
                 decision: HookOutcome::Deny,
                 cmd: cmd.to_string(),
-            }
+            };
         }
         HookDecision::Defer => {
             return PayloadAction::Skip {
                 decision: HookOutcome::Defer,
                 cmd: cmd.to_string(),
-            }
+            };
         }
         HookDecision::AllowRewrite(r) => (r, true),
         HookDecision::AskRewrite(r) => (r, false),
@@ -1186,24 +1186,28 @@ mod tests {
 
     #[test]
     fn test_copilot_cli_deny_returns_none() {
-        assert!(copilot_cli_response_from_decision(
-            &cli_args("cargo test"),
-            HookDecision::Deny,
-            "cargo test",
-        )
-        .is_none());
+        assert!(
+            copilot_cli_response_from_decision(
+                &cli_args("cargo test"),
+                HookDecision::Deny,
+                "cargo test",
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn test_copilot_cli_defer_returns_none() {
         // Defer covers both "no rewrite available" and the unattestable-construct gate.
         // The hook must emit NO modifiedArgs for CVE bypass forms — no laundering.
-        assert!(copilot_cli_response_from_decision(
-            &cli_args("git status & rm -rf /tmp/x"),
-            HookDecision::Defer,
-            "git status & rm -rf /tmp/x",
-        )
-        .is_none());
+        assert!(
+            copilot_cli_response_from_decision(
+                &cli_args("git status & rm -rf /tmp/x"),
+                HookDecision::Defer,
+                "git status & rm -rf /tmp/x",
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1214,10 +1218,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(response["permissionDecision"], "deny");
-        assert!(response["permissionDecisionReason"]
-            .as_str()
-            .unwrap()
-            .contains("rtk git status"));
+        assert!(
+            response["permissionDecisionReason"]
+                .as_str()
+                .unwrap()
+                .contains("rtk git status")
+        );
         assert!(response.get("modifiedArgs").is_none());
     }
 
@@ -1231,10 +1237,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(response["permissionDecision"], "deny");
-        assert!(response["permissionDecisionReason"]
-            .as_str()
-            .unwrap()
-            .contains("rtk git status"));
+        assert!(
+            response["permissionDecisionReason"]
+                .as_str()
+                .unwrap()
+                .contains("rtk git status")
+        );
         assert!(response.get("modifiedArgs").is_none());
     }
 

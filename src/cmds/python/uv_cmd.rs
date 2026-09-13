@@ -180,7 +180,10 @@ fn program_output(text: &str, tee_slug: &str) -> String {
         .iter()
         .map(|line| truncate(line, MAX_PROGRAM_LINE_CHARS))
         .collect();
-    let line_was_cut = capped.iter().zip(lines).any(|(cut, full)| cut.len() != full.len());
+    let line_was_cut = capped
+        .iter()
+        .zip(lines)
+        .any(|(cut, full)| cut.len() != full.len());
 
     if capped.len() <= CAP_INVENTORY {
         let out = capped.join("\n");
@@ -328,7 +331,9 @@ fn is_error_start(line: &str) -> bool {
         return true;
     }
 
-    ERROR_START_PATTERNS.iter().any(|pattern| pattern.is_match(line))
+    ERROR_START_PATTERNS
+        .iter()
+        .any(|pattern| pattern.is_match(line))
 }
 
 fn is_error_continuation(line: &str) -> bool {
@@ -349,7 +354,7 @@ fn is_error_continuation(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{filter_uv_run_output, CAP_INVENTORY, MAX_TRACEBACK_FRAMES};
+    use super::{CAP_INVENTORY, MAX_TRACEBACK_FRAMES, filter_uv_run_output};
     use crate::core::utils::count_tokens;
 
     #[test]

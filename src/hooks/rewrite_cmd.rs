@@ -202,7 +202,7 @@ mod tests {
     /// See: https://github.com/rtk-ai/rtk/issues/1155
     mod exit_code_protocol {
         use super::registry;
-        use crate::hooks::permissions::{check_command_with_rules, PermissionVerdict};
+        use crate::hooks::permissions::{PermissionVerdict, check_command_with_rules};
 
         /// Exit code that `run()` returns for each verdict:
         ///   Allow  → 0 (exit Ok(()))

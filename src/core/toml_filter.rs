@@ -2145,9 +2145,11 @@ match_command = "^make\\b"
         let unanchored =
             "schema_version = 1\n[filters.mytool]\nmatch_command = \"(?:^|/)mytool\\\\b\"\n";
         assert!(match_patterns_in(unanchored).is_empty());
-        assert!(TomlFilterRegistry::parse_and_compile(unanchored, "test")
-            .expect("schema is valid")
-            .is_empty());
+        assert!(
+            TomlFilterRegistry::parse_and_compile(unanchored, "test")
+                .expect("schema is valid")
+                .is_empty()
+        );
 
         let anchored = "schema_version = 1\n[filters.mytool]\nmatch_command = \"^mytool\\\\b\"\n";
         assert_eq!(match_patterns_in(anchored), vec!["^mytool\\b".to_string()]);
