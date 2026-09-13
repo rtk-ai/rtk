@@ -172,7 +172,7 @@ fn estimate_hook_coverage(permission_cmd: &str, rewrite_cmd: &str, ctx: &Coverag
 
 /// Pure core of `estimate_hook_coverage`, taking the permission verdict directly so
 /// it's testable without depending on real config files. Mirrors the real hook's own
-/// decision order (`hooks::hook_cmd::decide_from_verdict`): a `Deny`-rule match or an
+/// decision order (`hooks::decision::decide`): a `Deny`-rule match or an
 /// unattestable construct means the hook would never have rewritten this, regardless
 /// of registry support. See `estimate_hook_coverage` for why `permission_cmd` and
 /// `rewrite_cmd` can differ.

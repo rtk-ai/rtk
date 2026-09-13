@@ -462,28 +462,53 @@ fn pr_checks(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<i32>
         "gh",
         &label,
         format_pr_checks,
-        RunOptions::stdout_only()
-            .early_exit_on_failure()
-            .no_trailing_newline(),
+        RunOptions::stdout_only().no_trailing_newline(),
     )
 }
 
 fn format_pr_checks(stdout: &str) -> String {
-    let mut passed = 0;
-    let mut failed = 0;
-    let mut pending = 0;
-    let mut failed_checks = Vec::new();
-
+    // `gh pr checks --watch` appends each poll's table when stdout is not a TTY.
+    // Keep the latest row for each check so status transitions are reflected
+    // without inflating the summary.
+    let mut checks: Vec<(String, String, PrCheckStatus, String)> = Vec::new();
     for line in stdout.lines() {
-        if line.contains("[ok]") || line.contains("pass") {
-            passed += 1;
-        } else if line.contains("[x]") || line.contains("fail") {
-            failed += 1;
-            failed_checks.push(line.trim().to_string());
-        } else if line.contains('*') || line.contains("pending") {
-            pending += 1;
+        let Some((name, link, status)) = parse_pr_check_line(line) else {
+            continue;
+        };
+
+        if let Some(check) = checks
+            .iter_mut()
+            .find(|check| check.0 == name && check.1 == link)
+        {
+            check.2 = status;
+            check.3 = line.trim().to_string();
+        } else {
+            checks.push((
+                name.to_string(),
+                link.to_string(),
+                status,
+                line.trim().to_string(),
+            ));
         }
     }
+
+    let passed = checks
+        .iter()
+        .filter(|check| check.2 == PrCheckStatus::Passed)
+        .count();
+    let failed = checks
+        .iter()
+        .filter(|check| check.2 == PrCheckStatus::Failed)
+        .count();
+    let pending = checks
+        .iter()
+        .filter(|check| check.2 == PrCheckStatus::Pending)
+        .count();
+
+    let other = checks
+        .iter()
+        .filter(|check| check.2 == PrCheckStatus::Other)
+        .count();
 
     let mut out = String::new();
     out.push_str("CI Checks Summary:\n");
@@ -492,13 +517,45 @@ fn format_pr_checks(stdout: &str) -> String {
     if pending > 0 {
         out.push_str(&format!("  [pending] Pending: {}\n", pending));
     }
-    if !failed_checks.is_empty() {
+    if other > 0 {
+        out.push_str(&format!("  [skip] Skipped/cancelled: {}\n", other));
+    }
+    let failed_checks = checks
+        .iter()
+        .filter(|check| check.2 == PrCheckStatus::Failed)
+        .map(|check| check.3.as_str());
+    if failed > 0 {
         out.push_str("\n  Failed checks:\n");
         for check in failed_checks {
             out.push_str(&format!("    {}\n", check));
         }
     }
     out
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PrCheckStatus {
+    Passed,
+    Failed,
+    Pending,
+    Other,
+}
+
+fn parse_pr_check_line(line: &str) -> Option<(&str, &str, PrCheckStatus)> {
+    let mut fields = line.split('\t');
+    let name = fields.next()?.trim();
+    let status = match fields.next()?.trim() {
+        "pass" => PrCheckStatus::Passed,
+        "fail" => PrCheckStatus::Failed,
+        "pending" | "*" => PrCheckStatus::Pending,
+        // skipping, cancelled, and whatever a later gh adds. Counted rather than
+        // dropped, so the totals add up to the checks gh listed and a cancelled
+        // run cannot read as "nothing wrong".
+        _ => PrCheckStatus::Other,
+    };
+    let link = fields.nth(1).unwrap_or("").trim();
+
+    (!name.is_empty()).then_some((name, link, status))
 }
 
 fn pr_status(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<i32> {
@@ -1119,6 +1176,74 @@ mod tests {
         // No positional identifier, only flags
         let args: Vec<String> = vec!["-R".into(), "rtk-ai/rtk".into()];
         assert!(extract_identifier_and_extra_args(&args).is_none());
+    }
+
+    // --- format_pr_checks tests ---
+
+    #[test]
+    fn test_format_pr_checks_counts_each_watch_snapshot_once() {
+        let output = concat!(
+            "Analyze (actions)\tpass\t42s\thttps://example.com/actions\n",
+            "Analyze (rust)\tpass\t2m\thttps://example.com/rust\n",
+            "Analyze (actions)\tpass\t42s\thttps://example.com/actions\n",
+            "Analyze (rust)\tpass\t2m\thttps://example.com/rust\n",
+        );
+
+        let result = format_pr_checks(output);
+
+        assert!(result.contains("Passed: 2"));
+        assert!(!result.contains("Passed: 4"));
+    }
+
+    #[test]
+    fn test_format_pr_checks_uses_final_status_for_each_check() {
+        let output = concat!(
+            "Lint\tpending\t0\thttps://example.com/lint\n",
+            "Unit tests\tfail\t1m\thttps://example.com/unit\n",
+            "Lint\tpass\t30s\thttps://example.com/lint\n",
+            "Unit tests\tfail\t1m\thttps://example.com/unit\n",
+        );
+
+        let result = format_pr_checks(output);
+
+        assert!(result.contains("Passed: 1"));
+        assert!(result.contains("Failed: 1"));
+        assert!(!result.contains("Pending:"));
+        assert!(result.contains("Unit tests\tfail"));
+    }
+
+    #[test]
+    fn test_format_pr_checks_keeps_same_name_checks_with_different_links() {
+        let output = concat!(
+            "build\tpass\t1m\thttps://example.com/workflow-a\n",
+            "build\tfail\t1m\thttps://example.com/workflow-b\n",
+        );
+
+        let result = format_pr_checks(output);
+
+        assert!(result.contains("Passed: 1"));
+        assert!(result.contains("Failed: 1"));
+    }
+
+    /// Rows exactly as `gh` prints them when stdout is a pipe: five tab-separated
+    /// fields, the fifth (the description) usually empty. Captured from
+    /// `gh pr checks --watch` against a run that was still going, so the pending
+    /// rows here are the shape a real transition arrives in.
+    #[test]
+    fn test_format_pr_checks_handles_real_gh_row_shape() {
+        let output = concat!(
+            "test (macos-latest)\tpending\t0\thttps://example.com/job/1\t\n",
+            "clippy\tpass\t28s\thttps://example.com/job/2\t\n",
+            "license/cla\tpass\t0\thttps://cla.example.com/pr/1\tContributor License Agreement is signed.\n",
+            "test (macos-latest)\tpass\t3m1s\thttps://example.com/job/1\t\n",
+            "clippy\tpass\t28s\thttps://example.com/job/2\t\n",
+            "license/cla\tpass\t0\thttps://cla.example.com/pr/1\tContributor License Agreement is signed.\n",
+        );
+
+        let result = format_pr_checks(output);
+
+        assert!(result.contains("Passed: 3"), "got:\n{result}");
+        assert!(!result.contains("Pending:"), "got:\n{result}");
     }
 
     // --- parse_optional_identifier tests ---

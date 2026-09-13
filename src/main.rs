@@ -24,8 +24,8 @@ use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
 use cmds::system::{
-    ctest_cmd, deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd,
-    read, search, summary, tree, wc_cmd,
+    ast_grep_cmd, ctest_cmd, deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls,
+    pipe_cmd, read, search, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -111,11 +111,16 @@ enum Commands {
         /// Filter: none (default, full content), minimal, aggressive
         #[arg(short, long, default_value = "none")]
         level: core::filter::FilterLevel,
-        /// Max lines
-        #[arg(short, long, conflicts_with = "tail_lines")]
+        /// Structural preview capped at N lines (keeps signatures and imports;
+        /// not the first N lines — use --head-lines for that)
+        #[arg(short, long, conflicts_with_all = ["head_lines", "tail_lines"])]
         max_lines: Option<usize>,
+        /// Keep only the first N lines (byte-exact at the default --level none
+        /// with -n off; --level and -n still transform the window)
+        #[arg(long, conflicts_with_all = ["max_lines", "tail_lines"])]
+        head_lines: Option<usize>,
         /// Keep only last N lines
-        #[arg(long, conflicts_with = "max_lines")]
+        #[arg(long, conflicts_with_all = ["max_lines", "head_lines"])]
         tail_lines: Option<usize>,
         /// Show line numbers
         #[arg(short = 'n', long)]
@@ -355,6 +360,13 @@ enum Commands {
         extra_args: Vec<String>,
     },
 
+    /// Compact ast-grep - runs ast-grep natively, groups matches by file
+    AstGrep {
+        /// ast-grep subcommand, pattern, path, and any flags (e.g. run -p '$$$', --json)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra_args: Vec<String>,
+    },
+
     /// Initialize rtk instructions for assistant CLI usage
     Init {
         /// Add to global assistant config directory instead of local project file
@@ -405,7 +417,7 @@ enum Commands {
         #[arg(long)]
         uninstall: bool,
 
-        /// Target Codex CLI (uses AGENTS.md + RTK.md, no Claude hook patching)
+        /// Target Codex CLI (uses PreToolUse hook + AGENTS.md + RTK.md)
         #[arg(long)]
         codex: bool,
 
@@ -953,6 +965,8 @@ enum Commands {
 enum HookCommands {
     /// Process Claude Code PreToolUse hook (reads JSON from stdin)
     Claude,
+    /// Process Codex CLI PreToolUse hook (reads JSON from stdin)
+    Codex,
     /// Process Cursor Agent hook (reads JSON from stdin)
     Cursor,
     /// Process Gemini CLI BeforeTool hook (reads JSON from stdin)
@@ -1848,8 +1862,11 @@ fn run_cli() -> Result<i32> {
     };
 
     // Warn if installed hook is outdated/missing (1/day, non-blocking).
-    // Skip for Gain — it shows its own inline hook warning.
-    if !matches!(cli.command, Commands::Gain { .. }) {
+    // Skip for Gain (shows its own inline warning), Init/Verify (manage the hook themselves).
+    if !matches!(
+        cli.command,
+        Commands::Gain { .. } | Commands::Init { .. } | Commands::Verify { .. }
+    ) {
         hooks::hook_check::maybe_warn();
     }
 
@@ -1870,6 +1887,7 @@ fn run_cli() -> Result<i32> {
             files,
             level,
             max_lines,
+            head_lines,
             tail_lines,
             line_numbers,
         } => {
@@ -1882,12 +1900,20 @@ fn run_cli() -> Result<i32> {
                         continue;
                     }
                     stdin_seen = true;
-                    read::run_stdin(level, max_lines, tail_lines, line_numbers, cli.verbose)
+                    read::run_stdin(
+                        level,
+                        max_lines,
+                        head_lines,
+                        tail_lines,
+                        line_numbers,
+                        cli.verbose,
+                    )
                 } else {
                     read::run(
                         file,
                         level,
                         max_lines,
+                        head_lines,
                         tail_lines,
                         line_numbers,
                         cli.verbose,
@@ -2248,6 +2274,7 @@ fn run_cli() -> Result<i32> {
             &extra_args,
             cli.verbose,
         )?,
+        Commands::AstGrep { extra_args } => ast_grep_cmd::run(&extra_args)?,
         Commands::Rg { extra_args } => {
             search::run(search::Engine::Rg, 80, 200, false, &extra_args, cli.verbose)?
         }
@@ -2768,6 +2795,10 @@ fn run_cli() -> Result<i32> {
                 hooks::hook_cmd::run_claude()?;
                 0
             }
+            HookCommands::Codex => {
+                hooks::hook_cmd::run_codex()?;
+                0
+            }
             HookCommands::Cursor => {
                 hooks::hook_cmd::run_cursor()?;
                 0
@@ -2788,16 +2819,32 @@ fn run_cli() -> Result<i32> {
                 hooks::hook_cmd::run_vibe()?;
                 0
             }
-            HookCommands::Check { agent: _, command } => {
-                use crate::discover::registry::rewrite_command;
+            HookCommands::Check { agent, command } => {
+                // Answers the same question the hooks answer, through the same
+                // decision (`hooks::decision`) — not just "does a rewrite rule
+                // match?". Checking the rule alone reported a rewrite for
+                // command substitutions, file redirects and heredocs that both
+                // hook paths refuse to touch, which is the opposite of what a
+                // diagnostic is for.
+                use crate::hooks::decision::{AgentPath, HookDecision};
                 let raw = command.join(" ");
-                let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
-                match rewrite_command(&raw, &excluded, &transparent_prefixes) {
-                    Some(rewritten) => {
+                // Answer for the agent that was asked about. Agents differ both
+                // in whose permission rules their hook reads and in how it
+                // decides -- see `AgentPath` -- so one hard-coded answer would
+                // misdescribe the very hook being diagnosed.
+                let Some(path) = AgentPath::from_agent(&agent) else {
+                    return Ok(2);
+                };
+                match path.decide(&raw) {
+                    HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten) => {
                         println!("{}", rewritten);
                         0
                     }
-                    None => {
+                    HookDecision::Deny => {
+                        eprintln!("Denied by a permission rule: {}", raw);
+                        1
+                    }
+                    HookDecision::Defer => {
                         eprintln!("No rewrite for: {}", raw);
                         1
                     }
@@ -3101,6 +3148,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Summary { .. }
             | Commands::Grep { .. }
             | Commands::Rg { .. }
+            | Commands::AstGrep { .. }
             | Commands::Wget { .. }
             | Commands::Vitest { .. }
             | Commands::Ctest { .. }
@@ -3574,6 +3622,7 @@ mod tests {
             "tree",
             "read",
             "rg",
+            "ast-grep",
             "git",
             "gh",
             "glab",
@@ -3696,6 +3745,17 @@ mod tests {
             cli.command,
             Commands::Hook {
                 command: HookCommands::Claude
+            }
+        ));
+    }
+
+    #[test]
+    fn test_hook_codex_parses() {
+        let cli = Cli::try_parse_from(["rtk", "hook", "codex"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Hook {
+                command: HookCommands::Codex
             }
         ));
     }

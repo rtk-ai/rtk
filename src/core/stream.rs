@@ -720,14 +720,49 @@ pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
 /// `.output()` keep the diagnostic instead of losing it. The program name is
 /// used as the label so no call site has to pass one.
 fn capture(cmd: &mut Command) -> Result<CaptureResult> {
+    let raw = capture_raw(cmd)?;
+    Ok(CaptureResult {
+        stdout: super::utils::decode_process_output(&raw.stdout),
+        stderr: super::utils::decode_process_output(&raw.stderr),
+        exit_code: raw.exit_code,
+    })
+}
+
+/// Run `cmd` to completion and return its raw bytes plus a signal-aware exit code.
+/// The single spot that turns an `ExitStatus` into a code via
+/// [`exit_code_from_output`](super::utils::exit_code_from_output) — so the
+/// `process terminated by signal N` diagnostic is emitted uniformly whether the
+/// caller decodes the bytes ([`capture`]) or keeps them raw ([`exec_capture_bytes`]),
+/// instead of the raw path silently dropping it.
+fn capture_raw(cmd: &mut Command) -> Result<CaptureBytes> {
     let program = cmd.get_program().to_string_lossy().into_owned();
     let output = cmd.output().context("Failed to execute command")?;
     let exit_code = super::utils::exit_code_from_output(&output, &program);
-    Ok(CaptureResult {
-        stdout: super::utils::decode_process_output(&output.stdout),
-        stderr: super::utils::decode_process_output(&output.stderr),
+    Ok(CaptureBytes {
+        stdout: output.stdout,
+        stderr: output.stderr,
         exit_code,
     })
+}
+
+/// Raw-byte capture result, for callers that must control decoding themselves —
+/// e.g. non-UTF-8 output that [`exec_capture`]'s `from_utf8_lossy` would corrupt.
+pub struct CaptureBytes {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub exit_code: i32,
+}
+
+impl CaptureBytes {
+    pub fn success(&self) -> bool {
+        self.exit_code == 0
+    }
+}
+
+/// Like [`exec_capture`] but returns raw bytes so the caller decides how to decode.
+pub fn exec_capture_bytes(cmd: &mut Command) -> Result<CaptureBytes> {
+    cmd.stdin(Stdio::null());
+    capture_raw(cmd)
 }
 
 #[cfg(test)]
