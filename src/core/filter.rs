@@ -322,34 +322,53 @@ pub fn smart_truncate(content: &str, max_lines: usize, _lang: &Language) -> Stri
     if lines.len() <= max_lines {
         return content.to_string();
     }
+    if max_lines == 0 {
+        return format!("[{} more lines]", lines.len());
+    }
 
-    let mut result = Vec::with_capacity(max_lines + 1);
+    // Prioritize structurally important lines so the visible window stays useful.
+    // The old approach interleaved "// ... N lines omitted" markers which AI agents
+    // treated as code, causing parsing confusion and extra retry loops.
+    //
+    // `max_lines` is an explicit budget (e.g. `rtk read --max-lines 4`, or the
+    // hook's `head -4` mapping) — the caller asked for that many lines, so the
+    // window must be filled to exactly `max_lines`: important lines claim the
+    // budget first, the earliest remaining lines fill whatever is left.
+    let mut keep = vec![false; lines.len()];
     let mut kept_lines = 0;
 
-    for line in &lines {
+    for (i, line) in lines.iter().enumerate() {
+        if kept_lines >= max_lines {
+            break;
+        }
         let trimmed = line.trim();
-
-        // Prioritize structurally important lines so the visible window stays useful.
-        // The old approach interleaved "// ... N lines omitted" markers which AI agents
-        // treated as code, causing parsing confusion and extra retry loops.
         let is_important = FUNC_SIGNATURE.is_match(trimmed)
             || IMPORT_PATTERN.is_match(trimmed)
             || trimmed.starts_with("pub ")
             || trimmed.starts_with("export ")
             || trimmed == "}"
             || trimmed == "{";
-
-        if is_important || kept_lines < max_lines / 2 {
-            result.push((*line).to_string());
+        if is_important {
+            keep[i] = true;
             kept_lines += 1;
         }
-        // Non-important lines beyond max_lines/2 are silently skipped —
-        // no inline markers that could be mistaken for file content.
-
-        if kept_lines >= max_lines - 1 {
+    }
+    for kept in keep.iter_mut() {
+        if kept_lines >= max_lines {
             break;
         }
+        if !*kept {
+            *kept = true;
+            kept_lines += 1;
+        }
     }
+
+    let mut result: Vec<String> = lines
+        .iter()
+        .zip(&keep)
+        .filter(|(_, kept)| **kept)
+        .map(|(line, _)| (*line).to_string())
+        .collect();
 
     // Single end-of-output marker: not code syntax, unambiguous to AI agents.
     // Invariant: kept_lines + N == lines.len() (N = lines not shown)
@@ -472,9 +491,8 @@ fn main() {
     #[test]
     fn test_smart_truncate_overflow_count_exact() {
         // 200 plain-text lines (no function signatures/imports) with max_lines=20.
-        // Smart selection keeps up to max_lines/2=10 non-important lines then stops.
-        // The overflow message "[N more lines]" must satisfy:
-        //   kept_count + N == total_lines
+        // The window fills to exactly max_lines; the overflow message
+        // "[N more lines]" must satisfy: kept_count + N == total_lines
         let total_lines = 200usize;
         let max_lines = 20usize;
         let content: String = (0..total_lines)
@@ -515,8 +533,8 @@ fn main() {
 
     #[test]
     fn test_smart_truncate_no_annotations() {
-        // 10 plain-text lines, max_lines=3: smart logic keeps first max_lines/2=1 line.
-        // (None of the lines match FUNC_SIGNATURE or IMPORT_PATTERN patterns.)
+        // 10 plain-text lines, max_lines=3: the budget is filled with the
+        // first 3 lines. (None match FUNC_SIGNATURE or IMPORT_PATTERN.)
         let input = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n";
         let output = smart_truncate(input, 3, &Language::Unknown);
         // Must NOT contain old-style "// ... N lines omitted" annotations
@@ -524,10 +542,38 @@ fn main() {
             !output.contains("// ..."),
             "smart_truncate must not insert synthetic comment annotations"
         );
-        // Must contain clean end-of-output marker (1 kept + 9 omitted = 10 total)
-        assert!(output.contains("[9 more lines]"));
-        // Only the first line is kept (plain-text, no important signatures)
-        assert!(output.starts_with("line1\n"));
+        // Must contain clean end-of-output marker (3 kept + 7 omitted = 10 total)
+        assert!(output.contains("[7 more lines]"));
+        assert!(output.starts_with("line1\nline2\nline3\n"));
+    }
+
+    #[test]
+    fn test_smart_truncate_fills_budget_exactly() {
+        // `--max-lines N` is an explicit budget: N content lines must come
+        // back, not N/2. Regression: `head -4` (hook-mapped to
+        // `rtk read --max-lines 4`) on a 10-line file returned only 2 lines.
+        let input = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n";
+        let output = smart_truncate(input, 4, &Language::Unknown);
+        let content_lines: Vec<&str> = output
+            .lines()
+            .filter(|l| !l.contains("more lines"))
+            .collect();
+        assert_eq!(content_lines, vec!["line1", "line2", "line3", "line4"]);
+        assert!(output.contains("[6 more lines]"));
+    }
+
+    #[test]
+    fn test_smart_truncate_important_lines_keep_priority() {
+        // Important lines still claim the budget first; the remainder is
+        // filled with the earliest plain lines, in original file order.
+        let input = "plain a\nplain b\nfn one() {\nplain c\nfn two() {\nplain d\n";
+        let output = smart_truncate(input, 3, &Language::Rust);
+        let content_lines: Vec<&str> = output
+            .lines()
+            .filter(|l| !l.contains("more lines"))
+            .collect();
+        assert_eq!(content_lines, vec!["plain a", "fn one() {", "fn two() {"]);
+        assert!(output.contains("[3 more lines]"));
     }
 
     #[test]
