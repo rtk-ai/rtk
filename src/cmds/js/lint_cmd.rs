@@ -94,18 +94,32 @@ fn named_runner(args: &[String], skip: usize) -> Option<&str> {
     args[..skip].iter().map(String::as_str).find(|a| *a != "exec")
 }
 
+/// Linters `rtk lint <name>` dispatches to when named explicitly as args[0].
+/// Allowlist beats path-guessing: anything else (e.g. a bare `src`) is treated
+/// as a path and the default linter is sniffed instead. Extend the list when a
+/// new linter lands in the dispatch match below.
+const KNOWN_LINTERS: &[&str] = &[
+    "biome",
+    "eslint",
+    "oxlint",
+    "ruff",
+    "pylint",
+    "mypy",
+    "flake8",
+    "sqlfluff",
+];
+
 /// Detect the linter name from args (after stripping PM prefixes).
 /// Returns the linter name and whether it was explicitly specified.
 fn detect_linter(args: &[String]) -> (&str, bool) {
-    let is_path_or_flag = args.is_empty()
-        || args[0].starts_with('-')
-        || args[0].contains('/')
-        || args[0].contains('.');
+    let names_linter = args
+        .first()
+        .is_some_and(|a| KNOWN_LINTERS.contains(&a.as_str()));
 
-    if is_path_or_flag {
-        (detect_default_linter(), false)
+    if names_linter {
+        (args[0].as_str(), true)
     } else {
-        (&args[0], true)
+        (detect_default_linter(), false)
     }
 }
 
@@ -981,6 +995,16 @@ mod tests {
         let effective = &full_args[skip..];
         let (linter, _) = detect_linter(effective);
         assert_eq!(linter, "biome");
+    }
+
+    #[test]
+    fn test_detect_linter_bare_directory_is_not_a_linter() {
+        // Regression for rtk-ai/rtk#3812's misclassification in the lint path:
+        // a bare arg without / or . used to be taken as the linter name.
+        let args: Vec<String> = vec!["src".into()];
+        let (linter, explicit) = detect_linter(&args);
+        assert!(!explicit);
+        assert_eq!(linter, "eslint"); // untitled project (no oxlint signals) in tests
     }
 
     #[test]
