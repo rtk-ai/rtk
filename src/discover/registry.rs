@@ -5626,6 +5626,48 @@ mod tests {
         );
     }
 
+    // --- npm rewrite coverage (rtk-ai/rtk#3671, dup of closed #1148) ---
+
+    #[test]
+    fn test_rewrite_npm_install() {
+        assert_eq!(
+            rewrite_command_no_prefixes("npm install", &[]),
+            Some("rtk npm install".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_install_package() {
+        assert_eq!(
+            rewrite_command_no_prefixes("npm install express", &[]),
+            Some("rtk npm install express".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_ci() {
+        assert_eq!(
+            rewrite_command_no_prefixes("npm ci", &[]),
+            Some("rtk npm ci".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_test() {
+        assert_eq!(
+            rewrite_command_no_prefixes("npm test", &[]),
+            Some("rtk npm test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_run_still_works() {
+        assert_eq!(
+            rewrite_command_no_prefixes("npm run build", &[]),
+            Some("rtk npm run build".into())
+        );
+    }
+
     // --- Compound operator edge cases ---
 
     #[test]
