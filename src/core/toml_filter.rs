@@ -515,7 +515,7 @@ fn top_level_branches(pattern: &str) -> Vec<&str> {
     branches
 }
 
-/// A filter selects on argv[0], but its regex runs against the whole command
+/// A filter selects on `argv[0]`, but its regex runs against the whole command
 /// line. A top-level branch that does not start with `^` therefore matches a
 /// path component or wrapper argument mid-line, so `timeout 5 /usr/bin/liquibase
 /// update` activates the liquibase filter and rewrites the wrapper instead.

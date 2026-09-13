@@ -10,4 +10,6 @@
 - [ ] Manual testing: `rtk <command>` output inspected
 
 > **Important:** All PRs must target the `develop` branch (not `master`).
+<!-- Relative links here resolve against the PR URL, not the repo tree: ../blob/master/X
+     is what reaches github.com/<owner>/<repo>/blob/master/X. ../X gives a 404. -->
 > See [CONTRIBUTING.md](../blob/master/CONTRIBUTING.md) for details.
