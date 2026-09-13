@@ -114,9 +114,21 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 }
 
 fn is_check_invocation(args: &[String]) -> bool {
-    args.first().is_none_or(|arg| {
-        arg == "check" || (!arg.starts_with('-') && !RUFF_SUBCOMMANDS.contains(&arg.as_str()))
-    })
+    // The first non-flag argument names the subcommand. Leading global flags
+    // (--select, --fix, -q, ...) belong to `ruff check` rather than `ruff`, so
+    // bailing on the first `-` defeated implicit-check routing (see #3927).
+    let first_positional = args.iter().find(|arg| !arg.starts_with('-'));
+
+    match first_positional {
+        Some(arg) => arg == "check" || !RUFF_SUBCOMMANDS.contains(&arg.as_str()),
+        None => {
+            // No positional argument: `--version`/`-V`/`--help`/`-h` stay
+            // top-level; every other flag-only invocation is an implicit check.
+            !args
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "--version" | "-V" | "--help" | "-h"))
+        }
+    }
 }
 
 /// Filter ruff check JSON output - group by rule and file
@@ -414,6 +426,25 @@ mod tests {
     fn top_level_flags_are_not_misclassified_as_paths() {
         assert!(!is_check_invocation(&["--version".to_string()]));
         assert!(!is_check_invocation(&["--help".to_string()]));
+        assert!(!is_check_invocation(&["-V".to_string()]));
+        assert!(!is_check_invocation(&["-h".to_string()]));
+    }
+
+    #[test]
+    fn flag_first_implicit_check_routes_to_check() {
+        assert!(is_check_invocation(&[
+            "--select".to_string(),
+            "F401".to_string(),
+            "src".to_string()
+        ]));
+        assert!(is_check_invocation(&["--fix".to_string(), "src".to_string()]));
+        assert!(is_check_invocation(&["-q".to_string(), "src".to_string()]));
+    }
+
+    #[test]
+    fn flag_only_implicit_check_routes_to_check() {
+        assert!(is_check_invocation(&["--fix".to_string()]));
+        assert!(is_check_invocation(&["--statistics".to_string()]));
     }
 
     #[test]
