@@ -129,7 +129,7 @@ Four rules, each of which cost a real bug before it was written down:
 - `ValueSpec::value()` — `--flag=v` or `--flag v`, and a literal `--` is the boundary. The common case.
 - `ValueSpec::attached_only()` — `--flag=v` only, the next argument is never the value (git's `-M`/`-U`/`-C`/`-B` take an optional attached number and nothing else).
 - `ValueSpec::solo_only()` — a `Short` flag takes a separate value only when it is the whole argument: `git log -n 2` does, `git log -pn 2` does not. No meaning for a `Long` flag.
-- `.claiming_dash_dash()` — lets a literal `--` be this flag's value. A per-tool split, not per-flag: grep and rg let any value-taking flag swallow it, git and cargo reject it whichever flag is asking.
+- `.claiming_dash_dash()` — lets a literal `--` be this flag's value. Not always a per-tool split: grep and rg let any value-taking flag swallow it, git rejects it whichever flag is asking, and cargo rejects it everywhere except `-j`/`--jobs` under `build`/`check`/`test`, which takes hyphen-leading values so it can accept negative job counts — but not under `clippy`, whose separate wrapper binary splits argv on the first `--` before cargo's parser runs.
 
 The dialect is the one axis that is not per-flag, so it stays a parameter: `tokenize_grammar(args, takes_value, Dialect::Msbuild)`.
 

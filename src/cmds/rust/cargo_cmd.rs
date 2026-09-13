@@ -1,5 +1,6 @@
 //! Filters cargo output — build errors, test results, clippy warnings.
 
+use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
 use crate::core::args_utils;
 use crate::core::runner;
 use crate::core::stream::{BlockHandler, BlockStreamFilter, StreamFilter};
@@ -23,6 +24,9 @@ pub enum CargoCommand {
 }
 
 pub fn run(cmd: CargoCommand, args: &[String], verbose: u8) -> Result<i32> {
+    // Restore the `--` clap ate once, here: the child invocation and the `--message-format`
+    // lookup must both see the same boundary, or one of them reads the other side's arguments.
+    let args = &args_utils::restore_double_dash(args);
     match cmd {
         CargoCommand::Build => run_build(args, verbose),
         CargoCommand::Test => run_test(args, verbose),
@@ -264,8 +268,8 @@ impl BlockHandler for CargoTestHandler {
     }
 }
 
-/// Generic cargo command runner with filtering.
-/// Builds the Command with restored `--` separator, then delegates to shared runner.
+/// Generic cargo command runner with filtering. `args` must already be `--`-restored (see
+/// [`run`]).
 fn run_cargo_filtered<F>(
     subcommand: &str,
     args: &[String],
@@ -278,19 +282,18 @@ where
     let mut cmd = resolved_command("cargo");
     cmd.arg(subcommand);
 
-    let restored_args = args_utils::restore_double_dash(args);
-    for arg in &restored_args {
+    for arg in args {
         cmd.arg(arg);
     }
 
     if verbose > 0 {
-        eprintln!("Running: cargo {} {}", subcommand, restored_args.join(" "));
+        eprintln!("Running: cargo {} {}", subcommand, args.join(" "));
     }
 
     runner::run_filtered(
         cmd,
         &format!("cargo {}", subcommand),
-        &restored_args.join(" "),
+        &args.join(" "),
         filter_fn,
         runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
     )
@@ -310,19 +313,18 @@ where
     let mut cmd = resolved_command("cargo");
     cmd.arg(subcommand);
 
-    let restored_args = args_utils::restore_double_dash(args);
-    for arg in &restored_args {
+    for arg in args {
         cmd.arg(arg);
     }
 
     if verbose > 0 {
-        eprintln!("Running: cargo {} {}", subcommand, restored_args.join(" "));
+        eprintln!("Running: cargo {} {}", subcommand, args.join(" "));
     }
 
     runner::run_filtered_with_exit(
         cmd,
         &format!("cargo {}", subcommand),
-        &restored_args.join(" "),
+        &args.join(" "),
         filter_fn,
         runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
     )
@@ -337,41 +339,89 @@ fn run_cargo_streamed(
     let mut cmd = resolved_command("cargo");
     cmd.arg(subcommand);
 
-    let restored_args = args_utils::restore_double_dash(args);
-    for arg in &restored_args {
+    for arg in args {
         cmd.arg(arg);
     }
 
     if verbose > 0 {
-        eprintln!("Running: cargo {} {}", subcommand, restored_args.join(" "));
+        eprintln!("Running: cargo {} {}", subcommand, args.join(" "));
     }
 
     runner::run_streamed(
         cmd,
         &format!("cargo {}", subcommand),
-        &restored_args.join(" "),
+        &args.join(" "),
         filter,
         runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
     )
 }
 
-fn has_json_message_format(args: &[String]) -> bool {
-    let mut json = false;
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        if let Some(val) = arg.strip_prefix("--message-format=") {
-            json = val.contains("json");
-        } else if arg == "--message-format" {
-            if let Some(val) = iter.next() {
-                json = val.contains("json");
-            }
-        }
+/// Value-taking flags of the cargo subcommands that branch on `--message-format`, transcribed
+/// from each subcommand's own `--help`. The tables are not interchangeable: `--artifact-dir` is
+/// `cargo build` only, and `--explain` is `cargo clippy` only (`cargo check` rejects both).
+fn cargo_takes_value(subcommand: &str, kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    // `-j`/`--jobs` is the one cargo flag that swallows a literal `--`, because it accepts
+    // negative job counts and so allows hyphen-leading values. Not under clippy: the separate
+    // `cargo-clippy` wrapper splits argv on the first `--` before cargo's parser sees it.
+    if matches!(
+        (kind, name),
+        (TokenKind::Long, "jobs") | (TokenKind::Short, "j")
+    ) {
+        let spec = ValueSpec::value();
+        return Some(match subcommand {
+            "build" | "check" | "test" => spec.claiming_dash_dash(),
+            _ => spec,
+        });
     }
-    json
+
+    let shared = match kind {
+        TokenKind::Long => matches!(
+            name,
+            "message-format"
+                | "color"
+                | "config"
+                | "package"
+                | "exclude"
+                | "bin"
+                | "example"
+                | "test"
+                | "bench"
+                | "features"
+                | "profile"
+                | "target"
+                | "target-dir"
+                | "manifest-path"
+        ),
+        TokenKind::Short => matches!(name, "Z" | "p" | "F" | "m"),
+        TokenKind::Positional | TokenKind::DashDash => false,
+    };
+
+    let subcommand_only = matches!(
+        (subcommand, kind, name),
+        ("build", TokenKind::Long, "artifact-dir") | ("clippy", TokenKind::Long, "explain")
+    );
+
+    (shared || subcommand_only).then(ValueSpec::value)
+}
+
+/// True when cargo will emit JSON diagnostics, so the caller picks the JSON filter over the
+/// human one. `args` must already be `--`-restored: `cargo clippy -- --message-format=json`
+/// hands that flag to rustc, not to cargo, and reading it as cargo's own swaps the filter.
+fn has_json_message_format(subcommand: &str, args: &[String]) -> bool {
+    let tokens = arg_tokenizer::tokenize_grammar(
+        args,
+        &|kind, name| cargo_takes_value(subcommand, kind, name),
+        Dialect::Posix,
+    );
+    // Cargo rejects two conflicting kinds outright and merges modifiers, so last-wins only has
+    // to agree with it on whether json was asked for at all — every json spelling contains
+    // "json". No `before_dashdash` slice: `Dialect::Posix` ends option parsing at the boundary.
+    let values = arg_tokenizer::double_dash_flag_values(&tokens, Dialect::Posix, "message-format");
+    values.last().is_some_and(|value| value.contains("json"))
 }
 
 fn run_build(args: &[String], verbose: u8) -> Result<i32> {
-    if has_json_message_format(args) {
+    if has_json_message_format("build", args) {
         return run_cargo_filtered_with_exit("build", args, verbose, |o, exit| {
             filter_cargo_build_labeled(o, "build", exit)
         });
@@ -398,14 +448,14 @@ fn run_test(args: &[String], verbose: u8) -> Result<i32> {
 }
 
 fn run_clippy(args: &[String], verbose: u8) -> Result<i32> {
-    if has_json_message_format(args) {
+    if has_json_message_format("clippy", args) {
         return run_cargo_filtered_with_exit("clippy", args, verbose, filter_cargo_clippy_json);
     }
     run_cargo_filtered("clippy", args, verbose, filter_cargo_clippy)
 }
 
 fn run_check(args: &[String], verbose: u8) -> Result<i32> {
-    if has_json_message_format(args) {
+    if has_json_message_format("check", args) {
         return run_cargo_filtered_with_exit("check", args, verbose, |o, exit| {
             filter_cargo_build_labeled(o, "check", exit)
         });
@@ -2580,80 +2630,118 @@ error: aborting due to 1 previous error
         assert!(json.errors[0].contains("internal compiler error"), "got: {:?}", json.errors[0]);
     }
 
+    fn json_format(subcommand: &str, args: &[&str]) -> bool {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        has_json_message_format(subcommand, &args)
+    }
+
     #[test]
     fn test_json_format_inline_eq() {
-        assert!(has_json_message_format(&["--message-format=json".into()]));
+        assert!(json_format("build", &["--message-format=json"]));
     }
 
     #[test]
     fn test_json_format_space_separated() {
-        assert!(has_json_message_format(&[
-            "--message-format".into(),
-            "json".into(),
-        ]));
+        assert!(json_format("build", &["--message-format", "json"]));
     }
 
     #[test]
     fn test_json_format_rendered_ansi() {
-        assert!(has_json_message_format(&[
-            "--message-format=json-diagnostic-rendered-ansi".into()
-        ]));
+        assert!(json_format(
+            "build",
+            &["--message-format=json-diagnostic-rendered-ansi"]
+        ));
     }
 
     #[test]
     fn test_json_format_render_diagnostics() {
-        assert!(has_json_message_format(&[
-            "--message-format=json-render-diagnostics".into()
-        ]));
+        assert!(json_format(
+            "build",
+            &["--message-format=json-render-diagnostics"]
+        ));
     }
 
     #[test]
     fn test_json_format_space_rendered() {
-        assert!(has_json_message_format(&[
-            "--message-format".into(),
-            "json-diagnostic-rendered-ansi".into(),
-        ]));
+        assert!(json_format(
+            "build",
+            &["--message-format", "json-diagnostic-rendered-ansi"]
+        ));
     }
 
     #[test]
     fn test_non_json_format_not_detected() {
-        assert!(!has_json_message_format(&["--message-format=human".into()]));
+        assert!(!json_format("build", &["--message-format=human"]));
     }
 
     #[test]
     fn test_no_format_flag() {
-        assert!(!has_json_message_format(&[
-            "--release".into(),
-            "-p".into(),
-            "my-crate".into(),
-        ]));
+        assert!(!json_format("build", &["--release", "-p", "my-crate"]));
     }
 
     #[test]
     fn test_json_format_among_other_args() {
-        assert!(has_json_message_format(&[
-            "--release".into(),
-            "-p".into(),
-            "my-crate".into(),
-            "--message-format=json".into(),
-        ]));
+        assert!(json_format(
+            "build",
+            &["--release", "-p", "my-crate", "--message-format=json"]
+        ));
     }
 
     #[test]
     fn test_json_format_trailing_message_format_no_value() {
-        assert!(!has_json_message_format(&["--message-format".into()]));
+        assert!(!json_format("build", &["--message-format"]));
+    }
+
+    #[test]
+    fn test_json_format_ignores_args_past_double_dash() {
+        // `cargo clippy -- --message-format=json` hands that flag to rustc.
+        for subcommand in ["build", "check", "clippy"] {
+            assert!(!json_format(subcommand, &["--", "--message-format=json"]));
+            assert!(!json_format(subcommand, &["--", "--message-format", "json"]));
+        }
+        assert!(json_format(
+            "clippy",
+            &["--message-format=json", "--", "-D", "warnings"]
+        ));
+    }
+
+    #[test]
+    fn test_json_format_explain_is_clippy_only() {
+        // clippy's `--explain` eats the next token; cargo check has no such flag.
+        assert!(!json_format(
+            "clippy",
+            &["--explain", "--message-format=json"]
+        ));
+        assert!(json_format("check", &["--explain", "--message-format=json"]));
+    }
+
+    #[test]
+    fn test_json_format_jobs_dash_dash_is_clippy_only_boundary() {
+        // `cargo clippy -j --` reports a missing --jobs value, `cargo build -j --` reports an
+        // unparseable one: only clippy's wrapper claims the `--` first.
+        assert!(!json_format(
+            "clippy",
+            &["-j", "--", "--message-format=json"]
+        ));
+        assert!(json_format("build", &["-j", "--", "--message-format=json"]));
+    }
+
+    #[test]
+    fn test_json_format_after_short_cluster_value() {
+        assert!(json_format("build", &["-j4", "--message-format=json"]));
+        assert!(json_format("build", &["-j", "4", "--message-format=json"]));
     }
 
     #[test]
     fn test_json_format_last_occurrence_wins() {
-        assert!(!has_json_message_format(&[
-            "--message-format=json".into(),
-            "--message-format=human".into(),
-        ]));
-        assert!(has_json_message_format(&[
-            "--message-format=human".into(),
-            "--message-format=json".into(),
-        ]));
+        assert!(!json_format(
+            "build",
+            &["--message-format=json", "--message-format=human"]
+        ));
+        assert!(json_format(
+            "build",
+            &["--message-format=human", "--message-format=json"]
+        ));
     }
 
     #[test]
