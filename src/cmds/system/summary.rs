@@ -137,11 +137,10 @@ fn summarize_tests(output: &str, result: &mut Vec<String>) {
                 failures.push(line.to_string());
             }
         }
-        if lower.contains("skipped") || lower.contains("ignored") {
-            if let Some(n) = extract_number(&lower, "skipped").or(extract_number(&lower, "ignored"))
-            {
-                skipped = n;
-            }
+        if (lower.contains("skipped") || lower.contains("ignored"))
+            && let Some(n) = extract_number(&lower, "skipped").or(extract_number(&lower, "ignored"))
+        {
+            skipped = n;
         }
     }
 
@@ -258,7 +257,10 @@ fn summarize_json(output: &str, result: &mut Vec<String>) {
                     result.push(format!("   • {}", key));
                 }
                 if obj.len() > MAX_SUMMARY_KEYS {
-                    result.push(format!("   ... +{} more keys", obj.len() - MAX_SUMMARY_KEYS));
+                    result.push(format!(
+                        "   ... +{} more keys",
+                        obj.len() - MAX_SUMMARY_KEYS
+                    ));
                 }
             }
             _ => {

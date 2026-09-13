@@ -520,7 +520,8 @@ mod tests {
         // is the standard one-shot retrieval command over the hidden entries.
         if hint.lines().count() > 1 {
             assert!(
-                hint.contains("[see remaining: tail -n +1 ") || hint.contains("hidden: rtk recall "),
+                hint.contains("[see remaining: tail -n +1 ")
+                    || hint.contains("hidden: rtk recall "),
                 "recovery hint must be a standard retrieval form: {hint}"
             );
         }
@@ -530,15 +531,21 @@ mod tests {
     fn test_hidden_hint_note_variants() {
         let t = vec!["x  1B".to_string()];
         let f = vec!["target/".to_string()];
-        assert!(hidden_hint(&t, &[])
-            .expect("hint")
-            .starts_with("... (1 more)"));
-        assert!(hidden_hint(&[], &f)
-            .expect("hint")
-            .starts_with("... (1 filtered)"));
-        assert!(hidden_hint(&t, &f)
-            .expect("hint")
-            .starts_with("... (1 more, 1 filtered)"));
+        assert!(
+            hidden_hint(&t, &[])
+                .expect("hint")
+                .starts_with("... (1 more)")
+        );
+        assert!(
+            hidden_hint(&[], &f)
+                .expect("hint")
+                .starts_with("... (1 filtered)")
+        );
+        assert!(
+            hidden_hint(&t, &f)
+                .expect("hint")
+                .starts_with("... (1 more, 1 filtered)")
+        );
     }
 
     #[test]

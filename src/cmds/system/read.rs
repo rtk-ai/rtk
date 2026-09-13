@@ -76,12 +76,7 @@ pub fn run(
     };
     let shown = never_worse(&raw, &rtk_output);
     print!("{}", shown);
-    timer.track(
-        &format!("cat {}", file.display()),
-        "rtk read",
-        &raw,
-        shown,
-    );
+    timer.track(&format!("cat {}", file.display()), "rtk read", &raw, shown);
     Ok(())
 }
 
@@ -255,7 +250,11 @@ fn main() {{
         writeln!(f2, "charlie\ndelta").unwrap();
 
         let output = std::process::Command::new(&bin)
-            .args(["read", &f1.path().to_string_lossy(), &f2.path().to_string_lossy()])
+            .args([
+                "read",
+                &f1.path().to_string_lossy(),
+                &f2.path().to_string_lossy(),
+            ])
             .output()
             .expect("failed to run rtk read");
 
@@ -275,15 +274,28 @@ fn main() {{
         writeln!(f1, "valid content").unwrap();
 
         let output = std::process::Command::new(&bin)
-            .args(["read", &f1.path().to_string_lossy(), "/tmp/rtk_nonexistent_file.txt"])
+            .args([
+                "read",
+                &f1.path().to_string_lossy(),
+                "/tmp/rtk_nonexistent_file.txt",
+            ])
             .output()
             .expect("failed to run rtk read");
 
-        assert!(!output.status.success(), "should exit non-zero on missing file");
+        assert!(
+            !output.status.success(),
+            "should exit non-zero on missing file"
+        );
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stdout.contains("valid content"), "valid file should still be printed");
-        assert!(stderr.contains("rtk_nonexistent_file"), "should report missing file on stderr");
+        assert!(
+            stdout.contains("valid content"),
+            "valid file should still be printed"
+        );
+        assert!(
+            stderr.contains("rtk_nonexistent_file"),
+            "should report missing file on stderr"
+        );
     }
 
     #[test]

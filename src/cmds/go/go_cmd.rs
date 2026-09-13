@@ -2,7 +2,7 @@
 
 use crate::core::guard::never_worse;
 use crate::core::runner;
-use crate::core::stream::{exec_capture, CaptureResult};
+use crate::core::stream::{CaptureResult, exec_capture};
 use crate::core::tracking;
 use crate::core::truncate::CAP_ERRORS;
 use crate::core::utils::{resolved_command, truncate};
@@ -150,8 +150,8 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
         eprintln!("Running: go {} ...", subcommand);
     }
 
-    let captured = exec_capture(&mut cmd)
-        .with_context(|| format!("Failed to run go {}", subcommand))?;
+    let captured =
+        exec_capture(&mut cmd).with_context(|| format!("Failed to run go {}", subcommand))?;
     let raw = format!("{}\n{}", captured.stdout, captured.stderr);
 
     print!("{}", captured.stdout);
@@ -213,12 +213,11 @@ impl GoTool {
 
 /// If the first arg is `tool` identify if it is a tool we already handle.
 fn match_go_tool(args: &[OsString]) -> Option<(GoTool, &[OsString])> {
-    if args.first().map(|a| a == "tool").unwrap_or(false) {
-        if let Some(tool_arg) = args.get(1) {
-            if let Some(tool) = GoTool::from_name(&tool_arg.to_string_lossy()) {
-                return Some((tool, &args[2..]));
-            }
-        }
+    if args.first().map(|a| a == "tool").unwrap_or(false)
+        && let Some(tool_arg) = args.get(1)
+        && let Some(tool) = GoTool::from_name(&tool_arg.to_string_lossy())
+    {
+        return Some((tool, &args[2..]));
     }
     None
 }
@@ -350,10 +349,10 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
                     // Package-level build failure
                     pkg_result.build_failed = true;
                     // Collect build errors from the import path
-                    if let Some(import_path) = &event.failed_build {
-                        if let Some(errors) = build_output.remove(import_path) {
-                            pkg_result.build_errors = errors;
-                        }
+                    if let Some(import_path) = &event.failed_build
+                        && let Some(errors) = build_output.remove(import_path)
+                    {
+                        pkg_result.build_errors = errors;
                     }
                 } else {
                     // Package-level failure without a specific test or build error
@@ -518,15 +517,15 @@ fn select_go_test_failure_lines(outputs: &[String]) -> Vec<String> {
         }
     }
 
-    if relevant.is_empty() {
-        if let Some(line) = outputs.iter().map(|line| line.trim()).find(|line| {
+    if relevant.is_empty()
+        && let Some(line) = outputs.iter().map(|line| line.trim()).find(|line| {
             !line.is_empty()
                 && !line.starts_with("=== RUN")
                 && !line.starts_with("--- FAIL")
                 && !line.starts_with("--- PASS")
-        }) {
-            relevant.push(line.to_string());
-        }
+        })
+    {
+        relevant.push(line.to_string());
     }
 
     relevant
@@ -592,9 +591,14 @@ fn filter_go_build_with_exit(output: &str, exit_code: i32) -> String {
     }
 
     if errors.len() > MAX_GO_BUILD_ERRORS {
-        result.push_str(&format!("\n… +{} more errors\n", errors.len() - MAX_GO_BUILD_ERRORS));
+        result.push_str(&format!(
+            "\n… +{} more errors\n",
+            errors.len() - MAX_GO_BUILD_ERRORS
+        ));
         let all_errors = errors.join("\n");
-        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_errors, "go-build", MAX_GO_BUILD_ERRORS + 1) {
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_errors, "go-build", MAX_GO_BUILD_ERRORS + 1)
+        {
             result.push_str(&format!("  {}\n", hint));
         }
     }
@@ -715,9 +719,14 @@ fn filter_go_vet(output: &str) -> String {
     }
 
     if issues.len() > MAX_GO_VET_ISSUES {
-        result.push_str(&format!("\n… +{} more issues\n", issues.len() - MAX_GO_VET_ISSUES));
+        result.push_str(&format!(
+            "\n… +{} more issues\n",
+            issues.len() - MAX_GO_VET_ISSUES
+        ));
         let all_issues = issues.join("\n");
-        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_issues, "go-vet", MAX_GO_VET_ISSUES + 1) {
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_issues, "go-vet", MAX_GO_VET_ISSUES + 1)
+        {
             result.push_str(&format!("  {}\n", hint));
         }
     }

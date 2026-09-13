@@ -32,7 +32,7 @@ Think in terms of filter families, not individual commands. Every new `*_cmd.rs`
 ```
 src/main.rs
 ├── Commands enum (clap derive)
-│   ├── Git(GitArgs)      → cmds/git/git.rs
+│   ├── Git(GitArgs)      → cmds/git/git_cmd.rs
 │   ├── Cargo(CargoArgs)  → cmds/rust/runner.rs
 │   ├── Gh(GhArgs)        → cmds/git/gh_cmd.rs
 │   ├── Grep(GrepArgs)    → cmds/system/grep_cmd.rs

@@ -189,6 +189,13 @@ git pull origin develop
 git checkout -b feat/scope-your-clear-description
 ```
 
+Opt in once per clone so `git blame` skips the bulk-formatting commits listed in
+`.git-blame-ignore-revs` and reports whoever actually wrote each line:
+
+```bash
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
+
 ### 2. Make Your Changes
 
 **Respect the existing folder structure.** Place new files where similar files already live. Do not reorganize without prior discussion.
