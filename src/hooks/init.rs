@@ -3124,7 +3124,7 @@ fn resolve_claude_dir_from(
         .context("Cannot determine Claude config directory. Set $CLAUDE_CONFIG_DIR or $HOME.")
 }
 
-fn resolve_codex_dir() -> Result<PathBuf> {
+pub(crate) fn resolve_codex_dir() -> Result<PathBuf> {
     resolve_codex_dir_from(
         std::env::var_os("CODEX_HOME").map(PathBuf::from),
         dirs::home_dir(),
@@ -3144,7 +3144,7 @@ fn resolve_codex_dir_from(
         .context("Cannot determine Codex config directory. Set $CODEX_HOME or $HOME.")
 }
 
-fn resolve_hermes_home() -> Result<PathBuf> {
+pub(crate) fn resolve_hermes_home() -> Result<PathBuf> {
     resolve_hermes_home_from_env(dirs::home_dir(), std::env::var_os("HERMES_HOME"))
 }
 
@@ -3169,7 +3169,7 @@ fn resolve_hermes_home_from_env(
 /// `.factory` onto it (verified against Droid v0.164.0).
 /// - Global: `$FACTORY_HOME_OVERRIDE/.factory` or `~/.factory`.
 /// - Project: caller passes `.factory` relative to project root.
-fn resolve_droid_dir() -> Result<PathBuf> {
+pub(crate) fn resolve_droid_dir() -> Result<PathBuf> {
     resolve_droid_dir_from_env(dirs::home_dir(), std::env::var_os(DROID_HOME_ENV))
 }
 
@@ -3302,6 +3302,25 @@ fn resolve_droid_install_target(droid_dir: &Path) -> Result<DroidHookFile> {
         path: live_hooks_json.unwrap_or(root),
         layout: DroidLayout::Root,
     })
+}
+
+/// Return whether Droid's effective `PreToolUse` configuration registers `command`.
+pub(crate) fn droid_hook_command_registered(droid_dir: &Path, command: &str) -> bool {
+    let Ok(target) = resolve_droid_install_target(droid_dir) else {
+        return false;
+    };
+    let Ok(Some(root)) = read_droid_json(&target.path) else {
+        return false;
+    };
+
+    droid_events(&root, target.layout)
+        .get(PRE_TOOL_USE_KEY)
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("hooks").and_then(serde_json::Value::as_array))
+        .flatten()
+        .any(|hook| hook.get("command").and_then(serde_json::Value::as_str) == Some(command))
 }
 
 /// Install Factory Droid PreToolUse hook.
@@ -3660,7 +3679,7 @@ fn pi_plugin_path(pi_dir: &Path) -> PathBuf {
 /// Return the Pi extension install path for the given scope.
 /// global=true  → `$PI_CODING_AGENT_DIR/extensions/rtk.ts`
 /// global=false → `./.pi/extensions/rtk.ts`
-fn pi_plugin_path_for_scope(global: bool) -> Result<PathBuf> {
+pub(crate) fn pi_plugin_path_for_scope(global: bool) -> Result<PathBuf> {
     if global {
         Ok(pi_plugin_path(&resolve_pi_dir()?))
     } else {
@@ -3750,7 +3769,7 @@ fn is_current_pi_plugin(content: &str) -> bool {
         == normalize_pi_plugin_line_endings(PI_PLUGIN).trim_end()
 }
 
-fn looks_like_rtk_pi_plugin(content: &str) -> bool {
+pub(crate) fn looks_like_rtk_pi_plugin(content: &str) -> bool {
     content.contains(PI_PLUGIN_REWRITE_MARKER)
 }
 
@@ -4346,7 +4365,7 @@ fn remove_opencode_plugin(ctx: InitContext) -> Result<Vec<PathBuf>> {
 //   global=false -> `.omp/extensions/rtk.ts`
 
 /// Return the OMP extension install path for the given scope.
-fn omp_extension_path_for_scope(global: bool) -> Result<PathBuf> {
+pub(crate) fn omp_extension_path_for_scope(global: bool) -> Result<PathBuf> {
     if global {
         Ok(resolve_omp_dir()?
             .join(PI_EXTENSIONS_SUBDIR)

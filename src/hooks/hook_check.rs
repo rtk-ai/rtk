@@ -1,14 +1,28 @@
 //! Detects whether RTK hooks are installed and warns if they are outdated.
 
-use super::constants::{HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON};
-use super::init::resolve_claude_dir;
+use super::constants::{
+    CODEX_DIR, CONFIG_DIR, COPILOT_HOOK_FILE, COPILOT_USER_DIR, CURSOR_DIR, CURSOR_HOOK_COMMAND,
+    DROID_DIR, DROID_HOOK_COMMAND, GEMINI_DIR, GEMINI_HOOK_FILE, GITHUB_DIR, HERMES_DIR,
+    HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE,
+    HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR, OMP_DIR, OMP_LOCAL_DIR, OPENCODE_PLUGIN_FILE,
+    OPENCODE_SUBDIR, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE, PLUGIN_SUBDIR,
+    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_DIR, VIBE_HOOKS_FILE,
+    VIBE_HOOK_COMMAND, VIBE_HOOK_NAME,
+};
+use super::init::{
+    copilot_user_dir, droid_hook_command_registered, omp_extension_path_for_scope,
+    pi_plugin_path_for_scope, resolve_claude_dir, resolve_codex_dir, resolve_droid_dir,
+    resolve_hermes_home,
+};
 use super::is_claude_hook_command;
 use crate::core::constants::RTK_DATA_DIR;
 use crate::core::utils::from_json_str;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const CURRENT_HOOK_VERSION: u8 = 3;
 const WARN_INTERVAL_SECS: u64 = 24 * 3600;
+const WARN_MARKER_ENV: &str = "RTK_HOOK_WARN_MARKER";
+const WARN_HOME_ENV: &str = "RTK_HOOK_WARN_HOME";
 
 /// Hook status for diagnostics and `rtk gain`.
 #[derive(Debug, PartialEq, Clone)]
@@ -46,7 +60,7 @@ pub fn status() -> HookStatus {
 
     // Fall back to legacy script file check
     let Some(hook_path) = hook_installed_path() else {
-        return HookStatus::Missing;
+        return status_with_other_integration(HookStatus::Missing, other_integration_installed());
     };
     let Ok(content) = std::fs::read_to_string(&hook_path) else {
         return HookStatus::Outdated; // exists but unreadable — treat as needs-update
@@ -93,12 +107,8 @@ pub fn maybe_warn() {
 
 /// Single source of truth: delegates to `status()` then rate-limits the warning.
 fn check_and_warn() -> Option<()> {
-    let warning = match status() {
-        HookStatus::Ok => return Some(()),
-        HookStatus::Missing => {
-            "[rtk] /!\\ No hook installed — run `rtk init -g` for automatic token savings"
-        }
-        HookStatus::Outdated => "[rtk] /!\\ Hook outdated — run `rtk init -g` to update",
+    let Some(warning) = warning_for_status(status()) else {
+        return Some(());
     };
 
     // Rate limit: warn once per day
@@ -118,6 +128,16 @@ fn check_and_warn() -> Option<()> {
     let _ = std::fs::write(&marker, b"");
 
     Some(())
+}
+
+fn warning_for_status(status: HookStatus) -> Option<&'static str> {
+    match status {
+        HookStatus::Ok => None,
+        HookStatus::Missing => {
+            Some("[rtk] /!\\ No hook installed — run `rtk init -g` for automatic token savings")
+        }
+        HookStatus::Outdated => Some("[rtk] /!\\ Hook outdated — run `rtk init -g` to update"),
+    }
 }
 
 pub fn parse_hook_version(content: &str) -> u8 {
@@ -142,7 +162,242 @@ fn hook_installed_path() -> Option<PathBuf> {
     }
 }
 
+fn status_with_other_integration(status: HookStatus, has_other_integration: bool) -> HookStatus {
+    if status == HookStatus::Missing && has_other_integration {
+        HookStatus::Ok
+    } else {
+        status
+    }
+}
+
+/// Return whether an executable non-Claude integration is configured with RTK.
+/// Codex is retained as the established instruction-only exception; the other
+/// instruction-only install targets are deliberately not inferred here.
+///
+/// This only suppresses a missing Claude warning; an outdated Claude hook is
+/// still reported so users can complete its migration.
+/// Recognition confirms supported artifacts and registrations, not that a client
+/// actively loaded them or that its text artifacts are syntactically valid.
+fn other_integration_installed() -> bool {
+    if let Some(home) = std::env::var_os(WARN_HOME_ENV).filter(|path| !path.is_empty()) {
+        return other_integration_installed_at_home(&PathBuf::from(home));
+    }
+    other_integration_installed_with_paths(
+        dirs::home_dir().as_deref(),
+        resolve_codex_dir().ok().as_deref(),
+        resolve_hermes_home().ok().as_deref(),
+    ) || pi_or_omp_global_integration_installed()
+        || droid_global_integration_installed()
+        || copilot_global_integration_installed()
+        || std::env::current_dir().is_ok_and(|cwd| project_integration_installed_at(&cwd))
+}
+
+fn other_integration_installed_at_home(home: &Path) -> bool {
+    other_integration_installed_with_paths(
+        Some(home),
+        Some(&home.join(CODEX_DIR)),
+        Some(&home.join(HERMES_DIR)),
+    ) || pi_extension_registered(
+        &home
+            .join(PI_DIR)
+            .join(PI_EXTENSIONS_SUBDIR)
+            .join(PI_PLUGIN_FILE),
+    ) || pi_extension_registered(
+        &home
+            .join(OMP_DIR)
+            .join(PI_EXTENSIONS_SUBDIR)
+            .join(PI_PLUGIN_FILE),
+    ) || droid_hook_registered_in(&home.join(DROID_DIR))
+        || copilot_hook_registered(&home.join(COPILOT_USER_DIR).join(HOOKS_SUBDIR))
+        || std::env::current_dir().is_ok_and(|cwd| project_integration_installed_at(&cwd))
+}
+
+#[cfg(test)]
+fn other_integration_installed_at(home: &Path) -> bool {
+    other_integration_installed_with_paths(
+        Some(home),
+        Some(&home.join(CODEX_DIR)),
+        Some(&home.join(HERMES_DIR)),
+    )
+}
+
+fn other_integration_installed_with_paths(
+    home: Option<&Path>,
+    codex_dir: Option<&Path>,
+    hermes_dir: Option<&Path>,
+) -> bool {
+    home.is_some_and(|home| {
+        opencode_plugin_registered(
+            &home
+                .join(CONFIG_DIR)
+                .join(OPENCODE_SUBDIR)
+                .join(PLUGIN_SUBDIR)
+                .join(OPENCODE_PLUGIN_FILE),
+        ) || cursor_hook_registered(&home.join(CURSOR_DIR))
+            || gemini_hook_registered(&home.join(GEMINI_DIR))
+            || vibe_hook_registered(&home.join(VIBE_DIR).join(VIBE_HOOKS_FILE))
+    }) || codex_dir.is_some_and(codex_instructions_registered)
+        || hermes_dir.is_some_and(hermes_plugin_registered)
+}
+
+fn pi_or_omp_global_integration_installed() -> bool {
+    [
+        pi_plugin_path_for_scope(true),
+        omp_extension_path_for_scope(true),
+    ]
+    .into_iter()
+    .filter_map(Result::ok)
+    .any(|path| pi_extension_registered(&path))
+}
+
+fn droid_global_integration_installed() -> bool {
+    resolve_droid_dir().is_ok_and(|dir| droid_hook_registered_in(&dir))
+}
+
+fn copilot_global_integration_installed() -> bool {
+    copilot_user_dir().is_ok_and(|dir| copilot_hook_registered(&dir.join(HOOKS_SUBDIR)))
+}
+
+fn project_integration_installed_at(project_dir: &Path) -> bool {
+    pi_extension_registered(
+        &project_dir
+            .join(PI_LOCAL_DIR)
+            .join(PI_EXTENSIONS_SUBDIR)
+            .join(PI_PLUGIN_FILE),
+    ) || pi_extension_registered(
+        &project_dir
+            .join(OMP_LOCAL_DIR)
+            .join(PI_EXTENSIONS_SUBDIR)
+            .join(PI_PLUGIN_FILE),
+    ) || droid_hook_registered_in(&project_dir.join(DROID_DIR))
+        || copilot_hook_registered(&project_dir.join(GITHUB_DIR).join(HOOKS_SUBDIR))
+}
+
+fn opencode_plugin_registered(path: &Path) -> bool {
+    read_file(path).is_some_and(|content| {
+        content.contains("export const RtkOpenCodePlugin") && content.contains("rtk rewrite")
+    })
+}
+
+fn cursor_hook_registered(cursor_dir: &Path) -> bool {
+    let legacy_hook = cursor_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+    let legacy_command = format!("./{HOOKS_SUBDIR}/{REWRITE_HOOK_FILE}");
+    read_json(&cursor_dir.join(HOOKS_JSON)).is_some_and(|root| {
+        root.get("hooks")
+            .and_then(|hooks| hooks.get("preToolUse"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry
+                        .get("command")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|command| {
+                            command == CURSOR_HOOK_COMMAND
+                                || (legacy_hook.is_file() && command == legacy_command)
+                        })
+                })
+            })
+    })
+}
+
+fn codex_instructions_registered(codex_dir: &Path) -> bool {
+    let agents_path = codex_dir.join("AGENTS.md");
+    let rtk_md_path = codex_dir.join("RTK.md");
+    let rtk_md_ref = format!("@{}", rtk_md_path.display());
+    rtk_md_path.exists()
+        && read_file(&agents_path).is_some_and(|content| {
+            content
+                .lines()
+                .map(str::trim)
+                .any(|line| line == "@RTK.md" || line == rtk_md_ref)
+        })
+}
+
+fn gemini_hook_registered(gemini_dir: &Path) -> bool {
+    let hook_path = gemini_dir.join(HOOKS_SUBDIR).join(GEMINI_HOOK_FILE);
+    let hook_command = hook_path.to_string_lossy();
+    read_file(&hook_path).is_some_and(|content| content.contains("rtk hook gemini"))
+        && read_json(&gemini_dir.join(SETTINGS_JSON)).is_some_and(|root| {
+            root.get("hooks")
+                .and_then(|hooks| hooks.get("BeforeTool"))
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|entries| {
+                    entries.iter().any(|entry| {
+                        entry
+                            .get("hooks")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|hooks| {
+                                hooks.iter().any(|hook| {
+                                    hook.get("command").and_then(serde_json::Value::as_str)
+                                        == Some(hook_command.as_ref())
+                                })
+                            })
+                    })
+                })
+        })
+}
+
+fn hermes_plugin_registered(hermes_dir: &Path) -> bool {
+    let plugin_dir = hermes_dir
+        .join(HERMES_PLUGINS_SUBDIR)
+        .join(HERMES_PLUGIN_NAME);
+    read_file(&plugin_dir.join(HERMES_PLUGIN_MANIFEST_FILE)).is_some_and(|content| {
+        content
+            .lines()
+            .any(|line| line.trim() == "name: rtk-rewrite")
+    }) && read_file(&plugin_dir.join(HERMES_PLUGIN_INIT_FILE))
+        .is_some_and(|content| content.contains("rtk rewrite"))
+        && read_file(&hermes_dir.join("config.yaml")).is_some_and(|content| {
+            content
+                .lines()
+                .any(|line| line.trim().trim_matches(['\'', '"']) == "- rtk-rewrite")
+        })
+}
+
+fn pi_extension_registered(path: &Path) -> bool {
+    read_file(path).is_some_and(|content| super::init::looks_like_rtk_pi_plugin(&content))
+}
+
+fn droid_hook_registered_in(droid_dir: &Path) -> bool {
+    droid_hook_command_registered(droid_dir, DROID_HOOK_COMMAND)
+}
+
+fn vibe_hook_registered(path: &Path) -> bool {
+    read_file(path).is_some_and(|content| {
+        content.contains(&format!(r#"name = "{VIBE_HOOK_NAME}""#))
+            && content.contains(&format!(r#"command = "{VIBE_HOOK_COMMAND}""#))
+    })
+}
+
+fn copilot_hook_registered(hooks_dir: &Path) -> bool {
+    read_json(&hooks_dir.join(COPILOT_HOOK_FILE)).is_some_and(|root| {
+        root.get("hooks")
+            .and_then(|hooks| hooks.get(PRE_TOOL_USE_KEY))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry.get("command").and_then(serde_json::Value::as_str)
+                        == Some("rtk hook copilot")
+                })
+            })
+    })
+}
+
+fn read_file(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path).ok()
+}
+
+fn read_json(path: &Path) -> Option<serde_json::Value> {
+    let content = read_file(path)?;
+    (!content.trim().is_empty())
+        .then(|| from_json_str(&content).ok())
+        .flatten()
+}
+
 fn warn_marker_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os(WARN_MARKER_ENV).filter(|path| !path.is_empty()) {
+        return Some(PathBuf::from(path));
+    }
     let data_dir = dirs::data_local_dir()?.join(RTK_DATA_DIR);
     Some(data_dir.join(".hook_warn_last"))
 }
@@ -150,32 +405,7 @@ fn warn_marker_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hooks::constants::{
-        CODEX_DIR, CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, HERMES_DIR,
-        HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME,
-        OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
-    };
-
-    fn other_integration_installed(home: &std::path::Path) -> bool {
-        let paths = [
-            home.join(CONFIG_DIR)
-                .join(OPENCODE_SUBDIR)
-                .join(PLUGIN_SUBDIR)
-                .join(OPENCODE_PLUGIN_FILE),
-            home.join(CURSOR_DIR)
-                .join(HOOKS_SUBDIR)
-                .join(REWRITE_HOOK_FILE),
-            home.join(CODEX_DIR).join("AGENTS.md"),
-            home.join(GEMINI_DIR)
-                .join(HOOKS_SUBDIR)
-                .join(GEMINI_HOOK_FILE),
-            home.join(HERMES_DIR)
-                .join(HERMES_PLUGINS_SUBDIR)
-                .join(HERMES_PLUGIN_NAME)
-                .join(HERMES_PLUGIN_MANIFEST_FILE),
-        ];
-        paths.iter().any(|p| p.exists())
-    }
+    use crate::hooks::constants::{DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR, DROID_SETTINGS_FILE};
 
     #[test]
     fn test_parse_hook_version_present() {
@@ -237,7 +467,13 @@ mod tests {
     #[test]
     fn test_other_integration_none() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        assert!(!other_integration_installed(tmp.path()));
+        assert_eq!(
+            status_with_other_integration(
+                HookStatus::Missing,
+                other_integration_installed_at(tmp.path())
+            ),
+            HookStatus::Missing
+        );
     }
 
     #[test]
@@ -250,21 +486,109 @@ mod tests {
             .join(PLUGIN_SUBDIR)
             .join(OPENCODE_PLUGIN_FILE);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"plugin").unwrap();
-        assert!(other_integration_installed(tmp.path()));
+        std::fs::write(&path, "export const RtkOpenCodePlugin = () => rtk rewrite").unwrap();
+        assert_eq!(
+            status_with_other_integration(
+                HookStatus::Missing,
+                other_integration_installed_at(tmp.path())
+            ),
+            HookStatus::Ok
+        );
+    }
+
+    #[test]
+    fn test_other_integration_does_not_hide_outdated_claude_hook() {
+        assert_eq!(
+            status_with_other_integration(HookStatus::Outdated, true),
+            HookStatus::Outdated
+        );
+    }
+
+    #[test]
+    fn test_warning_for_status_is_hermetic() {
+        assert_eq!(warning_for_status(HookStatus::Ok), None);
+        assert_eq!(
+            warning_for_status(HookStatus::Missing),
+            Some("[rtk] /!\\ No hook installed — run `rtk init -g` for automatic token savings")
+        );
+        assert_eq!(
+            warning_for_status(HookStatus::Outdated),
+            Some("[rtk] /!\\ Hook outdated — run `rtk init -g` to update")
+        );
+    }
+
+    #[test]
+    fn test_other_integration_rejects_unrecognized_artifacts() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = [
+            tmp.path()
+                .join(CONFIG_DIR)
+                .join(OPENCODE_SUBDIR)
+                .join(PLUGIN_SUBDIR)
+                .join(OPENCODE_PLUGIN_FILE),
+            tmp.path().join(CURSOR_DIR).join(HOOKS_JSON),
+            tmp.path().join(CODEX_DIR).join("AGENTS.md"),
+            tmp.path()
+                .join(GEMINI_DIR)
+                .join(HOOKS_SUBDIR)
+                .join(GEMINI_HOOK_FILE),
+            tmp.path()
+                .join(HERMES_DIR)
+                .join(HERMES_PLUGINS_SUBDIR)
+                .join(HERMES_PLUGIN_NAME)
+                .join(HERMES_PLUGIN_MANIFEST_FILE),
+        ];
+        for path in paths {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"not an RTK integration").unwrap();
+        }
+
+        assert!(!other_integration_installed_at(tmp.path()));
     }
 
     #[test]
     fn test_other_integration_cursor() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp
-            .path()
-            .join(CURSOR_DIR)
-            .join(HOOKS_SUBDIR)
-            .join(REWRITE_HOOK_FILE);
+        let path = tmp.path().join(CURSOR_DIR).join(HOOKS_JSON);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"hook").unwrap();
-        assert!(other_integration_installed(tmp.path()));
+        std::fs::write(
+            &path,
+            format!(r#"{{"hooks":{{"preToolUse":[{{"command":"{CURSOR_HOOK_COMMAND}"}}]}}}}"#),
+        )
+        .unwrap();
+        assert!(other_integration_installed_at(tmp.path()));
+    }
+
+    #[test]
+    fn test_other_integration_cursor_legacy_script() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cursor_dir = tmp.path().join(CURSOR_DIR);
+        let hook = cursor_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "#!/usr/bin/env bash\nrtk rewrite \"$@\"").unwrap();
+        std::fs::write(
+            cursor_dir.join(HOOKS_JSON),
+            r#"{"hooks":{"preToolUse":[{"command":"./hooks/rtk-rewrite.sh"}]}}"#,
+        )
+        .unwrap();
+
+        assert!(other_integration_installed_at(tmp.path()));
+    }
+
+    #[test]
+    fn test_other_integration_cursor_rejects_legacy_script_substring() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cursor_dir = tmp.path().join(CURSOR_DIR);
+        let hook = cursor_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "#!/usr/bin/env bash\nrtk rewrite \"$@\"").unwrap();
+        std::fs::write(
+            cursor_dir.join(HOOKS_JSON),
+            r#"{"hooks":{"preToolUse":[{"command":"echo ./hooks/rtk-rewrite.sh"}]}}"#,
+        )
+        .unwrap();
+
+        assert!(!other_integration_installed_at(tmp.path()));
     }
 
     #[test]
@@ -272,8 +596,13 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join(CODEX_DIR).join("AGENTS.md");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"agents").unwrap();
-        assert!(other_integration_installed(tmp.path()));
+        std::fs::write(&path, "@RTK.md").unwrap();
+        std::fs::write(
+            tmp.path().join(CODEX_DIR).join("RTK.md"),
+            "RTK instructions",
+        )
+        .unwrap();
+        assert!(other_integration_installed_at(tmp.path()));
     }
 
     #[test]
@@ -285,22 +614,183 @@ mod tests {
             .join(HOOKS_SUBDIR)
             .join(GEMINI_HOOK_FILE);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"hook").unwrap();
-        assert!(other_integration_installed(tmp.path()));
+        std::fs::write(&path, "exec rtk hook gemini").unwrap();
+        std::fs::write(
+            tmp.path().join(GEMINI_DIR).join(SETTINGS_JSON),
+            serde_json::json!({
+                "hooks": { "BeforeTool": [{ "hooks": [{ "command": path }] }] }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(other_integration_installed_at(tmp.path()));
     }
 
     #[test]
     fn test_other_integration_hermes() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp
+        let plugin_dir = tmp
             .path()
             .join(HERMES_DIR)
             .join(HERMES_PLUGINS_SUBDIR)
-            .join(HERMES_PLUGIN_NAME)
-            .join(HERMES_PLUGIN_MANIFEST_FILE);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"plugin").unwrap();
-        assert!(other_integration_installed(tmp.path()));
+            .join(HERMES_PLUGIN_NAME);
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join(HERMES_PLUGIN_MANIFEST_FILE),
+            "name: rtk-rewrite",
+        )
+        .unwrap();
+        std::fs::write(plugin_dir.join(HERMES_PLUGIN_INIT_FILE), "rtk rewrite").unwrap();
+        std::fs::write(
+            tmp.path().join(HERMES_DIR).join("config.yaml"),
+            "enabled:\n  - rtk-rewrite",
+        )
+        .unwrap();
+        assert!(other_integration_installed_at(tmp.path()));
+    }
+
+    #[test]
+    fn test_other_integration_uses_override_home_paths() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let codex = tmp.path().join("codex-home");
+        std::fs::create_dir_all(&codex).unwrap();
+        std::fs::write(codex.join("RTK.md"), "RTK instructions").unwrap();
+        std::fs::write(codex.join("AGENTS.md"), "@RTK.md").unwrap();
+        assert!(other_integration_installed_with_paths(
+            Some(&home),
+            Some(&codex),
+            None,
+        ));
+
+        let hermes = tmp.path().join("hermes-home");
+        let plugin = hermes.join(HERMES_PLUGINS_SUBDIR).join(HERMES_PLUGIN_NAME);
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(
+            plugin.join(HERMES_PLUGIN_MANIFEST_FILE),
+            "name: rtk-rewrite",
+        )
+        .unwrap();
+        std::fs::write(plugin.join(HERMES_PLUGIN_INIT_FILE), "rtk rewrite").unwrap();
+        std::fs::write(hermes.join("config.yaml"), "enabled:\n  - rtk-rewrite").unwrap();
+        assert!(other_integration_installed_with_paths(
+            Some(&home),
+            None,
+            Some(&hermes),
+        ));
+    }
+
+    #[test]
+    fn test_project_pi_and_omp_integrations() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for agent_dir in [PI_LOCAL_DIR, OMP_LOCAL_DIR] {
+            let path = tmp
+                .path()
+                .join(agent_dir)
+                .join(PI_EXTENSIONS_SUBDIR)
+                .join(PI_PLUGIN_FILE);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "pi.exec(\"rtk\", [\"rewrite\", command])").unwrap();
+            assert!(project_integration_installed_at(tmp.path()));
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_droid_detection_respects_config_precedence() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join(DROID_HOOKS_FILE);
+        let settings = tmp.path().join(DROID_SETTINGS_FILE);
+        std::fs::write(
+            &root,
+            serde_json::json!({
+                PRE_TOOL_USE_KEY: [{ "hooks": [{ "command": "user command" }] }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            &settings,
+            serde_json::json!({
+                "hooks": { PRE_TOOL_USE_KEY: [{ "hooks": [{ "command": DROID_HOOK_COMMAND }] }] }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(!droid_hook_registered_in(tmp.path()));
+
+        std::fs::write(&root, "{}").unwrap();
+        assert!(droid_hook_registered_in(tmp.path()));
+
+        std::fs::remove_file(settings).unwrap();
+        let legacy = tmp.path().join(DROID_HOOKS_SUBDIR).join(DROID_HOOKS_FILE);
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(
+            &legacy,
+            serde_json::json!({
+                PRE_TOOL_USE_KEY: [{ "hooks": [{ "command": DROID_HOOK_COMMAND }] }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(!droid_hook_registered_in(tmp.path()));
+    }
+
+    #[test]
+    fn test_project_droid_and_copilot_integrations() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let droid = tmp.path().join(DROID_DIR).join(DROID_HOOKS_FILE);
+        std::fs::create_dir_all(droid.parent().unwrap()).unwrap();
+        std::fs::write(
+            &droid,
+            serde_json::json!({
+                PRE_TOOL_USE_KEY: [{ "hooks": [{ "command": DROID_HOOK_COMMAND }] }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(project_integration_installed_at(tmp.path()));
+        std::fs::remove_file(droid).unwrap();
+
+        let copilot = tmp
+            .path()
+            .join(GITHUB_DIR)
+            .join(HOOKS_SUBDIR)
+            .join(COPILOT_HOOK_FILE);
+        std::fs::create_dir_all(copilot.parent().unwrap()).unwrap();
+        std::fs::write(
+            &copilot,
+            serde_json::json!({
+                "hooks": { PRE_TOOL_USE_KEY: [{ "command": "rtk hook copilot" }] }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(project_integration_installed_at(tmp.path()));
+    }
+
+    #[test]
+    fn test_vibe_and_copilot_global_hook_artifacts() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let vibe = tmp.path().join(VIBE_HOOKS_FILE);
+        std::fs::write(
+            &vibe,
+            format!(r#"name = "{VIBE_HOOK_NAME}"\ncommand = "{VIBE_HOOK_COMMAND}""#),
+        )
+        .unwrap();
+        assert!(vibe_hook_registered(&vibe));
+
+        let hooks_dir = tmp.path().join(HOOKS_SUBDIR);
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        std::fs::write(
+            hooks_dir.join(COPILOT_HOOK_FILE),
+            serde_json::json!({
+                "hooks": { PRE_TOOL_USE_KEY: [{ "command": "rtk hook copilot" }] }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(copilot_hook_registered(&hooks_dir));
     }
 
     #[test]
@@ -316,7 +806,7 @@ mod tests {
                 .join(HERMES_PLUGIN_NAME),
         )
         .unwrap();
-        assert!(!other_integration_installed(tmp.path()));
+        assert!(!other_integration_installed_at(tmp.path()));
     }
 
     #[test]
