@@ -506,6 +506,10 @@ fn format_pr_checks(stdout: &str) -> String {
         .iter()
         .filter(|check| check.2 == PrCheckStatus::Pending)
         .count();
+    let skipped = checks
+        .iter()
+        .filter(|check| check.2 == PrCheckStatus::Skipped)
+        .count();
 
     let mut out = String::new();
     out.push_str("CI Checks Summary:\n");
@@ -513,6 +517,9 @@ fn format_pr_checks(stdout: &str) -> String {
     out.push_str(&format!("  [FAIL] Failed: {}\n", failed));
     if pending > 0 {
         out.push_str(&format!("  [pending] Pending: {}\n", pending));
+    }
+    if skipped > 0 {
+        out.push_str(&format!("  [skip] Skipped/cancelled: {}\n", skipped));
     }
     let failed_checks = checks
         .iter()
@@ -532,6 +539,7 @@ enum PrCheckStatus {
     Passed,
     Failed,
     Pending,
+    Skipped,
 }
 
 fn parse_pr_check_line(line: &str) -> Option<(&str, &str, PrCheckStatus)> {
@@ -541,6 +549,7 @@ fn parse_pr_check_line(line: &str) -> Option<(&str, &str, PrCheckStatus)> {
         "pass" => PrCheckStatus::Passed,
         "fail" => PrCheckStatus::Failed,
         "pending" | "*" => PrCheckStatus::Pending,
+        "skipping" | "cancel" => PrCheckStatus::Skipped,
         _ => return None,
     };
     let link = fields.nth(1).unwrap_or("").trim();
@@ -1234,6 +1243,57 @@ mod tests {
 
         assert!(result.contains("Passed: 3"), "got:\n{result}");
         assert!(!result.contains("Pending:"), "got:\n{result}");
+    }
+
+    /// `gh` buckets skipped jobs as `skipping` and cancelled ones as `cancel`
+    /// (cli/cli pkg/cmd/pr/checks/aggregate.go). Both must be tallied so the
+    /// summary totals add up to the checks that ran.
+    #[test]
+    fn test_format_pr_checks_counts_skipped_and_cancelled() {
+        let output = concat!(
+            "check\tpass\t5s\thttps://example.com/job/1\t\n",
+            "fmt\tfail\t7s\thttps://example.com/job/2\t\n",
+            "benchmark\tskipping\t0\thttps://example.com/job/3\t\n",
+            "test (${{ matrix.os }})\tskipping\t0\thttps://example.com/job/4\t\n",
+            "build\tcancel\t45s\thttps://example.com/job/5\t\n",
+        );
+
+        let result = format_pr_checks(output);
+
+        assert!(result.contains("Passed: 1"), "got:\n{result}");
+        assert!(result.contains("Failed: 1"), "got:\n{result}");
+        assert!(result.contains("Skipped/cancelled: 3"), "got:\n{result}");
+    }
+
+    /// A push that supersedes an in-progress run cancels every job, so the whole
+    /// table is `cancel`/`skipping`; the summary must say so instead of reading
+    /// as an empty run.
+    #[test]
+    fn test_format_pr_checks_reports_a_cancelled_run() {
+        let output = concat!(
+            "build\tcancel\t45s\thttps://example.com/job/1\t\n",
+            "test (ubuntu)\tcancel\t44s\thttps://example.com/job/2\t\n",
+            "Security Scan\tskipping\t0\thttps://example.com/job/3\t\n",
+        );
+
+        let result = format_pr_checks(output);
+
+        assert!(result.contains("Passed: 0"), "got:\n{result}");
+        assert!(result.contains("Failed: 0"), "got:\n{result}");
+        assert!(result.contains("Skipped/cancelled: 3"), "got:\n{result}");
+    }
+
+    #[test]
+    fn test_format_pr_checks_omits_skipped_line_when_nothing_was_skipped() {
+        let output = concat!(
+            "clippy\tpass\t28s\thttps://example.com/job/1\t\n",
+            "fmt\tpass\t7s\thttps://example.com/job/2\t\n",
+        );
+
+        let result = format_pr_checks(output);
+
+        assert!(result.contains("Passed: 2"), "got:\n{result}");
+        assert!(!result.contains("Skipped/cancelled"), "got:\n{result}");
     }
 
     // --- parse_optional_identifier tests ---
