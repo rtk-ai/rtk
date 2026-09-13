@@ -1,7 +1,12 @@
 //! Detects whether RTK hooks are installed and warns if they are outdated.
 
-use super::constants::{HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON};
-use super::init::resolve_claude_dir;
+use super::constants::{
+    CODEX_DIR, CONFIG_DIR, CURSOR_DIR, DROID_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, HERMES_DIR,
+    HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
+    HOOKS_SUBDIR, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR, PRE_TOOL_USE_KEY,
+    REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_DIR, VIBE_HOOKS_FILE,
+};
+use super::init::{resolve_claude_dir, AGENTS_MD};
 use super::is_claude_hook_command;
 use crate::core::constants::RTK_DATA_DIR;
 use crate::core::utils::from_json_str;
@@ -46,6 +51,14 @@ pub fn status() -> HookStatus {
 
     // Fall back to legacy script file check
     let Some(hook_path) = hook_installed_path() else {
+        // No Claude hook — but a `~/.claude` directory only means Claude Code
+        // has been run on this machine, not that it is the agent in use. A user
+        // whose agent is Codex, Antigravity, Gemini, Cursor, Droid, Hermes or
+        // Vibe would otherwise be told "No hook installed" forever, with a fix
+        // (`rtk init -g`) that targets an agent they do not use.
+        if any_other_integration_installed().unwrap_or(false) {
+            return HookStatus::Ok;
+        }
         return HookStatus::Missing;
     };
     let Ok(content) = std::fs::read_to_string(&hook_path) else {
@@ -147,35 +160,57 @@ fn warn_marker_path() -> Option<PathBuf> {
     Some(data_dir.join(".hook_warn_last"))
 }
 
+/// Artifacts RTK writes when it integrates with an agent other than Claude
+/// Code, relative to the user's home directory.
+///
+/// Deliberately a list of *installed artifacts* rather than of *agents*: an
+/// agent being present on the machine says nothing about whether RTK is wired
+/// into it, and that is the only question `status` needs answered.
+fn other_integration_paths(home: &std::path::Path) -> [PathBuf; 8] {
+    [
+        // OpenCode / Pi-style TypeScript plugin
+        home.join(CONFIG_DIR)
+            .join(OPENCODE_SUBDIR)
+            .join(PLUGIN_SUBDIR)
+            .join(OPENCODE_PLUGIN_FILE),
+        // Cursor
+        home.join(CURSOR_DIR)
+            .join(HOOKS_SUBDIR)
+            .join(REWRITE_HOOK_FILE),
+        // Codex CLI
+        home.join(CODEX_DIR).join(AGENTS_MD),
+        home.join(CODEX_DIR).join(HOOKS_JSON),
+        // Gemini CLI
+        home.join(GEMINI_DIR)
+            .join(HOOKS_SUBDIR)
+            .join(GEMINI_HOOK_FILE),
+        // Hermes
+        home.join(HERMES_DIR)
+            .join(HERMES_PLUGINS_SUBDIR)
+            .join(HERMES_PLUGIN_NAME)
+            .join(HERMES_PLUGIN_MANIFEST_FILE),
+        // Factory Droid
+        home.join(DROID_DIR).join(HOOKS_JSON),
+        // Mistral Vibe
+        home.join(VIBE_DIR).join(VIBE_HOOKS_FILE),
+    ]
+}
+
+/// True when RTK is integrated with some agent other than Claude Code.
+fn other_integration_installed(home: &std::path::Path) -> bool {
+    other_integration_paths(home).iter().any(|p| p.exists())
+}
+
+/// Same question against the real home directory. `None` when the home
+/// directory cannot be resolved — the caller then has no evidence either way
+/// and must not treat that as "no other integration".
+fn any_other_integration_installed() -> Option<bool> {
+    Some(other_integration_installed(&dirs::home_dir()?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hooks::constants::{
-        CODEX_DIR, CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, HERMES_DIR,
-        HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME,
-        OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
-    };
-
-    fn other_integration_installed(home: &std::path::Path) -> bool {
-        let paths = [
-            home.join(CONFIG_DIR)
-                .join(OPENCODE_SUBDIR)
-                .join(PLUGIN_SUBDIR)
-                .join(OPENCODE_PLUGIN_FILE),
-            home.join(CURSOR_DIR)
-                .join(HOOKS_SUBDIR)
-                .join(REWRITE_HOOK_FILE),
-            home.join(CODEX_DIR).join("AGENTS.md"),
-            home.join(GEMINI_DIR)
-                .join(HOOKS_SUBDIR)
-                .join(GEMINI_HOOK_FILE),
-            home.join(HERMES_DIR)
-                .join(HERMES_PLUGINS_SUBDIR)
-                .join(HERMES_PLUGIN_NAME)
-                .join(HERMES_PLUGIN_MANIFEST_FILE),
-        ];
-        paths.iter().any(|p| p.exists())
-    }
 
     #[test]
     fn test_parse_hook_version_present() {
@@ -237,6 +272,64 @@ mod tests {
     #[test]
     fn test_other_integration_none() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(!other_integration_installed(tmp.path()));
+    }
+
+    /// Covers every artifact `status` consults, so an integration added later
+    /// that forgets this list fails here rather than in a user's terminal.
+    #[test]
+    fn test_other_integration_detects_every_listed_artifact() {
+        for probe in other_integration_paths(std::path::Path::new("/probe")) {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let relative = probe
+                .strip_prefix("/probe")
+                .expect("paths are built from the home directory");
+            let path = tmp.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"installed").unwrap();
+            assert!(
+                other_integration_installed(tmp.path()),
+                "{} must count as an installed integration",
+                relative.display()
+            );
+        }
+    }
+
+    #[test]
+    fn test_other_integration_droid_vibe_and_codex_hook() {
+        // Droid, Vibe and the Codex hook post-date the original list, so their
+        // users were told "No hook installed" indefinitely.
+        for relative in [
+            std::path::Path::new(DROID_DIR).join(HOOKS_JSON),
+            std::path::Path::new(VIBE_DIR).join(VIBE_HOOKS_FILE),
+            std::path::Path::new(CODEX_DIR).join(HOOKS_JSON),
+        ] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join(&relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"hook").unwrap();
+            assert!(
+                other_integration_installed(tmp.path()),
+                "{} must count as an installed integration",
+                relative.display()
+            );
+        }
+    }
+
+    #[test]
+    fn test_other_integration_ignores_unrelated_files() {
+        // Detection keys on RTK's own artifacts. An agent's config directory
+        // existing says nothing about whether RTK is wired into it.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for relative in [
+            std::path::Path::new(CODEX_DIR).join("config.toml"),
+            std::path::Path::new(CURSOR_DIR).join("mcp.json"),
+            std::path::Path::new(GEMINI_DIR).join("settings.json"),
+        ] {
+            let path = tmp.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"unrelated").unwrap();
+        }
         assert!(!other_integration_installed(tmp.path()));
     }
 
