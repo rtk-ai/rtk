@@ -153,7 +153,8 @@ mod tests {
     use crate::hooks::constants::{
         CODEX_DIR, CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, HERMES_DIR,
         HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME,
-        OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
+        MIMOCODE_PLUGIN_FILE, MIMOCODE_SUBDIR, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR,
+        PLUGIN_SUBDIR,
     };
 
     fn other_integration_installed(home: &std::path::Path) -> bool {
@@ -162,6 +163,10 @@ mod tests {
                 .join(OPENCODE_SUBDIR)
                 .join(PLUGIN_SUBDIR)
                 .join(OPENCODE_PLUGIN_FILE),
+            home.join(CONFIG_DIR)
+                .join(MIMOCODE_SUBDIR)
+                .join(PLUGIN_SUBDIR)
+                .join(MIMOCODE_PLUGIN_FILE),
             home.join(CURSOR_DIR)
                 .join(HOOKS_SUBDIR)
                 .join(REWRITE_HOOK_FILE),
