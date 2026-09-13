@@ -1,11 +1,12 @@
 //! Detects whether RTK hooks are installed and warns if they are outdated.
 
 use super::constants::{
-    CONFIG_DIR, COPILOT_HOOK_FILE, CURSOR_DIR, CURSOR_HOOK_COMMAND, DROID_DIR, DROID_HOOK_COMMAND,
-    GEMINI_DIR, GEMINI_HOOK_FILE, GITHUB_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
-    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR, OMP_LOCAL_DIR,
-    OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
-    PLUGIN_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_DIR, VIBE_HOOKS_FILE,
+    CODEX_DIR, CONFIG_DIR, COPILOT_HOOK_FILE, COPILOT_USER_DIR, CURSOR_DIR, CURSOR_HOOK_COMMAND,
+    DROID_DIR, DROID_HOOK_COMMAND, GEMINI_DIR, GEMINI_HOOK_FILE, GITHUB_DIR, HERMES_DIR,
+    HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE,
+    HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR, OMP_DIR, OMP_LOCAL_DIR, OPENCODE_PLUGIN_FILE,
+    OPENCODE_SUBDIR, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE, PLUGIN_SUBDIR,
+    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_DIR, VIBE_HOOKS_FILE,
     VIBE_HOOK_COMMAND, VIBE_HOOK_NAME,
 };
 use super::init::{
@@ -18,11 +19,10 @@ use crate::core::constants::RTK_DATA_DIR;
 use crate::core::utils::from_json_str;
 use std::path::{Path, PathBuf};
 
-#[cfg(test)]
-use super::constants::{CODEX_DIR, HERMES_DIR};
-
 const CURRENT_HOOK_VERSION: u8 = 3;
 const WARN_INTERVAL_SECS: u64 = 24 * 3600;
+const WARN_MARKER_ENV: &str = "RTK_HOOK_WARN_MARKER";
+const WARN_HOME_ENV: &str = "RTK_HOOK_WARN_HOME";
 
 /// Hook status for diagnostics and `rtk gain`.
 #[derive(Debug, PartialEq, Clone)]
@@ -179,6 +179,9 @@ fn status_with_other_integration(status: HookStatus, has_other_integration: bool
 /// Recognition confirms supported artifacts and registrations, not that a client
 /// actively loaded them or that its text artifacts are syntactically valid.
 fn other_integration_installed() -> bool {
+    if let Some(home) = std::env::var_os(WARN_HOME_ENV).filter(|path| !path.is_empty()) {
+        return other_integration_installed_at_home(&PathBuf::from(home));
+    }
     other_integration_installed_with_paths(
         dirs::home_dir().as_deref(),
         resolve_codex_dir().ok().as_deref(),
@@ -186,6 +189,26 @@ fn other_integration_installed() -> bool {
     ) || pi_or_omp_global_integration_installed()
         || droid_global_integration_installed()
         || copilot_global_integration_installed()
+        || std::env::current_dir().is_ok_and(|cwd| project_integration_installed_at(&cwd))
+}
+
+fn other_integration_installed_at_home(home: &Path) -> bool {
+    other_integration_installed_with_paths(
+        Some(home),
+        Some(&home.join(CODEX_DIR)),
+        Some(&home.join(HERMES_DIR)),
+    ) || pi_extension_registered(
+        &home
+            .join(PI_DIR)
+            .join(PI_EXTENSIONS_SUBDIR)
+            .join(PI_PLUGIN_FILE),
+    ) || pi_extension_registered(
+        &home
+            .join(OMP_DIR)
+            .join(PI_EXTENSIONS_SUBDIR)
+            .join(PI_PLUGIN_FILE),
+    ) || droid_hook_registered_in(&home.join(DROID_DIR))
+        || copilot_hook_registered(&home.join(COPILOT_USER_DIR).join(HOOKS_SUBDIR))
         || std::env::current_dir().is_ok_and(|cwd| project_integration_installed_at(&cwd))
 }
 
@@ -372,6 +395,9 @@ fn read_json(path: &Path) -> Option<serde_json::Value> {
 }
 
 fn warn_marker_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os(WARN_MARKER_ENV).filter(|path| !path.is_empty()) {
+        return Some(PathBuf::from(path));
+    }
     let data_dir = dirs::data_local_dir()?.join(RTK_DATA_DIR);
     Some(data_dir.join(".hook_warn_last"))
 }
