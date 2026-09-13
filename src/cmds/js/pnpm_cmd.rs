@@ -11,8 +11,9 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 
 use crate::parser::{
-    emit_degradation_warning, emit_passthrough_warning, truncate_passthrough, Dependency,
-    DependencyState, FormatMode, OutputParser, ParseResult, TokenFormatter,
+    emit_degradation_warning, emit_passthrough_warning, passthrough_warning_reason,
+    truncate_passthrough, Dependency, DependencyState, FormatMode, OutputParser, ParseResult,
+    TokenFormatter,
 };
 
 const MAX_LISTING: usize = CAP_LIST;
@@ -43,9 +44,11 @@ struct PnpmOutdatedOutput {
 
 #[derive(Debug, Deserialize)]
 struct PnpmOutdatedPackage {
-    current: String,
+    current: Option<String>,
     latest: String,
     wanted: Option<String>,
+    #[serde(rename = "isDeprecated", default)]
+    is_deprecated: bool,
     #[serde(rename = "dependencyType", default)]
     dependency_type: String,
 }
@@ -199,14 +202,25 @@ impl OutputParser for PnpmOutdatedParser {
                 let mut outdated_count = 0;
 
                 for (name, pkg) in &json.packages {
-                    if pkg.current != pkg.latest {
+                    let current = pkg
+                        .current
+                        .as_deref()
+                        .or(pkg.wanted.as_deref())
+                        .unwrap_or(&pkg.latest);
+                    let latest = if pkg.is_deprecated && current == pkg.latest {
+                        format!("{} (deprecated)", pkg.latest)
+                    } else {
+                        pkg.latest.clone()
+                    };
+
+                    if current != latest {
                         outdated_count += 1;
                     }
 
                     dependencies.push(Dependency {
                         name: name.clone(),
-                        current_version: pkg.current.clone(),
-                        latest_version: Some(pkg.latest.clone()),
+                        current_version: current.to_string(),
+                        latest_version: Some(latest),
                         wanted_version: pkg.wanted.clone(),
                         dev_dependency: pkg.dependency_type == "devDependencies",
                     });
@@ -434,40 +448,66 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
     let result = exec_capture(&mut cmd).context("Failed to run pnpm outdated")?;
     let combined = result.combined();
 
-    // Parse output using PnpmOutdatedParser
-    let parse_result = PnpmOutdatedParser::parse(&result.stdout);
-    let mode = FormatMode::from_verbosity(verbose);
+    let formatted = format_outdated_output(
+        &result.stdout,
+        &combined,
+        result.exit_code,
+        verbose,
+    );
 
-    let filtered = match parse_result {
-        ParseResult::Full(data) => {
-            if verbose > 0 {
-                eprintln!("pnpm outdated (Tier 1: Full JSON parse)");
-            }
-            data.format(mode)
-        }
-        ParseResult::Degraded(data, warnings) => {
-            if verbose > 0 {
-                emit_degradation_warning("pnpm outdated", &warnings.join(", "));
-            }
-            data.format(mode)
-        }
-        ParseResult::Passthrough(raw) => {
-            emit_passthrough_warning("pnpm outdated", "All parsing tiers failed");
-            raw
-        }
-    };
-
-    let display = if filtered.trim().is_empty() {
+    let display = if formatted.text.trim().is_empty() {
         "All packages up-to-date".to_string()
     } else {
-        filtered.clone()
+        formatted.text.clone()
     };
     let shown = never_worse(&combined, &display);
     println!("{}", shown);
 
     timer.track("pnpm outdated", "rtk pnpm outdated", &combined, shown);
 
+    if formatted.passthrough && !result.success() {
+        return Ok(result.exit_code);
+    }
+
     Ok(0)
+}
+
+struct FormattedOutdatedOutput {
+    text: String,
+    passthrough: bool,
+}
+
+fn format_outdated_output(
+    stdout: &str,
+    combined: &str,
+    exit_code: i32,
+    verbose: u8,
+) -> FormattedOutdatedOutput {
+    let parse_result = PnpmOutdatedParser::parse(stdout);
+    let mode = FormatMode::from_verbosity(verbose);
+
+    let (text, passthrough) = match parse_result {
+        ParseResult::Full(data) => {
+            if verbose > 0 {
+                eprintln!("pnpm outdated (Tier 1: Full JSON parse)");
+            }
+            (data.format(mode), false)
+        }
+        ParseResult::Degraded(data, warnings) => {
+            if verbose > 0 {
+                emit_degradation_warning("pnpm outdated", &warnings.join(", "));
+            }
+            (data.format(mode), false)
+        }
+        ParseResult::Passthrough(_) => {
+            if let Some(reason) = passthrough_warning_reason(exit_code) {
+                emit_passthrough_warning("pnpm outdated", reason);
+            }
+            (truncate_passthrough(combined), true)
+        }
+    };
+
+    FormattedOutdatedOutput { text, passthrough }
 }
 
 fn run_install(args: &[String], verbose: u8) -> Result<i32> {
@@ -588,6 +628,62 @@ mod tests {
         let data = result.unwrap();
         assert_eq!(data.outdated_count, 1);
         assert_eq!(data.dependencies[0].name, "express");
+    }
+
+    #[test]
+    fn test_pnpm_outdated_parser_json_without_current() {
+        let json = r#"{
+            "left-pad": {
+                "latest": "1.3.0",
+                "wanted": "1.0.0",
+                "isDeprecated": true,
+                "dependencyType": "dependencies"
+            }
+        }"#;
+
+        let result = PnpmOutdatedParser::parse(json);
+        assert_eq!(result.tier(), 1);
+        assert!(result.is_ok());
+
+        let data = result.unwrap();
+        assert_eq!(data.outdated_count, 1);
+        assert_eq!(data.dependencies[0].name, "left-pad");
+        assert_eq!(data.dependencies[0].current_version, "1.0.0");
+        assert_eq!(data.dependencies[0].latest_version.as_deref(), Some("1.3.0"));
+    }
+
+    #[test]
+    fn test_pnpm_outdated_parser_json_deprecated_latest_package() {
+        let json = r#"{
+            "left-pad": {
+                "latest": "1.3.0",
+                "wanted": "1.3.0",
+                "isDeprecated": true,
+                "dependencyType": "dependencies"
+            }
+        }"#;
+
+        let result = PnpmOutdatedParser::parse(json);
+        assert_eq!(result.tier(), 1);
+        assert!(result.is_ok());
+
+        let data = result.unwrap();
+        assert_eq!(data.outdated_count, 1);
+        assert_eq!(data.dependencies[0].current_version, "1.3.0");
+        assert_eq!(
+            data.dependencies[0].latest_version.as_deref(),
+            Some("1.3.0 (deprecated)")
+        );
+    }
+
+    #[test]
+    fn test_pnpm_outdated_failed_command_passthrough_includes_stderr() {
+        let combined = "ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL Command failed\n";
+
+        let filtered = format_outdated_output("", combined, 1, 0);
+
+        assert_eq!(filtered.text, combined);
+        assert!(filtered.passthrough);
     }
 
     #[test]

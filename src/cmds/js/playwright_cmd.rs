@@ -9,8 +9,9 @@ use serde::Deserialize;
 use std::sync::LazyLock;
 
 use crate::parser::{
-    emit_degradation_warning, emit_passthrough_warning, truncate_passthrough, FormatMode,
-    OutputParser, ParseResult, TestFailure, TestResult, TokenFormatter,
+    emit_degradation_warning, emit_passthrough_warning, passthrough_warning_reason,
+    truncate_passthrough, FormatMode, OutputParser, ParseResult, TestFailure, TestResult,
+    TokenFormatter,
 };
 
 /// Matches real Playwright JSON reporter output (suites → specs → tests → results)
@@ -283,30 +284,14 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let result = exec_capture(&mut cmd)
         .context("Failed to run playwright (try: npm install -g playwright)")?;
 
-    let raw = format!("{}\n{}", result.stdout, result.stderr);
+    let raw = result.combined();
 
-    // Parse output using PlaywrightParser
-    let parse_result = PlaywrightParser::parse(&result.stdout);
-    let mode = FormatMode::from_verbosity(verbose);
-
-    let filtered = match parse_result {
-        ParseResult::Full(data) => {
-            if verbose > 0 {
-                eprintln!("playwright test (Tier 1: Full JSON parse)");
-            }
-            data.format(mode)
-        }
-        ParseResult::Degraded(data, warnings) => {
-            if verbose > 0 {
-                emit_degradation_warning("playwright", &warnings.join(", "));
-            }
-            data.format(mode)
-        }
-        ParseResult::Passthrough(raw) => {
-            emit_passthrough_warning("playwright", "All parsing tiers failed");
-            raw
-        }
-    };
+    let filtered = format_playwright_output(
+        &result.stdout,
+        &raw,
+        result.exit_code,
+        verbose,
+    );
 
     let hint = crate::core::tee::tee_and_hint(&raw, "playwright", result.exit_code);
     let shown = crate::core::runner::emit_guarded(&filtered, hint.as_deref(), &raw);
@@ -324,6 +309,32 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     }
 
     Ok(0)
+}
+
+fn format_playwright_output(stdout: &str, combined: &str, exit_code: i32, verbose: u8) -> String {
+    let parse_result = PlaywrightParser::parse(stdout);
+    let mode = FormatMode::from_verbosity(verbose);
+
+    match parse_result {
+        ParseResult::Full(data) => {
+            if verbose > 0 {
+                eprintln!("playwright test (Tier 1: Full JSON parse)");
+            }
+            data.format(mode)
+        }
+        ParseResult::Degraded(data, warnings) => {
+            if verbose > 0 {
+                emit_degradation_warning("playwright", &warnings.join(", "));
+            }
+            data.format(mode)
+        }
+        ParseResult::Passthrough(_) => {
+            if let Some(reason) = passthrough_warning_reason(exit_code) {
+                emit_passthrough_warning("playwright", reason);
+            }
+            truncate_passthrough(combined)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -470,5 +481,33 @@ mod tests {
         let result = PlaywrightParser::parse(invalid);
         assert_eq!(result.tier(), 3); // Passthrough
         assert!(!result.is_ok());
+    }
+
+    #[test]
+    fn test_playwright_successful_json_ignores_combined_stderr() {
+        let stdout = r#"{
+            "stats": {
+                "expected": 2,
+                "unexpected": 0,
+                "skipped": 0,
+                "duration": 100.0
+            },
+            "suites": []
+        }"#;
+        let combined = format!("{stdout}\nWARN noisy stderr line\n");
+
+        let filtered = format_playwright_output(stdout, &combined, 0, 0);
+
+        assert!(filtered.contains("PASS (2) FAIL (0)"));
+        assert!(!filtered.contains("noisy stderr"));
+    }
+
+    #[test]
+    fn test_playwright_failed_command_passthrough_includes_stderr() {
+        let combined = "Error: command not found: playwright\n";
+
+        let filtered = format_playwright_output("", combined, 1, 0);
+
+        assert_eq!(filtered, combined);
     }
 }
