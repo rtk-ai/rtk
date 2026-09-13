@@ -8,9 +8,18 @@ use crate::core::truncate::CAP_ERRORS;
 use crate::core::utils::{resolved_command, truncate};
 use crate::golangci_cmd;
 use anyhow::{Context, Result};
+use lazy_static::lazy_static;
+use regex::Regex;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::ffi::OsString;
+
+lazy_static! {
+    static ref BENCH_RESULT_RE: Regex =
+        Regex::new(r"^Benchmark\w+.*\t").expect("bench regex");
+    static ref FUZZ_PROGRESS_RE: Regex =
+        Regex::new(r"^fuzz: elapsed:").expect("fuzz regex");
+}
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -40,9 +49,11 @@ struct PackageResult {
     skip: usize,
     build_failed: bool,
     build_errors: Vec<String>,
-    failed_tests: Vec<(String, Vec<String>)>, // (test_name, output_lines)
-    package_failed: bool,                     // package-level failure (timeout, signal, etc.)
-    package_fail_output: Vec<String>,         // output lines collected before the package fail
+    failed_tests: Vec<(String, Vec<String>)>,
+    package_failed: bool,
+    package_fail_output: Vec<String>,
+    bench_results: Vec<String>,
+    fuzz_summary: Option<String>,
 }
 
 pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
@@ -294,8 +305,9 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
 /// Parse go test -json output (NDJSON format)
 pub(crate) fn filter_go_test_json(output: &str) -> String {
     let mut packages: HashMap<String, PackageResult> = HashMap::new();
-    let mut current_test_output: HashMap<(String, String), Vec<String>> = HashMap::new(); // (package, test) -> outputs
-    let mut build_output: HashMap<String, Vec<String>> = HashMap::new(); // import_path -> error lines
+    let mut current_test_output: HashMap<(String, String), Vec<String>> = HashMap::new();
+    let mut build_output: HashMap<String, Vec<String>> = HashMap::new();
+    let mut non_json_lines: Vec<String> = Vec::new();
 
     for line in output.lines() {
         let trimmed = line.trim();
@@ -305,10 +317,12 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
 
         let event: GoTestEvent = match serde_json::from_str(trimmed) {
             Ok(e) => e,
-            Err(_) => continue, // Skip non-JSON lines
+            Err(_) => {
+                non_json_lines.push(trimmed.to_string());
+                continue;
+            }
         };
 
-        // Handle build-output/build-fail events (use ImportPath, no Package)
         match event.action.as_str() {
             "build-output" => {
                 if let (Some(import_path), Some(output_text)) = (&event.import_path, &event.output)
@@ -324,7 +338,6 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
                 continue;
             }
             "build-fail" => {
-                // build-fail has ImportPath — we'll handle it when the package-level fail arrives
                 continue;
             }
             _ => {}
@@ -339,25 +352,19 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
             }
             "fail" => {
                 if let Some(test) = &event.test {
-                    // Individual test failure
                     pkg_result.fail += 1;
 
-                    // Collect output for failed test
                     let key = (package.clone(), test.clone());
                     let outputs = current_test_output.remove(&key).unwrap_or_default();
                     pkg_result.failed_tests.push((test.clone(), outputs));
                 } else if event.failed_build.is_some() {
-                    // Package-level build failure
                     pkg_result.build_failed = true;
-                    // Collect build errors from the import path
                     if let Some(import_path) = &event.failed_build {
                         if let Some(errors) = build_output.remove(import_path) {
                             pkg_result.build_errors = errors;
                         }
                     }
                 } else {
-                    // Package-level failure without a specific test or build error
-                    // (timeout, signal kill, panic before test execution, etc.)
                     pkg_result.package_failed = true;
                 }
             }
@@ -367,14 +374,18 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
             "output" => {
                 if let Some(output_text) = &event.output {
                     if let Some(test) = &event.test {
-                        // Collect output for current test
+                        let text = output_text.trim_end().to_string();
+                        if BENCH_RESULT_RE.is_match(&text) {
+                            pkg_result.bench_results.push(text);
+                        } else if FUZZ_PROGRESS_RE.is_match(&text) {
+                            pkg_result.fuzz_summary = Some(text);
+                        }
                         let key = (package.clone(), test.clone());
                         current_test_output
                             .entry(key)
                             .or_default()
                             .push(output_text.trim_end().to_string());
                     } else {
-                        // Package-level output (timeout messages, signal info, etc.)
                         let trimmed = output_text.trim();
                         if !trimmed.is_empty() {
                             pkg_result.package_fail_output.push(trimmed.to_string());
@@ -382,7 +393,7 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
                     }
                 }
             }
-            _ => {} // run, pause, cont, etc.
+            _ => {}
         }
     }
 
@@ -392,18 +403,69 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
     let total_fail: usize = packages.values().map(|p| p.fail).sum();
     let total_skip: usize = packages.values().map(|p| p.skip).sum();
     let total_build_fail: usize = packages.values().filter(|p| p.build_failed).count();
-    // Only count package-level fails for packages with no individual test or build failures.
-    // go test -json emits a trailing package-level {"action":"fail"} after any test failure
-    // too, but that event is just a cascade — the individual test failures are already counted.
     let total_pkg_fail: usize = packages
         .values()
         .filter(|p| p.package_failed && p.fail == 0 && !p.build_failed)
         .count();
+    let total_bench: usize = packages.values().map(|p| p.bench_results.len()).sum();
+    let total_fuzz: usize = packages.values().filter(|p| p.fuzz_summary.is_some()).count();
+    let has_extras = total_bench > 0 || total_fuzz > 0;
 
     let has_failures = total_fail > 0 || total_build_fail > 0 || total_pkg_fail > 0;
 
-    if !has_failures && total_pass == 0 {
+    if !has_failures && total_pass == 0 && !has_extras {
+        if !non_json_lines.is_empty() {
+            let mut result = String::from("Go test: error\n");
+            result.push_str("═══════════════════════════════════════\n");
+            for line in non_json_lines.iter().take(20) {
+                result.push_str(&format!("{}\n", truncate(line, 120)));
+            }
+            if non_json_lines.len() > 20 {
+                result.push_str(&format!("\n... +{} more lines\n", non_json_lines.len() - 20));
+            }
+            return result.trim().to_string();
+        }
         return "Go test: No tests found".to_string();
+    }
+
+    if !has_failures && has_extras {
+        let mut parts: Vec<String> = Vec::new();
+        if total_pass > 0 {
+            parts.push(format!("{} passed", total_pass));
+        }
+        if total_bench > 0 {
+            parts.push(format!("{} benchmarks", total_bench));
+        }
+        if total_fuzz > 0 {
+            parts.push(format!("{} fuzz", total_fuzz));
+        }
+        let mut result = format!(
+            "Go test: {} in {} packages\n",
+            parts.join(", "),
+            total_packages
+        );
+        result.push_str("═══════════════════════════════════════\n");
+        let mut first = true;
+        for (package, pkg_result) in packages.iter() {
+            let has_bench = !pkg_result.bench_results.is_empty();
+            let has_fuzz = pkg_result.fuzz_summary.is_some();
+            if !has_bench && !has_fuzz {
+                continue;
+            }
+            if first {
+                first = false;
+            } else {
+                result.push('\n');
+            }
+            result.push_str(&format!("{}\n", compact_package_name(package)));
+            for line in &pkg_result.bench_results {
+                result.push_str(&format!("  {}\n", line));
+            }
+            if let Some(fuzz) = &pkg_result.fuzz_summary {
+                result.push_str(&format!("  {}\n", fuzz));
+            }
+        }
+        return result.trim().to_string();
     }
 
     if !has_failures {
@@ -424,9 +486,6 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
     }
     result.push_str(&format!(" in {} packages\n", total_packages));
 
-    // Show package-level failures first (timeouts, signals, panics).
-    // Skip packages that already have individual test-level failures — those are displayed
-    // in the per-package section below and the package-level event is just a cascade.
     for (package, pkg_result) in packages.iter() {
         if !pkg_result.package_failed || pkg_result.fail > 0 || pkg_result.build_failed {
             continue;
@@ -442,7 +501,6 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
         }
     }
 
-    // Show build failures
     for (package, pkg_result) in packages.iter() {
         if !pkg_result.build_failed {
             continue;
@@ -455,14 +513,12 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
 
         for line in &pkg_result.build_errors {
             let trimmed = line.trim();
-            // Skip the "# package" header line
             if !trimmed.starts_with('#') && !trimmed.is_empty() {
                 result.push_str(&format!("  {}\n", truncate(trimmed, 120)));
             }
         }
     }
 
-    // Show failed tests grouped by package
     for (package, pkg_result) in packages.iter() {
         if pkg_result.fail == 0 {
             continue;
@@ -889,6 +945,247 @@ mod tests {
         assert!(
             result.contains("Test killed with quit"),
             "Should show timeout message, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_benchmark_only() {
+        let output = r#"{"Action":"start","Package":"example.com/foo"}
+{"Action":"output","Package":"example.com/foo","Output":"goos: darwin\n"}
+{"Action":"output","Package":"example.com/foo","Output":"goarch: arm64\n"}
+{"Action":"output","Package":"example.com/foo","Output":"pkg: example.com/foo\n"}
+{"Action":"output","Package":"example.com/foo","Output":"cpu: Apple M4\n"}
+{"Action":"run","Package":"example.com/foo","Test":"BenchmarkFoo"}
+{"Action":"output","Package":"example.com/foo","Test":"BenchmarkFoo","Output":"=== RUN   BenchmarkFoo\n"}
+{"Action":"output","Package":"example.com/foo","Test":"BenchmarkFoo","Output":"BenchmarkFoo\n"}
+{"Action":"output","Package":"example.com/foo","Test":"BenchmarkFoo","Output":"BenchmarkFoo-10   \t21207360\t        60.51 ns/op\t       0 B/op\t       0 allocs/op\n"}
+{"Action":"run","Package":"example.com/foo","Test":"BenchmarkBar"}
+{"Action":"output","Package":"example.com/foo","Test":"BenchmarkBar","Output":"=== RUN   BenchmarkBar\n"}
+{"Action":"output","Package":"example.com/foo","Test":"BenchmarkBar","Output":"BenchmarkBar\n"}
+{"Action":"output","Package":"example.com/foo","Test":"BenchmarkBar","Output":"BenchmarkBar-10   \t    4642\t    252548 ns/op\t  218434 B/op\t      17 allocs/op\n"}
+{"Action":"output","Package":"example.com/foo","Output":"PASS\n"}
+{"Action":"output","Package":"example.com/foo","Output":"ok  \texample.com/foo\t5.058s\n"}
+{"Action":"pass","Package":"example.com/foo","Elapsed":5.058}"#;
+
+        let result = filter_go_test_json(output);
+        assert!(
+            result.contains("2 benchmarks"),
+            "Expected '2 benchmarks' in output, got: {}",
+            result
+        );
+        assert!(
+            result.contains("60.51 ns/op"),
+            "Expected benchmark data preserved, got: {}",
+            result
+        );
+        assert!(
+            result.contains("252548 ns/op"),
+            "Expected benchmark data preserved, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("No tests found"),
+            "Must not say 'No tests found' for benchmarks, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_benchmark_with_tests() {
+        let output = r#"{"Action":"run","Package":"example.com/foo","Test":"TestUnit"}
+{"Action":"pass","Package":"example.com/foo","Test":"TestUnit","Elapsed":0.01}
+{"Action":"run","Package":"example.com/foo","Test":"BenchmarkFoo"}
+{"Action":"output","Package":"example.com/foo","Test":"BenchmarkFoo","Output":"BenchmarkFoo-10   \t1000000\t        100 ns/op\n"}
+{"Action":"output","Package":"example.com/foo","Output":"PASS\n"}
+{"Action":"pass","Package":"example.com/foo","Elapsed":1.5}"#;
+
+        let result = filter_go_test_json(output);
+        assert!(
+            result.contains("1 passed"),
+            "Expected '1 passed' in output, got: {}",
+            result
+        );
+        assert!(
+            result.contains("1 benchmarks"),
+            "Expected '1 benchmarks' in output, got: {}",
+            result
+        );
+        assert!(
+            result.contains("100 ns/op"),
+            "Expected benchmark data preserved, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_benchmark_multi_package() {
+        let output = r#"{"Action":"start","Package":"example.com/a"}
+{"Action":"output","Package":"example.com/a","Output":"?   \texample.com/a\t[no test files]\n"}
+{"Action":"skip","Package":"example.com/a","Elapsed":0}
+{"Action":"start","Package":"example.com/b"}
+{"Action":"run","Package":"example.com/b","Test":"BenchmarkX"}
+{"Action":"output","Package":"example.com/b","Test":"BenchmarkX","Output":"BenchmarkX-10   \t5000\t    200000 ns/op\t  1024 B/op\t      8 allocs/op\n"}
+{"Action":"output","Package":"example.com/b","Output":"PASS\n"}
+{"Action":"pass","Package":"example.com/b","Elapsed":2.0}
+{"Action":"start","Package":"example.com/c"}
+{"Action":"output","Package":"example.com/c","Output":"PASS\n"}
+{"Action":"pass","Package":"example.com/c","Elapsed":0.1}"#;
+
+        let result = filter_go_test_json(output);
+        assert!(
+            result.contains("1 benchmarks"),
+            "Expected '1 benchmarks', got: {}",
+            result
+        );
+        assert!(
+            result.contains("200000 ns/op"),
+            "Expected benchmark data, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("No tests found"),
+            "Must not say 'No tests found', got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_non_json_lines_on_empty_output() {
+        let output = "error: cannot find package\nsome other error line";
+
+        let result = filter_go_test_json(output);
+        assert!(
+            result.contains("error"),
+            "Expected non-JSON error lines in output, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("No tests found"),
+            "Must not say 'No tests found' when errors present, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_fuzz_only() {
+        let output = r#"{"Action":"start","Package":"example.com/foo"}
+{"Action":"run","Package":"example.com/foo","Test":"FuzzBar"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzBar","Output":"=== RUN   FuzzBar\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzBar","Output":"fuzz: elapsed: 0s, gathering baseline coverage: 0/6 completed\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzBar","Output":"fuzz: elapsed: 0s, gathering baseline coverage: 6/6 completed, now fuzzing with 10 workers\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzBar","Output":"fuzz: elapsed: 3s, execs: 224325 (74749/sec), new interesting: 0 (total: 6)\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzBar","Output":"fuzz: elapsed: 6s, execs: 494191 (89955/sec), new interesting: 0 (total: 6)\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzBar","Output":"fuzz: elapsed: 10s, execs: 842077 (78542/sec), new interesting: 0 (total: 6)\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzBar","Output":"--- PASS: FuzzBar (10.10s)\n"}
+{"Action":"pass","Package":"example.com/foo","Test":"FuzzBar","Elapsed":10.1}
+{"Action":"output","Package":"example.com/foo","Output":"PASS\n"}
+{"Action":"pass","Package":"example.com/foo","Elapsed":10.414}"#;
+
+        let result = filter_go_test_json(output);
+        assert!(
+            result.contains("1 fuzz"),
+            "Expected '1 fuzz' in output, got: {}",
+            result
+        );
+        assert!(
+            result.contains("842077"),
+            "Expected final fuzz stats preserved, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("224325"),
+            "Intermediate fuzz lines should be filtered out, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("No tests found"),
+            "Must not say 'No tests found', got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_fuzz_with_tests() {
+        let output = r#"{"Action":"run","Package":"example.com/foo","Test":"TestUnit"}
+{"Action":"pass","Package":"example.com/foo","Test":"TestUnit","Elapsed":0.01}
+{"Action":"run","Package":"example.com/foo","Test":"FuzzBar"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzBar","Output":"fuzz: elapsed: 3s, execs: 100000 (33333/sec), new interesting: 1 (total: 5)\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzBar","Output":"fuzz: elapsed: 5s, execs: 200000 (40000/sec), new interesting: 2 (total: 6)\n"}
+{"Action":"pass","Package":"example.com/foo","Test":"FuzzBar","Elapsed":5.0}
+{"Action":"pass","Package":"example.com/foo","Elapsed":5.1}"#;
+
+        let result = filter_go_test_json(output);
+        assert!(
+            result.contains("2 passed"),
+            "Expected '2 passed' (TestUnit + FuzzBar), got: {}",
+            result
+        );
+        assert!(
+            result.contains("1 fuzz"),
+            "Expected '1 fuzz', got: {}",
+            result
+        );
+        assert!(
+            result.contains("200000"),
+            "Expected final fuzz stats, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("100000"),
+            "Intermediate fuzz line should be filtered, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_mixed_bench_and_fuzz() {
+        let output = r#"{"Action":"run","Package":"example.com/foo","Test":"BenchmarkX"}
+{"Action":"output","Package":"example.com/foo","Test":"BenchmarkX","Output":"BenchmarkX-10   \t5000\t    200000 ns/op\n"}
+{"Action":"run","Package":"example.com/foo","Test":"FuzzY"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzY","Output":"fuzz: elapsed: 5s, execs: 300000 (60000/sec), new interesting: 3 (total: 8)\n"}
+{"Action":"pass","Package":"example.com/foo","Test":"FuzzY","Elapsed":5.0}
+{"Action":"pass","Package":"example.com/foo","Elapsed":6.0}"#;
+
+        let result = filter_go_test_json(output);
+        assert!(
+            result.contains("1 benchmarks"),
+            "Expected '1 benchmarks', got: {}",
+            result
+        );
+        assert!(
+            result.contains("1 fuzz"),
+            "Expected '1 fuzz', got: {}",
+            result
+        );
+        assert!(
+            result.contains("200000 ns/op"),
+            "Expected bench data, got: {}",
+            result
+        );
+        assert!(
+            result.contains("300000"),
+            "Expected fuzz data, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_benchmark_no_blank_line_after_separator() {
+        let output = r#"{"Action":"run","Package":"example.com/foo","Test":"BenchmarkX"}
+{"Action":"output","Package":"example.com/foo","Test":"BenchmarkX","Output":"BenchmarkX-10   \t5000\t    200000 ns/op\n"}
+{"Action":"pass","Package":"example.com/foo","Elapsed":1.0}"#;
+
+        let result = filter_go_test_json(output);
+        assert!(
+            !result.contains("═══════════════════════════════════════\n\n"),
+            "Should not have blank line after separator, got: {}",
+            result
+        );
+        let after_sep = result.split("═══════════════════════════════════════\n").nth(1);
+        assert!(
+            after_sep.map(|s| s.starts_with("foo")).unwrap_or(false),
+            "Package name should immediately follow separator, got: {}",
             result
         );
     }
