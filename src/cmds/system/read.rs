@@ -66,22 +66,15 @@ pub fn run(
 
     filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
 
-    let (raw, rtk_output) = if line_numbers {
-        (
-            format_with_line_numbers(&content),
-            format_with_line_numbers(&filtered),
-        )
+    let raw = tracking_baseline(&content, max_lines, tail_lines, line_numbers, &lang);
+    let rtk_output = if line_numbers {
+        format_with_line_numbers(&filtered)
     } else {
-        (content.clone(), filtered.clone())
+        filtered.clone()
     };
     let shown = never_worse(&raw, &rtk_output);
     print!("{}", shown);
-    timer.track(
-        &format!("cat {}", file.display()),
-        "rtk read",
-        &raw,
-        shown,
-    );
+    timer.track(&format!("cat {}", file.display()), "rtk read", &raw, shown);
     Ok(())
 }
 
@@ -134,13 +127,11 @@ pub fn run_stdin(
 
     filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
 
-    let (raw, rtk_output) = if line_numbers {
-        (
-            format_with_line_numbers(&content),
-            format_with_line_numbers(&filtered),
-        )
+    let raw = tracking_baseline(&content, max_lines, tail_lines, line_numbers, &lang);
+    let rtk_output = if line_numbers {
+        format_with_line_numbers(&filtered)
     } else {
-        (content.clone(), filtered.clone())
+        filtered.clone()
     };
     let shown = never_worse(&raw, &rtk_output);
     print!("{}", shown);
@@ -183,6 +174,37 @@ fn apply_line_window(
     }
 
     content.to_string()
+}
+
+fn tracking_baseline(
+    content: &str,
+    max_lines: Option<usize>,
+    tail_lines: Option<usize>,
+    line_numbers: bool,
+    lang: &Language,
+) -> String {
+    let baseline = if let Some(max) = max_lines {
+        head_window(content, max)
+    } else {
+        apply_line_window(content, max_lines, tail_lines, lang)
+    };
+    if line_numbers {
+        format_with_line_numbers(&baseline)
+    } else {
+        baseline
+    }
+}
+
+fn head_window(content: &str, max_lines: usize) -> String {
+    if max_lines == 0 {
+        return String::new();
+    }
+    let lines: Vec<&str> = content.lines().take(max_lines).collect();
+    let mut result = lines.join("\n");
+    if content.ends_with('\n') && !lines.is_empty() {
+        result.push('\n');
+    }
+    result
 }
 
 #[cfg(test)]
@@ -234,6 +256,34 @@ fn main() {{
         let output = apply_line_window(input, Some(2), None, &Language::Unknown);
         assert!(output.starts_with("a\n"));
         assert!(output.contains("more lines"));
+    }
+
+    #[test]
+    fn test_tracking_baseline_matches_head_window() {
+        let input = "a\nb\nc\nd\n";
+        let baseline = tracking_baseline(input, Some(2), None, false, &Language::Unknown);
+        assert_eq!(baseline, "a\nb\n");
+    }
+
+    #[test]
+    fn test_tracking_baseline_matches_tail_window() {
+        let input = "a\nb\nc\nd\n";
+        let baseline = tracking_baseline(input, None, Some(2), false, &Language::Unknown);
+        assert_eq!(baseline, "c\nd\n");
+    }
+
+    #[test]
+    fn test_tracking_baseline_keeps_plain_read_full_file() {
+        let input = "a\nb\nc\nd\n";
+        let baseline = tracking_baseline(input, None, None, false, &Language::Unknown);
+        assert_eq!(baseline, input);
+    }
+
+    #[test]
+    fn test_tracking_baseline_applies_line_numbers_after_window() {
+        let input = "a\nb\nc\nd\n";
+        let baseline = tracking_baseline(input, None, Some(2), true, &Language::Unknown);
+        assert_eq!(baseline, "1 │ c\n2 │ d\n");
     }
 
     fn rtk_bin() -> std::path::PathBuf {
