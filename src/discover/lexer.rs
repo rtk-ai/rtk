@@ -74,7 +74,7 @@ pub(crate) fn is_crlf_at(bytes: &[u8], i: usize) -> bool {
 /// into single words — e.g. `*.yml` tokenizes as `Shellism("*")` +
 /// `Arg(".yml")` but is one bash word. For callers that only need "was there
 /// a space here", not full shell-operator awareness.
-pub(crate) fn coalesce_words<'a>(cmd: &'a str, tokens: &[ParsedToken]) -> Vec<(&'a str, usize)> {
+fn coalesce_words<'a>(cmd: &'a str, tokens: &[ParsedToken]) -> Vec<(&'a str, usize)> {
     let mut words = Vec::new();
     let mut run_start: Option<usize> = None;
     let mut run_end: usize = 0;
@@ -95,6 +95,21 @@ pub(crate) fn coalesce_words<'a>(cmd: &'a str, tokens: &[ParsedToken]) -> Vec<(&
         words.push((&cmd[start..run_end], start));
     }
     words
+}
+
+/// A command's words (quote-aware, see [`coalesce_words`]) split from their byte offsets in
+/// `cmd`. The words are *unresolved*: they are slices of `cmd` with quote characters and
+/// backslash escapes still literal, so `--config "a path/x.yml"` yields the word
+/// `"a path/x.yml"` with its quotes. A caller that reads a word as a value must put it through
+/// [`resolve_word_text`] first; [`shell_split`] resolves but drops the offsets. Comparing an
+/// unresolved word to a keyword matches only the unquoted spelling -- fine when the miss means
+/// passthrough, not when it means a wrong rewrite.
+///
+/// Callers that hand the words to `core::arg_tokenizer` keep the offsets alongside:
+/// `Token::source_index` indexes the words, so `spans[token.source_index]` is the way back to a
+/// slice of the original command string.
+pub(crate) fn words_and_spans(cmd: &str) -> (Vec<&str>, Vec<usize>) {
+    coalesce_words(cmd, &tokenize(cmd)).into_iter().unzip()
 }
 
 fn tokenize_inner(input: &str, newline_mode: NewlineMode) -> Vec<ParsedToken> {
@@ -541,7 +556,7 @@ pub fn strip_quotes(s: &str) -> String {
 /// Turns a coalesced word's raw text (quotes/escapes still literal, as
 /// `tokenize()` preserves them) into argv-ready text: quote chars that
 /// open/close a span are stripped, backslash escapes resolved.
-fn resolve_word_text(raw: &str) -> String {
+pub(crate) fn resolve_word_text(raw: &str) -> String {
     let mut result = String::new();
     let mut chars = raw.chars().peekable();
     let mut quote: Option<char> = None;
@@ -606,6 +621,19 @@ mod tests {
             .map(|(w, _)| w)
             .collect();
         assert_eq!(words, vec!["golangci-lint", "--config", "*.yml", "run"]);
+    }
+
+    #[test]
+    fn test_words_and_spans_keeps_words_unresolved() {
+        let cmd = r#"golangci-lint --config "a path/x.yml" run"#;
+        let (words, _) = words_and_spans(cmd);
+        assert_eq!(words[2], r#""a path/x.yml""#);
+        assert_eq!(resolve_word_text(words[2]), "a path/x.yml");
+
+        let escaped = r"golangci-lint --config=a\ b run";
+        let (words, _) = words_and_spans(escaped);
+        assert_eq!(words[1], r"--config=a\ b");
+        assert_eq!(resolve_word_text(words[1]), "--config=a b");
     }
 
     #[test]
@@ -1278,9 +1306,9 @@ mod tests {
     #[test]
     fn test_shell_split_coalesces_unquoted_glob_next_to_quoted_segment() {
         // An unquoted metacharacter directly adjacent to a quoted segment
-        // (no space between them) must stay one word — the same
-        // token-coalescing gap that split_token_spans needed for golangci-lint,
-        // now exercised through shell_split's output shape (quotes stripped).
+        // (no space between them) must stay one word — the token-coalescing gap
+        // `coalesce_words` closes, here through shell_split's output shape
+        // (quotes stripped).
         assert_eq!(
             shell_split(r#"echo *.yml"quoted end""#),
             vec!["echo", "*.ymlquoted end"]

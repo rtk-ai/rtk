@@ -37,7 +37,7 @@ fn is_subcommand(name: &str) -> bool {
 /// inside a cluster (`golangci-lint -vc foo.yml run` is "unknown shorthand flag: 'c' in -c",
 /// verified against 2.13.1). Reading one as value-taking there swallowed the next token --
 /// `-Egosec run` lost `run`, and with it the subcommand detection this list exists for.
-fn global_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+pub(crate) fn global_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
     match kind {
         TokenKind::Long => matches!(
             name,
