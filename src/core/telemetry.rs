@@ -730,13 +730,21 @@ mod tests {
             Ok(t) => t,
             Err(_) => return, // No DB — skip
         };
-        let (cmds, top, pct, saved_24h, saved_total) = get_stats(&tracker);
+        // The trailing saved-token sums are unbounded and signed: `tokens_saved_24h` and
+        // `total_tokens_saved` return an unclamped `SUM(saved_tokens)`, so a window whose
+        // filters emitted more than they saved sums negative, and the 24h window can
+        // exceed the all-time total when the rows outside it are the negative ones.
+        // Nothing about their value is assertable, so this test does not bind them.
+        let (cmds, top, pct, ..) = get_stats(&tracker);
         assert!(cmds >= 0);
         assert!(top.len() <= 5);
-        assert!(saved_24h >= 0);
-        assert!(saved_total >= 0);
         if let Some(p) = pct {
-            assert!((0.0..=100.0).contains(&p));
+            // Signed savings: a net-regressing DB makes overall savings honestly
+            // negative; only the upper bound is a real invariant (never saves > 100%).
+            assert!(
+                p <= 100.0,
+                "overall savings pct must never exceed 100, got {p}"
+            );
         }
     }
 
@@ -750,7 +758,13 @@ mod tests {
         assert!(stats.passthrough_top.len() <= 5);
         assert!(stats.parse_failures_24h >= 0);
         assert!(stats.low_savings_commands.len() <= 5);
-        assert!((0.0..=100.0).contains(&stats.avg_savings_per_command));
+        // Signed savings: avg_savings_per_command can be negative for a regressing
+        // filter; bound only the upper end (a real saving never exceeds 100%).
+        assert!(
+            stats.avg_savings_per_command <= 100.0,
+            "avg savings per command must never exceed 100, got {}",
+            stats.avg_savings_per_command
+        );
         assert!(
             ["claude", "gemini", "codex", "cursor", "copilot", "vibe", "none", "unknown"]
                 .iter()

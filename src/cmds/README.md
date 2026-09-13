@@ -294,6 +294,7 @@ Adding a new filter or command requires changes in multiple places. For TOML-vs-
    - Add `.tee("label")` when the filter parses structured output (enables raw output recovery on failure)
    - **Exit codes**: handled automatically by `run_filtered()` — just return its result
    - **Truncation**: if the filter caps any list at N items, emit `force_tee_tail_hint` (flat lists) or `force_tee_hint` (multi-line blocks) so the agent can recover hidden items — see [Internal Truncation Recovery](#internal-truncation-recovery). Use a named constant for the cap; derive the offset from it (`MAX_XXX + 1`)
+   - **Arguments**: if the filter inspects its args at all — which flags were passed, which are paths, what to inject or strip — classify them with [`arg_tokenizer`](../core/README.md#argument-tokenizer-arg_tokenizerrs), never a string scan. Write the `takes_value` predicate from the tool's own `--help` and check it against the real binary
 2. **Register module**:
    - Ecosystem `mod.rs` files use `automod::dir!()` — any `.rs` file in the directory becomes a public module automatically. No manual `pub mod` needed, but be aware: WIP or helper files will also be exposed. Only commit command-ready modules.
    - Add variant to `Commands` enum in `main.rs` with `#[arg(trailing_var_arg = true, allow_hyphen_values = true)]`

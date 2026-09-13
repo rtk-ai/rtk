@@ -52,6 +52,12 @@ After installation, **verify you have the correct rtk**:
 rtk gain  # Must show the savings dashboard (not "command not found")
 ```
 
+### Quick Install (Windows)
+
+```powershell
+winget install rtk-ai.rtk
+```
+
 ### Alternative: Manual Installation
 
 ```bash
@@ -265,6 +271,7 @@ cargo uninstall rtk
 
 # If installed via package manager
 brew uninstall rtk          # macOS Homebrew
+winget uninstall rtk-ai.rtk # Windows winget
 sudo apt remove rtk         # Debian/Ubuntu
 sudo dnf remove rtk         # Fedora/RHEL
 ```

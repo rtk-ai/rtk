@@ -4,6 +4,7 @@
 //! corrupts the JSON protocol (Claude Code bug #4669 silently disables the hook).
 
 use super::constants::PRE_TOOL_USE_KEY;
+use super::decision::{self, HookDecision};
 use super::permissions::{self, PermissionVerdict};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -11,7 +12,6 @@ use std::io::{self, Read, Write};
 
 use crate::core::tracking::HookOutcome;
 use crate::core::utils::strip_leading_bom;
-use crate::discover::registry::{has_heredoc, rewrite_command};
 
 const STDIN_CAP: usize = 1_048_576; // 1 MiB
 
@@ -233,42 +233,14 @@ fn heal_legacy_hook_file(path: &std::path::Path) -> bool {
         .is_ok()
 }
 
-fn get_rewritten(cmd: &str) -> Option<String> {
-    if has_heredoc(cmd) {
-        return None;
-    }
-
-    let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
-
-    let rewritten = rewrite_command(cmd, &excluded, &transparent_prefixes)?;
-
-    if rewritten == cmd {
-        return None;
-    }
-
-    Some(rewritten)
-}
-
-enum HookDecision {
-    AllowRewrite(String),
-    AskRewrite(String),
-    Defer,
-    Deny,
-}
-
+/// The decision every hook applies -- [`decision::decide_for_agent`] -- plus the
+/// recall bookkeeping the hook path performs for any command it does not deny.
 fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
     if verdict == PermissionVerdict::Deny {
         return HookDecision::Deny;
     }
     crate::hooks::rewrite_cmd::track_tee_read(cmd);
-    if crate::discover::lexer::contains_unattestable_construct(cmd) {
-        return HookDecision::Defer;
-    }
-    match get_rewritten(cmd) {
-        Some(r) if verdict == PermissionVerdict::Allow => HookDecision::AllowRewrite(r),
-        Some(r) => HookDecision::AskRewrite(r),
-        None => HookDecision::Defer,
-    }
+    decision::decide_for_agent(cmd, verdict)
 }
 
 fn decide_hook_action(cmd: &str, host: permissions::Host) -> HookDecision {
@@ -1006,6 +978,7 @@ fn run_droid_inner_with_rules(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::permissions::PermissionVerdict;
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         crate::discover::registry::rewrite_command(cmd, excluded, &[])
@@ -1117,26 +1090,6 @@ mod tests {
     #[test]
     fn test_detect_unknown_is_passthrough() {
         assert!(matches!(detect_format(&json!({})), HookFormat::PassThrough));
-    }
-
-    #[test]
-    fn test_get_rewritten_supported() {
-        assert!(get_rewritten("git status").is_some());
-    }
-
-    #[test]
-    fn test_get_rewritten_unsupported() {
-        assert!(get_rewritten("htop").is_none());
-    }
-
-    #[test]
-    fn test_get_rewritten_already_rtk() {
-        assert!(get_rewritten("rtk git status").is_none());
-    }
-
-    #[test]
-    fn test_get_rewritten_heredoc() {
-        assert!(get_rewritten("cat <<'EOF'\nhello\nEOF").is_none());
     }
 
     // --- VS Code Copilot Chat / Copilot CLI (PascalCase) handler ---
@@ -2025,11 +1978,6 @@ mod tests {
         assert_eq!(
             check_command_with_rules("cargo test", &deny, &[], &[]),
             PermissionVerdict::Deny
-        );
-        // Denied commands must not be rewritten — Gemini handler checks deny before rewrite
-        assert!(
-            get_rewritten("cargo test").is_some(),
-            "cargo test should be rewritable when not denied"
         );
     }
 

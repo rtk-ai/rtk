@@ -11,6 +11,10 @@ These override general Rust conventions:
 3. **Lazy regex** — Put fixed patterns reused across calls in `LazyLock<Regex>`; keep runtime-dependent patterns local.
 4. **Fallback pattern** — If filter fails, execute raw command unchanged. Never block the user.
 5. **Exit code propagation** — `std::process::exit(code)` if underlying command fails.
+6. **Parse args with `arg_tokenizer`** — every new command, flag, or arg-handling fix classifies
+   arguments through `tokenize`/`tokenize_with_options`, never a `starts_with('-')` or
+   `arg == "--flag"` scan. See [`src/core/README.md`](../../src/core/README.md#argument-tokenizer-arg_tokenizerrs)
+   for the four rules that go with it.
 
 ## Error Handling
 

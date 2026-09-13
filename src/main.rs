@@ -2788,16 +2788,32 @@ fn run_cli() -> Result<i32> {
                 hooks::hook_cmd::run_vibe()?;
                 0
             }
-            HookCommands::Check { agent: _, command } => {
-                use crate::discover::registry::rewrite_command;
+            HookCommands::Check { agent, command } => {
+                // Answers the same question the hooks answer, through the same
+                // decision (`hooks::decision`) — not just "does a rewrite rule
+                // match?". Checking the rule alone reported a rewrite for
+                // command substitutions, file redirects and heredocs that both
+                // hook paths refuse to touch, which is the opposite of what a
+                // diagnostic is for.
+                use crate::hooks::decision::{AgentPath, HookDecision};
                 let raw = command.join(" ");
-                let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
-                match rewrite_command(&raw, &excluded, &transparent_prefixes) {
-                    Some(rewritten) => {
+                // Answer for the agent that was asked about. Agents differ both
+                // in whose permission rules their hook reads and in how it
+                // decides -- see `AgentPath` -- so one hard-coded answer would
+                // misdescribe the very hook being diagnosed.
+                let Some(path) = AgentPath::from_agent(&agent) else {
+                    return Ok(2);
+                };
+                match path.decide(&raw) {
+                    HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten) => {
                         println!("{}", rewritten);
                         0
                     }
-                    None => {
+                    HookDecision::Deny => {
+                        eprintln!("Denied by a permission rule: {}", raw);
+                        1
+                    }
+                    HookDecision::Defer => {
                         eprintln!("No rewrite for: {}", raw);
                         1
                     }

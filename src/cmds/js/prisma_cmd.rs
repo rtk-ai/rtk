@@ -316,7 +316,9 @@ fn filter_migrate_status(output: &str) -> String {
             applied_count += 1;
             if latest_migration.is_empty() && line.contains("202") {
                 if let Some(pos) = line.find("202") {
-                    let end = line[pos..].find(|c: char| c.is_whitespace()).unwrap_or(20);
+                    let end = line[pos..]
+                        .find(|c: char| c.is_whitespace())
+                        .unwrap_or(line.len() - pos);
                     latest_migration = line[pos..pos + end].to_string();
                 }
             }
@@ -460,6 +462,21 @@ import { PrismaClient } from '@prisma/client'
         // Parser may not extract exact counts from this format, just check it doesn't crash
         assert!(!result.contains("Prisma schema loaded"));
         assert!(!result.contains("Start by importing"));
+    }
+
+    #[test]
+    fn test_filter_migrate_status_reads_a_timestamp_at_end_of_line() {
+        // The migration id ran to the end of the line, so there was no whitespace to find and
+        // the hardcoded fallback of 20 sliced past it -- a panic, which aborts in release and
+        // takes the user's whole command output with it.
+        let output = "Migration could not be applied at 2024-01-01T12:00:00";
+        let result = filter_migrate_status(output);
+        assert!(result.contains("2024-01-01T12:00:00"), "{result}");
+
+        // A multibyte character after the id must not split mid-char either.
+        let output = "1 migration applied 20240101_café";
+        let result = filter_migrate_status(output);
+        assert!(result.contains("20240101_café"), "{result}");
     }
 
     #[test]

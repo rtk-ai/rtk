@@ -74,6 +74,14 @@ The token counts RTK reports are estimated as `bytes / 4` — RTK ships no token
 brew install rtk
 ```
 
+### winget (Windows)
+
+Easiest way to install on Windows — one command, no PATH setup needed:
+
+```powershell
+winget install rtk-ai.rtk
+```
+
 ### Quick Install (Linux/macOS)
 
 ```bash
@@ -368,7 +376,9 @@ By default `RTK.md` says nothing about RTK itself. Set `[awareness] level = "hig
 
 RTK works fully on native Windows. Since **v0.37.2** the auto-rewrite hook runs as a **native binary command** (`rtk hook claude`) — no Unix shell, bash, or jq required — so commands are rewritten transparently on Command Prompt, PowerShell, and Windows Terminal, just like on Linux and macOS.
 
-### Native Windows
+### Native Windows (manual install)
+
+Prefer [`winget`](#winget-windows) if you can — it handles PATH for you.
 
 ```powershell
 # 1. Download and extract rtk-x86_64-pc-windows-msvc.zip from releases
