@@ -1,11 +1,14 @@
 ---
-description: Build, commit, push & version bump workflow - automates the complete release cycle
+name: rtk-release
+description: RTK release workflow - build verification, version bump, CHANGELOG, git tag & push to trigger CI/CD. RTK-specific; renamed from "ship" to avoid collision with the gstack ship skill.
 allowed-tools: Read Write Edit Bash Grep Glob
 ---
 
-# Ship Release
+# RTK Release
 
 Systematic release workflow for RTK: build verification, version bump, changelog update, git tag, and push to trigger CI/CD.
+
+> Formerly named `ship`. Renamed to `rtk-release` on 2026-07-26 because the gstack `ship` skill shadowed it in the skill list, making this one unreachable.
 
 ## When to Use
 
@@ -15,7 +18,7 @@ Systematic release workflow for RTK: build verification, version bump, changelog
 
 ## Pre-Release Checklist (Auto-Verified)
 
-Before running `/ship`, verify:
+Before running `/rtk-release`, verify:
 
 ### 1. Quality Checks Pass
 ```bash
