@@ -193,6 +193,9 @@ impl AgentPath {
         match agent {
             // `copilot` reads Claude Code's settings rather than a Copilot file
             // (see `hook_cmd`'s `vscode_response` and `copilot_cli_response`).
+            // `alma` has no permission-settings surface of its own; its app-side
+            // approval flow judges the rewritten command.
+            "alma" => Some(Self::InProcess(Host::Alma)),
             "antigravity" | "cline" | "kilocode" | "kimi" | "windsurf" => Some(Self::RulesOnly),
             "claude" | "copilot" => Some(Self::InProcess(Host::Claude)),
             "codex" => Some(Self::InProcess(Host::Codex)),
@@ -207,6 +210,7 @@ impl AgentPath {
 
     /// The `--agent` values [`AgentPath::lookup`] accepts.
     const AGENTS: &'static [&'static str] = &[
+        "alma",
         "antigravity",
         "claude",
         "cline",

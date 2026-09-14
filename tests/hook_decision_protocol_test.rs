@@ -464,6 +464,7 @@ mod hook_check {
     fn answers_for_every_supported_agent() {
         let sb = Sandbox::bare();
         for agent in [
+            "alma",
             "claude",
             "copilot",
             "cursor",

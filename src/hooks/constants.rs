@@ -18,6 +18,8 @@ pub const CURSOR_HOOK_COMMAND: &str = "rtk hook cursor";
 pub const DROID_HOOK_COMMAND: &str = "rtk hook droid";
 /// Native Rust hook command for Mistral Vibe.
 pub const VIBE_HOOK_COMMAND: &str = "rtk hook vibe";
+/// Native Rust hook command for Alma.
+pub const ALMA_HOOK_COMMAND: &str = "rtk hook alma";
 
 pub const CONFIG_DIR: &str = ".config";
 pub const OPENCODE_SUBDIR: &str = "opencode";
@@ -78,3 +80,16 @@ pub const VIBE_PROMPTS_SUBDIR: &str = "prompts";
 pub const VIBE_PROMPT_FILE: &str = "rtk.md";
 pub const VIBE_HOOK_NAME: &str = "rtk-rewrite";
 pub const VIBE_BASH_MATCH: &str = "bash";
+
+/// Alma config subdirectory under `~/.config` (e.g. `~/.config/alma`).
+pub const ALMA_SUBDIR: &str = "alma";
+/// Alma hook registry file.
+pub const ALMA_HOOKS_FILE: &str = "hooks.json";
+/// Alma hook event RTK registers for: fired before a tool runs.
+pub const ALMA_WILL_EXECUTE_KEY: &str = "tool.willExecute";
+/// Alma matcher regular expression selecting the Bash tool.
+pub const ALMA_BASH_MATCHER: &str = "^Bash$";
+/// Hook timeout (milliseconds) written into the Alma hook entry. Alma's own
+/// default is 10s; a tighter bound keeps a stalled rewrite from delaying the
+/// tool call — Alma fails open on timeout either way.
+pub const ALMA_HOOK_TIMEOUT_MS: u64 = 5000;

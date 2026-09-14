@@ -14,14 +14,16 @@ use crate::hooks::constants::{
 };
 
 use super::constants::{
-    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CODEX_HOOK_COMMAND,
-    CURSOR_HOOK_COMMAND, DROID_DIR, DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOKS_FILE,
-    DROID_HOOKS_SUBDIR, DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR,
-    HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE,
-    HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR, OMP_DIR, OMP_LOCAL_DIR, PI_AGENT_STATE_FILE,
-    PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
-    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR, VIBE_HOOKS_FILE,
-    VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
+    ALMA_BASH_MATCHER, ALMA_HOOKS_FILE, ALMA_HOOK_COMMAND, ALMA_HOOK_TIMEOUT_MS, ALMA_SUBDIR,
+    ALMA_WILL_EXECUTE_KEY, BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR,
+    CODEX_HOOK_COMMAND, CURSOR_HOOK_COMMAND, DROID_DIR, DROID_EXECUTE_MATCHER, DROID_HOME_ENV,
+    DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR, DROID_HOOK_COMMAND, DROID_SETTINGS_FILE,
+    GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
+    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR, OMP_DIR,
+    OMP_LOCAL_DIR, PI_AGENT_STATE_FILE, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR,
+    PI_LOCAL_DIR, PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    VIBE_BASH_MATCH, VIBE_DIR, VIBE_HOOKS_FILE, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME,
+    VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
 };
 use super::integrity;
 use super::{is_claude_hook_command, is_codex_hook_command};
@@ -6139,6 +6141,289 @@ fn strip_vibe_rtk_entry(content: &str) -> Option<String> {
     Some(out)
 }
 
+// ─── Alma support ───────────────────────────────────────────
+
+/// Resolve Alma's config directory (`~/.config/alma`).
+fn resolve_alma_dir() -> Result<PathBuf> {
+    resolve_home_subdir(CONFIG_DIR).map(|p| p.join(ALMA_SUBDIR))
+}
+
+/// Install the Alma `tool.willExecute` hook.
+///
+/// Global-only: Alma reads a single user-scoped hook registry at
+/// `~/.config/alma/hooks.json` and hot-reloads it on save.
+pub fn run_alma_mode(global: bool, ctx: InitContext) -> Result<()> {
+    if !global {
+        anyhow::bail!("Alma support is global-only. Use: rtk init -g --agent alma");
+    }
+    let alma_dir = resolve_alma_dir()?;
+    run_alma_mode_at(&alma_dir, ctx)
+}
+
+fn run_alma_mode_at(alma_dir: &Path, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    if !dry_run {
+        fs::create_dir_all(alma_dir)
+            .with_context(|| format!("Failed to create Alma config dir: {}", alma_dir.display()))?;
+    }
+
+    let hooks_path = alma_dir.join(ALMA_HOOKS_FILE);
+    let patched = patch_alma_hooks_json(&hooks_path, ctx)?;
+
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        println!("\nAlma hook registered (global).\n");
+        println!("  Command:    {}", ALMA_HOOK_COMMAND);
+        println!("  Hooks file: {}", hooks_path.display());
+        if patched {
+            println!("  RTK tool.willExecute entry added");
+        } else {
+            println!("  RTK tool.willExecute entry already present");
+        }
+        println!("  Alma hot-reloads hooks.json on save. Test with: git status\n");
+    }
+    Ok(())
+}
+
+/// Merge the RTK entry into Alma's hooks.json. Returns true if the file was
+/// modified.
+///
+/// Additive by construction: existing matcher groups and their hooks — the
+/// user's own included — are preserved, and RTK joins an existing `^Bash$`
+/// group rather than duplicating the matcher (mirrors the Droid installer's
+/// Execute-group reuse). Idempotent: a present `rtk hook alma` command is
+/// detected and left alone.
+fn patch_alma_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
+    let mut root = read_json_file(path)?.unwrap_or_else(|| serde_json::json!({}));
+
+    if alma_hook_already_present(&root) {
+        if verbose > 0 {
+            eprintln!("{}: RTK hook already present", path.display());
+        }
+        return Ok(false);
+    }
+
+    insert_alma_hook_entry(&mut root)?;
+
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize Alma hooks.json")?;
+
+    if dry_run {
+        println!("[dry-run] would patch Alma hooks.json: {}", path.display());
+        if verbose > 0 {
+            println!("[dry-run] content:\n{}", serialized);
+        }
+        return Ok(true);
+    }
+
+    if let Some(backup_path) = backup_and_atomic_write(path, &serialized)? {
+        if verbose > 0 {
+            eprintln!("Backup: {}", backup_path.display());
+        }
+    }
+    Ok(true)
+}
+
+/// Check whether the RTK `tool.willExecute` hook is already registered.
+fn alma_hook_already_present(root: &serde_json::Value) -> bool {
+    let Some(entries) = root
+        .get("hooks")
+        .and_then(|h| h.get(ALMA_WILL_EXECUTE_KEY))
+        .and_then(|e| e.as_array())
+    else {
+        return false;
+    };
+    entries.iter().any(|entry| {
+        entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .is_some_and(|hooks| {
+                hooks.iter().any(|hook| {
+                    hook.get("command").and_then(|c| c.as_str()) == Some(ALMA_HOOK_COMMAND)
+                })
+            })
+    })
+}
+
+/// The hook entry RTK registers. `timeout` is Alma's per-hook budget in
+/// milliseconds; Alma fails open when it elapses.
+fn alma_hook_entry() -> serde_json::Value {
+    serde_json::json!({
+        "command": ALMA_HOOK_COMMAND,
+        "timeout": ALMA_HOOK_TIMEOUT_MS,
+        "enabled": true,
+    })
+}
+
+/// Insert the RTK `^Bash$` matcher entry into a parsed Alma hooks.json.
+fn insert_alma_hook_entry(root: &mut serde_json::Value) -> Result<()> {
+    let root_obj = match root.as_object_mut() {
+        Some(obj) => obj,
+        None => {
+            *root = serde_json::json!({});
+            root.as_object_mut().expect("just-created json object")
+        }
+    };
+
+    let events = root_obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("hooks value is not an object")?;
+
+    let will_execute = events
+        .entry(ALMA_WILL_EXECUTE_KEY)
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .context("tool.willExecute value is not an array")?;
+
+    for entry in will_execute.iter_mut() {
+        if entry.get("matcher").and_then(|m| m.as_str()) == Some(ALMA_BASH_MATCHER) {
+            if let Some(hooks) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+                hooks.push(alma_hook_entry());
+                return Ok(());
+            }
+        }
+    }
+
+    will_execute.push(serde_json::json!({
+        "matcher": ALMA_BASH_MATCHER,
+        "hooks": [alma_hook_entry()],
+    }));
+    Ok(())
+}
+
+/// Public entry point for `rtk init -g --agent alma --uninstall`.
+pub fn uninstall_alma(ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let alma_dir = match resolve_alma_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("RTK Alma uninstall skipped: could not resolve ~/.config/alma ({e})");
+            return Ok(());
+        }
+    };
+    let removed = uninstall_alma_at(&alma_dir, ctx)?;
+
+    if removed.is_empty() {
+        println!("RTK Alma support was not installed (nothing to remove)");
+    } else {
+        let header = if dry_run {
+            "[dry-run] would uninstall RTK for Alma:"
+        } else {
+            "RTK uninstalled for Alma:"
+        };
+        println!("{}", header);
+        for item in removed {
+            println!("  - {}", item);
+        }
+    }
+
+    if dry_run {
+        print_dry_run_footer();
+    }
+    Ok(())
+}
+
+/// Remove RTK's entry from `alma_dir/hooks.json`. A malformed file is left
+/// untouched with a warning rather than rewritten (mirrors Cursor uninstall);
+/// a missing file or absent entry is a no-op.
+fn uninstall_alma_at(alma_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
+    let mut removed = Vec::new();
+    let hooks_path = alma_dir.join(ALMA_HOOKS_FILE);
+
+    let root = match read_json_file(&hooks_path) {
+        Ok(root) => root,
+        Err(error) if error.downcast_ref::<serde_json::Error>().is_some() => {
+            eprintln!(
+                "rtk: warning: leaving malformed Alma hooks.json unchanged during uninstall: {error:#}"
+            );
+            None
+        }
+        Err(error) => return Err(error),
+    };
+
+    if let Some(mut root) = root {
+        if remove_alma_hook_from_json(&mut root) {
+            if dry_run {
+                println!(
+                    "[dry-run] would remove RTK entry from Alma hooks.json: {}",
+                    hooks_path.display()
+                );
+            } else {
+                let serialized = serde_json::to_string_pretty(&root)
+                    .context("Failed to serialize Alma hooks.json")?;
+                backup_and_atomic_write(&hooks_path, &serialized)?;
+                if verbose > 0 {
+                    eprintln!("Removed RTK hook from Alma hooks.json");
+                }
+            }
+            removed.push(format!(
+                "Alma hooks.json: removed RTK entry ({})",
+                hooks_path.display()
+            ));
+        }
+    }
+
+    Ok(removed)
+}
+
+/// Strip RTK's hook entry from a parsed Alma hooks.json, returning true when
+/// an entry was removed. Matcher groups left empty by the removal are dropped,
+/// as are a then-empty `tool.willExecute` key and `hooks` object. Everything
+/// else — other matchers, other hooks under `^Bash$`, other top-level keys —
+/// is preserved.
+fn remove_alma_hook_from_json(root: &mut serde_json::Value) -> bool {
+    let Some(events) = root.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
+        return false;
+    };
+    let Some(will_execute) = events
+        .get_mut(ALMA_WILL_EXECUTE_KEY)
+        .and_then(|e| e.as_array_mut())
+    else {
+        return false;
+    };
+
+    let mut modified = false;
+    for entry in will_execute.iter_mut() {
+        if let Some(hooks) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+            let before = hooks.len();
+            hooks.retain(|hook| {
+                hook.get("command").and_then(|c| c.as_str()) != Some(ALMA_HOOK_COMMAND)
+            });
+            if hooks.len() < before {
+                modified = true;
+            }
+        }
+    }
+    if !modified {
+        return false;
+    }
+
+    will_execute.retain(|entry| {
+        entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .is_none_or(|a| !a.is_empty())
+    });
+    if will_execute.is_empty() {
+        events.remove(ALMA_WILL_EXECUTE_KEY);
+    }
+    if events.is_empty() {
+        root.as_object_mut()
+            .expect("root was an object")
+            .remove("hooks");
+    }
+    true
+}
+
 // ── Copilot integration ─────────────────────────────────────
 
 // Single PascalCase `PreToolUse` entry, shared by VS Code Copilot Chat and
@@ -11119,5 +11404,198 @@ mod tests {
         uninstall_vibe_at(&vibe_dir, InitContext::default()).unwrap();
 
         assert!(!vibe_dir.join(VIBE_HOOKS_FILE).exists());
+    }
+
+    // --- Alma install / uninstall ---
+
+    fn alma_installed_entry() -> serde_json::Value {
+        serde_json::json!({
+            "matcher": "^Bash$",
+            "hooks": [{ "command": "rtk hook alma", "timeout": 5000, "enabled": true }]
+        })
+    }
+
+    fn read_alma_hooks(alma_dir: &Path) -> serde_json::Value {
+        let content = fs::read_to_string(alma_dir.join(ALMA_HOOKS_FILE)).unwrap();
+        serde_json::from_str(&content).unwrap()
+    }
+
+    #[test]
+    fn test_alma_install_creates_hooks_json() {
+        let temp = TempDir::new().unwrap();
+        let alma_dir = temp.path().join("alma");
+
+        run_alma_mode_at(&alma_dir, InitContext::default()).unwrap();
+
+        let v = read_alma_hooks(&alma_dir);
+        let entries = v["hooks"]["tool.willExecute"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0], alma_installed_entry());
+    }
+
+    /// Re-running install must not duplicate the RTK entry.
+    #[test]
+    fn test_alma_install_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let alma_dir = temp.path().join("alma");
+
+        run_alma_mode_at(&alma_dir, InitContext::default()).unwrap();
+        let first = fs::read_to_string(alma_dir.join(ALMA_HOOKS_FILE)).unwrap();
+        run_alma_mode_at(&alma_dir, InitContext::default()).unwrap();
+        let second = fs::read_to_string(alma_dir.join(ALMA_HOOKS_FILE)).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(first.matches(ALMA_HOOK_COMMAND).count(), 1);
+    }
+
+    /// Existing entries — the user's own hooks — must survive the merge, and
+    /// RTK joins a pre-existing `^Bash$` group instead of adding a second one.
+    #[test]
+    fn test_alma_install_merges_and_preserves_existing_hooks() {
+        let temp = TempDir::new().unwrap();
+        let alma_dir = temp.path().join("alma");
+        fs::create_dir_all(&alma_dir).unwrap();
+        fs::write(
+            alma_dir.join(ALMA_HOOKS_FILE),
+            r#"{
+  "hooks": {
+    "tool.willExecute": [
+      { "matcher": "^Bash$", "hooks": [{ "command": "/usr/local/bin/script-guard", "timeout": 3000, "enabled": true }] },
+      { "matcher": "^Write$", "hooks": [{ "command": "/usr/local/bin/protect-env" }] }
+    ],
+    "session.start": [
+      { "matcher": "*", "hooks": [{ "command": "/usr/local/bin/on-start" }] }
+    ]
+  },
+  "otherTopLevel": true
+}"#,
+        )
+        .unwrap();
+
+        run_alma_mode_at(&alma_dir, InitContext::default()).unwrap();
+
+        let v = read_alma_hooks(&alma_dir);
+        let entries = v["hooks"]["tool.willExecute"].as_array().unwrap();
+        assert_eq!(entries.len(), 2, "must not add a second ^Bash$ group");
+        let bash_hooks = entries[0]["hooks"].as_array().unwrap();
+        assert_eq!(bash_hooks.len(), 2);
+        assert_eq!(bash_hooks[0]["command"], "/usr/local/bin/script-guard");
+        assert_eq!(bash_hooks[1]["command"], ALMA_HOOK_COMMAND);
+        assert_eq!(bash_hooks[1]["timeout"], 5000);
+        assert_eq!(bash_hooks[1]["enabled"], true);
+        assert_eq!(entries[1]["matcher"], "^Write$");
+        assert_eq!(
+            v["hooks"]["session.start"][0]["hooks"][0]["command"],
+            "/usr/local/bin/on-start"
+        );
+        assert_eq!(v["otherTopLevel"], true);
+    }
+
+    /// Uninstall removes only RTK's entry and keeps every other hook.
+    #[test]
+    fn test_alma_uninstall_leaves_other_hooks_intact() {
+        let temp = TempDir::new().unwrap();
+        let alma_dir = temp.path().join("alma");
+        fs::create_dir_all(&alma_dir).unwrap();
+        fs::write(
+            alma_dir.join(ALMA_HOOKS_FILE),
+            r#"{
+  "hooks": {
+    "tool.willExecute": [
+      { "matcher": "^Bash$", "hooks": [{ "command": "/usr/local/bin/script-guard" }] }
+    ]
+  }
+}"#,
+        )
+        .unwrap();
+
+        run_alma_mode_at(&alma_dir, InitContext::default()).unwrap();
+        let removed = uninstall_alma_at(&alma_dir, InitContext::default()).unwrap();
+        assert_eq!(removed.len(), 1);
+
+        let v = read_alma_hooks(&alma_dir);
+        let entries = v["hooks"]["tool.willExecute"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        let hooks = entries[0]["hooks"].as_array().unwrap();
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0]["command"], "/usr/local/bin/script-guard");
+    }
+
+    /// When RTK's entry is the sole content, uninstall cleans up the emptied
+    /// matcher group and keys rather than leaving a dangling `^Bash$` group.
+    #[test]
+    fn test_alma_uninstall_drops_emptied_structure() {
+        let temp = TempDir::new().unwrap();
+        let alma_dir = temp.path().join("alma");
+
+        run_alma_mode_at(&alma_dir, InitContext::default()).unwrap();
+        uninstall_alma_at(&alma_dir, InitContext::default()).unwrap();
+
+        let v = read_alma_hooks(&alma_dir);
+        assert_eq!(v, serde_json::json!({}));
+    }
+
+    /// Uninstall is a no-op when RTK was never installed — and must not create
+    /// or rewrite the file.
+    #[test]
+    fn test_alma_uninstall_without_install_is_noop() {
+        let temp = TempDir::new().unwrap();
+        let alma_dir = temp.path().join("alma");
+        fs::create_dir_all(&alma_dir).unwrap();
+        let hooks_path = alma_dir.join(ALMA_HOOKS_FILE);
+        fs::write(&hooks_path, r#"{ "hooks": {} }"#).unwrap();
+        let before = fs::read_to_string(&hooks_path).unwrap();
+
+        let removed = uninstall_alma_at(&alma_dir, InitContext::default()).unwrap();
+
+        assert!(removed.is_empty());
+        assert_eq!(fs::read_to_string(&hooks_path).unwrap(), before);
+
+        // Missing file entirely: still a no-op.
+        let missing_dir = temp.path().join("no-such-alma");
+        let removed = uninstall_alma_at(&missing_dir, InitContext::default()).unwrap();
+        assert!(removed.is_empty());
+        assert!(!missing_dir.join(ALMA_HOOKS_FILE).exists());
+    }
+
+    /// A malformed hooks.json must survive uninstall untouched (the user can
+    /// fix it by hand; RTK never rewrites what it cannot parse).
+    #[test]
+    fn test_alma_uninstall_leaves_malformed_file_alone() {
+        let temp = TempDir::new().unwrap();
+        let alma_dir = temp.path().join("alma");
+        fs::create_dir_all(&alma_dir).unwrap();
+        let hooks_path = alma_dir.join(ALMA_HOOKS_FILE);
+        fs::write(&hooks_path, "{ not json").unwrap();
+
+        let removed = uninstall_alma_at(&alma_dir, InitContext::default()).unwrap();
+
+        assert!(removed.is_empty());
+        assert_eq!(fs::read_to_string(&hooks_path).unwrap(), "{ not json");
+    }
+
+    /// `hooks` holding a non-object (or the event key a non-array) is a shape
+    /// RTK must not guess at: install fails loudly instead of clobbering.
+    #[test]
+    fn test_alma_install_rejects_unexpected_shapes() {
+        let temp = TempDir::new().unwrap();
+        let alma_dir = temp.path().join("alma");
+        fs::create_dir_all(&alma_dir).unwrap();
+        let hooks_path = alma_dir.join(ALMA_HOOKS_FILE);
+        fs::write(&hooks_path, r#"{ "hooks": [] }"#).unwrap();
+
+        assert!(run_alma_mode_at(&alma_dir, InitContext::default()).is_err());
+        assert_eq!(
+            fs::read_to_string(&hooks_path).unwrap(),
+            r#"{ "hooks": [] }"#
+        );
+    }
+
+    #[test]
+    fn test_alma_hook_entry_shape() {
+        assert_eq!(
+            alma_hook_entry(),
+            serde_json::json!({ "command": "rtk hook alma", "timeout": 5000, "enabled": true })
+        );
     }
 }

@@ -39,6 +39,7 @@ pub enum Host {
     Gemini,
     Droid,
     Vibe,
+    Alma,
 }
 
 pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
@@ -59,10 +60,11 @@ pub(crate) fn load_rules_for(host: Host) -> (Vec<String>, Vec<String>, Vec<Strin
         Host::Gemini => load_gemini_rules(),
         Host::Droid => load_droid_rules(),
         // Hosts with no RTK-side rule source. Codex enforces its native
-        // execution rules after updatedInput. Do not interpret either host's
+        // execution rules after updatedInput; Alma applies its own tool
+        // approval after updatedInput. Do not interpret either host's
         // rules as Claude Bash patterns or borrow another host's settings.
         // No RTK-side match means Default, not an explicit Allow.
-        Host::Codex | Host::Vibe => (Vec::new(), Vec::new(), Vec::new()),
+        Host::Codex | Host::Vibe | Host::Alma => (Vec::new(), Vec::new(), Vec::new()),
     }
 }
 
