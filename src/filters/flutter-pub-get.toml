@@ -1,0 +1,29 @@
+[filters.flutter-pub-get]
+description = "Compact Flutter/Dart pub get output — cap large dependency-resolution listings"
+match_command = "^(?:fvm\\s+)?(?:flutter|dart)\\s+pub\\s+get\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+]
+max_lines = 40
+on_empty = "flutter pub get: ok"
+
+[[tests.flutter-pub-get]]
+name = "no changes, short output kept as-is"
+input = "Resolving dependencies...\nGot dependencies!"
+expected = "Resolving dependencies...\nGot dependencies!"
+
+[[tests.flutter-pub-get]]
+name = "blank lines stripped, dependency line kept"
+input = "Resolving dependencies...\n\n  path 1.9.0\n\nGot dependencies!"
+expected = "Resolving dependencies...\n  path 1.9.0\nGot dependencies!"
+
+[[tests.flutter-pub-get]]
+name = "large first-checkout listing capped at max_lines"
+input = "Resolving dependencies...\n  pkg1 1.0.1\n  pkg2 1.0.2\n  pkg3 1.0.3\n  pkg4 1.0.4\n  pkg5 1.0.5\n  pkg6 1.0.6\n  pkg7 1.0.7\n  pkg8 1.0.8\n  pkg9 1.0.9\n  pkg10 1.0.10\n  pkg11 1.0.11\n  pkg12 1.0.12\n  pkg13 1.0.13\n  pkg14 1.0.14\n  pkg15 1.0.15\n  pkg16 1.0.16\n  pkg17 1.0.17\n  pkg18 1.0.18\n  pkg19 1.0.19\n  pkg20 1.0.20\n  pkg21 1.0.21\n  pkg22 1.0.22\n  pkg23 1.0.23\n  pkg24 1.0.24\n  pkg25 1.0.25\n  pkg26 1.0.26\n  pkg27 1.0.27\n  pkg28 1.0.28\n  pkg29 1.0.29\n  pkg30 1.0.30\n  pkg31 1.0.31\n  pkg32 1.0.32\n  pkg33 1.0.33\n  pkg34 1.0.34\n  pkg35 1.0.35\n  pkg36 1.0.36\n  pkg37 1.0.37\n  pkg38 1.0.38\n  pkg39 1.0.39\n  pkg40 1.0.40\n  pkg41 1.0.41\n  pkg42 1.0.42\n  pkg43 1.0.43\nGot dependencies!"
+expected = "Resolving dependencies...\n  pkg1 1.0.1\n  pkg2 1.0.2\n  pkg3 1.0.3\n  pkg4 1.0.4\n  pkg5 1.0.5\n  pkg6 1.0.6\n  pkg7 1.0.7\n  pkg8 1.0.8\n  pkg9 1.0.9\n  pkg10 1.0.10\n  pkg11 1.0.11\n  pkg12 1.0.12\n  pkg13 1.0.13\n  pkg14 1.0.14\n  pkg15 1.0.15\n  pkg16 1.0.16\n  pkg17 1.0.17\n  pkg18 1.0.18\n  pkg19 1.0.19\n  pkg20 1.0.20\n  pkg21 1.0.21\n  pkg22 1.0.22\n  pkg23 1.0.23\n  pkg24 1.0.24\n  pkg25 1.0.25\n  pkg26 1.0.26\n  pkg27 1.0.27\n  pkg28 1.0.28\n  pkg29 1.0.29\n  pkg30 1.0.30\n  pkg31 1.0.31\n  pkg32 1.0.32\n  pkg33 1.0.33\n  pkg34 1.0.34\n  pkg35 1.0.35\n  pkg36 1.0.36\n  pkg37 1.0.37\n  pkg38 1.0.38\n  pkg39 1.0.39"
+
+[[tests.flutter-pub-get]]
+name = "empty after stripping falls back to on_empty"
+input = "\n\n"
+expected = "flutter pub get: ok"
