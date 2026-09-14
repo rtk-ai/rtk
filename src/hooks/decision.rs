@@ -193,7 +193,8 @@ impl AgentPath {
         match agent {
             // `copilot` reads Claude Code's settings rather than a Copilot file
             // (see `hook_cmd`'s `vscode_response` and `copilot_cli_response`).
-            "antigravity" | "cline" | "kilocode" | "kimi" | "windsurf" => Some(Self::RulesOnly),
+            "antigravity" => Some(Self::InProcess(Host::Antigravity)),
+            "cline" | "kilocode" | "kimi" | "windsurf" => Some(Self::RulesOnly),
             "claude" | "copilot" => Some(Self::InProcess(Host::Claude)),
             "codex" => Some(Self::InProcess(Host::Codex)),
             "cursor" => Some(Self::InProcess(Host::Cursor)),
@@ -418,6 +419,20 @@ mod tests {
             PermissionVerdict::Default
         );
         let (deny, ask, allow) = super::super::permissions::load_rules_for(Host::Codex);
+        assert!(deny.is_empty() && ask.is_empty() && allow.is_empty());
+    }
+
+    #[test]
+    fn antigravity_uses_shared_decision_without_claiming_permission() {
+        assert!(matches!(
+            AgentPath::lookup("antigravity"),
+            Some(AgentPath::InProcess(Host::Antigravity))
+        ));
+        assert_eq!(
+            check_command_for("git status", Host::Antigravity),
+            PermissionVerdict::Default
+        );
+        let (deny, ask, allow) = super::super::permissions::load_rules_for(Host::Antigravity);
         assert!(deny.is_empty() && ask.is_empty() && allow.is_empty());
     }
 
