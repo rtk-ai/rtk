@@ -10,8 +10,12 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 /// Matches the `path:line:` prefix ast-grep emits for every match/context line.
-static MATCH_LINE_RE: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"^(?P<file>[^:]+):(?P<line>\d+):(?P<content>.*)$").unwrap());
+/// A Windows drive prefix (`C:\` or `C:/`) is allowed ahead of the path; the
+/// separator is required so a one-letter relative file such as `a:12:34` still
+/// reads as line 12 of `a`.
+static MATCH_LINE_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"^(?P<file>(?:[A-Za-z]:[\\/])?[^:]+):(?P<line>\d+):(?P<content>.*)$").unwrap()
+});
 
 const DEFAULT_MAX_TOTAL: usize = 50;
 const DEFAULT_MAX_PER_FILE: usize = 5;
@@ -21,10 +25,9 @@ const DEFAULT_MAX_PER_FILE: usize = 5;
 /// Plain `ast-grep run` output is made up entirely of that shape. Other modes
 /// are not: in an `ast-grep scan` diagnostic only the `  ┌─ a.rs:2:13` locator
 /// parses, while the rule id, severity, message and source line do not, and
-/// `--heading` mode and Windows drive-letter paths (`C:\src\a.rs`, which
-/// `[^:]+` cannot match) fail to parse the same way. Grouping such a shape
-/// would keep whichever lines happen to parse and discard the rest, so any
-/// non-zero count leaves the output alone. `search.rs::unparsed_signal` guards
+/// `--heading` mode and POSIX paths containing a colon fail to parse the same
+/// way. Grouping such a shape would keep whichever lines happen to parse and
+/// discard the rest, so any non-zero count leaves the output alone. `search.rs::unparsed_signal` guards
 /// grep/rg with the same rule.
 fn unparsed_signal(raw: &str) -> usize {
     raw.lines()
@@ -170,6 +173,32 @@ src/b.rs:10:fn qux() {}
     fn test_unparseable_input_falls_back_unchanged() {
         let input = "no colons here\njust plain text\n";
         assert_eq!(filter_ast_grep(input, 5, 50), input);
+    }
+
+    /// ast-grep echoes absolute path arguments verbatim, so on Windows every
+    /// line starts with a drive letter whose colon `[^:]+` cannot cross.
+    #[test]
+    fn test_windows_drive_letter_paths_are_grouped() {
+        let input = "\
+C:\\src\\a.rs:1:static A: X = foo();
+C:\\src\\a.rs:2:static B: X = foo();
+C:\\src\\a.rs:3:static C: X = foo();
+D:/work/b.rs:10:static D: X = foo();
+";
+        let out = filter_ast_grep(input, 2, 50);
+        assert!(out.contains("C:\\src\\a.rs:1:static A: X = foo();"), "{out}");
+        assert!(!out.contains("C:\\src\\a.rs:3:"), "{out}");
+        assert!(out.contains("1 more match line(s) in C:\\src\\a.rs"), "{out}");
+        assert!(out.contains("D:/work/b.rs:10:static D"), "{out}");
+    }
+
+    /// A one-letter relative file is not a drive: `a:12:34` is line 12 of `a`.
+    #[test]
+    fn test_single_letter_file_is_not_a_drive() {
+        let caps = MATCH_LINE_RE.captures("a:12:34 + x").expect("parses");
+        assert_eq!(&caps["file"], "a");
+        assert_eq!(&caps["line"], "12");
+        assert_eq!(&caps["content"], "34 + x");
     }
 
     /// A scan diagnostic parses only on its locator line, so grouping it would
