@@ -5131,16 +5131,12 @@ mod tests {
             "npm exec eslint",
             "npm rum biome",
             "npm rum eslint",
-            "npm rum lint",
             "npm run biome",
             "npm run eslint",
-            "npm run lint",
             "npm run-script biome",
             "npm run-script eslint",
-            "npm run-script lint",
             "npm urn biome",
             "npm urn eslint",
-            "npm urn lint",
             "npm x biome",
             "npm x eslint",
             "pnpm dlx biome",
@@ -5149,10 +5145,8 @@ mod tests {
             "pnpm exec eslint",
             "pnpm run biome",
             "pnpm run eslint",
-            "pnpm run lint",
             "pnpm run-script biome",
             "pnpm run-script eslint",
-            "pnpm run-script lint",
             "npm biome",
             "npm eslint",
             "npm lint",
@@ -5161,7 +5155,6 @@ mod tests {
             "npx lint",
             "pnpm biome",
             "pnpm eslint",
-            "pnpm lint",
             "pnpx biome",
             "pnpx eslint",
             "pnpx lint",
@@ -5191,16 +5184,12 @@ mod tests {
             "npm exec eslint",
             "npm rum biome",
             "npm rum eslint",
-            "npm rum lint",
             "npm run biome",
             "npm run eslint",
-            "npm run lint",
             "npm run-script biome",
             "npm run-script eslint",
-            "npm run-script lint",
             "npm urn biome",
             "npm urn eslint",
-            "npm urn lint",
             "npm x biome",
             "npm x eslint",
             "pnpm dlx biome",
@@ -5209,10 +5198,8 @@ mod tests {
             "pnpm exec eslint",
             "pnpm run biome",
             "pnpm run eslint",
-            "pnpm run lint",
             "pnpm run-script biome",
             "pnpm run-script eslint",
-            "pnpm run-script lint",
             "npm biome",
             "npm eslint",
             "npm lint",
@@ -5221,7 +5208,6 @@ mod tests {
             "npx lint",
             "pnpm biome",
             "pnpm eslint",
-            "pnpm lint",
             "pnpx biome",
             "pnpx eslint",
             "pnpx lint",
@@ -5233,6 +5219,26 @@ mod tests {
             assert_eq!(
                 rewrite_command_no_prefixes(command, &[]),
                 Some("rtk lint".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_lint_scripts_delegate_to_package_manager() {
+        let commands = vec![
+            ("npm run lint", "rtk npm run lint"),
+            ("npm run-script lint", "rtk npm run-script lint"),
+            ("pnpm run lint", "rtk pnpm run lint"),
+            ("pnpm run-script lint", "rtk pnpm run-script lint"),
+            ("pnpm lint", "rtk pnpm lint"),
+        ];
+
+        for (command, expected) in commands {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected.into()),
                 "Failed for command: {}",
                 command
             );
