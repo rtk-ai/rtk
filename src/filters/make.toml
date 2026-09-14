@@ -6,7 +6,8 @@ strip_lines_matching = [
   "^\\s*$",
   "^Nothing to be done",
 ]
-max_lines = 50
+head_lines = 10
+tail_lines = 40
 on_empty = "make: ok"
 
 [[tests.make]]
@@ -39,3 +40,126 @@ make[1]: Entering directory '/home/user'
 make[1]: Leaving directory '/home/user'
 """
 expected = "make: ok"
+
+[[tests.make]]
+name = "preserves head + tail summary, drops middle"
+input = """
+HEAD line 1
+HEAD line 2
+HEAD line 3
+HEAD line 4
+HEAD line 5
+HEAD line 6
+HEAD line 7
+HEAD line 8
+HEAD line 9
+HEAD line 10
+mid 1
+mid 2
+mid 3
+mid 4
+mid 5
+mid 6
+mid 7
+mid 8
+mid 9
+mid 10
+mid 11
+mid 12
+mid 13
+mid 14
+mid 15
+TAIL line 1
+TAIL line 2
+TAIL line 3
+TAIL line 4
+TAIL line 5
+TAIL line 6
+TAIL line 7
+TAIL line 8
+TAIL line 9
+TAIL line 10
+TAIL line 11
+TAIL line 12
+TAIL line 13
+TAIL line 14
+TAIL line 15
+TAIL line 16
+TAIL line 17
+TAIL line 18
+TAIL line 19
+TAIL line 20
+TAIL line 21
+TAIL line 22
+TAIL line 23
+TAIL line 24
+TAIL line 25
+TAIL line 26
+TAIL line 27
+TAIL line 28
+TAIL line 29
+TAIL line 30
+TAIL line 31
+TAIL line 32
+TAIL line 33
+TAIL line 34
+TAIL line 35
+TAIL line 36
+TAIL line 37
+TAIL line 38
+TAIL line 39
+TAIL line 40
+"""
+expected = """
+HEAD line 1
+HEAD line 2
+HEAD line 3
+HEAD line 4
+HEAD line 5
+HEAD line 6
+HEAD line 7
+HEAD line 8
+HEAD line 9
+HEAD line 10
+... (15 lines omitted)
+TAIL line 1
+TAIL line 2
+TAIL line 3
+TAIL line 4
+TAIL line 5
+TAIL line 6
+TAIL line 7
+TAIL line 8
+TAIL line 9
+TAIL line 10
+TAIL line 11
+TAIL line 12
+TAIL line 13
+TAIL line 14
+TAIL line 15
+TAIL line 16
+TAIL line 17
+TAIL line 18
+TAIL line 19
+TAIL line 20
+TAIL line 21
+TAIL line 22
+TAIL line 23
+TAIL line 24
+TAIL line 25
+TAIL line 26
+TAIL line 27
+TAIL line 28
+TAIL line 29
+TAIL line 30
+TAIL line 31
+TAIL line 32
+TAIL line 33
+TAIL line 34
+TAIL line 35
+TAIL line 36
+TAIL line 37
+TAIL line 38
+TAIL line 39
+TAIL line 40
+"""
