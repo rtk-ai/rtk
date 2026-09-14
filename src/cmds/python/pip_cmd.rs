@@ -23,28 +23,25 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     // *same* environment the bare command would. Only fall back to `uv pip` when
     // `pip` genuinely isn't on PATH (uv-only environments). Auto-substituting
     // `uv pip` unconditionally made `pip list` show uv's discovered env instead
-    // of the active one — often just the 2-package base interpreter.
+    // of the active one — often just the 2-package base interpreter. A `pip`
+    // that is on PATH but cannot be started is handled below, after the spawn.
     let use_uv = !tool_exists("pip") && tool_exists("uv");
-    let base_cmd = if use_uv { "uv" } else { "pip" };
+    let mut base_cmd = if use_uv { "uv" } else { "pip" };
 
     if verbose > 0 && use_uv {
         eprintln!("pip not found — falling back to `uv pip`");
     }
 
-    // Detect subcommand
-    let subcommand = args.first().map(|s| s.as_str()).unwrap_or("");
-
-    let (cmd_str, filtered, exit_code) = match subcommand {
-        "list" => run_list(base_cmd, &args[1..], verbose)?,
-        "outdated" => run_outdated(base_cmd, &args[1..], verbose)?,
-        "install" | "uninstall" | "show" => {
-            // Passthrough for write operations
-            run_passthrough(base_cmd, args, verbose)?
+    let (cmd_str, filtered, exit_code) = match dispatch(base_cmd, args, verbose) {
+        // `pip` was on PATH but the OS refused to start it — typically a stale
+        // console script whose `#!` line names a deleted interpreter. Nothing
+        // ran, so retrying through `uv pip` is safe even for `install`.
+        Err(e) if base_cmd == "pip" && is_spawn_not_found(&e) && tool_exists("uv") => {
+            eprintln!("rtk: `pip` is on PATH but could not be started — falling back to `uv pip`");
+            base_cmd = "uv";
+            dispatch(base_cmd, args, verbose)?
         }
-        _ => {
-            // Unknown subcommand: passthrough to pip/uv
-            run_passthrough(base_cmd, args, verbose)?
-        }
+        result => result?,
     };
 
     timer.track(
@@ -55,6 +52,33 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     );
 
     Ok(exit_code)
+}
+
+/// Route a pip subcommand to its handler under `base_cmd` (`pip` or `uv`).
+fn dispatch(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String, i32)> {
+    let subcommand = args.first().map(|s| s.as_str()).unwrap_or("");
+
+    match subcommand {
+        "list" => run_list(base_cmd, &args[1..], verbose),
+        "outdated" => run_outdated(base_cmd, &args[1..], verbose),
+        "install" | "uninstall" | "show" => {
+            // Passthrough for write operations
+            run_passthrough(base_cmd, args, verbose)
+        }
+        _ => {
+            // Unknown subcommand: passthrough to pip/uv
+            run_passthrough(base_cmd, args, verbose)
+        }
+    }
+}
+
+/// True when `err` bottoms out in the OS refusing to start the program
+/// (ENOENT). On Unix a script with a dangling `#!` line fails the same way,
+/// so the file can exist on PATH and still be unrunnable.
+fn is_spawn_not_found(err: &anyhow::Error) -> bool {
+    err.root_cause()
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
 }
 
 fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String, i32)> {
@@ -231,6 +255,41 @@ fn filter_pip_outdated(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_is_spawn_not_found_matches_enoent_through_context() {
+        let err = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::NotFound))
+            .context("Failed to execute command")
+            .context("Failed to run pip list");
+        assert!(is_spawn_not_found(&err));
+    }
+
+    #[test]
+    fn test_is_spawn_not_found_ignores_other_errors() {
+        let perm = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert!(!is_spawn_not_found(&perm));
+        assert!(!is_spawn_not_found(&anyhow::anyhow!("filter failed")));
+    }
+
+    /// A console script whose shebang points at a missing interpreter is on
+    /// PATH and executable, yet the OS refuses to start it with ENOENT. This
+    /// is the #4054 shape; `tool_exists` alone cannot tell it from a good pip.
+    #[cfg(unix)]
+    #[test]
+    fn test_dead_shebang_script_is_spawn_not_found() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("pip");
+        std::fs::write(&script, "#!/nonexistent/python3.7\nprint('hi')\n").expect("write");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let mut cmd = std::process::Command::new(&script);
+        let err = exec_capture(&mut cmd)
+            .err()
+            .expect("dead shebang must fail to spawn");
+        assert!(is_spawn_not_found(&err), "unexpected error: {err:#}");
+    }
 
     #[test]
     fn test_filter_pip_list() {
