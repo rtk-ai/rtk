@@ -107,7 +107,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             // This is safer than returning "(empty)" for a non-empty directory.
             let has_real_content = raw
                 .lines()
-                .any(|l| !l.starts_with("total ") && !l.is_empty() && !is_dotdir(l));
+                .any(|l| !l.starts_with("total ") && !l.is_empty() && !is_dotdir(l) && !is_listing_header(l));
             if parsed_count == 0 && has_real_content {
                 return raw.to_string();
             }
@@ -265,6 +265,17 @@ fn perms_to_octal(perms: &str) -> Option<String> {
     }
 }
 
+fn is_listing_header(line: &str) -> bool {
+    line.ends_with(':') && parse_ls_line(line).is_none()
+}
+
+fn attributed_line(header: Option<&str>, line: &str) -> String {
+    match header {
+        Some(header) => format!("{header}\n{line}"),
+        None => line.to_string(),
+    }
+}
+
 /// Parse ls -la output into compact format.
 ///
 /// Without `show_long`:
@@ -278,7 +289,8 @@ fn perms_to_octal(perms: &str) -> Option<String> {
 /// Returns (entries, parsed_count, truncated, filtered) so caller can emit
 /// a recovery hint when anything was dropped.
 /// parsed_count tracks how many non-header lines were successfully parsed.
-/// truncated holds compact lines beyond the CAP_INVENTORY display cap.
+/// truncated holds compact entries beyond the CAP_INVENTORY display cap,
+/// prefixed with their directory header when present.
 /// filtered holds the display name of each entry RTK removed from view
 /// (noise dirs without -a/-A as `name/`, plus raw unparsable non-dotdir
 /// lines).
@@ -288,24 +300,38 @@ fn compact_ls(
     show_all: bool,
     show_long: bool,
 ) -> (String, usize, Vec<String>, Vec<String>) {
-    let mut dirs: Vec<(String, Option<String>)> = Vec::new(); // (name, octal_perms)
-    let mut files: Vec<(String, String, Option<String>)> = Vec::new(); // (name, size, octal_perms)
+    #[derive(Default)]
+    struct ListingGroup {
+        header: Option<String>,
+        dirs: Vec<(String, Option<String>)>,
+        files: Vec<(String, String, Option<String>)>,
+    }
+    let mut groups = vec![ListingGroup::default()];
     let mut lines_seen: usize = 0;
     let mut parsed_count: usize = 0;
     let mut dotdirs: usize = 0;
     let mut filtered: Vec<String> = Vec::new();
 
     for line in raw.lines() {
+        if is_listing_header(line) {
+            groups.push(ListingGroup {
+                header: Some(line.to_string()),
+                ..ListingGroup::default()
+            });
+            continue;
+        }
         if line.starts_with("total ") || line.is_empty() {
             continue;
         }
         lines_seen += 1;
+        let group_index = groups.len() - 1;
+        let group = &mut groups[group_index];
 
         let Some((file_type, perms, size, name)) = parse_ls_line(line) else {
             if is_dotdir(line) {
                 dotdirs += 1;
             } else {
-                filtered.push(line.trim().to_string());
+                filtered.push(attributed_line(group.header.as_deref(), line.trim()));
             }
             continue;
         };
@@ -314,7 +340,7 @@ fn compact_ls(
         // Filter noise dirs unless dotfiles were requested; every entry the
         // child printed and RTK drops is recorded so the hint can recover it.
         if !show_all && NOISE_DIRS.iter().any(|noise| name == *noise) {
-            filtered.push(format!("{}/", name));
+            filtered.push(attributed_line(group.header.as_deref(), &format!("{}/", name)));
             continue;
         }
 
@@ -327,53 +353,61 @@ fn compact_ls(
         };
 
         if file_type == 'd' {
-            dirs.push((name, octal));
+            group.dirs.push((name, octal));
         } else {
             // Regular files, symlinks, character/block devices, pipes, sockets
-            files.push((name, human_size(size), octal));
+            group.files.push((name, human_size(size), octal));
         }
     }
 
-    if dirs.is_empty() && files.is_empty() {
-        if lines_seen > 0 && parsed_count == 0 {
-            if dotdirs == lines_seen {
-                // Only . and .. entries (empty directory)
-                return ("(empty)\n".to_string(), 0, Vec::new(), Vec::new());
-            }
-            // Real content that couldn't be parsed (e.g., non-English locale)
-            return (String::new(), 0, Vec::new(), Vec::new());
-        }
-        // Everything parsed was filtered out (e.g., only noise dirs) —
-        // keep filtered so the caller can still emit a recovery hint.
-        return ("(empty)\n".to_string(), parsed_count, Vec::new(), filtered);
+    if parsed_count == 0 && lines_seen > dotdirs {
+        // An unrecognized listing must still reach the caller's raw fallback.
+        return (String::new(), 0, Vec::new(), Vec::new());
     }
 
-    // Dirs first, then files — one compact line each
-    let mut all_lines: Vec<String> = Vec::with_capacity(dirs.len() + files.len());
-    for (name, octal) in &dirs {
-        all_lines.push(match octal {
-            Some(octal) => format!("{}  {}/", octal, name),
-            None => format!("{}/", name),
-        });
-    }
-    for (name, size, octal) in &files {
-        all_lines.push(match octal {
-            Some(octal) => format!("{}  {}  {}", octal, name, size),
-            None => format!("{}  {}", name, size),
-        });
-    }
-
-    // Cap the displayed listing; the rest is recoverable via the tee hint.
-    let truncated = if all_lines.len() > CAP_INVENTORY {
-        all_lines.split_off(CAP_INVENTORY)
-    } else {
-        Vec::new()
-    };
-
+    let mut truncated = Vec::new();
     let mut entries = String::new();
-    for line in &all_lines {
-        entries.push_str(line);
-        entries.push('\n');
+    let mut displayed = 0;
+    for group in &groups {
+        let mut lines = Vec::with_capacity(group.dirs.len() + group.files.len());
+        for (name, octal) in &group.dirs {
+            lines.push(match octal {
+                Some(octal) => format!("{}  {}/", octal, name),
+                None => format!("{}/", name),
+            });
+        }
+        for (name, size, octal) in &group.files {
+            lines.push(match octal {
+                Some(octal) => format!("{}  {}  {}", octal, name, size),
+                None => format!("{}  {}", name, size),
+            });
+        }
+        if lines.is_empty() && group.header.is_none() && groups.len() > 1 {
+            continue;
+        }
+        if lines.is_empty() || displayed < CAP_INVENTORY {
+            if !entries.is_empty() {
+                entries.push('\n');
+            }
+            if let Some(header) = &group.header {
+                entries.push_str(header);
+                entries.push('\n');
+            }
+            if lines.is_empty() {
+                entries.push_str("(empty)\n");
+            }
+        }
+        for line in lines {
+            if displayed < CAP_INVENTORY {
+                entries.push_str(&line);
+                entries.push('\n');
+                displayed += 1;
+            } else {
+                // A recovered tail can start mid-group, so each hidden item
+                // carries its own directory attribution without counting labels.
+                truncated.push(attributed_line(group.header.as_deref(), &line));
+            }
+        }
     }
 
     (entries, parsed_count, truncated, filtered)
@@ -402,6 +436,114 @@ mod tests {
         assert!(!entries.contains("total")); // no total
         assert!(!entries.contains("\n.\n")); // no . entry
         assert!(!entries.contains("\n..\n")); // no .. entry
+    }
+
+    #[test]
+    fn test_compact_preserves_populated_directory_headers() {
+        // Given: native long output for two populated directory operands.
+        let input = "dir_a:\n\
+                     total 0\n\
+                     -rw-r--r-- 1 user staff 1234 Jan  1 12:00 a.txt\n\
+                     \n\
+                     dir_b:\n\
+                     total 0\n\
+                     -rw-r--r-- 1 user staff 5678 Jan  1 12:00 b.txt\n";
+
+        // When: the latest compact listing contract processes the native groups.
+        let (entries, parsed, truncated, filtered) = compact_ls(input, false, false);
+
+        // Then: each filename remains beneath its native directory header.
+        assert_eq!(entries, "dir_a:\na.txt  1.2K\n\ndir_b:\nb.txt  5.5K\n");
+        assert_eq!(parsed, 2);
+        assert!(truncated.is_empty());
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_compact_preserves_empty_directory_groups() {
+        // Given: native long output for two empty directory operands.
+        let input = "dir_a:\n\
+                     total 0\n\
+                     \n\
+                     dir_empty:\n\
+                     total 0\n";
+
+        // When: the listing is compacted.
+        let (entries, parsed, truncated, filtered) = compact_ls(input, false, false);
+
+        // Then: both native labels remain observable and explicitly empty.
+        assert_eq!(entries, "dir_a:\n(empty)\n\ndir_empty:\n(empty)\n");
+        assert_eq!(parsed, 0);
+        assert!(truncated.is_empty());
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_compact_preserves_mixed_file_and_directory_groups() {
+        // Given: native output for one file operand followed by one directory operand.
+        let input = "-rw-r--r-- 1 user staff 7 Jan  1 12:00 loose.txt\n\
+                     \n\
+                     dir_a:\n\
+                     total 0\n\
+                     -rw-r--r-- 1 user staff 9 Jan  1 12:00 nested.txt\n";
+
+        // When: the mixed listing is compacted.
+        let (entries, parsed, truncated, filtered) = compact_ls(input, false, false);
+
+        // Then: the loose file stays in the native preamble and the nested file is labelled.
+        assert_eq!(entries, "loose.txt  7B\n\ndir_a:\nnested.txt  9B\n");
+        assert_eq!(parsed, 2);
+        assert!(truncated.is_empty());
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_compact_tee_tail_preserves_headers_across_cap_boundary() {
+        // Given: the first group crosses the inventory cap and a second group follows it.
+        let mut input = String::from("dir_a:\ntotal 0\n");
+        for i in 0..=CAP_INVENTORY {
+            input.push_str(&format!(
+                "-rw-r--r-- 1 user staff 100 Jan  1 12:00 a{i:02}.txt\n"
+            ));
+        }
+        input.push_str(
+            "\ndir_b:\ntotal 0\n-rw-r--r-- 1 user staff 200 Jan  1 12:00 b.txt\n",
+        );
+
+        // When: compacting splits visible output from the tee-tail recovery payload.
+        let (entries, parsed, truncated, filtered) = compact_ls(&input, false, false);
+        let hint = hidden_hint(&truncated, &filtered).expect("truncated entries need a hint");
+
+        // Then: hidden entries retain both group labels without inflating the item count.
+        assert_eq!(parsed, CAP_INVENTORY + 2);
+        assert!(entries.starts_with("dir_a:\n"));
+        assert!(!entries.contains("dir_b:"));
+        assert_eq!(truncated.len(), 2);
+        assert_eq!(truncated[0], "dir_a:\na50.txt  100B");
+        assert_eq!(truncated[1], "dir_b:\nb.txt  200B");
+        assert!(filtered.is_empty());
+        assert!(hint.starts_with("... (2 more)"));
+    }
+
+    #[test]
+    fn test_compact_group_headers_distinguish_total_names_and_colon_files() {
+        let input = "total samples:\ntotal 0\n-rw-r--r-- 1 user staff 7 Jan  1 12:00 file:\n\nother:\ntotal 0\n";
+        let (entries, parsed, truncated, filtered) = compact_ls(input, false, false);
+        assert_eq!(entries, "total samples:\nfile:  7B\n\nother:\n(empty)\n");
+        assert_eq!(parsed, 1);
+        assert!(truncated.is_empty());
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_compact_filtered_entries_keep_directory_attribution() {
+        let input = "dir_a:\ntotal 0\ndrwxr-xr-x 1 user staff 0 Jan  1 12:00 node_modules\n\ndir_b:\ntotal 0\ndrwxr-xr-x 1 user staff 0 Jan  1 12:00 node_modules\n";
+        let (_, parsed, _, filtered) = compact_ls(input, false, false);
+        assert_eq!(parsed, 2);
+        assert_eq!(filtered, vec!["dir_a:\nnode_modules/", "dir_b:\nnode_modules/"]);
+        let (entries, _, _, filtered) = compact_ls(input, true, false);
+        assert_eq!(entries, "dir_a:\nnode_modules/\n\ndir_b:\nnode_modules/\n");
+        assert!(filtered.is_empty());
     }
 
     #[test]
