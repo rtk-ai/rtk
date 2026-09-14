@@ -35,7 +35,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let (cmd_str, filtered, exit_code) = match dispatch(base_cmd, args, verbose) {
         // `pip` was on PATH but the OS refused to start it — typically a stale
         // console script whose `#!` line names a deleted interpreter. Nothing
-        // ran, so retrying through `uv pip` is safe even for `install`. #4054
+        // ran, so retrying through `uv pip` is safe even for `install`.
         Err(e) if base_cmd == "pip" && is_spawn_not_found(&e) && tool_exists("uv") => {
             eprintln!("rtk: `pip` is on PATH but could not be started — falling back to `uv pip`");
             base_cmd = "uv";
