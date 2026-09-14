@@ -4,8 +4,9 @@ use crate::core::filter::{self, FilterLevel, Language};
 use crate::core::guard::never_worse;
 use crate::core::tracking;
 use anyhow::{Context, Result};
-use std::fs;
-use std::io::{self, Read as IoRead, Write};
+use std::collections::VecDeque;
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader, Read as IoRead, Write};
 use std::path::Path;
 
 pub fn run(
@@ -23,24 +24,28 @@ pub fn run(
         eprintln!("Reading: {} (filter: {})", file.display(), level);
     }
 
+    if level == FilterLevel::None
+        && !line_numbers
+        && (head_lines.is_some() || tail_lines.is_some())
+    {
+        let input = File::open(file)
+            .with_context(|| format!("Failed to read file: {}", file.display()))?;
+        let mut reader = BufReader::new(input);
+        if let Some(window) = read_line_window(&mut reader, head_lines, tail_lines)
+            .with_context(|| format!("Failed to read file: {}", file.display()))?
+        {
+            return emit_line_window(
+                &timer,
+                &format!("cat {}", file.display()),
+                "rtk read",
+                &window,
+            );
+        }
+    }
+
     // Read file content
     let bytes = fs::read(file)
         .with_context(|| format!("Failed to read file: {}", file.display()))?;
-    if level == FilterLevel::None && !line_numbers {
-        if let Some(window) = byte_line_window(&bytes, head_lines, tail_lines) {
-            io::stdout()
-                .lock()
-                .write_all(window)
-                .context("Failed to write line window")?;
-            timer.track(
-                &format!("cat {}", file.display()),
-                "rtk read",
-                &String::from_utf8_lossy(&bytes),
-                &String::from_utf8_lossy(window),
-            );
-            return Ok(());
-        }
-    }
     let content = String::from_utf8(bytes)
         .with_context(|| format!("Failed to decode file: {}", file.display()))?;
 
@@ -118,27 +123,29 @@ pub fn run_stdin(
         eprintln!("Reading from stdin (filter: {})", level);
     }
 
-    // Read from stdin
-    let mut bytes = Vec::new();
-    io::stdin()
-        .lock()
-        .read_to_end(&mut bytes)
-        .context("Failed to read from stdin")?;
-    if level == FilterLevel::None && !line_numbers {
-        if let Some(window) = byte_line_window(&bytes, head_lines, tail_lines) {
-            io::stdout()
-                .lock()
-                .write_all(window)
-                .context("Failed to write line window")?;
-            timer.track(
+    let stdin = io::stdin();
+    let mut stdin = stdin.lock();
+    if level == FilterLevel::None
+        && !line_numbers
+        && (head_lines.is_some() || tail_lines.is_some())
+    {
+        if let Some(window) = read_line_window(&mut stdin, head_lines, tail_lines)
+            .context("Failed to read from stdin")?
+        {
+            return emit_line_window(
+                &timer,
                 "cat - (stdin)",
                 "rtk read -",
-                &String::from_utf8_lossy(&bytes),
-                &String::from_utf8_lossy(window),
+                &window,
             );
-            return Ok(());
         }
     }
+
+    // Read from stdin
+    let mut bytes = Vec::new();
+    stdin
+        .read_to_end(&mut bytes)
+        .context("Failed to read from stdin")?;
     let content = String::from_utf8(bytes).context("Failed to decode stdin")?;
 
     // No file extension, so use Unknown language
@@ -266,10 +273,80 @@ fn byte_line_window(
     }
 }
 
+fn read_head_lines<R: BufRead>(reader: &mut R, line_count: usize) -> io::Result<Vec<u8>> {
+    let mut window = Vec::new();
+    for _ in 0..line_count {
+        if reader.read_until(b'\n', &mut window)? == 0 {
+            break;
+        }
+    }
+    Ok(window)
+}
+
+fn read_tail_lines<R: BufRead>(reader: &mut R, line_count: usize) -> io::Result<Vec<u8>> {
+    if line_count == 0 {
+        io::copy(reader, &mut io::sink())?;
+        return Ok(Vec::new());
+    }
+
+    let mut lines = VecDeque::new();
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            break;
+        }
+        if lines.len() == line_count {
+            if let Some(mut oldest) = lines.pop_front() {
+                std::mem::swap(&mut oldest, &mut line);
+                lines.push_back(oldest);
+            }
+        } else {
+            lines.push_back(std::mem::take(&mut line));
+        }
+    }
+
+    let output_len = lines.iter().map(Vec::len).sum();
+    let mut window = Vec::with_capacity(output_len);
+    for line in lines {
+        window.extend_from_slice(&line);
+    }
+    Ok(window)
+}
+
+fn read_line_window<R: BufRead>(
+    reader: &mut R,
+    head_lines: Option<usize>,
+    tail_lines: Option<usize>,
+) -> io::Result<Option<Vec<u8>>> {
+    if let Some(line_count) = head_lines {
+        read_head_lines(reader, line_count).map(Some)
+    } else if let Some(line_count) = tail_lines {
+        read_tail_lines(reader, line_count).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+fn emit_line_window(
+    timer: &tracking::TimedExecution,
+    original_cmd: &str,
+    rtk_cmd: &str,
+    window: &[u8],
+) -> Result<()> {
+    io::stdout()
+        .lock()
+        .write_all(window)
+        .context("Failed to write line window")?;
+    let tracked = String::from_utf8_lossy(window);
+    timer.track(original_cmd, rtk_cmd, &tracked, &tracked);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::io::{Cursor, Write};
     use tempfile::NamedTempFile;
 
     #[test]
@@ -347,6 +424,51 @@ fn main() {{
             apply_line_window("a\nb\n", None, Some(0), None, &Language::Unknown),
             ""
         );
+    }
+
+    #[test]
+    fn incremental_head_stops_after_the_requested_newline() {
+        let input = b"one\ntwo\nbytes that must not be consumed";
+        let mut reader = Cursor::new(input);
+
+        let window = read_head_lines(&mut reader, 2).expect("read head window");
+
+        assert_eq!(window, b"one\ntwo\n");
+        assert_eq!(reader.position(), 8);
+    }
+
+    #[test]
+    fn incremental_head_zero_does_not_touch_the_reader() {
+        let mut reader = Cursor::new(b"unbounded producer");
+
+        let window = read_head_lines(&mut reader, 0).expect("read empty head window");
+
+        assert!(window.is_empty());
+        assert_eq!(reader.position(), 0);
+    }
+
+    #[test]
+    fn incremental_tail_retains_only_the_requested_suffix() {
+        let input = (0..10_000)
+            .map(|index| format!("line-{index}\n"))
+            .collect::<String>();
+        let mut reader = Cursor::new(input.as_bytes());
+
+        let window = read_tail_lines(&mut reader, 2).expect("read tail window");
+
+        assert_eq!(window, b"line-9998\nline-9999\n");
+        assert_eq!(reader.position(), input.len() as u64);
+    }
+
+    #[test]
+    fn incremental_tail_zero_still_consumes_to_eof() {
+        let input = b"tail waits for EOF even when zero lines are requested";
+        let mut reader = Cursor::new(input);
+
+        let window = read_tail_lines(&mut reader, 0).expect("read empty tail window");
+
+        assert!(window.is_empty());
+        assert_eq!(reader.position(), input.len() as u64);
     }
 
     #[test]
