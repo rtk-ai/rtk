@@ -10,8 +10,9 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 /// Matches the `path:line:` prefix ast-grep emits for every match/context line.
-static MATCH_LINE_RE: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"^(?P<file>[^:]+):(?P<line>\d+):(?P<content>.*)$").unwrap());
+static MATCH_LINE_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"^(?P<file>[^:]+):(?P<line>\d+):(?P<content>.*)$").unwrap()
+});
 
 const DEFAULT_MAX_TOTAL: usize = 50;
 const DEFAULT_MAX_PER_FILE: usize = 5;
@@ -112,7 +113,9 @@ pub fn run(args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
     let real_cmd = format!("ast-grep {}", args.join(" "));
 
-    let is_json = args.iter().any(|a| a == "--json" || a.starts_with("--json="));
+    let is_json = args
+        .iter()
+        .any(|a| a == "--json" || a.starts_with("--json="));
 
     let mut cmd = resolved_command("ast-grep");
     cmd.args(args);

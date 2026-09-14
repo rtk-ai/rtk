@@ -11,8 +11,8 @@ use crate::core::utils::{resolved_command, truncate};
 use crate::dotnet_format_report;
 use crate::dotnet_trx;
 use anyhow::{Context, Result};
-use quick_xml::events::Event;
 use quick_xml::Reader;
+use quick_xml::events::Event;
 use serde_json::Value;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -69,10 +69,8 @@ pub fn run_format(args: &[String], verbose: u8) -> Result<i32> {
         shown,
     );
 
-    if cleanup_report_path {
-        if let Some(path) = report_path.as_deref() {
-            cleanup_temp_file(path);
-        }
+    if cleanup_report_path && let Some(path) = report_path.as_deref() {
+        cleanup_temp_file(path);
     }
 
     Ok(result.exit_code)
@@ -259,10 +257,8 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
     );
 
     cleanup_temp_file(&binlog_path);
-    if cleanup_trx_results_dir {
-        if let Some(dir) = trx_results_dir.as_deref() {
-            cleanup_temp_dir(dir);
-        }
+    if cleanup_trx_results_dir && let Some(dir) = trx_results_dir.as_deref() {
+        cleanup_temp_dir(dir);
     }
 
     if verbose > 0 {
@@ -334,18 +330,20 @@ fn build_effective_dotnet_format_args(
     if !force_write_mode && !has_verify_no_changes_arg(tokens) {
         injected.push("--verify-no-changes".to_string());
     }
-    if !has_report_arg(tokens) {
-        if let Some(path) = report_path {
-            injected.push("--report".to_string());
-            injected.push(path.display().to_string());
-        }
+    if !has_report_arg(tokens)
+        && let Some(path) = report_path
+    {
+        injected.push("--report".to_string());
+        injected.push(path.display().to_string());
     }
 
     // Injected flags go before the user's own `--`: dotnet parks everything past it in
     // UnparsedTokens, so a `--verify-no-changes` after the boundary never applies and format
     // rewrites the tree while RTK still reports check mode.
     let boundary = arg_tokenizer::injection_point(tokens, args.len());
-    let write_args: Vec<usize> = write_override_tokens(tokens).map(|t| t.source_index).collect();
+    let write_args: Vec<usize> = write_override_tokens(tokens)
+        .map(|t| t.source_index)
+        .collect();
     let mut effective: Vec<String> = Vec::with_capacity(args.len() + injected.len());
     for (index, arg) in args.iter().enumerate() {
         if index == boundary {
@@ -492,10 +490,10 @@ fn merge_test_summary_from_trx(
         }
     }
 
-    if trx_summary.is_none() {
-        if let Some(trx) = fallback_trx_path {
-            trx_summary = dotnet_trx::parse_trx_file_since(&trx, command_started_at);
-        }
+    if trx_summary.is_none()
+        && let Some(trx) = fallback_trx_path
+    {
+        trx_summary = dotnet_trx::parse_trx_file_since(&trx, command_started_at);
     }
 
     let Some(trx_summary) = trx_summary else {
@@ -555,11 +553,11 @@ fn build_effective_dotnet_args(
                     effective.push("--logger".to_string());
                     effective.push("trx".to_string());
                 }
-                if !has_results_directory_arg(tokens, runner_mode) {
-                    if let Some(results_dir) = trx_results_dir {
-                        effective.push("--results-directory".to_string());
-                        effective.push(results_dir.display().to_string());
-                    }
+                if !has_results_directory_arg(tokens, runner_mode)
+                    && let Some(results_dir) = trx_results_dir
+                {
+                    effective.push("--results-directory".to_string());
+                    effective.push(results_dir.display().to_string());
                 }
                 effective.extend(args.iter().cloned());
             }
@@ -646,10 +644,10 @@ fn scan_mtp_kind_in_file(path: &Path) -> MtpProjectKind {
                 );
             }
             Ok(Event::Text(e)) if inside_mtp_element => {
-                if let Ok(text) = e.unescape() {
-                    if text.trim().eq_ignore_ascii_case("true") {
-                        return MtpProjectKind::VsTestBridge;
-                    }
+                if let Ok(text) = e.unescape()
+                    && text.trim().eq_ignore_ascii_case("true")
+                {
+                    return MtpProjectKind::VsTestBridge;
                 }
             }
             Ok(Event::End(_)) => inside_mtp_element = false,
@@ -853,7 +851,6 @@ fn dotnet_has_bare_loose_flag(tokens: &[Token<'_>], name: &str) -> bool {
         t.kind == TokenKind::Long && t.attached.is_none() && t.text.eq_ignore_ascii_case(name)
     })
 }
-
 
 fn dotnet_has_bare_double_dash_flag(tokens: &[Token<'_>], name: &str) -> bool {
     tokens.iter().any(|t| {
@@ -1555,11 +1552,20 @@ mod tests {
     #[test]
     fn test_double_dash_only_flags_reject_single_dash_and_slash_spellings() {
         let args = vec!["-results-directory".to_string(), "/tmp/out".to_string()];
-        assert!(!has_results_directory_arg(&tokenize_dotnet_args(&args), TestRunnerMode::Classic));
-        assert_eq!(extract_results_directory_arg(&tokenize_dotnet_args(&args), TestRunnerMode::Classic), None);
+        assert!(!has_results_directory_arg(
+            &tokenize_dotnet_args(&args),
+            TestRunnerMode::Classic
+        ));
+        assert_eq!(
+            extract_results_directory_arg(&tokenize_dotnet_args(&args), TestRunnerMode::Classic),
+            None
+        );
 
         let args = vec!["/results-directory".to_string(), "/tmp/out".to_string()];
-        assert!(!has_results_directory_arg(&tokenize_dotnet_args(&args), TestRunnerMode::Classic));
+        assert!(!has_results_directory_arg(
+            &tokenize_dotnet_args(&args),
+            TestRunnerMode::Classic
+        ));
 
         let args = vec!["-report".to_string(), "/tmp/r.json".to_string()];
         assert!(!has_report_arg(&tokenize_dotnet_args(&args)));
@@ -1576,7 +1582,10 @@ mod tests {
 
         // The canonical "--" forms still work.
         let args = vec!["--results-directory".to_string(), "/tmp/out".to_string()];
-        assert!(has_results_directory_arg(&tokenize_dotnet_args(&args), TestRunnerMode::Classic));
+        assert!(has_results_directory_arg(
+            &tokenize_dotnet_args(&args),
+            TestRunnerMode::Classic
+        ));
     }
 
     #[test]
@@ -1716,8 +1725,7 @@ mod tests {
         // The raw stdout contains the inline failure; the filtered section also
         // contains it. With needs_raw_fallback=false, the failure must appear once.
         let raw_stdout = "  failed MyTests.HasRestriction\n    Assert.True() Failure";
-        let filtered =
-            "Failed Tests:\n  MyTests.HasRestriction\n    Assert.True() Failure\n\nfail dotnet test: 717 passed, 5 failed";
+        let filtered = "Failed Tests:\n  MyTests.HasRestriction\n    Assert.True() Failure\n\nfail dotnet test: 717 passed, 5 failed";
         let output = compose_failure_output(false, false, raw_stdout, "", filtered);
 
         assert_eq!(output, filtered);
@@ -2106,9 +2114,11 @@ mod tests {
         assert_eq!(merged.skipped, 8);
         assert_eq!(merged.total, 948);
         assert_eq!(merged.failed_tests.len(), 1);
-        assert!(merged.failed_tests[0]
-            .name
-            .contains("CreateInstance_should_initialize"));
+        assert!(
+            merged.failed_tests[0]
+                .name
+                .contains("CreateInstance_should_initialize")
+        );
     }
 
     #[test]
@@ -2331,11 +2341,7 @@ mod tests {
     fn test_forwarded_args_do_not_suppress_injection() {
         // Everything past `--` goes to the test runner, not to dotnet, so a `--logger` there
         // is not the user asking dotnet for a logger -- RTK still has to inject its own.
-        let args = vec![
-            "--".to_string(),
-            "--logger".to_string(),
-            "trx".to_string(),
-        ];
+        let args = vec!["--".to_string(), "--logger".to_string(), "trx".to_string()];
         let injected = build_dotnet_args_for_test("test", &args, true);
         let boundary = injected.iter().position(|a| a == "--").expect("boundary");
         let logger = injected
@@ -2347,7 +2353,10 @@ mod tests {
         let args = vec!["--".to_string(), "--nologo".to_string()];
         let injected = build_dotnet_args_for_test("test", &args, true);
         let boundary = injected.iter().position(|a| a == "--").expect("boundary");
-        let nologo = injected.iter().position(|a| a == "-nologo").expect("nologo");
+        let nologo = injected
+            .iter()
+            .position(|a| a == "-nologo")
+            .expect("nologo");
         assert!(nologo < boundary, "{injected:?}");
     }
 
@@ -2401,12 +2410,16 @@ mod tests {
         ];
 
         let injected = build_dotnet_args_for_test("test", &args, true);
-        assert!(!injected
-            .windows(2)
-            .any(|w| w[0] == "--results-directory" && w[1] == "/tmp/test results"));
-        assert!(injected
-            .windows(2)
-            .any(|w| w[0] == "--results-directory" && w[1] == "/custom/results"));
+        assert!(
+            !injected
+                .windows(2)
+                .any(|w| w[0] == "--results-directory" && w[1] == "/tmp/test results")
+        );
+        assert!(
+            injected
+                .windows(2)
+                .any(|w| w[0] == "--results-directory" && w[1] == "/custom/results")
+        );
     }
 
     #[test]
@@ -2735,15 +2748,14 @@ mod tests {
 
         let binlog_path = Path::new("/tmp/test.binlog");
         let trx_dir = Path::new("/tmp/test_results");
-        let injected =
-            build_effective_dotnet_args(
-                "test",
-                &args,
-                &tokens,
-                binlog_path,
-                Some(trx_dir),
-                TestRunnerMode::Classic,
-            );
+        let injected = build_effective_dotnet_args(
+            "test",
+            &args,
+            &tokens,
+            binlog_path,
+            Some(trx_dir),
+            TestRunnerMode::Classic,
+        );
         assert!(injected.contains(&"--logger".to_string()));
         assert!(injected.contains(&"trx".to_string()));
     }
@@ -3023,13 +3035,22 @@ mod tests {
     #[test]
     fn test_has_results_directory_arg_detects_variants() {
         let args = vec!["--results-directory".to_string(), "/tmp/trx".to_string()];
-        assert!(has_results_directory_arg(&tokenize_dotnet_args(&args), TestRunnerMode::Classic));
+        assert!(has_results_directory_arg(
+            &tokenize_dotnet_args(&args),
+            TestRunnerMode::Classic
+        ));
 
         let args = vec!["--results-directory=/tmp/trx".to_string()];
-        assert!(has_results_directory_arg(&tokenize_dotnet_args(&args), TestRunnerMode::Classic));
+        assert!(has_results_directory_arg(
+            &tokenize_dotnet_args(&args),
+            TestRunnerMode::Classic
+        ));
 
         let args = vec!["--logger".to_string(), "trx".to_string()];
-        assert!(!has_results_directory_arg(&tokenize_dotnet_args(&args), TestRunnerMode::Classic));
+        assert!(!has_results_directory_arg(
+            &tokenize_dotnet_args(&args),
+            TestRunnerMode::Classic
+        ));
     }
 
     #[test]
@@ -3054,7 +3075,11 @@ mod tests {
             "/custom/results".to_string(),
         ];
 
-        let (dir, cleanup) = resolve_trx_results_dir("test", &tokenize_dotnet_args(&args), TestRunnerMode::Classic);
+        let (dir, cleanup) = resolve_trx_results_dir(
+            "test",
+            &tokenize_dotnet_args(&args),
+            TestRunnerMode::Classic,
+        );
         assert_eq!(dir, Some(PathBuf::from("/custom/results")));
         assert!(!cleanup);
     }
@@ -3103,7 +3128,11 @@ mod tests {
     fn test_resolve_trx_results_dir_generated_directory_is_marked_for_cleanup() {
         let args = Vec::<String>::new();
 
-        let (dir, cleanup) = resolve_trx_results_dir("test", &tokenize_dotnet_args(&args), TestRunnerMode::Classic);
+        let (dir, cleanup) = resolve_trx_results_dir(
+            "test",
+            &tokenize_dotnet_args(&args),
+            TestRunnerMode::Classic,
+        );
         assert!(dir.is_some());
         assert!(cleanup);
     }
@@ -3186,7 +3215,10 @@ mod tests {
             .iter()
             .position(|a| a == "--verify-no-changes")
             .expect("check mode");
-        let report = effective.iter().position(|a| a == "--report").expect("report");
+        let report = effective
+            .iter()
+            .position(|a| a == "--report")
+            .expect("report");
         assert!(verify < boundary, "{effective:?}");
         assert!(report < boundary, "{effective:?}");
     }

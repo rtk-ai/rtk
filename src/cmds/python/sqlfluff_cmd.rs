@@ -72,9 +72,9 @@ pub fn plan(args: &[String]) -> Invocation {
     let is_lint = args.is_empty() || args[0] == "lint";
 
     // Both spellings: injecting a second --format makes sqlfluff reject the call.
-    let user_set_format = args
-        .iter()
-        .any(|a| a == "--format" || a == "-f" || a.starts_with("--format=") || a.starts_with("-f="));
+    let user_set_format = args.iter().any(|a| {
+        a == "--format" || a == "-f" || a.starts_with("--format=") || a.starts_with("-f=")
+    });
     let user_json_format = args.iter().enumerate().any(|(i, a)| {
         a == "--format=json"
             || a == "-f=json"
@@ -176,10 +176,8 @@ fn render_lint_json(output: &str, exit_code: i32) -> String {
     };
 
     // One sort feeds the whole report: files, worst first.
-    let mut files: Vec<&SqlfluffFile> = parsed
-        .iter()
-        .filter(|f| !f.violations.is_empty())
-        .collect();
+    let mut files: Vec<&SqlfluffFile> =
+        parsed.iter().filter(|f| !f.violations.is_empty()).collect();
 
     let total_violations: usize = files.iter().map(|f| f.violations.len()).sum();
     if total_violations == 0 {
@@ -209,9 +207,10 @@ fn render_lint_json(output: &str, exit_code: i32) -> String {
     let mut by_rule: HashMap<&str, (usize, &str, Option<u64>)> = HashMap::new();
     for file in &parsed {
         for v in &file.violations {
-            let entry = by_rule
-                .entry(v.code.as_str())
-                .or_insert((0, file.filepath.as_str(), v.line()));
+            let entry =
+                by_rule
+                    .entry(v.code.as_str())
+                    .or_insert((0, file.filepath.as_str(), v.line()));
             entry.0 += 1;
             if entry.2.is_none() && v.line().is_some() {
                 entry.1 = file.filepath.as_str();
@@ -268,9 +267,7 @@ fn render_lint_json(output: &str, exit_code: i32) -> String {
 
         let mut file_rules: HashMap<&str, (usize, Option<u64>)> = HashMap::new();
         for v in &file.violations {
-            let entry = file_rules
-                .entry(v.code.as_str())
-                .or_insert((0, v.line()));
+            let entry = file_rules.entry(v.code.as_str()).or_insert((0, v.line()));
             entry.0 += 1;
             if entry.1.is_none() && v.line().is_some() {
                 entry.1 = v.line();
@@ -504,7 +501,10 @@ mod tests {
             "the file ranked first must lead the detail section, got:\n{section}"
         );
         assert_eq!(
-            section.lines().filter(|l| l.contains("zzz_worst.sql")).count(),
+            section
+                .lines()
+                .filter(|l| l.contains("zzz_worst.sql"))
+                .count(),
             22,
             "every violation of the worst file must survive truncation"
         );
@@ -557,10 +557,7 @@ mod tests {
     #[test]
     fn test_violation_renders_full_coordinates_when_reported() {
         let out = filter_sqlfluff_lint_json(V4_JSON);
-        assert!(
-            out.contains("models/orders.sql:1:1 LT09"),
-            "got:\n{out}"
-        );
+        assert!(out.contains("models/orders.sql:1:1 LT09"), "got:\n{out}");
     }
 
     // ── fixability across sqlfluff versions ─────────────────────────────────
@@ -602,7 +599,11 @@ mod tests {
     #[test]
     fn test_plan_never_injects_a_second_format() {
         for user in [
-            vec!["lint".to_string(), "--format".to_string(), "human".to_string()],
+            vec![
+                "lint".to_string(),
+                "--format".to_string(),
+                "human".to_string(),
+            ],
             vec!["lint".to_string(), "-f=human".to_string()],
         ] {
             let p = plan(&user);
@@ -619,14 +620,7 @@ mod tests {
     #[test]
     fn test_plan_keeps_user_json_format_parseable() {
         assert!(plan(&["lint".to_string(), "--format=json".to_string()]).expect_json);
-        assert!(
-            plan(&[
-                "lint".to_string(),
-                "-f".to_string(),
-                "json".to_string()
-            ])
-            .expect_json
-        );
+        assert!(plan(&["lint".to_string(), "-f".to_string(), "json".to_string()]).expect_json);
     }
 
     #[test]
@@ -756,8 +750,7 @@ mod tests {
     fn test_filter_legacy_line_no_alias() {
         // Older sqlfluff versions emit line_no/line_pos; the serde alias must
         // surface sample locations for them too.
-        let input =
-            r#"[{"filepath": "models/core/dim_users.sql", "violations": [{"line_no": 7, "line_pos": 2, "code": "LT09", "description": "Select wildcard.", "fixes": []}]}]"#;
+        let input = r#"[{"filepath": "models/core/dim_users.sql", "violations": [{"line_no": 7, "line_pos": 2, "code": "LT09", "description": "Select wildcard.", "fixes": []}]}]"#;
         let result = filter_sqlfluff_lint_json(input);
         assert!(
             result.contains("models/core/dim_users.sql:7"),
@@ -788,7 +781,10 @@ mod tests {
         let input =
             std::iter::repeat_n("line of human sqlfluff output\n", 2000).collect::<String>();
         let result = filter_sqlfluff_lint_json(&input);
-        assert_eq!(result, input, "large raw output must pass through unchanged");
+        assert_eq!(
+            result, input,
+            "large raw output must pass through unchanged"
+        );
     }
 
     #[test]
@@ -833,12 +829,8 @@ mod tests {
   }
 ]"#;
         let result = filter_sqlfluff_lint_json(input);
-        let lt02 = result
-            .find("LT02")
-            .expect("LT02 should be listed");
-        let lt10 = result
-            .find("LT10")
-            .expect("LT10 should be listed");
+        let lt02 = result.find("LT02").expect("LT02 should be listed");
+        let lt10 = result.find("LT10").expect("LT10 should be listed");
         assert!(
             lt02 < lt10,
             "tied rules must sort alphabetically, got: {result}"
@@ -912,13 +904,21 @@ mod tests {
     fn test_compact_path_disambiguates_non_dbt_layouts() {
         // The detail section exists to be opened, so paths sharing a filename
         // across an ordinary migrations/reports/src layout must stay distinct.
-        let rendered: Vec<String> = ["migrations/orders.sql", "reports/orders.sql", "/repo/src/sql/orders.sql"]
-            .iter()
-            .map(|p| compact_path(p))
-            .collect();
+        let rendered: Vec<String> = [
+            "migrations/orders.sql",
+            "reports/orders.sql",
+            "/repo/src/sql/orders.sql",
+        ]
+        .iter()
+        .map(|p| compact_path(p))
+        .collect();
         assert_eq!(
             rendered,
-            ["migrations/orders.sql", "reports/orders.sql", "sql/orders.sql"]
+            [
+                "migrations/orders.sql",
+                "reports/orders.sql",
+                "sql/orders.sql"
+            ]
         );
     }
 

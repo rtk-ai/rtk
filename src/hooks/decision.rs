@@ -15,7 +15,7 @@
 //! machine's settings (#3146); and the no-op-rewrite policy lives in
 //! [`decide_for_agent`], which every hook shares and the CLI does not.
 
-use super::permissions::{check_command_for, Host, PermissionVerdict};
+use super::permissions::{Host, PermissionVerdict, check_command_for};
 use crate::discover::registry::rewrite_command;
 
 /// What a hook should do with a command.
