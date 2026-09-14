@@ -1,0 +1,81 @@
+{
+    "cluster": {
+        "name": "production-cluster",
+        "arn": "arn:aws:eks:us-east-1:123456789012:cluster/production-cluster",
+        "createdAt": "2024-01-15T10:30:00.000000+00:00",
+        "version": "1.28",
+        "endpoint": "https://ABCDEF1234567890.gr7.us-east-1.eks.amazonaws.com",
+        "roleArn": "arn:aws:iam::123456789012:role/eksClusterRole",
+        "resourcesVpcConfig": {
+            "subnetIds": [
+                "subnet-0a1b2c3d4e5f6071",
+                "subnet-1a2b3c4d5e6f7082",
+                "subnet-2a3b4c5d6e7f8093"
+            ],
+            "securityGroupIds": [
+                "sg-0a1b2c3d4e5f6071"
+            ],
+            "clusterSecurityGroupId": "sg-9z8y7x6w5v4u3t2s",
+            "vpcId": "vpc-0a1b2c3d4e5f6071",
+            "endpointPublicAccess": true,
+            "endpointPrivateAccess": true,
+            "publicAccessCidrs": [
+                "0.0.0.0/0"
+            ]
+        },
+        "kubernetesNetworkConfig": {
+            "serviceIpv4Cidr": "10.100.0.0/16",
+            "ipFamily": "ipv4"
+        },
+        "logging": {
+            "clusterLogging": [
+                {
+                    "types": [
+                        "api",
+                        "audit",
+                        "authenticator"
+                    ],
+                    "enabled": true
+                },
+                {
+                    "types": [
+                        "controllerManager",
+                        "scheduler"
+                    ],
+                    "enabled": false
+                }
+            ]
+        },
+        "identity": {
+            "oidc": {
+                "issuer": "https://oidc.eks.us-east-1.amazonaws.com/id/ABCDEF1234567890"
+            }
+        },
+        "status": "ACTIVE",
+        "certificateAuthority": {
+            "data": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUN5RENDQWJDZ0F3SUJBZ0lCQURBTkJna3Foa2lHOXcwQkFRc0ZBREFWTVJNd0VRWURWUVFERXdwcmRXSmxjbTVsZEdWekxXTmhNQjRYRFRJME1ERXhOVEV3TXpBd01Gb1hEVE0wTURFeE1qRXdNekF3TUZvd0ZURVRNQkVHQTFVRUF4TUthM1ZpWlhKdVpYUmxjeTFqWVR0PQ=="
+        },
+        "platformVersion": "eks.5",
+        "tags": {
+            "env": "production",
+            "team": "platform",
+            "cost-center": "eng-1234"
+        },
+        "encryptionConfig": [
+            {
+                "resources": [
+                    "secrets"
+                ],
+                "provider": {
+                    "keyArn": "arn:aws:kms:us-east-1:123456789012:key/abcd1234-5678-90ab-cdef-1234567890ab"
+                }
+            }
+        ],
+        "accessConfig": {
+            "authenticationMode": "API_AND_CONFIG_MAP"
+        },
+        "health": {
+            "issues": []
+        }
+    }
+}
