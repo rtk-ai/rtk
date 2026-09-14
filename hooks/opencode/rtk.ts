@@ -6,6 +6,12 @@ import type { Plugin } from "@opencode-ai/plugin"
 // This is a thin delegating plugin: all rewrite logic lives in `rtk rewrite`,
 // which is the single source of truth (src/discover/registry.rs).
 // To add or change rewrite rules, edit the Rust registry — not this file.
+//
+// OpenCode v2 (>=2.0.x) requires the default export to satisfy
+// `{ id, setup | effect }`. We export a default that carries both:
+//   - `id` + `setup` so the v2 loader's schema decode succeeds
+//   - `server` so OpenCode v1 hosts keep working
+// The hook logic lives once in `RtkOpenCodePlugin` and is reused by v1.
 
 export const RtkOpenCodePlugin: Plugin = async ({ $ }) => {
   try {
@@ -36,4 +42,14 @@ export const RtkOpenCodePlugin: Plugin = async ({ $ }) => {
       }
     },
   }
+}
+
+export default {
+  id: "rtk",
+  // v2 hosts require `setup` (or `effect`). The real v1 hook logic is in
+  // `server` below; v2 currently ignores `server`. A future revision will
+  // re-register the hook through the v2 PluginContext when its tool APIs
+  // stabilize (see https://github.com/anomalyco/opencode/issues/42878).
+  setup: async () => {},
+  server: RtkOpenCodePlugin,
 }
