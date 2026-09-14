@@ -131,7 +131,28 @@ Four rules, each of which cost a real bug before it was written down:
 - `ValueSpec::solo_only()` — a `Short` flag takes a separate value only when it is the whole argument: `git log -n 2` does, `git log -pn 2` does not. No meaning for a `Long` flag.
 - `.claiming_dash_dash()` — lets a literal `--` be this flag's value. A per-tool split, not per-flag: grep and rg let any value-taking flag swallow it, git and cargo reject it whichever flag is asking.
 
-The dialect is the one axis that is not per-flag, so it stays a parameter: `tokenize_grammar(args, takes_value, Dialect::Msbuild)`.
+### Dialects
+
+Everything that is not per-flag is per-tool, and stays a parameter: `tokenize_grammar(args, takes_value, Dialect::Msbuild)`. `Dialect` is a `Copy` struct of five independent axes, because the tools measured want five different combinations of them:
+
+| axis | values | what differs |
+|---|---|---|
+| `single_dash` | `Cluster` / `Atomic` / `AtomicAliasingLong` | what `-abc` is: three short flags, one flag name, or one flag name that is also `--abc` |
+| `attach` | `Equals` / `EqualsOrColon` | which separator attaches a value (`--logger:trx`) |
+| `dash_dash` | `EndsOptions` / `Forwards` / `EndsGlobalOptions` | whether classification stops at `--`, continues because the tail is forwarded to another program, or continues because only the *global* option region ended |
+| `name_case` | `Sensitive` / `Folded` | whether flag lookups fold ASCII case |
+| `slash_flags` | `bool` | whether `/flag` is a switch rather than a path |
+
+**Naming rule.** A preset names a grammar *family* that several tools can share — a parser library, or a real convention — so its name answers "can my tool reuse this?". `Dialect::CommonsCli` is checkable (`ls /usr/share/maven/lib/` ships `commons-cli-1.11.0.jar`); "is my tool Maven?" is not. A single tool's bespoke parser gets **no preset**: its caller composes the axes at its own call site. That rule is what stops this list growing one variant per tool.
+
+- `Dialect::Posix` — git, cargo, rg, golangci-lint. Cluster, `=`, `--` ends options, case-sensitive, no `/flag`.
+- `Dialect::Msbuild` — dotnet. Atomic, `=` or `:`, `--` forwards, case-folded, `/flag`.
+- `Dialect::CommonsCli` — Apache commons-cli. POSIX with `Atomic`: the library's short options are whole multi-character words (`-pl`, `-am`, `-gs`, `-emp`), so `mvn -Bo` is an error, not a cluster. Maven is the first consumer.
+- `Dialect::GoFlag` — Go's `flag` package: atomic single-dash options, and `-run` is the same flag as `--run`.
+
+Gradle gets no preset: its parser is `org.gradle.cli` (`gradle:jdk21` ships `gradle-cli-*.jar` and no commons-cli), used by nothing else. It is `Posix` with `dash_dash: EndsGlobalOptions`, composed as a `const` in `gradlew_cmd.rs`. The axis value is shared infrastructure; the one-tool combination is not.
+
+`src/core/arg_tokenizer/frozen.rs` is the pre-axes implementation, kept as the oracle for the differential test in `differential.rs`: every arg vector up to four tokens over an alphabet covering each construct the scanner branches on, asserted token-for-token identical under `Posix` and `Msbuild`. Never edit `frozen.rs` to match new behaviour — a diff against it is the only proof the presets have not moved.
 
 ## Consumer Contracts
 
