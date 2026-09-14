@@ -1121,6 +1121,47 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 65.0,
         ..RtkRule::DEFAULT
     },
+    // Flutter/Dart tooling — kept as four separate prefixes (not collapsed into
+    // one canonical rtk_cmd like gradle/gradlew) because `flutter` vs `dart` and
+    // fvm-pinned vs global invocations are not interchangeable aliases: fvm
+    // resolves a project-pinned SDK version, and dropping it would silently run
+    // the wrong toolchain.
+    RtkRule {
+        pattern: r"^flutter\s+(analyze|pub\s+get)\b",
+        rtk_cmd: "rtk flutter",
+        pipeline_safety: PipelineSafety::ProducerOnly,
+        rewrite_prefixes: &["flutter"],
+        category: "Build",
+        savings_pct: 35.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^dart\s+(analyze|pub\s+get)\b",
+        rtk_cmd: "rtk dart",
+        pipeline_safety: PipelineSafety::ProducerOnly,
+        rewrite_prefixes: &["dart"],
+        category: "Build",
+        savings_pct: 35.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^fvm\s+flutter\s+(analyze|pub\s+get)\b",
+        rtk_cmd: "rtk fvm flutter",
+        pipeline_safety: PipelineSafety::ProducerOnly,
+        rewrite_prefixes: &["fvm flutter"],
+        category: "Build",
+        savings_pct: 35.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^fvm\s+dart\s+(analyze|pub\s+get)\b",
+        rtk_cmd: "rtk fvm dart",
+        pipeline_safety: PipelineSafety::ProducerOnly,
+        rewrite_prefixes: &["fvm dart"],
+        category: "Build",
+        savings_pct: 35.0,
+        ..RtkRule::DEFAULT
+    },
 ];
 
 pub const IGNORED_PREFIXES: &[&str] = &[
