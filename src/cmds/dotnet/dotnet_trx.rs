@@ -385,6 +385,7 @@ fn parse_trx_content(content: &str) -> Option<TestSummary> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmds::dotnet::test_support;
     use std::time::Duration;
 
     #[test]
@@ -493,11 +494,14 @@ mod tests {
         let testresults_dir = temp_dir.path().join("TestResults");
         std::fs::create_dir_all(&testresults_dir).expect("create TestResults");
 
+        let base = SystemTime::now();
+        let old = base - Duration::from_secs(86_400);
+        let new = base + Duration::from_secs(3_600);
+
         let old_trx = testresults_dir.join("old.trx");
         let new_trx = testresults_dir.join("new.trx");
-        std::fs::write(&old_trx, "old").expect("write old");
-        std::thread::sleep(Duration::from_millis(5));
-        std::fs::write(&new_trx, "new").expect("write new");
+        test_support::write_trx_with_mtime(&old_trx, "old", old);
+        test_support::write_trx_with_mtime(&new_trx, "new", new);
 
         let found = find_recent_trx_in_dir(&testresults_dir).expect("should find newest trx");
         assert_eq!(found, new_trx);
@@ -554,21 +558,19 @@ mod tests {
         let trx_dir = temp_dir.path().join("TestResults");
         std::fs::create_dir_all(&trx_dir).expect("create TestResults");
 
+        let base = SystemTime::now();
+        let old = base - Duration::from_secs(86_400);
+        let new = base + Duration::from_secs(3_600);
+
         let trx_old = r#"<?xml version="1.0" encoding="utf-8"?>
 <TestRun><ResultSummary><Counters total="2" executed="2" passed="2" failed="0" /></ResultSummary></TestRun>"#;
-        std::fs::write(trx_dir.join("old.trx"), trx_old).expect("write old trx");
-
-        std::thread::sleep(Duration::from_millis(10));
-
-        let since = SystemTime::now()
-            .checked_sub(Duration::from_millis(10))
-            .expect("threshold overflow");
+        test_support::write_trx_with_mtime(&trx_dir.join("old.trx"), trx_old, old);
 
         let trx_new = r#"<?xml version="1.0" encoding="utf-8"?>
 <TestRun><ResultSummary><Counters total="3" executed="3" passed="2" failed="1" /></ResultSummary></TestRun>"#;
-        std::fs::write(trx_dir.join("new.trx"), trx_new).expect("write new trx");
+        test_support::write_trx_with_mtime(&trx_dir.join("new.trx"), trx_new, new);
 
-        let summary = parse_trx_files_in_dir_since(&trx_dir, Some(since)).expect("merged summary");
+        let summary = parse_trx_files_in_dir_since(&trx_dir, Some(base)).expect("merged summary");
         assert_eq!(summary.total, 3);
         assert_eq!(summary.failed, 1);
     }
