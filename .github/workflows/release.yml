@@ -52,6 +52,10 @@ jobs:
             os: ubuntu-latest
             archive: tar.gz
             cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: tar.gz
+            setup_cross_toolchain: true
           # Windows
           - target: x86_64-pc-windows-msvc
             os: windows-latest
@@ -78,6 +82,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
+
+      # Sets up a native musl cross-compiler + linker for targets like
+      # aarch64-unknown-linux-musl so the standard `cargo build` step below
+      # works and build-time env (RTK_TELEMETRY_*) passes through normally.
+      - name: Set up cross toolchain
+        if: matrix.setup_cross_toolchain
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
