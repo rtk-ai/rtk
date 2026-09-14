@@ -38,7 +38,7 @@ def _check_rtk():
 
 
 def _pre_tool_call(tool_name=None, args=None, **_kwargs):
-    """Rewrite mutable Hermes terminal command args when RTK provides a change."""
+    """Return a Hermes modify directive when RTK rewrites a terminal command."""
     try:
         if tool_name != "terminal" or not isinstance(args, dict):
             return
@@ -70,7 +70,7 @@ def _pre_tool_call(tool_name=None, args=None, **_kwargs):
 
         rewritten = result.stdout.strip()
         if rewritten and rewritten != command:
-            args["command"] = rewritten
+            return {"action": "modify", "args": {**args, "command": rewritten}}
     except Exception as e:
         _warn(str(e))
         return
