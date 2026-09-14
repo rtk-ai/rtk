@@ -80,6 +80,12 @@ pub fn run(
         _ => {} // Continue with text format
     }
 
+    // Warn about hook issues that silently kill savings (stderr, not stdout).
+    // Placed before the summary load / empty-report early return so every text
+    // view (default, --daily, --weekly, --monthly, --all) and the empty-report
+    // path show it exactly once; JSON/CSV return earlier and stay clean.
+    warn_hook_issues();
+
     let summary = tracker
         .get_summary_filtered(project_scope.as_deref()) // changed: use filtered variant
         .context("Failed to load token savings summary from database")?;
@@ -136,26 +142,6 @@ pub fn run(
         );
         print_efficiency_meter(summary.avg_savings_pct);
         println!();
-
-        // Warn about hook issues that silently kill savings (stderr, not stdout)
-        match hook_check::status() {
-            hook_check::HookStatus::Missing => {
-                eprintln!(
-                    "{}",
-                    "[warn] No hook installed — run `rtk init -g` for automatic token savings"
-                        .yellow()
-                );
-                eprintln!();
-            }
-            hook_check::HookStatus::Outdated => {
-                eprintln!(
-                    "{}",
-                    "[warn] Hook outdated — run `rtk init -g` to update".yellow()
-                );
-                eprintln!();
-            }
-            hook_check::HookStatus::Ok => {}
-        }
 
         // Lightweight RTK_DISABLED bypass check (best-effort, silent on failure)
         if let Some(warning) = check_rtk_disabled_bypass() {
@@ -350,6 +336,30 @@ pub fn run(
 }
 
 // ── Display helpers (TTY-aware) ── // added: entire section
+
+/// Warn about hook issues that silently kill savings (stderr, not stdout).
+/// Body moved verbatim from the former default-view block; called once from
+/// `run()` after the JSON/CSV format match so all text views + the empty
+/// report see it, while machine-readable exports stay warning-free.
+fn warn_hook_issues() {
+    match hook_check::status() {
+        hook_check::HookStatus::Missing => {
+            eprintln!(
+                "{}",
+                "[warn] No hook installed — run `rtk init -g` for automatic token savings".yellow()
+            );
+            eprintln!();
+        }
+        hook_check::HookStatus::Outdated => {
+            eprintln!(
+                "{}",
+                "[warn] Hook outdated — run `rtk init -g` to update".yellow()
+            );
+            eprintln!();
+        }
+        hook_check::HookStatus::Ok => {}
+    }
+}
 
 /// Format text with bold styling (TTY-aware). // added
 fn styled(text: &str, strong: bool) -> String {
