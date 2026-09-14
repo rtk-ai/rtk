@@ -169,6 +169,77 @@ fn rg_honors_ignore_files_grep_does_not() {
     );
 }
 
+#[test]
+fn grep_recursive_search_skips_claude_worktrees() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = dir.path().join("src");
+    let worktree = dir.path().join(".claude/worktrees/feature");
+    std::fs::create_dir_all(&source).expect("create source");
+    std::fs::create_dir_all(&worktree).expect("create worktree");
+    std::fs::write(source.join("kept.txt"), "NEEDLE source\n").expect("write source");
+    std::fs::write(worktree.join("skipped.txt"), "NEEDLE worktree\n").expect("write worktree");
+
+    let out = rtk()
+        .args(["grep", "-r", "NEEDLE", dir.path().to_str().unwrap()])
+        .output()
+        .expect("rtk grep");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains("kept.txt"),
+        "source match missing:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("skipped.txt") && !stdout.contains("worktree"),
+        "Claude worktree match leaked into grep output:\n{stdout}"
+    );
+
+    let listed = rtk()
+        .args(["grep", "-rl", "NEEDLE", dir.path().to_str().unwrap()])
+        .output()
+        .expect("rtk grep -rl");
+    let listed_stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(listed_stdout.contains("kept.txt"));
+    assert!(!listed_stdout.contains("skipped.txt"));
+}
+
+#[test]
+fn rg_hidden_search_skips_claude_worktrees() {
+    if !rg_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = dir.path().join("src");
+    let worktree = dir.path().join(".claude/worktrees/feature");
+    std::fs::create_dir_all(&source).expect("create source");
+    std::fs::create_dir_all(&worktree).expect("create worktree");
+    std::fs::write(source.join("kept.txt"), "NEEDLE source\n").expect("write source");
+    std::fs::write(worktree.join("skipped.txt"), "NEEDLE worktree\n").expect("write worktree");
+
+    let out = rtk()
+        .args(["rg", "--hidden", "NEEDLE", dir.path().to_str().unwrap()])
+        .output()
+        .expect("rtk rg");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains("kept.txt"),
+        "source match missing:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("skipped.txt") && !stdout.contains("worktree"),
+        "Claude worktree match leaked into rg output:\n{stdout}"
+    );
+
+    let listed = rtk()
+        .args(["rg", "--hidden", "--files", dir.path().to_str().unwrap()])
+        .output()
+        .expect("rtk rg --files");
+    let listed_stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(listed_stdout.contains("kept.txt"));
+    assert!(!listed_stdout.contains("skipped.txt"));
+}
+
 // --- token savings: rg path compresses as much as the grep path ---
 
 // Covers #545: rg savings are measured against the real rg output, not a
