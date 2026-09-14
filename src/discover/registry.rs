@@ -1474,7 +1474,37 @@ fn search_uses_pattern_file(cmd: &str) -> bool {
 }
 
 fn pipeline_command_is_safe(rtk_cmd: &str, cmd: &str) -> bool {
-    !matches!(rtk_cmd, "rtk grep" | "rtk rg") || !search_uses_pattern_file(cmd)
+    if matches!(rtk_cmd, "rtk grep" | "rtk rg") && search_uses_pattern_file(cmd) {
+        return false;
+    }
+
+    // `rtk ls` appends file sizes to bare listings. That is useful when
+    // displaying a directory, but it makes a producer rewrite larger than
+    // native `ls` output and leaves a decorated filename in a pipeline. Keep
+    // producer rewrites for the long forms where rtk actually removes the
+    // native permission/owner/date columns.
+    if rtk_cmd == "rtk ls" {
+        return ls_has_long_format(cmd);
+    }
+    if rtk_cmd == "rtk find" {
+        // `rtk find` may cap, reorder, filter, or strip `./` from entries;
+        // keep producer pipelines on the native listing so consumers receive
+        // the exact names and ordering emitted by find.
+        return false;
+    }
+
+    true
+}
+
+fn ls_has_long_format(cmd: &str) -> bool {
+    shell_split(cmd).into_iter().skip(1).any(|arg| {
+        arg == "--full-time"
+            || arg == "--format=long"
+            || arg == "--format=verbose"
+            || (arg.starts_with('-')
+                && !arg.starts_with("--")
+                && arg.chars().any(|c| matches!(c, 'l' | 'g' | 'n' | 'o')))
+    })
 }
 
 pub(crate) enum ExcludePattern {
@@ -2462,6 +2492,42 @@ mod tests {
         ] {
             assert!(!analyze_test_pipeline(cmd).all_consumers_safe, "{cmd}");
         }
+    }
+
+    #[test]
+    fn test_ls_pipeline_producer_requires_long_format() {
+        for command in ["ls", "ls -t", "ls -t src", "ls src"] {
+            assert!(!pipeline_command_is_safe("rtk ls", command), "{command}");
+            assert_eq!(
+                rewrite_command_no_prefixes(&format!("{command} | head -1"), &[]),
+                None,
+                "{command}"
+            );
+        }
+
+        for command in [
+            "ls -l",
+            "ls -la",
+            "ls -lt src",
+            "ls --full-time src",
+            "ls --format=verbose src",
+        ] {
+            assert!(pipeline_command_is_safe("rtk ls", command), "{command}");
+        }
+
+        assert_eq!(
+            rewrite_command_no_prefixes("ls -la src | head -1", &[]),
+            Some("rtk ls -la src | head -1".into())
+        );
+
+        assert!(!pipeline_command_is_safe(
+            "rtk find",
+            "find . -name '*.txt'"
+        ));
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -name '*.txt' | head -2", &[]),
+            None
+        );
     }
 
     #[test]
