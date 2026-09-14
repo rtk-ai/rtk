@@ -1,8 +1,18 @@
 # RTK - Documentation fonctionnelle complete
 
-> **rtk (Rust Token Killer)** -- Proxy CLI haute performance qui reduit la consommation de tokens LLM de 60 a 90%.
+> **rtk (Rust Token Killer)** -- Proxy CLI haute performance qui reduit jusqu'a 90% de la sortie bash lue par votre agent.
 
 Binaire Rust unique, zero dependances externes, overhead < 10ms par commande.
+
+## A propos de la reduction de sortie bash
+
+Tous les pourcentages notes **Reduction sortie bash** dans ce document mesurent les **octets de sortie bash supprimes** : la sortie qu'une commande shell renvoie avant que l'agent ne la lise. Ce n'est pas equivalent a une reduction de facture du meme ordre.
+
+La sortie bash n'est qu'une source parmi d'autres pour les tokens d'entree, aux cotes de votre prompt, du prompt systeme et de l'historique de conversation. Les tokens d'entree ne representent eux-memes qu'une partie de la facture, qui compte aussi les tokens de sortie. La reduction se dilue a chaque etape.
+
+Les compteurs de tokens affiches par RTK sont estimes a `octets / 4` : RTK n'embarque pas de tokenizer, donc **les pourcentages sont fiables mais les nombres absolus de tokens sont approximatifs**.
+
+Explication complete : [How RTK Savings Work](../guide/resources/savings-explained.md)
 
 ---
 
@@ -53,7 +63,7 @@ Ces drapeaux s'appliquent a **toutes** les sous-commandes :
 | Drapeau | Court | Description |
 |---------|-------|-------------|
 | `--verbose` | `-v` | Augmenter la verbosite (-v, -vv, -vvv). Montre les details de filtrage. |
-| `--ultra-compact` | `-u` | Mode ultra-compact : icones ASCII, format inline. Economies supplementaires. |
+| `--ultra-compact` | `-u` | Mode ultra-compact : icones ASCII, format inline. Reduit encore la sortie bash. |
 | `--skip-env` | -- | Definit `SKIP_ENV_VALIDATION=1` pour les processus enfants (Next.js, tsc, lint, prisma). |
 
 **Exemples :**
@@ -80,8 +90,6 @@ rtk ls [args...]
 
 Tous les drapeaux natifs de `ls` sont supportes (`-l`, `-a`, `-h`, `-R`, etc.).
 
-**Economies :** ~80% de reduction de tokens
-
 **Avant / Apres :**
 ```
 # ls -la (45 lignes, ~800 tokens)          # rtk ls (12 lignes, ~150 tokens)
@@ -105,8 +113,6 @@ rtk tree [args...]
 
 Supporte tous les drapeaux natifs de `tree` (`-L`, `-d`, `-a`, etc.).
 
-**Economies :** ~80%
-
 ---
 
 ### `rtk read` -- Lecture de fichier
@@ -129,7 +135,7 @@ rtk read - [options]          # Lecture depuis stdin
 
 **Niveaux de filtrage :**
 
-| Niveau | Description | Economies |
+| Niveau | Description | Reduction sortie bash |
 |--------|-------------|-----------|
 | `none` | Aucun filtrage, sortie brute | 0% |
 | `minimal` | Supprime commentaires et lignes vides excessives | ~30% |
@@ -162,8 +168,6 @@ fn main() -> Result<()> {                   fn main() -> Result<()> { ... }
 rtk smart <fichier> [--model heuristic] [--force-download]
 ```
 
-**Economies :** ~95%
-
 **Exemple :**
 ```
 $ rtk smart src/tracking.rs
@@ -183,8 +187,6 @@ rtk find [args...]
 ```
 
 Supporte a la fois la syntaxe RTK et la syntaxe native `find` (`-name`, `-type`, etc.).
-
-**Economies :** ~80%
 
 **Avant / Apres :**
 ```
@@ -221,8 +223,6 @@ rtk grep <pattern> [chemin] [options]
 
 Les arguments supplementaires sont transmis a `rg` (ripgrep). Les flags qui changent le format de sortie (`-c`, `-l`, `-L`, `-o`, `-Z`) passent directement a `rg`/`grep` sans filtrage RTK.
 
-**Economies :** ~80%
-
 **Avant / Apres :**
 ```
 # rg "fn run" (20 lignes)                   # rtk grep "fn run" (10 lignes)
@@ -245,8 +245,6 @@ src/ls.rs:25:fn run_tree(...)                src/ls.rs
 rtk diff <fichier1> <fichier2>
 rtk diff <fichier1>              # Stdin comme second fichier
 ```
-
-**Economies :** ~60%
 
 ---
 
@@ -286,8 +284,6 @@ Toutes les sous-commandes git sont supportees. Les commandes non reconnues sont 
 
 ### `rtk git status` -- Status compact
 
-**Economies :** ~80%
-
 ```bash
 rtk git status [args...]    # Supporte tous les drapeaux git status
 ```
@@ -310,8 +306,6 @@ Changes not staged for commit:                ? new_file.txt
 
 ### `rtk git log` -- Historique compact
 
-**Economies :** ~80%
-
 ```bash
 rtk git log [args...]    # Supporte --oneline, --graph, --all, -n, etc.
 ```
@@ -330,8 +324,6 @@ Date:   Mon Jan 15 10:30:00 2024            789abc Refactor filter engine
 ---
 
 ### `rtk git diff` -- Diff compact
-
-**Economies :** ~75%
 
 ```bash
 rtk git diff [args...]    # Supporte --stat, --cached, --staged, etc.
@@ -354,8 +346,6 @@ index abc123..def456 100644                    +  let config = Config::load()?;
 
 ### `rtk git show` -- Show compact
 
-**Economies :** ~80%
-
 ```bash
 rtk git show [args...]
 ```
@@ -365,8 +355,6 @@ Affiche le resume du commit + stat + diff compact.
 ---
 
 ### `rtk git add` -- Add ultra-compact
-
-**Economies :** ~92%
 
 ```bash
 rtk git add [args...]    # Supporte -A, -p, --all, etc.
@@ -378,8 +366,6 @@ rtk git add [args...]    # Supporte -A, -p, --all, etc.
 
 ### `rtk git commit` -- Commit ultra-compact
 
-**Economies :** ~92%
-
 ```bash
 rtk git commit -m "message" [args...]    # Supporte -a, --amend, --allow-empty, etc.
 ```
@@ -389,8 +375,6 @@ rtk git commit -m "message" [args...]    # Supporte -a, --amend, --allow-empty, 
 ---
 
 ### `rtk git push` -- Push ultra-compact
-
-**Economies :** ~92%
 
 ```bash
 rtk git push [args...]    # Supporte -u, remote, branch, etc.
@@ -408,8 +392,6 @@ Delta compression using up to 8 threads
 ---
 
 ### `rtk git pull` -- Pull ultra-compact
-
-**Economies :** ~92%
 
 ```bash
 rtk git pull [args...]
@@ -480,7 +462,7 @@ rtk gh <sous-commande> [args...]
 
 **Sous-commandes supportees :**
 
-| Commande | Description | Economies |
+| Commande | Description | Reduction sortie bash |
 |----------|-------------|-----------|
 | `rtk gh pr list` | Liste des PRs compacte | ~80% |
 | `rtk gh pr view <num>` | Details d'une PR + checks | ~87% |
@@ -513,8 +495,6 @@ Showing 10 of 15 pull requests in org/repo   #42 feat: add vitest (open, 2d)
 rtk test <commande...>
 ```
 
-**Economies :** ~90%
-
 **Exemple :**
 ```bash
 rtk test cargo test
@@ -544,8 +524,6 @@ test utils::test_edge_case ... FAILED
 rtk err <commande...>
 ```
 
-**Economies :** ~80%
-
 **Exemple :**
 ```bash
 rtk err npm run build
@@ -555,8 +533,6 @@ rtk err cargo build
 ---
 
 ### `rtk cargo test` -- Tests Rust
-
-**Economies :** ~90%
 
 ```bash
 rtk cargo test [args...]
@@ -578,8 +554,6 @@ Filtre la sortie de `cargo nextest` pour n'afficher que les echecs.
 
 ### `rtk jest` / `rtk vitest` -- Tests Jest/Vitest
 
-**Economies :** ~99.5%
-
 ```bash
 rtk jest [args...]
 rtk vitest [args...]
@@ -589,8 +563,6 @@ rtk vitest [args...]
 
 ### `rtk playwright test` -- Tests E2E Playwright
 
-**Economies :** ~94%
-
 ```bash
 rtk playwright [args...]
 ```
@@ -599,8 +571,6 @@ rtk playwright [args...]
 
 ### `rtk pytest` -- Tests Python
 
-**Economies :** ~90%
-
 ```bash
 rtk pytest [args...]
 ```
@@ -608,8 +578,6 @@ rtk pytest [args...]
 ---
 
 ### `rtk go test` -- Tests Go
-
-**Economies :** ~90%
 
 ```bash
 rtk go test [args...]
@@ -623,8 +591,6 @@ Utilise le streaming JSON NDJSON de Go pour un filtrage precis.
 
 ### `rtk cargo build` -- Build Rust
 
-**Economies :** ~80%
-
 ```bash
 rtk cargo build [args...]
 ```
@@ -635,8 +601,6 @@ Supprime les lignes "Compiling...", ne conserve que les erreurs et le resultat f
 
 ### `rtk cargo check` -- Check Rust
 
-**Economies :** ~80%
-
 ```bash
 rtk cargo check [args...]
 ```
@@ -646,8 +610,6 @@ Supprime les lignes "Checking...", ne conserve que les erreurs.
 ---
 
 ### `rtk cargo clippy` -- Clippy Rust
-
-**Economies :** ~80%
 
 ```bash
 rtk cargo clippy [args...]
@@ -669,8 +631,6 @@ Supprime la compilation des dependances, ne conserve que le resultat d'installat
 
 ### `rtk tsc` -- TypeScript Compiler
 
-**Economies :** ~83%
-
 ```bash
 rtk tsc [args...]
 ```
@@ -691,8 +651,6 @@ src/utils.ts(5,1): error TS2304: ...         src/utils.ts (1 error)
 
 ### `rtk lint` -- ESLint / Biome
 
-**Economies :** ~84%
-
 ```bash
 rtk lint [args...]
 rtk lint biome [args...]
@@ -703,8 +661,6 @@ Regroupe les violations par regle et par fichier. Auto-detecte le linter.
 ---
 
 ### `rtk prettier` -- Verification du formatage
-
-**Economies :** ~70%
 
 ```bash
 rtk prettier [args...]    # ex: rtk prettier --check .
@@ -726,8 +682,6 @@ Auto-detecte le formateur du projet (prettier, black, ruff format) et applique u
 
 ### `rtk next build` -- Build Next.js
 
-**Economies :** ~87%
-
 ```bash
 rtk next [args...]
 ```
@@ -737,8 +691,6 @@ Sortie compacte avec metriques de routes.
 ---
 
 ### `rtk ruff` -- Linter/formateur Python
-
-**Economies :** ~80%
 
 ```bash
 rtk ruff check [args...]
@@ -760,8 +712,6 @@ Regroupe les erreurs de type par fichier.
 ---
 
 ### `rtk golangci-lint` -- Linter Go
-
-**Economies :** ~85%
 
 ```bash
 rtk golangci-lint run [args...]
@@ -796,7 +746,7 @@ Detecte automatiquement : prettier, black, ruff format, rustfmt. Applique un fil
 
 ### `rtk pnpm` -- pnpm
 
-| Commande | Description | Economies |
+| Commande | Description | Reduction sortie bash |
 |----------|-------------|-----------|
 | `rtk pnpm list [-d N]` | Arbre de dependances compact | ~70% |
 | `rtk pnpm outdated` | Paquets obsoletes : `pkg: old -> new` | ~80% |
@@ -854,8 +804,6 @@ rtk deps [chemin]    # Defaut: repertoire courant
 
 Auto-detecte : `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`, `Gemfile`, etc.
 
-**Economies :** ~70%
-
 ---
 
 ### `rtk prisma` -- ORM Prisma
@@ -874,7 +822,7 @@ Auto-detecte : `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`, `Gemfil
 
 ### `rtk docker` -- Docker
 
-| Commande | Description | Economies |
+| Commande | Description | Reduction sortie bash |
 |----------|-------------|-----------|
 | `rtk docker ps` | Liste compacte des conteneurs | ~80% |
 | `rtk docker images` | Liste compacte des images | ~80% |
@@ -918,8 +866,6 @@ rtk json <fichier> [--depth N]    # Defaut: profondeur 5
 rtk json -                         # Depuis stdin
 ```
 
-**Economies :** ~60%
-
 **Avant / Apres :**
 ```
 # cat package.json (50 lignes)              # rtk json package.json (10 lignes)
@@ -959,8 +905,6 @@ rtk log               # Depuis stdin (pipe)
 ```
 
 Les lignes repetees sont fusionnees : `[ERROR] Connection refused (x42)`.
-
-**Economies :** ~60-80% (selon la repetitivite)
 
 ---
 
@@ -1056,11 +1000,11 @@ RTK enregistre chaque execution de commande dans une base SQLite :
 
 - **Emplacement :** `~/.local/share/rtk/tracking.db` (Linux), `~/Library/Application Support/rtk/tracking.db` (macOS)
 - **Retention :** 90 jours automatique
-- **Metriques :** tokens entree/sortie, pourcentage d'economies, temps d'execution, projet
+- **Metriques :** tokens entree/sortie, pourcentage de reduction de sortie bash, temps d'execution, projet
 
 ---
 
-### `rtk gain` -- Statistiques d'economies
+### `rtk gain` -- Statistiques de reduction de sortie bash
 
 ```bash
 rtk gain                        # Resume global
@@ -1071,7 +1015,7 @@ rtk gain --daily                # Ventilation jour par jour
 rtk gain --weekly               # Ventilation par semaine
 rtk gain --monthly              # Ventilation par mois
 rtk gain --all                  # Toutes les ventilations
-rtk gain --quota -t pro         # Estimation d'economies sur le quota mensuel
+rtk gain --quota -t pro         # Estimation de la sortie bash economisee sur le quota mensuel
 rtk gain --failures             # Log des echecs de parsing (commandes en fallback)
 rtk gain --format json          # Export JSON (pour dashboards)
 rtk gain --format csv           # Export CSV
@@ -1084,7 +1028,7 @@ rtk gain --format csv           # Export CSV
 | `--project` | `-p` | Filtrer par repertoire courant |
 | `--graph` | `-g` | Graphe ASCII des 30 derniers jours |
 | `--history` | `-H` | Historique recent des commandes |
-| `--quota` | `-q` | Estimation d'economies sur le quota mensuel |
+| `--quota` | `-q` | Estimation de la sortie bash economisee sur le quota mensuel |
 | `--tier` | `-t` | Tier d'abonnement : `pro`, `5x`, `20x` (defaut: `20x`) |
 | `--daily` | `-d` | Ventilation quotidienne |
 | `--weekly` | `-w` | Ventilation hebdomadaire |
@@ -1152,7 +1096,7 @@ rtk learn --format json               # Export JSON
 
 ### `rtk cc-economics` -- Analyse economique Claude Code
 
-**Objectif :** Compare les depenses Claude Code (via ccusage) avec les economies RTK.
+**Objectif :** Compare les depenses Claude Code (via ccusage) avec la sortie bash economisee par RTK.
 
 ```bash
 rtk cc-economics                      # Resume
@@ -1377,7 +1321,7 @@ FAILED: 2/15 tests
 
 RTK peut envoyer un ping anonyme une fois par jour (23h d'intervalle) pour des statistiques d'utilisation. La telemetrie est **desactivee par defaut** et requiert un consentement explicite (RGPD Art. 6, 7).
 
-**Donnees envoyees :** hash de device (SHA-256 d'un sel aleatoire), version, OS, architecture, nombre de commandes/24h, top commandes, pourcentage d'economies.
+**Donnees envoyees :** hash de device (SHA-256 d'un sel aleatoire), version, OS, architecture, nombre de commandes/24h, top commandes, pourcentage de reduction de sortie bash.
 
 **Responsable du traitement :** `RTK AI Labs`, contact@rtk-ai.app
 
@@ -1398,13 +1342,15 @@ Aucune donnee personnelle, aucun contenu de commande, aucun chemin de fichier n'
 
 ---
 
-## Resume des economies par categorie
+## Resume de la reduction de sortie bash par categorie
 
-| Categorie | Commandes | Economies typiques |
+Octets de sortie bash supprimes (voir [A propos de la reduction de sortie bash](#a-propos-de-la-reduction-de-sortie-bash)).
+
+| Categorie | Commandes | Reduction sortie bash |
 |-----------|-----------|-------------------|
 | **Fichiers** | ls, tree, read, find, grep, diff | 60-80% |
 | **Git** | status, log, diff, show, add, commit, push, pull | 75-92% |
-| **GitHub** | pr, issue, run, api | 26-87% |
+| **GitHub** | pr, issue, run, api | 79-87% |
 | **Tests** | cargo test, vitest, playwright, pytest, go test | 90-99% |
 | **Build/Lint** | cargo build, tsc, eslint, prettier, next, ruff, clippy | 70-87% |
 | **Paquets** | pnpm, npm, pip, deps, prisma | 60-80% |

@@ -196,19 +196,56 @@ pub fn list_trusted() -> Result<HashMap<String, TrustEntry>> {
     Ok(store.trusted)
 }
 
+pub fn gated_filter_paths() -> Vec<PathBuf> {
+    gated_filter_paths_labeled()
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect()
+}
+
+pub fn gated_filter_paths_labeled() -> Vec<(&'static str, PathBuf)> {
+    let mut paths = vec![("project", PathBuf::from(".rtk/filters.toml"))];
+    if let Some(dir) = dirs::config_dir() {
+        paths.push((
+            "global",
+            dir.join(RTK_DATA_DIR)
+                .join(crate::core::constants::FILTERS_TOML),
+        ));
+    }
+    paths
+}
+
+pub fn untrusted_active_filter_count() -> usize {
+    gated_filter_paths_labeled()
+        .into_iter()
+        .filter(|(_, path)| path.exists())
+        .filter(|(_, path)| {
+            !matches!(
+                check_trust(path).unwrap_or(TrustStatus::Untrusted),
+                TrustStatus::Trusted | TrustStatus::EnvOverride
+            )
+        })
+        .map(|(_, path)| {
+            std::fs::read_to_string(&path)
+                .map(|c| crate::core::toml_filter::active_filter_summaries(&c).len())
+                .unwrap_or(0)
+        })
+        .sum()
+}
+
 // ---------------------------------------------------------------------------
 // CLI commands
 // ---------------------------------------------------------------------------
 
 /// Run `rtk trust` — review and trust project-local filters.
-pub fn run_trust(list: bool) -> Result<()> {
+pub fn run_trust(list: bool, yes: bool) -> Result<()> {
     if list {
         let trusted = list_trusted()?;
         if trusted.is_empty() {
-            println!("No trusted project filters.");
+            println!("No trusted filters.");
             return Ok(());
         }
-        println!("Trusted project filters:");
+        println!("Trusted filters:");
         println!("{}", "═".repeat(60));
         for (path, entry) in &trusted {
             let date = entry.trusted_at.get(..10).unwrap_or(&entry.trusted_at);
@@ -218,54 +255,110 @@ pub fn run_trust(list: bool) -> Result<()> {
         return Ok(());
     }
 
-    let filter_path = Path::new(".rtk/filters.toml");
-    if !filter_path.exists() {
-        anyhow::bail!("No .rtk/filters.toml found in current directory");
+    let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin());
+    let mut found_any = false;
+    let mut enabled_any = false;
+    let mut had_error = false;
+    for (scope, filter_path) in gated_filter_paths_labeled() {
+        if !filter_path.exists() {
+            continue;
+        }
+        let bytes = std::fs::read(&filter_path)
+            .with_context(|| format!("Failed to read {}", filter_path.display()))?;
+        let content = String::from_utf8_lossy(&bytes);
+
+        if let Some(err) = crate::core::toml_filter::filter_parse_error(&content) {
+            had_error = true;
+            eprintln!(
+                "  {} — invalid TOML, not loaded: {}",
+                filter_path.display(),
+                err
+            );
+            continue;
+        }
+        let filters = crate::core::toml_filter::active_filter_summaries(&content);
+        if filters.is_empty() {
+            continue;
+        }
+        found_any = true;
+
+        if matches!(
+            check_trust(&filter_path).unwrap_or(TrustStatus::Untrusted),
+            TrustStatus::Trusted | TrustStatus::EnvOverride
+        ) {
+            eprintln!("  {} already trusted.", filter_path.display());
+            enabled_any = true;
+            continue;
+        }
+
+        print_filter_notice(&filter_path, scope, &filters);
+        print_risk_summary(&content);
+
+        if !(yes || confirm_enable_at_tty()?) {
+            eprintln!("  Not enabled — re-run `rtk trust --yes` to trust non-interactively.");
+            continue;
+        }
+        let hash = crate::hooks::integrity::compute_hash_bytes(&bytes);
+        trust_filter_with_hash(&filter_path, &hash)?;
+        enabled_any = true;
+        eprintln!("  Enabled — revoke with `rtk untrust`.");
     }
 
-    // Read ONCE to prevent TOCTOU: display + hash from same buffer
-    let content_bytes = std::fs::read(filter_path).context("Failed to read .rtk/filters.toml")?;
-    let content = String::from_utf8_lossy(&content_bytes);
-
-    println!("=== .rtk/filters.toml ===");
-    println!("{}", content);
-    println!("=========================");
-    println!();
-
-    // Risk summary
-    print_risk_summary(&content);
-
-    // Hash the in-memory buffer (not a second file read)
-    let hash = {
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(&content_bytes);
-        format!("{:x}", h.finalize())
-    };
-
-    // Store trust with pre-computed hash
-    trust_filter_with_hash(filter_path, &hash)?;
-    println!();
-    println!(
-        "Trusted .rtk/filters.toml (sha256:{})",
-        hash.get(..16).unwrap_or(&hash)
-    );
-    println!("Project-local filters will now be applied.");
-
+    if !found_any {
+        if had_error {
+            anyhow::bail!("Filter file present but not valid TOML — see the error above.");
+        }
+        anyhow::bail!("No custom filters found (.rtk/filters.toml or ~/.config/rtk/filters.toml)");
+    }
+    if !enabled_any {
+        if !interactive {
+            anyhow::bail!("Custom filters found but none enabled — re-run `rtk trust --yes`.");
+        }
+        return Ok(());
+    }
+    println!("Filters will now be applied.");
     Ok(())
+}
+
+pub fn print_filter_notice(path: &Path, scope: &str, filters: &[(String, String)]) {
+    let yellow = "\x1b[33m";
+    let reset = "\x1b[0m";
+    eprintln!();
+    eprintln!(
+        "{yellow}Detected {} custom {scope} scoped toml filter(s) in {} — they rewrite matching command output:{reset}",
+        filters.len(),
+        path.display()
+    );
+    for (name, regex) in filters {
+        eprintln!("{yellow}    {name:<20} {regex}{reset}");
+    }
+}
+
+pub fn confirm_enable_at_tty() -> Result<bool> {
+    use std::io::{self, BufRead, IsTerminal};
+    if !io::stdin().is_terminal() {
+        return Ok(false);
+    }
+    eprint!("\x1b[33m  Enable these filters? [y/N] \x1b[0m");
+    let mut line = String::new();
+    io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .context("Failed to read user input")?;
+    Ok(matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
 /// Run `rtk untrust` — revoke trust for project-local filters.
 pub fn run_untrust() -> Result<()> {
-    let filter_path = Path::new(".rtk/filters.toml");
-    // If file doesn't exist, untrust by canonical path lookup won't work.
-    // Try anyway (file may have been deleted after trust), fallback gracefully.
-    let removed = untrust_filter(filter_path).unwrap_or(false);
-    if removed {
-        println!("Trust revoked for .rtk/filters.toml");
-        println!("Project-local filters will no longer be applied.");
-    } else {
-        println!("No trust entry found for current directory.");
+    let mut revoked_any = false;
+    for filter_path in gated_filter_paths() {
+        if untrust_filter(&filter_path).unwrap_or(false) {
+            revoked_any = true;
+            println!("Trust revoked for {}", filter_path.display());
+        }
+    }
+    if !revoked_any {
+        println!("No trusted filters found to revoke.");
     }
     Ok(())
 }
@@ -275,7 +368,7 @@ pub fn run_untrust() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn print_risk_summary(content: &str) {
-    let filter_count = content.matches("[filters.").count();
+    let filter_count = crate::core::toml_filter::active_filter_summaries(content).len();
     let has_replace = content.contains("replace");
     let has_match_output = content.contains("match_output");
     let has_dot_pattern = content.contains("pattern = \".\"") || content.contains("pattern = '.'");
@@ -387,6 +480,17 @@ mod tests {
             std::fs::write(store_file, content)?;
         }
         Ok(removed)
+    }
+
+    #[test]
+    fn test_gated_filter_paths_covers_project_and_global() {
+        let paths = gated_filter_paths();
+        assert_eq!(paths[0], PathBuf::from(".rtk/filters.toml"));
+        if dirs::config_dir().is_some() {
+            assert_eq!(paths.len(), 2);
+            assert!(paths[1].ends_with("filters.toml"));
+            assert!(paths[1].is_absolute());
+        }
     }
 
     #[test]

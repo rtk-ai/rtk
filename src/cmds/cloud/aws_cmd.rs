@@ -13,9 +13,9 @@ use crate::core::utils::{
 };
 use crate::json_cmd;
 use anyhow::{Context, Result};
-use lazy_static::lazy_static;
 use regex::Regex;
 use serde_json::Value;
+use std::sync::LazyLock;
 
 const MAX_ITEMS: usize = CAP_LIST;
 const JSON_COMPRESS_DEPTH: usize = 4;
@@ -1325,9 +1325,8 @@ fn filter_eks_cluster(json_str: &str) -> Option<FilterResult> {
     Some(FilterResult::new(text))
 }
 
-lazy_static! {
-    static ref S3_TRANSFER_RE: Regex = Regex::new(r"^(upload|download|delete|copy|move):").unwrap();
-}
+static S3_TRANSFER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(upload|download|delete|copy|move):").unwrap());
 
 fn filter_sqs_messages(json_str: &str) -> Option<FilterResult> {
     let v: Value = serde_json::from_str(json_str).ok()?;

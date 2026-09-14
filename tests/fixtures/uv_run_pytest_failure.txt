@@ -1,0 +1,28 @@
+Downloading cpython-3.13.5-macos-aarch64-none (download) (14.9MiB)
+ Downloading cpython-3.13.5-macos-aarch64-none (download)
+Using CPython 3.13.5
+Creating virtual environment at: .venv
+Downloading pygments (1.2MiB)
+ Downloading pygments
+Installed 5 packages in 7ms
+============================= test session starts ==============================
+platform darwin -- Python 3.13.5, pytest-8.4.1, pluggy-1.6.0
+rootdir: /private/tmp/rtk-uv-fixture
+configfile: pyproject.toml
+collected 2 items
+
+tests/test_users.py .F                                                   [100%]
+
+=================================== FAILURES ===================================
+______________________ test_normalize_user_rejects_empty _______________________
+
+    def test_normalize_user_rejects_empty():
+>       assert normalize_user("   ") == "anonymous"
+E       AssertionError: assert '' == 'anonymous'
+E
+E         - anonymous
+
+tests/test_users.py:10: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_users.py::test_normalize_user_rejects_empty - AssertionErro...
+========================= 1 failed, 1 passed in 0.01s ==========================

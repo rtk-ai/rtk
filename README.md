@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>High-performance CLI proxy that reduces LLM token consumption by 60-90%</strong>
+  <strong>High-performance CLI proxy that cuts up to 90% of the bash output your agent reads</strong>
 </p>
 
 <p align="center">
@@ -36,25 +36,34 @@
 
 rtk filters and compresses command outputs before they reach your LLM context. Single Rust binary, 100+ supported commands, <10ms overhead.
 
-## Token Savings (30-min Claude Code Session)
+## What RTK Does
 
-| Operation | Frequency | Standard | rtk | Savings |
-|-----------|-----------|----------|-----|---------|
-| `ls` / `tree` | 10x | 2,000 | 400 | -80% |
-| `cat` / `read` | 20x | 40,000 | 12,000 | -70% |
-| `grep` / `rg` | 8x | 16,000 | 3,200 | -80% |
-| `git status` | 10x | 3,000 | 600 | -80% |
-| `git diff` | 5x | 10,000 | 2,500 | -75% |
-| `git log` | 5x | 2,500 | 500 | -80% |
-| `git add/commit/push` | 8x | 1,600 | 120 | -92% |
-| `cargo test` / `npm test` | 5x | 25,000 | 2,500 | -90% |
-| `ruff check` | 3x | 3,000 | 600 | -80% |
-| `pytest` | 4x | 8,000 | 800 | -90% |
-| `go test` | 3x | 6,000 | 600 | -90% |
-| `docker ps` | 3x | 900 | 180 | -80% |
-| **Total** | | **~118,000** | **~23,900** | **-80%** |
+RTK intercepts shell commands and compresses their output before your agent reads it.
 
-> Estimates based on medium-sized TypeScript/Rust projects. Actual savings vary by project size.
+| Operation | What RTK does to the output |
+|-----------|-----------------------------|
+| `ls` / `tree` | Tree format with file counts instead of one line per entry |
+| `cat` / `read` | Smart file reading: signatures and structure over full bodies |
+| `grep` / `rg` | Truncates long lines, groups matches by file |
+| `git status` | Compact stat format, grouped by state |
+| `git diff` | Reduced context, headers stripped |
+| `git log` | Hash, author and subject only |
+| `git add/commit/push` | Confirmation line instead of full progress output |
+| `cargo test` / `npm test` | Failures only, passing tests collapsed to a count |
+| `ruff check` | Grouped by rule and file |
+| `pytest` | Failures only, traceback trimmed |
+| `go test` | NDJSON parsed, failures only |
+| `docker ps` | Essential fields only |
+
+## How Savings Work
+
+RTK cuts **up to 90% of the bash output** your agent reads. That is what RTK measures, and it is not the same as cutting your bill by 90%.
+
+Bash output is **one contributor to input tokens**, alongside your prompt, the system prompt and conversation history. Input tokens are in turn **only part of the bill**, which also counts output tokens. The reduction dilutes at every step.
+
+The token counts RTK reports are estimated as `bytes / 4` — RTK ships no tokenizer, so the **percentages are reliable but the absolute token numbers are approximate**.
+
+> Full explanation: [How RTK Savings Work](docs/guide/resources/savings-explained.md)
 
 ## Installation
 
@@ -88,13 +97,13 @@ Download from [releases](https://github.com/rtk-ai/rtk/releases):
 - Linux: `rtk-x86_64-unknown-linux-musl.tar.gz` / `rtk-aarch64-unknown-linux-gnu.tar.gz`
 - Windows: `rtk-x86_64-pc-windows-msvc.zip`
 
-> **Windows users**: Extract the zip and place `rtk.exe` somewhere in your PATH (e.g. `C:\Users\<you>\.local\bin`). Run RTK from **Command Prompt**, **PowerShell**, or **Windows Terminal** — do not double-click the `.exe` (it will flash and close). For the best experience, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) where the full hook system works natively. See [Windows setup](#windows) below for details.
+> **Windows users**: Extract the zip and place `rtk.exe` somewhere in your PATH (e.g. `C:\Users\<you>\.local\bin`). Run RTK from **Command Prompt**, **PowerShell**, or **Windows Terminal** — do not double-click the `.exe` (it will flash and close). The full hook system works natively on Windows (and in [WSL](https://learn.microsoft.com/en-us/windows/wsl/install)). See [Windows setup](#windows) below for details.
 
 ### Verify Installation
 
 ```bash
 rtk --version   # Should show "rtk 0.28.2"
-rtk gain        # Should show token savings stats
+rtk gain        # Should show the savings dashboard
 ```
 
 > **Name collision warning**: Another project named "rtk" (Rust Type Kit) exists on crates.io. If `rtk gain` fails, you have the wrong package. Use `cargo install --git` above instead.
@@ -111,8 +120,10 @@ rtk init -g --agent windsurf    # Windsurf
 rtk init --agent cline          # Cline / Roo Code
 rtk init --agent kilocode       # Kilo Code
 rtk init --agent antigravity    # Google Antigravity
+rtk init --agent kimi           # Kimi AI
 rtk init -g --agent pi          # Pi
 rtk init --agent hermes         # Hermes
+rtk init -g --agent droid       # Factory Droid
 
 # 2. Restart your AI tool, then test
 git status  # Automatically rewritten to rtk git status
@@ -129,7 +140,7 @@ Hook-based agents rewrite Bash commands (e.g., `git status` -> `rtk git status`)
 
   Claude  --git status-->  shell  -->  git         Claude  --git status-->  RTK  -->  git
     ^                                   |            ^                      |          |
-    |        ~2,000 tokens (raw)        |            |   ~200 tokens        | filter   |
+    |         full raw output           |            |  compact output      | filter   |
     +-----------------------------------+            +------- (filtered) ---+----------+
 ```
 
@@ -142,9 +153,11 @@ Four strategies applied per command type:
 
 ## Commands
 
+> Percentages below are **reductions in bash output**, not reductions in your bill. See [How Savings Work](#how-savings-work).
+
 ### Files
 ```bash
-rtk ls .                        # Token-optimized directory tree
+rtk ls .                        # Compact directory tree
 rtk read file.rs                # Smart file reading
 rtk read file.rs -l aggressive  # Signatures only (strips bodies)
 rtk smart file.rs               # 2-line heuristic code summary
@@ -198,11 +211,15 @@ rtk cargo clippy                # Cargo clippy (-80%)
 rtk ruff check                  # Python linting (JSON, -80%)
 rtk golangci-lint run           # Go linting (JSON, -85%)
 rtk rubocop                     # Ruby linting (JSON, -60%+)
+rtk sbt test                    # ScalaTest output (-90%)
+rtk sbt compile                 # Compilation errors only (-75%)
+rtk sbt run                     # Strip SBT preamble noise
 ```
 
 ### Package Managers
 ```bash
 rtk pnpm list                   # Compact dependency tree
+rtk uv run pytest               # Preserve uv env, keep program output
 rtk pip list                    # Python packages (auto-detect uv)
 rtk pip outdated                # Outdated packages
 rtk bundle install              # Ruby gems (strip Using lines)
@@ -273,7 +290,7 @@ rtk session                     # Show RTK adoption across recent sessions
 ## Global Flags
 
 ```bash
--u, --ultra-compact    # ASCII icons, inline format (extra token savings)
+-u, --ultra-compact    # ASCII icons, inline format (further output reduction)
 -v, --verbose          # Increase verbosity (-v, -vv, -vvv)
 ```
 
@@ -281,7 +298,7 @@ rtk session                     # Show RTK adoption across recent sessions
 
 **Directory listing:**
 ```
-# ls -la (45 lines, ~800 tokens)        # rtk ls (12 lines, ~150 tokens)
+# ls -la (45 lines)                     # rtk ls (12 lines)
 drwxr-xr-x  15 user staff 480 ...       my-project/
 -rw-r--r--   1 user staff 1234 ...       +-- src/ (8 files)
 ...                                      |   +-- main.rs
@@ -290,7 +307,7 @@ drwxr-xr-x  15 user staff 480 ...       my-project/
 
 **Git operations:**
 ```
-# git push (15 lines, ~200 tokens)       # rtk git push (1 line, ~10 tokens)
+# git push (15 lines)                    # rtk git push (1 line)
 Enumerating objects: 5, done.             ok main
 Counting objects: 100% (5/5), done.
 Delta compression using up to 8 threads
@@ -310,7 +327,7 @@ test utils::test_format ... ok              test_overflow: panic at utils.rs:18
 
 The most effective way to use rtk. The hook transparently intercepts Bash commands and rewrites them to rtk equivalents before execution.
 
-**Result**: 100% rtk adoption across all conversations and subagents, zero token overhead.
+**Result**: 100% rtk adoption across all conversations and subagents, with no per-command context overhead.
 
 **Scope note:** this only applies to Bash tool calls. Claude Code built-in tools such as `Read`, `Grep`, and `Glob` bypass the hook, so use shell commands or explicit `rtk` commands when you want RTK filtering there.
 
@@ -328,11 +345,26 @@ After install, **restart Claude Code**.
 
 ## Windows
 
-RTK works on Windows with some limitations. The auto-rewrite hook (`rtk-rewrite.sh`) requires a Unix shell, so on native Windows RTK falls back to **CLAUDE.md injection mode** — your AI assistant receives RTK instructions but commands are not rewritten automatically.
+RTK works fully on native Windows. Since **v0.37.2** the auto-rewrite hook runs as a **native binary command** (`rtk hook claude`) — no Unix shell, bash, or jq required — so commands are rewritten transparently on Command Prompt, PowerShell, and Windows Terminal, just like on Linux and macOS.
 
-### Recommended: WSL (full support)
+### Native Windows
 
-For the best experience, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) (Windows Subsystem for Linux). Inside WSL, RTK works exactly like Linux — full hook support, auto-rewrite, everything:
+```powershell
+# 1. Download and extract rtk-x86_64-pc-windows-msvc.zip from releases
+# 2. Add rtk.exe to your PATH (e.g. C:\Users\<you>\.local\bin)
+# 3. Initialize — installs the native binary hook
+rtk init -g
+```
+
+**Upgrading from an older install?** If you set RTK up before v0.37.2 you may still have the legacy `rtk-rewrite.sh` shell hook (which does need a Unix shell). Re-run `rtk init -g` to migrate to the native binary hook.
+
+**Prerequisites**: some filters shell out to [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`). Install it and keep it on your PATH (e.g. `winget install BurntSushi.ripgrep.MSVC`) to avoid `Binary 'rg' not found on PATH` warnings.
+
+**Important**: Do not double-click `rtk.exe` — it is a CLI tool that prints usage and exits immediately. Always run it from a terminal (Command Prompt, PowerShell, or Windows Terminal).
+
+### WSL
+
+[WSL](https://learn.microsoft.com/en-us/windows/wsl/install) also works and behaves exactly like Linux:
 
 ```bash
 # Inside WSL
@@ -340,36 +372,20 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 rtk init -g
 ```
 
-### Native Windows (limited support)
-
-On native Windows (cmd.exe / PowerShell), RTK filters work but the hook does not auto-rewrite commands:
-
-```powershell
-# 1. Download and extract rtk-x86_64-pc-windows-msvc.zip from releases
-# 2. Add rtk.exe to your PATH
-# 3. Initialize (falls back to CLAUDE.md injection)
-rtk init -g
-# 4. Use rtk explicitly
-rtk cargo test
-rtk git status
-```
-
-**Important**: Do not double-click `rtk.exe` — it is a CLI tool that prints usage and exits immediately. Always run it from a terminal (Command Prompt, PowerShell, or Windows Terminal).
-
-| Feature | WSL | Native Windows |
-|---------|-----|----------------|
+| Feature | Native Windows | WSL |
+|---------|----------------|-----|
 | Filters (cargo, git, etc.) | Full | Full |
-| Auto-rewrite hook | Yes | No (CLAUDE.md fallback) |
-| `rtk init -g` | Hook mode | CLAUDE.md mode |
+| Auto-rewrite hook | Yes (native binary) | Yes |
+| `rtk init -g` | Hook mode | Hook mode |
 | `rtk gain` / analytics | Full | Full |
 
 ## Supported AI Tools
 
-RTK supports 14 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents for 60-90% token savings where the agent supports command interception.
+RTK supports 16 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents, reducing the bash output the agent reads where the agent supports command interception.
 
 | Tool | Install | Method |
 |------|---------|--------|
-| **Claude Code** | `rtk init -g` | PreToolUse hook (bash) |
+| **Claude Code** | `rtk init -g` | PreToolUse hook (native binary) |
 | **GitHub Copilot (VS Code)** | `rtk init -g --copilot` | PreToolUse hook — transparent rewrite |
 | **GitHub Copilot CLI** | `rtk init -g --copilot` | PreToolUse deny-with-suggestion (CLI limitation) |
 | **Cursor** | `rtk init -g --agent cursor` | preToolUse hook (hooks.json) |
@@ -381,9 +397,11 @@ RTK supports 14 AI coding tools. Each integration rewrites shell commands to `rt
 | **OpenClaw** | `openclaw plugins install ./openclaw` | Plugin TS (before_tool_call) |
 | **Pi** | `rtk init -g --agent pi` (global) | TypeScript extension (tool_call) |
 | **Hermes** | `rtk init --agent hermes` | Python plugin adapter (terminal command mutation via `rtk rewrite`) |
-| **Mistral Vibe** | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Blocked on upstream |
+| **Mistral Vibe** | `rtk init -g --agent vibe` | `pre_tool` hook (hooks.toml) |
 | **Kilo Code** | `rtk init --agent kilocode` | .kilocode/rules/rtk-rules.md (project-scoped) |
 | **Google Antigravity** | `rtk init --agent antigravity` | .agents/rules/antigravity-rtk-rules.md (project-scoped) |
+| **Kimi AI** | `rtk init --agent kimi` | AGENTS.md (project-scoped) |
+| **Factory Droid** | `rtk init -g --agent droid` (or per-project) | PreToolUse hook in `~/.factory/hooks.json` (matcher `Execute`) |
 
 For per-agent setup details, override controls, and graceful degradation, see the [Supported Agents guide](https://www.rtk-ai.app/guide/getting-started/supported-agents). The Hermes plugin source and tests live in `hooks/hermes/`; installed Hermes runtime files still live under `~/.hermes/plugins/rtk-rewrite/`.
 
@@ -435,14 +453,14 @@ RTK can collect **anonymous, aggregate usage metrics** once per day. Telemetry i
 |----------|------|-----|
 | Identity | Salted device hash (SHA-256, not reversible) | Count unique installations without tracking individuals |
 | Environment | RTK version, OS, architecture, install method | Know which platforms to support and test |
-| Usage volume | Command count (24h), total commands, tokens saved (24h/30d/total) | Measure adoption and value delivered |
-| Quality | Top 5 passthrough commands (0% savings), parse failure count, commands with <30% savings | Identify missing filters and weak ones to improve |
+| Usage volume | Command count (24h), total commands, estimated tokens saved (24h/30d/total) | Measure adoption and value delivered |
+| Quality | Top 5 passthrough commands (0% reduction), parse failure count, commands with <30% reduction | Identify missing filters and weak ones to improve |
 | Ecosystem | Command category distribution (e.g. git 45%, cargo 20%, js 15%) | Prioritize filter development for popular ecosystems |
 | Retention | Days since first use, active days in last 30 | Understand engagement and detect churn |
 | Adoption | AI agent hook type (claude/gemini/codex), custom TOML filter count | Track integration coverage and DSL adoption |
 | Configuration | Whether config.toml exists, number of excluded commands, project count | Understand user maturity and customization patterns |
 | Features | Usage counts for meta-commands (gain, discover, proxy, verify) | Know which RTK features are valued vs unused |
-| Economics | Estimated USD savings (based on API token pricing) | Quantify the value RTK provides to users |
+| Economics | Estimated USD value, derived from the estimated tokens saved and a fixed internal constant | Quantify the value RTK provides to users |
 
 All data is **aggregate counts or anonymized command names** (first 3 words, no arguments). Top commands report only tool names (e.g. "git", "cargo"), never full command lines.
 
@@ -489,6 +507,10 @@ export RTK_TELEMETRY_DISABLED=1   # Blocks telemetry regardless of consent
   [GitHub](https://github.com/FlorianBruniaux) · [LinkedIn](https://www.linkedin.com/in/florian-bruniaux-43408b83/)
 - **Adrien Eppling** — Core contributor
   [GitHub](https://github.com/aeppling) · [LinkedIn](https://www.linkedin.com/in/adrien-eppling/)
+- **Nicolas Le Cam** — Core contributor
+  [Github](https://github.com/kush) · [LinkedIn](https://www.linkedin.com/in/nicolas-le-cam-386387160/)
+- **Takayuki Maeda** — Core contributor
+  [GitHub](https://github.com/TaKO8Ki) · [LinkedIn](https://www.linkedin.com/in/tako8ki/)
 
 ## Contributing
 

@@ -1,0 +1,47 @@
+[info] welcome to sbt 1.9.7 (Eclipse Adoptium Java 17.0.9)
+[info] loading settings for project root-build from plugins.sbt ...
+[info] loading project definition from /home/user/myproject/project
+[info] loading settings for project root from build.sbt ...
+[info] set current project to myproject (in build file:/home/user/myproject/)
+[info] Compiling 3 Scala sources to /home/user/myproject/target/scala-2.13/test-classes ...
+[info] MyServiceSpec:
+[info] A MyService
+[info]   when initialized
+[info]   - should return default config
+[info]   - should accept valid parameters
+[info]   - should reject invalid parameters *** FAILED ***
+[info]     Expected ServiceException to be thrown, but no exception was thrown (MyServiceSpec.scala:45)
+[info]   when running
+[info]   - should process events correctly
+[info]   - should handle timeouts gracefully *** FAILED ***
+[info]     The future timed out after [5 seconds]. (MyServiceSpec.scala:78)
+[info]   - should retry on transient failures
+[info] MyRepositorySpec:
+[info] A MyRepository
+[info]   - should save entities
+[info]   - should find entities by id
+[info]   - should delete entities
+[info]   - should list all entities
+[info]   - should handle concurrent writes *** FAILED ***
+[info]     42 was not equal to 43 (MyRepositorySpec.scala:92)
+[info] MyControllerSpec:
+[info] A MyController
+[info]   GET /api/items
+[info]   - should return 200 with items
+[info]   - should return 404 when not found
+[info]   POST /api/items
+[info]   - should return 201 on create
+[info]   - should return 400 on invalid input
+[info]   DELETE /api/items/:id
+[info]   - should return 204 on delete
+[info]   - should return 404 when not found
+[info] Run completed in 8 seconds, 442 milliseconds.
+[info] Total number of tests run: 18
+[info] Suites: completed 3, aborted 0
+[info] Tests: succeeded 15, failed 3, canceled 0, ignored 0, pending 0
+[info] *** 3 TESTS FAILED ***
+[error] Failed tests:
+[error]   com.example.MyServiceSpec
+[error]   com.example.MyRepositorySpec
+[error] (Test / test) sbt.TestsFailedException: Tests unsuccessful
+[error] Total time: 15 s, completed Jan 15, 2025 10:31:02 AM

@@ -1,0 +1,36 @@
+[info] welcome to sbt 1.9.7 (Temurin Java 17.0.9)
+[info] loading project definition from /home/user/myproject/project
+[info] loading settings for project myproject from build.sbt
+[info] set current project to myproject (in build file:/home/user/myproject/)
+[info] Done updating.
+[info] compiling 1 Scala source to /home/user/myproject/target/scala-3.3.1/test-classes ...
+[info] MySuite:
+[info]   + test addition 0.013s
+[info]   - test subtraction *** FAILED ***
+[info]       Assertion failed: 5 - 3 was not equal to 3
+[info]       Values obtained:
+[info]         lhs: 2
+[info]         rhs: 3
+[info]       at MySuite.scala:18
+[info]   + test string equality 0.002s
+[info]   + test list operations 0.006s
+[info] MathSuite:
+[info]   + factorial of 0 is 1 0.001s
+[info]   - factorial of 5 is 120 *** FAILED ***
+[info]       Assertion failed: 60 was not equal to 120
+[info]       Values obtained:
+[info]         lhs: 60
+[info]         rhs: 120
+[info]       at MathSuite.scala:34
+[info]   + fibonacci 0.002s
+[info] HttpClientSuite:
+[info]   + GET request succeeds 0.045s
+[info]   + POST request with body 0.038s
+[info]   + handles 404 response 0.021s
+[info]   + handles connection timeout 0.019s
+[info] Failed: Total 10, Failed 2, Errors 0, Passed 8
+[error] Failed tests:
+[error]     com.example.MySuite
+[error]     com.example.MathSuite
+[error] (Test / test) sbt.TestsFailedException: Tests unsuccessful
+[error] Total time: 9 s, completed May 17, 2026 10:15:00 AM

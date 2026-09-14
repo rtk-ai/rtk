@@ -233,12 +233,11 @@ touch src/cmds/<ecosystem>/newcmd_cmd.rs
 ```rust
 // src/cmds/<ecosystem>/newcmd_cmd.rs
 use anyhow::{Context, Result};
-use lazy_static::lazy_static;
 use regex::Regex;
+use std::sync::LazyLock;
 
-lazy_static! {
-    static ref PATTERN: Regex = Regex::new(r"pattern").unwrap();
-}
+static PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"pattern").unwrap());
 
 pub fn filter_newcmd(input: &str) -> Result<String> {
     // Filter logic
@@ -300,7 +299,7 @@ cargo fmt --all && cargo clippy --all-targets && cargo test --all
 
 - **Token savings**: ≥60% verified in tests
 - **Startup time**: <10ms with `hyperfine`
-- **Lazy regex**: All patterns in `lazy_static!`
+- **Lazy regex**: Fixed, reused patterns use `LazyLock<Regex>`
 - **Error handling**: Fallback to raw command on failure
 - **Cross-platform**: Tested on macOS + Linux
 ```

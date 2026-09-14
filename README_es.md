@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Proxy CLI de alto rendimiento que reduce el consumo de tokens LLM en un 60-90%</strong>
+  <strong>Proxy CLI de alto rendimiento que elimina hasta el 90% de la salida bash que lee tu agente</strong>
 </p>
 
 <p align="center">
@@ -35,16 +35,34 @@
 
 rtk filtra y comprime las salidas de comandos antes de que lleguen al contexto de tu LLM. Binario Rust unico, cero dependencias, <10ms de overhead.
 
-## Ahorro de tokens (sesion de 30 min en Claude Code)
+## Que hace RTK
 
-| Operacion | Frecuencia | Estandar | rtk | Ahorro |
-|-----------|------------|----------|-----|--------|
-| `ls` / `tree` | 10x | 2,000 | 400 | -80% |
-| `cat` / `read` | 20x | 40,000 | 12,000 | -70% |
-| `grep` / `rg` | 8x | 16,000 | 3,200 | -80% |
-| `git status` | 10x | 3,000 | 600 | -80% |
-| `cargo test` / `npm test` | 5x | 25,000 | 2,500 | -90% |
-| **Total** | | **~118,000** | **~23,900** | **-80%** |
+RTK intercepta comandos de shell y comprime su salida antes de que tu agente la lea.
+
+| Operacion | Que hace RTK con la salida |
+|-----------|----------------------------|
+| `ls` / `tree` | Formato de arbol con conteo de archivos en lugar de una linea por entrada |
+| `cat` / `read` | Lectura inteligente: firmas y estructura en vez de cuerpos completos |
+| `grep` / `rg` | Trunca lineas largas, agrupa coincidencias por archivo |
+| `git status` | Formato stat compacto, agrupado por estado |
+| `git diff` | Contexto reducido, cabeceras eliminadas |
+| `git log` | Solo hash, autor y asunto |
+| `git add/commit/push` | Linea de confirmacion en lugar de la salida de progreso completa |
+| `cargo test` / `npm test` | Solo fallos, los tests que pasan se reducen a un contador |
+| `ruff check` | Agrupado por regla y archivo |
+| `pytest` | Solo fallos, traceback recortado |
+| `go test` | NDJSON parseado, solo fallos |
+| `docker ps` | Solo campos esenciales |
+
+## Como funciona el ahorro
+
+RTK elimina **hasta el 90% de la salida bash** que lee tu agente. Eso es lo que RTK mide, y no es lo mismo que reducir tu factura en un 90%.
+
+La salida bash es **uno de los factores que alimentan los tokens de entrada**, junto con tu prompt, el prompt del sistema y el historial de conversacion. Los tokens de entrada son a su vez **solo una parte de la factura**, que tambien cuenta los tokens de salida. La reduccion se diluye en cada paso.
+
+Los recuentos de tokens que reporta RTK se estiman como `bytes / 4`: RTK no incluye ningun tokenizador, por lo que los **porcentajes son fiables pero las cifras absolutas de tokens son aproximadas**.
+
+> Explicacion completa: [Como funciona el ahorro en RTK](docs/guide/resources/savings-explained.md)
 
 ## Instalacion
 
@@ -102,6 +120,8 @@ Cuatro estrategias:
 4. **Deduplicacion** - Colapsa lineas de log repetidas con contadores
 
 ## Comandos
+
+> Los porcentajes de abajo son **reducciones de bytes de salida bash**, medidas con el estimador `bytes / 4` de RTK. Ver [Como funciona el ahorro](#como-funciona-el-ahorro).
 
 ### Archivos
 ```bash

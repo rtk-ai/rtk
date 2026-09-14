@@ -94,7 +94,7 @@ cargo flamegraph -- target/release/rtk git status
 # Open flamegraph.svg
 open flamegraph.svg
 # Look for:
-# - Regex compilation (should be in lazy_static init)
+# - Repeated fixed-regex compilation (should be in LazyLock init)
 # - Excessive allocations
 # - File I/O on startup (should be zero)
 ```
@@ -133,7 +133,7 @@ cargo test test_token_savings
 ```bash
 # Flamegraph shows Regex::new() calls during execution
 cargo flamegraph -- target/release/rtk git log -10
-# Look for "regex::Regex::new" in non-lazy_static sections
+# Check whether fixed patterns are compiled outside LazyLock statics
 ```
 
 **Fix**:
@@ -144,12 +144,11 @@ fn filter_line(line: &str) -> Option<&str> {
     re.find(line).map(|m| m.as_str())
 }
 
-// ✅ RIGHT: Compiled once with lazy_static
-use lazy_static::lazy_static;
+// ✅ RIGHT: Compiled once with LazyLock
+use std::sync::LazyLock;
 
-lazy_static! {
-    static ref LINE_PATTERN: Regex = Regex::new(r"pattern").unwrap();
-}
+static LINE_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"pattern").unwrap());
 
 fn filter_line(line: &str) -> Option<&str> {
     LINE_PATTERN.find(line).map(|m| m.as_str())
@@ -248,22 +247,23 @@ clap = { version = "4", features = ["derive"], default-features = false }
 
 ## Optimization Techniques
 
-### Technique 1: Lazy Static Initialization
+### Technique 1: LazyLock Initialization
 
 **Use case**: Regex patterns, static configuration, one-time allocations
 
 **Implementation**:
 ```rust
-use lazy_static::lazy_static;
 use regex::Regex;
+use std::sync::LazyLock;
 
-lazy_static! {
-    static ref COMMIT_HASH: Regex = Regex::new(r"[0-9a-f]{7,40}").unwrap();
-    static ref AUTHOR_LINE: Regex = Regex::new(r"^Author: (.+)$").unwrap();
-    static ref DATE_LINE: Regex = Regex::new(r"^Date: (.+)$").unwrap();
-}
+static COMMIT_HASH: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[0-9a-f]{7,40}").unwrap());
+static AUTHOR_LINE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^Author: (.+)$").unwrap());
+static DATE_LINE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^Date: (.+)$").unwrap());
 
-// All regex compiled once at startup, reused forever
+// Fixed regexes compile on first use and are then reused
 ```
 
 **Impact**: ~5-10ms saved per regex pattern (if compiled at runtime)
@@ -309,7 +309,7 @@ serde = { version = "1", features = ["derive"], default-features = false }
 # ❌ Avoid: tokio (adds 5-10ms startup overhead)
 # ❌ Avoid: full regex (use regex-lite if possible)
 # ✅ Use: anyhow (lightweight error handling)
-# ✅ Use: lazy_static (zero runtime overhead)
+# ✅ Use: LazyLock (zero runtime overhead)
 ```
 
 **Impact**: ~1-2MB binary size reduction, ~2-5ms startup saved
@@ -401,7 +401,7 @@ Add to `.github/workflows/ci.yml`:
 
 **Priority order** (highest to lowest impact):
 
-1. **🔴 Lazy static regex** (5-10ms per pattern if compiled at runtime)
+1. **🔴 LazyLock regex** (5-10ms per pattern if compiled at runtime)
 2. **🔴 Remove startup I/O** (10-50ms for config file reads)
 3. **🟡 Zero-copy processing** (1-2MB memory, 1-2ms startup)
 4. **🟡 Minimal dependencies** (1-2MB binary, 2-5ms startup)

@@ -7,18 +7,18 @@ use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::CAP_LIST;
 use crate::core::utils::resolved_command;
 use anyhow::Result;
-use lazy_static::lazy_static;
 use regex::Regex;
+use std::sync::LazyLock;
 
 const MAX_TABLE_ROWS: usize = CAP_LIST;
 const MAX_EXPANDED_RECORDS: usize = CAP_LIST;
 
-lazy_static! {
-    static ref EXPANDED_RECORD: Regex = Regex::new(r"-\[ RECORD \d+ \]-").unwrap();
-    static ref SEPARATOR: Regex = Regex::new(r"^[-+]+$").unwrap();
-    static ref ROW_COUNT: Regex = Regex::new(r"^\(\d+ rows?\)$").unwrap();
-    static ref RECORD_HEADER: Regex = Regex::new(r"^-\[ RECORD (\d+) \]-").unwrap();
-}
+static EXPANDED_RECORD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"-\[ RECORD \d+ \]-").unwrap());
+static SEPARATOR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[-+]+$").unwrap());
+static ROW_COUNT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\(\d+ rows?\)$").unwrap());
+static RECORD_HEADER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^-\[ RECORD (\d+) \]-").unwrap());
 
 // Edge cases vs previous manual implementation:
 // - On failure: stderr is no longer eprinted on the success path (only on failure via early_exit)

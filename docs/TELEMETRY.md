@@ -83,7 +83,7 @@ This data directly drives our roadmap. For example, if telemetry shows that 40% 
 | Field | Example | Purpose |
 |-------|---------|---------|
 | `tokens_saved_30d` | `12000000` | 30-day token savings for trend analysis |
-| `estimated_savings_usd_30d` | `36.0` | Estimated dollar value saved (at ~$3/Mtok input pricing, Claude Sonnet) |
+| `estimated_savings_usd_30d` | — | A USD value derived from the estimated tokens saved and a fixed internal constant. It is not a measured cost and does not reflect any provider's pricing |
 
 ### Adoption
 

@@ -1,6 +1,6 @@
 ---
 title: RTK Documentation
-description: RTK (Rust Token Killer) — reduce LLM token consumption by 60-90% on common dev commands, with zero workflow changes
+description: RTK (Rust Token Killer) — cut up to 90% of the bash output your agent reads on common dev commands, with zero workflow changes
 sidebar:
   order: 1
 ---
@@ -9,7 +9,7 @@ sidebar:
 
 RTK is a CLI proxy that sits between your AI assistant and your development tools. It filters command output before it reaches the LLM, keeping only what matters and discarding boilerplate, progress bars, and noise.
 
-**Result:** 60-90% fewer tokens consumed per command, without changing how you work. You run `git status` as usual — RTK's hook intercepts it, filters the output, and the LLM sees a compact 3-line summary instead of 40 lines.
+**Result:** up to 90% fewer bash output bytes reaching the LLM per command, without changing how you work. You run `git status` as usual — RTK's hook intercepts it, filters the output, and the LLM sees a compact 3-line summary instead of 40 lines.
 
 ## How it works
 
@@ -21,16 +21,23 @@ Your AI assistant runs:  git status
               rtk git status  (transparent rewrite)
                               ↓
      Raw output: 40 lines     →     Filtered: 3 lines
-     ~800 tokens              →     ~60 tokens  (92% saved)
                               ↓
               LLM sees the compact output
 ```
 
 Zero config changes to your workflow. The hook handles everything automatically.
 
+## What the savings mean
+
+RTK reduces **bash output bytes** — the output a shell command sends back before your agent reads it. That is not the same as reducing your bill by the same amount.
+
+Bash output is one contributor to input tokens, alongside your prompt, the system prompt and conversation history. Input tokens are in turn only part of the bill, which also counts output tokens. The reduction dilutes at every step.
+
+See [How RTK Savings Work](./resources/savings-explained.md) for the full picture, including why the token counts RTK reports are estimates.
+
 ## What RTK optimizes
 
-Dozens of commands across all major ecosystems — Git, Cargo/Rust, JavaScript, Python, Go, Ruby, .NET, Docker/Kubernetes, and more. See [What RTK Optimizes](./resources/what-rtk-covers.md) for the full list with savings percentages.
+Dozens of commands across all major ecosystems — Git, Cargo/Rust, JavaScript, Python, Go, Ruby, .NET, Docker/Kubernetes, and more. See [What RTK Optimizes](./resources/what-rtk-covers.md) for the full list with per-command bash output reduction.
 
 ## Get started
 

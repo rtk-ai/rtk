@@ -29,4 +29,4 @@ rtk proxy <cmd>       # Run raw (no filtering, for debugging)
 
 ## Why
 
-RTK filters and compresses command output before it reaches the LLM context, saving 60-90% tokens on common operations. Always use `rtk <cmd>` instead of raw commands.
+RTK filters and compresses command output before it reaches the LLM context, cutting up to 90% of the bash output on common operations. Always use `rtk <cmd>` instead of raw commands.

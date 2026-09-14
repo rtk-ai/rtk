@@ -1,6 +1,6 @@
 # RTK — Copilot Integration (VS Code Copilot Chat + Copilot CLI)
 
-**Usage**: Token-optimized CLI proxy (60-90% savings on dev operations)
+**Usage**: Token-optimized CLI proxy (cuts up to 90% of bash output)
 
 ## What's automatic
 

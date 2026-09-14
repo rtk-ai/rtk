@@ -3,11 +3,11 @@
 use crate::core::utils::strip_ansi;
 use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
-use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::HashSet;
 use std::io::{Cursor, Read};
 use std::path::Path;
+use std::sync::LazyLock;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinlogIssue {
@@ -52,63 +52,74 @@ pub struct RestoreSummary {
     pub duration_text: Option<String>,
 }
 
-lazy_static! {
-    static ref ISSUE_RE: Regex = Regex::new(
+static ISSUE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
         r"(?m)^\s*(?P<file>[^\r\n:(]+)\((?P<line>\d+),(?P<column>\d+)\):\s*(?P<kind>error|warning)\s*(?:(?P<code>[A-Za-z]+\d+)\s*:\s*)?(?P<msg>.*)$"
     )
-    .expect("valid regex");
-    static ref BUILD_SUMMARY_RE: Regex = Regex::new(r"(?mi)^\s*(?P<count>\d+)\s+(?P<kind>warning|error)\(s\)")
-        .expect("valid regex");
-    static ref ERROR_COUNT_RE: Regex =
-        Regex::new(r"(?i)\b(?P<count>\d+)\s+error\(s\)").expect("valid regex");
-    static ref WARNING_COUNT_RE: Regex =
-        Regex::new(r"(?i)\b(?P<count>\d+)\s+warning\(s\)").expect("valid regex");
-    static ref FALLBACK_ERROR_LINE_RE: Regex =
-        Regex::new(r"(?mi)^.+\(\d+,\d+\):\s*error(?:\s+[A-Za-z]{2,}\d{3,})?(?:\s*:.*)?$")
-            .expect("valid regex");
-    static ref FALLBACK_WARNING_LINE_RE: Regex =
-        Regex::new(r"(?mi)^.+\(\d+,\d+\):\s*warning(?:\s+[A-Za-z]{2,}\d{3,})?(?:\s*:.*)?$")
-            .expect("valid regex");
-    static ref DURATION_RE: Regex =
-        Regex::new(r"(?m)^\s*Time Elapsed\s+(?P<duration>[^\r\n]+)$").expect("valid regex");
-    static ref TEST_RESULT_RE: Regex = Regex::new(
+    .expect("valid regex")
+});
+static BUILD_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?mi)^\s*(?P<count>\d+)\s+(?P<kind>warning|error)\(s\)").expect("valid regex")
+});
+static ERROR_COUNT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(?P<count>\d+)\s+error\(s\)").expect("valid regex"));
+static WARNING_COUNT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(?P<count>\d+)\s+warning\(s\)").expect("valid regex"));
+static FALLBACK_ERROR_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?mi)^.+\(\d+,\d+\):\s*error(?:\s+[A-Za-z]{2,}\d{3,})?(?:\s*:.*)?$")
+        .expect("valid regex")
+});
+static FALLBACK_WARNING_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?mi)^.+\(\d+,\d+\):\s*warning(?:\s+[A-Za-z]{2,}\d{3,})?(?:\s*:.*)?$")
+        .expect("valid regex")
+});
+static DURATION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^\s*Time Elapsed\s+(?P<duration>[^\r\n]+)$").expect("valid regex")
+});
+static TEST_RESULT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
         r"(?m)(?:Passed!|Failed!)\s*-\s*Failed:\s*(?P<failed>\d+),\s*Passed:\s*(?P<passed>\d+),\s*Skipped:\s*(?P<skipped>\d+),\s*Total:\s*(?P<total>\d+),\s*Duration:\s*(?P<duration>[^\r\n-]+)"
     )
-    .expect("valid regex");
-    static ref TEST_SUMMARY_RE: Regex = Regex::new(
+    .expect("valid regex")
+});
+static TEST_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
         r"(?mi)^\s*Test summary:\s*total:\s*(?P<total>\d+),\s*failed:\s*(?P<failed>\d+),\s*(?:succeeded|passed):\s*(?P<passed>\d+),\s*skipped:\s*(?P<skipped>\d+),\s*duration:\s*(?P<duration>[^\r\n]+)$"
     )
-    .expect("valid regex");
-    static ref FAILED_TEST_HEAD_RE: Regex = Regex::new(
-        r"(?m)^\s*Failed\s+(?P<name>[^\r\n\[]+)\s+\[[^\]\r\n]+\]\s*$"
-    )
-    .expect("valid regex");
-    static ref RESTORE_PROJECT_RE: Regex =
-        Regex::new(r"(?m)^\s*Restored\s+.+\.csproj\s*\(").expect("valid regex");
-    static ref RESTORE_DIAGNOSTIC_RE: Regex = Regex::new(
+    .expect("valid regex")
+});
+static FAILED_TEST_HEAD_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^\s*Failed\s+(?P<name>[^\r\n\[]+)\s+\[[^\]\r\n]+\]\s*$").expect("valid regex")
+});
+static RESTORE_PROJECT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*Restored\s+.+\.csproj\s*\(").expect("valid regex"));
+static RESTORE_DIAGNOSTIC_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
         r"(?mi)^\s*(?:(?P<file>.+?)\s+:\s+)?(?P<kind>warning|error)\s+(?P<code>[A-Za-z]{2,}\d{3,})\s*:\s*(?P<msg>.+)$"
     )
-    .expect("valid regex");
-    static ref PROJECT_PATH_RE: Regex =
-        Regex::new(r"(?m)^\s*([A-Za-z]:)?[^\r\n]*\.csproj(?:\s|$)").expect("valid regex");
-    static ref PRINTABLE_RUN_RE: Regex = Regex::new(r"[\x20-\x7E]{5,}").expect("valid regex");
-    static ref DIAGNOSTIC_CODE_RE: Regex =
-        Regex::new(r"^[A-Za-z]{2,}\d{3,}$").expect("valid regex");
-    static ref SOURCE_FILE_RE: Regex = Regex::new(r"(?i)([A-Za-z]:)?[/\\][^\s]+\.(cs|vb|fs)")
-        .expect("valid regex");
-    static ref SENSITIVE_ENV_RE: Regex = {
-        let keys = SENSITIVE_ENV_VARS
-            .iter()
-            .map(|key| regex::escape(key))
-            .collect::<Vec<_>>()
-            .join("|");
-        Regex::new(&format!(
-            r"(?P<prefix>\b(?:{})\s*(?:=|:)\s*)(?P<value>[^\s;]+)",
-            keys
-        ))
-        .expect("valid regex")
-    };
-}
+    .expect("valid regex")
+});
+static PROJECT_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^\s*([A-Za-z]:)?[^\r\n]*\.csproj(?:\s|$)").expect("valid regex")
+});
+static PRINTABLE_RUN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[\x20-\x7E]{5,}").expect("valid regex"));
+static DIAGNOSTIC_CODE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z]{2,}\d{3,}$").expect("valid regex"));
+static SOURCE_FILE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)([A-Za-z]:)?[/\\][^\s]+\.(cs|vb|fs)").expect("valid regex"));
+static SENSITIVE_ENV_RE: LazyLock<Regex> = LazyLock::new(|| {
+    let keys = SENSITIVE_ENV_VARS
+        .iter()
+        .map(|key| regex::escape(key))
+        .collect::<Vec<_>>()
+        .join("|");
+    Regex::new(&format!(
+        r"(?P<prefix>\b(?:{})\s*(?:=|:)\s*)(?P<value>[^\s;]+)",
+        keys
+    ))
+    .expect("valid regex")
+});
 
 const SENSITIVE_ENV_VARS: &[&str] = &[
     "PATH",

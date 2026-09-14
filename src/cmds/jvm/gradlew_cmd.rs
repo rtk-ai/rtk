@@ -3,20 +3,20 @@ use crate::core::stream::StreamFilter;
 use crate::core::truncate::CAP_LIST;
 use crate::core::utils::resolved_command;
 use anyhow::Result;
-use lazy_static::lazy_static;
 use regex::Regex;
 use std::ffi::OsString;
 use std::process::Command;
+use std::sync::LazyLock;
 
 // ── Shared regex patterns (used across multiple filters) ─────────────────────
 
-lazy_static! {
-    static ref TASK_LINE: Regex = Regex::new(r"^> Task :").unwrap();
-    static ref TRY_SECTION: Regex =
-        Regex::new(r"^\* Try:|^> Run with --|^> Get more help at").unwrap();
-    static ref BUILD_STATUS: Regex = Regex::new(r"^BUILD (SUCCESSFUL|FAILED)").unwrap();
-    static ref ACTIONABLE: Regex = Regex::new(r"^\d+ actionable tasks?").unwrap();
-}
+static TASK_LINE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^> Task :").unwrap());
+static TRY_SECTION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\* Try:|^> Run with --|^> Get more help at").unwrap());
+static BUILD_STATUS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^BUILD (SUCCESSFUL|FAILED)").unwrap());
+static ACTIONABLE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\d+ actionable tasks?").unwrap());
 
 #[derive(Debug, PartialEq)]
 enum GradlewTask {
@@ -177,25 +177,27 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 // ── Build filter predicate ────────────────────────────────────────────────────
 
 fn filter_build_line(line: &str) -> bool {
-    lazy_static! {
-        static ref DAEMON_LINE: Regex = Regex::new(
+    static DAEMON_LINE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
             r"^(Starting a Gradle Daemon|Daemon will be stopped|Reusing configuration cache|Calculating task graph|> Configure project|Deprecated Gradle features|You can use|For more on this|Configuration cache entry)"
         )
-        .unwrap();
-        static ref PROGRESS: Regex =
-            Regex::new(r"^\s*\d+%|^Downloading|^Configuring|^Resolving|^\[Incubating\]|^Wrote HTML report|^class \S+ could not|^\[android-")
-                .unwrap();
-        static ref ERROR_LINE: Regex = Regex::new(
+        .unwrap()
+    });
+    static PROGRESS: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^\s*\d+%|^Downloading|^Configuring|^Resolving|^\[Incubating\]|^Wrote HTML report|^class \S+ could not|^\[android-")
+                .unwrap()
+    });
+    static ERROR_LINE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
             r"(?i)(^FAILURE:|^\* What went wrong:|^\* Where:|> Could not|e: |error:|^Execution failed|Lint found \d+ error)"
         )
-        .unwrap();
-        // Compiler + gradle warnings: kotlinc emits "w: ", javac/gradle "warning:" or "Warning:"
-        static ref WARN_LINE: Regex = Regex::new(
-            r"^(w: |warning:|Warning:|WARNING:)"
-        )
-        .unwrap();
-        static ref BUILD_SCAN: Regex = Regex::new(r"gradle\.com/s/|Publishing build scan").unwrap();
-    }
+        .unwrap()
+    });
+    // Compiler + gradle warnings: kotlinc emits "w: ", javac/gradle "warning:" or "Warning:"
+    static WARN_LINE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^(w: |warning:|Warning:|WARNING:)").unwrap());
+    static BUILD_SCAN: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"gradle\.com/s/|Publishing build scan").unwrap());
 
     // Always strip these
     if TASK_LINE.is_match(line)
@@ -228,14 +230,16 @@ fn is_framework_frame(trimmed: &str) -> bool {
 }
 
 fn filter_test(output: &str) -> String {
-    lazy_static! {
-        static ref FAILED_LINE: Regex = Regex::new(r"FAILED$| FAILED ").unwrap();
-        static ref PASSED_SKIPPED: Regex = Regex::new(r" PASSED$| SKIPPED$").unwrap();
-        static ref SUMMARY_LINE: Regex = Regex::new(
-            r"\d+ tests? completed|\d+ tests? failed|There were failing tests|See the report at"
+    static FAILED_LINE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"FAILED$| FAILED ").unwrap());
+    static PASSED_SKIPPED: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r" PASSED$| SKIPPED$").unwrap());
+    static SUMMARY_LINE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"\d+ tests? completed|\d+ tests? failed|There were failing tests|See the report at",
         )
-        .unwrap();
-    }
+        .unwrap()
+    });
 
     if output.is_empty() {
         return String::new();
@@ -304,14 +308,16 @@ fn filter_test(output: &str) -> String {
 // ── Connected / instrumented test filter ─────────────────────────────────────
 
 fn filter_connected(output: &str) -> String {
-    lazy_static! {
-        static ref INSTRUMENTATION_STATUS: Regex =
-            Regex::new(r"^INSTRUMENTATION_STATUS[_CODE]*:").unwrap();
-        static ref INSTRUMENTATION_RESULT: Regex = Regex::new(r"^INSTRUMENTATION_RESULT:").unwrap();
-        static ref INSTRUMENTATION_CODE: Regex = Regex::new(r"^INSTRUMENTATION_CODE:").unwrap();
-        static ref STARTING_TESTS: Regex = Regex::new(r"^Starting \d+ tests? on ").unwrap();
-        static ref INSTALLING_APK: Regex = Regex::new(r"^Installing APK").unwrap();
-    }
+    static INSTRUMENTATION_STATUS: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^INSTRUMENTATION_STATUS[_CODE]*:").unwrap());
+    static INSTRUMENTATION_RESULT: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^INSTRUMENTATION_RESULT:").unwrap());
+    static INSTRUMENTATION_CODE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^INSTRUMENTATION_CODE:").unwrap());
+    static STARTING_TESTS: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^Starting \d+ tests? on ").unwrap());
+    static INSTALLING_APK: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^Installing APK").unwrap());
 
     if output.is_empty() {
         return String::new();
@@ -352,26 +358,25 @@ fn filter_connected(output: &str) -> String {
 // ── Lint output filter ────────────────────────────────────────────────────────
 
 fn filter_lint(output: &str) -> String {
-    lazy_static! {
-        // Android lint errors: src/main/java/Foo.kt:45: Error: message [IssueId]
-        static ref ANDROID_LINT_ERROR: Regex =
-            Regex::new(r"[^:]+:\d+:.*[Ee]rror:.*\[").unwrap();
-        // Android lint warnings: src/main/java/Foo.kt:89: Warning: message [IssueId]
-        static ref ANDROID_LINT_WARNING: Regex =
-            Regex::new(r"[^:]+:\d+:.*[Ww]arning:.*\[").unwrap();
-        // ktlint: file:line:col: Lint error > message
-        static ref KTLINT_VIOLATION: Regex =
-            Regex::new(r"[^:]+:\d+:\d+:.*[Ll]int").unwrap();
-        // detekt: file:line:col: error - message
-        static ref DETEKT_VIOLATION: Regex =
-            Regex::new(r"[^:]+:\d+:\d+:.*error").unwrap();
-        // Summary lines
-        static ref SUMMARY_LINE: Regex =
-            Regex::new(r"\d+ (issues?|errors?|warnings?)").unwrap();
-        // Strip report path lines (too long)
-        static ref REPORT_LINE: Regex =
-            Regex::new(r"Wrote (HTML|XML|text) report|file://|/build/reports/lint").unwrap();
-    }
+    // Android lint errors: src/main/java/Foo.kt:45: Error: message [IssueId]
+    static ANDROID_LINT_ERROR: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"[^:]+:\d+:.*[Ee]rror:.*\[").unwrap());
+    // Android lint warnings: src/main/java/Foo.kt:89: Warning: message [IssueId]
+    static ANDROID_LINT_WARNING: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"[^:]+:\d+:.*[Ww]arning:.*\[").unwrap());
+    // ktlint: file:line:col: Lint error > message
+    static KTLINT_VIOLATION: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"[^:]+:\d+:\d+:.*[Ll]int").unwrap());
+    // detekt: file:line:col: error - message
+    static DETEKT_VIOLATION: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"[^:]+:\d+:\d+:.*error").unwrap());
+    // Summary lines
+    static SUMMARY_LINE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\d+ (issues?|errors?|warnings?)").unwrap());
+    // Strip report path lines (too long)
+    static REPORT_LINE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"Wrote (HTML|XML|text) report|file://|/build/reports/lint").unwrap()
+    });
 
     if output.is_empty() {
         return String::new();

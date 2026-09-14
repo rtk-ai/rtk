@@ -346,8 +346,8 @@ bench "wc" "wc Cargo.toml src/main.rs" "$RTK wc Cargo.toml src/main.rs"
 # ===================
 section "curl"
 if command -v curl &> /dev/null; then
-  bench "curl json" "curl -s https://httpbin.org/json" "$RTK curl https://httpbin.org/json"
-  bench "curl text" "curl -s https://httpbin.org/robots.txt" "$RTK curl https://httpbin.org/robots.txt"
+  bench "curl json" "curl -s https://mockhttp.org/json/1" "$RTK curl https://mockhttp.org/json/1"
+  bench "curl text" "curl -s https://mockhttp.org/robots.txt" "$RTK curl https://mockhttp.org/robots.txt"
 fi
 
 # ===================
@@ -355,8 +355,8 @@ fi
 # ===================
 if command -v wget &> /dev/null; then
   section "wget"
-  bench "wget" "wget -qO- https://httpbin.org/json" "$RTK wget https://httpbin.org/json"
-  rm -f json 2>/dev/null
+  bench "wget" "wget -qO- https://mockhttp.org/json/1" "$RTK wget https://mockhttp.org/json/1"
+  rm -f 1 2>/dev/null
 fi
 
 # ===================

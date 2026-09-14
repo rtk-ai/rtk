@@ -27,6 +27,13 @@ pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
         "ruff-check" => Some(crate::cmds::python::ruff_cmd::filter_ruff_check_json),
         "ruff-format" => Some(crate::cmds::python::ruff_cmd::filter_ruff_format),
         "prettier" => Some(crate::cmds::js::prettier_cmd::filter_prettier_output),
+        "phpunit" => Some(crate::cmds::php::phpunit_cmd::filter_phpunit_output),
+        "pest" | "paratest" | "php-test" => {
+            Some(crate::cmds::php::test_output::filter_test_runner_output)
+        }
+        "ecs" => Some(crate::cmds::php::ecs_cmd::filter_ecs_output),
+        "phpstan" => Some(phpstan_wrapper),
+        "pint" => Some(pint_wrapper),
         _ => None,
     }
 }
@@ -45,6 +52,24 @@ fn git_log_wrapper(input: &str) -> String {
 
 fn git_diff_wrapper(input: &str) -> String {
     crate::cmds::git::git::compact_diff(input, 200)
+}
+
+fn phpstan_wrapper(input: &str) -> String {
+    // Runner forces --format=json; piped output may be either JSON or the
+    // default human table. Pick by content.
+    if input.trim_start().starts_with('{') {
+        crate::cmds::php::phpstan_cmd::filter_phpstan_json(input)
+    } else {
+        crate::cmds::php::phpstan_cmd::filter_phpstan_text(input)
+    }
+}
+
+fn pint_wrapper(input: &str) -> String {
+    if input.trim_start().starts_with('{') {
+        crate::cmds::php::pint_cmd::filter_pint_json(input)
+    } else {
+        crate::core::utils::fallback_tail(input, "pint", 60)
+    }
 }
 
 fn vitest_wrapper(input: &str) -> String {
@@ -155,6 +180,14 @@ pub fn auto_detect_filter(input: &str) -> fn(&str) -> String {
     }
 
     let first_trimmed = first_1k.trim_start();
+
+    // phpunit banner: "PHPUnit X.Y.Z by Sebastian Bergmann and contributors."
+    // Anchor to the leading "PHPUnit " token so a LICENSE/composer/`git log`
+    // that merely mentions the author isn't misrouted here.
+    if first_trimmed.starts_with("PHPUnit ") && first_1k.contains("by Sebastian Bergmann") {
+        return crate::cmds::php::phpunit_cmd::filter_phpunit_output;
+    }
+
     if first_trimmed.starts_with('{') && first_1k.contains("\"Action\"") {
         return go_test_wrapper;
     }
@@ -231,7 +264,8 @@ pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
             anyhow::anyhow!(
                 "Unknown filter '{}'. Available: cargo-test, pytest, go-test, go-build, \
                  tsc, vitest, grep, rg, find, fd, git-log, git-diff, git-status, \
-                 log, mypy, ruff-check, ruff-format, prettier",
+                 log, mypy, ruff-check, ruff-format, prettier, phpunit, pest, \
+                 paratest, php-test, ecs, phpstan, pint",
                 name
             )
         })?,
@@ -247,6 +281,31 @@ pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_auto_detect_phpunit_banner() {
+        // The phpunit banner must route to the phpunit filter with no -f flag.
+        let input = "PHPUnit 11.0.0 by Sebastian Bergmann and contributors.\n\n\
+                     ...  3 / 3 (100%)\n\nOK (3 tests, 5 assertions)\n";
+        let f = auto_detect_filter(input);
+        let out = f(input);
+        assert!(out.starts_with("PHPUnit:"), "out={}", out);
+    }
+
+    #[test]
+    fn test_auto_detect_phpunit_not_misrouted_by_author_mention() {
+        // Text that merely mentions the author (LICENSE, git log, composer meta)
+        // must pass through untouched, not route to the phpunit filter.
+        let input = "commit abc123\nAuthor: written by Sebastian Bergmann and contributors\n\n    Update changelog\n";
+        let f = auto_detect_filter(input);
+        let out = f(input);
+        assert_eq!(out, input, "should pass through unchanged, got: {}", out);
+    }
+
+    #[test]
+    fn test_resolve_filter_phpunit() {
+        assert!(resolve_filter("phpunit").is_some());
+    }
 
     #[test]
     fn test_resolve_filter_cargo_test() {
