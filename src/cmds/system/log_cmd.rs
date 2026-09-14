@@ -21,6 +21,11 @@ static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
 static HEX_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"0x[0-9a-fA-F]+").unwrap());
 static NUM_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b\d{4,}\b").unwrap());
 static PATH_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"/[\w./\-]+").unwrap());
+/// Run/build result lines that report a failure without any severity keyword:
+/// VSTest `Failed!  - Failed: N, ...`, Microsoft.Testing.Platform
+/// `Test run summary: Failed!` and MSBuild `Build FAILED.`.
+static FAILURE_SUMMARY_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(^|\s)Failed!(\s|$)|^\s*Build FAILED\.").unwrap());
 
 /// Filter and deduplicate log output
 pub fn run_file(file: &Path, verbose: u8) -> Result<()> {
@@ -96,6 +101,7 @@ fn analyze_logs(content: &str) -> String {
             || line_lower.contains("alert")
             || line_lower.contains("emerg")
             || line_lower.contains("severe")
+            || FAILURE_SUMMARY_RE.is_match(line)
         {
             let count = error_counts.entry(normalized.clone()).or_insert(0);
             if *count == 0 {
@@ -263,6 +269,34 @@ mod tests {
         let result = analyze_logs(logs);
         assert!(result.contains("ERRORS"), "critical/alert/emerg/severe should count as errors");
         assert!(result.contains("WARNINGS"), "notice should count as warning");
+    }
+
+    /// VSTest's run summary is the only line that says a `dotnet test` run
+    /// failed, and it contains none of the severity keywords (#4018).
+    #[test]
+    fn test_analyze_logs_vstest_failure_summary() {
+        let logs = "Failed!  - Failed:     3, Passed:   382, Skipped:     0, Total:   385, Duration: 1 m 2 s - Sample.Tests.dll (net8.0)\n";
+        let result = analyze_logs(logs);
+        assert!(result.contains("[error] 1 errors"), "{result}");
+        assert!(result.contains("Failed!  - Failed:     3, Passed:   382"), "{result}");
+    }
+
+    #[test]
+    fn test_analyze_logs_build_and_mtp_failure_summaries() {
+        let logs = "Build FAILED.\n\
+                    Test run summary: Failed! - bin/Debug/net8.0/Sample.Tests.dll (net8.0|arm64)\n";
+        let result = analyze_logs(logs);
+        assert!(result.contains("[error] 2 errors"), "{result}");
+        assert!(result.contains("Build FAILED."), "{result}");
+        assert!(result.contains("Test run summary: Failed!"), "{result}");
+    }
+
+    #[test]
+    fn test_analyze_logs_passing_summary_is_not_an_error() {
+        let logs = "Passed!  - Failed:     0, Passed:   385, Skipped:     0, Total:   385, Duration: 1 m 2 s - Sample.Tests.dll (net8.0)\n\
+                    Build succeeded.\n";
+        let result = analyze_logs(logs);
+        assert!(result.contains("[error] 0 errors"), "{result}");
     }
 
     #[test]
