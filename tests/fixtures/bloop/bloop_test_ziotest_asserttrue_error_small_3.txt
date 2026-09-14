@@ -1,0 +1,42 @@
+Compiling root (1 Scala source)
+Compiled root (1433ms)
+Compiling root-test (1 Scala source)
+Compiled root-test (1218ms)
++ Calculator
+  + add returns the sum
+  + sub returns the difference
+  + mul returns the product
+  - div returns the quotient
+    java.lang.ArithmeticException: / by zero
+    	at example.Calculator$.div(Calculator.scala:8)
+    	at example.CalculatorSpec$.spec$$anonfun$4(CalculatorSpec.scala:20)
+    	at zio.test.TestConstructor$.apply$$anonfun$1$$anonfun$1(TestConstructor.scala:22)
+    	at example.CalculatorSpec.spec(CalculatorSpec.scala:22)
+Execution took 95ms
+4 tests, 3 passed, 1 failed
+
+3 tests passed. 1 tests failed. 0 tests ignored.
+
+
+  - Calculator - div returns the quotient
+    java.lang.ArithmeticException: / by zero
+    	at example.Calculator$.div(Calculator.scala:8)
+    	at example.CalculatorSpec$.spec$$anonfun$4(CalculatorSpec.scala:20)
+    	at zio.test.TestConstructor$.apply$$anonfun$1$$anonfun$1(TestConstructor.scala:22)
+    	at example.CalculatorSpec.spec(CalculatorSpec.scala:22)
+Executed in 173 ms
+
+The test execution was successfully closed.
+====================================================================================================
+Total duration: 95ms
+1 failed
+
+Failed:
+- example.CalculatorSpec:
+  * Calculator - div returns the quotient -   - div returns the quotient
+    java.lang.ArithmeticException: / by zero
+    	at example.Calculator$.div(Calculator.scala:8)
+    	at example.CalculatorSpec$.spec$$anonfun$4(CalculatorSpec.scala:20)
+    	at zio.test.TestConstructor$.apply$$anonfun$1$$anonfun$1(TestConstructor.scala:22)
+    	at example.CalculatorSpec.spec(CalculatorSpec.scala:22)
+====================================================================================================
