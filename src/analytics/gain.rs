@@ -11,6 +11,30 @@ use serde::Serialize;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
+/// Reports a missing or outdated hook on stderr.
+///
+/// Without the hook nothing is tracked, so this is the likeliest explanation
+/// for a low — or empty — savings report.
+fn warn_hook_issues() {
+    match hook_check::status() {
+        hook_check::HookStatus::Missing => {
+            eprintln!(
+                "{}",
+                "[warn] No hook installed — run `rtk init -g` for automatic token savings".yellow()
+            );
+            eprintln!();
+        }
+        hook_check::HookStatus::Outdated => {
+            eprintln!(
+                "{}",
+                "[warn] Hook outdated — run `rtk init -g` to update".yellow()
+            );
+            eprintln!();
+        }
+        hook_check::HookStatus::Ok => {}
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     project: bool, // added: per-project scope flag
@@ -92,6 +116,11 @@ pub fn run(
         eprintln!();
     }
 
+    // Hook issues silently kill savings, so they are reported for every view —
+    // including the empty one, where a missing hook is the likeliest reason
+    // there is nothing to show. stderr, so machine-readable output stays clean.
+    warn_hook_issues();
+
     if summary.total_commands == 0 {
         println!("No tracking data yet.");
         println!("Run some rtk commands to start tracking savings.");
@@ -136,26 +165,6 @@ pub fn run(
         );
         print_efficiency_meter(summary.avg_savings_pct);
         println!();
-
-        // Warn about hook issues that silently kill savings (stderr, not stdout)
-        match hook_check::status() {
-            hook_check::HookStatus::Missing => {
-                eprintln!(
-                    "{}",
-                    "[warn] No hook installed — run `rtk init -g` for automatic token savings"
-                        .yellow()
-                );
-                eprintln!();
-            }
-            hook_check::HookStatus::Outdated => {
-                eprintln!(
-                    "{}",
-                    "[warn] Hook outdated — run `rtk init -g` to update".yellow()
-                );
-                eprintln!();
-            }
-            hook_check::HookStatus::Ok => {}
-        }
 
         // Lightweight RTK_DISABLED bypass check (best-effort, silent on failure)
         if let Some(warning) = check_rtk_disabled_bypass() {
