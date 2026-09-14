@@ -198,9 +198,9 @@ pub struct GainSummary {
     pub total_saved: usize,
     /// Average savings percentage across all commands
     pub avg_savings_pct: f64,
-    /// Total execution time across all commands (milliseconds)
+    /// Total execution time of the timed commands (milliseconds); see [`DayStats::timed_commands`]
     pub total_time_ms: u64,
-    /// Average execution time per command (milliseconds)
+    /// Average execution time per timed command (milliseconds)
     pub avg_time_ms: u64,
     /// Top 10 commands by tokens saved: (cmd, count, saved, weighted_rate, avg_time_ms)
     pub by_command: Vec<(String, usize, usize, f64, u64)>,
@@ -240,10 +240,16 @@ pub struct DayStats {
     pub saved_tokens: usize,
     /// Savings percentage for this day
     pub savings_pct: f64,
-    /// Total execution time for this day (milliseconds)
+    /// Total execution time of this day's timed commands (milliseconds)
     pub total_time_ms: u64,
-    /// Average execution time per command (milliseconds)
+    /// Average execution time per timed command (milliseconds)
     pub avg_time_ms: u64,
+    /// Commands whose execution time counts toward `total_time_ms`: those with captured
+    /// input. A zero-input row (passthrough, fallback) filtered nothing, and its duration is
+    /// the wrapped process's lifetime — a whole interactive TUI session for `rtk claude`
+    /// (#4003) — so it would swamp the aggregate. Not exported: CSV/JSON keep their schema.
+    #[serde(skip)]
+    pub timed_commands: usize,
 }
 
 /// Weekly statistics for token savings and execution metrics.
@@ -266,10 +272,13 @@ pub struct WeekStats {
     pub saved_tokens: usize,
     /// Savings percentage for this week
     pub savings_pct: f64,
-    /// Total execution time for this week (milliseconds)
+    /// Total execution time of this week's timed commands (milliseconds)
     pub total_time_ms: u64,
-    /// Average execution time per command (milliseconds)
+    /// Average execution time per timed command (milliseconds)
     pub avg_time_ms: u64,
+    /// Commands whose execution time counts toward `total_time_ms`; see [`DayStats::timed_commands`]
+    #[serde(skip)]
+    pub timed_commands: usize,
 }
 
 /// Monthly statistics for token savings and execution metrics.
@@ -289,10 +298,13 @@ pub struct MonthStats {
     pub saved_tokens: usize,
     /// Savings percentage for this month
     pub savings_pct: f64,
-    /// Total execution time for this month (milliseconds)
+    /// Total execution time of this month's timed commands (milliseconds)
     pub total_time_ms: u64,
-    /// Average execution time per command (milliseconds)
+    /// Average execution time per timed command (milliseconds)
     pub avg_time_ms: u64,
+    /// Commands whose execution time counts toward `total_time_ms`; see [`DayStats::timed_commands`]
+    #[serde(skip)]
+    pub timed_commands: usize,
 }
 
 /// Type alias for command statistics tuple: (command, count, saved_tokens, weighted_savings_rate, avg_time_ms)
@@ -306,6 +318,15 @@ pub struct MonthStats {
 /// instead. `saved_tokens` is signed, so the rate can be negative where the 3rd field, being
 /// unsigned, is clamped to 0.
 type CommandStats = (String, usize, usize, f64, u64);
+
+/// Mean execution time over the timed commands only (see [`DayStats::timed_commands`]).
+pub fn average_time_ms(total_time_ms: u64, timed_commands: usize) -> u64 {
+    if timed_commands > 0 {
+        total_time_ms / timed_commands as u64
+    } else {
+        0
+    }
+}
 
 /// Current tracking-DB schema version, stored in the SQLite `user_version` pragma.
 ///
@@ -840,6 +861,7 @@ impl Tracker {
         let mut total_output = 0usize;
         let mut total_saved = 0usize;
         let mut total_time_ms = 0u64;
+        let mut timed_commands = 0usize;
 
         let mut stmt = self.conn.prepare(
             "SELECT input_tokens, output_tokens, saved_tokens, exec_time_ms
@@ -865,7 +887,10 @@ impl Tracker {
             total_input += input;
             total_output += output;
             total_saved += saved;
-            total_time_ms += time_ms;
+            if input > 0 {
+                total_time_ms += time_ms;
+                timed_commands += 1;
+            }
         }
 
         let avg_savings_pct = if total_input > 0 {
@@ -874,11 +899,7 @@ impl Tracker {
             0.0
         };
 
-        let avg_time_ms = if total_commands > 0 {
-            total_time_ms / total_commands as u64
-        } else {
-            0
-        };
+        let avg_time_ms = average_time_ms(total_time_ms, timed_commands);
 
         let by_command = self.get_by_command(project_path)?; // added: pass project filter
         let by_day = self.get_by_day(project_path)?; // added: pass project filter
@@ -987,7 +1008,8 @@ impl Tracker {
                 SUM(input_tokens) as input,
                 SUM(output_tokens) as output,
                 SUM(saved_tokens) as saved,
-                SUM(exec_time_ms) as total_time
+                SUM(CASE WHEN input_tokens > 0 THEN exec_time_ms ELSE 0 END) as total_time,
+                SUM(CASE WHEN input_tokens > 0 THEN 1 ELSE 0 END) as timed_commands
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY DATE(timestamp)
@@ -1000,15 +1022,11 @@ impl Tracker {
             let saved = row.get::<_, i64>(4)?.max(0) as usize; // clamp net-negative group
             let commands = row.get::<_, i64>(1)? as usize;
             let total_time = row.get::<_, i64>(5)? as u64;
+            let timed_commands = row.get::<_, i64>(6)? as usize;
             let savings_pct = if input > 0 {
                 (saved as f64 / input as f64) * 100.0
             } else {
                 0.0
-            };
-            let avg_time_ms = if commands > 0 {
-                total_time / commands as u64
-            } else {
-                0
             };
 
             Ok(DayStats {
@@ -1019,7 +1037,8 @@ impl Tracker {
                 saved_tokens: saved,
                 savings_pct,
                 total_time_ms: total_time,
-                avg_time_ms,
+                avg_time_ms: average_time_ms(total_time, timed_commands),
+                timed_commands,
             })
         })?;
 
@@ -1061,7 +1080,8 @@ impl Tracker {
                 SUM(input_tokens) as input,
                 SUM(output_tokens) as output,
                 SUM(saved_tokens) as saved,
-                SUM(exec_time_ms) as total_time
+                SUM(CASE WHEN input_tokens > 0 THEN exec_time_ms ELSE 0 END) as total_time,
+                SUM(CASE WHEN input_tokens > 0 THEN 1 ELSE 0 END) as timed_commands
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY week_start
@@ -1074,15 +1094,11 @@ impl Tracker {
             let saved = row.get::<_, i64>(5)?.max(0) as usize; // clamp net-negative group
             let commands = row.get::<_, i64>(2)? as usize;
             let total_time = row.get::<_, i64>(6)? as u64;
+            let timed_commands = row.get::<_, i64>(7)? as usize;
             let savings_pct = if input > 0 {
                 (saved as f64 / input as f64) * 100.0
             } else {
                 0.0
-            };
-            let avg_time_ms = if commands > 0 {
-                total_time / commands as u64
-            } else {
-                0
             };
 
             Ok(WeekStats {
@@ -1094,7 +1110,8 @@ impl Tracker {
                 saved_tokens: saved,
                 savings_pct,
                 total_time_ms: total_time,
-                avg_time_ms,
+                avg_time_ms: average_time_ms(total_time, timed_commands),
+                timed_commands,
             })
         })?;
 
@@ -1135,7 +1152,8 @@ impl Tracker {
                 SUM(input_tokens) as input,
                 SUM(output_tokens) as output,
                 SUM(saved_tokens) as saved,
-                SUM(exec_time_ms) as total_time
+                SUM(CASE WHEN input_tokens > 0 THEN exec_time_ms ELSE 0 END) as total_time,
+                SUM(CASE WHEN input_tokens > 0 THEN 1 ELSE 0 END) as timed_commands
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY month
@@ -1148,15 +1166,11 @@ impl Tracker {
             let saved = row.get::<_, i64>(4)?.max(0) as usize; // clamp net-negative group
             let commands = row.get::<_, i64>(1)? as usize;
             let total_time = row.get::<_, i64>(5)? as u64;
+            let timed_commands = row.get::<_, i64>(6)? as usize;
             let savings_pct = if input > 0 {
                 (saved as f64 / input as f64) * 100.0
             } else {
                 0.0
-            };
-            let avg_time_ms = if commands > 0 {
-                total_time / commands as u64
-            } else {
-                0
             };
 
             Ok(MonthStats {
@@ -1167,7 +1181,8 @@ impl Tracker {
                 saved_tokens: saved,
                 savings_pct,
                 total_time_ms: total_time,
-                avg_time_ms,
+                avg_time_ms: average_time_ms(total_time, timed_commands),
+                timed_commands,
             })
         })?;
 
@@ -1821,7 +1836,9 @@ impl TimedExecution {
     ///
     /// For commands that stream output or run interactively where output
     /// cannot be captured. Records execution time but sets tokens to 0
-    /// (does not dilute savings statistics).
+    /// (does not dilute savings statistics). The zero input also keeps the
+    /// row out of the `rtk gain` exec-time aggregates, since its duration is
+    /// the wrapped process's lifetime, not filtering work.
     ///
     /// # Arguments
     ///
@@ -2818,5 +2835,71 @@ mod tests {
             "expected ({ls_rate:.1} + 24 - 50) / 3 = {expected:.1}%, got {avg:.1}% \
              (an unweighted inner AVG(savings_pct) would give (19 + 12.5 - 50) / 3 = -6.2%)"
         );
+    }
+
+    /// Three filtered commands (100 + 200 + 300 ms) plus one `rtk claude` TUI session
+    /// left open for 11 hours, recorded through the passthrough path with no input (#4003).
+    fn tracker_with_interactive_session() -> Tracker {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        for (ms, input) in [(100, 1_000), (200, 2_000), (300, 3_000)] {
+            tracker
+                .record("git status", "rtk git status", input, input / 4, ms)
+                .expect("record filtered command");
+        }
+        tracker
+            .record("claude", "rtk fallback: claude", 0, 0, 11 * 3_600_000)
+            .expect("record interactive session");
+        tracker
+    }
+
+    // 20. A zero-input row did no filtering, so its wall-clock lifetime must not reach the
+    // exec-time aggregate or its average. Commands and savings still count every row.
+    #[test]
+    fn test_summary_exec_time_excludes_zero_input_rows() {
+        let summary = tracker_with_interactive_session()
+            .get_summary()
+            .expect("Failed to get summary");
+
+        assert_eq!(summary.total_time_ms, 600);
+        assert_eq!(summary.avg_time_ms, 200);
+        assert_eq!(summary.total_commands, 4);
+        assert_eq!(summary.total_input, 6_000);
+        assert_eq!(summary.total_saved, 4_500);
+    }
+
+    // 21. The daily / weekly / monthly breakdowns (text, JSON and CSV) apply the same rule.
+    #[test]
+    fn test_period_exec_time_excludes_zero_input_rows() {
+        let tracker = tracker_with_interactive_session();
+
+        let days = tracker.get_all_days().expect("get_all_days");
+        let weeks = tracker.get_by_week().expect("get_by_week");
+        let months = tracker.get_by_month().expect("get_by_month");
+        assert_eq!((days.len(), weeks.len(), months.len()), (1, 1, 1));
+
+        for (period, commands, total_time_ms, avg_time_ms) in [
+            (
+                "day",
+                days[0].commands,
+                days[0].total_time_ms,
+                days[0].avg_time_ms,
+            ),
+            (
+                "week",
+                weeks[0].commands,
+                weeks[0].total_time_ms,
+                weeks[0].avg_time_ms,
+            ),
+            (
+                "month",
+                months[0].commands,
+                months[0].total_time_ms,
+                months[0].avg_time_ms,
+            ),
+        ] {
+            assert_eq!(commands, 4, "{period}: every row still counts as a command");
+            assert_eq!(total_time_ms, 600, "{period}: total exec time");
+            assert_eq!(avg_time_ms, 200, "{period}: avg exec time");
+        }
     }
 }
