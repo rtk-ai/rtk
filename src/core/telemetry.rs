@@ -560,8 +560,8 @@ pub fn telemetry_marker_path() -> PathBuf {
     data_dir.join(".telemetry_last_ping")
 }
 
-fn touch_marker(path: &PathBuf) {
-    let _ = std::fs::write(path, b"");
+fn touch_marker(path: &std::path::Path) {
+    let _ = crate::core::utils::touch_file(path);
 }
 
 #[cfg(test)]
