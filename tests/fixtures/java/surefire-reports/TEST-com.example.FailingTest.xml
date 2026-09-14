@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.example.FailingTest" time="1.234" tests="4" errors="0" skipped="0" failures="2">
+  <testcase name="shouldPass" classname="com.example.FailingTest" time="0.100"/>
+  <testcase name="shouldReturnUser" classname="com.example.FailingTest" time="0.500">
+    <failure message="expected:&lt;200&gt; but was:&lt;404&gt;" type="org.opentest4j.AssertionFailedError">org.opentest4j.AssertionFailedError: expected:&lt;200&gt; but was:&lt;404&gt;
+	at org.junit.jupiter.api.AssertEquals.assertEquals(AssertEquals.java:150)
+	at com.example.FailingTest.shouldReturnUser(FailingTest.java:42)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)</failure>
+  </testcase>
+  <testcase name="shouldHandleNull" classname="com.example.FailingTest" time="0.300">
+    <failure message="Unexpected exception: NullPointerException" type="java.lang.AssertionError">java.lang.AssertionError: Unexpected exception: NullPointerException
+	at com.example.FailingTest.shouldHandleNull(FailingTest.java:55)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)</failure>
+  </testcase>
+  <testcase name="shouldAlsoPass" classname="com.example.FailingTest" time="0.334"/>
+</testsuite>
