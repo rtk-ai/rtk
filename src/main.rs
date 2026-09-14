@@ -448,6 +448,9 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Show Claude Code context token budget
+    Context,
+
     /// Show token savings summary and history
     Gain {
         /// Filter statistics to current project (current working directory) // added
@@ -2420,6 +2423,11 @@ fn run_cli() -> Result<i32> {
         }
 
         Commands::Wc { args } => wc_cmd::run(&args, cli.verbose)?,
+
+        Commands::Context => {
+            analytics::context_cmd::run(cli.verbose)?;
+            0
+        }
 
         Commands::Gain {
             project, // added
