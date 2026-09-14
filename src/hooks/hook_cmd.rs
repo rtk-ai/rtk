@@ -512,6 +512,121 @@ fn gemini_json(decision: &str, rewrite: Option<&str>) -> String {
     output.to_string()
 }
 
+// ── Alma hook ───────────────────────────────────────────────
+//
+// Alma desktop assistant `tool.willExecute` hook. The contract is observed
+// app behavior (Alma's hook protocol is not publicly documented):
+// - stdin: `{"hook":"tool.willExecute","input":{"tool":"Bash","args":{"command":"…", …}}, "matcher":"^Bash$"}`
+// - rewrite: the LAST stdout line is
+//   `{"decision":"allow","updatedInput":{…}}` and `updatedInput` replaces the
+//   tool arguments wholesale — so every original arg field is carried over,
+//   with only `command` swapped.
+// - anything else (no stdout, exit 0) leaves the command untouched. Alma also
+//   fails open on hook timeout (its own default is 10s; the installed entry
+//   sets 5s) and on hook process errors, so this handler never blocks: the
+//   `Deny` arm stays silent rather than emitting Alma's
+//   `{"decision":"block","reason":"…"}` form, letting the original command run.
+
+/// Commands whose first token must not be rewritten for Alma: `rtk curl` /
+/// `rtk wget` compress JSON responses into a schema, which breaks programmatic
+/// consumers downstream of a pipe (`curl … | jq`).
+const ALMA_SKIP_FIRST_TOKENS: &[&str] = &["curl", "wget"];
+
+/// Why a command must not be rewritten for Alma, or `None` when it is fair
+/// game. Mirrors the reference Python hook this replaces: besides the token
+/// list above, multi-line commands are out of `rtk rewrite`'s single-line
+/// scope, and an already-prefixed command has no RTK form other than itself
+/// (`decide_for_agent`'s `suppress_identity` remains the backstop).
+fn alma_skip_reason(cmd: &str) -> Option<&'static str> {
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() || trimmed.contains('\n') {
+        return Some("empty-or-multiline");
+    }
+    let first = trimmed.split_whitespace().next().unwrap_or("");
+    if ALMA_SKIP_FIRST_TOKENS.contains(&first) {
+        return Some("skip-first-token");
+    }
+    if first == "rtk" {
+        return Some("already-rtk");
+    }
+    None
+}
+
+/// Run the Alma `tool.willExecute` hook.
+pub fn run_alma() -> Result<()> {
+    let input = read_stdin_limited()?;
+    if let Some(output) = run_alma_inner(&input) {
+        let _ = writeln!(io::stdout(), "{output}");
+    }
+    Ok(())
+}
+
+/// Parse the Alma payload, decide (Alma has no RTK-side permission rule
+/// source — `Host::Alma` reads nothing, so every rewritable command lands on
+/// the shared `AskRewrite` arm), and render the response JSON. No I/O, so
+/// tests exercise the exact production logic.
+fn run_alma_inner(input: &str) -> Option<String> {
+    run_alma_inner_impl(input, |cmd| {
+        decide_hook_action(cmd, permissions::Host::Alma)
+    })
+}
+
+/// Same parse/render path as `run_alma_inner`, with the decision injected so
+/// tests can drive the full Allow/Ask/Deny/Defer matrix without settings files
+/// — mirrors `run_gemini_inner_with_rules`.
+#[cfg(test)]
+fn run_alma_inner_with_rules(
+    input: &str,
+    deny: &[String],
+    ask: &[String],
+    allow: &[String],
+) -> Option<String> {
+    run_alma_inner_impl(input, |cmd| {
+        decide_from_verdict(
+            cmd,
+            permissions::check_command_with_rules(cmd, deny, ask, allow),
+        )
+    })
+}
+
+fn run_alma_inner_impl(input: &str, decide: impl Fn(&str) -> HookDecision) -> Option<String> {
+    let input = strip_leading_bom(input);
+    let json: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return None;
+        }
+    };
+
+    let tool = json
+        .pointer("/input/tool")
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+    if tool != "Bash" {
+        return None;
+    }
+
+    // Alma replaces the tool arguments with `updatedInput` wholesale, so the
+    // response must carry every original field, not just the swapped command.
+    let args = json.pointer("/input/args").and_then(|a| a.as_object())?;
+    let cmd = args.get("command").and_then(|c| c.as_str()).unwrap_or("");
+    if cmd.is_empty() || alma_skip_reason(cmd).is_some() {
+        return None;
+    }
+
+    let rewritten = match decide(cmd) {
+        HookDecision::AllowRewrite(r) | HookDecision::AskRewrite(r) => r,
+        HookDecision::Deny | HookDecision::Defer => return None,
+    };
+
+    audit_log("rewrite", cmd, &rewritten);
+
+    let mut updated = args.clone();
+    updated.insert("command".to_string(), Value::String(rewritten));
+    Some(json!({ "decision": "allow", "updatedInput": Value::Object(updated) }).to_string())
+}
+
 // ── Audit logging ─────────────────────────────────────────────
 
 /// Best-effort audit log when RTK_HOOK_AUDIT=1.
@@ -2824,5 +2939,136 @@ mod tests {
     fn test_vibe_substitution_defers() {
         let input = vibe_input("bash", "echo $(rm -rf /)");
         assert!(run_vibe_inner(&input).is_none());
+    }
+
+    // --- Alma hook ---
+
+    fn alma_input(tool: &str, args: Value) -> String {
+        json!({
+            "hook": "tool.willExecute",
+            "input": { "tool": tool, "args": args, "context": {} },
+            "matcher": "^Bash$"
+        })
+        .to_string()
+    }
+
+    fn alma_bash_input(cmd: &str) -> String {
+        alma_input("Bash", json!({ "command": cmd }))
+    }
+
+    /// Rewrite hit: the last-line JSON allows with `updatedInput.command`
+    /// swapped to the rtk form.
+    #[test]
+    fn test_alma_rewrite_hit() {
+        let out = run_alma_inner(&alma_bash_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(v["updatedInput"]["command"], "rtk git status");
+    }
+
+    /// No rtk equivalent: silent passthrough (Alma runs the original command).
+    #[test]
+    fn test_alma_no_equivalent_is_silent() {
+        assert!(run_alma_inner(&alma_bash_input("htop")).is_none());
+    }
+
+    /// Every original args field must survive the rewrite — Alma replaces the
+    /// tool arguments with `updatedInput` wholesale.
+    #[test]
+    fn test_alma_rewrite_preserves_other_args_fields() {
+        let input = alma_input(
+            "Bash",
+            json!({ "command": "git status", "description": "Show status", "timeout": 30000 }),
+        );
+        let out = run_alma_inner(&input).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["updatedInput"]["command"], "rtk git status");
+        assert_eq!(v["updatedInput"]["description"], "Show status");
+        assert_eq!(v["updatedInput"]["timeout"], 30000);
+    }
+
+    /// curl/wget stay raw: `rtk curl` compresses a JSON response into a schema,
+    /// which breaks `curl … | jq`-style programmatic parsing.
+    #[test]
+    fn test_alma_skips_curl_and_wget_first_token() {
+        for cmd in [
+            "curl https://api.example.com/json | jq .",
+            "wget -q https://example.com/data.json",
+        ] {
+            assert!(
+                run_alma_inner(&alma_bash_input(cmd)).is_none(),
+                "cmd: {cmd}"
+            );
+        }
+    }
+
+    /// Multi-line commands are out of `rtk rewrite`'s single-line scope.
+    #[test]
+    fn test_alma_skips_multiline_command() {
+        assert!(run_alma_inner(&alma_bash_input("git status\ncargo test")).is_none());
+        assert!(run_alma_inner(&alma_bash_input("cat <<EOF\nhi\nEOF")).is_none());
+    }
+
+    /// Already rtk-prefixed: no rewrite to apply.
+    #[test]
+    fn test_alma_skips_already_rtk_command() {
+        assert!(run_alma_inner(&alma_bash_input("rtk git status")).is_none());
+    }
+
+    /// Non-Bash tools (matcher regex is only a hint — the payload's tool name
+    /// is authoritative) and missing/malformed args pass through silently.
+    #[test]
+    fn test_alma_ignores_non_bash_tool() {
+        let input = alma_input("Edit", json!({ "command": "git status" }));
+        assert!(run_alma_inner(&input).is_none());
+    }
+
+    #[test]
+    fn test_alma_missing_command_is_silent() {
+        assert!(run_alma_inner(&alma_input("Bash", json!({}))).is_none());
+        assert!(run_alma_inner(&alma_input("Bash", json!({ "command": 42 }))).is_none());
+        assert!(run_alma_inner(&alma_bash_input("")).is_none());
+    }
+
+    #[test]
+    fn test_alma_malformed_json_is_silent() {
+        assert!(run_alma_inner("not json at all").is_none());
+        assert!(run_alma_inner("{ unterminated").is_none());
+    }
+
+    /// The hook never blocks: even an explicit deny rule yields silence, not
+    /// Alma's `{"decision":"block"}` form — Alma's own approval flow judges
+    /// the original command.
+    #[test]
+    fn test_alma_deny_rule_stays_silent() {
+        let deny = vec!["git push".to_string()];
+        let input = alma_bash_input("git push origin main");
+        let out = run_alma_inner_with_rules(&input, &deny, &[], &[]);
+        assert!(out.is_none());
+    }
+
+    /// An allow rule upgrades nothing protocol-wise: Alma only understands
+    /// `allow` + `updatedInput`, so Allow and Ask render identically.
+    #[test]
+    fn test_alma_allow_and_ask_render_the_same_response() {
+        let input = alma_bash_input("git status");
+        let allow = run_alma_inner_with_rules(&input, &[], &[], &["git *".to_string()]).unwrap();
+        let default = run_alma_inner_with_rules(&input, &[], &[], &[]).unwrap();
+        assert_eq!(allow, default);
+    }
+
+    #[test]
+    fn test_alma_skip_reason_classification() {
+        assert_eq!(alma_skip_reason("  "), Some("empty-or-multiline"));
+        assert_eq!(
+            alma_skip_reason("git status\nls"),
+            Some("empty-or-multiline")
+        );
+        assert_eq!(alma_skip_reason("curl -s x"), Some("skip-first-token"));
+        assert_eq!(alma_skip_reason("wget x"), Some("skip-first-token"));
+        assert_eq!(alma_skip_reason("rtk git status"), Some("already-rtk"));
+        assert_eq!(alma_skip_reason("git status"), None);
+        // `curly` is not `curl` — the skip list matches whole first tokens.
+        assert_eq!(alma_skip_reason("curly x"), None);
     }
 }

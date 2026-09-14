@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, and Mistral Vibe
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, Mistral Vibe, and Alma
 sidebar:
   order: 3
 ---
@@ -45,6 +45,7 @@ Agent runs "cargo test"
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rules file (prompt-level) | N/A |
 | Mistral Vibe | Rust binary (`pre_tool`) | Yes |
+| Alma | Rust binary (`tool.willExecute`, matcher `^Bash$`) | Yes |
 
 Agents that rewrite transparently receive the awareness file selected by `awareness.level` in
 `config.toml` (`default` says nothing about RTK). Rules-file agents cannot rewrite, so the agent
@@ -192,6 +193,26 @@ rtk init --uninstall --agent droid
 ```
 
 Removes only RTK's hook entry; other hooks and settings are untouched.
+
+### Alma
+
+```bash
+rtk init -g --agent alma    # user-scoped (~/.config/alma/hooks.json)
+```
+
+Installs a `tool.willExecute` hook entry (`matcher = "^Bash$"`, `command = "rtk hook alma"`, `timeout = 5000`, `enabled = true`) into Alma's hook registry. Alma hot-reloads `hooks.json` on save, so no restart is needed. The install merges into the existing file: it joins a pre-existing `^Bash$` matcher group, and hooks you already run under that or any other matcher are preserved. Re-running the installer is a no-op.
+
+Alma's hook protocol (not publicly documented; this is the observed behavior): the hook process receives `{"hook": "tool.willExecute", "input": {"tool": "Bash", "args": {"command": "…"}}}` on stdin, and the **last** stdout line is the decision. RTK answers `{"decision": "allow", "updatedInput": {…}}` with the full original args and only `command` swapped for its rtk form. Every other case — no rewrite available, non-Bash tool, malformed input, hook error, or timeout — is fail-open: RTK stays silent and exits 0, so the original command runs unchanged. RTK never emits `{"decision": "block"}`.
+
+Two deliberate skip rules: commands starting with `curl` or `wget` are left raw because `rtk curl` compresses a JSON response into a schema, which breaks programmatic parsing (`curl … | jq`); and multi-line commands are left raw because `rtk rewrite` covers single-line commands.
+
+Uninstall:
+
+```bash
+rtk init -g --agent alma --uninstall
+```
+
+Removes only RTK's hook entry (plus structure it emptied); every other hook entry is preserved.
 
 ### Cline / Roo Code
 

@@ -61,6 +61,8 @@ pub enum AgentTarget {
     Vibe,
     /// Oh My Pi (OMP)
     Omp,
+    /// Alma desktop AI assistant
+    Alma,
 }
 
 #[derive(Parser)]
@@ -977,6 +979,8 @@ enum HookCommands {
     Droid,
     /// Process Mistral Vibe CLI pre_tool hook (reads JSON from stdin)
     Vibe,
+    /// Process Alma tool.willExecute hook (reads JSON from stdin)
+    Alma,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -1829,6 +1833,8 @@ where
         hooks::init::uninstall_droid(global, ctx)
     } else if agent == Some(AgentTarget::Vibe) {
         hooks::init::uninstall_vibe(ctx)
+    } else if agent == Some(AgentTarget::Alma) {
+        hooks::init::uninstall_alma(ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -2366,6 +2372,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_droid_mode(global, ctx)?;
             } else if agent == Some(AgentTarget::Vibe) {
                 hooks::init::run_vibe_mode(global, hook_only, patch_mode, ctx)?;
+            } else if agent == Some(AgentTarget::Alma) {
+                hooks::init::run_alma_mode(global, ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -2817,6 +2825,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Vibe => {
                 hooks::hook_cmd::run_vibe()?;
+                0
+            }
+            HookCommands::Alma => {
+                hooks::hook_cmd::run_alma()?;
                 0
             }
             HookCommands::Check { agent, command } => {
@@ -3336,6 +3348,48 @@ mod tests {
             }
             _ => panic!("Expected Init command"),
         }
+    }
+
+    #[test]
+    fn test_try_parse_init_agent_alma() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "alma"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, .. } => {
+                assert_eq!(agent, Some(AgentTarget::Alma));
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_init_agent_alma_uninstall() {
+        let cli =
+            Cli::try_parse_from(["rtk", "init", "--uninstall", "--agent", "alma", "--global"])
+                .unwrap();
+        match cli.command {
+            Commands::Init {
+                uninstall,
+                agent,
+                global,
+                ..
+            } => {
+                assert!(uninstall);
+                assert_eq!(agent, Some(AgentTarget::Alma));
+                assert!(global);
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_hook_alma() {
+        let cli = Cli::try_parse_from(["rtk", "hook", "alma"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Hook {
+                command: HookCommands::Alma
+            }
+        ));
     }
 
     #[test]
