@@ -124,14 +124,18 @@ pub fn run_stdin(
         .lock()
         .read_to_end(&mut bytes)
         .context("Failed to read from stdin")?;
-    if level == FilterLevel::None
-        && !line_numbers
-        && let Some(window) = byte_line_window(&bytes, head_lines, tail_lines)
-    {
+    if let Some(window) = raw_byte_window(
+        &bytes,
+        level,
+        max_lines,
+        head_lines,
+        tail_lines,
+        line_numbers,
+    ) {
         io::stdout()
             .lock()
             .write_all(window)
-            .context("Failed to write line window")?;
+            .context("Failed to write raw bytes")?;
         timer.track(
             "cat - (stdin)",
             "rtk read -",
@@ -258,7 +262,8 @@ fn tail_window(content: &[u8], n: usize) -> &[u8] {
 /// The slice to write out verbatim, or `None` when a later step needs a `&str`:
 /// a filter level, line numbers, or `--max-lines` (counted on filtered text).
 /// Head and tail windows slice on byte offsets, so they stay here, and so does a
-/// plain read — that is what lets `rtk read` handle files that are not valid UTF-8.
+/// plain read — that is what lets `rtk read` handle a file or a stdin stream that
+/// is not valid UTF-8.
 fn raw_byte_window(
     content: &[u8],
     level: FilterLevel,
@@ -543,7 +548,7 @@ fn main() {{
             Some(&b"alpha\n"[..])
         );
         assert_eq!(
-            raw_byte_window(input, FilterLevel::None, Some(2), None, Some(1), false),
+            raw_byte_window(input, FilterLevel::None, None, None, Some(1), false),
             Some(&b"charlie\n"[..])
         );
     }
@@ -661,6 +666,39 @@ fn main() {{
         assert!(
             !output.status.success(),
             "filtering cannot run on undecodable input, so it must still report the error"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn test_read_stdin_non_utf8_is_byte_exact() {
+        let bin = rtk_bin();
+        assert!(bin.exists(), "Run `cargo build` first");
+
+        let raw: &[u8] = b"line one\nlatin-1 byte: \xe9\nline three\n";
+        let mut child = std::process::Command::new(&bin)
+            .args(["read", "-"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("failed to run rtk read -");
+        child
+            .stdin
+            .take()
+            .expect("stdin was piped")
+            .write_all(raw)
+            .expect("failed to write to stdin");
+        let output = child.wait_with_output().expect("failed to wait for rtk");
+
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            output.stdout, raw,
+            "non-UTF-8 stdin must reach stdout verbatim"
         );
     }
 
