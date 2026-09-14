@@ -1748,13 +1748,25 @@ fn rewrite_segment_inner(
     // (php wrapper + ini flags, ./, vendor/bin, composer bin-dir) exactly as
     // classify_command does, so a small canonical prefix list matches every
     // invocation form instead of enumerating each literal spelling.
+    //
+    // For everything else, strip an absolute binary path (/usr/bin/grep →
+    // grep) the same way classify_command does (#485) before matching
+    // rewrite_prefixes below. classify_command normalizes internally and
+    // discards the result, so without this an absolute-path invocation was
+    // classified Supported but then silently fell through the rewrite_prefixes
+    // loop (which only ever matches bare prefixes like "ls"), returning None —
+    // classify and rewrite disagreeing on the exact same command.
     let php_normalized;
+    let absolute_path_stripped;
     let strip_target: &str = match php_tool_form(cmd_part, rule.rtk_cmd) {
         Some(normalized) => {
             php_normalized = normalized;
             &php_normalized
         }
-        None => cmd_part,
+        None => {
+            absolute_path_stripped = strip_absolute_path(cmd_part);
+            &absolute_path_stripped
+        }
     };
 
     // Try each rewrite prefix (longest first) with word-boundary check
@@ -2497,7 +2509,9 @@ mod tests {
                 "rtk du",
                 "rtk ecs",
                 "rtk find",
+                "rtk gh",
                 "rtk git",
+                "rtk glab",
                 "rtk go",
                 "rtk golangci-lint run",
                 "rtk grep",
@@ -7376,13 +7390,39 @@ mod tests {
     }
 
     #[test]
-    fn test_path_qualified_liquibase_is_not_rewritten() {
-        // #3757 originally requested path-qualified rewriting, but registry
-        // normalization currently classifies the basename without rewriting
-        // the original argv[0]. Pin that existing behavior explicitly.
+    fn test_path_qualified_liquibase_is_rewritten() {
+        // #3757 originally requested path-qualified rewriting; registry
+        // normalization (classify_command) already classified the basename
+        // correctly, but rewrite_segment_inner matched rewrite_prefixes against
+        // the raw argv[0] and silently dropped the rewrite. Fixed by stripping
+        // an absolute binary path before the rewrite_prefixes match, the same
+        // normalization classify_command already applies (#485).
         assert_eq!(
             rewrite_command_no_prefixes("/usr/bin/liquibase update", &[]),
-            None,
+            Some("rtk liquibase update".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_absolute_path_ls_is_rewritten() {
+        assert_eq!(
+            rewrite_command_no_prefixes("/bin/ls -lt", &[]),
+            Some("rtk ls -lt".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_gh_pipeline_producer_is_rewritten() {
+        // gh/glab were missing from PipelineSafety::ProducerOnly (unlike git,
+        // cargo, etc.), so `gh ... | head` never rewrote the gh side even
+        // though it's exactly as safe as `git log | head`.
+        assert_eq!(
+            rewrite_command_no_prefixes("gh pr list | head -50", &[]),
+            Some("rtk gh pr list | head -50".to_string()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("glab mr list | head -50", &[]),
+            Some("rtk glab mr list | head -50".to_string()),
         );
     }
 }
