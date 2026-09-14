@@ -571,6 +571,13 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Oxlint with grouped rule violations
+    Oxlint {
+        /// Linter arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Prettier format checker with compact output
     Prettier {
         /// Prettier arguments (e.g., --check, --write)
@@ -2542,6 +2549,11 @@ fn run_cli() -> Result<i32> {
 
         Commands::Lint { args } => lint_cmd::run(None, &args, cli.verbose)?,
 
+        Commands::Oxlint { mut args } => {
+            args.insert(0, "oxlint".to_string());
+            lint_cmd::run(None, &args, cli.verbose)?
+        }
+
         Commands::Prettier { args } => prettier_cmd::run(&args, cli.verbose)?,
 
         Commands::Format { args } => format_cmd::run(&args, cli.verbose)?,
@@ -2677,6 +2689,7 @@ fn run_cli() -> Result<i32> {
             match args[0].as_str() {
                 "tsc" | "typescript" => tsc_cmd::run(Some("npx"), &args[1..], cli.verbose)?,
                 "eslint" => lint_cmd::run(Some("npx"), &args, cli.verbose)?,
+                "oxlint" => lint_cmd::run(Some("npx"), &args, cli.verbose)?,
                 "prisma" => {
                     // Route to prisma_cmd based on subcommand
                     if args.len() > 1 {
@@ -3662,6 +3675,7 @@ mod tests {
             "tsc",
             "next",
             "lint",
+            "oxlint",
             "prettier",
             "format",
             "playwright",
