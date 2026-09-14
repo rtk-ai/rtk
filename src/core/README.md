@@ -15,16 +15,24 @@ Core infrastructure shared by all RTK command modules. Every filter, tracker, an
 
 ## TOML Filter Pipeline
 
-The TOML DSL applies 8 stages in order:
+The TOML DSL applies 11 stages in order:
 
 1. **strip_ansi**: Remove ANSI escape codes if enabled
 2. **replace**: Line-by-line regex substitutions (chainable, supports backreferences)
 3. **match_output**: Short-circuit rules (if output matches pattern, return message; `unless` field prevents swallowing errors)
 4. **strip/keep_lines**: Filter lines by regex (mutually exclusive)
-5. **truncate_lines_at**: Truncate each line to N chars (unicode-safe)
-6. **head/tail_lines**: Keep first N or last N lines (with omit message)
-7. **max_lines**: Absolute line cap applied after head/tail
-8. **on_empty**: Return message if result is empty after all stages
+5. **squeeze_whitespace**: Collapse intra-line space/tab runs to one space, trim trailing whitespace, keep leading indentation (lossless, off by default)
+6. **collapse_table_padding**: Collapse padded-column gaps (2+ spaces, or `|`-separated with padding) to a single separator, cells kept verbatim (lossless, off by default)
+7. **fold_repeats**: Collapse consecutive identical lines into one line suffixed with ` ×N` (lossless, off by default)
+8. **truncate_lines_at**: Truncate each line to N chars (unicode-safe)
+9. **head/tail_lines**: Keep first N or last N lines (with omit message)
+10. **max_lines**: Absolute line cap applied after head/tail
+11. **on_empty**: Return message if result is empty after all stages
+
+Stages 5-7 never drop content — they only compact whitespace geometry or repeat
+counts, both of which are exactly recoverable from the output — so they run
+*before* the truncating stages (8-11), letting truncation work off already
+one of the smallest possible representations of the same information.
 
 Three-tier filter lookup (first match wins):
 1. `.rtk/filters.toml` (project-local, requires `rtk trust`)
