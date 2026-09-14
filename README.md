@@ -29,7 +29,8 @@
   <a href="README_ja.md">日本語</a> &bull;
   <a href="README_ko.md">한국어</a> &bull;
   <a href="README_es.md">Espanol</a> &bull;
-  <a href="README_pt.md">Português</a>
+  <a href="README_pt.md">Português</a> &bull;
+  <a href="README_it.md">Italiano</a>
 </p>
 
 ---
