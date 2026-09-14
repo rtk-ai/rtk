@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::Write;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 fn read_stdin(input: &[u8], args: &[&str]) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
@@ -18,6 +19,26 @@ fn read_stdin(input: &[u8], args: &[&str]) -> Output {
         .write_all(input)
         .expect("write stdin");
     child.wait_with_output().expect("wait for rtk read")
+}
+
+fn wait_before_eof<W>(mut child: Child, held_open: W, source: &str) -> Output {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll rtk read") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("kill blocked rtk read");
+            let _ = child.wait();
+            panic!("--head-lines waited for {source} EOF after receiving both lines");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    drop(held_open);
+
+    let output = child.wait_with_output().expect("collect rtk read output");
+    assert!(status.success(), "{source}: {:?}", output.stderr);
+    output
 }
 
 #[test]
@@ -93,6 +114,69 @@ fn read_windows_accept_invalid_bytes_outside_the_selected_window() {
         assert!(output.status.success(), "{flag}: {:?}", output.stderr);
         assert_eq!(output.stdout, b"valid\n");
     }
+}
+
+#[test]
+fn head_window_finishes_before_stdin_reaches_eof() {
+    let tracking_dir = tempfile::tempdir().expect("create tracking directory");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args(["read", "-", "--head-lines", "2"])
+        .env(
+            "CLAUDE_CONFIG_DIR",
+            tracking_dir.path().join("no-claude-config"),
+        )
+        .env("RTK_DB_PATH", tracking_dir.path().join("tracking.db"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run rtk read from a held-open stdin");
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    stdin
+        .write_all(b"one\ntwo\nproducer remains open")
+        .expect("write bounded prefix");
+    stdin.flush().expect("flush bounded prefix");
+
+    let output = wait_before_eof(child, stdin, "stdin");
+    assert_eq!(output.stdout, b"one\ntwo\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn head_window_finishes_before_fifo_writer_reaches_eof() {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let dir = tempfile::tempdir().expect("create FIFO directory");
+    let fifo = dir.path().join("held-open.fifo");
+    let created = Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("run mkfifo");
+    assert!(created.success(), "create FIFO: {created:?}");
+
+    let mut writer = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&fifo)
+        .expect("open held-open FIFO");
+    let child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .arg("read")
+        .arg(&fifo)
+        .args(["--head-lines", "2"])
+        .env("CLAUDE_CONFIG_DIR", dir.path().join("no-claude-config"))
+        .env("RTK_DB_PATH", dir.path().join("tracking.db"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run rtk read from a held-open FIFO");
+    writer
+        .write_all(b"one\ntwo\nproducer remains open")
+        .expect("write bounded FIFO prefix");
+
+    let output = wait_before_eof(child, writer, "FIFO");
+    assert_eq!(output.stdout, b"one\ntwo\n");
 }
 
 #[test]
