@@ -385,6 +385,7 @@ fn parse_trx_content(content: &str) -> Option<TestSummary> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use filetime::{set_file_mtime, FileTime};
     use std::time::Duration;
 
     #[test]
@@ -496,8 +497,17 @@ mod tests {
         let old_trx = testresults_dir.join("old.trx");
         let new_trx = testresults_dir.join("new.trx");
         std::fs::write(&old_trx, "old").expect("write old");
-        std::thread::sleep(Duration::from_millis(5));
+        set_file_mtime(
+            &old_trx,
+            FileTime::from_system_time(SystemTime::now() - Duration::from_secs(10)),
+        )
+        .expect("set old mtime");
         std::fs::write(&new_trx, "new").expect("write new");
+        set_file_mtime(
+            &new_trx,
+            FileTime::from_system_time(SystemTime::now() + Duration::from_secs(10)),
+        )
+        .expect("set new mtime");
 
         let found = find_recent_trx_in_dir(&testresults_dir).expect("should find newest trx");
         assert_eq!(found, new_trx);
@@ -556,17 +566,25 @@ mod tests {
 
         let trx_old = r#"<?xml version="1.0" encoding="utf-8"?>
 <TestRun><ResultSummary><Counters total="2" executed="2" passed="2" failed="0" /></ResultSummary></TestRun>"#;
-        std::fs::write(trx_dir.join("old.trx"), trx_old).expect("write old trx");
+        let old_path = trx_dir.join("old.trx");
+        std::fs::write(&old_path, trx_old).expect("write old trx");
+        set_file_mtime(
+            &old_path,
+            FileTime::from_system_time(SystemTime::now() - Duration::from_secs(10)),
+        )
+        .expect("set old mtime");
 
-        std::thread::sleep(Duration::from_millis(10));
-
-        let since = SystemTime::now()
-            .checked_sub(Duration::from_millis(10))
-            .expect("threshold overflow");
+        let since = SystemTime::now();
 
         let trx_new = r#"<?xml version="1.0" encoding="utf-8"?>
 <TestRun><ResultSummary><Counters total="3" executed="3" passed="2" failed="1" /></ResultSummary></TestRun>"#;
-        std::fs::write(trx_dir.join("new.trx"), trx_new).expect("write new trx");
+        let new_path = trx_dir.join("new.trx");
+        std::fs::write(&new_path, trx_new).expect("write new trx");
+        set_file_mtime(
+            &new_path,
+            FileTime::from_system_time(SystemTime::now() + Duration::from_secs(10)),
+        )
+        .expect("set new mtime");
 
         let summary = parse_trx_files_in_dir_since(&trx_dir, Some(since)).expect("merged summary");
         assert_eq!(summary.total, 3);

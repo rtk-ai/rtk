@@ -43,6 +43,9 @@ quick-xml = "0.37"
 which = "8"
 automod = "1"
 
+[dev-dependencies]
+filetime = "0.2"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
