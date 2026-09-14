@@ -200,6 +200,12 @@ pub fn classify_command(cmd: &str) -> Classification {
     // Strip golangci-lint global options before `run` so classify/rewrite stays
     // aligned with the runtime wrapper behavior.
     let cmd_normalized = strip_golangci_global_opts(&cmd_normalized);
+    // Strip npm/bun workspace options before their subcommand for classification.
+    // The helpers only return the normalized form when it selects that package
+    // manager's own rule, so wrapper rules cannot claim savings the rewrite path
+    // cannot emit for the original flag-first spelling.
+    let cmd_normalized = strip_npm_global_opts(&cmd_normalized);
+    let cmd_normalized = strip_bun_global_opts(&cmd_normalized);
     let cmd_clean = cmd_normalized.as_str();
 
     // Exclude cat/head/tail with redirect operators — these are writes, not reads (#315)
@@ -420,6 +426,70 @@ fn strip_git_global_opts(cmd: &str) -> String {
     let after_git = &cmd[4..]; // skip "git "
     let stripped = GIT_GLOBAL_OPT.replace(after_git, "");
     format!("git {}", stripped.trim())
+}
+
+// npm workspace options that may appear before the command. Keep this closed:
+// stripping an unknown option could turn a command that npm rejects into one
+// that rtk rewrites. Value-taking options accept both `--option value` and
+// `--option=value`; `--workspaces` is a boolean but npm also accepts its
+// `=true`/`=false` form.
+static NPM_GLOBAL_OPT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:(?:-w(?:=\S+|\s+\S+)|--workspace(?:=\S+|\s+\S+)|--workspaces(?:=\S+)?)\s+)+")
+        .unwrap()
+});
+
+// Bun workspace options that may appear before the command. These are kept
+// separate from npm's set because the same option name can have different
+// ownership and arity in each CLI.
+static BUN_GLOBAL_OPT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:(?:--filter(?:=\S+|\s+\S+)|--cwd(?:=\S+|\s+\S+))\s+)+").unwrap()
+});
+
+/// Strip a package manager's known global options before its subcommand.
+///
+/// This normalization is used only for registry classification. The rewrite
+/// path still receives the original command, so accepted options remain in the
+/// emitted command. Returning the original command when the normalized text
+/// matches another rule keeps classification and rewriting in agreement.
+fn strip_package_manager_global_opts(
+    cmd: &str,
+    binary: &str,
+    rtk_equivalent: &str,
+    global_opts: &Regex,
+) -> String {
+    let Some(after_binary) = cmd
+        .strip_prefix(binary)
+        .and_then(|rest| rest.strip_prefix(' '))
+    else {
+        return cmd.to_string();
+    };
+
+    let stripped = global_opts.replace(after_binary, "");
+    let normalized = format!("{binary} {}", stripped.trim());
+    if normalized == cmd {
+        return cmd.to_string();
+    }
+
+    let Some(rule_index) = REGEX_SET.matches(&normalized).into_iter().next_back() else {
+        return cmd.to_string();
+    };
+    if RULES[rule_index].rtk_cmd != rtk_equivalent {
+        return cmd.to_string();
+    }
+
+    normalized
+}
+
+/// Strip npm workspace options before the subcommand for classification.
+/// `npm -w @app run build` → `npm run build`.
+fn strip_npm_global_opts(cmd: &str) -> String {
+    strip_package_manager_global_opts(cmd, "npm", "rtk npm", &NPM_GLOBAL_OPT)
+}
+
+/// Strip Bun workspace options before the subcommand for classification.
+/// `bun --filter '*' test` → `bun test`.
+fn strip_bun_global_opts(cmd: &str) -> String {
+    strip_package_manager_global_opts(cmd, "bun", "rtk bun", &BUN_GLOBAL_OPT)
 }
 
 /// Strip golangci-lint global options before the `run` subcommand.
@@ -5565,6 +5635,79 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_npm_workspace_options_before_subcommand() {
+        for (command, expected) in [
+            ("npm -w @app run build", "rtk npm -w @app run build"),
+            (
+                "npm --workspace @app run build",
+                "rtk npm --workspace @app run build",
+            ),
+            (
+                "npm --workspace=@app run build",
+                "rtk npm --workspace=@app run build",
+            ),
+            (
+                "npm --workspaces run build",
+                "rtk npm --workspaces run build",
+            ),
+            (
+                "npm --workspaces=false run build",
+                "rtk npm --workspaces=false run build",
+            ),
+            (
+                "npm -w @app --workspaces run build",
+                "rtk npm -w @app --workspaces run build",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected.to_string()),
+                "Failed for command: {command}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_bun_workspace_options_before_subcommand() {
+        for (command, expected) in [
+            ("bun --filter '*' test", "rtk bun --filter '*' test"),
+            ("bun --filter='*' test", "rtk bun --filter='*' test"),
+            (
+                "bun --cwd packages/app test",
+                "rtk bun --cwd packages/app test",
+            ),
+            (
+                "bun --cwd=packages/app --filter '*' test",
+                "rtk bun --cwd=packages/app --filter '*' test",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected.to_string()),
+                "Failed for command: {command}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_workspace_option_stripping_stays_closed_and_rule_scoped() {
+        for command in [
+            "npm --unknown run build",
+            "npm --workspace @app --unknown run build",
+            "bun --unknown test",
+            "bun --filter '*' --unknown test",
+            "npm --workspace @app exec vitest",
+            "bunish --filter '*' test",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                None,
+                "Unknown or non-owned command was rewritten: {command}",
+            );
+        }
+    }
+
+    #[test]
     fn test_rewrite_npx() {
         assert_eq!(
             rewrite_command_no_prefixes("npx svgo", &[]),
@@ -6446,6 +6589,47 @@ mod tests {
         assert_eq!(strip_git_global_opts("git --no-pager log"), "git log");
         assert_eq!(strip_git_global_opts("git status"), "git status");
         assert_eq!(strip_git_global_opts("cargo test"), "cargo test");
+    }
+
+    #[test]
+    fn test_strip_npm_global_opts_helper() {
+        assert_eq!(
+            strip_npm_global_opts("npm -w @app run build"),
+            "npm run build"
+        );
+        assert_eq!(
+            strip_npm_global_opts("npm --workspace=@app --workspaces run build"),
+            "npm run build"
+        );
+        assert_eq!(
+            strip_npm_global_opts("npm --unknown run build"),
+            "npm --unknown run build"
+        );
+        assert_eq!(
+            strip_npm_global_opts("npm --workspace @app exec vitest"),
+            "npm --workspace @app exec vitest"
+        );
+        assert_eq!(
+            strip_npm_global_opts("bun --cwd app test"),
+            "bun --cwd app test"
+        );
+    }
+
+    #[test]
+    fn test_strip_bun_global_opts_helper() {
+        assert_eq!(strip_bun_global_opts("bun --filter '*' test"), "bun test");
+        assert_eq!(
+            strip_bun_global_opts("bun --cwd=packages/app --filter '*' test"),
+            "bun test"
+        );
+        assert_eq!(
+            strip_bun_global_opts("bun --unknown test"),
+            "bun --unknown test"
+        );
+        assert_eq!(
+            strip_bun_global_opts("npm -w @app run build"),
+            "npm -w @app run build"
+        );
     }
 
     #[test]
