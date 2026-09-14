@@ -1483,6 +1483,7 @@ fn format_restore_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmds::dotnet::test_support;
     use crate::dotnet_format_report;
     use std::fs;
     use std::time::Duration;
@@ -2935,16 +2936,16 @@ mod tests {
     fn test_merge_test_summary_from_trx_ignores_stale_fallback_file() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let fallback = temp_dir.path().join("fallback.trx");
-        fs::write(&fallback, trx_with_counts(2, 1, 1)).expect("write fallback trx");
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let command_started_at = SystemTime::now();
+        let base = SystemTime::now();
+        let stale = base - std::time::Duration::from_secs(86_400);
+        test_support::write_trx_with_mtime(&fallback, &trx_with_counts(2, 1, 1), stale);
         let missing_primary = temp_dir.path().join("missing.trx");
 
         let filled = merge_test_summary_from_trx(
             binlog::TestSummary::default(),
             Some(&missing_primary),
             Some(fallback.clone()),
-            command_started_at,
+            base,
         );
 
         assert_eq!(filled.total, 0);
