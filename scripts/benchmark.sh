@@ -47,8 +47,10 @@ bench() {
   local unix_cmd="$2"
   local rtk_cmd="$3"
 
-  unix_out=$(eval "$unix_cmd" 2>/dev/null || true)
-  rtk_out=$(eval "$rtk_cmd" 2>/dev/null || true)
+  # rtk forwards the stderr it does not filter, so measuring only stdout would book
+  # a passed-through stream as if the filter had removed it.
+  unix_out=$(eval "$unix_cmd" 2>&1 || true)
+  rtk_out=$(eval "$rtk_cmd" 2>&1 || true)
 
   unix_tokens=$(count_tokens "$unix_out")
   rtk_tokens=$(count_tokens "$rtk_out")
