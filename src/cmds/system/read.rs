@@ -26,14 +26,18 @@ pub fn run(
     // Read file content
     let bytes =
         fs::read(file).with_context(|| format!("Failed to read file: {}", file.display()))?;
-    if level == FilterLevel::None
-        && !line_numbers
-        && let Some(window) = byte_line_window(&bytes, head_lines, tail_lines)
-    {
+    if let Some(window) = raw_byte_window(
+        &bytes,
+        level,
+        max_lines,
+        head_lines,
+        tail_lines,
+        line_numbers,
+    ) {
         io::stdout()
             .lock()
             .write_all(window)
-            .context("Failed to write line window")?;
+            .context("Failed to write raw bytes")?;
         timer.track(
             &format!("cat {}", file.display()),
             "rtk read",
@@ -249,6 +253,25 @@ fn tail_window(content: &[u8], n: usize) -> &[u8] {
         }
     }
     content
+}
+
+/// The slice to write out verbatim, or `None` when a later step needs a `&str`:
+/// a filter level, line numbers, or `--max-lines` (counted on filtered text).
+/// Head and tail windows slice on byte offsets, so they stay here, and so does a
+/// plain read — that is what lets `rtk read` handle files that are not valid UTF-8.
+fn raw_byte_window(
+    content: &[u8],
+    level: FilterLevel,
+    max_lines: Option<usize>,
+    head_lines: Option<usize>,
+    tail_lines: Option<usize>,
+    line_numbers: bool,
+) -> Option<&[u8]> {
+    if level != FilterLevel::None || line_numbers {
+        return None;
+    }
+    byte_line_window(content, head_lines, tail_lines)
+        .or_else(|| max_lines.is_none().then_some(content))
 }
 
 fn byte_line_window(
@@ -487,6 +510,44 @@ fn main() {{
         assert!(output.contains("more lines"));
     }
 
+    #[test]
+    fn test_raw_byte_window_passes_a_plain_read_through() {
+        let input: &[u8] = b"alpha\nbravo\n";
+        assert_eq!(
+            raw_byte_window(input, FilterLevel::None, None, None, None, false),
+            Some(input)
+        );
+    }
+
+    #[test]
+    fn test_raw_byte_window_declines_when_decoding_is_needed() {
+        let input: &[u8] = b"alpha\nbravo\n";
+        for (level, max_lines, line_numbers) in [
+            (FilterLevel::Minimal, None, false),
+            (FilterLevel::Aggressive, None, false),
+            (FilterLevel::None, None, true),
+            (FilterLevel::None, Some(1), false),
+        ] {
+            assert_eq!(
+                raw_byte_window(input, level, max_lines, None, None, line_numbers),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn test_raw_byte_window_keeps_line_windows() {
+        let input: &[u8] = b"alpha\nbravo\ncharlie\n";
+        assert_eq!(
+            raw_byte_window(input, FilterLevel::None, None, Some(1), None, false),
+            Some(&b"alpha\n"[..])
+        );
+        assert_eq!(
+            raw_byte_window(input, FilterLevel::None, Some(2), None, Some(1), false),
+            Some(&b"charlie\n"[..])
+        );
+    }
+
     fn rtk_bin() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target")
@@ -551,6 +612,55 @@ fn main() {{
         assert!(
             stderr.contains("rtk_nonexistent_file"),
             "should report missing file on stderr"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn test_read_non_utf8_file_is_byte_exact() {
+        let bin = rtk_bin();
+        assert!(bin.exists(), "Run `cargo build` first");
+
+        let raw: &[u8] = b"line one\nlatin-1 byte: \xe9\nline three\n";
+        let mut file = NamedTempFile::with_suffix(".log").unwrap();
+        file.write_all(raw).unwrap();
+        file.flush().unwrap();
+
+        let output = std::process::Command::new(&bin)
+            .args(["read", &file.path().to_string_lossy()])
+            .output()
+            .expect("failed to run rtk read");
+
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            output.stdout, raw,
+            "non-UTF-8 input must reach stdout verbatim"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn test_read_non_utf8_file_still_errors_when_filtering() {
+        let bin = rtk_bin();
+        assert!(bin.exists(), "Run `cargo build` first");
+
+        let raw: &[u8] = b"line one\nlatin-1 byte: \xe9\nline three\n";
+        let mut file = NamedTempFile::with_suffix(".log").unwrap();
+        file.write_all(raw).unwrap();
+        file.flush().unwrap();
+
+        let output = std::process::Command::new(&bin)
+            .args(["read", "-l", "minimal", &file.path().to_string_lossy()])
+            .output()
+            .expect("failed to run rtk read");
+
+        assert!(
+            !output.status.success(),
+            "filtering cannot run on undecodable input, so it must still report the error"
         );
     }
 
