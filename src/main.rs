@@ -2374,7 +2374,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_vibe_mode(global, hook_only, patch_mode, ctx)?;
             } else {
                 let install_opencode = opencode;
-                let install_claude = !opencode;
+                // --opencode is additive: Claude Code hook is always installed too
+                let install_claude = true;
                 let install_cursor = agent == Some(AgentTarget::Cursor);
                 let install_windsurf = agent == Some(AgentTarget::Windsurf);
                 let install_cline = agent == Some(AgentTarget::Cline);

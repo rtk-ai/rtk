@@ -429,7 +429,6 @@ pub fn run(
         } else {
             // Mode selection (Claude Code / OpenCode)
             match (install_claude, install_opencode, claude_md, hook_only) {
-                (false, true, _, _) => run_opencode_only_mode(ctx)?,
                 (true, opencode, true, _) => run_claude_md_mode(global, opencode, ctx)?,
                 (true, opencode, false, true) => {
                     run_hook_only_mode(global, patch_mode, opencode, ctx)?
@@ -437,7 +436,7 @@ pub fn run(
                 (true, opencode, false, false) => {
                     run_default_mode(global, patch_mode, opencode, ctx)?
                 }
-                (false, false, _, _) => {
+                (false, _, _, _) => {
                     if !install_cursor {
                         anyhow::bail!(
                             "at least one of install_claude or install_opencode must be true"
@@ -5350,7 +5349,7 @@ fn show_claude_config() -> Result<()> {
     println!("  rtk init -g --hook-only     # Hook only, no RTK.md");
     println!("  rtk init --codex            # Configure local AGENTS.md + RTK.md + hooks.json");
     println!("  rtk init -g --codex         # Configure global AGENTS.md + RTK.md + hooks.json");
-    println!("  rtk init -g --opencode      # OpenCode plugin only");
+    println!("  rtk init -g --opencode      # Claude Code hook + OpenCode plugin");
     println!("  rtk init -g --agent cursor  # Install Cursor Agent hooks");
 
     Ok(())
@@ -5458,18 +5457,6 @@ fn show_codex_config() -> Result<()> {
     println!("  rtk init --codex --uninstall     # Remove local Codex RTK artifacts");
     println!("  rtk init -g --codex --uninstall  # Remove global Codex RTK artifacts");
 
-    Ok(())
-}
-
-fn run_opencode_only_mode(ctx: InitContext) -> Result<()> {
-    let InitContext { dry_run, .. } = ctx;
-    let opencode_plugin_path = prepare_opencode_plugin_path()?;
-    ensure_opencode_plugin_installed(&opencode_plugin_path, ctx)?;
-    if !dry_run {
-        println!("\nOpenCode plugin installed (global).\n");
-        println!("  OpenCode: {}", opencode_plugin_path.display());
-        println!("  Restart OpenCode. Test with: git status\n");
-    }
     Ok(())
 }
 
