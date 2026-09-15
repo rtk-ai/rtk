@@ -1575,7 +1575,7 @@ enum MigrationMode {
 /// migrations per `mode`. Shared by `Tracker::new()` (hot path, gated) and
 /// `ensure_schema_fresh` (`rtk init`, unconditional).
 fn open_and_prepare(mode: MigrationMode) -> Result<Connection> {
-    let db_path = get_db_path()?;
+    let db_path = tracker_db_path()?;
 
     // `create_private_dir` is cheap even when the directory already exists (its own
     // chmod is a no-op past the first call — see `utils::set_owner_only`), so it
@@ -1654,6 +1654,39 @@ fn open_and_prepare(mode: MigrationMode) -> Result<Connection> {
 /// EXISTS`/`ALTER TABLE` are additive, so existing history is left untouched.
 pub fn ensure_schema_fresh() -> Result<()> {
     open_and_prepare(MigrationMode::Always).map(|_| ())
+}
+
+/// Resolve the path the tracker actually opens.
+///
+/// Identical to [`get_db_path`] in a release build. Under `cfg(test)` it diverts
+/// to a per-process temp file unless `RTK_DB_PATH` is set explicitly.
+///
+/// This exists because `cargo test` — which CONTRIBUTING tells contributors to
+/// run — used to insert rows straight into the developer's real
+/// `<data-dir>/rtk/history.db`. Every write path funnels through
+/// `Tracker::new()`, so it is not only the handful of tests in this module that
+/// leak: any command test exercising the real code path via [`TimedExecution`]
+/// leaks too (`find`/`git`/`read` tests accounted for the majority of the rows
+/// observed in the wild). Fixing it here rather than per-test makes the whole
+/// class impossible instead of patching the instances.
+///
+/// Guarding at the *open* site keeps `get_db_path` a pure configuration
+/// resolver, so `test_db_path_env_and_default` still asserts real precedence
+/// rules rather than the test shim.
+fn tracker_db_path() -> Result<PathBuf> {
+    #[cfg(test)]
+    {
+        // An explicit RTK_DB_PATH still wins, so a test can point at a fixture
+        // on purpose (test_db_path_env_and_default relies on that precedence).
+        if std::env::var_os("RTK_DB_PATH").is_none() {
+            // Stable within the process: Tracker::new() is called many times per
+            // test binary and every call must land on the same database.
+            return Ok(
+                std::env::temp_dir().join(format!("rtk-test-history-{}.db", std::process::id()))
+            );
+        }
+    }
+    get_db_path()
 }
 
 /// Individual parse failure record.
