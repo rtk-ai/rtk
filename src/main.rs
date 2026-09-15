@@ -1642,7 +1642,7 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
             Err(e) => {
                 // Command not found — same behaviour as no-TOML path
                 core::tracking::record_parse_failure_silent(&raw_command, &error_message, false);
-                eprintln!("[rtk: {}]", e);
+                eprintln!("{}", core::utils::spawn_error_message(&args[0], &e));
                 Ok(127)
             }
         }
@@ -1666,7 +1666,7 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
             Err(e) => {
                 core::tracking::record_parse_failure_silent(&raw_command, &error_message, false);
                 // Command not found or other OS error — single message, no duplicate Clap error
-                eprintln!("[rtk: {}]", e);
+                eprintln!("{}", core::utils::spawn_error_message(&args[0], &e));
                 Ok(127)
             }
         }
