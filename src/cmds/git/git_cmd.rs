@@ -2323,6 +2323,32 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     Ok(0)
 }
 
+/// `git add`'s value-taking flags, from `git add -h`. Every other flag is a boolean.
+fn add_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    match kind {
+        TokenKind::Long => matches!(name, "chmod" | "pathspec-from-file").then(ValueSpec::value),
+        _ => None,
+    }
+}
+
+/// True when `git add` was asked to report what it does: `--dry-run` stages nothing, so the
+/// file list git prints is the command's only result, and `--verbose` names each file the
+/// staged-diff summary would not. The last spelling wins, as in git (`-n --no-dry-run` stages).
+fn add_asked_for_report(tokens: &[Token<'_>]) -> bool {
+    let mut dry_run = false;
+    let mut verbose = false;
+    for t in arg_tokenizer::before_dashdash(tokens) {
+        match (t.kind, t.text) {
+            (TokenKind::Long, "dry-run") | (TokenKind::Short, "n") => dry_run = true,
+            (TokenKind::Long, "no-dry-run") => dry_run = false,
+            (TokenKind::Long, "verbose") | (TokenKind::Short, "v") => verbose = true,
+            (TokenKind::Long, "no-verbose") => verbose = false,
+            _ => {}
+        }
+    }
+    dry_run || verbose
+}
+
 fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -2345,6 +2371,21 @@ fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> 
     }
 
     let raw_output = format!("{}\n{}", result.stdout, result.stderr);
+
+    let tokens = arg_tokenizer::tokenize_grammar(args, &add_takes_value, Dialect::Posix);
+    if add_asked_for_report(&tokens) {
+        print!("{}", result.stdout);
+        if !result.stderr.trim().is_empty() {
+            eprintln!("{}", result.stderr.trim());
+        }
+        timer.track(
+            &format!("git add {}", args.join(" ")),
+            &format!("rtk git add {} (passthrough)", args.join(" ")),
+            &raw_output,
+            &raw_output,
+        );
+        return Ok(result.exit_code);
+    }
 
     if result.success() {
         // Count what was added
@@ -4982,6 +5023,48 @@ mod tests {
         }
         // A worktree path spelled like the flag is a path, not a request.
         assert!(!report(&["remove", "--", "-n"]));
+    }
+
+    #[test]
+    fn test_add_asked_for_report() {
+        let report = |args: &[&str]| {
+            let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            add_asked_for_report(&arg_tokenizer::tokenize_grammar(
+                &owned,
+                &add_takes_value,
+                Dialect::Posix,
+            ))
+        };
+        assert!(!report(&[]));
+        assert!(!report(&["."]));
+        assert!(!report(&["-A"]));
+        assert!(!report(&["-u", "src/"]));
+        for spelling in [
+            &["--dry-run", "."][..],
+            &["-n", "."][..],
+            &["-An"][..],
+            &["-nv", "."][..],
+            &["--verbose", "f.txt"][..],
+            &["-v", "f.txt"][..],
+        ] {
+            assert!(report(spelling), "{spelling:?} asks for a report");
+        }
+        // The last spelling wins, as in git.
+        assert!(!report(&["-n", "--no-dry-run", "."]));
+        assert!(report(&["--no-dry-run", "-n", "."]));
+        // A pathspec spelled like the flag is a path, not a request.
+        assert!(!report(&["--", "-n"]));
+        // A value-taking flag's value is not a flag either.
+        assert!(!report(&["--pathspec-from-file", "-n"]));
+    }
+
+    #[test]
+    fn test_run_add_dry_run_propagates_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let global = vec!["-C".to_string(), dir.path().to_string_lossy().into_owned()];
+        let args = vec!["--dry-run".to_string(), ".".to_string()];
+        let code = run_add(&args, 0, &global).expect("run_add --dry-run");
+        assert_ne!(code, 0, "git add --dry-run failure must propagate");
     }
 
     #[test]
