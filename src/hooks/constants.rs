@@ -10,6 +10,9 @@ pub const BEFORE_TOOL_KEY: &str = "BeforeTool";
 
 /// Native Rust hook command for Claude Code (replaces rtk-rewrite.sh).
 pub const CLAUDE_HOOK_COMMAND: &str = "rtk hook claude";
+/// Native Rust hook command for Trae.
+pub const TRAE_HOOK_COMMAND: &str = "rtk hook trae";
+
 /// Native Rust hook command for Codex CLI.
 pub const CODEX_HOOK_COMMAND: &str = "rtk hook codex";
 /// Native Rust hook command for Cursor (replaces rtk-rewrite.sh).
@@ -25,6 +28,8 @@ pub const PLUGIN_SUBDIR: &str = "plugins";
 pub const OPENCODE_PLUGIN_FILE: &str = "rtk.ts";
 
 pub const CURSOR_DIR: &str = ".cursor";
+pub const TRAE_DIR: &str = ".trae";
+pub const TRAE_CN_DIR: &str = ".trae-cn";
 pub const CODEX_DIR: &str = ".codex";
 pub const GEMINI_DIR: &str = ".gemini";
 

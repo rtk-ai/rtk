@@ -41,6 +41,8 @@ pub enum AgentTarget {
     Claude,
     /// Cursor Agent (editor and CLI)
     Cursor,
+    /// Trae IDE
+    Trae,
     /// Windsurf IDE (Cascade)
     Windsurf,
     /// Cline / Roo Code (VS Code)
@@ -965,6 +967,8 @@ enum Commands {
 enum HookCommands {
     /// Process Claude Code PreToolUse hook (reads JSON from stdin)
     Claude,
+    /// Process Trae PreToolUse hook (reads JSON from stdin)
+    Trae,
     /// Process Codex CLI PreToolUse hook (reads JSON from stdin)
     Codex,
     /// Process Cursor Agent hook (reads JSON from stdin)
@@ -1825,6 +1829,8 @@ where
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
+    } else if agent == Some(AgentTarget::Trae) {
+        hooks::init::uninstall_trae_mode(global, ctx)
     } else if agent == Some(AgentTarget::Droid) {
         hooks::init::uninstall_droid(global, ctx)
     } else if agent == Some(AgentTarget::Vibe) {
@@ -2347,6 +2353,8 @@ fn run_cli() -> Result<i32> {
                 }
             } else if agent == Some(AgentTarget::Pi) {
                 hooks::init::run_pi_mode_with_patch_mode(global, patch_mode, ctx)?
+            } else if agent == Some(AgentTarget::Trae) {
+                hooks::init::run_trae_mode(global, ctx)?
             } else if agent == Some(AgentTarget::Omp) {
                 hooks::init::run_omp_mode_with_patch_mode(global, patch_mode, ctx)?
             } else if agent == Some(AgentTarget::Kilocode) {
@@ -2799,6 +2807,10 @@ fn run_cli() -> Result<i32> {
         Commands::Hook { command } => match command {
             HookCommands::Claude => {
                 hooks::hook_cmd::run_claude()?;
+                0
+            }
+            HookCommands::Trae => {
+                hooks::hook_cmd::run_trae()?;
                 0
             }
             HookCommands::Codex => {
@@ -3351,6 +3363,20 @@ mod tests {
     }
 
     #[test]
+    fn test_try_parse_init_agent_trae_and_uninstall() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "trae", "--uninstall"]).unwrap();
+        match cli.command {
+            Commands::Init {
+                agent, uninstall, ..
+            } => {
+                assert_eq!(agent, Some(AgentTarget::Trae));
+                assert!(uninstall);
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
     fn test_try_parse_kubectl_get_alias() {
         let cli = Cli::try_parse_from(["rtk", "kubectl", "get", "pods", "-n", "default"]).unwrap();
 
@@ -3759,6 +3785,12 @@ mod tests {
                 command: HookCommands::Claude
             }
         ));
+    }
+
+    #[test]
+    fn test_hook_trae_parses() {
+        let cli = Cli::try_parse_from(["rtk", "hook", "trae"]);
+        assert!(cli.is_ok());
     }
 
     #[test]
