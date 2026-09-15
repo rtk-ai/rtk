@@ -534,7 +534,7 @@ pub fn resolved_command(name: &str) -> Command {
 /// `io::Error` never carries the program name, so printing it bare makes a
 /// missing binary (e.g. `jq`) look like rtk itself is missing.
 pub fn spawn_error_message(program: &str, err: &std::io::Error) -> String {
-    format!("[rtk: failed to run '{}': {}]", program, err)
+    format!("[rtk: failed to spawn `{}`: {}]", program, err)
 }
 
 /// Return Composer bin directories in precedence order.
@@ -798,7 +798,7 @@ mod tests {
     fn test_spawn_error_message_names_program() {
         let err = std::io::Error::from_raw_os_error(2);
         let msg = spawn_error_message("jq", &err);
-        assert_eq!(msg, format!("[rtk: failed to run 'jq': {}]", err));
+        assert_eq!(msg, format!("[rtk: failed to spawn `jq`: {}]", err));
     }
 
     #[test]
