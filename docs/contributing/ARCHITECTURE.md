@@ -775,12 +775,15 @@ if verbose > 0 {
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                       Ultra-Compact Mode (-u)                          │
+│                  Ultra-Compact Mode (--ultra-compact)                  │
 └────────────────────────────────────────────────────────────────────────┘
 
 main.rs:51-53
 #[arg(long, global = true)]
 ultra_compact: bool,
+
+No short form (`-u` was removed so `git push -u` keeps its meaning).
+Only gh_cmd and glab_cmd read it; other commands accept and ignore it.
 
 Features:
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -1034,7 +1037,7 @@ Overhead Sources:
 - **Derive Macros**: Less boilerplate (declarative CLI definition)
 - **Auto-Generated Help**: `--help` generated automatically
 - **Type Safety**: Parse arguments directly into typed structs
-- **Global Flags**: `-v` and `-u` work across all commands
+- **Global Flags**: `--ultra-compact` and `--skip-env` are accepted before or after any subcommand
 
 ---
 
@@ -1058,7 +1061,7 @@ Overhead Sources:
 | **Exit Code Preservation** | Passing through tool's exit code for CI/CD reliability |
 | **Package Manager Detection** | Identifying pnpm/yarn/npm to execute JS/TS tools correctly |
 | **Verbosity Levels** | `-v/-vv/-vvv` for progressively more debug output |
-| **Ultra-Compact** | `-u` flag for maximum compression (ASCII icons, inline format) |
+| **Ultra-Compact** | `--ultra-compact` flag for extra compression of `gh`/`glab` output (ASCII icons, inline format) |
 
 ---
 
