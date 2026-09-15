@@ -135,6 +135,7 @@ rtk init -g --agent pi          # Pi
 rtk init --agent omp            # Oh My Pi (OMP)
 rtk init --agent hermes         # Hermes
 rtk init -g --agent droid       # Factory Droid
+rtk init -g --agent grok        # Grok Build CLI
 
 # 2. Restart your AI tool, then test
 git status  # Automatically rewritten to rtk git status
@@ -413,7 +414,7 @@ rtk init -g
 
 ## Supported AI Tools
 
-RTK supports 17 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents, reducing the bash output the agent reads where the agent supports command interception.
+RTK supports 18 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents, reducing the bash output the agent reads where the agent supports command interception.
 
 | Tool | Install | Method |
 |------|---------|--------|
@@ -435,6 +436,7 @@ RTK supports 17 AI coding tools. Each integration rewrites shell commands to `rt
 | **Google Antigravity** | `rtk init --agent antigravity` | .agents/rules/antigravity-rtk-rules.md (project-scoped) |
 | **Kimi AI** | `rtk init --agent kimi` | AGENTS.md (project-scoped) |
 | **Factory Droid** | `rtk init -g --agent droid` (or per-project) | PreToolUse hook in `~/.factory/hooks.json` (matcher `Execute`) |
+| **Grok Build CLI** | `rtk init -g --agent grok` (or per-project) | PreToolUse hook in `$GROK_HOME/hooks/rtk-rewrite.json` |
 
 For per-agent setup details, override controls, and graceful degradation, see the [Supported Agents guide](https://www.rtk-ai.app/guide/getting-started/supported-agents). The Hermes plugin source and tests live in `hooks/hermes/`; installed Hermes runtime files still live under `~/.hermes/plugins/rtk-rewrite/`.
 

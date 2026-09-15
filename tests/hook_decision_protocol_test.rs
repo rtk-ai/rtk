@@ -470,6 +470,7 @@ mod hook_check {
             "gemini",
             "droid",
             "vibe",
+            "grok",
             "opencode",
             "openclaw",
             "pi",

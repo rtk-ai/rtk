@@ -201,6 +201,7 @@ impl AgentPath {
             "gemini" => Some(Self::InProcess(Host::Gemini)),
             "hermes" | "omp" | "openclaw" | "opencode" | "pi" => Some(Self::ViaRewrite),
             "vibe" => Some(Self::InProcess(Host::Vibe)),
+            "grok" => Some(Self::InProcess(Host::Grok)),
             _ => None,
         }
     }
@@ -215,6 +216,7 @@ impl AgentPath {
         "cursor",
         "droid",
         "gemini",
+        "grok",
         "hermes",
         "kilocode",
         "kimi",
@@ -418,6 +420,20 @@ mod tests {
             PermissionVerdict::Default
         );
         let (deny, ask, allow) = super::super::permissions::load_rules_for(Host::Codex);
+        assert!(deny.is_empty() && ask.is_empty() && allow.is_empty());
+    }
+
+    #[test]
+    fn grok_uses_shared_decision_without_claiming_permission() {
+        assert!(matches!(
+            AgentPath::lookup("grok"),
+            Some(AgentPath::InProcess(Host::Grok))
+        ));
+        assert_eq!(
+            check_command_for("git status", Host::Grok),
+            PermissionVerdict::Default
+        );
+        let (deny, ask, allow) = super::super::permissions::load_rules_for(Host::Grok);
         assert!(deny.is_empty() && ask.is_empty() && allow.is_empty());
     }
 
