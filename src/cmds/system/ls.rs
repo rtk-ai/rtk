@@ -330,7 +330,14 @@ fn compact_ls(
             dirs.push((name, octal));
         } else {
             // Regular files, symlinks, character/block devices, pipes, sockets
-            files.push((name, human_size(size), octal));
+            // `-l` is a request for the real numbers: a rounded 137.2K
+            // answers "how big is it?" wrongly when the reader wanted bytes.
+            let shown = if show_long {
+                size.to_string()
+            } else {
+                human_size(size)
+            };
+            files.push((name, shown, octal));
         }
     }
 
@@ -615,6 +622,22 @@ mod tests {
     }
 
     #[test]
+    fn test_long_listing_shows_exact_bytes() {
+        let raw = "total 8\n-rw-r--r--@  1 louis  staff  140484 Sep 12 12:49 crucible.rs\n-rw-r--r--   1 louis  staff     500 Sep 12 12:49 tiny.rs\n";
+        let (long, ..) = compact_ls(raw, false, true);
+        assert!(
+            long.contains("140484"),
+            "-l must keep the byte count: {long}"
+        );
+        assert!(!long.contains("137.2K"));
+        let (short, ..) = compact_ls(raw, false, false);
+        assert!(
+            short.contains("137.2K"),
+            "plain ls keeps the compact size: {short}"
+        );
+    }
+
+    #[test]
     fn test_human_size() {
         assert_eq!(human_size(0), "0B");
         assert_eq!(human_size(500), "500B");
@@ -846,11 +869,11 @@ mod tests {
             "dir should be prefixed with octal perms, got: {entries}"
         );
         assert!(
-            entries.contains("644  Cargo.toml  1.2K"),
+            entries.contains("644  Cargo.toml  1234"),
             "file should be prefixed with octal perms, got: {entries}"
         );
         assert!(
-            entries.contains("755  build.sh  500B"),
+            entries.contains("755  build.sh  500"),
             "executable should show 755, got: {entries}"
         );
     }
