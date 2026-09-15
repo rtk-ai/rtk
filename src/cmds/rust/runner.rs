@@ -1,34 +1,29 @@
-//! Shell-string wrappers over the shared err/test command runners in core.
+//! Argv wrappers over the shared err/test command runners in core.
 
 use crate::core::runner::{run_err_cmd, run_test_cmd};
+use crate::core::utils::user_command;
 use anyhow::Result;
-use std::process::Command;
 
-fn build_shell_command(command: &str) -> Command {
-    if cfg!(target_os = "windows") {
-        let mut c = Command::new("cmd");
-        c.args(["/C", command]);
-        c
-    } else {
-        let mut c = Command::new("sh");
-        c.args(["-c", command]);
-        c
-    }
+/// Run a command and filter output to show only errors/warnings.
+///
+/// `parts` are clap trailing varargs; they are joined only for display and
+/// tracking labels, never to build the child process (see [`user_command`]).
+pub fn run_err(parts: &[String], verbose: u8) -> Result<i32> {
+    let label = parts.join(" ");
+    run_err_cmd(user_command(parts), "err", &label, "err", verbose)
 }
 
-/// Run a command via the shell and filter output to show only errors/warnings.
-pub fn run_err(command: &str, verbose: u8) -> Result<i32> {
-    run_err_cmd(build_shell_command(command), "err", command, "err", verbose)
-}
-
-/// Run tests via the shell and show only failures.
-pub fn run_test(command: &str, verbose: u8) -> Result<i32> {
+/// Run tests and show only failures.
+///
+/// `parts` are clap trailing varargs; see [`run_err`] for the join caveat.
+pub fn run_test(parts: &[String], verbose: u8) -> Result<i32> {
+    let label = parts.join(" ");
     run_test_cmd(
-        build_shell_command(command),
+        user_command(parts),
         "test",
-        command,
+        &label,
         "test",
-        crate::core::runner::TestEcosystem::detect(command),
+        crate::core::runner::TestEcosystem::detect(&label),
         verbose,
     )
 }
