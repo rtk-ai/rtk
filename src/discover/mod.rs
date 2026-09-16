@@ -260,6 +260,22 @@ struct UnsupportedBucket {
     unmeasured_count: usize,
 }
 
+/// Order unsupported entries for display: estimated impact descending, then
+/// count descending, then `base_command` ascending. The tie-breakers matter
+/// because equal-impact entries otherwise render in `HashMap` iteration order,
+/// which varies run to run. Impact is measured `output_len / 4` plus
+/// `count x category_avg_tokens` for entries lacking a measured length -- not
+/// raw count, so a rarely-called command with huge output can outrank a
+/// frequent tiny one.
+fn sort_unsupported(entries: &mut [UnsupportedEntry]) {
+    entries.sort_by(|a, b| {
+        b.estimated_impact_tokens
+            .cmp(&a.estimated_impact_tokens)
+            .then_with(|| b.count.cmp(&a.count))
+            .then_with(|| a.base_command.cmp(&b.base_command))
+    });
+}
+
 pub fn run(
     project: Option<&str>,
     all: bool,
@@ -585,11 +601,8 @@ pub fn run(
         })
         .collect();
 
-    // Sort by estimated impact descending: sum of measured output_len/4 plus
-    // `count x category_avg_tokens` for entries lacking a measured length --
-    // not raw count, so a rarely-called command with huge output can outrank a
-    // frequent tiny one.
-    unsupported.sort_by_key(|b| std::cmp::Reverse(b.estimated_impact_tokens));
+    // Deterministic display order: impact desc, count desc, base_command asc.
+    sort_unsupported(&mut unsupported);
 
     // Build RTK_DISABLED examples sorted by frequency (top 5)
     let rtk_disabled_examples: Vec<String> = {
@@ -680,6 +693,28 @@ mod tests {
             exclude_patterns: vec![],
             normalized_transparent_prefixes: vec![],
         }
+    }
+
+    #[test]
+    fn test_sort_unsupported_is_deterministic() {
+        let entry = |base: &str, count: usize, impact: usize| UnsupportedEntry {
+            base_command: base.to_string(),
+            count,
+            example: base.to_string(),
+            estimated_impact_tokens: impact,
+        };
+        let mut entries = vec![
+            entry("zebra", 1, 100),
+            entry("alpha", 1, 100),
+            entry("beta", 5, 100),
+            entry("gamma", 2, 200),
+        ];
+
+        sort_unsupported(&mut entries);
+
+        let order: Vec<&str> = entries.iter().map(|e| e.base_command.as_str()).collect();
+        // Impact desc; equal impact breaks count desc, then base_command asc.
+        assert_eq!(order, vec!["gamma", "beta", "alpha", "zebra"]);
     }
 
     #[test]
