@@ -940,8 +940,8 @@ abc123def456   nginx:1.25     "/dock..."  ...      db   postgres:16 Up 2d (healt
 
 | Commande | Description | Options |
 |----------|-------------|---------|
-| `rtk kubectl pods [-n ns] [-A]` | Liste compacte des pods | Namespace ou tous |
-| `rtk kubectl services [-n ns] [-A]` | Liste compacte des services | Namespace ou tous |
+| `rtk kubectl pods [-n ns] [-A] [--force]` | Liste compacte des pods | Namespace ou tous ; --force = detail complet |
+| `rtk kubectl services [-n ns] [-A] [--force]` | Liste compacte des services | Namespace ou tous ; --force = detail complet |
 | `rtk kubectl logs <pod> [-c container]` | Logs dedupliques | Container specifique |
 
 Les sous-commandes non reconnues sont transmises directement (passthrough).

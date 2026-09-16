@@ -7,7 +7,6 @@ pub mod constants;
 pub mod display_helpers;
 pub mod filter;
 pub mod guard;
-pub mod k8s_cache;
 pub mod retriever;
 pub mod runner;
 pub mod stream;
