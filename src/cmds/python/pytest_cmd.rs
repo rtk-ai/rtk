@@ -1,8 +1,9 @@
 //! Filters pytest output to show only failures and the summary line.
 
+use crate::core::config;
 use crate::core::runner;
 use crate::core::truncate::CAP_WARNINGS;
-use crate::core::utils::{resolved_command, tool_exists, truncate};
+use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
 
 const MAX_XFAIL: usize = CAP_WARNINGS;
@@ -28,7 +29,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let has_tb_flag = args.iter().any(|a| a.starts_with("--tb"));
     let has_quiet_flag = args.iter().any(|a| a == "-q" || a == "--quiet");
     // Only treat a short `-r…` as pytest's report flag (not `--randomly-seed` etc.)
-    let has_report_flag = args.iter().any(|a| a.starts_with("-r") && !a.starts_with("--"));
+    let has_report_flag = args
+        .iter()
+        .any(|a| a.starts_with("-r") && !a.starts_with("--"));
 
     if !has_tb_flag {
         cmd.arg("--tb=short");
@@ -51,14 +54,25 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: pytest --tb=short -q {}", args.join(" "));
     }
 
-    runner::run_filtered(
+    runner::run_filtered_with_exit(
         cmd,
         "pytest",
         &args.join(" "),
-        filter_pytest_output,
+        |raw, exit_code| {
+            let clean = strip_ansi(raw);
+            let filtered = filter_pytest_output(&clean);
+            // Any other failure parsed as empty means the run broke before reporting.
+            if exit_code != 0 && exit_code != PYTEST_EXIT_NO_TESTS && filtered == PYTEST_NO_TESTS {
+                return truncate(clean.trim(), config::limits().passthrough_max_chars);
+            }
+            filtered
+        },
         runner::RunOptions::stdout_only().tee("pytest"),
     )
 }
+
+const PYTEST_NO_TESTS: &str = "Pytest: No tests collected";
+const PYTEST_EXIT_NO_TESTS: i32 = 5;
 
 pub(crate) fn filter_pytest_output(output: &str) -> String {
     let mut state = ParseState::Header;
@@ -181,7 +195,7 @@ fn build_pytest_summary(
     } = counts;
 
     if passed == 0 && failed == 0 && skipped == 0 && xfailed == 0 && xpassed == 0 {
-        return "Pytest: No tests collected".to_string();
+        return PYTEST_NO_TESTS.to_string();
     }
 
     let extras_present = skipped > 0 || xfailed > 0 || xpassed > 0 || !xfail_lines.is_empty();
@@ -213,7 +227,9 @@ fn build_pytest_summary(
         if xfail_lines.len() > MAX_XFAIL {
             result.push_str(&format!("  … +{} more\n", xfail_lines.len() - MAX_XFAIL));
             let all_xfail = xfail_lines.join("\n");
-            if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_xfail, "pytest-xfail", MAX_XFAIL + 1) {
+            if let Some(hint) =
+                crate::core::tee::force_tee_tail_hint(&all_xfail, "pytest-xfail", MAX_XFAIL + 1)
+            {
                 result.push_str(&format!("  {}\n", hint));
             }
         }
@@ -411,10 +427,7 @@ collected 0 items
         assert_eq!((c.passed, c.failed, c.skipped), (3, 1, 2));
 
         let c = parse_summary_line("=== 2 passed, 1 failed, 2 xfailed, 1 xpassed in 1.0s ===");
-        assert_eq!(
-            (c.passed, c.failed, c.xfailed, c.xpassed),
-            (2, 1, 2, 1)
-        );
+        assert_eq!((c.passed, c.failed, c.xfailed, c.xpassed), (2, 1, 2, 1));
     }
 
     #[test]
@@ -441,10 +454,7 @@ collected 0 items
             .lines()
             .filter(|l| l.trim().starts_with("XFAIL"))
             .count();
-        assert!(
-            listed <= 10,
-            "MAX_XFAIL cap not enforced: listed {listed}"
-        );
+        assert!(listed <= 10, "MAX_XFAIL cap not enforced: listed {listed}");
         assert!(result.contains("… +5 more"), "missing '+N more': {result}");
     }
 

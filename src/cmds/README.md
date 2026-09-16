@@ -2,7 +2,7 @@
 
 ## Scope
 
-**Command execution and output filtering.** Every module here calls an external CLI tool (`Command::new("some_tool")`), transforms its stdout/stderr to reduce token consumption, and records savings via `core/tracking`.
+**Command execution and output filtering.** Every module here calls an external CLI tool (`Command::new("some_tool")`), transforms its stdout/stderr to reduce the bytes the agent reads, and records the reduction via `core/tracking`.
 
 Owns: all command-specific filter logic, organized by ecosystem (git, rust, js, python, go, dotnet, cloud, system). Cross-ecosystem routing (e.g., `lint_cmd` detecting Python and delegating to `ruff_cmd`) is an intra-component concern.
 
@@ -265,7 +265,7 @@ When a filter caps a list at N items (e.g. `take(20)`), the remaining items must
 
 **Cap values come from `src/core/truncate.rs`.** Pick the `CAP_*` matching your data class (`CAP_ERRORS`, `CAP_WARNINGS`, `CAP_LIST`, `CAP_INVENTORY`) and bind it to a local `const MAX_XXX: usize = CAP_Y;`. Derive `take(MAX_XXX)`, `> MAX_XXX`, and the offset `MAX_XXX + 1` from the local. These CAPs will later become the configuration surface for per-filter cap tuning (user-overridable via config) — keep all truncation values routed through them so that hook lands as a single switch rather than a codebase-wide hunt. A filter that genuinely needs to deviate uses **`truncate::reduced(CAP_Y, n)`** (e.g. `reduced(CAP_WARNINGS, 5)`) so it still tracks the global when reconfigured — never a bare literal, never `cap - n` (underflows once caps are runtime-configurable), and never `*`/`/` (those scale unboundedly). `reduced` falls back to the full cap if the reduction would empty the list. Each deviation needs a one-line comment stating why; if there's no real reason, just use the plain CAP. See `src/core/README.md` ("Truncation Caps") for the full rationale.
 
-**The tee content must match what `tail` produces.** For `force_tee_tail_hint`, build the tee from the same formatted values shown in the output — not raw/intermediate data. If the filter reformats items before displaying them, pre-build a `Vec<String>` of formatted lines and use it for both the display loop and the tee.
+**The stored content must match what was shown.** For `force_tee_tail_hint`, build the recall blob from the same formatted values displayed — not raw/intermediate data — and pass the 1-based first-hidden line as `offset`. `rtk recall <hash>` slices the stored content from that offset, so the agent gets exactly the hidden items. If the filter reformats items before displaying them, pre-build a `Vec<String>` of formatted lines and use it for both the display loop and the recall blob.
 
 ### Stderr Handling
 
@@ -294,12 +294,13 @@ Adding a new filter or command requires changes in multiple places. For TOML-vs-
    - Add `.tee("label")` when the filter parses structured output (enables raw output recovery on failure)
    - **Exit codes**: handled automatically by `run_filtered()` — just return its result
    - **Truncation**: if the filter caps any list at N items, emit `force_tee_tail_hint` (flat lists) or `force_tee_hint` (multi-line blocks) so the agent can recover hidden items — see [Internal Truncation Recovery](#internal-truncation-recovery). Use a named constant for the cap; derive the offset from it (`MAX_XXX + 1`)
+   - **Arguments**: if the filter inspects its args at all — which flags were passed, which are paths, what to inject or strip — classify them with [`arg_tokenizer`](../core/README.md#argument-tokenizer-arg_tokenizerrs), never a string scan. Write the `takes_value` predicate from the tool's own `--help` and check it against the real binary
 2. **Register module**:
-   - Ecosystem `mod.rs` files use `automod::dir!()` — any `.rs` file in the directory becomes a public module automatically. No manual `pub mod` needed, but be aware: WIP or helper files will also be exposed. Only commit command-ready modules.
+   - Add `pub mod mycmd_cmd;` to the ecosystem `mod.rs`, keeping the list alphabetical. Modules are listed explicitly rather than generated from the directory: rustfmt only follows literal `mod` items and cannot expand macros, so a generated list hides every file under `src/cmds/` from `cargo fmt` — and therefore from CI's fmt gate. `build.rs` fails the build if a `.rs` file here is missing from its `mod.rs`, since an undeclared module is never compiled, linted, or tested.
    - Add variant to `Commands` enum in `main.rs` with `#[arg(trailing_var_arg = true, allow_hyphen_values = true)]`
    - Add routing match arm in `main.rs`: `Commands::Mycmd { args } => mycmd_cmd::run(&args, cli.verbose)?,`
 3. **Add rewrite pattern** — Entry in `src/discover/rules.rs` (PATTERNS + RULES arrays at matching index) so hooks auto-rewrite the command
-4. **Write tests** — Real fixture, snapshot test, token savings >= 60% (see [testing rules](../../.claude/rules/cli-testing.md))
+4. **Write tests** — Real fixture, snapshot test, >= 20% reduction in bash output (measured with RTK's token estimator, see [testing rules](../../.claude/rules/cli-testing.md))
 5. **Update docs** — Ecosystem README (CHANGELOG.md is auto-generated by release-please)
 
 ### TOML filter (simple line-based filtering)

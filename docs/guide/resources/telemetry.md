@@ -2,7 +2,7 @@
 title: Telemetry & Privacy
 description: What RTK collects, how to opt out, and your GDPR rights
 sidebar:
-  order: 3
+  order: 4
 ---
 
 # Telemetry & Privacy
@@ -21,7 +21,7 @@ Without telemetry, we have no visibility into:
 - Which commands are used most and need the best filters
 - Which filters are underperforming and need improvement
 - Which ecosystems to prioritize for new filter development
-- How much value RTK delivers to users (token savings in $ terms)
+- How much bash output RTK removes before it reaches the model
 - Whether users stay engaged over time or churn after trying RTK
 
 This data directly drives our roadmap. For example, if telemetry shows that 40% of users run Python commands but only 10% of our filters cover Python, we know where to invest next.
@@ -65,10 +65,10 @@ This data directly drives our roadmap. For example, if telemetry shows that 40% 
 
 | Field | Example | Purpose |
 |-------|---------|---------|
-| `passthrough_top` | `["git:15", "npm:8"]` | Top 5 commands with 0% savings — these need filters |
+| `passthrough_top` | `["git:15", "npm:8"]` | Top 5 commands with 0% bash output reduction — these need filters |
 | `parse_failures_24h` | `3` | Filter fragility — high count means filters are breaking |
-| `low_savings_commands` | `["rtk docker ps:25%"]` | Commands averaging <30% savings — filters to improve |
-| `avg_savings_per_command` | `68.5` | Unweighted average (vs global which is volume-biased) |
+| `low_savings_commands` | `["rtk <cmd>:25%"]` | Commands with a weighted bash output reduction <30%, net-negative ones included — filters to improve. The rate is `SUM(saved)/SUM(input)` over every call of the command, the same figure as the `rtk gain` By Command table, so high-volume calls are not diluted by passthrough calls. Exact 0% is left to `passthrough_top`. The example is a placeholder, not a measured value |
+| `avg_savings_per_command` | `68.5` | Unweighted average across distinct command names (each filter counts once regardless of invocation volume); each command's own rate is weighted by volume before the outer average, and commands that never had any input are skipped |
 
 ### Ecosystem distribution
 
@@ -88,7 +88,7 @@ This data directly drives our roadmap. For example, if telemetry shows that 40% 
 | Field | Example | Purpose |
 |-------|---------|---------|
 | `tokens_saved_30d` | `12000000` | 30-day token savings for trend analysis |
-| `estimated_savings_usd_30d` | `36.0` | Estimated dollar value saved (at ~$3/Mtok input pricing, Claude Sonnet) |
+| `estimated_savings_usd_30d` | — | A USD value derived from the estimated tokens saved and a fixed internal constant. It is not a measured cost and does not reflect any provider's pricing |
 
 ### Adoption
 

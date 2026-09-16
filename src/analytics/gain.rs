@@ -2,7 +2,7 @@
 
 use crate::core::display_helpers::{format_duration, print_period_table};
 use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
-use crate::core::utils::format_tokens;
+use crate::core::utils::{format_tokens, truncate};
 use crate::hooks::hook_check;
 use anyhow::{Context, Result};
 use chrono::Local;
@@ -24,10 +24,14 @@ pub fn run(
     all: bool,
     format: &str,
     failures: bool,
+    recalls: bool,
     reset: bool,
     yes: bool,
     _verbose: u8,
 ) -> Result<()> {
+    if recalls && !reset {
+        return show_recall_stats();
+    }
     let tracker = Tracker::new().context("Failed to initialize tracking database")?;
     let project_scope = resolve_project_scope(project)?; // added: resolve project path
 
@@ -39,7 +43,11 @@ pub fn run(
         tracker
             .reset_all()
             .context("Failed to reset token savings")?;
-        println!("{}", styled("Token savings stats reset to zero.", true));
+        crate::core::retriever::reset_stats().context("Failed to reset recall stats")?;
+        println!(
+            "{}",
+            styled("Token savings and recall stats reset to zero.", true)
+        );
         return Ok(());
     }
 
@@ -75,6 +83,14 @@ pub fn run(
     let summary = tracker
         .get_summary_filtered(project_scope.as_deref()) // changed: use filtered variant
         .context("Failed to load token savings summary from database")?;
+
+    if crate::core::tee_file::legacy_tee_migration_pending() {
+        eprintln!(
+            "{}",
+            format!("[rtk] {}", crate::core::tee_file::LEGACY_TEE_NOTICE).yellow()
+        );
+        eprintln!();
+    }
 
     if summary.total_commands == 0 {
         println!("No tracking data yet.");
@@ -147,6 +163,18 @@ pub fn run(
             eprintln!();
         }
 
+        let untrusted_filters = crate::hooks::trust::untrusted_active_filter_count();
+        if untrusted_filters > 0 {
+            eprintln!(
+                "{}",
+                format!(
+                    "[rtk] {untrusted_filters} untrusted custom filter(s) not applied — run `rtk trust`"
+                )
+                .yellow()
+            );
+            eprintln!();
+        }
+
         if !summary.by_command.is_empty() {
             // added: styled section header
             println!("{}", styled("By Command", true));
@@ -192,9 +220,17 @@ pub fn run(
             println!("{}", "─".repeat(table_width));
             println!(
                 "{:>3}  {:<cmd_width$}  {:>count_width$}  {:>saved_width$}  {:>6}  {:>time_width$}  {:<impact_width$}",
-                "#", "Command", "Count", "Saved", "Avg%", "Time", "Impact",
-                cmd_width = cmd_width, count_width = count_width,
-                saved_width = saved_width, time_width = time_width,
+                "#",
+                "Command",
+                "Count",
+                "Saved",
+                "Total%",
+                "Time",
+                "Impact",
+                cmd_width = cmd_width,
+                count_width = count_width,
+                saved_width = saved_width,
+                time_width = time_width,
                 impact_width = impact_width
             );
             println!("{}", "─".repeat(table_width));
@@ -246,11 +282,7 @@ pub fn run(
                 println!("──────────────────────────────────────────────────────────");
                 for rec in recent {
                     let time = rec.timestamp.with_timezone(&Local).format("%m-%d %H:%M");
-                    let cmd_short = if rec.rtk_cmd.len() > 25 {
-                        format!("{}...", &rec.rtk_cmd[..22])
-                    } else {
-                        rec.rtk_cmd.clone()
-                    };
+                    let cmd_short = truncate(&rec.rtk_cmd, 25);
                     // added: tier indicators by savings level
                     let sign = if rec.savings_pct >= 70.0 {
                         "▲"
@@ -409,6 +441,113 @@ fn print_efficiency_meter(pct: f64) {
     } else {
         println!("Efficiency meter: {} {:.1}%", meter, pct);
     }
+}
+
+const VERDICT_MIN_ELISIONS: i64 = 5;
+const VERDICT_WIDTH: usize = 14;
+const ISSUES_URL: &str = "https://github.com/rtk-ai/rtk/issues";
+
+/// Bands match `colorize_recall_rate` so the colour and the wording never disagree.
+fn recall_verdict(elisions: i64, recalls: i64) -> &'static str {
+    if elisions < VERDICT_MIN_ELISIONS {
+        return "-";
+    }
+    match recalls * 100 / elisions {
+        p if p >= 30 => "too aggressive",
+        p if p >= 10 => "watch",
+        _ => "ok",
+    }
+}
+
+fn colorize_recall_rate(pct: i64, padded: &str) -> String {
+    if !std::io::stdout().is_terminal() {
+        return padded.to_string();
+    }
+    if pct >= 30 {
+        padded.red().bold().to_string()
+    } else if pct >= 10 {
+        padded.yellow().bold().to_string()
+    } else {
+        padded.green().bold().to_string()
+    }
+}
+
+fn show_recall_stats() -> Result<()> {
+    use crate::core::retriever::RecoveryMode;
+
+    let mode = crate::core::config::Config::load()
+        .unwrap_or_default()
+        .retriever
+        .mode;
+    let mode_label = match mode {
+        RecoveryMode::Sqlite => "sqlite",
+        RecoveryMode::Tee => "tee",
+        RecoveryMode::Disabled => "disabled",
+    };
+    let stats = crate::core::retriever::stats_snapshot()?;
+
+    println!("{}", styled("RTK Recall Efficiency", true));
+    println!("{}", "═".repeat(60));
+    println!("Mode: {mode_label}");
+    println!();
+
+    if stats.is_empty() {
+        println!("No recall activity recorded yet.");
+        println!("Stats appear once filters elide output (failures, trimmed lists).");
+        return Ok(());
+    }
+
+    let slug_width = stats
+        .iter()
+        .map(|s| s.slug.chars().count())
+        .max()
+        .unwrap_or(6)
+        .clamp(6, 24);
+    let table_width = slug_width + 2 + 8 + 2 + 8 + 2 + 6 + 2 + VERDICT_WIDTH;
+
+    let render = |title: &str, mode_key: &str, prefix: &str| {
+        let rows: Vec<_> = stats.iter().filter(|s| s.mode == mode_key).collect();
+        if rows.is_empty() {
+            return;
+        }
+        println!("{}", styled(title, true));
+        println!("{}", "─".repeat(table_width));
+        println!(
+            "{:<slug_width$}  {:>8}  {:>8}  {:>6}  Verdict",
+            "Filter", "Elisions", "Recalled", "Rate"
+        );
+        println!("{}", "─".repeat(table_width));
+        for s in rows {
+            let (pct, rate) = if s.elisions > 0 {
+                let pct = s.recalls * 100 / s.elisions;
+                (pct, format!("{prefix}{pct}%"))
+            } else {
+                (0, "-".to_string())
+            };
+            println!(
+                "{}  {:>8}  {:>8}  {}  {}",
+                truncate_for_column(&s.slug, slug_width),
+                s.elisions,
+                s.recalls,
+                colorize_recall_rate(pct, &format!("{rate:>6}")),
+                colorize_recall_rate(pct, recall_verdict(s.elisions, s.recalls))
+            );
+        }
+        println!();
+    };
+
+    render("Sqlite (exact — reads go through rtk recall)", "sqlite", "");
+    render("Tee (approximate — bash-observed reads only)", "tee", "≥");
+
+    println!("\"too aggressive\" means the filter hides output the agent comes back for.");
+    println!("Each recall costs an extra API turn plus the full output, so it cancels");
+    println!("the savings on that command instead of adding to them.");
+    println!(
+        "\"-\" means fewer than {VERDICT_MIN_ELISIONS} elisions so far: not enough data to judge."
+    );
+    println!();
+    println!("Raise that filter's cap, or report it: {ISSUES_URL}");
+    Ok(())
 }
 
 /// Resolve project scope from --project flag. // added
@@ -573,7 +712,9 @@ fn export_csv(
     if all || daily {
         let days = tracker.get_all_days_filtered(project_scope)?; // changed: use filtered
         println!("# Daily Data");
-        println!("date,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms");
+        println!(
+            "date,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms"
+        );
         for day in days {
             println!(
                 "{},{},{},{},{},{:.2},{},{}",
@@ -616,7 +757,9 @@ fn export_csv(
     if all || monthly {
         let months = tracker.get_by_month_filtered(project_scope)?; // changed: use filtered
         println!("# Monthly Data");
-        println!("month,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms");
+        println!(
+            "month,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms"
+        );
         for month in months {
             println!(
                 "{},{},{},{},{},{:.2},{},{}",
@@ -707,11 +850,7 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
         println!("{}", styled("Top Commands (by frequency)", true));
         println!("{}", "─".repeat(60));
         for (cmd, count) in &summary.top_commands {
-            let cmd_display = if cmd.len() > 50 {
-                format!("{}...", &cmd[..47])
-            } else {
-                cmd.clone()
-            };
+            let cmd_display = truncate(cmd, 50);
             println!("  {:>4}x  {}", count, cmd_display);
         }
         println!();
@@ -721,17 +860,11 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
         println!("{}", styled("Recent Failures (last 10)", true));
         println!("{}", "─".repeat(60));
         for rec in &summary.recent {
-            let ts_short = if rec.timestamp.len() >= 16 {
-                &rec.timestamp[..16]
-            } else {
-                &rec.timestamp
-            };
+            // ISSUE #2787: floor to the previous char boundary so the prefix
+            // never exceeds 16 bytes and never lands mid-character
+            let ts_short = &rec.timestamp[..rec.timestamp.floor_char_boundary(16)];
             let status = if rec.fallback_succeeded { "ok" } else { "FAIL" };
-            let cmd_display = if rec.raw_command.len() > 40 {
-                format!("{}...", &rec.raw_command[..37])
-            } else {
-                rec.raw_command.clone()
-            };
+            let cmd_display = truncate(&rec.raw_command, 40);
             println!("  {} [{}] {}", ts_short, status, cmd_display);
         }
         println!();
@@ -745,7 +878,9 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
 fn confirm_reset() -> Result<bool> {
     use std::io::{self, BufRead, IsTerminal, Write};
 
-    eprint!("This will permanently delete all tracking data. Continue? [y/N] ");
+    eprint!(
+        "This will permanently delete all tracking data and recall counters (stored outputs are kept). Continue? [y/N] "
+    );
     io::stderr().flush().ok();
 
     if !io::stdin().is_terminal() {
@@ -761,4 +896,32 @@ fn confirm_reset() -> Result<bool> {
         .context("Failed to read confirmation")?;
 
     Ok(matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_recall_verdict_needs_a_sample_before_judging() {
+        assert_eq!(recall_verdict(4, 4), "-");
+        assert_eq!(recall_verdict(0, 0), "-");
+        assert_eq!(recall_verdict(5, 5), "too aggressive");
+    }
+
+    #[test]
+    fn test_recall_verdict_bands_match_the_colour_bands() {
+        assert_eq!(recall_verdict(100, 29), "watch");
+        assert_eq!(recall_verdict(100, 30), "too aggressive");
+        assert_eq!(recall_verdict(100, 9), "ok");
+        assert_eq!(recall_verdict(100, 10), "watch");
+        assert_eq!(recall_verdict(100, 0), "ok");
+    }
+
+    #[test]
+    fn test_recall_verdict_fits_its_column() {
+        for v in ["-", "ok", "watch", "too aggressive"] {
+            assert!(v.len() <= VERDICT_WIDTH, "{v} overflows the column");
+        }
+    }
 }

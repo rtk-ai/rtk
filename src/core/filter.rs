@@ -1,8 +1,8 @@
 //! Strips comments and boilerplate from source code to save tokens.
 
-use lazy_static::lazy_static;
 use regex::Regex;
 use std::str::FromStr;
+use std::sync::LazyLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterLevel {
@@ -155,10 +155,7 @@ impl FilterStrategy for NoFilter {
 
 pub struct MinimalFilter;
 
-lazy_static! {
-    static ref MULTIPLE_BLANK_LINES: Regex = Regex::new(r"\n{3,}").unwrap();
-    static ref TRAILING_WHITESPACE: Regex = Regex::new(r"[ \t]+$").unwrap();
-}
+static MULTIPLE_BLANK_LINES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
 
 impl FilterStrategy for MinimalFilter {
     fn filter(&self, content: &str, lang: &Language) -> String {
@@ -201,17 +198,17 @@ impl FilterStrategy for MinimalFilter {
             }
 
             // Skip single-line comments (but keep doc comments)
-            if let Some(line_comment) = patterns.line {
-                if trimmed.starts_with(line_comment) {
-                    // Keep doc comments
-                    if let Some(doc) = patterns.doc_line {
-                        if trimmed.starts_with(doc) {
-                            result.push_str(line);
-                            result.push('\n');
-                        }
-                    }
-                    continue;
+            if let Some(line_comment) = patterns.line
+                && trimmed.starts_with(line_comment)
+            {
+                // Keep doc comments
+                if let Some(doc) = patterns.doc_line
+                    && trimmed.starts_with(doc)
+                {
+                    result.push_str(line);
+                    result.push('\n');
                 }
+                continue;
             }
 
             // Skip empty lines at this point, we'll normalize later
@@ -232,14 +229,14 @@ impl FilterStrategy for MinimalFilter {
 
 pub struct AggressiveFilter;
 
-lazy_static! {
-    static ref IMPORT_PATTERN: Regex =
-        Regex::new(r"^(use |import |from |require\(|#include)").unwrap();
-    static ref FUNC_SIGNATURE: Regex = Regex::new(
-        r"^(pub\s+)?(async\s+)?(fn|def|function|func|class|struct|enum|trait|interface|type)\s+\w+"
+static IMPORT_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(use |import |from |require\(|#include)").unwrap());
+static FUNC_SIGNATURE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^(pub\s+)?(async\s+)?(fn|def|function|func|class|struct|enum|trait|interface|type)\s+\w+",
     )
-    .unwrap();
-}
+    .unwrap()
+});
 
 impl FilterStrategy for AggressiveFilter {
     fn filter(&self, content: &str, lang: &Language) -> String {
@@ -321,6 +318,12 @@ pub fn get_filter(level: FilterLevel) -> Box<dyn FilterStrategy> {
 }
 
 pub fn smart_truncate(content: &str, max_lines: usize, _lang: &Language) -> String {
+    // A zero budget shows nothing, matching `--tail-lines 0`/`--head-lines 0`.
+    // Returning early also keeps `max_lines - 1` below from underflowing.
+    if max_lines == 0 {
+        return String::new();
+    }
+
     let lines: Vec<&str> = content.lines().collect();
     if lines.len() <= max_lines {
         return content.to_string();
@@ -349,7 +352,7 @@ pub fn smart_truncate(content: &str, max_lines: usize, _lang: &Language) -> Stri
         // Non-important lines beyond max_lines/2 are silently skipped —
         // no inline markers that could be mistaken for file content.
 
-        if kept_lines >= max_lines - 1 {
+        if kept_lines + 1 >= max_lines {
             break;
         }
     }

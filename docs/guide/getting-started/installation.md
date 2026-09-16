@@ -1,6 +1,6 @@
 ---
 title: Installation
-description: Install RTK via curl, Homebrew, Cargo, or from source, and verify the correct version
+description: Install RTK via curl, Homebrew, winget, Cargo, or from source, and verify the correct version
 sidebar:
   order: 1
 ---
@@ -14,13 +14,13 @@ Two unrelated projects share the name `rtk`. Make sure you install the right one
 - **Rust Token Killer** (`rtk-ai/rtk`) — this project, a token-saving CLI proxy
 - **Rust Type Kit** (`reachingforthejack/rtk`) — a different tool for generating Rust types
 
-The easiest way to verify you have the correct one: run `rtk gain`. It should display token savings stats. If it returns "command not found", you either have the wrong package or RTK is not installed.
+The easiest way to verify you have the correct one: run `rtk gain`. It should display the savings dashboard. If it returns "command not found", you either have the wrong package or RTK is not installed.
 
 ## Check before installing
 
 ```bash
 rtk --version   # should print: rtk x.y.z
-rtk gain        # should show token savings stats
+rtk gain        # should show the savings dashboard
 ```
 
 If both commands work, RTK is already installed. Skip to [Project initialization](#project-initialization).
@@ -37,6 +37,12 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh
 brew install rtk-ai/tap/rtk
 ```
 
+## winget (Windows)
+
+```powershell
+winget install rtk-ai.rtk
+```
+
 ## Cargo
 
 :::caution[Name collision risk]
@@ -44,7 +50,7 @@ brew install rtk-ai/tap/rtk
 :::
 
 ```bash
-cargo install --git https://github.com/rtk-ai/rtk rtk
+cargo install --git https://github.com/rtk-ai/rtk --branch master rtk
 ```
 
 ## Pre-built binaries (Windows, Linux, macOS)
@@ -61,7 +67,7 @@ Download from [GitHub releases](https://github.com/rtk-ai/rtk/releases):
 
 ```bash
 rtk --version   # rtk x.y.z
-rtk gain        # token savings dashboard
+rtk gain        # savings dashboard
 ```
 
 If `rtk gain` fails but `rtk --version` succeeds, you installed Rust Type Kit by mistake. Uninstall it first:
@@ -92,4 +98,5 @@ rtk init --global
 rtk init -g --uninstall    # remove hook, RTK.md, and settings.json entry
 cargo uninstall rtk         # remove binary (if installed via Cargo)
 brew uninstall rtk          # remove binary (if installed via Homebrew)
+winget uninstall rtk-ai.rtk # remove binary (if installed via winget)
 ```

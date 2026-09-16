@@ -1,6 +1,6 @@
 # RTK Plugin for OpenClaw
 
-Transparently rewrites shell commands executed via OpenClaw's `exec` tool to their RTK equivalents, achieving 60-90% LLM token savings.
+Transparently rewrites shell commands executed via OpenClaw's `exec` tool to their RTK equivalents, cutting up to 90% of the bash output that reaches the LLM context.
 
 This is the OpenClaw equivalent of the Claude Code hooks in `hooks/rtk-rewrite.sh`.
 
@@ -73,7 +73,7 @@ Handled by `rtk rewrite` guards:
 
 ## Measured savings
 
-| Command | Token savings |
+| Command | Output reduction |
 |---------|--------------|
 | `git log --stat` | 87% |
 | `ls -la` | 78% |

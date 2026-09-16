@@ -1,5 +1,6 @@
 //! Filters pnpm output — dependency trees, install logs, outdated packages.
 
+use crate::core::guard::never_worse;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::CAP_LIST;
@@ -10,8 +11,8 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 
 use crate::parser::{
-    emit_degradation_warning, emit_passthrough_warning, truncate_passthrough, Dependency,
-    DependencyState, FormatMode, OutputParser, ParseResult, TokenFormatter,
+    Dependency, DependencyState, FormatMode, OutputParser, ParseResult, TokenFormatter,
+    emit_degradation_warning, emit_passthrough_warning, truncate_passthrough,
 };
 
 const MAX_LISTING: usize = CAP_LIST;
@@ -290,8 +291,16 @@ fn extract_outdated_text(output: &str) -> Option<DependencyState> {
 /// `cap = false` for `pnpm list --prod` / `pnpm list --dev` (hint targets,
 /// must show every package so the LLM can find what was hidden by the cap).
 fn format_dependency_listing(state: &DependencyState, cap: bool) -> String {
-    let prod: Vec<_> = state.dependencies.iter().filter(|d| !d.dev_dependency).collect();
-    let dev: Vec<_> = state.dependencies.iter().filter(|d| d.dev_dependency).collect();
+    let prod: Vec<_> = state
+        .dependencies
+        .iter()
+        .filter(|d| !d.dev_dependency)
+        .collect();
+    let dev: Vec<_> = state
+        .dependencies
+        .iter()
+        .filter(|d| d.dev_dependency)
+        .collect();
     let total = state.total_packages.max(state.dependencies.len());
 
     let mut lines = vec![format!(
@@ -303,7 +312,11 @@ fn format_dependency_listing(state: &DependencyState, cap: bool) -> String {
 
     if !prod.is_empty() {
         lines.push("[prod]".to_string());
-        let shown = if cap { prod.len().min(MAX_LISTING) } else { prod.len() };
+        let shown = if cap {
+            prod.len().min(MAX_LISTING)
+        } else {
+            prod.len()
+        };
         for dep in prod.iter().take(shown) {
             lines.push(format!("  {} {}", dep.name, dep.current_version));
         }
@@ -324,7 +337,11 @@ fn format_dependency_listing(state: &DependencyState, cap: bool) -> String {
 
     if !dev.is_empty() {
         lines.push("[dev]".to_string());
-        let shown = if cap { dev.len().min(MAX_LISTING) } else { dev.len() };
+        let shown = if cap {
+            dev.len().min(MAX_LISTING)
+        } else {
+            dev.len()
+        };
         for dep in dev.iter().take(shown) {
             lines.push(format!("  {} {}", dep.name, dep.current_version));
         }
@@ -405,13 +422,14 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<i32> {
         }
     };
 
-    println!("{}", filtered);
+    let shown = never_worse(&result.stdout, &filtered);
+    println!("{}", shown);
 
     timer.track(
         &format!("pnpm list --depth={}", depth),
         &format!("rtk pnpm list --depth={}", depth),
         &result.stdout,
-        &filtered,
+        shown,
     );
 
     Ok(0)
@@ -455,13 +473,15 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
         }
     };
 
-    if filtered.trim().is_empty() {
-        println!("All packages up-to-date");
+    let display = if filtered.trim().is_empty() {
+        "All packages up-to-date".to_string()
     } else {
-        println!("{}", filtered);
-    }
+        filtered.clone()
+    };
+    let shown = never_worse(&combined, &display);
+    println!("{}", shown);
 
-    timer.track("pnpm outdated", "rtk pnpm outdated", &combined, &filtered);
+    timer.track("pnpm outdated", "rtk pnpm outdated", &combined, shown);
 
     Ok(0)
 }
@@ -490,9 +510,10 @@ fn run_install(args: &[String], verbose: u8) -> Result<i32> {
     let combined = result.combined();
     let filtered = filter_pnpm_install(&combined);
 
-    println!("{}", filtered);
+    let shown = never_worse(&combined, &filtered);
+    println!("{}", shown);
 
-    timer.track("pnpm install", "rtk pnpm install", &combined, &filtered);
+    timer.track("pnpm install", "rtk pnpm install", &combined, shown);
 
     Ok(0)
 }
@@ -627,7 +648,10 @@ mod tests {
         assert!(out.contains("[dev]"), "dev section missing");
         assert!(out.contains("react"), "prod package missing");
         assert!(out.contains("eslint"), "dev package missing");
-        assert!(!out.contains("(dev)"), "per-line (dev) marker should be gone");
+        assert!(
+            !out.contains("(dev)"),
+            "per-line (dev) marker should be gone"
+        );
     }
 
     #[test]
@@ -657,15 +681,26 @@ mod tests {
         let state = make_state(&[], &dev);
         let out = format_dependency_listing(&state, false);
         assert!(!out.contains("… +"), "should not truncate when cap=false");
-        assert!(!out.contains("[prod]"), "no prod section for dev-only state");
+        assert!(
+            !out.contains("[prod]"),
+            "no prod section for dev-only state"
+        );
     }
 
     #[test]
     fn test_extract_list_text_tracks_dev_section() {
         let input = "dependencies:\nreact@18.0.0\ndevDependencies:\neslint@8.0.0\n";
         let state = extract_list_text(input).expect("should parse");
-        let react = state.dependencies.iter().find(|d| d.name == "react").unwrap();
-        let eslint = state.dependencies.iter().find(|d| d.name == "eslint").unwrap();
+        let react = state
+            .dependencies
+            .iter()
+            .find(|d| d.name == "react")
+            .unwrap();
+        let eslint = state
+            .dependencies
+            .iter()
+            .find(|d| d.name == "eslint")
+            .unwrap();
         assert!(!react.dev_dependency, "react should be prod");
         assert!(eslint.dev_dependency, "eslint should be dev");
     }

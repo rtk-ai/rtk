@@ -120,3 +120,23 @@ First match wins. A project filter with the same name as a built-in shadows the 
 ```
 [rtk] warning: filter 'make' is shadowing a built-in filter
 ```
+
+## Custom filters and trust
+
+You can add your own filters in two places (both use the format above):
+
+- **Project-local** — `.rtk/filters.toml` (committed with a repo, applies in that project)
+- **User-global** — `~/.config/rtk/filters.toml` (applies in every project)
+
+Because a filter can rewrite or hide the command output an agent sees, **custom filter files are not applied until you trust them**. An untrusted (or edited) filter file is skipped **silently** on the command path — RTK never prints a warning around a rewritten command. You discover and enable untrusted filters through commands you run deliberately:
+
+```bash
+rtk trust       # lists each detected filter (labelled project/global) + a risk summary, then asks to confirm ([y/N], or --yes)
+rtk untrust     # revokes trust
+```
+
+- Trust is recorded as a SHA-256 of the file's contents, so **editing a trusted file requires re-running `rtk trust`** — a content change invalidates trust.
+- `rtk init` detects existing custom filters and lets you enable them — an interactive `[y/N]`, or `--trust-filters` / `--no-trust-filters` for scripts. It stays silent for an empty template (comments only) and, when run non-interactively, leaves filters disabled.
+- Built-in filters (this directory) are compiled into the binary and always trusted; only the on-disk project and user-global files are gated.
+
+> **Honest limitation:** this is consent + tamper-evidence, not a sandbox. An attacker who can write your filter file can usually also write the trust store (`~/.local/share/rtk/trusted_filters.json`) and bypass the gate. It defends the common case — a filter dropped in by a script, a dotfile sync, or an untrusted repo — not a same-user attacker who specifically targets RTK.

@@ -5,6 +5,7 @@ use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
 use regex::Regex;
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = if tool_exists("mypy") {
@@ -23,14 +24,24 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: mypy {}", args.join(" "));
     }
 
-    runner::run_filtered(
+    runner::run_filtered_with_exit(
         cmd,
         "mypy",
         &args.join(" "),
-        |raw| filter_mypy_output(&strip_ansi(raw)),
+        |raw, exit_code| {
+            let clean = strip_ansi(raw);
+            let filtered = filter_mypy_output(&clean);
+            // Nothing recognised on a failed run means mypy never type-checked.
+            if exit_code != 0 && filtered == MYPY_CLEAN {
+                return clean.trim().to_string();
+            }
+            filtered
+        },
         runner::RunOptions::default(),
     )
 }
+
+const MYPY_CLEAN: &str = "mypy: No issues found";
 
 struct MypyError {
     file: String,
@@ -41,13 +52,11 @@ struct MypyError {
 }
 
 pub fn filter_mypy_output(output: &str) -> String {
-    lazy_static::lazy_static! {
-        // file.py:12: error: Message [error-code]
-        // file.py:12:5: error: Message [error-code]
-        static ref MYPY_DIAG: Regex = Regex::new(
-            r"^(.+?):(\d+)(?::\d+)?: (error|warning|note): (.+?)(?:\s+\[(.+)\])?$"
-        ).unwrap();
-    }
+    // file.py:12: error: Message [error-code]
+    // file.py:12:5: error: Message [error-code]
+    static MYPY_DIAG: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(.+?):(\d+)(?::\d+)?: (error|warning|note): (.+?)(?:\s+\[(.+)\])?$").unwrap()
+    });
 
     let lines: Vec<&str> = output.lines().collect();
     let mut errors: Vec<MypyError> = Vec::new();
@@ -80,12 +89,12 @@ pub fn filter_mypy_output(output: &str) -> String {
 
             if severity == "note" {
                 // Attach note to preceding error if same file and line
-                if let Some(last) = errors.last_mut() {
-                    if last.file == file {
-                        last.context_lines.push(message);
-                        i += 1;
-                        continue;
-                    }
+                if let Some(last) = errors.last_mut()
+                    && last.file == file
+                {
+                    last.context_lines.push(message);
+                    i += 1;
+                    continue;
                 }
                 // Standalone note with no parent -- display as fileless
                 fileless_lines.push(line.to_string());
@@ -104,13 +113,14 @@ pub fn filter_mypy_output(output: &str) -> String {
             // Capture continuation note lines
             i += 1;
             while i < lines.len() {
-                if let Some(next_caps) = MYPY_DIAG.captures(lines[i]) {
-                    if &next_caps[3] == "note" && next_caps[1] == err.file {
-                        let note_msg = next_caps[4].to_string();
-                        err.context_lines.push(note_msg);
-                        i += 1;
-                        continue;
-                    }
+                if let Some(next_caps) = MYPY_DIAG.captures(lines[i])
+                    && &next_caps[3] == "note"
+                    && next_caps[1] == err.file
+                {
+                    let note_msg = next_caps[4].to_string();
+                    err.context_lines.push(note_msg);
+                    i += 1;
+                    continue;
                 }
                 break;
             }
@@ -128,9 +138,9 @@ pub fn filter_mypy_output(output: &str) -> String {
     // No errors at all
     if errors.is_empty() && fileless_lines.is_empty() {
         if output.contains("Success: no issues found") || output.contains("no issues found") {
-            return "mypy: No issues found".to_string();
+            return MYPY_CLEAN.to_string();
         }
-        return "mypy: No issues found".to_string();
+        return MYPY_CLEAN.to_string();
     }
 
     // Group by file

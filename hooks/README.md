@@ -2,17 +2,24 @@
 
 ## Scope
 
-**Deployed hook artifacts** — the actual files installed on user machines by `rtk init`. These are shell scripts, TypeScript plugins, and rules files that run outside the Rust binary. They are **thin delegates**: parse agent-specific JSON, call `rtk rewrite` as a subprocess, format agent-specific response. Zero filtering logic lives here.
+**Deployed hook artifacts** — the files and agent-specific configuration installed on user machines by `rtk init`. External scripts and plugins are thin delegates to `rtk rewrite`; native processors such as Codex call the same Rust rewrite registry directly. Zero filtering logic is duplicated in this directory.
 
-Owns: per-agent hook scripts and configuration files for 9 supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi).
+Owns: per-agent hook scripts and configuration files for 11 supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, Oh My Pi, Mistral Vibe).
 
 Does **not** own: hook installation/uninstallation (that's `src/hooks/init.rs`), the rewrite pattern registry (that's `discover/registry`), or integrity verification (that's `src/hooks/integrity.rs`).
 
 Relationship to `src/hooks/`: that component **creates** these files; this directory **contains** them.
 
+## Awareness files
+
+`rtk-awareness.md`, `rtk-awareness-high.md`, `rtk-awareness-full.md` are the agent-neutral
+instruction files embedded by `rtk init` (`RTK.md`, `GEMINI.md`, rules files, `AGENTS.md` blocks).
+`awareness.level` in `config.toml` picks one for hook-based agents; agents without a hook always get
+`rtk-awareness-full.md`, the only one that tells the agent to prefix commands with `rtk`.
+
 ## Purpose
 
-LLM agent integrations that intercept CLI commands and route them through RTK for token optimization. Each hook transparently rewrites raw commands (e.g., `git status`) to their RTK equivalents (e.g., `rtk git status`), delivering 60-90% token savings without requiring the agent or user to change their workflow.
+LLM agent integrations that intercept CLI commands and route them through RTK for token optimization. Each hook transparently rewrites raw commands (e.g., `git status`) to their RTK equivalents (e.g., `rtk git status`), cutting up to 90% of the bash output that reaches the LLM context without requiring the agent or user to change their workflow.
 
 ## How It Works
 
@@ -20,14 +27,14 @@ LLM agent integrations that intercept CLI commands and route them through RTK fo
 Agent runs command (e.g., "cargo test --nocapture")
   -> Hook intercepts (PreToolUse / plugin event)
   -> Reads JSON input, extracts command string
-  -> Calls `rtk rewrite "cargo test --nocapture"`
+  -> Uses the shared RTK rewrite registry
   -> Registry matches pattern, returns "rtk cargo test --nocapture"
   -> Hook sends response in agent-specific JSON format
   -> Agent executes "rtk cargo test --nocapture" instead
-  -> Filtered output reaches LLM (~90% fewer tokens)
+  -> Filtered output reaches LLM (up to 90% fewer bash output bytes)
 ```
 
-All rewrite logic lives in the Rust binary (`src/discover/registry.rs`). Hook scripts are **thin delegates** that handle agent-specific JSON formats and call `rtk rewrite` for the actual decision. This ensures a single source of truth for all 70+ rewrite patterns.
+All rewrite logic lives in the Rust binary (`src/discover/registry.rs`). External hook scripts call `rtk rewrite`; native Rust hook processors call the registry directly. This keeps one source of truth for all 70+ rewrite patterns.
 
 ## Directory Structure
 
@@ -38,10 +45,11 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`cursor/`](cursor/README.md)** — Shell hook, Cursor JSON format, empty `{}` response requirement
 - **[`cline/`](cline/README.md)** — Rules file (prompt-level), `.clinerules` project-local installation
 - **[`windsurf/`](windsurf/README.md)** — Rules file (prompt-level), `.windsurfrules` workspace-scoped
-- **[`codex/`](codex/README.md)** — Awareness document, `AGENTS.md` integration, `$CODEX_HOME` or `~/.codex/` location
+- **[`codex/`](codex/README.md)** — Rust binary hook (`rtk hook codex`), `PreToolUse.updatedInput`, `.codex/hooks.json` / `$CODEX_HOME/hooks.json`, plus `AGENTS.md` awareness
 - **[`opencode/`](opencode/README.md)** — TypeScript plugin, `zx` library, `tool.execute.before` event, in-place mutation
-- **[`pi/`](pi/README.md)** — TypeScript extension, `tool_call` event, `isToolCallEventType` guard, in-place mutation, `~/.pi/agent/extensions/`
+- **[`pi/`](pi/README.md)** — TypeScript extension, `tool_call` event, local `isBashToolCallEvent` guard, in-place mutation, `~/.pi/agent/extensions/`; **shared with Oh My Pi (OMP)** — OMP installs the same file at `.omp/extensions/` via its `legacy-pi-compat` layer
 - **[`hermes/`](hermes/README.md)** — Python plugin, `pre_tool_call` hook, in-place terminal command mutation
+- **[`vibe/`](vibe/README.md)** — Rust binary hook (`rtk hook vibe`), `pre_tool` entry in `~/.vibe/hooks.toml`, `hook_specific_output.tool_input` rewrite plus `system_message` for UI visibility
 
 ## Supported Agents
 
@@ -50,14 +58,16 @@ Each agent subdirectory has its own README with hook-specific details:
 | Claude Code | Shell hook (`PreToolUse`) | Transparent rewrite | Yes (`updatedInput`) |
 | VS Code Copilot Chat | Rust binary (`rtk hook copilot`) | Transparent rewrite | Yes (`updatedInput`) |
 | GitHub Copilot CLI | Rust binary (`rtk hook copilot`) | Deny-with-suggestion | No (agent retries) |
-| Cursor | Shell hook (`preToolUse`) | Transparent rewrite | Yes (`updated_input`) |
+| Cursor | Rust binary | Transparent rewrite | Yes (`updated_input`) |
 | Gemini CLI | Rust binary (`rtk hook gemini`) | Transparent rewrite | Yes (`hookSpecificOutput`) |
 | Cline / Roo Code | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Windsurf | Custom instructions (rules file) | Prompt-level guidance | N/A |
-| Codex CLI | AGENTS.md / instructions | Prompt-level guidance | N/A |
+| Codex CLI | Rust binary (`rtk hook codex`) | Transparent rewrite | Yes (`updatedInput`) |
 | OpenCode | TypeScript plugin (`tool.execute.before`) | In-place mutation | Yes |
 | Pi | TypeScript extension (`tool_call` event) | In-place mutation | Yes |
+| Oh My Pi (OMP) | TypeScript extension (`tool_call` event, shared with Pi) | In-place mutation | Yes |
 | Hermes | Python plugin (`pre_tool_call`) | In-place mutation | Yes |
+| Mistral Vibe | Rust binary (`rtk hook vibe`) | Transparent rewrite | Yes (`hook_specific_output.tool_input`) |
 
 ## JSON Formats by Agent
 
@@ -99,6 +109,34 @@ Each agent subdirectory has its own README with hook-specific details:
 ```
 
 Returns `{}` when no rewrite (Cursor requires JSON for all paths).
+
+### Codex CLI (Rust Binary)
+
+**Input** (stdin):
+
+```json
+{
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "permission_mode": "default",
+  "tool_input": { "command": "git status" }
+}
+```
+
+**Output** (stdout, when rewritten):
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "allow",
+    "permissionDecisionReason": "RTK auto-rewrite",
+    "updatedInput": { "command": "rtk git status" }
+  }
+}
+```
+
+The `allow` value is required by Codex to accept `updatedInput`; Codex still runs its native approval and sandbox checks after applying the replacement. Those checks classify the rewritten command, and Codex does not currently unwrap the `rtk` binary for its safe/dangerous-command heuristics. Missing or unknown permission modes and other no-rewrite cases produce no stdout.
 
 ### Copilot CLI (Rust Binary)
 
@@ -157,6 +195,32 @@ Returns `{}` when no rewrite (Cursor requires JSON for all paths).
 
 **No rewrite**: `{"decision": "allow"}`
 
+### Mistral Vibe (Rust Binary)
+
+**Input** (stdin):
+
+```json
+{
+  "tool_name": "bash",
+  "tool_input": { "command": "git status" },
+  "hook_event_name": "pre_tool",
+  "session_id": "..."
+}
+```
+
+**Output** (when rewritten):
+
+```json
+{
+  "hook_specific_output": {
+    "tool_input": { "command": "rtk git status" }
+  },
+  "system_message": "rtk: rewrote to `rtk git status`"
+}
+```
+
+**No rewrite**: exit 0 with empty stdout (Vibe's contract for "no opinion" from a `pre_tool` hook).
+
 ### OpenCode (TypeScript Plugin)
 
 Mutates `args.command` in-place via the zx library:
@@ -197,11 +261,12 @@ The registry (`src/discover/registry.rs`) handles command patterns across these 
 
 ### Compound Command Handling
 
-The registry handles `&&`, `||`, `;`, `|`, and `&` operators:
+The registry handles `&&`, `||`, `;`, `|`, `|&`, and `&` operators:
 
-- **Pipe** (`|`): Only the left side is rewritten (right side consumes output format)
+- **Pipe** (`|`): Producers and intermediate stages stay raw; only a pipeline-safe final stage is rewritten
+- **Stderr pipe** (`|&`): The complete pipeline stays raw
 - **And/Or/Semicolon** (`&&`, `||`, `;`): Both sides rewritten independently
-- **find/fd in pipes**: Never rewritten (output format incompatible with xargs/wc/grep)
+- **Pipeline-safe rules**: Initially limited to argument-safe `grep`, `rg`, and `wc` invocations; search pattern-file forms defer
 
 Example: `cargo fmt --all && cargo test` becomes `rtk cargo fmt --all && rtk cargo test`
 
@@ -240,9 +305,9 @@ New integrations must follow the [Exit Code Contract](#exit-code-contract) and [
 
 | Tier | Mechanism | Maintenance | Examples |
 |------|-----------|-------------|----------|
-| **Full hook** | Shell script or Rust binary, intercepts commands via agent's hook API | High — must track agent API changes | Claude Code, Cursor, Copilot, Gemini |
-| **Plugin** | TypeScript/JS/Python plugin in agent's plugin system | Medium — agent manages loading | OpenCode, Hermes, Pi |
-| **Rules file** | Prompt-level instructions the agent reads | Low — no code to break | Cline, Windsurf, Codex |
+| **Full hook** | Shell script or Rust binary, intercepts commands via agent's hook API | High — must track agent API changes | Claude Code, Cursor, Copilot, Gemini, Codex |
+| **Plugin** | TypeScript/JS/Python plugin in agent's plugin system | Medium — agent manages loading | OpenCode, Hermes, Pi, Oh My Pi |
+| **Rules file** | Prompt-level instructions the agent reads | Low — no code to break | Cline, Windsurf |
 
 ### Eligibility
 

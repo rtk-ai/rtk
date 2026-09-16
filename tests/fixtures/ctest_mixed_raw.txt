@@ -1,0 +1,60 @@
+Test project /tmp/build
+      Start  1: pass_fast
+ 1/11 Test  #1: pass_fast ........................   Passed    0.00 sec
+      Start  2: pass_slow
+ 2/11 Test  #2: pass_slow ........................   Passed    0.31 sec
+      Start  3: pass_medium
+ 3/11 Test  #3: pass_medium ......................   Passed    0.11 sec
+      Start  4: regex_fail
+ 4/11 Test  #4: regex_fail .......................***Failed  Required regular expression not found. Regex=[expected-token
+]  0.01 sec
+      Start  5: skipped_case
+ 5/11 Test  #5: skipped_case .....................***Skipped   0.01 sec
+      Start  6: disabled_case
+ 6/11 Test  #6: disabled_case ....................***Not Run (Disabled)   0.00 sec
+      Start  7: missing_case
+Could not find executable missing-command
+Looked in the following places:
+missing-command
+missing-command
+Release/missing-command
+Release/missing-command
+Debug/missing-command
+Debug/missing-command
+MinSizeRel/missing-command
+MinSizeRel/missing-command
+RelWithDebInfo/missing-command
+RelWithDebInfo/missing-command
+Deployment/missing-command
+Deployment/missing-command
+Development/missing-command
+Development/missing-command
+ 7/11 Test  #7: missing_case .....................***Not Run   0.00 sec
+      Start  8: timeout_case
+ 8/11 Test  #8: timeout_case .....................***Timeout   1.06 sec
+      Start  9: plain_fail
+ 9/11 Test  #9: plain_fail .......................***Failed    0.00 sec
+      Start 10: noisy_fail
+10/11 Test #10: noisy_fail .......................***Failed    0.00 sec
+      Start 11: discovery_fail
+11/11 Test #11: discovery_fail ...................***Failed    0.00 sec
+
+40% tests passed, 6 tests failed out of 10
+
+Total Test time (real) =   1.52 sec
+
+The following tests did not run:
+	  5 - skipped_case (Skipped)
+	  6 - disabled_case (Disabled)
+
+The following tests FAILED:
+	  4 - regex_fail (Failed)
+	  7 - missing_case (Not Run)
+	  8 - timeout_case (Timeout)
+	  9 - plain_fail (Failed)
+	 10 - noisy_fail (Failed)
+	 11 - discovery_fail (Failed)
+Unable to find executable: missing-command
+Errors while running CTest
+Output from these tests are in: /tmp/build/Testing/Temporary/LastTest.log
+Use "--rerun-failed --output-on-failure" to re-run the failed cases verbosely.

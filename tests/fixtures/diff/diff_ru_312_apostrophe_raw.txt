@@ -1,0 +1,15 @@
+Only in q2: "Kyle's notes.txt"
+Binary files "q1/bin's.dat" and "q2/bin's.dat" differ
+diff -ru q1/it's.txt q2/it's.txt
+--- q1/it's.txt	2026-09-07 09:04:54.732038100 -0400
++++ q2/it's.txt	2026-09-07 09:04:54.733037800 -0400
+@@ -1 +1 @@
+-x
++y
+diff -ru "q1/ta\tb.txt" "q2/ta\tb.txt"
+--- "q1/ta\tb.txt"	2026-09-07 09:04:54.734068400 -0400
++++ "q2/ta\tb.txt"	2026-09-07 09:04:54.735038000 -0400
+@@ -1 +1 @@
+-x
++y
+Binary files 'q1/tab'$'\t''bin.dat' and 'q2/tab'$'\t''bin.dat' differ

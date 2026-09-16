@@ -3,16 +3,17 @@
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::Deserialize;
+use std::sync::LazyLock;
 
+use crate::Commands;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{package_manager_exec, strip_ansi};
 use crate::parser::{
+    FormatMode, OutputParser, ParseResult, TestFailure, TestResult, TokenFormatter,
     emit_degradation_warning, emit_passthrough_warning, extract_json_object, truncate_output,
-    truncate_passthrough, FormatMode, OutputParser, ParseResult, TestFailure, TestResult,
-    TokenFormatter,
+    truncate_passthrough,
 };
-use crate::Commands;
 
 /// Vitest JSON output structures (tool-specific format)
 #[derive(Debug, Deserialize)]
@@ -116,17 +117,10 @@ fn extract_failures_from_json(json: &VitestJsonOutput) -> Vec<TestFailure> {
 
 /// Tier 2: Extract test statistics using regex (degraded mode)
 fn extract_stats_regex(output: &str) -> Option<TestResult> {
-    lazy_static::lazy_static! {
-        static ref TEST_FILES_RE: Regex = Regex::new(
-            r"Test Files\s+(?:(\d+)\s+failed\s+\|\s+)?(\d+)\s+passed"
-        ).unwrap();
-        static ref TESTS_RE: Regex = Regex::new(
-            r"Tests\s+(?:(\d+)\s+failed\s+\|\s+)?(\d+)\s+passed"
-        ).unwrap();
-        static ref DURATION_RE: Regex = Regex::new(
-            r"Duration\s+([\d.]+)(ms|s)"
-        ).unwrap();
-    }
+    static TESTS_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"Tests\s+(?:(\d+)\s+failed\s+\|\s+)?(\d+)\s+passed").unwrap());
+    static DURATION_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"Duration\s+([\d.]+)(ms|s)").unwrap());
 
     let clean_output = strip_ansi(output);
 
@@ -256,16 +250,14 @@ pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32>
     );
     let tee_label = format!("{}_run", framework);
 
-    println!(
-        "{}",
-        render_test_output(&filtered, &combined, &tee_label, result.exit_code)
-    );
+    let rendered = render_test_output(&filtered, &combined, &tee_label, result.exit_code);
+    let shown = crate::core::runner::emit_guarded(&rendered, None, &combined);
 
     timer.track(
         format!("{} run", framework).as_str(),
         format!("rtk {} run", framework).as_str(),
         &combined,
-        &filtered.text,
+        &shown,
     );
 
     if !result.success() {
@@ -533,7 +525,8 @@ Scope: all 6 workspace projects
 
     #[test]
     fn test_vitest_effective_args_inject_json_reporter_by_default() {
-        let effective = build_vitest_effective_args(&args(&["run", "constants.test.ts", "--watch"]));
+        let effective =
+            build_vitest_effective_args(&args(&["run", "constants.test.ts", "--watch"]));
 
         assert!(!effective.passthrough);
         assert_eq!(
@@ -556,8 +549,12 @@ Scope: all 6 workspace projects
 
     #[test]
     fn test_vitest_effective_args_preserve_explicit_reporter_value() {
-        let effective =
-            build_vitest_effective_args(&args(&["run", "constants.test.ts", "--reporter", "verbose"]));
+        let effective = build_vitest_effective_args(&args(&[
+            "run",
+            "constants.test.ts",
+            "--reporter",
+            "verbose",
+        ]));
 
         assert!(effective.passthrough);
         assert_eq!(

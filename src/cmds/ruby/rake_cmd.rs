@@ -8,6 +8,7 @@ use crate::core::runner;
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{ruby_exec, strip_ansi};
 use anyhow::Result;
+use std::sync::LazyLock;
 
 const MAX_RAKE_FAILURES: usize = CAP_WARNINGS;
 
@@ -163,10 +164,9 @@ fn filter_minitest_output(output: &str) -> String {
 }
 
 fn is_failure_header(line: &str) -> bool {
-    lazy_static::lazy_static! {
-        static ref RE_FAILURE: regex::Regex =
-            regex::Regex::new(r"^\d+\)\s+(Failure|Error):$").unwrap();
-    }
+    static RE_FAILURE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"^\d+\)\s+(Failure|Error):$").unwrap());
+
     RE_FAILURE.is_match(line)
 }
 
@@ -242,16 +242,16 @@ fn parse_minitest_summary(summary: &str) -> (usize, usize, usize, usize, usize) 
     for part in summary.split(',') {
         let part = part.trim();
         let words: Vec<&str> = part.split_whitespace().collect();
-        if words.len() >= 2 {
-            if let Ok(n) = words[0].parse::<usize>() {
-                match words[1].trim_end_matches(',') {
-                    "runs" | "run" | "tests" | "test" => runs = n,
-                    "assertions" | "assertion" => assertions = n,
-                    "failures" | "failure" => failures = n,
-                    "errors" | "error" => errors = n,
-                    "skips" | "skip" => skips = n,
-                    _ => {}
-                }
+        if words.len() >= 2
+            && let Ok(n) = words[0].parse::<usize>()
+        {
+            match words[1].trim_end_matches(',') {
+                "runs" | "run" | "tests" | "test" => runs = n,
+                "assertions" | "assertion" => assertions = n,
+                "failures" | "failure" => failures = n,
+                "errors" | "error" => errors = n,
+                "skips" | "skip" => skips = n,
+                _ => {}
             }
         }
     }

@@ -1,0 +1,8 @@
+Binary files 'd: x/b.bin' and 'e: y/b.bin' differ
+diff -ru "d: x/f.txt" "e: y/f.txt"
+--- "d: x/f.txt"	2026-09-07 13:03:55.284360030 +0000
++++ "e: y/f.txt"	2026-09-07 13:03:55.284360030 +0000
+@@ -1 +1 @@
+-a
++b
+Only in 'e: y': only.txt

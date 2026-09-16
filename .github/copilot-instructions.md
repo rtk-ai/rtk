@@ -1,6 +1,6 @@
 # Copilot Instructions for rtk
 
-**rtk (Rust Token Killer)** is a CLI proxy that filters and compresses command outputs before they reach an LLM context, saving 60-90% of tokens. It wraps common tools (`git`, `cargo`, `grep`, `pnpm`, `go`, etc.) and outputs condensed summaries instead of raw output.
+**rtk (Rust Token Killer)** is a CLI proxy that filters and compresses command outputs before they reach an LLM context, cutting 60-90% of bash output. It wraps common tools (`git`, `cargo`, `grep`, `pnpm`, `go`, etc.) and outputs condensed summaries instead of raw output. Percentages measure bash output, not billed tokens; RTK ships no tokenizer (`src/core/tracking.rs` estimates `bytes / 4`).
 
 ## Using rtk in this session
 
@@ -57,7 +57,7 @@ For full details see [ARCHITECTURE.md](../docs/contributing/ARCHITECTURE.md) and
 ## Key Conventions
 
 - **Error handling**: `anyhow::Result` with `.context("description")?` — no bare `?`, no `unwrap()` in production. Filters must fall back to raw command on error.
-- **Regex**: Always `lazy_static!`, never compile inside a function body.
+- **Regex**: Use `LazyLock<Regex>` for fixed patterns reused across calls; keep runtime-dependent patterns local.
 - **Testing**: Unit tests inside modules (`#[cfg(test)] mod tests`). Fixtures in `tests/fixtures/`. Token savings assertions with `count_tokens()`.
 - **Exit codes**: Preserve the underlying command's exit code via `std::process::exit(code)`.
 - **Performance**: Startup <10ms (no async runtime), binary <5MB stripped.

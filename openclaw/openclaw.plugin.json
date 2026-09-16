@@ -2,7 +2,7 @@
   "id": "rtk-rewrite",
   "name": "RTK Token Optimizer",
   "version": "1.0.0",
-  "description": "Transparently rewrites shell commands to their RTK equivalents for 60-90% LLM token savings",
+  "description": "Transparently rewrites shell commands to their RTK equivalents, cutting up to 90% of the bash output reaching the LLM context",
   "homepage": "https://github.com/rtk-ai/rtk",
   "license": "Apache-2.0",
   "configSchema": {

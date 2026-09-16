@@ -1,0 +1,2 @@
+File g1/a_fifo is a fifo while file g2/a_fifo is a regular file
+Files g1/c.txt and g2/c.txt differ

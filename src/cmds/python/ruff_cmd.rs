@@ -8,6 +8,20 @@ use anyhow::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
 
+const RUFF_SUBCOMMANDS: &[&str] = &[
+    "analyze",
+    "check",
+    "clean",
+    "config",
+    "format",
+    "generate-shell-completion",
+    "help",
+    "linter",
+    "rule",
+    "server",
+    "version",
+];
+
 #[derive(Debug, Deserialize)]
 struct RuffLocation {
     row: usize,
@@ -32,19 +46,28 @@ struct RuffDiagnostic {
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let is_check = args.is_empty()
-        || args[0] == "check"
-        || (!args[0].starts_with('-') && args[0] != "format" && args[0] != "version");
+    let is_check = is_check_invocation(args);
 
     let is_format = args.iter().any(|a| a == "format");
 
     let mut cmd = resolved_command("ruff");
 
+    // Both spellings: injecting a second --output-format makes ruff reject the call.
+    let user_set_output_format = args
+        .iter()
+        .any(|a| a == "--output-format" || a.starts_with("--output-format="));
+
+    let user_json_format = args.iter().enumerate().any(|(i, a)| {
+        a == "--output-format=json"
+            || (a == "--output-format" && args.get(i + 1).is_some_and(|n| n == "json"))
+    });
+    let use_json_filter = !user_set_output_format || user_json_format;
+
     if is_check {
-        if !args.contains(&"--output-format".to_string()) {
-            cmd.arg("check").arg("--output-format=json");
-        } else {
+        if user_set_output_format {
             cmd.arg("check");
+        } else {
+            cmd.arg("check").arg("--output-format=json");
         }
 
         let start_idx = if !args.is_empty() && args[0] == "check" {
@@ -78,16 +101,22 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         "ruff",
         &args.join(" "),
         move |stdout| {
-            if is_check && !stdout.trim().is_empty() {
+            if is_check && use_json_filter && !stdout.trim().is_empty() {
                 filter_ruff_check_json(stdout)
             } else if is_format {
                 filter_ruff_format(stdout)
             } else {
-                stdout.trim().to_string()
+                truncate(stdout.trim(), config::limits().passthrough_max_chars)
             }
         },
         runner::RunOptions::stdout_only(),
     )
+}
+
+fn is_check_invocation(args: &[String]) -> bool {
+    args.first().is_none_or(|arg| {
+        arg == "check" || (!arg.starts_with('-') && !RUFF_SUBCOMMANDS.contains(&arg.as_str()))
+    })
 }
 
 /// Filter ruff check JSON output - group by rule and file
@@ -256,11 +285,12 @@ pub fn filter_ruff_format(output: &str) -> String {
                     let words: Vec<&str> = part.split_whitespace().collect();
                     // Look for number before "file" or "files"
                     for (i, word) in words.iter().enumerate() {
-                        if (word == &"file" || word == &"files") && i > 0 {
-                            if let Ok(count) = words[i - 1].parse::<usize>() {
-                                files_checked = count;
-                                break;
-                            }
+                        if (word == &"file" || word == &"files")
+                            && i > 0
+                            && let Ok(count) = words[i - 1].parse::<usize>()
+                        {
+                            files_checked = count;
+                            break;
                         }
                     }
                     break;
@@ -338,6 +368,54 @@ fn compact_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn known_ruff_subcommands_do_not_route_through_check() {
+        for subcommand in RUFF_SUBCOMMANDS {
+            let args = vec![subcommand.to_string()];
+            assert_eq!(
+                is_check_invocation(&args),
+                *subcommand == "check",
+                "unexpected routing for ruff {subcommand}"
+            );
+        }
+    }
+
+    /// `known_ruff_subcommands_do_not_route_through_check` iterates the constant, so it
+    /// cannot catch an entry going missing. This pins the list against `ruff --help`.
+    #[test]
+    fn ruff_subcommands_cover_the_ruff_cli() {
+        assert_eq!(
+            RUFF_SUBCOMMANDS,
+            [
+                "analyze",
+                "check",
+                "clean",
+                "config",
+                "format",
+                "generate-shell-completion",
+                "help",
+                "linter",
+                "rule",
+                "server",
+                "version",
+            ]
+        );
+    }
+
+    #[test]
+    fn paths_and_explicit_check_route_through_check() {
+        assert!(is_check_invocation(&[]));
+        assert!(is_check_invocation(&["check".to_string(), ".".to_string()]));
+        assert!(is_check_invocation(&["src".to_string()]));
+        assert!(is_check_invocation(&["pyproject.toml".to_string()]));
+    }
+
+    #[test]
+    fn top_level_flags_are_not_misclassified_as_paths() {
+        assert!(!is_check_invocation(&["--version".to_string()]));
+        assert!(!is_check_invocation(&["--help".to_string()]));
+    }
 
     #[test]
     fn test_filter_ruff_check_no_issues() {
