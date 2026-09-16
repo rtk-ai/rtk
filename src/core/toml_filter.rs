@@ -1,6 +1,6 @@
 //! Applies TOML-defined filter rules to command output.
 ///
-/// Provides a declarative pipeline of 8 stages that can be configured
+/// Provides a declarative pipeline of 9 stages that can be configured
 /// via TOML files. Lookup priority (first match wins):
 ///   1. `.rtk/filters.toml`              — project-local, committable with the repo
 ///   2. `~/.config/rtk/filters.toml`     — user-global, applies to all projects
@@ -18,10 +18,11 @@
 ///   2. replace              — regex substitutions, line-by-line, chainable
 ///   3. match_output         — short-circuit: if blob matches a pattern, return message immediately
 ///   4. strip/keep_lines     — filter lines by regex
-///   5. truncate_lines_at    — truncate each line to N chars
-///   6. head/tail_lines      — keep first/last N lines
-///   7. max_lines            — absolute line cap
-///   8. on_empty             — message if result is empty
+///   5. dedupe_consecutive   — collapse adjacent identical non-empty lines
+///   6. truncate_lines_at    — truncate each line to N chars
+///   7. head/tail_lines      — keep first/last N lines
+///   8. max_lines            — absolute line cap
+///   9. on_empty             — message if result is empty
 use super::constants::RTK_META_COMMANDS;
 use regex::{Regex, RegexSet};
 use serde::Deserialize;
@@ -97,6 +98,11 @@ struct TomlFilterDef {
     strip_lines_matching: Vec<String>,
     #[serde(default)]
     keep_lines_matching: Vec<String>,
+    /// Collapse adjacent identical non-empty lines and append a repeat count.
+    /// This runs after replacements and line filtering, so volatile prefixes
+    /// can be normalized before comparison.
+    #[serde(default)]
+    dedupe_consecutive: bool,
     truncate_lines_at: Option<usize>,
     head_lines: Option<usize>,
     tail_lines: Option<usize>,
@@ -144,6 +150,7 @@ pub struct CompiledFilter {
     replace: Vec<CompiledReplaceRule>,
     match_output: Vec<CompiledMatchOutputRule>,
     line_filter: LineFilter,
+    dedupe_consecutive: bool,
     truncate_lines_at: Option<usize>,
     head_lines: Option<usize>,
     tail_lines: Option<usize>,
@@ -393,6 +400,7 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
         replace,
         match_output,
         line_filter,
+        dedupe_consecutive: def.dedupe_consecutive,
         truncate_lines_at: def.truncate_lines_at,
         head_lines: def.head_lines,
         tail_lines: def.tail_lines,
@@ -556,10 +564,11 @@ pub fn find_filter_in<'a>(
 ///   2. replace              — regex substitutions, line-by-line, chainable
 ///   3. match_output         — short-circuit if blob matches a pattern
 ///   4. strip/keep_lines     — filter lines by regex
-///   5. truncate_lines_at    — truncate each line to N chars
-///   6. head/tail_lines      — keep first/last N lines
-///   7. max_lines            — absolute line cap
-///   8. on_empty             — message if result is empty
+///   5. dedupe_consecutive   — collapse adjacent identical non-empty lines
+///   6. truncate_lines_at    — truncate each line to N chars
+///   7. head/tail_lines      — keep first/last N lines
+///   8. max_lines            — absolute line cap
+///   9. on_empty             — message if result is empty
 pub fn apply_filter(filter: &CompiledFilter, stdout: &str) -> String {
     apply_filter_with_info(filter, stdout).0
 }
@@ -626,7 +635,30 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
         LineFilter::None => {}
     }
 
-    // 5. truncate_lines_at — uses utils::truncate (unicode-safe)
+    // 5. dedupe_consecutive — exact, adjacent, non-empty lines only
+    let mut dedupe_loss = false;
+    if filter.dedupe_consecutive {
+        let mut deduped = Vec::with_capacity(lines.len());
+        let mut iter = lines.into_iter().peekable();
+        while let Some(line) = iter.next() {
+            let mut count = 1;
+            while iter.peek().is_some_and(|next| *next == line) {
+                iter.next();
+                count += 1;
+            }
+
+            if count > 1 && !line.is_empty() {
+                deduped.push(format!("{line} [×{count}]"));
+                dedupe_loss = true;
+            } else {
+                deduped.push(line);
+                deduped.extend((1..count).map(|_| String::new()));
+            }
+        }
+        lines = deduped;
+    }
+
+    // 6. truncate_lines_at — uses utils::truncate (unicode-safe)
     let mut intra_line_loss = false;
     if let Some(max_chars) = filter.truncate_lines_at {
         lines = lines
@@ -641,12 +673,13 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
             .collect();
     }
 
-    let snapshot_for_tail = !intra_line_loss
+    let snapshot_for_tail = !dedupe_loss
+        && !intra_line_loss
         && filter.tail_lines.is_none()
         && (filter.head_lines.is_some() || filter.max_lines.is_some());
     let pre_cut = snapshot_for_tail.then(|| lines.clone());
 
-    // 6. head + tail
+    // 7. head + tail
     let total = lines.len();
     let mut noncontiguous_drop = false;
     let mut head_cut: Option<usize> = None;
@@ -673,7 +706,7 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
         noncontiguous_drop = true;
     }
 
-    // 7. max_lines — absolute cap applied after head/tail (includes omit messages)
+    // 8. max_lines — absolute cap applied after head/tail (includes omit messages)
     let mut max_cut: Option<usize> = None;
     if let Some(max) = filter.max_lines
         && lines.len() > max
@@ -684,7 +717,7 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
         max_cut = Some(max);
     }
 
-    // 8. on_empty
+    // 9. on_empty
     let result = lines.join("\n");
     if result.trim().is_empty()
         && let Some(ref msg) = filter.on_empty
@@ -705,7 +738,12 @@ pub fn apply_filter_with_info(filter: &CompiledFilter, stdout: &str) -> (String,
             },
             (None, None) => Lossiness::None,
         }
-    } else if noncontiguous_drop || intra_line_loss || head_cut.is_some() || max_cut.is_some() {
+    } else if dedupe_loss
+        || noncontiguous_drop
+        || intra_line_loss
+        || head_cut.is_some()
+        || max_cut.is_some()
+    {
         Lossiness::Whole
     } else {
         Lossiness::None
@@ -1013,6 +1051,13 @@ mod tests {
     }
 
     #[test]
+    fn test_loss_dedupe_consecutive_is_whole_only_when_changed() {
+        let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\ndedupe_consecutive = true\n";
+        assert_eq!(loss_of(toml, "same\nsame\nother"), Lossiness::Whole);
+        assert_eq!(loss_of(toml, "same\nother"), Lossiness::None);
+    }
+
+    #[test]
     fn test_loss_match_output_is_whole() {
         let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\n[[filters.f.match_output]]\npattern = \"ok\"\nmessage = \"all good\"\n";
         let (out, loss) = apply_filter_with_info(&first_filter(toml), "everything ok here\nmore");
@@ -1094,6 +1139,69 @@ keep_lines_matching = ["^PASS", "^FAIL"]
         let input = "PASS test_a\nsome noise\nFAIL test_b\nmore noise";
         let out = apply_filter(&f, input);
         assert_eq!(out, "PASS test_a\nFAIL test_b");
+    }
+
+    #[test]
+    fn test_dedupe_consecutive_runs_after_replace() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+replace = [
+  { pattern = "^\\d{2}:\\d{2}:\\d{2} ", replacement = "" },
+]
+dedupe_consecutive = true
+"#,
+        );
+        let input = "12:00:00 retrying connection\n12:00:01 retrying connection\n12:00:02 retrying connection\n12:00:03 recovered\n12:00:04 retrying connection";
+        let out = apply_filter(&f, input);
+        assert_eq!(
+            out,
+            "retrying connection [×3]\nrecovered\nretrying connection"
+        );
+    }
+
+    #[test]
+    fn test_dedupe_consecutive_keeps_tasks_and_blank_lines_distinct() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+dedupe_consecutive = true
+"#,
+        );
+        let input = "[task-a] waiting\n[task-a] waiting\n\n\n[task-b] waiting\n[task-a] waiting";
+        let out = apply_filter(&f, input);
+        assert_eq!(
+            out,
+            "[task-a] waiting [×2]\n\n\n[task-b] waiting\n[task-a] waiting"
+        );
+    }
+
+    #[test]
+    fn test_dedupe_consecutive_reduces_repeated_log_tokens() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+dedupe_consecutive = true
+"#,
+        );
+        let line = "[train/task-123] connection retry failed after timeout";
+        let input = std::iter::repeat_n(line, 10).collect::<Vec<_>>().join("\n");
+        let out = apply_filter(&f, &input);
+        let input_tokens = input.split_whitespace().count();
+        let output_tokens = out.split_whitespace().count();
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+
+        assert_eq!(out, format!("{line} [×10]"));
+        assert!(
+            savings >= 60.0,
+            "expected at least 60% savings, got {savings:.1}%"
+        );
     }
 
     #[test]

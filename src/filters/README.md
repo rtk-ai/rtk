@@ -35,6 +35,7 @@ strip_lines_matching = [               # optional: drop lines matching any of th
   "^\\s*$",
   "^noise pattern",
 ]
+dedupe_consecutive = true               # optional: collapse adjacent identical non-empty lines
 max_lines = 40                          # optional: keep only the first N lines after filtering
 on_empty = "my-tool: ok"               # optional: message to emit when output is empty after filtering
 
@@ -56,6 +57,7 @@ expected = "expected filtered output"
 | `keep_lines_matching` | regex[] | Keep only lines matching at least one regex |
 | `replace` | array | Regex substitutions (`{ pattern, replacement }`) |
 | `match_output` | array | Short-circuit rules (`{ pattern, message }`) |
+| `dedupe_consecutive` | bool | Collapse adjacent identical non-empty lines and append `[×N]` |
 | `truncate_lines_at` | int | Truncate lines longer than N characters |
 | `max_lines` | int | Keep only the first N lines |
 | `tail_lines` | int | Keep only the last N lines (applied after other filters) |
@@ -92,7 +94,7 @@ flowchart TD
         R["TomlFilterRegistry::load()\n1. .rtk/filters.toml\n2. ~/.config/rtk/filters.toml\n3. BUILTIN_TOML\n4. passthrough"] --> S
         S{"match_command\nmatches?"} -->|"no match"| T[["exec raw (passthrough)"]]
         S -->|"match"| U["exec command\ncapture stdout"]
-        U --> V["8-stage pipeline\nstrip_ansi → replace → match_output\n→ strip/keep_lines → truncate\n→ tail_lines → max_lines → on_empty"]
+        U --> V["9-stage pipeline\nstrip_ansi → replace → match_output\n→ strip/keep_lines → dedupe → truncate\n→ tail_lines → max_lines → on_empty"]
         V --> W[["print filtered output + exit code"]]
     end
 
