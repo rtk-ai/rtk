@@ -33,8 +33,17 @@ pub enum Classification {
 /// `category_avg_tokens` so unhandled commands get the same per-category output
 /// estimate as handled ones, instead of every unhandled command being treated
 /// as equally "big".
+///
+/// `base_command` can be two tokens (`extract_base_command` returns e.g.
+/// "docker compose" / "go test"), so the match is on the first whitespace token
+/// — matching the full string left almost every arm dead and everything falling
+/// through to the default `""`.
 pub fn guess_unsupported_category(base_command: &str) -> &'static str {
-    match base_command {
+    let first = base_command
+        .split_whitespace()
+        .next()
+        .unwrap_or(base_command);
+    match first {
         "find" | "ls" | "cat" | "head" | "tail" => "Files",
         "grep" | "rg" | "ag" => "Files",
         "curl" | "wget" | "ping" | "ssh" | "sshpass" => "Network",
@@ -1963,6 +1972,22 @@ mod tests {
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         super::rewrite_command(cmd, excluded, &[])
+    }
+
+    #[test]
+    fn guess_unsupported_category_matches_bare_command() {
+        assert_eq!(guess_unsupported_category("docker"), "Infra");
+        assert_eq!(guess_unsupported_category("grep"), "Files");
+        assert_eq!(guess_unsupported_category(""), "");
+    }
+
+    #[test]
+    fn guess_unsupported_category_matches_two_token_base_command() {
+        // `extract_base_command` returns "cmd subcmd" for these, so matching the
+        // full string left every arm dead; the first token is what classifies.
+        assert_eq!(guess_unsupported_category("docker compose"), "Infra");
+        assert_eq!(guess_unsupported_category("go test"), "Build");
+        assert_eq!(guess_unsupported_category("cat Makefile"), "Files");
     }
 
     // Three compound-command segmenters look at the same kind of input for

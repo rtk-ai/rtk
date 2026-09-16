@@ -253,6 +253,11 @@ struct SupportedBucket {
 struct UnsupportedBucket {
     count: usize,
     example: String,
+    /// Output tokens measured from `ExtractedCommand::output_len` (`len / 4`)
+    /// summed over entries that had a length.
+    measured_tokens: usize,
+    /// Entries without a measured `output_len`, estimated by category average.
+    unmeasured_count: usize,
 }
 
 pub fn run(
@@ -486,9 +491,16 @@ pub fn run(
                             UnsupportedBucket {
                                 count: 0,
                                 example: part.to_string(),
+                                measured_tokens: 0,
+                                unmeasured_count: 0,
                             }
                         });
                         bucket.count += 1;
+                        if let Some(len) = ext_cmd.output_len {
+                            bucket.measured_tokens += len / 4;
+                        } else {
+                            bucket.unmeasured_count += 1;
+                        }
                     }
                     Classification::Ignored => {
                         // Ground truth from the transcript itself — the model really
@@ -563,13 +575,19 @@ pub fn run(
                 base_command: base,
                 count: bucket.count,
                 example: bucket.example,
-                estimated_impact_tokens: bucket.count * avg_tokens,
+                // Measured output tokens where the transcript recorded a length,
+                // plus count x category average only for entries without one --
+                // a failed category guess can no longer collapse the score to a
+                // bare count sort.
+                estimated_impact_tokens: bucket.measured_tokens
+                    + bucket.unmeasured_count * avg_tokens,
             }
         })
         .collect();
 
-    // Sort by estimated impact (call_frequency x avg_output) descending, not
-    // raw count -- a rarely-called command with huge output can outrank a
+    // Sort by estimated impact descending: sum of measured output_len/4 plus
+    // `count x category_avg_tokens` for entries lacking a measured length --
+    // not raw count, so a rarely-called command with huge output can outrank a
     // frequent tiny one.
     unsupported.sort_by_key(|b| std::cmp::Reverse(b.estimated_impact_tokens));
 
