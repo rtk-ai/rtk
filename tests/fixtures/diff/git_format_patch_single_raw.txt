@@ -1,0 +1,51 @@
+From 0e7632a01b00c70cbc9dafcf1f23c71fa6b10de1 Mon Sep 17 00:00:00 2001
+From: Fixture <fix@example.com>
+Date: Sat, 29 Aug 2026 22:44:59 -0400
+Subject: [PATCH] fix: drop SQL comments, tweak main, document ++
+
+- remove the -- comments from schema.sql
+- change two -> 2 and add five
+- notes.md gains a ++ line
+---
+ main.rs    | 3 ++-
+ notes.md   | 1 +
+ schema.sql | 3 ---
+ 3 files changed, 3 insertions(+), 4 deletions(-)
+
+diff --git a/main.rs b/main.rs
+index 5d804c0..0658d30 100644
+--- a/main.rs
++++ b/main.rs
+@@ -1,6 +1,7 @@
+ fn main() {
+     println!("one");
+-    println!("two");
++    println!("2");
+     println!("three");
+     println!("four");
++    println!("five");
+ }
+diff --git a/notes.md b/notes.md
+index d4d7d60..976bcb5 100644
+--- a/notes.md
++++ b/notes.md
+@@ -3,3 +3,4 @@ Some intro text.
+ ---
+ A horizontal rule above.
+ increment operator: x
++++ can also start a line
+diff --git a/schema.sql b/schema.sql
+index bb42838..07010ac 100644
+--- a/schema.sql
++++ b/schema.sql
+@@ -1,7 +1,4 @@
+--- users table
+--- created 2024
+ CREATE TABLE users (
+   id INTEGER PRIMARY KEY,
+-  -- legacy column
+   name TEXT
+ );
+-- 
+2.54.0.windows.1
+

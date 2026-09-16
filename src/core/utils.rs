@@ -205,11 +205,7 @@ pub fn join_with_overflow(items: &[String], total: usize, max: usize, label: &st
 /// assert_eq!(truncate_iso_date("short"), "short");
 /// ```
 pub fn truncate_iso_date(date: &str) -> &str {
-    if date.len() >= 10 {
-        &date[..10]
-    } else {
-        date
-    }
+    if date.len() >= 10 { &date[..10] } else { date }
 }
 
 /// Format a confirmation message: "ok \<action\> \<detail\>"
@@ -284,6 +280,12 @@ pub fn fallback_tail(output: &str, label: &str, n: usize) -> String {
 }
 
 /// Create a directory owner-only (0700 on Unix), tightening one that already exists.
+/// Serializes tests across modules that mutate process-global recall env vars
+/// (`RTK_RECALL`, `RTK_TEE`): a static declared inside one test module is not
+/// shared with other modules, so those tests would not actually serialize.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn create_private_dir(path: &std::path::Path) -> std::io::Result<()> {
     fs::create_dir_all(path)?;
     set_owner_only(path, 0o700);
@@ -342,10 +344,10 @@ fn set_owner_only(path: &std::path::Path, mode: u32) {
     // Falls through to chmod on any metadata-read failure, erring toward
     // enforcing the permission rather than silently skipping it.
     //
-    if let Ok(meta) = fs::metadata(path) {
-        if mode_already_correct(meta.permissions().mode(), mode) {
-            return;
-        }
+    if let Ok(meta) = fs::metadata(path)
+        && mode_already_correct(meta.permissions().mode(), mode)
+    {
+        return;
     }
     let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode));
 }

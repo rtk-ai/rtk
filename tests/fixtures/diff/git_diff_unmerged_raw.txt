@@ -1,0 +1,13 @@
+* Unmerged path cfile.txt
+diff --git a/cfile.txt b/cfile.txt
+index 4520e44..ae914e1 100644
+--- a/cfile.txt
++++ b/cfile.txt
+@@ -1,3 +1,7 @@
+ shared head
++<<<<<<< HEAD
+ conflict line MAIN-NEW
++=======
++conflict line SIDE-B
++>>>>>>> conflict-side
+ shared tail

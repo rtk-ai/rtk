@@ -1,0 +1,7 @@
+diff -r 3364aecea8a5 v	2.txt
+--- a/v	2.txt
++++ b/v	2.txt
+@@ -1,2 +1,2 @@
+ one
+-two
++TWO
