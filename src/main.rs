@@ -1211,6 +1211,9 @@ enum OcCommands {
         /// All namespaces
         #[arg(short = 'A', long)]
         all: bool,
+        /// Bypass the unchanged-state cache and show full detail
+        #[arg(long)]
+        force: bool,
     },
     /// List services
     Services {
@@ -1219,6 +1222,9 @@ enum OcCommands {
         /// All namespaces
         #[arg(short = 'A', long)]
         all: bool,
+        /// Bypass the unchanged-state cache and show full detail
+        #[arg(long)]
+        force: bool,
     },
     /// Show pod logs (deduplicated)
     Logs {
@@ -2264,12 +2270,20 @@ fn run_cli() -> Result<i32> {
 
         Commands::Oc { command } => match command {
             OcCommands::Get { args } => container::run_oc_get(&args, cli.verbose)?,
-            OcCommands::Pods { namespace, all } => {
-                let args = build_k8s_namespace_args(namespace, all, false);
+            OcCommands::Pods {
+                namespace,
+                all,
+                force,
+            } => {
+                let args = build_k8s_namespace_args(namespace, all, force);
                 container::k8s_pods("oc", &args, cli.verbose)?
             }
-            OcCommands::Services { namespace, all } => {
-                let args = build_k8s_namespace_args(namespace, all, false);
+            OcCommands::Services {
+                namespace,
+                all,
+                force,
+            } => {
+                let args = build_k8s_namespace_args(namespace, all, force);
                 container::k8s_services("oc", &args, cli.verbose)?
             }
             OcCommands::Logs { pod, container: c } => {

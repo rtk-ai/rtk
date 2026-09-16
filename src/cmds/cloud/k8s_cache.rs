@@ -11,8 +11,8 @@
 use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
 use crate::core::constants::RTK_DATA_DIR;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -133,10 +133,15 @@ fn save(map: &HashMap<String, CacheEntry>) {
     }
 }
 
+/// SHA-256 of `s`, truncated to 8 bytes (big-endian `u64`). The hash is
+/// persisted to disk and compared across rtk runs, so it must be stable —
+/// std's `DefaultHasher` is explicitly unspecified and may change between Rust
+/// versions, which would silently invalidate every cached entry.
 fn hash_str(s: &str) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    s.hash(&mut h);
-    h.finish()
+    let digest = Sha256::digest(s.as_bytes());
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&digest[..8]);
+    u64::from_be_bytes(buf)
 }
 
 /// Build a stable cache key from the resource kind, tool, and passthrough
@@ -176,6 +181,11 @@ pub fn check_and_update(key: &str, formatted: &str, force: bool) -> Option<Strin
         && existing
             .as_ref()
             .is_some_and(|e| e.hash == hash && ts.saturating_sub(e.last_seen_ts) < CACHE_TTL_SECS);
+    // The message is about the gap since the previous query, so it must age off
+    // the previous `last_seen_ts` -- `last_change_ts` traces back to the last
+    // time the summary actually changed and, under steady polling, can be days
+    // old, which would print a misleading "(3 days ago)".
+    let previous_seen_ts = existing.as_ref().map(|e| e.last_seen_ts);
 
     let entry = match (hit, existing) {
         (true, Some(e)) => CacheEntry {
@@ -193,10 +203,10 @@ pub fn check_and_update(key: &str, formatted: &str, force: bool) -> Option<Strin
     };
 
     let message = hit.then(|| {
+        let age_secs = previous_seen_ts.map_or(0, |prev| ts.saturating_sub(prev));
         format!(
             "No material change since previous query ({}s ago). {}\nUse --force for fresh detail.\n",
-            ts.saturating_sub(entry.last_change_ts),
-            entry.count_line
+            age_secs, entry.count_line
         )
     });
 
@@ -207,8 +217,10 @@ pub fn check_and_update(key: &str, formatted: &str, force: bool) -> Option<Strin
 
 /// The value-taking flags on the `kubectl get` path. Only used so a value that
 /// literally equals `--force` (e.g. `-n --force`) is not misread as the flag;
-/// `-A`/`--all-namespaces` and `--force` themselves stay boolean.
-fn kubectl_get_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+/// `-A`/`--all-namespaces` and `--force` themselves stay boolean. Shared with
+/// `container::k8s_get_requests_raw_output`, which needs the same value
+/// consumption to tell `-o`/`--output` from a flag's value.
+pub(crate) fn kubectl_get_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
     let takes_value = match kind {
         TokenKind::Long => matches!(
             name,
@@ -357,6 +369,32 @@ mod tests {
         with_temp_cache(|path| {
             std::fs::write(path, "{ this is not json").expect("write garbage");
             assert!(check_and_update("pods:kubectl:-A", "3 pods: 3\n", false).is_none());
+        });
+    }
+
+    #[test]
+    fn collapse_age_uses_previous_seen_ts_not_last_change_ts() {
+        with_temp_cache(|_| {
+            let key = "pods:kubectl:-A";
+            let summary = "3 pods: 3\n";
+            let ts = now();
+            let mut map = HashMap::new();
+            map.insert(
+                key.to_string(),
+                CacheEntry {
+                    hash: hash_str(summary),
+                    count_line: summary.lines().next().unwrap_or("").to_string(),
+                    // Changed long ago but polled 5s ago: the message must
+                    // describe the poll gap, not the stale change age.
+                    last_change_ts: ts.saturating_sub(500),
+                    last_seen_ts: ts.saturating_sub(5),
+                },
+            );
+            save(&map);
+
+            let message = check_and_update(key, summary, false).expect("should hit");
+            assert!(message.contains("(5s ago)"), "got: {message}");
+            assert!(!message.contains("500"), "got: {message}");
         });
     }
 
