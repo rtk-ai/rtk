@@ -441,7 +441,7 @@ rtk/
 ├── src/
 │   ├── cmds/
 │   │   ├── git/
-│   │   │   ├── git.rs                    # Filter implementation
+│   │   │   ├── git_cmd.rs                    # Filter implementation
 │   │   │   │   └── #[cfg(test)] mod tests { ... }  # Unit tests
 │   │   │   └── snapshots/                # Insta snapshots for git module
 │   │   ├── js/

@@ -1,0 +1,29 @@
+From 2c7f4ef391779624d181ba325dd7118e5d27e2e9 Mon Sep 17 00:00:00 2001
+From: a <a@b>
+Date: Mon, 7 Sep 2026 04:09:35 +0000
+Subject: [PATCH] feat: v
+
+---
+ v.txt | 1 +
+ 1 file changed, 1 insertion(+)
+ create mode 100644 v.txt
+
+diff --git a/v.txt b/v.txt
+new file mode 100644
+index 0000000..8c1384d
+--- /dev/null
++++ b/v.txt
+@@ -0,0 +1 @@
++v2
+
+Interdiff:
+  diff --git a/v.txt b/v.txt
+  index 626799f..8c1384d 100644
+  --- a/v.txt
+  +++ b/v.txt
+  @@ -1 +1 @@
+  -v1
+  +v2
+-- 
+2.47.3
+

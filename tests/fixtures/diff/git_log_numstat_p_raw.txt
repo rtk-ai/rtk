@@ -1,0 +1,31 @@
+commit 2ce95c8f043dd82fd45fde5d25a97b10484159c5
+Author: a <a@b>
+Date:   Mon Sep 7 09:51:26 2026 -0400
+
+    second
+
+-	-	b.bin
+1	0	d/e/f
+1	0	a.txt => renamed.txt
+
+diff --git a/b.bin b/b.bin
+index 8352675..ef2caff 100644
+Binary files a/b.bin and b/b.bin differ
+diff --git a/d/e/f b/d/e/f
+index bca70f3..8a08eba 100644
+--- a/d/e/f
++++ b/d/e/f
+@@ -1 +1,2 @@
+ q
++r
+diff --git a/a.txt b/renamed.txt
+similarity index 66%
+rename from a.txt
+rename to renamed.txt
+index b77b4eb..04ec35a 100644
+--- a/a.txt
++++ b/renamed.txt
+@@ -1,2 +1,3 @@
+ x
+ y
++z
