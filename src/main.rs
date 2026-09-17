@@ -1,5 +1,6 @@
 mod analytics;
 mod cmds;
+mod completions;
 mod core;
 mod discover;
 mod hooks;
@@ -31,6 +32,7 @@ use cmds::system::{
 use anyhow::{Context, Result};
 use clap::error::ErrorKind;
 use clap::{Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -959,6 +961,13 @@ enum Commands {
         #[command(subcommand)]
         command: HookCommands,
     },
+
+    /// Generate shell completion scripts (bash, zsh, fish, elvish, powershell)
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: Shell,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1865,7 +1874,10 @@ fn run_cli() -> Result<i32> {
     // Skip for Gain (shows its own inline warning), Init/Verify (manage the hook themselves).
     if !matches!(
         cli.command,
-        Commands::Gain { .. } | Commands::Init { .. } | Commands::Verify { .. }
+        Commands::Completions { .. }
+            | Commands::Gain { .. }
+            | Commands::Init { .. }
+            | Commands::Verify { .. }
     ) {
         hooks::hook_check::maybe_warn();
     }
@@ -2864,6 +2876,11 @@ fn run_cli() -> Result<i32> {
             0
         }
 
+        Commands::Completions { shell } => {
+            completions::generate(shell)?;
+            0
+        }
+
         Commands::Pipe {
             filter,
             passthrough,
@@ -3839,6 +3856,7 @@ mod tests {
             vec!["rtk", "run", "-c", "echo hi"],
             vec!["rtk", "hook-audit"],
             vec!["rtk", "cc-economics"],
+            vec!["rtk", "completions", "bash"],
         ];
         for args in &meta_cmds_that_parse {
             let result = Cli::try_parse_from(args.iter());
