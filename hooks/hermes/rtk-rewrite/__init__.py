@@ -2,6 +2,11 @@
 
 All rewrite logic lives in RTK's Rust ``rtk rewrite`` command; this module
 only bridges Hermes ``pre_tool_call`` payloads to that command and fails open.
+
+The rewrite is returned as Hermes' documented ``modify`` directive
+(``{"action": "modify", "args": {...}}``) rather than by mutating the payload
+in place, so the change goes through Hermes' hook contract and shows up in its
+plugin ledger instead of relying on argument-object identity.
 """
 
 import shutil
@@ -38,7 +43,7 @@ def _check_rtk():
 
 
 def _pre_tool_call(tool_name=None, args=None, **_kwargs):
-    """Rewrite mutable Hermes terminal command args when RTK provides a change."""
+    """Return a Hermes ``modify`` directive when RTK provides a rewrite."""
     try:
         if tool_name != "terminal" or not isinstance(args, dict):
             return
@@ -70,7 +75,7 @@ def _pre_tool_call(tool_name=None, args=None, **_kwargs):
 
         rewritten = result.stdout.strip()
         if rewritten and rewritten != command:
-            args["command"] = rewritten
+            return {"action": "modify", "args": {"command": rewritten}}
     except Exception as e:
         _warn(str(e))
         return
