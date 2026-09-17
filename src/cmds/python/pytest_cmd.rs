@@ -67,12 +67,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             if is_passthrough_cmd {
                 return fallback_tail(&clean, "pytest", 60);
             }
-            let filtered = filter_pytest_output(&clean);
-            // Any other failure parsed as empty means the run broke before reporting.
-            if exit_code != 0 && exit_code != PYTEST_EXIT_NO_TESTS && filtered == PYTEST_NO_TESTS {
-                return truncate(clean.trim(), config::limits().passthrough_max_chars);
-            }
-            filtered
+            resolve_pytest_summary(&clean, exit_code)
         },
         runner::RunOptions::stdout_only().tee("pytest"),
     )
@@ -80,6 +75,20 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
 const PYTEST_NO_TESTS: &str = "Pytest: No tests collected";
 const PYTEST_EXIT_NO_TESTS: i32 = 5;
+
+// pytest's own exit codes guarantee 0 only when at least one test was
+// collected and passed, so "No tests collected" can never be true at exit 0.
+// A verbosity level that prints no summary line at all — e.g. rtk's injected
+// `-q` stacking with a project's `addopts = -q` into `-qq` — hits the parser's
+// zero-counts fallback despite tests having actually run; fall back to the
+// raw output instead of asserting the impossible.
+fn resolve_pytest_summary(clean: &str, exit_code: i32) -> String {
+    let filtered = filter_pytest_output(clean);
+    if exit_code != PYTEST_EXIT_NO_TESTS && filtered == PYTEST_NO_TESTS {
+        return truncate(clean.trim(), config::limits().passthrough_max_chars);
+    }
+    filtered
+}
 
 // --version / --help / -h: pytest prints info and exits, there's nothing to
 // filter. Passing these through raw (like the JVM/PHP wrappers do) avoids
@@ -600,6 +609,25 @@ ERROR tests/test_bar.py - ImportError: boom
             result
         );
         assert!(result.contains("test_bar.py"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_double_quiet_no_summary_line_falls_back_at_exit_zero() {
+        // rtk's injected -q stacked with a project's `addopts = -q` becomes
+        // -qq, which prints no final summary line even though tests ran and
+        // passed (exit 0). pytest can never legitimately exit 0 with zero
+        // tests collected, so this must not render "No tests collected".
+        let output = "=== test session starts ===\nplatform darwin -- Python 3.11.0\ncollected 20 items\n\n....................\n";
+        let result = resolve_pytest_summary(output, 0);
+        assert_ne!(result, PYTEST_NO_TESTS, "got: {}", result);
+        assert!(result.contains("20 items"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_no_tests_collected_still_reported_at_exit_five() {
+        let output =
+            "=== test session starts ===\ncollected 0 items\n\n=== no tests ran in 0.00s ===";
+        assert_eq!(resolve_pytest_summary(output, 5), PYTEST_NO_TESTS);
     }
 
     #[test]
