@@ -146,6 +146,54 @@ fn tokenize_search_args<'a, T: AsRef<str>>(args: &'a [T], engine: Engine) -> Vec
     )
 }
 
+#[cfg(windows)]
+fn append_search_arg(cmd: &mut Command, arg: &str) {
+    use std::os::windows::process::CommandExt;
+
+    let is_batch_wrapper = std::path::Path::new(cmd.get_program())
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"));
+    if !arg.contains('"') || is_batch_wrapper {
+        cmd.arg(arg);
+        return;
+    }
+
+    // Rust only wraps Windows arguments automatically when they contain whitespace.
+    // MSYS2 tools also need wrapping when an argument contains literal quotes, or their
+    // C runtime interprets Rust's otherwise-correct quote escapes as regex backslashes.
+    let mut quoted = String::with_capacity(arg.len() + 2);
+    quoted.push('"');
+    let mut backslashes = 0;
+    for ch in arg.chars() {
+        if ch == '\\' {
+            backslashes += 1;
+            continue;
+        }
+        if ch == '"' {
+            quoted.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
+        } else {
+            quoted.extend(std::iter::repeat_n('\\', backslashes));
+        }
+        backslashes = 0;
+        quoted.push(ch);
+    }
+    quoted.extend(std::iter::repeat_n('\\', backslashes * 2));
+    quoted.push('"');
+    cmd.raw_arg(quoted);
+}
+
+#[cfg(not(windows))]
+fn append_search_arg(cmd: &mut Command, arg: &str) {
+    cmd.arg(arg);
+}
+
+fn append_search_args<T: AsRef<str>>(cmd: &mut Command, args: &[T]) {
+    for arg in args {
+        append_search_arg(cmd, arg.as_ref());
+    }
+}
+
 /// Every grep/rg value-taking flag claims even a literal `--` as its value, unlike git/cargo --
 /// verified against both engines for short and long, numeric- and file-typed flags alike.
 fn search_takes_value(engine: Engine, kind: TokenKind, name: &str) -> Option<ValueSpec> {
@@ -432,18 +480,17 @@ fn engine_command<T: AsRef<str>>(
 ) -> Command {
     let mut cmd = resolved_command(engine.bin());
     cmd.args(engine.parse_flags());
-    for a in extra_args {
-        cmd.arg(a.as_ref());
-    }
+    append_search_args(&mut cmd, extra_args);
     if line_buffered {
         // The engine writes through a pipe, so flush each match immediately.
         cmd.arg("--line-buffered");
     }
     for p in patterns {
-        cmd.args(["-e", p]);
+        cmd.arg("-e");
+        append_search_arg(&mut cmd, p);
     }
     cmd.arg("--");
-    cmd.args(paths);
+    append_search_args(&mut cmd, paths);
     cmd
 }
 
@@ -561,9 +608,7 @@ fn passthrough<T: AsRef<str>>(
         // Keep passthrough output live when stdout is piped.
         cmd.arg("--line-buffered");
     }
-    for a in args {
-        cmd.arg(a.as_ref());
-    }
+    append_search_args(&mut cmd, args);
 
     let exit_code = if stream_stdin {
         stream::run_streaming(&mut cmd, StdinMode::Inherit, FilterMode::Passthrough)
@@ -616,7 +661,7 @@ pub fn run(
 
     if asks_for_help {
         let mut cmd = resolved_command(engine.bin());
-        cmd.args(args);
+        append_search_args(&mut cmd, args);
         let result = exec_capture(&mut cmd).context("search failed")?;
         print!("{}", result.stdout);
         if !result.stderr.is_empty() {
