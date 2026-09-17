@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "outDir": "dist",
+    "strict": true,
+    "skipLibCheck": true
+  },
+  "files": [
+    "index.ts"
+  ]
+}
