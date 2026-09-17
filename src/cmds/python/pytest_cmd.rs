@@ -3,7 +3,7 @@
 use crate::core::config;
 use crate::core::runner;
 use crate::core::truncate::CAP_WARNINGS;
-use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
+use crate::core::utils::{fallback_tail, resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
 
 const MAX_XFAIL: usize = CAP_WARNINGS;
@@ -26,6 +26,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         c
     };
 
+    let is_passthrough_cmd = is_passthrough_flag(args);
+
     let has_tb_flag = args.iter().any(|a| a.starts_with("--tb"));
     let has_quiet_flag = args.iter().any(|a| a == "-q" || a == "--quiet");
     // Only treat a short `-r…` as pytest's report flag (not `--randomly-seed` etc.)
@@ -33,17 +35,19 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         .iter()
         .any(|a| a.starts_with("-r") && !a.starts_with("--"));
 
-    if !has_tb_flag {
-        cmd.arg("--tb=short");
-    }
-    if !has_quiet_flag {
-        cmd.arg("-q");
-    }
-    // Surface xfailed/xpassed (and their reasons) in the short summary section
-    // so the compact output can report expected failures and — crucially —
-    // unexpected passes (XPASS), which signal a behavior change.
-    if !has_report_flag {
-        cmd.arg("-rxX");
+    if !is_passthrough_cmd {
+        if !has_tb_flag {
+            cmd.arg("--tb=short");
+        }
+        if !has_quiet_flag {
+            cmd.arg("-q");
+        }
+        // Surface xfailed/xpassed (and their reasons) in the short summary section
+        // so the compact output can report expected failures and — crucially —
+        // unexpected passes (XPASS), which signal a behavior change.
+        if !has_report_flag {
+            cmd.arg("-rxX");
+        }
     }
 
     for arg in args {
@@ -58,8 +62,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         cmd,
         "pytest",
         &args.join(" "),
-        |raw, exit_code| {
+        move |raw, exit_code| {
             let clean = strip_ansi(raw);
+            if is_passthrough_cmd {
+                return fallback_tail(&clean, "pytest", 60);
+            }
             let filtered = filter_pytest_output(&clean);
             // Any other failure parsed as empty means the run broke before reporting.
             if exit_code != 0 && exit_code != PYTEST_EXIT_NO_TESTS && filtered == PYTEST_NO_TESTS {
@@ -73,6 +80,14 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
 const PYTEST_NO_TESTS: &str = "Pytest: No tests collected";
 const PYTEST_EXIT_NO_TESTS: i32 = 5;
+
+// --version / --help / -h: pytest prints info and exits, there's nothing to
+// filter. Passing these through raw (like the JVM/PHP wrappers do) avoids
+// parsing that output as "no tests collected".
+fn is_passthrough_flag(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| matches!(a.as_str(), "--version" | "--help" | "-h"))
+}
 
 pub(crate) fn filter_pytest_output(output: &str) -> String {
     let mut state = ParseState::Header;
@@ -509,6 +524,14 @@ FAILED tests/test_foo.py::test_something - AssertionError
             "Should show actual test counts. Got: {}",
             result
         );
+    }
+
+    #[test]
+    fn test_is_passthrough_flag() {
+        assert!(is_passthrough_flag(&["--version".to_string()]));
+        assert!(is_passthrough_flag(&["--help".to_string()]));
+        assert!(is_passthrough_flag(&["-h".to_string()]));
+        assert!(!is_passthrough_flag(&["tests/test_foo.py".to_string()]));
     }
 
     #[test]
