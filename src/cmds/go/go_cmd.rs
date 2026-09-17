@@ -2,9 +2,10 @@
 
 use crate::core::guard::never_worse;
 use crate::core::runner;
+use crate::core::stream::{CaptureResult, exec_capture};
 use crate::core::tracking;
 use crate::core::truncate::CAP_ERRORS;
-use crate::core::utils::{exit_code_from_output, resolved_command, truncate};
+use crate::core::utils::{resolved_command, truncate};
 use crate::golangci_cmd;
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -149,16 +150,12 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
         eprintln!("Running: go {} ...", subcommand);
     }
 
-    let output = cmd
-        .output()
-        .with_context(|| format!("Failed to run go {}", subcommand))?;
+    let captured =
+        exec_capture(&mut cmd).with_context(|| format!("Failed to run go {}", subcommand))?;
+    let raw = format!("{}\n{}", captured.stdout, captured.stderr);
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    print!("{}", stdout);
-    eprint!("{}", stderr);
+    print!("{}", captured.stdout);
+    eprint!("{}", captured.stderr);
 
     timer.track(
         &format!("go {}", subcommand),
@@ -167,26 +164,21 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
         &raw, // No filtering for unsupported commands
     );
 
-    Ok(exit_code_from_output(&output, "go"))
+    Ok(captured.exit_code)
 }
 
 /// Detect golangci-lint major version when invoked via `go tool`.
 /// Returns 1 on any failure (safe fallback — v1 behaviour).
 fn detect_go_tool_golangci_version() -> u32 {
-    let output = resolved_command("go")
-        .arg("tool")
-        .arg("golangci-lint")
-        .arg("--version")
-        .output();
+    let mut cmd = resolved_command("go");
+    cmd.arg("tool").arg("golangci-lint").arg("--version");
 
-    match output {
-        Ok(o) => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            let version_text = if stdout.trim().is_empty() {
-                &*stderr
+    match exec_capture(&mut cmd) {
+        Ok(captured) => {
+            let version_text = if captured.stdout.trim().is_empty() {
+                &captured.stderr
             } else {
-                &*stdout
+                &captured.stdout
             };
             golangci_cmd::parse_major_version(version_text)
         }
@@ -221,12 +213,11 @@ impl GoTool {
 
 /// If the first arg is `tool` identify if it is a tool we already handle.
 fn match_go_tool(args: &[OsString]) -> Option<(GoTool, &[OsString])> {
-    if args.first().map(|a| a == "tool").unwrap_or(false) {
-        if let Some(tool_arg) = args.get(1) {
-            if let Some(tool) = GoTool::from_name(&tool_arg.to_string_lossy()) {
-                return Some((tool, &args[2..]));
-            }
-        }
+    if args.first().map(|a| a == "tool").unwrap_or(false)
+        && let Some(tool_arg) = args.get(1)
+        && let Some(tool) = GoTool::from_name(&tool_arg.to_string_lossy())
+    {
+        return Some((tool, &args[2..]));
     }
     None
 }
@@ -265,12 +256,11 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
         }
     }
 
-    let output = cmd
-        .output()
-        .context("Failed to run go tool golangci-lint")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let CaptureResult {
+        stdout,
+        stderr,
+        exit_code,
+    } = exec_capture(&mut cmd).context("Failed to run go tool golangci-lint")?;
     let raw = format!("{}\n{}", stdout, stderr);
 
     // v2 outputs JSON on first line + trailing text; v1 outputs just JSON
@@ -295,7 +285,6 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
         shown,
     );
 
-    let exit_code = exit_code_from_output(&output, "go tool golangci-lint");
     // golangci-lint: exit 0 = clean, exit 1 = lint issues found (not an error),
     // exit 2+ = config/build error, None = killed by signal (OOM, SIGKILL)
     Ok(if exit_code == 1 { 0 } else { exit_code })
@@ -360,10 +349,10 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
                     // Package-level build failure
                     pkg_result.build_failed = true;
                     // Collect build errors from the import path
-                    if let Some(import_path) = &event.failed_build {
-                        if let Some(errors) = build_output.remove(import_path) {
-                            pkg_result.build_errors = errors;
-                        }
+                    if let Some(import_path) = &event.failed_build
+                        && let Some(errors) = build_output.remove(import_path)
+                    {
+                        pkg_result.build_errors = errors;
                     }
                 } else {
                     // Package-level failure without a specific test or build error
@@ -528,15 +517,15 @@ fn select_go_test_failure_lines(outputs: &[String]) -> Vec<String> {
         }
     }
 
-    if relevant.is_empty() {
-        if let Some(line) = outputs.iter().map(|line| line.trim()).find(|line| {
+    if relevant.is_empty()
+        && let Some(line) = outputs.iter().map(|line| line.trim()).find(|line| {
             !line.is_empty()
                 && !line.starts_with("=== RUN")
                 && !line.starts_with("--- FAIL")
                 && !line.starts_with("--- PASS")
-        }) {
-            relevant.push(line.to_string());
-        }
+        })
+    {
+        relevant.push(line.to_string());
     }
 
     relevant
@@ -602,9 +591,14 @@ fn filter_go_build_with_exit(output: &str, exit_code: i32) -> String {
     }
 
     if errors.len() > MAX_GO_BUILD_ERRORS {
-        result.push_str(&format!("\n… +{} more errors\n", errors.len() - MAX_GO_BUILD_ERRORS));
+        result.push_str(&format!(
+            "\n… +{} more errors\n",
+            errors.len() - MAX_GO_BUILD_ERRORS
+        ));
         let all_errors = errors.join("\n");
-        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_errors, "go-build", MAX_GO_BUILD_ERRORS + 1) {
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_errors, "go-build", MAX_GO_BUILD_ERRORS + 1)
+        {
             result.push_str(&format!("  {}\n", hint));
         }
     }
@@ -725,9 +719,14 @@ fn filter_go_vet(output: &str) -> String {
     }
 
     if issues.len() > MAX_GO_VET_ISSUES {
-        result.push_str(&format!("\n… +{} more issues\n", issues.len() - MAX_GO_VET_ISSUES));
+        result.push_str(&format!(
+            "\n… +{} more issues\n",
+            issues.len() - MAX_GO_VET_ISSUES
+        ));
         let all_issues = issues.join("\n");
-        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_issues, "go-vet", MAX_GO_VET_ISSUES + 1) {
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_issues, "go-vet", MAX_GO_VET_ISSUES + 1)
+        {
             result.push_str(&format!("  {}\n", hint));
         }
     }

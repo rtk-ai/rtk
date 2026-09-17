@@ -1,0 +1,16 @@
+Test project /tmp/build
+    Start  1: pass_fast
+1/2 Test  #1: pass_fast ........................   Passed    0.00 sec
+    Start 11: discovery_fail
+2/2 Test #11: discovery_fail ...................***Failed    0.00 sec
+ERROR: No tests were found in the discovery phase
+assertion failed at bar.cpp:3
+
+
+50% tests passed, 1 tests failed out of 2
+
+Total Test time (real) =   0.01 sec
+
+The following tests FAILED:
+	 11 - discovery_fail (Failed)
+Errors while running CTest

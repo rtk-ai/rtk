@@ -10,7 +10,7 @@
 - Returns `hook_specific_output.tool_input.command` for transparent rewrite plus a `system_message` for UI visibility
 - Non-bash tool / empty command / malformed JSON / RTK-unknown command → passthrough (exit 0, empty stdout)
 - RTK permission deny → `{"decision":"deny","reason":"..."}`
-- Alongside the hook, a system prompt at `~/.vibe/prompts/rtk.md` is installed as a belt-and-suspenders fallback (skip with `--hook-only`)
+- Alongside the hook, a system prompt at `~/.vibe/prompts/rtk.md` is installed as a belt-and-suspenders fallback (skip with `--hook-only`); its content follows `awareness.level` in config.toml (`../rtk-awareness*.md`)
 - Installed globally via `rtk init -g --agent vibe`; there is no project-scoped variant
 
 ## Notes

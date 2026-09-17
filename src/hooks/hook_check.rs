@@ -4,6 +4,7 @@ use super::constants::{HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTIN
 use super::init::resolve_claude_dir;
 use super::is_claude_hook_entry;
 use crate::core::constants::RTK_DATA_DIR;
+use crate::core::utils::from_json_str;
 use std::path::PathBuf;
 
 const CURRENT_HOOK_VERSION: u8 = 3;
@@ -64,7 +65,7 @@ fn binary_hook_registered(claude_dir: &std::path::Path) -> bool {
         Ok(c) if !c.trim().is_empty() => c,
         _ => return false,
     };
-    let root: serde_json::Value = match serde_json::from_str(&content) {
+    let root: serde_json::Value = match from_json_str(&content) {
         Ok(v) => v,
         Err(_) => return false,
     };
@@ -101,12 +102,11 @@ fn check_and_warn() -> Option<()> {
 
     // Rate limit: warn once per day
     let marker = warn_marker_path()?;
-    if let Ok(meta) = std::fs::metadata(&marker) {
-        if let Ok(modified) = meta.modified() {
-            if modified.elapsed().map(|e| e.as_secs()).unwrap_or(u64::MAX) < WARN_INTERVAL_SECS {
-                return Some(());
-            }
-        }
+    if let Ok(meta) = std::fs::metadata(&marker)
+        && let Ok(modified) = meta.modified()
+        && modified.elapsed().map(|e| e.as_secs()).unwrap_or(u64::MAX) < WARN_INTERVAL_SECS
+    {
+        return Some(());
     }
 
     eprintln!("{}", warning);
@@ -121,10 +121,10 @@ fn check_and_warn() -> Option<()> {
 pub fn parse_hook_version(content: &str) -> u8 {
     // Version tag must be in the first 5 lines (shebang + header convention)
     for line in content.lines().take(5) {
-        if let Some(rest) = line.strip_prefix("# rtk-hook-version:") {
-            if let Ok(v) = rest.trim().parse::<u8>() {
-                return v;
-            }
+        if let Some(rest) = line.strip_prefix("# rtk-hook-version:")
+            && let Ok(v) = rest.trim().parse::<u8>()
+        {
+            return v;
         }
     }
     0 // No version tag = version 0 (outdated)
@@ -133,11 +133,7 @@ pub fn parse_hook_version(content: &str) -> u8 {
 fn hook_installed_path() -> Option<PathBuf> {
     let claude_dir = resolve_claude_dir().ok()?;
     let path = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
-    if path.exists() {
-        Some(path)
-    } else {
-        None
-    }
+    if path.exists() { Some(path) } else { None }
 }
 
 fn warn_marker_path() -> Option<PathBuf> {
@@ -150,7 +146,7 @@ mod tests {
     use super::*;
     use crate::hooks::constants::{
         CODEX_DIR, CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, HERMES_DIR,
-        HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME,
+        HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HERMES_PLUGINS_SUBDIR,
         OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
     };
 

@@ -96,13 +96,11 @@ impl BlockHandler for CargoBuildHandler {
         !(line.trim().is_empty() && block.len() > 3)
     }
 
-    fn format_summary(&self, exit_code: i32, _raw: &str) -> Option<String> {
+    fn format_summary(&self, exit_code: i32, raw: &str) -> Option<String> {
         if self.error_count == 0 && self.warnings == 0 && exit_code == 0 {
-            return Some(cargo_build_success_line(
-                self.compiled,
-                self.finished_line.as_deref(),
-                self.label,
-            ));
+            let summary =
+                cargo_build_success_line(self.compiled, self.finished_line.as_deref(), self.label);
+            return Some(crate::core::guard::never_worse(raw, &summary).to_string());
         }
         // The streamed path only runs for non-json build/check; error blocks are
         // emitted live, so the summary carries no rendered diagnostics.
@@ -136,6 +134,64 @@ impl CargoTestHandler {
             summary_lines: Vec::new(),
             has_compile_errors: false,
         }
+    }
+
+    /// Compacted `cargo test` summary, before the never-worse guard.
+    fn compute_test_summary(&self, raw: &str) -> Option<String> {
+        if self.summary_lines.is_empty() {
+            let json = extract_json_diagnostics(raw);
+            if self.has_compile_errors || !json.errors.is_empty() {
+                // Content-based (exit 0): a real compile error yields "cargo test: N
+                // errors"; a bare "could not compile" leaves the raw tail fallback.
+                let build_filtered = filter_cargo_build_labeled(raw, "test", 0);
+                if build_filtered.contains("cargo test:") {
+                    return Some(format!("{}\n", build_filtered));
+                }
+                // Fallback: last 5 meaningful lines
+                let meaningful: Vec<&str> = raw
+                    .lines()
+                    .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("Compiling"))
+                    .collect();
+                let last5: Vec<&str> = meaningful.iter().rev().take(5).rev().copied().collect();
+                return Some(format!("{}\n", last5.join("\n")));
+            }
+        }
+
+        // No failures emitted — aggregate pass results
+        let mut aggregated: Option<AggregatedTestResult> = None;
+        let mut all_parsed = true;
+
+        for line in &self.summary_lines {
+            if let Some(parsed) = AggregatedTestResult::parse_line(line) {
+                if let Some(ref mut agg) = aggregated {
+                    agg.merge(&parsed);
+                } else {
+                    aggregated = Some(parsed);
+                }
+            } else {
+                all_parsed = false;
+                break;
+            }
+        }
+
+        if all_parsed
+            && let Some(agg) = aggregated
+            && agg.suites > 0
+        {
+            return Some(format!("{}\n", agg.format_compact()));
+        }
+
+        // Fallback: show raw summary lines
+        if !self.summary_lines.is_empty() {
+            let mut s = String::new();
+            for line in &self.summary_lines {
+                s.push_str(line);
+                s.push('\n');
+            }
+            return Some(s);
+        }
+
+        None
     }
 }
 
@@ -195,61 +251,12 @@ impl BlockHandler for CargoTestHandler {
     }
 
     fn format_summary(&self, _exit_code: i32, raw: &str) -> Option<String> {
-        if self.summary_lines.is_empty() {
-            let json = extract_json_diagnostics(raw);
-            if self.has_compile_errors || !json.errors.is_empty() {
-                // Content-based (exit 0): a real compile error yields "cargo test: N
-                // errors"; a bare "could not compile" leaves the raw tail fallback.
-                let build_filtered = filter_cargo_build_labeled(raw, "test", 0);
-                if build_filtered.contains("cargo test:") {
-                    return Some(format!("{}\n", build_filtered));
-                }
-                // Fallback: last 5 meaningful lines
-                let meaningful: Vec<&str> = raw
-                    .lines()
-                    .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("Compiling"))
-                    .collect();
-                let last5: Vec<&str> = meaningful.iter().rev().take(5).rev().copied().collect();
-                return Some(format!("{}\n", last5.join("\n")));
-            }
-        }
-
-        // No failures emitted — aggregate pass results
-        let mut aggregated: Option<AggregatedTestResult> = None;
-        let mut all_parsed = true;
-
-        for line in &self.summary_lines {
-            if let Some(parsed) = AggregatedTestResult::parse_line(line) {
-                if let Some(ref mut agg) = aggregated {
-                    agg.merge(&parsed);
-                } else {
-                    aggregated = Some(parsed);
-                }
-            } else {
-                all_parsed = false;
-                break;
-            }
-        }
-
-        if all_parsed {
-            if let Some(agg) = aggregated {
-                if agg.suites > 0 {
-                    return Some(format!("{}\n", agg.format_compact()));
-                }
-            }
-        }
-
-        // Fallback: show raw summary lines
-        if !self.summary_lines.is_empty() {
-            let mut s = String::new();
-            for line in &self.summary_lines {
-                s.push_str(line);
-                s.push('\n');
-            }
-            return Some(s);
-        }
-
-        None
+        // Same never-worse guard as CargoBuildHandler (#3430 review): if the
+        // compacted summary ends up larger than the raw output (e.g. a tiny
+        // `cargo test` run), keep the raw output instead of "compacting" it
+        // into something bigger.
+        let summary = self.compute_test_summary(raw)?;
+        Some(crate::core::guard::never_worse(raw, &summary).to_string())
     }
 }
 
@@ -350,10 +357,10 @@ fn has_json_message_format(args: &[String]) -> bool {
     while let Some(arg) = iter.next() {
         if let Some(val) = arg.strip_prefix("--message-format=") {
             json = val.contains("json");
-        } else if arg == "--message-format" {
-            if let Some(val) = iter.next() {
-                json = val.contains("json");
-            }
+        } else if arg == "--message-format"
+            && let Some(val) = iter.next()
+        {
+            json = val.contains("json");
         }
     }
     json
@@ -369,7 +376,9 @@ fn run_build(args: &[String], verbose: u8) -> Result<i32> {
         "build",
         args,
         verbose,
-        Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label("build"))),
+        Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label(
+            "build",
+        ))),
     )
 }
 
@@ -403,7 +412,9 @@ fn run_check(args: &[String], verbose: u8) -> Result<i32> {
         "check",
         args,
         verbose,
-        Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label("check"))),
+        Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label(
+            "check",
+        ))),
     )
 }
 
@@ -662,10 +673,10 @@ fn filter_cargo_nextest(output: &str) -> String {
 
         // Parse binary count from Starting line
         if trimmed.starts_with("Starting") {
-            if let Some(caps) = starting_re.captures(trimmed) {
-                if let Some(m) = caps.get(1) {
-                    binaries = m.as_str().parse().unwrap_or(0);
-                }
+            if let Some(caps) = starting_re.captures(trimmed)
+                && let Some(m) = caps.get(1)
+            {
+                binaries = m.as_str().parse().unwrap_or(0);
             }
             continue;
         }
@@ -877,7 +888,11 @@ fn extract_json_diagnostics(raw: &str) -> JsonDiagnostics {
             continue;
         }
         if let Some(rendered) = msg.rendered {
-            bucket.push(crate::core::utils::strip_ansi(&rendered).trim_end().to_string());
+            bucket.push(
+                crate::core::utils::strip_ansi(&rendered)
+                    .trim_end()
+                    .to_string(),
+            );
         } else if !msg.message.is_empty() {
             bucket.push(msg.message);
         }
@@ -885,7 +900,11 @@ fn extract_json_diagnostics(raw: &str) -> JsonDiagnostics {
     JsonDiagnostics { errors, warnings }
 }
 
-fn merge_diag_counts(error_count: usize, warnings: usize, json: &JsonDiagnostics) -> (usize, usize) {
+fn merge_diag_counts(
+    error_count: usize,
+    warnings: usize,
+    json: &JsonDiagnostics,
+) -> (usize, usize) {
     (
         error_count.max(json.errors.len()),
         warnings.max(json.warnings.len()),
@@ -988,7 +1007,9 @@ fn filter_cargo_build_labeled(output: &str, label: &'static str, exit_code: i32)
     let (errors, warnings) = merge_diag_counts(handler.error_count, handler.warnings, &json);
 
     if errors == 0 && warnings == 0 && exit_code == 0 {
-        return cargo_build_success_line(handler.compiled, handler.finished_line.as_deref(), label);
+        let summary =
+            cargo_build_success_line(handler.compiled, handler.finished_line.as_deref(), label);
+        return crate::core::guard::never_worse(output, &summary).to_string();
     }
 
     let mut result =
@@ -1187,12 +1208,11 @@ pub(crate) fn filter_cargo_test(output: &str) -> String {
         }
 
         // If all lines parsed successfully and we have at least one suite, return compact format
-        if all_parsed {
-            if let Some(agg) = aggregated {
-                if agg.suites > 0 {
-                    return agg.format_compact();
-                }
-            }
+        if all_parsed
+            && let Some(agg) = aggregated
+            && agg.suites > 0
+        {
+            return agg.format_compact();
         }
 
         // Fallback: use original behavior if regex failed
@@ -1209,7 +1229,10 @@ pub(crate) fn filter_cargo_test(output: &str) -> String {
             result.push_str(&format!("{}. {}\n", i + 1, truncate(failure, 200)));
         }
         if failures.len() > MAX_FAILURES {
-            result.push_str(&format!("\n… +{} more failures\n", failures.len() - MAX_FAILURES));
+            result.push_str(&format!(
+                "\n… +{} more failures\n",
+                failures.len() - MAX_FAILURES
+            ));
             let all_failures = failures.join("\n\n");
             if let Some(hint) =
                 crate::core::tee::force_tee_hint(&all_failures, "cargo-test-failures")
@@ -1383,8 +1406,7 @@ fn filter_cargo_clippy(output: &str) -> String {
                 .map(|b| b.join("\n"))
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            if let Some(hint) =
-                crate::core::tee::force_tee_hint(&all_blocks, "cargo-clippy-errors")
+            if let Some(hint) = crate::core::tee::force_tee_hint(&all_blocks, "cargo-clippy-errors")
             {
                 result.push_str(&format!("  {}\n", hint));
             }
@@ -1437,6 +1459,9 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
+    const TINY_BUILD_SUCCESS_OUTPUT: &str =
+        "    Finished dev [unoptimized + debuginfo] target(s) in 0.01s\n";
+
     use super::*;
     use crate::core::args_utils::restore_double_dash_with_raw;
 
@@ -1555,6 +1580,42 @@ mod tests {
         let result = filter_cargo_build(output);
         assert!(result.contains("cargo build"));
         assert!(result.contains("3 crates compiled"));
+    }
+
+    #[test]
+    fn test_filter_cargo_build_success_uses_raw_when_summary_is_larger() {
+        let output = TINY_BUILD_SUCCESS_OUTPUT;
+        let result = filter_cargo_build(output);
+        assert_eq!(result, output);
+    }
+
+    #[test]
+    fn test_cargo_test_summary_uses_raw_when_summary_is_larger() {
+        // A one-line compile failure is already minimal: prefixing it with the
+        // "cargo test: N errors, ..." header emits more tokens than the raw
+        // output, so the never-worse guard must keep the raw output.
+        const CARGO_COMPILE_FAILURE_EXIT_CODE: i32 = 101;
+        let raw = "error[E0433]: failed to resolve: use of undeclared type `Foo`\n";
+
+        let mut handler = CargoTestHandler::new();
+        for line in raw.lines() {
+            handler.should_skip(line);
+        }
+
+        let unguarded = handler
+            .compute_test_summary(raw)
+            .expect("compile failure yields a summary");
+        assert!(
+            unguarded.len() > raw.len(),
+            "expected the compacted summary to be larger than the raw output, got {:?}",
+            unguarded
+        );
+        assert_eq!(
+            handler
+                .format_summary(CARGO_COMPILE_FAILURE_EXIT_CODE, raw)
+                .as_deref(),
+            Some(raw)
+        );
     }
 
     #[test]
@@ -2315,6 +2376,14 @@ error: test run failed
     }
 
     #[test]
+    fn test_cargo_build_stream_success_uses_raw_when_summary_is_larger() {
+        let input = TINY_BUILD_SUCCESS_OUTPUT;
+        let mut f = BlockStreamFilter::new(CargoBuildHandler::with_label("build"));
+        let result = run_block_filter(&mut f, input, 0);
+        assert_eq!(result, input);
+    }
+
+    #[test]
     fn test_cargo_build_stream_json_success() {
         let input = concat!(
             "   Compiling demo v0.1.0 (/tmp/demo)\n",
@@ -2420,7 +2489,11 @@ error: aborting due to 1 previous error
         );
         let result = filter_cargo_clippy_json(input, 0);
         assert!(result.contains("unused variable"), "got: {}", result);
-        assert!(result.contains("cargo clippy: 0 errors, 1 warnings"), "got: {}", result);
+        assert!(
+            result.contains("cargo clippy: 0 errors, 1 warnings"),
+            "got: {}",
+            result
+        );
     }
 
     #[test]
@@ -2437,7 +2510,11 @@ error: aborting due to 1 previous error
             "a failed build must not be reported as compiled: {}",
             result
         );
-        assert!(result.contains("cargo build: failed (exit 101)"), "got: {}", result);
+        assert!(
+            result.contains("cargo build: failed (exit 101)"),
+            "got: {}",
+            result
+        );
     }
 
     #[test]
@@ -2489,7 +2566,6 @@ error: aborting due to 1 previous error
         );
     }
 
-
     #[test]
     fn test_extract_json_diagnostics_skips_generated_summary() {
         let output = concat!(
@@ -2501,7 +2577,11 @@ error: aborting due to 1 previous error
             "\n",
         );
         let json = extract_json_diagnostics(output);
-        assert_eq!(json.warnings.len(), 1, "generated summary must not inflate the count");
+        assert_eq!(
+            json.warnings.len(),
+            1,
+            "generated summary must not inflate the count"
+        );
         assert!(
             !json.warnings.iter().any(|w| w.contains("generated")),
             "the generated summary line must not appear in the output"
@@ -2518,7 +2598,11 @@ error: aborting due to 1 previous error
         );
         let json = extract_json_diagnostics(output);
         assert_eq!(json.errors.len(), 1, "an ICE must count as an error");
-        assert!(json.errors[0].contains("internal compiler error"), "got: {:?}", json.errors[0]);
+        assert!(
+            json.errors[0].contains("internal compiler error"),
+            "got: {:?}",
+            json.errors[0]
+        );
     }
 
     #[test]
@@ -2627,7 +2711,11 @@ error: aborting due to 1 previous error
 
         let result = filter_cargo_build(&output);
         let rendered = result.matches("error[E0308]").count();
-        assert_eq!(rendered, CAP_ERRORS, "json errors must be capped: {}", result);
+        assert_eq!(
+            rendered, CAP_ERRORS,
+            "json errors must be capped: {}",
+            result
+        );
         assert!(
             result.contains(&format!("… +{} more errors", total - CAP_ERRORS)),
             "expected overflow hint: {}",
@@ -2661,7 +2749,11 @@ error: aborting due to 1 previous error
 
         // The cap is what bounds the output, so assert it holds here too.
         let rendered = result.matches("error[E0308]").count();
-        assert_eq!(rendered, CAP_ERRORS, "json errors must be capped: {}", result);
+        assert_eq!(
+            rendered, CAP_ERRORS,
+            "json errors must be capped: {}",
+            result
+        );
         assert!(
             result.contains(&format!("… +{} more errors", total - CAP_ERRORS)),
             "expected overflow hint: {}",
@@ -2773,10 +2865,17 @@ error: could not compile `rtk` (test "repro_compile_fail") due to 1 previous err
         );
         let mut f = BlockStreamFilter::new(CargoTestHandler::new());
         let result = run_block_filter(&mut f, input, 101);
-        assert!(!result.trim().is_empty(), "json compile error must not be silent");
+        assert!(
+            !result.trim().is_empty(),
+            "json compile error must not be silent"
+        );
         assert!(result.contains("cargo test:"), "got: {}", result);
         assert!(result.contains("1 errors"), "got: {}", result);
-        assert!(result.contains("E0425"), "diagnostic must be surfaced: {}", result);
+        assert!(
+            result.contains("E0425"),
+            "diagnostic must be surfaced: {}",
+            result
+        );
     }
 
     #[test]

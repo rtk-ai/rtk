@@ -141,7 +141,7 @@ cargo build --release
 cargo install --path . --force
 ```
 
-Minimum required Rust version: 1.70+.
+Minimum required Rust version: 1.91 (edition 2024 needs Cargo 1.85 or newer).
 
 ## OpenCode not using RTK
 
@@ -160,6 +160,23 @@ Always use the explicit URL, pinned to the release branch:
 ```bash
 cargo install --git https://github.com/rtk-ai/rtk --branch master
 ```
+
+## Does RTK break Claude's prompt cache?
+
+No. RTK filters command output once, at execution time. The filtered result is written into the
+conversation history and never changes afterwards, and prompt caching matches on a stable prefix
+— RTK does not rewrite anything the cache has already seen.
+
+Smaller tool results also make caching cheaper: cache writes bill at 1.25x and cache reads at
+0.1x the input rate, so fewer tokens in means less to write once and less to re-read every turn.
+
+To see your own cache write and read volumes next to RTK's savings:
+
+```bash
+rtk cc-economics
+```
+
+`rtk gain` reports token savings only; the cache breakdown lives in `rtk cc-economics`.
 
 ## Run the diagnostic script
 

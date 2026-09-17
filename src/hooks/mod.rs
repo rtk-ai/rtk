@@ -1,6 +1,11 @@
 //! Hook installation and lifecycle management for AI coding agents.
 
 pub mod constants;
+// Shares `hook_cmd`'s constraint: it runs inside the hook, where stray output
+// corrupts the JSON protocol. `from_agent` is the one exception and carries its
+// own allow -- it is reached only from the `rtk hook check` CLI.
+#[deny(clippy::print_stdout, clippy::print_stderr)]
+pub mod decision;
 pub mod hook_audit_cmd;
 pub mod hook_check;
 #[deny(clippy::print_stdout, clippy::print_stderr)]
@@ -17,13 +22,21 @@ fn is_rtk_binary(binary: &str) -> bool {
     binary_name == constants::CLAUDE_HOOK_BINARY || binary_name.eq_ignore_ascii_case("rtk.exe")
 }
 
-pub fn is_claude_hook_command(command: &str) -> bool {
+fn is_rtk_hook_command(command: &str, agent: &str) -> bool {
     let parts = crate::discover::lexer::shell_split(command);
-    let [binary, hook, claude] = parts.as_slice() else {
+    let [parsed_binary, hook, target] = parts.as_slice() else {
         return false;
     };
 
-    is_rtk_binary(binary) && hook == "hook" && claude == "claude"
+    is_rtk_binary(parsed_binary) && hook == "hook" && target == agent
+}
+
+pub fn is_claude_hook_command(command: &str) -> bool {
+    is_rtk_hook_command(command, "claude")
+}
+
+pub fn is_codex_hook_command(command: &str) -> bool {
+    is_rtk_hook_command(command, "codex")
 }
 
 pub fn is_claude_hook_entry(hook: &serde_json::Value) -> bool {
@@ -59,6 +72,9 @@ mod tests {
         assert!(is_claude_hook_command(
             "\"/opt/homebrew/bin/rtk\" hook claude"
         ));
+        assert!(is_claude_hook_command(
+            "/Users/jane/My\\ Apps/rtk hook claude"
+        ));
     }
 
     #[test]
@@ -66,6 +82,22 @@ mod tests {
         assert!(!is_claude_hook_command("not-rtk hook claude"));
         assert!(!is_claude_hook_command("/opt/homebrew/bin/rtk hook cursor"));
         assert!(!is_claude_hook_command("echo rtk hook claude"));
+    }
+
+    #[test]
+    fn codex_hook_command_matches_bare_absolute_and_windows_rtk() {
+        assert!(is_codex_hook_command("rtk hook codex"));
+        assert!(is_codex_hook_command("/opt/homebrew/bin/rtk hook codex"));
+        assert!(is_codex_hook_command(
+            "\"C:\\Program Files\\rtk.exe\" hook codex"
+        ));
+    }
+
+    #[test]
+    fn codex_hook_command_rejects_other_commands() {
+        assert!(!is_codex_hook_command("rtk hook claude"));
+        assert!(!is_codex_hook_command("echo rtk hook codex"));
+        assert!(!is_codex_hook_command("\"rtk\"evil hook codex"));
     }
 
     #[test]

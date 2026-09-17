@@ -4,12 +4,12 @@
 //! Specialized filters for high-frequency commands (STS, S3, EC2, ECS, RDS, CloudFormation).
 
 use crate::core::guard::never_worse;
+use crate::core::stream::{CaptureResult, exec_capture};
 use crate::core::tee::force_tee_hint;
 use crate::core::tracking;
 use crate::core::truncate::{CAP_INVENTORY, CAP_LIST};
 use crate::core::utils::{
-    exit_code_from_output, exit_code_from_status, human_bytes, join_with_overflow,
-    resolved_command, shorten_arn, truncate_iso_date,
+    human_bytes, join_with_overflow, resolved_command, shorten_arn, truncate_iso_date,
 };
 use crate::json_cmd;
 use anyhow::{Context, Result};
@@ -242,11 +242,13 @@ fn run_generic(subcommand: &str, args: &[String], verbose: u8, full_sub: &str) -
         eprintln!("Running: aws {}", full_sub);
     }
 
-    let output = cmd.output().context("Failed to run aws CLI")?;
-    let raw = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let CaptureResult {
+        stdout: raw,
+        stderr,
+        exit_code,
+    } = exec_capture(&mut cmd).context("Failed to run aws CLI")?;
 
-    if !output.status.success() {
+    if exit_code != 0 {
         timer.track(
             &format!("aws {}", full_sub),
             &format!("rtk aws {}", full_sub),
@@ -254,7 +256,7 @@ fn run_generic(subcommand: &str, args: &[String], verbose: u8, full_sub: &str) -
             &stderr,
         );
         eprintln!("{}", stderr.trim());
-        return Ok(crate::core::utils::exit_code_from_output(&output, "aws"));
+        return Ok(exit_code);
     }
 
     let filtered = match json_cmd::filter_json_compact(&raw, JSON_COMPRESS_DEPTH) {
@@ -280,11 +282,7 @@ fn run_generic(subcommand: &str, args: &[String], verbose: u8, full_sub: &str) -
     Ok(0)
 }
 
-fn run_aws_json(
-    sub_args: &[&str],
-    extra_args: &[String],
-    verbose: u8,
-) -> Result<(String, String, std::process::ExitStatus)> {
+fn run_aws_json(sub_args: &[&str], extra_args: &[String], verbose: u8) -> Result<CaptureResult> {
     let mut cmd = resolved_command("aws");
     for arg in sub_args {
         cmd.arg(arg);
@@ -313,17 +311,13 @@ fn run_aws_json(
         eprintln!("Running: {}", cmd_desc);
     }
 
-    let output = cmd
-        .output()
-        .context(format!("Failed to run {}", cmd_desc))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let captured = exec_capture(&mut cmd).context(format!("Failed to run {}", cmd_desc))?;
 
-    if !output.status.success() {
-        eprintln!("{}", stderr.trim());
+    if !captured.success() {
+        eprintln!("{}", captured.stderr.trim());
     }
 
-    Ok((stdout, stderr, output.status))
+    Ok(captured)
 }
 
 /// Shared runner for AWS commands that return JSON.
@@ -338,7 +332,11 @@ fn run_aws_filtered(
     let rtk_label = format!("rtk {}", cmd_label);
     let slug = cmd_label.replace(' ', "_");
     let timer = tracking::TimedExecution::start();
-    let (stdout, stderr, status) = run_aws_json(sub_args, extra_args, verbose)?;
+    let CaptureResult {
+        stdout,
+        stderr,
+        exit_code,
+    } = run_aws_json(sub_args, extra_args, verbose)?;
 
     // Combine stdout+stderr for accurate tracking (per contract)
     let raw = if stderr.is_empty() {
@@ -347,8 +345,7 @@ fn run_aws_filtered(
         format!("{}\n{}", stdout, stderr)
     };
 
-    if !status.success() {
-        let exit_code = exit_code_from_status(&status, "aws");
+    if exit_code != 0 {
         if let Some(hint) = crate::core::tee::tee_and_hint(&raw, &slug, exit_code) {
             eprintln!("{}\n{}", stderr.trim(), hint);
         } else {
@@ -387,16 +384,17 @@ fn run_s3_ls(extra_args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: aws s3 ls {}", extra_args.join(" "));
     }
 
-    let output = cmd.output().context("Failed to run aws s3 ls")?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let CaptureResult {
+        stdout,
+        stderr,
+        exit_code,
+    } = exec_capture(&mut cmd).context("Failed to run aws s3 ls")?;
     let raw = if stderr.is_empty() {
         stdout.clone()
     } else {
         format!("{}\n{}", stdout, stderr)
     };
-    if !output.status.success() {
-        let exit_code = exit_code_from_output(&output, "aws");
+    if exit_code != 0 {
         if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "aws_s3_ls", exit_code) {
             eprintln!("{}\n{}", stderr.trim(), hint);
         } else {
@@ -435,18 +433,17 @@ fn run_s3_transfer(operation: &str, extra_args: &[String], verbose: u8) -> Resul
         eprintln!("Running: {} {}", cmd_label, extra_args.join(" "));
     }
 
-    let output = cmd
-        .output()
-        .context(format!("Failed to run {}", cmd_label))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let CaptureResult {
+        stdout,
+        stderr,
+        exit_code,
+    } = exec_capture(&mut cmd).context(format!("Failed to run {}", cmd_label))?;
     let raw = if stderr.is_empty() {
         stdout.clone()
     } else {
         format!("{}\n{}", stdout, stderr)
     };
-    if !output.status.success() {
-        let exit_code = exit_code_from_output(&output, "aws");
+    if exit_code != 0 {
         if let Some(hint) = crate::core::tee::tee_and_hint(&raw, &slug, exit_code) {
             eprintln!("{}\n{}", stderr.trim(), hint);
         } else {
@@ -877,22 +874,22 @@ fn filter_lambda_get(json_str: &str) -> Option<FilterResult> {
 
     // Show layer names if present
     // Layer ARNs use colons: arn:aws:lambda:region:acct:layer:name:version
-    if let Some(layers) = config["Layers"].as_array() {
-        if !layers.is_empty() {
-            let layer_names: Vec<String> = layers
-                .iter()
-                .filter_map(|l| {
-                    let arn = l["Arn"].as_str()?;
-                    let parts: Vec<&str> = arn.rsplitn(3, ':').collect();
-                    if parts.len() >= 2 {
-                        Some(format!("{}:{}", parts[1], parts[0]))
-                    } else {
-                        Some(arn.to_string())
-                    }
-                })
-                .collect();
-            text.push_str(&format!("\n  layers: {}", layer_names.join(", ")));
-        }
+    if let Some(layers) = config["Layers"].as_array()
+        && !layers.is_empty()
+    {
+        let layer_names: Vec<String> = layers
+            .iter()
+            .filter_map(|l| {
+                let arn = l["Arn"].as_str()?;
+                let parts: Vec<&str> = arn.rsplitn(3, ':').collect();
+                if parts.len() >= 2 {
+                    Some(format!("{}:{}", parts[1], parts[0]))
+                } else {
+                    Some(arn.to_string())
+                }
+            })
+            .collect();
+        text.push_str(&format!("\n  layers: {}", layer_names.join(", ")));
     }
 
     Some(FilterResult::new(text))
@@ -1017,69 +1014,69 @@ fn unwrap_dynamodb_value(val: &Value, depth: usize) -> Value {
     }
 
     if let Some(obj) = val.as_object() {
-        if obj.len() == 1 {
-            if let Some((key, inner)) = obj.iter().next() {
-                match key.as_str() {
-                    "S" | "B" => return inner.clone(),
-                    "N" => {
-                        if let Some(s) = inner.as_str() {
-                            // Try i64 first, then f64
-                            if let Ok(n) = s.parse::<i64>() {
-                                return Value::Number(n.into());
-                            }
-                            if let Ok(f) = s.parse::<f64>() {
-                                if let Some(n) = serde_json::Number::from_f64(f) {
-                                    return Value::Number(n);
-                                }
-                            }
-                            return Value::String(s.to_string());
+        if obj.len() == 1
+            && let Some((key, inner)) = obj.iter().next()
+        {
+            match key.as_str() {
+                "S" | "B" => return inner.clone(),
+                "N" => {
+                    if let Some(s) = inner.as_str() {
+                        // Try i64 first, then f64
+                        if let Ok(n) = s.parse::<i64>() {
+                            return Value::Number(n.into());
                         }
-                        return inner.clone();
-                    }
-                    "BOOL" => return inner.clone(),
-                    "NULL" => return Value::Null,
-                    "L" => {
-                        if let Some(arr) = inner.as_array() {
-                            return Value::Array(
-                                arr.iter()
-                                    .map(|v| unwrap_dynamodb_value(v, depth + 1))
-                                    .collect(),
-                            );
+                        if let Ok(f) = s.parse::<f64>()
+                            && let Some(n) = serde_json::Number::from_f64(f)
+                        {
+                            return Value::Number(n);
                         }
+                        return Value::String(s.to_string());
                     }
-                    "M" => {
-                        if let Some(map) = inner.as_object() {
-                            let unwrapped: serde_json::Map<String, Value> = map
-                                .iter()
-                                .map(|(k, v)| (k.clone(), unwrap_dynamodb_value(v, depth + 1)))
-                                .collect();
-                            return Value::Object(unwrapped);
-                        }
-                    }
-                    "SS" => return inner.clone(),
-                    "NS" => {
-                        // Parse NS set: try i64 first, then f64
-                        if let Some(arr) = inner.as_array() {
-                            let nums: Vec<Value> = arr
-                                .iter()
-                                .filter_map(|v| {
-                                    let s = v.as_str()?;
-                                    if let Ok(n) = s.parse::<i64>() {
-                                        Some(Value::Number(n.into()))
-                                    } else if let Ok(f) = s.parse::<f64>() {
-                                        serde_json::Number::from_f64(f).map(Value::Number)
-                                    } else {
-                                        Some(Value::String(s.to_string()))
-                                    }
-                                })
-                                .collect();
-                            return Value::Array(nums);
-                        }
-                        return inner.clone();
-                    }
-                    "BS" => return inner.clone(),
-                    _ => {}
+                    return inner.clone();
                 }
+                "BOOL" => return inner.clone(),
+                "NULL" => return Value::Null,
+                "L" => {
+                    if let Some(arr) = inner.as_array() {
+                        return Value::Array(
+                            arr.iter()
+                                .map(|v| unwrap_dynamodb_value(v, depth + 1))
+                                .collect(),
+                        );
+                    }
+                }
+                "M" => {
+                    if let Some(map) = inner.as_object() {
+                        let unwrapped: serde_json::Map<String, Value> = map
+                            .iter()
+                            .map(|(k, v)| (k.clone(), unwrap_dynamodb_value(v, depth + 1)))
+                            .collect();
+                        return Value::Object(unwrapped);
+                    }
+                }
+                "SS" => return inner.clone(),
+                "NS" => {
+                    // Parse NS set: try i64 first, then f64
+                    if let Some(arr) = inner.as_array() {
+                        let nums: Vec<Value> = arr
+                            .iter()
+                            .filter_map(|v| {
+                                let s = v.as_str()?;
+                                if let Ok(n) = s.parse::<i64>() {
+                                    Some(Value::Number(n.into()))
+                                } else if let Ok(f) = s.parse::<f64>() {
+                                    serde_json::Number::from_f64(f).map(Value::Number)
+                                } else {
+                                    Some(Value::String(s.to_string()))
+                                }
+                            })
+                            .collect();
+                        return Value::Array(nums);
+                    }
+                    return inner.clone();
+                }
+                "BS" => return inner.clone(),
+                _ => {}
             }
         }
         // Not a DynamoDB type wrapper — unwrap each field as a potential item
@@ -1106,10 +1103,10 @@ fn filter_dynamodb_items(json_str: &str) -> Option<FilterResult> {
     lines.push(format!("Count: {}/{}", count, scanned));
 
     // Show ConsumedCapacity if present
-    if let Some(capacity) = v["ConsumedCapacity"].as_object() {
-        if let Some(units) = capacity["CapacityUnits"].as_f64() {
-            lines.push(format!("Capacity: {} RCU", units));
-        }
+    if let Some(capacity) = v["ConsumedCapacity"].as_object()
+        && let Some(units) = capacity["CapacityUnits"].as_f64()
+    {
+        lines.push(format!("Capacity: {} RCU", units));
     }
 
     // Show pagination status if LastEvaluatedKey exists
@@ -1367,10 +1364,10 @@ fn filter_dynamodb_get_item(json_str: &str) -> Option<FilterResult> {
     }
 
     // Show ConsumedCapacity if present
-    if let Some(capacity) = v["ConsumedCapacity"].as_object() {
-        if let Some(units) = capacity["CapacityUnits"].as_f64() {
-            lines.push(format!("Capacity: {} RCU", units));
-        }
+    if let Some(capacity) = v["ConsumedCapacity"].as_object()
+        && let Some(units) = capacity["CapacityUnits"].as_f64()
+    {
+        lines.push(format!("Capacity: {} RCU", units));
     }
 
     if lines.is_empty() {
@@ -1557,9 +1554,11 @@ mod tests {
         let result = filter_ec2_instances(json).unwrap();
         assert!(result.text.contains("EC2: 2 instances"));
         assert!(result.text.contains("i-0a1b2c3d4e5f00001 running t3.micro 10.0.1.10 pub:54.1.2.3 vpc:vpc-123 subnet:subnet-a sg:[sg-001] (web-server-1)"));
-        assert!(result
-            .text
-            .contains("i-0a1b2c3d4e5f00002 stopped t3.large 10.0.2.20"));
+        assert!(
+            result
+                .text
+                .contains("i-0a1b2c3d4e5f00002 stopped t3.large 10.0.2.20")
+        );
         assert!(!result.truncated);
     }
 
@@ -1708,7 +1707,10 @@ mod tests {
             }]
         }"#;
         let result = filter_rds_instances(json).unwrap();
-        assert_eq!(result.text, "mydb postgres 15.4 db.t3.micro available mydb.cluster-abc.us-east-1.rds.amazonaws.com:5432");
+        assert_eq!(
+            result.text,
+            "mydb postgres 15.4 db.t3.micro available mydb.cluster-abc.us-east-1.rds.amazonaws.com:5432"
+        );
     }
 
     #[test]
@@ -1727,9 +1729,11 @@ mod tests {
         }"#;
         let result = filter_cfn_list_stacks(json).unwrap();
         assert!(result.text.contains("my-stack CREATE_COMPLETE 2024-01-15"));
-        assert!(result
-            .text
-            .contains("other-stack UPDATE_COMPLETE 2024-02-20"));
+        assert!(
+            result
+                .text
+                .contains("other-stack UPDATE_COMPLETE 2024-02-20")
+        );
     }
 
     #[test]
@@ -1999,9 +2003,11 @@ mod tests {
         }"#;
         let result = filter_lambda_list(json).unwrap();
         assert!(result.text.contains("my-api python3.12 512MB 30s Active"));
-        assert!(result
-            .text
-            .contains("my-worker nodejs20.x 256MB 60s Active"));
+        assert!(
+            result
+                .text
+                .contains("my-worker nodejs20.x 256MB 60s Active")
+        );
         // SECURITY: secrets must NOT appear
         assert!(!result.text.contains("SECRET_KEY"));
         assert!(!result.text.contains("s3cr3t"));
@@ -2049,9 +2055,11 @@ mod tests {
             "Tags": {"Team": "backend"}
         }"#;
         let result = filter_lambda_get(json).unwrap();
-        assert!(result
-            .text
-            .contains("my-api python3.12 app.handler 512MB 30s Active 2024-01-15"));
+        assert!(
+            result
+                .text
+                .contains("my-api python3.12 app.handler 512MB 30s Active 2024-01-15")
+        );
         assert!(result.text.contains("layers: my-layer:5, common-utils:3"));
         // SECURITY
         assert!(!result.text.contains("SECRET"));
@@ -2100,12 +2108,16 @@ mod tests {
             ]
         }"#;
         let result = filter_iam_roles(json).unwrap();
-        assert!(result
-            .text
-            .contains("admin-role 2024-01-15 [Admin access] assume:[lambda.amazonaws.com]"));
-        assert!(result
-            .text
-            .contains("lambda-exec 2024-02-20 assume:[lambda.amazonaws.com]"));
+        assert!(
+            result
+                .text
+                .contains("admin-role 2024-01-15 [Admin access] assume:[lambda.amazonaws.com]")
+        );
+        assert!(
+            result
+                .text
+                .contains("lambda-exec 2024-02-20 assume:[lambda.amazonaws.com]")
+        );
         // Full policy JSON should NOT appear, only extracted principals
         assert!(!result.text.contains("Statement"));
         assert!(!result.text.contains("Version"));
@@ -2227,15 +2239,21 @@ mod tests {
             ]
         }"#;
         let result = filter_ecs_tasks(json).unwrap();
-        assert!(result
-            .text
-            .contains("abc123def456 RUNNING containers:[web:RUNNING, sidecar:RUNNING]"));
-        assert!(result
-            .text
-            .contains("def789ghi012 STOPPED containers:[worker:STOPPED(exit:1)]"));
-        assert!(result
-            .text
-            .contains("reason:Essential container in task exited"));
+        assert!(
+            result
+                .text
+                .contains("abc123def456 RUNNING containers:[web:RUNNING, sidecar:RUNNING]")
+        );
+        assert!(
+            result
+                .text
+                .contains("def789ghi012 STOPPED containers:[worker:STOPPED(exit:1)]")
+        );
+        assert!(
+            result
+                .text
+                .contains("reason:Essential container in task exited")
+        );
         // Attachments and overrides should NOT appear
         assert!(!result.text.contains("ElasticNetworkInterface"));
         assert!(!result.text.contains("containerOverrides"));
@@ -2334,9 +2352,11 @@ mod tests {
             }
         }"#;
         let result = filter_eks_cluster(json).unwrap();
-        assert!(result
-            .text
-            .contains("my-cluster ACTIVE k8s/1.28 https://ABC123.gr7.us-east-1.eks.amazonaws.com"));
+        assert!(
+            result.text.contains(
+                "my-cluster ACTIVE k8s/1.28 https://ABC123.gr7.us-east-1.eks.amazonaws.com"
+            )
+        );
         // certificateAuthority should NOT appear
         assert!(!result.text.contains("LS0tLS1CRUdJTi"));
         assert!(!result.text.contains("VERY_LONG"));
@@ -2493,9 +2513,11 @@ upload: file10.txt to s3://bucket/file10.txt
         }"#;
         let result = filter_secrets_get(json).unwrap();
         assert!(result.text.contains("Name: my-secret"));
-        assert!(result
-            .text
-            .contains(r#"{"username":"admin","password":"secret123"}"#));
+        assert!(
+            result
+                .text
+                .contains(r#"{"username":"admin","password":"secret123"}"#)
+        );
         assert!(!result.text.contains("ARN"));
         assert!(!result.text.contains("VersionId"));
     }
@@ -2633,13 +2655,17 @@ upload: file10.txt to s3://bucket/file10.txt
             {"Timestamp": "2024-01-15T10:29:00Z", "LogicalResourceId": "VPC", "ResourceType": "AWS::EC2::VPC", "ResourceStatus": "CREATE_COMPLETE"}
         ]}"#;
         let result = filter_cfn_events(json).unwrap();
-        assert!(result
-            .text
-            .starts_with("CloudFormation: 2 events (1 failed, 1 successful)"));
+        assert!(
+            result
+                .text
+                .starts_with("CloudFormation: 2 events (1 failed, 1 successful)")
+        );
         assert!(result.text.contains("--- FAILURES ---"));
-        assert!(result
-            .text
-            .contains("Bucket S3::Bucket CREATE_FAILED REASON: Already exists"));
+        assert!(
+            result
+                .text
+                .contains("Bucket S3::Bucket CREATE_FAILED REASON: Already exists")
+        );
     }
 
     // === Empty collection edge cases ===
@@ -2745,9 +2771,8 @@ upload: file10.txt to s3://bucket/file10.txt
     // type names. Calls the primitive used at aws_cmd.rs run_generic line 259.
     #[test]
     fn test_aws_unsupported_subcommand_json_preserves_values() {
-        let fixture = include_str!(
-            "../../../tests/fixtures/aws_backup_describe_global_settings.json"
-        );
+        let fixture =
+            include_str!("../../../tests/fixtures/aws_backup_describe_global_settings.json");
         let output = json_cmd::filter_json_compact(fixture, JSON_COMPRESS_DEPTH)
             .expect("filter_json_compact must not error on valid AWS JSON");
 

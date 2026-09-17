@@ -1,0 +1,23 @@
+[1mdiff --git a/bin.dat b/bin.dat[m
+[1mindex bdc955b..8835708 100644[m
+Binary files a/bin.dat and b/bin.dat differ
+[1mdiff --git a/src.txt b/dst.txt[m
+[1msimilarity index 57%[m
+[1mrename from src.txt[m
+[1mrename to dst.txt[m
+[1mindex 814f4a4..4cb29ea 100644[m
+[1m--- a/src.txt[m
+[1m+++ b/dst.txt[m
+[36m@@ -1,2 +1,3 @@[m
+ one[m
+ two[m
+[32m+[m[32mthree[m
+[1mdiff --git a/f.txt b/f.txt[m
+[1mindex de98044..7be73ce 100644[m
+[1m--- a/f.txt[m
+[1m+++ b/f.txt[m
+[36m@@ -1,3 +1,3 @@[m
+ a[m
+[31m-b[m
+[32m+[m[32mB[m
+ c[m
