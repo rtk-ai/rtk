@@ -8,16 +8,22 @@
 #![cfg(unix)]
 
 use std::path::Path;
-use std::process::Command;
+
+mod common;
 
 const REMINDER: &str = "No hook installed";
 
 /// Runs `rtk <args>` against a home directory whose Claude config directory
 /// exists but registers no hook, and returns stderr.
 fn run(home: &Path, args: &[&str]) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let out = common::rtk_command()
         .args(args)
         .env("HOME", home)
+        // The daily marker lives under the data directory, which `dirs` takes
+        // from `XDG_DATA_HOME` ahead of `HOME` on Linux. Left at the scratch
+        // directory every test in this file would share one marker, and the
+        // first to spend it would silence the rest.
+        .env("XDG_DATA_HOME", home.join(".local").join("share"))
         .env("RTK_DB_PATH", home.join("rtk.db"))
         .output()
         .expect("run rtk");

@@ -10,8 +10,9 @@
 //! including the #1155 invariant that a `Default` verdict exits 3 and never 0.
 
 use std::path::PathBuf;
-use std::process::Command;
 use tempfile::TempDir;
+
+mod common;
 
 /// An isolated machine: no developer settings, no user rtk config, no real HOME.
 struct Sandbox {
@@ -69,7 +70,7 @@ impl Sandbox {
     }
 
     fn run(&self, args: &[&str]) -> (i32, String, String) {
-        let out = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        let out = common::rtk_command()
             .args(args)
             .current_dir(&self.project)
             .env("HOME", &self.home)
@@ -134,7 +135,7 @@ impl Sandbox {
             "tool_input": { "command": cmd },
         })
         .to_string();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        let mut child = common::rtk_command()
             .args(["hook", "claude"])
             .current_dir(&self.project)
             .env("HOME", &self.home)

@@ -24,7 +24,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const RTK_BIN: &str = env!("CARGO_BIN_EXE_rtk");
+mod common;
 
 /// Number of fuzz iterations. Seeded, so this is deterministic across runs/CI.
 const ITERATIONS: usize = 600;
@@ -101,7 +101,7 @@ fn cat_file_type(repo: &Path, home: &Path, arg: &str) -> Option<String> {
 }
 
 fn rtk_show(repo: &Path, home: &Path, args: &[&str]) -> Output {
-    let mut cmd = Command::new(RTK_BIN);
+    let mut cmd = common::rtk_command();
     cmd.arg("git").arg("show").args(args).current_dir(repo);
     isolate(&mut cmd, home);
     cmd.output().expect("run rtk git show")

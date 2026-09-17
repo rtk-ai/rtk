@@ -9,13 +9,12 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+mod common;
+
 fn rtk_grep(args: &[&str]) -> (String, Option<i32>) {
     let mut a = vec!["grep"];
     a.extend_from_slice(args);
-    let out = Command::new(env!("CARGO_BIN_EXE_rtk"))
-        .args(&a)
-        .output()
-        .expect("rtk");
+    let out = common::rtk_command().args(&a).output().expect("rtk");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
         out.status.code(),
@@ -179,7 +178,7 @@ fn piped_stdin_matches_grep() {
     for args in [vec!["apple"], vec!["-n", "apple"]] {
         let mut rtk_args = vec!["grep"];
         rtk_args.extend_from_slice(&args);
-        let rtk = feed(Command::new(env!("CARGO_BIN_EXE_rtk")).args(&rtk_args));
+        let rtk = feed(common::rtk_command().args(&rtk_args));
         let grep = feed(Command::new("grep").args(&args));
         assert_eq!(rtk, grep, "piped stdin mismatch for {args:?}");
     }
