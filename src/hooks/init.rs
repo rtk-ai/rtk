@@ -128,6 +128,7 @@ schema_version = 1
 # match_command = "^my-tool\\s+build"
 # strip_ansi = true
 # strip_lines_matching = ["^\\s*$", "^Downloading", "^Installing"]
+# dedupe_consecutive = true
 # max_lines = 30
 # on_empty = "my-tool: ok"
 "#;
@@ -144,6 +145,7 @@ schema_version = 1
 # match_command = "^my-global-tool\\b"
 # strip_ansi = true
 # strip_lines_matching = ["^\\s*$"]
+# dedupe_consecutive = true
 # max_lines = 40
 "#;
 
