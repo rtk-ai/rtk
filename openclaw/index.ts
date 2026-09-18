@@ -73,7 +73,7 @@ function tryRewrite(
 }
 
 export default function register(api: any) {
-  const pluginConfig = api.config ?? {};
+  const pluginConfig = api.pluginConfig ?? {};
   const enabled = pluginConfig.enabled !== false;
   const verbose = pluginConfig.verbose === true;
 
