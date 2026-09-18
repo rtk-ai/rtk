@@ -9,6 +9,7 @@
 //! up for its address and otherwise leaves it to whoever runs it. A problem is
 //! at most a warning; nothing here disrupts the session.
 
+use crate::core::child_command::ChildCommand;
 use std::io::Write;
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
@@ -126,7 +127,8 @@ fn is_listening(addr: &str, timeout: Duration) -> bool {
 
 fn spawn_start(addr: &str) -> anyhow::Result<()> {
     let exe = std::env::current_exe().context("resolve the rtk binary path")?;
-    std::process::Command::new(exe)
+    // nosemgrep: dynamic-command-execution -- exe is rtk's own path from current_exe
+    ChildCommand::new(exe)
         .args(["llm-proxy", "start", "--bind", addr])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
