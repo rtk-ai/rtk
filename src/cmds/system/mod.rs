@@ -14,4 +14,5 @@ pub mod read;
 pub mod search;
 pub mod summary;
 pub mod tree;
+pub mod typesafe_cmd;
 pub mod wc_cmd;
