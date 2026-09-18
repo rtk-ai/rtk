@@ -57,6 +57,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     Ok(exit_code)
 }
 
+/// `base_cmd` is already "pip" on the plain path, so a hardcoded "pip" after
+/// it doubled up as "pip pip list" (#4050).
+fn prog_label(base_cmd: &str) -> &'static str {
+    if base_cmd == "uv" { "uv pip" } else { "pip" }
+}
+
 fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String, i32)> {
     let mut cmd = resolved_command(base_cmd);
 
@@ -71,11 +77,11 @@ fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, Str
     }
 
     if verbose > 0 {
-        eprintln!("Running: {} pip list --format=json", base_cmd);
+        eprintln!("Running: {} list --format=json", prog_label(base_cmd));
     }
 
-    let result =
-        exec_capture(&mut cmd).with_context(|| format!("Failed to run {} pip list", base_cmd))?;
+    let result = exec_capture(&mut cmd)
+        .with_context(|| format!("Failed to run {} list", prog_label(base_cmd)))?;
 
     let raw = format!("{}\n{}", result.stdout, result.stderr);
 
@@ -99,11 +105,14 @@ fn run_outdated(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String,
     }
 
     if verbose > 0 {
-        eprintln!("Running: {} pip list --outdated --format=json", base_cmd);
+        eprintln!(
+            "Running: {} list --outdated --format=json",
+            prog_label(base_cmd)
+        );
     }
 
     let result = exec_capture(&mut cmd)
-        .with_context(|| format!("Failed to run {} pip list --outdated", base_cmd))?;
+        .with_context(|| format!("Failed to run {} list --outdated", prog_label(base_cmd)))?;
 
     let raw = format!("{}\n{}", result.stdout, result.stderr);
 
@@ -125,11 +134,11 @@ fn run_passthrough(base_cmd: &str, args: &[String], verbose: u8) -> Result<(Stri
     }
 
     if verbose > 0 {
-        eprintln!("Running: {} pip {}", base_cmd, args.join(" "));
+        eprintln!("Running: {} {}", prog_label(base_cmd), args.join(" "));
     }
 
     let result = exec_capture(&mut cmd)
-        .with_context(|| format!("Failed to run {} pip {}", base_cmd, args.join(" ")))?;
+        .with_context(|| format!("Failed to run {} {}", prog_label(base_cmd), args.join(" ")))?;
 
     let raw = format!("{}\n{}", result.stdout, result.stderr);
 
@@ -231,6 +240,12 @@ fn filter_pip_outdated(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_prog_label_never_doubles_pip() {
+        assert_eq!(prog_label("pip"), "pip");
+        assert_eq!(prog_label("uv"), "uv pip");
+    }
 
     #[test]
     fn test_filter_pip_list() {
