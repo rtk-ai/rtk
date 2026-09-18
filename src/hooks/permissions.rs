@@ -36,6 +36,7 @@ pub enum Host {
     Claude,
     Codex,
     Cursor,
+    Crush,
     Gemini,
     Droid,
     Vibe,
@@ -56,6 +57,7 @@ pub(crate) fn load_rules_for(host: Host) -> (Vec<String>, Vec<String>, Vec<Strin
     match host {
         Host::Claude => load_permission_rules(),
         Host::Cursor => load_cursor_rules(),
+        Host::Crush => (Vec::new(), Vec::new(), Vec::new()),
         Host::Gemini => load_gemini_rules(),
         Host::Droid => load_droid_rules(),
         // Hosts with no RTK-side rule source. Codex enforces its native
