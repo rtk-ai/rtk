@@ -9,3 +9,4 @@
 - `curl_cmd.rs` truncates long responses, saves full output to file for recovery
 - `wget_cmd.rs` wraps wget with output filtering
 - `psql_cmd.rs` filters PostgreSQL query output
+- `mysql_cmd.rs` filters MySQL query output — strips table-mode (`-t`) borders/padding and the `(N.NN sec)` footer, passes batch (`-B`) and `\G` vertical output through unchanged; shares the table de-formatter with psql via `core::ascii_table`, and scrubs inline credentials (`-p`, `--password=`) from tracked/logged labels
