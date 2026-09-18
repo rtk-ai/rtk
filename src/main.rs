@@ -1850,6 +1850,9 @@ fn validate_pnpm_globals(
     }
 }
 
+/// Exit status when rtk cannot write its output (full disk, quota, I/O error).
+const EXIT_OUTPUT_WRITE_FAILED: i32 = 1;
+
 fn main() {
     // Reset SIGPIPE to default handler so writing to a closed pipe
     // e.g `rtk git log | head` exits silently instead of panicking.
@@ -1861,6 +1864,32 @@ fn main() {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
+
+    // A stdout write can fail for reasons other than a closed pipe: a full
+    // disk, an exhausted tmpfs quota, an I/O error. println! panics inside std
+    // when that happens, and panic="abort" turns the panic into SIGABRT +
+    // coredump - the same crash the SIGPIPE reset above prevents, arriving
+    // through a different door. The print macros hand us no error to return,
+    // so catch that one panic before it reaches the abort and exit the way a
+    // CLI should: non-zero, with a line on stderr.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info.payload();
+        let msg = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        // std's message is "failed printing to stdout: ..." / "... stderr: ...".
+        if msg.starts_with("failed printing to std") {
+            use std::io::Write as _;
+            // stderr may be broken too; stay silent rather than panicking
+            // inside the panic hook, which would abort after all.
+            let _ = writeln!(std::io::stderr(), "rtk: {}", msg);
+            std::process::exit(EXIT_OUTPUT_WRITE_FAILED);
+        }
+        default_hook(info);
+    }));
 
     let code = match run_cli() {
         Ok(code) => code,
@@ -4287,6 +4316,47 @@ mod tests {
         assert_ne!(
             code, 134,
             "rtk crashed with SIGABRT (exit 134) on broken pipe - SIGPIPE handler missing"
+        );
+    }
+
+    #[test]
+    #[ignore] // Integration test: requires `cargo build` first
+    fn test_unwritable_stdout_does_not_crash() {
+        let bin_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("debug")
+            .join("rtk");
+        assert!(
+            bin_path.exists(),
+            "Debug binary not found at {:?} - run `cargo build` first",
+            bin_path
+        );
+
+        // /dev/full opens fine and fails every write with ENOSPC: the same
+        // shape as a full disk or an exhausted tmpfs quota, which is what
+        // actually killed rtk in the field.
+        let full = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .expect("/dev/full is required for this test");
+
+        let status = std::process::Command::new(&bin_path)
+            .args(["read", "Cargo.toml"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .stdout(std::process::Stdio::from(full))
+            .stderr(std::process::Stdio::piped())
+            .status()
+            .expect("Failed to spawn rtk");
+
+        let code = status.code().unwrap_or(-1);
+        assert_ne!(
+            code, 134,
+            "rtk crashed with SIGABRT (exit 134) on an unwritable stdout"
+        );
+        assert_eq!(
+            code, EXIT_OUTPUT_WRITE_FAILED,
+            "rtk should exit {} when it cannot write its output, not panic",
+            EXIT_OUTPUT_WRITE_FAILED
         );
     }
 
