@@ -297,7 +297,6 @@ impl Dialect {
     /// the flag `DskipTests`, not `D` with the value `skipTests=true`. A caller that reads `-D`
     /// values has to split the name itself; one that only needs "this is not a positional" does
     /// not care.
-    #[allow(dead_code)] // No in-tree caller yet: mvn still parses its args by hand.
     pub const CommonsCli: Self = Self {
         single_dash: SingleDash::Atomic,
         ..Self::Posix
