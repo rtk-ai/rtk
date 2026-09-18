@@ -25,7 +25,7 @@ use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
 use cmds::system::{
     ast_grep_cmd, ctest_cmd, deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls,
-    pipe_cmd, read, search, summary, tree, wc_cmd,
+    pipe_cmd, read, search, summary, tree, wc_cmd, xcrun_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -366,6 +366,13 @@ enum Commands {
         /// Pattern, path, and any rg flags (e.g. -v, -i, -t rust, --glob)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
+    },
+
+    /// Apple developer tools with compact simulator app inventories
+    Xcrun {
+        /// Native xcrun arguments (e.g. simctl listapps booted)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
     /// Compact ast-grep - runs ast-grep natively, groups matches by file
@@ -2362,6 +2369,8 @@ fn run_cli() -> Result<i32> {
             &extra_args,
             cli.verbose,
         )?,
+        Commands::Xcrun { args } => xcrun_cmd::run(&args, cli.verbose)?,
+
         Commands::AstGrep { extra_args } => ast_grep_cmd::run(&extra_args)?,
         Commands::Rg { extra_args } => {
             search::run(search::Engine::Rg, 80, 200, false, &extra_args, cli.verbose)?
@@ -3242,6 +3251,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Summary { .. }
             | Commands::Grep { .. }
             | Commands::Rg { .. }
+            | Commands::Xcrun { .. }
             | Commands::AstGrep { .. }
             | Commands::Wget { .. }
             | Commands::Vitest { .. }
@@ -3757,6 +3767,7 @@ mod tests {
             "read",
             "rg",
             "ast-grep",
+            "xcrun",
             "git",
             "gh",
             "glab",
