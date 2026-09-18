@@ -137,9 +137,12 @@ pub fn run(
         print_efficiency_meter(summary.avg_savings_pct);
         println!();
 
-        // Warn about hook issues that silently kill savings (stderr, not stdout)
+        // Warn about hook issues that silently kill savings (stderr, not stdout).
+        // `suppress_hook_warning` hides the missing-hook arm here too: a user who
+        // runs rtk without hooks on purpose reads this report most often, and the
+        // outdated-hook arm stays visible either way.
         match hook_check::status() {
-            hook_check::HookStatus::Missing => {
+            hook_check::HookStatus::Missing if !crate::core::config::hook_warning_suppressed() => {
                 eprintln!(
                     "{}",
                     "[warn] No hook installed — run `rtk init -g` for automatic token savings"
@@ -154,7 +157,7 @@ pub fn run(
                 );
                 eprintln!();
             }
-            hook_check::HookStatus::Ok => {}
+            hook_check::HookStatus::Missing | hook_check::HookStatus::Ok => {}
         }
 
         // Lightweight RTK_DISABLED bypass check (best-effort, silent on failure)
@@ -220,9 +223,17 @@ pub fn run(
             println!("{}", "─".repeat(table_width));
             println!(
                 "{:>3}  {:<cmd_width$}  {:>count_width$}  {:>saved_width$}  {:>6}  {:>time_width$}  {:<impact_width$}",
-                "#", "Command", "Count", "Saved", "Avg%", "Time", "Impact",
-                cmd_width = cmd_width, count_width = count_width,
-                saved_width = saved_width, time_width = time_width,
+                "#",
+                "Command",
+                "Count",
+                "Saved",
+                "Total%",
+                "Time",
+                "Impact",
+                cmd_width = cmd_width,
+                count_width = count_width,
+                saved_width = saved_width,
+                time_width = time_width,
                 impact_width = impact_width
             );
             println!("{}", "─".repeat(table_width));
@@ -704,7 +715,9 @@ fn export_csv(
     if all || daily {
         let days = tracker.get_all_days_filtered(project_scope)?; // changed: use filtered
         println!("# Daily Data");
-        println!("date,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms");
+        println!(
+            "date,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms"
+        );
         for day in days {
             println!(
                 "{},{},{},{},{},{:.2},{},{}",
@@ -747,7 +760,9 @@ fn export_csv(
     if all || monthly {
         let months = tracker.get_by_month_filtered(project_scope)?; // changed: use filtered
         println!("# Monthly Data");
-        println!("month,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms");
+        println!(
+            "month,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms"
+        );
         for month in months {
             println!(
                 "{},{},{},{},{},{:.2},{},{}",
@@ -866,7 +881,9 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
 fn confirm_reset() -> Result<bool> {
     use std::io::{self, BufRead, IsTerminal, Write};
 
-    eprint!("This will permanently delete all tracking data and recall counters (stored outputs are kept). Continue? [y/N] ");
+    eprint!(
+        "This will permanently delete all tracking data and recall counters (stored outputs are kept). Continue? [y/N] "
+    );
     io::stderr().flush().ok();
 
     if !io::stdin().is_terminal() {

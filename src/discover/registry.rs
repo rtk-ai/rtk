@@ -6,10 +6,10 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use super::lexer::{
-    advance_quote_state, coalesce_words, is_crlf_at, redirect_has_file_target, shell_split,
-    split_on_operators, tokenize, tokenize_with_newlines, ParsedToken, PipeKind, TokenKind,
+    ParsedToken, PipeKind, TokenKind, advance_quote_state, coalesce_words, is_crlf_at,
+    redirect_has_file_target, shell_split, split_on_operators, tokenize, tokenize_with_newlines,
 };
-use super::rules::{RtkRule, IGNORED_EXACT, IGNORED_PREFIXES, RULES};
+use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 
 const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
 
@@ -77,13 +77,77 @@ static ENV_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
 static GIT_GLOBAL_OPT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(?:(?:-C\s+\S+|-c\s+\S+|--git-dir(?:=\S+|\s+\S+)|--work-tree(?:=\S+|\s+\S+)|--no-pager|--no-optional-locks|--bare|--literal-pathspecs)\s+)+").unwrap()
 });
+// Strip pnpm global options that precede the subcommand so `pnpm -r install`,
+// `pnpm --filter @app install`, `pnpm -w list` route to the same rules as their
+// bare forms. Only a fixed, known set is stripped — never an unknown `-x`, so a
+// non-install flag-first command can't be mis-rewritten into a filter with savings.
+static PNPM_GLOBAL_OPT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:(?:-r|--recursive|-w|--workspace-root|--filter(?:=\S+|\s+\S+)|-F(?:=\S+|\s+\S+))\s+)+").unwrap()
+});
 // Issue #1362: each capture expects a SINGLE file argument (`\S+$`). Multi-file
 // invocations like `head -3 a b c` fail to match so the segment is passed through
 // to the native `head`/`tail` binary — which already handles multi-file with
-// `==> name <==` banners that `rtk read --max-lines` cannot reproduce.
+// `==> name <==` banners that a single `rtk read` window cannot reproduce.
 static HEAD_N: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^head\s+-(\d+)\s+(\S+)$").unwrap());
 static HEAD_LINES: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^head\s+--lines=(\d+)\s+(\S+)$").unwrap());
+// `-n N` and `--lines N` are the spellings `tail` already accepted below; `head`
+// silently fell through to no rewrite at all without them.
+static HEAD_N_SPACE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^head\s+-n\s+(\d+)\s+(\S+)$").unwrap());
+static HEAD_LINES_SPACE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^head\s+--lines\s+(\d+)\s+(\S+)$").unwrap());
+// Bare `head FILE` means ten lines, not the whole file. Restricted to a single
+// operand: multi-file and optioned forms stay with the native binary.
+static HEAD_BARE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^head\s+(\S+)$").unwrap());
+
+/// Re-attach a trailing redirect to a rewritten head/tail command.
+///
+/// `head -n 1 f>out` strips to a suffix with no leading space, and these
+/// rewrites end in a bare number, so plain concatenation yields
+/// `--head-lines 1>out` — which the shell reads as an fd-1 redirect, leaving
+/// `--head-lines` with no value. A separating space keeps the flag intact.
+///
+/// Deliberately not applied to the shared prefix rewrites: those keep the
+/// original argument/redirect boundary, where inserting a space could split a
+/// descriptor-duplication form such as `1>&2` and demote the descriptor number
+/// into an argument.
+fn join_redirect_suffix(rewritten: &str, redirect_suffix: &str) -> String {
+    if redirect_suffix.is_empty() || redirect_suffix.starts_with(char::is_whitespace) {
+        format!("{}{}", rewritten, redirect_suffix)
+    } else {
+        format!("{} {}", rewritten, redirect_suffix)
+    }
+}
+
+/// Whether an operand is safe to hand to `rtk read` as one concrete file.
+///
+/// One whitespace-delimited token is not one shell operand: `*.rs`, `{a,b}` and
+/// `$FILES` each expand to several at execution time, and `rtk read`
+/// concatenates files where `head`/`tail` print `==> name <==` banners.
+///
+/// The token is raw shell source, not the argument the callee receives, so
+/// character-class blocklists kept missing cases: `'--'` and `\--help` hide an
+/// option behind a quote or backslash, and a leading `#` opens a comment that
+/// swallows the flags this rewrite appends. Hence an allowlist: only characters
+/// that cannot change the operand's word count or turn it into an option are
+/// accepted, and anything else is left to the native binary. `~` is the one
+/// shell-active character kept, because tilde expansion yields exactly one word
+/// and the operand is passed through unchanged. Unicode alphanumerics stay
+/// eligible so non-ASCII filenames still route.
+///
+/// The cost is deliberate: a quoted literal like `'literal*.txt'` also stays
+/// native even though the quoting would prevent expansion. Losing a rewrite is
+/// recoverable; changing what the user's command does is not.
+fn is_single_file_operand(operand: &str) -> bool {
+    if operand.is_empty() || operand.starts_with('-') {
+        return false;
+    }
+    operand.chars().all(|c| {
+        c.is_alphanumeric()
+            || matches!(c, '.' | '_' | '/' | '-' | '~' | '+' | '@' | ':' | ',' | '=')
+    })
+}
 static TAIL_N: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^tail\s+-(\d+)\s+(\S+)$").unwrap());
 static TAIL_N_SPACE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^tail\s+-n\s+(\d+)\s+(\S+)$").unwrap());
@@ -143,6 +207,21 @@ pub fn classify_command(cmd: &str) -> Classification {
     // Strip golangci-lint global options before `run` so classify/rewrite stays
     // aligned with the runtime wrapper behavior.
     let cmd_normalized = strip_golangci_global_opts(&cmd_normalized);
+    // Strip pnpm global options (-r, --filter, -w) before the subcommand so
+    // `pnpm -r install` classifies like `pnpm install` — but only adopt the
+    // stripped form when it routes to the `rtk pnpm` rule itself. For the tool
+    // rules reachable via `pnpm exec`/`pnpm run` (`pnpm -r exec vitest`,
+    // `pnpm -r lint`, …) the rewrite matches the original flag-first text and
+    // never fires, so classifying the stripped form there would report a
+    // Supported saving the hook can't deliver — misleading `rtk discover` and
+    // `rtk session`, which count `Supported` as covered. See #3275.
+    let cmd_pnpm_stripped = strip_pnpm_global_opts(&cmd_normalized);
+    let cmd_normalized =
+        if cmd_pnpm_stripped != cmd_normalized && matches_pnpm_rule(&cmd_pnpm_stripped) {
+            cmd_pnpm_stripped
+        } else {
+            cmd_normalized
+        };
     let cmd_clean = cmd_normalized.as_str();
 
     // Exclude cat/head/tail with redirect operators — these are writes, not reads (#315)
@@ -341,13 +420,12 @@ fn normalize_php_tool_path(path: &str) -> String {
         normalized = stripped.to_string();
     }
 
-    if let Some((stem, ext)) = normalized.rsplit_once('.') {
-        if ["bat", "cmd", "exe", "ps1"]
+    if let Some((stem, ext)) = normalized.rsplit_once('.')
+        && ["bat", "cmd", "exe", "ps1"]
             .iter()
             .any(|candidate| ext.eq_ignore_ascii_case(candidate))
-        {
-            normalized = stem.to_string();
-        }
+    {
+        normalized = stem.to_string();
     }
 
     normalized
@@ -364,6 +442,39 @@ fn strip_git_global_opts(cmd: &str) -> String {
     let after_git = &cmd[4..]; // skip "git "
     let stripped = GIT_GLOBAL_OPT.replace(after_git, "");
     format!("git {}", stripped.trim())
+}
+
+/// Strip pnpm global options before the subcommand (mirror of `strip_git_global_opts`).
+/// `pnpm -r install` → `pnpm install`; `pnpm --filter @app list` → `pnpm list`.
+/// Classification only — the rewrite re-emits the ORIGINAL command, so the stripped
+/// flags are preserved (e.g. `pnpm -r install` → `rtk pnpm -r install`).
+/// Returns the original string unchanged if not a pnpm command.
+fn strip_pnpm_global_opts(cmd: &str) -> String {
+    // Require a single ASCII space after `pnpm` — the exact boundary the rewrite's
+    // `strip_word_prefix` enforces — so classify and rewrite can never diverge on a
+    // tab or other whitespace separator (that would resurrect the class of bug
+    // #3275 closes: Supported on one side, un-rewritable on the other). Extra
+    // spaces are still tolerated via `trim_start` (`pnpm  -r  install`), since
+    // `PNPM_GLOBAL_OPT` is `^`-anchored and a leading space would skip the strip.
+    if !cmd.starts_with("pnpm ") {
+        return cmd.to_string();
+    }
+    let after_pnpm = cmd[5..].trim_start(); // skip "pnpm ", then any extra spaces
+    let stripped = PNPM_GLOBAL_OPT.replace(after_pnpm, "");
+    format!("pnpm {}", stripped.trim())
+}
+
+/// True when `cmd` (already normalized) routes to the `rtk pnpm` rule rather than
+/// a tool rule reachable through `pnpm exec`/`pnpm run`. Gates the pnpm
+/// global-option strip in `classify_command`: adopting the stripped form for a
+/// tool rule would diverge from the rewrite, which matches the original
+/// flag-first text and never fires there. See #3275.
+fn matches_pnpm_rule(cmd: &str) -> bool {
+    REGEX_SET
+        .matches(cmd)
+        .into_iter()
+        .next_back()
+        .is_some_and(|idx| RULES[idx].rtk_cmd == "rtk pnpm")
 }
 
 /// Strip golangci-lint global options before the `run` subcommand.
@@ -408,10 +519,10 @@ fn parse_golangci_run_parts(cmd: &str) -> Option<GolangciRunParts<'_>> {
             return None;
         }
 
-        if let Some(flag) = split_golangci_flag_name(token) {
-            if golangci_flag_takes_separate_value(token, flag) {
-                i += 1;
-            }
+        if let Some(flag) = split_golangci_flag_name(token)
+            && golangci_flag_takes_separate_value(token, flag)
+        {
+            i += 1;
         }
 
         i += 1;
@@ -961,11 +1072,7 @@ fn rewrite_multiline_block(
         i = end + 1;
     }
 
-    if any_changed {
-        Some(result)
-    } else {
-        None
-    }
+    if any_changed { Some(result) } else { None }
 }
 
 /// Pipeline boundaries used to rewrite its final stage.
@@ -1234,22 +1341,27 @@ fn rewrite_compound(
     }
     result.push_str(&rewritten);
 
-    if any_changed {
-        Some(result)
-    } else {
-        None
-    }
+    if any_changed { Some(result) } else { None }
 }
 
 fn rewrite_line_range(cmd: &str) -> Option<String> {
-    for re in [&*HEAD_N, &*HEAD_LINES] {
+    for re in [&*HEAD_N, &*HEAD_LINES, &*HEAD_N_SPACE, &*HEAD_LINES_SPACE] {
         if let Some(caps) = re.captures(cmd) {
             let n = caps.get(1)?.as_str();
             let file = caps.get(2)?.as_str();
-            return Some(format!("rtk read {} --max-lines {}", file, n));
+            if is_single_file_operand(file) {
+                return Some(format!("rtk read {} --head-lines {}", file, n));
+            }
+            return None;
         }
     }
-    if cmd.starts_with("head -") {
+    if let Some(caps) = HEAD_BARE.captures(cmd) {
+        let file = caps.get(1)?.as_str();
+        if is_single_file_operand(file) {
+            return Some(format!("rtk read {} --head-lines 10", file));
+        }
+    }
+    if cmd.starts_with("head") {
         return None;
     }
     for re in [
@@ -1261,7 +1373,10 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
         if let Some(caps) = re.captures(cmd) {
             let n = caps.get(1)?.as_str();
             let file = caps.get(2)?.as_str();
-            return Some(format!("rtk read {} --tail-lines {}", file, n));
+            if is_single_file_operand(file) {
+                return Some(format!("rtk read {} --tail-lines {}", file, n));
+            }
+            return None;
         }
     }
     None
@@ -1274,6 +1389,58 @@ const ROUTABLE_WRAPPER_PREFIXES: &[&str] = &["uv run"];
 /// Shell keywords that wrap a command without changing which one runs. They are
 /// not spawnable, so they must never fall through: `rtk exec foo` cannot run.
 const SHELL_KEYWORD_PREFIXES: &[&str] = &["noglob", "command", "builtin", "exec", "nocorrect"];
+
+struct ProcessWrapper {
+    name: &'static str,
+    value_opts: &'static [&'static str],
+    flag_opts: &'static [&'static str],
+    attached_opts: &'static [&'static str],
+    positionals: usize,
+    numeric_opts: bool,
+}
+
+const PROCESS_WRAPPERS: &[ProcessWrapper] = &[
+    ProcessWrapper {
+        name: "timeout",
+        value_opts: &["-s", "-k", "--signal", "--kill-after"],
+        flag_opts: &["--preserve-status", "--foreground", "-v", "--verbose"],
+        attached_opts: &["-s", "-k"],
+        positionals: 1,
+        numeric_opts: false,
+    },
+    ProcessWrapper {
+        name: "time",
+        value_opts: &["-f", "-o", "--format", "--output"],
+        flag_opts: &[
+            "-p",
+            "-a",
+            "-v",
+            "--append",
+            "--verbose",
+            "--portability",
+            "--quiet",
+        ],
+        attached_opts: &["-f", "-o"],
+        positionals: 0,
+        numeric_opts: false,
+    },
+    ProcessWrapper {
+        name: "nice",
+        value_opts: &["-n", "--adjustment"],
+        flag_opts: &[],
+        attached_opts: &["-n"],
+        positionals: 0,
+        numeric_opts: true,
+    },
+    ProcessWrapper {
+        name: "nohup",
+        value_opts: &[],
+        flag_opts: &[],
+        attached_opts: &[],
+        positionals: 0,
+        numeric_opts: false,
+    },
+];
 
 struct SafePipeConsumer {
     name: &'static str,
@@ -1498,6 +1665,12 @@ fn rewrite_segment_inner(
         }
     }
 
+    // #2375
+    if let Some((prefix, rest)) = strip_process_wrapper_prefix(trimmed) {
+        return rewrite_segment_inner(rest, excluded, transparent_prefixes, context, depth + 1)
+            .map(|rewritten| format!("{} {}", prefix, rewritten));
+    }
+
     // User-configured wrapper prefixes (e.g. `docker exec mycontainer`). These
     // never fall through: an unmatched inner command drops the rewrite.
     for prefix in transparent_prefixes {
@@ -1520,7 +1693,7 @@ fn rewrite_segment_inner(
     }
 
     if context == RewriteContext::Normal
-        && (cmd_part.starts_with("head -") || cmd_part.starts_with("tail "))
+        && (cmd_part.starts_with("head ") || cmd_part.starts_with("tail "))
     {
         // head/tail rewrite to `rtk read`, so honour exclude_commands here too:
         // this branch returns before the checks below. Any env prefix has already
@@ -1528,7 +1701,7 @@ fn rewrite_segment_inner(
         if is_excluded(cmd_part, excluded) {
             return None;
         }
-        return rewrite_line_range(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
+        return rewrite_line_range(cmd_part).map(|r| join_redirect_suffix(&r, redirect_suffix));
     }
 
     // Most cat flags (-v, -A, -e, -t, -s, -b, --show-all, etc.) have different
@@ -1707,6 +1880,104 @@ fn tool_form(cmd_clean: &str, rtk_equivalent: &str) -> String {
             })
         })
         .unwrap_or(normalized)
+}
+
+fn strip_process_wrapper_prefix(cmd: &str) -> Option<(&str, &str)> {
+    let tokens = tokenize(cmd);
+    let first = tokens.first()?;
+    if first.kind != TokenKind::Arg {
+        return None;
+    }
+    let wrapper = PROCESS_WRAPPERS
+        .iter()
+        .find(|candidate| candidate.name == command_basename(&first.value))?;
+    let inner = wrapper_inner_command(wrapper, &tokens)?;
+    if tokens[..inner_index(&tokens, inner)]
+        .iter()
+        .any(|token| token.value == "rtk")
+    {
+        return None;
+    }
+    let prefix = cmd[..inner.offset].trim_end();
+    let rest = cmd[inner.offset..].trim_start();
+    if prefix.is_empty() || rest.is_empty() {
+        return None;
+    }
+    Some((prefix, rest))
+}
+
+fn inner_index(tokens: &[ParsedToken], inner: &ParsedToken) -> usize {
+    tokens
+        .iter()
+        .position(|token| token.offset == inner.offset)
+        .unwrap_or(tokens.len())
+}
+
+fn command_basename(command: &str) -> &str {
+    command.rsplit('/').next().unwrap_or(command)
+}
+
+fn wrapper_inner_command<'a>(
+    wrapper: &ProcessWrapper,
+    tokens: &'a [ParsedToken],
+) -> Option<&'a ParsedToken> {
+    let mut idx = 1;
+    let mut options_done = false;
+    let mut positionals = wrapper.positionals;
+
+    loop {
+        let token = arg_token(tokens, idx)?;
+        let arg = token.value.as_str();
+
+        if !options_done && arg == "--" {
+            options_done = true;
+            idx += 1;
+            continue;
+        }
+        if !options_done && wrapper.numeric_opts && is_numeric_option(arg) {
+            idx += 1;
+            continue;
+        }
+        if !options_done && arg.starts_with('-') && arg != "-" {
+            if wrapper.flag_opts.contains(&arg) || takes_attached_value(wrapper, arg) {
+                idx += 1;
+                continue;
+            }
+            if wrapper.value_opts.contains(&arg) {
+                arg_token(tokens, idx + 1)?;
+                idx += 2;
+                continue;
+            }
+            return None;
+        }
+        if positionals > 0 {
+            positionals -= 1;
+            idx += 1;
+            continue;
+        }
+        return Some(token);
+    }
+}
+
+fn arg_token(tokens: &[ParsedToken], idx: usize) -> Option<&ParsedToken> {
+    tokens.get(idx).filter(|token| token.kind == TokenKind::Arg)
+}
+
+fn is_numeric_option(arg: &str) -> bool {
+    let Some(digits) = arg.strip_prefix('-').or_else(|| arg.strip_prefix('+')) else {
+        return false;
+    };
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+}
+
+fn takes_attached_value(wrapper: &ProcessWrapper, arg: &str) -> bool {
+    if let Some((name, _)) = arg.split_once('=') {
+        return wrapper.value_opts.contains(&name);
+    }
+    wrapper
+        .attached_opts
+        .iter()
+        .any(|opt| arg.len() > opt.len() && arg.starts_with(opt))
 }
 
 /// Strip a command prefix with word-boundary check.
@@ -2261,6 +2532,7 @@ mod tests {
         assert_eq!(
             safe_rules,
             vec![
+                "rtk ast-grep",
                 "rtk brew",
                 "rtk bundle",
                 "rtk cargo",
@@ -2753,6 +3025,179 @@ mod tests {
             "git -C should be classified as supported, got: {:?}",
             result
         );
+    }
+
+    // --- pnpm global option stripping (-r / --filter / -w) ---
+
+    #[test]
+    fn test_rewrite_pnpm_recursive_install() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm -r install", &[]),
+            Some("rtk pnpm -r install".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_filter_install() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --filter @app install", &[]),
+            Some("rtk pnpm --filter @app install".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_filter_short_install() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm -F @app install", &[]),
+            Some("rtk pnpm -F @app install".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_filter_eq_install() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --filter=@app install", &[]),
+            Some("rtk pnpm --filter=@app install".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_workspace_root_install() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm -w install", &[]),
+            Some("rtk pnpm -w install".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_recursive_filter_combo() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm -r --filter @app list", &[]),
+            Some("rtk pnpm -r --filter @app list".into())
+        );
+    }
+
+    // No-regression: bare forms behave exactly as before.
+    #[test]
+    fn test_rewrite_pnpm_bare_install_unchanged() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm install", &[]),
+            Some("rtk pnpm install".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_run_build_unchanged() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm run build", &[]),
+            Some("rtk pnpm run build".into())
+        );
+    }
+
+    // Bare `pnpm build` is still NOT rewritten: it would only hit the passthrough
+    // (no output parser), so rewriting it would add false-positive surface for zero
+    // savings. Stripping global opts must not change this.
+    #[test]
+    fn test_rewrite_pnpm_bare_build_none() {
+        assert_eq!(rewrite_command_no_prefixes("pnpm build", &[]), None);
+    }
+
+    // False-positive guards.
+    #[test]
+    fn test_rewrite_pnpm_filter_no_subcommand_none() {
+        // A filter with no subcommand must not be rewritten.
+        assert_eq!(rewrite_command_no_prefixes("pnpm --filter @app", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_unknown_flag_not_stripped() {
+        // `-x` is not a known global opt → not stripped → no subcommand → None.
+        assert_eq!(rewrite_command_no_prefixes("pnpm -x build", &[]), None);
+        // Load-bearing case for the fixed-set design: `install` IS a routed
+        // subcommand, so if `-x` were stripped this would rewrite to
+        // `rtk pnpm -x install`, which reaches clap and dies. Only the fixed
+        // allowlist keeps it a safe passthrough (None).
+        assert_eq!(rewrite_command_no_prefixes("pnpm -x install", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_recursive_lint_safe_noop() {
+        // `pnpm lint` classifies as Supported, but the ORIGINAL `pnpm -r lint`
+        // matches no lint rewrite-prefix → safe no-op (never a malformed rewrite).
+        assert_eq!(rewrite_command_no_prefixes("pnpm -r lint", &[]), None);
+    }
+
+    #[test]
+    fn test_classify_pnpm_flag_first_tool_stays_unsupported() {
+        // #3275 blocker: the strip must not make a tool rule reachable via
+        // `pnpm exec`/`pnpm run` classify as Supported — its rewrite matches the
+        // original flag-first text and never fires, so a Supported verdict would
+        // advertise savings `rtk discover`/`rtk session` can never deliver. These
+        // must classify exactly as on develop: Unsupported(pnpm).
+        for cmd in [
+            "pnpm -r lint",
+            "pnpm -r exec eslint .",
+            "pnpm --filter @app exec vitest run",
+            "pnpm -F web exec playwright test",
+            "pnpm -r exec tsc --noEmit",
+            "pnpm -w exec next build",
+        ] {
+            assert!(
+                matches!(classify_command(cmd), Classification::Unsupported { .. }),
+                "{cmd} must stay Unsupported (rewrite can't fire), got: {:?}",
+                classify_command(cmd)
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_pnpm_flag_first_install_still_supported() {
+        // The gate keeps everything the PR claims: flag-first forms that route to
+        // the `rtk pnpm` rule stay Supported.
+        for cmd in [
+            "pnpm -r install",
+            "pnpm --filter @app list",
+            "pnpm -w install",
+            "pnpm -r outdated",
+        ] {
+            assert!(
+                matches!(
+                    classify_command(cmd),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk pnpm",
+                        ..
+                    }
+                ),
+                "{cmd} must classify as rtk pnpm, got: {:?}",
+                classify_command(cmd)
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_extra_whitespace() {
+        // Extra spaces before the global flag must not skip the strip
+        // (`PNPM_GLOBAL_OPT` is `^`-anchored, so the slice is trimmed first).
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm  -r  install", &[]),
+            Some("rtk pnpm -r  install".into())
+        );
+    }
+
+    #[test]
+    fn test_pnpm_tab_separator_no_classify_rewrite_divergence() {
+        // A non-space separator must NOT be stripped: the rewrite's
+        // `strip_word_prefix` only accepts an ASCII space, so classify has to
+        // agree and stay Unsupported. If the strip tolerated `\t` (or any other
+        // whitespace), classify would say Supported(rtk pnpm) while rewrite
+        // returned None — the exact classify/rewrite divergence #3275 closes.
+        let cmd = "pnpm\t-r install";
+        assert!(
+            matches!(classify_command(cmd), Classification::Unsupported { .. }),
+            "tab-separated pnpm must stay Unsupported, got: {:?}",
+            classify_command(cmd)
+        );
+        assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None);
     }
 
     #[test]
@@ -3471,10 +3916,10 @@ mod tests {
             .ok()
             .and_then(|p| std::fs::metadata(p).ok())
             .and_then(|m| m.modified().ok());
-        if let (Some(rtk_t), Some(test_t)) = (rtk_mtime, test_mtime) {
-            if rtk_t < test_t {
-                return;
-            }
+        if let (Some(rtk_t), Some(test_t)) = (rtk_mtime, test_mtime)
+            && rtk_t < test_t
+        {
+            return;
         }
 
         let output = std::process::Command::new(&rtk_bin)
@@ -3675,7 +4120,7 @@ mod tests {
         // A non-excluded inner command still rewrites through the wrapper.
         assert_eq!(
             rewrite_command_no_prefixes("uv run head -20 src/main.rs", &["cat".to_string()]),
-            Some("uv run rtk read src/main.rs --max-lines 20".into())
+            Some("uv run rtk read src/main.rs --head-lines 20".into())
         );
     }
 
@@ -3683,33 +4128,211 @@ mod tests {
     fn test_head_tail_rewrite_when_not_excluded() {
         assert_eq!(
             rewrite_command_no_prefixes("head -20 src/main.rs", &["cat".to_string()]),
-            Some("rtk read src/main.rs --max-lines 20".into())
+            Some("rtk read src/main.rs --head-lines 20".into())
         );
     }
 
     #[test]
     fn test_rewrite_head_numeric_flag() {
-        // head -20 file → rtk read file --max-lines 20 (not rtk read -20 file)
+        // head -20 file → rtk read file --head-lines 20 (not rtk read -20 file)
         assert_eq!(
             rewrite_command_no_prefixes("head -20 src/main.rs", &[]),
-            Some("rtk read src/main.rs --max-lines 20".into())
+            Some("rtk read src/main.rs --head-lines 20".into())
         );
+    }
+
+    /// A single token that the shell expands into several operands must stay
+    /// native: `rtk read` concatenates files, losing `head`'s `==> name <==`
+    /// banners. Covers the newly added `-n N` / `--lines N` routes, which had
+    /// no matcher at all before and so were native by accident.
+    #[test]
+    fn test_rewrite_head_expanding_operand_stays_native() {
+        for cmd in [
+            "head src/core/*.rs",
+            "head -1 src/core/*.rs",
+            "head -n 1 src/core/*.rs",
+            "head --lines 1 src/core/*.rs",
+            "head --lines=1 src/core/*.rs",
+            "head -n 1 src/core/{a,b}.rs",
+            "head -n 1 $FILES",
+            "head -n 1 src/core/?.rs",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                None,
+                "expanding operand must stay native: {}",
+                cmd
+            );
+        }
+    }
+
+    /// `head -n 1 --help` must reach `head`, not print `rtk read`'s help. The
+    /// quoted and escaped spellings matter as much as the bare one: the matcher
+    /// sees shell source, so `'--'` and `\--help` slip past a leading-`-` test
+    /// while still reaching the tool as options.
+    #[test]
+    fn test_rewrite_head_option_operand_stays_native() {
+        for cmd in [
+            "head -n 1 --help",
+            "head --lines 1 --version",
+            "head --help",
+            "head -n 1 '--'",
+            "head -n 1 \"--\"",
+            "head -n 1 '--help'",
+            "head -n 1 \"--help\"",
+            "head -n 1 \\--help",
+            "head '--'",
+            "head -n 1 #comment",
+            "head #comment",
+            "head -n 1 a|b",
+            "head -n 1 (x)",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                None,
+                "option-like operand must stay native: {}",
+                cmd
+            );
+        }
+    }
+
+    /// The same expansion hazard applied to `tail`, which shared the code path.
+    #[test]
+    fn test_rewrite_tail_expanding_operand_stays_native() {
+        for cmd in [
+            "tail -20 src/core/*.rs",
+            "tail -n 20 src/core/*.rs",
+            "tail --lines 20 $FILES",
+            "tail -n 1 '--'",
+            "tail -n 1 \\--help",
+            "tail -n 1 #comment",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                None,
+                "expanding operand must stay native: {}",
+                cmd
+            );
+        }
+    }
+
+    /// `;` and `&` are operators the lexer splits on before the operand is ever
+    /// examined, so the trailing text is a separate command and the real operand
+    /// is just `f`. These rewrite, and should: the allowlist only has to judge
+    /// characters that survive segmentation.
+    #[test]
+    fn test_rewrite_head_operand_after_operator_split() {
+        assert_eq!(
+            rewrite_command_no_prefixes("head -n 1 f;rm", &[]),
+            Some("rtk read f --head-lines 1; rm".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("head -n 1 a&b", &[]),
+            Some("rtk read a --head-lines 1 & b".into())
+        );
+    }
+
+    /// A trailing redirect is stripped before the operand is judged, so `a>b`
+    /// rewrites with operand `a` — but the suffix must not fuse onto the numeric
+    /// flag value, or the shell reads `1>b` as an fd-1 redirect and
+    /// `--head-lines` loses its argument.
+    #[test]
+    fn test_rewrite_head_redirect_suffix_keeps_flag_value() {
+        assert_eq!(
+            rewrite_command_no_prefixes("head -n 1 a>b", &[]),
+            Some("rtk read a --head-lines 1 >b".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("tail -n 1 a>b", &[]),
+            Some("rtk read a --tail-lines 1 >b".into())
+        );
+        // An already-spaced suffix must not gain a second space.
+        assert_eq!(
+            rewrite_command_no_prefixes("head -n 1 a > b", &[]),
+            Some("rtk read a --head-lines 1 > b".into())
+        );
+    }
+
+    /// Shapes the allowlist must keep accepting, including a non-ASCII name.
+    #[test]
+    fn test_rewrite_head_accepts_ordinary_paths() {
+        for (cmd, want) in [
+            (
+                "head -10 /tmp/seq.txt",
+                "rtk read /tmp/seq.txt --head-lines 10",
+            ),
+            ("head ./a-b_c.txt", "rtk read ./a-b_c.txt --head-lines 10"),
+            ("head ~/x.txt", "rtk read ~/x.txt --head-lines 10"),
+            (
+                "head /tmp/a.b.c-d_e.txt",
+                "rtk read /tmp/a.b.c-d_e.txt --head-lines 10",
+            ),
+            (
+                "head src/日本語.rs",
+                "rtk read src/日本語.rs --head-lines 10",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(want.into()),
+                "must still rewrite: {}",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_tail_plain_operand_still_rewrites() {
+        assert_eq!(
+            rewrite_command_no_prefixes("tail -20 src/main.rs", &[]),
+            Some("rtk read src/main.rs --tail-lines 20".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_head_n_space_flag() {
+        assert_eq!(
+            rewrite_command_no_prefixes("head -n 50 src/lib.rs", &[]),
+            Some("rtk read src/lib.rs --head-lines 50".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_head_lines_space_flag() {
+        assert_eq!(
+            rewrite_command_no_prefixes("head --lines 50 src/lib.rs", &[]),
+            Some("rtk read src/lib.rs --head-lines 50".into())
+        );
+    }
+
+    /// Multi-file and optioned bare forms stay native: the rewrite emits one
+    /// path (see `is_single_file_operand`), and `head` prints `==> name <==`
+    /// banners for several files, which a concatenated read cannot reproduce.
+    #[test]
+    fn test_rewrite_head_bare_multifile_stays_native() {
+        assert_eq!(rewrite_command_no_prefixes("head a.txt b.txt", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_head_unsupported_option_stays_native() {
+        assert_eq!(rewrite_command_no_prefixes("head -c 10 f.bin", &[]), None);
     }
 
     #[test]
     fn test_rewrite_head_lines_long_flag() {
         assert_eq!(
             rewrite_command_no_prefixes("head --lines=50 src/lib.rs", &[]),
-            Some("rtk read src/lib.rs --max-lines 50".into())
+            Some("rtk read src/lib.rs --head-lines 50".into())
         );
     }
 
     #[test]
     fn test_rewrite_head_no_flag_still_rewrites() {
-        // plain `head file` → `rtk read file` (no numeric flag)
+        // plain `head file` means ten lines, so the rewrite must bound the read
+        // rather than dumping the whole file.
         assert_eq!(
             rewrite_command_no_prefixes("head src/main.rs", &[]),
-            Some("rtk read src/main.rs".into())
+            Some("rtk read src/main.rs --head-lines 10".into())
         );
     }
 
@@ -3769,7 +4392,8 @@ mod tests {
 
     // --- Issue #1362: head/tail with multiple files falls back to native command ---
     //
-    // `rtk read <file> --max-lines N` only accepts a single positional file path in
+    // The head/tail rewrite emits a single positional path (see
+    // `is_single_file_operand`), even though `rtk read` itself accepts several, in
     // a shape that maps cleanly to `head -N`. Rewriting `head -N a b c` to
     // `rtk read a b c --max-lines N` previously produced a command where `rtk read`
     // would concatenate the files without the `==> name <==` banners that native
@@ -5692,11 +6316,13 @@ mod tests {
             );
         }
         // A different PHP tool is untouched.
-        assert!(rewrite_command_no_prefixes(
-            "php vendor/bin/phpstan analyse src",
-            &["phpunit".to_string()]
-        )
-        .is_some());
+        assert!(
+            rewrite_command_no_prefixes(
+                "php vendor/bin/phpstan analyse src",
+                &["phpunit".to_string()]
+            )
+            .is_some()
+        );
     }
 
     #[test]
@@ -6266,6 +6892,166 @@ mod tests {
     }
 
     #[test]
+    fn test_process_wrapper_rewrites_inner_command() {
+        for (input, expected) in [
+            ("timeout 300 cargo test", "timeout 300 rtk cargo test"),
+            ("time cargo build", "time rtk cargo build"),
+            ("nice -n 10 cargo test", "nice -n 10 rtk cargo test"),
+            ("nohup cargo build", "nohup rtk cargo build"),
+            (
+                "/usr/bin/timeout 300 cargo test",
+                "/usr/bin/timeout 300 rtk cargo test",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                Some(expected.into()),
+                "{}",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_process_wrapper_option_forms() {
+        for (input, expected) in [
+            (
+                "timeout -k 5s 300 cargo test",
+                "timeout -k 5s 300 rtk cargo test",
+            ),
+            (
+                "timeout -k5s 300 cargo test",
+                "timeout -k5s 300 rtk cargo test",
+            ),
+            (
+                "timeout --kill-after=5s 300 cargo test",
+                "timeout --kill-after=5s 300 rtk cargo test",
+            ),
+            (
+                "timeout --preserve-status 300 cargo test",
+                "timeout --preserve-status 300 rtk cargo test",
+            ),
+            ("timeout -- 300 cargo test", "timeout -- 300 rtk cargo test"),
+            ("timeout 300 -- cargo test", "timeout 300 -- rtk cargo test"),
+            ("time -p cargo build", "time -p rtk cargo build"),
+            ("time -f %e cargo build", "time -f %e rtk cargo build"),
+            ("nice -n10 cargo test", "nice -n10 rtk cargo test"),
+            ("nice -10 cargo test", "nice -10 rtk cargo test"),
+            ("nice +5 cargo test", "nice +5 rtk cargo test"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                Some(expected.into()),
+                "{}",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_process_wrapper_unknown_option_is_passthrough() {
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout --unknown 300 cargo test", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("nice --unknown cargo test", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_process_wrapper_with_unsupported_inner_command_is_passthrough() {
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout 300 mycustombinary --flag", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_process_wrapper_never_doubles_rtk() {
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout rtk cargo test", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_process_wrapper_without_inner_command_is_passthrough() {
+        assert_eq!(rewrite_command_no_prefixes("timeout 300", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("time", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("timeout -k 5s", &[]), None);
+    }
+
+    #[test]
+    fn test_process_wrapper_refuses_shell_syntax() {
+        for input in [
+            "time (cargo build)",
+            "timeout 300 >out.log cargo test",
+            "timeout 300 $(which cargo) test",
+            "timeout 300 */bin/cargo test",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(input, &[]), None, "{}", input);
+        }
+    }
+
+    #[test]
+    fn test_stdbuf_is_not_a_process_wrapper() {
+        assert_eq!(
+            rewrite_command_no_prefixes("stdbuf -oL cargo test", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_process_wrapper_composes_with_prefixes_and_compounds() {
+        assert_eq!(
+            rewrite_command_no_prefixes("CI=1 timeout 300 cargo test", &[]),
+            Some("CI=1 timeout 300 rtk cargo test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("nice -n 10 timeout 300 cargo test", &[]),
+            Some("nice -n 10 timeout 300 rtk cargo test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout 300 cargo test && time git status", &[]),
+            Some("timeout 300 rtk cargo test && time rtk git status".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("command timeout 300 git status", &[]),
+            Some("command timeout 300 rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_process_wrapper_rewrite_is_idempotent() {
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout 300 rtk cargo test", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_process_wrapper_keeps_pipeline_context() {
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout 300 git log | head -5", &[]),
+            Some("timeout 300 rtk git log | head -5".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test | timeout 5 grep error", &[]),
+            Some("cargo test | timeout 5 rtk grep error".into())
+        );
+    }
+
+    #[test]
+    fn test_process_wrapper_respects_exclusions() {
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout 300 cargo test", &["cargo test".to_string()]),
+            None
+        );
+    }
+
+    #[test]
     fn test_transparent_prefix_multiple_configured() {
         let prefixes = vec!["shadowenv exec --".to_string(), "direnv exec .".to_string()];
         assert_eq!(
@@ -6792,19 +7578,21 @@ mod tests {
     /// `jj` is covered only by a TOML filter, never by the native RULES table,
     /// so the bare case pins the TOML branch of the rewrite path and keeps the
     /// wrapper assertions below from passing vacuously when TOML is disabled.
+    /// #2375: wrappers are peeled before matching; `is_fully_anchored` in
+    /// `core::toml_filter` is what keeps a filter off the wrapper itself.
     #[test]
-    fn test_toml_filter_rewrites_bare_command_but_not_wrapped_invocations() {
+    fn test_toml_filter_rewrites_bare_and_wrapped_invocations() {
         assert_eq!(
             rewrite_command_no_prefixes("jj log", &[]),
             Some("rtk jj log".into()),
         );
         assert_eq!(
             rewrite_command_no_prefixes("timeout 5 /usr/bin/jj log", &[]),
-            None,
+            Some("timeout 5 rtk /usr/bin/jj log".into()),
         );
         assert_eq!(
             rewrite_command_no_prefixes("nohup /opt/tools/jj log", &[]),
-            None,
+            Some("nohup rtk /opt/tools/jj log".into()),
         );
     }
 

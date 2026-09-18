@@ -52,7 +52,7 @@ more noise
 }
 ```
 
-Used in: `git.rs`, `grep_cmd.rs`, `lint_cmd.rs`, `tsc_cmd.rs`, `vitest_cmd.rs`, `pnpm_cmd.rs`, `next_cmd.rs`, `prettier_cmd.rs`, `playwright_cmd.rs`, `prisma_cmd.rs`
+Used in: `git_cmd.rs`, `grep_cmd.rs`, `lint_cmd.rs`, `tsc_cmd.rs`, `vitest_cmd.rs`, `pnpm_cmd.rs`, `next_cmd.rs`, `prettier_cmd.rs`, `playwright_cmd.rs`, `prisma_cmd.rs`
 
 ### Pattern 2: Pure Computation
 

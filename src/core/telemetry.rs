@@ -60,14 +60,12 @@ pub fn maybe_ping() {
 
     // Check last ping time
     let marker = telemetry_marker_path();
-    if let Ok(metadata) = std::fs::metadata(&marker) {
-        if let Ok(modified) = metadata.modified() {
-            if let Ok(elapsed) = modified.elapsed() {
-                if elapsed.as_secs() < PING_INTERVAL_SECS {
-                    return;
-                }
-            }
-        }
+    if let Ok(metadata) = std::fs::metadata(&marker)
+        && let Ok(modified) = metadata.modified()
+        && let Ok(elapsed) = modified.elapsed()
+        && elapsed.as_secs() < PING_INTERVAL_SECS
+    {
+        return;
     }
 
     // Touch marker file immediately (before sending) to avoid double-ping
@@ -506,23 +504,23 @@ fn count_custom_toml_filters() -> usize {
     let mut count = 0;
 
     // Project-local: .rtk/filters/*.toml
-    if let Ok(cwd) = std::env::current_dir() {
-        if let Ok(entries) = std::fs::read_dir(cwd.join(".rtk/filters")) {
-            count += entries
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "toml"))
-                .count();
-        }
+    if let Ok(cwd) = std::env::current_dir()
+        && let Ok(entries) = std::fs::read_dir(cwd.join(".rtk/filters"))
+    {
+        count += entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "toml"))
+            .count();
     }
 
     // Global: ~/.config/rtk/filters/*.toml
-    if let Some(config_dir) = dirs::config_dir() {
-        if let Ok(entries) = std::fs::read_dir(config_dir.join("rtk/filters")) {
-            count += entries
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "toml"))
-                .count();
-        }
+    if let Some(config_dir) = dirs::config_dir()
+        && let Ok(entries) = std::fs::read_dir(config_dir.join("rtk/filters"))
+    {
+        count += entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "toml"))
+            .count();
     }
 
     count
@@ -730,13 +728,21 @@ mod tests {
             Ok(t) => t,
             Err(_) => return, // No DB — skip
         };
-        let (cmds, top, pct, saved_24h, saved_total) = get_stats(&tracker);
+        // The trailing saved-token sums are unbounded and signed: `tokens_saved_24h` and
+        // `total_tokens_saved` return an unclamped `SUM(saved_tokens)`, so a window whose
+        // filters emitted more than they saved sums negative, and the 24h window can
+        // exceed the all-time total when the rows outside it are the negative ones.
+        // Nothing about their value is assertable, so this test does not bind them.
+        let (cmds, top, pct, ..) = get_stats(&tracker);
         assert!(cmds >= 0);
         assert!(top.len() <= 5);
-        assert!(saved_24h >= 0);
-        assert!(saved_total >= 0);
         if let Some(p) = pct {
-            assert!((0.0..=100.0).contains(&p));
+            // Signed savings: a net-regressing DB makes overall savings honestly
+            // negative; only the upper bound is a real invariant (never saves > 100%).
+            assert!(
+                p <= 100.0,
+                "overall savings pct must never exceed 100, got {p}"
+            );
         }
     }
 
@@ -750,11 +756,19 @@ mod tests {
         assert!(stats.passthrough_top.len() <= 5);
         assert!(stats.parse_failures_24h >= 0);
         assert!(stats.low_savings_commands.len() <= 5);
-        assert!((0.0..=100.0).contains(&stats.avg_savings_per_command));
+        // Signed savings: avg_savings_per_command can be negative for a regressing
+        // filter; bound only the upper end (a real saving never exceeds 100%).
         assert!(
-            ["claude", "gemini", "codex", "cursor", "copilot", "vibe", "none", "unknown"]
-                .iter()
-                .any(|&h| stats.hook_type.starts_with(h)),
+            stats.avg_savings_per_command <= 100.0,
+            "avg savings per command must never exceed 100, got {}",
+            stats.avg_savings_per_command
+        );
+        assert!(
+            [
+                "claude", "gemini", "codex", "cursor", "copilot", "vibe", "none", "unknown"
+            ]
+            .iter()
+            .any(|&h| stats.hook_type.starts_with(h)),
             "Unexpected hook type: {}",
             stats.hook_type
         );
@@ -764,8 +778,10 @@ mod tests {
     fn test_detect_hook_type_returns_known() {
         let ht = detect_hook_type();
         assert!(
-            ["claude", "gemini", "codex", "cursor", "copilot", "vibe", "none", "unknown"]
-                .contains(&ht.as_str()),
+            [
+                "claude", "gemini", "codex", "cursor", "copilot", "vibe", "none", "unknown"
+            ]
+            .contains(&ht.as_str()),
             "Unexpected hook type: {}",
             ht
         );

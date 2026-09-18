@@ -5,15 +5,15 @@ use regex::Regex;
 use serde::Deserialize;
 use std::sync::LazyLock;
 
+use crate::Commands;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{package_manager_exec, strip_ansi};
 use crate::parser::{
+    FormatMode, OutputParser, ParseResult, TestFailure, TestResult, TokenFormatter,
     emit_degradation_warning, emit_passthrough_warning, extract_json_object, truncate_output,
-    truncate_passthrough, FormatMode, OutputParser, ParseResult, TestFailure, TestResult,
-    TokenFormatter,
+    truncate_passthrough,
 };
-use crate::Commands;
 
 /// Vitest JSON output structures (tool-specific format)
 #[derive(Debug, Deserialize)]
@@ -525,7 +525,8 @@ Scope: all 6 workspace projects
 
     #[test]
     fn test_vitest_effective_args_inject_json_reporter_by_default() {
-        let effective = build_vitest_effective_args(&args(&["run", "constants.test.ts", "--watch"]));
+        let effective =
+            build_vitest_effective_args(&args(&["run", "constants.test.ts", "--watch"]));
 
         assert!(!effective.passthrough);
         assert_eq!(
@@ -548,8 +549,12 @@ Scope: all 6 workspace projects
 
     #[test]
     fn test_vitest_effective_args_preserve_explicit_reporter_value() {
-        let effective =
-            build_vitest_effective_args(&args(&["run", "constants.test.ts", "--reporter", "verbose"]));
+        let effective = build_vitest_effective_args(&args(&[
+            "run",
+            "constants.test.ts",
+            "--reporter",
+            "verbose",
+        ]));
 
         assert!(effective.passthrough);
         assert_eq!(

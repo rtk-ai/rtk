@@ -172,21 +172,21 @@ fn dispatch(original: &[String]) -> Result<Dispatch> {
         };
         return Ok(Dispatch::Verbatim(verbatim));
     }
-    if options.is_empty() {
-        if let Some(mut parsed) = parse_subset(&paths, &expr) {
-            let repeated_max = max.is_some() && parsed.max_explicit;
-            let repeated_type =
-                file_type.is_some() && parsed.file_type != FindArgs::default().file_type;
-            if !repeated_max && !repeated_type {
-                if let Some(n) = max {
-                    parsed.max_results = n;
-                    parsed.max_explicit = true;
-                }
-                if let Some(t) = file_type {
-                    parsed.file_type = t;
-                }
-                return Ok(Dispatch::Native(parsed));
+    if options.is_empty()
+        && let Some(mut parsed) = parse_subset(&paths, &expr)
+    {
+        let repeated_max = max.is_some() && parsed.max_explicit;
+        let repeated_type =
+            file_type.is_some() && parsed.file_type != FindArgs::default().file_type;
+        if !repeated_max && !repeated_type {
+            if let Some(n) = max {
+                parsed.max_results = n;
+                parsed.max_explicit = true;
             }
+            if let Some(t) = file_type {
+                parsed.file_type = t;
+            }
+            return Ok(Dispatch::Native(parsed));
         }
     }
     Ok(Dispatch::Compress {
@@ -907,7 +907,9 @@ mod tests {
     #[test]
     fn rtk_flags_mid_expression_reach_find_untouched() {
         assert_eq!(
-            class(&[".", "-name", "*.rs", "-m", "5", "-exec", "grep", "-m", "1", "x", "{}", ";"]),
+            class(&[
+                ".", "-name", "*.rs", "-m", "5", "-exec", "grep", "-m", "1", "x", "{}", ";"
+            ]),
             "verbatim"
         );
         match dispatch(&args(&[".", "-m", "5", "-mtime", "-7"])).unwrap() {
@@ -1344,13 +1346,14 @@ mod tests {
     #[test]
     fn native_run_returns_zero_on_success() {
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("RTK_TEE_DIR", tmp.path());
-        std::fs::write(tmp.path().join("a.txt"), "x").unwrap();
-        let root = tmp.path().to_string_lossy().into_owned();
-        assert_eq!(
-            run("*.txt", &root, 10, false, None, "f", false, 0).unwrap(),
-            0
-        );
+        temp_env::with_var("RTK_TEE_DIR", Some(tmp.path()), || {
+            std::fs::write(tmp.path().join("a.txt"), "x").unwrap();
+            let root = tmp.path().to_string_lossy().into_owned();
+            assert_eq!(
+                run("*.txt", &root, 10, false, None, "f", false, 0).unwrap(),
+                0
+            );
+        });
     }
 
     #[test]
@@ -1409,28 +1412,29 @@ mod tests {
     #[test]
     fn disclosure_survives_the_output_guard() {
         let tee = tempfile::tempdir().unwrap();
-        std::env::set_var("RTK_TEE_DIR", tee.path());
-        let timer = tracking::TimedExecution::start();
-        let shown = render(
-            vec!["visible.txt".to_string()],
-            50,
-            false,
-            &["secret.txt".to_string()],
-            "find . -name '*.txt'",
-            "visible.txt",
-            &timer,
-        );
-        assert!(shown.contains("(1 filtered"), "{shown}");
-        let shown = render(
-            vec![],
-            50,
-            false,
-            &["secret.txt".to_string()],
-            "find . -name secret.txt",
-            "",
-            &timer,
-        );
-        assert!(shown.contains("(1 filtered"), "{shown}");
+        temp_env::with_var("RTK_TEE_DIR", Some(tee.path()), || {
+            let timer = tracking::TimedExecution::start();
+            let shown = render(
+                vec!["visible.txt".to_string()],
+                50,
+                false,
+                &["secret.txt".to_string()],
+                "find . -name '*.txt'",
+                "visible.txt",
+                &timer,
+            );
+            assert!(shown.contains("(1 filtered"), "{shown}");
+            let shown = render(
+                vec![],
+                50,
+                false,
+                &["secret.txt".to_string()],
+                "find . -name secret.txt",
+                "",
+                &timer,
+            );
+            assert!(shown.contains("(1 filtered"), "{shown}");
+        });
     }
 
     #[cfg(unix)]

@@ -45,6 +45,7 @@ RTK intercepts shell commands and compresses their output before your agent read
 | `ls` / `tree` | Tree format with file counts instead of one line per entry |
 | `cat` / `read` | Smart file reading: signatures and structure over full bodies |
 | `grep` / `rg` | Truncates long lines, groups matches by file |
+| `ast-grep` | Groups structural matches by file, caps overflow |
 | `git status` | Compact stat format, grouped by state |
 | `git diff` | Reduced context, headers stripped |
 | `git log` | Hash, author and subject only |
@@ -72,6 +73,14 @@ The token counts RTK reports are estimated as `bytes / 4` — RTK ships no token
 
 ```bash
 brew install rtk
+```
+
+### winget (Windows)
+
+Easiest way to install on Windows — one command, no PATH setup needed:
+
+```powershell
+winget install rtk-ai.rtk
 ```
 
 ### Quick Install (Linux/macOS)
@@ -369,7 +378,9 @@ By default `RTK.md` says nothing about RTK itself. Set `[awareness] level = "hig
 
 RTK works fully on native Windows. Since **v0.37.2** the auto-rewrite hook runs as a **native binary command** (`rtk hook claude`) — no Unix shell, bash, or jq required — so commands are rewritten transparently on Command Prompt, PowerShell, and Windows Terminal, just like on Linux and macOS.
 
-### Native Windows
+### Native Windows (manual install)
+
+Prefer [`winget`](#winget-windows) if you can — it handles PATH for you.
 
 ```powershell
 # 1. Download and extract rtk-x86_64-pc-windows-msvc.zip from releases
@@ -412,7 +423,7 @@ RTK supports 17 AI coding tools. Each integration rewrites shell commands to `rt
 | **GitHub Copilot CLI** | `rtk init -g --copilot` | PreToolUse deny-with-suggestion (CLI limitation) |
 | **Cursor** | `rtk init -g --agent cursor` | preToolUse hook (hooks.json) |
 | **Gemini CLI** | `rtk init -g --gemini` | BeforeTool hook |
-| **Codex** | `rtk init -g --codex` | AGENTS.md + RTK.md instructions |
+| **Codex** | `rtk init -g --codex` | PreToolUse hook (`updatedInput`) + AGENTS.md |
 | **Windsurf** | `rtk init -g --agent windsurf` | .windsurfrules (project-scoped) |
 | **Cline / Roo Code** | `rtk init --agent cline` | .clinerules (project-scoped) |
 | **OpenCode** | `rtk init -g --opencode` | Plugin TS (tool.execute.before) |
@@ -436,6 +447,7 @@ For per-agent setup details, override controls, and graceful degradation, see th
 ```toml
 [hooks]
 exclude_commands = ["curl", "playwright"]  # skip rewrite for these (matches `npx playwright` too)
+suppress_hook_warning = false                # suppress the missing-hook warning only
 
 [retriever]
 mode = "sqlite"         # sqlite (default) | tee (legacy files) | disabled

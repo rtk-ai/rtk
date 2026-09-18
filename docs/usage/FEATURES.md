@@ -130,7 +130,9 @@ rtk read - [options]          # Lecture depuis stdin
 | Option | Court | Defaut | Description |
 |--------|-------|--------|-------------|
 | `--level` | `-l` | `minimal` | Niveau de filtrage : `none`, `minimal`, `aggressive` |
-| `--max-lines` | `-m` | illimite | Nombre maximum de lignes |
+| `--max-lines` | `-m` | illimite | Apercu structurel plafonne a N lignes (signatures et imports, pas les N premieres) |
+| `--head-lines` | | illimite | Garde seulement les N premieres lignes, a l'octet pres |
+| `--tail-lines` | | illimite | Garde seulement les N dernieres lignes, a l'octet pres |
 | `--line-numbers` | `-n` | non | Afficher les numeros de ligne |
 
 **Niveaux de filtrage :**
@@ -235,6 +237,21 @@ src/ls.rs:25:fn run_tree(...)                src/ls.rs
 ...                                            12: pub fn run(...)
                                                25: fn run_tree(...)
 ```
+
+---
+
+### `rtk ast-grep` -- Recherche structurelle (AST)
+
+**Objectif :** Remplace `ast-grep` avec une sortie groupee par fichier, plafonnee.
+
+**Syntaxe :**
+```bash
+rtk ast-grep run -p '<pattern>' [chemin] [options]
+```
+
+Regroupe les correspondances par fichier, plafonnees a 5 par fichier et 50 au total ; le surplus est remplace par une note de comptage ("N more match line(s) in X" / "N more file(s) not shown"). ast-grep imprime une ligne par ligne source d'une correspondance, et une correspondance structurelle s'etend sur plusieurs lignes : le decompte porte donc sur les lignes, pas sur les correspondances. Les sorties que rtk ne sait pas decouper (`ast-grep scan`, `--heading`) passent telles quelles. Sur une recherche reelle dans ce depot, ~85% de reduction.
+
+`--json` n'est pas filtre -- une demande explicite de sortie structuree passe telle quelle, sans compression.
 
 ---
 
@@ -419,6 +436,14 @@ rtk git show [args...]
 ```
 
 Affiche le resume du commit + stat + diff compact.
+
+> **Attention (redirection vers un fichier).** Pour un blob volumineux
+> (`rtk git show HEAD:gros-fichier`), la sortie est fenetree : seul un apercu
+> est affiche, suivi d'un indice `[see remaining: git show 'HEAD:...' | tail -n +N]`.
+> Un `rtk git show HEAD:x > fichier` ecrit a la main peut donc tronquer
+> silencieusement le contenu (le code de sortie reste 0). Pour capturer le
+> fichier complet, utilisez `git show` directement, ou suivez l'indice de
+> recuperation.
 
 ---
 
@@ -1268,6 +1293,7 @@ rtk verify
 | `cargo test/build/clippy/check` | `rtk cargo ...` |
 | `cat/head/tail <fichier>` | `rtk read <fichier>` |
 | `rg/grep <pattern>` | `rtk grep <pattern>` |
+| `ast-grep run -p <pattern>` | `rtk ast-grep run -p <pattern>` |
 | `ls` | `rtk ls` |
 | `tree` | `rtk tree` |
 | `wc` | `rtk wc` |
@@ -1440,7 +1466,7 @@ Octets de sortie bash supprimes (voir [A propos de la reduction de sortie bash](
 
 | Categorie | Commandes | Reduction sortie bash |
 |-----------|-----------|-------------------|
-| **Fichiers** | ls, tree, read, find, grep, diff | 60-80% |
+| **Fichiers** | ls, tree, read, find, grep, ast-grep, diff | 60-85% |
 | **Git** | status, log, diff, show, add, commit, push, pull | 75-92% |
 | **GitHub** | pr, issue, run, api | 79-87% |
 | **Tests** | cargo test, vitest, playwright, pytest, go test | 90-99% |

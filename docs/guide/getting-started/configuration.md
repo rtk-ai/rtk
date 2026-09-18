@@ -55,6 +55,7 @@ enabled = true              # anonymous daily ping — see Telemetry & Privacy f
 
 [hooks]
 exclude_commands = []       # commands to never auto-rewrite
+suppress_hook_warning = false # suppress the missing-hook warning only
 
 [awareness]
 level = "default"           # "default", "high", "full" — see Awareness level
@@ -94,6 +95,8 @@ since the agent must type `rtk` itself. `rtk init` prints a note when it does th
 | `RTK_TEE_DIR` | Override the tee directory (tee mode) |
 | `RTK_TELEMETRY_DISABLED=1` | Disable telemetry |
 | `RTK_HOOK_AUDIT=1` | Enable hook audit logging |
+| `RTK_SUPPRESS_HOOK_WARNING=1` | Suppress the missing-hook warning only (not the outdated-hook upgrade prompt); `true`, `yes`, `on` also accepted |
+| `RTK_SUPPRESS_HOOK_WARNING=0` | Force the missing-hook warning back on, overriding `hooks.suppress_hook_warning`; `false`, `no`, `off` also accepted |
 | `SKIP_ENV_VALIDATION=1` | Skip env validation (useful with Next.js) |
 
 ## Recall system
