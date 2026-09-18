@@ -1137,7 +1137,12 @@ fn analyze_pipeline(
 
     if cmd[stage_start..end_offset].trim().is_empty() {
         has_supported_structure = false;
-    } else if !is_safe_pipe_consumer(cmd[stage_start..end_offset].trim()) {
+    } else if !is_safe_pipe_consumer(cmd[stage_start..end_offset].trim())
+        && !is_find_line_count_consumer(
+            cmd[stage_start..end_offset].trim(),
+            cmd[segment_start..first_pipe_offset].trim(),
+        )
+    {
         consumers_all_safe = false;
     }
 
@@ -1492,6 +1497,16 @@ fn is_safe_pipe_consumer(stage: &str) -> bool {
         return false;
     };
     !words.any(|arg| arg_matches_unsafe_flag(consumer, arg))
+}
+
+fn is_find_line_count_consumer(stage: &str, producer: &str) -> bool {
+    if !producer.trim_start().starts_with("find ") {
+        return false;
+    }
+    let words = shell_split(stage);
+    words.first().is_some_and(|word| word == "wc")
+        && words.get(1).is_some_and(|word| word == "-l")
+        && words.len() == 2
 }
 
 /// Every built-in transparent wrapper, paired with whether it may fall through.
@@ -3528,10 +3543,10 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_find_pipe_wc_stays_raw() {
+    fn test_rewrite_find_pipe_wc_line_count() {
         assert_eq!(
             rewrite_command_no_prefixes("find src -type f | wc -l", &[]),
-            None
+            Some("rtk find src -type f | wc -l".into())
         );
     }
 
@@ -3626,6 +3641,18 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("git log | grep feat | wc -l", &[]),
             None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_find_before_wc_line_count() {
+        assert_eq!(
+            rewrite_command_no_prefixes("find . | wc -l", &[]),
+            Some("rtk find . | wc -l".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"find . -type f -name "*.php" | wc -l"#, &[]),
+            Some(r#"rtk find . -type f -name "*.php" | wc -l"#.into())
         );
     }
 
