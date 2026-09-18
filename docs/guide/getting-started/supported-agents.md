@@ -33,7 +33,7 @@ Agent runs "cargo test"
 | GitHub Copilot CLI | Shell hook (`PreToolUse`) | Yes |
 | Cursor | Shell hook (`preToolUse`) | Yes |
 | Gemini CLI | Rust binary (`BeforeTool`) | Yes |
-| OpenCode | TypeScript plugin (`tool.execute.before`) | Yes |
+| OpenCode | TypeScript plugin (`tool.execute.before`, v1 `server` hook) | Yes on v1 |
 | OpenClaw | TypeScript plugin (`before_tool_call`) | Yes |
 | Pi | TypeScript extension (`tool_call` event) | Yes |
 | Oh My Pi (OMP) | TypeScript extension (`tool_call` event, shared with Pi) | Yes |
@@ -106,6 +106,8 @@ rtk init --global --opencode
 ```
 
 Creates `~/.config/opencode/plugins/rtk.ts`. Uses the `tool.execute.before` hook.
+
+The installed plugin includes a v2-compatible default export, so it loads on OpenCode v2. Command rewriting remains available through the legacy v1 `server` hook; it is not yet wired on v2 hosts.
 
 ### Pi
 
@@ -265,7 +267,7 @@ Strips only RTK's `[[hooks]]` block and the `~/.vibe/prompts/rtk.md` file. Any o
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini, Codex) rewrite the command before execution. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
+Rules file integrations (Cline, Windsurf, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini, Codex) rewrite the command before execution. Plugin integrations (OpenCode's legacy v1 server hook, Pi) use in-place mutation via the agent's TypeScript extension API; OpenCode v2 loading is supported, but command rewriting is not yet wired there.
 
 ## Windows support
 

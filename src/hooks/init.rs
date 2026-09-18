@@ -6531,6 +6531,25 @@ mod tests {
     }
 
     #[test]
+    fn test_opencode_plugin_v2_compatibility_contract() {
+        let assert_contract = |content: &str| {
+            assert!(content.contains("export default {"));
+            assert!(content.contains("id: \"rtk\""));
+            assert!(content.contains("setup: async () => {}"));
+            assert!(content.contains("server: RtkOpenCodePlugin"));
+            assert!(content.contains("\"tool.execute.before\": async"));
+        };
+
+        assert_contract(OPENCODE_PLUGIN);
+
+        let temp = TempDir::new().unwrap();
+        let plugin_path = opencode_plugin_path(&temp.path().join("opencode"));
+        ensure_opencode_plugin_installed(&plugin_path, InitContext::default()).unwrap();
+        let installed = fs::read_to_string(plugin_path).unwrap();
+        assert_contract(&installed);
+    }
+
+    #[test]
     fn test_opencode_plugin_remove() {
         let temp = TempDir::new().unwrap();
         let opencode_dir = temp.path().join("opencode");
