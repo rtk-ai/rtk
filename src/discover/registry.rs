@@ -990,9 +990,10 @@ fn rewrite_multiline_block(
         match rewrite_single(line, excluded, transparent_prefixes) {
             Some(rewritten) if rewritten != line => {
                 any_changed = true;
-                let indent = &seg[..seg.len() - seg.trim_start().len()];
+                let indent = &unit[..unit.len() - unit.trim_start().len()];
                 result.push_str(indent);
                 result.push_str(&rewritten);
+                result.push_str(&unit[indent.len() + line.len()..]);
             }
             _ => result.push_str(unit),
         }
@@ -1112,11 +1113,13 @@ fn rewrite_pipeline_final_stage(
         transparent_prefixes,
     )
     .map(|rewritten| {
-        format!(
-            "{} {}",
-            cmd[segment_start..final_stage_start].trim(),
-            rewritten
-        )
+        // The earlier stages and the `|` between them are the author's text,
+        // not this rewrite's to respace. The gap after the `|` sits inside the
+        // final stage's own range, which the rewrite returns trimmed.
+        let head = &cmd[segment_start..final_stage_start];
+        let stage = &cmd[final_stage_start..analysis.end_offset];
+        let lead = &stage[..stage.len() - stage.trim_start().len()];
+        format!("{}{}{}", head.trim_start(), lead, rewritten)
     })
 }
 
@@ -1142,11 +1145,12 @@ fn rewrite_pipeline_producer(
         transparent_prefixes,
     )
     .map(|rewritten| {
-        format!(
-            "{} {}",
-            rewritten,
-            cmd[first_pipe_offset..analysis.end_offset].trim()
-        )
+        // The gap between the producer and the `|` sits in neither piece:
+        // the rewrite is trimmed and the tail starts at the pipe itself.
+        let producer = &cmd[segment_start..first_pipe_offset];
+        let gap = &producer[producer.trim_end().len()..];
+        let tail = &cmd[first_pipe_offset..analysis.end_offset];
+        format!("{}{}{}", rewritten, gap, tail.trim_end())
     })
 }
 
@@ -1155,6 +1159,32 @@ fn rewrite_pipeline_producer(
 /// table on [`crate::discover::lexer::split_for_permissions`]. Deliberately
 /// less conservative than that gate: standalone `(`/`)` isn't a segment
 /// boundary, and redirects are preserved verbatim rather than truncated.
+/// Rewrite the command occupying `cmd[start..end]`, keeping the whitespace
+/// that surrounds it inside that range.
+///
+/// The rewrite replaces a command, not the text around it. Emitting the gaps
+/// from the source rather than rebuilding them is what keeps `echo 1;;esac`
+/// and `a  &&  b` intact: an operator's own spacing is nobody's to normalise.
+fn emit_segment(
+    out: &mut String,
+    cmd: &str,
+    start: usize,
+    end: usize,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+) -> bool {
+    let raw = &cmd[start..end];
+    let trimmed = raw.trim();
+    let lead = raw.len() - raw.trim_start().len();
+
+    out.push_str(&raw[..lead]);
+    let rewritten = rewrite_segment(trimmed, excluded, transparent_prefixes)
+        .unwrap_or_else(|| trimmed.to_string());
+    out.push_str(&rewritten);
+    out.push_str(&raw[lead + trimmed.len()..]);
+    rewritten != trimmed
+}
+
 fn rewrite_compound(
     cmd: &str,
     excluded: &[ExcludePattern],
@@ -1181,32 +1211,25 @@ fn rewrite_compound(
         }
         match tok.kind {
             TokenKind::Operator => {
-                let seg = cmd[seg_start..tok.offset].trim();
-                let rewritten = rewrite_segment(seg, excluded, transparent_prefixes)
-                    .unwrap_or_else(|| seg.to_string());
-                if rewritten != seg {
-                    any_changed = true;
-                }
-                result.push_str(&rewritten);
-                if tok.value.starts_with(';') {
-                    result.push_str(&tok.value);
-                    let after = tok.offset + tok.value.len();
-                    if after < cmd.len() {
-                        result.push(' ');
-                    }
-                } else {
-                    result.push(' ');
-                    result.push_str(&tok.value);
-                    result.push(' ');
-                }
+                any_changed |= emit_segment(
+                    &mut result,
+                    cmd,
+                    seg_start,
+                    tok.offset,
+                    excluded,
+                    transparent_prefixes,
+                );
                 seg_start = tok.offset + tok.value.len();
-                while seg_start < cmd.len() && cmd.as_bytes().get(seg_start) == Some(&b' ') {
-                    seg_start += 1;
-                }
+                result.push_str(&cmd[tok.offset..seg_start]);
             }
             TokenKind::Pipe(_) => {
                 let analysis = analyze_pipeline(cmd, &tokens, seg_start, tok.offset);
-                let pipeline = cmd[seg_start..analysis.end_offset].trim();
+                // The pipeline rewriters work on trimmed text, so the gap on
+                // either side is emitted here rather than rebuilt by them.
+                let raw_pipeline = &cmd[seg_start..analysis.end_offset];
+                let lead = raw_pipeline.len() - raw_pipeline.trim_start().len();
+                let pipeline = raw_pipeline.trim();
+                result.push_str(&raw_pipeline[..lead]);
                 let rewritten_pipeline = rewrite_pipeline_final_stage(
                     cmd,
                     seg_start,
@@ -1231,6 +1254,7 @@ fn rewrite_compound(
                 } else {
                     result.push_str(pipeline);
                 }
+                result.push_str(&raw_pipeline[lead + pipeline.len()..]);
 
                 match analysis.next_clause_offset {
                     Some(next_clause_offset) => {
@@ -1243,30 +1267,29 @@ fn rewrite_compound(
                 }
             }
             TokenKind::Shellism if tok.value == "&" => {
-                let seg = cmd[seg_start..tok.offset].trim();
-                let rewritten = rewrite_segment(seg, excluded, transparent_prefixes)
-                    .unwrap_or_else(|| seg.to_string());
-                if rewritten != seg {
-                    any_changed = true;
-                }
-                result.push_str(&rewritten);
-                result.push_str(" & ");
+                any_changed |= emit_segment(
+                    &mut result,
+                    cmd,
+                    seg_start,
+                    tok.offset,
+                    excluded,
+                    transparent_prefixes,
+                );
                 seg_start = tok.offset + tok.value.len();
-                while seg_start < cmd.len() && cmd.as_bytes().get(seg_start) == Some(&b' ') {
-                    seg_start += 1;
-                }
+                result.push_str(&cmd[tok.offset..seg_start]);
             }
             _ => {}
         }
     }
 
-    let seg = cmd[seg_start..].trim();
-    let rewritten =
-        rewrite_segment(seg, excluded, transparent_prefixes).unwrap_or_else(|| seg.to_string());
-    if rewritten != seg {
-        any_changed = true;
-    }
-    result.push_str(&rewritten);
+    any_changed |= emit_segment(
+        &mut result,
+        cmd,
+        seg_start,
+        cmd.len(),
+        excluded,
+        transparent_prefixes,
+    );
 
     if any_changed { Some(result) } else { None }
 }
@@ -1575,7 +1598,12 @@ fn rewrite_segment_inner(
             if let Some(rewritten) =
                 rewrite_segment_inner(rest, excluded, transparent_prefixes, context, depth + 1)
             {
-                return Some(format!("{} {}", prefix, rewritten));
+                return Some(format!(
+                    "{}{}{}",
+                    prefix,
+                    prefix_gap(trimmed, prefix, rest),
+                    rewritten
+                ));
             }
             // #2768: falling through re-tests the full prefixed string, which is
             // only valid when the wrapper is itself a routable command.
@@ -1595,7 +1623,14 @@ fn rewrite_segment_inner(
     // #2375
     if let Some((prefix, rest)) = strip_process_wrapper_prefix(trimmed) {
         return rewrite_segment_inner(rest, excluded, transparent_prefixes, context, depth + 1)
-            .map(|rewritten| format!("{} {}", prefix, rewritten));
+            .map(|rewritten| {
+                format!(
+                    "{}{}{}",
+                    prefix,
+                    prefix_gap(trimmed, prefix, rest),
+                    rewritten
+                )
+            });
     }
 
     // User-configured wrapper prefixes (e.g. `docker exec mycontainer`). These
@@ -1606,7 +1641,14 @@ fn rewrite_segment_inner(
                 return None;
             }
             return rewrite_segment_inner(rest, excluded, transparent_prefixes, context, depth + 1)
-                .map(|rewritten| format!("{} {}", prefix, rewritten));
+                .map(|rewritten| {
+                    format!(
+                        "{}{}{}",
+                        prefix,
+                        prefix_gap(trimmed, prefix, rest),
+                        rewritten
+                    )
+                });
         }
     }
 
@@ -1909,6 +1951,15 @@ fn takes_attached_value(wrapper: &ProcessWrapper, arg: &str) -> bool {
 
 /// Strip a command prefix with word-boundary check.
 /// Returns the remainder of the command after the prefix, or `None` if no match.
+/// The whitespace `strip_word_prefix` skipped between `prefix` and `rest`.
+///
+/// It trims the remainder so the inner command can be matched, and rejoining
+/// with a single space would respace text the author wrote: `uv run  ls` is
+/// one gap, not one space.
+fn prefix_gap<'a>(cmd: &'a str, prefix: &str, rest: &str) -> &'a str {
+    &cmd[prefix.len()..cmd.len() - rest.len()]
+}
+
 fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
     if cmd == prefix {
         Some("")
@@ -2268,7 +2319,7 @@ mod tests {
         fn test_cross_line_and_list_joins_and_rewrites() {
             assert_eq!(
                 rewrite_command_no_prefixes("git status &&\ngit log -3", &[]),
-                Some("rtk git status && rtk git log -3".into())
+                Some("rtk git status &&\nrtk git log -3".into())
             );
         }
 
@@ -2276,7 +2327,7 @@ mod tests {
         fn test_cross_line_pipeline_joins_and_rewrites() {
             assert_eq!(
                 rewrite_command_no_prefixes("git log |\ngrep feat", &[]),
-                Some("git log | rtk grep feat".into())
+                Some("git log |\nrtk grep feat".into())
             );
             assert_eq!(
                 rewrite_command_no_prefixes("cargo test |&\ngrep FAILED", &[]),
@@ -2296,7 +2347,7 @@ mod tests {
         fn test_mixed_independent_and_continued_lines() {
             assert_eq!(
                 rewrite_command_no_prefixes("grep -rn foo src\ngit status &&\ngit log -3", &[]),
-                Some("rtk grep -rn foo src\nrtk git status && rtk git log -3".into())
+                Some("rtk grep -rn foo src\nrtk git status &&\nrtk git log -3".into())
             );
         }
 
@@ -2304,7 +2355,7 @@ mod tests {
         fn test_blank_line_inside_continuation_joins() {
             assert_eq!(
                 rewrite_command_no_prefixes("git status &&\n\ngit log -3", &[]),
-                Some("rtk git status && rtk git log -3".into())
+                Some("rtk git status &&\n\nrtk git log -3".into())
             );
         }
 
@@ -2340,7 +2391,7 @@ mod tests {
         fn test_balanced_conditional_line_still_rewrites() {
             assert_eq!(
                 rewrite_command_no_prefixes("[[ -x foo ]] &&\ngit status", &[]),
-                Some("[[ -x foo ]] && rtk git status".into())
+                Some("[[ -x foo ]] &&\nrtk git status".into())
             );
         }
 
@@ -4201,12 +4252,105 @@ mod tests {
     fn test_rewrite_head_operand_after_operator_split() {
         assert_eq!(
             rewrite_command_no_prefixes("head -n 1 f;rm", &[]),
-            Some("rtk read f --head-lines 1; rm".into())
+            Some("rtk read f --head-lines 1;rm".into())
         );
         assert_eq!(
             rewrite_command_no_prefixes("head -n 1 a&b", &[]),
-            Some("rtk read a --head-lines 1 & b".into())
+            Some("rtk read a --head-lines 1&b".into())
         );
+    }
+
+    /// The rewrite replaces commands, so everything that is not a command must
+    /// come through untouched. Removing each inserted `rtk ` has to give back
+    /// the input exactly — no operator respaced, no newline collapsed, no
+    /// separator invented.
+    ///
+    /// Stated as a property because what it catches is spacing, and nobody
+    /// writes a case for the spacing they did not think of.
+    #[test]
+    fn test_rewrite_changes_commands_and_nothing_else() {
+        const COMMANDS: &[&str] = &["ls", "ls -la", "cargo build", "echo hi", "nosuchtool x"];
+        const GAPS: &[&str] = &["", " ", "  ", "\t"];
+        const JOINERS: &[&str] = &[
+            " && ", "&&", "  &&  ", " || ", "||", "; ", ";", "  ;  ", " & ", "&", " | ", "|",
+            " ;; ", ";;", ";&", ";;&", "\n", " \n ", "\n\n", "\t&&\t",
+        ];
+
+        let mut corpus: Vec<String> = Vec::new();
+        for left in COMMANDS {
+            for joiner in JOINERS {
+                for right in COMMANDS {
+                    corpus.push(format!("{left}{joiner}{right}"));
+                }
+            }
+        }
+        // Derived from the tables the production code reads, not listed by
+        // hand: a wrapper or consumer added later is covered without anyone
+        // remembering to add it here. Every one of these rejoins text around
+        // a command, and every one of them collapsed the gap at some point.
+        let mut groups: Vec<(&str, Vec<String>)> = Vec::new();
+
+        let mut wrapped = Vec::new();
+        let wrappers = ROUTABLE_WRAPPER_PREFIXES
+            .iter()
+            .copied()
+            .chain(SHELL_KEYWORD_PREFIXES.iter().copied())
+            .chain(PROCESS_WRAPPERS.iter().map(|w| w.name));
+        for wrapper in wrappers {
+            // `timeout`/`time` take a duration before the command they wrap.
+            let operand = if PROCESS_WRAPPERS.iter().any(|w| w.name == wrapper) {
+                "5 "
+            } else {
+                ""
+            };
+            for gap in GAPS {
+                wrapped.push(format!("{wrapper} {operand}{gap}ls -la"));
+                wrapped.push(format!("{wrapper} {operand}{gap}ls -la && ls"));
+            }
+        }
+        groups.push(("wrapper prefixes", wrapped));
+
+        let mut piped = Vec::new();
+        for consumer in SAFE_PIPE_CONSUMERS {
+            for gap in GAPS {
+                for pipe_gap in GAPS {
+                    piped.push(format!("ls -la{gap}|{pipe_gap}{} -3", consumer.name));
+                }
+            }
+        }
+        groups.push(("safe pipe consumers", piped));
+
+        for (label, group) in &groups {
+            let rewritten = group
+                .iter()
+                .filter(|c| rewrite_command_no_prefixes(c, &[]).is_some())
+                .count();
+            // A group that stops rewriting asserts nothing. That is how the
+            // pipe cases sat here proving nothing while a real bug lived
+            // behind them.
+            assert!(
+                rewritten * 2 >= group.len(),
+                "{label}: only {rewritten} of {} inputs rewrite, so this group \
+                 no longer exercises the emitter",
+                group.len()
+            );
+            corpus.extend(group.iter().cloned());
+        }
+
+        for cmd in &corpus {
+            let Some(out) = rewrite_command_no_prefixes(cmd, &[]) else {
+                continue;
+            };
+            // The whole command is trimmed on the way in, which is separate
+            // from what the emitter owns: the text between one command and
+            // the next.
+            let restored = out.replace("rtk ", "");
+            assert_eq!(
+                restored,
+                cmd.trim().replace("rtk ", ""),
+                "rewrite altered text outside a command\n  in:  {cmd:?}\n  out: {out:?}"
+            );
+        }
     }
 
     /// A trailing redirect is stripped before the operand is judged, so `a>b`
