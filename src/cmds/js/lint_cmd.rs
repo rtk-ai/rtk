@@ -53,6 +53,21 @@ struct PylintDiagnostic {
     message_id: String, // e.g., "W0612"
 }
 
+#[derive(Debug, Deserialize)]
+struct OxlintOutput {
+    diagnostics: Vec<OxlintDiagnostic>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OxlintDiagnostic {
+    #[allow(dead_code)]
+    message: String,
+    code: Option<String>, // rule id, e.g. "eslint(no-unused-vars)"
+    severity: String,     // "error" | "warning"
+    #[serde(default)]
+    filename: String,
+}
+
 /// Check if a linter is Python-based (uses pip/pipx, not npm/pnpm)
 fn is_python_linter(linter: &str) -> bool {
     matches!(linter, "ruff" | "pylint" | "mypy" | "flake8" | "sqlfluff")
@@ -82,19 +97,73 @@ fn named_runner(args: &[String], skip: usize) -> Option<&str> {
         .find(|a| *a != "exec")
 }
 
+/// Linters `rtk lint <name>` dispatches to when named explicitly as args[0].
+/// Allowlist beats path-guessing: anything else (e.g. a bare `src`) is treated
+/// as a path and the default linter is sniffed instead. Extend the list when a
+/// new linter lands in the dispatch match below.
+const KNOWN_LINTERS: &[&str] = &[
+    "biome",
+    "eslint",
+    "oxlint",
+    "ruff",
+    "pylint",
+    "mypy",
+    "flake8",
+    "sqlfluff",
+];
+
 /// Detect the linter name from args (after stripping PM prefixes).
 /// Returns the linter name and whether it was explicitly specified.
 fn detect_linter(args: &[String]) -> (&str, bool) {
-    let is_path_or_flag = args.is_empty()
-        || args[0].starts_with('-')
-        || args[0].contains('/')
-        || args[0].contains('.');
+    let names_linter = args
+        .first()
+        .is_some_and(|a| KNOWN_LINTERS.contains(&a.as_str()));
 
-    if is_path_or_flag {
-        ("eslint", false)
+    if names_linter {
+        (args[0].as_str(), true)
     } else {
-        (&args[0], true)
+        (detect_default_linter(), false)
     }
+}
+
+/// The linter assumed when `rtk lint` is invoked without naming one (`npm run lint`
+/// rewrites to a bare `rtk lint`). Historically always eslint; sniff the project
+/// so oxlint repos don't get routed to a missing eslint.
+/// ponytail: 3 cheap signals (config file, lint script, dependency). A global
+/// oxlint with no config, no script and no dep entry still defaults to eslint —
+/// per-project config or a registry-side rewrite rule if that ever matters.
+fn detect_default_linter() -> &'static str {
+    if project_uses_oxlint(std::path::Path::new(".")) {
+        "oxlint"
+    } else {
+        "eslint"
+    }
+}
+
+/// Does the project rooted at `dir` lint with oxlint?
+fn project_uses_oxlint(dir: &std::path::Path) -> bool {
+    if dir.join(".oxlintrc.json").exists() || dir.join(".oxlintrc.jsonc").exists() {
+        return true;
+    }
+    let Ok(pkg) = std::fs::read_to_string(dir.join("package.json")) else {
+        return false;
+    };
+    let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&pkg) else {
+        return false;
+    };
+    if pkg
+        .get("scripts")
+        .and_then(|s| s.get("lint"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s.contains("oxlint"))
+    {
+        return true;
+    }
+    ["dependencies", "devDependencies", "peerDependencies"].iter().any(|key| {
+        pkg.get(key)
+            .and_then(|d| d.as_object())
+            .is_some_and(|d| d.contains_key("oxlint"))
+    })
 }
 
 /// `runner` is the package runner the user named (`bunx eslint`), or None when
@@ -135,6 +204,10 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
         // Force JSON2 output for pylint
         "pylint" if !effective_args.contains(&"--output-format".to_string()) => {
             cmd.arg("--output-format=json2");
+        }
+        // Force JSON output for oxlint
+        "oxlint" if !effective_args.iter().any(|a| a == "-f" || a.starts_with("--format")) => {
+            cmd.arg("--format").arg("json");
         }
         // sqlfluff's full argv comes from the plan below, flags included.
         "sqlfluff" => {}
@@ -177,7 +250,7 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
     }
 
     // Default to current directory if no path specified (for ruff/pylint/mypy/eslint)
-    if matches!(linter, "ruff" | "pylint" | "mypy" | "eslint") {
+    if matches!(linter, "ruff" | "pylint" | "mypy" | "eslint" | "oxlint") {
         let has_path = effective_args
             .iter()
             .skip(start_idx)
@@ -216,6 +289,7 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
     } else {
         match linter {
             "eslint" => filter_eslint_json(&result.stdout),
+            "oxlint" => filter_oxlint_json(&result.stdout),
             "ruff" => {
                 // Reuse ruff_cmd's JSON parser
                 if !result.stdout.trim().is_empty() {
@@ -342,6 +416,108 @@ fn filter_eslint_json(output: &str) -> String {
             .join("\n");
         if let Some(hint) =
             crate::core::tee::force_tee_tail_hint(&all_file_lines, "eslint-files", MAX_FILES + 1)
+        {
+            result.push_str(&format!("  {}\n", hint));
+        }
+    }
+
+    result.trim().to_string()
+}
+
+/// Filter oxlint JSON output (`--format=json`) - group by rule and file.
+/// Shape: `{"diagnostics": [{"message", "code", "severity", "filename", ...}], ...}`
+fn filter_oxlint_json(output: &str) -> String {
+    let parsed: Result<OxlintOutput, _> = serde_json::from_str(output);
+
+    let parsed = match parsed {
+        Ok(p) => p,
+        Err(e) => {
+            // Fallback if JSON parsing fails
+            return format!(
+                "Oxlint output (JSON parse failed: {})\n{}",
+                e,
+                truncate(output, config::limits().passthrough_max_chars)
+            );
+        }
+    };
+
+    let diagnostics = &parsed.diagnostics;
+    if diagnostics.is_empty() {
+        return "Oxlint: No issues found".to_string();
+    }
+
+    let mut errors = 0usize;
+    let mut warnings = 0usize;
+    let mut by_rule: HashMap<String, usize> = HashMap::new();
+    let mut by_file: HashMap<String, usize> = HashMap::new();
+    let mut file_rules: HashMap<String, HashMap<String, usize>> = HashMap::new();
+
+    for diag in diagnostics {
+        match diag.severity.as_str() {
+            "error" => errors += 1,
+            "warning" => warnings += 1,
+            _ => {}
+        }
+        let rule = diag
+            .code
+            .clone()
+            .unwrap_or_else(|| "<no-rule>".to_string());
+        *by_rule.entry(rule.clone()).or_insert(0) += 1;
+        *by_file.entry(diag.filename.clone()).or_insert(0) += 1;
+        *file_rules
+            .entry(diag.filename.clone())
+            .or_default()
+            .entry(rule)
+            .or_insert(0) += 1;
+    }
+
+    // Build output
+    let mut result = format!(
+        "Oxlint: {} errors, {} warnings in {} files\n",
+        errors,
+        warnings,
+        by_file.len()
+    );
+
+    // Show top rules
+    let mut rule_counts: Vec<_> = by_rule.iter().collect();
+    rule_counts.sort_by(|a, b| b.1.cmp(a.1));
+    result.push_str("Top rules:\n");
+    for (rule, count) in rule_counts.iter().take(10) {
+        result.push_str(&format!("  {} ({}x)\n", rule, count));
+    }
+    result.push('\n');
+
+    // Show top files with most issues, plus the top rules in each
+    const MAX_FILES: usize = CAP_WARNINGS;
+    let mut file_counts: Vec<_> = by_file.iter().collect();
+    file_counts.sort_by(|a, b| b.1.cmp(a.1));
+    result.push_str("Top files:\n");
+    for (file, count) in file_counts.iter().take(MAX_FILES) {
+        let short_path = compact_path(file);
+        result.push_str(&format!("  {} ({} issues)\n", short_path, count));
+
+        if let Some(rules) = file_rules.get(*file) {
+            let mut file_rule_counts: Vec<_> = rules.iter().collect();
+            file_rule_counts.sort_by(|a, b| b.1.cmp(a.1));
+            for (rule, count) in file_rule_counts.iter().take(3) {
+                result.push_str(&format!("    {} ({})\n", rule, count));
+            }
+        }
+    }
+
+    if file_counts.len() > MAX_FILES {
+        result.push_str(&format!(
+            "\n… +{} more files\n",
+            file_counts.len() - MAX_FILES
+        ));
+        let all_file_lines = file_counts
+            .iter()
+            .map(|(file, count)| format!("{} ({} issues)", compact_path(file), count))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_file_lines, "oxlint-files", MAX_FILES + 1)
         {
             result.push_str(&format!("  {}\n", hint));
         }
@@ -659,6 +835,100 @@ mod tests {
     }
 
     #[test]
+    fn test_filter_oxlint_json() {
+        let json = r#"{
+            "diagnostics": [
+                {
+                    "message": "Variable 'y' is declared but never used.",
+                    "code": "eslint(no-unused-vars)",
+                    "severity": "error",
+                    "url": "https://oxc.rs/docs/guide/usage/linter/rules/eslint/no-unused-vars.html",
+                    "help": "Consider removing this declaration.",
+                    "filename": "/tmp/proj/src/utils.ts",
+                    "labels": [{"label": "'y' is declared here", "span": {"offset": 21, "length": 1, "line": 1, "column": 22}}]
+                },
+                {
+                    "message": "Unexpected console statement.",
+                    "code": "eslint(no-console)",
+                    "severity": "warning",
+                    "url": "https://oxc.rs/docs/guide/usage/linter/rules/eslint/no-console.html",
+                    "help": "",
+                    "filename": "/tmp/proj/src/utils.ts",
+                    "labels": [{"label": "", "span": {"offset": 40, "length": 11, "line": 3, "column": 5}}]
+                },
+                {
+                    "message": "Unexpected var, use let or const instead.",
+                    "code": "eslint(no-var)",
+                    "severity": "error",
+                    "url": "https://oxc.rs/docs/guide/usage/linter/rules/eslint/no-var.html",
+                    "help": "",
+                    "filename": "/tmp/proj/src/api.ts",
+                    "labels": [{"label": "", "span": {"offset": 0, "length": 3, "line": 1, "column": 1}}]
+                }
+            ],
+            "number_of_files": 3,
+            "number_of_rules": 96
+        }"#;
+
+        let result = filter_oxlint_json(json);
+        assert!(result.contains("Oxlint: 2 errors, 1 warnings in 2 files"));
+        assert!(result.contains("eslint(no-unused-vars)"));
+        assert!(result.contains("Top rules:"));
+        assert!(result.contains("Top files:"));
+        assert!(result.contains("src/utils.ts"));
+        assert!(result.contains("src/api.ts"));
+    }
+
+    #[test]
+    fn test_filter_oxlint_json_empty() {
+        let json = r#"{"diagnostics": []}"#;
+        let result = filter_oxlint_json(json);
+        assert!(result.contains("Oxlint: No issues found"));
+    }
+
+    #[test]
+    fn test_filter_oxlint_json_parse_failure_falls_back_to_raw() {
+        let result = filter_oxlint_json("not json");
+        assert!(result.contains("JSON parse failed"));
+        assert!(result.contains("not json"));
+    }
+
+    #[test]
+    fn test_project_uses_oxlint() {
+        let dir = std::env::temp_dir().join(format!(
+            "rtk-oxlint-test-{}",
+            std::process::id() as u64 + std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert!(!project_uses_oxlint(&dir));
+
+        std::fs::write(dir.join(".oxlintrc.json"), "{}").unwrap();
+        assert!(project_uses_oxlint(&dir));
+        std::fs::remove_file(dir.join(".oxlintrc.json")).unwrap();
+
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"scripts": {"lint": "oxlint src/"}}"#,
+        )
+        .unwrap();
+        assert!(project_uses_oxlint(&dir));
+        std::fs::remove_file(dir.join("package.json")).unwrap();
+
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"devDependencies": {"oxlint": "1.0.0"}}"#,
+        )
+        .unwrap();
+        assert!(project_uses_oxlint(&dir));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn test_strip_pm_prefix_npx() {
         let args: Vec<String> = vec!["npx".into(), "eslint".into(), "src/".into()];
         assert_eq!(strip_pm_prefix(&args), 1);
@@ -730,6 +1000,16 @@ mod tests {
         let effective = &full_args[skip..];
         let (linter, _) = detect_linter(effective);
         assert_eq!(linter, "biome");
+    }
+
+    #[test]
+    fn test_detect_linter_bare_directory_is_not_a_linter() {
+        // Regression for rtk-ai/rtk#3812's misclassification in the lint path:
+        // a bare arg without / or . used to be taken as the linter name.
+        let args: Vec<String> = vec!["src".into()];
+        let (linter, explicit) = detect_linter(&args);
+        assert!(!explicit);
+        assert_eq!(linter, "eslint"); // untitled project (no oxlint signals) in tests
     }
 
     #[test]

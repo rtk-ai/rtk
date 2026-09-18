@@ -52,6 +52,7 @@ RTK intercepts shell commands and compresses their output before your agent read
 | `git add/commit/push` | Confirmation line instead of full progress output |
 | `cargo test` / `npm test` | Failures only, passing tests collapsed to a count |
 | `ruff check` | Grouped by rule and file |
+| `oxlint` | Grouped by rule and file |
 | `sqlfluff lint` | Grouped by rule and file |
 | `pytest` | Failures only, traceback trimmed |
 | `go test` | NDJSON parsed, failures only |
@@ -219,6 +220,7 @@ rtk test <cmd>                  # Generic test wrapper - failures only (-90%)
 ```bash
 rtk lint                        # ESLint grouped by rule/file
 rtk lint biome                  # Supports other linters
+rtk oxlint                      # Oxlint grouped by rule/file (JSON)
 rtk sqlfluff lint               # SQL linting (JSON, -75%)
 rtk sqlfluff lint models/       # Lint a specific directory (pass path after `lint`)
 rtk tsc                         # TypeScript errors grouped by file
