@@ -69,7 +69,7 @@ Examples: `test_truncate_edge_case`, `test_parse_invalid_input`, `test_filter_em
 
 ## When NOT to Use Pure TDD
 
-- Functions calling `Command::new()` -> test the parser, not the execution
+- Functions that spawn a child (`resolved_command()`) -> test the parser, not the execution
 - `std::process::exit()` -> refactor to `Result` first, then test the Result
 - Direct I/O (SQLite, network) -> use tempfile/mock or test the pure logic separately
 - Main/CLI wiring -> covered by integration/smoke tests

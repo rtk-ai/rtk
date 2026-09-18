@@ -13,6 +13,5 @@ publish = false
 [dependencies]
 regex = "1"
 
-[lints.rust]
-unsafe_code = "deny"
-warnings = "deny"
+[lints]
+workspace = true

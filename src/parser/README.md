@@ -15,7 +15,7 @@ The parser infrastructure provides a unified, three-tier parsing system for tool
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                    ToolCommand Builder                   │
-│  Command::new("vitest").arg("--reporter=json")          │
+│  resolved_command("vitest").arg("--reporter=json")      │
 └─────────────────────┬───────────────────────────────────┘
                       │
 ┌─────────────────────▼───────────────────────────────────┐

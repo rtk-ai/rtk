@@ -1,11 +1,11 @@
 //! Filters Prisma CLI output by stripping ASCII art and verbose decoration.
 
+use crate::core::child_command::ChildCommand;
 use crate::core::guard::never_worse;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{resolved_command, tool_exists};
 use anyhow::{Context, Result};
-use std::process::Command;
 
 #[derive(Debug, Clone)]
 pub enum PrismaCommand {
@@ -30,7 +30,7 @@ pub fn run(cmd: PrismaCommand, args: &[String], verbose: u8) -> Result<i32> {
 }
 
 /// Create a Command that will run prisma (tries global first, then npx)
-fn create_prisma_command() -> Command {
+fn create_prisma_command() -> ChildCommand {
     if tool_exists("prisma") {
         resolved_command("prisma")
     } else {
