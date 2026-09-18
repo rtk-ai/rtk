@@ -3,7 +3,7 @@
 //! Eliminates duplication in gain.rs and cc_economics.rs by providing
 //! a unified trait-based system for displaying daily/weekly/monthly data.
 
-use crate::core::tracking::{DayStats, MonthStats, WeekStats};
+use crate::core::tracking::{average_time_ms, DayStats, MonthStats, WeekStats};
 use crate::core::utils::format_tokens;
 
 /// Format duration in milliseconds to human-readable string
@@ -48,8 +48,11 @@ pub trait PeriodStats {
     /// Total execution time in milliseconds
     fn total_time_ms(&self) -> u64;
 
-    /// Average execution time per command in milliseconds
+    /// Average execution time per timed command in milliseconds
     fn avg_time_ms(&self) -> u64;
+
+    /// Commands whose execution time counts toward `total_time_ms`
+    fn timed_commands(&self) -> usize;
 
     /// Period column width for alignment
     fn period_width() -> usize;
@@ -112,17 +115,12 @@ pub fn print_period_table<T: PeriodStats>(data: &[T]) {
     let total_input: usize = data.iter().map(|d| d.input_tokens()).sum();
     let total_output: usize = data.iter().map(|d| d.output_tokens()).sum();
     let total_saved: usize = data.iter().map(|d| d.saved_tokens()).sum();
-    let total_time: u64 = data.iter().map(|d| d.total_time_ms()).sum();
     let avg_pct = if total_input > 0 {
         (total_saved as f64 / total_input as f64) * 100.0
     } else {
         0.0
     };
-    let avg_time = if total_cmds > 0 {
-        total_time / total_cmds as u64
-    } else {
-        0
-    };
+    let avg_time = total_avg_time_ms(data);
 
     println!("{}", "─".repeat(T::separator_width()));
     println!(
@@ -137,6 +135,13 @@ pub fn print_period_table<T: PeriodStats>(data: &[T]) {
         width = period_width
     );
     println!();
+}
+
+/// Mean exec time across all periods, weighted by each period's timed commands.
+fn total_avg_time_ms<T: PeriodStats>(data: &[T]) -> u64 {
+    let total_time: u64 = data.iter().map(|d| d.total_time_ms()).sum();
+    let timed_cmds: usize = data.iter().map(|d| d.timed_commands()).sum();
+    average_time_ms(total_time, timed_cmds)
 }
 
 // ── Trait Implementations ──
@@ -180,6 +185,10 @@ impl PeriodStats for DayStats {
 
     fn avg_time_ms(&self) -> u64 {
         self.avg_time_ms
+    }
+
+    fn timed_commands(&self) -> usize {
+        self.timed_commands
     }
 
     fn period_width() -> usize {
@@ -242,6 +251,10 @@ impl PeriodStats for WeekStats {
         self.avg_time_ms
     }
 
+    fn timed_commands(&self) -> usize {
+        self.timed_commands
+    }
+
     fn period_width() -> usize {
         22
     }
@@ -292,6 +305,10 @@ impl PeriodStats for MonthStats {
         self.avg_time_ms
     }
 
+    fn timed_commands(&self) -> usize {
+        self.timed_commands
+    }
+
     fn period_width() -> usize {
         10
     }
@@ -316,6 +333,7 @@ mod tests {
             savings_pct: 20.0,
             total_time_ms: 1500,
             avg_time_ms: 150,
+            timed_commands: 10,
         };
 
         assert_eq!(day.period(), "2026-01-20");
@@ -338,6 +356,7 @@ mod tests {
             savings_pct: 40.0,
             total_time_ms: 5000,
             avg_time_ms: 100,
+            timed_commands: 50,
         };
 
         assert_eq!(week.period(), "01-20 → 01-26");
@@ -357,6 +376,7 @@ mod tests {
             savings_pct: 50.0,
             total_time_ms: 20000,
             avg_time_ms: 100,
+            timed_commands: 200,
         };
 
         assert_eq!(month.period(), "2026-01");
@@ -384,6 +404,7 @@ mod tests {
                 savings_pct: 20.0,
                 total_time_ms: 1500,
                 avg_time_ms: 150,
+                timed_commands: 10,
             },
             DayStats {
                 date: "2026-01-21".to_string(),
@@ -394,9 +415,42 @@ mod tests {
                 savings_pct: 30.0,
                 total_time_ms: 2250,
                 avg_time_ms: 150,
+                timed_commands: 15,
             },
         ];
         print_period_table(&data);
         // Should print table with 2 rows + total
+    }
+
+    // #4003: the TOTAL row averages over timed commands, like each period's own average.
+    // Day 1 holds two 150 ms filtered commands plus an 11 h zero-input TUI session.
+    #[test]
+    fn test_total_avg_time_ignores_untimed_commands() {
+        let data = vec![
+            DayStats {
+                date: "2026-01-20".to_string(),
+                commands: 3,
+                input_tokens: 1000,
+                output_tokens: 500,
+                saved_tokens: 500,
+                savings_pct: 50.0,
+                total_time_ms: 300,
+                avg_time_ms: 150,
+                timed_commands: 2,
+            },
+            DayStats {
+                date: "2026-01-21".to_string(),
+                commands: 2,
+                input_tokens: 1000,
+                output_tokens: 500,
+                saved_tokens: 500,
+                savings_pct: 50.0,
+                total_time_ms: 300,
+                avg_time_ms: 150,
+                timed_commands: 2,
+            },
+        ];
+
+        assert_eq!(total_avg_time_ms(&data), 150);
     }
 }
