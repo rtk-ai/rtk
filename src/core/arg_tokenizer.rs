@@ -235,8 +235,9 @@ pub enum Attachment {
 pub struct ValueSpec {
     pub attachment: Attachment,
     /// Whether a not-yet-seen literal `--` may be this flag's value rather than the
-    /// end-of-options boundary. A per-tool split, confirmed against each: grep and rg let any
-    /// value-taking flag swallow it, git and cargo reject it whichever flag is asking.
+    /// end-of-options boundary. Not always a per-tool split, confirmed against each: grep and
+    /// rg let any value-taking flag swallow it, git rejects it whichever flag is asking, and
+    /// cargo rejects it everywhere except `-j`/`--jobs`, and there only outside `cargo clippy`.
     pub claims_dash_dash: bool,
 }
 
