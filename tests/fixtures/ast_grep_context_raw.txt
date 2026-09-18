@@ -1,0 +1,10 @@
+context.ts:1:const before = 1;
+context.ts:2:const before2 = 2;
+context.ts:3:const result = make(
+context.ts:4:  before,
+context.ts:5:  before2,
+context.ts:6:  3,
+context.ts:7:  4,
+context.ts:8:);
+context.ts:9:const after = 5;
+context.ts:10:const after2 = 6;

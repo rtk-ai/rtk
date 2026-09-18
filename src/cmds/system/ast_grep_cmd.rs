@@ -1,7 +1,9 @@
 //! Filters `ast-grep run` plain-mode output by grouping matches by file and
-//! capping how many are shown. `--json` is left near-passthrough (explicit
-//! structured-output request — see Correctness vs Token Savings).
+//! capping how many are shown. Explicit JSON and context requests pass through
+//! unchanged — see Correctness vs Token Savings.
 
+use crate::core::arg_tokenizer::{Dialect, TokenKind, ValueSpec, tokenize_grammar};
+use crate::core::args_utils::restore_double_dash;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::resolved_command;
@@ -109,7 +111,36 @@ fn filter_ast_grep(raw: &str, max_per_file: usize, max_total: usize) -> String {
     out
 }
 
+// Value-taking options from `ast-grep run --help`. Values must be consumed so
+// a pattern or glob spelled like `-C2` is not mistaken for a context request.
+fn run_option_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    match (kind, name) {
+        (TokenKind::Short, "p" | "k" | "r" | "l" | "c" | "j" | "A" | "B" | "C")
+        | (
+            TokenKind::Long,
+            "pattern" | "selector" | "strictness" | "kind" | "rewrite" | "lang" | "config"
+            | "no-ignore" | "globs" | "threads" | "color" | "inspect" | "heading" | "after"
+            | "before" | "context",
+        ) => Some(ValueSpec::value()),
+        (TokenKind::Long, "json" | "debug-query") => Some(ValueSpec::attached_only()),
+        _ => None,
+    }
+}
+
+fn requests_context(args: &[String]) -> bool {
+    tokenize_grammar(args, &run_option_value, Dialect::Posix)
+        .iter()
+        .any(|token| {
+            matches!(
+                (token.kind, token.text),
+                (TokenKind::Short, "A" | "B" | "C")
+                    | (TokenKind::Long, "after" | "before" | "context")
+            )
+        })
+}
+
 pub fn run(args: &[String]) -> Result<i32> {
+    let args = restore_double_dash(args);
     let timer = tracking::TimedExecution::start();
     let real_cmd = format!("ast-grep {}", args.join(" "));
 
@@ -118,11 +149,13 @@ pub fn run(args: &[String]) -> Result<i32> {
         .any(|a| a == "--json" || a.starts_with("--json="));
 
     let mut cmd = resolved_command("ast-grep");
-    cmd.args(args);
+    cmd.args(&args);
     let result = exec_capture(&mut cmd).context("Failed to execute ast-grep")?;
 
     let filtered_owned;
-    let filtered: &str = if is_json {
+    // Context and match lines have the same prefix, so the line cap cannot
+    // distinguish them. Preserve the detail the caller explicitly requested.
+    let filtered: &str = if is_json || requests_context(&args) {
         &result.stdout
     } else {
         filtered_owned = filter_ast_grep(&result.stdout, DEFAULT_MAX_PER_FILE, DEFAULT_MAX_TOTAL);
@@ -143,6 +176,42 @@ pub fn run(args: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_options_are_recognized_in_all_spellings() {
+        for args in [
+            vec!["run", "-C", "2"],
+            vec!["run", "-C2"],
+            vec!["run", "-A2"],
+            vec!["run", "-B", "2"],
+            vec!["run", "--context=2"],
+            vec!["run", "--after", "2"],
+            vec!["run", "--before=2"],
+            vec!["-p", "make($$$)", "-C2"],
+            vec!["run", "-C0"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
+            assert!(requests_context(&args), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn context_like_values_and_positionals_are_not_options() {
+        for args in [
+            vec!["run", "-p", "-C2"],
+            vec!["run", "-p-C2"],
+            vec!["run", "--pattern=--context"],
+            vec!["run", "--globs", "-A2"],
+            vec!["run", "-r", "-B2"],
+            vec!["run", "-c", "--context"],
+            vec!["run", "--", "-C2"],
+            vec!["run", "--", "--after=2"],
+            vec!["run", "--contextual=2"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
+            assert!(!requests_context(&args), "{args:?}");
+        }
+    }
 
     fn count_tokens(s: &str) -> usize {
         s.split_whitespace().count()
