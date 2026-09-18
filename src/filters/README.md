@@ -60,6 +60,7 @@ expected = "expected filtered output"
 | `max_lines` | int | Keep only the first N lines |
 | `tail_lines` | int | Keep only the last N lines (applied after other filters) |
 | `on_empty` | string | Fallback message when filtered output is empty |
+| `pass_through_if_args` | string[] | Skip filtering entirely when any invoked arg matches an entry exactly or by prefix. Short-option clusters are scanned for single-char entries (`-hs` matches `-s`). Use when a line cap would drop the answer itself, e.g. `du -s` rows are independent per-root totals: `pass_through_if_args = ["-s", "--summarize", "-d", "--max-depth"]` |
 
 ## Naming convention
 
