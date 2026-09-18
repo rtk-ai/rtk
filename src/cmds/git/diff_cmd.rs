@@ -2,10 +2,10 @@
 
 use crate::core::guard::never_worse;
 use crate::core::tracking;
+use crate::core::utils::read_path_operands;
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashSet;
-use std::fs;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -41,8 +41,7 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
         eprintln!("Comparing: {} vs {}", file1.display(), file2.display());
     }
 
-    let content1 = fs::read_to_string(file1)?;
-    let content2 = fs::read_to_string(file2)?;
+    let (content1, content2) = read_path_operands(file1, file2)?;
     let both_files = format!("{}\n---\n{}", content1, content2);
 
     let comparison = compare_files(&content1, &content2);
