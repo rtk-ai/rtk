@@ -7,10 +7,22 @@
 /// - `wc -c file.py`  → `978`
 /// - `wc -l *.py`     → table with common path prefix stripped
 use crate::core::runner::{self, RunOptions};
-use crate::core::utils::resolved_command;
+use crate::core::utils::{resolved_command, tool_exists};
 use anyhow::Result;
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+    // On Windows, `wc` is not a standard executable. Provide a helpful message.
+    if cfg!(target_os = "windows") && !tool_exists("wc") {
+        eprintln!(
+            "[rtk] Note: 'wc' is not available as a standard Windows executable.\n\
+             For line/word/char counts on Windows, consider:\n\
+             - PowerShell: Get-Content file.txt | Measure-Object -Line -Word -Character\n\
+             - Git Bash/WSL: wc (available in Unix-like environments)\n\
+             - Native alternative: find /c /v \"\" file.txt (line count only)"
+        );
+        // Fall through to let resolved_command fail with its own message
+    }
+
     let mut cmd = resolved_command("wc");
     for arg in args {
         cmd.arg(arg);
