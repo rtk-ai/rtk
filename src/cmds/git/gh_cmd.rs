@@ -871,9 +871,9 @@ fn view_run(args: &[String], _verbose: u8) -> Result<i32> {
         "gh",
         &label,
         move |stdout| format_run_view(stdout, &run_id_owned),
-        RunOptions::stdout_only()
-            .early_exit_on_failure()
-            .no_trailing_newline(),
+        // `--exit-status` makes gh exit 1 for a failed run with complete stdout, so a
+        // non-zero exit is a normal result here; the guard still covers real errors.
+        RunOptions::stdout_only().no_trailing_newline(),
     )
 }
 
