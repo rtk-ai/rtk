@@ -2102,60 +2102,146 @@ fn run_kilocode_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
 
 // ─── Google Antigravity support ───────────────────────────────
 
-pub fn run_antigravity_mode(ctx: InitContext) -> Result<()> {
-    run_antigravity_mode_at(&std::env::current_dir()?, ctx)
+const ANTIGRAVITY_PLUGIN_JSON: &str = r#"{
+  "name": "rtk",
+  "version": "1.0.0",
+  "description": "Antigravity plugin for transparent command rewriting and token optimization using rtk"
+}
+"#;
+
+const ANTIGRAVITY_HOOKS_JSON: &str = r#"{
+  "rtk-rewrite": {
+    "enabled": true,
+    "PreToolUse": [
+      {
+        "matcher": "run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "rtk hook antigravity",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
+"#;
+
+pub fn run_antigravity_mode(global: bool, ctx: InitContext) -> Result<()> {
+    if global {
+        let home = dirs::home_dir().context("Could not determine user home directory")?;
+        let base_dir = home.join(".gemini/config");
+        run_antigravity_mode_at(&base_dir, true, ctx)
+    } else {
+        run_antigravity_mode_at(&std::env::current_dir()?, false, ctx)
+    }
 }
 
-fn run_antigravity_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
+pub fn run_antigravity_mode_at(base_dir: &Path, global: bool, ctx: InitContext) -> Result<()> {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
-    // Antigravity reads .agents/rules/ from the project root (workspace-scoped)
-    let target_dir = base_dir.join(".agents/rules");
-    let rules_path = target_dir.join("antigravity-rtk-rules.md");
-
-    let existing = fs::read_to_string(&rules_path).unwrap_or_default();
-    if existing.contains("RTK") || existing.contains("rtk") {
-        if !dry_run {
-            println!("\nRTK already configured for Antigravity in this project.\n");
-            println!("  Rules: .agents/rules/antigravity-rtk-rules.md (already present)");
-        }
+    let plugin_dir = if global {
+        base_dir.join("plugins/rtk")
     } else {
-        let new_content = if existing.trim().is_empty() {
-            RTK_AWARENESS_FULL.to_string()
-        } else {
-            format!("{}\n\n{}", existing.trim(), RTK_AWARENESS_FULL)
-        };
-        if dry_run {
-            println!(
-                "[dry-run] would write {}: (and create parent dir if missing)",
-                rules_path.display()
-            );
-            if verbose > 0 {
-                println!("[dry-run] content:\n{}", new_content);
-            }
-        } else {
-            fs::create_dir_all(&target_dir).context("Failed to create .agents/rules directory")?;
-            fs::write(&rules_path, &new_content)
-                .context("Failed to write .agents/rules/antigravity-rtk-rules.md")?;
+        base_dir.join(".agents/plugins/rtk")
+    };
 
-            if verbose > 0 {
-                eprintln!("Wrote .agents/rules/antigravity-rtk-rules.md");
-            }
+    let plugin_json_path = plugin_dir.join("plugin.json");
+    let hooks_json_path = plugin_dir.join("hooks.json");
 
-            println!("\nRTK configured for Google Antigravity.\n");
-            println!("  Rules: .agents/rules/antigravity-rtk-rules.md (installed)");
-        }
-    }
-    print_rules_only_awareness_note("Antigravity", ctx);
     if dry_run {
+        println!(
+            "[dry-run] would create plugin directory: {}",
+            plugin_dir.display()
+        );
+        println!("[dry-run] would write {}", plugin_json_path.display());
+        println!("[dry-run] would write {}", hooks_json_path.display());
+        if verbose > 0 {
+            println!(
+                "[dry-run] plugin.json content:\n{}",
+                ANTIGRAVITY_PLUGIN_JSON
+            );
+            println!("[dry-run] hooks.json content:\n{}", ANTIGRAVITY_HOOKS_JSON);
+        }
         print_dry_run_footer();
     } else {
-        println!("  Antigravity will now use rtk commands for token savings.");
-        println!("  Test with: git status\n");
+        fs::create_dir_all(&plugin_dir).context("Failed to create Antigravity plugin directory")?;
+        fs::write(&plugin_json_path, ANTIGRAVITY_PLUGIN_JSON)
+            .context("Failed to write Antigravity plugin.json")?;
+        fs::write(&hooks_json_path, ANTIGRAVITY_HOOKS_JSON)
+            .context("Failed to write Antigravity hooks.json")?;
+
+        if verbose > 0 {
+            eprintln!("Wrote {}", plugin_json_path.display());
+            eprintln!("Wrote {}", hooks_json_path.display());
+        }
+
+        println!("\nRTK plugin configured for Google Antigravity.\n");
+        println!("  Plugin: {} (installed)", plugin_dir.display());
+        println!("  Hooks:  PreToolUse -> rtk hook antigravity");
+        println!("  Antigravity will now transparently rewrite commands to rtk.");
+        println!(
+            "\n  Note: Antigravity checks permissions after hooks rewrite a command.\n  \
+             If you use command allowlists, ensure `rtk` commands are permitted,\n  \
+             e.g. `command(rtk git status)` or `command(rtk *)`.\n"
+        );
     }
 
     Ok(())
+}
+
+pub fn uninstall_antigravity_mode(global: bool, ctx: InitContext) -> Result<Vec<String>> {
+    if global {
+        let home = dirs::home_dir().context("Could not determine user home directory")?;
+        let base_dir = home.join(".gemini/config");
+        uninstall_antigravity_mode_at(&base_dir, true, ctx)
+    } else {
+        uninstall_antigravity_mode_at(&std::env::current_dir()?, false, ctx)
+    }
+}
+
+pub fn uninstall_antigravity_mode_at(
+    base_dir: &Path,
+    global: bool,
+    ctx: InitContext,
+) -> Result<Vec<String>> {
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
+    let mut removed = Vec::new();
+    let plugin_dir = if global {
+        base_dir.join("plugins/rtk")
+    } else {
+        base_dir.join(".agents/plugins/rtk")
+    };
+
+    if plugin_dir.exists() {
+        if dry_run {
+            println!(
+                "[dry-run] would remove Antigravity plugin directory: {}",
+                plugin_dir.display()
+            );
+        } else {
+            // nosemgrep: filesystem-deletion -- uninstall intentionally removes only RTK's Antigravity plugin directory.
+            fs::remove_dir_all(&plugin_dir).with_context(|| {
+                format!(
+                    "Failed to remove Antigravity plugin directory: {}",
+                    plugin_dir.display()
+                )
+            })?;
+            if verbose > 0 {
+                eprintln!(
+                    "Removed Antigravity plugin directory: {}",
+                    plugin_dir.display()
+                );
+            }
+        }
+        removed.push(format!("Antigravity plugin: {}", plugin_dir.display()));
+    }
+
+    Ok(removed)
 }
 
 // ─── Hermes support ────────────────────────────────────────────
@@ -6842,14 +6928,6 @@ mod tests {
                 "kilocode with level {level}"
             );
 
-            run_antigravity_mode_at(temp.path(), ctx).unwrap();
-            assert_eq!(
-                fs::read_to_string(temp.path().join(".agents/rules/antigravity-rtk-rules.md"))
-                    .unwrap(),
-                RTK_AWARENESS_FULL,
-                "antigravity with level {level}"
-            );
-
             run_kimi_mode_at(temp.path(), ctx).unwrap();
             let agents_md = fs::read_to_string(temp.path().join(AGENTS_MD)).unwrap();
             assert!(
@@ -6891,28 +6969,81 @@ mod tests {
     }
 
     #[test]
-    fn test_antigravity_mode_creates_rules_file() {
+    fn test_antigravity_mode_creates_plugin_files_local() {
         let temp = TempDir::new().unwrap();
-        run_antigravity_mode_at(temp.path(), InitContext::default()).unwrap();
+        run_antigravity_mode_at(temp.path(), false, InitContext::default()).unwrap();
 
-        let rules_path = temp.path().join(".agents/rules/antigravity-rtk-rules.md");
-        assert!(rules_path.exists(), "Rules file should be created");
-        let content = fs::read_to_string(&rules_path).unwrap();
-        assert!(content.contains("RTK"), "Rules file should contain RTK");
+        let plugin_dir = temp.path().join(".agents/plugins/rtk");
+        let manifest_path = plugin_dir.join("plugin.json");
+        let hooks_path = plugin_dir.join("hooks.json");
+
+        assert!(manifest_path.exists(), "plugin.json should exist");
+        assert!(hooks_path.exists(), "hooks.json should exist");
+
+        let manifest = fs::read_to_string(&manifest_path).unwrap();
+        assert!(manifest.contains(r#""name": "rtk""#));
+
+        let hooks = fs::read_to_string(&hooks_path).unwrap();
+        assert!(hooks.contains(r#""rtk-rewrite""#));
+        assert!(hooks.contains(r#""command": "rtk hook antigravity""#));
     }
 
     #[test]
-    fn test_antigravity_mode_is_idempotent() {
+    fn test_antigravity_mode_creates_plugin_files_global() {
         let temp = TempDir::new().unwrap();
-        run_antigravity_mode_at(temp.path(), InitContext::default()).unwrap();
+        run_antigravity_mode_at(temp.path(), true, InitContext::default()).unwrap();
 
-        let path = temp.path().join(".agents/rules/antigravity-rtk-rules.md");
-        let first = fs::read_to_string(&path).unwrap();
+        let plugin_dir = temp.path().join("plugins/rtk");
+        let manifest_path = plugin_dir.join("plugin.json");
+        let hooks_path = plugin_dir.join("hooks.json");
 
-        // Second run should not overwrite
-        run_antigravity_mode_at(temp.path(), InitContext::default()).unwrap();
-        let second = fs::read_to_string(&path).unwrap();
-        assert_eq!(first, second, "Idempotent: content should not change");
+        assert!(manifest_path.exists(), "global plugin.json should exist");
+        assert!(hooks_path.exists(), "global hooks.json should exist");
+    }
+
+    #[test]
+    fn test_antigravity_mode_dry_run_writes_nothing() {
+        let temp = TempDir::new().unwrap();
+        run_antigravity_mode_at(
+            temp.path(),
+            false,
+            InitContext {
+                dry_run: true,
+                ..InitContext::default()
+            },
+        )
+        .unwrap();
+
+        let plugin_dir = temp.path().join(".agents/plugins/rtk");
+        assert!(
+            !plugin_dir.exists(),
+            "Plugin dir must not exist after dry run"
+        );
+    }
+
+    #[test]
+    fn test_antigravity_mode_reinstall_idempotent() {
+        let temp = TempDir::new().unwrap();
+        run_antigravity_mode_at(temp.path(), false, InitContext::default()).unwrap();
+        // Second install should succeed without errors
+        run_antigravity_mode_at(temp.path(), false, InitContext::default()).unwrap();
+
+        let plugin_dir = temp.path().join(".agents/plugins/rtk");
+        assert!(plugin_dir.join("plugin.json").exists());
+        assert!(plugin_dir.join("hooks.json").exists());
+    }
+
+    #[test]
+    fn test_antigravity_mode_uninstall_removes_plugin() {
+        let temp = TempDir::new().unwrap();
+        run_antigravity_mode_at(temp.path(), false, InitContext::default()).unwrap();
+
+        let removed =
+            uninstall_antigravity_mode_at(temp.path(), false, InitContext::default()).unwrap();
+        assert_eq!(removed.len(), 1);
+
+        let plugin_dir = temp.path().join(".agents/plugins/rtk");
+        assert!(!plugin_dir.exists(), "Plugin dir should be removed");
     }
 
     #[test]
