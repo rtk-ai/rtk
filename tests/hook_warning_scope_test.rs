@@ -77,3 +77,31 @@ fn a_meta_command_leaves_the_daily_reminder_for_the_next_filtered_command() {
         "the reminder must survive a preceding meta command: {stderr}"
     );
 }
+
+#[test]
+fn other_meta_commands_do_not_spend_the_daily_reminder() {
+    for args in [
+        vec!["config"],
+        vec!["trust"],
+        vec!["untrust"],
+        vec!["hook-audit"],
+        vec!["discover"],
+        vec!["session"],
+        vec!["telemetry", "status"],
+        vec!["learn"],
+    ] {
+        let home = fresh_home();
+        let stderr = run(home.path(), &args);
+        assert!(
+            !stderr.contains(REMINDER),
+            "rtk {} must not print the daily reminder: {stderr}",
+            args.join(" ")
+        );
+        let stderr = run(home.path(), &["ls"]);
+        assert!(
+            stderr.contains(REMINDER),
+            "the reminder must survive rtk {}: {stderr}",
+            args.join(" ")
+        );
+    }
+}
