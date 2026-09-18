@@ -61,6 +61,8 @@ pub enum AgentTarget {
     Vibe,
     /// Oh My Pi (OMP)
     Omp,
+    /// Grok Build CLI
+    Grok,
 }
 
 #[derive(Parser)]
@@ -985,6 +987,8 @@ enum HookCommands {
     Droid,
     /// Process Mistral Vibe CLI pre_tool hook (reads JSON from stdin)
     Vibe,
+    /// Process Grok Build CLI PreToolUse hook (reads JSON from stdin)
+    Grok,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -1902,6 +1906,8 @@ where
         hooks::init::uninstall_droid(global, ctx)
     } else if agent == Some(AgentTarget::Vibe) {
         hooks::init::uninstall_vibe(ctx)
+    } else if agent == Some(AgentTarget::Grok) {
+        hooks::init::uninstall_grok(global, ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -2454,6 +2460,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_droid_mode(global, ctx)?;
             } else if agent == Some(AgentTarget::Vibe) {
                 hooks::init::run_vibe_mode(global, hook_only, patch_mode, ctx)?;
+            } else if agent == Some(AgentTarget::Grok) {
+                hooks::init::run_grok_mode(global, hook_only, ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -2905,6 +2913,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Vibe => {
                 hooks::hook_cmd::run_vibe()?;
+                0
+            }
+            HookCommands::Grok => {
+                hooks::hook_cmd::run_grok()?;
                 0
             }
             HookCommands::Check { agent, command } => {
@@ -3892,6 +3904,28 @@ mod tests {
                 command: HookCommands::Codex
             }
         ));
+    }
+
+    #[test]
+    fn test_hook_grok_parses() {
+        let cli = Cli::try_parse_from(["rtk", "hook", "grok"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Hook {
+                command: HookCommands::Grok
+            }
+        ));
+    }
+
+    #[test]
+    fn test_try_parse_init_agent_grok() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "grok"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, .. } => {
+                assert_eq!(agent, Some(AgentTarget::Grok));
+            }
+            _ => panic!("Expected Init command"),
+        }
     }
 
     #[test]

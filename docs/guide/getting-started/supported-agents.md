@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, and Mistral Vibe
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, Mistral Vibe, and Grok Build
 sidebar:
   order: 3
 ---
@@ -45,6 +45,7 @@ Agent runs "cargo test"
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rules file (prompt-level) | N/A |
 | Mistral Vibe | Rust binary (`pre_tool`) | Yes |
+| Grok Build CLI | Rust binary (`PreToolUse`) | Yes |
 
 Agents that rewrite transparently receive the awareness file selected by `awareness.level` in
 `config.toml` (`default` says nothing about RTK). Rules-file agents cannot rewrite, so the agent
@@ -193,6 +194,29 @@ rtk init --uninstall --agent droid
 
 Removes only RTK's hook entry; other hooks and settings are untouched.
 
+### Grok Build CLI
+
+```bash
+rtk init -g --agent grok            # user-scoped ($GROK_HOME/hooks/, default ~/.grok)
+rtk init --agent grok               # project-scoped (.grok/hooks/, needs folder trust)
+rtk init -g --agent grok --hook-only
+```
+
+Installs a `PreToolUse` hook (matcher `Bash`, which Grok also maps to `run_terminal_command`) as a dedicated `rtk-rewrite.json` under Grok's hooks directory. Respects `$GROK_HOME`. Unless `--hook-only`, also writes `rules/rtk.md` (Grok always scans `$GROK_HOME/rules/` and `<project>/.grok/rules/`).
+
+Rewrites go out as `updatedInput` with **no** `permissionDecision`. Grok treats an omitted decision as "apply the rewrite and keep the normal permission flow", so plan mode, the permission prompt, and the sandbox still see the rewritten command. RTK does not parse Grok permission files.
+
+Project hooks are skipped until the folder is trusted (`/hooks-trust` or `--trust`). Built-in tools (`read_file`, `grep`, `list_dir`) do not pass through this hook; use shell commands or `rtk read` / `rtk grep` when you want compact output there.
+
+Uninstall:
+
+```bash
+rtk init --uninstall -g --agent grok
+rtk init --uninstall --agent grok
+```
+
+Removes only RTK's `rtk-rewrite.json` and `rules/rtk.md`. Other Grok hooks are untouched.
+
 ### Cline / Roo Code
 
 ```bash
@@ -265,7 +289,7 @@ Strips only RTK's `[[hooks]]` block and the `~/.vibe/prompts/rtk.md` file. Any o
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini, Codex) rewrite the command before execution. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
+Rules file integrations (Cline, Windsurf, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini, Codex, Grok Build) rewrite the command before execution. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
 
 ## Windows support
 

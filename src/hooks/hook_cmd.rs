@@ -499,6 +499,80 @@ fn vibe_rewrite_json(rewritten: &str) -> String {
     .to_string()
 }
 
+// ── Grok Build CLI hook ───────────────────────────────────────
+
+/// Run the Grok Build CLI `PreToolUse` hook.
+///
+/// Grok contract: empty stdout is passthrough. A rewrite is
+/// `hookSpecificOutput.updatedInput` with **no** `permissionDecision`, so
+/// Grok's own permission prompt still runs on the rewritten command.
+pub fn run_grok() -> Result<()> {
+    let input = read_stdin_limited()?;
+    if let Some(output) = run_grok_inner(&input) {
+        let _ = writeln!(io::stdout(), "{output}");
+    }
+    Ok(())
+}
+
+fn run_grok_inner(input: &str) -> Option<String> {
+    let input = strip_leading_bom(input).trim();
+    if input.is_empty() {
+        return None;
+    }
+    let json: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return None;
+        }
+    };
+
+    let cmd = grok_shell_command(&json)?;
+    match decide_hook_action(cmd, permissions::Host::Grok) {
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            None
+        }
+        HookDecision::AllowRewrite(ref rewritten) | HookDecision::AskRewrite(ref rewritten) => {
+            audit_log("rewrite", cmd, rewritten);
+            Some(grok_rewrite_json(&json, rewritten))
+        }
+        HookDecision::Defer => None,
+    }
+}
+
+fn grok_shell_command(v: &Value) -> Option<&str> {
+    let tool = v
+        .get("tool_name")
+        .or_else(|| v.get("toolName"))
+        .and_then(Value::as_str)?;
+    if !matches!(tool, "Bash" | "bash" | "run_terminal_command") {
+        return None;
+    }
+    v.pointer("/tool_input/command")
+        .or_else(|| v.pointer("/toolInput/command"))
+        .and_then(Value::as_str)
+        .filter(|c| !c.is_empty())
+}
+
+fn grok_rewrite_json(v: &Value, rewritten: &str) -> String {
+    let mut updated = v
+        .get("toolInput")
+        .cloned()
+        .or_else(|| v.get("tool_input").cloned())
+        .unwrap_or_else(|| json!({}));
+    if let Some(obj) = updated.as_object_mut() {
+        obj.insert("command".into(), Value::String(rewritten.to_string()));
+    }
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": PRE_TOOL_USE_KEY,
+            "updatedInput": updated
+        }
+    })
+    .to_string()
+}
+
 fn gemini_json(decision: &str, rewrite: Option<&str>) -> String {
     let mut output = serde_json::json!({ "decision": decision });
     if let Some(cmd) = rewrite {
@@ -2830,5 +2904,91 @@ mod tests {
     fn test_vibe_substitution_defers() {
         let input = vibe_input("bash", "echo $(rm -rf /)");
         assert!(run_vibe_inner(&input).is_none());
+    }
+
+    fn grok_input(tool: &str, cmd: &str) -> String {
+        json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool,
+            "tool_input": { "command": cmd }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_grok_rewrites_run_terminal_command() {
+        let input = grok_input("run_terminal_command", "git status");
+        let out = run_grok_inner(&input).expect("rewrite expected");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v.pointer("/hookSpecificOutput/updatedInput/command")
+                .and_then(|c| c.as_str()),
+            Some("rtk git status")
+        );
+        assert!(
+            v.pointer("/hookSpecificOutput/permissionDecision")
+                .is_none(),
+            "Grok must not receive permissionDecision so its own prompt still runs"
+        );
+    }
+
+    #[test]
+    fn test_grok_accepts_bash_alias_and_camel_case() {
+        let input = json!({
+            "hookEventName": "pre_tool_use",
+            "toolName": "Bash",
+            "toolInput": { "command": "git status", "timeout": 30 }
+        })
+        .to_string();
+        let out = run_grok_inner(&input).expect("rewrite expected");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let updated = &v["hookSpecificOutput"]["updatedInput"];
+        assert_eq!(updated["command"], "rtk git status");
+        assert_eq!(updated["timeout"], 30);
+    }
+
+    #[test]
+    fn test_grok_strips_utf8_bom() {
+        let input = format!(
+            "\u{feff}{}",
+            grok_input("run_terminal_command", "git status")
+        );
+        let out = run_grok_inner(&input).expect("BOM-prefixed payload must parse");
+        assert_eq!(
+            serde_json::from_str::<Value>(&out)
+                .unwrap()
+                .pointer("/hookSpecificOutput/updatedInput/command")
+                .and_then(|c| c.as_str()),
+            Some("rtk git status")
+        );
+    }
+
+    #[test]
+    fn test_grok_ignores_non_shell_tool() {
+        let input = grok_input("read_file", "irrelevant");
+        assert!(run_grok_inner(&input).is_none());
+    }
+
+    #[test]
+    fn test_grok_empty_command_passthrough() {
+        let input = grok_input("run_terminal_command", "");
+        assert!(run_grok_inner(&input).is_none());
+    }
+
+    #[test]
+    fn test_grok_malformed_json_returns_none() {
+        assert!(run_grok_inner("not json at all").is_none());
+    }
+
+    #[test]
+    fn test_grok_unknown_binary_passthrough() {
+        let input = grok_input("run_terminal_command", "definitely-not-a-real-binary --foo");
+        assert!(run_grok_inner(&input).is_none());
+    }
+
+    #[test]
+    fn test_grok_substitution_defers() {
+        let input = grok_input("run_terminal_command", "echo $(rm -rf /)");
+        assert!(run_grok_inner(&input).is_none());
     }
 }

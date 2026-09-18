@@ -478,6 +478,7 @@ fn detect_hook_type() -> String {
         (home.join(".codex/AGENTS.md"), "codex"),
         (home.join(".cursor/hooks/rtk-rewrite.json"), "cursor"),
         (home.join(".vibe/hooks.toml"), "vibe"),
+        (home.join(".grok/hooks/rtk-rewrite.json"), "grok"),
     ];
 
     for (path, name) in &checks {
@@ -765,7 +766,7 @@ mod tests {
         );
         assert!(
             [
-                "claude", "gemini", "codex", "cursor", "copilot", "vibe", "none", "unknown"
+                "claude", "gemini", "codex", "cursor", "copilot", "vibe", "grok", "none", "unknown"
             ]
             .iter()
             .any(|&h| stats.hook_type.starts_with(h)),
@@ -779,7 +780,7 @@ mod tests {
         let ht = detect_hook_type();
         assert!(
             [
-                "claude", "gemini", "codex", "cursor", "copilot", "vibe", "none", "unknown"
+                "claude", "gemini", "codex", "cursor", "copilot", "vibe", "grok", "none", "unknown"
             ]
             .contains(&ht.as_str()),
             "Unexpected hook type: {}",
