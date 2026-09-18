@@ -5525,11 +5525,7 @@ fn show_claude_config() -> Result<()> {
     let settings_path = claude_dir.join(SETTINGS_JSON);
     let binary_hook_registered = if settings_path.exists() {
         let content = fs::read_to_string(&settings_path).unwrap_or_default();
-        if let Ok(root) = from_json_str::<serde_json::Value>(&content) {
-            hook_already_present(&root, CLAUDE_HOOK_COMMAND)
-        } else {
-            false
-        }
+        integrity::settings_has_claude_hook(&content)
     } else {
         false
     };
@@ -5592,26 +5588,35 @@ fn show_claude_config() -> Result<()> {
         println!("[--] RTK.md: not found");
     }
 
-    // Check hook integrity (only relevant for legacy script hooks)
-    if hook_path.exists() && !binary_hook_registered {
+    // A remaining script has its own integrity state, even with native registration.
+    if hook_path.exists() {
+        let label = if binary_hook_registered {
+            "Legacy script integrity"
+        } else {
+            "Integrity"
+        };
         match integrity::verify_hook_at(&hook_path) {
             Ok(integrity::IntegrityStatus::Verified) => {
-                println!("[ok] Integrity: hook hash verified");
+                println!("[ok] {label}: hook hash verified");
             }
             Ok(integrity::IntegrityStatus::Tampered { .. }) => {
-                println!("[FAIL] Integrity: hook modified outside rtk init (run: rtk verify)");
+                println!("[FAIL] {label}: hook modified outside rtk init (run: rtk verify)");
             }
             Ok(integrity::IntegrityStatus::NoBaseline) => {
-                println!("[warn] Integrity: no baseline hash (run: rtk init -g to establish)");
+                println!("[warn] {label}: no baseline hash");
             }
             Ok(integrity::IntegrityStatus::NotInstalled)
             | Ok(integrity::IntegrityStatus::OrphanedHash) => {
                 // Don't show integrity line if hook isn't installed
             }
             Err(_) => {
-                println!("[warn] Integrity: check failed");
+                println!("[warn] {label}: check failed");
             }
         }
+        println!(
+            "    Legacy hook script: {} (preview migration: rtk init -g --dry-run --no-patch)",
+            hook_path.display()
+        );
     }
 
     // Check global CLAUDE.md
