@@ -1,0 +1,23 @@
+{
+  "model": "jev-1.13.0",
+  "answers": {
+    "department": {
+      "type": "choice",
+      "choice": "billing",
+      "confidence": 0.98,
+      "probabilities": {
+        "billing": 0.99,
+        "technical": 0.01,
+        "sales": 0.0
+      }
+    },
+    "urgent": {
+      "type": "noul",
+      "noul": 0.96
+    }
+  },
+  "usage": {
+    "input_tokens": 397,
+    "output_tokens": 55
+  }
+}
