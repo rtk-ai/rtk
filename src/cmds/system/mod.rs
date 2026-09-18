@@ -15,3 +15,4 @@ pub mod search;
 pub mod summary;
 pub mod tree;
 pub mod wc_cmd;
+pub mod xcrun_cmd;

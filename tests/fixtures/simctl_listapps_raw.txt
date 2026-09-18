@@ -1,0 +1,73 @@
+{
+    "com.example.DemoCamera" =     {
+        ApplicationType = User;
+        Bundle = "file:///Users/developer/Library/Developer/CoreSimulator/Devices/00000000-0000-0000-0000-000000000001/data/Containers/Bundle/Application/00000000-0000-0000-0000-000000000002/DemoCamera.app/";
+        BundleContainer = "file:///Users/developer/Library/Developer/CoreSimulator/Devices/00000000-0000-0000-0000-000000000001/data/Containers/Bundle/Application/00000000-0000-0000-0000-000000000002/";
+        CFBundleDisplayName = DemoCamera;
+        CFBundleExecutable = "/Users/developer/Library/Developer/CoreSimulator/Devices/00000000-0000-0000-0000-000000000001/data/Containers/Bundle/Application/00000000-0000-0000-0000-000000000002/DemoCamera.app/DemoCamera";
+        CFBundleIdentifier = "com.example.DemoCamera";
+        CFBundleName = DemoCamera;
+        CFBundleShortVersionString = "1.0.3";
+        CFBundleVersion = "13.0";
+        DataContainer = "file:///Users/developer/Library/Developer/CoreSimulator/Devices/00000000-0000-0000-0000-000000000001/data/Containers/Data/Application/00000000-0000-0000-0000-000000000003/";
+        GroupContainers =         {
+            "group.com.example.DemoCamera" = "file:///Users/developer/Library/Developer/CoreSimulator/Devices/00000000-0000-0000-0000-000000000001/data/Containers/Shared/AppGroup/00000000-0000-0000-0000-000000000004/";
+        };
+        IsAppClip = 0;
+        IsDeveloperApp = 0;
+        IsFirstParty = 0;
+        IsHidden = 0;
+        IsRemovable = 1;
+        Path = "/Users/developer/Library/Developer/CoreSimulator/Devices/00000000-0000-0000-0000-000000000001/data/Containers/Bundle/Application/00000000-0000-0000-0000-000000000002/DemoCamera.app";
+        SBAppTags =         (
+        );
+    };
+    "com.apple.Bridge" =     {
+        ApplicationType = System;
+        Bundle = "file:///Library/Developer/CoreSimulator/Volumes/iOS_24A5355p/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS%2027.0.simruntime/Contents/Resources/RuntimeRoot/Applications/Bridge.app/";
+        CFBundleDisplayName = Watch;
+        CFBundleExecutable = "/Library/Developer/CoreSimulator/Volumes/iOS_24A5355p/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/Applications/Bridge.app/Bridge";
+        CFBundleIdentifier = "com.apple.Bridge";
+        CFBundleName = Watch;
+        CFBundleShortVersionString = "1.0";
+        CFBundleVersion = "1.0";
+        DataContainer = "file:///Users/developer/Library/Developer/CoreSimulator/Devices/00000000-0000-0000-0000-000000000001/data/Containers/Data/Application/00000000-0000-0000-0000-000000000005/";
+        GroupContainers =         {
+            "243LU875E5.groups.com.apple.podcasts" = "file:///Users/developer/Library/Developer/CoreSimulator/Devices/00000000-0000-0000-0000-000000000001/data/Containers/Shared/AppGroup/00000000-0000-0000-0000-000000000006/";
+            "group.com.apple.bridge" = "file:///Users/developer/Library/Developer/CoreSimulator/Devices/00000000-0000-0000-0000-000000000001/data/Containers/Shared/AppGroup/00000000-0000-0000-0000-000000000007/";
+            "group.com.apple.iBooks" = "file:///Users/developer/Library/Developer/CoreSimulator/Devices/00000000-0000-0000-0000-000000000001/data/Containers/Shared/AppGroup/00000000-0000-0000-0000-000000000008/";
+            "group.com.apple.mail" = "file:///Users/developer/Library/Developer/CoreSimulator/Devices/00000000-0000-0000-0000-000000000001/data/Containers/Shared/AppGroup/00000000-0000-0000-0000-000000000009/";
+            "group.com.apple.stocks" = "file:///Users/developer/Library/Developer/CoreSimulator/Devices/00000000-0000-0000-0000-000000000001/data/Containers/Shared/AppGroup/00000000-0000-0000-0000-000000000010/";
+            "group.com.apple.weather" = "file:///Users/developer/Library/Developer/CoreSimulator/Devices/00000000-0000-0000-0000-000000000001/data/Containers/Shared/AppGroup/00000000-0000-0000-0000-000000000011/";
+        };
+        IsAppClip = 0;
+        IsDeveloperApp = 0;
+        IsFirstParty = 1;
+        IsHidden = 0;
+        IsRemovable = 1;
+        Path = "/Library/Developer/CoreSimulator/Volumes/iOS_24A5355p/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/Applications/Bridge.app";
+        SBAppTags =         (
+            "watch-companion"
+        );
+    };
+    "com.apple.CarPlayApp" =     {
+        ApplicationType = System;
+        Bundle = "file:///Library/Developer/CoreSimulator/Volumes/iOS_24A5355p/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS%2027.0.simruntime/Contents/Resources/RuntimeRoot/System/Library/CoreServices/CarPlay.app/";
+        CFBundleDisplayName = CarPlay;
+        CFBundleExecutable = "/Library/Developer/CoreSimulator/Volumes/iOS_24A5355p/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/System/Library/CoreServices/CarPlay.app/CarPlay";
+        CFBundleIdentifier = "com.apple.CarPlayApp";
+        CFBundleName = CarPlay;
+        CFBundleShortVersionString = "1.0";
+        CFBundleVersion = "1.0";
+        GroupContainers =         {
+        };
+        IsAppClip = 0;
+        IsDeveloperApp = 0;
+        IsFirstParty = 1;
+        IsHidden = 0;
+        IsRemovable = 1;
+        Path = "/Library/Developer/CoreSimulator/Volumes/iOS_24A5355p/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/System/Library/CoreServices/CarPlay.app";
+        SBAppTags =         (
+        );
+    };
+}

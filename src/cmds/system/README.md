@@ -13,3 +13,21 @@
 ## Cross-command
 
 - `format_cmd` routes to `cmds/js/prettier_cmd` and `cmds/python/ruff_cmd`
+
+## iOS Simulator app inventories (macOS)
+
+`rtk xcrun simctl listapps booted` (or a device UDID) keeps every app entry and
+its application type, bundle identifier, display/bundle name, version, path,
+and SDK fields when present. It removes repeated container metadata and flags
+while retaining the native OpenStep property-list format, string escaping, and
+full paths. No app list is truncated.
+
+The hook automatically rewrites plain `xcrun simctl listapps ...` commands.
+Pipelines are excluded because downstream commands may consume omitted fields.
+Explicit options, `simctl list devices`, `simctl list runtimes`, and other xcrun
+tools/subcommands use native passthrough, including stdin, stderr, and exit status.
+Unknown or incomplete inventory formats fall back to the complete raw output.
+
+Use `rtk proxy xcrun simctl listapps booted` for all app metadata. Existing tee
+recovery settings also apply to filtered inventories. Xcode is needed to run
+simctl; fixture-based filter tests run without Xcode.

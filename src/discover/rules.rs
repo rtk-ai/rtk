@@ -56,6 +56,14 @@ impl Default for RtkRule {
 
 pub const RULES: &[RtkRule] = &[
     RtkRule {
+        pattern: r"^xcrun\s+simctl\s+listapps(?:\s|$)",
+        rtk_cmd: "rtk xcrun",
+        rewrite_prefixes: &["xcrun"],
+        category: "Build",
+        savings_pct: 70.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|checkout|push|pull|branch|fetch|stash|worktree)",
         rtk_cmd: "rtk git",
         pipeline_safety: PipelineSafety::ProducerOnly,

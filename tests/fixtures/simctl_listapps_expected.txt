@@ -1,0 +1,29 @@
+{
+    "com.example.DemoCamera" = {
+        ApplicationType = User;
+        CFBundleDisplayName = DemoCamera;
+        CFBundleIdentifier = "com.example.DemoCamera";
+        CFBundleName = DemoCamera;
+        CFBundleShortVersionString = "1.0.3";
+        CFBundleVersion = "13.0";
+        Path = "/Users/developer/Library/Developer/CoreSimulator/Devices/00000000-0000-0000-0000-000000000001/data/Containers/Bundle/Application/00000000-0000-0000-0000-000000000002/DemoCamera.app";
+    };
+    "com.apple.Bridge" = {
+        ApplicationType = System;
+        CFBundleDisplayName = Watch;
+        CFBundleIdentifier = "com.apple.Bridge";
+        CFBundleName = Watch;
+        CFBundleShortVersionString = "1.0";
+        CFBundleVersion = "1.0";
+        Path = "/Library/Developer/CoreSimulator/Volumes/iOS_24A5355p/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/Applications/Bridge.app";
+    };
+    "com.apple.CarPlayApp" = {
+        ApplicationType = System;
+        CFBundleDisplayName = CarPlay;
+        CFBundleIdentifier = "com.apple.CarPlayApp";
+        CFBundleName = CarPlay;
+        CFBundleShortVersionString = "1.0";
+        CFBundleVersion = "1.0";
+        Path = "/Library/Developer/CoreSimulator/Volumes/iOS_24A5355p/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/System/Library/CoreServices/CarPlay.app";
+    };
+}
