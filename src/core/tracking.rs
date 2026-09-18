@@ -1505,7 +1505,7 @@ fn categorize_command(rtk_cmd: &str) -> String {
         | "prettier" | "next" | "playwright" | "prisma" => "js",
         "pytest" | "ruff" | "mypy" | "pip" | "sqlfluff" => "python",
         "go" | "golangci-lint" => "go",
-        "docker" | "kubectl" => "cloud",
+        "docker" | "kubectl" | "psql" | "mysql" => "cloud",
         "rspec" | "rubocop" | "rake" => "ruby",
         "dotnet" => "dotnet",
         "ctest" => "cpp",
@@ -2818,5 +2818,12 @@ mod tests {
             "expected ({ls_rate:.1} + 24 - 50) / 3 = {expected:.1}%, got {avg:.1}% \
              (an unweighted inner AVG(savings_pct) would give (19 + 12.5 - 50) / 3 = -6.2%)"
         );
+    }
+
+    #[test]
+    fn test_categorize_psql_and_mysql_as_cloud() {
+        for cmd in ["rtk psql -l", "rtk mysql -e 'SELECT 1'"] {
+            assert_eq!(categorize_command(cmd), "cloud", "{cmd}");
+        }
     }
 }
