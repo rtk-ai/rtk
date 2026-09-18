@@ -1,7 +1,9 @@
-//! Filters `ast-grep run` plain-mode output by grouping matches by file and
-//! capping how many are shown. `--json` is left near-passthrough (explicit
-//! structured-output request — see Correctness vs Token Savings).
+//! Filters `ast-grep run` plain output: caps matches per file. `outline`
+//! filtering lives in `ast_grep_outline`. `--json` passes through untouched
+//! (explicit structured-output request; see Correctness VS Token Savings in
+//! CONTRIBUTING.md).
 
+use super::ast_grep_outline;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::resolved_command;
@@ -116,14 +118,19 @@ pub fn run(args: &[String]) -> Result<i32> {
     let is_json = args
         .iter()
         .any(|a| a == "--json" || a.starts_with("--json="));
+    let is_outline = args.first().map(String::as_str) == Some("outline");
 
     let mut cmd = resolved_command("ast-grep");
     cmd.args(args);
     let result = exec_capture(&mut cmd).context("Failed to execute ast-grep")?;
 
+    let outline_filtered;
     let filtered_owned;
     let filtered: &str = if is_json {
         &result.stdout
+    } else if is_outline {
+        outline_filtered = ast_grep_outline::filter(&result.stdout);
+        &outline_filtered
     } else {
         filtered_owned = filter_ast_grep(&result.stdout, DEFAULT_MAX_PER_FILE, DEFAULT_MAX_TOTAL);
         &filtered_owned
@@ -218,16 +225,17 @@ b.rs:3:eight
         let input = include_str!("../../../tests/fixtures/ast_grep_lazylock_raw.txt");
         let output = filter_ast_grep(input, DEFAULT_MAX_PER_FILE, DEFAULT_MAX_TOTAL);
 
-        let input_tokens = count_tokens(input);
-        let output_tokens = count_tokens(&output);
-        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
-
+        let savings = savings_pct(input, &output, count_tokens);
         assert!(
             savings >= 60.0,
-            "ast-grep filter: expected >=60% savings, got {:.1}% ({} -> {} tokens)",
-            savings,
-            input_tokens,
-            output_tokens
+            "ast-grep filter: expected >=60% savings, got {:.1}%",
+            savings
         );
+    }
+
+    fn savings_pct(input: &str, output: &str, count: impl Fn(&str) -> usize) -> f64 {
+        let input_tokens = count(input);
+        let output_tokens = count(output);
+        100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0)
     }
 }

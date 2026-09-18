@@ -1,0 +1,62 @@
+src/main.rs
+   1: mod analytics
+   2: mod cmds
+   3: mod core
+   4: mod discover
+   5: mod hooks
+   6: mod learn
+   7: mod parser
+  39: pub enum AgentTarget
+        enumMember: Claude, Cursor, Windsurf, Cline, Kilocode, Antigravity, Kimi, Pi, Hermes, Droid, Vibe
+  71: struct Cli
+        field: command, verbose, ultra_compact, skip_env
+  89: enum Commands
+        enumMember: Ls, Tree, Read, Smart, Git, Gh, Glab, Aws, Psql, Pnpm, Err, Test, Json, Deps, Env, Find, Diff, Log, Dotnet, Docker, Kubectl, Oc, Summary, Grep, Rg, AstGrep, Init, Wget, Wc, Gain, CcEconomics, Config, Jest, Vitest, Ctest, Prisma, Tsc, Next, Lint, Prettier, Format, Playwright, Cargo, Npm, Npx, Bun, Bunx, Curl, Discover, Session, Telemetry, Learn, Run, Proxy, Pipe, Trust, Untrust, Verify, Ruff, Pytest, Mypy, Php, Phpunit, Phpstan, Pest, Paratest, Ecs, Pint, Phpt, Rake, Rubocop, Rspec, Pip, Uv, Deno, Go, Sbt, Gt, GolangciLint, Gradlew, Mvn, Mvnd, HookAudit, Rewrite, Hook
+ 925: enum HookCommands
+        enumMember: Claude, Cursor, Gemini, Copilot, Droid, Vibe, Check
+ 950: enum GitCommands
+        enumMember: Diff, Log, Status, Show, Add, Commit, Checkout, Push, Pull, Branch, Fetch, Stash, Worktree, Other
+1037: enum PnpmCommands
+        enumMember: List, Outdated, Install, Typecheck, Other
+1071: enum DockerCommands
+        enumMember: Ps, Images, Logs, Compose, Other
+1092: enum ComposeCommands
+        enumMember: Ps, Logs, Build, Other
+1117: enum KubectlCommands
+        enumMember: Get, Pods, Services, Logs, Other
+1152: enum OcCommands
+        enumMember: Get, Pods, Services, Logs, Other
+1187: enum PrismaCommands
+        enumMember: Generate, Migrate, DbPush
+1208: enum PrismaMigrateCommands
+        enumMember: Dev, Status, Deploy
+1233: enum CargoCommands
+        enumMember: Build, Test, Clippy, Check, Install, Nextest, Other
+1276: enum DotnetCommands
+        enumMember: Build, Test, Restore, Format, Other
+1303: enum GoCommands
+        enumMember: Test, Build, Vet, Other
+1328: enum SbtCommands
+        enumMember: Test, Compile, Run, Other
+1353: enum BunCommands
+        enumMember: Install, Run, Build, Test, Add, Remove, Pm, X, Other
+1400: enum BunPmCommands
+        enumMember: Ls, Other
+1412: enum DenoCommands
+        enumMember: Run, Check, Lint, Test, Task, Compile, Install, Other
+1455: fn run_bunx_tool(args: &[String], verbose: u8, skip_env: bool) -> Result<i32>
+1466: fn run_fallback(parse_error: clap::Error) -> Result<i32>
+1610: enum GtCommands
+        enumMember: Log, Submit, Sync, Restack, Create, Branch, Other
+1648: fn shell_split(input: &str) -> Vec<String>
+1652: fn build_k8s_namespace_args(namespace: Option<String>, all: bool) -> Vec<String>
+1663: fn build_k8s_logs_args(pod: String, container: Option<String>) -> Vec<String>
+1673: fn merge_pnpm_args(filters: &[String], args: &[String]) -> Vec<String>
+1682: fn merge_pnpm_args_os(filters: &[String], args: &[OsString]) -> Vec<OsString>
+1691: fn validate_pnpm_filters(filters: &[String], command: &PnpmCommands) -> Option<String>
+1713: fn main()
+1735: fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
+1761: fn run_cli() -> Result<i32>
+2968: fn is_operational_command(cmd: &Commands) -> bool
+3034: mod tests
+        function: test_git_commit_single_message, test_git_commit_multiple_messages, test_git_commit_am_flag, test_git_commit_amend, test_git_global_options_parsing, test_git_commit_long_flag_multiple, test_try_parse_valid_git_status, test_try_parse_init_agent_hermes, test_try_parse_kubectl_get_alias, test_try_parse_oc_get, test_try_parse_oc_other, test_try_parse_grep_dash_m_is_max_count, test_try_parse_init_agent_hermes_uninstall, test_init_uninstall_dispatch_routes_hermes_to_hermes_cleanup, test_try_parse_help_is_display_help, test_try_parse_version_is_display_version, test_try_parse_unknown_subcommand_is_error, test_try_parse_git_with_dash_c_succeeds, test_gain_failures_flag_parses, test_gain_failures_short_flag_parses, test_meta_commands_reject_bad_flags, test_every_subcommand_is_classified, test_run_command_with_dash_c, test_run_command_positional_args, test_ctest_help_and_version_passthrough_args, test_hook_claude_parses, test_hook_check_parses, test_hook_check_with_agent, test_hook_check_preserves_double_dash_in_command, test_meta_command_list_is_complete, test_shell_split_simple, test_shell_split_double_quotes, test_shell_split_single_quotes, test_shell_split_single_word, test_shell_split_empty, test_rewrite_clap_multi_args, test_rewrite_clap_quoted_single_arg, test_merge_filters_with_no_args, test_merge_filters_with_args, test_merge_filters_with_no_args_os, test_merge_filters_with_args_os, test_pnpm_subcommand_with_filter, test_git_push_u_flag_passes_through, test_pnpm_subcommand_with_short_filter, test_pnpm_typecheck_without_filters, test_pnpm_typecheck_with_filters, test_broken_pipe_does_not_crash, test_ultra_compact_long_form_still_works, test_npx_unknown_tool_passthrough, test_init_pi_flag_rejected, test_init_agent_pi_parses, test_init_uninstall_agent_pi_parses, grep_extra_args, test_grep_parse_simple_pattern_path, test_grep_parse_combined_short_cluster, test_grep_parse_value_flag_after_context, test_grep_parse_invert_match_v_not_shadowed, test_grep_parse_alternation_pattern_intact, test_grep_parse_files_with_matches_l, test_grep_parse_type_t_forwarded, test_grep_file_type_option_is_gone, parse_grep, test_grep_long_options_bind_before_pattern, test_grep_options_after_pattern_stay_in_extra_args, test_grep_version_routes_to_extra_args, test_grep_double_dash_consumed_by_clap, test_bun_build_parses_to_arg_vector, test_bun_x_parses_to_arg_vector, test_bun_pm_ls_parses_to_typed_ls, test_bun_pm_other_passes_through, test_deno_compile_parses_to_arg_vector
