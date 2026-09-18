@@ -1071,7 +1071,11 @@ pattern ./...: directory prefix . does not contain modules listed in go.work or 
         let filtered = filter_go_vet(raw);
         assert_eq!(filtered, "Go vet: No issues found");
         let result = crate::core::guard::guard_exit(raw, 1, "go vet", &filtered);
-        assert!(result.contains("go vet: failed (exit 1)"), "got: {}", result);
+        assert!(
+            result.contains("go vet: failed (exit 1)"),
+            "got: {}",
+            result
+        );
         assert!(!result.contains("No issues found"), "got: {}", result);
     }
 

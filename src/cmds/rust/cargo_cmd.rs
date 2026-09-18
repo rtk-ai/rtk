@@ -260,7 +260,12 @@ impl BlockHandler for CargoTestHandler {
         // intentionally exempt from the output guard.
         let summary = self.compute_test_summary(raw)?;
         let budgeted = crate::core::guard::never_worse(raw, &summary);
-        Some(crate::core::guard::guard_exit(raw, exit_code, "cargo test", budgeted))
+        Some(crate::core::guard::guard_exit(
+            raw,
+            exit_code,
+            "cargo test",
+            budgeted,
+        ))
     }
 }
 
