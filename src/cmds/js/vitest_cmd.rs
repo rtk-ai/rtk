@@ -567,7 +567,9 @@ Scope: all 6 workspace projects
         let data = result.unwrap();
         assert_eq!(data.failed, 1, "failed suites must count as failures");
         assert!(
-            data.failures.iter().any(|f| f.test_name.contains("broken.spec.ts")),
+            data.failures
+                .iter()
+                .any(|f| f.test_name.contains("broken.spec.ts")),
             "failed suite must appear in failures list"
         );
 

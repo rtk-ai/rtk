@@ -916,8 +916,7 @@ Tests run: 3, Failures: 1, Errors: 0, Skipped: 0"#;
         // Instrumentation crash: the only informative lines (INSTRUMENTATION_RESULT)
         // are stripped, so filter_connected would render a green "ok ✓" verdict.
         // With a non-zero exit the guard must replace it with a failure verdict.
-        let raw =
-            "> Task :app:connectedDebugAndroidTest\nINSTRUMENTATION_RESULT: shortMsg=Process crashed.\nINSTRUMENTATION_CODE: -1";
+        let raw = "> Task :app:connectedDebugAndroidTest\nINSTRUMENTATION_RESULT: shortMsg=Process crashed.\nINSTRUMENTATION_CODE: -1";
         let filtered = filter_connected(raw);
         assert_eq!(filtered, "ok ✓ (connected tests passed)");
         let guarded = crate::core::guard::guard_exit(raw, 1, "./gradlew", &filtered);

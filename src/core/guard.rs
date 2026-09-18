@@ -229,7 +229,10 @@ mod tests {
     #[test]
     fn guard_falls_back_on_green_summary_with_nonzero_exit() {
         let result = guard_exit("opaque failure output", 1, "pytest", "Pytest: 5 passed");
-        assert_eq!(result, "pytest: failed (exit 1)\n═══════════════════════════════════════\n1. opaque failure output");
+        assert_eq!(
+            result,
+            "pytest: failed (exit 1)\n═══════════════════════════════════════\n1. opaque failure output"
+        );
     }
 
     #[test]
