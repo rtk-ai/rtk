@@ -124,7 +124,7 @@ class RtkRewritePluginTest(unittest.TestCase):
 
         which.assert_called_once_with("rtk")
 
-    def test_rewrite_success_mutates_same_terminal_args_dict(self):
+    def test_rewrite_success_returns_modify_directive(self):
         module, callback = self.load_callback()
         args = {"command": "git status"}
 
@@ -133,11 +133,14 @@ class RtkRewritePluginTest(unittest.TestCase):
             "run",
             return_value=FakeCompletedProcess(stdout="rtk git status\n"),
         ):
-            callback(tool_name="terminal", args=args)
+            directive = callback(tool_name="terminal", args=args)
 
-        self.assertEqual({"command": "rtk git status"}, args)
+        self.assertEqual(
+            {"action": "modify", "args": {"command": "rtk git status"}}, directive
+        )
+        self.assertEqual({"command": "git status"}, args)
 
-    def test_rewrite_returncode_three_mutates_same_terminal_args_dict(self):
+    def test_rewrite_returncode_three_returns_modify_directive(self):
         module, callback = self.load_callback()
         args = {"command": "git status"}
 
@@ -146,11 +149,14 @@ class RtkRewritePluginTest(unittest.TestCase):
             "run",
             return_value=FakeCompletedProcess(returncode=3, stdout="rtk git status\n"),
         ):
-            callback(tool_name="terminal", args=args)
+            directive = callback(tool_name="terminal", args=args)
 
-        self.assertEqual({"command": "rtk git status"}, args)
+        self.assertEqual(
+            {"action": "modify", "args": {"command": "rtk git status"}}, directive
+        )
+        self.assertEqual({"command": "git status"}, args)
 
-    def test_rewrite_returncode_zero_mutates_when_rewrite_changes_command(self):
+    def test_rewrite_returncode_zero_returns_modify_directive(self):
         module, callback = self.load_callback()
         args = {"command": "git status"}
 
@@ -159,9 +165,12 @@ class RtkRewritePluginTest(unittest.TestCase):
             "run",
             return_value=FakeCompletedProcess(stdout="rtk git status\n"),
         ):
-            callback(tool_name="terminal", args=args)
+            directive = callback(tool_name="terminal", args=args)
 
-        self.assertEqual({"command": "rtk git status"}, args)
+        self.assertEqual(
+            {"action": "modify", "args": {"command": "rtk git status"}}, directive
+        )
+        self.assertEqual({"command": "git status"}, args)
 
     def test_expected_passthrough_returncodes_do_not_warn_or_mutate(self):
         for returncode in (1, 2):
@@ -179,8 +188,9 @@ class RtkRewritePluginTest(unittest.TestCase):
                     ),
                 ):
                     with mock.patch.object(module.sys, "stderr", new_callable=io.StringIO) as stderr:
-                        callback(tool_name="terminal", args=args)
+                        directive = callback(tool_name="terminal", args=args)
 
+                self.assertIsNone(directive)
                 self.assertEqual({"command": "git status"}, args)
                 self.assertEqual("", stderr.getvalue())
 
