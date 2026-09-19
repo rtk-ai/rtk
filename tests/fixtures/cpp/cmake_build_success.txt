@@ -1,0 +1,20 @@
+[  5%] Building CXX object CMakeFiles/myapp.dir/main.cpp.o
+[ 10%] Building CXX object CMakeFiles/myapp.dir/util.cpp.o
+[ 15%] Building CXX object CMakeFiles/myapp.dir/parser.cpp.o
+[ 20%] Building CXX object CMakeFiles/myapp.dir/lexer.cpp.o
+[ 25%] Building CXX object CMakeFiles/myapp.dir/codegen.cpp.o
+[ 30%] Building CXX object CMakeFiles/myapp.dir/optimizer.cpp.o
+[ 35%] Building CXX object CMakeFiles/myapp.dir/diagnostics.cpp.o
+[ 40%] Building CXX object CMakeFiles/myapp.dir/types.cpp.o
+[ 45%] Building CXX object CMakeFiles/myapp.dir/scope.cpp.o
+[ 50%] Building CXX object CMakeFiles/myapp.dir/symbol.cpp.o
+[ 55%] Building CXX object CMakeFiles/myapp.dir/ir.cpp.o
+[ 60%] Building CXX object CMakeFiles/myapp.dir/asm.cpp.o
+[ 65%] Building CXX object CMakeFiles/myapp.dir/link.cpp.o
+[ 70%] Building CXX object CMakeFiles/myapp.dir/io.cpp.o
+[ 75%] Building CXX object CMakeFiles/myapp.dir/runtime.cpp.o
+[ 80%] Linking CXX static library libmyapp_core.a
+[ 85%] Built target myapp_core
+[ 90%] Building CXX object CMakeFiles/myapp.dir/main_app.cpp.o
+[ 95%] Linking CXX executable myapp
+[100%] Built target myapp
