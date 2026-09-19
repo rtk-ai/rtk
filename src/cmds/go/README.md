@@ -6,4 +6,5 @@
 
 - `go_cmd.rs` uses `GoCommands` sub-enum in main.rs (same pattern as git/cargo)
 - `go test` outputs NDJSON (`-json` flag injected by RTK) -- parsed line-by-line as streaming events
+- Explicit Go test verbosity (`-v` or `-test.v`, including `=true` forms) passes through the original output and exit code. `-v=false` keeps the default compression; flags after `-args` or `--` belong to the test binary.
 - `golangci_cmd.rs` forces `--out-format=json` for structured parsing
