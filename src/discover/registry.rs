@@ -6,8 +6,9 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use super::lexer::{
-    ParsedToken, PipeKind, TokenKind, advance_quote_state, coalesce_words, is_crlf_at,
-    redirect_has_file_target, shell_split, split_on_operators, tokenize, tokenize_with_newlines,
+    ParsedToken, PipeKind, QuoteScan, TokenKind, ansi_c_quote_defeats_lexer, coalesce_words,
+    is_crlf_at, redirect_has_file_target, shell_split, split_on_operators, tokenize,
+    tokenize_with_newlines,
 };
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 
@@ -764,55 +765,6 @@ const BLOCK_KEYWORDS: &[&str] = &[
     "select", "function", "coproc", "{", "}", "(", ")",
 ];
 
-/// Shared quote-state byte walker used by all line scanners. Yields
-/// `(offset, byte, in_single_before, in_double_before)`, skipping backslash
-/// escape pairs outside single quotes and toggling quote state — the same
-/// model the lexer applies.
-struct QuoteScan<'a> {
-    bytes: &'a [u8],
-    i: usize,
-    // Same `Option<char>` model `tokenize_inner`/`shell_split` use, driven by
-    // the shared `advance_quote_state` — not an independently-maintained pair
-    // of bools, so this can't drift from the lexer's own quote handling.
-    quote: Option<char>,
-}
-
-impl<'a> QuoteScan<'a> {
-    fn new(s: &'a str) -> Self {
-        Self {
-            bytes: s.as_bytes(),
-            i: 0,
-            quote: None,
-        }
-    }
-
-    fn balanced(&self) -> bool {
-        self.quote.is_none()
-    }
-}
-
-impl Iterator for QuoteScan<'_> {
-    type Item = (usize, u8, bool, bool);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.i < self.bytes.len() {
-            let i = self.i;
-            let b = self.bytes[i];
-            if b == b'\\' && self.quote != Some('\'') {
-                self.i += 2;
-                continue;
-            }
-            let item = (i, b, self.quote == Some('\''), self.quote == Some('"'));
-            if b == b'\'' || b == b'"' {
-                self.quote = advance_quote_state(self.quote, b as char);
-            }
-            self.i += 1;
-            return Some(item);
-        }
-        None
-    }
-}
-
 /// Byte offset where an unquoted `#` at the start of a word begins a trailing
 /// comment, if any. The lexer has no comment state, so the independence checks
 /// must ignore comment text themselves: `git log | # keep pipeline` continues
@@ -876,31 +828,6 @@ fn line_has_unbalanced_test_brackets(code: &str) -> bool {
         }
     }
     depth != 0
-}
-
-// Only `\'` inside `$'…'` diverges: bash keeps the string open, the lexer
-// closes it — an extra split point the newline-count check can't see (#3188).
-fn ansi_c_quote_defeats_lexer(cmd: &str) -> bool {
-    let bytes = cmd.as_bytes();
-    let mut ansi_span = false;
-    let mut backslash_run = 0u32;
-    for (i, b, in_single, in_double) in QuoteScan::new(cmd) {
-        if b == b'\'' && !in_double {
-            if !in_single {
-                ansi_span = i > 0 && bytes[i - 1] == b'$';
-                backslash_run = 0;
-            } else if ansi_span && backslash_run % 2 == 1 {
-                return true;
-            }
-        } else if in_single {
-            if b == b'\\' {
-                backslash_run += 1;
-            } else {
-                backslash_run = 0;
-            }
-        }
-    }
-    false
 }
 
 fn quotes_balanced(cmd: &str) -> bool {
