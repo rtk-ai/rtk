@@ -7,10 +7,10 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use super::lexer::{
-    CaseTracker, ParsedToken, PipeKind, QuoteScan, TokenKind, ansi_c_quote_defeats_lexer,
-    coalesce_words, is_crlf_at, is_word_boundary_whitespace, opens_substitution,
+    CaseTracker, ParsedToken, PipeKind, QuoteScan, SubstitutionDepth, TokenKind,
+    ansi_c_quote_defeats_lexer, coalesce_words, is_crlf_at, is_word_boundary_whitespace,
     redirect_has_file_target, shell_split, split_for_classify, split_for_permissions, tokenize,
-    tokenize_with_newlines,
+    tokenize_with_newlines, word_spans,
 };
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 
@@ -64,7 +64,7 @@ static COMPILED: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         .collect()
 });
 /// One `NAME=value` word. The value is whatever the rest of the word is, since
-/// `coalesce_words` has already decided where the word ends — quotes included.
+/// [`word_spans`] has already decided where the word ends — quotes included.
 ///
 /// The name charset stays `[A-Z_][A-Z0-9_]*`: widening it to lowercase would
 /// reclassify `foo=bar git status`, which is a decision of its own.
@@ -668,68 +668,23 @@ pub fn cmd_has_rtk_disabled_prefix(cmd: &str) -> bool {
 /// rtk as root (#146).
 pub fn split_env_prefix(cmd: &str) -> (&str, &str) {
     let trimmed = cmd.trim();
-    let mut pos = 0;
-    // Where the command starts, not where the last assignment ends, so that
-    // whoever puts the two back together need not know what separated them.
-    let mut end = 0;
+    let words = word_spans(trimmed);
 
-    while pos < trimmed.len() {
-        let word_end = word_end_from(trimmed, pos);
-        let word = &trimmed[pos..word_end];
-        if word != "env" && !ENV_ASSIGN.is_match(word) {
-            break;
-        }
-        pos = skip_blanks(trimmed, word_end);
-        end = pos;
-    }
-
-    if end == 0 {
+    let consumed = words
+        .iter()
+        .take_while(|(from, to)| {
+            let word = &trimmed[*from..*to];
+            word == "env" || ENV_ASSIGN.is_match(word)
+        })
+        .count();
+    if consumed == 0 {
         return ("", trimmed);
     }
+
+    // Up to where the command starts, not where the last assignment ends, so
+    // that whoever puts the two back together need not know what separated them.
+    let end = words.get(consumed).map_or(trimmed.len(), |(from, _)| *from);
     (&trimmed[..end], trimmed[end..].trim())
-}
-
-/// Where the word starting at `start` ends: at the first blank that is not
-/// inside quotes.
-///
-/// A quoted value is one word however many blanks it contains, which is the
-/// whole difficulty — `D='# shellcheck disable=SC2034'` is an assignment, and
-/// the `shellcheck` within it is not a command anybody ran.
-fn word_end_from(s: &str, start: usize) -> usize {
-    let bytes = s.as_bytes();
-    let mut i = start;
-    let mut quote: Option<u8> = None;
-    while i < bytes.len() {
-        let c = bytes[i];
-        match quote {
-            // A backslash escapes inside double quotes but is literal inside
-            // single ones, so `FOO="he said \"hi\""` is one word and
-            // `FOO='it\'` ends at the quote.
-            Some(b'"') if c == b'\\' => i += 1,
-            Some(open) => {
-                if c == open {
-                    quote = None;
-                }
-            }
-            None => match c {
-                b'\'' | b'"' => quote = Some(c),
-                b'\\' => i += 1,
-                b' ' | b'\t' => break,
-                _ => {}
-            },
-        }
-        i += 1;
-    }
-    i.min(bytes.len())
-}
-
-fn skip_blanks(s: &str, from: usize) -> usize {
-    let bytes = s.as_bytes();
-    let mut i = from;
-    while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
-        i += 1;
-    }
-    i
 }
 
 fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
@@ -922,14 +877,14 @@ fn comment_start(line: &str) -> Option<usize> {
     let bytes = line.as_bytes();
     // `#` starts a comment at any word start, incl. after an operator
     // byte — but not after `{`: `${#var}` is an expansion (#3188 review).
-    QuoteScan::new(line).find_map(|(i, b, in_single, in_double)| {
-        (b == b'#'
-            && !in_single
-            && !in_double
-            && (i == 0
-                || bytes[i - 1].is_ascii_whitespace()
-                || matches!(bytes[i - 1], b'|' | b'&' | b';' | b'(' | b')')))
-        .then_some(i)
+    QuoteScan::new(line).significant().find_map(|c| {
+        (c.byte == b'#'
+            && !c.in_single
+            && !c.in_double
+            && (c.index == 0
+                || bytes[c.index - 1].is_ascii_whitespace()
+                || matches!(bytes[c.index - 1], b'|' | b'&' | b';' | b'(' | b')')))
+        .then_some(c.index)
     })
 }
 
@@ -939,11 +894,11 @@ fn comment_start(line: &str) -> Option<usize> {
 fn line_has_unbalanced_grouping(code: &str) -> bool {
     let mut paren = 0i32;
     let mut brace = 0i32;
-    for (_, b, in_single, in_double) in QuoteScan::new(code) {
-        if in_single || in_double {
+    for c in QuoteScan::new(code).significant() {
+        if c.in_single || c.in_double {
             continue;
         }
-        match b {
+        match c.byte {
             b'(' => paren += 1,
             b')' => paren -= 1,
             b'{' => brace += 1,
@@ -963,14 +918,15 @@ fn line_has_unbalanced_grouping(code: &str) -> bool {
 fn line_has_unbalanced_test_brackets(code: &str) -> bool {
     let bytes = code.as_bytes();
     let mut depth = 0i32;
-    for (i, b, in_single, in_double) in QuoteScan::new(code) {
-        if in_single || in_double || !matches!(b, b'[' | b']') {
+    for c in QuoteScan::new(code).significant() {
+        if c.in_single || c.in_double || !matches!(c.byte, b'[' | b']') {
             continue;
         }
+        let i = c.index;
         let word_start = i == 0 || bytes[i - 1].is_ascii_whitespace();
-        let word_end = bytes.get(i + 2).is_none_or(|c| c.is_ascii_whitespace());
-        if bytes.get(i + 1) == Some(&b) && word_start && word_end {
-            depth += if b == b'[' { 1 } else { -1 };
+        let word_end = bytes.get(i + 2).is_none_or(|b| b.is_ascii_whitespace());
+        if bytes.get(i + 1) == Some(&c.byte) && word_start && word_end {
+            depth += if c.byte == b'[' { 1 } else { -1 };
             if depth < 0 {
                 return true;
             }
@@ -1353,11 +1309,19 @@ fn rewrite_compound(
     let mut result = String::with_capacity(cmd.len() + 32);
     let mut any_changed = false;
     let mut seg_start: usize = 0;
-    let mut substitution_depth: usize = 0;
+    let mut substitution = SubstitutionDepth::default();
     let mut cases = CaseTracker::default();
 
     for tok in &tokens {
         if tok.offset < seg_start {
+            continue;
+        }
+        // `$( )`, `<( )` and `>( )` all run a command in service of the outer
+        // one — as text it is built from, or as a file it reads. Filtering that
+        // output would change what the outer command parses rather than what
+        // reaches anyone, so nothing inside one is a boundary and nothing
+        // inside one is rewritten.
+        if substitution.absorbs(cmd, tok) || substitution.is_inside() {
             continue;
         }
         // Nothing but whitespace since the last boundary means this token is
@@ -1366,10 +1330,6 @@ fn rewrite_compound(
         let in_case_pattern = cases.in_pattern();
         cases.observe(tok, at_command_position);
         match tok.kind {
-            // Inside a substitution nothing ends a command out here: the whole
-            // `$( )` is one word of the command being built, and an operator
-            // within it separates commands whose output becomes that word.
-            TokenKind::Operator | TokenKind::Pipe(_) if substitution_depth > 0 => {}
             TokenKind::Operator => {
                 any_changed |= emit_segment(
                     &mut result,
@@ -1426,35 +1386,11 @@ fn rewrite_compound(
                     }
                 }
             }
-            // `$( )`, `<( )` and `>( )` all run a command in service of the
-            // outer one — as text it is built from, or as a file it reads.
-            // Filtering that output would change what the outer command parses
-            // rather than what reaches anyone, so the body is stepped over, and
-            // so is the `)` that ends it.
-            TokenKind::Shellism
-                if tok.value == "("
-                    && opens_substitution(cmd, tok.offset)
-                    && substitution_depth == 0 =>
-            {
-                substitution_depth += 1;
-            }
-            TokenKind::Shellism if tok.value == "(" && substitution_depth > 0 => {
-                substitution_depth += 1;
-            }
-            TokenKind::Shellism if tok.value == ")" && substitution_depth > 0 => {
-                substitution_depth -= 1;
-            }
             // `case x in (ls) …` is the same statement as `case x in ls) …`:
-            // the bracket opens the pattern, not a subshell. Rewriting inside
+            // that bracket opens the pattern, not a subshell. Rewriting inside
             // it would make the one-word pattern two words, which bash rejects.
             TokenKind::Shellism if tok.value == "(" && in_case_pattern => {}
-            // A subshell runs the commands it wraps, so each one is its own
-            // rewrite candidate. Gluing the bracket to the text beside it left
-            // `(git status` matching nothing while `cargo build)` matched, which
-            // rewrote one command of a pair and dropped the other.
-            TokenKind::Shellism
-                if matches!(tok.value.as_str(), "&" | "(" | ")") && substitution_depth == 0 =>
-            {
+            TokenKind::Shellism if matches!(tok.value.as_str(), "&" | "(" | ")") => {
                 any_changed |= emit_segment(
                     &mut result,
                     cmd,
@@ -7548,6 +7484,18 @@ mod tests {
             // Lowercase is not an assignment here, deliberately: widening the
             // name charset would reclassify `foo=bar git status`.
             ("foo=bar git status", "", "foo=bar git status"),
+            // A prefix with nothing after it is all prefix. There is no command
+            // to classify, which is the same answer as before by a shorter road.
+            ("env", "env", ""),
+            ("FOO=bar", "FOO=bar", ""),
+            // A word of nothing but escapes ends the prefix like any other word
+            // that is not an assignment. Lose it and the assignment behind it is
+            // swallowed too, and `BAZ=1` stops being the env var it is.
+            (
+                "FOO=bar \\' BAZ=1 git status",
+                "FOO=bar ",
+                "\\' BAZ=1 git status",
+            ),
             // `sudo` is never stripped (#146).
             ("sudo docker ps", "", "sudo docker ps"),
         ] {
