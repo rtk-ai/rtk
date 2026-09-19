@@ -2862,7 +2862,7 @@ mod tests {
         // Verify that every GitCommand subcommand has a matching pattern
         for subcmd in [
             "status", "log", "diff", "show", "add", "commit", "push", "pull", "branch", "fetch",
-            "stash", "worktree",
+            "stash", "worktree", "remote",
         ] {
             let cmd = format!("git {subcmd}");
             match classify_command(&cmd) {

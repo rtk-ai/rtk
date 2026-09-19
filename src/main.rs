@@ -1082,6 +1082,12 @@ enum GitCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Compact remote listing (one line per remote, -v deduplicated)
+    Remote {
+        /// Git remote arguments (supports -v, --verbose, add, remove, etc.)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Passthrough: runs any unsupported git subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -2146,6 +2152,13 @@ fn run_cli() -> Result<i32> {
                 )?,
                 GitCommands::Worktree { args } => git_cmd::run(
                     git_cmd::GitCommand::Worktree,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Remote { args } => git_cmd::run(
+                    git_cmd::GitCommand::Remote,
                     &args,
                     None,
                     cli.verbose,
