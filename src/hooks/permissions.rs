@@ -192,8 +192,51 @@ fn append_bash_rules(rules_value: Option<&Value>, target: &mut Vec<String>) {
 }
 
 /// Return the ordered list of Claude Code settings file paths to check.
-fn get_settings_paths() -> Vec<PathBuf> {
+///
+/// `pub(crate)` so `hooks::init`'s uninstall flow can reuse the same
+/// project-root + global resolution when sweeping stale RTK permission rules.
+pub(crate) fn get_settings_paths() -> Vec<PathBuf> {
     get_settings_paths_from(find_project_root(), resolve_claude_dir().ok())
+}
+
+/// Does this raw permission rule (e.g. `"Bash(rtk grep *)"`,
+/// `"Bash(command rtk ls *)"`) invoke the `rtk` binary?
+///
+/// Only strips the `command ` wrapper — the one form RTK's own docs and
+/// settings ever emit — rather than trying to anticipate every shell prefix
+/// (`sudo`, `env FOO=bar`, ...). Word-boundary checked so `rtkx` or
+/// `rtk-other-tool` don't match.
+pub(crate) fn is_rtk_permission_rule(rule: &str) -> bool {
+    if !rule.starts_with("Bash(") {
+        return false;
+    }
+    let pattern = extract_bash_pattern(rule);
+    let pattern = pattern.strip_prefix("command ").unwrap_or(pattern);
+    pattern == "rtk" || pattern.starts_with("rtk ") || pattern.starts_with("rtk:")
+}
+
+/// Remove every stale `rtk` entry from `permissions.allow`/`deny`/`ask` in a
+/// parsed settings.json value. Returns the removed rules (for reporting).
+pub(crate) fn strip_stale_rtk_rules(root: &mut Value) -> Vec<String> {
+    let mut removed = Vec::new();
+    let Some(permissions) = root.get_mut("permissions").and_then(|p| p.as_object_mut()) else {
+        return removed;
+    };
+    for key in ["allow", "deny", "ask"] {
+        let Some(arr) = permissions.get_mut(key).and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        arr.retain(|rule| {
+            let Some(s) = rule.as_str() else { return true };
+            if is_rtk_permission_rule(s) {
+                removed.push(s.to_string());
+                false
+            } else {
+                true
+            }
+        });
+    }
+    removed
 }
 
 /// Assemble the settings paths for a project root and a resolved Claude config dir.
@@ -511,6 +554,51 @@ fn split_compound_command(cmd: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_is_rtk_permission_rule_matches_direct_and_wrapped() {
+        assert!(is_rtk_permission_rule("Bash(rtk grep *)"));
+        assert!(is_rtk_permission_rule("Bash(rtk)"));
+        assert!(is_rtk_permission_rule("Bash(command rtk ls *)"));
+    }
+
+    #[test]
+    fn test_is_rtk_permission_rule_respects_word_boundary() {
+        assert!(!is_rtk_permission_rule("Bash(rtk-other-tool *)"));
+        assert!(!is_rtk_permission_rule("Bash(rtkx find *)"));
+        assert!(!is_rtk_permission_rule("Bash(gh api *)"));
+        assert!(!is_rtk_permission_rule("Read(//tmp/**)"));
+    }
+
+    #[test]
+    fn test_strip_stale_rtk_rules_removes_only_rtk_entries() {
+        let mut root = serde_json::json!({
+            "permissions": {
+                "allow": ["Bash(rtk grep *)", "Bash(git add *)", "Bash(command rtk ls *)"],
+                "deny": ["Bash(rtk find *)"],
+                "ask": ["Bash(rm -rf *)"]
+            }
+        });
+
+        let removed = strip_stale_rtk_rules(&mut root);
+
+        assert_eq!(removed.len(), 3);
+        assert_eq!(
+            root["permissions"]["allow"],
+            serde_json::json!(["Bash(git add *)"])
+        );
+        assert_eq!(root["permissions"]["deny"], serde_json::json!([]));
+        assert_eq!(
+            root["permissions"]["ask"],
+            serde_json::json!(["Bash(rm -rf *)"])
+        );
+    }
+
+    #[test]
+    fn test_strip_stale_rtk_rules_noop_without_permissions_key() {
+        let mut root = serde_json::json!({"hooks": {}});
+        assert!(strip_stale_rtk_rules(&mut root).is_empty());
+    }
 
     #[test]
     fn test_get_settings_paths_uses_the_resolved_claude_dir() {
