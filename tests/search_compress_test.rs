@@ -484,3 +484,56 @@ fn binary_match_is_skipped_unless_text_requested() {
         "-a must show the binary content"
     );
 }
+
+// --- line truncation must survive when nothing was capped by count ---
+
+#[test]
+fn long_line_is_truncated_even_when_no_match_is_capped() {
+    let long = "x".repeat(50_000);
+    let content = format!("MATCH {long}\nMATCH short\n");
+    let (_dir, path) = write_temp(&content);
+
+    let out = rtk()
+        .args(["grep", "-n", "MATCH", path.to_str().unwrap()])
+        .output()
+        .expect("rtk grep");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains("MATCH short"),
+        "both matches must still be reported:\n{stdout}"
+    );
+    // Two matches fit well under --max 200, so nothing is dropped; the win here
+    // is the per-line cap, and it must not be discarded for that reason.
+    assert!(
+        stdout.len() < 5_000,
+        "a 50 000-char line must be cut to --max-len, got {} bytes",
+        stdout.len()
+    );
+}
+
+#[test]
+fn many_short_matches_keep_the_faithful_baseline() {
+    let content = (0..20)
+        .map(|i| format!("MATCH line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (_dir, path) = write_temp(&format!("{content}\n"));
+
+    let out = rtk()
+        .args(["grep", "-n", "MATCH", path.to_str().unwrap()])
+        .output()
+        .expect("rtk grep");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        !stdout.contains("matches in"),
+        "nothing was capped, so no grouped header belongs here:\n{stdout}"
+    );
+    for i in 0..20 {
+        assert!(
+            stdout.contains(&format!("MATCH line {i}")),
+            "short matches must survive untouched:\n{stdout}"
+        );
+    }
+}
