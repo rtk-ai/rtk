@@ -1,0 +1,62 @@
+Compiling root (1 Scala source)
+Compiled root (1472ms)
+Compiling root-test (1 Scala source)
+Compiled root-test (683ms)
+Test run example.CalculatorSuite started
+==> X example.CalculatorSuite.sub returns the difference 0.029s munit.ComparisonFailException: /tmp/workspace/munit-funsuite-fail-small/src/test/scala/example/CalculatorSuite.scala:10
+9:   test("sub returns the difference") {
+10:    assertEquals(Calculator.sub(10, 4), 7)
+11:  }
+values are not the same
+=> Obtained
+6
+=> Diff (- expected, + obtained)
+-7
++6
+    at munit.FunSuite.assertEquals(FunSuite.scala:12)
+    at example.CalculatorSuite.$init$$$anonfun$2(CalculatorSuite.scala:10)
+==> X example.CalculatorSuite.div returns the quotient 0.0s munit.ComparisonFailException: /tmp/workspace/munit-funsuite-fail-small/src/test/scala/example/CalculatorSuite.scala:18
+17:  test("div returns the quotient") {
+18:    assertEquals(Calculator.div(20, 4), 4)
+19:  }
+values are not the same
+=> Obtained
+5
+=> Diff (- expected, + obtained)
+-4
++5
+    at munit.FunSuite.assertEquals(FunSuite.scala:12)
+    at example.CalculatorSuite.$init$$$anonfun$4(CalculatorSuite.scala:18)
+example.CalculatorSuite: finished 0.071s
+Test run example.CalculatorSuite finished: 2 failed, 0 ignored, 4 total 0.086s
+Execution took 42ms
+4 tests, 2 passed, 2 failed
+
+The test execution was successfully closed.
+===========================================================================================================================================================================
+Total duration: 42ms
+1 failed
+
+Failed:
+- example.CalculatorSuite:
+  * example.CalculatorSuite.sub returns the difference - munit.ComparisonFailException: /tmp/workspace/munit-funsuite-fail-small/src/test/scala/example/CalculatorSuite.scala:10
+9:   test("sub returns the difference") {
+10:    assertEquals(Calculator.sub(10, 4), 7)
+11:  }
+values are not the same
+=> Obtained
+6
+=> Diff (- expected, + obtained)
+-7
++6
+  * example.CalculatorSuite.div returns the quotient - munit.ComparisonFailException: /tmp/workspace/munit-funsuite-fail-small/src/test/scala/example/CalculatorSuite.scala:18
+17:  test("div returns the quotient") {
+18:    assertEquals(Calculator.div(20, 4), 4)
+19:  }
+values are not the same
+=> Obtained
+5
+=> Diff (- expected, + obtained)
+-4
++5
+===========================================================================================================================================================================
