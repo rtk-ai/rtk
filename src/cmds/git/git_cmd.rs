@@ -1047,8 +1047,12 @@ fn compact_blob_show(raw: &str, blob_arg: &str, global_args: &[String]) -> Strin
         prefix.push_str(&shell_single_quote(arg));
         prefix.push(' ');
     }
+    // Through `rtk proxy`, like the `diff` hints: a bare `git show` is what RTK's own hook
+    // rewrites back into `rtk git show`, which windows the dump a second time and leaves
+    // `tail` nothing but this hint to print -- one line where the reader asked for the rest
+    // of the file. `proxy` is the documented way to reach the unfiltered command.
     let hint = format!(
-        "[see remaining: git {}show {} | tail -n +{}]",
+        "[see remaining: rtk proxy git {}show {} | tail -n +{}]",
         prefix,
         shell_single_quote(blob_arg),
         offset
@@ -4674,19 +4678,50 @@ mod tests {
             .2;
         let out = compact_blob_show(&s, "HEAD:my dir/big.lock", &[]);
         assert!(out.len() < s.len(), "windowing must shrink the output");
-        let expected =
-            format!("[see remaining: git show 'HEAD:my dir/big.lock' | tail -n +{offset}]");
+        let expected = format!(
+            "[see remaining: rtk proxy git show 'HEAD:my dir/big.lock' | tail -n +{offset}]"
+        );
         assert!(out.contains(&expected), "hint missing/unquoted: {out:?}");
         assert!(!out.contains("tail -n +0"));
 
         // A path containing a single quote must be escaped `'\''` so the hint stays
         // copy-paste safe (the dangerous branch of `shell_single_quote`).
         let out_q = compact_blob_show(&s, "HEAD:it's/a.lock", &[]);
-        let expected_q =
-            format!("[see remaining: git show 'HEAD:it'\\''s/a.lock' | tail -n +{offset}]");
+        let expected_q = format!(
+            "[see remaining: rtk proxy git show 'HEAD:it'\\''s/a.lock' | tail -n +{offset}]"
+        );
         assert!(
             out_q.contains(&expected_q),
             "single-quote path unescaped: {out_q:?}"
+        );
+    }
+
+    #[test]
+    fn test_compact_blob_show_hint_survives_rtks_own_hook() {
+        // The hook rewrites a bare `git ...` into `rtk git ...`, which windows the dump a
+        // second time -- `tail` then has only the hint left to print. The hint must name a
+        // command the hook leaves alone.
+        let mut s = String::new();
+        for i in 0..2000 {
+            s.push_str(&format!(
+                "line {i} with enough content to exceed the byte budget\n"
+            ));
+        }
+        let out = compact_blob_show(&s, "HEAD:big.lock", &[]);
+        let hint = out
+            .lines()
+            .next_back()
+            .and_then(|l| l.split_once("[see remaining: "))
+            .map(|(_, rest)| rest.trim_end_matches(']'))
+            .expect("hint");
+        assert!(
+            hint.starts_with("rtk proxy git "),
+            "hint must go through proxy: {hint:?}"
+        );
+        assert_eq!(
+            crate::discover::registry::rewrite_command(hint, &[], &[]),
+            None,
+            "the hook must leave the hint alone: {hint:?}"
         );
     }
 
@@ -4721,7 +4756,7 @@ mod tests {
         // Every token is shell-quoted (same policy as the blob arg) — quoting a flag
         // like `-C` is a harmless no-op and keeps the hint copy-paste safe.
         let expected = format!(
-            "[see remaining: git '-C' '/tmp/my repo' '-c' 'core.autocrlf=false' show 'HEAD:big.lock' | tail -n +{offset}]"
+            "[see remaining: rtk proxy git '-C' '/tmp/my repo' '-c' 'core.autocrlf=false' show 'HEAD:big.lock' | tail -n +{offset}]"
         );
         assert!(out.contains(&expected), "global-args hint wrong: {out:?}");
     }

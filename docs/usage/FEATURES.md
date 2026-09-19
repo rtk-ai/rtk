@@ -439,11 +439,13 @@ Affiche le resume du commit + stat + diff compact.
 
 > **Attention (redirection vers un fichier).** Pour un blob volumineux
 > (`rtk git show HEAD:gros-fichier`), la sortie est fenetree : seul un apercu
-> est affiche, suivi d'un indice `[see remaining: git show 'HEAD:...' | tail -n +N]`.
+> est affiche, suivi d'un indice
+> `[see remaining: rtk proxy git show 'HEAD:...' | tail -n +N]`.
 > Un `rtk git show HEAD:x > fichier` ecrit a la main peut donc tronquer
 > silencieusement le contenu (le code de sortie reste 0). Pour capturer le
-> fichier complet, utilisez `git show` directement, ou suivez l'indice de
-> recuperation.
+> fichier complet, suivez l'indice de recuperation, ou passez par
+> `rtk proxy git show`. Un `git show` nu ne suffit pas quand le hook RTK est
+> actif : il est reecrit en `rtk git show`, qui fenetre a nouveau la sortie.
 
 ---
 
