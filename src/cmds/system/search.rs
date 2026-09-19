@@ -8,7 +8,7 @@ use crate::core::stream::{
     self, CaptureResult, FilterMode, StdinMode, StreamFilter, exec_capture, exec_capture_stdin,
 };
 use crate::core::tracking;
-use crate::core::utils::{resolved_command, strip_ansi};
+use crate::core::utils::{ChildArgExt, resolved_command, strip_ansi};
 use crate::core::{args_utils, config};
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -144,54 +144,6 @@ fn tokenize_search_args<'a, T: AsRef<str>>(args: &'a [T], engine: Engine) -> Vec
         &|kind, name| search_takes_value(engine, kind, name),
         Dialect::Posix,
     )
-}
-
-#[cfg(windows)]
-fn append_search_arg(cmd: &mut Command, arg: &str) {
-    use std::os::windows::process::CommandExt;
-
-    let is_batch_wrapper = std::path::Path::new(cmd.get_program())
-        .extension()
-        .and_then(std::ffi::OsStr::to_str)
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"));
-    if !arg.contains('"') || is_batch_wrapper {
-        cmd.arg(arg);
-        return;
-    }
-
-    // Rust only wraps Windows arguments automatically when they contain whitespace.
-    // MSYS2 tools also need wrapping when an argument contains literal quotes, or their
-    // C runtime interprets Rust's otherwise-correct quote escapes as regex backslashes.
-    let mut quoted = String::with_capacity(arg.len() + 2);
-    quoted.push('"');
-    let mut backslashes = 0;
-    for ch in arg.chars() {
-        if ch == '\\' {
-            backslashes += 1;
-            continue;
-        }
-        if ch == '"' {
-            quoted.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
-        } else {
-            quoted.extend(std::iter::repeat_n('\\', backslashes));
-        }
-        backslashes = 0;
-        quoted.push(ch);
-    }
-    quoted.extend(std::iter::repeat_n('\\', backslashes * 2));
-    quoted.push('"');
-    cmd.raw_arg(quoted);
-}
-
-#[cfg(not(windows))]
-fn append_search_arg(cmd: &mut Command, arg: &str) {
-    cmd.arg(arg);
-}
-
-fn append_search_args<T: AsRef<str>>(cmd: &mut Command, args: &[T]) {
-    for arg in args {
-        append_search_arg(cmd, arg.as_ref());
-    }
 }
 
 /// Every grep/rg value-taking flag claims even a literal `--` as its value, unlike git/cargo --
@@ -479,18 +431,19 @@ fn engine_command<T: AsRef<str>>(
     line_buffered: bool,
 ) -> Command {
     let mut cmd = resolved_command(engine.bin());
-    cmd.args(engine.parse_flags());
-    append_search_args(&mut cmd, extra_args);
+    cmd.child_args(engine.parse_flags());
+    for a in extra_args {
+        cmd.child_arg(a.as_ref());
+    }
     if line_buffered {
         // The engine writes through a pipe, so flush each match immediately.
-        cmd.arg("--line-buffered");
+        cmd.child_arg("--line-buffered");
     }
     for p in patterns {
-        cmd.arg("-e");
-        append_search_arg(&mut cmd, p);
+        cmd.child_args(["-e", p]);
     }
-    cmd.arg("--");
-    append_search_args(&mut cmd, paths);
+    cmd.child_arg("--");
+    cmd.child_args(paths);
     cmd
 }
 
@@ -606,9 +559,11 @@ fn passthrough<T: AsRef<str>>(
     let mut cmd = resolved_command(engine.bin());
     if stream_stdin && !std::io::stdout().is_terminal() {
         // Keep passthrough output live when stdout is piped.
-        cmd.arg("--line-buffered");
+        cmd.child_arg("--line-buffered");
     }
-    append_search_args(&mut cmd, args);
+    for a in args {
+        cmd.child_arg(a.as_ref());
+    }
 
     let exit_code = if stream_stdin {
         stream::run_streaming(&mut cmd, StdinMode::Inherit, FilterMode::Passthrough)
@@ -661,7 +616,7 @@ pub fn run(
 
     if asks_for_help {
         let mut cmd = resolved_command(engine.bin());
-        append_search_args(&mut cmd, args);
+        cmd.child_args(args);
         let result = exec_capture(&mut cmd).context("search failed")?;
         print!("{}", result.stdout);
         if !result.stderr.is_empty() {

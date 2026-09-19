@@ -2948,7 +2948,15 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let fallback = temp_dir.path().join("fallback.trx");
         fs::write(&fallback, trx_with_counts(2, 1, 1)).expect("write fallback trx");
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        // Force the fixture's mtime well before the cutoff rather than leaning on a
+        // sleep: with write ordering as the only guarantee, filesystem mtime
+        // granularity decides whether the file reads as stale.
+        std::fs::File::options()
+            .write(true)
+            .open(&fallback)
+            .expect("open fallback for mtime")
+            .set_modified(SystemTime::now() - std::time::Duration::from_secs(10))
+            .expect("set fallback mtime");
         let command_started_at = SystemTime::now();
         let missing_primary = temp_dir.path().join("missing.trx");
 
