@@ -63,7 +63,7 @@ git diff "$BASE_BRANCH"...HEAD --stat
 | `src/main.rs`                  | Command routing + Commands enum            |
 | `src/core/tracking.rs`         | SQLite patterns + DB path config           |
 | `src/core/config.rs`           | Configuration system                       |
-| `src/hooks/init.rs`            | Init patterns + hook installation          |
+| `src/hooks/init/`              | Init patterns + hook installation          |
 | `.github/workflows/`           | CI/CD multi-platform build targets         |
 | `tests/` ou `fixtures/`        | Testing Strategy (CLAUDE.md)               |
 | `Cargo.toml`                   | Dependencies + build optimizations         |
