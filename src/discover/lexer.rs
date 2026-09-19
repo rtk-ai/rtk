@@ -569,6 +569,16 @@ pub(crate) struct Policy {
     /// `&`, `(` and `)` end a segment.
     group_boundaries: bool,
     redirects: RedirectPolicy,
+    /// Whether the body of a `$( )` is read as commands in its own right.
+    ///
+    /// The gate descends, because a command hidden in a substitution still runs
+    /// and still has to meet the deny rules. Every other caller stays out: the
+    /// text around a substitution is not a command of its own — descending
+    /// turns `git log $(git rev-parse HEAD)` into a `git log $` nobody ran —
+    /// and what a substitution captures is a string the outer command is built
+    /// from, so filtering it would change that string rather than change what
+    /// reaches anyone.
+    descend_into_substitution: bool,
 }
 
 impl Policy {
@@ -577,13 +587,15 @@ impl Policy {
         newline: NewlineMode::Conservative,
         group_boundaries: true,
         redirects: RedirectPolicy::Excise,
+        descend_into_substitution: true,
     };
 
     /// Classification only, never a security decision.
     pub(crate) const CLASSIFY: Self = Self {
         newline: NewlineMode::None,
-        group_boundaries: false,
+        group_boundaries: true,
         redirects: RedirectPolicy::Keep,
+        descend_into_substitution: false,
     };
 }
 
@@ -622,6 +634,16 @@ fn push_segment<'a>(
     });
 }
 
+/// Whether the `(` at `offset` opens a substitution rather than a subshell.
+///
+/// `$( )` captures a command's output as text the outer command is built from;
+/// `<( )` and `>( )` hand it over as a file the outer command reads or writes.
+/// In all three the inner command serves the outer one, so none of them is a
+/// place to end a command or to filter output somebody else is about to parse.
+pub(crate) fn opens_substitution(input: &str, offset: usize) -> bool {
+    matches!(input[..offset].chars().next_back(), Some('$' | '<' | '>'))
+}
+
 /// Split a compound command into the commands it runs, under `policy`.
 ///
 /// Offsets are relative to `cmd.trim()`, which is what every caller matches
@@ -637,14 +659,37 @@ pub(crate) fn segment(cmd: &str, policy: Policy) -> Vec<Segment<'_>> {
     let mut seg_start: usize = 0;
     let mut seg_end: Option<usize> = None;
     let mut seg_has_text = false;
+    let mut substitution_depth: usize = 0;
 
     let mut i = 0;
     while let Some(tok) = tokens.get(i) {
         let is_boundary = match tok.kind {
-            TokenKind::Operator | TokenKind::Pipe(_) => true,
-            TokenKind::Shellism => {
-                policy.group_boundaries && matches!(tok.value.as_str(), "&" | "(" | ")")
-            }
+            TokenKind::Operator | TokenKind::Pipe(_) => substitution_depth == 0,
+            TokenKind::Shellism => match tok.value.as_str() {
+                // A `(` that closes a `$` opens a substitution, not a subshell.
+                // Its body is tracked so the `)` that ends it is not read as a
+                // boundary either, and so an operator inside it does not end a
+                // command out here.
+                "(" if !policy.descend_into_substitution
+                    && opens_substitution(trimmed, tok.offset) =>
+                {
+                    substitution_depth += 1;
+                    false
+                }
+                // A bracket nested inside a substitution counts too, or its `)`
+                // closes the substitution one bracket early and the real
+                // closing `)` is read as a boundary out here.
+                "(" if substitution_depth > 0 => {
+                    substitution_depth += 1;
+                    false
+                }
+                ")" if substitution_depth > 0 => {
+                    substitution_depth -= 1;
+                    false
+                }
+                "&" | "(" | ")" => policy.group_boundaries && substitution_depth == 0,
+                _ => false,
+            },
             _ => false,
         };
 
@@ -704,27 +749,32 @@ pub(crate) fn segment(cmd: &str, policy: Policy) -> Vec<Segment<'_>> {
 
 /// Segments `cmd` for the **permission gate** (`permissions.rs::check_command_with_rules`):
 /// every segment this returns is independently checked against deny/ask/allow
-/// rules, so this is deliberately the most paranoid of the three compound-command
-/// segmenters in this codebase — see [`split_for_classify`] (analytics/discovery
-/// classification) and `registry.rs::rewrite_compound`'s inline token walk (actual
-/// rewrite) for the other two, which intentionally segment the same kind of input
-/// differently:
+/// rules, so this is the most paranoid of the three compound-command segmenters
+/// in this codebase — see [`split_for_classify`] (analytics/discovery
+/// classification) and `registry.rs::rewrite_compound`'s inline token walk
+/// (actual rewrite) for the other two.
+///
+/// All three agree on where a command begins and ends. Where a row below still
+/// differs, the difference is the consumer's purpose, not an accident, and
+/// `registry.rs`'s `segmenter_agreement` tests hold each one to a stated reason:
 ///
 /// | | here (permission gate) | [`split_for_classify`] (analytics) | `rewrite_compound` (rewrite) |
 /// |---|---|---|---|
 /// | `&&` / `\|\|` / `;` | splits | splits | splits |
-/// | `\|` | always splits | always splits | pipeline handled specially |
-/// | background `&` | splits (Shellism boundary) | does not split | splits |
-/// | `( ... )` grouping | splits (Shellism boundary) | does not split | does not split standalone |
-/// | trailing redirect | truncates the segment | kept | kept (rewritten output preserves it) |
+/// | `\|` | splits | splits | splits, then `PipelineSafety` decides per rule |
+/// | background `&` | splits | splits | splits |
+/// | `( ... )` grouping | splits | splits | splits |
+/// | `$( ... )` substitution | descends: a command that runs must meet the rules | stays out: the text around it is not a command | stays out: it captures a string, not output |
+/// | `{ ... }` grouping | strips the bracket before matching | not a boundary: `{` is brace expansion off a command position | not a boundary, same reason |
+/// | trailing redirect | truncates the segment, so nothing rides in behind one | kept | kept, so the rewrite reproduces the real shape |
 /// | leading redirect | stepped over, command kept | kept | kept |
 /// | lone `\r` (no following `\n`) | splits | does not split | does not split |
 ///
-/// Like [`split_for_classify`] but also breaks on newline, background `&`,
-/// subshell `( ... )`, and a lone `\r` (`NewlineMode::Conservative`), and
-/// truncates each segment at the first redirect that follows command text —
-/// deliberately conservative so a hidden command can't evade the gate by
-/// hiding behind a construct another segmenter would leave intact.
+/// Like [`split_for_classify`] but also breaks on newline and on a lone `\r`
+/// (`NewlineMode::Conservative`), descends into `$( )`, and truncates each
+/// segment at the first redirect that follows command text — deliberately
+/// conservative so a hidden command can't evade the gate by hiding behind a
+/// construct another segmenter would leave intact.
 /// Callers must still gate on [`contains_unattestable_construct`] first.
 pub fn split_for_permissions(cmd: &str) -> Vec<&str> {
     segment(cmd, Policy::PERMISSIONS)
@@ -737,9 +787,9 @@ pub fn split_for_permissions(cmd: &str) -> Vec<&str> {
 /// quote-aware.
 ///
 /// For classification only — unlike [`split_for_permissions`] this never
-/// splits on background `&`/`( ... )` or truncates at a redirect (see that
-/// function's comparison table), so it must not be repurposed for
-/// permission/security decisions.
+/// splits on a newline or a lone `\r`, stays out of `$( )`, and keeps rather
+/// than truncates at a redirect (see that function's comparison table), so it
+/// must not be repurposed for permission/security decisions.
 pub(crate) fn split_for_classify(cmd: &str) -> Vec<Segment<'_>> {
     segment(cmd, Policy::CLASSIFY)
 }
@@ -1722,9 +1772,10 @@ mod tests {
 
     // --- split_for_permissions ---------------------------------------------
 
-    /// `segment()` replaced two hand-rolled walkers. This is the contract for
-    /// that replacement: over a generated corpus of compound commands, both
-    /// policies must return exactly what the walker they replaced returned.
+    /// `segment()` replaced two hand-rolled walkers. The gate's contract is
+    /// still exactly that: over a generated corpus of compound commands it must
+    /// return what the walker it replaced returned, because a gate that segments
+    /// differently is a gate with different holes.
     ///
     /// The corpus is built from the constructs each walker treats specially,
     /// crossed rather than listed, because the shapes that broke the gate in
@@ -1777,6 +1828,15 @@ mod tests {
             "case x in a) ls;; esac",
             "  ls  ;  ls  ",
             "café;;fin",
+            // Substitutions, which the boundary rules deliberately treat unlike
+            // the subshells they look like.
+            "echo $(ls)",
+            "echo $(ls && rm -rf /)",
+            "echo $(cd /tmp && (ls; pwd))",
+            "echo $(ls) && rm -rf /",
+            "ls $(",
+            "ls )",
+            "ls $(()) x",
         ] {
             corpus.push(extra.to_string());
         }
@@ -1789,11 +1849,47 @@ mod tests {
                 legacy_segmenters::split_for_permissions_legacy(cmd),
                 "permission segmentation changed for {cmd:?}"
             );
-            assert_eq!(
-                classify_texts(cmd),
-                legacy_segmenters::split_on_operators_legacy(cmd, false),
-                "classify segmentation changed for {cmd:?}"
-            );
+            // Classify and the gate hold the same policy once the three things
+            // they deliberately differ on are out of the picture: newlines,
+            // redirects, and substitutions. On everything else they must agree
+            // exactly. That is what anchors classify to the frozen walker —
+            // the gate is still compared against it line by line above, so an
+            // unintended drift in `segment()` has to show up as classify and
+            // the gate disagreeing here.
+            // `<(` and `>(` are covered by excluding `<` and `>` for redirects.
+            if !cmd.contains(['\n', '\r', '>', '<']) && !cmd.contains("$(") {
+                assert_eq!(
+                    classify_texts(cmd),
+                    split_for_permissions(cmd),
+                    "classify and the gate disagree on {cmd:?}, which shares their policy"
+                );
+            }
+
+            // Whatever the policy, a segment is text that was really there, at
+            // the span it claims, so a caller splicing by span can never write
+            // over a neighbour or quote something nobody typed. This says
+            // nothing about *which* text became a segment — gaps are legal,
+            // that is where separators live — so the placement cases live in
+            // registry.rs's `segmenter_agreement`.
+            let trimmed = cmd.trim();
+            let mut furthest = 0;
+            for seg in split_for_classify(cmd) {
+                assert!(
+                    seg.start <= seg.end && seg.end <= trimmed.len(),
+                    "span out of range for {cmd:?}"
+                );
+                assert_eq!(
+                    &trimmed[seg.start..seg.end],
+                    seg.text,
+                    "span does not address its own text for {cmd:?}"
+                );
+                assert!(!seg.text.is_empty(), "empty segment for {cmd:?}");
+                assert!(
+                    seg.start >= furthest,
+                    "segments overlap or run backwards for {cmd:?}"
+                );
+                furthest = seg.end;
+            }
         }
     }
 
