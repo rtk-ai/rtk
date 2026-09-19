@@ -235,6 +235,31 @@ fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
     failures
 }
 
+/// Strip the user's `--reporter` flag so it can't conflict with the injected
+/// `--reporter=json`. Handles both `--reporter=<name>` and the space-separated
+/// `--reporter <name>` form — the latter must also consume the value, otherwise
+/// the bare reporter name (`list`, `dot`, ...) is left behind as a positional
+/// test-filter and Playwright silently runs the wrong (usually empty) test set.
+fn strip_reporter_args(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut skip_value = false;
+    for arg in args {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        if arg == "--reporter" {
+            skip_value = true;
+            continue;
+        }
+        if arg.starts_with("--reporter=") {
+            continue;
+        }
+        out.push(arg.clone());
+    }
+    out
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -265,10 +290,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         cmd.arg("test");
         cmd.arg("--reporter=json");
         // Strip user's --reporter to avoid conflicts with our forced JSON
-        for arg in &args[1..] {
-            if !arg.starts_with("--reporter") {
-                cmd.arg(arg);
-            }
+        for arg in strip_reporter_args(&args[1..]) {
+            cmd.arg(arg);
         }
     } else {
         for arg in args {
@@ -470,5 +493,37 @@ mod tests {
         let result = PlaywrightParser::parse(invalid);
         assert_eq!(result.tier(), 3); // Passthrough
         assert!(!result.is_ok());
+    }
+
+    // --- --reporter stripping: space-separated form must consume its value ---
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_strip_reporter_space_form_consumes_value() {
+        // `--reporter list` — the value must not survive as a positional
+        // test filter (it would silently run the wrong test set).
+        let result = strip_reporter_args(&strings(&["--reporter", "list", "e2e/login.spec.ts"]));
+        assert_eq!(result, strings(&["e2e/login.spec.ts"]));
+    }
+
+    #[test]
+    fn test_strip_reporter_equals_form() {
+        let result = strip_reporter_args(&strings(&["--reporter=dot", "e2e/login.spec.ts"]));
+        assert_eq!(result, strings(&["e2e/login.spec.ts"]));
+    }
+
+    #[test]
+    fn test_strip_reporter_keeps_unrelated_args() {
+        let result = strip_reporter_args(&strings(&["--workers=2", "--grep", "login"]));
+        assert_eq!(result, strings(&["--workers=2", "--grep", "login"]));
+    }
+
+    #[test]
+    fn test_strip_reporter_trailing_flag_without_value() {
+        let result = strip_reporter_args(&strings(&["spec.ts", "--reporter"]));
+        assert_eq!(result, strings(&["spec.ts"]));
     }
 }
