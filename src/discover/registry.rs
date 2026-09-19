@@ -63,18 +63,12 @@ static COMPILED: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         .map(|r| Regex::new(r.pattern).expect("invalid regex"))
         .collect()
 });
-static ENV_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
-    let double_quoted = r#""(?:[^"\\]|\\.)*""#;
-    let single_quoted = r#"'(?:[^'\\]|\\.)*'"#;
-    let unquoted = r#"[^\s]*"#;
-    let env_value = format!("(?:{}|{}|{})", double_quoted, single_quoted, unquoted);
-    let env_assign = format!(r#"[A-Z_][A-Z0-9_]*={}"#, env_value);
-    // NOTE: `sudo` is intentionally NOT stripped here. Rewriting `sudo docker ps`
-    // to `sudo rtk docker ps` breaks at runtime because `rtk` is not on root's
-    // secure_path, and (where it is) would run rtk itself as root. sudo commands
-    // are left untouched so they pass through unchanged. See #146.
-    Regex::new(&format!(r#"^(?:env\s+|{}\s+)+"#, env_assign)).unwrap()
-});
+/// One `NAME=value` word. The value is whatever the rest of the word is, since
+/// `coalesce_words` has already decided where the word ends — quotes included.
+///
+/// The name charset stays `[A-Z_][A-Z0-9_]*`: widening it to lowercase would
+/// reclassify `foo=bar git status`, which is a decision of its own.
+static ENV_ASSIGN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Z_][A-Z0-9_]*=").unwrap());
 // Git global options that appear before the subcommand: -C <path>, -c <key=val>,
 // --git-dir <dir>, --work-tree <dir>, and flag-only options (#163)
 static GIT_GLOBAL_OPT: LazyLock<Regex> = LazyLock::new(|| {
@@ -194,8 +188,7 @@ pub fn classify_command(cmd: &str) -> Classification {
     }
 
     // Strip env prefixes (env VAR=val, VAR=val); sudo is left untouched (#146)
-    let stripped = ENV_PREFIX.replace(trimmed, "");
-    let cmd_clean = stripped.trim();
+    let cmd_clean = split_env_prefix(trimmed).1;
     if cmd_clean.is_empty() {
         return Classification::Ignored;
     }
@@ -660,16 +653,88 @@ pub fn cmd_has_rtk_disabled_prefix(cmd: &str) -> bool {
     prefix_contains_rtk_disabled(prefix_part)
 }
 
+/// Split the leading `env` and `NAME=value` assignments off a command, as
+/// `(prefix, command)`.
+///
+/// By words, because a quoted value is one word: `D='# shellcheck disable=SC2034'`
+/// is an assignment whole, and the `shellcheck` inside it is not a command. A
+/// pattern cannot hold that line — its alternation for the value backtracks into
+/// the quotes as soon as the quoted form is not followed by a blank, which is
+/// what happens at the end of a line or before a `;`, and the rewrite then edits
+/// inside the literal (#3262).
+///
+/// `sudo` is deliberately not stripped. `sudo rtk docker ps` fails at runtime
+/// because `rtk` is not on root's `secure_path`, and where it is, it would run
+/// rtk as root (#146).
+pub fn split_env_prefix(cmd: &str) -> (&str, &str) {
+    let trimmed = cmd.trim();
+    let mut pos = 0;
+    // Where the command starts, not where the last assignment ends, so that
+    // whoever puts the two back together need not know what separated them.
+    let mut end = 0;
+
+    while pos < trimmed.len() {
+        let word_end = word_end_from(trimmed, pos);
+        let word = &trimmed[pos..word_end];
+        if word != "env" && !ENV_ASSIGN.is_match(word) {
+            break;
+        }
+        pos = skip_blanks(trimmed, word_end);
+        end = pos;
+    }
+
+    if end == 0 {
+        return ("", trimmed);
+    }
+    (&trimmed[..end], trimmed[end..].trim())
+}
+
+/// Where the word starting at `start` ends: at the first blank that is not
+/// inside quotes.
+///
+/// A quoted value is one word however many blanks it contains, which is the
+/// whole difficulty — `D='# shellcheck disable=SC2034'` is an assignment, and
+/// the `shellcheck` within it is not a command anybody ran.
+fn word_end_from(s: &str, start: usize) -> usize {
+    let bytes = s.as_bytes();
+    let mut i = start;
+    let mut quote: Option<u8> = None;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match quote {
+            // A backslash escapes inside double quotes but is literal inside
+            // single ones, so `FOO="he said \"hi\""` is one word and
+            // `FOO='it\'` ends at the quote.
+            Some(b'"') if c == b'\\' => i += 1,
+            Some(open) => {
+                if c == open {
+                    quote = None;
+                }
+            }
+            None => match c {
+                b'\'' | b'"' => quote = Some(c),
+                b'\\' => i += 1,
+                b' ' | b'\t' => break,
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    i.min(bytes.len())
+}
+
+fn skip_blanks(s: &str, from: usize) -> usize {
+    let bytes = s.as_bytes();
+    let mut i = from;
+    while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+        i += 1;
+    }
+    i
+}
+
 /// Strip RTK_DISABLED=X and other env prefixes, returns `(env_prefix, actual_command)`.
 pub fn strip_disabled_prefix(cmd: &str) -> (&str, &str) {
-    let trimmed = cmd.trim();
-    let stripped = ENV_PREFIX.replace(trimmed, "");
-    // stripped is a Cow<str> that borrows from trimmed when no replacement happens.
-    // We need to return a &str into the original, so compute the offset.
-    let prefix_len = trimmed.len() - stripped.len();
-    let prefix_part = &trimmed[..prefix_len];
-    let rest = trimmed[prefix_len..].trim();
-    (prefix_part, rest)
+    split_env_prefix(cmd)
 }
 
 fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
@@ -1750,7 +1815,7 @@ fn rewrite_segment_inner(
             // The inner command may have been dropped because it is excluded.
             // Re-testing the wrapped form would route it through the wrapper's
             // own filter, defeating the exclusion.
-            if is_excluded(ENV_PREFIX.replace(rest, "").trim(), excluded) {
+            if is_excluded(split_env_prefix(rest).1, excluded) {
                 return None;
             }
             break;
@@ -1823,8 +1888,7 @@ fn rewrite_segment_inner(
     // Use classify_command for correct ignore/prefix handling
     let rtk_equivalent = match classify_command(cmd_part) {
         Classification::Supported { rtk_equivalent, .. } => {
-            let stripped = ENV_PREFIX.replace(cmd_part, "");
-            let cmd_clean = stripped.trim();
+            let cmd_clean = split_env_prefix(cmd_part).1;
             if !excluded.is_empty()
                 && (is_excluded(cmd_clean, excluded)
                     || is_excluded(&tool_form(cmd_clean, rtk_equivalent), excluded))
@@ -7451,6 +7515,64 @@ mod tests {
             ("FOO=1 RTK_DISABLED=1 ", "cargo test")
         );
         assert_eq!(strip_disabled_prefix("git status"), ("", "git status"));
+    }
+
+    /// A quoted value is one word however many blanks it holds. Reading it with
+    /// a pattern let the value alternation backtrack into the quotes whenever
+    /// the quoted form was not followed by a blank — at the end of a line, or
+    /// before a `;` — so `D='# shellcheck disable=SC2034'` was read as the
+    /// assignment `D='# ` and a command `shellcheck`, and the rewrite edited
+    /// inside the literal (#3262).
+    #[test]
+    fn test_a_quoted_value_is_one_word() {
+        for (cmd, prefix, rest) in [
+            // The three shapes of the same backtrack: before a `;`, at the end
+            // of the line, either quote.
+            (
+                "D='# shellcheck disable=SC2034'",
+                "D='# shellcheck disable=SC2034'",
+                "",
+            ),
+            ("D=\"x y\"", "D=\"x y\"", ""),
+            ("D='no trailing space'", "D='no trailing space'", ""),
+            // And the forms that always worked, which must keep working.
+            ("FOO=bar git status", "FOO=bar ", "git status"),
+            (
+                "GIT_SSH_COMMAND='ssh -o X=no' git push",
+                "GIT_SSH_COMMAND='ssh -o X=no' ",
+                "git push",
+            ),
+            ("env FOO=1 cargo test", "env FOO=1 ", "cargo test"),
+            ("FOO=a\\ b git status", "FOO=a\\ b ", "git status"),
+            // A backslash escapes inside double quotes, not inside single ones.
+            (
+                "FOO=\"he said \\\"hi\\\"\" git status",
+                "FOO=\"he said \\\"hi\\\"\" ",
+                "git status",
+            ),
+            // Lowercase is not an assignment here, deliberately: widening the
+            // name charset would reclassify `foo=bar git status`.
+            ("foo=bar git status", "", "foo=bar git status"),
+            // `sudo` is never stripped (#146).
+            ("sudo docker ps", "", "sudo docker ps"),
+        ] {
+            assert_eq!(split_env_prefix(cmd), (prefix, rest), "{cmd}");
+        }
+    }
+
+    /// The value belongs to the assignment, so a command inside it is not a
+    /// command — but the real one after it still is.
+    #[test]
+    fn test_a_command_after_a_quoted_assignment_is_still_rewritten() {
+        assert_eq!(
+            rewrite_command_no_prefixes("D='# shellcheck disable=SC2034'; git status", &[]),
+            Some("D='# shellcheck disable=SC2034'; rtk git status".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("D='x shellcheck y'; echo hi", &[]),
+            None,
+            "nothing here is a command RTK handles"
+        );
     }
 
     // --- #485: absolute path normalization ---
