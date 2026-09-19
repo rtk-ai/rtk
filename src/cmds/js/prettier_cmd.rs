@@ -20,13 +20,13 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         cmd,
         "prettier",
         &args.join(" "),
-        filter_prettier_output,
+        filter_output,
         RunOptions::stdout_only(),
     )
 }
 
 /// Filter Prettier output - show only files that need formatting
-pub fn filter_prettier_output(output: &str) -> String {
+pub fn filter_output(output: &str) -> String {
     // #221: empty or whitespace-only output means prettier didn't run
     if output.trim().is_empty() {
         return "Error: prettier produced no output".to_string();
@@ -134,7 +134,7 @@ mod tests {
 Checking formatting...
 All matched files use Prettier code style!
         "#;
-        let result = filter_prettier_output(output);
+        let result = filter_output(output);
         assert!(result.contains("Prettier"));
         assert!(result.contains("All files formatted correctly"));
     }
@@ -148,7 +148,7 @@ src/lib/auth/session.ts
 src/pages/dashboard.tsx
 Code style issues found in the above file(s). Forgot to run Prettier?
         "#;
-        let result = filter_prettier_output(output);
+        let result = filter_output(output);
         assert!(result.contains("3 files need formatting"));
         assert!(result.contains("button.tsx"));
         assert!(result.contains("session.ts"));
@@ -160,7 +160,7 @@ Code style issues found in the above file(s). Forgot to run Prettier?
         for i in 0..15 {
             output.push_str(&format!("src/file{}.ts\n", i));
         }
-        let result = filter_prettier_output(&output);
+        let result = filter_output(&output);
         assert!(result.contains("15 files need formatting"));
         assert!(result.contains("... +5 more files"));
     }
@@ -169,14 +169,14 @@ Code style issues found in the above file(s). Forgot to run Prettier?
 
     #[test]
     fn test_filter_empty_output() {
-        let result = filter_prettier_output("");
+        let result = filter_output("");
         assert!(result.contains("Error"));
         assert!(!result.contains("All files formatted"));
     }
 
     #[test]
     fn test_filter_whitespace_only_output() {
-        let result = filter_prettier_output("   \n\n  ");
+        let result = filter_output("   \n\n  ");
         assert!(result.contains("Error"));
         assert!(!result.contains("All files formatted"));
     }

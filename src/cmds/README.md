@@ -107,7 +107,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     runner::run_filtered(
         cmd, "mycmd", &args.join(" "),
-        filter_mycmd_output,
+        filter_output,
         runner::RunOptions::stdout_only().tee("mycmd"),
     )
 }
@@ -287,7 +287,8 @@ Adding a new filter or command requires changes in multiple places. For TOML-vs-
 ### Rust module (structured output, flag injection, state machines)
 
 1. **Create module** in `src/cmds/<ecosystem>/mycmd_cmd.rs`:
-   - Write the `filter_mycmd()` function (pure: `&str -> String`, no side effects)
+   - Write the `filter_output()` function (pure: `&str -> String`, no side effects)
+   - **Naming**: name filter functions for what they produce, not for the tool — the module path already supplies that. `mycmd_cmd::filter_output` and `mycmd_cmd::filter_check_json` read cleanly; `mycmd_cmd::filter_mycmd_output` stutters at every call site. Cross-module calls are always module-qualified, so the short name is never ambiguous.
    - Write `pub fn run(...) -> Result<i32>` using `runner::run_filtered()` — build the `Command`, choose `RunOptions`, delegate
    - Use `RunOptions::stdout_only()` when the filter parses structured stdout (JSON, NDJSON) — stderr would corrupt parsing
    - Use `RunOptions::default()` when filtering combined text output
