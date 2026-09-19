@@ -1,4 +1,6 @@
-#![cfg(unix)]
+//! Runs on every platform: each test that shells out to `grep` or `rg`
+//! skips itself when that engine is not installed, so Windows CI exercises
+//! the filters instead of compiling an empty test binary.
 //! Engine-faithfulness contract: `rtk grep` runs grep and `rtk rg` runs rg, each
 //! with its own regex dialect and ignore semantics. rtk filters output noise only;
 //! it never substitutes one engine for the other (the bug this PR removes).
