@@ -470,15 +470,13 @@ pub fn run_stdin(_verbose: u8) -> Result<()> {
             );
         }
         None => {
-            // Structural fallback: the caller's exact bytes (plus println!
-            // parity — a terminating newline when the input lacked one).
+            // Structural fallback: emit the caller's exact input bytes,
+            // byte-for-byte. condense_stdin's None contract is "exact input
+            // bytes", and RTK never adds bytes a native pipe would not produce.
             use std::io::Write;
             let mut out = io::stdout();
             out.write_all(&bytes)
                 .context("Failed to write raw diff to stdout")?;
-            if !bytes.is_empty() && !bytes.ends_with(b"\n") {
-                writeln!(out).context("Failed to write raw diff to stdout")?;
-            }
             let raw = String::from_utf8_lossy(&bytes);
             timer.track("diff (stdin)", "rtk diff (stdin)", &raw, &raw);
         }
