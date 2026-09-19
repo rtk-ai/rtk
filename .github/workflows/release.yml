@@ -105,6 +105,77 @@ jobs:
           name: rtk-${{ matrix.target }}
           path: rtk-${{ matrix.target }}.${{ matrix.archive }}
 
+      # The bare exe is uploaded separately for SignPath: its artifact
+      # configuration signs a single pe-file, and the signed exe is re-zipped
+      # by the sign-windows job below.
+      - name: Upload unsigned Windows exe (for signing)
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtk-windows-exe-unsigned
+          path: target/${{ matrix.target }}/release/rtk.exe
+
+  # Signs rtk.exe via SignPath, then replaces the unsigned windows zip with a
+  # signed one under the same artifact name so the release job needs no change.
+  # Skipped entirely (unsigned release, previous behaviour) when the
+  # SIGNPATH_ORGANIZATION_ID repository variable is not configured.
+  sign-windows:
+    name: Sign Windows binary (SignPath)
+    needs: build
+    if: vars.SIGNPATH_ORGANIZATION_ID != ''
+    runs-on: ubuntu-latest
+    # Least-privilege: this job only reads the artifact list and talks to the
+    # SignPath API — it never checks out or writes repo contents.
+    permissions:
+      actions: read
+    steps:
+      # Looked up by name via the REST API instead of threading a job-level
+      # output through the build matrix: GitHub does not guarantee matrix job
+      # ordering, and a job-level output set by only one leg ("last matrix job
+      # that runs wins") can arrive empty if a non-Windows leg happens to
+      # finish last (rare but real — Windows is usually, not always, slowest).
+      - name: Look up unsigned Windows exe artifact
+        id: find-artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          artifact_id=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
+            --jq '.artifacts[] | select(.name == "rtk-windows-exe-unsigned") | .id')
+          if [ -z "$artifact_id" ]; then
+            echo "::error::rtk-windows-exe-unsigned artifact not found for run ${{ github.run_id }}"
+            exit 1
+          fi
+          echo "id=$artifact_id" >> "$GITHUB_OUTPUT"
+
+      - name: Submit signing request
+        # Pinned by commit SHA (not the mutable v1.2 tag) per SignPath repo tag
+        # refs/tags/v1.2 = 4f13d373e8f0cd8d3c0465ff4877feff27aed2ae.
+        uses: signpath/github-action-submit-signing-request@4f13d373e8f0cd8d3c0465ff4877feff27aed2ae # v1.2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: rtk
+          signing-policy-slug: release-signing
+          github-artifact-id: ${{ steps.find-artifact.outputs.id }}
+          wait-for-completion: true
+          # Default is 600s: too short if the signing policy requires a human
+          # approver. Signing itself is fast; waiting on an approval is the
+          # realistic bottleneck.
+          wait-for-completion-timeout-in-seconds: "3600"
+          output-artifact-directory: signed
+
+      - name: Repackage signed exe
+        run: |
+          cd signed
+          7z a ../rtk-x86_64-pc-windows-msvc.zip rtk.exe
+
+      - name: Replace Windows artifact with signed zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtk-x86_64-pc-windows-msvc
+          path: rtk-x86_64-pc-windows-msvc.zip
+          overwrite: true
+
   build-deb:
     name: Build DEB package
     runs-on: ubuntu-latest
@@ -162,7 +233,15 @@ jobs:
 
   release:
     name: Create Release
-    needs: [build, build-deb, build-rpm]
+    needs: [build, sign-windows, build-deb, build-rpm]
+    # sign-windows may be skipped (no SignPath config) — release anyway with
+    # the unsigned zip, but never release if signing was attempted and failed.
+    if: >-
+      !cancelled() &&
+      needs.build.result == 'success' &&
+      needs.build-deb.result == 'success' &&
+      needs.build-rpm.result == 'success' &&
+      (needs.sign-windows.result == 'success' || needs.sign-windows.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/create-github-app-token@v3
