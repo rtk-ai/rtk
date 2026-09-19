@@ -308,7 +308,7 @@ Start here, then drill down into each README for file-level details.
 | [`discover/`](../src/discover/README.md) | History analysis + rewrite registry | Rewrite patterns, session providers, compound command splitting |
 | [`learn/`](../src/learn/README.md) | CLI correction detection | Error classification, correction pair detection, rule generation |
 | [`parser/`](../src/parser/README.md) | Parser infrastructure | Canonical types (TestResult, LintResult, etc.), 3-tier format modes, migration guide |
-| [`filters/`](../src/filters/README.md) | TOML filter configs | TOML DSL syntax, 8-stage pipeline, inline testing, naming conventions |
+| [`filters/`](../src/filters/README.md) | TOML filter configs | TOML DSL syntax, 11-stage pipeline, inline testing, naming conventions |
 
 ### `hooks/` — Deployed hook artifacts (root directory)
 
@@ -355,7 +355,7 @@ Compiled filter modules for complex transformations, cutting 60-95% of the bash 
 
 ### TOML DSL Filters (src/filters/*.toml)
 
-Declarative filters with an 8-stage pipeline: strip ANSI, regex replace, match output, strip/keep lines, truncate lines, head/tail, max lines, on-empty message. Loaded from three tiers: built-in (compiled), global (`~/.config/rtk/filters/`), project-local (`.rtk/filters/`, trust-gated).
+Declarative filters with an 11-stage pipeline: strip ANSI, regex replace, match output, strip/keep lines, squeeze whitespace, collapse table padding, fold repeated lines, truncate lines, head/tail, max lines, on-empty message. The last three lossless stages (squeeze/collapse/fold) default off and only compact whitespace geometry or repeat counts — never content. Loaded from three tiers: built-in (compiled), global (`~/.config/rtk/filters/`), project-local (`.rtk/filters/`, trust-gated).
 
 > **Details**: [`src/core/README.md`](../src/core/README.md) covers the TOML filter engine.
 
