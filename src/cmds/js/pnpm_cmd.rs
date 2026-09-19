@@ -448,6 +448,12 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
     }
 
     let result = exec_capture(&mut cmd).context("Failed to run pnpm outdated")?;
+
+    if !result.success() && !result.stderr.is_empty() {
+        eprint!("{}", result.stderr);
+        return Ok(result.exit_code);
+    }
+
     let combined = result.combined();
 
     // Parse output using PnpmOutdatedParser
@@ -483,7 +489,7 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
 
     timer.track("pnpm outdated", "rtk pnpm outdated", &combined, shown);
 
-    Ok(0)
+    Ok(result.exit_code)
 }
 
 fn run_install(args: &[String], verbose: u8) -> Result<i32> {
