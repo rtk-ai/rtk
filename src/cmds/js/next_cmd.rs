@@ -21,7 +21,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     cmd.arg("build");
 
-    for arg in args {
+    // `rtk next` always runs `next build`, so a redundant leading `build` token
+    // (the natural `rtk next build` invocation) must be dropped — otherwise the
+    // child becomes `next build build`, which Next.js parses as a `[directory]`
+    // positional ("Invalid project directory provided, no such directory: .../build")
+    // and exits 1 on an otherwise-clean build. See normalize_build_args.
+    for arg in normalize_build_args(args) {
         cmd.arg(arg);
     }
 
@@ -37,6 +42,18 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         filter_next_build,
         runner::RunOptions::default(),
     )
+}
+
+/// `rtk next` already injects the `build` subcommand, so a leading redundant
+/// `build` token (from the natural `rtk next build` invocation) is stripped to
+/// avoid `next build build`, which Next.js rejects as an invalid `[directory]`
+/// positional and exits 1 on an otherwise-successful build. Any other args
+/// (e.g. `--debug`, `--no-lint`) pass through unchanged.
+fn normalize_build_args(args: &[String]) -> &[String] {
+    match args.first() {
+        Some(first) if first.as_str() == "build" => &args[1..],
+        _ => args,
+    }
 }
 
 /// Filter Next.js build output - extract routes, bundles, warnings
@@ -208,6 +225,38 @@ Route (app)                    Size     First Load JS
         assert!(result.contains("Next.js Build"));
         assert!(result.contains("routes"));
         assert!(!result.contains("Creating an optimized")); // Should filter verbose logs
+    }
+
+    #[test]
+    fn test_normalize_build_args_strips_redundant_build() {
+        // `rtk next build` → args ["build"] must not become `next build build`.
+        let only_build = vec!["build".to_string()];
+        assert!(normalize_build_args(&only_build).is_empty());
+
+        // `rtk next build --debug` → keep the flags, drop the redundant `build`.
+        let with_flag = vec!["build".to_string(), "--debug".to_string()];
+        assert_eq!(
+            normalize_build_args(&with_flag).to_vec(),
+            vec!["--debug".to_string()]
+        );
+
+        // `rtk next --debug` (no redundant token) is unchanged.
+        let flag_only = vec!["--debug".to_string()];
+        assert_eq!(
+            normalize_build_args(&flag_only).to_vec(),
+            vec!["--debug".to_string()]
+        );
+
+        // `rtk next` (no args) is unchanged.
+        let empty: Vec<String> = Vec::new();
+        assert!(normalize_build_args(&empty).is_empty());
+
+        // A later `build` token (e.g. a flag value) is NOT stripped — only a leading one.
+        let trailing = vec!["--debug".to_string(), "build".to_string()];
+        assert_eq!(
+            normalize_build_args(&trailing).to_vec(),
+            vec!["--debug".to_string(), "build".to_string()]
+        );
     }
 
     #[test]
