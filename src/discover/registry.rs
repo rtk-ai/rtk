@@ -7,8 +7,8 @@ use std::sync::LazyLock;
 
 use super::lexer::{
     ParsedToken, PipeKind, QuoteScan, TokenKind, ansi_c_quote_defeats_lexer, coalesce_words,
-    is_crlf_at, redirect_has_file_target, shell_split, split_on_operators, tokenize,
-    tokenize_with_newlines,
+    is_crlf_at, is_word_boundary_whitespace, redirect_has_file_target, shell_split,
+    split_on_operators, tokenize, tokenize_with_newlines,
 };
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 
@@ -313,7 +313,7 @@ pub fn classify_command(cmd: &str) -> Classification {
 
 /// Extract the base command (first word, or first two if it looks like a subcommand pattern).
 fn extract_base_command(cmd: &str) -> &str {
-    let parts: Vec<&str> = cmd.splitn(3, char::is_whitespace).collect();
+    let parts: Vec<&str> = cmd.splitn(3, is_word_boundary_whitespace).collect();
     match parts.len() {
         0 => "",
         1 => parts[0],
@@ -323,12 +323,12 @@ fn extract_base_command(cmd: &str) -> &str {
             if !second.starts_with('-') && !second.contains('/') && !second.contains('.') {
                 // Return "cmd subcmd"
                 let end = cmd
-                    .find(char::is_whitespace)
+                    .find(is_word_boundary_whitespace)
                     .and_then(|i| {
                         let rest = &cmd[i..];
                         let trimmed = rest.trim_start();
                         trimmed
-                            .find(char::is_whitespace)
+                            .find(is_word_boundary_whitespace)
                             .map(|j| i + (rest.len() - trimmed.len()) + j)
                     })
                     .unwrap_or(cmd.len());
@@ -374,7 +374,7 @@ fn strip_php_wrapper(cmd: &str) -> &str {
 }
 
 fn normalize_php_tool_command_with_dirs(cmd: &str, bin_dirs: &[std::path::PathBuf]) -> String {
-    let first_space = cmd.find(char::is_whitespace);
+    let first_space = cmd.find(is_word_boundary_whitespace);
     let first_word = match first_space {
         Some(pos) => &cmd[..pos],
         None => cmd,
@@ -566,7 +566,7 @@ fn split_token_spans(cmd: &str) -> Vec<(&str, usize)> {
 /// Normalize absolute binary paths: `/usr/bin/grep -rn foo` → `grep -rn foo` (#485)
 /// Only strips if the first word contains a `/` (Unix path).
 fn strip_absolute_path(cmd: &str) -> String {
-    let first_space = cmd.find(' ');
+    let first_space = cmd.find(is_word_boundary_whitespace);
     let first_word = match first_space {
         Some(pos) => &cmd[..pos],
         None => cmd,
@@ -1960,14 +1960,29 @@ fn prefix_gap<'a>(cmd: &'a str, prefix: &str, rest: &str) -> &'a str {
     &cmd[prefix.len()..cmd.len() - rest.len()]
 }
 
+/// Bash separates words on space, tab and newline alike, and the rule
+/// patterns match `\s+`, so the boundary here is all three.
+///
+/// A newline is also a command terminator, so accepting one here would be
+/// wrong if it could arrive joining two commands. It cannot, by two separate
+/// routes, and both have to hold:
+///
+/// - `rewrite_command_precompiled` hands anything containing a newline to
+///   `rewrite_multiline_block`, which splits on the lexer's unquoted newline
+///   tokens. A newline surviving that is inside an open quote span, where the
+///   byte after a matching prefix is the quote rather than whitespace.
+/// - A line ending in an operator is rejoined with the next into one unit,
+///   which does carry an unquoted newline. `rewrite_compound` then re-splits
+///   on that operator, and the newline lands as leading whitespace of the
+///   following segment, which is trimmed before this is reached.
 fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
     if cmd == prefix {
         Some("")
     } else if cmd.len() > prefix.len()
         && cmd.starts_with(prefix)
-        && cmd.as_bytes()[prefix.len()] == b' '
+        && cmd[prefix.len()..].starts_with(is_word_boundary_whitespace)
     {
-        Some(cmd[prefix.len() + 1..].trim_start())
+        Some(cmd[prefix.len()..].trim_start())
     } else {
         None
     }
@@ -4257,6 +4272,72 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("head -n 1 a&b", &[]),
             Some("rtk read a --head-lines 1&b".into())
+        );
+    }
+
+    /// Bash's `$IFS` is space, tab and newline, and the rule patterns match
+    /// `\s+`, so a tab-separated command classifies as Supported. The rewrite
+    /// then has to agree, or the hook reports coverage it does not deliver
+    /// and the command streams raw (#4100).
+    #[test]
+    fn test_a_tab_separates_a_command_from_its_prefix() {
+        for (cmd, expected) in [
+            ("ls\t-la", "rtk ls -la"),
+            ("cargo\tbuild", "rtk cargo build"),
+            // Wrapper prefixes peel on a tab as they do on a space, and the
+            // tab itself is the author's text.
+            ("noglob\tls -la", "noglob\trtk ls -la"),
+            ("command\tls -la", "command\trtk ls -la"),
+            ("exec\tls -la", "exec\trtk ls -la"),
+            ("uv run\tls -la", "uv run\trtk ls -la"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                Some(expected),
+                "{cmd:?} classifies as Supported, so it has to rewrite"
+            );
+        }
+    }
+
+    /// The two sides have to agree about what a command is: anything
+    /// `classify_command` calls Supported must produce a rewrite, or
+    /// `rtk discover` counts coverage the hook never delivers.
+    #[test]
+    fn test_supported_classification_implies_a_rewrite() {
+        const SEPARATORS: &[&str] = &[" ", "\t", "  ", " \t "];
+        // Shapes a rule pattern matches directly, where "did it rewrite" is
+        // the whole question. Wrappers are deliberately absent. `noglob` and
+        // the other shell keywords because no rule names them, so
+        // `classify_command` never calls them Supported; `uv run` because a
+        // broken wrapper peel still returns `Some` — the wrong text, routed to
+        // `rtk uv` instead of peeling — and presence alone cannot see that.
+        // Both are pinned by the exact-output table above.
+        const COMMANDS: &[&str] = &["ls|-la", "cargo|build", "git|status", "grep|-rn foo"];
+
+        let mut silent: Vec<&str> = Vec::new();
+        for shape in COMMANDS {
+            let mut checked = 0;
+            for separator in SEPARATORS {
+                let cmd = shape.replace('|', separator);
+                if !matches!(classify_command(&cmd), Classification::Supported { .. }) {
+                    continue;
+                }
+                checked += 1;
+                assert!(
+                    rewrite_command_no_prefixes(&cmd, &[]).is_some(),
+                    "{cmd:?} classifies as Supported but does not rewrite"
+                );
+            }
+            // Per shape, not in total: a shape that never classifies Supported
+            // contributes nothing, and a total is large enough to hide it.
+            if checked < SEPARATORS.len() {
+                silent.push(shape);
+            }
+        }
+        assert!(
+            silent.is_empty(),
+            "these shapes do not classify as Supported for every separator, so \
+             they assert nothing here: {silent:#?}"
         );
     }
 
@@ -6583,6 +6664,122 @@ mod tests {
     fn test_exclude_bare_anchor_ignored() {
         let excluded = vec!["^".to_string()];
         assert!(rewrite_command_no_prefixes("git status", &excluded).is_some());
+    }
+
+    /// A rule matches against a whole command line, so a pattern that ends in
+    /// a bare alternation matches any command whose subcommand merely *starts*
+    /// with a listed one — `git branchless` routes into `rtk git` (#4009).
+    ///
+    #[test]
+    fn test_every_rule_pattern_is_anchored_at_both_ends() {
+        // The spellings in use. `\s+` and `\b` are the forms used by rules
+        // that take a whole command rather than a subcommand alternation.
+        const APPROVED_SUFFIXES: &[&str] = &[
+            r"(?:\s|$|[;|&()<>])",
+            r#"(?:[\s"']|$)"#,
+            r"(?:\s|$)",
+            r"(\s|$)",
+            r"\s+",
+            r"\b",
+            r"$",
+        ];
+
+        // Pending #4014 (21 rules) and #3676 (pnpm). Shrink this as they land;
+        // an entry that no longer matches any rule fails the check below, so
+        // it cannot rot into a permanent exemption.
+        const PENDING: &[&str] = &[
+            r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|checkout|push|pull|branch|fetch|stash|worktree)",
+            r"^gh\s+(pr|issue|run|repo|api|release)",
+            r"^glab\s+(mr|issue|ci|pipeline|api|release)",
+            r"^cargo\s+(build|test|clippy|check|fmt|install)",
+            r"^pnpm\s+(exec|i|install|list|ls|outdated|run|run-script)",
+            r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?prettier",
+            r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?next\s+build",
+            r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?playwright",
+            r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?prisma",
+            r"^docker\s+(ps|images|logs|run|exec|build|compose\s+(ps|logs|build))",
+            r"^kubectl\s+(get|logs|describe|apply)",
+            r"^oc\s+(get|logs|describe|apply|status|adm)",
+            r"^ruff\s+(check|format)",
+            r"^sqlfluff\s+lint",
+            r"^(pip3?|uv\s+pip)\s+(list|outdated|install|show)",
+            r"^go\s+(test|build|vet)",
+            r"^(?:bundle\s+exec\s+)?(?:bin/)?(?:rake|rails)\s+test",
+            r"^pio\s+run",
+            r"^quarto\s+render",
+            r"^shopify\s+theme\s+(push|pull)",
+            r"^terraform\s+plan",
+            r"^trunk\s+build",
+        ];
+
+        let mut unanchored_start = Vec::new();
+        let mut unterminated = Vec::new();
+        for rule in RULES {
+            if !rule.pattern.starts_with('^') {
+                unanchored_start.push(rule.pattern);
+            }
+            if PENDING.contains(&rule.pattern) {
+                continue;
+            }
+            if !APPROVED_SUFFIXES.iter().any(|s| rule.pattern.ends_with(s)) {
+                unterminated.push(rule.pattern);
+            }
+        }
+
+        assert!(
+            unanchored_start.is_empty(),
+            "patterns match against a whole command line, so one that does not \
+             start with `^` fires on a path component or a wrapper argument: \
+             {unanchored_start:#?}"
+        );
+        assert!(
+            unterminated.is_empty(),
+            "these patterns do not end at a word boundary, so any command whose \
+             subcommand merely starts with a listed one is rewritten (#4009): \
+             {unterminated:#?}"
+        );
+
+        let stale: Vec<&str> = PENDING
+            .iter()
+            .copied()
+            .filter(|p| !RULES.iter().any(|r| r.pattern == *p))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "PENDING names patterns no longer in RULES — drop them rather than \
+             leave a standing exemption: {stale:#?}"
+        );
+    }
+
+    /// `classify_command` picks a rule by index, then `rewrite_segment_inner`
+    /// looks one up again by `rtk_cmd` with `find` — which takes the first of
+    /// a duplicate pair, not necessarily the one that classified.
+    ///
+    /// `rtk php` and `rtk uv` are each two rules, so that lookup already
+    /// returns a sibling. It is harmless only because every field it reads
+    /// matches across the pair; an edit to one sibling's `pipeline_safety` or
+    /// `rewrite_prefixes` would silently apply to the other's commands.
+    #[test]
+    fn test_duplicate_rtk_cmds_agree_on_what_the_rewrite_reads() {
+        for rule in RULES {
+            let siblings: Vec<&RtkRule> =
+                RULES.iter().filter(|r| r.rtk_cmd == rule.rtk_cmd).collect();
+            let first = siblings[0];
+            for sibling in &siblings[1..] {
+                assert_eq!(
+                    sibling.rewrite_prefixes, first.rewrite_prefixes,
+                    "{} is several rules with different rewrite_prefixes, and the \
+                     rewrite reads whichever comes first",
+                    rule.rtk_cmd
+                );
+                assert_eq!(
+                    sibling.pipeline_safety, first.pipeline_safety,
+                    "{} is several rules with different pipeline_safety, and the \
+                     rewrite reads whichever comes first",
+                    rule.rtk_cmd
+                );
+            }
+        }
     }
 
     #[test]
