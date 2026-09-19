@@ -45,9 +45,9 @@ rtk gain    # should now show token savings stats
 
 2. Initialize the hook:
    ```bash
-   rtk init --global    # Claude Code
-   rtk init --global --cursor    # Cursor
-   rtk init --global --opencode  # OpenCode
+   rtk init --global              # Claude Code
+   rtk init --global --agent cursor  # Cursor (no bare --cursor flag)
+   rtk init --global --opencode   # OpenCode
    ```
 
 3. Restart your AI assistant.
