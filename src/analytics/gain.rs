@@ -11,6 +11,31 @@ use serde::Serialize;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
+/// Reports a missing or outdated hook on stderr.
+///
+/// `suppress_hook_warning` hides the missing-hook arm: a user who runs rtk
+/// without hooks on purpose reads this report most often. The outdated-hook
+/// arm stays visible either way.
+fn warn_hook_issues() {
+    match hook_check::status() {
+        hook_check::HookStatus::Missing if !crate::core::config::hook_warning_suppressed() => {
+            eprintln!(
+                "{}",
+                "[warn] No hook installed — run `rtk init -g` for automatic token savings".yellow()
+            );
+            eprintln!();
+        }
+        hook_check::HookStatus::Outdated => {
+            eprintln!(
+                "{}",
+                "[warn] Hook outdated — run `rtk init -g` to update".yellow()
+            );
+            eprintln!();
+        }
+        hook_check::HookStatus::Missing | hook_check::HookStatus::Ok => {}
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     project: bool, // added: per-project scope flag
@@ -92,6 +117,11 @@ pub fn run(
         eprintln!();
     }
 
+    // Reported for every text view, including the empty one: with no hook
+    // nothing is tracked, so a missing hook is the likeliest reason there is
+    // nothing to show. The JSON and CSV exports return earlier and stay clean.
+    warn_hook_issues();
+
     if summary.total_commands == 0 {
         println!("No tracking data yet.");
         println!("Run some rtk commands to start tracking savings.");
@@ -136,29 +166,6 @@ pub fn run(
         );
         print_efficiency_meter(summary.avg_savings_pct);
         println!();
-
-        // Warn about hook issues that silently kill savings (stderr, not stdout).
-        // `suppress_hook_warning` hides the missing-hook arm here too: a user who
-        // runs rtk without hooks on purpose reads this report most often, and the
-        // outdated-hook arm stays visible either way.
-        match hook_check::status() {
-            hook_check::HookStatus::Missing if !crate::core::config::hook_warning_suppressed() => {
-                eprintln!(
-                    "{}",
-                    "[warn] No hook installed — run `rtk init -g` for automatic token savings"
-                        .yellow()
-                );
-                eprintln!();
-            }
-            hook_check::HookStatus::Outdated => {
-                eprintln!(
-                    "{}",
-                    "[warn] Hook outdated — run `rtk init -g` to update".yellow()
-                );
-                eprintln!();
-            }
-            hook_check::HookStatus::Missing | hook_check::HookStatus::Ok => {}
-        }
 
         // Lightweight RTK_DISABLED bypass check (best-effort, silent on failure)
         if let Some(warning) = check_rtk_disabled_bypass() {
