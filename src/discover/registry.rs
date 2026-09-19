@@ -661,7 +661,7 @@ fn is_analytics_env_wrapper_token(value: &str) -> bool {
 /// Strip an `RTK_DISABLED=` prefix for analytics, including a shallow `sudo` /
 /// `env` / assign / `-flag` wrapper around it.
 ///
-/// Unlike [`strip_disabled_prefix`] (rewrite path), this recognizes
+/// Unlike [`split_env_prefix`] (rewrite path), this recognizes
 /// `sudo RTK_DISABLED=1 …` and `RTK_DISABLED=1 sudo …` so discover can find
 /// them; whether one counts as a bypass is `judge_disabled_segment`'s call. It is intentionally stricter than a full shell parse:
 /// - never looks past `|` / `&&` / other non-`Arg` tokens for `RTK_DISABLED=`
@@ -686,12 +686,12 @@ pub fn strip_disabled_prefix_for_analytics(cmd: &str) -> (&str, &str) {
         if !is_analytics_env_wrapper_token(&token.value) {
             // A real command word before RTK_DISABLED= (e.g. `docker run -e
             // RTK_DISABLED=1 …`) — not an RTK bypass prefix.
-            return strip_disabled_prefix(trimmed);
+            return split_env_prefix(trimmed);
         }
     }
 
     let Some(disabled_index) = disabled_index else {
-        return strip_disabled_prefix(trimmed);
+        return split_env_prefix(trimmed);
     };
 
     // Walk past RTK_DISABLED= and any remaining wrapper tokens; the next Arg
@@ -717,14 +717,14 @@ pub fn strip_disabled_prefix_for_analytics(cmd: &str) -> (&str, &str) {
         break;
     }
 
-    strip_disabled_prefix(trimmed)
+    split_env_prefix(trimmed)
 }
 
 /// Check if a command has RTK_DISABLED= prefix in its env prefix portion.
 pub fn cmd_has_rtk_disabled_prefix(cmd: &str) -> bool {
     // `gain` has no coverage gate, so this stays on the syntactic rewrite-path
     // stripper; the wrapper-aware peel is for discover, where the gate judges it.
-    let (prefix_part, _) = strip_disabled_prefix(cmd);
+    let (prefix_part, _) = split_env_prefix(cmd);
     prefix_contains_rtk_disabled(prefix_part)
 }
 
@@ -805,11 +805,6 @@ fn skip_blanks(s: &str, from: usize) -> usize {
         i += 1;
     }
     i
-}
-
-/// Strip RTK_DISABLED=X and other env prefixes, returns `(env_prefix, actual_command)`.
-pub fn strip_disabled_prefix(cmd: &str) -> (&str, &str) {
-    split_env_prefix(cmd)
 }
 
 fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
@@ -918,7 +913,7 @@ fn uses_rtk_disabled(cmd: &str) -> bool {
     !has_heredoc(cmd)
         && split_for_permissions(cmd)
             .iter()
-            .any(|seg| prefix_contains_rtk_disabled(strip_disabled_prefix(seg).0))
+            .any(|seg| prefix_contains_rtk_disabled(split_env_prefix(seg).0))
 }
 
 /// Core of `rewrite_command`, taking already-compiled exclude patterns and
@@ -1849,7 +1844,7 @@ fn rewrite_segment_inner(
         return None;
     }
 
-    let (env_prefix, rest_after_env) = strip_disabled_prefix(trimmed);
+    let (env_prefix, rest_after_env) = split_env_prefix(trimmed);
     if !env_prefix.is_empty() {
         // #345: RTK_DISABLED=1 in env prefix → skip rewrite entirely. The
         // warning that goes with it (#508) is raised by `rewrite_command`,
@@ -1943,7 +1938,7 @@ fn rewrite_segment_inner(
     {
         // head/tail rewrite to `rtk read`, so honour exclude_commands here too:
         // this branch returns before the checks below. Any env prefix has already
-        // been peeled by strip_disabled_prefix above.
+        // been peeled by split_env_prefix above.
         if is_excluded(cmd_part, excluded) {
             return None;
         }
@@ -4861,7 +4856,7 @@ mod tests {
             rewrite_command_no_prefixes("tail -20 src/main.rs", &excluded),
             None
         );
-        // An env prefix is peeled by strip_disabled_prefix before this branch,
+        // An env prefix is peeled by split_env_prefix before this branch,
         // so the exclusion still applies to the wrapped head/tail.
         assert_eq!(
             rewrite_command_no_prefixes("RUST_LOG=debug tail -20 src/main.rs", &excluded),
@@ -7661,7 +7656,7 @@ mod tests {
         assert!(!cmd_has_rtk_disabled_prefix("SOME_VAR=1 git status"));
         assert!(!cmd_has_rtk_disabled_prefix("sudo docker ps"));
 
-        // Leading RTK_DISABLED= still reports true via strip_disabled_prefix
+        // Leading RTK_DISABLED= still reports true via split_env_prefix
         // fallthrough when the command word is unsupported (pre-existing gain
         // behavior). Discover only counts Supported actual commands, so this
         // does not create a false bypass example — see analytics strip tests
@@ -7696,19 +7691,19 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_disabled_prefix() {
+    fn test_split_env_prefix_keeps_the_bypass_visible() {
         assert_eq!(
-            strip_disabled_prefix("RTK_DISABLED=1 git status"),
+            split_env_prefix("RTK_DISABLED=1 git status"),
             ("RTK_DISABLED=1 ", "git status")
         );
         assert_eq!(
-            strip_disabled_prefix("FOO=1 RTK_DISABLED=1 cargo test"),
+            split_env_prefix("FOO=1 RTK_DISABLED=1 cargo test"),
             ("FOO=1 RTK_DISABLED=1 ", "cargo test")
         );
-        assert_eq!(strip_disabled_prefix("git status"), ("", "git status"));
+        assert_eq!(split_env_prefix("git status"), ("", "git status"));
         // Rewrite helper still does not strip sudo (see ENV_PREFIX / #146).
         assert_eq!(
-            strip_disabled_prefix("sudo RTK_DISABLED=1 docker ps"),
+            split_env_prefix("sudo RTK_DISABLED=1 docker ps"),
             ("", "sudo RTK_DISABLED=1 docker ps")
         );
     }
@@ -7740,7 +7735,7 @@ mod tests {
             "sudo -E RTK_DISABLED=1 ./deploy.sh docker ps",
         ] {
             let (prefix, actual) = strip_disabled_prefix_for_analytics(cmd);
-            assert_eq!((prefix, actual), strip_disabled_prefix(cmd), "{cmd}");
+            assert_eq!((prefix, actual), split_env_prefix(cmd), "{cmd}");
             assert!(
                 !actual.starts_with("docker") && !actual.starts_with("git "),
                 "must not attribute inner command for {cmd}: {actual}"
@@ -7767,13 +7762,13 @@ mod tests {
             strip_disabled_prefix_for_analytics(
                 "sudo -E docker run -e RTK_DISABLED=1 myimage npm run build"
             ),
-            strip_disabled_prefix("sudo -E docker run -e RTK_DISABLED=1 myimage npm run build")
+            split_env_prefix("sudo -E docker run -e RTK_DISABLED=1 myimage npm run build")
         );
         assert_eq!(
             strip_disabled_prefix_for_analytics(
                 "sudo -E ls && docker run -e RTK_DISABLED=1 img git status"
             ),
-            strip_disabled_prefix("sudo -E ls && docker run -e RTK_DISABLED=1 img git status")
+            split_env_prefix("sudo -E ls && docker run -e RTK_DISABLED=1 img git status")
         );
     }
 

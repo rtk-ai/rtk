@@ -306,6 +306,10 @@ struct SupportedBucket {
     /// `total_output_tokens / total_raw_output_tokens` — a weighted average across
     /// all sub-commands, regardless of which sub-command was seen first.
     total_raw_output_tokens: usize,
+    /// How many of `count` were sized by the category average because the line
+    /// they came from measured somebody else's output. A command that feeds a
+    /// pipe is never the last of its line, so it is always one of these.
+    estimated_occurrences: usize,
     // For display: the most common raw command
     command_counts: HashMap<String, usize>,
 }
@@ -489,10 +493,15 @@ impl Tally {
                             count: 0,
                             total_output_tokens: 0,
                             total_raw_output_tokens: 0,
+                            estimated_occurrences: 0,
                             command_counts: HashMap::new(),
                         });
 
                     bucket.count += 1;
+
+                    if output_len.is_none() {
+                        bucket.estimated_occurrences += 1;
+                    }
 
                     // Estimate tokens for this command
                     let output_tokens = if let Some(len) = output_len {
@@ -591,6 +600,7 @@ fn into_entries(map: HashMap<&'static str, SupportedBucket>) -> Vec<SupportedEnt
             SupportedEntry {
                 command: command_with_status,
                 count: bucket.count,
+                estimated_occurrences: bucket.estimated_occurrences,
                 rtk_equivalent: bucket.rtk_equivalent,
                 category: bucket.category,
                 estimated_savings_tokens: bucket.total_output_tokens,
@@ -1072,6 +1082,7 @@ mod tests {
                     count: 1,
                     total_output_tokens: tokens,
                     total_raw_output_tokens: tokens * 2,
+                    estimated_occurrences: 0,
                     command_counts: HashMap::new(),
                 },
             );
