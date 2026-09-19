@@ -250,13 +250,13 @@ The `allow` value is required by Codex to accept `updatedInput`; Codex still run
 
 ### OpenCode (TypeScript Plugin)
 
-Mutates `args.command` in-place via the zx library:
+Supports OpenCode 1.0 (`tool.execute.before`) and OpenCode 2.0 (`execute.before` / `create.before`), mutating commands in-place via `rtk rewrite`:
 
 ```typescript
-const result = await $`rtk rewrite ${command}`.quiet().nothrow()
-const rewritten = String(result.stdout).trim()
+const { stdout } = await execFileAsync("rtk", ["rewrite", command], { timeout: 3000 })
+const rewritten = String(stdout).trim()
 if (rewritten && rewritten !== command) {
-  (args as Record<string, unknown>).command = rewritten
+  // mutates command in-place
 }
 ```
 
