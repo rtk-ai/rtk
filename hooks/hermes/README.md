@@ -20,7 +20,7 @@ python3 -m unittest discover -s hooks/hermes
 
 ## How it works
 
-Hermes loads plugins from Python, so the plugin entrypoint is Python. The Python code is only a thin Hermes adapter. It reads the Hermes terminal tool payload, calls `rtk rewrite` for the actual command decision, then mutates the terminal tool `command` before Hermes executes it.
+Hermes loads plugins from Python, so the plugin entrypoint is Python. The Python code is only a thin Hermes adapter. It reads the Hermes terminal tool payload, calls `rtk rewrite` for the actual command decision, then returns a `modify` directive with the rewritten `command` and all other terminal arguments preserved. The original payload stays unchanged; Hermes applies the returned directive before execution.
 
 All rewrite rules stay in Rust inside `rtk rewrite`. When RTK adds or changes command rewrite behavior, the Hermes plugin picks up that behavior by delegating to the RTK binary.
 
@@ -40,4 +40,4 @@ If rtk is not available in PATH when Hermes loads the plugin, the plugin prints 
 
 - Only Hermes `terminal` tool calls are rewritten.
 - Commands skipped by `rtk rewrite` stay unchanged, including commands already prefixed with `rtk`, compound shell commands, heredocs, and commands without an RTK filter.
-- Shell hooks are not used for Hermes command rewriting. The integration depends on Hermes loading Python plugins and passing a mutable terminal tool payload.
+- Shell hooks are not used for Hermes command rewriting. The integration depends on Hermes loading Python plugins and applying `pre_tool_call` modify directives.
