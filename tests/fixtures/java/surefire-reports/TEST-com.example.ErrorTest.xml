@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.example.ErrorTest" time="0.800" tests="2" errors="1" skipped="0" failures="0">
+  <testcase name="shouldWork" classname="com.example.ErrorTest" time="0.200"/>
+  <testcase name="shouldNotThrow" classname="com.example.ErrorTest" time="0.600">
+    <error message="Connection refused" type="java.net.ConnectException">java.net.ConnectException: Connection refused
+	at java.base/sun.nio.ch.Net.connect(Net.java:579)
+	at com.example.ErrorTest.shouldNotThrow(ErrorTest.java:30)</error>
+  </testcase>
+</testsuite>
