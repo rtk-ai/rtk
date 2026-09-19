@@ -150,9 +150,11 @@ pub const RULES: &[RtkRule] = &[
     RtkRule {
         pattern: r"^ast-grep\s+",
         rtk_cmd: "rtk ast-grep",
-        // Unlike grep/rg, `rtk ast-grep`'s run() execs with stdin null (no
-        // piped-stdin support yet), so it must not be rewritten as a
-        // pipeline's final stage — that would silently drop the pipe input.
+        // Unlike grep/rg, `rtk ast-grep`'s run() captures with stdin null on the
+        // path it filters, so it must not be rewritten as a pipeline's final
+        // stage — that would silently drop the pipe input. `run --stdin` and the
+        // other subcommands do reach the child's stdin, but only when invoked
+        // directly: this rule keeps the hook from producing that form at all.
         pipeline_safety: PipelineSafety::ProducerOnly,
         rewrite_prefixes: &["ast-grep"],
         category: "Files",
