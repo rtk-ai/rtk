@@ -470,8 +470,15 @@ For the full config reference (all sections, env vars, per-project filters), see
 
 ```bash
 rtk init -g --uninstall     # Remove hook, RTK.md, settings.json entry
+                             # (also strips stale Bash(rtk ...) permission
+                             # rules from the current project's and the
+                             # global settings.json/settings.local.json)
 cargo uninstall rtk          # Remove binary
 brew uninstall rtk           # If installed via Homebrew
+
+# Used RTK across several checked-out repos? --uninstall only cleans the
+# current project. Sweep the rest in one pass:
+rtk init --sweep-permissions ~/work
 ```
 
 ## Documentation
