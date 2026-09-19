@@ -292,6 +292,8 @@ Strips only RTK's `[[hooks]]` block and the `~/.vibe/prompts/rtk.md` file. Any o
 
 Rules file integrations (Cline, Windsurf, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Trae, Cursor, Gemini, Codex, Factory Droid) apply rewrites before execution whenever RTK supports and can safely attest the command. Plugin integrations (OpenCode, Pi, Hermes) use in-place mutation via the agent's extension or plugin API.
 
+Building a harness of your own? A host can skip these hooks and call `rtk rewrite` from its own bash tool. [Embedding rtk in your own agent harness](embedding.md) covers the exit-code contract, where the call goes, the fail-open rules, and per-session accounting.
+
 ## Windows support
 
 The shell hook (`rtk-rewrite.sh`) requires a Unix shell. On native Windows:
