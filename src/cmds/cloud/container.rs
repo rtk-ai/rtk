@@ -1,5 +1,7 @@
 //! Filters Docker and kubectl output into compact summaries.
 
+use super::k8s_cache::kubectl_get_takes_value;
+use crate::core::arg_tokenizer::{self, Dialect, TokenKind};
 use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
 use crate::core::stream::exec_capture;
@@ -362,12 +364,18 @@ fn docker_logs(args: &[String], _verbose: u8) -> Result<i32> {
 }
 
 pub fn k8s_pods(tool: &str, args: &[String], _verbose: u8) -> Result<i32> {
+    let (force, rest) = super::k8s_cache::extract_force_flag(args);
+    let key = super::k8s_cache::cache_key("pods", tool, &rest);
+
     let mut cmd = resolved_command(tool);
     cmd.args(["get", "pods", "-o", "json"]);
-    for arg in args {
+    for arg in &rest {
         cmd.arg(arg);
     }
-    run_k8s_json(cmd, tool, "get pods", format_kubectl_pods)
+    run_k8s_json(cmd, tool, "get pods", move |json| {
+        let full = format_kubectl_pods(json);
+        super::k8s_cache::check_and_update(&key, &full, force).unwrap_or(full)
+    })
 }
 
 fn format_kubectl_pods(json: &Value) -> String {
@@ -450,12 +458,18 @@ fn format_kubectl_pods(json: &Value) -> String {
 }
 
 pub fn k8s_services(tool: &str, args: &[String], _verbose: u8) -> Result<i32> {
+    let (force, rest) = super::k8s_cache::extract_force_flag(args);
+    let key = super::k8s_cache::cache_key("services", tool, &rest);
+
     let mut cmd = resolved_command(tool);
     cmd.args(["get", "services", "-o", "json"]);
-    for arg in args {
+    for arg in &rest {
         cmd.arg(arg);
     }
-    run_k8s_json(cmd, tool, "get services", format_kubectl_services)
+    run_k8s_json(cmd, tool, "get services", move |json| {
+        let full = format_kubectl_services(json);
+        super::k8s_cache::check_and_update(&key, &full, force).unwrap_or(full)
+    })
 }
 
 fn format_kubectl_services(json: &Value) -> String {
@@ -832,14 +846,22 @@ fn k8s_get_target(args: &[String]) -> Option<(&'static str, &[String])> {
     }
 }
 
+/// Whether the requested `kubectl get` output demands the raw, unfiltered
+/// result: a custom output format (`-o`/`--output`, attached or separate),
+/// watch mode (`-w`/`--watch`), or the extra columns `--show-labels`/
+/// `--show-kind` add. Detection goes through the shared tokenizer (repo rule
+/// #6); a literal `--` ends kubectl's own option parsing, so anything after it
+/// is forwarded text, not our flag.
 fn k8s_get_requests_raw_output(args: &[String]) -> bool {
-    args.iter().any(|arg| {
-        matches!(
-            arg.as_str(),
-            "-o" | "--output" | "-w" | "--watch" | "--show-labels" | "--show-kind"
-        ) || arg.starts_with("-o")
-            || arg.starts_with("--output=")
-    })
+    let tokens = arg_tokenizer::tokenize_grammar(args, &kubectl_get_takes_value, Dialect::Posix);
+    let tokens = arg_tokenizer::before_dashdash(&tokens);
+
+    ["output", "watch", "show-labels", "show-kind"]
+        .iter()
+        .any(|name| arg_tokenizer::has_flag(tokens, Dialect::Posix, name))
+        || tokens
+            .iter()
+            .any(|token| token.kind == TokenKind::Short && matches!(token.text, "o" | "w"))
 }
 
 pub fn run_kubectl_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
@@ -1045,6 +1067,38 @@ api-1  | Connected to database";
                 "should pass through {output_flag}"
             );
         }
+    }
+
+    #[test]
+    fn test_k8s_get_requests_raw_output_detects_all_spellings() {
+        for args in [
+            vec!["-o", "json"],
+            vec!["-ojson"],
+            vec!["--output=json"],
+            vec!["-w"],
+            vec!["--watch"],
+            vec!["--show-labels"],
+        ] {
+            let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+            assert!(
+                k8s_get_requests_raw_output(&args),
+                "should request raw output for {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_k8s_get_requests_raw_output_ignores_plain_values_and_boundary() {
+        let plain = vec!["-n".to_string(), "x".to_string()];
+        assert!(!k8s_get_requests_raw_output(&plain));
+
+        // "-o" is a value to -n here, not an output flag.
+        let flag_as_value = vec!["-n".to_string(), "-o".to_string()];
+        assert!(!k8s_get_requests_raw_output(&flag_as_value));
+
+        // Everything after the literal `--` is forwarded text, not our flag.
+        let after_boundary = vec!["--".to_string(), "--watch".to_string()];
+        assert!(!k8s_get_requests_raw_output(&after_boundary));
     }
 
     // ── oc support ────────────────────────────────────────

@@ -28,6 +28,31 @@ pub enum Classification {
     Ignored,
 }
 
+/// Best-effort category guess for an unsupported base command (no rule matched,
+/// so no `category` from `Classification::Supported` is available). Feeds
+/// `category_avg_tokens` so unhandled commands get the same per-category output
+/// estimate as handled ones, instead of every unhandled command being treated
+/// as equally "big".
+///
+/// `base_command` can be two tokens (`extract_base_command` returns e.g.
+/// "docker compose" / "go test"), so the match is on the first whitespace token
+/// — matching the full string left almost every arm dead and everything falling
+/// through to the default `""`.
+pub fn guess_unsupported_category(base_command: &str) -> &'static str {
+    let first = base_command
+        .split_whitespace()
+        .next()
+        .unwrap_or(base_command);
+    match first {
+        "find" | "ls" | "cat" | "head" | "tail" => "Files",
+        "grep" | "rg" | "ag" => "Files",
+        "curl" | "wget" | "ping" | "ssh" | "sshpass" => "Network",
+        "python3" | "python" | "node" | "go" | "make" => "Build",
+        "docker" | "kubectl" | "helm" | "terraform" | "ansible" => "Infra",
+        _ => "",
+    }
+}
+
 /// Average token counts per category for estimation when no output_len available.
 pub fn category_avg_tokens(category: &str, subcmd: &str) -> usize {
     match category {
@@ -2002,6 +2027,22 @@ mod tests {
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         super::rewrite_command(cmd, excluded, &[])
+    }
+
+    #[test]
+    fn guess_unsupported_category_matches_bare_command() {
+        assert_eq!(guess_unsupported_category("docker"), "Infra");
+        assert_eq!(guess_unsupported_category("grep"), "Files");
+        assert_eq!(guess_unsupported_category(""), "");
+    }
+
+    #[test]
+    fn guess_unsupported_category_matches_two_token_base_command() {
+        // `extract_base_command` returns "cmd subcmd" for these, so matching the
+        // full string left every arm dead; the first token is what classifies.
+        assert_eq!(guess_unsupported_category("docker compose"), "Infra");
+        assert_eq!(guess_unsupported_category("go test"), "Build");
+        assert_eq!(guess_unsupported_category("cat Makefile"), "Files");
     }
 
     // Three compound-command segmenters look at the same kind of input for

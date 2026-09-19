@@ -46,6 +46,10 @@ pub struct UnsupportedEntry {
     pub base_command: String,
     pub count: usize,
     pub example: String,
+    /// Measured output tokens (sum of `output_len / 4`) plus `count x category
+    /// average` for entries with no measured length -- rough impact score used
+    /// to prioritize which unhandled command is worth filing an issue for first.
+    pub estimated_impact_tokens: usize,
 }
 
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq, Default)]
@@ -229,15 +233,19 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
         out.push_str(&"-".repeat(52));
         out.push('\n');
         out.push_str(&format!(
-            "{:<24} {:>5}    {}\n",
-            "Command", "Count", "Example"
+            "{:<24} {:>5}    {:>12}    {}\n",
+            "Command", "Count", "Priority", "Example"
         ));
 
         for entry in report.unsupported.iter().take(limit) {
+            // Same width for header and rows, or every row's Example column
+            // drifts right of the header's (`~` + token string is wider than 9).
+            let priority = format!("~{}", format_tokens(entry.estimated_impact_tokens));
             out.push_str(&format!(
-                "{:<24} {:>5}    {}\n",
+                "{:<24} {:>5}    {:>12}    {}\n",
                 truncate_str(&entry.base_command, 23),
                 entry.count,
+                priority,
                 truncate_str(&entry.example, 40),
             ));
         }
@@ -383,6 +391,32 @@ mod tests {
             estimated_savings_pct: 50.0,
             rtk_status: RtkStatus::Existing,
         }
+    }
+
+    #[test]
+    fn test_unsupported_table_header_and_rows_align_example_column() {
+        let mut report = make_report(10, 0);
+        report.unsupported = vec![UnsupportedEntry {
+            base_command: "frobnicate".to_string(),
+            count: 3,
+            example: "frobnicate --all".to_string(),
+            estimated_impact_tokens: 450,
+        }];
+
+        let output = format_text(&report, 10, false);
+        let header = output
+            .lines()
+            .find(|line| line.contains("Priority"))
+            .expect("priority header");
+        let row = output
+            .lines()
+            .find(|line| line.contains("frobnicate --all"))
+            .expect("unsupported row");
+        assert_eq!(
+            header.find("Example"),
+            row.find("frobnicate --all"),
+            "Example column must start at the same offset in header and rows:\n{header}\n{row}"
+        );
     }
 
     #[test]

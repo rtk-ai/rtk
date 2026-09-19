@@ -277,8 +277,10 @@ rtk docker compose ps           # Compose services
 rtk kubectl pods                # Compact pod list
 rtk kubectl logs <pod>          # Deduplicated logs
 rtk kubectl services            # Compact service list
+rtk kubectl pods --force        # Full detail; repeat queries collapse to "no material change"
 rtk oc get pods                 # OpenShift pod summary
 rtk oc get services             # OpenShift service list
+rtk oc get pods --force         # Full detail; repeat queries collapse to "no material change"
 rtk oc logs <pod>               # Deduplicated logs
 ```
 
