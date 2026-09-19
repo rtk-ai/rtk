@@ -23,6 +23,8 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 
 **Compound splitting** — The rewrite engine walks the tokens, splitting on `Operator` (`&&`, `||`, `;`) and typed `Pipe` tokens (`|`, `|&`). For normal pipelines, intermediate stages stay raw. A final stage whose rule's `pipeline_safety` allows it (ordinary `grep` and `rg` invocations) is rewritten; search pattern-file forms (`-f`/`--file`) defer because they can consume pipeline stdin as configuration. The producer stage is rewritten when its rule's `pipeline_safety` allows it and every downstream stage is a display-only consumer (`cat`, `head`, non-following `tail`) with no file-target redirect (#3171). Stderr pipelines (`|&`) and pipelines containing opaque shell groups remain raw.
 
+**Quoted shell wrappers** — An exact `sh -c`, `bash -c`, `zsh -c` or `fish -c` segment whose script is one balanced quoted argument has that script rewritten in place, leaving the shell path, quote delimiters, spacing, suffix arguments and redirects byte-identical (`shell_wrapper.rs`). Recursion is capped at one level, so a wrapper inside a wrapper stays raw. A script carrying a newline, heredoc, `$((`, or any construct the lexer cannot attest defers unchanged. The wrapper names the shell, so the script is attested under *that* shell's grammar (`ShellDialect`): inside `fish -c`, `(cmd)` is substitution and `and`/`or`/`end` are control flow, and either one defers — while the same shapes in a host command string or a POSIX wrapper stay ordinary bash and keep rewriting.
+
 **Per-segment rewriting** — Each segment goes through:
 
 1. Strip trailing redirects (`2>&1`, `>/dev/null`) — matched via lexer tokens, set aside, re-appended after rewriting
@@ -51,6 +53,7 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 | `split_for_permissions(cmd)` | Segments a compound command for the **permission gate** — deliberately the most conservative of three segmenters (see its doc comment for the full comparison table) | `hooks/permissions.rs::check_command_with_rules` |
 | `split_on_operators(cmd, stop_at_pipe)` | Segments for classification only — not safe for permission/security decisions | `registry.rs::split_command_chain` |
 | `contains_unattestable_construct(cmd)` | True for command/process substitution or a file-target redirect — constructs the permission gate can't decompose and must never auto-allow | `hooks/permissions.rs::check_command_with_rules` |
+| `contains_unattestable_construct_in(cmd, dialect)` | The same check for a string whose shell is known — adds fish's `(cmd)` substitution and command-position control keywords | `registry.rs::rewrite_shell_wrapper` (fish `-c` scripts only) |
 
 The permission gate, discover/analytics classification, and rewrite each segment compound commands (`&&`, `;`, `|`, background `&`, subshells) slightly differently on purpose — the gate must never under-segment (a hidden command could evade a deny rule), while rewrite and analytics only need to reproduce or classify the command's actual shape. Don't reuse `split_on_operators` or `rewrite_compound`'s segmenting for a permission/security decision; use `split_for_permissions`.
 

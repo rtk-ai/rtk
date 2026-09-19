@@ -76,6 +76,23 @@ Deny > Ask > Allow (explicit) > Default (ask)
 
 Rules are loaded from all Claude Code `settings.json` files (project + global, including `.local` variants). Only `Bash(...)` rules are extracted; other scopes (Read, Write) are ignored.
 
+Quoted `sh -c`, `bash -c`, `zsh -c` and `fish -c` scripts add a
+second command-parsing boundary. RTK checks deny rules against both the outer
+wrapper and the parsed inner segments. A wrapper rewrite is never auto-allowed:
+its strongest RTK verdict is `Ask`. Ask-capable hosts prompt, while other
+hosts retain their existing native permission flow. Unsupported or ambiguous
+wrapper syntax is left unchanged for the host to evaluate.
+
+Unambiguously-fish scripts (a fish-only keyword such as `end`, `begin`,
+`switch`, `and`, `or`, or `not` at command position, with no POSIX
+disambiguator) are rewritten to `rtk run --shell fish -c '<script>'`
+(`discover/fish_script.rs`) before the rewrite rules are consulted, so a POSIX
+host layer does not fail on fish syntax before the command runs. Like wrapper
+rewrites, the wrapped form is never auto-allowed — its strongest verdict is
+`Ask` — and deny rules are checked first. The wrap is skipped without a
+resolvable `fish` binary, on Windows, or when `hooks.wrap_fish_scripts =
+false`; those cases take the decision path they always did.
+
 | Verdict | Trigger | rewrite_cmd exit | Hook behavior |
 |---------|---------|-----------------|---------------|
 | Deny | `permissions.deny` rule matched | 2 | Passthrough — host tool handles denial |
@@ -101,6 +118,7 @@ Rules are loaded from all Claude Code `settings.json` files (project + global, i
 - `permissions.rs` — loads deny/ask/allow rules, evaluates precedence, returns `PermissionVerdict`
 - `rewrite_cmd.rs` — maps verdict to exit code (consumed by shell hook)
 - `hook_cmd.rs` — maps decisions to each agent's JSON protocol, including Codex `updatedInput`
+- `discover/shell_wrapper.rs` — shares conservative script-span parsing between rewrite and permission checks
 
 ## Exit Code Contract
 

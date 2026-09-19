@@ -6,10 +6,12 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use super::lexer::{
-    ParsedToken, PipeKind, TokenKind, advance_quote_state, coalesce_words, is_crlf_at,
-    redirect_has_file_target, shell_split, split_on_operators, tokenize, tokenize_with_newlines,
+    ParsedToken, PipeKind, TokenKind, advance_quote_state, coalesce_words,
+    contains_unattestable_construct_in, is_crlf_at, redirect_has_file_target, shell_split,
+    split_on_operators, tokenize, tokenize_with_newlines,
 };
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
+use super::shell_wrapper::parse_shell_wrapper;
 
 const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
 
@@ -753,7 +755,7 @@ fn rewrite_single(
         return Some(trimmed.to_string());
     }
 
-    rewrite_compound(trimmed, excluded, transparent_prefixes)
+    rewrite_compound(trimmed, excluded, transparent_prefixes, 0)
 }
 
 /// Shell keywords that open or close a multi-line construct. A line inside a
@@ -1160,11 +1162,19 @@ fn rewrite_pipeline_stage(
     context: RewriteContext,
     excluded: &[ExcludePattern],
     transparent_prefixes: &[String],
+    shell_wrapper_depth: usize,
 ) -> Option<String> {
     let stage = cmd[stage_start..stage_end].trim();
 
-    rewrite_segment_inner(stage, excluded, transparent_prefixes, context, 0)
-        .filter(|rewritten| rewritten != stage)
+    rewrite_segment_inner(
+        stage,
+        excluded,
+        transparent_prefixes,
+        context,
+        0,
+        shell_wrapper_depth,
+    )
+    .filter(|rewritten| rewritten != stage)
 }
 
 fn rewrite_pipeline_final_stage(
@@ -1173,6 +1183,7 @@ fn rewrite_pipeline_final_stage(
     analysis: PipelineAnalysis,
     excluded: &[ExcludePattern],
     transparent_prefixes: &[String],
+    shell_wrapper_depth: usize,
 ) -> Option<String> {
     let final_stage_start = analysis.final_stage_start?;
 
@@ -1183,6 +1194,7 @@ fn rewrite_pipeline_final_stage(
         RewriteContext::PipelineFinal,
         excluded,
         transparent_prefixes,
+        shell_wrapper_depth,
     )
     .map(|rewritten| {
         format!(
@@ -1201,6 +1213,7 @@ fn rewrite_pipeline_producer(
     analysis: PipelineAnalysis,
     excluded: &[ExcludePattern],
     transparent_prefixes: &[String],
+    shell_wrapper_depth: usize,
 ) -> Option<String> {
     if !analysis.all_consumers_safe {
         return None;
@@ -1213,6 +1226,7 @@ fn rewrite_pipeline_producer(
         RewriteContext::PipelineProducer,
         excluded,
         transparent_prefixes,
+        shell_wrapper_depth,
     )
     .map(|rewritten| {
         format!(
@@ -1232,6 +1246,7 @@ fn rewrite_compound(
     cmd: &str,
     excluded: &[ExcludePattern],
     transparent_prefixes: &[String],
+    shell_wrapper_depth: usize,
 ) -> Option<String> {
     let tokens = tokenize(cmd);
     let has_pipe = tokens
@@ -1255,8 +1270,9 @@ fn rewrite_compound(
         match tok.kind {
             TokenKind::Operator => {
                 let seg = cmd[seg_start..tok.offset].trim();
-                let rewritten = rewrite_segment(seg, excluded, transparent_prefixes)
-                    .unwrap_or_else(|| seg.to_string());
+                let rewritten =
+                    rewrite_segment(seg, excluded, transparent_prefixes, shell_wrapper_depth)
+                        .unwrap_or_else(|| seg.to_string());
                 if rewritten != seg {
                     any_changed = true;
                 }
@@ -1286,6 +1302,7 @@ fn rewrite_compound(
                     analysis,
                     excluded,
                     transparent_prefixes,
+                    shell_wrapper_depth,
                 )
                 .or_else(|| {
                     rewrite_pipeline_producer(
@@ -1295,6 +1312,7 @@ fn rewrite_compound(
                         analysis,
                         excluded,
                         transparent_prefixes,
+                        shell_wrapper_depth,
                     )
                 });
 
@@ -1317,8 +1335,9 @@ fn rewrite_compound(
             }
             TokenKind::Shellism if tok.value == "&" => {
                 let seg = cmd[seg_start..tok.offset].trim();
-                let rewritten = rewrite_segment(seg, excluded, transparent_prefixes)
-                    .unwrap_or_else(|| seg.to_string());
+                let rewritten =
+                    rewrite_segment(seg, excluded, transparent_prefixes, shell_wrapper_depth)
+                        .unwrap_or_else(|| seg.to_string());
                 if rewritten != seg {
                     any_changed = true;
                 }
@@ -1334,8 +1353,8 @@ fn rewrite_compound(
     }
 
     let seg = cmd[seg_start..].trim();
-    let rewritten =
-        rewrite_segment(seg, excluded, transparent_prefixes).unwrap_or_else(|| seg.to_string());
+    let rewritten = rewrite_segment(seg, excluded, transparent_prefixes, shell_wrapper_depth)
+        .unwrap_or_else(|| seg.to_string());
     if rewritten != seg {
         any_changed = true;
     }
@@ -1505,6 +1524,9 @@ fn builtin_transparent_prefixes() -> impl Iterator<Item = (&'static str, bool)> 
 
 const MAX_PREFIX_DEPTH: usize = 10;
 
+/// A wrapper's script may be rewritten, but a script inside that script may not.
+const MAX_SHELL_WRAPPER_DEPTH: usize = 1;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RewriteContext {
     Normal,
@@ -1586,6 +1608,7 @@ fn rewrite_segment(
     seg: &str,
     excluded: &[ExcludePattern],
     transparent_prefixes: &[String],
+    shell_wrapper_depth: usize,
 ) -> Option<String> {
     rewrite_segment_inner(
         seg,
@@ -1593,7 +1616,39 @@ fn rewrite_segment(
         transparent_prefixes,
         RewriteContext::Normal,
         0,
+        shell_wrapper_depth,
     )
+}
+
+/// Rewrite the portable commands inside an exact quoted `sh|bash|zsh|fish -c`
+/// script, leaving the wrapper's own bytes — shell path, quote delimiters,
+/// spacing, suffix arguments, redirects — untouched. Refs: #2767.
+fn rewrite_shell_wrapper(
+    command: &str,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+    shell_wrapper_depth: usize,
+) -> Option<String> {
+    let wrapper = parse_shell_wrapper(command)?;
+    let script = wrapper.script(command)?;
+    if script.contains(['\n', '\r'])
+        || has_heredoc(script)
+        || script.contains("$((")
+        // The wrapper names the shell, so the script is checked under that
+        // shell's grammar: fish's `(cmd)` substitution and `and`/`or`/`end`
+        // control flow defer here, where bash's subshells and keywords do not.
+        || contains_unattestable_construct_in(script, wrapper.dialect())
+    {
+        return None;
+    }
+
+    let rewritten = rewrite_compound(
+        script,
+        excluded,
+        transparent_prefixes,
+        shell_wrapper_depth + 1,
+    )?;
+    wrapper.replace_script(command, &rewritten)
 }
 
 fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
@@ -1609,10 +1664,21 @@ fn rewrite_segment_inner(
     transparent_prefixes: &[String],
     context: RewriteContext,
     depth: usize,
+    shell_wrapper_depth: usize,
 ) -> Option<String> {
     let trimmed = seg.trim();
     if trimmed.is_empty() {
         return None;
+    }
+
+    // Reached at any prefix depth, so a wrapper behind a transparent prefix
+    // (`direnv exec . bash -c '…'`) is still seen. `shell_wrapper_depth` is the
+    // only recursion bound that matters here.
+    if shell_wrapper_depth < MAX_SHELL_WRAPPER_DEPTH
+        && let Some(rewritten) =
+            rewrite_shell_wrapper(trimmed, excluded, transparent_prefixes, shell_wrapper_depth)
+    {
+        return Some(rewritten);
     }
 
     if depth >= MAX_PREFIX_DEPTH {
@@ -1636,6 +1702,7 @@ fn rewrite_segment_inner(
             transparent_prefixes,
             context,
             depth + 1,
+            shell_wrapper_depth,
         )?;
         return Some(format!("{}{}", env_prefix, rewritten));
     }
@@ -1645,9 +1712,14 @@ fn rewrite_segment_inner(
             if rest.is_empty() {
                 return None;
             }
-            if let Some(rewritten) =
-                rewrite_segment_inner(rest, excluded, transparent_prefixes, context, depth + 1)
-            {
+            if let Some(rewritten) = rewrite_segment_inner(
+                rest,
+                excluded,
+                transparent_prefixes,
+                context,
+                depth + 1,
+                shell_wrapper_depth,
+            ) {
                 return Some(format!("{} {}", prefix, rewritten));
             }
             // #2768: falling through re-tests the full prefixed string, which is
@@ -1667,8 +1739,15 @@ fn rewrite_segment_inner(
 
     // #2375
     if let Some((prefix, rest)) = strip_process_wrapper_prefix(trimmed) {
-        return rewrite_segment_inner(rest, excluded, transparent_prefixes, context, depth + 1)
-            .map(|rewritten| format!("{} {}", prefix, rewritten));
+        return rewrite_segment_inner(
+            rest,
+            excluded,
+            transparent_prefixes,
+            context,
+            depth + 1,
+            shell_wrapper_depth,
+        )
+        .map(|rewritten| format!("{} {}", prefix, rewritten));
     }
 
     // User-configured wrapper prefixes (e.g. `docker exec mycontainer`). These
@@ -1678,8 +1757,15 @@ fn rewrite_segment_inner(
             if rest.is_empty() {
                 return None;
             }
-            return rewrite_segment_inner(rest, excluded, transparent_prefixes, context, depth + 1)
-                .map(|rewritten| format!("{} {}", prefix, rewritten));
+            return rewrite_segment_inner(
+                rest,
+                excluded,
+                transparent_prefixes,
+                context,
+                depth + 1,
+                shell_wrapper_depth,
+            )
+            .map(|rewritten| format!("{} {}", prefix, rewritten));
         }
     }
 
@@ -7574,7 +7660,6 @@ mod tests {
             "pest"
         );
     }
-
     /// `jj` is covered only by a TOML filter, never by the native RULES table,
     /// so the bare case pins the TOML branch of the rewrite path and keeps the
     /// wrapper assertions below from passing vacuously when TOML is disabled.
@@ -7604,6 +7689,182 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("/usr/bin/liquibase update", &[]),
             None,
+        );
+    }
+
+    // --- quoted shell wrapper tests ---
+
+    #[test]
+    fn test_shell_wrapper_rewrites_bash_command_string() {
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"bash -c "head foo && grep -R bar .""#, &[]),
+            Some(r#"bash -c "rtk read foo --head-lines 10 && rtk grep -R bar .""#.into())
+        );
+    }
+
+    #[test]
+    fn test_shell_wrapper_rewrites_fish_portable_command_string() {
+        assert_eq!(
+            rewrite_command_no_prefixes("fish -c 'git status; cargo test'", &[]),
+            Some("fish -c 'rtk git status; rtk cargo test'".into())
+        );
+    }
+
+    #[test]
+    fn test_shell_wrapper_defers_fish_specific_scripts() {
+        // `(cmd)` is substitution and `and`/`if`/`end` are control flow in the
+        // script's own shell, so the wrapper hands them back untouched.
+        for command in [
+            "fish -c 'git status; and cargo test'",
+            "fish -c 'git status (pwd)'",
+            "fish -c 'if test -d src; git status; end'",
+            "fish -c 'not git status'",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                None,
+                "fish-specific script must pass through: {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_fish_rules_do_not_reach_bash_commands() {
+        // The same shapes outside a fish wrapper are ordinary bash, and stay
+        // rewritable: a subshell, a keyword block, and both inside a POSIX
+        // wrapper's script.
+        for (command, expected) in [
+            (
+                "git log -20 && (cd www && npm test)",
+                "rtk git log -20 && (cd www && npm test)",
+            ),
+            ("(cd sub && git status)", "(cd sub && rtk git status)"),
+            (
+                "git status; if true; then echo x; fi",
+                "rtk git status; if true; then echo x; fi",
+            ),
+            (
+                // In bash `and` is just a command name, so only `git status`
+                // rewrites — but the script is still attested and rewritten.
+                "bash -c 'git status; and cargo test'",
+                "bash -c 'rtk git status; and cargo test'",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected.into()),
+                "bash command must still rewrite: {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_shell_wrapper_preserves_path_quotes_and_suffix_arguments() {
+        assert_eq!(
+            rewrite_command_no_prefixes("/bin/bash -c 'git status' command-name 'a b'", &[]),
+            Some("/bin/bash -c 'rtk git status' command-name 'a b'".into())
+        );
+    }
+
+    #[test]
+    fn test_shell_wrapper_supports_sh_zsh_and_horizontal_spacing() {
+        assert_eq!(
+            rewrite_command_no_prefixes("sh\t-c\t'git status'\tname", &[]),
+            Some("sh\t-c\t'rtk git status'\tname".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("zsh -c 'cargo test'", &[]),
+            Some("zsh -c 'rtk cargo test'".into())
+        );
+    }
+
+    #[test]
+    fn test_shell_wrapper_rewrites_inside_outer_compound_command() {
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"bash -c "git status && cargo test" || git status"#, &[]),
+            Some(r#"bash -c "rtk git status && rtk cargo test" || rtk git status"#.into())
+        );
+    }
+
+    #[test]
+    fn test_shell_wrapper_applies_inner_exclusions() {
+        let excluded = vec!["git".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("bash -c 'git status; cargo test'", &excluded),
+            Some("bash -c 'git status; rtk cargo test'".into())
+        );
+    }
+
+    #[test]
+    fn test_shell_wrapper_preserves_fd_redirect() {
+        assert_eq!(
+            rewrite_command_no_prefixes("bash -c 'git status' 2>&1", &[]),
+            Some("bash -c 'rtk git status' 2>&1".into())
+        );
+    }
+
+    #[test]
+    fn test_shell_wrapper_rejects_unsafe_or_unsupported_scripts() {
+        for command in [
+            "bash -c 'git status $(whoami)'",
+            "bash -c 'git status > /tmp/out'",
+            "bash -c 'git status\ncargo test'",
+            "fish -c 'git status; and cargo test'",
+            "bash -lc 'git status'",
+            r#"bash -c "git status $HOME""#,
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                None,
+                "unsafe or unsupported wrapper must pass through: {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_shell_wrapper_rewrites_behind_a_strippable_prefix() {
+        assert_eq!(
+            rewrite_command_no_prefixes("command bash -c 'git status'", &[]),
+            Some("command bash -c 'rtk git status'".into())
+        );
+    }
+
+    #[test]
+    fn test_shell_wrapper_behind_sudo_is_not_rewritten() {
+        // The inner `rtk` would run as root, where it is off secure_path — the
+        // same reason a bare `sudo docker ps` is left alone. See #146.
+        assert_eq!(
+            rewrite_command_no_prefixes("sudo bash -c 'git status'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_shell_wrapper_rewrites_behind_a_transparent_prefix() {
+        let prefixes = vec!["direnv exec .".to_string(), "devenv shell --".to_string()];
+        assert_eq!(
+            super::rewrite_command("direnv exec . bash -c 'git status'", &[], &prefixes),
+            Some("direnv exec . bash -c 'rtk git status'".into())
+        );
+        assert_eq!(
+            super::rewrite_command(
+                "devenv shell -- bash -c 'cargo test; git status'",
+                &[],
+                &prefixes
+            ),
+            Some("devenv shell -- bash -c 'rtk cargo test; rtk git status'".into())
+        );
+    }
+
+    #[test]
+    fn test_shell_wrapper_does_not_rewrite_nested_wrapper() {
+        assert_eq!(
+            rewrite_command_no_prefixes("bash -c 'bash -c \"git status\"'", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("bash -c 'git status && bash -c \"cargo test\"'", &[]),
+            Some("bash -c 'rtk git status && bash -c \"cargo test\"'".into())
         );
     }
 }

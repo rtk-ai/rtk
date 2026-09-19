@@ -79,8 +79,36 @@ pub(crate) fn decide_with_params(
     excluded: &[String],
     transparent_prefixes: &[String],
 ) -> HookDecision {
+    decide_with_wrap(
+        cmd,
+        verdict,
+        excluded,
+        transparent_prefixes,
+        crate::discover::fish_script::try_wrap,
+    )
+}
+
+/// [`decide_with_params`] with the fish-script wrapper injected, so a test pins
+/// the wrap outcome instead of depending on the machine's `fish` binary and
+/// `hooks.wrap_fish_scripts` — the same reason the verdict and the rewrite
+/// parameters are passed in rather than looked up.
+pub(crate) fn decide_with_wrap(
+    cmd: &str,
+    verdict: PermissionVerdict,
+    excluded: &[String],
+    transparent_prefixes: &[String],
+    wrap_fish: fn(&str) -> Option<String>,
+) -> HookDecision {
     if verdict == PermissionVerdict::Deny {
         return HookDecision::Deny;
+    }
+
+    // A provably-fish script fails to parse in a POSIX host layer before RTK is
+    // ever consulted, so it is handed back as one quoted argument every layer
+    // can parse. Never auto-allowed: the script's content is not attested, so
+    // its strongest verdict is `Ask` even under an explicit allow rule.
+    if let Some(wrapped) = wrap_fish(cmd) {
+        return HookDecision::AskRewrite(wrapped);
     }
 
     if crate::discover::lexer::contains_unattestable_construct(cmd) {
@@ -334,6 +362,101 @@ mod tests {
         let decided = decide_with_params(cmd, PermissionVerdict::Default, &[], &[]);
         assert_eq!(decided, HookDecision::AskRewrite(cmd.to_string()));
         assert_eq!(suppress_identity(cmd, decided), HookDecision::Defer);
+    }
+
+    mod fish_wrap {
+        use super::super::{HookDecision, decide_with_wrap};
+        use crate::hooks::permissions::PermissionVerdict;
+
+        /// Real classification and assembly, with the environment gates pinned
+        /// open so the answer does not depend on a local `fish`.
+        fn wrap_stub(cmd: &str) -> Option<String> {
+            crate::discover::fish_script::try_wrap_gated(cmd, true)
+        }
+
+        /// Wrap unavailable: no fish binary, flag off, or Windows.
+        fn wrap_none(_cmd: &str) -> Option<String> {
+            None
+        }
+
+        #[cfg(not(windows))]
+        #[test]
+        fn fish_script_is_wrapped_as_ask() {
+            assert_eq!(
+                decide_with_wrap(
+                    "test -d src; and git status",
+                    PermissionVerdict::Default,
+                    &[],
+                    &[],
+                    wrap_stub
+                ),
+                HookDecision::AskRewrite(
+                    "rtk run --shell fish -c 'test -d src; and git status'".to_string()
+                )
+            );
+        }
+
+        /// An explicit allow rule cannot promote the wrap: the script's content
+        /// was never parsed, so `Ask` is its strongest verdict.
+        #[cfg(not(windows))]
+        #[test]
+        fn fish_wrap_is_never_auto_allowed() {
+            assert!(matches!(
+                decide_with_wrap(
+                    "test -d src; and git status",
+                    PermissionVerdict::Allow,
+                    &[],
+                    &[],
+                    wrap_stub
+                ),
+                HookDecision::AskRewrite(_)
+            ));
+        }
+
+        /// A deny rule still wins: the wrap is never consulted.
+        #[test]
+        fn deny_outranks_the_wrap() {
+            assert_eq!(
+                decide_with_wrap(
+                    "test -d src; and git status",
+                    PermissionVerdict::Deny,
+                    &[],
+                    &[],
+                    wrap_stub
+                ),
+                HookDecision::Deny
+            );
+        }
+
+        #[test]
+        fn without_a_wrap_the_command_takes_its_usual_path() {
+            // No fish available: `and git status` is just a command bash would
+            // run, and nothing in it is rewritable, so the decision defers.
+            assert_eq!(
+                decide_with_wrap(
+                    "test -d src; and git status",
+                    PermissionVerdict::Default,
+                    &[],
+                    &[],
+                    wrap_none
+                ),
+                HookDecision::Defer
+            );
+        }
+
+        #[test]
+        fn posix_script_is_not_wrapped() {
+            assert!(matches!(
+                decide_with_wrap(
+                    "git status; if true; then echo x; fi",
+                    PermissionVerdict::Default,
+                    &[],
+                    &[],
+                    wrap_stub
+                ),
+                HookDecision::AskRewrite(rewritten) if rewritten.starts_with("rtk git status")
+            ));
+        }
     }
 
     /// Suppression only fires on an actual no-op — a real rewrite is untouched.

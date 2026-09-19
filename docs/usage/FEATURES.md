@@ -586,8 +586,12 @@ Showing 10 of 15 pull requests in org/repo   #42 feat: add vitest (open, 2d)
 **Syntaxe :**
 ```bash
 rtk test <commande...>
+rtk test --shell fish '<commande fish>'
 ```
 
+Par défaut, la commande et ses arguments sont exécutés directement, sans
+expansion par un shell. `--shell` accepte une commande complète comme argument
+unique lorsque la syntaxe d'un shell est nécessaire.
 **Exemple :**
 ```bash
 rtk test cargo test
@@ -615,8 +619,11 @@ test utils::test_edge_case ... FAILED
 **Syntaxe :**
 ```bash
 rtk err <commande...>
+rtk err --shell fish '<commande fish>'
 ```
 
+Sans `--shell`, les limites des arguments sont préservées et les jokers,
+variables et opérateurs ne sont pas interprétés par un shell.
 **Exemple :**
 ```bash
 rtk err npm run build
@@ -1028,9 +1035,12 @@ Supprime les barres de progression et le bruit.
 
 ```bash
 rtk summary <commande...>
+rtk summary --shell fish '<commande fish>'
 ```
 
 Utile pour les commandes longues dont la sortie n'a pas de filtre dedie.
+La commande est exécutée directement par défaut ; `--shell` active
+explicitement l'interprétation d'une commande complète par le shell choisi.
 
 ---
 
@@ -1330,6 +1340,28 @@ Avant la comparaison, RTK retire le wrapper, l'interpreteur ou le chemin, donc `
 aussi `python3 -m pytest tests/`. Les arguments sont conserves : `"^ls$"` exclut `ls` seul sans
 englober `ls -la`.
 
+### Scripts fish non ambigus
+
+Certains hotes evaluent la chaine de commande avec une couche compatible POSIX
+meme quand le shell de l'utilisateur est fish : un script fish multi-lignes
+(`if ... end`, `; and`, `; or`) echoue alors en erreur de parsing avant meme
+que RTK demarre. Le hook detecte les scripts **non ambigus** (mot-cle
+exclusivement fish comme `end`, `begin`, `switch`, `and`, `or`, `not` en
+position de commande, sans marqueur POSIX `then`/`fi`/`do`/`done`) et les
+reecrit en execution fish explicite :
+
+```
+if test -d src\n  git status\nend
+-> rtk run --shell fish -c 'if test -d src\n  git status\nend'
+```
+
+Points cles :
+- La reecriture est toujours en mode « ask » (jamais auto-approuvee) : le
+  contenu du script n'est pas attestable.
+- Necessite un binaire `fish` resolvable ; desactive sous Windows.
+- Les scripts ambigus ou POSIX passent inchanges, comme avant.
+- Desactivable via `wrap_fish_scripts = false` dans la section `[hooks]`.
+
 ---
 
 ## Configuration
@@ -1376,6 +1408,7 @@ enabled = false             # Telemetrie anonyme (1 ping/jour, requiert consente
 
 [hooks]
 exclude_commands = []       # Commandes a exclure de la recriture automatique
+wrap_fish_scripts = true    # Reecrire les scripts fish non ambigus en `rtk run --shell fish -c`
 ```
 
 ### Variables d'environnement
