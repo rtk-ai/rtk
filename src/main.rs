@@ -7,6 +7,7 @@ mod learn;
 mod parser;
 
 // Re-export command modules for routing
+
 use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git_cmd, glab_cmd, gt_cmd};
@@ -1543,8 +1544,6 @@ fn configured_awareness_level() -> core::config::AwarenessLevel {
 }
 
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
-    use crate::core::utils::ChildArgExt;
-
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // No args → show Clap's error (user ran just "rtk" with bad syntax)
@@ -1587,14 +1586,14 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
         let result = if filter.filter_stderr {
             // Merge stderr into stdout so the filter can strip banners emitted by tools like liquibase
             core::utils::resolved_command(&args[0])
-                .child_args(&args[1..])
+                .args(&args[1..])
                 .stdin(std::process::Stdio::inherit())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped()) // captured for merging
                 .output()
         } else {
             core::utils::resolved_command(&args[0])
-                .child_args(&args[1..])
+                .args(&args[1..])
                 .stdin(std::process::Stdio::inherit())
                 .stdout(std::process::Stdio::piped()) // capture
                 .stderr(std::process::Stdio::inherit()) // stderr always direct
@@ -1663,7 +1662,7 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     } else {
         // No TOML match: original passthrough behaviour (Stdio::inherit, streaming)
         let status = core::utils::resolved_command(&args[0])
-            .child_args(&args[1..])
+            .args(&args[1..])
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
@@ -2980,6 +2979,8 @@ fn run_cli() -> Result<i32> {
                 use std::process::Command as ProcCommand;
                 let shell = if cfg!(windows) { "cmd" } else { "sh" };
                 let flag = if cfg!(windows) { "/C" } else { "-c" };
+                // A shell string, not an argument vector, so ChildCommand's
+                // per-argument encoding does not apply here (#2985, #2389, #3704).
                 let status = ProcCommand::new(shell)
                     .arg(flag)
                     .arg(&raw)
@@ -3006,7 +3007,6 @@ fn run_cli() -> Result<i32> {
         })?,
 
         Commands::Proxy { args } => {
-            use crate::core::utils::ChildArgExt;
             use std::io::{Read, Write};
             use std::process::Stdio;
             use std::sync::atomic::{AtomicU32, Ordering};
@@ -3095,7 +3095,7 @@ fn run_cli() -> Result<i32> {
 
             let mut child = ChildGuard(Some(
                 core::utils::resolved_command(cmd_name.as_ref())
-                    .child_args(&cmd_args)
+                    .args(&cmd_args)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .spawn()

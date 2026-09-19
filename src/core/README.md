@@ -104,12 +104,39 @@ Key functions available to all command modules:
 |----------|---------|
 | `truncate(s, max)` | Truncate string with `...` suffix |
 | `strip_ansi(text)` | Remove ANSI escape/color codes |
-| `resolved_command(name)` | Find command in PATH, returns `Command` |
+| `resolved_command(name)` | Find command in PATH, returns `ChildCommand` |
 | `tool_exists(name)` | Check if a CLI tool is available |
 | `detect_package_manager()` | Detect pnpm/yarn/npm from lockfiles |
-| `package_manager_exec(tool)` | Build `Command` using detected package manager |
+| `package_manager_exec(tool)` | Build `ChildCommand` using detected package manager |
 | `ruby_exec(tool)` | Auto-detect `bundle exec` when `Gemfile` exists |
 | `count_tokens(text)` | Estimate tokens: `ceil(chars / 4.0)` |
+
+### Child arguments (child_command.rs)
+
+Every child process is built as a `ChildCommand`, never a `std::process::Command`.
+On Windows an MSYS/Cygwin child (Git for Windows' `grep`, `find`, `tree`, …) re-parses
+its command line with its own rules, so each argument has to be encoded for it.
+`ChildCommand` owns that encoding, which is why it has no `Deref` to `Command`:
+reaching the inner command is spelled `as_std_mut()` or `into_std()`.
+
+Two ways to add an argument, and the choice matters:
+
+| Method | Use for | Effect on Windows |
+|--------|---------|-------------------|
+| `arg` / `args` | the default: flags, flag values, patterns, regexes | quoted whenever it holds a character Cygwin's `build_argv`/`globify` would reinterpret, so the child sees the bytes literally |
+| `glob_arg` / `glob_args` | operands rtk has itself parsed as paths, where a glob should still expand | quoted only for `'` and `"`, leaving `?`, `*`, `[`, `(`, `)`, `{`, `}` and a leading `~` for the child to expand |
+
+Pick `arg` when in doubt: a missed `glob_arg` gives a glob that does not expand,
+which is visible, while a missed `arg` silently corrupts the argument.
+
+`glob_args` belongs only on a slice rtk has already separated into path operands
+(`find`, the search engines). A vector rtk has not split still holds
+flag values and search patterns, so it takes the literal default — that is why
+every passthrough, `rtk proxy`, `tree`, `wc` and `ls` use `args`.
+
+A shell string handed to `sh -c` or `cmd /C` is not an argument vector — it is one
+opaque string — so those sites build a `std::process::Command` and convert with
+`ChildCommand::from`.
 
 ## Argument Tokenizer (arg_tokenizer.rs)
 

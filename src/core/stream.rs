@@ -1,7 +1,8 @@
+use crate::core::child_command::ChildCommand;
 use anyhow::{Context, Result};
 use std::borrow::Cow;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc;
 
 #[cfg(test)]
@@ -423,7 +424,7 @@ pub fn status_to_exit_code(status: std::process::ExitStatus) -> i32 {
 pub const RAW_CAP: usize = 10_485_760; // 10 MiB
 
 pub fn run_streaming(
-    cmd: &mut Command,
+    cmd: &mut ChildCommand,
     stdin_mode: StdinMode,
     stdout_mode: FilterMode<'_>,
 ) -> Result<StreamResult> {
@@ -707,13 +708,13 @@ impl CaptureResult {
     }
 }
 
-pub fn exec_capture(cmd: &mut Command) -> Result<CaptureResult> {
+pub fn exec_capture(cmd: &mut ChildCommand) -> Result<CaptureResult> {
     cmd.stdin(Stdio::null());
     capture(cmd)
 }
 
 /// Like [`exec_capture`] but inherits stdin so a wrapped engine can read a piped stdin.
-pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
+pub fn exec_capture_stdin(cmd: &mut ChildCommand) -> Result<CaptureResult> {
     cmd.stdin(Stdio::inherit());
     capture(cmd)
 }
@@ -725,7 +726,7 @@ pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
 /// announces that on stderr, so callers moving here from a hand-rolled
 /// `.output()` keep the diagnostic instead of losing it. The program name is
 /// used as the label so no call site has to pass one.
-fn capture(cmd: &mut Command) -> Result<CaptureResult> {
+fn capture(cmd: &mut ChildCommand) -> Result<CaptureResult> {
     let raw = capture_raw(cmd)?;
     Ok(CaptureResult {
         stdout: super::utils::decode_process_output(&raw.stdout),
@@ -740,7 +741,7 @@ fn capture(cmd: &mut Command) -> Result<CaptureResult> {
 /// `process terminated by signal N` diagnostic is emitted uniformly whether the
 /// caller decodes the bytes ([`capture`]) or keeps them raw ([`exec_capture_bytes`]),
 /// instead of the raw path silently dropping it.
-fn capture_raw(cmd: &mut Command) -> Result<CaptureBytes> {
+fn capture_raw(cmd: &mut ChildCommand) -> Result<CaptureBytes> {
     let program = cmd.get_program().to_string_lossy().into_owned();
     let output = cmd.output().context("Failed to execute command")?;
     let exit_code = super::utils::exit_code_from_output(&output, &program);
@@ -766,7 +767,7 @@ impl CaptureBytes {
 }
 
 /// Like [`exec_capture`] but returns raw bytes so the caller decides how to decode.
-pub fn exec_capture_bytes(cmd: &mut Command) -> Result<CaptureBytes> {
+pub fn exec_capture_bytes(cmd: &mut ChildCommand) -> Result<CaptureBytes> {
     cmd.stdin(Stdio::null());
     capture_raw(cmd)
 }
@@ -774,7 +775,6 @@ pub fn exec_capture_bytes(cmd: &mut Command) -> Result<CaptureBytes> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::process::Command;
 
     #[test]
     fn test_read_lines_lossy_preserves_lines_after_invalid_utf8() {
@@ -869,20 +869,20 @@ pub(crate) mod tests {
 
     #[test]
     fn test_exit_code_zero() {
-        let status = Command::new("true").status().unwrap();
+        let status = ChildCommand::new("true").status().unwrap();
         assert_eq!(status_to_exit_code(status), 0);
     }
 
     #[test]
     fn test_exit_code_nonzero() {
-        let status = Command::new("false").status().unwrap();
+        let status = ChildCommand::new("false").status().unwrap();
         assert_eq!(status_to_exit_code(status), 1);
     }
 
     #[cfg(unix)]
     #[test]
     fn test_exit_code_signal_kill() {
-        let mut child = Command::new("sleep").arg("60").spawn().unwrap();
+        let mut child = ChildCommand::new("sleep").arg("60").spawn().unwrap();
         child.kill().unwrap();
         let status = child.wait().unwrap();
         assert_eq!(status_to_exit_code(status), 137);
@@ -890,7 +890,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_exec_capture_decodes_and_reports_exit_code() {
-        let captured = exec_capture(&mut Command::new("false")).expect("spawn");
+        let captured = exec_capture(&mut ChildCommand::new("false")).expect("spawn");
         assert_eq!(captured.exit_code, 1);
         assert!(!captured.success());
     }
@@ -902,7 +902,8 @@ pub(crate) mod tests {
     #[test]
     fn test_exec_capture_reports_signal_exit_code() {
         // `kill -TERM $$` makes the shell terminate itself by signal 15.
-        let mut cmd = Command::new("sh");
+        // nosemgrep: interpreter-execution -- a signal-killed child needs a shell to kill
+        let mut cmd = ChildCommand::new("sh");
         cmd.arg("-c").arg("kill -TERM $$");
         let captured = exec_capture(&mut cmd).expect("spawn");
         assert_eq!(captured.exit_code, 128 + 15);
@@ -971,7 +972,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_run_streaming_passthrough_echo() {
-        let mut cmd = Command::new("echo");
+        let mut cmd = ChildCommand::new("echo");
         cmd.arg("hello");
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::Passthrough).unwrap();
         assert_eq!(result.exit_code, 0);
@@ -982,7 +983,7 @@ pub(crate) mod tests {
     #[test]
     fn test_run_streaming_exit_code_preserved() {
         // nosemgrep: interpreter-execution
-        let mut cmd = Command::new("sh");
+        let mut cmd = ChildCommand::new("sh");
         cmd.args(["-c", "exit 42"]);
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::Passthrough).unwrap();
         assert_eq!(result.exit_code, 42);
@@ -990,7 +991,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_run_streaming_exit_code_zero() {
-        let mut cmd = Command::new("true");
+        let mut cmd = ChildCommand::new("true");
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::Passthrough).unwrap();
         assert_eq!(result.exit_code, 0);
         assert!(result.success());
@@ -998,7 +999,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_run_streaming_exit_code_one() {
-        let mut cmd = Command::new("false");
+        let mut cmd = ChildCommand::new("false");
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::Passthrough).unwrap();
         assert_eq!(result.exit_code, 1);
         assert!(!result.success());
@@ -1007,7 +1008,7 @@ pub(crate) mod tests {
     #[cfg(not(windows))]
     #[test]
     fn test_run_streaming_streaming_filter_drops_lines() {
-        let mut cmd = Command::new("printf");
+        let mut cmd = ChildCommand::new("printf");
         cmd.arg("a\nb\nc\n");
         let filter = LineFilter::new(|l| {
             if l == "b" {
@@ -1031,7 +1032,7 @@ pub(crate) mod tests {
     #[cfg(not(windows))]
     #[test]
     fn test_run_streaming_buffered_filter() {
-        let mut cmd = Command::new("printf");
+        let mut cmd = ChildCommand::new("printf");
         cmd.arg("line1\nline2\nline3\n");
         let result = run_streaming(
             &mut cmd,
@@ -1047,7 +1048,7 @@ pub(crate) mod tests {
     #[test]
     fn test_run_streaming_raw_cap_at_10mb() {
         // nosemgrep: interpreter-execution
-        let mut cmd = Command::new("sh");
+        let mut cmd = ChildCommand::new("sh");
         // ~11 MiB of 80-char lines (fast: fewer lines than `yes | head -6M`)
         cmd.args([
             "-c",
@@ -1068,7 +1069,7 @@ pub(crate) mod tests {
     #[test]
     fn test_run_streaming_stderr_cap_at_10mb() {
         // nosemgrep: interpreter-execution
-        let mut cmd = Command::new("sh");
+        let mut cmd = ChildCommand::new("sh");
         // ~11 MiB on stderr, nothing on stdout
         cmd.args([
             "-c",
@@ -1085,7 +1086,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_child_guard_prevents_zombie() {
-        let mut cmd = Command::new("true");
+        let mut cmd = ChildCommand::new("true");
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().exit_code, 0);
@@ -1093,14 +1094,14 @@ pub(crate) mod tests {
 
     #[test]
     fn test_run_streaming_null_stdin_cat() {
-        let mut cmd = Command::new("cat");
+        let mut cmd = ChildCommand::new("cat");
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::Passthrough).unwrap();
         assert_eq!(result.exit_code, 0);
     }
 
     #[test]
     fn test_run_streaming_raw_contains_stdout() {
-        let mut cmd = Command::new("echo");
+        let mut cmd = ChildCommand::new("echo");
         cmd.arg("test_output_xyz");
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly).unwrap();
         assert!(result.raw.contains("test_output_xyz"));
@@ -1108,7 +1109,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_run_streaming_capture_only_filtered_equals_raw() {
-        let mut cmd = Command::new("echo");
+        let mut cmd = ChildCommand::new("echo");
         cmd.arg("check_equality");
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly).unwrap();
         assert_eq!(result.filtered.trim(), result.raw_stdout.trim());
@@ -1116,7 +1117,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_exec_capture_success() {
-        let mut cmd = Command::new("echo");
+        let mut cmd = ChildCommand::new("echo");
         cmd.arg("hello_capture");
         let result = exec_capture(&mut cmd).unwrap();
         assert!(result.success());
@@ -1126,7 +1127,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_exec_capture_failure() {
-        let mut cmd = Command::new("false");
+        let mut cmd = ChildCommand::new("false");
         let result = exec_capture(&mut cmd).unwrap();
         assert!(!result.success());
         assert_eq!(result.exit_code, 1);
@@ -1135,7 +1136,7 @@ pub(crate) mod tests {
     #[test]
     fn test_exec_capture_stderr() {
         // nosemgrep: interpreter-execution
-        let mut cmd = Command::new("sh");
+        let mut cmd = ChildCommand::new("sh");
         cmd.args(["-c", "echo err_msg >&2"]);
         let result = exec_capture(&mut cmd).unwrap();
         assert!(result.stderr.contains("err_msg"));
@@ -1144,7 +1145,7 @@ pub(crate) mod tests {
     #[test]
     fn test_exec_capture_combined() {
         // nosemgrep: interpreter-execution
-        let mut cmd = Command::new("sh");
+        let mut cmd = ChildCommand::new("sh");
         cmd.args(["-c", "echo out_msg; echo err_msg >&2"]);
         let result = exec_capture(&mut cmd).unwrap();
         let combined = result.combined();
@@ -1319,7 +1320,7 @@ pub(crate) mod tests {
     #[test]
     fn test_streaming_filters_both_fds_and_routes_to_correct_fd() {
         // nosemgrep: interpreter-execution
-        let mut cmd = Command::new("sh");
+        let mut cmd = ChildCommand::new("sh");
         cmd.args(["-c", "echo 'error[E0308]: type mismatch'; echo '   Compiling foo v1.0' >&2; echo '   Downloading bar v2.0' >&2; echo '   Finished dev' >&2; echo 'real error on stderr' >&2"]);
 
         struct CargoLikeHandler;

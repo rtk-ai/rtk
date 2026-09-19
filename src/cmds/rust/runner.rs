@@ -1,11 +1,14 @@
 //! Shell-string wrappers over the shared err/test command runners in core.
 
+use crate::core::child_command::ChildCommand;
 use crate::core::runner::{run_err_cmd, run_test_cmd};
 use anyhow::Result;
 use std::process::Command;
 
-fn build_shell_command(command: &str) -> Command {
-    if cfg!(target_os = "windows") {
+/// The shell receives one command *string*, not an argument vector, so
+/// `ChildCommand`'s per-argument encoding must not be applied to it.
+fn build_shell_command(command: &str) -> ChildCommand {
+    let shell = if cfg!(target_os = "windows") {
         let mut c = Command::new("cmd");
         c.args(["/C", command]);
         c
@@ -13,7 +16,8 @@ fn build_shell_command(command: &str) -> Command {
         let mut c = Command::new("sh");
         c.args(["-c", command]);
         c
-    }
+    };
+    ChildCommand::from(shell)
 }
 
 /// Run a command via the shell and filter output to show only errors/warnings.

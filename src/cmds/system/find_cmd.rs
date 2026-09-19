@@ -2,7 +2,7 @@
 
 use crate::core::tracking;
 use crate::core::truncate::CAP_INVENTORY;
-use crate::core::utils::ChildArgExt;
+
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use std::collections::{HashMap, HashSet};
@@ -259,17 +259,16 @@ fn run_compress(
     let max_results = max.unwrap_or(CAP_INVENTORY);
     let max_explicit = max.is_some();
     let mut cmd = crate::core::utils::resolved_command("find");
-    cmd.child_args(options).child_args(paths);
+    cmd.args(options).glob_args(paths);
     if !expr.is_empty() {
-        cmd.child_arg("(");
-        cmd.child_args(expr);
-        cmd.child_arg(")");
+        cmd.arg("(");
+        cmd.args(expr);
+        cmd.arg(")");
     }
     if let Some(t) = file_type {
-        cmd.child_arg("-type").child_arg(t);
+        cmd.arg("-type").arg(t);
     }
-    cmd.child_arg("-print0")
-        .stdin(std::process::Stdio::inherit());
+    cmd.arg("-print0").stdin(std::process::Stdio::inherit());
     let output = cmd.output().context("Failed to execute find")?;
     let exit_code = crate::core::utils::exit_code_from_output(&output, "find");
     {
@@ -746,6 +745,7 @@ fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::child_command::ChildCommand;
 
     /// Convert string slices to Vec<String> for test convenience.
     fn args(values: &[&str]) -> Vec<String> {
@@ -1361,7 +1361,7 @@ mod tests {
     #[test]
     fn run_from_args_propagates_find_exit_status() {
         let argv = ["/definitely/missing/xyz", "-mtime", "+0"];
-        let expected = std::process::Command::new("find")
+        let expected = ChildCommand::new("find")
             .args(argv)
             .output()
             .map(|o| o.status.code().unwrap_or(1))
@@ -1374,7 +1374,7 @@ mod tests {
     fn hidden_and_ignored_matches_are_collected_for_disclosure() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        if !std::process::Command::new("git")
+        if !ChildCommand::new("git")
             .args(["init", "-q"])
             .current_dir(root)
             .status()

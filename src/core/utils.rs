@@ -5,14 +5,15 @@
 //! - Text truncation
 //! - Command execution with error context
 
+use crate::core::child_command::ChildCommand;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde_json::Value;
-use std::ffi::OsStr;
+
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
+
 use std::sync::LazyLock;
 use std::sync::OnceLock;
 
@@ -359,13 +360,14 @@ fn set_owner_only(_path: &std::path::Path, _mode: u32) {}
 /// Build a Command for Ruby tools, auto-detecting bundle exec.
 /// Uses `bundle exec <tool>` when a Gemfile exists (transitive deps like rake
 /// won't appear in the Gemfile but still need bundler for version isolation).
-pub fn ruby_exec(tool: &str) -> Command {
+pub fn ruby_exec(tool: &str) -> ChildCommand {
     if std::path::Path::new("Gemfile").exists() {
-        let mut c = Command::new("bundle");
+        let mut c = ChildCommand::new("bundle");
         c.arg("exec").arg(tool);
         return c;
     }
-    Command::new(tool)
+    // nosemgrep: dynamic-command-execution -- tool is one of rtk's known ruby entry points
+    ChildCommand::new(tool)
 }
 
 /// Count whitespace-delimited tokens in text. Used by filter tests to verify
@@ -405,7 +407,7 @@ pub fn detect_package_manager_in(dir: &std::path::Path) -> &'static str {
 
 /// Build a Command using the detected package manager's exec mechanism.
 /// Returns a Command ready to have tool-specific args appended.
-pub fn package_manager_exec(tool: &str) -> Command {
+pub fn package_manager_exec(tool: &str) -> ChildCommand {
     tool_exec(None, tool, MissingTool::Fail)
 }
 
@@ -446,7 +448,7 @@ pub fn exec_runner(runner: Option<&str>, missing: MissingTool) -> &str {
 /// Detection applies only when nothing was named, as with a bare `rtk tsc`.
 ///
 /// A tool already on PATH is run directly only when no runner was named.
-pub fn tool_exec(runner: Option<&str>, tool: &str, missing: MissingTool) -> Command {
+pub fn tool_exec(runner: Option<&str>, tool: &str, missing: MissingTool) -> ChildCommand {
     // Only when nothing was named: `bunx tsc` must resolve the project's tsc,
     // not a global one that happens to be on PATH. Both bunx and npx prefer
     // node_modules/.bin before fetching, so naming one is a real choice.
@@ -520,73 +522,11 @@ pub fn quote_arg_for_child(arg: &str) -> String {
     out
 }
 
-/// Pass caller-supplied arguments to a child so that MSYS/Cygwin children on
-/// Windows receive them intact.
-///
-/// Use instead of `Command::arg`/`args` for anything that arrived on rtk's own
-/// command line — a pattern, a path, a flag value.
-pub trait ChildArgExt {
-    fn child_arg<S: AsRef<OsStr>>(&mut self, arg: S) -> &mut Command;
-
-    fn child_args<I, S>(&mut self, args: I) -> &mut Command
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>;
-}
-
-impl ChildArgExt for Command {
-    fn child_arg<S: AsRef<OsStr>>(&mut self, arg: S) -> &mut Command {
-        push_child_arg(self, arg.as_ref());
-        self
-    }
-
-    fn child_args<I, S>(&mut self, args: I) -> &mut Command
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        for arg in args {
-            push_child_arg(self, arg.as_ref());
-        }
-        self
-    }
-}
-
-/// Windows: `"` is the only character std encodes differently from libuv, so
-/// re-encode just those arguments and leave the rest on std's path. `.bat`/`.cmd`
-/// shims stay on it too — cmd.exe parses by its own rules and `raw_arg` would
-/// bypass the escaping std applies for them.
-#[cfg(windows)]
-fn push_child_arg(cmd: &mut Command, arg: &OsStr) {
-    match arg.to_str() {
-        Some(s) if s.contains('"') && !is_batch_program(cmd) => {
-            std::os::windows::process::CommandExt::raw_arg(cmd, quote_arg_for_child(s));
-        }
-        _ => {
-            cmd.arg(arg);
-        }
-    }
-}
-
-#[cfg(windows)]
-fn is_batch_program(cmd: &Command) -> bool {
-    std::path::Path::new(cmd.get_program())
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("bat") || ext.eq_ignore_ascii_case("cmd"))
-}
-
-/// Unix: the argument vector reaches `execvp` verbatim, so there is nothing to
-/// encode.
-#[cfg(not(windows))]
-fn push_child_arg(cmd: &mut Command, arg: &OsStr) {
-    cmd.arg(arg);
-}
-
 /// Resolve a binary name to its full path, honoring PATHEXT on Windows.
 ///
 /// On Windows, Node.js tools are installed as `.CMD`/`.BAT`/`.PS1` shims.
-/// Rust's `std::process::Command::new()` does NOT honor PATHEXT, so
-/// `Command::new("vitest")` fails even when `vitest.CMD` is on PATH.
+/// Rust's `ChildCommand::new()` does NOT honor PATHEXT, so
+/// `ChildCommand::new("vitest")` fails even when `vitest.CMD` is on PATH.
 ///
 /// This function uses the `which` crate to perform proper PATH+PATHEXT resolution.
 ///
@@ -601,10 +541,10 @@ pub fn resolve_binary(name: &str) -> Result<PathBuf> {
 
 /// Create a `Command` with PATHEXT-aware binary resolution.
 ///
-/// Drop-in replacement for `Command::new(name)` that works on Windows
+/// Drop-in replacement for `ChildCommand::new(name)` that works on Windows
 /// with `.CMD`/`.BAT`/`.PS1` wrappers.
 ///
-/// Falls back to `Command::new(name)` if resolution fails, so native
+/// Falls back to `ChildCommand::new(name)` if resolution fails, so native
 /// commands (git, cargo) still work even if `which` can't find them.
 ///
 /// # Arguments
@@ -612,9 +552,10 @@ pub fn resolve_binary(name: &str) -> Result<PathBuf> {
 ///
 /// # Returns
 /// A `Command` configured with the resolved binary path.
-pub fn resolved_command(name: &str) -> Command {
+pub fn resolved_command(name: &str) -> ChildCommand {
     match resolve_binary(name) {
-        Ok(path) => Command::new(path),
+        // nosemgrep: dynamic-command-execution -- this IS the resolver; the path comes from resolve_binary
+        Ok(path) => ChildCommand::new(path),
         Err(e) => {
             // On Windows, resolution failure likely means a .CMD/.BAT wrapper
             // wasn't found — always warn so users have a signal.
@@ -626,7 +567,8 @@ pub fn resolved_command(name: &str) -> Command {
                 );
             }
 
-            Command::new(name)
+            // nosemgrep: dynamic-command-execution -- unresolved fallback, name is an rtk tool name
+            ChildCommand::new(name)
         }
     }
 }
@@ -700,7 +642,7 @@ pub fn join_or_ok(lines: &[&str]) -> String {
 
 /// Check if a tool exists on PATH (PATHEXT-aware on Windows).
 ///
-/// Replaces manual `Command::new("which").arg(tool)` checks that fail on Windows.
+/// Replaces manual `ChildCommand::new("which").arg(tool)` checks that fail on Windows.
 pub fn tool_exists(name: &str) -> bool {
     which::which(name).is_ok()
 }
@@ -1265,31 +1207,13 @@ mod tests {
         assert_eq!(quote_arg_for_child(r#"a b "c""#), r#""a b \"c\"""#);
     }
 
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn test_child_arg_re_encodes_only_arguments_holding_a_quote() {
-        let mut cmd = Command::new("grep");
-        cmd.child_args(["-c", r#""type""#, "q.jsonl"]);
-        let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, ["-c", r#""\"type\"""#, "q.jsonl"]);
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn test_child_arg_leaves_batch_shims_on_stds_encoding() {
-        // cmd.exe parses by its own rules, so `raw_arg` must not be used there.
-        let mut cmd = Command::new("gradlew.bat");
-        cmd.child_arg(r#""type""#);
-        let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, [r#""type""#]);
-    }
-
     // ===== Windows-specific PATHEXT resolution tests (issue #212) =====
 
     #[cfg(target_os = "windows")]
     mod windows_tests {
         use super::super::*;
         use std::fs;
+        use std::process::Command;
 
         /// Create a temporary .cmd wrapper to simulate Node.js tool installation
         fn create_temp_cmd_wrapper(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
@@ -1393,7 +1317,7 @@ mod tests {
         #[test]
         fn test_resolved_command_fallback_on_unknown_binary() {
             // When resolve_binary fails, resolved_command should fall back to
-            // Command::new(name) instead of panicking.  On Windows this also
+            // ChildCommand::new(name) instead of panicking.  On Windows this also
             // prints a warning to stderr.
             let mut cmd = resolved_command("nonexistent_binary_xyz_99999");
             // The Command should be created (not panic).  Attempting to run it

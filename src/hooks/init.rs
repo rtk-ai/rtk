@@ -6842,8 +6842,8 @@ fn uninstall_copilot_global_at(copilot_dir: &Path, ctx: InitContext) -> Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::child_command::ChildCommand;
     use crate::hooks::constants::TRAE_RUN_COMMAND_MATCHER;
-    use std::process::Command;
     use tempfile::TempDir;
 
     #[test]
@@ -10871,7 +10871,7 @@ mod tests {
             return;
         }
 
-        let revisions = Command::new("git")
+        let revisions = ChildCommand::new("git")
             .current_dir(manifest_dir)
             .args([
                 "rev-list",
@@ -10899,7 +10899,7 @@ mod tests {
 
         for commit in commits {
             let object = format!("{commit}:hooks/pi/rtk.ts");
-            let file = Command::new("git")
+            let file = ChildCommand::new("git")
                 .current_dir(manifest_dir)
                 .args(["show", object.as_str()])
                 .output()

@@ -7,12 +7,14 @@
 /// - `wc -c file.py`  → `978`
 /// - `wc -l *.py`     → table with common path prefix stripped
 use crate::core::runner::{self, RunOptions};
-use crate::core::utils::{ChildArgExt, resolved_command};
+use crate::core::utils::resolved_command;
 use anyhow::Result;
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("wc");
-    cmd.child_args(args);
+    // Unsplit: `--files0-from F` and `--total WHEN` take a free-standing
+    // value, so this vector is not path operands and takes the literal default.
+    cmd.args(args);
 
     if verbose > 0 {
         eprintln!("Running: wc {}", args.join(" "));

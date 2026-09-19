@@ -1,8 +1,11 @@
 rules:
   - id: dynamic-command-execution
     patterns:
-      - pattern: Command::new($ARG)
+      - pattern-either:
+          - pattern: Command::new($ARG)
+          - pattern: ChildCommand::new($ARG)
       - pattern-not: Command::new("...")
+      - pattern-not: ChildCommand::new("...")
     message: >
       Dynamic shell invocation via Command::new($ARG).
       RTK only executes known CLI tools — use string literals, not variables.
@@ -48,14 +51,23 @@ rules:
   - id: interpreter-execution
     pattern-either:
       - pattern: Command::new("curl")
+      - pattern: ChildCommand::new("curl")
       - pattern: Command::new("wget")
+      - pattern: ChildCommand::new("wget")
       - pattern: Command::new("python")
+      - pattern: ChildCommand::new("python")
       - pattern: Command::new("python3")
+      - pattern: ChildCommand::new("python3")
       - pattern: Command::new("node")
+      - pattern: ChildCommand::new("node")
       - pattern: Command::new("bash")
+      - pattern: ChildCommand::new("bash")
       - pattern: Command::new("sh")
+      - pattern: ChildCommand::new("sh")
       - pattern: Command::new("perl")
+      - pattern: ChildCommand::new("perl")
       - pattern: Command::new("ruby")
+      - pattern: ChildCommand::new("ruby")
     message: >
       Direct interpreter/downloader execution detected.
       RTK proxies user commands — it should never spawn interpreters

@@ -1,3 +1,4 @@
+use crate::core::child_command::ChildCommand;
 use crate::core::runner::{self, RunOptions};
 use crate::core::stream::StreamFilter;
 use crate::core::truncate::CAP_LIST;
@@ -5,7 +6,7 @@ use crate::core::utils::resolved_command;
 use anyhow::Result;
 use regex::Regex;
 use std::ffi::OsString;
-use std::process::Command;
+
 use std::sync::LazyLock;
 
 // ── Shared regex patterns (used across multiple filters) ─────────────────────
@@ -84,15 +85,15 @@ fn gradlew_binary() -> &'static str {
 /// semgrep's `dynamic-command-execution` rule stays happy. The `gradle` system
 /// binary is resolved via `resolved_command("gradle")` for PATHEXT support on
 /// Windows (`.CMD`/`.BAT` shims) — matches how cargo, golangci-lint, etc. do it.
-fn new_gradle_command(args: &[String]) -> Command {
+fn new_gradle_command(args: &[String]) -> ChildCommand {
     let mut cmd = if cfg!(windows) {
         if std::path::Path::new(".\\gradlew.bat").exists() {
-            Command::new(".\\gradlew.bat")
+            ChildCommand::new(".\\gradlew.bat")
         } else {
             resolved_command("gradle")
         }
     } else if std::path::Path::new("./gradlew").exists() {
-        Command::new("./gradlew")
+        ChildCommand::new("./gradlew")
     } else {
         resolved_command("gradle")
     };
