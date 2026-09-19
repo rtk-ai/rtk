@@ -50,9 +50,9 @@ Trigger: push to develop | workflow_dispatch (not master) | Concurrency: cancel-
               │
      ┌────────▼──────────────────┐
      │ pre-release                │
-     │ compute next version      │
-     │ from conventional commits │
-     │ tag = v{next}-rc.{run}    │
+      │ compute next version      │
+      │ from conventional commits │
+      │ tag = dev-{next}-rc.{run} │
      └────────┬──────────────────┘
               │
      ┌────────▼──────────────────┐
@@ -73,6 +73,10 @@ Trigger: push to develop | workflow_dispatch (not master) | Concurrency: cancel-
      │ Homebrew: SKIPPED         │
      └──────────────────────────┘
 ```
+
+When no stable `vX.Y.Z` tag exists, the workflow uses the `Cargo.toml`
+package version as the baseline and analyzes the full commit history. This
+allows a fork to create its first pre-release before its first stable release.
 
 ## Merge to master — stable release (cd.yml)
 
