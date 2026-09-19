@@ -1,6 +1,6 @@
 [filters.pio-run]
 description = "Compact PlatformIO build output"
-match_command = "^pio\\s+run"
+match_command = "^pio\\s+run(\\s|$|[;|&()<>])"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",
