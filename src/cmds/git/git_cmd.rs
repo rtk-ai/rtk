@@ -196,7 +196,10 @@ fn hard_suppresses_diff_body(token: &Token<'_>) -> bool {
 
 fn requests_patch_output(token: &Token<'_>) -> bool {
     match token.kind {
-        TokenKind::Long => matches!(token.text, "patch" | "unified" | "function-context"),
+        TokenKind::Long => matches!(
+            token.text,
+            "patch" | "patch-with-stat" | "patch-with-raw" | "unified" | "function-context"
+        ),
         TokenKind::Short => matches!(token.text, "p" | "u" | "U" | "W"),
         _ => false,
     }
@@ -682,11 +685,17 @@ fn run_show(
     // header this step must not repeat, and git resolves the two by last flag wins, so a user
     // `--oneline` re-enabled it and the summary printed twice. Appending RTK's flag after the
     // user's instead would put it past their `--`, where git reads it as a pathspec.
+    // Re-tokenized, because dropping `--oneline` shifts every later argument down one and
+    // `tokens` still addresses the unshifted `args`. Stale indices make the patch-shape strip
+    // below drop the wrong argument: `--oneline -p <sha>` loses the `<sha>` and keeps a bare
+    // `-p`, which outranks RTK's `--no-patch` -- HEAD's stat and patch under another
+    // commit's header.
     let stat_args = args_without_oneline(args, &tokens);
+    let stat_tokens = tokenize_git_diff_args(&stat_args);
     let mut stat_cmd = show_cmd(
         global_args,
         &stat_args,
-        &tokens,
+        &stat_tokens,
         &["--no-patch", "--stat", "--pretty=format:"],
         true,
     );
@@ -1561,17 +1570,154 @@ fn raw_log_is_capped(tokens: &[Token<'_>]) -> bool {
     !has_limit_flag(tokens) && !bounds_the_walk(tokens)
 }
 
-/// How many commits a default-format `git log` printed. `None` when the format is not the
-/// default one, which is when RTK cannot tell and says nothing rather than guessing.
-fn count_default_format_commits(stdout: &str) -> Option<usize> {
-    let n = stdout
+/// Whether the walk holds more commits than RTK's default limit shows -- the question the
+/// truncation notice answers.
+///
+/// Asks git for the one commit just past the limit and reads only whether anything came back.
+/// Nothing about the printed shape can disfigure that answer, which is what counting commits
+/// out of the emitted output could never manage: `--oneline` leaves no commit header,
+/// `log.decorate` and `--graph` disfigure the one there is, `-z` runs the walk onto a single
+/// line, `--line-prefix` puts something in front of it, colour puts an escape there, and a
+/// SHA-256 object name is not 40 characters. Each of those silenced the notice on a cap that
+/// had taken most of the history away.
+///
+/// RTK's flags go in front of every user argument: git refuses an option that follows a
+/// positional, so a bare pathspec would otherwise make the probe fail outright. That leaves
+/// the user's flags last, where git's last-flag-wins hands the format back to them -- harmless
+/// except for `--pretty`/`--format`/`--oneline`, since an empty `--pretty=format:` prints a
+/// commit as no bytes at all and would read as "nothing left". Those three are dropped from
+/// what is forwarded, along with `--skip`, which RTK's own has to absorb, `--exit-code`, which
+/// would make the probe report failure on a walk git was perfectly happy with, `--output`,
+/// which is a redirect that would truncate the file the command just wrote, and the
+/// patch-shape flags, which are work with no answer in them.
+///
+/// `None` when git refuses the command: RTK then says nothing rather than guessing.
+fn walk_exceeds_limit(
+    global_args: &[String],
+    args: &[String],
+    tokens: &[Token<'_>],
+    limit: usize,
+) -> Option<bool> {
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("log");
+    // No `--no-patch`: git refuses it beside `--name-only`/`--name-status`, and the strip in
+    // `log_probe_args` has already taken the patch-shape flags out of what is forwarded.
+    cmd.args(["--pretty=format:%H"]);
+    // `--skip` is counted where the walk starts; a diff-based filter is applied after it. So
+    // for those the skip lands on commits the filter would have dropped and the probe reports
+    // on a commit the user was never going to see -- `git log -p -S needle` matching twice
+    // claimed a cap of ten. `--max-count` is applied last, after every filter, so there the
+    // question becomes how many came back rather than whether one did.
+    let counting = selects_by_diff(tokens);
+    if counting {
+        cmd.arg(format!("--max-count={}", limit.saturating_add(1)));
+    } else {
+        cmd.args(["--max-count=1".to_string()]);
+        cmd.arg(format!(
+            "--skip={}",
+            limit.saturating_add(user_skip(tokens))
+        ));
+    }
+    cmd.args(log_probe_args(args, tokens));
+
+    let result = exec_capture(&mut cmd).ok()?;
+    if !result.success() {
+        return None;
+    }
+    if !counting {
+        return Some(!result.stdout.trim().is_empty());
+    }
+    // One line per commit is RTK's own `--pretty` talking, but the user's `--stat`,
+    // `--name-only` or `--graph` still add lines of their own, so commits are counted by
+    // shape. ANSI first: `color.ui=always` puts an escape in front of the rail.
+    let shown = strip_ansi(&result.stdout)
         .lines()
-        .filter(|line| {
-            line.strip_prefix("commit ")
-                .is_some_and(|rest| rest.len() >= 7 && rest.chars().all(|c| c.is_ascii_hexdigit()))
-        })
+        .filter(|line| is_commit_name(line))
         .count();
-    (n > 0).then_some(n)
+    Some(shown > limit)
+}
+
+/// True for a `--pretty=format:%H` line, ignoring any `--graph` rail in front of it. No upper
+/// bound on the length: a SHA-256 object name is 64 characters, and rejecting it counted every
+/// commit in such a repository as none.
+fn is_commit_name(line: &str) -> bool {
+    let name =
+        line.trim_matches(|c: char| c.is_whitespace() || matches!(c, '*' | '|' | '/' | '\\'));
+    name.len() >= 7 && name.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// True when the walk is narrowed by what the commits changed rather than by where they are.
+/// git applies these after `--skip` and before `--max-count`, which is what makes the two
+/// probes above answer different questions.
+fn selects_by_diff(tokens: &[Token<'_>]) -> bool {
+    arg_tokenizer::before_dashdash(tokens).iter().any(|t| {
+        match t.kind {
+            TokenKind::Long => matches!(
+                t.text,
+                "find-object" | "diff-filter" | "pickaxe-regex" | "pickaxe-all"
+            ),
+            // `-S<string>` and `-G<regex>`.
+            TokenKind::Short => matches!(t.text, "S" | "G"),
+            _ => false,
+        }
+    })
+}
+
+/// The user arguments [`walk_exceeds_limit`] forwards: everything that bounds the walk, and
+/// nothing that decides what git does with it.
+///
+/// Three classes come out. `--pretty`/`--format`/`--oneline`, because RTK's own `--pretty` is
+/// written first and would otherwise lose the last-flag-wins arbitration -- an empty
+/// `--pretty=format:` then prints a commit as no bytes at all, which reads as "nothing left"
+/// (`--summary` and `--dirstat` print nothing of their own for a plain modification, so the
+/// probe would have only that format to go on). `--skip`, because RTK's has to absorb it for
+/// the same reason. And `--output=<file>`, which is not a format at all but a redirect: left
+/// in, the probe reruns it and truncates the file the command it follows has just written.
+///
+/// The patch-shape flags go too, through the same strip the `show` header uses. The probe
+/// reads only whether git printed anything, so a patch is work with no answer in it -- and
+/// with `diff.external` or a `textconv` driver configured, work that runs the user's own
+/// program one more time than they asked for.
+fn log_probe_args(args: &[String], tokens: &[Token<'_>]) -> Vec<String> {
+    let mut dropped: Vec<usize> = Vec::new();
+    for token in tokens {
+        if token.kind != TokenKind::Long
+            || !matches!(
+                token.text,
+                "pretty" | "format" | "oneline" | "skip" | "output" | "exit-code"
+            )
+        {
+            continue;
+        }
+        dropped.push(token.source_index);
+        // `--skip 5` spends a second argument on its value; `--skip=5` does not.
+        if let Some(index) = token.linked
+            && let Some(value) = tokens.get(index)
+        {
+            dropped.push(value.source_index);
+        }
+    }
+    let kept: Vec<String> = args
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !dropped.contains(index))
+        .map(|(_, arg)| arg.clone())
+        .collect();
+    // Re-tokenized, because the drop above shifted every index `tokens` holds.
+    let kept_tokens = tokenize_git_log_args(&kept);
+    args_without_patch_shape(&kept, &kept_tokens)
+}
+
+/// The user's own `--skip`, which RTK's has to absorb: git takes the last one, and RTK's is
+/// written first. Last one wins here too, matching git. Unparseable means git will reject the
+/// command anyway, so 0 is as good an answer as any.
+fn user_skip(tokens: &[Token<'_>]) -> usize {
+    tokens
+        .iter()
+        .rfind(|t| t.kind == TokenKind::Long && t.text == "skip")
+        .and_then(|t| t.value(tokens))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
 }
 
 /// True when the arguments already bound the walk, so RTK's default limit would only take away
@@ -1621,14 +1767,23 @@ fn run_log(
             &result.stdout,
             &result.stdout,
         );
-        if !result.success() {
-            return Ok(result.exit_code);
-        }
-        if count_default_format_commits(&result.stdout) == Some(DEFAULT_LOG_LIMIT) {
+        // Before the exit check, not after: `--exit-code` makes a perfectly successful
+        // `git log` exit 1, and returning first left that cap unannounced. A command git
+        // really did refuse silences the notice anyway -- the probe fails on it too.
+        //
+        // Asked unconditionally, never skipped on empty output: `--output=<file>` sends the
+        // whole run to a file and `--summary --pretty=format:` prints nothing for a plain
+        // modification, and both of those are capped walks with a notice owed. The probe
+        // walks the history a second time when a filter like `-S` matches little, which is
+        // the price of an answer that does not depend on what the run happened to print.
+        if walk_exceeds_limit(global_args, args, &tokens, DEFAULT_LOG_LIMIT) == Some(true) {
             eprintln!(
-                "[rtk] showing {} commits; pass -n <count> for more",
+                "[rtk] capped at {} commits; pass -n <count> for more",
                 DEFAULT_LOG_LIMIT
             );
+        }
+        if !result.success() {
+            return Ok(result.exit_code);
         }
         return Ok(0);
     }
@@ -5477,6 +5632,32 @@ A  added.rs
             vec!["-w", "HEAD~1", "f.txt"]
         );
         assert_eq!(rebuild(&["--author", "-p"]), vec!["--author", "-p"]);
+    }
+
+    #[test]
+    fn test_stat_step_retokenizes_after_dropping_oneline() {
+        // The stat step drops `--oneline` and then strips patch-shape flags. Both steps read
+        // token indices, and the first shifts them, so the second must re-tokenize or it
+        // deletes the argument that inherited the patch flag's index -- here the revision.
+        let args: Vec<String> = ["--oneline", "-p", "deadbee"]
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        let tokens = tokenize_git_diff_args(&args);
+        let stat_args = args_without_oneline(&args, &tokens);
+        assert_eq!(stat_args, vec!["-p", "deadbee"]);
+
+        let stat_tokens = tokenize_git_diff_args(&stat_args);
+        assert_eq!(
+            args_without_patch_shape(&stat_args, &stat_tokens),
+            vec!["deadbee"],
+            "the revision must survive; only the patch flag is dropped"
+        );
+        assert_eq!(
+            args_without_patch_shape(&stat_args, &tokens),
+            vec!["-p"],
+            "stale indices invert the result: revision dropped, patch flag kept"
+        );
     }
 
     #[test]
