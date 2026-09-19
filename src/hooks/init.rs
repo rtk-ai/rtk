@@ -205,6 +205,60 @@ fn awareness_content(level: AwarenessLevel) -> &'static str {
     }
 }
 
+/// The line that says an `RTK.md` is RTK's to rewrite and to remove.
+///
+/// `--codex` is the one mode whose `RTK.md` sits at the project root, next to the user's own
+/// files and under a name RTK does not own, so it has to be able to tell the two apart. It
+/// says so in the file rather than by comparing content: the payload changes between releases,
+/// and a check against the running build's copy stops recognising RTK's own file the moment it
+/// does -- leaving it orphaned on uninstall and backed up on every upgrade.
+const RTK_MD_OWNED_MARKER: &str = "<!-- rtk-owned:";
+
+/// The header [`RTK_MD_OWNED_MARKER`] appears in, written above the awareness payload.
+const RTK_MD_OWNED_HEADER: &str =
+    "<!-- rtk-owned: written by `rtk init --codex`, removed by `rtk init --codex --uninstall` -->";
+
+/// The `RTK.md` the Codex mode writes: RTK's ownership line, then the awareness payload.
+fn codex_rtk_md_content(level: AwarenessLevel) -> String {
+    format!("{RTK_MD_OWNED_HEADER}\n\n{}", awareness_content(level))
+}
+
+/// Whether `content` is an RTK.md that RTK itself wrote.
+///
+/// The legacy `--claude-md` payload carries the `rtk-instructions` marker instead, and is
+/// recognised by it for the same reason.
+fn is_rtk_authored_md(content: &str) -> bool {
+    content.contains(RTK_MD_OWNED_MARKER) || content.contains(RTK_BLOCK_START)
+}
+
+/// [`is_rtk_authored_md`] for a path. An unreadable file is not provably RTK's, so it is
+/// treated as the user's and left alone.
+fn rtk_md_is_rtk_authored(path: &Path) -> bool {
+    fs::read_to_string(path).is_ok_and(|content| is_rtk_authored_md(&content))
+}
+
+/// A free `<name>.bak` sibling for `path`, numbered when earlier backups are still there so a
+/// second run cannot overwrite the first one's rescue copy.
+fn free_backup_path(path: &Path) -> Result<PathBuf> {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".bak");
+    let first = PathBuf::from(name);
+    if !first.exists() {
+        return Ok(first);
+    }
+    for n in 1..100 {
+        // Built from the `OsString` like the first candidate, not through `display()`, which
+        // is lossy: on a path that is not valid UTF-8 the probe and the rename would disagree.
+        let mut numbered = first.clone().into_os_string();
+        numbered.push(format!(".{n}"));
+        let candidate = PathBuf::from(numbered);
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    anyhow::bail!("Too many backups next to {}", path.display())
+}
+
 /// Agents without a command hook must prefix `rtk` themselves, which only the `full` level
 /// teaches, so they always receive `RTK_AWARENESS_FULL`. This prints the one-line note that
 /// tells the user why their configured `awareness.level` was not applied.
@@ -643,9 +697,15 @@ fn read_json_file(path: &Path) -> Result<Option<serde_json::Value>> {
 }
 
 /// Back up an existing JSON file before replacing it atomically.
+/// Where [`backup_and_atomic_write`] puts the copy it takes before overwriting `path`. Named
+/// so a caller that has to vouch for where it writes can vouch for this one too.
+fn backup_path_for(path: &Path) -> PathBuf {
+    path.with_extension("json.bak")
+}
+
 fn backup_and_atomic_write(path: &Path, content: &str) -> Result<Option<PathBuf>> {
     let backup_path = if path.exists() {
-        let backup_path = path.with_extension("json.bak");
+        let backup_path = backup_path_for(path);
         fs::copy(path, &backup_path).with_context(|| {
             format!(
                 "Failed to backup {} to {}",
@@ -1140,10 +1200,25 @@ fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
         let codex_dir = resolve_codex_dir()?;
         uninstall_codex_at(&codex_dir, ctx)?
     } else {
+        // Only the hook path is guarded, and only it is given up when the guard trips:
+        // `AGENTS.md` and `RTK.md` are project-root names RTK joins itself, they are
+        // demonstrably where uninstall left them, and refusing to clean them because some
+        // other path is a symlink leaves the user with artifacts and no command to remove
+        // them -- `--global` acts on `~/.codex`, which is not where these are.
+        let hooks_json_path = Path::new(CODEX_DIR).join(HOOKS_JSON);
+        let hooks_json_path = match ensure_inside_project(&hooks_json_path)
+            .and_then(|()| ensure_inside_project(&backup_path_for(&hooks_json_path)))
+        {
+            Ok(()) => Some(hooks_json_path.as_path()),
+            Err(error) => {
+                eprintln!("rtk: leaving the Codex hook in place: {error}");
+                None
+            }
+        };
         uninstall_codex_with_paths(
             Path::new(AGENTS_MD),
             Path::new(RTK_MD),
-            &Path::new(CODEX_DIR).join(HOOKS_JSON),
+            hooks_json_path,
             &[RTK_MD_REF],
             ctx,
         )?
@@ -1171,7 +1246,7 @@ fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>>
     uninstall_codex_with_paths(
         &codex_dir.join(AGENTS_MD),
         &codex_dir.join(RTK_MD),
-        &codex_dir.join(HOOKS_JSON),
+        Some(&codex_dir.join(HOOKS_JSON)),
         &[RTK_MD_REF, absolute_rtk_md_ref.as_str()],
         ctx,
     )
@@ -1180,7 +1255,7 @@ fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>>
 fn uninstall_codex_with_paths(
     agents_md_path: &Path,
     rtk_md_path: &Path,
-    hooks_json_path: &Path,
+    hooks_json_path: Option<&Path>,
     rtk_md_refs: &[&str],
     ctx: InitContext,
 ) -> Result<Vec<String>> {
@@ -1189,13 +1264,25 @@ fn uninstall_codex_with_paths(
     } = ctx;
     let mut removed = Vec::new();
 
-    if remove_codex_hook_from_file(hooks_json_path, ctx)? {
+    if let Some(hooks_json_path) = hooks_json_path
+        && remove_codex_hook_from_file(hooks_json_path, ctx)?
+    {
         removed.push(format!("hooks.json: removed {} entry", CODEX_HOOK_COMMAND));
     }
 
     if rtk_md_path.exists() {
-        if dry_run {
+        if !rtk_md_is_rtk_authored(rtk_md_path) {
+            // Under `--codex` this path is the project root, where an `RTK.md` may be the
+            // user's own notes rather than anything RTK put there. Uninstall removes RTK's
+            // artifacts, not files that merely share their name.
+            println!(
+                "{}Kept RTK.md: {} (it carries no rtk-owned marker; remove it yourself if you want it gone)",
+                if dry_run { "[dry-run] " } else { "  " },
+                rtk_md_path.display()
+            );
+        } else if dry_run {
             println!("[dry-run] would remove RTK.md: {}", rtk_md_path.display());
+            removed.push(format!("RTK.md: {}", rtk_md_path.display()));
         } else {
             // nosemgrep: filesystem-deletion
             fs::remove_file(rtk_md_path)
@@ -1203,8 +1290,8 @@ fn uninstall_codex_with_paths(
             if verbose > 0 {
                 eprintln!("Removed RTK.md: {}", rtk_md_path.display());
             }
+            removed.push(format!("RTK.md: {}", rtk_md_path.display()));
         }
-        removed.push(format!("RTK.md: {}", rtk_md_path.display()));
     }
 
     if agents_md_path.exists() {
@@ -2706,14 +2793,52 @@ fn run_codex_mode(global: bool, ctx: InitContext) -> Result<()> {
             codex_dir.join(HOOKS_JSON),
         )
     } else {
-        (
+        let paths = (
             PathBuf::from(AGENTS_MD),
             PathBuf::from(RTK_MD),
             PathBuf::from(CODEX_DIR).join(HOOKS_JSON),
-        )
+        );
+        // Only the hook path: `AGENTS.md` and `RTK.md` may legitimately be symlinks the user
+        // maintains, and `atomic_write` preserves those deliberately. `.codex` is the one
+        // component RTK creates itself, and creating it through a symlink puts a hook in a
+        // directory the user never named. Install refuses rather than half-configures.
+        //
+        // Its backup sibling is vouched for as well: `fs::copy` follows a symlink at the
+        // destination, so a planted `hooks.json.bak` carried the existing hooks.json out of
+        // the project even when `.codex` itself was a real directory.
+        ensure_inside_project(&paths.2)?;
+        ensure_inside_project(&backup_path_for(&paths.2))?;
+        paths
     };
 
     run_codex_mode_with_paths(agents_md_path, rtk_md_path, hooks_json_path, global, ctx)
+}
+
+/// Move a user-authored `RTK.md` aside before init writes RTK's own over it, returning where
+/// it went. `--codex` writes `RTK.md` into the project root, so the file it is about to
+/// replace may be the user's; nothing else in init claims that name outside an RTK-owned
+/// directory.
+fn back_up_foreign_rtk_md(path: &Path, ctx: InitContext) -> Result<Option<PathBuf>> {
+    if !path.exists() || rtk_md_is_rtk_authored(path) {
+        return Ok(None);
+    }
+    let backup = free_backup_path(path)?;
+    if ctx.dry_run {
+        println!(
+            "[dry-run] would move your RTK.md aside: {} -> {}",
+            path.display(),
+            backup.display()
+        );
+        return Ok(None);
+    }
+    fs::rename(path, &backup).with_context(|| {
+        format!(
+            "Failed to move {} aside to {}",
+            path.display(),
+            backup.display()
+        )
+    })?;
+    Ok(Some(backup))
 }
 
 fn run_codex_mode_with_paths(
@@ -2749,13 +2874,25 @@ fn run_codex_mode_with_paths(
         RTK_MD_REF.to_string()
     };
 
-    write_if_changed(&rtk_md_path, awareness_content(ctx.awareness), RTK_MD, ctx)?;
+    let backup = back_up_foreign_rtk_md(&rtk_md_path, ctx)?;
+    write_if_changed(
+        &rtk_md_path,
+        &codex_rtk_md_content(ctx.awareness),
+        RTK_MD,
+        ctx,
+    )?;
     let added_ref = patch_agents_md(&agents_md_path, &rtk_md_ref, ctx)?;
     let hook_added = patch_codex_hooks_json(&hooks_json_path, ctx)?;
 
     if !dry_run {
         println!("\nRTK configured for Codex CLI.\n");
         println!("  RTK.md:    {}", rtk_md_path.display());
+        if let Some(backup) = &backup {
+            println!(
+                "             your existing RTK.md was saved to {}",
+                backup.display()
+            );
+        }
         println!(
             "  Hook:      {} ({})",
             hooks_json_path.display(),
@@ -4042,6 +4179,46 @@ fn canonicalize_path_for_comparison(path: &Path) -> PathBuf {
         }
         candidate = parent;
     }
+}
+
+/// Refuse a project-scoped write whose path leaves the project.
+///
+/// The project paths are relative names RTK joins itself (`.codex/hooks.json`, `AGENTS.md`,
+/// `RTK.md`), so a symlinked component is the only way they can resolve elsewhere -- and then
+/// `rtk init --codex` would create and patch files in a directory the user never named. The
+/// global mode exists for writing outside the project.
+fn ensure_inside_project(path: &Path) -> Result<()> {
+    let root = std::env::current_dir().context("Failed to resolve the current directory")?;
+    ensure_inside_root(&root, path)
+}
+
+/// [`ensure_inside_project`] against an explicit root.
+fn ensure_inside_root(root: &Path, path: &Path) -> Result<()> {
+    let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    // Anchored to the root before resolving: these paths are relative, and
+    // `canonicalize_path_for_comparison` hands a relative path straight back when none of its
+    // components exist yet, which no absolute root can ever contain.
+    let joined = root.join(path);
+    // The link itself, first. A symlink still decides where a write lands when its target does
+    // not exist yet -- `fs::copy` and `fs::rename` create it -- and `canonicalize` gives up on
+    // a dangling one, falling back to the deepest existing ancestor and reporting the path as
+    // being right where the link sits.
+    let target = match fs::read_link(&joined) {
+        Ok(target) if target.is_absolute() => target,
+        Ok(target) => joined.parent().unwrap_or(&joined).join(target),
+        Err(_) => joined,
+    };
+    let resolved = canonicalize_path_for_comparison(&target);
+    if !resolved.starts_with(&root) {
+        anyhow::bail!(
+            "{} resolves to {}, outside the project at {}.\n\
+             Remove the symlink, or use --global to configure Codex outside the project.",
+            path.display(),
+            resolved.display(),
+            root.display()
+        );
+    }
+    Ok(())
 }
 
 fn shared_agent_state_path(path: &Path) -> PathBuf {
@@ -6847,6 +7024,244 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn test_rtk_md_ownership_is_carried_by_the_file_not_by_the_build() {
+        for level in [
+            AwarenessLevel::Default,
+            AwarenessLevel::High,
+            AwarenessLevel::Full,
+        ] {
+            assert!(is_rtk_authored_md(&codex_rtk_md_content(level)), "{level}");
+        }
+        // The legacy `--claude-md` payload says so with its own marker.
+        assert!(is_rtk_authored_md(RTK_INSTRUCTIONS));
+
+        // The point of the marker: a payload from another release is still recognised, where
+        // comparing against this build's copy stopped the moment the wording moved on.
+        assert!(is_rtk_authored_md(&format!(
+            "{RTK_MD_OWNED_HEADER}\n\n# Command output\n\nwording from some other release\n"
+        )));
+        // And an edit to RTK's own file does not make it the user's.
+        assert!(is_rtk_authored_md(&format!(
+            "{}\nmy own note\n",
+            codex_rtk_md_content(AwarenessLevel::Full)
+        )));
+
+        // A file RTK never wrote, including one holding the awareness text without the line
+        // that claims it.
+        assert!(!is_rtk_authored_md("my own notes about rtk\n"));
+        assert!(!is_rtk_authored_md(""));
+        assert!(!is_rtk_authored_md(RTK_AWARENESS_DEFAULT));
+        assert!(!is_rtk_authored_md(RTK_AWARENESS_FULL));
+    }
+
+    #[test]
+    fn test_codex_uninstall_keeps_a_user_authored_rtk_md() {
+        // `--codex` puts RTK.md in the project root, where the name is not RTK's to claim:
+        // uninstall removes RTK's own artifacts, never a file that merely shares their name.
+        let dir = TempDir::new().expect("tempdir");
+        let rtk_md = dir.path().join(RTK_MD);
+        let agents_md = dir.path().join(AGENTS_MD);
+        let hooks_json = dir.path().join(CODEX_DIR).join(HOOKS_JSON);
+        fs::write(&rtk_md, "my own notes about rtk\n").expect("write");
+        fs::write(&agents_md, "# Agents\n").expect("write");
+
+        let removed = uninstall_codex_with_paths(
+            &agents_md,
+            &rtk_md,
+            Some(&hooks_json),
+            &[RTK_MD_REF],
+            InitContext::default(),
+        )
+        .expect("uninstall");
+
+        assert_eq!(
+            fs::read_to_string(&rtk_md).expect("read"),
+            "my own notes about rtk\n",
+            "a user-authored RTK.md must survive uninstall"
+        );
+        assert!(
+            !removed.iter().any(|item| item.starts_with("RTK.md")),
+            "and must not be reported as removed: {removed:?}"
+        );
+    }
+
+    #[test]
+    fn test_codex_uninstall_removes_rtks_own_rtk_md() {
+        let dir = TempDir::new().expect("tempdir");
+        let rtk_md = dir.path().join(RTK_MD);
+        let agents_md = dir.path().join(AGENTS_MD);
+        let hooks_json = dir.path().join(CODEX_DIR).join(HOOKS_JSON);
+        fs::write(&rtk_md, codex_rtk_md_content(AwarenessLevel::Default)).expect("write");
+        fs::write(&agents_md, "# Agents\n").expect("write");
+
+        let removed = uninstall_codex_with_paths(
+            &agents_md,
+            &rtk_md,
+            Some(&hooks_json),
+            &[RTK_MD_REF],
+            InitContext::default(),
+        )
+        .expect("uninstall");
+
+        assert!(!rtk_md.exists(), "RTK's own RTK.md must still be removed");
+        assert!(removed.iter().any(|item| item.starts_with("RTK.md")));
+    }
+
+    #[test]
+    fn test_codex_install_moves_a_user_authored_rtk_md_aside() {
+        let dir = TempDir::new().expect("tempdir");
+        let rtk_md = dir.path().join(RTK_MD);
+        fs::write(&rtk_md, "my own notes\n").expect("write");
+
+        let backup = back_up_foreign_rtk_md(&rtk_md, InitContext::default())
+            .expect("backup")
+            .expect("a foreign RTK.md must be moved aside");
+        assert_eq!(fs::read_to_string(&backup).expect("read"), "my own notes\n");
+        assert!(!rtk_md.exists(), "the original is moved, not copied");
+
+        // A second run must not overwrite the first rescue copy.
+        fs::write(&rtk_md, "notes again\n").expect("write");
+        let second = back_up_foreign_rtk_md(&rtk_md, InitContext::default())
+            .expect("backup")
+            .expect("second backup");
+        assert_ne!(second, backup);
+        assert_eq!(fs::read_to_string(&backup).expect("read"), "my own notes\n");
+        assert_eq!(fs::read_to_string(&second).expect("read"), "notes again\n");
+    }
+
+    #[test]
+    fn test_codex_install_leaves_rtks_own_rtk_md_alone() {
+        let dir = TempDir::new().expect("tempdir");
+        let rtk_md = dir.path().join(RTK_MD);
+        assert_eq!(
+            back_up_foreign_rtk_md(&rtk_md, InitContext::default()).expect("absent"),
+            None,
+            "nothing to rescue when there is no file"
+        );
+
+        fs::write(&rtk_md, codex_rtk_md_content(AwarenessLevel::Full)).expect("write");
+        assert_eq!(
+            back_up_foreign_rtk_md(&rtk_md, InitContext::default()).expect("ours"),
+            None,
+            "RTK's own file is overwritten in place, with no backup litter"
+        );
+        // Including one written by a release whose wording has since moved on: an upgrade
+        // must not leave a numbered backup behind on every run.
+        fs::write(
+            &rtk_md,
+            format!("{RTK_MD_OWNED_HEADER}\n\nwording from some other release\n"),
+        )
+        .expect("write");
+        assert_eq!(
+            back_up_foreign_rtk_md(&rtk_md, InitContext::default()).expect("older payload"),
+            None
+        );
+        assert!(rtk_md.exists());
+    }
+
+    #[test]
+    fn test_codex_install_dry_run_moves_nothing() {
+        let dir = TempDir::new().expect("tempdir");
+        let rtk_md = dir.path().join(RTK_MD);
+        fs::write(&rtk_md, "my own notes\n").expect("write");
+
+        let ctx = InitContext {
+            dry_run: true,
+            ..InitContext::default()
+        };
+        assert_eq!(back_up_foreign_rtk_md(&rtk_md, ctx).expect("dry run"), None);
+        assert_eq!(fs::read_to_string(&rtk_md).expect("read"), "my own notes\n");
+        assert!(!rtk_md.with_extension("md.bak").exists());
+    }
+
+    /// The guard exists to keep a write inside the project, not to strand the files that are
+    /// already inside it: refusing to clean those leaves artifacts with no command to remove
+    /// them, since `--global` acts on a different directory.
+    #[test]
+    fn test_uninstall_cleans_the_project_even_without_the_hook_file() {
+        let dir = TempDir::new().expect("tempdir");
+        let rtk_md = dir.path().join(RTK_MD);
+        let agents_md = dir.path().join(AGENTS_MD);
+        fs::write(&rtk_md, codex_rtk_md_content(AwarenessLevel::Default)).expect("write");
+        fs::write(&agents_md, format!("# Team rules\n\n{RTK_MD_REF}\n")).expect("write");
+
+        let removed = uninstall_codex_with_paths(
+            &agents_md,
+            &rtk_md,
+            None,
+            &[RTK_MD_REF],
+            InitContext::default(),
+        )
+        .expect("uninstall");
+
+        assert!(!rtk_md.exists(), "RTK.md must still be removed");
+        assert!(
+            !fs::read_to_string(&agents_md)
+                .expect("read")
+                .contains(RTK_MD_REF),
+            "the AGENTS.md reference must still go"
+        );
+        assert!(removed.iter().any(|item| item.starts_with("RTK.md")));
+        assert!(!removed.iter().any(|item| item.starts_with("hooks.json")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_project_scoped_write_refuses_to_leave_the_project() {
+        use std::os::unix::fs::symlink;
+
+        let project = TempDir::new().expect("project");
+        let elsewhere = TempDir::new().expect("elsewhere");
+        let hooks_json = Path::new(CODEX_DIR).join(HOOKS_JSON);
+
+        // Nothing created yet: the ordinary first-install case must pass.
+        ensure_inside_root(project.path(), Path::new(AGENTS_MD)).expect("plain AGENTS.md");
+        ensure_inside_root(project.path(), Path::new(RTK_MD)).expect("plain RTK.md");
+        ensure_inside_root(project.path(), &hooks_json).expect("plain .codex/hooks.json");
+
+        symlink(elsewhere.path(), project.path().join(CODEX_DIR)).expect("symlink");
+        let error = ensure_inside_root(project.path(), &hooks_json)
+            .expect_err("a symlinked .codex must be refused");
+        assert!(error.to_string().contains("outside the project"), "{error}");
+        assert!(
+            fs::read_dir(elsewhere.path())
+                .expect("read_dir")
+                .next()
+                .is_none(),
+            "and nothing may be written there"
+        );
+    }
+
+    /// `fs::copy` follows a symlink at the destination, so the backup sibling carries the
+    /// existing hooks out of the project while `.codex` itself is an ordinary directory.
+    #[cfg(unix)]
+    #[test]
+    fn test_the_backup_destination_must_stay_inside_the_project_too() {
+        use std::os::unix::fs::symlink;
+
+        let project = TempDir::new().expect("project");
+        let elsewhere = TempDir::new().expect("elsewhere");
+        let hooks_json = Path::new(CODEX_DIR).join(HOOKS_JSON);
+        let backup = backup_path_for(&hooks_json);
+
+        fs::create_dir(project.path().join(CODEX_DIR)).expect("mkdir");
+        // A real directory, and a backup path that does not exist yet, are both inside.
+        ensure_inside_root(project.path(), &hooks_json).expect("real .codex");
+        ensure_inside_root(project.path(), &backup).expect("plain backup path");
+
+        // The link is dangling, as it would be before the first backup is taken: resolving
+        // only its existing ancestors would report it as sitting right where the link does.
+        symlink(
+            elsewhere.path().join("stolen.json"),
+            project.path().join(&backup),
+        )
+        .expect("symlink");
+        let error = ensure_inside_root(project.path(), &backup)
+            .expect_err("a symlinked backup destination must be refused");
+        assert!(error.to_string().contains("outside the project"), "{error}");
+    }
+
+    #[test]
     fn test_init_mentions_all_top_level_commands() {
         for cmd in [
             "rtk cargo",
@@ -7262,7 +7677,7 @@ mod tests {
             .unwrap();
             assert_eq!(
                 fs::read_to_string(&codex_rtk).unwrap(),
-                awareness_content(level),
+                codex_rtk_md_content(level),
                 "codex with level {level}"
             );
         }
@@ -7874,7 +8289,10 @@ mod tests {
         .unwrap();
 
         assert!(rtk_md.exists());
-        assert_eq!(fs::read_to_string(&rtk_md).unwrap(), RTK_AWARENESS_DEFAULT);
+        assert_eq!(
+            fs::read_to_string(&rtk_md).unwrap(),
+            codex_rtk_md_content(AwarenessLevel::Default)
+        );
         assert_eq!(
             fs::read_to_string(&agents_md).unwrap(),
             format!("{}\n", codex_rtk_md_ref(temp.path()))
@@ -8393,7 +8811,7 @@ mod tests {
         let rtk_md = codex_dir.join("RTK.md");
 
         fs::write(&agents_md, "# Team rules\n\n@RTK.md\n").unwrap();
-        fs::write(&rtk_md, "codex config").unwrap();
+        fs::write(&rtk_md, codex_rtk_md_content(AwarenessLevel::Default)).unwrap();
 
         let removed_first = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
         let removed_second = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
@@ -8442,7 +8860,7 @@ mod tests {
         let absolute_ref = codex_rtk_md_ref(codex_dir);
 
         fs::write(&agents_md, format!("# Team rules\n\n{}\n", absolute_ref)).unwrap();
-        fs::write(&rtk_md, "codex config").unwrap();
+        fs::write(&rtk_md, codex_rtk_md_content(AwarenessLevel::Default)).unwrap();
 
         let removed = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
 
@@ -8615,7 +9033,7 @@ mod tests {
             ),
         )
         .unwrap();
-        fs::write(&rtk_md, "codex config").unwrap();
+        fs::write(&rtk_md, codex_rtk_md_content(AwarenessLevel::Default)).unwrap();
 
         let removed = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
 
