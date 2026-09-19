@@ -1,0 +1,23 @@
+[filters.adb]
+description = "Compact adb output — strip blank lines, cap verbose device output"
+match_command = "^adb\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+]
+max_lines = 80
+truncate_lines_at = 160
+
+[[tests.adb]]
+name = "getprop output strips blanks"
+input = """
+[ro.product.model]: [Galaxy A02]
+
+[service.adb.tcp.port]: [5555]
+"""
+expected = "[ro.product.model]: [Galaxy A02]\n[service.adb.tcp.port]: [5555]"
+
+[[tests.adb]]
+name = "empty input passes through"
+input = ""
+expected = ""
