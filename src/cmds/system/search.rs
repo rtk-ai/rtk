@@ -5,7 +5,8 @@
 
 use crate::core::arg_tokenizer::{self, Dialect, Token, TokenKind, ValueSpec};
 use crate::core::stream::{
-    self, CaptureResult, FilterMode, StdinMode, StreamFilter, exec_capture, exec_capture_stdin,
+    self, BoundedCaptureResult, FilterMode, StdinMode, StreamFilter, exec_capture,
+    exec_capture_stdin, exec_capture_stdin_bounded,
 };
 use crate::core::tracking;
 use crate::core::utils::{ChildArgExt, resolved_command, strip_ansi};
@@ -379,6 +380,114 @@ fn unparsed_signal(stdout: &str) -> usize {
         .count()
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct GrepOptions {
+    agent_safe: bool,
+    files_only: bool,
+    count_by_file: bool,
+    top_files: Option<usize>,
+    max_matches: Option<usize>,
+    max_per_file: Option<usize>,
+    max_line_chars: Option<usize>,
+    full_lines: bool,
+    all: bool,
+    json: bool,
+}
+
+fn parse_grep_options(args: &[String]) -> Result<(GrepOptions, Vec<String>)> {
+    let tokens = tokenize_search_args(args, Engine::Grep);
+    let boundary = arg_tokenizer::injection_point(&tokens, args.len());
+    let mut options = GrepOptions::default();
+    let mut remove = vec![false; args.len()];
+    let mut i = 0;
+    while i < tokens.len() {
+        let token = tokens[i];
+        if token.source_index >= boundary || token.kind != TokenKind::Long || token.linked.is_some()
+        {
+            i += 1;
+            continue;
+        }
+        let name = token.text;
+        let value_name = match name {
+            "agent-safe" => {
+                options.agent_safe = true;
+                None
+            }
+            "files-only" => {
+                options.files_only = true;
+                None
+            }
+            "count-by-file" => {
+                options.count_by_file = true;
+                None
+            }
+            "full-lines" => {
+                options.full_lines = true;
+                None
+            }
+            "all" => {
+                options.all = true;
+                None
+            }
+            "json" => {
+                options.json = true;
+                None
+            }
+            "top-files" => Some("top-files"),
+            "max-matches" => Some("max-matches"),
+            "max-per-file" => Some("max-per-file"),
+            "max-line-chars" => Some("max-line-chars"),
+            _ => None,
+        };
+        if let Some(label) = value_name {
+            let next = token.source_index + 1;
+            let value_text = if let Some(value) = token.attached {
+                value
+            } else {
+                if next >= boundary || next >= args.len() {
+                    anyhow::bail!("--{label} requires a value");
+                }
+                let next_token = tokens.iter().find(|t| t.source_index == next);
+                if next_token.is_none_or(|t| t.kind != TokenKind::Positional || t.linked.is_some())
+                {
+                    anyhow::bail!("--{label} requires a value");
+                }
+                remove[next] = true;
+                args[next].as_str()
+            };
+            let value = value_text
+                .parse::<usize>()
+                .with_context(|| format!("invalid --{label} value"))?;
+            if value == 0 {
+                anyhow::bail!("--{label} must be greater than zero");
+            }
+            match name {
+                "top-files" => options.top_files = Some(value),
+                "max-matches" => options.max_matches = Some(value),
+                "max-per-file" => options.max_per_file = Some(value),
+                _ => options.max_line_chars = Some(value),
+            }
+        }
+        if value_name.is_some()
+            || matches!(
+                name,
+                "agent-safe" | "files-only" | "count-by-file" | "full-lines" | "all" | "json"
+            )
+        {
+            remove[token.source_index] = true;
+        }
+        i += 1;
+    }
+    Ok((
+        options,
+        args.iter()
+            .enumerate()
+            .filter(|(i, _)| !remove[*i])
+            .map(|(_, a)| a.clone())
+            .collect(),
+    ))
+}
+
 /// Run real grep so matches and the savings baseline match the agent's command;
 /// rg is the fallback when grep is absent, rejects a flag, or `--type` is used.
 /// The search engine the agent actually invoked. RTK runs this binary verbatim
@@ -418,9 +527,9 @@ fn engine_capture<T: AsRef<str>>(
     extra_args: &[T],
     patterns: &[String],
     paths: &[String],
-) -> Result<CaptureResult> {
+) -> Result<BoundedCaptureResult> {
     let mut cmd = engine_command(engine, extra_args, patterns, paths, false);
-    exec_capture_stdin(&mut cmd).context("search failed")
+    exec_capture_stdin_bounded(&mut cmd, stream::RAW_CAP).context("search failed")
 }
 
 fn engine_command<T: AsRef<str>>(
@@ -445,6 +554,22 @@ fn engine_command<T: AsRef<str>>(
     cmd.child_arg("--");
     cmd.child_args(paths);
     cmd
+}
+
+fn recovery_argv(
+    engine: Engine,
+    extra_args: &[String],
+    patterns: &[String],
+    paths: &[String],
+) -> Vec<String> {
+    let mut argv = vec![engine.bin().to_string()];
+    argv.extend(extra_args.iter().cloned());
+    for pattern in patterns {
+        argv.extend(["-e".to_string(), pattern.clone()]);
+    }
+    argv.push("--".to_string());
+    argv.extend(paths.iter().cloned());
+    argv
 }
 
 fn format_match_line(line: &str, show_file: bool, show_line: bool) -> Option<String> {
@@ -591,8 +716,43 @@ pub fn run(
     verbose: u8,
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
-    // Restored first: every check below classifies these args, and clap ate the boundary.
-    let args = &args_utils::restore_double_dash(args);
+    // Restore first: tokenizer sees original boundary and native value roles.
+    let restored = args_utils::restore_double_dash(args);
+    let (grep_options, forwarded) = if engine == Engine::Grep {
+        parse_grep_options(&restored)?
+    } else {
+        (GrepOptions::default(), restored.clone())
+    };
+    let args = &forwarded;
+    let env_safe = std::env::var("RTK_AGENT_SAFE")
+        .ok()
+        .and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(false);
+    let config_safe = config::Config::load()
+        .ok()
+        .and_then(|c| c.agent.map(|a| a.safe_mode))
+        .unwrap_or(false);
+    let safe = grep_options.agent_safe || env_safe || config_safe;
+    let max_results = if grep_options.all {
+        usize::MAX
+    } else {
+        grep_options
+            .max_matches
+            .or(safe.then_some(80))
+            .unwrap_or(max_results)
+    };
+    let max_line_len = if grep_options.full_lines {
+        usize::MAX
+    } else {
+        grep_options
+            .max_line_chars
+            .or(safe.then_some(240))
+            .unwrap_or(max_line_len)
+    };
 
     // --version / --help: pass through to the engine without filtering. Token-based and
     // scoped before the boundary, because `rtk grep -- --version` searches *for* that string.
@@ -673,6 +833,43 @@ pub fn run(
     let exit_code = result.exit_code;
     let raw_output = result.stdout.clone();
 
+    if grep_options.json && (!result.stderr.is_empty() || exit_code >= 2) {
+        let error = serde_json::json!({
+            "schema": "rtk.grep.v1",
+            "engine": engine.label(),
+            "patterns": patterns,
+            "paths": paths,
+            "total_matches": 0,
+            "displayed_matches": 0,
+            "files": [],
+            "partial": !raw_output.is_empty() || result.stdout_overflow,
+            "error": result.stderr.trim(),
+            "capture_overflow": result.stdout_overflow || result.stderr_overflow,
+            "recovery_argv": recovery_argv(engine, &extra_args, &patterns, &paths),
+            "exit_code": exit_code
+        });
+        let text = serde_json::to_string(&error)? + "\n";
+        print!("{text}");
+        timer.track(&real_cmd, &rtk_label, &raw_output, &text);
+        return Ok(exit_code);
+    }
+
+    if (result.stdout_overflow || result.stderr_overflow)
+        && (grep_options.agent_safe
+            || grep_options.files_only
+            || grep_options.count_by_file
+            || grep_options.top_files.is_some()
+            || grep_options.max_matches.is_some()
+            || grep_options.max_per_file.is_some()
+            || grep_options.max_line_chars.is_some())
+    {
+        eprintln!(
+            "[rtk] structured grep capture exceeded {} bytes",
+            stream::RAW_CAP
+        );
+        return Ok(2);
+    }
+
     // Unparseable shape re-runs verbatim below (with its own stderr), so handle it
     // before surfacing this run's stderr (#2333).
     if unparsed_signal(&raw_output) > 0 {
@@ -698,11 +895,15 @@ pub fn run(
         None
     };
 
+    let mut clipped_line_count = 0usize;
     let mut by_file: HashMap<String, Vec<(usize, bool, String)>> = HashMap::new();
     for line in raw_output.lines() {
         let Some((file, line_num, is_match, content)) = parse_match_line(line) else {
             continue;
         };
+        if max_line_len != usize::MAX && content.chars().count() > max_line_len {
+            clipped_line_count += 1;
+        }
         let cleaned = clean_line(content, max_line_len, context_re.as_ref(), &pattern_display);
         by_file
             .entry(file)
@@ -715,6 +916,99 @@ pub fn run(
         .flat_map(|v| v.iter())
         .filter(|(_, is_match, _)| *is_match)
         .count();
+
+    let mut ordered_files: Vec<_> = by_file.iter().collect();
+    ordered_files.sort_by_key(|(file, _)| *file);
+    if grep_options.files_only || grep_options.count_by_file || grep_options.top_files.is_some() {
+        let mut rows: Vec<(String, usize)> = ordered_files
+            .iter()
+            .map(|(file, rows)| (file.to_string(), rows.iter().filter(|(_, m, _)| *m).count()))
+            .collect();
+        if let Some(limit) = grep_options.top_files {
+            rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            rows.truncate(limit);
+        }
+        let output: String = if grep_options.files_only {
+            rows.into_iter()
+                .map(|(file, _)| format!("{file}\n"))
+                .collect()
+        } else {
+            rows.into_iter()
+                .map(|(file, count)| format!("{file}: {count}\n"))
+                .collect()
+        };
+        print!("{output}");
+        timer.track(&real_cmd, &rtk_label, &raw_output, &output);
+        return Ok(exit_code);
+    }
+    if grep_options.json {
+        let structured_per_file = if grep_options.all {
+            usize::MAX
+        } else {
+            grep_options
+                .max_per_file
+                .or(safe.then_some(5))
+                .unwrap_or(config::limits().grep_max_per_file)
+        };
+        let mut displayed_context = 0usize;
+        let mut omitted_context = 0usize;
+        let files: Vec<_> = ordered_files.iter().map(|(file, rows)| {
+            let true_matches = rows.iter().filter(|(_, m, _)| *m).count();
+            let mut seen_matches = 0usize;
+            let mut displayed_matches = 0usize;
+            let mut rows_json = Vec::new();
+            let total_context = rows.iter().filter(|(_, m, _)| !*m).count();
+            for (line, is_match, text) in rows.iter() {
+                if *is_match {
+                    seen_matches += 1;
+                    if seen_matches <= structured_per_file && displayed_matches < max_results {
+                        displayed_matches += 1;
+                        rows_json.push(serde_json::json!({"line": line, "kind": "match", "match": true, "text": text, "clipped": false}));
+                    }
+                } else if displayed_matches > 0 && seen_matches <= structured_per_file {
+                    displayed_context += 1;
+                    rows_json.push(serde_json::json!({"line": line, "kind": "context", "match": false, "text": text, "clipped": false}));
+                } else {
+                    omitted_context += 1;
+                }
+            }
+            let displayed_context_count = rows_json.iter().filter(|r| r["kind"] == "context").count();
+            serde_json::json!({"path": file, "true_match_count": true_matches, "displayed_count": displayed_matches, "omitted_count": true_matches.saturating_sub(displayed_matches), "displayed_context_count": displayed_context_count, "omitted_context_count": total_context.saturating_sub(displayed_context_count), "matches": rows_json})
+        }).collect();
+        let displayed_matches = files
+            .iter()
+            .map(|f| f["displayed_count"].as_u64().unwrap_or(0))
+            .sum::<u64>();
+        let output = serde_json::json!({
+            "schema": "rtk.grep.v1",
+            "mode": "json",
+            "engine": engine.label(),
+            "patterns": patterns,
+            "searched_paths": paths,
+            "total_match_count": total_matches,
+            "matched_file_count": files.len(),
+            "displayed_match_count": displayed_matches,
+            "omitted_match_count": (total_matches as u64).saturating_sub(displayed_matches),
+            "clipped_line_count": clipped_line_count,
+            "displayed_context_row_count": displayed_context,
+            "omitted_context_row_count": omitted_context,
+            "files": files,
+            "partial": result.stdout_overflow || result.stderr_overflow,
+            "error": if result.stdout_overflow || result.stderr_overflow {
+                Some(format!("structured capture exceeded {} bytes", stream::RAW_CAP))
+            } else {
+                None::<String>
+            },
+            "capture_overflow": result.stdout_overflow || result.stderr_overflow,
+            "recovery_hints": [],
+            "recovery_argv": [recovery_argv(engine, &extra_args, &patterns, &paths)],
+            "exit_code": exit_code
+        });
+        let text = serde_json::to_string(&output)? + "\n";
+        print!("{text}");
+        timer.track(&real_cmd, &rtk_label, &raw_output, &text);
+        return Ok(exit_code);
+    }
 
     // Mirror what the real command prints: the filename only when grep/rg would
     // show one (multiple files, a directory, -r or -H), the line number only with
@@ -744,7 +1038,14 @@ pub fn run(
 
     let has_context = detected_flags.context;
 
-    let per_file = config::limits().grep_max_per_file;
+    let per_file = if grep_options.all {
+        usize::MAX
+    } else {
+        grep_options
+            .max_per_file
+            .or(safe.then_some(5))
+            .unwrap_or(config::limits().grep_max_per_file)
+    };
     let mut files: Vec<_> = by_file.iter().collect();
     files.sort_by_key(|(f, _)| *f);
 
@@ -1072,6 +1373,38 @@ fn compact_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rtk_options_respect_native_value_roles_and_boundary() {
+        let (options, args) = parse_grep_options(&[
+            "-e".into(),
+            "--json".into(),
+            "--agent-safe".into(),
+            "file.txt".into(),
+        ])
+        .unwrap();
+        assert!(options.agent_safe);
+        assert!(!options.json);
+        assert_eq!(args, ["-e", "--json", "file.txt"]);
+
+        let (options, args) =
+            parse_grep_options(&["needle".into(), "--".into(), "--json".into()]).unwrap();
+        assert!(!options.json);
+        assert_eq!(args, ["needle", "--", "--json"]);
+    }
+
+    #[test]
+    fn rtk_limits_parse_and_preserve_native_args() {
+        let (options, args) = parse_grep_options(&[
+            "needle".into(),
+            "--max-matches".into(),
+            "12".into(),
+            "--max-line-chars=20".into(),
+        ])
+        .unwrap();
+        assert_eq!(options.max_matches, Some(12));
+        assert_eq!(args, ["needle"]);
+    }
 
     #[test]
     fn test_clean_line() {

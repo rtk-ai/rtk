@@ -29,6 +29,14 @@ pub struct Config {
     pub limits: LimitsConfig,
     #[serde(default)]
     pub awareness: AwarenessConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct AgentConfig {
+    #[serde(default)]
+    pub safe_mode: bool,
 }
 
 /// How much the agent is told about RTK by the instructions file `rtk init` writes.
@@ -518,6 +526,16 @@ pub fn show_config() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_safe_mode_defaults_and_round_trips() {
+        let absent = Config::from_toml("").unwrap();
+        assert!(absent.agent.is_none());
+        let enabled = Config::from_toml("[agent]\nsafe_mode = true\n").unwrap();
+        assert_eq!(enabled.agent.as_ref().map(|a| a.safe_mode), Some(true));
+        let encoded = toml::to_string(&enabled).unwrap();
+        assert!(encoded.contains("safe_mode = true"));
+    }
 
     #[test]
     fn test_hooks_config_deserialize() {
