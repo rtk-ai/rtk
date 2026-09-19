@@ -1340,6 +1340,28 @@ Avant la comparaison, RTK retire le wrapper, l'interpreteur ou le chemin, donc `
 aussi `python3 -m pytest tests/`. Les arguments sont conserves : `"^ls$"` exclut `ls` seul sans
 englober `ls -la`.
 
+### Scripts fish non ambigus
+
+Certains hotes evaluent la chaine de commande avec une couche compatible POSIX
+meme quand le shell de l'utilisateur est fish : un script fish multi-lignes
+(`if ... end`, `; and`, `; or`) echoue alors en erreur de parsing avant meme
+que RTK demarre. Le hook detecte les scripts **non ambigus** (mot-cle
+exclusivement fish comme `end`, `begin`, `switch`, `and`, `or`, `not` en
+position de commande, sans marqueur POSIX `then`/`fi`/`do`/`done`) et les
+reecrit en execution fish explicite :
+
+```
+if test -d src\n  git status\nend
+-> rtk run --shell fish -c 'if test -d src\n  git status\nend'
+```
+
+Points cles :
+- La reecriture est toujours en mode « ask » (jamais auto-approuvee) : le
+  contenu du script n'est pas attestable.
+- Necessite un binaire `fish` resolvable ; desactive sous Windows.
+- Les scripts ambigus ou POSIX passent inchanges, comme avant.
+- Desactivable via `wrap_fish_scripts = false` dans la section `[hooks]`.
+
 ---
 
 ## Configuration
@@ -1386,6 +1408,7 @@ enabled = false             # Telemetrie anonyme (1 ping/jour, requiert consente
 
 [hooks]
 exclude_commands = []       # Commandes a exclure de la recriture automatique
+wrap_fish_scripts = true    # Reecrire les scripts fish non ambigus en `rtk run --shell fish -c`
 ```
 
 ### Variables d'environnement

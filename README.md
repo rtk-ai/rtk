@@ -395,6 +395,29 @@ fish -c 'git status; and cargo test'  # unchanged
 Shell expansion in an outer double quote, additional shell options, redirects
 to files, and nested wrappers pass through unchanged.
 
+A command string that is *itself* fish — a multiline `if`/`for`/`switch` … `end`
+block, or a `; and` / `; or` chain — is handled before the rewrite rules are
+consulted: a host that evaluates it with a POSIX-compatible layer would fail to
+parse it before RTK ever runs, so the hook hands the script back for explicit
+fish execution:
+
+```fish
+if test -d src
+  git status
+end
+# → rtk run --shell fish -c 'if test -d src\n  git status\nend'
+```
+
+The script travels byte-identical inside one quoted argument, so both POSIX and
+fish host layers parse the wrapped command. The wrap always surfaces as an
+"ask" rewrite — never auto-allowed — because the script's content cannot be
+attested. It requires a resolvable `fish` binary, is disabled on Windows, and
+can be turned off with `wrap_fish_scripts = false` under `[hooks]` in the RTK
+config. Ambiguous scripts (shared `if`/`for` keywords without a fish-only
+marker, POSIX `then`/`do`/`fi` forms, heredocs, backticks) are untouched — keep
+writing intentionally shell-specific scripts as
+`rtk run --shell <shell> -c '<script>'`.
+
 ### Setup
 
 ```bash
