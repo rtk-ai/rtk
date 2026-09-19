@@ -2050,6 +2050,7 @@ match_command = "^make\\b"
             "dotnet-build",
             "du",
             "fail2ban-client",
+            "gitleaks",
             "gcloud",
             "hadolint",
             "helm",
@@ -2102,8 +2103,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            63,
-            "Expected exactly 63 built-in filters, got {}. \
+            64,
+            "Expected exactly 64 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
