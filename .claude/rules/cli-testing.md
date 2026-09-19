@@ -190,6 +190,30 @@ behavior (search/grep compression, guard rails, faithful formatting) rather than
 filter module, and several of them draw on `tests/fixtures/` (real captured aws/glab/gradlew/
 mvn/phpstan/dotnet output) alongside their own inline cases.
 
+### Machine independence (🔴 Critical)
+
+A test that spawns a real process must not depend on the machine it runs on. Two rules,
+both with `src/core/test_support.rs` helpers behind them:
+
+- **Never assert on a third-party tool's wording.** git, grep and coreutils translate their
+  messages, so `stderr.contains("not a git repository")` fails outright in a French shell —
+  and a *negative* assertion (`!out.contains("Is a directory")`) is worse, passing vacuously
+  while testing nothing. Assert RTK's own output, or the structure (exit code, which stream
+  the message went to). When a test genuinely needs a tool's English text, spawn it through
+  `test_support::rtk_command()` / `pin_environment()`, which pin `LC_ALL`/`LANGUAGE` and
+  neutralize the contributor's git config.
+- **Never touch the ambient repository.** Use `test_support::temp_git_repo()` and
+  `.current_dir(repo.path())`. A test that runs `git branch` in whatever repo the
+  contributor is sitting in mutates their work, and one that assumes it is inside a repo at
+  all silently stops exercising anything when it isn't.
+
+Verify a change here against a hostile environment, not just yours:
+
+```bash
+LC_ALL=de_DE.UTF-8 cargo test --all -- --ignored
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null cargo test --all -- --ignored
+```
+
 ### Real Command Execution
 
 ```rust
