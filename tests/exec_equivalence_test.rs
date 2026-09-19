@@ -12,10 +12,20 @@
 //! nothing that is compared, while a rewrite reaching inside a substitution
 //! changes the text the outer command was built from — visibly.
 //!
-//! What this does not check: whether a rewrite happened at all (a command RTK
-//! declines runs identically, so coverage belongs to other tests), and plumbing
-//! (stubs record their arguments, not where their file descriptors point, so a
-//! dropped redirect is invisible here).
+//! What this does not check:
+//!
+//!   - Whether a rewrite happened at all. A command RTK declines runs
+//!     identically, so coverage belongs to other tests.
+//!   - Plumbing. Stubs record their arguments, not where their file descriptors
+//!     point, so a dropped redirect is invisible here.
+//!   - A rewrite that *translates* rather than wraps. `head -5 f` becomes
+//!     `rtk read f --head-lines 5` — a different program with reordered
+//!     operands — and "the same programs ran" cannot be the test for that.
+//!     Those belong in `registry.rs`'s own assertions.
+//!
+//! A case whose programs are all unstubbed would record nothing on either side
+//! and pass while testing nothing, so every trace is required to be non-empty.
+//! That is what keeps the third item above from quietly becoming the first two.
 //!
 //! Unix only, skipped where there is no `bash`.
 #![cfg(unix)]
@@ -39,11 +49,19 @@ static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 struct Oracle {
     bin: PathBuf,
     root: PathBuf,
+    /// Whether a bounded read is available, and so whether what a process
+    /// substitution carries can be compared at all. `timeout` is coreutils;
+    /// macOS does not ship it.
+    reads_fd_contents: bool,
 }
 
 impl Oracle {
     fn new() -> Option<Self> {
         Command::new("bash").arg("-c").arg("true").output().ok()?;
+        let reads_fd_contents = Command::new("bash")
+            .args(["-c", "command -v timeout"])
+            .output()
+            .is_ok_and(|o| o.status.success());
 
         // One directory per instance: cargo runs these tests concurrently, and
         // rewriting a stub another test is executing fails with ETXTBSY.
@@ -63,6 +81,11 @@ impl Oracle {
             // Bounded, because `>( )` hands over the writing end of a pipe: it
             // opens but never delivers, so an unbounded read waits for a writer
             // that is itself waiting for this process to finish.
+            let read_arg = if reads_fd_contents {
+                "rec=\"$rec <$(timeout 1 tr '\\n' ' ' < \"$a\")>\""
+            } else {
+                "rec=\"$rec $a\""
+            };
             write_stub(
                 &bin.join(name),
                 &format!(
@@ -70,7 +93,7 @@ impl Oracle {
                      rec=\"\"\n\
                      for a in \"$@\"; do\n\
                      \x20 if [ -r \"$a\" ] && [ ! -d \"$a\" ]; then\n\
-                     \x20   rec=\"$rec <$(timeout 1 tr '\\n' ' ' < \"$a\")>\"\n\
+                     \x20   {read_arg}\n\
                      \x20 else\n\
                      \x20   rec=\"$rec $a\"\n\
                      \x20 fi\n\
@@ -90,7 +113,11 @@ impl Oracle {
             "#!/bin/bash\nout=$(\"$@\")\necho \"filtered:$out\"\n",
         );
 
-        Some(Self { bin, root })
+        Some(Self {
+            bin,
+            root,
+            reads_fd_contents,
+        })
     }
 
     /// Which programs `cmd` ran, with what arguments and working directory.
@@ -160,17 +187,31 @@ fn a_rewrite_runs_the_same_programs() {
         "git status & wait",
         "sink $(git status && cargo build)",
         "sink $( (ls) && git status )",
-        "diff <(git status) <(cargo build)",
-        "tee >(cargo build) < /dev/null",
         "D='# shellcheck disable=SC2034'; sink \"$D\"",
         "D='# shellcheck disable=SC2034'; git status",
         "ls {a,b}.txt",
         "time (cargo build)",
         "cd / && git status",
-    ] {
+    ]
+    .into_iter()
+    .chain(
+        // Only meaningful where a bounded read is available; without it the
+        // stub records the `/dev/fd/N` path, which is the same either way.
+        [
+            "diff <(git status) <(cargo build)",
+            "tee >(cargo build) < /dev/null",
+        ]
+        .into_iter()
+        .filter(|_| oracle.reads_fd_contents),
+    ) {
         let rewritten = oracle.rewrite(cmd);
+        let before = oracle.trace(cmd);
+        assert!(
+            !before.is_empty(),
+            "{cmd:?} ran nothing a stub recorded, so comparing it proves nothing"
+        );
         assert_eq!(
-            oracle.trace(cmd),
+            before,
             oracle.trace(&rewritten),
             "rewriting {cmd:?} to {rewritten:?} changed what ran"
         );
@@ -196,18 +237,28 @@ fn the_oracle_objects_to_a_rewrite_that_changes_what_runs() {
             "editing inside a quoted assignment changes what a later command reads",
         ),
         (
-            "diff <(git status) <(cargo build)",
-            "diff <(rtk git status) <(cargo build)",
-            "filtering a process substitution changes what the outer command compares",
-        ),
-        (
             "git status && cargo build",
             "git status && rtk cargo test",
             "rewriting one command into a different one",
         ),
-    ] {
+    ]
+    .into_iter()
+    .chain(
+        [(
+            "diff <(git status) <(cargo build)",
+            "diff <(rtk git status) <(cargo build)",
+            "filtering a process substitution changes what the outer command compares",
+        )]
+        .into_iter()
+        .filter(|_| oracle.reads_fd_contents),
+    ) {
+        let before = oracle.trace(original);
+        assert!(
+            !before.is_empty(),
+            "{original:?} ran nothing a stub recorded, so comparing it proves nothing"
+        );
         assert_ne!(
-            oracle.trace(original),
+            before,
             oracle.trace(corrupted),
             "the oracle did not notice that {what}"
         );

@@ -65,6 +65,8 @@ pub(crate) struct QuoteScan<'a> {
     bytes: &'a [u8],
     i: usize,
     quote: Option<char>,
+    /// The next byte is the one a `\` escapes.
+    pending_escape: bool,
 }
 
 impl<'a> QuoteScan<'a> {
@@ -73,7 +75,16 @@ impl<'a> QuoteScan<'a> {
             bytes: s.as_bytes(),
             i: 0,
             quote: None,
+            pending_escape: false,
         }
+    }
+
+    /// Only the bytes that are shell syntax: an escaped byte, and the backslash
+    /// escaping it, are dropped. What almost every caller wants — the exception
+    /// being one asking where words start and end, for which an escaped byte is
+    /// text like any other.
+    pub(crate) fn significant(self) -> impl Iterator<Item = Scanned> {
+        self.filter(|s| !s.escaped)
     }
 
     pub(crate) fn balanced(&self) -> bool {
@@ -81,26 +92,101 @@ impl<'a> QuoteScan<'a> {
     }
 }
 
+/// One byte of a command, with what the quoting was when it was reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Scanned {
+    pub(crate) index: usize,
+    pub(crate) byte: u8,
+    pub(crate) in_single: bool,
+    pub(crate) in_double: bool,
+    /// A `\` outside single quotes, or the byte it escapes. Present in the
+    /// text but not shell syntax: `\(` is not a bracket and `\'` opens
+    /// nothing. Ask [`QuoteScan::significant`] to leave these out.
+    pub(crate) escaped: bool,
+}
+
 impl Iterator for QuoteScan<'_> {
-    type Item = (usize, u8, bool, bool);
+    type Item = Scanned;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while self.i < self.bytes.len() {
-            let i = self.i;
-            let b = self.bytes[i];
-            if b == b'\\' && self.quote != Some('\'') {
-                self.i += 2;
-                continue;
-            }
-            let item = (i, b, self.quote == Some('\''), self.quote == Some('"'));
-            if b == b'\'' || b == b'"' {
-                self.quote = advance_quote_state(self.quote, b as char);
-            }
+        let i = self.i;
+        let b = *self.bytes.get(i)?;
+        let in_single = self.quote == Some('\'');
+        let in_double = self.quote == Some('"');
+
+        if self.pending_escape {
+            self.pending_escape = false;
             self.i += 1;
-            return Some(item);
+            return Some(Scanned {
+                index: i,
+                byte: b,
+                in_single,
+                in_double,
+                escaped: true,
+            });
         }
-        None
+
+        // A backslash outside single quotes escapes what follows, and neither
+        // byte is syntax — including a quote, which must not flip the state.
+        if b == b'\\' && !in_single {
+            self.pending_escape = self.i + 1 < self.bytes.len();
+            self.i += 1;
+            return Some(Scanned {
+                index: i,
+                byte: b,
+                in_single,
+                in_double,
+                escaped: true,
+            });
+        }
+
+        if b == b'\'' || b == b'"' {
+            self.quote = advance_quote_state(self.quote, b as char);
+        }
+        self.i += 1;
+        Some(Scanned {
+            index: i,
+            byte: b,
+            in_single,
+            in_double,
+            escaped: false,
+        })
     }
+}
+
+/// The shell words of `cmd`, as byte ranges, with a quoted span counted as one
+/// word however many blanks it holds.
+///
+/// [`coalesce_words`] answers a different question: it merges *adjacent* tokens,
+/// so `D='a b'` comes back as two words. That is right for argv and wrong for
+/// anyone asking where a word ends, which is how a value like
+/// `D='# shellcheck disable=SC2034'` came to be read as an assignment plus a
+/// command (#3262).
+///
+/// Escapes need no special handling here because [`QuoteScan`] never yields an
+/// escaped byte, so the space in `a\ b` is not a blank.
+pub(crate) fn word_spans(cmd: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start: Option<usize> = None;
+
+    // Every byte, escaped ones included: a `\'` on its own is a word, and
+    // `a\ b` is one word rather than two.
+    for c in QuoteScan::new(cmd) {
+        let blank =
+            !c.escaped && !c.in_single && !c.in_double && (c.byte == b' ' || c.byte == b'\t');
+        if blank {
+            if let Some(from) = start.take() {
+                spans.push((from, c.index));
+            }
+        } else if start.is_none() {
+            start = Some(c.index);
+        }
+    }
+
+    if let Some(from) = start {
+        spans.push((from, cmd.len()));
+    }
+    spans
 }
 
 /// Only `\'` inside `$'…'` diverges: bash keeps the string open, the lexer
@@ -112,7 +198,13 @@ pub(crate) fn ansi_c_quote_defeats_lexer(cmd: &str) -> bool {
     // The `$` must be one QuoteScan yielded: in `\$'...'` it was consumed as an
     // escape, so indexing the raw bytes would read a `$` that never opened a span.
     let mut prev_yielded = None;
-    for (_, b, in_single, in_double) in QuoteScan::new(cmd) {
+    for Scanned {
+        byte: b,
+        in_single,
+        in_double,
+        ..
+    } in QuoteScan::new(cmd).significant()
+    {
         if b == b'\'' && !in_double {
             if !in_single {
                 ansi_span = prev_yielded == Some(b'$');
@@ -500,27 +592,15 @@ pub fn contains_unattestable_construct(cmd: &str) -> bool {
 /// but treats single-quoted text literally; `<(`/`>(` is unquoted-only.
 fn contains_substitution(cmd: &str) -> bool {
     let bytes = cmd.as_bytes();
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\\' if !in_single => {
-                i += 2;
-                continue;
-            }
-            b'\'' if !in_double => in_single = !in_single,
-            b'"' if !in_single => in_double = !in_double,
-            b'`' if !in_single => return true,
-            b'$' if !in_single && bytes.get(i + 1) == Some(&b'(') => return true,
-            b'<' | b'>' if !in_single && !in_double && bytes.get(i + 1) == Some(&b'(') => {
-                return true;
-            }
-            _ => {}
+    QuoteScan::new(cmd).significant().any(|c| {
+        let opens_paren = bytes.get(c.index + 1) == Some(&b'(');
+        match c.byte {
+            b'`' => !c.in_single,
+            b'$' => !c.in_single && opens_paren,
+            b'<' | b'>' => !c.in_single && !c.in_double && opens_paren,
+            _ => false,
         }
-        i += 1;
-    }
-    false
+    })
 }
 
 /// Grammar that can open a command without being part of it, so it does not
@@ -644,6 +724,50 @@ pub(crate) fn opens_substitution(input: &str, offset: usize) -> bool {
     matches!(input[..offset].chars().next_back(), Some('$' | '<' | '>'))
 }
 
+/// How deep a walk currently is inside `$( )`, `<( )` or `>( )`.
+///
+/// The segmenter and the emitter walk the same tokens and must agree about
+/// where a substitution starts and stops — one counting a bracket the other
+/// does not is a command appearing or vanishing. They share this rather than
+/// each keeping their own count.
+#[derive(Default)]
+pub(crate) struct SubstitutionDepth(usize);
+
+impl SubstitutionDepth {
+    /// Whether the token being looked at sits inside a substitution, where
+    /// nothing ends a command out here.
+    pub(crate) fn is_inside(&self) -> bool {
+        self.0 > 0
+    }
+
+    /// Take `tok` into account, and say whether it was the bracketing of a
+    /// substitution — the `(` that opens one or the `)` that closes it — which
+    /// is never a boundary in its own right.
+    pub(crate) fn absorbs(&mut self, cmd: &str, tok: &ParsedToken) -> bool {
+        if tok.kind != TokenKind::Shellism {
+            return false;
+        }
+        match tok.value.as_str() {
+            // Brackets nest, so one inside a substitution counts too: without
+            // that its `)` closes the substitution a bracket early and the real
+            // closing `)` reads as a boundary.
+            "(" if self.0 > 0 => {
+                self.0 += 1;
+                true
+            }
+            "(" if opens_substitution(cmd, tok.offset) => {
+                self.0 += 1;
+                true
+            }
+            ")" if self.0 > 0 => {
+                self.0 -= 1;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Split a compound command into the commands it runs, under `policy`.
 ///
 /// Offsets are relative to `cmd.trim()`, which is what every caller matches
@@ -659,39 +783,22 @@ pub(crate) fn segment(cmd: &str, policy: Policy) -> Vec<Segment<'_>> {
     let mut seg_start: usize = 0;
     let mut seg_end: Option<usize> = None;
     let mut seg_has_text = false;
-    let mut substitution_depth: usize = 0;
+    let mut substitution = SubstitutionDepth::default();
 
     let mut i = 0;
     while let Some(tok) = tokens.get(i) {
-        let is_boundary = match tok.kind {
-            TokenKind::Operator | TokenKind::Pipe(_) => substitution_depth == 0,
-            TokenKind::Shellism => match tok.value.as_str() {
-                // A `(` that closes a `$` opens a substitution, not a subshell.
-                // Its body is tracked so the `)` that ends it is not read as a
-                // boundary either, and so an operator inside it does not end a
-                // command out here.
-                "(" if !policy.descend_into_substitution
-                    && opens_substitution(trimmed, tok.offset) =>
-                {
-                    substitution_depth += 1;
-                    false
+        // The gate descends into a substitution, so for it the tracker never
+        // engages and everything inside is read as ordinary commands.
+        let bracketing = !policy.descend_into_substitution && substitution.absorbs(trimmed, tok);
+        let is_boundary = !bracketing
+            && !substitution.is_inside()
+            && match tok.kind {
+                TokenKind::Operator | TokenKind::Pipe(_) => true,
+                TokenKind::Shellism => {
+                    policy.group_boundaries && matches!(tok.value.as_str(), "&" | "(" | ")")
                 }
-                // A bracket nested inside a substitution counts too, or its `)`
-                // closes the substitution one bracket early and the real
-                // closing `)` is read as a boundary out here.
-                "(" if substitution_depth > 0 => {
-                    substitution_depth += 1;
-                    false
-                }
-                ")" if substitution_depth > 0 => {
-                    substitution_depth -= 1;
-                    false
-                }
-                "&" | "(" | ")" => policy.group_boundaries && substitution_depth == 0,
                 _ => false,
-            },
-            _ => false,
-        };
+            };
 
         if is_boundary {
             let end = seg_end.take().unwrap_or(tok.offset);
@@ -865,6 +972,127 @@ pub fn shell_split(input: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The scan reports every byte and says which are escaped, so a caller
+    /// asking about syntax and a caller asking about text get different
+    /// answers from one place rather than one answer and a workaround.
+    #[test]
+    fn test_quote_scan_reports_escaped_bytes_without_letting_them_act() {
+        let all: Vec<u8> = QuoteScan::new(r"a\'b").map(|c| c.byte).collect();
+        assert_eq!(all, b"a\\'b", "every byte is reported");
+
+        let significant: Vec<u8> = QuoteScan::new(r"a\'b")
+            .significant()
+            .map(|c| c.byte)
+            .collect();
+        assert_eq!(significant, b"ab", "the escape and its byte are not syntax");
+
+        // An escaped quote opens nothing, so what follows is not quoted — and
+        // a real one after it still is.
+        let quoted: Vec<(u8, bool)> = QuoteScan::new(r"\'a'b")
+            .significant()
+            .map(|c| (c.byte, c.in_single))
+            .collect();
+        assert_eq!(quoted, vec![(b'a', false), (b'\'', false), (b'b', true)]);
+
+        assert!(
+            quotes_balanced_for_test(r"echo \'"),
+            "an escaped quote leaves nothing open"
+        );
+        assert!(!quotes_balanced_for_test("echo '"), "a real quote does");
+    }
+
+    /// A pending escape is consumed before a fresh backslash is looked for.
+    /// Reverse those two and a run of backslashes never finishes escaping, so
+    /// the real quote after it is swallowed as an escaped byte and never opens
+    /// the string — `\\\\'x` would report no quote and `x` as unquoted.
+    #[test]
+    fn test_quote_scan_finishes_one_escape_before_starting_another() {
+        let seen: Vec<(u8, bool)> = QuoteScan::new(r"\\\\'x")
+            .significant()
+            .map(|c| (c.byte, c.in_single))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![(b'\'', false), (b'x', true)],
+            "two escaped backslashes, then a quote that really opens"
+        );
+    }
+
+    fn quotes_balanced_for_test(cmd: &str) -> bool {
+        let mut scan = QuoteScan::new(cmd);
+        scan.by_ref().for_each(drop);
+        scan.balanced()
+    }
+
+    /// `word_spans` decides where a word ends for anyone who needs to know —
+    /// `split_env_prefix` among them — so it is worth asserting on its own
+    /// rather than only through a caller that happens to exercise it.
+    #[test]
+    fn test_word_spans_reads_a_quoted_span_as_one_word() {
+        fn words(cmd: &str) -> Vec<&str> {
+            word_spans(cmd)
+                .into_iter()
+                .map(|(from, to)| &cmd[from..to])
+                .collect()
+        }
+
+        assert_eq!(words("git status"), vec!["git", "status"]);
+        assert_eq!(
+            words("D='# shellcheck disable=SC2034' git status"),
+            vec!["D='# shellcheck disable=SC2034'", "git", "status"]
+        );
+        assert_eq!(words("FOO=\"a b\" ls"), vec!["FOO=\"a b\"", "ls"]);
+        assert_eq!(
+            words("a\\ b c"),
+            vec!["a\\ b", "c"],
+            "an escaped blank joins"
+        );
+        assert_eq!(words("a\tb"), vec!["a", "b"], "a tab separates");
+        assert_eq!(words("echo \"a'b'c\" x"), vec!["echo", "\"a'b'c\"", "x"]);
+        assert_eq!(words("echo '' x"), vec!["echo", "''", "x"]);
+        assert_eq!(words("café日本語 x"), vec!["café日本語", "x"]);
+        // A word of nothing but escapes is still a word, which is why this
+        // reads the whole scan rather than only the bytes that are syntax.
+        assert_eq!(words(r"git status \'"), vec!["git", "status", r"\'"]);
+        assert_eq!(words(r"\' foo"), vec![r"\'", "foo"]);
+        assert_eq!(words(r"a \' b"), vec!["a", r"\'", "b"]);
+
+        assert!(words("").is_empty());
+        assert!(words("   \t  ").is_empty());
+        assert_eq!(words("  ls  "), vec!["ls"], "outer blanks are not words");
+    }
+
+    /// Nothing here should panic or lose a byte, however the quoting ends.
+    #[test]
+    fn test_word_spans_survives_unfinished_quoting() {
+        for cmd in ["echo 'abc", "echo \"abc", "echo abc\\", "'", "\\"] {
+            for (from, to) in word_spans(cmd) {
+                assert!(from < to && to <= cmd.len(), "bad span in {cmd:?}");
+                assert!(cmd.is_char_boundary(from) && cmd.is_char_boundary(to));
+            }
+        }
+    }
+
+    /// `$'…'` is read as a plain `'…'`, so the backslash inside it closes the
+    /// string where bash would keep it open (#3188). That belongs to the shared
+    /// scanner and is why `ansi_c_quote_defeats_lexer` exists as a separate
+    /// guard; pinned here so the limitation is visible where the splitting is.
+    #[test]
+    fn test_word_spans_reads_ansi_c_quoting_as_ordinary_quoting() {
+        let cmd = "D=$'ansi\\'c' git status";
+        let spans = word_spans(cmd);
+        assert_ne!(
+            spans.len(),
+            3,
+            "if this ever splits into three words the limitation is gone and \
+             the comment above should go with it"
+        );
+        assert!(
+            ansi_c_quote_defeats_lexer(cmd),
+            "the guard that does catch it"
+        );
+    }
 
     #[test]
     fn test_coalesce_words_merges_adjacent_tokens() {
@@ -1832,6 +2060,11 @@ mod tests {
             // the subshells they look like.
             "echo $(ls)",
             "echo $(ls && rm -rf /)",
+            // Process substitution, which the boundary rules treat like `$( )`
+            // and which nothing else in this corpus produces.
+            "diff <(ls) <(rm -rf /)",
+            "tee >(rm -rf /) < in",
+            "diff <(ls) && rm -rf /",
             "echo $(cd /tmp && (ls; pwd))",
             "echo $(ls) && rm -rf /",
             "ls $(",
@@ -1856,7 +2089,11 @@ mod tests {
             // the gate is still compared against it line by line above, so an
             // unintended drift in `segment()` has to show up as classify and
             // the gate disagreeing here.
-            // `<(` and `>(` are covered by excluding `<` and `>` for redirects.
+            // About a third of the corpus reaches this: the redirect variants
+            // are eight of nine and every one of them carries a `<` or `>`.
+            // What is left still crosses every joiner with every wrapper, which
+            // is where this commit's boundaries live. `<(`/`>(` fall out with
+            // the redirects, and `$(` is named because it has no angle bracket.
             if !cmd.contains(['\n', '\r', '>', '<']) && !cmd.contains("$(") {
                 assert_eq!(
                     classify_texts(cmd),
