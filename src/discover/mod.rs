@@ -10,10 +10,10 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
-use provider::{ClaudeProvider, SessionProvider};
+use provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
 use registry::{
-    Classification, ExcludePattern, category_avg_tokens, classify_command, split_command_chain,
-    strip_disabled_prefix,
+    Classification, ExcludePattern, category_avg_tokens, classify_command,
+    split_command_chain_parts, strip_disabled_prefix,
 };
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
@@ -249,6 +249,306 @@ struct SupportedBucket {
     command_counts: HashMap<String, usize>,
 }
 
+/// What the report does with one command of a line.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum Disposition {
+    /// The hook routed it through RTK.
+    AlreadyRtk,
+    /// RTK would have filtered it where it ran, and did not.
+    Missed,
+    /// RTK handles it, but not as it was run — the saving is real and reachable
+    /// only by changing the command.
+    Opportunity,
+    /// Nothing RTK would do with it.
+    Dropped,
+}
+
+/// Decide which of those a command is.
+///
+/// Kept apart from the scanning loop so a test can reach it: the loop needs a
+/// real session directory and a real tracking database.
+///
+/// `covered` alone cannot be trusted, because neither source behind it knows
+/// where the command sat: a `hook_decisions` row is one decision for the whole
+/// tool call, and the estimate asks about the command on its own. `cat f.log`
+/// becomes `rtk read` alone but not in `cat f.log | grep ERROR`, so the producer
+/// of every such line would read as adoption RTK never had.
+fn disposition(bypassed: bool, reached: bool, covered: bool, consumes_a_pipe: bool) -> Disposition {
+    if reached && covered {
+        return Disposition::AlreadyRtk;
+    }
+    // A bypassed command belongs in the main table: the rewriter refused it for
+    // its prefix, not for its position, and the bypass bucket has already had
+    // its say about that.
+    if bypassed || reached {
+        return Disposition::Missed;
+    }
+    // A command reading another's output wrote what actually came back, and
+    // `output_len` already measures that. Counting it would claim a saving on
+    // the one line `tail` printed on top of everything `cargo` wrote.
+    //
+    // Anything else RTK has a rule for is an opportunity, whatever kept the
+    // rewriter off it — feeding a pipe whose consumer throws the output away,
+    // or being written in a form the rewriter does not match, like an absolute
+    // path (#1053). Dropping those hides real savings and hides the
+    // disagreements between classification and rewriting that cause them.
+    if consumes_a_pipe {
+        return Disposition::Dropped;
+    }
+    Disposition::Opportunity
+}
+
+/// Everything one scan counts, kept apart from the session files and the
+/// tracking database `run()` reads them from.
+///
+/// Counting lives here rather than inline in `run()`, which needs a real session
+/// directory and a real tracking database, so a test can hand it commands
+/// directly and assert on what it counted.
+#[derive(Default)]
+struct Tally {
+    total_commands: usize,
+    already_rtk: usize,
+    already_rtk_estimated: usize,
+    rtk_disabled_count: usize,
+    rtk_disabled_estimated: usize,
+    rtk_disabled_cmds: HashMap<String, usize>,
+    supported: HashMap<&'static str, SupportedBucket>,
+    /// Commands RTK handles that the rewriter passed over because of where they
+    /// ran — reachable by changing the command, not by the hook.
+    opportunities: HashMap<&'static str, SupportedBucket>,
+    unsupported: HashMap<String, UnsupportedBucket>,
+}
+
+impl Tally {
+    fn take_rows(&mut self) -> ReportRows {
+        ReportRows {
+            supported: into_entries(std::mem::take(&mut self.supported)),
+            opportunities: into_entries(std::mem::take(&mut self.opportunities)),
+        }
+    }
+
+    fn add(&mut self, ext_cmd: &ExtractedCommand, ctx: &CoverageContext) {
+        let parts = split_command_chain_parts(&ext_cmd.command);
+        // One answer per command, worked out once for the line: what the
+        // rewriter does to one command depends on the ones around it, and a
+        // report that counts a command the rewriter passes over promises a
+        // saving the hook does not take.
+        let reached = registry::stages_the_rewriter_reaches(
+            &ext_cmd.command,
+            &ctx.exclude_patterns,
+            &ctx.normalized_transparent_prefixes,
+        );
+        for (index, chain_part) in parts.iter().enumerate() {
+            let part = chain_part.text;
+            // `output_len` measures what came back from the tool call, which
+            // is what the last command in the line wrote. An earlier one
+            // either fed a pipe, and its output was consumed rather than
+            // returned, or shares the number with its siblings — either way
+            // the per-category average is the honest estimate for it, and
+            // handing this number to every part would multiply the total by
+            // the number of parts.
+            let output_len = if index + 1 == parts.len() {
+                ext_cmd.output_len
+            } else {
+                None
+            };
+            self.total_commands += 1;
+
+            // Detect RTK_DISABLED= bypass before classification
+            let (env_prefix, actual_cmd) = strip_disabled_prefix(part);
+            let bypassed = prefix_contains_rtk_disabled(env_prefix);
+            let part = if bypassed {
+                match classify_command(actual_cmd) {
+                    Classification::Supported { .. } => {
+                        // Only count as a "bypass" if the hook would actually have
+                        // covered it absent the bypass — otherwise RTK_DISABLED=
+                        // bypassed nothing (hook wasn't installed / excluded / would
+                        // defer / would deny), and flagging it as a "bypass" would be
+                        // false advice. See `would_be_covered_without_bypass`'s doc
+                        // comment for why this must never go through `hook_coverage`'s
+                        // measured-log path.
+                        if would_be_covered_without_bypass(&ext_cmd.command, actual_cmd, ctx) {
+                            self.rtk_disabled_count += 1;
+                            self.rtk_disabled_estimated += 1;
+                            let display = truncate_command(actual_cmd);
+                            *self.rtk_disabled_cmds.entry(display).or_insert(0) += 1;
+                            continue;
+                        }
+                        // Genuinely never had a chance regardless of the bypass (no
+                        // hook installed / excluded by config / etc.) — a real
+                        // missed-savings opportunity like any other command, not a
+                        // "bypass" of anything. Fall through to the normal
+                        // classification below (using the env-stripped command)
+                        // instead of vanishing from the whole report — previously
+                        // this case was counted only in `self.total_commands` and nowhere
+                        // else (rtk-ai/rtk#3206 review).
+                        actual_cmd
+                    }
+                    // Unsupported/Ignored under RTK_DISABLED= isn't interesting
+                    // either way — rtk was never going to touch it regardless of
+                    // the bypass.
+                    _ => continue,
+                }
+            } else {
+                part
+            };
+
+            match classify_command(part) {
+                Classification::Supported {
+                    rtk_equivalent,
+                    category,
+                    estimated_savings_pct,
+                    status,
+                } => {
+                    let coverage = hook_coverage(&ext_cmd.command, part, &ext_cmd.tool_use_id, ctx);
+
+                    // A command reads another's output when the one before it
+                    // feeds a pipe.
+                    let consumes_a_pipe = index
+                        .checked_sub(1)
+                        .and_then(|prev| parts.get(prev))
+                        .is_some_and(|prev| prev.feeds_pipe);
+
+                    let map = match disposition(
+                        bypassed,
+                        reached.get(index).copied().unwrap_or(false),
+                        coverage.is_covered(),
+                        consumes_a_pipe,
+                    ) {
+                        Disposition::AlreadyRtk => {
+                            self.already_rtk += 1;
+                            if coverage.is_estimated() {
+                                self.already_rtk_estimated += 1;
+                            }
+                            continue;
+                        }
+                        Disposition::Dropped => continue,
+                        Disposition::Missed => &mut self.supported,
+                        Disposition::Opportunity => &mut self.opportunities,
+                    };
+
+                    let bucket = map
+                        .entry(rtk_equivalent)
+                        .or_insert_with(|| SupportedBucket {
+                            rtk_equivalent,
+                            category,
+                            count: 0,
+                            total_output_tokens: 0,
+                            total_raw_output_tokens: 0,
+                            command_counts: HashMap::new(),
+                        });
+
+                    bucket.count += 1;
+
+                    // Estimate tokens for this command
+                    let output_tokens = if let Some(len) = output_len {
+                        // Real: from tool_result content length
+                        len / 4
+                    } else {
+                        // Fallback: category average
+                        let subcmd = extract_subcmd(part);
+                        category_avg_tokens(category, subcmd)
+                    };
+
+                    let savings = (output_tokens as f64 * estimated_savings_pct / 100.0) as usize;
+                    bucket.total_output_tokens += savings;
+                    // Accumulate pre-savings tokens so we can compute a weighted effective
+                    // savings rate across all sub-commands in this bucket later.
+                    bucket.total_raw_output_tokens += output_tokens;
+
+                    // Track the display name with status
+                    let display_name = truncate_command(part);
+                    let entry = bucket
+                        .command_counts
+                        .entry(format!("{}:{:?}", display_name, status))
+                        .or_insert(0);
+                    *entry += 1;
+                }
+                Classification::Unsupported { base_command } => {
+                    let bucket =
+                        self.unsupported
+                            .entry(base_command)
+                            .or_insert_with(|| UnsupportedBucket {
+                                count: 0,
+                                example: part.to_string(),
+                            });
+                    bucket.count += 1;
+                }
+                Classification::Ignored => {
+                    // Ground truth from the transcript itself — the model really
+                    // did invoke `rtk` directly (excluding the deliberate
+                    // unfiltered `rtk proxy` escape hatch).
+                    if is_already_rtk(part) {
+                        self.already_rtk += 1;
+                    }
+                    // Otherwise just skip
+                }
+            }
+        }
+    }
+}
+
+/// The two tables of the report, once the buckets behind them are rows.
+///
+/// They hold the same type, so crossing them compiles and prints each table
+/// under the other's heading — which is why the assignment lives in
+/// [`Tally::take_rows`] where a test can check it, rather than inline in `run()`.
+struct ReportRows {
+    supported: Vec<SupportedEntry>,
+    opportunities: Vec<SupportedEntry>,
+}
+
+/// Collapse aggregated buckets into report rows, highest estimated saving first.
+fn into_entries(map: HashMap<&'static str, SupportedBucket>) -> Vec<SupportedEntry> {
+    let mut entries: Vec<SupportedEntry> = map
+        .into_values()
+        .map(|bucket| {
+            // Pick the most common command as the display name
+            let (command_with_status, status) = bucket
+                .command_counts
+                .into_iter()
+                .max_by_key(|(_, c)| *c)
+                .map(|(name, _)| {
+                    // Extract status from "command:Status" format
+                    if let Some(colon_pos) = name.rfind(':') {
+                        let cmd = name[..colon_pos].to_string();
+                        let status_str = &name[colon_pos + 1..];
+                        let status = match status_str {
+                            "Passthrough" => report::RtkStatus::Passthrough,
+                            "NotSupported" => report::RtkStatus::NotSupported,
+                            _ => report::RtkStatus::Existing,
+                        };
+                        (cmd, status)
+                    } else {
+                        (name, report::RtkStatus::Existing)
+                    }
+                })
+                .unwrap_or_else(|| (String::new(), report::RtkStatus::Existing));
+
+            // Derive the effective savings rate from accumulated totals rather than
+            // using the first-seen sub-command's rate. This gives a weighted average
+            // across all sub-commands that fell in this bucket.
+            let effective_savings_pct = if bucket.total_raw_output_tokens > 0 {
+                bucket.total_output_tokens as f64 * 100.0 / bucket.total_raw_output_tokens as f64
+            } else {
+                0.0
+            };
+
+            SupportedEntry {
+                command: command_with_status,
+                count: bucket.count,
+                rtk_equivalent: bucket.rtk_equivalent,
+                category: bucket.category,
+                estimated_savings_tokens: bucket.total_output_tokens,
+                estimated_savings_pct: effective_savings_pct,
+                rtk_status: status,
+            }
+        })
+        .collect();
+    entries.sort_by_key(|b| std::cmp::Reverse(b.estimated_savings_tokens));
+    entries
+}
+
 /// Aggregation bucket for unsupported commands.
 struct UnsupportedBucket {
     count: usize,
@@ -350,15 +650,8 @@ pub fn run(
         normalized_transparent_prefixes,
     };
 
-    let mut total_commands: usize = 0;
-    let mut already_rtk: usize = 0;
-    let mut already_rtk_estimated: usize = 0;
     let mut parse_errors: usize = 0;
-    let mut rtk_disabled_count: usize = 0;
-    let mut rtk_disabled_estimated: usize = 0;
-    let mut rtk_disabled_cmds: HashMap<String, usize> = HashMap::new();
-    let mut supported_map: HashMap<&'static str, SupportedBucket> = HashMap::new();
-    let mut unsupported_map: HashMap<String, UnsupportedBucket> = HashMap::new();
+    let mut tally = Tally::default();
 
     for session_path in &sessions {
         let extracted = match provider.extract_commands(session_path) {
@@ -373,186 +666,26 @@ pub fn run(
         };
 
         for ext_cmd in &extracted {
-            let parts = split_command_chain(&ext_cmd.command);
-            for part in parts {
-                total_commands += 1;
-
-                // Detect RTK_DISABLED= bypass before classification
-                let (env_prefix, actual_cmd) = strip_disabled_prefix(part);
-                let part = if prefix_contains_rtk_disabled(env_prefix) {
-                    match classify_command(actual_cmd) {
-                        Classification::Supported { .. } => {
-                            // Only count as a "bypass" if the hook would actually have
-                            // covered it absent the bypass — otherwise RTK_DISABLED=
-                            // bypassed nothing (hook wasn't installed / excluded / would
-                            // defer / would deny), and flagging it as a "bypass" would be
-                            // false advice. See `would_be_covered_without_bypass`'s doc
-                            // comment for why this must never go through `hook_coverage`'s
-                            // measured-log path.
-                            if would_be_covered_without_bypass(
-                                &ext_cmd.command,
-                                actual_cmd,
-                                &coverage_ctx,
-                            ) {
-                                rtk_disabled_count += 1;
-                                rtk_disabled_estimated += 1;
-                                let display = truncate_command(actual_cmd);
-                                *rtk_disabled_cmds.entry(display).or_insert(0) += 1;
-                                continue;
-                            }
-                            // Genuinely never had a chance regardless of the bypass (no
-                            // hook installed / excluded by config / etc.) — a real
-                            // missed-savings opportunity like any other command, not a
-                            // "bypass" of anything. Fall through to the normal
-                            // classification below (using the env-stripped command)
-                            // instead of vanishing from the whole report — previously
-                            // this case was counted only in `total_commands` and nowhere
-                            // else (rtk-ai/rtk#3206 review).
-                            actual_cmd
-                        }
-                        // Unsupported/Ignored under RTK_DISABLED= isn't interesting
-                        // either way — rtk was never going to touch it regardless of
-                        // the bypass.
-                        _ => continue,
-                    }
-                } else {
-                    part
-                };
-
-                match classify_command(part) {
-                    Classification::Supported {
-                        rtk_equivalent,
-                        category,
-                        estimated_savings_pct,
-                        status,
-                    } => {
-                        let coverage = hook_coverage(
-                            &ext_cmd.command,
-                            part,
-                            &ext_cmd.tool_use_id,
-                            &coverage_ctx,
-                        );
-
-                        if coverage.is_covered() {
-                            // Hook already routed this through RTK at runtime — it's
-                            // coverage, not a missed opportunity.
-                            already_rtk += 1;
-                            if coverage.is_estimated() {
-                                already_rtk_estimated += 1;
-                            }
-                            continue;
-                        }
-
-                        let bucket = supported_map.entry(rtk_equivalent).or_insert_with(|| {
-                            SupportedBucket {
-                                rtk_equivalent,
-                                category,
-                                count: 0,
-                                total_output_tokens: 0,
-                                total_raw_output_tokens: 0,
-                                command_counts: HashMap::new(),
-                            }
-                        });
-
-                        bucket.count += 1;
-
-                        // Estimate tokens for this command
-                        let output_tokens = if let Some(len) = ext_cmd.output_len {
-                            // Real: from tool_result content length
-                            len / 4
-                        } else {
-                            // Fallback: category average
-                            let subcmd = extract_subcmd(part);
-                            category_avg_tokens(category, subcmd)
-                        };
-
-                        let savings =
-                            (output_tokens as f64 * estimated_savings_pct / 100.0) as usize;
-                        bucket.total_output_tokens += savings;
-                        // Accumulate pre-savings tokens so we can compute a weighted effective
-                        // savings rate across all sub-commands in this bucket later.
-                        bucket.total_raw_output_tokens += output_tokens;
-
-                        // Track the display name with status
-                        let display_name = truncate_command(part);
-                        let entry = bucket
-                            .command_counts
-                            .entry(format!("{}:{:?}", display_name, status))
-                            .or_insert(0);
-                        *entry += 1;
-                    }
-                    Classification::Unsupported { base_command } => {
-                        let bucket = unsupported_map.entry(base_command).or_insert_with(|| {
-                            UnsupportedBucket {
-                                count: 0,
-                                example: part.to_string(),
-                            }
-                        });
-                        bucket.count += 1;
-                    }
-                    Classification::Ignored => {
-                        // Ground truth from the transcript itself — the model really
-                        // did invoke `rtk` directly (excluding the deliberate
-                        // unfiltered `rtk proxy` escape hatch).
-                        if is_already_rtk(part) {
-                            already_rtk += 1;
-                        }
-                        // Otherwise just skip
-                    }
-                }
-            }
+            tally.add(ext_cmd, &coverage_ctx);
         }
     }
 
     // Build report
-    let mut supported: Vec<SupportedEntry> = supported_map
-        .into_values()
-        .map(|bucket| {
-            // Pick the most common command as the display name
-            let (command_with_status, status) = bucket
-                .command_counts
-                .into_iter()
-                .max_by_key(|(_, c)| *c)
-                .map(|(name, _)| {
-                    // Extract status from "command:Status" format
-                    if let Some(colon_pos) = name.rfind(':') {
-                        let cmd = name[..colon_pos].to_string();
-                        let status_str = &name[colon_pos + 1..];
-                        let status = match status_str {
-                            "Passthrough" => report::RtkStatus::Passthrough,
-                            "NotSupported" => report::RtkStatus::NotSupported,
-                            _ => report::RtkStatus::Existing,
-                        };
-                        (cmd, status)
-                    } else {
-                        (name, report::RtkStatus::Existing)
-                    }
-                })
-                .unwrap_or_else(|| (String::new(), report::RtkStatus::Existing));
+    let ReportRows {
+        supported,
+        opportunities,
+    } = tally.take_rows();
 
-            // Derive the effective savings rate from accumulated totals rather than
-            // using the first-seen sub-command's rate. This gives a weighted average
-            // across all sub-commands that fell in this bucket.
-            let effective_savings_pct = if bucket.total_raw_output_tokens > 0 {
-                bucket.total_output_tokens as f64 * 100.0 / bucket.total_raw_output_tokens as f64
-            } else {
-                0.0
-            };
-
-            SupportedEntry {
-                command: command_with_status,
-                count: bucket.count,
-                rtk_equivalent: bucket.rtk_equivalent,
-                category: bucket.category,
-                estimated_savings_tokens: bucket.total_output_tokens,
-                estimated_savings_pct: effective_savings_pct,
-                rtk_status: status,
-            }
-        })
-        .collect();
-
-    // Sort by estimated savings descending
-    supported.sort_by_key(|b| std::cmp::Reverse(b.estimated_savings_tokens));
+    let Tally {
+        total_commands,
+        already_rtk,
+        already_rtk_estimated,
+        rtk_disabled_count,
+        rtk_disabled_estimated,
+        rtk_disabled_cmds,
+        unsupported: unsupported_map,
+        ..
+    } = tally;
 
     let mut unsupported: Vec<UnsupportedEntry> = unsupported_map
         .into_iter()
@@ -585,6 +718,7 @@ pub fn run(
         measured_since: measured_since.map(|ts| ts.format("%Y-%m-%d").to_string()),
         since_days,
         supported,
+        opportunities,
         unsupported,
         parse_errors,
         rtk_disabled_count,
@@ -624,16 +758,46 @@ mod tests {
     use super::*;
     use crate::core::tracking::HookOutcome;
 
-    // rtk-ai/rtk#3148: hook-rewritten commands were counted as missed savings
-    // because transcripts record the pre-rewrite (raw) form of the command.
-    // Real hook decisions are logged (`hook_decisions`, keyed by `tool_use_id`)
-    // now so coverage is measured, not guessed; `estimate_hook_coverage`/
-    // `Coverage::Estimated` — partially modeled on #3164's heuristic, with its
-    // permission-deny gap fixed — remain only as the fallback for history that
-    // predates that log.
-
-    fn record(decision: HookOutcome) -> HookDecisionRecord {
-        HookDecisionRecord { decision }
+    /// Every combination of the four facts, written out rather than derived, so
+    /// that changing the rule means changing this table and saying why. Deriving
+    /// the expected value would restate the rule and agree with it no matter
+    /// what the rule became.
+    #[test]
+    fn test_every_disposition_is_pinned() {
+        use Disposition::{AlreadyRtk, Dropped, Missed, Opportunity};
+        // bypassed, reached, covered, consumes_a_pipe
+        let table = [
+            ((false, false, false, false), Opportunity),
+            ((false, false, false, true), Dropped),
+            // Coverage says yes, but the rewriter never took this command —
+            // that is the producer of `cat f.log | grep ERROR`, and calling it
+            // adoption is what the `reached` gate exists to stop.
+            ((false, false, true, false), Opportunity),
+            ((false, false, true, true), Dropped),
+            ((false, true, false, false), Missed),
+            ((false, true, false, true), Missed),
+            ((false, true, true, false), AlreadyRtk),
+            ((false, true, true, true), AlreadyRtk),
+            // A bypassed command is a missed saving wherever it sits: the
+            // rewriter refused it for its prefix, not for its position.
+            ((true, false, false, false), Missed),
+            ((true, false, false, true), Missed),
+            ((true, false, true, false), Missed),
+            ((true, false, true, true), Missed),
+            ((true, true, false, false), Missed),
+            ((true, true, false, true), Missed),
+            ((true, true, true, false), AlreadyRtk),
+            ((true, true, true, true), AlreadyRtk),
+        ];
+        assert_eq!(table.len(), 16, "one row per combination of four facts");
+        for ((bypassed, reached, covered, consumes_a_pipe), expected) in table {
+            assert_eq!(
+                disposition(bypassed, reached, covered, consumes_a_pipe),
+                expected,
+                "bypassed={bypassed} reached={reached} covered={covered} \
+                 consumes_a_pipe={consumes_a_pipe}"
+            );
+        }
     }
 
     fn empty_rules() -> PermissionRules {
@@ -642,6 +806,10 @@ mod tests {
             ask: vec![],
             allow: vec![],
         }
+    }
+
+    fn record(decision: HookOutcome) -> HookDecisionRecord {
+        HookDecisionRecord { decision }
     }
 
     /// Build a `CoverageContext` for tests, with an empty `hook_log` (so every
@@ -655,6 +823,201 @@ mod tests {
             exclude_patterns: vec![],
             normalized_transparent_prefixes: vec![],
         }
+    }
+
+    fn scanned(command: &str, output_len: Option<usize>) -> ExtractedCommand {
+        ExtractedCommand {
+            command: command.to_string(),
+            output_len,
+            session_id: "s".to_string(),
+            tool_use_id: String::new(),
+            output_content: None,
+            is_error: false,
+            sequence_index: 0,
+        }
+    }
+
+    fn tally_of(commands: &[&str], ctx: &CoverageContext) -> Tally {
+        let mut tally = Tally::default();
+        for c in commands {
+            tally.add(&scanned(c, None), ctx);
+        }
+        tally
+    }
+
+    fn counts(map: &HashMap<&'static str, SupportedBucket>) -> Vec<(&'static str, usize)> {
+        let mut rows: Vec<_> = map.iter().map(|(k, b)| (*k, b.count)).collect();
+        rows.sort();
+        rows
+    }
+
+    /// The whole point of the split between the two tables: `grep` is rewritten
+    /// where it sits, `cargo test` only would be if it ran on its own, and each
+    /// lands on its own side. Driving the real scan is the only way to catch the
+    /// arguments being handed to `disposition` in the wrong order — every one of
+    /// them is a `bool`, so a transposition compiles and the pinned table still
+    /// passes.
+    #[test]
+    fn test_a_pipeline_splits_across_the_two_tables() {
+        let tally = tally_of(&["cargo test | grep FAILED"], &test_ctx(false));
+
+        assert_eq!(tally.total_commands, 2);
+        assert_eq!(counts(&tally.supported), vec![("rtk grep", 1)]);
+        assert_eq!(counts(&tally.opportunities), vec![("rtk cargo", 1)]);
+        assert_eq!(tally.already_rtk, 0, "no hook installed, so no adoption");
+    }
+
+    /// The producer is taken here and the consumer is not, which is the reverse
+    /// of the case above and the reason position has to decide rather than the
+    /// command's own name.
+    #[test]
+    fn test_a_consumer_the_rewriter_declines_is_in_neither_table() {
+        let tally = tally_of(&["cargo test 2>&1 | tail -1"], &test_ctx(false));
+
+        assert_eq!(tally.total_commands, 2);
+        assert_eq!(counts(&tally.supported), vec![("rtk cargo", 1)]);
+        assert!(
+            tally.opportunities.is_empty(),
+            "`tail` wrote what came back; counting it would bill the line twice"
+        );
+    }
+
+    /// With a hook installed and nothing in the log, the estimate carries the
+    /// answer — and it must not carry it to a command the rewriter passed over.
+    #[test]
+    fn test_coverage_does_not_reach_a_command_the_rewriter_passed_over() {
+        let tally = tally_of(&["cat f.log | grep ERROR"], &test_ctx(true));
+
+        assert_eq!(
+            tally.already_rtk, 1,
+            "the `grep` the hook rewrites is adoption"
+        );
+        assert_eq!(
+            counts(&tally.opportunities),
+            vec![("rtk read", 1)],
+            "`cat` is rewritable alone, so it is an opportunity, not adoption"
+        );
+        assert!(tally.supported.is_empty());
+    }
+
+    /// A line's measured output was written by its last command. Handing it to
+    /// every part multiplies the estimate by the number of parts.
+    #[test]
+    fn test_measured_output_is_credited_to_the_command_that_wrote_it() {
+        let ctx = test_ctx(false);
+        let mut tally = Tally::default();
+        tally.add(&scanned("cargo test | grep FAILED", Some(40_000)), &ctx);
+
+        let grep = tally.supported.get("rtk grep").expect("grep is reported");
+        let cargo = tally
+            .opportunities
+            .get("rtk cargo")
+            .expect("cargo is reported");
+        assert_eq!(
+            grep.total_raw_output_tokens,
+            40_000 / 4,
+            "the last command gets the measured size"
+        );
+        assert_ne!(
+            cargo.total_raw_output_tokens,
+            40_000 / 4,
+            "an earlier command falls back to the category average"
+        );
+    }
+
+    /// A bypassed command is a missed saving, not an opportunity and not
+    /// adoption, and it still counts once in the denominator.
+    #[test]
+    fn test_a_bypassed_command_is_counted_as_a_bypass() {
+        let tally = tally_of(&["RTK_DISABLED=1 git status"], &test_ctx(true));
+
+        assert_eq!(tally.total_commands, 1);
+        assert_eq!(tally.rtk_disabled_count, 1);
+        assert!(tally.supported.is_empty());
+        assert!(tally.opportunities.is_empty());
+    }
+
+    /// Whatever else it decides, every command a session ran reaches the
+    /// denominator exactly once — the buckets are a partition of it, not a
+    /// filter on it.
+    #[test]
+    fn test_every_command_is_counted_once() {
+        for (line, parts) in [
+            ("git status", 1),
+            ("cargo test | grep FAILED", 2),
+            ("a | b | c", 3),
+            ("git status && cargo build", 2),
+            ("frobnicate | wibble", 2),
+            ("RTK_DISABLED=1 git status", 1),
+            ("cat <<EOF | wc -l", 1),
+        ] {
+            let tally = tally_of(&[line], &test_ctx(true));
+            assert_eq!(tally.total_commands, parts, "wrong part count for {line:?}");
+        }
+    }
+
+    /// Classification normalises an absolute path and the rewriter does not
+    /// match one, so the hook leaves `/usr/bin/git status` alone. The saving is
+    /// still there for anyone who writes `git status`, and dropping the command
+    /// would hide both the saving and the disagreement behind it (#1053).
+    #[test]
+    fn test_a_command_the_rewriter_never_matches_is_still_an_opportunity() {
+        let tally = tally_of(&["/usr/bin/git status"], &test_ctx(true));
+
+        assert_eq!(tally.total_commands, 1);
+        assert_eq!(counts(&tally.opportunities), vec![("rtk git", 1)]);
+        assert!(tally.supported.is_empty());
+        assert_eq!(tally.already_rtk, 0);
+    }
+
+    /// The two tables are filled from two buckets, and nothing downstream can
+    /// tell them apart once they are rows — so the assembly has to keep them
+    /// straight.
+    #[test]
+    fn test_each_bucket_reaches_its_own_table() {
+        let mut tally = Tally::default();
+        tally.add(&scanned("cargo test | grep FAILED", None), &test_ctx(false));
+
+        let rows = tally.take_rows();
+
+        assert_eq!(
+            rows.supported
+                .iter()
+                .map(|e| e.rtk_equivalent)
+                .collect::<Vec<_>>(),
+            vec!["rtk grep"],
+            "what the hook would take"
+        );
+        assert_eq!(
+            rows.opportunities
+                .iter()
+                .map(|e| e.rtk_equivalent)
+                .collect::<Vec<_>>(),
+            vec!["rtk cargo"],
+            "what it would take a changed command to collect"
+        );
+    }
+
+    /// Rows are ranked by what they would save, so the first line of the report
+    /// is the one worth acting on.
+    #[test]
+    fn test_entries_are_ranked_by_saving() {
+        let mut map: HashMap<&'static str, SupportedBucket> = HashMap::new();
+        for (rtk_cmd, tokens) in [("rtk git", 10), ("rtk cargo", 900), ("rtk ls", 300)] {
+            map.insert(
+                rtk_cmd,
+                SupportedBucket {
+                    rtk_equivalent: rtk_cmd,
+                    category: "build",
+                    count: 1,
+                    total_output_tokens: tokens,
+                    total_raw_output_tokens: tokens * 2,
+                    command_counts: HashMap::new(),
+                },
+            );
+        }
+        let ranked: Vec<&str> = into_entries(map).iter().map(|e| e.rtk_equivalent).collect();
+        assert_eq!(ranked, vec!["rtk cargo", "rtk ls", "rtk git"]);
     }
 
     #[test]

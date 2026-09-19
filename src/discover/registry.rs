@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 use super::lexer::{
     ParsedToken, PipeKind, QuoteScan, TokenKind, ansi_c_quote_defeats_lexer, coalesce_words,
     is_crlf_at, is_word_boundary_whitespace, redirect_has_file_target, shell_split,
-    split_on_operators, tokenize, tokenize_with_newlines,
+    split_for_classify, split_for_permissions, tokenize, tokenize_with_newlines,
 };
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 
@@ -347,7 +347,15 @@ pub fn has_heredoc(cmd: &str) -> bool {
         .any(|t| t.kind == TokenKind::Redirect && t.value.starts_with("<<"))
 }
 
-pub fn split_command_chain(cmd: &str) -> Vec<&str> {
+/// One command in a chain, with what a report needs to know about where it sat.
+pub struct ChainPart<'a> {
+    pub text: &'a str,
+    /// Whether a `|` follows, so this command's output is consumed by the next
+    /// one rather than read by the person who ran it.
+    pub feeds_pipe: bool,
+}
+
+pub fn split_command_chain_parts(cmd: &str) -> Vec<ChainPart<'_>> {
     let trimmed = cmd.trim();
     if trimmed.is_empty() {
         return vec![];
@@ -355,10 +363,64 @@ pub fn split_command_chain(cmd: &str) -> Vec<&str> {
 
     // Lexer-based for `<<`; string-based for `$((` (lexer splits it across tokens).
     if has_heredoc(trimmed) || trimmed.contains("$((") {
-        return vec![trimmed];
+        return vec![ChainPart {
+            text: trimmed,
+            feeds_pipe: false,
+        }];
     }
 
-    split_on_operators(trimmed, true)
+    // Every stage, not just the one before the first `|`. A pipeline's later
+    // stages are commands the agent ran, and stopping at the pipe made them
+    // invisible to classification — `rtk discover` could not report what it
+    // never looked at (#3683).
+    split_for_classify(trimmed)
+        .into_iter()
+        .map(|s| ChainPart {
+            text: s.text,
+            feeds_pipe: s.feeds_pipe,
+        })
+        .collect()
+}
+
+pub fn split_command_chain(cmd: &str) -> Vec<&str> {
+    split_command_chain_parts(cmd)
+        .into_iter()
+        .map(|p| p.text)
+        .collect()
+}
+
+/// Which commands of `full` the rewriter acts on, one flag per
+/// [`split_command_chain`] part.
+///
+/// Put to the rewriter rather than re-derived from `PipelineSafety`, so the two
+/// cannot drift: a second copy of the rule is a second thing to keep in step.
+/// Answered for the whole line at once, because what happens to one command
+/// depends on the ones around it.
+///
+/// Position decides it. `tail -1` alone becomes `rtk read`, but in
+/// `cargo test 2>&1 | tail -1` the rewriter takes the producer and leaves the
+/// consumer alone — RTK filters what `cargo` writes, and rewriting the stage
+/// that reads it would change what the pipeline prints. In
+/// `cargo test | grep FAILED` it is the other way round, because `rtk grep` is
+/// one of the rules that are safe to run at the end of a pipeline. A command
+/// the rewriter passes over offers nothing to save.
+pub(crate) fn stages_the_rewriter_reaches(
+    full: &str,
+    excluded: &[ExcludePattern],
+    normalized_prefixes: &[String],
+) -> Vec<bool> {
+    let before = split_command_chain(full);
+    let Some(rewritten) = rewrite_command_precompiled(full, excluded, normalized_prefixes) else {
+        return vec![false; before.len()];
+    };
+    let after = split_command_chain(&rewritten);
+    // A rewrite substitutes commands and keeps every separator, so the chains
+    // line up command for command. If they ever do not, nothing can be located
+    // and claiming a saving would be a guess.
+    if before.len() != after.len() {
+        return vec![false; before.len()];
+    }
+    before.iter().zip(after).map(|(b, a)| *b != a).collect()
 }
 
 fn normalize_php_tool_command(cmd: &str) -> String {
@@ -451,12 +513,12 @@ fn strip_git_global_opts(cmd: &str) -> String {
 /// flags are preserved (e.g. `pnpm -r install` → `rtk pnpm -r install`).
 /// Returns the original string unchanged if not a pnpm command.
 fn strip_pnpm_global_opts(cmd: &str) -> String {
-    // Require a single ASCII space after `pnpm` — the exact boundary the rewrite's
-    // `strip_word_prefix` enforces — so classify and rewrite can never diverge on a
-    // tab or other whitespace separator (that would resurrect the class of bug
-    // #3275 closes: Supported on one side, un-rewritable on the other). Extra
-    // spaces are still tolerated via `trim_start` (`pnpm  -r  install`), since
-    // `PNPM_GLOBAL_OPT` is `^`-anchored and a leading space would skip the strip.
+    // Gate on a literal `pnpm ` so that the form classify adopts is one the
+    // rewrite also matches: `pnpm\t-r install` is left alone here and stays
+    // Unsupported on both sides, rather than being classified `rtk pnpm` on a
+    // shape the rewrite declines (#3275). Extra spaces are still tolerated via
+    // `trim_start` (`pnpm  -r  install`), since `PNPM_GLOBAL_OPT` is
+    // `^`-anchored and a leading space would skip the strip.
     if !cmd.starts_with("pnpm ") {
         return cmd.to_string();
     }
@@ -687,9 +749,34 @@ pub fn rewrite_command(
     excluded: &[String],
     transparent_prefixes: &[String],
 ) -> Option<String> {
+    // #508: tell the agent it is paying for the bypass. Raised here rather than
+    // at the segment that carries the prefix, because this is the entry point a
+    // real invocation comes through — `rewrite_command_precompiled` also serves
+    // `rtk discover`, which asks about commands from months of history and must
+    // not answer with advice about any of them.
+    if uses_rtk_disabled(cmd) {
+        eprintln!(
+            "[rtk] RTK_DISABLED=1 detected — skipping filter for this command. \
+             Remove RTK_DISABLED=1 to restore token savings."
+        );
+    }
     let compiled = compile_exclude_patterns(excluded);
     let normalized_prefixes = normalize_transparent_prefixes(transparent_prefixes);
     rewrite_command_precompiled(cmd, &compiled, &normalized_prefixes)
+}
+
+/// Whether any command in `cmd` is prefixed with `RTK_DISABLED=`, which is what
+/// `rewrite_segment_inner` refuses on. A chain disables per command, so the
+/// prefix can sit on any of them, on any line — but only where a command really
+/// starts. `split_for_permissions` is the segmenter that knows the difference,
+/// so text like `echo "a<newline>RTK_DISABLED=1 b"` stays one command and draws
+/// no warning. A heredoc is refused before any of this (`has_heredoc`, above),
+/// so its body never counts either.
+fn uses_rtk_disabled(cmd: &str) -> bool {
+    !has_heredoc(cmd)
+        && split_for_permissions(cmd)
+            .iter()
+            .any(|seg| prefix_contains_rtk_disabled(strip_disabled_prefix(seg).0))
 }
 
 /// Core of `rewrite_command`, taking already-compiled exclude patterns and
@@ -1571,13 +1658,10 @@ fn rewrite_segment_inner(
 
     let (env_prefix, rest_after_env) = strip_disabled_prefix(trimmed);
     if !env_prefix.is_empty() {
-        // #345: RTK_DISABLED=1 in env prefix → skip rewrite entirely
-        // #508: warn on stderr so agents learn to stop overusing it
+        // #345: RTK_DISABLED=1 in env prefix → skip rewrite entirely. The
+        // warning that goes with it (#508) is raised by `rewrite_command`,
+        // where someone is actually running the command.
         if env_prefix.contains("RTK_DISABLED=") {
-            eprintln!(
-                "[rtk] RTK_DISABLED=1 detected — skipping filter for this command. \
-                 Remove RTK_DISABLED=1 to restore token savings."
-            );
             return None;
         }
         let rewritten = rewrite_segment_inner(
@@ -1999,7 +2083,7 @@ mod tests {
 
     // Three compound-command segmenters look at the same kind of input for
     // different, deliberate purposes — split_for_permissions (the permission
-    // gate, most conservative), split_on_operators/split_command_chain
+    // gate, most conservative), split_for_classify/split_command_chain
     // (analytics/discovery classification), and rewrite_compound's inline
     // token walk (actual rewrite). See the comparison table on
     // split_for_permissions's doc comment. These tests pin today's actual,
@@ -2062,10 +2146,13 @@ mod tests {
                 split_for_permissions(cmd),
                 vec!["git status", "grep x", "cargo build"]
             );
-            // Analytics: split_command_chain stops entirely at the first `|`,
-            // discarding everything after it (including the later `&&` clause) —
-            // it only needs to classify what's in front of the pipe.
-            assert_eq!(split_command_chain(cmd), vec!["git status"]);
+            // Analytics: the same segments as the gate. Classification has no
+            // reason to see less of a command line than the rules that guard
+            // it, and seeing less meant reporting on less.
+            assert_eq!(
+                split_command_chain(cmd),
+                vec!["git status", "grep x", "cargo build"]
+            );
             // Rewrite: pipelines are handled specially (rewrite_pipeline_final_stage),
             // and clauses after the pipeline are still walked and rewritten.
             assert_eq!(
@@ -2902,9 +2989,130 @@ mod tests {
         assert_eq!(split_command_chain("a ; b"), vec!["a", "b"]);
     }
 
+    /// Every stage is a command the agent ran, so classification sees them
+    /// all. Stopping at the first `|` hid the rest from the report (#3683).
     #[test]
-    fn test_split_pipe_first_only() {
-        assert_eq!(split_command_chain("a | b"), vec!["a"]);
+    fn test_split_chain_covers_every_pipeline_stage() {
+        assert_eq!(split_command_chain("a | b"), vec!["a", "b"]);
+        assert_eq!(split_command_chain("a | b | c"), vec!["a", "b", "c"]);
+        assert_eq!(
+            split_command_chain("a | b && c"),
+            vec!["a", "b", "c"],
+            "a pipeline followed by another clause"
+        );
+        // A heredoc or arithmetic expansion is still handed over whole.
+        assert_eq!(
+            split_command_chain("cat <<EOF | wc -l"),
+            vec!["cat <<EOF | wc -l"]
+        );
+    }
+
+    /// Seeing a stage is not the same as being able to rewrite it, and the
+    /// report must not promise a saving the hook declines to take.
+    #[test]
+    fn test_only_the_stages_the_rewriter_takes_are_reached() {
+        for (cmd, expected) in [
+            // The producer is rewritten; `tail` reads what RTK filtered, so
+            // rewriting it too would change what the pipeline prints.
+            ("cargo test 2>&1 | tail -1", vec![true, false]),
+            // `rtk grep` is pipeline-final safe, so here the consumer is the
+            // stage that gets taken and `cargo test` is left feeding it.
+            ("cargo test | grep FAILED", vec![false, true]),
+            // Separate clauses, each rewritten on its own.
+            ("git status && cargo build", vec![true, true]),
+            // Nothing RTK handles anywhere in the line.
+            ("frobnicate | wibble", vec![false, false]),
+            // Already routed through RTK, so there is nothing left to take.
+            ("cargo test | rtk grep foo", vec![false, false]),
+            // The bypass stops the command carrying it, and the pipeline it
+            // feeds goes with it.
+            (
+                "cargo test | RTK_DISABLED=1 grep FAILED",
+                vec![false, false],
+            ),
+        ] {
+            assert_eq!(
+                stages_the_rewriter_reaches(cmd, &[], &[]),
+                expected,
+                "{cmd:?} rewrites to {:?}",
+                rewrite_command_no_prefixes(cmd, &[])
+            );
+        }
+    }
+
+    /// A command that feeds a pipe writes for another command to consume, and
+    /// the report treats that differently from one whose output came back — so
+    /// the flag has to follow the `|`, not the position in the chain.
+    #[test]
+    fn test_only_a_command_before_a_pipe_feeds_one() {
+        for (cmd, expected) in [
+            ("a | b | c", vec![true, true, false]),
+            ("a && b | c ; d", vec![false, true, false, false]),
+            ("a || b", vec![false, false]),
+            ("a", vec![false]),
+            ("cat <<EOF | wc -l", vec![false]),
+        ] {
+            let feeds: Vec<bool> = split_command_chain_parts(cmd)
+                .iter()
+                .map(|p| p.feeds_pipe)
+                .collect();
+            assert_eq!(feeds, expected, "wrong pipe-feeding for {cmd:?}");
+        }
+    }
+
+    /// One flag per part, whatever the line looks like — a caller indexes this
+    /// by part, so a short answer would silently point at the wrong command.
+    #[test]
+    fn test_every_part_gets_a_reachability_flag() {
+        for cmd in [
+            "cargo test | grep FAILED",
+            "a && b || c ; d | e",
+            "cat <<EOF | wc -l",
+            "echo $((1 + 2))",
+            "git status",
+        ] {
+            assert_eq!(
+                stages_the_rewriter_reaches(cmd, &[], &[]).len(),
+                split_command_chain(cmd).len(),
+                "flag count does not match part count for {cmd:?}"
+            );
+        }
+    }
+
+    /// The bypass is per command, so the prefix can sit on any of them — the
+    /// warning must not depend on it being the first thing on the line.
+    #[test]
+    fn test_uses_rtk_disabled_finds_the_prefix_on_any_command() {
+        assert!(uses_rtk_disabled("RTK_DISABLED=1 git status"));
+        assert!(uses_rtk_disabled("cargo test | RTK_DISABLED=1 grep FAILED"));
+        assert!(uses_rtk_disabled(
+            "git status && RTK_DISABLED=1 cargo build"
+        ));
+        assert!(uses_rtk_disabled("git status\nRTK_DISABLED=1 cargo build"));
+
+        assert!(!uses_rtk_disabled("git status"));
+        assert!(!uses_rtk_disabled("SOME_VAR=1 git status"));
+        assert!(
+            !uses_rtk_disabled("echo RTK_DISABLED=1"),
+            "an argument is not a prefix"
+        );
+        assert!(
+            !uses_rtk_disabled("echo \"a\nRTK_DISABLED=1 b\""),
+            "a newline inside quotes does not start a command"
+        );
+        assert!(
+            !uses_rtk_disabled("cat <<EOF\nRTK_DISABLED=1 b\nEOF"),
+            "a heredoc body is data, and the line is refused before this anyway"
+        );
+    }
+
+    /// The bypass stops the command that carries it, not the clause beside it.
+    #[test]
+    fn test_a_bypass_does_not_stop_a_sibling_clause() {
+        assert_eq!(
+            stages_the_rewriter_reaches("RTK_DISABLED=1 cargo test && git status", &[], &[]),
+            vec![false, true]
+        );
     }
 
     #[test]
@@ -3179,11 +3387,9 @@ mod tests {
 
     #[test]
     fn test_pnpm_tab_separator_no_classify_rewrite_divergence() {
-        // A non-space separator must NOT be stripped: the rewrite's
-        // `strip_word_prefix` only accepts an ASCII space, so classify has to
-        // agree and stay Unsupported. If the strip tolerated `\t` (or any other
-        // whitespace), classify would say Supported(rtk pnpm) while rewrite
-        // returned None — the exact classify/rewrite divergence #3275 closes.
+        // The global-option strip gates on a literal `pnpm `, so a tab-separated
+        // `pnpm` carrying one is never classified into a shape the rewrite
+        // declines — both sides say no, which is what #3275 is about.
         let cmd = "pnpm\t-r install";
         assert!(
             matches!(classify_command(cmd), Classification::Unsupported { .. }),
@@ -3191,6 +3397,13 @@ mod tests {
             classify_command(cmd)
         );
         assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None);
+
+        // With no global option to strip there is nothing to disagree about, and
+        // a tab separates a command from its prefix like any other blank.
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm\tinstall", &[]),
+            Some("rtk pnpm install".into())
+        );
     }
 
     #[test]
