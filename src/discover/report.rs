@@ -184,6 +184,17 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
     // `RTK_DISABLED=1 <cmd>` never populates `supported`/`unsupported` at all, and
     // this would print "RTK usage looks good!" while hiding that 100% of their
     // commands ran unfiltered.
+    // Nothing scanned is not a clean bill of health, and it is the likelier reading
+    // when a filter matched no project directory at all. Saying "looks good" there
+    // reports the absence of evidence as evidence of absence.
+    if report.sessions_scanned == 0 {
+        out.push_str(
+            "\nNo sessions matched, so nothing was analysed. Check the project filter, or pass --all.\n",
+        );
+        append_agent_notes(&mut out, report.agent_status);
+        return out;
+    }
+
     if report.supported.is_empty()
         && report.unsupported.is_empty()
         && report.rtk_disabled_count == 0
@@ -383,6 +394,25 @@ mod tests {
             estimated_savings_pct: 50.0,
             rtk_status: RtkStatus::Existing,
         }
+    }
+
+    #[test]
+    fn test_format_text_does_not_call_zero_sessions_a_clean_bill() {
+        // Nothing scanned is not "looks good". A filter that matches no project
+        // directory — the drive-letter case mismatch on Windows, or a typo in
+        // --project — otherwise renders as a confident green over no evidence.
+        let mut report = make_report(0, 0);
+        report.sessions_scanned = 0;
+
+        let output = format_text(&report, 10, false);
+        assert!(
+            !output.contains("No missed savings found"),
+            "zero sessions must not read as a clean result: {output}"
+        );
+        assert!(
+            output.contains("No sessions matched"),
+            "the report must say nothing was analysed: {output}"
+        );
     }
 
     #[test]
