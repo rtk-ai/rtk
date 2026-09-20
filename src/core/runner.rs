@@ -139,8 +139,8 @@ where
         raw
     };
 
-    // stderr is forwarded unchanged below, so it costs the same whether or not rtk is
-    // in the way. What the guard must not inflate is the stdout it replaces.
+    // The guard governs the stdout rtk replaces. stderr is forwarded separately below, and
+    // only ever shrinks there, so it cannot push the total past what the command emitted.
     let shown = if let Some(label) = opts.tee_label {
         print_with_hint(&filtered, raw, raw_for_tracking, label, exit_code)
     } else {
@@ -155,20 +155,98 @@ where
 
     // Stdout-only filters parse structured stdout; stderr still carries diagnostics
     // (config errors, missing linters) that the user needs.
-    let forwarded_stderr = opts.filter_stdout_only && !result.raw_stderr.trim().is_empty();
-    if forwarded_stderr {
-        eprint!("{}", result.raw_stderr);
+    let forwarded = (opts.filter_stdout_only && !result.raw_stderr.trim().is_empty()).then(|| {
+        forwarded_stderr(&result.raw_stderr, exit_code, &shown, |stderr| {
+            crate::core::tee::force_tee_hint(
+                stderr,
+                &format!("{}-stderr", opts.tee_label.unwrap_or(tool_name)),
+            )
+        })
+    });
+    if let Some(text) = &forwarded {
+        eprint!("{}", text);
     }
 
     // Forwarded stderr reaches the user just as much as stdout does, so counting only
     // stdout would book a passed-through stream as if the filter had removed it.
-    let emitted = if forwarded_stderr {
-        Cow::Owned(format!("{}{}", shown, result.raw_stderr))
-    } else {
-        Cow::Borrowed(shown.as_str())
+    let emitted = match &forwarded {
+        Some(text) => Cow::Owned(format!("{}{}", shown, text)),
+        None => Cow::Borrowed(shown.as_str()),
     };
     timer.track(cmd_label, &format!("rtk {}", cmd_label), raw, &emitted);
     Ok(exit_code)
+}
+
+/// How many stderr lines survive the cap. Warning-shaped data, so the warnings cap.
+const MAX_FORWARDED_STDERR_LINES: usize = CAP_WARNINGS;
+
+/// The stderr a stdout-only filter forwards.
+///
+/// Whole, whenever stderr is the report: the command failed, or the filter had nothing to show
+/// for stdout. Those are the cases stderr forwarding exists for -- a golangci-lint config
+/// error leaves stdout empty, and dropping its stderr left the user with no output at all.
+///
+/// Capped otherwise, because on a run that succeeded and reported on stdout, stderr is as
+/// often progress chatter -- `go: downloading …` once per module on a cold cache -- and
+/// forwarding all of it verbatim leaves rtk emitting as much as the command it stands in
+/// front of.
+///
+/// The cap keeps the END. A tool resolves and downloads before it builds, so its chatter comes
+/// first and anything it has to say -- a deprecation warning, "matched no packages" -- comes
+/// after: a cap on the head keeps the noise and drops exactly the lines worth forwarding.
+///
+/// Three things make it give up and forward the lot. A stderr below the recovery store's own
+/// floor, which is not worth a stored file and the eviction that comes with it. `recovery_hint`
+/// returning `None`, meaning there is no store to point at, and a count of lines nobody can
+/// read is worse than the lines (`curl_cmd` declines the same way). And a result that is not
+/// actually smaller, since the note and the hint cost bytes of their own -- rtk emits no more
+/// than the command it stands in front of, on either stream.
+fn forwarded_stderr<'a>(
+    stderr: &'a str,
+    exit_code: i32,
+    shown_stdout: &str,
+    recovery_hint: impl FnOnce(&str) -> Option<String>,
+) -> Cow<'a, str> {
+    if exit_code != 0 || shown_stdout.trim().is_empty() {
+        return Cow::Borrowed(stderr);
+    }
+    // Below the recovery store's own floor there is nothing to gain and a file to write for
+    // it: the store would hold a stderr smaller than the note and hint that point at it, and
+    // every write evicts an older entry. `tsc_cmd` declines on the same threshold.
+    if stderr.len() < crate::core::tee::MIN_TEE_SIZE {
+        return Cow::Borrowed(stderr);
+    }
+    let Some((offset, held_back)) = last_lines_offset(stderr, MAX_FORWARDED_STDERR_LINES) else {
+        return Cow::Borrowed(stderr);
+    };
+    let Some(hint) = recovery_hint(stderr) else {
+        return Cow::Borrowed(stderr);
+    };
+    let capped = format!(
+        "... (+{} earlier stderr {} not shown)\n{}{}\n",
+        held_back,
+        if held_back == 1 { "line" } else { "lines" },
+        &stderr[offset..],
+        hint
+    );
+    if capped.len() >= stderr.len() {
+        return Cow::Borrowed(stderr);
+    }
+    Cow::Owned(capped)
+}
+
+/// Where `text`'s last `n` lines begin, as a byte offset, and how many lines that skips.
+/// `None` when it has no more than `n`.
+///
+/// A byte offset rather than `lines().collect()` and a re-join: `str::lines` drops the `\r` of
+/// a CRLF ending and nothing puts it back, so re-joining would rewrite the line endings of a
+/// stderr that happened to be long enough to cap. It also reads none of the lines it skips.
+/// `\n` is ASCII, so the offset is always a char boundary.
+fn last_lines_offset(text: &str, n: usize) -> Option<(usize, usize)> {
+    let skipped = text.lines().count().checked_sub(n).filter(|&s| s > 0)?;
+    text.match_indices('\n')
+        .nth(skipped - 1)
+        .map(|(index, _)| (index + 1, skipped))
 }
 
 pub fn run(
@@ -285,7 +363,7 @@ pub fn run_passthrough(tool: &str, args: &[std::ffi::OsString], verbose: u8) -> 
         eprintln!("{} passthrough: {:?}", tool, args);
     }
     let mut cmd = crate::core::utils::resolved_command(tool);
-    cmd.args(args);
+    crate::core::utils::ChildArgExt::child_args(&mut cmd, args);
     let args_str = tracking::args_display(args);
     run(
         cmd,
@@ -910,6 +988,184 @@ fn is_bun_count_line(trimmed: &str) -> bool {
         (Some(count), Some("pass" | "fail" | "skip" | "todo" | "error"), None)
             if count.chars().all(|c| c.is_ascii_digit())
     )
+}
+
+#[cfg(test)]
+mod forwarded_stderr_tests {
+    use super::*;
+
+    const HINT: &str = "[full output: ~/.local/share/rtk/tee/1_go_test-stderr.log]";
+
+    fn with_hint(stderr: &str, exit_code: i32, shown: &str) -> String {
+        forwarded_stderr(stderr, exit_code, shown, |_| Some(HINT.to_string())).into_owned()
+    }
+
+    fn chatter(lines: usize) -> String {
+        (0..lines)
+            .map(|i| format!("go: downloading example.com/module-{i} v1.2.3\n"))
+            .collect()
+    }
+
+    /// Long enough to clear the recovery store's floor, so a test about the cap is about the
+    /// cap rather than about that threshold.
+    fn over_the_floor(lines: usize) -> String {
+        let raw = chatter(lines);
+        assert!(raw.len() >= crate::core::tee::MIN_TEE_SIZE, "{lines} lines");
+        raw
+    }
+
+    #[test]
+    fn a_successful_run_with_output_keeps_the_end_of_stderr() {
+        // The signal in a chatty stderr sits after the chatter: resolution and downloads come
+        // first, and what the tool has to say comes last.
+        let mut raw = over_the_floor(150);
+        raw.push_str("go: warning: \"./...\" matched no packages\n");
+        raw.push_str("go: WARNING: module example.com/legacy is deprecated\n");
+
+        let out = with_hint(&raw, 0, "ok  example.com/pkg  0.012s");
+        assert!(out.contains("matched no packages"), "{out}");
+        assert!(out.contains("is deprecated"), "{out}");
+        assert!(
+            out.starts_with("... (+142 earlier stderr lines not shown)\n"),
+            "the elision note comes before what it stands for: {out}"
+        );
+        assert!(
+            out.contains(HINT),
+            "the held-back lines must stay reachable: {out}"
+        );
+        assert_eq!(
+            out.lines().count(),
+            MAX_FORWARDED_STDERR_LINES + 2,
+            "note, kept lines, hint: {out}"
+        );
+        assert!(out.len() < raw.len() / 2, "the cap must actually compress");
+    }
+
+    #[test]
+    fn a_failing_run_forwards_stderr_whole() {
+        let raw = over_the_floor(150);
+        assert_eq!(with_hint(&raw, 1, "some stdout"), raw);
+    }
+
+    #[test]
+    fn an_empty_filtered_stdout_forwards_stderr_whole() {
+        // golangci-lint's config errors land here: stdout is empty, so stderr IS the report.
+        let raw = over_the_floor(150);
+        assert_eq!(with_hint(&raw, 0, ""), raw);
+        assert_eq!(with_hint(&raw, 0, "   \n"), raw);
+    }
+
+    #[test]
+    fn a_short_stderr_is_forwarded_whole() {
+        let raw = chatter(MAX_FORWARDED_STDERR_LINES);
+        assert_eq!(with_hint(&raw, 0, "stdout"), raw);
+        let one = "one warning\n";
+        assert_eq!(with_hint(one, 0, "stdout"), one);
+        assert_eq!(with_hint("", 0, "stdout"), "");
+    }
+
+    /// Under the recovery store's floor nothing is stored and nothing is capped, however many
+    /// lines it runs to.
+    #[test]
+    fn a_stderr_under_the_recovery_floor_is_forwarded_whole() {
+        let raw: String = (0..40).map(|i| format!("w{i}\n")).collect();
+        assert!(raw.len() < crate::core::tee::MIN_TEE_SIZE);
+        let mut asked = false;
+        let out = forwarded_stderr(&raw, 0, "stdout", |_| {
+            asked = true;
+            Some(HINT.to_string())
+        });
+        assert_eq!(out, raw);
+        assert!(!asked, "nothing may be written to the store for it");
+    }
+
+    /// A note and a hint cost bytes of their own. On a stderr just over the line cap they cost
+    /// more than the lines they replace, and rtk would emit more than the command it replaces.
+    #[test]
+    fn a_cap_that_would_not_shrink_the_output_is_not_applied() {
+        for lines in (MAX_FORWARDED_STDERR_LINES + 1)..=30 {
+            let raw: String = (0..lines).map(|i| format!("w{i}\n")).collect();
+            let out = with_hint(&raw, 0, "stdout");
+            assert!(
+                out.len() <= raw.len(),
+                "{lines} short lines: rtk emitted {} bytes for {} of stderr",
+                out.len(),
+                raw.len()
+            );
+        }
+        // And it still caps once the lines are worth removing.
+        let raw = over_the_floor(40);
+        assert!(with_hint(&raw, 0, "stdout").len() < raw.len());
+    }
+
+    /// No recovery store means no way to read what the cap held back, and a count of
+    /// unreachable lines is worse than the lines.
+    #[test]
+    fn without_a_recovery_hint_stderr_is_forwarded_whole() {
+        let raw = over_the_floor(150);
+        assert_eq!(
+            forwarded_stderr(&raw, 0, "stdout", |_| None).into_owned(),
+            raw
+        );
+    }
+
+    #[test]
+    fn the_note_is_singular_for_one_held_back_line() {
+        let mut raw = chatter(MAX_FORWARDED_STDERR_LINES + 1);
+        raw.push_str(&"go: a long trailing warning that makes the cap worth applying\n".repeat(4));
+        let out = with_hint(&raw, 0, "stdout");
+        assert!(
+            out.contains("... (+5 earlier stderr lines not shown)"),
+            "{out}"
+        );
+
+        let raw = chatter(MAX_FORWARDED_STDERR_LINES).replace("module-0 v1.2.3", &"x".repeat(400))
+            + "go: one more\n";
+        let out = with_hint(&raw, 0, "stdout");
+        assert!(
+            out.contains("... (+1 earlier stderr line not shown)"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn capping_does_not_rewrite_crlf_line_endings() {
+        // `str::lines()` drops the `\r` and nothing puts it back, so a re-joined cap would
+        // change line endings for exactly the stderr that was long enough to cap.
+        let raw: String = (0..60)
+            .map(|i| format!("line {i} with enough text to make capping worthwhile\r\n"))
+            .collect();
+        let out = with_hint(&raw, 0, "stdout");
+        assert_eq!(
+            out.matches('\r').count(),
+            MAX_FORWARDED_STDERR_LINES,
+            "every forwarded line must keep its CRLF: {out:?}"
+        );
+    }
+
+    #[test]
+    fn last_lines_offset_slices_on_a_line_boundary() {
+        assert_eq!(last_lines_offset("a\nb\nc\n", 1), Some((4, 2)));
+        assert_eq!(&"a\nb\nc\n"[4..], "c\n");
+        // An unterminated last line is still a line.
+        assert_eq!(last_lines_offset("a\nb\nc", 1), Some((4, 2)));
+        assert_eq!(&"a\nb\nc"[4..], "c");
+        // Nothing to skip.
+        assert_eq!(last_lines_offset("a\nb\n", 2), None);
+        assert_eq!(last_lines_offset("a\nb\n", 5), None);
+        assert_eq!(last_lines_offset("", 1), None);
+    }
+
+    /// `\n` is ASCII, so the offset lands on a char boundary whatever the bytes around it.
+    #[test]
+    fn a_non_ascii_stderr_is_sliced_without_panicking() {
+        let raw: String = (0..60)
+            .map(|i| format!("警告 {i}: «déprécié» 🎌 with enough text to be worth capping\n"))
+            .collect();
+        let out = with_hint(&raw, 0, "stdout");
+        assert!(out.contains("警告 59"), "{out}");
+        assert!(out.len() < raw.len());
+    }
 }
 
 #[cfg(test)]
