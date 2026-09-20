@@ -60,6 +60,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | GitHub Copilot CLI | Rust binary (`rtk hook copilot`) | Deny-with-suggestion | No (agent retries) |
 | Cursor | Rust binary | Transparent rewrite | Yes (`updated_input`) |
 | Trae | Rust binary (`rtk hook trae`) | Transparent rewrite | Yes (`updatedInput`) |
+| WorkBuddy | Rust binary (`rtk hook workbuddy`) | Transparent rewrite | Yes (`updatedInput`); [global installation](workbuddy/README.md) |
 | Gemini CLI | Rust binary (`rtk hook gemini`) | Transparent rewrite | Yes (`hookSpecificOutput`) |
 | Cline / Roo Code | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Windsurf | Custom instructions (rules file) | Prompt-level guidance | N/A |
