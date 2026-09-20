@@ -5,12 +5,14 @@ use crate::core::guard::never_worse;
 use crate::core::tracking;
 use anyhow::{Context, Result};
 use std::fs;
+use std::io::{self, Read as IoRead, Write};
 use std::path::Path;
 
 pub fn run(
     file: &Path,
     level: FilterLevel,
     max_lines: Option<usize>,
+    head_lines: Option<usize>,
     tail_lines: Option<usize>,
     line_numbers: bool,
     verbose: u8,
@@ -22,8 +24,26 @@ pub fn run(
     }
 
     // Read file content
-    let content = fs::read_to_string(file)
-        .with_context(|| format!("Failed to read file: {}", file.display()))?;
+    let bytes =
+        fs::read(file).with_context(|| format!("Failed to read file: {}", file.display()))?;
+    if level == FilterLevel::None
+        && !line_numbers
+        && let Some(window) = byte_line_window(&bytes, head_lines, tail_lines)
+    {
+        io::stdout()
+            .lock()
+            .write_all(window)
+            .context("Failed to write line window")?;
+        timer.track(
+            &format!("cat {}", file.display()),
+            "rtk read",
+            &String::from_utf8_lossy(&bytes),
+            &String::from_utf8_lossy(window),
+        );
+        return Ok(());
+    }
+    let content = String::from_utf8(bytes)
+        .with_context(|| format!("Failed to decode file: {}", file.display()))?;
 
     // Detect language from extension
     let lang = file
@@ -67,34 +87,28 @@ pub fn run(
     let (raw, rtk_output) = if line_numbers {
         (
             format_with_line_numbers(&content),
-            apply_numbered_line_window(&filtered, max_lines, tail_lines, &lang),
+            apply_numbered_line_window(&filtered, max_lines, head_lines, tail_lines, &lang),
         )
     } else {
         (
             content.clone(),
-            apply_line_window(&filtered, max_lines, tail_lines, &lang),
+            apply_line_window(&filtered, max_lines, head_lines, tail_lines, &lang),
         )
     };
     let shown = never_worse(&raw, &rtk_output);
     print!("{}", shown);
-    timer.track(
-        &format!("cat {}", file.display()),
-        "rtk read",
-        &raw,
-        shown,
-    );
+    timer.track(&format!("cat {}", file.display()), "rtk read", &raw, shown);
     Ok(())
 }
 
 pub fn run_stdin(
     level: FilterLevel,
     max_lines: Option<usize>,
+    head_lines: Option<usize>,
     tail_lines: Option<usize>,
     line_numbers: bool,
     verbose: u8,
 ) -> Result<()> {
-    use std::io::{self, Read as IoRead};
-
     let timer = tracking::TimedExecution::start();
 
     if verbose > 0 {
@@ -102,11 +116,28 @@ pub fn run_stdin(
     }
 
     // Read from stdin
-    let mut content = String::new();
+    let mut bytes = Vec::new();
     io::stdin()
         .lock()
-        .read_to_string(&mut content)
+        .read_to_end(&mut bytes)
         .context("Failed to read from stdin")?;
+    if level == FilterLevel::None
+        && !line_numbers
+        && let Some(window) = byte_line_window(&bytes, head_lines, tail_lines)
+    {
+        io::stdout()
+            .lock()
+            .write_all(window)
+            .context("Failed to write line window")?;
+        timer.track(
+            "cat - (stdin)",
+            "rtk read -",
+            &String::from_utf8_lossy(&bytes),
+            &String::from_utf8_lossy(window),
+        );
+        return Ok(());
+    }
+    let content = String::from_utf8(bytes).context("Failed to decode stdin")?;
 
     // No file extension, so use Unknown language
     let lang = Language::Unknown;
@@ -143,12 +174,12 @@ pub fn run_stdin(
     let (raw, rtk_output) = if line_numbers {
         (
             format_with_line_numbers(&content),
-            apply_numbered_line_window(&filtered, max_lines, tail_lines, &lang),
+            apply_numbered_line_window(&filtered, max_lines, head_lines, tail_lines, &lang),
         )
     } else {
         (
             content.clone(),
-            apply_line_window(&filtered, max_lines, tail_lines, &lang),
+            apply_line_window(&filtered, max_lines, head_lines, tail_lines, &lang),
         )
     };
     let shown = never_worse(&raw, &rtk_output);
@@ -179,20 +210,12 @@ fn format_with_line_numbers(content: &str) -> String {
 fn apply_line_window(
     content: &str,
     max_lines: Option<usize>,
+    head_lines: Option<usize>,
     tail_lines: Option<usize>,
     lang: &Language,
 ) -> String {
-    if let Some(tail) = tail_lines {
-        if tail == 0 {
-            return String::new();
-        }
-        let lines: Vec<&str> = content.lines().collect();
-        let start = lines.len().saturating_sub(tail);
-        let mut result = lines[start..].join("\n");
-        if content.ends_with('\n') {
-            result.push('\n');
-        }
-        return result;
+    if let Some(window) = byte_line_window(content.as_bytes(), head_lines, tail_lines) {
+        return String::from_utf8_lossy(window).into_owned();
     }
 
     if let Some(max) = max_lines {
@@ -205,9 +228,14 @@ fn apply_line_window(
 fn apply_numbered_line_window(
     content: &str,
     max_lines: Option<usize>,
+    head_lines: Option<usize>,
     tail_lines: Option<usize>,
     lang: &Language,
 ) -> String {
+    if let Some(head) = head_lines {
+        let window = String::from_utf8_lossy(head_window(content.as_bytes(), head));
+        return format_with_line_numbers(&window);
+    }
     if let Some(tail) = tail_lines {
         if tail == 0 {
             return String::new();
@@ -229,6 +257,61 @@ fn apply_numbered_line_window(
     format_with_line_numbers(content)
 }
 
+/// First `n` lines, sliced on byte offsets rather than round-tripped through
+/// `lines()`, so CRLF endings and an unterminated final line survive verbatim.
+/// `\n` is ASCII, so valid UTF-8 input also stays valid after slicing.
+fn head_window(content: &[u8], n: usize) -> &[u8] {
+    if n == 0 {
+        return &[];
+    }
+    let mut seen = 0;
+    for (idx, &byte) in content.iter().enumerate() {
+        if byte == b'\n' {
+            seen += 1;
+            if seen == n {
+                return &content[..=idx];
+            }
+        }
+    }
+    content
+}
+
+/// Last `n` lines, byte-sliced for the same fidelity reasons as `head_window`.
+/// A trailing newline terminates the final line instead of starting a new one,
+/// so it is excluded before counting separators backwards — otherwise `n` would
+/// select one line too few for newline-terminated input.
+fn tail_window(content: &[u8], n: usize) -> &[u8] {
+    if n == 0 {
+        return &[];
+    }
+    let search_end = match content.last() {
+        Some(b'\n') => content.len() - 1,
+        _ => content.len(),
+    };
+    let mut seen = 0;
+    for idx in (0..search_end).rev() {
+        if content[idx] == b'\n' {
+            seen += 1;
+            if seen == n {
+                return &content[idx + 1..];
+            }
+        }
+    }
+    content
+}
+
+fn byte_line_window(
+    content: &[u8],
+    head_lines: Option<usize>,
+    tail_lines: Option<usize>,
+) -> Option<&[u8]> {
+    if let Some(head) = head_lines {
+        Some(head_window(content, head))
+    } else {
+        tail_lines.map(|tail| tail_window(content, tail))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,7 +330,15 @@ fn main() {{
         )?;
 
         // Just verify it doesn't panic
-        run(file.path(), FilterLevel::Minimal, None, None, false, 0)?;
+        run(
+            file.path(),
+            FilterLevel::Minimal,
+            None,
+            None,
+            None,
+            false,
+            0,
+        )?;
         Ok(())
     }
 
@@ -261,21 +352,186 @@ fn main() {{
     #[test]
     fn test_apply_line_window_tail_lines() {
         let input = "a\nb\nc\nd\n";
-        let output = apply_line_window(input, None, Some(2), &Language::Unknown);
+        let output = apply_line_window(input, None, None, Some(2), &Language::Unknown);
         assert_eq!(output, "c\nd\n");
     }
 
     #[test]
     fn test_apply_line_window_tail_lines_no_trailing_newline() {
         let input = "a\nb\nc\nd";
-        let output = apply_line_window(input, None, Some(2), &Language::Unknown);
+        let output = apply_line_window(input, None, None, Some(2), &Language::Unknown);
         assert_eq!(output, "c\nd");
+    }
+
+    #[test]
+    fn test_head_window_matches_native_head() {
+        let input = "1\n2\n3\n4\n5\n";
+        assert_eq!(
+            apply_line_window(input, None, Some(3), None, &Language::Unknown),
+            "1\n2\n3\n"
+        );
+    }
+
+    /// The defect this window exists to fix: `--max-lines N` keeps only about
+    /// N/2 lines, so it could never stand in for `head -N`.
+    #[test]
+    fn test_head_window_keeps_all_n_lines_unlike_max_lines() {
+        let input = (1..=200)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let head = apply_line_window(&input, None, Some(10), None, &Language::Unknown);
+        assert_eq!(head.lines().count(), 10);
+        assert_eq!(head.lines().last(), Some("10"));
+    }
+
+    #[test]
+    fn test_head_window_single_line() {
+        let input = "1\n2\n3\n";
+        assert_eq!(
+            apply_line_window(input, None, Some(1), None, &Language::Unknown),
+            "1\n"
+        );
+    }
+
+    #[test]
+    fn test_head_window_zero_is_empty() {
+        assert_eq!(
+            apply_line_window("a\nb\n", None, Some(0), None, &Language::Unknown),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_head_window_n_exceeds_line_count() {
+        let input = "a\nb\n";
+        assert_eq!(
+            apply_line_window(input, None, Some(99), None, &Language::Unknown),
+            input
+        );
+    }
+
+    #[test]
+    fn test_head_window_empty_input() {
+        assert_eq!(
+            apply_line_window("", None, Some(5), None, &Language::Unknown),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_head_window_unterminated_final_line() {
+        assert_eq!(
+            apply_line_window("a\nb\nc", None, Some(3), None, &Language::Unknown),
+            "a\nb\nc"
+        );
+    }
+
+    #[test]
+    fn test_head_window_preserves_crlf() {
+        assert_eq!(
+            apply_line_window("a\r\nb\r\nc\r\n", None, Some(2), None, &Language::Unknown),
+            "a\r\nb\r\n"
+        );
+    }
+
+    #[test]
+    fn test_tail_window_preserves_crlf() {
+        assert_eq!(
+            apply_line_window("a\r\nb\r\nc\r\n", None, None, Some(2), &Language::Unknown),
+            "b\r\nc\r\n"
+        );
+    }
+
+    /// Without discounting the terminal newline, counting separators backwards
+    /// selects one line too few for newline-terminated input.
+    #[test]
+    fn test_tail_window_unterminated_single_line() {
+        assert_eq!(
+            apply_line_window("a\nb\nc", None, None, Some(1), &Language::Unknown),
+            "c"
+        );
+    }
+
+    #[test]
+    fn test_tail_window_n_exceeds_line_count() {
+        let input = "a\nb\n";
+        assert_eq!(
+            apply_line_window(input, None, None, Some(99), &Language::Unknown),
+            input
+        );
+    }
+
+    #[test]
+    fn test_tail_window_empty_input() {
+        assert_eq!(
+            apply_line_window("", None, None, Some(5), &Language::Unknown),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_max_lines_zero_is_empty() {
+        assert_eq!(
+            apply_line_window("a\nb\nc\n", Some(0), None, None, &Language::Unknown),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_head_window_mixed_line_endings() {
+        assert_eq!(
+            apply_line_window("a\r\nb\nc\r\n", None, Some(2), None, &Language::Unknown),
+            "a\r\nb\n"
+        );
+    }
+
+    #[test]
+    fn test_tail_window_mixed_line_endings() {
+        assert_eq!(
+            apply_line_window("a\r\nb\nc\r\n", None, None, Some(2), &Language::Unknown),
+            "b\nc\r\n"
+        );
+    }
+
+    #[test]
+    fn test_windows_preserve_multibyte_utf8() {
+        let input = "héllo\n日本語\nثالث\n";
+        assert_eq!(
+            apply_line_window(input, None, Some(2), None, &Language::Unknown),
+            "héllo\n日本語\n"
+        );
+        assert_eq!(
+            apply_line_window(input, None, None, Some(2), &Language::Unknown),
+            "日本語\nثالث\n"
+        );
+    }
+
+    #[test]
+    fn test_windows_on_blank_lines_only() {
+        assert_eq!(
+            apply_line_window("\n\n\n", None, Some(2), None, &Language::Unknown),
+            "\n\n"
+        );
+        assert_eq!(
+            apply_line_window("\n\n\n", None, None, Some(2), &Language::Unknown),
+            "\n\n"
+        );
+    }
+
+    #[test]
+    fn test_tail_window_zero_is_empty() {
+        assert_eq!(
+            apply_line_window("a\nb\n", None, None, Some(0), &Language::Unknown),
+            ""
+        );
     }
 
     #[test]
     fn test_apply_line_window_max_lines_still_works() {
         let input = "a\nb\nc\nd\n";
-        let output = apply_line_window(input, Some(2), None, &Language::Unknown);
+        let output = apply_line_window(input, Some(2), None, None, &Language::Unknown);
         assert!(output.starts_with("a\n"));
         assert!(output.contains("lines omitted"));
     }
@@ -298,7 +554,7 @@ fn wipe_database() {
     drop_all();
 }"#;
 
-        let output = apply_numbered_line_window(input, Some(10), None, &Language::Rust);
+        let output = apply_numbered_line_window(input, Some(10), None, None, &Language::Rust);
 
         assert!(output.contains(" 5 │     if user.is_banned {"));
         assert!(output.contains("   │ [1 line omitted]"));
@@ -309,8 +565,15 @@ fn wipe_database() {
     #[test]
     fn test_numbered_tail_uses_source_line_numbers() {
         let output =
-            apply_numbered_line_window("a\nb\nc\nd\n", None, Some(2), &Language::Unknown);
+            apply_numbered_line_window("a\nb\nc\nd\n", None, None, Some(2), &Language::Unknown);
         assert_eq!(output, "3 │ c\n4 │ d\n");
+    }
+
+    #[test]
+    fn test_numbered_head_keeps_contiguous_prefix() {
+        let output =
+            apply_numbered_line_window("a\nb\nc\nd\n", None, Some(2), None, &Language::Unknown);
+        assert_eq!(output, "1 │ a\n2 │ b\n");
     }
 
     #[test]
@@ -346,7 +609,11 @@ fn wipe_database() {
         writeln!(f2, "charlie\ndelta").unwrap();
 
         let output = std::process::Command::new(&bin)
-            .args(["read", &f1.path().to_string_lossy(), &f2.path().to_string_lossy()])
+            .args([
+                "read",
+                &f1.path().to_string_lossy(),
+                &f2.path().to_string_lossy(),
+            ])
             .output()
             .expect("failed to run rtk read");
 
@@ -366,15 +633,28 @@ fn wipe_database() {
         writeln!(f1, "valid content").unwrap();
 
         let output = std::process::Command::new(&bin)
-            .args(["read", &f1.path().to_string_lossy(), "/tmp/rtk_nonexistent_file.txt"])
+            .args([
+                "read",
+                &f1.path().to_string_lossy(),
+                "/tmp/rtk_nonexistent_file.txt",
+            ])
             .output()
             .expect("failed to run rtk read");
 
-        assert!(!output.status.success(), "should exit non-zero on missing file");
+        assert!(
+            !output.status.success(),
+            "should exit non-zero on missing file"
+        );
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stdout.contains("valid content"), "valid file should still be printed");
-        assert!(stderr.contains("rtk_nonexistent_file"), "should report missing file on stderr");
+        assert!(
+            stdout.contains("valid content"),
+            "valid file should still be printed"
+        );
+        assert!(
+            stderr.contains("rtk_nonexistent_file"),
+            "should report missing file on stderr"
+        );
     }
 
     #[test]

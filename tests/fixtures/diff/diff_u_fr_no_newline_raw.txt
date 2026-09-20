@@ -1,0 +1,7 @@
+--- n1	2026-09-07 19:16:09.514362950 +0000
++++ n2	2026-09-07 19:16:09.514362950 +0000
+@@ -1 +1 @@
+-x
+\ Pas de fin de ligne à la fin du fichier
++y
+\ Pas de fin de ligne à la fin du fichier

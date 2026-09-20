@@ -184,3 +184,54 @@ fn piped_stdin_matches_grep() {
         assert_eq!(rtk, grep, "piped stdin mismatch for {args:?}");
     }
 }
+
+// Regression: `-m` is GNU grep's --max-count (stop after N matches), not RTK's
+// --max display cap. RTK must forward `-m N` to grep so the scan actually stops
+// at N — i.e. `rtk grep -m N` equals `grep -m N` (checked with and without -n).
+// Covers `-m` leading and trailing. With the short bound to --max, `-m` was
+// swallowed and never reached grep, so the output diverged.
+#[test]
+fn dash_m_max_count_matches_grep_n() {
+    let d = tempfile::tempdir().unwrap();
+    let f = write(d.path(), "m.txt", "hit1\nhit2\nhit3\nhit4\nhit5\n");
+    assert_eq_grep_with_and_without_n(&["-m", "2", "hit", &f]); // -m leading
+    assert_eq_grep_with_and_without_n(&["hit", &f, "-m", "3"]); // -m trailing
+    assert_eq_grep_with_and_without_n(&["-m", "9", "hit", &f]); // N >= total: no truncation, all 5
+}
+
+// `--max-count` is per file, so the multi-file case is the one that motivates the
+// fix: each file must be independently capped and the grouped output must still
+// equal `grep -m N` (with and without -n).
+#[test]
+fn dash_m_max_count_is_per_file_like_grep_n() {
+    let d = tempfile::tempdir().unwrap();
+    let f1 = write(d.path(), "a.txt", "hit\nhit\nhit\n");
+    let f2 = write(d.path(), "b.txt", "hit\nhit\nhit\n");
+    assert_eq_grep_with_and_without_n(&["-m", "2", "hit", &f1, &f2]); // 2 per file, both files
+}
+
+// Regression: the `-l` short used to be bound to RTK's --max-len, so `grep -l PAT`
+// made clap read PAT as a usize and error out (0% savings via raw fallback).
+// `-l` is GNU grep's --files-with-matches; `rtk grep -l` must match `grep -l`
+// byte-for-byte (explicit file args => deterministic order). Also covers `-l`
+// trailing (arg-order sensitivity) and `-L` (--files-without-match).
+#[test]
+fn dash_l_and_dash_cap_l_match_grep() {
+    let d = tempfile::tempdir().unwrap();
+    let f1 = write(d.path(), "hit1.txt", "alpha\ntenant_id here\n");
+    let f2 = write(d.path(), "miss.txt", "nothing to see\n");
+    let f3 = write(d.path(), "hit2.txt", "tenant_id again\n");
+    let f4 = write(d.path(), "port.txt", "listen on 8080\n");
+
+    assert_eq_grep(&["-l", "tenant_id", &f1, &f2, &f3]); // -l leading (the token that broke)
+    assert_eq_grep(&["tenant_id", &f1, &f2, &f3, "-l"]); // -l trailing
+    assert_eq_grep(&["-L", "tenant_id", &f1, &f2, &f3]); // -L files-without-match
+
+    // A numeric pattern is the only form that failed silently: bound to `usize`,
+    // `-l` swallowed it as max_len and read the first path as the pattern, so rtk
+    // printed nothing and exited 1 while grep listed the file. A non-numeric
+    // pattern stops at clap's parse error and falls back to raw grep, which is
+    // byte-identical here and so invisible to the assertions above.
+    assert_eq_grep(&["-l", "8080", &f4, &f2]);
+    assert_eq_grep(&["-L", "8080", &f4, &f2]);
+}

@@ -1,0 +1,9 @@
+diff -ru a/c.txt b/c.txt
+--- a/c.txt	2026-09-07 09:09:26.059556700 -0400
++++ b/c.txt	2026-09-07 09:09:26.060557500 -0400
+@@ -1,2 +1,2 @@
+ one
+-two
++TWO
+Only in b: onlyb.txt
+Binary files a/x/bin.dat and b/x/bin.dat differ

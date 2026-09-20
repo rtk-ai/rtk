@@ -403,8 +403,7 @@ mod tests {
     /// Overrides the store path via a scoped env var (not possible with
     /// the real function), so we test the logic by calling internal fns.
     fn setup_test_env(temp: &TempDir) -> PathBuf {
-        let store_file = temp.path().join("trusted_filters.json");
-        store_file
+        temp.path().join("trusted_filters.json")
     }
 
     fn check_trust_with_store(filter_path: &Path, store_file: &Path) -> Result<TrustStatus> {
@@ -565,15 +564,13 @@ mod tests {
         std::fs::write(&filter, "[filters.test]\nmatch_command = \"echo\"").unwrap();
 
         // Both env vars must be set: trust override + CI indicator
-        #[allow(deprecated)]
-        std::env::set_var("RTK_TRUST_PROJECT_FILTERS", "1");
-        #[allow(deprecated)]
-        std::env::set_var("CI", "true");
-        let status = check_trust(&filter).unwrap();
-        #[allow(deprecated)]
-        std::env::remove_var("RTK_TRUST_PROJECT_FILTERS");
-        #[allow(deprecated)]
-        std::env::remove_var("CI");
+        let status = temp_env::with_vars(
+            [
+                ("RTK_TRUST_PROJECT_FILTERS", Some("1")),
+                ("CI", Some("true")),
+            ],
+            || check_trust(&filter).unwrap(),
+        );
 
         assert_eq!(status, TrustStatus::EnvOverride);
     }

@@ -7,22 +7,27 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
+use crate::core::utils::{from_json_str, strip_leading_bom};
 use crate::hooks::constants::{
     CONFIG_DIR, COPILOT_HOME_ENV, COPILOT_HOOK_FILE, COPILOT_INSTRUCTIONS_FILE, COPILOT_USER_DIR,
     CURSOR_DIR, GEMINI_DIR, GITHUB_DIR, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
+    TRAE_CN_DIR, TRAE_DIR, TRAE_RUN_COMMAND_MATCHER,
 };
 
 use super::constants::{
-    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND, DROID_DIR,
-    DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR,
-    DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
-    HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
-    HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
-    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR,
-    VIBE_HOOKS_FILE, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
+    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CODEX_HOOK_COMMAND,
+    CURSOR_HOOK_COMMAND, DROID_DIR, DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOK_COMMAND,
+    DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR, DROID_SETTINGS_FILE, GEMINI_HOOK_FILE, HERMES_DIR,
+    HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME,
+    HERMES_PLUGINS_SUBDIR, HOOKS_JSON, HOOKS_SUBDIR, OMP_DIR, OMP_LOCAL_DIR, PI_AGENT_STATE_FILE,
+    PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
+    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, TRAE_HOOK_COMMAND, VIBE_BASH_MATCH,
+    VIBE_DIR, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_HOOKS_FILE, VIBE_PROMPT_FILE,
+    VIBE_PROMPTS_SUBDIR,
 };
 use super::integrity;
-use super::is_claude_hook_command;
+use super::{is_claude_hook_command, is_codex_hook_command, is_trae_hook_command};
+use crate::core::config::AwarenessLevel;
 
 // Embedded OpenCode plugin (auto-rewrite)
 const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
@@ -30,9 +35,86 @@ const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
 // Embedded Pi extension (auto-rewrite)
 const PI_PLUGIN: &str = include_str!("../../hooks/pi/rtk.ts");
 
-// Embedded slim RTK awareness instructions
-const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
-const RTK_SLIM_CODEX: &str = include_str!("../../hooks/codex/rtk-awareness.md");
+// Stable code marker used to recognize a modified RTK extension without
+// relying on explanatory comments that users may remove. The marker matches
+// both the current `pi.exec` call and older stock revisions that imported
+// `exec` locally before invoking it.
+const PI_PLUGIN_REWRITE_MARKER: &str = "exec(\"rtk\", [\"rewrite\"";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PiCompatibleAgent {
+    Pi,
+    Omp,
+}
+
+enum ManagedAgentState {
+    Absent,
+    Known(Vec<PiCompatibleAgent>),
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtensionShareStatus {
+    NotShared,
+    Shared,
+    Unknown,
+}
+
+impl PiCompatibleAgent {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Pi => "Pi",
+            Self::Omp => "OMP",
+        }
+    }
+
+    fn state_name(self) -> &'static str {
+        match self {
+            Self::Pi => "pi",
+            Self::Omp => "omp",
+        }
+    }
+
+    fn other(self) -> Self {
+        match self {
+            Self::Pi => Self::Omp,
+            Self::Omp => Self::Pi,
+        }
+    }
+
+    fn from_state_name(name: &str) -> Option<Self> {
+        match name {
+            "pi" => Some(Self::Pi),
+            "omp" => Some(Self::Omp),
+            _ => None,
+        }
+    }
+}
+
+// SHA-256 hashes of stock Pi extension revisions that may exist on user
+// machines, including the current embedded file. Keep historical entries
+// when changing the extension so an untouched older install can still be
+// removed safely. Hashes are computed after normalizing CRLF to LF and
+// trimming trailing whitespace, matching the comparisons below.
+// The history-based test below verifies that this list remains append-only
+// for every revision in the current checkout's ancestor history.
+const KNOWN_PI_PLUGIN_HASHES: &[&str] = &[
+    "5e80e811e689adc9d5ae5a59d1d5702060ca0c10320fea7cffd83c659026f1c5",
+    "2cbb2a7a9081275d6eda140d9e375f6772b5c354e7fe931c554c371ad8836c6e",
+    "94e80d1a5c159ea38ba8913f7c5b9d9b5c89bf7c204f1e583bfac2ed7fc40ab9",
+    "b63e3f6eeaeec23837df5a7c4024fe16dca1f8a49fb1743f8a877cc136ebc2d9",
+    "c30d4f4774c59bf25b50b70ab8a7dcb1b8287074592af1598dc09962fa1c7137",
+    "5ad230679294dc8dce09546fa25101fd3d0949f454cc8b72e04664fa1bd45ed7",
+    "be251e44747e6d09e5ca56ecaeddd8f4861c35a57500cd8b2bf9c39afe5795e8",
+    "eb56dd08b8d5f4704906d037d70b357d84d827abe1063135cc7c998efe6cf7f2",
+    "628308173ae41c488b76bcf90eafbd4c0c72435927645d81cdbec652eac4b107",
+    "3eb16108f51a29c2a62a453d5c97a6ea2da8aea1061da34c50fdcfaa32dc0ff7",
+];
+
+// Embedded agent-neutral RTK awareness instructions, one file per `awareness.level`.
+const RTK_AWARENESS_DEFAULT: &str = include_str!("../../hooks/rtk-awareness.md");
+const RTK_AWARENESS_HIGH: &str = include_str!("../../hooks/rtk-awareness-high.md");
+const RTK_AWARENESS_FULL: &str = include_str!("../../hooks/rtk-awareness-full.md");
 
 /// Template written by `rtk init` when no filters.toml exists yet.
 const FILTERS_TEMPLATE: &str = r#"# Project-local RTK filters — commit this file with your repo.
@@ -72,6 +154,7 @@ const RTK_MD_REF: &str = "@RTK.md";
 const GEMINI_MD: &str = "GEMINI.md";
 
 const RTK_BLOCK_START: &str = "<!-- rtk-instructions";
+const RTK_BLOCK_VERSION: &str = "v2";
 const RTK_BLOCK_END: &str = "<!-- /rtk-instructions -->";
 
 /// Control flow for settings.json patching
@@ -109,6 +192,41 @@ pub enum PatchResult {
 pub struct InitContext {
     pub verbose: u8,
     pub dry_run: bool,
+    /// `awareness.level` from config.toml. Agents with a command hook receive the matching
+    /// awareness file; agents without a hook always receive `full` (see `print_rules_only_awareness_note`).
+    pub awareness: AwarenessLevel,
+}
+
+fn awareness_content(level: AwarenessLevel) -> &'static str {
+    match level {
+        AwarenessLevel::Default => RTK_AWARENESS_DEFAULT,
+        AwarenessLevel::High => RTK_AWARENESS_HIGH,
+        AwarenessLevel::Full => RTK_AWARENESS_FULL,
+    }
+}
+
+/// Agents without a command hook must prefix `rtk` themselves, which only the `full` level
+/// teaches, so they always receive `RTK_AWARENESS_FULL`. This prints the one-line note that
+/// tells the user why their configured `awareness.level` was not applied.
+fn print_rules_only_awareness_note(agent: &str, ctx: InitContext) {
+    let prefix = if ctx.dry_run { "[dry-run] " } else { "  " };
+    let ignored = if ctx.awareness == AwarenessLevel::Full {
+        String::new()
+    } else {
+        format!(
+            " (config awareness.level = \"{}\" does not apply here)",
+            ctx.awareness
+        )
+    };
+    println!(
+        "{prefix}Awareness: full — {agent} has no command hook, so the agent is told to prefix rtk itself{ignored}"
+    );
+}
+
+/// Wrap an awareness file in the `<!-- rtk-instructions -->` markers used by
+/// `write_rtk_block`, so it can be upserted into a shared file like AGENTS.md.
+fn rtk_block(body: &str) -> String {
+    format!("{RTK_BLOCK_START} {RTK_BLOCK_VERSION} -->\n{body}{RTK_BLOCK_END}\n")
 }
 
 /// Shared dry-run footer printed at the end of every init sub-mode.
@@ -339,11 +457,38 @@ pub fn run(
 
     if !dry_run {
         prompt_telemetry_consent()?;
+        // Best-effort: unconditionally re-run tracking-DB schema migrations during
+        // install/upgrade (bypassing the `user_version` gate `Tracker::new()` uses
+        // on its hot path). This both pre-warms the schema so the first PreToolUse
+        // hook invocation (or `rtk <cmd>`) after this doesn't pay the one-time
+        // migration cost itself, and self-heals a table dropped/corrupted
+        // out-of-band (see `tracking::warn_if_missing_table`) — `rtk init` is
+        // already the natural "something's wrong, reinstall" move, so no separate
+        // repair flag is needed. `CREATE TABLE IF NOT EXISTS`/`ALTER TABLE` are
+        // additive, so existing history is left untouched. Never fail `rtk init`
+        // over a tracking-DB hiccup — but still tell the user something's wrong,
+        // consistent with every other best-effort warning in this function
+        // (rust-patterns.md's anti-pattern rule: a silent `Err(_) => {}` leaves
+        // the user with zero indication anything went wrong).
+        if let Err(e) = crate::core::tracking::ensure_schema_fresh() {
+            eprintln!("  [warn] Failed to prepare tracking database: {e}");
+        }
     }
 
     if dry_run {
         print_dry_run_footer();
     } else {
+        println!();
+    }
+
+    if crate::core::tee_file::legacy_tee_migration_pending() {
+        println!("{}", crate::core::tee_file::LEGACY_TEE_NOTICE);
+        println!();
+    } else if crate::core::tee_file::legacy_tee_config_in_use() {
+        println!("{}", crate::core::tee_file::LEGACY_TEE_CONFIG_NOTICE);
+        println!();
+    } else if crate::core::tee_file::legacy_tee_fields_merged_in_use() {
+        println!("{}", crate::core::tee_file::LEGACY_TEE_MERGED_NOTICE);
         println!();
     }
 
@@ -353,10 +498,55 @@ pub fn run(
 /// Idempotent file write: create or update if content differs.
 /// When `dry_run` is true, prints the intended action and does not touch the filesystem.
 fn write_if_changed(path: &Path, content: &str, name: &str, ctx: InitContext) -> Result<bool> {
-    let InitContext { verbose, dry_run } = ctx;
+    write_if_changed_internal(path, content, name, ctx, false)
+}
+
+/// Variant used for protected RTK files. A file that cannot be decoded is
+/// still replaceable after the caller's policy allows it (for example,
+/// `--auto-patch`), so a read error is treated like differing content instead
+/// of preventing recovery.
+fn write_if_changed_allow_read_error(
+    path: &Path,
+    content: &str,
+    name: &str,
+    ctx: InitContext,
+) -> Result<bool> {
+    write_if_changed_internal(path, content, name, ctx, true)
+}
+
+fn write_if_changed_internal(
+    path: &Path,
+    content: &str,
+    name: &str,
+    ctx: InitContext,
+    allow_read_error: bool,
+) -> Result<bool> {
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     if path.exists() {
-        let existing = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read {}: {}", name, path.display()))?;
+        let existing = match fs::read_to_string(path) {
+            Ok(existing) => existing,
+            Err(_) if allow_read_error => {
+                if dry_run {
+                    println!("[dry-run] would update {}: {}", name, path.display());
+                    if verbose > 0 {
+                        println!("[dry-run] content:\n{}", content);
+                    }
+                } else {
+                    atomic_write(path, content)
+                        .with_context(|| format!("Failed to write {}: {}", name, path.display()))?;
+                    if verbose > 0 {
+                        eprintln!("Updated {}: {}", name, path.display());
+                    }
+                }
+                return Ok(true);
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("Failed to read {}: {}", name, path.display()));
+            }
+        };
 
         if existing == content {
             if verbose > 0 {
@@ -433,17 +623,58 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
-/// Prompt user for consent to patch settings.json
-/// Prints to stderr (stdout may be piped), reads from stdin
-/// Default is No (capital N)
-fn prompt_user_consent(settings_path: &Path) -> Result<bool> {
+/// Read a JSON file with path-aware errors. Missing files return `None` and
+/// empty files are treated as an empty JSON object.
+fn read_json_file(path: &Path) -> Result<Option<serde_json::Value>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let content = strip_leading_bom(&content);
+    if content.trim().is_empty() {
+        return Ok(Some(serde_json::json!({})));
+    }
+
+    from_json_str(content)
+        .map(Some)
+        .with_context(|| format!("Failed to parse {} as JSON", path.display()))
+}
+
+/// Back up an existing JSON file before replacing it atomically.
+fn backup_and_atomic_write(path: &Path, content: &str) -> Result<Option<PathBuf>> {
+    let backup_path = if path.exists() {
+        let backup_path = path.with_extension("json.bak");
+        fs::copy(path, &backup_path).with_context(|| {
+            format!(
+                "Failed to backup {} to {}",
+                path.display(),
+                backup_path.display()
+            )
+        })?;
+        Some(backup_path)
+    } else {
+        None
+    };
+
+    atomic_write(path, content)
+        .with_context(|| format!("Failed to update JSON file: {}", path.display()))?;
+    Ok(backup_path)
+}
+
+/// Prompt user for confirmation.
+/// Prints to stderr (stdout may be piped), reads from stdin, and defaults to
+/// No in non-interactive environments.
+fn prompt_user_confirmation(prompt: &str) -> Result<bool> {
     use std::io::{self, BufRead, IsTerminal};
 
-    eprintln!("\nPatch existing {}? [y/N] ", settings_path.display());
+    eprint!("\n{} [y/N] ", prompt);
+    io::stderr().flush().context("Failed to flush prompt")?;
 
-    // If stdin is not a terminal (piped), default to No
+    // If stdin is not a terminal (piped), default to No.
     if !io::stdin().is_terminal() {
-        eprintln!("(non-interactive mode, defaulting to N)");
+        eprintln!("\n(non-interactive mode, defaulting to N)");
         return Ok(false);
     }
 
@@ -456,6 +687,11 @@ fn prompt_user_consent(settings_path: &Path) -> Result<bool> {
 
     let response = line.trim().to_lowercase();
     Ok(response == "y" || response == "yes")
+}
+
+/// Prompt user for consent to patch settings.json.
+fn prompt_user_consent(settings_path: &Path) -> Result<bool> {
+    prompt_user_confirmation(&format!("Patch existing {}?", settings_path.display()))
 }
 
 pub fn save_telemetry_consent(accepted: bool) -> Result<()> {
@@ -583,7 +819,9 @@ fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
 /// Remove RTK hook from settings.json file
 /// Backs up before modification, returns true if hook was found and removed
 fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let claude_dir = resolve_claude_dir()?;
     let settings_path = claude_dir.join(SETTINGS_JSON);
 
@@ -596,12 +834,13 @@ fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
 
     let content = fs::read_to_string(&settings_path)
         .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+    let content = strip_leading_bom(&content);
 
     if content.trim().is_empty() {
         return Ok(false);
     }
 
-    let mut root: serde_json::Value = serde_json::from_str(&content)
+    let mut root: serde_json::Value = from_json_str(content)
         .with_context(|| format!("Failed to parse {} as JSON", settings_path.display()))?;
 
     let removed = remove_hook_from_json(&mut root);
@@ -638,16 +877,36 @@ fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
     Ok(removed)
 }
 
-/// Full uninstall for Claude, Gemini, Codex, Cursor, or Pi artifacts.
+/// Full uninstall for Claude, Gemini, Codex, Cursor, Pi, or OMP artifacts.
+#[allow(dead_code)] // Kept as the default-policy API for in-crate callers and tests.
 pub fn uninstall(
     global: bool,
     gemini: bool,
     codex: bool,
     cursor: bool,
     pi: bool,
+    omp: bool,
     ctx: InitContext,
 ) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
+    uninstall_with_patch_mode(global, gemini, codex, cursor, pi, omp, PatchMode::Ask, ctx)
+}
+
+/// Full uninstall with an explicit confirmation policy for managed
+/// Pi-compatible extensions.
+#[allow(clippy::too_many_arguments)]
+pub fn uninstall_with_patch_mode(
+    global: bool,
+    gemini: bool,
+    codex: bool,
+    cursor: bool,
+    pi: bool,
+    omp: bool,
+    patch_mode: PatchMode,
+    ctx: InitContext,
+) -> Result<()> {
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     if codex {
         uninstall_codex(global, ctx)?;
         if dry_run {
@@ -684,12 +943,19 @@ pub fn uninstall(
     }
 
     if pi {
-        uninstall_pi(global, ctx)?;
+        uninstall_pi_with_patch_mode(global, patch_mode, ctx)?;
+        return Ok(());
+    }
+
+    if omp {
+        uninstall_omp_with_patch_mode(global, patch_mode, ctx)?;
         return Ok(());
     }
 
     if !global {
-        anyhow::bail!("Uninstall only works with --global flag. For local projects, manually remove RTK from CLAUDE.md");
+        anyhow::bail!(
+            "Uninstall only works with --global flag. For local projects, manually remove RTK from CLAUDE.md"
+        );
     }
 
     let claude_dir = resolve_claude_dir()?;
@@ -870,14 +1136,18 @@ pub fn uninstall(
 
 fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
-    if !global {
-        anyhow::bail!(
-            "Uninstall only works with --global flag. For local projects, manually remove RTK from AGENTS.md"
-        );
-    }
-
-    let codex_dir = resolve_codex_dir()?;
-    let removed = uninstall_codex_at(&codex_dir, ctx)?;
+    let removed = if global {
+        let codex_dir = resolve_codex_dir()?;
+        uninstall_codex_at(&codex_dir, ctx)?
+    } else {
+        uninstall_codex_with_paths(
+            Path::new(AGENTS_MD),
+            Path::new(RTK_MD),
+            &Path::new(CODEX_DIR).join(HOOKS_JSON),
+            &[RTK_MD_REF],
+            ctx,
+        )?
+    };
 
     if removed.is_empty() {
         println!("RTK was not installed for Codex CLI (nothing to remove)");
@@ -897,16 +1167,38 @@ fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
 }
 
 fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
-    let InitContext { verbose, dry_run } = ctx;
-    let mut removed = Vec::new();
     let absolute_rtk_md_ref = codex_rtk_md_ref(codex_dir);
+    uninstall_codex_with_paths(
+        &codex_dir.join(AGENTS_MD),
+        &codex_dir.join(RTK_MD),
+        &codex_dir.join(HOOKS_JSON),
+        &[RTK_MD_REF, absolute_rtk_md_ref.as_str()],
+        ctx,
+    )
+}
 
-    let rtk_md_path = codex_dir.join(RTK_MD);
+fn uninstall_codex_with_paths(
+    agents_md_path: &Path,
+    rtk_md_path: &Path,
+    hooks_json_path: &Path,
+    rtk_md_refs: &[&str],
+    ctx: InitContext,
+) -> Result<Vec<String>> {
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
+    let mut removed = Vec::new();
+
+    if remove_codex_hook_from_file(hooks_json_path, ctx)? {
+        removed.push(format!("hooks.json: removed {} entry", CODEX_HOOK_COMMAND));
+    }
+
     if rtk_md_path.exists() {
         if dry_run {
             println!("[dry-run] would remove RTK.md: {}", rtk_md_path.display());
         } else {
-            fs::remove_file(&rtk_md_path)
+            // nosemgrep: filesystem-deletion
+            fs::remove_file(rtk_md_path)
                 .with_context(|| format!("Failed to remove RTK.md: {}", rtk_md_path.display()))?;
             if verbose > 0 {
                 eprintln!("Removed RTK.md: {}", rtk_md_path.display());
@@ -915,9 +1207,8 @@ fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>>
         removed.push(format!("RTK.md: {}", rtk_md_path.display()));
     }
 
-    let agents_md_path = codex_dir.join(AGENTS_MD);
     if agents_md_path.exists() {
-        let content = fs::read_to_string(&agents_md_path)
+        let content = fs::read_to_string(agents_md_path)
             .with_context(|| format!("Failed to read AGENTS.md: {}", agents_md_path.display()))?;
 
         let mut working_content = content.clone();
@@ -933,17 +1224,13 @@ fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>>
         }
 
         if agents_changed {
-            atomic_write(&agents_md_path, &working_content).with_context(|| {
+            atomic_write(agents_md_path, &working_content).with_context(|| {
                 format!("Failed to write AGENTS.md: {}", agents_md_path.display())
             })?;
         }
     }
 
-    if remove_rtk_reference_from_agents(
-        &agents_md_path,
-        &[RTK_MD_REF, absolute_rtk_md_ref.as_str()],
-        ctx,
-    )? {
+    if remove_rtk_reference_from_agents(agents_md_path, rtk_md_refs, ctx)? {
         removed.push("AGENTS.md: removed @RTK.md reference".to_string());
     }
 
@@ -958,7 +1245,9 @@ fn patch_settings_json_command(
     include_opencode: bool,
     ctx: InitContext,
 ) -> Result<PatchResult> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let claude_dir = resolve_claude_dir()?;
     let settings_path = claude_dir.join(SETTINGS_JSON);
 
@@ -966,11 +1255,12 @@ fn patch_settings_json_command(
     let mut root = if settings_path.exists() {
         let content = fs::read_to_string(&settings_path)
             .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+        let content = strip_leading_bom(&content);
 
         if content.trim().is_empty() {
             serde_json::json!({})
         } else {
-            serde_json::from_str(&content)
+            from_json_str(content)
                 .with_context(|| format!("Failed to parse {} as JSON", settings_path.display()))?
         }
     } else {
@@ -1147,8 +1437,15 @@ fn run_default_mode(
 ) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
     if !global {
-        // Local init: inject CLAUDE.md + generate project-local filters template
-        run_claude_md_mode(false, install_opencode, ctx)?;
+        // Local init: inject the awareness block into CLAUDE.md + generate
+        // project-local filters template. The legacy full-instruction block
+        // stays behind the explicit --claude-md opt-in.
+        run_claude_md_mode_with(
+            false,
+            install_opencode,
+            &rtk_block(awareness_content(ctx.awareness)),
+            ctx,
+        )?;
         generate_project_filters_template(ctx)?;
         return Ok(());
     }
@@ -1161,7 +1458,10 @@ fn run_default_mode(
     migrate_old_hook_script(ctx);
 
     // 2. Write RTK.md
-    write_if_changed(&rtk_md_path, RTK_SLIM, RTK_MD, ctx)?;
+    write_if_changed(&rtk_md_path, awareness_content(ctx.awareness), RTK_MD, ctx)?;
+    if dry_run {
+        println!("[dry-run] awareness level: {}", ctx.awareness);
+    }
 
     let opencode_plugin_path = if install_opencode {
         let path = prepare_opencode_plugin_path()?;
@@ -1178,7 +1478,11 @@ fn run_default_mode(
     if !dry_run {
         println!("\nRTK hook registered (global).\n");
         println!("  Command:   {}", CLAUDE_HOOK_COMMAND);
-        println!("  RTK.md:    {} (10 lines)", rtk_md_path.display());
+        println!(
+            "  RTK.md:    {} (awareness: {})",
+            rtk_md_path.display(),
+            ctx.awareness
+        );
         if let Some(path) = &opencode_plugin_path {
             println!("  OpenCode:  {}", path.display());
         }
@@ -1186,7 +1490,10 @@ fn run_default_mode(
 
         if migrated {
             println!("\n  [ok] Migrated: removed 137-line RTK block from CLAUDE.md");
-            println!("              replaced with @RTK.md (10 lines)");
+            println!(
+                "              replaced with @RTK.md (awareness: {})",
+                ctx.awareness
+            );
         }
     }
 
@@ -1232,7 +1539,9 @@ fn run_default_mode(
 /// and removes the stale settings.json entry so the new `rtk hook claude` entry
 /// can be registered.
 fn migrate_old_hook_script(ctx: InitContext) {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     if let Some(home) = dirs::home_dir() {
         let old_hook = home
             .join(CLAUDE_DIR)
@@ -1254,10 +1563,10 @@ fn migrate_old_hook_script(ctx: InitContext) {
                     eprintln!("  [ok] Removed old hook script: {}", old_hook.display());
                 }
                 // Clean up the stale settings.json entry that pointed to the deleted script
-                if let Err(e) = remove_legacy_settings_entries(ctx) {
-                    if verbose > 0 {
-                        eprintln!("  [warn] Failed to clean legacy settings.json entry: {e}");
-                    }
+                if let Err(e) = remove_legacy_settings_entries(ctx)
+                    && verbose > 0
+                {
+                    eprintln!("  [warn] Failed to clean legacy settings.json entry: {e}");
                 }
             }
         }
@@ -1294,7 +1603,9 @@ fn migrate_old_hook_script(ctx: InitContext) {
 /// Remove only legacy `rtk-rewrite.sh` entries from settings.json.
 /// Preserves any existing `rtk hook claude` entries (new format).
 fn remove_legacy_settings_entries(ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let claude_dir = resolve_claude_dir()?;
     let settings_path = claude_dir.join(SETTINGS_JSON);
 
@@ -1304,11 +1615,12 @@ fn remove_legacy_settings_entries(ctx: InitContext) -> Result<()> {
 
     let content = fs::read_to_string(&settings_path)
         .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+    let content = strip_leading_bom(&content);
     if content.trim().is_empty() {
         return Ok(());
     }
 
-    let mut root: serde_json::Value = serde_json::from_str(&content)
+    let mut root: serde_json::Value = from_json_str(content)
         .with_context(|| format!("Failed to parse {}", settings_path.display()))?;
 
     if !remove_legacy_hook_entries_from_json(&mut root) {
@@ -1372,7 +1684,9 @@ fn remove_legacy_hook_entries_from_json(root: &mut serde_json::Value) -> bool {
 
 /// Generate .rtk/filters.toml template in the current directory if not present.
 fn generate_project_filters_template(ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let rtk_dir = std::path::Path::new(".rtk");
     let path = rtk_dir.join("filters.toml");
 
@@ -1405,7 +1719,9 @@ fn generate_project_filters_template(ctx: InitContext) -> Result<()> {
 
 /// Generate ~/.config/rtk/filters.toml template if not present.
 fn generate_global_filters_template(ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let config_dir = dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from(".config"));
     let rtk_dir = config_dir.join(crate::core::constants::RTK_DATA_DIR);
     let path = rtk_dir.join("filters.toml");
@@ -1564,19 +1880,31 @@ fn run_hook_only_mode(
     Ok(())
 }
 
-/// Legacy mode: full 137-line injection into CLAUDE.md
+/// Legacy mode (--claude-md): inject the full RTK_INSTRUCTIONS block into CLAUDE.md.
 fn run_claude_md_mode(global: bool, install_opencode: bool, ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
+    run_claude_md_mode_with(global, install_opencode, RTK_INSTRUCTIONS, ctx)
+}
+
+fn run_claude_md_mode_with(
+    global: bool,
+    install_opencode: bool,
+    block: &str,
+    ctx: InitContext,
+) -> Result<()> {
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let path = if global {
         resolve_claude_dir()?.join(CLAUDE_MD)
     } else {
         PathBuf::from(CLAUDE_MD)
     };
 
-    if global && !dry_run {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+    if global
+        && !dry_run
+        && let Some(parent) = path.parent()
+    {
+        fs::create_dir_all(parent)?;
     }
 
     if verbose > 0 {
@@ -1589,13 +1917,7 @@ fn run_claude_md_mode(global: bool, install_opencode: bool, ctx: InitContext) ->
         "rtk init --claude-md"
     };
 
-    let action = write_rtk_block(
-        &path,
-        RTK_INSTRUCTIONS,
-        "rtk instructions",
-        recovery_cmd,
-        ctx,
-    )?;
+    let action = write_rtk_block(&path, block, "rtk instructions", recovery_cmd, ctx)?;
 
     if matches!(action, RtkBlockUpsert::Unchanged) {
         return Ok(());
@@ -1624,16 +1946,12 @@ fn run_claude_md_mode(global: bool, install_opencode: bool, ctx: InitContext) ->
 
 // ─── Windsurf support ─────────────────────────────────────────
 
-/// Embedded Windsurf RTK rules
-const WINDSURF_RULES: &str = include_str!("../../hooks/windsurf/rules.md");
-
-/// Embedded Cline RTK rules
-const CLINE_RULES: &str = include_str!("../../hooks/cline/rules.md");
-
 // ─── Cline / Roo Code support ─────────────────────────────────
 
 fn run_cline_mode(ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     // Cline reads .clinerules from the project root (workspace-scoped)
     let rules_path = PathBuf::from(".clinerules");
 
@@ -1645,9 +1963,9 @@ fn run_cline_mode(ctx: InitContext) -> Result<()> {
         }
     } else {
         let new_content = if existing.trim().is_empty() {
-            CLINE_RULES.to_string()
+            RTK_AWARENESS_FULL.to_string()
         } else {
-            format!("{}\n\n{}", existing.trim(), CLINE_RULES)
+            format!("{}\n\n{}", existing.trim(), RTK_AWARENESS_FULL)
         };
         if dry_run {
             println!(
@@ -1668,6 +1986,7 @@ fn run_cline_mode(ctx: InitContext) -> Result<()> {
             println!("  Rules: .clinerules (installed)");
         }
     }
+    print_rules_only_awareness_note("Cline", ctx);
     if !dry_run {
         println!("  Cline will now use rtk commands for token savings.");
         println!("  Test with: git status\n");
@@ -1677,7 +1996,9 @@ fn run_cline_mode(ctx: InitContext) -> Result<()> {
 }
 
 fn run_windsurf_mode(ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     // Windsurf reads .windsurfrules from the project root (workspace-scoped).
     // Global rules (~/.codeium/windsurf/memories/global_rules.md) are unreliable.
     let rules_path = PathBuf::from(".windsurfrules");
@@ -1690,9 +2011,9 @@ fn run_windsurf_mode(ctx: InitContext) -> Result<()> {
         }
     } else {
         let new_content = if existing.trim().is_empty() {
-            WINDSURF_RULES.to_string()
+            RTK_AWARENESS_FULL.to_string()
         } else {
-            format!("{}\n\n{}", existing.trim(), WINDSURF_RULES)
+            format!("{}\n\n{}", existing.trim(), RTK_AWARENESS_FULL)
         };
         if dry_run {
             println!(
@@ -1713,6 +2034,7 @@ fn run_windsurf_mode(ctx: InitContext) -> Result<()> {
             println!("  Rules: .windsurfrules (installed)");
         }
     }
+    print_rules_only_awareness_note("Windsurf", ctx);
     if !dry_run {
         println!("  Cascade will now use rtk commands for token savings.");
         println!("  Restart Windsurf. Test with: git status\n");
@@ -1723,14 +2045,14 @@ fn run_windsurf_mode(ctx: InitContext) -> Result<()> {
 
 // ─── Kilo Code support ────────────────────────────────────────
 
-const KILOCODE_RULES: &str = include_str!("../../hooks/kilocode/rules.md");
-
 pub fn run_kilocode_mode(ctx: InitContext) -> Result<()> {
     run_kilocode_mode_at(&std::env::current_dir()?, ctx)
 }
 
 fn run_kilocode_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     // Kilo Code reads .kilocode/rules/ from the project root (workspace-scoped)
     let target_dir = base_dir.join(".kilocode/rules");
     let rules_path = target_dir.join("rtk-rules.md");
@@ -1743,9 +2065,9 @@ fn run_kilocode_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
         }
     } else {
         let new_content = if existing.trim().is_empty() {
-            KILOCODE_RULES.to_string()
+            RTK_AWARENESS_FULL.to_string()
         } else {
-            format!("{}\n\n{}", existing.trim(), KILOCODE_RULES)
+            format!("{}\n\n{}", existing.trim(), RTK_AWARENESS_FULL)
         };
         if dry_run {
             println!(
@@ -1769,6 +2091,7 @@ fn run_kilocode_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
             println!("  Rules: .kilocode/rules/rtk-rules.md (installed)");
         }
     }
+    print_rules_only_awareness_note("Kilo Code", ctx);
     if dry_run {
         print_dry_run_footer();
     } else {
@@ -1781,14 +2104,14 @@ fn run_kilocode_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
 
 // ─── Google Antigravity support ───────────────────────────────
 
-const ANTIGRAVITY_RULES: &str = include_str!("../../hooks/antigravity/rules.md");
-
 pub fn run_antigravity_mode(ctx: InitContext) -> Result<()> {
     run_antigravity_mode_at(&std::env::current_dir()?, ctx)
 }
 
 fn run_antigravity_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     // Antigravity reads .agents/rules/ from the project root (workspace-scoped)
     let target_dir = base_dir.join(".agents/rules");
     let rules_path = target_dir.join("antigravity-rtk-rules.md");
@@ -1801,9 +2124,9 @@ fn run_antigravity_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
         }
     } else {
         let new_content = if existing.trim().is_empty() {
-            ANTIGRAVITY_RULES.to_string()
+            RTK_AWARENESS_FULL.to_string()
         } else {
-            format!("{}\n\n{}", existing.trim(), ANTIGRAVITY_RULES)
+            format!("{}\n\n{}", existing.trim(), RTK_AWARENESS_FULL)
         };
         if dry_run {
             println!(
@@ -1826,6 +2149,7 @@ fn run_antigravity_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
             println!("  Rules: .agents/rules/antigravity-rtk-rules.md (installed)");
         }
     }
+    print_rules_only_awareness_note("Antigravity", ctx);
     if dry_run {
         print_dry_run_footer();
     } else {
@@ -1942,12 +2266,13 @@ fn run_kimi_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
 
     write_rtk_block(
         &agents_md_path,
-        RTK_INSTRUCTIONS,
+        &rtk_block(RTK_AWARENESS_FULL),
         "RTK instructions",
         "rtk init --agent kimi",
         ctx,
     )?;
 
+    print_rules_only_awareness_note("Kimi AI", ctx);
     if !ctx.dry_run {
         println!("\nRTK configured for Kimi AI.\n");
         println!("  AGENTS.md: {}", agents_md_path.display());
@@ -1959,7 +2284,9 @@ fn run_kimi_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
 }
 
 fn uninstall_hermes_at(hermes_home: &Path, ctx: InitContext) -> Result<Vec<String>> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let mut removed = Vec::new();
 
     let plugin_dir = hermes_plugin_dir(hermes_home);
@@ -2085,10 +2412,10 @@ fn ensure_previous_yaml_line_ends_with_newline(lines: &mut [String], insert_idx:
         return;
     }
 
-    if let Some(previous) = lines.get_mut(insert_idx - 1) {
-        if !previous.ends_with('\n') {
-            previous.push('\n');
-        }
+    if let Some(previous) = lines.get_mut(insert_idx - 1)
+        && !previous.ends_with('\n')
+    {
+        previous.push('\n');
     }
 }
 
@@ -2371,32 +2698,42 @@ fn normalized_yaml_scalar(value: &str) -> Option<String> {
 }
 
 fn run_codex_mode(global: bool, ctx: InitContext) -> Result<()> {
-    let (agents_md_path, rtk_md_path) = if global {
+    let (agents_md_path, rtk_md_path, hooks_json_path) = if global {
         let codex_dir = resolve_codex_dir()?;
-        (codex_dir.join(AGENTS_MD), codex_dir.join(RTK_MD))
+        (
+            codex_dir.join(AGENTS_MD),
+            codex_dir.join(RTK_MD),
+            codex_dir.join(HOOKS_JSON),
+        )
     } else {
-        (PathBuf::from(AGENTS_MD), PathBuf::from(RTK_MD))
+        (
+            PathBuf::from(AGENTS_MD),
+            PathBuf::from(RTK_MD),
+            PathBuf::from(CODEX_DIR).join(HOOKS_JSON),
+        )
     };
 
-    run_codex_mode_with_paths(agents_md_path, rtk_md_path, global, ctx)
+    run_codex_mode_with_paths(agents_md_path, rtk_md_path, hooks_json_path, global, ctx)
 }
 
 fn run_codex_mode_with_paths(
     agents_md_path: PathBuf,
     rtk_md_path: PathBuf,
+    hooks_json_path: PathBuf,
     global: bool,
     ctx: InitContext,
 ) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
-    if global && !dry_run {
-        if let Some(parent) = agents_md_path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "Failed to create Codex config directory: {}",
-                    parent.display()
-                )
-            })?;
-        }
+    if global
+        && !dry_run
+        && let Some(parent) = agents_md_path.parent()
+    {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create Codex config directory: {}",
+                parent.display()
+            )
+        })?;
     }
 
     // ISSUE #892: In global mode, use absolute path so @RTK.md resolves
@@ -2412,12 +2749,22 @@ fn run_codex_mode_with_paths(
         RTK_MD_REF.to_string()
     };
 
-    write_if_changed(&rtk_md_path, RTK_SLIM_CODEX, RTK_MD, ctx)?;
+    write_if_changed(&rtk_md_path, awareness_content(ctx.awareness), RTK_MD, ctx)?;
     let added_ref = patch_agents_md(&agents_md_path, &rtk_md_ref, ctx)?;
+    let hook_added = patch_codex_hooks_json(&hooks_json_path, ctx)?;
 
     if !dry_run {
         println!("\nRTK configured for Codex CLI.\n");
         println!("  RTK.md:    {}", rtk_md_path.display());
+        println!(
+            "  Hook:      {} ({})",
+            hooks_json_path.display(),
+            if hook_added {
+                "registered"
+            } else {
+                "already present"
+            }
+        );
         if added_ref {
             println!("  AGENTS.md: {} reference added", rtk_md_ref);
         } else {
@@ -2434,9 +2781,159 @@ fn run_codex_mode_with_paths(
                 agents_md_path.display()
             );
         }
+        println!(
+            "\n  Restart Codex. For a project hook, approve it when Codex asks you to trust it."
+        );
+        match crate::core::tracking::get_db_path().and_then(|path| codex_tracking_config(&path)) {
+            Ok(config) => {
+                println!("\n  Optional: if history recording fails with SQLITE_CANTOPEN in the");
+                println!(
+                    "  workspace-write sandbox, grant write access to the tracking directory:"
+                );
+                println!("\n{config}");
+                println!(
+                    "  Merge this into Codex config.toml only if you want persistent history."
+                );
+                println!("  Keep existing writable_roots; do not add a duplicate table.");
+                println!("  This grants access to the directory, including SQLite sidecar files.");
+                println!("  No Codex permission settings have been changed.");
+            }
+            Err(error) => eprintln!("rtk: warning: could not prepare tracking guidance: {error:#}"),
+        }
     }
 
     Ok(())
+}
+
+fn codex_tracking_config(db_path: &Path) -> Result<String> {
+    let absolute = std::path::absolute(db_path).context("Failed to resolve RTK database path")?;
+    let parent = absolute
+        .parent()
+        .context("RTK database path has no parent")?;
+    let directory = fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+    let directory = directory
+        .to_str()
+        .context("RTK database directory is not valid UTF-8")?;
+    let quoted = toml::Value::String(directory.to_string());
+    Ok(format!(
+        "sandbox_mode = \"workspace-write\"\n\n[sandbox_workspace_write]\nwritable_roots = [{quoted}]\n"
+    ))
+}
+
+fn codex_hook_already_present(root: &serde_json::Value) -> bool {
+    root.pointer("/hooks/PreToolUse")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("hooks")?.as_array())
+        .flatten()
+        .filter_map(|hook| hook.get("command")?.as_str())
+        .any(is_codex_hook_command)
+}
+
+fn patch_codex_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
+    let mut root = read_json_file(path)?.unwrap_or_else(|| serde_json::json!({}));
+
+    if codex_hook_already_present(&root) {
+        return Ok(false);
+    }
+
+    insert_hook_entry(&mut root, CODEX_HOOK_COMMAND)?;
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize Codex hooks.json")?;
+
+    if dry_run {
+        println!("[dry-run] would patch Codex hooks: {}", path.display());
+        if verbose > 0 {
+            println!("[dry-run] content:\n{}", serialized);
+        }
+        return Ok(true);
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create Codex config directory: {}",
+                parent.display()
+            )
+        })?;
+    }
+    backup_and_atomic_write(path, &serialized)?;
+    if verbose > 0 {
+        eprintln!("Patched Codex hooks: {}", path.display());
+    }
+
+    Ok(true)
+}
+
+fn remove_codex_hook_from_json(root: &mut serde_json::Value) -> bool {
+    let Some(pre_tool_use) = root
+        .pointer_mut("/hooks/PreToolUse")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return false;
+    };
+
+    let mut removed = false;
+    for entry in pre_tool_use.iter_mut() {
+        let Some(hooks) = entry
+            .get_mut("hooks")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        let before = hooks.len();
+        hooks.retain(|hook| {
+            !hook
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(is_codex_hook_command)
+        });
+        removed |= hooks.len() != before;
+    }
+    pre_tool_use.retain(|entry| {
+        entry
+            .get("hooks")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|hooks| !hooks.is_empty())
+    });
+
+    removed
+}
+
+fn remove_codex_hook_from_file(path: &Path, ctx: InitContext) -> Result<bool> {
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
+    let Some(mut root) = read_json_file(path)? else {
+        return Ok(false);
+    };
+    if !remove_codex_hook_from_json(&mut root) {
+        return Ok(false);
+    }
+
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize Codex hooks.json")?;
+    if dry_run {
+        println!(
+            "[dry-run] would remove RTK hook entry from {}",
+            path.display()
+        );
+        if verbose > 0 {
+            println!("[dry-run] content:\n{}", serialized);
+        }
+        return Ok(true);
+    }
+
+    backup_and_atomic_write(path, &serialized)?;
+    if verbose > 0 {
+        eprintln!("Removed Codex RTK hook: {}", path.display());
+    }
+
+    Ok(true)
 }
 
 // --- upsert_rtk_block: idempotent RTK block management ---
@@ -2583,7 +3080,9 @@ fn write_rtk_block(
 
 /// Patch CLAUDE.md: add @RTK.md, migrate if old block exists
 fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let mut content = if path.exists() {
         fs::read_to_string(path)?
     } else {
@@ -2650,7 +3149,9 @@ fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
 
 /// Patch AGENTS.md: add @RTK.md (or absolute path), migrate old inline block if present
 fn patch_agents_md(path: &Path, rtk_md_ref: &str, ctx: InitContext) -> Result<bool> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let mut content = if path.exists() {
         fs::read_to_string(path)
             .with_context(|| format!("Failed to read AGENTS.md: {}", path.display()))?
@@ -2743,7 +3244,9 @@ fn has_rtk_reference(content: &str, refs: &[&str]) -> bool {
 }
 
 fn remove_rtk_reference_from_agents(path: &Path, refs: &[&str], ctx: InitContext) -> Result<bool> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     if !path.exists() {
         return Ok(false);
     }
@@ -2950,22 +3453,6 @@ fn droid_hook_file_candidates(droid_dir: &Path) -> [DroidHookFile; 3] {
     ]
 }
 
-/// Read a Droid config file as JSON. `Ok(None)` when the file doesn't exist;
-/// an empty file parses as `{}`.
-fn read_droid_json(path: &Path) -> Result<Option<serde_json::Value>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let content =
-        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    if content.trim().is_empty() {
-        return Ok(Some(serde_json::json!({})));
-    }
-    serde_json::from_str(&content)
-        .map(Some)
-        .with_context(|| format!("Failed to parse {} as JSON", path.display()))
-}
-
 /// The JSON object holding hook events for the given layout, if present.
 fn droid_events(root: &serde_json::Value, layout: DroidLayout) -> &serde_json::Value {
     match layout {
@@ -3007,24 +3494,23 @@ fn resolve_droid_install_target(droid_dir: &Path) -> Result<DroidHookFile> {
         None
     };
 
-    if let Some(path) = &live_hooks_json {
-        if let Some(json) = read_droid_json(path)? {
-            if droid_has_pre_tool_use(&json, DroidLayout::Root) {
-                return Ok(DroidHookFile {
-                    path: path.clone(),
-                    layout: DroidLayout::Root,
-                });
-            }
-        }
+    if let Some(path) = &live_hooks_json
+        && let Some(json) = read_json_file(path)?
+        && droid_has_pre_tool_use(&json, DroidLayout::Root)
+    {
+        return Ok(DroidHookFile {
+            path: path.clone(),
+            layout: DroidLayout::Root,
+        });
     }
 
-    if let Some(json) = read_droid_json(&settings)? {
-        if droid_has_pre_tool_use(&json, DroidLayout::Nested) {
-            return Ok(DroidHookFile {
-                path: settings,
-                layout: DroidLayout::Nested,
-            });
-        }
+    if let Some(json) = read_json_file(&settings)?
+        && droid_has_pre_tool_use(&json, DroidLayout::Nested)
+    {
+        return Ok(DroidHookFile {
+            path: settings,
+            layout: DroidLayout::Nested,
+        });
     }
 
     Ok(DroidHookFile {
@@ -3100,9 +3586,11 @@ fn run_droid_mode_at(droid_dir: &Path, global: bool, ctx: InitContext) -> Result
 /// Insert RTK PreToolUse entry into a Droid hook file.
 /// Returns true if the file was modified.
 fn patch_droid_hook_file(file: &DroidHookFile, ctx: InitContext) -> Result<bool> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let path = &file.path;
-    let mut root = read_droid_json(path)?.unwrap_or_else(|| serde_json::json!({}));
+    let mut root = read_json_file(path)?.unwrap_or_else(|| serde_json::json!({}));
 
     if droid_hook_already_present(&root, file.layout) {
         if verbose > 0 {
@@ -3124,16 +3612,11 @@ fn patch_droid_hook_file(file: &DroidHookFile, ctx: InitContext) -> Result<bool>
         return Ok(true);
     }
 
-    if path.exists() {
-        let backup_path = path.with_extension("json.bak");
-        fs::copy(path, &backup_path)
-            .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
-        if verbose > 0 {
-            eprintln!("Backup: {}", backup_path.display());
-        }
+    if let Some(backup_path) = backup_and_atomic_write(path, &serialized)?
+        && verbose > 0
+    {
+        eprintln!("Backup: {}", backup_path.display());
     }
-
-    atomic_write(path, &serialized)?;
     Ok(true)
 }
 
@@ -3193,14 +3676,14 @@ fn insert_droid_hook_entry(root: &mut serde_json::Value, layout: DroidLayout) ->
             .get("matcher")
             .and_then(|m| m.as_str())
             .unwrap_or_default();
-        if matcher == DROID_EXECUTE_MATCHER {
-            if let Some(hook_array) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) {
-                hook_array.push(serde_json::json!({
-                    "type": "command",
-                    "command": DROID_HOOK_COMMAND
-                }));
-                return Ok(());
-            }
+        if matcher == DROID_EXECUTE_MATCHER
+            && let Some(hook_array) = entry.get_mut("hooks").and_then(|h| h.as_array_mut())
+        {
+            hook_array.push(serde_json::json!({
+                "type": "command",
+                "command": DROID_HOOK_COMMAND
+            }));
+            return Ok(());
         }
     }
 
@@ -3247,21 +3730,36 @@ pub fn uninstall_droid(global: bool, ctx: InitContext) -> Result<()> {
 
 fn uninstall_droid_at(droid_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
     let mut removed = Vec::new();
+    let mut errors = Vec::new();
     for candidate in droid_hook_file_candidates(droid_dir) {
-        if remove_droid_hook_from_file(&candidate, ctx)? {
-            removed.push(format!("Droid hook file: {}", candidate.path.display()));
+        match remove_droid_hook_from_file(&candidate, ctx) {
+            Ok(true) => {
+                removed.push(format!("Droid hook file: {}", candidate.path.display()));
+            }
+            Ok(false) => {}
+            Err(error) => errors.push(format!("{}: {error:#}", candidate.path.display())),
         }
     }
+
+    if !errors.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Failed to uninstall RTK from one or more Droid hook files:\n  - {}",
+            errors.join("\n  - ")
+        ));
+    }
+
     Ok(removed)
 }
 
 /// Strip the RTK entry from one Droid hook file. Returns true if the file
 /// held an RTK entry (and was rewritten, unless dry-run).
 fn remove_droid_hook_from_file(file: &DroidHookFile, ctx: InitContext) -> Result<bool> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let path = &file.path;
 
-    let mut root = match read_droid_json(path)? {
+    let mut root = match read_json_file(path)? {
         Some(v) => v,
         None => return Ok(false),
     };
@@ -3276,12 +3774,9 @@ fn remove_droid_hook_from_file(file: &DroidHookFile, ctx: InitContext) -> Result
             path.display()
         );
     } else {
-        let backup_path = path.with_extension("json.bak");
-        fs::copy(path, &backup_path).ok();
-
         let serialized =
             serde_json::to_string_pretty(&root).context("Failed to serialize Droid hook file")?;
-        atomic_write(path, &serialized)?;
+        backup_and_atomic_write(path, &serialized)?;
 
         if verbose > 0 {
             eprintln!("Removed RTK hook from {}", path.display());
@@ -3348,10 +3843,9 @@ fn remove_droid_hook_from_json(root: &mut serde_json::Value, layout: DroidLayout
             .get("hooks")
             .and_then(|h| h.as_object())
             .is_some_and(|o| o.is_empty())
+        && let Some(obj) = root.as_object_mut()
     {
-        if let Some(obj) = root.as_object_mut() {
-            obj.remove("hooks");
-        }
+        obj.remove("hooks");
     }
 
     modified
@@ -3369,10 +3863,10 @@ fn resolve_opencode_dir() -> Result<PathBuf> {
 
 /// Resolve Pi config directory, honouring `PI_CODING_AGENT_DIR` override.
 fn resolve_pi_dir() -> Result<PathBuf> {
-    if let Ok(dir) = std::env::var(PI_CODING_AGENT_DIR_ENV) {
-        if !dir.is_empty() {
-            return Ok(PathBuf::from(dir));
-        }
+    if let Ok(dir) = std::env::var(PI_CODING_AGENT_DIR_ENV)
+        && !dir.is_empty()
+    {
+        return Ok(PathBuf::from(dir));
     }
     resolve_home_subdir(PI_DIR)
 }
@@ -3395,9 +3889,100 @@ fn pi_plugin_path_for_scope(global: bool) -> Result<PathBuf> {
     }
 }
 
-/// Write the Pi extension file if missing or outdated. Returns true if written.
-fn ensure_pi_plugin_installed(path: &Path, ctx: InitContext) -> Result<bool> {
-    write_if_changed(path, PI_PLUGIN, "Pi extension", ctx)
+/// Check whether a managed Pi-compatible extension can be installed.
+///
+/// Returns `false` when the selected policy declines or previews a skipped
+/// action; `--auto-patch --dry-run` returns `true` so the caller can preview
+/// the same directory and write actions as a real auto-patch. Validation runs
+/// before parent directory creation.
+fn validate_stock_pi_plugin_path(
+    path: &Path,
+    name: &str,
+    patch_mode: PatchMode,
+    ctx: InitContext,
+) -> Result<bool> {
+    if path.exists() {
+        let is_known_stock = match fs::read_to_string(path) {
+            Ok(existing) => is_known_stock_pi_plugin(&existing),
+            Err(error) => {
+                eprintln!(
+                    "[warn] {} at {} could not be read; treating it as non-stock: {}",
+                    name,
+                    path.display(),
+                    error
+                );
+                false
+            }
+        };
+        if !is_known_stock {
+            if ctx.dry_run {
+                return match patch_mode {
+                    PatchMode::Ask => {
+                        println!(
+                            "[dry-run] would prompt before overwriting {}: {}",
+                            name,
+                            path.display()
+                        );
+                        Ok(false)
+                    }
+                    PatchMode::Auto => {
+                        println!(
+                            "[dry-run] would overwrite non-stock {}: {}",
+                            name,
+                            path.display()
+                        );
+                        Ok(true)
+                    }
+                    PatchMode::Skip => {
+                        println!(
+                            "[dry-run] would leave {} unchanged: {}",
+                            name,
+                            path.display()
+                        );
+                        Ok(false)
+                    }
+                };
+            }
+
+            let should_overwrite = match patch_mode {
+                PatchMode::Auto => true,
+                PatchMode::Skip => false,
+                PatchMode::Ask => {
+                    let prompt = format!("Overwrite the non-stock {} at {}?", name, path.display());
+                    prompt_user_confirmation(&prompt)?
+                }
+            };
+
+            return Ok(should_overwrite);
+        }
+    }
+
+    Ok(true)
+}
+
+fn normalize_pi_plugin_line_endings(content: &str) -> String {
+    content.replace("\r\n", "\n")
+}
+
+fn is_current_pi_plugin(content: &str) -> bool {
+    normalize_pi_plugin_line_endings(content).trim_end()
+        == normalize_pi_plugin_line_endings(PI_PLUGIN).trim_end()
+}
+
+fn looks_like_rtk_pi_plugin(content: &str) -> bool {
+    content.contains(PI_PLUGIN_REWRITE_MARKER)
+}
+
+fn is_known_stock_pi_plugin(content: &str) -> bool {
+    if is_current_pi_plugin(content) {
+        return true;
+    }
+
+    let normalized = normalize_pi_plugin_line_endings(content);
+    let hash = integrity::compute_hash_bytes(normalized.trim_end().as_bytes());
+    KNOWN_PI_PLUGIN_HASHES
+        .iter()
+        .any(|expected| *expected == hash)
 }
 
 /// Create the Pi extensions directory, or in dry-run mode, print a message only if
@@ -3415,42 +4000,420 @@ fn ensure_pi_extensions_dir(parent: &Path, name: &str, ctx: InitContext) -> Resu
     Ok(())
 }
 
-/// Uninstall Pi extension for the given scope.
-/// Mirrors `uninstall_codex` / `uninstall_hermes`: extracted from the dispatcher
-/// so it can be tested and reasoned about independently.
-fn uninstall_pi(global: bool, ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
-    let plugin_path = pi_plugin_path_for_scope(global)?;
-    let mut removed: Vec<String> = Vec::new();
+/// Check whether the Pi and OMP extension paths for the selected scope resolve
+/// to the same target.
+fn extension_paths_alias(global: bool, path: &Path, agent: PiCompatibleAgent) -> Result<bool> {
+    let other_path = match agent {
+        PiCompatibleAgent::Pi => omp_extension_path_for_scope(global)?,
+        PiCompatibleAgent::Omp => pi_plugin_path_for_scope(global)?,
+    };
 
-    if plugin_path.exists() {
-        if dry_run {
-            println!(
-                "[dry-run] would remove Pi extension: {}",
-                plugin_path.display()
-            );
-        } else {
-            // nosemgrep: filesystem-deletion -- Pi uninstall removes only the RTK-managed extension file.
-            fs::remove_file(&plugin_path).with_context(|| {
-                format!("Failed to remove Pi extension: {}", plugin_path.display())
-            })?;
-            if verbose > 0 {
-                eprintln!("Removed Pi extension: {}", plugin_path.display());
+    Ok(canonicalize_path_for_comparison(path) == canonicalize_path_for_comparison(&other_path))
+}
+
+/// Canonicalize an extension path even when its final file has not been
+/// created yet. This detects agent directories connected by symlinks while
+/// retaining a literal-path fallback for genuinely unresolved paths.
+fn canonicalize_path_for_comparison(path: &Path) -> PathBuf {
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return canonical;
+    }
+
+    let mut missing_components = Vec::new();
+    let mut candidate = path;
+    loop {
+        if let Ok(mut canonical) = fs::canonicalize(candidate) {
+            for component in missing_components.iter().rev() {
+                canonical.push(component);
             }
-            removed.push(format!("Pi extension: {}", plugin_path.display()));
+            return canonical;
+        }
+
+        let Some(file_name) = candidate.file_name() else {
+            return path.to_path_buf();
+        };
+        missing_components.push(file_name.to_os_string());
+
+        let Some(parent) = candidate.parent() else {
+            return path.to_path_buf();
+        };
+        if parent == candidate {
+            return path.to_path_buf();
+        }
+        candidate = parent;
+    }
+}
+
+fn shared_agent_state_path(path: &Path) -> PathBuf {
+    canonicalize_path_for_comparison(path).with_file_name(PI_AGENT_STATE_FILE)
+}
+
+fn read_managed_agents(path: &Path) -> Result<ManagedAgentState> {
+    let state_path = shared_agent_state_path(path);
+    let content = match fs::read_to_string(&state_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ManagedAgentState::Absent);
+        }
+        Err(error) => {
+            eprintln!(
+                "[warn] RTK extension ownership state at {} could not be read; treating ownership as unknown: {}",
+                state_path.display(),
+                error
+            );
+            return Ok(ManagedAgentState::Unknown);
+        }
+    };
+    let mut agents = Vec::new();
+    let mut has_invalid_entry = false;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match PiCompatibleAgent::from_state_name(line) {
+            Some(agent) => {
+                if !agents.contains(&agent) {
+                    agents.push(agent);
+                }
+            }
+            None => has_invalid_entry = true,
         }
     }
 
-    if dry_run {
-        print_dry_run_footer();
-    } else if !removed.is_empty() {
-        println!("RTK uninstalled (Pi):");
-        for item in &removed {
-            println!("  - {}", item);
-        }
-        println!("\nRestart pi to apply changes.");
+    if has_invalid_entry {
+        eprintln!(
+            "[warn] RTK extension ownership state at {} contains unknown entries; treating ownership as unknown",
+            state_path.display()
+        );
+        return Ok(ManagedAgentState::Unknown);
+    }
+
+    if agents.is_empty() {
+        eprintln!(
+            "[warn] RTK extension ownership state at {} is empty; treating ownership as unknown",
+            state_path.display()
+        );
+        return Ok(ManagedAgentState::Unknown);
+    }
+
+    Ok(ManagedAgentState::Known(agents))
+}
+
+fn record_managed_agent(
+    global: bool,
+    path: &Path,
+    agent: PiCompatibleAgent,
+    extension_was_present: bool,
+    ctx: InitContext,
+) -> Result<()> {
+    if !extension_paths_alias(global, path, agent)? {
+        return Ok(());
+    }
+
+    let state_path = shared_agent_state_path(path);
+    let mut agents = if !extension_was_present {
+        // If the extension was absent before this install, any remaining
+        // sidecar describes a file that no longer exists and must not be
+        // carried into the new installation.
+        Vec::new()
     } else {
-        println!("RTK Pi extension was not installed (nothing to remove)");
+        match read_managed_agents(path)? {
+            ManagedAgentState::Absent => {
+                eprintln!(
+                    "[warn] RTK extension ownership state at {} could not be established because this pre-existing extension has no ownership record; preserving the absent state and proceeding without recording {}",
+                    state_path.display(),
+                    agent.state_name()
+                );
+                return Ok(());
+            }
+            ManagedAgentState::Known(agents) => agents,
+            ManagedAgentState::Unknown => {
+                // Do not turn unknown ownership into a current-agent-only
+                // record. The extension was installed successfully, but the
+                // existing state must remain intact for the fallback path.
+                eprintln!(
+                    "[warn] RTK extension ownership state at {} could not be updated because ownership is unknown; preserving it and proceeding without recording {}",
+                    state_path.display(),
+                    agent.state_name()
+                );
+                return Ok(());
+            }
+        }
+    };
+    if !agents.contains(&agent) {
+        agents.push(agent);
+    }
+    agents.sort_by_key(|agent| agent.state_name());
+    let content = format!(
+        "{}\n",
+        agents
+            .iter()
+            .map(|agent| agent.state_name())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    write_if_changed_allow_read_error(&state_path, &content, "RTK extension ownership state", ctx)?;
+    Ok(())
+}
+
+fn remove_managed_agent_state(state_path: &Path, ctx: InitContext) -> Result<()> {
+    if !state_path.exists() {
+        return Ok(());
+    }
+
+    if ctx.dry_run {
+        println!(
+            "[dry-run] would remove RTK extension ownership state: {}",
+            state_path.display()
+        );
+    } else {
+        // nosemgrep: filesystem-deletion -- state belongs exclusively to the RTK-managed extension.
+        fs::remove_file(state_path).with_context(|| {
+            format!(
+                "Failed to remove RTK extension ownership state: {}",
+                state_path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// Determine whether a Pi-compatible extension path is shared by both agents,
+/// distinguishing definitive sidecar ownership from unavailable information.
+///
+/// The ownership sidecar records which agents RTK installed for a relocated
+/// shared path. A missing sidecar is treated as uncertain because the
+/// extension may predate RTK's ownership tracking.
+fn extension_share_status(
+    global: bool,
+    path: &Path,
+    agent: PiCompatibleAgent,
+) -> Result<ExtensionShareStatus> {
+    if !extension_paths_alias(global, path, agent)? {
+        return Ok(ExtensionShareStatus::NotShared);
+    }
+
+    let other_agent = agent.other();
+    match read_managed_agents(path)? {
+        ManagedAgentState::Known(agents) => {
+            if agents.contains(&other_agent) {
+                Ok(ExtensionShareStatus::Shared)
+            } else {
+                Ok(ExtensionShareStatus::NotShared)
+            }
+        }
+        ManagedAgentState::Absent | ManagedAgentState::Unknown => Ok(ExtensionShareStatus::Unknown),
+    }
+}
+
+fn extension_scope_name(global: bool) -> &'static str {
+    if global { "global" } else { "project" }
+}
+
+fn warn_if_extension_shared_on_install(
+    global: bool,
+    path: &Path,
+    agent: PiCompatibleAgent,
+) -> Result<()> {
+    let scope = extension_scope_name(global);
+    match extension_share_status(global, path, agent)? {
+        ExtensionShareStatus::NotShared => {}
+        ExtensionShareStatus::Shared => eprintln!(
+            "[warn] Pi and OMP share the {} extension path at {}; installing {} here enables the shared integration for both agents.",
+            scope,
+            path.display(),
+            agent.name()
+        ),
+        ExtensionShareStatus::Unknown => eprintln!(
+            "[warn] Pi and OMP resolve to the same {} extension path at {}, but RTK could not confirm both agents' ownership; installing {} without a definitive ownership record.",
+            scope,
+            path.display(),
+            agent.name()
+        ),
+    }
+
+    Ok(())
+}
+
+fn confirm_shared_extension_uninstall(
+    global: bool,
+    path: &Path,
+    agent: PiCompatibleAgent,
+    patch_mode: PatchMode,
+    ctx: InitContext,
+) -> Result<bool> {
+    let scope = extension_scope_name(global);
+    match extension_share_status(global, path, agent)? {
+        ExtensionShareStatus::NotShared => return Ok(true),
+        ExtensionShareStatus::Unknown => {
+            eprintln!(
+                "[warn] Pi and OMP resolve to the same {} extension path at {}, but RTK could not confirm both agents' ownership; proceeding with {} uninstall without shared-path protection.",
+                scope,
+                path.display(),
+                agent.name()
+            );
+            return Ok(true);
+        }
+        ExtensionShareStatus::Shared => eprintln!(
+            "[warn] Pi and OMP share the {} extension path at {}; uninstalling {} changes a path used by the other agent's shared integration.",
+            scope,
+            path.display(),
+            agent.name()
+        ),
+    }
+
+    match patch_mode {
+        PatchMode::Auto => Ok(true),
+        PatchMode::Skip => {
+            if ctx.dry_run {
+                println!(
+                    "[dry-run] would leave shared Pi/OMP extension unchanged: {}",
+                    path.display()
+                );
+            }
+            Ok(false)
+        }
+        PatchMode::Ask => {
+            if ctx.dry_run {
+                println!(
+                    "[dry-run] would prompt before removing shared Pi/OMP extension: {}",
+                    path.display()
+                );
+                return Ok(false);
+            }
+
+            let prompt = format!("Remove the shared Pi/OMP extension at {}?", path.display());
+            if prompt_user_confirmation(&prompt)? {
+                Ok(true)
+            } else {
+                println!("Skipped removal of shared Pi/OMP extension.");
+                Ok(false)
+            }
+        }
+    }
+}
+
+fn read_extension_for_uninstall(
+    path: &Path,
+    name: &str,
+    ctx: InitContext,
+) -> Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(content) => Ok(Some(content)),
+        Err(error) => {
+            eprintln!(
+                "[warn] {} at {} could not be read; leaving it alone: {}",
+                name,
+                path.display(),
+                error
+            );
+            if ctx.dry_run {
+                println!(
+                    "[dry-run] would leave unreadable {} unchanged: {}",
+                    name,
+                    path.display()
+                );
+                print_dry_run_footer();
+                Ok(None)
+            } else {
+                anyhow::bail!(
+                    "{} at {} could not be read; leaving it alone.",
+                    name,
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+/// Uninstall Pi extension for the given scope.
+/// Mirrors `uninstall_codex` / `uninstall_hermes`: extracted from the dispatcher
+/// so it can be tested and reasoned about independently.
+fn uninstall_pi_with_patch_mode(
+    global: bool,
+    patch_mode: PatchMode,
+    ctx: InitContext,
+) -> Result<()> {
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
+    let plugin_path = pi_plugin_path_for_scope(global)?;
+
+    if !plugin_path.exists() {
+        if dry_run {
+            print_dry_run_footer();
+        } else {
+            println!("RTK Pi extension was not installed (nothing to remove)");
+        }
+        return Ok(());
+    }
+
+    let ownership_state_path = shared_agent_state_path(&plugin_path);
+    let Some(content) = read_extension_for_uninstall(&plugin_path, "Pi extension", ctx)? else {
+        return Ok(());
+    };
+
+    if !is_known_stock_pi_plugin(&content) {
+        if looks_like_rtk_pi_plugin(&content) {
+            if dry_run {
+                println!(
+                    "[dry-run] would refuse to remove Pi extension: {}",
+                    plugin_path.display()
+                );
+                print_dry_run_footer();
+                return Ok(());
+            }
+            anyhow::bail!(
+                "Pi extension at {} contains RTK content that does not match the stock extension. Remove the file manually.",
+                plugin_path.display()
+            );
+        }
+        println!(
+            "Pi extension at {} is not RTK content; leaving it alone.",
+            plugin_path.display()
+        );
+        if dry_run {
+            print_dry_run_footer();
+        }
+        return Ok(());
+    }
+
+    if !confirm_shared_extension_uninstall(
+        global,
+        &plugin_path,
+        PiCompatibleAgent::Pi,
+        patch_mode,
+        ctx,
+    )? {
+        if dry_run {
+            print_dry_run_footer();
+            return Ok(());
+        }
+        anyhow::bail!(
+            "Shared Pi/OMP extension at {} was not removed; rerun with --auto-patch to approve the removal.",
+            plugin_path.display()
+        );
+    }
+
+    if dry_run {
+        println!(
+            "[dry-run] would remove Pi extension: {}",
+            plugin_path.display()
+        );
+        remove_managed_agent_state(&ownership_state_path, ctx)?;
+        print_dry_run_footer();
+    } else {
+        // nosemgrep: filesystem-deletion -- Pi uninstall removes only a known RTK stock extension.
+        fs::remove_file(&plugin_path)
+            .with_context(|| format!("Failed to remove Pi extension: {}", plugin_path.display()))?;
+        remove_managed_agent_state(&ownership_state_path, ctx)?;
+        if verbose > 0 {
+            eprintln!("Removed Pi extension: {}", plugin_path.display());
+        }
+        println!("RTK uninstalled (Pi):");
+        println!("  - Pi extension: {}", plugin_path.display());
+        println!("\nRestart pi to apply changes.");
     }
     Ok(())
 }
@@ -3459,27 +4422,56 @@ fn uninstall_pi(global: bool, ctx: InitContext) -> Result<()> {
 ///
 /// global=true  → `$PI_CODING_AGENT_DIR/extensions/rtk.ts`
 /// global=false → `.pi/extensions/rtk.ts`
+#[allow(dead_code)] // Kept as the default-policy API for in-crate callers and tests.
 pub fn run_pi_mode(global: bool, ctx: InitContext) -> Result<()> {
-    let InitContext {
-        verbose: _,
-        dry_run,
-    } = ctx;
-    let plugin_path = if global {
-        let pi_dir = resolve_pi_dir()?;
-        let path = pi_plugin_path(&pi_dir);
-        if let Some(parent) = path.parent() {
-            ensure_pi_extensions_dir(parent, "Pi extensions directory", ctx)?;
-        }
-        path
-    } else {
-        let path = pi_plugin_path_for_scope(false)?;
-        if let Some(parent) = path.parent() {
-            ensure_pi_extensions_dir(parent, "local Pi extensions directory", ctx)?;
-        }
-        path
-    };
+    run_pi_mode_with_patch_mode(global, PatchMode::Ask, ctx)
+}
 
-    let installed = ensure_pi_plugin_installed(&plugin_path, ctx)?;
+/// Install the Pi extension with an explicit confirmation policy for an
+/// existing non-stock file.
+pub fn run_pi_mode_with_patch_mode(
+    global: bool,
+    patch_mode: PatchMode,
+    ctx: InitContext,
+) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let plugin_path = pi_plugin_path_for_scope(global)?;
+    let extension_was_present = plugin_path.exists();
+
+    warn_if_extension_shared_on_install(global, &plugin_path, PiCompatibleAgent::Pi)?;
+
+    if !validate_stock_pi_plugin_path(&plugin_path, "Pi extension", patch_mode, ctx)? {
+        if dry_run {
+            print_dry_run_footer();
+            return Ok(());
+        }
+        anyhow::bail!(
+            "Pi extension at {} was not changed; remove or back up the file manually before retrying.",
+            plugin_path.display()
+        );
+    }
+
+    if let Some(parent) = plugin_path.parent() {
+        ensure_pi_extensions_dir(
+            parent,
+            if global {
+                "Pi extensions directory"
+            } else {
+                "local Pi extensions directory"
+            },
+            ctx,
+        )?;
+    }
+
+    let installed =
+        write_if_changed_allow_read_error(&plugin_path, PI_PLUGIN, "Pi extension", ctx)?;
+    record_managed_agent(
+        global,
+        &plugin_path,
+        PiCompatibleAgent::Pi,
+        extension_was_present,
+        ctx,
+    )?;
 
     if dry_run {
         print_dry_run_footer();
@@ -3520,22 +4512,22 @@ fn prepare_opencode_plugin_path() -> Result<PathBuf> {
 fn ensure_opencode_plugin_installed(path: &Path, ctx: InitContext) -> Result<bool> {
     let InitContext { dry_run, .. } = ctx;
     // Ensure parent dir exists (skip in dry-run)
-    if !dry_run {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "Failed to create OpenCode plugin directory: {}",
-                    parent.display()
-                )
-            })?;
-        }
+    if !dry_run && let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create OpenCode plugin directory: {}",
+                parent.display()
+            )
+        })?;
     }
     write_if_changed(path, OPENCODE_PLUGIN, "OpenCode plugin", ctx)
 }
 
 /// Remove OpenCode plugin file
 fn remove_opencode_plugin(ctx: InitContext) -> Result<Vec<PathBuf>> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let opencode_dir = resolve_opencode_dir()?;
     let path = opencode_plugin_path(&opencode_dir);
     let mut removed = Vec::new();
@@ -3556,6 +4548,215 @@ fn remove_opencode_plugin(ctx: InitContext) -> Result<Vec<PathBuf>> {
     Ok(removed)
 }
 
+// ─── Oh My Pi (OMP) support ──────────────────────────────────────────
+
+// OMP ships a `legacy-pi-compat` layer that remaps the Pi coding-agent
+// extension API, so it loads the exact same extension file as Pi
+// (`hooks/pi/rtk.ts`, embedded as `PI_PLUGIN`). Only the install paths
+// differ:
+//
+//   global=true  -> `$HOME/.omp/agent/extensions/rtk.ts`
+//   global=false -> `.omp/extensions/rtk.ts`
+
+/// Return the OMP extension install path for the given scope.
+fn omp_extension_path_for_scope(global: bool) -> Result<PathBuf> {
+    if global {
+        Ok(resolve_omp_dir()?
+            .join(PI_EXTENSIONS_SUBDIR)
+            .join(PI_PLUGIN_FILE))
+    } else {
+        Ok(PathBuf::from(OMP_LOCAL_DIR)
+            .join(PI_EXTENSIONS_SUBDIR)
+            .join(PI_PLUGIN_FILE))
+    }
+}
+
+/// Resolve OMP's global agent directory. OMP itself uses
+/// `PI_CODING_AGENT_DIR` for this relocation, so RTK follows the same
+/// override instead of introducing a second path configuration.
+fn resolve_omp_dir() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var(PI_CODING_AGENT_DIR_ENV)
+        && !dir.is_empty()
+    {
+        return Ok(PathBuf::from(dir));
+    }
+    resolve_home_subdir(OMP_DIR)
+}
+
+/// Install the shared Pi extension file for OMP (hook-only; no AGENTS.md
+/// injection). OMP loads the file through its `legacy-pi-compat` layer.
+///
+/// global=true  -> `$HOME/.omp/agent/extensions/rtk.ts`
+/// global=false -> `.omp/extensions/rtk.ts`
+#[allow(dead_code)] // Kept as the default-policy API for in-crate callers and tests.
+pub fn run_omp_mode(global: bool, ctx: InitContext) -> Result<()> {
+    run_omp_mode_with_patch_mode(global, PatchMode::Ask, ctx)
+}
+
+/// Install the shared Pi extension file for OMP with an explicit
+/// confirmation policy for an existing non-stock file.
+pub fn run_omp_mode_with_patch_mode(
+    global: bool,
+    patch_mode: PatchMode,
+    ctx: InitContext,
+) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let path = omp_extension_path_for_scope(global)?;
+    let extension_was_present = path.exists();
+
+    warn_if_extension_shared_on_install(global, &path, PiCompatibleAgent::Omp)?;
+
+    if !validate_stock_pi_plugin_path(&path, "OMP extension", patch_mode, ctx)? {
+        if dry_run {
+            print_dry_run_footer();
+            return Ok(());
+        }
+        anyhow::bail!(
+            "OMP extension at {} was not changed; remove or back up the file manually before retrying.",
+            path.display()
+        );
+    }
+
+    if let Some(parent) = path.parent() {
+        ensure_pi_extensions_dir(
+            parent,
+            if global {
+                "OMP extensions directory"
+            } else {
+                "local OMP extensions directory"
+            },
+            ctx,
+        )?;
+    }
+
+    let installed =
+        write_if_changed_allow_read_error(path.as_path(), PI_PLUGIN, "OMP extension", ctx)?;
+    record_managed_agent(
+        global,
+        &path,
+        PiCompatibleAgent::Omp,
+        extension_was_present,
+        ctx,
+    )?;
+
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        print_omp_result(&path, installed);
+    }
+
+    Ok(())
+}
+
+fn print_omp_result(extension_path: &Path, installed: bool) {
+    let status = if installed {
+        "installed"
+    } else {
+        "already up to date"
+    };
+    println!("RTK OMP extension {}:", status);
+    println!("  Extension: {}", extension_path.display());
+    println!();
+    println!("OMP will load the extension automatically on next start.");
+}
+
+/// Uninstall the OMP extension for the given scope.
+///
+/// The installed file is the shared stock Pi extension. Current and known
+/// historical stock content is removed; RTK content that no longer matches a
+/// known stock revision is left in place with a manual-removal notice.
+/// Unrelated content is never touched.
+#[allow(dead_code)] // Kept as the default-policy API for in-crate callers and tests.
+pub fn uninstall_omp(global: bool, ctx: InitContext) -> Result<()> {
+    uninstall_omp_with_patch_mode(global, PatchMode::Ask, ctx)
+}
+
+/// Uninstall the OMP extension with an explicit confirmation policy for a
+/// global path shared with Pi.
+pub fn uninstall_omp_with_patch_mode(
+    global: bool,
+    patch_mode: PatchMode,
+    ctx: InitContext,
+) -> Result<()> {
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
+    let path = omp_extension_path_for_scope(global)?;
+
+    if !path.exists() {
+        if dry_run {
+            print_dry_run_footer();
+        } else {
+            println!("RTK OMP extension was not installed (nothing to remove)");
+        }
+        return Ok(());
+    }
+
+    let ownership_state_path = shared_agent_state_path(&path);
+    let Some(content) = read_extension_for_uninstall(&path, "OMP extension", ctx)? else {
+        return Ok(());
+    };
+
+    if is_known_stock_pi_plugin(&content) {
+        if !confirm_shared_extension_uninstall(
+            global,
+            &path,
+            PiCompatibleAgent::Omp,
+            patch_mode,
+            ctx,
+        )? {
+            if dry_run {
+                print_dry_run_footer();
+                return Ok(());
+            }
+            anyhow::bail!(
+                "Shared Pi/OMP extension at {} was not removed; rerun with --auto-patch to approve the removal.",
+                path.display()
+            );
+        }
+
+        if dry_run {
+            println!("[dry-run] would remove OMP extension: {}", path.display());
+            remove_managed_agent_state(&ownership_state_path, ctx)?;
+            print_dry_run_footer();
+        } else {
+            // nosemgrep: filesystem-deletion -- OMP uninstall removes only the RTK-managed extension file.
+            fs::remove_file(&path)
+                .with_context(|| format!("Failed to remove OMP extension: {}", path.display()))?;
+            remove_managed_agent_state(&ownership_state_path, ctx)?;
+            if verbose > 0 {
+                eprintln!("Removed OMP extension: {}", path.display());
+            }
+            println!("RTK uninstalled (OMP):");
+            println!("  - Extension: {}", path.display());
+            println!("\nRestart OMP to apply changes.");
+        }
+    } else if looks_like_rtk_pi_plugin(&content) {
+        if dry_run {
+            println!(
+                "[dry-run] would refuse to remove OMP extension: {}",
+                path.display()
+            );
+            print_dry_run_footer();
+            return Ok(());
+        }
+        anyhow::bail!(
+            "OMP extension at {} contains RTK content that does not match the stock extension. Remove the file manually.",
+            path.display()
+        );
+    } else {
+        println!(
+            "OMP extension at {} is not RTK content; leaving it alone.",
+            path.display()
+        );
+        if dry_run {
+            print_dry_run_footer();
+        }
+    }
+
+    Ok(())
+}
+
 // ─── Cursor Agent support ─────────────────────────────────────────────
 
 fn resolve_cursor_dir() -> Result<PathBuf> {
@@ -3564,7 +4765,9 @@ fn resolve_cursor_dir() -> Result<PathBuf> {
 
 /// Install Cursor hooks: register binary command in hooks.json
 fn install_cursor_hooks(ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let cursor_dir = resolve_cursor_dir()?;
 
     // Migrate old hook script if present
@@ -3586,10 +4789,10 @@ fn install_cursor_hooks(ctx: InitContext) -> Result<()> {
         }
         // Clean stale hooks.json entry pointing to the deleted script
         let hooks_json_path = cursor_dir.join(HOOKS_JSON);
-        if let Err(e) = remove_legacy_cursor_hooks_json_entries(&hooks_json_path, ctx) {
-            if verbose > 0 {
-                eprintln!("  [warn] Failed to clean legacy Cursor hooks.json entry: {e}");
-            }
+        if let Err(e) = remove_legacy_cursor_hooks_json_entries(&hooks_json_path, ctx)
+            && verbose > 0
+        {
+            eprintln!("  [warn] Failed to clean legacy Cursor hooks.json entry: {e}");
         }
     }
 
@@ -3618,19 +4821,10 @@ fn install_cursor_hooks(ctx: InitContext) -> Result<()> {
 /// Patch ~/.cursor/hooks.json to add RTK preToolUse hook.
 /// Returns true if the file was modified.
 fn patch_cursor_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
-    let InitContext { verbose, dry_run } = ctx;
-    let mut root = if path.exists() {
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read {}", path.display()))?;
-        if content.trim().is_empty() {
-            serde_json::json!({ "version": 1 })
-        } else {
-            serde_json::from_str(&content)
-                .with_context(|| format!("Failed to parse {} as JSON", path.display()))?
-        }
-    } else {
-        serde_json::json!({ "version": 1 })
-    };
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
+    let mut root = read_json_file(path)?.unwrap_or_else(|| serde_json::json!({ "version": 1 }));
 
     // Check idempotency
     if cursor_hook_already_present(&root) {
@@ -3656,18 +4850,11 @@ fn patch_cursor_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
         return Ok(true);
     }
 
-    // Backup if exists
-    if path.exists() {
-        let backup_path = path.with_extension("json.bak");
-        fs::copy(path, &backup_path)
-            .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
-        if verbose > 0 {
-            eprintln!("Backup: {}", backup_path.display());
-        }
+    if let Some(backup_path) = backup_and_atomic_write(path, &serialized)?
+        && verbose > 0
+    {
+        eprintln!("Backup: {}", backup_path.display());
     }
-
-    // Atomic write
-    atomic_write(path, &serialized)?;
 
     Ok(true)
 }
@@ -3726,19 +4913,12 @@ fn insert_cursor_hook_entry(root: &mut serde_json::Value) -> Result<()> {
 /// Remove only legacy `rtk-rewrite.sh` entries from Cursor hooks.json.
 /// Preserves any existing `rtk hook cursor` entries (new format).
 fn remove_legacy_cursor_hooks_json_entries(path: &Path, ctx: InitContext) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
-    if !path.exists() {
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
+    let Some(mut root) = read_json_file(path)? else {
         return Ok(());
-    }
-
-    let content =
-        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    if content.trim().is_empty() {
-        return Ok(());
-    }
-
-    let mut root: serde_json::Value = serde_json::from_str(&content)
-        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    };
 
     if !remove_legacy_cursor_hook_entries_from_json(&mut root) {
         return Ok(());
@@ -3754,7 +4934,7 @@ fn remove_legacy_cursor_hooks_json_entries(path: &Path, ctx: InitContext) -> Res
 
     let serialized =
         serde_json::to_string_pretty(&root).context("Failed to serialize hooks.json")?;
-    atomic_write(path, &serialized)?;
+    backup_and_atomic_write(path, &serialized)?;
 
     if verbose > 0 {
         eprintln!("  [ok] Removed legacy rtk-rewrite.sh entry from Cursor hooks.json");
@@ -3788,8 +4968,14 @@ fn remove_legacy_cursor_hook_entries_from_json(root: &mut serde_json::Value) -> 
 
 /// Remove Cursor RTK artifacts: hook script + hooks.json entry
 fn remove_cursor_hooks(ctx: InitContext) -> Result<Vec<String>> {
-    let InitContext { verbose, dry_run } = ctx;
     let cursor_dir = resolve_cursor_dir()?;
+    remove_cursor_hooks_at(&cursor_dir, ctx)
+}
+
+fn remove_cursor_hooks_at(cursor_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let mut removed = Vec::new();
 
     // 1. Remove hook script
@@ -3811,34 +4997,34 @@ fn remove_cursor_hooks(ctx: InitContext) -> Result<Vec<String>> {
 
     // 2. Remove RTK entry from hooks.json
     let hooks_json_path = cursor_dir.join(HOOKS_JSON);
-    if hooks_json_path.exists() {
-        let content = fs::read_to_string(&hooks_json_path)
-            .with_context(|| format!("Failed to read {}", hooks_json_path.display()))?;
+    let root = match read_json_file(&hooks_json_path) {
+        Ok(root) => root,
+        Err(error) if error.downcast_ref::<serde_json::Error>().is_some() => {
+            eprintln!(
+                "rtk: warning: leaving malformed Cursor hooks.json unchanged during uninstall: {error:#}"
+            );
+            None
+        }
+        Err(error) => return Err(error),
+    };
+    if let Some(mut root) = root
+        && remove_cursor_hook_from_json(&mut root)
+    {
+        if dry_run {
+            println!(
+                "[dry-run] would remove RTK entry from Cursor hooks.json: {}",
+                hooks_json_path.display()
+            );
+        } else {
+            let serialized =
+                serde_json::to_string_pretty(&root).context("Failed to serialize hooks.json")?;
+            backup_and_atomic_write(&hooks_json_path, &serialized)?;
 
-        if !content.trim().is_empty() {
-            if let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&content) {
-                if remove_cursor_hook_from_json(&mut root) {
-                    if dry_run {
-                        println!(
-                            "[dry-run] would remove RTK entry from Cursor hooks.json: {}",
-                            hooks_json_path.display()
-                        );
-                    } else {
-                        let backup_path = hooks_json_path.with_extension("json.bak");
-                        fs::copy(&hooks_json_path, &backup_path).ok();
-
-                        let serialized = serde_json::to_string_pretty(&root)
-                            .context("Failed to serialize hooks.json")?;
-                        atomic_write(&hooks_json_path, &serialized)?;
-
-                        if verbose > 0 {
-                            eprintln!("Removed RTK hook from Cursor hooks.json");
-                        }
-                    }
-                    removed.push("Cursor hooks.json: removed RTK entry".to_string());
-                }
+            if verbose > 0 {
+                eprintln!("Removed RTK hook from Cursor hooks.json");
             }
         }
+        removed.push("Cursor hooks.json: removed RTK entry".to_string());
     }
 
     Ok(removed)
@@ -3868,13 +5054,462 @@ fn remove_cursor_hook_from_json(root: &mut serde_json::Value) -> bool {
     pre_tool_use.len() < original_len
 }
 
+// ─── Trae support ────────────────────────────────────────────────────
+
+/// Return the hook files Trae uses below `home`.
+///
+/// `~/.trae/hooks.json` is always managed for global installation. Trae CN is
+/// opt-in: it is updated too only when the user already has a `~/.trae-cn`
+/// directory.
+fn trae_hook_paths_at(home: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![home.join(TRAE_DIR).join(HOOKS_JSON)];
+    if home.join(TRAE_CN_DIR).is_dir() {
+        paths.push(home.join(TRAE_CN_DIR).join(HOOKS_JSON));
+    }
+    paths
+}
+
+fn resolve_trae_hook_paths(global: bool) -> Result<Vec<PathBuf>> {
+    if global {
+        let home = dirs::home_dir().context("Failed to resolve home directory for Trae")?;
+        Ok(trae_hook_paths_at(&home))
+    } else {
+        Ok(vec![PathBuf::from(TRAE_DIR).join(HOOKS_JSON)])
+    }
+}
+
+fn read_trae_hooks_json(path: &Path) -> Result<(serde_json::Value, bool)> {
+    match read_json_file(path)? {
+        Some(root) => Ok((root, true)),
+        None => Ok((serde_json::json!({ "version": 1 }), false)),
+    }
+}
+
+fn validate_trae_hooks_json(root: &serde_json::Value) -> Result<()> {
+    let root_object = root
+        .as_object()
+        .context("Trae hooks.json root must be an object")?;
+    if root_object
+        .get("version")
+        .is_some_and(|version| version != &serde_json::json!(1))
+    {
+        anyhow::bail!("Trae hooks.json version must be 1");
+    }
+    if root_object
+        .get("hooks")
+        .is_some_and(|hooks| !hooks.is_object())
+    {
+        anyhow::bail!("Trae hooks value is not an object");
+    }
+    if root_object
+        .get("hooks")
+        .and_then(|hooks| hooks.get(PRE_TOOL_USE_KEY))
+        .is_some_and(|pre_tool_use| !pre_tool_use.is_array())
+    {
+        anyhow::bail!("Trae PreToolUse value is not an array");
+    }
+    Ok(())
+}
+
+/// Install RTK's Trae hook in every supplied target. All targets are read and
+/// parsed before any write, so malformed `.trae` or `.trae-cn` configuration
+/// cannot cause a partially-applied update.
+fn patch_trae_hooks_json_paths(paths: &[PathBuf], ctx: InitContext) -> Result<Vec<PatchResult>> {
+    struct PendingPatch {
+        path: PathBuf,
+        existed: bool,
+        serialized: String,
+    }
+
+    let mut results = Vec::with_capacity(paths.len());
+    let mut pending = Vec::new();
+    let mut applied: Vec<String> = Vec::new();
+
+    // Preflight every target before writing any one of them.
+    for path in paths {
+        let (mut root, existed) = read_trae_hooks_json(path)?;
+        validate_trae_hooks_json(&root)?;
+        let added_version = if root.get("version").is_none() {
+            root.as_object_mut()
+                .expect("validated object")
+                .insert("version".into(), serde_json::json!(1));
+            true
+        } else {
+            false
+        };
+
+        if trae_hook_already_present(&root) && !added_version {
+            results.push(PatchResult::AlreadyPresent);
+            // Already carries the hook, so it counts as updated when a later
+            // target fails -- otherwise a rerun after fixing that failure
+            // reports "none" and invites a duplicate hand-edit.
+            applied.push(path.display().to_string());
+            continue;
+        }
+
+        if !trae_hook_already_present(&root) {
+            insert_trae_hook_entry(&mut root)?;
+        }
+        let serialized =
+            serde_json::to_string_pretty(&root).context("Failed to serialize Trae hooks.json")?;
+        pending.push(PendingPatch {
+            path: path.clone(),
+            existed,
+            serialized,
+        });
+        results.push(if ctx.dry_run {
+            PatchResult::WouldPatch
+        } else {
+            PatchResult::Patched
+        });
+    }
+
+    for patch in pending {
+        if ctx.dry_run {
+            println!(
+                "[dry-run] would patch Trae hooks.json: {}",
+                patch.path.display()
+            );
+            if ctx.verbose > 0 {
+                println!("[dry-run] content:\n{}", patch.serialized);
+            }
+            continue;
+        }
+
+        let write_result: Result<()> = (|| {
+            let parent = patch.path.parent().with_context(|| {
+                format!(
+                    "Cannot write Trae hooks file {}: path has no parent directory",
+                    patch.path.display()
+                )
+            })?;
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create Trae directory {}", parent.display()))?;
+
+            if patch.existed {
+                let backup_path = patch.path.with_extension("json.bak");
+                fs::copy(&patch.path, &backup_path)
+                    .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
+                if ctx.verbose > 0 {
+                    eprintln!("Backup: {}", backup_path.display());
+                }
+            }
+
+            atomic_write(&patch.path, &patch.serialized)
+        })();
+        write_result.with_context(|| {
+            format!(
+                "Failed to update Trae hooks file {}. Already updated: {}",
+                patch.path.display(),
+                if applied.is_empty() {
+                    "none".to_string()
+                } else {
+                    applied.join(", ")
+                }
+            )
+        })?;
+        applied.push(patch.path.display().to_string());
+    }
+
+    Ok(results)
+}
+
+/// Check whether a Trae config already contains RTK's native command hook.
+/// Whether `group` would run for the `RunCommand` tool RTK serves.
+///
+/// A group with no `matcher` applies to every tool. Otherwise the matcher is
+/// read as `|`-separated tool names. Anything unrecognised counts as *not*
+/// covering `RunCommand`, so an install adds a registration that fires rather
+/// than skipping one that never would.
+fn trae_group_covers_run_command(group: &serde_json::Value) -> bool {
+    match group.get("matcher") {
+        None => true,
+        Some(matcher) => matcher.as_str().is_some_and(|matcher| {
+            matcher
+                .split('|')
+                .any(|tool| tool.trim() == TRAE_RUN_COMMAND_MATCHER)
+        }),
+    }
+}
+
+/// Whether `hook` is an entry RTK installed: our command, under the `command`
+/// type we write. A missing `type` is ours too, since a hand-written
+/// registration commonly omits it; any other explicit type is the user's.
+fn is_trae_hook_entry(hook: &serde_json::Value) -> bool {
+    let is_our_command = hook
+        .get("command")
+        .and_then(|command| command.as_str())
+        .is_some_and(is_trae_hook_command);
+    let is_command_type = match hook.get("type") {
+        None => true,
+        Some(hook_type) => hook_type.as_str() == Some("command"),
+    };
+    is_our_command && is_command_type
+}
+
+fn trae_hook_already_present(root: &serde_json::Value) -> bool {
+    root.get("hooks")
+        .and_then(|hooks| hooks.get(PRE_TOOL_USE_KEY))
+        .and_then(|groups| groups.as_array())
+        .is_some_and(|groups| {
+            groups.iter().any(|group| {
+                trae_group_covers_run_command(group)
+                    && group
+                        .get("hooks")
+                        .and_then(|hooks| hooks.as_array())
+                        .is_some_and(|hooks| hooks.iter().any(is_trae_hook_entry))
+            })
+        })
+}
+
+fn insert_trae_hook_entry(root: &mut serde_json::Value) -> Result<()> {
+    validate_trae_hooks_json(root)?;
+
+    let root_object = root.as_object_mut().expect("validated object");
+
+    root_object.entry("version").or_insert(serde_json::json!(1));
+    let hooks = root_object
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("Trae hooks value is not an object")?;
+    let pre_tool_use = hooks
+        .entry(PRE_TOOL_USE_KEY)
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .context("Trae PreToolUse value is not an array")?;
+
+    pre_tool_use.push(serde_json::json!({
+        "matcher": TRAE_RUN_COMMAND_MATCHER,
+        "hooks": [{
+            "type": "command",
+            "command": TRAE_HOOK_COMMAND,
+            "timeout": 30
+        }]
+    }));
+    Ok(())
+}
+
+/// Remove RTK commands from nested Trae PreToolUse groups. A group is pruned
+/// only when removing RTK made its nested `hooks` array empty.
+fn remove_trae_hook_from_json(root: &mut serde_json::Value) -> bool {
+    let Some(groups) = root
+        .get_mut("hooks")
+        .and_then(|hooks| hooks.get_mut(PRE_TOOL_USE_KEY))
+        .and_then(|groups| groups.as_array_mut())
+    else {
+        return false;
+    };
+
+    let mut removed = false;
+    groups.retain_mut(|group| {
+        let Some(hooks) = group
+            .get_mut("hooks")
+            .and_then(|hooks| hooks.as_array_mut())
+        else {
+            return true;
+        };
+
+        let original_len = hooks.len();
+        hooks.retain(|hook| !is_trae_hook_entry(hook));
+        if hooks.len() == original_len {
+            return true;
+        }
+
+        removed = true;
+        !hooks.is_empty()
+    });
+
+    removed
+}
+
+/// Install Trae's native PreToolUse hook in the project or user configuration.
+pub fn run_trae_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let paths = resolve_trae_hook_paths(global)?;
+    let results = patch_trae_hooks_json_paths(&paths, ctx)?;
+
+    if ctx.dry_run {
+        print_dry_run_footer();
+        return Ok(());
+    }
+
+    let scope = if global { "global" } else { "project" };
+    println!("\nTrae hook registered ({scope}).\n");
+    println!("  Command: {}", TRAE_HOOK_COMMAND);
+    for (path, result) in paths.iter().zip(results) {
+        let status = match result {
+            PatchResult::Patched => "RTK PreToolUse entry added",
+            PatchResult::AlreadyPresent => "RTK PreToolUse entry already present",
+            _ => continue,
+        };
+        println!("  hooks.json: {} ({status})", path.display());
+    }
+    println!("  Test with: git status\n");
+    Ok(())
+}
+
+/// Remove Trae hooks from every selected config after parsing all configs
+/// first, so malformed selected configs cannot cause a partial uninstall.
+fn remove_trae_hooks_json_paths(paths: &[PathBuf], ctx: InitContext) -> Result<Vec<bool>> {
+    struct PendingRemoval {
+        path: PathBuf,
+        serialized: String,
+    }
+
+    let mut results = Vec::with_capacity(paths.len());
+    let mut pending = Vec::new();
+    let mut applied: Vec<String> = Vec::new();
+
+    for path in paths {
+        let Some(mut root) = read_json_file(path)? else {
+            results.push(false);
+            continue;
+        };
+        let removed = remove_trae_hook_from_json(&mut root);
+        results.push(removed);
+        if !removed {
+            // Present on disk and already free of RTK: same rerun reasoning as
+            // the install path.
+            applied.push(path.display().to_string());
+        }
+        if removed {
+            pending.push(PendingRemoval {
+                path: path.clone(),
+                serialized: serde_json::to_string_pretty(&root)
+                    .context("Failed to serialize Trae hooks.json")?,
+            });
+        }
+    }
+
+    for removal in pending {
+        if ctx.dry_run {
+            println!(
+                "[dry-run] would remove RTK entry from Trae hooks.json: {}",
+                removal.path.display()
+            );
+            continue;
+        }
+
+        let write_result: Result<()> = (|| {
+            let backup_path = removal.path.with_extension("json.bak");
+            fs::copy(&removal.path, &backup_path)
+                .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
+            atomic_write(&removal.path, &removal.serialized)
+        })();
+        write_result.with_context(|| {
+            format!(
+                "Failed to update Trae hooks file {}. Already updated: {}",
+                removal.path.display(),
+                if applied.is_empty() {
+                    "none".to_string()
+                } else {
+                    applied.join(", ")
+                }
+            )
+        })?;
+        applied.push(removal.path.display().to_string());
+    }
+
+    Ok(results)
+}
+
+/// Uninstall Trae's native hook from project or selected global configs.
+pub fn uninstall_trae_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let paths = resolve_trae_hook_paths(global)?;
+    let removed = remove_trae_hooks_json_paths(&paths, ctx)?;
+
+    if removed.iter().any(|removed| *removed) {
+        let action = if ctx.dry_run {
+            "[dry-run] would uninstall RTK (Trae):"
+        } else {
+            "RTK uninstalled (Trae):"
+        };
+        println!("{action}");
+        for path in paths
+            .iter()
+            .zip(removed)
+            .filter(|(_, removed)| *removed)
+            .map(|(path, _)| path.display().to_string())
+        {
+            println!("  - Trae hooks.json: {path}");
+        }
+    } else {
+        println!("RTK Trae support was not installed (nothing to remove)");
+    }
+
+    if ctx.dry_run {
+        print_dry_run_footer();
+    }
+    Ok(())
+}
+
 /// Show current rtk configuration
-pub fn show_config(codex: bool) -> Result<()> {
+pub fn show_config(codex: bool, omp: bool) -> Result<()> {
+    if omp {
+        return show_omp_config();
+    }
     if codex {
         return show_codex_config();
     }
 
     show_claude_config()
+}
+
+/// Show OMP configuration status.
+fn show_omp_config() -> Result<()> {
+    let global_extension = omp_extension_path_for_scope(true)?;
+    let project_extension = omp_extension_path_for_scope(false)?;
+
+    println!("rtk Configuration (Oh My Pi):\n");
+    print_omp_extension_status("Global extension", &global_extension)?;
+    print_omp_extension_status("Project extension", &project_extension)?;
+
+    println!("\nUsage:");
+    println!("  rtk init --agent omp                 # Configure ./.omp/extensions/rtk.ts");
+    println!(
+        "  rtk init -g --agent omp              # Configure {}",
+        global_extension.display()
+    );
+    println!("  rtk init --agent omp --uninstall     # Remove project OMP RTK extension");
+    println!("  rtk init -g --agent omp --uninstall  # Remove global OMP RTK extension");
+
+    Ok(())
+}
+
+fn print_omp_extension_status(label: &str, path: &Path) -> Result<()> {
+    if path.exists() {
+        let content = match fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(_) => {
+                println!("  {}: {} (unreadable)", label, path.display());
+                return Ok(());
+            }
+        };
+        if is_current_pi_plugin(&content) {
+            println!("  {}: {} (up to date)", label, path.display());
+        } else if is_known_stock_pi_plugin(&content) {
+            println!(
+                "  {}: {} (stock version - will be replaced on next rtk init)",
+                label,
+                path.display()
+            );
+        } else if looks_like_rtk_pi_plugin(&content) {
+            println!(
+                "  {}: {} (modified RTK content - rtk init will ask before overwriting; use --auto-patch to replace)",
+                label,
+                path.display()
+            );
+        } else {
+            println!(
+                "  {}: {} (unrelated content - rtk init will ask before overwriting; use --auto-patch to replace)",
+                label,
+                path.display()
+            );
+        }
+    } else {
+        println!("  {}: {} (not installed)", label, path.display());
+    }
+    Ok(())
 }
 
 fn show_claude_config() -> Result<()> {
@@ -3890,7 +5525,7 @@ fn show_claude_config() -> Result<()> {
     let settings_path = claude_dir.join(SETTINGS_JSON);
     let binary_hook_registered = if settings_path.exists() {
         let content = fs::read_to_string(&settings_path).unwrap_or_default();
-        if let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) {
+        if let Ok(root) = from_json_str::<serde_json::Value>(&content) {
             hook_already_present(&root, CLAUDE_HOOK_COMMAND)
         } else {
             false
@@ -4010,8 +5645,9 @@ fn show_claude_config() -> Result<()> {
     // Check settings.json (detailed status)
     if settings_path.exists() {
         let content = fs::read_to_string(&settings_path)?;
+        let content = strip_leading_bom(&content);
         if !content.trim().is_empty() {
-            if let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Ok(root) = from_json_str::<serde_json::Value>(content) {
                 if hook_already_present(&root, CLAUDE_HOOK_COMMAND) {
                     println!("[ok] settings.json: RTK hook configured");
                 } else {
@@ -4029,67 +5665,70 @@ fn show_claude_config() -> Result<()> {
     }
 
     // Check OpenCode plugin
-    if let Ok(opencode_dir) = resolve_opencode_dir() {
-        let plugin = opencode_plugin_path(&opencode_dir);
-        if plugin.exists() {
-            println!("[ok] OpenCode: plugin installed ({})", plugin.display());
-        } else {
-            println!("[--] OpenCode: plugin not found");
+    match resolve_opencode_dir() {
+        Ok(opencode_dir) => {
+            let plugin = opencode_plugin_path(&opencode_dir);
+            if plugin.exists() {
+                println!("[ok] OpenCode: plugin installed ({})", plugin.display());
+            } else {
+                println!("[--] OpenCode: plugin not found");
+            }
         }
-    } else {
-        println!("[--] OpenCode: config dir not found");
+        _ => println!("[--] OpenCode: config dir not found"),
     }
 
     // Check Cursor hooks
-    if let Ok(cursor_dir) = resolve_cursor_dir() {
-        let cursor_hook = cursor_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
-        let cursor_hooks_json = cursor_dir.join(HOOKS_JSON);
+    match resolve_cursor_dir() {
+        Ok(cursor_dir) => {
+            let cursor_hook = cursor_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+            let cursor_hooks_json = cursor_dir.join(HOOKS_JSON);
 
-        // Check for binary command in hooks.json first
-        let cursor_binary_registered = if cursor_hooks_json.exists() {
-            let content = fs::read_to_string(&cursor_hooks_json).unwrap_or_default();
-            if let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) {
-                cursor_hook_already_present(&root)
+            // Check for binary command in hooks.json first
+            let cursor_binary_registered = if cursor_hooks_json.exists() {
+                let content = fs::read_to_string(&cursor_hooks_json).unwrap_or_default();
+                if let Ok(root) = from_json_str::<serde_json::Value>(&content) {
+                    cursor_hook_already_present(&root)
+                } else {
+                    false
+                }
             } else {
                 false
-            }
-        } else {
-            false
-        };
+            };
 
-        if cursor_binary_registered {
-            println!("[ok] Cursor hook: registered in hooks.json");
-        } else if cursor_hook.exists() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let meta = fs::metadata(&cursor_hook)?;
-                let is_executable = meta.permissions().mode() & 0o111 != 0;
-                let content = fs::read_to_string(&cursor_hook)?;
-                let _is_thin = content.contains("rtk rewrite");
+            if cursor_binary_registered {
+                println!("[ok] Cursor hook: registered in hooks.json");
+            } else if cursor_hook.exists() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let meta = fs::metadata(&cursor_hook)?;
+                    let is_executable = meta.permissions().mode() & 0o111 != 0;
 
-                if !is_executable {
-                    println!(
-                        "[warn] Cursor hook: {} (legacy script, NOT executable)",
-                        cursor_hook.display()
-                    );
-                } else {
+                    if !is_executable {
+                        println!(
+                            "[warn] Cursor hook: {} (legacy script, NOT executable)",
+                            cursor_hook.display()
+                        );
+                    } else {
+                        println!(
+                            "[warn] Cursor hook: {} (legacy script — run `rtk init -g --agent cursor` to upgrade)",
+                            cursor_hook.display()
+                        );
+                    }
+                }
+
+                #[cfg(not(unix))]
+                {
                     println!(
                         "[warn] Cursor hook: {} (legacy script — run `rtk init -g --agent cursor` to upgrade)",
                         cursor_hook.display()
                     );
                 }
+            } else {
+                println!("[--] Cursor hook: not found");
             }
-
-            #[cfg(not(unix))]
-            {
-                println!("[warn] Cursor hook: {} (legacy script — run `rtk init -g --agent cursor` to upgrade)", cursor_hook.display());
-            }
-        } else {
-            println!("[--] Cursor hook: not found");
         }
-    } else {
-        println!("[--] Cursor: home dir not found");
+        _ => println!("[--] Cursor: home dir not found"),
     }
 
     println!("\nUsage:");
@@ -4100,8 +5739,8 @@ fn show_claude_config() -> Result<()> {
     println!("  rtk init -g --uninstall     # Remove all RTK artifacts");
     println!("  rtk init -g --claude-md     # Legacy: full injection into ~/.claude/CLAUDE.md");
     println!("  rtk init -g --hook-only     # Hook only, no RTK.md");
-    println!("  rtk init --codex            # Configure local AGENTS.md + RTK.md");
-    println!("  rtk init -g --codex         # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
+    println!("  rtk init --codex            # Configure local AGENTS.md + RTK.md + hooks.json");
+    println!("  rtk init -g --codex         # Configure global AGENTS.md + RTK.md + hooks.json");
     println!("  rtk init -g --opencode      # OpenCode plugin only");
     println!("  rtk init -g --agent cursor  # Install Cursor Agent hooks");
 
@@ -4112,9 +5751,11 @@ fn show_codex_config() -> Result<()> {
     let codex_dir = resolve_codex_dir()?;
     let global_agents_md = codex_dir.join(AGENTS_MD);
     let global_rtk_md = codex_dir.join(RTK_MD);
+    let global_hooks_json = codex_dir.join(HOOKS_JSON);
     let global_rtk_md_ref = codex_rtk_md_ref(&codex_dir);
     let local_agents_md = PathBuf::from(AGENTS_MD);
     let local_rtk_md = PathBuf::from(RTK_MD);
+    let local_hooks_json = PathBuf::from(CODEX_DIR).join(HOOKS_JSON);
 
     println!("rtk Configuration (Codex CLI):\n");
 
@@ -4124,8 +5765,31 @@ fn show_codex_config() -> Result<()> {
         println!("[--] Global RTK.md: not found");
     }
 
+    if global_hooks_json.exists() {
+        let content = fs::read_to_string(&global_hooks_json).with_context(|| {
+            format!(
+                "Failed to read global Codex hooks: {}",
+                global_hooks_json.display()
+            )
+        })?;
+        match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(root) if codex_hook_already_present(&root) => {
+                println!("[ok] Global hook: {}", global_hooks_json.display());
+            }
+            Ok(_) => println!("[--] Global hooks.json exists but RTK hook is not configured"),
+            Err(_) => println!("[!!] Global hooks.json is invalid JSON"),
+        }
+    } else {
+        println!("[--] Global hook: not found");
+    }
+
     if global_agents_md.exists() {
-        let content = fs::read_to_string(&global_agents_md)?;
+        let content = fs::read_to_string(&global_agents_md).with_context(|| {
+            format!(
+                "Failed to read global Codex instructions: {}",
+                global_agents_md.display()
+            )
+        })?;
         if has_rtk_reference(&content, &[RTK_MD_REF, global_rtk_md_ref.as_str()]) {
             println!("[ok] Global AGENTS.md: RTK.md reference");
         } else if content.contains(RTK_BLOCK_START) {
@@ -4143,8 +5807,31 @@ fn show_codex_config() -> Result<()> {
         println!("[--] Local RTK.md: not found");
     }
 
+    if local_hooks_json.exists() {
+        let content = fs::read_to_string(&local_hooks_json).with_context(|| {
+            format!(
+                "Failed to read local Codex hooks: {}",
+                local_hooks_json.display()
+            )
+        })?;
+        match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(root) if codex_hook_already_present(&root) => {
+                println!("[ok] Local hook: {}", local_hooks_json.display());
+            }
+            Ok(_) => println!("[--] Local hooks.json exists but RTK hook is not configured"),
+            Err(_) => println!("[!!] Local hooks.json is invalid JSON"),
+        }
+    } else {
+        println!("[--] Local hook: not found");
+    }
+
     if local_agents_md.exists() {
-        let content = fs::read_to_string(&local_agents_md)?;
+        let content = fs::read_to_string(&local_agents_md).with_context(|| {
+            format!(
+                "Failed to read local Codex instructions: {}",
+                local_agents_md.display()
+            )
+        })?;
         if has_rtk_reference(&content, &[RTK_MD_REF]) {
             println!("[ok] Local AGENTS.md: @RTK.md reference");
         } else if content.contains(RTK_BLOCK_START) {
@@ -4157,8 +5844,9 @@ fn show_codex_config() -> Result<()> {
     }
 
     println!("\nUsage:");
-    println!("  rtk init --codex              # Configure local AGENTS.md + RTK.md");
-    println!("  rtk init -g --codex           # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
+    println!("  rtk init --codex              # Configure local AGENTS.md + RTK.md + hooks.json");
+    println!("  rtk init -g --codex           # Configure global AGENTS.md + RTK.md + hooks.json");
+    println!("  rtk init --codex --uninstall     # Remove local Codex RTK artifacts");
     println!("  rtk init -g --codex --uninstall  # Remove global Codex RTK artifacts");
 
     Ok(())
@@ -4235,12 +5923,16 @@ pub fn run_gemini(
     // 2. Install GEMINI.md (RTK awareness for Gemini)
     if !hook_only {
         let gemini_md_path = gemini_dir.join(GEMINI_MD);
-        // Reuse the same slim RTK awareness content
-        write_if_changed(&gemini_md_path, RTK_SLIM, GEMINI_MD, ctx)?;
+        write_if_changed(
+            &gemini_md_path,
+            awareness_content(ctx.awareness),
+            GEMINI_MD,
+            ctx,
+        )?;
     }
 
     // 3. Patch ~/.gemini/settings.json
-    patch_gemini_settings(&gemini_dir, &hook_path, patch_mode, ctx)?;
+    let settings_parse_failed = patch_gemini_settings(&gemini_dir, &hook_path, patch_mode, ctx)?;
 
     if dry_run {
         print_dry_run_footer();
@@ -4250,19 +5942,42 @@ pub fn run_gemini(
         if !hook_only {
             println!("  GEMINI.md: {}", gemini_dir.join(GEMINI_MD).display());
         }
+        if settings_parse_failed {
+            println!(
+                "  settings.json: NOT patched (existing file could not be parsed; see warning above)"
+            );
+        }
         println!("  Restart Gemini CLI. Test with: git status\n");
     }
     Ok(())
 }
 
-/// Patch ~/.gemini/settings.json with the BeforeTool hook
+/// Print the manual-setup instructions for ~/.gemini/settings.json, shared by
+/// PatchMode::Skip and the unparseable-settings fallback in
+/// `patch_gemini_settings`.
+fn print_gemini_manual_setup(settings_path: &Path) {
+    println!(
+        "\nManual setup needed: add RTK hook to {}\n\
+         See: https://github.com/rtk-ai/rtk#gemini-cli",
+        settings_path.display()
+    );
+}
+
+/// Patch ~/.gemini/settings.json with the BeforeTool hook.
+///
+/// Returns `Ok(true)` when the existing settings.json could not be parsed
+/// (so the caller can tell an honest "hook installed, settings.json NOT
+/// patched" apart from every other reason nothing changed — already
+/// patched, `PatchMode::Skip`, declined at the `Ask` prompt, dry-run).
 fn patch_gemini_settings(
     gemini_dir: &Path,
     hook_path: &Path,
     patch_mode: PatchMode,
     ctx: InitContext,
-) -> Result<()> {
-    let InitContext { verbose, dry_run } = ctx;
+) -> Result<bool> {
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let settings_path = gemini_dir.join(SETTINGS_JSON);
     let hook_cmd = hook_path.to_string_lossy().to_string();
 
@@ -4270,35 +5985,52 @@ fn patch_gemini_settings(
     let mut settings: serde_json::Value = if settings_path.exists() {
         let content = fs::read_to_string(&settings_path)
             .with_context(|| format!("Failed to read {}", settings_path.display()))?;
-        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+        let content = strip_leading_bom(&content);
+
+        if content.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            match from_json_str(content) {
+                Ok(v) => v,
+                Err(e) => {
+                    // A parse failure must not abort the whole `rtk init` run
+                    // (run_gemini has already written the hook script,
+                    // GEMINI.md, and the integrity baseline by this point).
+                    // Treat it like PatchMode::Skip: warn, tell the user how
+                    // to patch it themselves, and leave the file untouched.
+                    eprintln!(
+                        "Warning: failed to parse {} as JSON: {}",
+                        settings_path.display(),
+                        e
+                    );
+                    print_gemini_manual_setup(&settings_path);
+                    return Ok(true);
+                }
+            }
+        }
     } else {
         serde_json::json!({})
     };
 
     let before_tool_pointer = format!("/hooks/{}", BEFORE_TOOL_KEY);
-    if let Some(hooks) = settings.pointer(&before_tool_pointer) {
-        if let Some(arr) = hooks.as_array() {
-            if arr.iter().any(|h| {
-                h.pointer("/hooks/0/command")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|c| c.contains("rtk"))
-            }) {
-                if verbose > 0 {
-                    eprintln!("Gemini settings.json already has RTK hook");
-                }
-                return Ok(());
-            }
+    if let Some(hooks) = settings.pointer(&before_tool_pointer)
+        && let Some(arr) = hooks.as_array()
+        && arr.iter().any(|h| {
+            h.pointer("/hooks/0/command")
+                .and_then(|v| v.as_str())
+                .is_some_and(|c| c.contains("rtk"))
+        })
+    {
+        if verbose > 0 {
+            eprintln!("Gemini settings.json already has RTK hook");
         }
+        return Ok(false);
     }
 
     // Ask user before patching
     if patch_mode == PatchMode::Skip {
-        println!(
-            "\nManual setup needed: add RTK hook to {}\n\
-             See: https://github.com/rtk-ai/rtk#gemini-cli",
-            settings_path.display()
-        );
-        return Ok(());
+        print_gemini_manual_setup(&settings_path);
+        return Ok(false);
     }
 
     if patch_mode == PatchMode::Ask {
@@ -4314,7 +6046,7 @@ fn patch_gemini_settings(
             std::io::stdin().read_line(&mut answer)?;
             if !answer.trim().eq_ignore_ascii_case("y") {
                 println!("Skipped. Add hook manually later.");
-                return Ok(());
+                return Ok(false);
             }
         }
     }
@@ -4356,7 +6088,7 @@ fn patch_gemini_settings(
         if verbose > 0 {
             println!("[dry-run] content:\n{}", content);
         }
-        return Ok(());
+        return Ok(false);
     }
 
     // Write atomically
@@ -4369,12 +6101,14 @@ fn patch_gemini_settings(
         eprintln!("Patched {}", settings_path.display());
     }
 
-    Ok(())
+    Ok(false)
 }
 
 /// Remove Gemini artifacts during uninstall
 fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let mut removed = Vec::new();
     let gemini_dir = match resolve_gemini_dir() {
         Ok(d) => d,
@@ -4412,7 +6146,7 @@ fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
     let settings_path = gemini_dir.join(SETTINGS_JSON);
     if settings_path.exists() {
         let content = fs::read_to_string(&settings_path)?;
-        if let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&content) {
+        if let Ok(mut settings) = from_json_str::<serde_json::Value>(&content) {
             let bt_pointer = format!("/hooks/{}", BEFORE_TOOL_KEY);
             if let Some(arr) = settings
                 .pointer_mut(&bt_pointer)
@@ -4496,7 +6230,12 @@ fn run_vibe_mode_at(
             })?;
         }
         let prompt_path = prompts_dir.join(VIBE_PROMPT_FILE);
-        write_if_changed(&prompt_path, RTK_SLIM, VIBE_PROMPT_FILE, ctx)?;
+        write_if_changed(
+            &prompt_path,
+            awareness_content(ctx.awareness),
+            VIBE_PROMPT_FILE,
+            ctx,
+        )?;
     }
 
     if dry_run {
@@ -4546,7 +6285,9 @@ fn patch_vibe_hooks_toml(
     patch_mode: PatchMode,
     ctx: InitContext,
 ) -> Result<VibeHookPatchOutcome> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
 
     let existing = if hooks_path.exists() {
         fs::read_to_string(hooks_path)
@@ -4691,7 +6432,9 @@ pub fn uninstall_vibe(ctx: InitContext) -> Result<()> {
 /// lines) from `~/.vibe/hooks.toml` and the sibling `~/.vibe/prompts/rtk.md`
 /// prompt file. Leaves any other user-declared hooks intact.
 fn uninstall_vibe_at(vibe_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
-    let InitContext { verbose, dry_run } = ctx;
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
     let mut removed = Vec::new();
 
     let prompt_path = vibe_dir.join(VIBE_PROMPTS_SUBDIR).join(VIBE_PROMPT_FILE);
@@ -5099,6 +6842,8 @@ fn uninstall_copilot_global_at(copilot_dir: &Path, ctx: InitContext) -> Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::constants::TRAE_RUN_COMMAND_MATCHER;
+    use std::process::Command;
     use tempfile::TempDir;
 
     #[test]
@@ -5199,15 +6944,137 @@ mod tests {
     }
 
     #[test]
-    fn test_default_mode_creates_rtk_md() {
+    fn test_awareness_content_maps_each_level_to_its_file() {
+        assert_eq!(
+            awareness_content(AwarenessLevel::Default),
+            RTK_AWARENESS_DEFAULT
+        );
+        assert_eq!(awareness_content(AwarenessLevel::High), RTK_AWARENESS_HIGH);
+        assert_eq!(awareness_content(AwarenessLevel::Full), RTK_AWARENESS_FULL);
+    }
+
+    #[test]
+    fn test_awareness_levels_nest() {
+        let contract = RTK_AWARENESS_DEFAULT.trim_end();
+        assert!(
+            RTK_AWARENESS_HIGH.starts_with(contract),
+            "high must start with the default output contract verbatim"
+        );
+        assert!(
+            RTK_AWARENESS_FULL.contains(contract),
+            "full must contain the default output contract verbatim"
+        );
+    }
+
+    #[test]
+    fn test_awareness_activation_rule_only_in_full() {
+        const ACTIVATION: &str = "Prefix every shell command with `rtk`";
+        assert!(!RTK_AWARENESS_DEFAULT.contains(ACTIVATION));
+        assert!(!RTK_AWARENESS_HIGH.contains(ACTIVATION));
+        assert!(RTK_AWARENESS_FULL.contains(ACTIVATION));
+    }
+
+    #[test]
+    fn test_awareness_meta_commands_present_above_default() {
+        for (name, content) in [
+            ("default", RTK_AWARENESS_DEFAULT),
+            ("high", RTK_AWARENESS_HIGH),
+            ("full", RTK_AWARENESS_FULL),
+        ] {
+            assert!(
+                content.contains("rtk proxy <cmd>"),
+                "{name} must mention rtk proxy"
+            );
+        }
+        for (name, content) in [("high", RTK_AWARENESS_HIGH), ("full", RTK_AWARENESS_FULL)] {
+            assert!(
+                content.contains("RTK_DISABLED=1"),
+                "{name} must mention RTK_DISABLED"
+            );
+            assert!(content.contains("rtk gain"), "{name} must mention rtk gain");
+        }
+        assert!(!RTK_AWARENESS_DEFAULT.contains("rtk gain"));
+    }
+
+    #[test]
+    fn test_awareness_files_stay_within_line_budget() {
+        assert!(RTK_AWARENESS_DEFAULT.lines().count() <= 10);
+        assert!(RTK_AWARENESS_HIGH.lines().count() <= 21);
+        assert!(RTK_AWARENESS_FULL.lines().count() <= 25);
+    }
+
+    #[test]
+    fn test_rtk_block_wraps_body_in_markers() {
+        let block = rtk_block(RTK_AWARENESS_FULL);
+        assert!(block.starts_with(&format!("{RTK_BLOCK_START} v2 -->\n")));
+        assert!(block.ends_with(&format!("{RTK_BLOCK_END}\n")));
+        assert!(block.contains(RTK_AWARENESS_FULL));
+    }
+
+    #[test]
+    fn test_write_if_changed_switches_awareness_level() {
         let temp = TempDir::new().unwrap();
         let rtk_md_path = temp.path().join("RTK.md");
 
-        fs::write(&rtk_md_path, RTK_SLIM).unwrap();
-        assert!(rtk_md_path.exists());
+        let default_ctx = InitContext::default();
+        assert!(
+            write_if_changed(
+                &rtk_md_path,
+                awareness_content(default_ctx.awareness),
+                RTK_MD,
+                default_ctx
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(&rtk_md_path).unwrap(),
+            RTK_AWARENESS_DEFAULT
+        );
 
-        let content = fs::read_to_string(&rtk_md_path).unwrap();
-        assert_eq!(content, RTK_SLIM);
+        let high_ctx = InitContext {
+            awareness: AwarenessLevel::High,
+            ..Default::default()
+        };
+        assert!(
+            write_if_changed(
+                &rtk_md_path,
+                awareness_content(high_ctx.awareness),
+                RTK_MD,
+                high_ctx
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(&rtk_md_path).unwrap(),
+            RTK_AWARENESS_HIGH
+        );
+
+        assert!(
+            !write_if_changed(
+                &rtk_md_path,
+                awareness_content(high_ctx.awareness),
+                RTK_MD,
+                high_ctx
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_local_init_block_follows_awareness_level_not_legacy() {
+        for level in [
+            AwarenessLevel::Default,
+            AwarenessLevel::High,
+            AwarenessLevel::Full,
+        ] {
+            let block = rtk_block(awareness_content(level));
+            assert!(block.starts_with(RTK_BLOCK_START));
+            assert!(block.contains(awareness_content(level).trim_end()));
+        }
+        // Plain local init must not ship the legacy Golden Rule; --claude-md keeps it.
+        assert!(!rtk_block(awareness_content(AwarenessLevel::Default)).contains("Golden Rule"));
+        assert!(!rtk_block(awareness_content(AwarenessLevel::High)).contains("Golden Rule"));
+        assert!(RTK_INSTRUCTIONS.contains("Golden Rule"));
     }
 
     #[test]
@@ -5344,7 +7211,61 @@ mod tests {
         let rules_path = temp.path().join(".kilocode/rules/rtk-rules.md");
         assert!(rules_path.exists(), "Rules file should be created");
         let content = fs::read_to_string(&rules_path).unwrap();
-        assert!(content.contains("RTK"), "Rules file should contain RTK");
+        assert_eq!(content, RTK_AWARENESS_FULL);
+    }
+
+    #[test]
+    fn test_agents_get_appropriate_awareness_at_every_level() {
+        for level in [
+            AwarenessLevel::Default,
+            AwarenessLevel::High,
+            AwarenessLevel::Full,
+        ] {
+            let ctx = InitContext {
+                awareness: level,
+                ..Default::default()
+            };
+            let temp = TempDir::new().unwrap();
+
+            run_kilocode_mode_at(temp.path(), ctx).unwrap();
+            assert_eq!(
+                fs::read_to_string(temp.path().join(".kilocode/rules/rtk-rules.md")).unwrap(),
+                RTK_AWARENESS_FULL,
+                "kilocode with level {level}"
+            );
+
+            run_antigravity_mode_at(temp.path(), ctx).unwrap();
+            assert_eq!(
+                fs::read_to_string(temp.path().join(".agents/rules/antigravity-rtk-rules.md"))
+                    .unwrap(),
+                RTK_AWARENESS_FULL,
+                "antigravity with level {level}"
+            );
+
+            run_kimi_mode_at(temp.path(), ctx).unwrap();
+            let agents_md = fs::read_to_string(temp.path().join(AGENTS_MD)).unwrap();
+            assert!(
+                agents_md.contains(RTK_AWARENESS_FULL),
+                "kimi with level {level}"
+            );
+
+            let codex_agents = temp.path().join("codex").join(AGENTS_MD);
+            let codex_rtk = temp.path().join("codex").join(RTK_MD);
+            fs::create_dir_all(temp.path().join("codex")).unwrap();
+            run_codex_mode_with_paths(
+                codex_agents,
+                codex_rtk.clone(),
+                temp.path().join("codex/hooks.json"),
+                false,
+                ctx,
+            )
+            .unwrap();
+            assert_eq!(
+                fs::read_to_string(&codex_rtk).unwrap(),
+                awareness_content(level),
+                "codex with level {level}"
+            );
+        }
     }
 
     #[test]
@@ -5941,21 +7862,96 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let agents_md = temp.path().join("AGENTS.md");
         let rtk_md = temp.path().join("RTK.md");
+        let hooks_json = temp.path().join(HOOKS_JSON);
 
         run_codex_mode_with_paths(
             agents_md.clone(),
             rtk_md.clone(),
+            hooks_json.clone(),
             true,
             InitContext::default(),
         )
         .unwrap();
 
         assert!(rtk_md.exists());
-        assert_eq!(fs::read_to_string(&rtk_md).unwrap(), RTK_SLIM_CODEX);
+        assert_eq!(fs::read_to_string(&rtk_md).unwrap(), RTK_AWARENESS_DEFAULT);
         assert_eq!(
             fs::read_to_string(&agents_md).unwrap(),
             format!("{}\n", codex_rtk_md_ref(temp.path()))
         );
+        let hooks: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&hooks_json).unwrap()).unwrap();
+        assert!(codex_hook_already_present(&hooks));
+    }
+
+    #[test]
+    fn test_codex_tracking_config_limits_root_to_database_parent() {
+        let temp = TempDir::new().unwrap();
+        let directory = temp.path().join("tracking data");
+        fs::create_dir(&directory).unwrap();
+        let config = codex_tracking_config(&directory.join("custom.db")).unwrap();
+        let parsed: toml::Value = toml::from_str(&config).unwrap();
+        assert_eq!(parsed["sandbox_mode"].as_str(), Some("workspace-write"));
+        let roots = parsed["sandbox_workspace_write"]["writable_roots"]
+            .as_array()
+            .unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(
+            roots[0].as_str().unwrap(),
+            fs::canonicalize(&directory).unwrap().to_str().unwrap()
+        );
+        assert!(!directory.join("custom.db").exists());
+    }
+
+    #[test]
+    fn test_codex_tracking_config_escapes_paths_without_creating_files() {
+        let temp = TempDir::new().unwrap();
+        let directory = temp.path().join("quoted \"directory\"");
+        let config = codex_tracking_config(&directory.join("history.db")).unwrap();
+        let parsed: toml::Value = toml::from_str(&config).unwrap();
+        assert_eq!(
+            parsed["sandbox_workspace_write"]["writable_roots"][0]
+                .as_str()
+                .unwrap(),
+            directory.to_str().unwrap()
+        );
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn test_patch_codex_hooks_is_idempotent_and_preserves_existing_hooks() {
+        let temp = TempDir::new().unwrap();
+        let hooks_json = temp.path().join(HOOKS_JSON);
+        fs::write(
+            &hooks_json,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [{
+                        "matcher": "Bash",
+                        "hooks": [{ "type": "command", "command": "echo existing" }]
+                    }],
+                    "Stop": [{
+                        "hooks": [{ "type": "command", "command": "echo stop" }]
+                    }]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(patch_codex_hooks_json(&hooks_json, InitContext::default()).unwrap());
+        assert!(!patch_codex_hooks_json(&hooks_json, InitContext::default()).unwrap());
+
+        let root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&hooks_json).unwrap()).unwrap();
+        assert!(codex_hook_already_present(&root));
+        assert_eq!(root["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            root["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            "echo existing"
+        );
+        assert_eq!(root["hooks"]["Stop"][0]["hooks"][0]["command"], "echo stop");
+        assert!(hooks_json.with_extension("json.bak").exists());
     }
 
     #[test]
@@ -6190,6 +8186,62 @@ mod tests {
     }
 
     #[test]
+    fn test_remove_droid_hook_propagates_backup_failure_and_preserves_file() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join(DROID_HOOKS_FILE);
+        let original = serde_json::to_string_pretty(&serde_json::json!({
+            "PreToolUse": [{
+                "matcher": DROID_EXECUTE_MATCHER,
+                "hooks": [{ "type": "command", "command": DROID_HOOK_COMMAND }]
+            }]
+        }))
+        .unwrap();
+        fs::write(&path, &original).unwrap();
+        fs::create_dir(path.with_extension("json.bak")).unwrap();
+
+        let err = remove_droid_hook_from_file(
+            &DroidHookFile {
+                path: path.clone(),
+                layout: DroidLayout::Root,
+            },
+            InitContext::default(),
+        )
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("backup"));
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn test_uninstall_droid_continues_after_candidate_failure() {
+        let temp = TempDir::new().unwrap();
+        let droid_dir = temp.path().join(DROID_DIR);
+        let root_path = droid_dir.join(DROID_HOOKS_FILE);
+        let legacy_path = droid_dir.join(DROID_HOOKS_SUBDIR).join(DROID_HOOKS_FILE);
+        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+
+        let hook_json = serde_json::to_string_pretty(&serde_json::json!({
+            "PreToolUse": [{
+                "matcher": DROID_EXECUTE_MATCHER,
+                "hooks": [{ "type": "command", "command": DROID_HOOK_COMMAND }]
+            }]
+        }))
+        .unwrap();
+        fs::write(&root_path, &hook_json).unwrap();
+        fs::write(&legacy_path, &hook_json).unwrap();
+        fs::create_dir(root_path.with_extension("json.bak")).unwrap();
+
+        let err = uninstall_droid_at(&droid_dir, InitContext::default()).unwrap_err();
+
+        assert!(format!("{err:#}").contains(&root_path.display().to_string()));
+        assert_eq!(fs::read_to_string(&root_path).unwrap(), hook_json);
+        let legacy: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&legacy_path).unwrap()).unwrap();
+        assert!(!droid_hook_already_present(&legacy, DroidLayout::Root));
+        assert!(legacy_path.with_extension("json.bak").exists());
+    }
+
+    #[test]
     fn test_droid_target_defaults_to_hooks_json() {
         // Fresh setup: the canonical hooks.json is created (Droid's own
         // /hooks UI location), not the settings.json fallback.
@@ -6265,6 +8317,7 @@ mod tests {
         let ctx = InitContext {
             verbose: 0,
             dry_run: false,
+            ..Default::default()
         };
 
         run_droid_mode_at(&droid_dir, true, ctx).unwrap();
@@ -6311,6 +8364,7 @@ mod tests {
         let ctx = InitContext {
             verbose: 0,
             dry_run: false,
+            ..Default::default()
         };
         run_droid_mode_at(&droid_dir, true, ctx).unwrap();
 
@@ -6354,6 +8408,32 @@ mod tests {
     }
 
     #[test]
+    fn test_local_codex_install_can_be_uninstalled() {
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new().unwrap();
+        let original_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+
+        fs::write(AGENTS_MD, "# Team rules\n").unwrap();
+        run_codex_mode(false, InitContext::default()).unwrap();
+        let uninstall_result = uninstall_codex(false, InitContext::default());
+
+        std::env::set_current_dir(original_cwd).unwrap();
+        uninstall_result.unwrap();
+
+        assert!(!temp.path().join(RTK_MD).exists());
+        assert!(!codex_hook_already_present(
+            &serde_json::from_str(
+                &fs::read_to_string(temp.path().join(CODEX_DIR).join(HOOKS_JSON)).unwrap()
+            )
+            .unwrap()
+        ));
+        let agents = fs::read_to_string(temp.path().join(AGENTS_MD)).unwrap();
+        assert_eq!(agents.trim_end(), "# Team rules");
+        assert!(!agents.contains(RTK_MD_REF));
+    }
+
+    #[test]
     fn test_uninstall_codex_at_removes_absolute_reference() {
         let temp = TempDir::new().unwrap();
         let codex_dir = temp.path();
@@ -6370,6 +8450,66 @@ mod tests {
         let content = fs::read_to_string(&agents_md).unwrap();
         assert!(!content.contains(&absolute_ref));
         assert!(content.contains("# Team rules"));
+    }
+
+    #[test]
+    fn test_remove_codex_hook_preserves_other_hooks_in_same_entry() {
+        let mut root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [
+                        { "type": "command", "command": "echo user hook" },
+                        { "type": "command", "command": CODEX_HOOK_COMMAND }
+                    ]
+                }],
+                "Stop": [{
+                    "hooks": [{ "type": "command", "command": "echo stop" }]
+                }]
+            }
+        });
+
+        assert!(remove_codex_hook_from_json(&mut root));
+        assert!(!codex_hook_already_present(&root));
+        assert_eq!(
+            root["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            "echo user hook"
+        );
+        assert_eq!(root["hooks"]["Stop"][0]["hooks"][0]["command"], "echo stop");
+    }
+
+    #[test]
+    fn test_uninstall_codex_at_removes_hook_and_preserves_other_hooks() {
+        let temp = TempDir::new().unwrap();
+        let hooks_json = temp.path().join(HOOKS_JSON);
+        fs::write(
+            &hooks_json,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [{
+                        "matcher": "Bash",
+                        "hooks": [
+                            { "type": "command", "command": "echo user hook" },
+                            { "type": "command", "command": CODEX_HOOK_COMMAND }
+                        ]
+                    }]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let removed = uninstall_codex_at(temp.path(), InitContext::default()).unwrap();
+
+        assert_eq!(removed.len(), 1);
+        let root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&hooks_json).unwrap()).unwrap();
+        assert!(!codex_hook_already_present(&root));
+        assert_eq!(
+            root["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            "echo user hook"
+        );
+        assert!(hooks_json.with_extension("json.bak").exists());
     }
 
     #[test]
@@ -6429,10 +8569,12 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let agents_md = temp.path().join("AGENTS.md");
         let rtk_md = temp.path().join("RTK.md");
+        let hooks_json = temp.path().join(HOOKS_JSON);
 
         run_codex_mode_with_paths(
             agents_md.clone(),
             rtk_md.clone(),
+            hooks_json.clone(),
             true,
             InitContext {
                 dry_run: true,
@@ -6450,6 +8592,11 @@ mod tests {
             !agents_md.exists(),
             "dry-run must not create AGENTS.md: {}",
             agents_md.display()
+        );
+        assert!(
+            !hooks_json.exists(),
+            "dry-run must not create hooks.json: {}",
+            hooks_json.display()
         );
     }
 
@@ -6599,11 +8746,13 @@ mod tests {
 
         // Should create full structure
         assert!(json_content.get("hooks").is_some());
-        assert!(json_content
-            .get("hooks")
-            .unwrap()
-            .get("PreToolUse")
-            .is_some());
+        assert!(
+            json_content
+                .get("hooks")
+                .unwrap()
+                .get("PreToolUse")
+                .is_some()
+        );
 
         let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(pre_tool_use.len(), 1);
@@ -6673,6 +8822,56 @@ mod tests {
         assert!(file_path.exists());
         let written = fs::read_to_string(&file_path).unwrap();
         assert_eq!(written, content);
+    }
+
+    #[test]
+    fn test_read_json_file_handles_missing_and_empty_files() {
+        let temp = TempDir::new().unwrap();
+        let missing = temp.path().join("missing.json");
+        let empty = temp.path().join("empty.json");
+        fs::write(&empty, "  \n").unwrap();
+
+        assert!(read_json_file(&missing).unwrap().is_none());
+        assert_eq!(read_json_file(&empty).unwrap(), Some(serde_json::json!({})));
+    }
+
+    #[test]
+    fn test_read_json_file_errors_include_the_path() {
+        let temp = TempDir::new().unwrap();
+        let invalid = temp.path().join("invalid.json");
+        fs::write(&invalid, "{").unwrap();
+
+        let parse_error = read_json_file(&invalid).unwrap_err();
+        assert!(format!("{parse_error:#}").contains(&invalid.display().to_string()));
+
+        let read_error = read_json_file(temp.path()).unwrap_err();
+        assert!(format!("{read_error:#}").contains(&temp.path().display().to_string()));
+    }
+
+    #[test]
+    fn test_backup_and_atomic_write_preserves_previous_content() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("hooks.json");
+        fs::write(&path, "old").unwrap();
+
+        let backup = backup_and_atomic_write(&path, "new").unwrap().unwrap();
+
+        assert_eq!(backup, path.with_extension("json.bak"));
+        assert_eq!(fs::read_to_string(path).unwrap(), "new");
+        assert_eq!(fs::read_to_string(backup).unwrap(), "old");
+    }
+
+    #[test]
+    fn test_backup_and_atomic_write_failure_preserves_original() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("hooks.json");
+        fs::write(&path, "old").unwrap();
+        fs::create_dir(path.with_extension("json.bak")).unwrap();
+
+        let err = backup_and_atomic_write(&path, "new").unwrap_err();
+
+        assert!(format!("{err:#}").contains("backup"));
+        assert_eq!(fs::read_to_string(path).unwrap(), "old");
     }
 
     #[cfg(unix)]
@@ -6965,6 +9164,61 @@ mod tests {
     }
 
     #[test]
+    fn test_patch_cursor_hook_propagates_backup_failure_and_preserves_file() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join(HOOKS_JSON);
+        let original = serde_json::to_string_pretty(&serde_json::json!({
+            "version": 1,
+            "hooks": {
+                "preToolUse": [{
+                    "command": "./hooks/other.sh",
+                    "matcher": "Shell"
+                }]
+            }
+        }))
+        .unwrap();
+        fs::write(&path, &original).unwrap();
+        fs::create_dir(path.with_extension("json.bak")).unwrap();
+
+        let err = patch_cursor_hooks_json(&path, InitContext::default()).unwrap_err();
+
+        assert!(format!("{err:#}").contains("backup"));
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn test_remove_cursor_hooks_keeps_malformed_json_best_effort() {
+        let temp = TempDir::new().unwrap();
+        let cursor_dir = temp.path().join(CURSOR_DIR);
+        let hook_path = cursor_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+        let hooks_json = cursor_dir.join(HOOKS_JSON);
+        fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
+        fs::write(&hook_path, "legacy hook").unwrap();
+        fs::write(&hooks_json, "{").unwrap();
+
+        let removed = remove_cursor_hooks_at(&cursor_dir, InitContext::default()).unwrap();
+
+        assert!(!hook_path.exists());
+        assert_eq!(fs::read_to_string(hooks_json).unwrap(), "{");
+        assert_eq!(
+            removed,
+            vec![format!("Cursor hook: {}", hook_path.display())]
+        );
+    }
+
+    #[test]
+    fn test_remove_cursor_hooks_still_propagates_read_errors() {
+        let temp = TempDir::new().unwrap();
+        let cursor_dir = temp.path().join(CURSOR_DIR);
+        let hooks_json = cursor_dir.join(HOOKS_JSON);
+        fs::create_dir_all(&hooks_json).unwrap();
+
+        let err = remove_cursor_hooks_at(&cursor_dir, InitContext::default()).unwrap_err();
+
+        assert!(format!("{err:#}").contains(&hooks_json.display().to_string()));
+    }
+
+    #[test]
     fn test_remove_cursor_hook_from_json() {
         let mut json_content = serde_json::json!({
             "version": 1,
@@ -7017,6 +9271,527 @@ mod tests {
 
         let removed = remove_cursor_hook_from_json(&mut json_content);
         assert!(!removed);
+    }
+
+    // ─── Trae hooks.json tests ───
+
+    #[test]
+    fn test_trae_hook_paths_include_trae_cn_only_when_its_directory_exists() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+
+        assert_eq!(
+            trae_hook_paths_at(home),
+            vec![home.join(".trae").join("hooks.json")]
+        );
+
+        fs::create_dir(home.join(".trae-cn")).unwrap();
+        assert_eq!(
+            trae_hook_paths_at(home),
+            vec![
+                home.join(".trae").join("hooks.json"),
+                home.join(".trae-cn").join("hooks.json"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_insert_trae_hook_preserves_unrelated_configuration() {
+        let mut root = serde_json::json!({
+            "custom": { "keep": true },
+            "hooks": {
+                "PostToolUse": [{ "matcher": "WriteFile", "hooks": [] }],
+                "PreToolUse": [{
+                    "matcher": "ReadFile",
+                    "hooks": [{ "type": "command", "command": "other read hook" }]
+                }]
+            }
+        });
+
+        insert_trae_hook_entry(&mut root).unwrap();
+
+        assert_eq!(root["version"], 1);
+        assert_eq!(root["custom"]["keep"], true);
+        assert_eq!(root["hooks"]["PostToolUse"][0]["matcher"], "WriteFile");
+        let groups = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[1]["matcher"], "RunCommand");
+        assert_eq!(groups[1]["hooks"][0]["type"], "command");
+        assert_eq!(groups[1]["hooks"][0]["command"], "rtk hook trae");
+        assert_eq!(groups[1]["hooks"][0]["timeout"], 30);
+    }
+
+    #[test]
+    fn test_insert_trae_hook_rejects_non_object_or_non_v1_roots_without_mutation() {
+        for mut root in [serde_json::json!(null), serde_json::json!({ "version": 2 })] {
+            let original = root.clone();
+            assert!(insert_trae_hook_entry(&mut root).is_err());
+            assert_eq!(root, original);
+        }
+    }
+
+    #[test]
+    fn test_trae_customized_hooks_are_detected_without_duplicate_install_and_removed() {
+        for (matcher, timeout, hook_type) in [
+            (
+                serde_json::json!("RunCommand|WriteFile"),
+                serde_json::json!(30),
+                serde_json::json!("command"),
+            ),
+            (
+                serde_json::json!("RunCommand"),
+                serde_json::json!(60),
+                serde_json::json!("command"),
+            ),
+            (
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+            ),
+        ] {
+            let temp = TempDir::new().unwrap();
+            let path = temp.path().join("hooks.json");
+            let unrelated = serde_json::json!({ "type": "command", "command": "other hook" });
+            let mut group = serde_json::json!({
+                "hooks": [{ "command": "rtk hook trae" }, unrelated.clone()]
+            });
+            if !matcher.is_null() {
+                group["matcher"] = matcher;
+            }
+            if !timeout.is_null() {
+                group["hooks"][0]["timeout"] = timeout;
+            }
+            if !hook_type.is_null() {
+                group["hooks"][0]["type"] = hook_type;
+            }
+            let root = serde_json::json!({
+                "version": 1,
+                "custom": { "keep": true },
+                "hooks": {
+                    "PreToolUse": [group],
+                    "PostToolUse": [{ "matcher": "WriteFile", "hooks": [] }]
+                }
+            });
+            assert!(trae_hook_already_present(&root), "not detected: {root}");
+            let original = serde_json::to_string_pretty(&root).unwrap();
+            fs::write(&path, &original).unwrap();
+            let paths = vec![path.clone()];
+            assert_eq!(
+                patch_trae_hooks_json_paths(&paths, InitContext::default()).unwrap(),
+                vec![PatchResult::AlreadyPresent]
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
+            assert_eq!(
+                remove_trae_hooks_json_paths(&paths, InitContext::default()).unwrap(),
+                vec![true]
+            );
+            let actual: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            let mut expected = root;
+            expected["hooks"]["PreToolUse"][0]["hooks"] = serde_json::json!([unrelated]);
+            assert_eq!(actual, expected);
+            assert!(!trae_hook_already_present(&actual));
+        }
+    }
+
+    #[test]
+    fn test_trae_registration_outside_run_command_does_not_count_as_installed() {
+        // A registration under a matcher that never runs for RunCommand is not
+        // a working install: reporting it as present would skip the one that
+        // would actually fire.
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("hooks.json");
+        let root = serde_json::json!({ "version": 1, "hooks": { PRE_TOOL_USE_KEY: [{
+            "matcher": "ReadFile",
+            "hooks": [{ "command": "rtk hook trae" }]
+        }] } });
+        assert!(!trae_hook_already_present(&root));
+        fs::write(&path, root.to_string()).unwrap();
+
+        let paths = vec![path.clone()];
+        assert_eq!(
+            patch_trae_hooks_json_paths(&paths, InitContext::default()).unwrap(),
+            vec![PatchResult::Patched]
+        );
+        let patched = read_json_file(&path).unwrap().unwrap();
+        assert!(trae_hook_already_present(&patched));
+        let groups = patched["hooks"][PRE_TOOL_USE_KEY].as_array().unwrap();
+        assert!(
+            groups
+                .iter()
+                .any(|group| group["matcher"] == TRAE_RUN_COMMAND_MATCHER),
+            "{patched}"
+        );
+    }
+
+    #[test]
+    fn test_trae_matcher_alternation_counts_as_installed() {
+        for matcher in ["RunCommand", "RunCommand|WriteFile", "ReadFile|RunCommand"] {
+            let root = serde_json::json!({ "version": 1, "hooks": { PRE_TOOL_USE_KEY: [{
+                "matcher": matcher,
+                "hooks": [{ "command": "rtk hook trae" }]
+            }] } });
+            assert!(trae_hook_already_present(&root), "{matcher}");
+        }
+        // No matcher key at all applies to every tool, RunCommand included.
+        let no_matcher = serde_json::json!({ "version": 1, "hooks": { PRE_TOOL_USE_KEY: [{
+            "hooks": [{ "command": "rtk hook trae" }]
+        }] } });
+        assert!(trae_hook_already_present(&no_matcher));
+    }
+
+    #[test]
+    fn test_trae_rerun_after_failure_still_names_the_completed_target() {
+        // The docs tell the user to rerun after fixing the filesystem error.
+        // On that rerun the first target preflights as AlreadyPresent, so it
+        // must still be listed rather than reported as "none".
+        let temp = TempDir::new().unwrap();
+        let first = temp.path().join(".trae/hooks.json");
+        let second = temp.path().join(".trae-cn/hooks.json");
+        fs::create_dir_all(second.parent().unwrap()).unwrap();
+        fs::write(&second, "{}").unwrap();
+        fs::create_dir(second.with_extension("json.bak")).unwrap();
+        let paths = vec![first.clone(), second.clone()];
+
+        let first_error = patch_trae_hooks_json_paths(&paths, InitContext::default()).unwrap_err();
+        assert!(
+            format!("{first_error:#}").contains(&format!("Already updated: {}: ", first.display())),
+            "{first_error:#}"
+        );
+
+        // Rerun without fixing anything: the first target is installed now.
+        let rerun_error = patch_trae_hooks_json_paths(&paths, InitContext::default()).unwrap_err();
+        let message = format!("{rerun_error:#}");
+        assert!(
+            message.contains(&format!("Already updated: {}: ", first.display())),
+            "{message}"
+        );
+        assert!(!message.contains("Already updated: none"), "{message}");
+    }
+
+    #[test]
+    fn test_trae_uninstall_keeps_user_authored_non_command_entries() {
+        // `type: "prompt"` is never something RTK installs, so it is the
+        // user's -- removing it would also take the group and its keys.
+        let mut root = serde_json::json!({ "version": 1, "hooks": { PRE_TOOL_USE_KEY: [{
+            "matcher": "ReadFile",
+            "description": "user-owned group",
+            "hooks": [{ "type": "prompt", "command": "rtk hook trae" }]
+        }] } });
+        let original = root.clone();
+        assert!(!remove_trae_hook_from_json(&mut root));
+        assert_eq!(root, original);
+    }
+
+    #[test]
+    fn test_trae_uninstall_write_failure_reports_completed_targets() {
+        let temp = TempDir::new().unwrap();
+        let installed = serde_json::json!({ "version": 1, "hooks": { PRE_TOOL_USE_KEY: [{
+            "matcher": TRAE_RUN_COMMAND_MATCHER,
+            "hooks": [{ "type": "command", "command": TRAE_HOOK_COMMAND }]
+        }] } })
+        .to_string();
+        let first = temp.path().join(".trae/hooks.json");
+        let second = temp.path().join(".trae-cn/hooks.json");
+        for path in [&first, &second] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, &installed).unwrap();
+        }
+        // A directory at the backup path fails on every platform, even as root.
+        fs::create_dir(second.with_extension("json.bak")).unwrap();
+
+        let error =
+            remove_trae_hooks_json_paths(&[first.clone(), second.clone()], InitContext::default())
+                .unwrap_err();
+        assert!(!trae_hook_already_present(
+            &read_json_file(&first).unwrap().unwrap()
+        ));
+        assert_eq!(fs::read_to_string(&second).unwrap(), installed);
+        let message = format!("{error:#}");
+        assert!(message.contains(&second.display().to_string()), "{message}");
+        assert!(
+            message.contains(&format!("Already updated: {}: ", first.display())),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn test_trae_hook_detection_and_removal_preserve_other_commands() {
+        let mut root = serde_json::json!({
+            "hooks": { "PreToolUse": [{
+                "matcher": "RunCommand",
+                "hooks": [
+                    { "command": "rtk hook cursor" },
+                    { "command": "echo rtk hook trae" },
+                    { "command": "not-rtk hook trae" }
+                ]
+            }] }
+        });
+        let original = root.clone();
+        assert!(!trae_hook_already_present(&root));
+        assert!(!remove_trae_hook_from_json(&mut root));
+        assert_eq!(root, original);
+    }
+
+    #[test]
+    fn test_remove_trae_hook_only_removes_rtk_and_prunes_its_empty_group() {
+        let mut root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "RunCommand",
+                        "hooks": [
+                            { "type": "command", "command": "rtk hook trae" },
+                            { "type": "command", "command": "other hook" }
+                        ]
+                    },
+                    {
+                        "matcher": "RunCommand",
+                        "hooks": [{ "type": "command", "command": "/opt/bin/rtk hook trae" }]
+                    }
+                ],
+                "PostToolUse": [{ "matcher": "WriteFile", "hooks": [] }]
+            }
+        });
+
+        assert!(remove_trae_hook_from_json(&mut root));
+
+        let groups = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0]["hooks"][0]["command"], "other hook");
+        assert_eq!(root["hooks"]["PostToolUse"][0]["matcher"], "WriteFile");
+    }
+
+    #[test]
+    fn test_trae_bom_config_install_and_uninstall() {
+        for prefix in ["\u{feff}", "\u{feff}\u{feff}"] {
+            let temp = TempDir::new().unwrap();
+            let path = temp.path().join("hooks.json");
+            let original = serde_json::json!({"version": 1, "custom": true, "hooks": {
+                "PreToolUse": [{"matcher": "ReadFile", "hooks": [{"command": "other hook"}]}]
+            }});
+            fs::write(&path, format!("{prefix}{original}")).unwrap();
+            let paths = vec![path.clone()];
+            assert_eq!(
+                patch_trae_hooks_json_paths(&paths, InitContext::default()).unwrap(),
+                vec![PatchResult::Patched]
+            );
+            let installed = fs::read_to_string(&path).unwrap();
+            assert!(trae_hook_already_present(
+                &serde_json::from_str(&installed).unwrap()
+            ));
+            fs::write(&path, format!("{prefix}{installed}")).unwrap();
+            assert_eq!(
+                remove_trae_hooks_json_paths(&paths, InitContext::default()).unwrap(),
+                vec![true]
+            );
+            let removed: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(removed, original);
+        }
+    }
+
+    #[test]
+    fn test_trae_windows_command_install_is_idempotent_and_uninstalls() {
+        for command in [
+            "rtk.exe hook trae",
+            r#""C:\Program Files\rtk.exe" hook trae"#,
+        ] {
+            let temp = TempDir::new().unwrap();
+            let path = temp.path().join("hooks.json");
+            let root = serde_json::json!({"version": 1, "hooks": {"PreToolUse": [{
+                "matcher": "RunCommand|WriteFile", "hooks": [{"command": command, "timeout": 60}]
+            }]}});
+            let original = root.to_string();
+            fs::write(&path, &original).unwrap();
+            let paths = vec![path.clone()];
+            assert_eq!(
+                patch_trae_hooks_json_paths(&paths, InitContext::default()).unwrap(),
+                vec![PatchResult::AlreadyPresent]
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
+            assert_eq!(
+                remove_trae_hooks_json_paths(&paths, InitContext::default()).unwrap(),
+                vec![true]
+            );
+            let removed: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(removed["hooks"]["PreToolUse"], serde_json::json!([]));
+        }
+    }
+
+    #[test]
+    fn test_trae_write_failure_reports_completed_targets() {
+        let temp = TempDir::new().unwrap();
+        let first = temp.path().join(".trae/hooks.json");
+        let second = temp.path().join(".trae-cn/hooks.json");
+        fs::create_dir_all(second.parent().unwrap()).unwrap();
+        fs::write(&second, "{}").unwrap();
+        // A directory at the backup path fails on every platform, even as root.
+        fs::create_dir(second.with_extension("json.bak")).unwrap();
+        let error =
+            patch_trae_hooks_json_paths(&[first.clone(), second.clone()], InitContext::default())
+                .unwrap_err();
+        assert!(trae_hook_already_present(
+            &read_json_file(&first).unwrap().unwrap()
+        ));
+        assert_eq!(fs::read_to_string(&second).unwrap(), "{}");
+        let message = format!("{error:#}");
+        assert!(message.contains(&second.display().to_string()), "{message}");
+        // Pin the exact list: a prefix match also accepts the failing target
+        // being reported as already updated.
+        assert!(
+            message.contains(&format!("Already updated: {}: ", first.display())),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn test_trae_patch_preflights_all_global_targets_before_writing() {
+        let temp = TempDir::new().unwrap();
+        let trae = temp.path().join(".trae").join("hooks.json");
+        let trae_cn = temp.path().join(".trae-cn").join("hooks.json");
+        fs::create_dir_all(trae.parent().unwrap()).unwrap();
+        fs::create_dir_all(trae_cn.parent().unwrap()).unwrap();
+        let original = "{\n  \"existing\": true\n}\n";
+        fs::write(&trae, original).unwrap();
+        fs::write(&trae_cn, "not json").unwrap();
+
+        let result = patch_trae_hooks_json_paths(&[trae.clone(), trae_cn], InitContext::default());
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(trae).unwrap(), original);
+    }
+
+    #[test]
+    fn test_trae_patch_rejects_non_v1_config_before_idempotency_check() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join(".trae").join("hooks.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = r#"{
+            "version": 2,
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "RunCommand",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "rtk hook trae",
+                        "timeout": 30
+                    }]
+                }]
+            }
+        }"#;
+        fs::write(&path, original).unwrap();
+
+        assert!(
+            patch_trae_hooks_json_paths(std::slice::from_ref(&path), InitContext::default())
+                .is_err()
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn test_trae_patch_adds_missing_version_without_duplicating_matching_hook() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join(".trae").join("hooks.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{
+                "hooks": {
+                    "PreToolUse": [{
+                        "matcher": "RunCommand",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "rtk hook trae",
+                            "timeout": 30
+                        }]
+                    }]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            patch_trae_hooks_json_paths(std::slice::from_ref(&path), InitContext::default())
+                .unwrap(),
+            vec![PatchResult::Patched]
+        );
+        let root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(root["version"], 1);
+        assert_eq!(root["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_trae_patch_updates_every_selected_target_and_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let trae = temp.path().join(".trae").join("hooks.json");
+        let trae_cn = temp.path().join(".trae-cn").join("hooks.json");
+        fs::create_dir_all(trae.parent().unwrap()).unwrap();
+        fs::write(&trae, r#"{ "custom": { "keep": true } }"#).unwrap();
+
+        let paths = vec![trae.clone(), trae_cn.clone()];
+        let results = patch_trae_hooks_json_paths(&paths, InitContext::default()).unwrap();
+        assert_eq!(results, vec![PatchResult::Patched, PatchResult::Patched]);
+        assert!(trae.with_extension("json.bak").exists());
+
+        for path in &paths {
+            let root: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+            assert!(trae_hook_already_present(&root));
+        }
+        let trae_root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&trae).unwrap()).unwrap();
+        assert_eq!(trae_root["custom"]["keep"], true);
+
+        let results = patch_trae_hooks_json_paths(&paths, InitContext::default()).unwrap();
+        assert_eq!(
+            results,
+            vec![PatchResult::AlreadyPresent, PatchResult::AlreadyPresent]
+        );
+    }
+
+    #[test]
+    fn test_trae_uninstall_updates_every_selected_target_and_preserves_siblings() {
+        let temp = TempDir::new().unwrap();
+        let paths = vec![
+            temp.path().join(".trae").join("hooks.json"),
+            temp.path().join(".trae-cn").join("hooks.json"),
+        ];
+        for path in &paths {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(
+                path,
+                r#"{
+                    "hooks": {
+                        "PreToolUse": [{
+                            "matcher": "RunCommand",
+                            "hooks": [
+                                { "type": "command", "command": "rtk hook trae" },
+                                { "type": "command", "command": "other hook" }
+                            ]
+                        }]
+                    }
+                }"#,
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            remove_trae_hooks_json_paths(&paths, InitContext::default()).unwrap(),
+            vec![true, true]
+        );
+        for path in &paths {
+            assert!(path.with_extension("json.bak").exists());
+            let root: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+            assert!(!trae_hook_already_present(&root));
+            assert_eq!(
+                root["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+                "other hook"
+            );
+        }
     }
 
     // ─── Legacy migration tests ──────────────────────────────────────
@@ -7161,37 +9936,30 @@ mod tests {
     }
 
     use std::sync::Mutex;
-    static CLAUDE_DIR_LOCK: Mutex<()> = Mutex::new(());
-    static PI_DIR_LOCK: Mutex<()> = Mutex::new(());
     /// Serialises all tests that mutate the process-wide working directory.
     static CWD_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
-        let _guard = CLAUDE_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let claude_dir = tmp.path().join(CLAUDE_DIR);
         fs::create_dir_all(&claude_dir).unwrap();
 
-        let orig = std::env::var_os("CLAUDE_CONFIG_DIR");
-        std::env::set_var("CLAUDE_CONFIG_DIR", &claude_dir);
-        f(&claude_dir);
-        match orig {
-            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
-            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
-        }
+        temp_env::with_var("CLAUDE_CONFIG_DIR", Some(&claude_dir), || f(&claude_dir));
     }
 
     fn with_pi_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
-        let _guard = PI_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let pi_dir = tmp.path().join("pi_agent");
         fs::create_dir_all(&pi_dir).unwrap();
 
-        let orig = std::env::var_os(PI_CODING_AGENT_DIR_ENV);
-        std::env::set_var(PI_CODING_AGENT_DIR_ENV, &pi_dir);
-        f(&pi_dir);
-        match orig {
-            Some(v) => std::env::set_var(PI_CODING_AGENT_DIR_ENV, v),
-            None => std::env::remove_var(PI_CODING_AGENT_DIR_ENV),
-        }
+        temp_env::with_var(PI_CODING_AGENT_DIR_ENV, Some(&pi_dir), || f(&pi_dir));
+    }
+
+    // OMP reuses PI_CODING_AGENT_DIR, so this overrides the same variable as
+    // with_pi_dir_override; temp-env serialises the two against each other.
+    fn with_omp_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
+        let omp_dir = tmp.path().join("omp_agent");
+        fs::create_dir_all(&omp_dir).unwrap();
+
+        temp_env::with_var(PI_CODING_AGENT_DIR_ENV, Some(&omp_dir), || f(&omp_dir));
     }
 
     #[test]
@@ -7217,11 +9985,134 @@ mod tests {
     }
 
     #[test]
+    fn test_patch_settings_json_tolerates_utf8_bom() {
+        let tmp = TempDir::new().unwrap();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            // Notepad and PowerShell 5.1 `Out-File -Encoding utf8` prepend a BOM.
+            let settings = claude_dir.join(SETTINGS_JSON);
+            fs::write(&settings, "\u{feff}{\"foo\": 1}").unwrap();
+
+            let result = patch_settings_json_command(
+                CLAUDE_HOOK_COMMAND,
+                PatchMode::Auto,
+                false,
+                InitContext::default(),
+            );
+            assert!(
+                result.is_ok(),
+                "BOM-prefixed settings.json must not abort init: {:?}",
+                result.err()
+            );
+
+            let content = fs::read_to_string(&settings).unwrap();
+            let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+            assert_eq!(v["foo"], 1, "existing keys must survive the patch");
+            assert!(
+                content.contains(CLAUDE_HOOK_COMMAND),
+                "hook must be installed"
+            );
+        });
+    }
+
+    #[test]
+    fn test_patch_settings_json_bom_plus_invalid_json_still_errors() {
+        // Stripping the BOM must not mask genuinely broken JSON: the
+        // parse-error context has to survive so the user gets blamed for
+        // the right thing.
+        let tmp = TempDir::new().unwrap();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let settings = claude_dir.join(SETTINGS_JSON);
+            fs::write(&settings, "\u{feff}{not valid json").unwrap();
+
+            let result = patch_settings_json_command(
+                CLAUDE_HOOK_COMMAND,
+                PatchMode::Auto,
+                false,
+                InitContext::default(),
+            );
+            let err = result.expect_err("invalid JSON must still fail");
+            assert!(
+                err.to_string().contains("Failed to parse"),
+                "error must carry the parse context, got: {err:#}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_patch_settings_json_bom_only_file() {
+        // U+FEFF is not whitespace, so the `content.trim().is_empty()`
+        // empty-file guard does not catch a BOM-only file.
+        let tmp = TempDir::new().unwrap();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let settings = claude_dir.join(SETTINGS_JSON);
+            fs::write(&settings, "\u{feff}").unwrap();
+
+            let result = patch_settings_json_command(
+                CLAUDE_HOOK_COMMAND,
+                PatchMode::Auto,
+                false,
+                InitContext::default(),
+            );
+            assert!(
+                result.is_ok(),
+                "BOM-only settings.json must be treated as empty: {:?}",
+                result.err()
+            );
+        });
+    }
+
+    #[test]
+    fn test_patch_gemini_settings_malformed_json_warns_without_overwriting() {
+        // A parse failure (not a BOM) must not abort `rtk init` — by the time
+        // patch_gemini_settings runs, run_gemini has already written the hook
+        // script, GEMINI.md, and the integrity baseline, so aborting here
+        // would leave a half-installed state with no summary. Treat it like
+        // PatchMode::Skip: warn and continue, and critically still never
+        // overwrite the unparsed file. Unlike Skip (and every other
+        // non-patch outcome), this path returns Ok(true) so run_gemini's
+        // final summary can honestly say settings.json was NOT patched
+        // instead of implying full success.
+        let tmp = TempDir::new().unwrap();
+        let gemini_dir = tmp.path().join(".gemini");
+        fs::create_dir_all(&gemini_dir).unwrap();
+        let settings_path = gemini_dir.join(SETTINGS_JSON);
+        let original = "{\"model\": \"foo\", \"mcpServers\": {},"; // trailing comma
+        fs::write(&settings_path, original).unwrap();
+
+        let result = patch_gemini_settings(
+            &gemini_dir,
+            Path::new("/fake/hook/path"),
+            PatchMode::Auto,
+            InitContext::default(),
+        );
+
+        assert!(
+            result.unwrap(),
+            "parse failure must be signaled so the summary can say settings.json was NOT patched"
+        );
+
+        let content = fs::read_to_string(&settings_path).unwrap();
+        assert_eq!(
+            content, original,
+            "settings.json must not be overwritten when parsing fails"
+        );
+    }
+
+    #[test]
     fn test_global_uninstall_removes_artifacts() {
         let tmp = TempDir::new().unwrap();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
-            uninstall(true, false, false, false, false, InitContext::default()).unwrap();
+            uninstall(
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                InitContext::default(),
+            )
+            .unwrap();
 
             assert!(!claude_dir.join(RTK_MD).exists(), "RTK.md must be removed");
             let settings_content =
@@ -7349,7 +10240,7 @@ mod tests {
                 dry_run: true,
                 ..Default::default()
             };
-            uninstall(true, false, false, false, false, dry).unwrap();
+            uninstall(true, false, false, false, false, false, dry).unwrap();
 
             // Files must still exist with identical content
             assert!(
@@ -7506,6 +10397,13 @@ mod tests {
                 content.contains("rtk rewrite"),
                 "extension must delegate to rtk rewrite"
             );
+            // Regression guard for #2753: a value import (e.g. `import { isToolCallEventType }`)
+            // pulls in the whole @earendil-works/pi-coding-agent barrel at extension load,
+            // adding ~250ms of startup latency. Only `import type { ... }` is allowed.
+            assert!(
+                !content.contains("import {"),
+                "extension must not load the Pi package at runtime"
+            );
         });
     }
 
@@ -7529,6 +10427,57 @@ mod tests {
     }
 
     #[test]
+    fn test_pi_install_refuses_modified_extension() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let dir = tmp.path().join(PI_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(PI_PLUGIN_FILE);
+        let modified = "// user-modified extension\nexport default () => {}\n";
+        fs::write(&path, modified).unwrap();
+
+        let result = run_pi_mode_with_patch_mode(false, PatchMode::Skip, InitContext::default());
+        std::env::set_current_dir(&cwd).unwrap();
+
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("was not changed"),
+            "unexpected error: {}",
+            err
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), modified);
+    }
+
+    #[test]
+    fn test_pi_install_dry_run_reports_refusal_without_error() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let dir = tmp.path().join(PI_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(PI_PLUGIN_FILE);
+        let modified = "// user-modified extension\nexport default () => {}\n";
+        fs::write(&path, modified).unwrap();
+
+        let result = run_pi_mode(
+            false,
+            InitContext {
+                dry_run: true,
+                ..InitContext::default()
+            },
+        );
+        std::env::set_current_dir(&cwd).unwrap();
+
+        result.unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), modified);
+    }
+
+    #[test]
     fn test_run_pi_mode_global_does_not_create_agents_md() {
         let tmp = TempDir::new().unwrap();
         with_pi_dir_override(&tmp, |pi_dir| {
@@ -7543,18 +10492,10 @@ mod tests {
     fn test_run_pi_mode_global_creates_plugin_when_dir_absent() {
         let tmp = TempDir::new().unwrap();
         let absent_dir = tmp.path().join("no_such_pi_dir");
-        let _guard = PI_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let orig = std::env::var_os(PI_CODING_AGENT_DIR_ENV);
-        std::env::set_var(PI_CODING_AGENT_DIR_ENV, &absent_dir);
-
-        let result = run_pi_mode(true, InitContext::default());
-
-        match orig {
-            Some(v) => std::env::set_var(PI_CODING_AGENT_DIR_ENV, v),
-            None => std::env::remove_var(PI_CODING_AGENT_DIR_ENV),
-        }
-
-        result.unwrap();
+        temp_env::with_var(PI_CODING_AGENT_DIR_ENV, Some(&absent_dir), || {
+            run_pi_mode(true, InitContext::default())
+        })
+        .unwrap();
 
         let plugin = absent_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE);
         assert!(
@@ -7575,7 +10516,17 @@ mod tests {
             let plugin = pi_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE);
             assert!(plugin.exists());
 
-            uninstall(true, false, false, false, true, InitContext::default()).unwrap();
+            uninstall_with_patch_mode(
+                true,
+                false,
+                false,
+                false,
+                true,
+                false,
+                PatchMode::Auto,
+                InitContext::default(),
+            )
+            .unwrap();
 
             assert!(!plugin.exists(), "plugin must be removed");
         });
@@ -7589,7 +10540,15 @@ mod tests {
         std::env::set_current_dir(tmp.path()).unwrap();
 
         run_pi_mode(false, InitContext::default()).unwrap();
-        let result = uninstall(false, false, false, false, true, InitContext::default());
+        let result = uninstall(
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            InitContext::default(),
+        );
         std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
 
@@ -7630,6 +10589,7 @@ mod tests {
                 InitContext {
                     verbose: 0,
                     dry_run: true,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -7660,6 +10620,7 @@ mod tests {
             InitContext {
                 verbose: 0,
                 dry_run: true,
+                ..Default::default()
             },
         );
         std::env::set_current_dir(&cwd).unwrap();
@@ -7688,9 +10649,11 @@ mod tests {
                 false,
                 false,
                 true,
+                false,
                 InitContext {
                     verbose: 0,
                     dry_run: true,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -7726,9 +10689,11 @@ mod tests {
             false,
             false,
             true,
+            false,
             InitContext {
                 verbose: 0,
                 dry_run: true,
+                ..Default::default()
             },
         );
         std::env::set_current_dir(&cwd).unwrap();
@@ -7738,6 +10703,668 @@ mod tests {
             plugin.exists(),
             "dry-run uninstall must not remove the local Pi extension"
         );
+    }
+
+    #[test]
+    fn test_pi_uninstall_modified_extension_bails() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let dir = tmp.path().join(PI_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(PI_PLUGIN_FILE);
+        fs::write(&path, format!("{}\n// user modification\n", PI_PLUGIN)).unwrap();
+
+        let result = uninstall(
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            InitContext::default(),
+        );
+        std::env::set_current_dir(&cwd).unwrap();
+
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("does not match the stock extension"),
+            "unexpected error: {}",
+            err
+        );
+        assert!(path.exists(), "modified extension must not be removed");
+    }
+
+    #[test]
+    fn test_pi_uninstall_modified_extension_dry_run_is_preview() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let dir = tmp.path().join(PI_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(PI_PLUGIN_FILE);
+        fs::write(&path, format!("{}\n// user modification\n", PI_PLUGIN)).unwrap();
+
+        let result = uninstall(
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            InitContext {
+                dry_run: true,
+                ..InitContext::default()
+            },
+        );
+        std::env::set_current_dir(&cwd).unwrap();
+
+        result.unwrap();
+        assert!(path.exists(), "dry-run must preserve modified extension");
+    }
+
+    #[test]
+    fn test_pi_uninstall_unreadable_extension_is_left_alone() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let dir = tmp.path().join(PI_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(PI_PLUGIN_FILE);
+        fs::write(&path, [0xff, 0xfe, 0xfd]).unwrap();
+
+        let result = uninstall(
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            InitContext::default(),
+        );
+        std::env::set_current_dir(&cwd).unwrap();
+
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("could not be read; leaving it alone"),
+            "unreadable extension uninstall should fail clearly: {err}"
+        );
+        assert!(path.exists(), "unreadable extension must be left alone");
+    }
+
+    #[test]
+    fn test_pi_uninstall_unrelated_content_left_alone() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let dir = tmp.path().join(PI_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(PI_PLUGIN_FILE);
+        fs::write(
+            &path,
+            "// rtk rewrite is mentioned here\nexport default () => {}\n",
+        )
+        .unwrap();
+
+        uninstall(
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            InitContext::default(),
+        )
+        .unwrap();
+        std::env::set_current_dir(&cwd).unwrap();
+
+        assert!(path.exists(), "non-RTK extension must be left in place");
+    }
+
+    #[test]
+    fn test_known_pi_plugin_hashes_are_sha256() {
+        assert!(
+            KNOWN_PI_PLUGIN_HASHES.len() >= 8,
+            "historical Pi extension hashes must not be removed"
+        );
+        assert!(
+            KNOWN_PI_PLUGIN_HASHES
+                .iter()
+                .all(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        );
+
+        let current_hash = integrity::compute_hash_bytes(
+            normalize_pi_plugin_line_endings(PI_PLUGIN)
+                .trim_end()
+                .as_bytes(),
+        );
+        assert!(
+            KNOWN_PI_PLUGIN_HASHES.contains(&current_hash.as_str()),
+            "current Pi extension hash {current_hash} is missing from KNOWN_PI_PLUGIN_HASHES"
+        );
+        assert!(is_known_stock_pi_plugin(PI_PLUGIN));
+
+        let crlf = PI_PLUGIN.replace("\r\n", "\n").replace('\n', "\r\n");
+        assert!(is_current_pi_plugin(&crlf));
+        assert!(is_known_stock_pi_plugin(&crlf));
+
+        let modified = format!("{}\n// user modification\n", PI_PLUGIN);
+        assert!(!is_known_stock_pi_plugin(&modified));
+    }
+
+    #[test]
+    fn test_all_git_pi_plugin_revisions_are_allowlisted() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        if !manifest_dir.join(".git").exists() {
+            // Source archives do not contain Git history. CI checks out the
+            // repository with full history so this guard remains active there.
+            return;
+        }
+
+        let revisions = Command::new("git")
+            .current_dir(manifest_dir)
+            .args([
+                "rev-list",
+                "HEAD",
+                "--full-history",
+                "--",
+                "hooks/pi/rtk.ts",
+            ])
+            .output()
+            .expect("git must be available to verify Pi extension history");
+        assert!(
+            revisions.status.success(),
+            "git rev-list failed: {}",
+            String::from_utf8_lossy(&revisions.stderr)
+        );
+
+        let mut commits: Vec<String> = String::from_utf8(revisions.stdout)
+            .expect("git revision list must be UTF-8")
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        commits.push("HEAD".to_owned());
+        commits.sort();
+        commits.dedup();
+
+        for commit in commits {
+            let object = format!("{commit}:hooks/pi/rtk.ts");
+            let file = Command::new("git")
+                .current_dir(manifest_dir)
+                .args(["show", object.as_str()])
+                .output()
+                .expect("git must be available to inspect Pi extension history");
+            if !file.status.success() {
+                // A revision that deletes the file is not an installable stock
+                // extension revision.
+                continue;
+            }
+
+            let content = String::from_utf8(file.stdout)
+                .expect("Pi extension history must contain UTF-8 source");
+            let hash = integrity::compute_hash_bytes(
+                normalize_pi_plugin_line_endings(&content)
+                    .trim_end()
+                    .as_bytes(),
+            );
+            assert!(
+                KNOWN_PI_PLUGIN_HASHES.contains(&hash.as_str()),
+                "Pi extension revision {commit} has unallowlisted hash {hash}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rtk_pi_plugin_marker_tracks_code_not_comments() {
+        let code_without_comments: String = PI_PLUGIN
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(looks_like_rtk_pi_plugin(&code_without_comments));
+        assert!(looks_like_rtk_pi_plugin(
+            "import { exec } from 'pi';\nexec(\"rtk\", [\"rewrite\", cmd]);\n"
+        ));
+        assert!(!looks_like_rtk_pi_plugin("const note = 'rtk rewrite';\n"));
+    }
+
+    // ─── OMP tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_omp_extension_path_for_scope_local() {
+        let path = omp_extension_path_for_scope(false).unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from(OMP_LOCAL_DIR)
+                .join(PI_EXTENSIONS_SUBDIR)
+                .join(PI_PLUGIN_FILE)
+        );
+    }
+
+    #[test]
+    fn test_omp_extension_path_for_scope_global_honours_pi_dir_override() {
+        let tmp = TempDir::new().unwrap();
+        with_omp_dir_override(&tmp, |omp_dir| {
+            let path = omp_extension_path_for_scope(true).unwrap();
+            assert_eq!(
+                path,
+                omp_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE)
+            );
+        });
+    }
+
+    #[test]
+    fn test_omp_global_install_and_uninstall_use_override() {
+        let tmp = TempDir::new().unwrap();
+        with_omp_dir_override(&tmp, |omp_dir| {
+            run_omp_mode(true, InitContext::default()).unwrap();
+
+            let plugin = omp_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE);
+            assert!(plugin.exists(), "global OMP extension must be created");
+            let state_path = shared_agent_state_path(&plugin);
+            assert_eq!(
+                fs::read_to_string(&state_path).unwrap(),
+                "omp\n",
+                "OMP install must record its ownership"
+            );
+
+            uninstall_with_patch_mode(
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                PatchMode::Auto,
+                InitContext::default(),
+            )
+            .unwrap();
+            assert!(!plugin.exists(), "global OMP extension must be removed");
+            assert!(!state_path.exists(), "ownership state must be removed");
+        });
+    }
+
+    #[test]
+    fn test_global_uninstall_detects_shared_pi_omp_extension() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        with_omp_dir_override(&tmp, |omp_dir| {
+            let omp_path = omp_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE);
+            let pi_path = pi_plugin_path_for_scope(true).unwrap();
+            assert_eq!(pi_path, omp_path);
+            fs::create_dir_all(omp_path.parent().unwrap()).unwrap();
+            fs::write(&omp_path, PI_PLUGIN).unwrap();
+            record_managed_agent(
+                true,
+                &omp_path,
+                PiCompatibleAgent::Pi,
+                false,
+                InitContext::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                extension_share_status(true, &omp_path, PiCompatibleAgent::Omp).unwrap(),
+                ExtensionShareStatus::Shared
+            );
+
+            fs::create_dir_all(OMP_LOCAL_DIR).unwrap();
+            assert!(
+                extension_share_status(true, &pi_path, PiCompatibleAgent::Pi).unwrap()
+                    == ExtensionShareStatus::NotShared,
+                "a definitive Pi-only sidecar must override an unrelated project-local OMP directory"
+            );
+
+            record_managed_agent(
+                true,
+                &omp_path,
+                PiCompatibleAgent::Omp,
+                true,
+                InitContext::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                extension_share_status(true, &pi_path, PiCompatibleAgent::Pi).unwrap(),
+                ExtensionShareStatus::Shared
+            );
+        });
+        std::env::set_current_dir(&cwd).unwrap();
+    }
+
+    #[test]
+    fn test_omp_local_install_writes_shared_pi_extension() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        run_omp_mode(false, InitContext::default()).unwrap();
+        std::env::set_current_dir(&cwd).unwrap();
+
+        let path = tmp
+            .path()
+            .join(OMP_LOCAL_DIR)
+            .join(PI_EXTENSIONS_SUBDIR)
+            .join(PI_PLUGIN_FILE);
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(content.trim(), PI_PLUGIN.trim());
+    }
+
+    #[test]
+    fn test_omp_install_refuses_modified_extension() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let dir = tmp.path().join(OMP_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(PI_PLUGIN_FILE);
+        let modified = "// user-modified extension\nexport default () => {}\n";
+        fs::write(&path, modified).unwrap();
+
+        let result = run_omp_mode_with_patch_mode(false, PatchMode::Skip, InitContext::default());
+        std::env::set_current_dir(&cwd).unwrap();
+
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("was not changed"),
+            "unexpected error: {}",
+            err
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), modified);
+    }
+
+    #[test]
+    fn test_omp_install_dry_run_reports_refusal_without_error() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let dir = tmp.path().join(OMP_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(PI_PLUGIN_FILE);
+        let modified = "// user-modified extension\nexport default () => {}\n";
+        fs::write(&path, modified).unwrap();
+
+        let result = run_omp_mode(
+            false,
+            InitContext {
+                dry_run: true,
+                ..InitContext::default()
+            },
+        );
+        std::env::set_current_dir(&cwd).unwrap();
+
+        result.unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), modified);
+    }
+
+    #[test]
+    fn test_omp_local_install_dry_run_writes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        run_omp_mode(
+            false,
+            InitContext {
+                verbose: 0,
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        std::env::set_current_dir(&cwd).unwrap();
+
+        let path = tmp
+            .path()
+            .join(OMP_LOCAL_DIR)
+            .join(PI_EXTENSIONS_SUBDIR)
+            .join(PI_PLUGIN_FILE);
+        assert!(!path.exists());
+        assert!(!tmp.path().join(OMP_LOCAL_DIR).exists());
+    }
+
+    #[test]
+    fn test_omp_local_uninstall_removes_plugin() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        run_omp_mode(false, InitContext::default()).unwrap();
+        let result = uninstall(
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            InitContext::default(),
+        );
+        std::env::set_current_dir(&cwd).unwrap();
+        result.unwrap();
+
+        let path = tmp
+            .path()
+            .join(OMP_LOCAL_DIR)
+            .join(PI_EXTENSIONS_SUBDIR)
+            .join(PI_PLUGIN_FILE);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_omp_local_uninstall_dry_run_keeps_plugin() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        run_omp_mode(false, InitContext::default()).unwrap();
+        let plugin = tmp
+            .path()
+            .join(OMP_LOCAL_DIR)
+            .join(PI_EXTENSIONS_SUBDIR)
+            .join(PI_PLUGIN_FILE);
+        assert!(
+            plugin.exists(),
+            "plugin must exist before uninstall dry-run"
+        );
+
+        let result = uninstall(
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            InitContext {
+                verbose: 0,
+                dry_run: true,
+                ..Default::default()
+            },
+        );
+        std::env::set_current_dir(&cwd).unwrap();
+        result.unwrap();
+
+        assert!(
+            plugin.exists(),
+            "dry-run uninstall must not remove the local OMP extension"
+        );
+    }
+
+    #[test]
+    fn test_omp_uninstall_modified_extension_bails() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let dir = tmp.path().join(OMP_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(PI_PLUGIN_FILE);
+        fs::write(
+            &path,
+            "// user-modified extension\nexport default (pi) => { pi.exec(\"rtk\", [\"rewrite\", cmd]) }\n",
+        )
+        .unwrap();
+
+        let result = uninstall(
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            InitContext::default(),
+        );
+        std::env::set_current_dir(&cwd).unwrap();
+
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("does not match the stock extension"),
+            "unexpected error: {}",
+            err
+        );
+        assert!(path.exists(), "modified extension must not be removed");
+    }
+
+    #[test]
+    fn test_omp_uninstall_modified_extension_dry_run_is_preview() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let dir = tmp.path().join(OMP_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(PI_PLUGIN_FILE);
+        fs::write(
+            &path,
+            "// user-modified extension\nexport default (pi) => { pi.exec(\"rtk\", [\"rewrite\", cmd]) }\n",
+        )
+        .unwrap();
+
+        let result = uninstall(
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            InitContext {
+                dry_run: true,
+                ..InitContext::default()
+            },
+        );
+        std::env::set_current_dir(&cwd).unwrap();
+
+        result.unwrap();
+        assert!(path.exists(), "dry-run must preserve modified extension");
+    }
+
+    #[test]
+    fn test_omp_uninstall_unreadable_extension_is_left_alone() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let dir = tmp.path().join(OMP_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(PI_PLUGIN_FILE);
+        fs::write(&path, [0xff, 0xfe, 0xfd]).unwrap();
+
+        let result = uninstall(
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            InitContext::default(),
+        );
+        std::env::set_current_dir(&cwd).unwrap();
+
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("could not be read; leaving it alone"),
+            "unreadable extension uninstall should fail clearly: {err}"
+        );
+        assert!(path.exists(), "unreadable extension must be left alone");
+    }
+
+    #[test]
+    fn test_omp_uninstall_unrelated_content_dry_run_left_alone() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let dir = tmp.path().join(OMP_LOCAL_DIR).join(PI_EXTENSIONS_SUBDIR);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(PI_PLUGIN_FILE);
+        fs::write(
+            &path,
+            "// rtk rewrite is mentioned here\nexport default () => {}\n",
+        )
+        .unwrap();
+
+        let result = uninstall(
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            InitContext {
+                dry_run: true,
+                ..InitContext::default()
+            },
+        );
+        std::env::set_current_dir(&cwd).unwrap();
+        result.unwrap();
+
+        assert!(path.exists(), "non-RTK extension must be left in place");
+    }
+
+    #[test]
+    fn test_omp_uninstall_missing_dry_run_is_noop() {
+        let tmp = TempDir::new().unwrap();
+        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let result = uninstall(
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            InitContext {
+                dry_run: true,
+                ..InitContext::default()
+            },
+        );
+        std::env::set_current_dir(&cwd).unwrap();
+        result.unwrap();
     }
 
     // ─── Copilot tests ───────────────────────────────────────────────
@@ -7996,6 +11623,7 @@ mod tests {
         let ctx = InitContext {
             verbose: 0,
             dry_run: true,
+            ..Default::default()
         };
         uninstall_copilot_at(temp.path(), ctx).unwrap();
 
@@ -8202,6 +11830,7 @@ mod tests {
         let ctx = InitContext {
             verbose: 0,
             dry_run: true,
+            ..Default::default()
         };
         run_copilot_global_at(temp.path(), ctx).unwrap();
         assert!(!temp.path().join("hooks").join("rtk-rewrite.json").exists());
@@ -8338,10 +11967,12 @@ mod tests {
         run_vibe_mode_at(&vibe_dir, true, PatchMode::Auto, InitContext::default()).unwrap();
 
         assert!(vibe_dir.join(VIBE_HOOKS_FILE).exists());
-        assert!(!vibe_dir
-            .join(VIBE_PROMPTS_SUBDIR)
-            .join(VIBE_PROMPT_FILE)
-            .exists());
+        assert!(
+            !vibe_dir
+                .join(VIBE_PROMPTS_SUBDIR)
+                .join(VIBE_PROMPT_FILE)
+                .exists()
+        );
     }
 
     #[test]
@@ -8353,20 +11984,24 @@ mod tests {
         fs::write(vibe_dir.join(VIBE_HOOKS_FILE), user_hook).unwrap();
 
         run_vibe_mode_at(&vibe_dir, false, PatchMode::Auto, InitContext::default()).unwrap();
-        assert!(vibe_dir
-            .join(VIBE_PROMPTS_SUBDIR)
-            .join(VIBE_PROMPT_FILE)
-            .exists());
+        assert!(
+            vibe_dir
+                .join(VIBE_PROMPTS_SUBDIR)
+                .join(VIBE_PROMPT_FILE)
+                .exists()
+        );
 
         let removed_first = uninstall_vibe_at(&vibe_dir, InitContext::default()).unwrap();
         let removed_second = uninstall_vibe_at(&vibe_dir, InitContext::default()).unwrap();
 
         assert_eq!(removed_first.len(), 2);
         assert!(removed_second.is_empty());
-        assert!(!vibe_dir
-            .join(VIBE_PROMPTS_SUBDIR)
-            .join(VIBE_PROMPT_FILE)
-            .exists());
+        assert!(
+            !vibe_dir
+                .join(VIBE_PROMPTS_SUBDIR)
+                .join(VIBE_PROMPT_FILE)
+                .exists()
+        );
 
         let remaining = fs::read_to_string(vibe_dir.join(VIBE_HOOKS_FILE)).unwrap();
         assert!(remaining.contains(r#"name = "user-audit""#));

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::borrow::Cow;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -47,6 +48,12 @@ pub trait StreamFilter {
 }
 
 pub trait BlockHandler {
+    /// Rewrite a raw line before it is matched or emitted — the place to
+    /// strip ANSI escapes for tools that colour by default. Identity unless
+    /// a handler opts in, so the rest of the pipeline sees raw bytes.
+    fn normalize_line<'a>(&self, line: &'a str) -> Cow<'a, str> {
+        Cow::Borrowed(line)
+    }
     fn should_skip(&mut self, line: &str) -> bool;
     fn is_block_start(&mut self, line: &str) -> bool;
     fn is_block_continuation(&mut self, line: &str, block: &[String]) -> bool;
@@ -83,6 +90,8 @@ impl<H: BlockHandler> BlockStreamFilter<H> {
 
 impl<H: BlockHandler> StreamFilter for BlockStreamFilter<H> {
     fn feed_line(&mut self, line: &str) -> Option<String> {
+        let line = self.handler.normalize_line(line);
+        let line = line.as_ref();
         if self.handler.should_skip(line) {
             return None;
         }
@@ -259,6 +268,143 @@ impl StreamResult {
     }
 }
 
+// #2375
+#[cfg(unix)]
+mod signal_relay {
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    const POLL: Duration = Duration::from_millis(25);
+    const KILL_GRACE: Duration = Duration::from_millis(750);
+    const EXIT_GRACE: Duration = Duration::from_millis(750);
+
+    static CHILD_PID: AtomicU32 = AtomicU32::new(0);
+    static RELAYED: AtomicI32 = AtomicI32::new(0);
+    static FINISHED: AtomicBool = AtomicBool::new(false);
+
+    #[allow(unsafe_code)]
+    unsafe extern "C" fn relay(sig: libc::c_int) {
+        let pid = CHILD_PID.load(Ordering::SeqCst);
+        if pid == 0 || RELAYED.swap(sig, Ordering::SeqCst) != 0 {
+            // nosemgrep: unsafe-block
+            unsafe {
+                libc::signal(sig, libc::SIG_DFL);
+                libc::raise(sig);
+            }
+            return;
+        }
+        // nosemgrep: unsafe-block
+        unsafe {
+            libc::kill(pid as libc::pid_t, sig);
+        }
+    }
+
+    fn escalate(pid: u32) {
+        thread::sleep(KILL_GRACE);
+        if FINISHED.load(Ordering::SeqCst) {
+            return;
+        }
+        #[allow(unsafe_code)]
+        // nosemgrep: unsafe-block
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+        thread::sleep(EXIT_GRACE);
+        if FINISHED.load(Ordering::SeqCst) {
+            return;
+        }
+        let sig = RELAYED.load(Ordering::SeqCst);
+        #[allow(unsafe_code)]
+        // nosemgrep: unsafe-block
+        unsafe {
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+    }
+
+    pub fn relayed() -> Option<libc::c_int> {
+        match RELAYED.load(Ordering::SeqCst) {
+            0 => None,
+            sig => Some(sig),
+        }
+    }
+
+    pub struct Relay;
+
+    impl Relay {
+        pub fn install(pid: u32) -> Self {
+            CHILD_PID.store(pid, Ordering::SeqCst);
+            RELAYED.store(0, Ordering::SeqCst);
+            FINISHED.store(false, Ordering::SeqCst);
+            #[allow(unsafe_code)]
+            // nosemgrep: unsafe-block
+            unsafe {
+                for sig in [libc::SIGINT, libc::SIGTERM] {
+                    let previous = libc::signal(sig, relay as *const () as libc::sighandler_t);
+                    if previous == libc::SIG_IGN {
+                        libc::signal(sig, libc::SIG_IGN);
+                    }
+                }
+            }
+            thread::spawn(move || {
+                while !FINISHED.load(Ordering::SeqCst) {
+                    if RELAYED.load(Ordering::SeqCst) != 0 {
+                        escalate(pid);
+                        return;
+                    }
+                    thread::sleep(POLL);
+                }
+            });
+            Relay
+        }
+    }
+
+    impl Drop for Relay {
+        fn drop(&mut self) {
+            FINISHED.store(true, Ordering::SeqCst);
+            CHILD_PID.store(0, Ordering::SeqCst);
+            #[allow(unsafe_code)]
+            // nosemgrep: unsafe-block
+            unsafe {
+                for sig in [libc::SIGINT, libc::SIGTERM] {
+                    if libc::signal(sig, libc::SIG_DFL) == libc::SIG_IGN {
+                        libc::signal(sig, libc::SIG_IGN);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+mod signal_relay {
+    pub struct Relay;
+
+    impl Relay {
+        pub fn install(_pid: u32) -> Self {
+            Relay
+        }
+    }
+}
+
+// #2375
+#[cfg(unix)]
+pub fn die_by_relayed_signal() {
+    let Some(sig) = signal_relay::relayed() else {
+        return;
+    };
+    #[allow(unsafe_code)]
+    // nosemgrep: unsafe-block
+    unsafe {
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
+    }
+}
+
+#[cfg(not(unix))]
+pub fn die_by_relayed_signal() {}
+
 pub fn status_to_exit_code(status: std::process::ExitStatus) -> i32 {
     if let Some(code) = status.code() {
         return code;
@@ -323,6 +469,7 @@ pub fn run_streaming(
     let is_streaming = matches!(stdout_mode, FilterMode::Streaming(_));
 
     let mut child = ChildGuard(cmd.spawn().context("Failed to spawn process")?);
+    let _signal_relay = signal_relay::Relay::install(child.0.id());
 
     let stdin_thread: Option<std::thread::JoinHandle<()>> = match stdin_mode {
         StdinMode::Filter(mut filter) => {
@@ -331,10 +478,10 @@ pub fn run_streaming(
                 let mut writer = BufWriter::new(child_stdin);
                 let stdin_handle = io::stdin();
                 for line in read_lines_lossy(stdin_handle.lock()) {
-                    if let Some(out) = filter.feed_line(&line) {
-                        if writeln!(writer, "{}", out).is_err() {
-                            break;
-                        }
+                    if let Some(out) = filter.feed_line(&line)
+                        && writeln!(writer, "{}", out).is_err()
+                    {
+                        break;
                     }
                 }
                 let tail = filter.flush();
@@ -519,19 +666,19 @@ pub fn run_streaming(
     let exit_code = status_to_exit_code(status);
     let raw = format!("{}{}", raw_stdout, raw_stderr);
 
-    if let Some(mut f) = saved_filter {
-        if let Some(post) = f.on_exit(exit_code, &raw) {
-            filtered.push_str(&post);
-            let mut dest: Box<dyn Write> = if filter_fd_is_stderr {
-                Box::new(io::stderr().lock())
-            } else {
-                Box::new(io::stdout().lock())
-            };
-            match write!(dest, "{}", post) {
-                Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
-                Err(e) => return Err(e.into()),
-                Ok(_) => {}
-            }
+    if let Some(mut f) = saved_filter
+        && let Some(post) = f.on_exit(exit_code, &raw)
+    {
+        filtered.push_str(&post);
+        let mut dest: Box<dyn Write> = if filter_fd_is_stderr {
+            Box::new(io::stderr().lock())
+        } else {
+            Box::new(io::stdout().lock())
+        };
+        match write!(dest, "{}", post) {
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
+            Err(e) => return Err(e.into()),
+            Ok(_) => {}
         }
     }
 
@@ -579,14 +726,49 @@ pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
 /// `.output()` keep the diagnostic instead of losing it. The program name is
 /// used as the label so no call site has to pass one.
 fn capture(cmd: &mut Command) -> Result<CaptureResult> {
+    let raw = capture_raw(cmd)?;
+    Ok(CaptureResult {
+        stdout: super::utils::decode_process_output(&raw.stdout),
+        stderr: super::utils::decode_process_output(&raw.stderr),
+        exit_code: raw.exit_code,
+    })
+}
+
+/// Run `cmd` to completion and return its raw bytes plus a signal-aware exit code.
+/// The single spot that turns an `ExitStatus` into a code via
+/// [`exit_code_from_output`](super::utils::exit_code_from_output) — so the
+/// `process terminated by signal N` diagnostic is emitted uniformly whether the
+/// caller decodes the bytes ([`capture`]) or keeps them raw ([`exec_capture_bytes`]),
+/// instead of the raw path silently dropping it.
+fn capture_raw(cmd: &mut Command) -> Result<CaptureBytes> {
     let program = cmd.get_program().to_string_lossy().into_owned();
     let output = cmd.output().context("Failed to execute command")?;
     let exit_code = super::utils::exit_code_from_output(&output, &program);
-    Ok(CaptureResult {
-        stdout: super::utils::decode_process_output(&output.stdout),
-        stderr: super::utils::decode_process_output(&output.stderr),
+    Ok(CaptureBytes {
+        stdout: output.stdout,
+        stderr: output.stderr,
         exit_code,
     })
+}
+
+/// Raw-byte capture result, for callers that must control decoding themselves —
+/// e.g. non-UTF-8 output that [`exec_capture`]'s `from_utf8_lossy` would corrupt.
+pub struct CaptureBytes {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub exit_code: i32,
+}
+
+impl CaptureBytes {
+    pub fn success(&self) -> bool {
+        self.exit_code == 0
+    }
+}
+
+/// Like [`exec_capture`] but returns raw bytes so the caller decides how to decode.
+pub fn exec_capture_bytes(cmd: &mut Command) -> Result<CaptureBytes> {
+    cmd.stdin(Stdio::null());
+    capture_raw(cmd)
 }
 
 #[cfg(test)]
@@ -992,6 +1174,34 @@ pub(crate) mod tests {
             output.push_str(&post);
         }
         output
+    }
+
+    struct UpperHandler;
+
+    impl BlockHandler for UpperHandler {
+        fn normalize_line<'a>(&self, line: &'a str) -> Cow<'a, str> {
+            Cow::Owned(line.to_uppercase())
+        }
+        fn should_skip(&mut self, _line: &str) -> bool {
+            false
+        }
+        fn is_block_start(&mut self, line: &str) -> bool {
+            line.starts_with("ERR")
+        }
+        fn is_block_continuation(&mut self, line: &str, _block: &[String]) -> bool {
+            line.starts_with("  ")
+        }
+        fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
+            None
+        }
+    }
+
+    #[test]
+    fn block_handler_normalize_line_feeds_matching_and_emission() {
+        // Both the match and the emitted block see the normalized line.
+        let mut f = BlockStreamFilter::new(UpperHandler);
+        let out = run_block_filter(&mut f, "err: one\n  detail\nnoise\n", 0);
+        assert_eq!(out, "ERR: ONE\n  DETAIL\n");
     }
 
     struct TestHandler;

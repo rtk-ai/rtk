@@ -6,7 +6,7 @@
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::CAP_LIST;
 use crate::core::utils::{ok_confirmation, resolved_command, truncate};
-use crate::git;
+use crate::git_cmd;
 use anyhow::Result;
 use regex::Regex;
 use serde_json::Value;
@@ -267,7 +267,13 @@ fn format_pr_list(json: &Value, ultra_compact: bool) -> String {
             let state = pr["state"].as_str().unwrap_or("???");
             let author = pr["author"]["login"].as_str().unwrap_or("???");
             let icon = state_icon(state, ultra_compact);
-            format!("  {} #{} {} ({})", icon, number, truncate(title, 60), author)
+            format!(
+                "  {} #{} {} ({})",
+                icon,
+                number,
+                truncate(title, 60),
+                author
+            )
         })
         .collect();
     const MAX_LIST: usize = CAP_LIST;
@@ -277,7 +283,8 @@ fn format_pr_list(json: &Value, ultra_compact: bool) -> String {
     if all_lines.len() > MAX_LIST {
         out.push_str(&format!("  … +{} more\n", all_lines.len() - MAX_LIST));
         let all_text = all_lines.join("\n");
-        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_text, "gh-prs", MAX_LIST + 1) {
+        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_text, "gh-prs", MAX_LIST + 1)
+        {
             out.push_str(&format!("  {}\n", hint));
         }
     }
@@ -425,17 +432,17 @@ fn format_pr_view(json: &Value, ultra_compact: bool) -> String {
 
     out.push_str(&format!("  {}\n", url));
 
-    if let Some(body) = json["body"].as_str() {
-        if !body.is_empty() {
-            let body_filtered = filter_markdown_body(body);
-            if !body_filtered.is_empty() {
-                out.push('\n');
-                for line in body_filtered.lines() {
-                    out.push_str(&format!("  {}\n", line));
-                }
-            } else {
-                out.push_str("\n  (body contained only badges/images/comments)\n");
+    if let Some(body) = json["body"].as_str()
+        && !body.is_empty()
+    {
+        let body_filtered = filter_markdown_body(body);
+        if !body_filtered.is_empty() {
+            out.push('\n');
+            for line in body_filtered.lines() {
+                out.push_str(&format!("  {}\n", line));
             }
+        } else {
+            out.push_str("\n  (body contained only badges/images/comments)\n");
         }
     }
 
@@ -462,28 +469,53 @@ fn pr_checks(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<i32>
         "gh",
         &label,
         format_pr_checks,
-        RunOptions::stdout_only()
-            .early_exit_on_failure()
-            .no_trailing_newline(),
+        RunOptions::stdout_only().no_trailing_newline(),
     )
 }
 
 fn format_pr_checks(stdout: &str) -> String {
-    let mut passed = 0;
-    let mut failed = 0;
-    let mut pending = 0;
-    let mut failed_checks = Vec::new();
-
+    // `gh pr checks --watch` appends each poll's table when stdout is not a TTY.
+    // Keep the latest row for each check so status transitions are reflected
+    // without inflating the summary.
+    let mut checks: Vec<(String, String, PrCheckStatus, String)> = Vec::new();
     for line in stdout.lines() {
-        if line.contains("[ok]") || line.contains("pass") {
-            passed += 1;
-        } else if line.contains("[x]") || line.contains("fail") {
-            failed += 1;
-            failed_checks.push(line.trim().to_string());
-        } else if line.contains('*') || line.contains("pending") {
-            pending += 1;
+        let Some((name, link, status)) = parse_pr_check_line(line) else {
+            continue;
+        };
+
+        if let Some(check) = checks
+            .iter_mut()
+            .find(|check| check.0 == name && check.1 == link)
+        {
+            check.2 = status;
+            check.3 = line.trim().to_string();
+        } else {
+            checks.push((
+                name.to_string(),
+                link.to_string(),
+                status,
+                line.trim().to_string(),
+            ));
         }
     }
+
+    let passed = checks
+        .iter()
+        .filter(|check| check.2 == PrCheckStatus::Passed)
+        .count();
+    let failed = checks
+        .iter()
+        .filter(|check| check.2 == PrCheckStatus::Failed)
+        .count();
+    let pending = checks
+        .iter()
+        .filter(|check| check.2 == PrCheckStatus::Pending)
+        .count();
+
+    let other = checks
+        .iter()
+        .filter(|check| check.2 == PrCheckStatus::Other)
+        .count();
 
     let mut out = String::new();
     out.push_str("CI Checks Summary:\n");
@@ -492,13 +524,45 @@ fn format_pr_checks(stdout: &str) -> String {
     if pending > 0 {
         out.push_str(&format!("  [pending] Pending: {}\n", pending));
     }
-    if !failed_checks.is_empty() {
+    if other > 0 {
+        out.push_str(&format!("  [skip] Skipped/cancelled: {}\n", other));
+    }
+    let failed_checks = checks
+        .iter()
+        .filter(|check| check.2 == PrCheckStatus::Failed)
+        .map(|check| check.3.as_str());
+    if failed > 0 {
         out.push_str("\n  Failed checks:\n");
         for check in failed_checks {
             out.push_str(&format!("    {}\n", check));
         }
     }
     out
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PrCheckStatus {
+    Passed,
+    Failed,
+    Pending,
+    Other,
+}
+
+fn parse_pr_check_line(line: &str) -> Option<(&str, &str, PrCheckStatus)> {
+    let mut fields = line.split('\t');
+    let name = fields.next()?.trim();
+    let status = match fields.next()?.trim() {
+        "pass" => PrCheckStatus::Passed,
+        "fail" => PrCheckStatus::Failed,
+        "pending" | "*" => PrCheckStatus::Pending,
+        // skipping, cancelled, and whatever a later gh adds. Counted rather than
+        // dropped, so the totals add up to the checks gh listed and a cancelled
+        // run cannot read as "nothing wrong".
+        _ => PrCheckStatus::Other,
+    };
+    let link = fields.nth(1).unwrap_or("").trim();
+
+    (!name.is_empty()).then_some((name, link, status))
 }
 
 fn pr_status(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<i32> {
@@ -636,7 +700,9 @@ fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
     if all_lines.len() > MAX_LIST {
         out.push_str(&format!("  … +{} more\n", all_lines.len() - MAX_LIST));
         let all_text = all_lines.join("\n");
-        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_text, "gh-issues", MAX_LIST + 1) {
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_text, "gh-issues", MAX_LIST + 1)
+        {
             out.push_str(&format!("  {}\n", hint));
         }
     }
@@ -687,17 +753,17 @@ fn format_issue_view(json: &Value) -> String {
     out.push_str(&format!("  Status: {}\n", state));
     out.push_str(&format!("  URL: {}\n", url));
 
-    if let Some(body) = json["body"].as_str() {
-        if !body.is_empty() {
-            let body_filtered = filter_markdown_body(body);
-            if !body_filtered.is_empty() {
-                out.push_str("\n  Description:\n");
-                for line in body_filtered.lines() {
-                    out.push_str(&format!("    {}\n", line));
-                }
-            } else {
-                out.push_str("\n  Description: (body contained only badges/images/comments)\n");
+    if let Some(body) = json["body"].as_str()
+        && !body.is_empty()
+    {
+        let body_filtered = filter_markdown_body(body);
+        if !body_filtered.is_empty() {
+            out.push_str("\n  Description:\n");
+            for line in body_filtered.lines() {
+                out.push_str(&format!("    {}\n", line));
             }
+        } else {
+            out.push_str("\n  Description: (body contained only badges/images/comments)\n");
         }
     }
     out
@@ -916,6 +982,11 @@ fn pr_merge(args: &[String], _verbose: u8) -> Result<i32> {
 
 /// Flags that change `gh pr diff` output from unified diff to a different format.
 /// When present, compact_diff would produce empty output since it expects diff headers.
+///
+/// `--patch` is here because GitHub's `.patch` is an mbox of `format-patch`
+/// output, not a unified diff: each patch carries a commit message, a bare
+/// `---` before the diffstat, and a `-- ` signature. Someone asking for a patch
+/// wants one that applies, so it passes through whole.
 fn has_non_diff_format_flag(args: &[String]) -> bool {
     args.iter().any(|a| {
         a == "--name-only"
@@ -923,6 +994,7 @@ fn has_non_diff_format_flag(args: &[String]) -> bool {
             || a == "--stat"
             || a == "--numstat"
             || a == "--shortstat"
+            || a == "--patch"
     })
 }
 
@@ -949,7 +1021,7 @@ fn pr_diff(args: &[String], _verbose: u8) -> Result<i32> {
             if raw.trim().is_empty() {
                 "No diff".to_string()
             } else {
-                git::compact_diff(raw, 500)
+                git_cmd::compact_diff(raw, 500)
             }
         },
         RunOptions::stdout_only().early_exit_on_failure(),
@@ -1017,7 +1089,7 @@ mod tests {
         // Emoji: 🚀 = 4 bytes, 1 char
         assert_eq!(truncate("🚀🎉🔥abc", 6), "🚀🎉🔥abc"); // 6 chars, fits
         assert_eq!(truncate("🚀🎉🔥abcdef", 8), "🚀🎉🔥ab..."); // 10 chars > 8
-                                                                // Edge case: all multibyte
+        // Edge case: all multibyte
         assert_eq!(truncate("🚀🎉🔥🌟🎯", 5), "🚀🎉🔥🌟🎯"); // exact fit
         assert_eq!(truncate("🚀🎉🔥🌟🎯x", 5), "🚀🎉..."); // 6 chars > 5
     }
@@ -1113,6 +1185,74 @@ mod tests {
         // No positional identifier, only flags
         let args: Vec<String> = vec!["-R".into(), "rtk-ai/rtk".into()];
         assert!(extract_identifier_and_extra_args(&args).is_none());
+    }
+
+    // --- format_pr_checks tests ---
+
+    #[test]
+    fn test_format_pr_checks_counts_each_watch_snapshot_once() {
+        let output = concat!(
+            "Analyze (actions)\tpass\t42s\thttps://example.com/actions\n",
+            "Analyze (rust)\tpass\t2m\thttps://example.com/rust\n",
+            "Analyze (actions)\tpass\t42s\thttps://example.com/actions\n",
+            "Analyze (rust)\tpass\t2m\thttps://example.com/rust\n",
+        );
+
+        let result = format_pr_checks(output);
+
+        assert!(result.contains("Passed: 2"));
+        assert!(!result.contains("Passed: 4"));
+    }
+
+    #[test]
+    fn test_format_pr_checks_uses_final_status_for_each_check() {
+        let output = concat!(
+            "Lint\tpending\t0\thttps://example.com/lint\n",
+            "Unit tests\tfail\t1m\thttps://example.com/unit\n",
+            "Lint\tpass\t30s\thttps://example.com/lint\n",
+            "Unit tests\tfail\t1m\thttps://example.com/unit\n",
+        );
+
+        let result = format_pr_checks(output);
+
+        assert!(result.contains("Passed: 1"));
+        assert!(result.contains("Failed: 1"));
+        assert!(!result.contains("Pending:"));
+        assert!(result.contains("Unit tests\tfail"));
+    }
+
+    #[test]
+    fn test_format_pr_checks_keeps_same_name_checks_with_different_links() {
+        let output = concat!(
+            "build\tpass\t1m\thttps://example.com/workflow-a\n",
+            "build\tfail\t1m\thttps://example.com/workflow-b\n",
+        );
+
+        let result = format_pr_checks(output);
+
+        assert!(result.contains("Passed: 1"));
+        assert!(result.contains("Failed: 1"));
+    }
+
+    /// Rows exactly as `gh` prints them when stdout is a pipe: five tab-separated
+    /// fields, the fifth (the description) usually empty. Captured from
+    /// `gh pr checks --watch` against a run that was still going, so the pending
+    /// rows here are the shape a real transition arrives in.
+    #[test]
+    fn test_format_pr_checks_handles_real_gh_row_shape() {
+        let output = concat!(
+            "test (macos-latest)\tpending\t0\thttps://example.com/job/1\t\n",
+            "clippy\tpass\t28s\thttps://example.com/job/2\t\n",
+            "license/cla\tpass\t0\thttps://cla.example.com/pr/1\tContributor License Agreement is signed.\n",
+            "test (macos-latest)\tpass\t3m1s\thttps://example.com/job/1\t\n",
+            "clippy\tpass\t28s\thttps://example.com/job/2\t\n",
+            "license/cla\tpass\t0\thttps://cla.example.com/pr/1\tContributor License Agreement is signed.\n",
+        );
+
+        let result = format_pr_checks(output);
+
+        assert!(result.contains("Passed: 3"), "got:\n{result}");
+        assert!(!result.contains("Pending:"), "got:\n{result}");
     }
 
     // --- parse_optional_identifier tests ---
@@ -1385,6 +1525,12 @@ mod tests {
     #[test]
     fn test_non_diff_format_flag_shortstat() {
         assert!(has_non_diff_format_flag(&["--shortstat".into()]));
+    }
+
+    #[test]
+    fn test_has_non_diff_format_flag_patch() {
+        // `--patch` yields an mbox, which compact_diff has no business parsing.
+        assert!(has_non_diff_format_flag(&["--patch".into()]));
     }
 
     #[test]

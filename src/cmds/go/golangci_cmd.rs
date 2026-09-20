@@ -1,5 +1,7 @@
 //! Filters golangci-lint output, grouping issues by rule.
 
+use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
+use crate::core::args_utils;
 use crate::core::config;
 use crate::core::runner;
 use crate::core::stream::exec_capture;
@@ -10,28 +12,94 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::ffi::OsString;
 
-const GOLANGCI_SUBCOMMANDS: &[&str] = &[
-    "cache",
-    "completion",
-    "config",
-    "custom",
-    "fmt",
-    "formatters",
-    "help",
-    "linters",
-    "migrate",
-    "run",
-    "version",
-];
+fn is_subcommand(name: &str) -> bool {
+    matches!(
+        name,
+        "cache"
+            | "completion"
+            | "config"
+            | "custom"
+            | "fmt"
+            | "formatters"
+            | "help"
+            | "linters"
+            | "migrate"
+            | "run"
+            | "version"
+    )
+}
 
-const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[
-    "-c",
-    "--color",
-    "--config",
-    "--cpu-profile-path",
-    "--mem-profile-path",
-    "--trace-path",
-];
+/// golangci-lint's *global* grammar: the value-taking flags accepted before a subcommand. `-c`
+/// is `--config`'s shorthand; this list is wider than `--help`'s "Global Flags" section, which
+/// omits several of these.
+///
+/// Solo-only, like every short flag here: Cobra does not let a value-taking shorthand sit
+/// inside a cluster (`golangci-lint -vc foo.yml run` is "unknown shorthand flag: 'c' in -c",
+/// verified against 2.13.1). Reading one as value-taking there swallowed the next token --
+/// `-Egosec run` lost `run`, and with it the subcommand detection this list exists for.
+fn global_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    match kind {
+        TokenKind::Long => matches!(
+            name,
+            "color" | "config" | "cpu-profile-path" | "mem-profile-path" | "trace-path"
+        )
+        .then(ValueSpec::value),
+        TokenKind::Short => (name == "c").then(ValueSpec::solo_only),
+        _ => None,
+    }
+}
+
+/// The `run` subcommand's grammar -- a wider list than [`global_takes_value`], which is scoped
+/// to the flags valid before a subcommand. Missing an entry here risks a value like
+/// `--path-prefix --out-format` tokenizing as its own flag and being misdetected by
+/// [`has_output_flag`].
+fn run_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    // The one exception to one-grammar-per-command (`src/core/README.md`), earned by a strict
+    // subset: every flag valid before `run` stays valid after it. Grammars that merely
+    // intersect get a table each instead.
+    if let Some(spec) = global_takes_value(kind, name) {
+        return Some(spec);
+    }
+    if OUTPUT_PATH_FLAGS.contains(&name) && kind == TokenKind::Long {
+        return Some(ValueSpec::value());
+    }
+    match kind {
+        TokenKind::Long => matches!(
+            name,
+            "build-tags"
+                | "concurrency"
+                | "default"
+                | "disable"
+                | "enable"
+                | "enable-only"
+                | "issues-exit-code"
+                | "max-issues-per-linter"
+                | "max-same-issues"
+                | "modules-download-mode"
+                | "new-from-merge-base"
+                | "new-from-patch"
+                | "new-from-rev"
+                // v1-only legacy flag (golangci-lint 2.x's --help no longer lists it, replaced
+                // by output.json.path/etc.), kept for v1 installs since has_output_flag checks
+                // for it explicitly.
+                | "out-format"
+                | "path-mode"
+                | "path-prefix"
+                // Deprecated in 2.x but still value-taking there ("flag needs an argument"),
+                // and current in the 1.x installs run_filtered still supports.
+                | "deadline"
+                | "exclude"
+                | "presets"
+                | "skip-dirs"
+                | "skip-files"
+                | "timeout"
+        )
+        .then(ValueSpec::value),
+        // `-e`/`-p` are 1.x's --exclude/--presets; 2.x rejects them outright either way.
+        TokenKind::Short => matches!(name, "D" | "E" | "e" | "j" | "p").then(ValueSpec::solo_only),
+        _ => None,
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 struct RunInvocation {
@@ -88,11 +156,19 @@ pub(crate) fn parse_major_version(version_output: &str) -> u32 {
     // Handles:
     //   "golangci-lint version 1.59.1"
     //   "golangci-lint has version 2.10.0 built with ..."
+    //   "golangci-lint has version v1.64.8 built with ..."
+    //
+    // The `v` prefix varies with how the binary was built, and reading a v2 as a v1
+    // would send it `--out-format=json`, a flag v2 removed.
     for word in version_output.split_whitespace() {
-        if let Some(major) = word.split('.').next().and_then(|s| s.parse::<u32>().ok()) {
-            if word.contains('.') {
-                return major;
-            }
+        let version = word.strip_prefix('v').unwrap_or(word);
+        if let Some(major) = version
+            .split('.')
+            .next()
+            .and_then(|s| s.parse::<u32>().ok())
+            && version.contains('.')
+        {
+            return major;
         }
     }
     1
@@ -118,6 +194,7 @@ pub(crate) fn detect_major_version() -> u32 {
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+    let args = &args_utils::restore_double_dash(args);
     match classify_invocation(args) {
         Invocation::FilteredRun(invocation) => run_filtered(args, &invocation, verbose),
         Invocation::Passthrough => run_passthrough(args, verbose),
@@ -127,15 +204,16 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 fn run_filtered(original_args: &[String], invocation: &RunInvocation, verbose: u8) -> Result<i32> {
     let version = detect_major_version();
 
+    let filtered_args = build_filtered_args(invocation, version);
     let mut cmd = resolved_command("golangci-lint");
-    for arg in build_filtered_args(invocation, version) {
+    for arg in &filtered_args {
         cmd.arg(arg);
     }
 
     if verbose > 0 {
         eprintln!(
             "Running: {}",
-            format_command("golangci-lint", &build_filtered_args(invocation, version))
+            format_command("golangci-lint", &filtered_args)
         );
     }
 
@@ -175,56 +253,26 @@ fn classify_invocation(args: &[String]) -> Invocation {
     }
 }
 
+/// Finds the index in `args` of the first non-flag token, stopping (and returning `None`)
+/// entirely at `--` or at a non-flag token that isn't a recognized subcommand — mirroring
+/// golangci-lint's own arg parsing just enough to locate `run`, not fully replicate it.
 fn find_subcommand_index(args: &[String]) -> Option<usize> {
-    let mut i = 0;
-    while i < args.len() {
-        let arg = args[i].as_str();
+    let tokens = arg_tokenizer::tokenize_grammar(args, &global_takes_value, Dialect::Posix);
 
-        if arg == "--" {
-            return None;
-        }
-
-        if !arg.starts_with('-') {
-            if GOLANGCI_SUBCOMMANDS.contains(&arg) {
-                return Some(i);
+    for token in &tokens {
+        match token.kind {
+            TokenKind::DashDash => return None,
+            // A bare "-" (e.g. a stdin placeholder) is unrecognized-flag-like, not a stopping
+            // condition -- keep scanning past it, same as any other unrecognized `-`-prefixed
+            // token, instead of treating it as "no subcommand found."
+            TokenKind::Positional if token.is_free_positional() && token.text != "-" => {
+                return is_subcommand(token.text).then_some(token.source_index);
             }
-            return None;
+            _ => {}
         }
-
-        if let Some(flag) = split_flag_name(arg) {
-            if golangci_flag_takes_separate_value(arg, flag) {
-                i += 1;
-            }
-        }
-
-        i += 1;
     }
 
     None
-}
-
-fn split_flag_name(arg: &str) -> Option<&str> {
-    if arg.starts_with("--") {
-        return Some(arg.split_once('=').map(|(flag, _)| flag).unwrap_or(arg));
-    }
-
-    if arg.starts_with('-') {
-        return Some(arg);
-    }
-
-    None
-}
-
-fn golangci_flag_takes_separate_value(arg: &str, flag: &str) -> bool {
-    if !GLOBAL_FLAGS_WITH_VALUE.contains(&flag) {
-        return false;
-    }
-
-    if arg.starts_with("--") && arg.contains('=') {
-        return false;
-    }
-
-    true
 }
 
 fn build_filtered_args(invocation: &RunInvocation, version: u32) -> Vec<String> {
@@ -244,12 +292,41 @@ fn build_filtered_args(invocation: &RunInvocation, version: u32) -> Vec<String> 
     args
 }
 
+/// The nine `--output.<format>.path` sinks golangci-lint 2.x accepts, enumerated rather than
+/// pattern-matched: `starts_with("output.")` would also swallow spellings golangci rejects.
+/// One list, read by both the value-taking predicate and the collision check, so they cannot
+/// drift apart.
+const OUTPUT_PATH_FLAGS: &[&str] = &[
+    "output.checkstyle.path",
+    "output.code-climate.path",
+    "output.html.path",
+    "output.json.path",
+    "output.junit-xml.path",
+    "output.sarif.path",
+    "output.tab.path",
+    "output.teamcity.path",
+    "output.text.path",
+];
+
+/// True when RTK's own `--output.json.path stdout` would collide with what the user asked for:
+/// they already configured the json sink (whatever its destination -- golangci takes one path
+/// per format), or they directed some other format at stdout, where two reports would
+/// interleave and the json parse would choke on whichever landed first. A *file* sink for some
+/// other format takes nothing away from stdout, so RTK still injects there or it is left with
+/// nothing to parse.
 fn has_output_flag(args: &[String]) -> bool {
-    args.iter().any(|a| {
-        a == "--out-format"
-            || a.starts_with("--out-format=")
-            || a == "--output.json.path"
-            || a.starts_with("--output.json.path=")
+    let tokens = arg_tokenizer::tokenize_grammar(args, &run_takes_value, Dialect::Posix);
+    tokens.iter().any(|t| {
+        if t.kind != TokenKind::Long {
+            return false;
+        }
+        match t.text {
+            "out-format" | "output.json.path" => true,
+            other => {
+                OUTPUT_PATH_FLAGS.contains(&other)
+                    && t.value(&tokens).is_none_or(|dest| dest == "stdout")
+            }
+        }
     })
 }
 
@@ -346,17 +423,16 @@ pub(crate) fn filter_golangci_json(output: &str, version: u32) -> String {
             result.push_str(&format!("    {} ({})\n", linter, linter_issues.len()));
 
             // v2 only: show first source line for this linter-file group
-            if version >= 2 {
-                if let Some(first_issue) = linter_issues.first() {
-                    if let Some(source_line) = first_issue.source_lines.first() {
-                        let trimmed = source_line.trim();
-                        let display = match trimmed.char_indices().nth(80) {
-                            Some((i, _)) => &trimmed[..i],
-                            None => trimmed,
-                        };
-                        result.push_str(&format!("      → {}\n", display));
-                    }
-                }
+            if version >= 2
+                && let Some(first_issue) = linter_issues.first()
+                && let Some(source_line) = first_issue.source_lines.first()
+            {
+                let trimmed = source_line.trim();
+                let display = match trimmed.char_indices().nth(80) {
+                    Some((i, _)) => &trimmed[..i],
+                    None => trimmed,
+                };
+                result.push_str(&format!("      → {}\n", display));
             }
         }
     }
@@ -391,6 +467,7 @@ fn compact_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::tracking::estimate_tokens;
 
     #[test]
     fn test_filter_golangci_no_issues() {
@@ -456,7 +533,27 @@ mod tests {
     #[test]
     fn test_parse_version_v2_format() {
         assert_eq!(
-            parse_major_version("golangci-lint has version 2.10.0 built with go1.26.0 from 95dcb68a on 2026-02-17T13:05:51Z"),
+            parse_major_version(
+                "golangci-lint has version 2.10.0 built with go1.26.0 from 95dcb68a on 2026-02-17T13:05:51Z"
+            ),
+            2
+        );
+    }
+
+    /// A `go install` build of v1 prints the version `v`-prefixed while the same
+    /// build of v2 does not, so neither spelling may decide the major version.
+    #[test]
+    fn test_parse_version_tolerates_v_prefix() {
+        assert_eq!(
+            parse_major_version(
+                "golangci-lint has version v1.64.8 built with go1.27.0 from (unknown)"
+            ),
+            1
+        );
+        assert_eq!(
+            parse_major_version(
+                "golangci-lint has version v2.13.2 built with go1.27.0 from (unknown)"
+            ),
             2
         );
     }
@@ -504,6 +601,42 @@ mod tests {
             classify_invocation(&["-v".into(), "run".into(), "./...".into()]),
             Invocation::FilteredRun(RunInvocation {
                 global_args: vec!["-v".into()],
+                run_args: vec!["./...".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn test_classify_invocation_with_short_flag_separate_value_uses_filtered_path() {
+        // -c takes a separate-token value; its value ("foo.yml") must not be mistaken for
+        // the subcommand.
+        assert_eq!(
+            classify_invocation(&["-c".into(), "foo.yml".into(), "run".into(), "./...".into(),]),
+            Invocation::FilteredRun(RunInvocation {
+                global_args: vec!["-c".into(), "foo.yml".into()],
+                run_args: vec!["./...".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn test_classify_invocation_dashdash_before_subcommand_is_passthrough() {
+        // `--` ends option parsing before any subcommand was found; golangci-lint's own
+        // parser gets to decide what follows, not rtk's filter.
+        assert_eq!(
+            classify_invocation(&["--".into(), "run".into()]),
+            Invocation::Passthrough
+        );
+    }
+
+    #[test]
+    fn test_classify_invocation_bare_dash_before_subcommand_uses_filtered_path() {
+        // Regression: a bare "-" (e.g. a stdin placeholder) is unrecognized-flag-like, not a
+        // stopping condition -- must not be mistaken for "no subcommand found."
+        assert_eq!(
+            classify_invocation(&["-".into(), "run".into(), "./...".into()]),
+            Invocation::FilteredRun(RunInvocation {
+                global_args: vec!["-".into()],
                 run_args: vec!["./...".into()],
             })
         );
@@ -562,6 +695,104 @@ mod tests {
         assert_eq!(
             build_filtered_args(&invocation, 2),
             vec!["run", "--output.json.path", "stdout", "./..."]
+        );
+    }
+
+    #[test]
+    fn test_has_output_flag_ignores_positional_after_dashdash() {
+        // Regression: a positional argument literally named "--out-format" after `--` (e.g.
+        // a package path to lint) must not be mistaken for the real flag.
+        assert!(!has_output_flag(&[
+            "./...".to_string(),
+            "--".to_string(),
+            "--out-format".to_string(),
+        ]));
+        assert!(has_output_flag(&["--out-format=json".to_string()]));
+        assert!(has_output_flag(&["--output.json.path".to_string()]));
+    }
+
+    #[test]
+    fn test_has_output_flag_sees_every_output_destination() {
+        // golangci-lint 2.x has one --output.<format>.path per format; RTK injecting a second
+        // sink makes it write two reports to stdout and the JSON parse then fails.
+        for flag in [
+            "--output.text.path",
+            "--output.tab.path",
+            "--output.sarif.path",
+            "--output.checkstyle.path",
+            "--output.code-climate.path",
+            "--output.html.path",
+            "--output.junit-xml.path",
+            "--output.teamcity.path",
+            "--output.json.path",
+        ] {
+            assert!(
+                has_output_flag(&[flag.to_string(), "stdout".to_string()]),
+                "{flag} is a user-chosen destination"
+            );
+        }
+        assert!(!has_output_flag(&["--tests".to_string()]));
+    }
+
+    #[test]
+    fn test_run_level_value_flags_swallow_their_own_values() {
+        // `-e '--out-format'` is 1.x's --exclude pattern, not an output flag.
+        assert!(!has_output_flag(&[
+            "-e".to_string(),
+            "--out-format".to_string()
+        ]));
+        assert!(!has_output_flag(&[
+            "--concurrency".to_string(),
+            "--output.json.path".to_string()
+        ]));
+    }
+
+    #[test]
+    fn test_has_output_flag_does_not_misread_a_run_level_flags_value() {
+        // --path-prefix's separate-token value must not be misdetected as the real output flag.
+        assert!(!has_output_flag(&[
+            "--path-prefix".to_string(),
+            "--output.json.path".to_string(),
+        ]));
+        assert!(!has_output_flag(&[
+            "--disable".to_string(),
+            "errcheck".to_string(),
+        ]));
+        assert!(!has_output_flag(&[
+            "--timeout".to_string(),
+            "30s".to_string()
+        ]));
+    }
+
+    #[test]
+    fn test_clustered_short_flag_does_not_swallow_the_subcommand() {
+        // Cobra rejects a value-taking shorthand inside a cluster ("unknown shorthand flag:
+        // 'c' in -c", golangci-lint 2.13.1), so reading `-Egosec`'s trailing `c` as --config
+        // and eating `run` lost the subcommand and with it all filtering.
+        let args: Vec<String> = ["-Egosec", "run"].iter().map(|a| a.to_string()).collect();
+        assert_eq!(find_subcommand_index(&args), Some(1));
+
+        // Solo, it still takes its value -- that spelling golangci-lint does accept.
+        let args: Vec<String> = ["-c", "cfg.yml", "run"]
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        assert_eq!(find_subcommand_index(&args), Some(2));
+
+        // And the attached spelling is untouched by the solo-only rule.
+        let args: Vec<String> = ["-cCfg.yml", "run"].iter().map(|a| a.to_string()).collect();
+        assert_eq!(find_subcommand_index(&args), Some(1));
+    }
+
+    #[test]
+    fn test_golangci_run_takes_value_links_out_format_separate_token_value() {
+        // --out-format is a v1-only legacy flag; its value must still link, not tokenize as an
+        // unlinked Positional.
+        let args = vec!["--out-format".to_string(), "json".to_string()];
+        let tokens = arg_tokenizer::tokenize_grammar(&args, &run_takes_value, Dialect::Posix);
+        assert!(
+            tokens[0].linked.is_some(),
+            "\"json\" must link to --out-format"
         );
     }
 
@@ -702,22 +933,65 @@ mod tests {
         }
     }
 
-    fn count_tokens(text: &str) -> usize {
-        text.split_whitespace().count()
+    #[test]
+    fn test_filter_real_v2_clean_json() {
+        let raw = include_str!("../../../tests/fixtures/golangci_v2_clean_raw.json");
+        assert_eq!(
+            filter_golangci_json(raw.lines().next().unwrap_or(""), 2),
+            "golangci-lint: No issues found"
+        );
     }
 
     #[test]
-    fn test_golangci_v2_token_savings() {
-        let raw = include_str!("../../../tests/fixtures/golangci_v2_json.txt");
+    fn test_filter_real_v2_issues_json() {
+        let raw = include_str!("../../../tests/fixtures/golangci_v2_issues_raw.json");
+        let filtered = filter_golangci_json(raw.lines().next().unwrap_or(""), 2);
 
-        let filtered = filter_golangci_json(raw, 2);
-        let savings = 100.0 - (count_tokens(&filtered) as f64 / count_tokens(raw) as f64 * 100.0);
+        assert!(filtered.contains("golangci-lint: 6 issues in 1 files"));
+        assert!(filtered.contains("errcheck (3x)"));
+        assert!(filtered.contains("ineffassign (3x)"));
+        assert!(filtered.contains("main.go"));
+    }
+
+    #[test]
+    fn test_real_v2_issues_token_savings() {
+        let raw = include_str!("../../../tests/fixtures/golangci_v2_issues_raw.json");
+        // v2 puts the JSON on the first line and may print text after it; measure
+        // against the slice the filter is actually handed, not the whole file.
+        let json = raw.lines().next().unwrap_or("");
+        let filtered = filter_golangci_json(json, 2);
+        // golangci-lint emits its JSON on a single line, so whitespace-word counting
+        // measures indentation rather than content. Use the estimator RTK bills with.
+        let raw_tokens = estimate_tokens(json) as f64;
+        let filtered_tokens = estimate_tokens(&filtered) as f64;
+        let savings = 100.0 - (filtered_tokens / raw_tokens * 100.0);
 
         assert!(
             savings >= 60.0,
-            "Expected ≥60% token savings, got {:.1}%\nFiltered output:\n{}",
-            savings,
-            filtered
+            "expected >=60% savings, got {:.1}%",
+            savings
         );
+    }
+
+    /// The filter always has something to say about its input. Whether that is worth
+    /// printing is the guard's call, not an empty return here.
+    #[test]
+    fn test_filter_never_silent_on_go127_load_error() {
+        let stderr = include_str!("../../../tests/fixtures/golangci_v1_go127_error_stderr.txt");
+
+        for (label, input) in [
+            ("empty stdout", ""),
+            ("whitespace", "   \n  "),
+            ("error text on stdout", stderr),
+            ("truncated json", "{\"Issues\": ["),
+        ] {
+            for version in [1, 2] {
+                let filtered = filter_golangci_json(input, version);
+                assert!(
+                    !filtered.trim().is_empty(),
+                    "filter went silent on {label} (v{version})"
+                );
+            }
+        }
     }
 }

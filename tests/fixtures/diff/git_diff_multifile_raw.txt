@@ -1,0 +1,34 @@
+diff --git a/main.rs b/main.rs
+index 5d804c0..0658d30 100644
+--- a/main.rs
++++ b/main.rs
+@@ -1,6 +1,7 @@
+ fn main() {
+     println!("one");
+-    println!("two");
++    println!("2");
+     println!("three");
+     println!("four");
++    println!("five");
+ }
+diff --git a/notes.md b/notes.md
+index d4d7d60..976bcb5 100644
+--- a/notes.md
++++ b/notes.md
+@@ -3,3 +3,4 @@ Some intro text.
+ ---
+ A horizontal rule above.
+ increment operator: x
++++ can also start a line
+diff --git a/schema.sql b/schema.sql
+index bb42838..07010ac 100644
+--- a/schema.sql
++++ b/schema.sql
+@@ -1,7 +1,4 @@
+--- users table
+--- created 2024
+ CREATE TABLE users (
+   id INTEGER PRIMARY KEY,
+-  -- legacy column
+   name TEXT
+ );

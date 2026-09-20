@@ -1,0 +1,22 @@
+[0m[32mCheck[0m green_test.ts
+[0m[38;5;245m------- pre-test output -------[0m
+FAILURES
+legacy fixture header
+[0m[38;5;245m----- pre-test output end -----[0m
+[0m[38;5;245mrunning 2 tests from ./green_test.ts[0m
+logs sections ...
+[0m[38;5;245m------- output -------[0m
+ERRORS
+error: this is only a log line
+some detail
+[0m[38;5;245m----- output end -----[0m
+logs sections ... [0m[32mok[0m [0m[38;5;245m(225µs)[0m
+logs a stack ...
+[0m[38;5;245m------- output -------[0m
+error: caught and handled
+    at file:///home/user/project/green_test.ts:9:11
+[0m[38;5;245m----- output end -----[0m
+logs a stack ... [0m[32mok[0m [0m[38;5;245m(42µs)[0m
+
+[0m[32mok[0m | 2 passed | 0 failed [0m[38;5;245m(1ms)[0m
+

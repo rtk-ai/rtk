@@ -10,6 +10,11 @@ pub const BEFORE_TOOL_KEY: &str = "BeforeTool";
 
 /// Native Rust hook command for Claude Code (replaces rtk-rewrite.sh).
 pub const CLAUDE_HOOK_COMMAND: &str = "rtk hook claude";
+/// Native Rust hook command for Trae.
+pub const TRAE_HOOK_COMMAND: &str = "rtk hook trae";
+
+/// Native Rust hook command for Codex CLI.
+pub const CODEX_HOOK_COMMAND: &str = "rtk hook codex";
 /// Native Rust hook command for Cursor (replaces rtk-rewrite.sh).
 pub const CURSOR_HOOK_COMMAND: &str = "rtk hook cursor";
 /// Native Rust hook command for Factory Droid.
@@ -23,6 +28,10 @@ pub const PLUGIN_SUBDIR: &str = "plugins";
 pub const OPENCODE_PLUGIN_FILE: &str = "rtk.ts";
 
 pub const CURSOR_DIR: &str = ".cursor";
+/// The Trae tool name RTK's hook registers against.
+pub const TRAE_RUN_COMMAND_MATCHER: &str = "RunCommand";
+pub const TRAE_DIR: &str = ".trae";
+pub const TRAE_CN_DIR: &str = ".trae-cn";
 pub const CODEX_DIR: &str = ".codex";
 pub const GEMINI_DIR: &str = ".gemini";
 
@@ -36,7 +45,16 @@ pub const PI_DIR: &str = ".pi/agent";
 pub const PI_LOCAL_DIR: &str = ".pi";
 pub const PI_EXTENSIONS_SUBDIR: &str = "extensions";
 pub const PI_PLUGIN_FILE: &str = "rtk.ts";
+/// Hidden ownership state stored beside the shared Pi/OMP extension.
+pub const PI_AGENT_STATE_FILE: &str = ".rtk-agents";
 pub const PI_CODING_AGENT_DIR_ENV: &str = "PI_CODING_AGENT_DIR";
+
+/// Oh My Pi (OMP) home subdirectory (`$HOME/.omp/agent`) and project
+/// subdirectory (`.omp`). OMP loads the same extension file as Pi through
+/// its `legacy-pi-compat` layer, so both agents share `PI_EXTENSIONS_SUBDIR`
+/// and `PI_PLUGIN_FILE`.
+pub const OMP_DIR: &str = ".omp/agent";
+pub const OMP_LOCAL_DIR: &str = ".omp";
 
 /// Factory Droid config directory, joined onto the resolved home directory.
 pub const DROID_DIR: &str = ".factory";
