@@ -705,13 +705,35 @@ fn unpatched_non_interactive_error() -> anyhow::Error {
     )
 }
 
-/// True when a human could actually answer a prompt on stdin.
+/// How an init run ends, given what happened to settings.json.
 ///
-/// `prompt_user_confirmation` already defaults to No without a terminal, which
-/// is the safe default. The caller still has to tell that apart from a human
-/// typing `n`: an installer, a CI job or a devcontainer `postCreateCommand`
-/// otherwise gets a zero exit for a hook that was never installed.
-fn stdin_can_answer_prompt() -> bool {
+/// Both `run_default_mode` and `run_hook_only_mode` finish this way, so the
+/// decision lives here rather than being written out twice. A prompt nobody
+/// answered is the only outcome that fails the run: `--no-patch` and a human
+/// declining are choices, and an already-present hook is success.
+fn finish_patch_outcome(patch_result: PatchResult) -> Result<()> {
+    match patch_result {
+        PatchResult::DeclinedNonInteractive => Err(unpatched_non_interactive_error()),
+        PatchResult::Patched
+        | PatchResult::AlreadyPresent
+        | PatchResult::Declined
+        | PatchResult::Skipped
+        | PatchResult::WouldPatch => Ok(()),
+    }
+}
+
+/// True when stdin is a terminal.
+///
+/// This proves only that a prompt *could* be displayed, never that a human is
+/// there to answer it: `prompt_telemetry_consent` already records that some
+/// non-interactive environments hand rtk a pseudo-TTY, where this returns true
+/// and the prompt waits forever. That case is unchanged here and wants a
+/// separate answer (an explicit non-interactive signal, or a bounded read).
+///
+/// What it does settle is the other half: with no terminal at all, the No in
+/// `prompt_user_confirmation` is nobody's decision, so the caller must not
+/// report it as one.
+fn stdin_is_terminal() -> bool {
     use std::io::IsTerminal;
     std::io::stdin().is_terminal()
 }
@@ -1315,7 +1337,7 @@ fn patch_settings_json_command(
                     "[dry-run] would prompt before patching {}",
                     settings_path.display()
                 );
-            } else if !stdin_can_answer_prompt() {
+            } else if !stdin_is_terminal() {
                 // No terminal, so the prompt would decline on nobody's behalf.
                 // Report it as its own outcome instead of a user decision.
                 print_manual_instructions(hook_command, include_opencode);
@@ -1567,14 +1589,10 @@ fn run_default_mode(
         println!(); // Final newline
     }
 
-    // Everything else is installed, so finish the run before failing: the hook
+    // Everything else is installed, so finish the run before deciding: the hook
     // is the one piece that did not land, and a zero exit would tell an
     // installer it did.
-    if patch_result == PatchResult::DeclinedNonInteractive {
-        return Err(unpatched_non_interactive_error());
-    }
-
-    Ok(())
+    finish_patch_outcome(patch_result)
 }
 
 /// Migrate old hook script to new binary command.
@@ -1923,11 +1941,7 @@ fn run_hook_only_mode(
         println!(); // Final newline
     }
 
-    if patch_result == PatchResult::DeclinedNonInteractive {
-        return Err(unpatched_non_interactive_error());
-    }
-
-    Ok(())
+    finish_patch_outcome(patch_result)
 }
 
 /// Legacy mode (--claude-md): inject the full RTK_INSTRUCTIONS block into CLAUDE.md.
@@ -10163,6 +10177,32 @@ mod tests {
 
             assert_eq!(result, PatchResult::Skipped);
         });
+    }
+
+    #[test]
+    fn test_only_the_unanswered_prompt_fails_the_run() {
+        // The caller-level contract, where the exit code is decided: every
+        // other outcome, including a human declining and --no-patch, ends the
+        // run at zero.
+        for outcome in [
+            PatchResult::Patched,
+            PatchResult::AlreadyPresent,
+            PatchResult::Declined,
+            PatchResult::Skipped,
+            PatchResult::WouldPatch,
+        ] {
+            assert!(
+                finish_patch_outcome(outcome).is_ok(),
+                "{outcome:?} must not fail the run"
+            );
+        }
+
+        let err = finish_patch_outcome(PatchResult::DeclinedNonInteractive)
+            .expect_err("an unanswered prompt must fail the run");
+        assert!(
+            err.to_string().contains("--auto-patch"),
+            "the failure must say what to run instead, got: {err:#}"
+        );
     }
 
     #[test]
