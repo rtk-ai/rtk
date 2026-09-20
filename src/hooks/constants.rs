@@ -12,6 +12,9 @@ pub const BEFORE_TOOL_KEY: &str = "BeforeTool";
 pub const CLAUDE_HOOK_COMMAND: &str = "rtk hook claude";
 /// Native Rust hook command for Trae.
 pub const TRAE_HOOK_COMMAND: &str = "rtk hook trae";
+pub const WORKBUDDY_HOOK_COMMAND: &str = "rtk hook workbuddy";
+pub const WORKBUDDY_DIR: &str = ".workbuddy";
+pub const WORKBUDDY_MATCHER: &str = "Bash|execute_command";
 
 /// Native Rust hook command for Codex CLI.
 pub const CODEX_HOOK_COMMAND: &str = "rtk hook codex";

@@ -43,6 +43,8 @@ pub enum AgentTarget {
     Cursor,
     /// Trae IDE
     Trae,
+    /// WorkBuddy desktop (global hook)
+    Workbuddy,
     /// Windsurf IDE (Cascade)
     Windsurf,
     /// Cline / Roo Code (VS Code)
@@ -980,6 +982,8 @@ enum HookCommands {
     Claude,
     /// Process Trae PreToolUse hook (reads JSON from stdin)
     Trae,
+    /// Process WorkBuddy PreToolUse hook (reads JSON from stdin)
+    Workbuddy,
     /// Process Codex CLI PreToolUse hook (reads JSON from stdin)
     Codex,
     /// Process Cursor Agent hook (reads JSON from stdin)
@@ -1909,6 +1913,8 @@ where
         uninstall_hermes(ctx)
     } else if agent == Some(AgentTarget::Trae) {
         hooks::init::uninstall_trae_mode(global, ctx)
+    } else if agent == Some(AgentTarget::Workbuddy) {
+        hooks::init::uninstall_workbuddy_mode(global, ctx)
     } else if agent == Some(AgentTarget::Droid) {
         hooks::init::uninstall_droid(global, ctx)
     } else if agent == Some(AgentTarget::Vibe) {
@@ -2411,7 +2417,14 @@ fn run_cli() -> Result<i32> {
             } else {
                 hooks::init::PatchMode::Ask
             };
-            if show {
+            if agent == Some(AgentTarget::Workbuddy)
+                && (gemini || codex || copilot || opencode || claude_md)
+            {
+                anyhow::bail!("--agent workbuddy cannot be combined with another agent mode");
+            }
+            if show && agent == Some(AgentTarget::Workbuddy) {
+                hooks::init::show_workbuddy_config(global)?;
+            } else if show {
                 hooks::init::show_config(codex, agent == Some(AgentTarget::Omp))?;
             } else if uninstall && copilot {
                 if global {
@@ -2442,6 +2455,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_pi_mode_with_patch_mode(global, patch_mode, ctx)?
             } else if agent == Some(AgentTarget::Trae) {
                 hooks::init::run_trae_mode(global, ctx)?
+            } else if agent == Some(AgentTarget::Workbuddy) {
+                hooks::init::run_workbuddy_mode(global, patch_mode, ctx)?
             } else if agent == Some(AgentTarget::Omp) {
                 hooks::init::run_omp_mode_with_patch_mode(global, patch_mode, ctx)?
             } else if agent == Some(AgentTarget::Kilocode) {
@@ -2898,6 +2913,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Trae => {
                 hooks::hook_cmd::run_trae()?;
+                0
+            }
+            HookCommands::Workbuddy => {
+                hooks::hook_cmd::run_workbuddy()?;
                 0
             }
             HookCommands::Codex => {
