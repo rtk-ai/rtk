@@ -187,6 +187,38 @@ fn git_log_patch_output_matches_raw_git() {
 }
 
 #[test]
+fn git_log_preserves_literal_record_separator_like_body_text() {
+    let dir = init_git_repo();
+    for i in 1..10 {
+        std::fs::write(dir.path().join("history.txt"), format!("line {i}\n"))
+            .expect("write history fixture");
+        git_in_dir(dir.path(), &["add", "history.txt"]);
+        if i == 9 {
+            std::fs::write(
+                dir.path().join("message.txt"),
+                "newest commit\n\nfirst body line\n---END---\nsecond body line\n",
+            )
+            .expect("write commit message");
+            git_in_dir(dir.path(), &["commit", "-q", "-F", "message.txt"]);
+        } else {
+            git_in_dir(dir.path(), &["commit", "-q", "-m", &format!("commit {i}")]);
+        }
+    }
+
+    let (stdout, stderr, code) = rtk_output_in_dir(dir.path(), &["git", "log"]);
+
+    assert_eq!(code, Some(0), "rtk stderr: {stderr}");
+    assert!(stdout.contains("newest commit"));
+    assert!(stdout.contains("  first body line"));
+    assert!(stdout.contains("  ---END---"));
+    assert!(stdout.contains("  second body line"));
+    assert!(
+        stdout.contains("commit 1"),
+        "the marker in the newest body must not consume the oldest commit: {stdout:?}"
+    );
+}
+
+#[test]
 fn git_log_dash_p_pathspec_after_double_dash_is_not_patch_flag() {
     // Regression: `rtk git log -- -p` must not be misread as the real `-p`
     // patch flag. Clap's `trailing_var_arg` strips the literal "--" before
