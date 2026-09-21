@@ -1,0 +1,6 @@
+# clap's derived builder for the `Commands` enum puts every subcommand on one stack frame. In
+# unoptimized builds that frame outgrew libtest's 2 MiB default thread stack once the enum passed
+# ~165 variants, so tests that parse a command line overflowed. The release binary parses on the
+# 8 MiB main thread and is not affected. This only applies to processes cargo runs.
+[env]
+RUST_MIN_STACK = "8388608"

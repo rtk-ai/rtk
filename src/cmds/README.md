@@ -33,6 +33,7 @@ Each subdirectory has its own README with file descriptions, parsing strategies,
 - **[`dotnet/`](dotnet/README.md)** — dotnet, binlog, trx, format_report — DotnetCommands sub-enum, internal helper modules
 - **[`cloud/`](cloud/README.md)** — aws, docker/kubectl, curl, wget, psql — Docker/Kubectl sub-enums, JSON forced output
 - **[`system/`](system/README.md)** — ls, tree, read, grep, find, wc, env, json, log, deps, summary, format, smart — format_cmd routing, filter levels, language detection
+- **[`perl/`](perl/README.md)** — prove, yath, perlcritic, cover, dzil, perldoc — shared TAP harness filter, `-v -m` injection so diagnostics stay with their file
 - **[`ruby/`](ruby/README.md)** — rake/rails test, rspec, rubocop — JSON injection pattern, `ruby_exec()` bundle exec auto-detection
 
 ## Execution Flow

@@ -1,0 +1,41 @@
+[  HALT  ]  job  1    database not reachable at localhost:5432
+(INTERNAL)     1313696 yath-runner BAIL-OUT detected: database not reachable at localhost:5432
+(INTERNAL)     1313696 yath-runner Aborting the test run...
+( FAILED )  job  1    t-bail/01-bail.t
+< REASON >  job  1    Test script returned error (Err: 255)
+< REASON >  job  1    Errors were encountered (Count: 1)
+< REASON >  job  1    No plan was declared
+
+The following jobs failed:
++--------------------------------------+------------------+
+| Job ID                               | Test File        |
++--------------------------------------+------------------+
+| 425E2EBE-B5C9-11F1-94AA-ED880C5E4102 | t-bail/01-bail.t |
++--------------------------------------+------------------+
+
+The following jobs requested all testing be halted:
++---------------------------+------------------+---------------------------+
+| Job ID                    | Test File        | Reason                    |
++---------------------------+------------------+---------------------------+
+| 425E2EBE-B5C9-11F1-94AA-E | t-bail/01-bail.t | database not reachable at |
+| D880C5E4102               |                  |  localhost:5432           |
++---------------------------+------------------+---------------------------+
+
+The following jobs never ran:
++------------------------------------+------------------------------------+
+| Job ID                             | Test File                          |
++------------------------------------+------------------------------------+
+| 425E31F2-B5C9-11F1-94AA-ED880C5E41 | /home/user/Acme-RtkSample/t-bail/0 |
+| 02                                 | 2-after.t                          |
++------------------------------------+------------------------------------+
+
+                                Yath Result Summary
+-----------------------------------------------------------------------------------
+     Fail Count: 1
+     File Count: 1
+Assertion Count: 1
+      Wall Time: 0.30 seconds
+       CPU Time: 0.28 seconds (usr: 0.09s | sys: 0.01s | cusr: 0.14s | csys: 0.04s)
+      CPU Usage: 92%
+    -->  Result: FAILED  <--
+[0m

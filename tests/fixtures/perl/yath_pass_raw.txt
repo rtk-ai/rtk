@@ -1,0 +1,13 @@
+( PASSED )  job  1    t-pass/00-load.t
+( PASSED )  job  2    t-pass/01-basic.t
+( PASSED )  job  3    t-pass/06-todo-skip.t
+
+                                Yath Result Summary
+-----------------------------------------------------------------------------------
+     File Count: 3
+Assertion Count: 19
+      Wall Time: 0.40 seconds
+       CPU Time: 0.34 seconds (usr: 0.09s | sys: 0.02s | cusr: 0.17s | csys: 0.06s)
+      CPU Usage: 85%
+    -->  Result: PASSED  <--
+[0m
