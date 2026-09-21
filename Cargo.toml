@@ -49,6 +49,7 @@ libc = "0.2"
 windows-sys = { version = "0.59", features = [
     "Win32_System_Console",
     "Win32_Globalization",
+    "Win32_Storage_FileSystem",
 ] }
 
 [build-dependencies]

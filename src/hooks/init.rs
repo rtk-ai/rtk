@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use std::ffi::OsString;
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use tempfile::NamedTempFile;
 
@@ -838,11 +838,45 @@ fn backup_path_for(path: &Path) -> PathBuf {
     path.with_extension("json.bak")
 }
 
+/// Copy a backup without following a symlink at the destination.
+///
+/// `fs::copy` opens its destination with truncation, which follows a planted symlink and can
+/// write a project's configuration outside the project. The platform-specific reparse/no-follow
+/// flags make the final path component part of the open operation, so a link cannot be swapped in
+/// between a metadata check and the write.
+#[cfg(any(unix, windows))]
+fn copy_backup_without_following_destination(source: &Path, destination: &Path) -> io::Result<u64> {
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
+    #[cfg(windows)]
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let mut source_file = fs::File::open(source)?;
+    let source_permissions = source_file.metadata()?.permissions();
+
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW);
+    #[cfg(windows)]
+    options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+
+    let mut destination_file = options.open(destination)?;
+    let bytes = io::copy(&mut source_file, &mut destination_file)?;
+    destination_file.set_permissions(source_permissions)?;
+    Ok(bytes)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn copy_backup_without_following_destination(source: &Path, destination: &Path) -> io::Result<u64> {
+    fs::copy(source, destination)
+}
+
 /// Back up an existing JSON file before replacing it atomically.
 fn backup_and_atomic_write(path: &Path, content: &str) -> Result<Option<PathBuf>> {
     let backup_path = if path.exists() {
         let backup_path = backup_path_for(path);
-        fs::copy(path, &backup_path).with_context(|| {
+        copy_backup_without_following_destination(path, &backup_path).with_context(|| {
             format!(
                 "Failed to backup {} to {}",
                 path.display(),
@@ -1057,7 +1091,7 @@ fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
 
         // Backup original
         let backup_path = settings_path.with_extension("json.bak");
-        fs::copy(&settings_path, &backup_path)
+        copy_backup_without_following_destination(&settings_path, &backup_path)
             .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
 
         // Atomic write
@@ -1571,7 +1605,7 @@ fn patch_settings_json_command(
     // Backup original
     if settings_path.exists() {
         let backup_path = settings_path.with_extension("json.bak");
-        fs::copy(&settings_path, &backup_path)
+        copy_backup_without_following_destination(&settings_path, &backup_path)
             .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
         if verbose > 0 {
             eprintln!("Backup: {}", backup_path.display());
@@ -1891,7 +1925,7 @@ fn remove_legacy_settings_entries(ctx: InitContext) -> Result<()> {
 
     // Backup before modifying
     let backup_path = settings_path.with_extension("json.bak");
-    fs::copy(&settings_path, &backup_path)
+    copy_backup_without_following_destination(&settings_path, &backup_path)
         .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
 
     let serialized =
@@ -2972,9 +3006,8 @@ fn run_codex_mode(global: bool, ctx: InitContext) -> Result<()> {
         // text, where `.codex/hooks.json` is a hook that runs shell commands, and RTK creates
         // `.codex` itself rather than following something the user put there.
         //
-        // Its backup sibling is vouched for as well: `fs::copy` follows a symlink at the
-        // destination, so a planted `hooks.json.bak` carried the existing hooks.json out of
-        // the project even when `.codex` itself was a real directory.
+        // Its backup sibling is vouched for as well: a planted `hooks.json.bak` must not carry
+        // the existing hooks.json out of the project even when `.codex` is a real directory.
         ensure_inside_project(&paths.2)?;
         ensure_inside_project(&backup_path_for(&paths.2))?;
         paths
@@ -5744,7 +5777,7 @@ fn patch_trae_hooks_json_paths(paths: &[PathBuf], ctx: InitContext) -> Result<Ve
 
             if patch.existed {
                 let backup_path = patch.path.with_extension("json.bak");
-                fs::copy(&patch.path, &backup_path)
+                copy_backup_without_following_destination(&patch.path, &backup_path)
                     .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
                 if ctx.verbose > 0 {
                     eprintln!("Backup: {}", backup_path.display());
@@ -5948,7 +5981,7 @@ fn remove_trae_hooks_json_paths(paths: &[PathBuf], ctx: InitContext) -> Result<V
 
         let write_result: Result<()> = (|| {
             let backup_path = removal.path.with_extension("json.bak");
-            fs::copy(&removal.path, &backup_path)
+            copy_backup_without_following_destination(&removal.path, &backup_path)
                 .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
             atomic_write(&removal.path, &removal.serialized)
         })();
@@ -10424,6 +10457,28 @@ mod tests {
 
         assert!(format!("{err:#}").contains("backup"));
         assert_eq!(fs::read_to_string(path).unwrap(), "old");
+    }
+
+    /// A dangling backup link must be rejected by the same open that creates the backup. A
+    /// metadata check alone would leave a race in which the link can be swapped in afterward.
+    #[cfg(unix)]
+    #[test]
+    fn test_backup_and_atomic_write_refuses_a_dangling_backup_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let project = TempDir::new().unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        let path = project.path().join("hooks.json");
+        let backup = path.with_extension("json.bak");
+        let outside = elsewhere.path().join("stolen.json");
+        fs::write(&path, "old").unwrap();
+        symlink(&outside, &backup).unwrap();
+
+        let err = backup_and_atomic_write(&path, "new").unwrap_err();
+
+        assert!(format!("{err:#}").contains("backup"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "old");
+        assert!(!outside.exists(), "the dangling link must not be followed");
     }
 
     #[cfg(unix)]
