@@ -1,6 +1,5 @@
-lib/Acme/RtkSample.pm: "return" statement followed by "sort" at line 22, column 5.  Behavior is undefined if called in scalar context.  (Severity: 5)
-lib/Acme/RtkSample.pm: Bareword file handle opened at line 27, column 5.  See pages 202,204 of PBP.  (Severity: 5)
-lib/Acme/RtkSample.pm: Two-argument "open" used at line 27, column 5.  See page 207 of PBP.  (Severity: 5)
-lib/Acme/RtkSample.pm: Use of bitwise operator at line 54, column 15.  Use of bitwise operator "&".  (Severity: 5)
-lib/Acme/RtkSample.pm: Expression form of "eval" at line 59, column 13.  See page 161 of PBP.  (Severity: 5)
+lib/Acme/RtkSample.pm: "return" statement followed by "sort" at line 23, column 5.  Behavior is undefined if called in scalar context.  (Severity: 5)
+lib/Acme/RtkSample.pm: Bareword file handle opened at line 28, column 5.  See pages 202,204 of PBP.  (Severity: 5)
+lib/Acme/RtkSample.pm: Two-argument "open" used at line 28, column 5.  See page 207 of PBP.  (Severity: 5)
+lib/Acme/RtkSample.pm: Expression form of "eval" at line 60, column 13.  See page 161 of PBP.  (Severity: 5)
 lib/Acme/RtkSample/Util.pm source OK
