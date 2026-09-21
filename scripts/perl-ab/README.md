@@ -13,6 +13,7 @@ matters.
   perlcritic policies on purpose.
 - `build-scenarios.sh` runs each tool on a fresh copy of `sample/` and writes the output pairs.
 - `questions.md` holds the fixed questions for each scenario.
+- `perlcriticrc` is the profile for the perlcritic scenario. It names 15 policies from the Perl::Critic distribution and sets `only = 1`. Add-on policy distributions on the machine do not run, and `~/.perlcriticrc` is not read, so the scenario gives the same result everywhere.
 
 ## Build the output pairs
 

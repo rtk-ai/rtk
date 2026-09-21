@@ -60,7 +60,7 @@ scenario prove_fail_jobs prove -l -j4 t
 scenario prove_bailout prove -l t-bail
 scenario prove_pass prove -l t-pass
 scenario yath_fail yath test -Ilib t
-scenario perlcritic_sev1 perlcritic --noprofile --severity 1 lib
+scenario perlcritic_sev1 perlcritic --profile "$HERE/perlcriticrc" lib
 scenario perldoc_function perldoc -f sprintf
 
 SETUP=fresh_copy

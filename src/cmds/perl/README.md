@@ -29,10 +29,10 @@ These numbers come from the sample in [`scripts/perl-ab/`](../../../scripts/perl
 | `prove -l t-pass` | 325 | 78 | 76% |
 | `yath test` | 3480 | 1380 | 61% |
 | `prove -l t-bail` (bailout) | 559 | 249 | 56% |
-| `perlcritic --severity 1` | 8567 | 4096 | 53% |
 | `cover -test` | 2257 | 1104 | 52% |
 | `dzil test` | 3189 | 1563 | 51% |
 | `prove -l t` (4 of 7 files fail) | 2384 | 1362 | 43% |
+| `perlcritic`, 15 core policies at severity 1 | 3084 | 1827 | 41% |
 | `perldoc -f sprintf` | 18063 | 15158 | 17% |
 
 When a run fails, the rtk output of `prove` names the passing files on one line, so that a reader can tell a passing file from a file that did not run. Past 20 files, it prints only the count. A clean run prints one line.
