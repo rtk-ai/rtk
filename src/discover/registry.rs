@@ -3094,12 +3094,18 @@ mod tests {
         );
     }
 
-    // Bare `pnpm build` is still NOT rewritten: it would only hit the passthrough
-    // (no output parser), so rewriting it would add false-positive surface for zero
-    // savings. Stripping global opts must not change this.
+    // Bare `pnpm <script>` now routes to `rtk pnpm`, which runs the script
+    // verbatim through the passthrough. #3275 left it unrouted because the
+    // passthrough parses nothing, but dropping the script names from the lint
+    // rule (this change) means `pnpm lint` would otherwise match no rule at all
+    // and lose its rewrite. Routing the whole bare form keeps the script's real
+    // flags, chain and exit code, and the output filter is the follow-up.
     #[test]
-    fn test_rewrite_pnpm_bare_build_none() {
-        assert_eq!(rewrite_command_no_prefixes("pnpm build", &[]), None);
+    fn test_rewrite_pnpm_bare_build_routes_to_pnpm() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm build", &[]),
+            Some("rtk pnpm build".into())
+        );
     }
 
     // False-positive guards.
@@ -3121,10 +3127,16 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_pnpm_recursive_lint_safe_noop() {
-        // `pnpm lint` classifies as Supported, but the ORIGINAL `pnpm -r lint`
-        // matches no lint rewrite-prefix → safe no-op (never a malformed rewrite).
-        assert_eq!(rewrite_command_no_prefixes("pnpm -r lint", &[]), None);
+    fn test_rewrite_pnpm_recursive_lint_routes_to_pnpm() {
+        // `pnpm -r lint` used to be a safe no-op: it classified through the lint
+        // rule, whose rewrite prefixes never matched the flag-first spelling.
+        // With `lint` off that rule it classifies as `rtk pnpm` (via the global
+        // -opt strip) and the `pnpm` rewrite prefix does match, so `-r` is
+        // forwarded as the global flag `rtk pnpm` already accepts.
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm -r lint", &[]),
+            Some("rtk pnpm -r lint".into())
+        );
     }
 
     #[test]
@@ -3134,8 +3146,10 @@ mod tests {
         // original flag-first text and never fires, so a Supported verdict would
         // advertise savings `rtk discover`/`rtk session` can never deliver. These
         // must classify exactly as on develop: Unsupported(pnpm).
+        // (`pnpm -r lint` left this list when `lint` left the lint rule — it now
+        // routes to `rtk pnpm`, and its rewrite does fire. See
+        // `test_rewrite_pnpm_recursive_lint_routes_to_pnpm`.)
         for cmd in [
-            "pnpm -r lint",
             "pnpm -r exec eslint .",
             "pnpm --filter @app exec vitest run",
             "pnpm -F web exec playwright test",
@@ -5359,16 +5373,12 @@ mod tests {
             "npm exec eslint",
             "npm rum biome",
             "npm rum eslint",
-            "npm rum lint",
             "npm run biome",
             "npm run eslint",
-            "npm run lint",
             "npm run-script biome",
             "npm run-script eslint",
-            "npm run-script lint",
             "npm urn biome",
             "npm urn eslint",
-            "npm urn lint",
             "npm x biome",
             "npm x eslint",
             "pnpm dlx biome",
@@ -5377,25 +5387,18 @@ mod tests {
             "pnpm exec eslint",
             "pnpm run biome",
             "pnpm run eslint",
-            "pnpm run lint",
             "pnpm run-script biome",
             "pnpm run-script eslint",
-            "pnpm run-script lint",
             "npm biome",
             "npm eslint",
-            "npm lint",
             "npx biome",
             "npx eslint",
-            "npx lint",
             "pnpm biome",
             "pnpm eslint",
-            "pnpm lint",
             "pnpx biome",
             "pnpx eslint",
-            "pnpx lint",
             "biome",
             "eslint",
-            "lint",
         ];
         for command in commands {
             assert!(
@@ -5413,22 +5416,48 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_lint_scripts_not_rewritten() {
+        let script_commands = vec![
+            "lint",
+            "npm lint",
+            "npm run lint",
+            "npm rum lint",
+            "npm urn lint",
+            "npm run-script lint",
+            "npx lint",
+            "pnpm lint",
+            "pnpm run lint",
+            "pnpm run-script lint",
+            "pnpx lint",
+        ];
+        for command in script_commands {
+            assert!(
+                !matches!(
+                    classify_command(command),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk lint",
+                        ..
+                    }
+                ),
+                "'{}' should NOT classify as rtk lint (it's a script, not a linter binary)",
+                command
+            );
+        }
+    }
+
+    #[test]
     fn test_rewrite_lint() {
         let commands = vec![
             "npm exec biome",
             "npm exec eslint",
             "npm rum biome",
             "npm rum eslint",
-            "npm rum lint",
             "npm run biome",
             "npm run eslint",
-            "npm run lint",
             "npm run-script biome",
             "npm run-script eslint",
-            "npm run-script lint",
             "npm urn biome",
             "npm urn eslint",
-            "npm urn lint",
             "npm x biome",
             "npm x eslint",
             "pnpm dlx biome",
@@ -5437,25 +5466,18 @@ mod tests {
             "pnpm exec eslint",
             "pnpm run biome",
             "pnpm run eslint",
-            "pnpm run lint",
             "pnpm run-script biome",
             "pnpm run-script eslint",
-            "pnpm run-script lint",
             "npm biome",
             "npm eslint",
-            "npm lint",
             "npx biome",
             "npx eslint",
-            "npx lint",
             "pnpm biome",
             "pnpm eslint",
-            "pnpm lint",
             "pnpx biome",
             "pnpx eslint",
-            "pnpx lint",
             "biome",
             "eslint",
-            "lint",
         ];
         for command in commands {
             assert_eq!(
@@ -5463,6 +5485,84 @@ mod tests {
                 Some("rtk lint".into()),
                 "Failed for command: {}",
                 command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_lint_scripts_not_rewritten_to_rtk_lint() {
+        let script_commands = vec![
+            "lint",
+            "npm lint",
+            "npm run lint",
+            "pnpm lint",
+            "pnpm run lint",
+            "npx lint",
+            "pnpx lint",
+        ];
+        for command in script_commands {
+            let result = rewrite_command_no_prefixes(command, &[]);
+            assert_ne!(
+                result,
+                Some("rtk lint".into()),
+                "'{}' should NOT be rewritten to rtk lint (got {:?})",
+                command,
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn test_pnpm_scripts_route_through_rtk_pnpm() {
+        let script_commands = vec![
+            ("pnpm lint", "rtk pnpm lint"),
+            ("pnpm build", "rtk pnpm build"),
+            ("pnpm dev", "rtk pnpm dev"),
+            ("pnpm test", "rtk pnpm test"),
+            ("pnpm typecheck", "rtk pnpm typecheck"),
+            ("pnpm run lint", "rtk pnpm run lint"),
+            ("pnpm run build", "rtk pnpm run build"),
+        ];
+        for (command, expected) in script_commands {
+            assert_eq!(
+                classify_command(command),
+                Classification::Supported {
+                    rtk_equivalent: "rtk pnpm",
+                    category: "PackageManager",
+                    estimated_savings_pct: 80.0,
+                    status: RtkStatus::Existing,
+                },
+                "'{}' should classify as rtk pnpm",
+                command
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected.into()),
+                "'{}' should rewrite to '{}'",
+                command,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_pnpm_specific_tools_still_override_generic() {
+        let specific_commands = vec![
+            ("pnpm eslint", "rtk lint"),
+            ("pnpm biome", "rtk lint"),
+            ("pnpm vitest", "rtk vitest"),
+            ("pnpm jest", "rtk jest"),
+            ("pnpm tsc", "rtk tsc"),
+            ("pnpm prettier", "rtk prettier"),
+            ("pnpm playwright", "rtk playwright"),
+        ];
+        for (command, expected_rtk) in specific_commands {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected_rtk.into()),
+                "'{}' should route to specific '{}', not generic rtk pnpm",
+                command,
+                expected_rtk
             );
         }
     }

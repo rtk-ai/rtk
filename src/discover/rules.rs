@@ -99,7 +99,14 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[("fmt", RtkStatus::Passthrough)],
     },
     RtkRule {
-        pattern: r"^pnpm\s+(exec|i|install|list|ls|outdated|run|run-script)",
+        // Any bare `pnpm <word>` routes here, so a package.json script keeps its
+        // real flags, chain and exit code instead of being re-spelled as a tool
+        // invocation. Enumerating script names would just be another list to
+        // chase. The first token must not start with `-`: a global flag is not a
+        // subcommand, and `rtk pnpm --filter @app` / `rtk pnpm -x install` would
+        // die at clap. Flag-first forms keep reaching this rule through
+        // `strip_pnpm_global_opts` (#3275), which only strips the fixed set.
+        pattern: r"^pnpm\s+[^-\s]\S*",
         rtk_cmd: "rtk pnpm",
         rewrite_prefixes: &["pnpm"],
         category: "PackageManager",
@@ -204,51 +211,40 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?(biome|eslint|lint)(\s|$)",
+        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?(biome|eslint)(\s|$)",
         rtk_cmd: "rtk lint",
         pipeline_safety: PipelineSafety::ProducerOnly,
         rewrite_prefixes: &[
             "biome",
             "eslint",
-            "lint",
             "npm biome",
             "npm eslint",
             "npm exec biome",
             "npm exec eslint",
-            "npm lint",
             "npm rum biome",
             "npm rum eslint",
-            "npm rum lint",
             "npm run biome",
             "npm run eslint",
-            "npm run lint",
             "npm run-script biome",
             "npm run-script eslint",
-            "npm run-script lint",
             "npm urn biome",
             "npm urn eslint",
-            "npm urn lint",
             "npm x biome",
             "npm x eslint",
             "npx biome",
             "npx eslint",
-            "npx lint",
             "pnpm biome",
             "pnpm dlx biome",
             "pnpm dlx eslint",
             "pnpm eslint",
             "pnpm exec biome",
             "pnpm exec eslint",
-            "pnpm lint",
             "pnpm run biome",
             "pnpm run eslint",
-            "pnpm run lint",
             "pnpm run-script biome",
             "pnpm run-script eslint",
-            "pnpm run-script lint",
             "pnpx biome",
             "pnpx eslint",
-            "pnpx lint",
         ],
         category: "Build",
         savings_pct: 84.0,
