@@ -1,0 +1,54 @@
+
+#   Failed test 'two plus two is five'
+#   at t/02-fail-more.t line 10.
+#          got: '4'
+#     expected: '5'
+
+#   Failed test 'sorted names structure'
+#   at t/02-fail-more.t line 11.
+#     Structures begin differing at:
+#          $got->{list}[2] = 'c'
+#     $expected->{list}[2] = 'd'
+
+#   Failed test 'twenty is big'
+#   at t/02-fail-more.t line 16.
+#                   'medium'
+#     doesn't match '(?^:^big$)'
+# Looks like you failed 3 tests of 5.
+t/02-fail-more.t .. 
+ok 1 - object builds
+not ok 2 - two plus two is five
+not ok 3 - sorted names structure
+not ok 4 - twenty is big
+ok 5 - still running
+1..5
+Dubious, test returned 3 (wstat 768, 0x300)
+Failed 3/5 subtests 
+
+# Failed test 'pairs round-trips'
+# at t/03-fail-t2.t line 7.
+# +------+-----+----+-------+
+# | PATH | GOT | OP | CHECK |
+# +------+-----+----+-------+
+# | {b}  | 2   | eq | 3     |
+# +------+-----+----+-------+
+(If this table is too small, you can use the TABLE_TERM_SIZE=### env var to set a larger size, detected size is '78')
+
+t/03-fail-t2.t .... 
+# Seeded srand with seed '20260921' from local date.
+not ok 1 - pairs round-trips
+ok 2 - trim tabs and newlines
+1..2
+Dubious, test returned 1 (wstat 256, 0x100)
+Failed 1/2 subtests 
+
+Test Summary Report
+-------------------
+t/02-fail-more.t (Wstat: 768 (exited 3) Tests: 5 Failed: 3)
+  Failed tests:  2-4
+  Non-zero exit status: 3
+t/03-fail-t2.t  (Wstat: 256 (exited 1) Tests: 2 Failed: 1)
+  Failed test:  1
+  Non-zero exit status: 1
+Files=2, Tests=7,  1 wallclock secs ( 0.00 usr  0.00 sys +  0.04 cusr  0.00 csys =  0.04 CPU)
+Result: FAIL

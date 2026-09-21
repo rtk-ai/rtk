@@ -1,0 +1,81 @@
+[DZ] building distribution under .build/pqv6gurU1u for installation
+[DZ] beginning to build Acme-RtkSample
+[DZ] guessing dist's main_module is lib/Acme/RtkSample.pm
+[DZ] writing Acme-RtkSample in .build/pqv6gurU1u
+Checking if your kit is complete...
+Looks good
+Generating a Unix-style Makefile
+Writing Makefile for Acme::RtkSample
+Writing MYMETA.yml and MYMETA.json
+cp lib/Acme/RtkSample.pm blib/lib/Acme/RtkSample.pm
+cp lib/Acme/RtkSample/Util.pm blib/lib/Acme/RtkSample/Util.pm
+PERL_DL_NONLAZY=1 "/opt/perl5/perl5.44.0/bin/perl" "-MExtUtils::Command::MM" "-MTest::Harness" "-e" "undef *Test::Harness::Switches; test_harness(0, 'blib/lib', 'blib/arch')" t/*.t
+t/00-load.t ........... ok
+t/01-basic.t .......... ok
+
+#   Failed test 'two plus two is five'
+#   at t/02-fail-more.t line 10.
+#          got: '4'
+#     expected: '5'
+
+#   Failed test 'sorted names structure'
+#   at t/02-fail-more.t line 11.
+#     Structures begin differing at:
+#          $got->{list}[2] = 'c'
+#     $expected->{list}[2] = 'd'
+
+#   Failed test 'twenty is big'
+#   at t/02-fail-more.t line 16.
+#                   'medium'
+#     doesn't match '(?^:^big$)'
+# Looks like you failed 3 tests of 5.
+t/02-fail-more.t ...... 
+Dubious, test returned 3 (wstat 768, 0x300)
+Failed 3/5 subtests 
+
+# Failed test 'pairs round-trips'
+# at t/03-fail-t2.t line 7.
+# +------+-----+----+-------+
+# | PATH | GOT | OP | CHECK |
+# +------+-----+----+-------+
+# | {b}  | 2   | eq | 3     |
+# +------+-----+----+-------+
+(If this table is too small, you can use the TABLE_TERM_SIZE=### env var to set a larger size, detected size is '78')
+
+# Seeded srand with seed '20260921' from local date.
+t/03-fail-t2.t ........ 
+Dubious, test returned 1 (wstat 256, 0x100)
+Failed 1/2 subtests 
+cannot open /nonexistent/rtk-sample.txt at /home/user/Acme-RtkSample/.build/pqv6gurU1u/blib/lib/Acme/RtkSample.pm line 28.
+# Looks like your test exited with 2 just after 1.
+t/04-die.t ............ 
+Dubious, test returned 2 (wstat 512, 0x200)
+Failed 2/3 subtests 
+Global symbol "$undeclared_total" requires explicit package name (did you forget to declare "my $undeclared_total"?) at t/05-compile-error.t line 9.
+Execution of t/05-compile-error.t aborted due to compilation errors.
+t/05-compile-error.t .. 
+Dubious, test returned 255 (wstat 65280, 0xff00)
+No subtests run 
+t/06-todo-skip.t ...... ok
+
+Test Summary Report
+-------------------
+t/02-fail-more.t    (Wstat: 768 (exited 3) Tests: 5 Failed: 3)
+  Failed tests:  2-4
+  Non-zero exit status: 3
+t/03-fail-t2.t      (Wstat: 256 (exited 1) Tests: 2 Failed: 1)
+  Failed test:  1
+  Non-zero exit status: 1
+t/04-die.t          (Wstat: 512 (exited 2) Tests: 1 Failed: 0)
+  Non-zero exit status: 2
+  Parse errors: Bad plan.  You planned 3 tests but ran 1.
+t/05-compile-error.t (Wstat: 65280 (exited 255) Tests: 0 Failed: 0)
+  Non-zero exit status: 255
+  Parse errors: No plan found in TAP output
+t/06-todo-skip.t    (Wstat: 0 Tests: 4 Failed: 0)
+  TODO passed:   1
+Files=7, Tests=17,  0 wallclock secs ( 0.01 usr  0.00 sys +  0.12 cusr  0.02 csys =  0.15 CPU)
+Result: FAIL
+Failed 4/7 test programs. 4/17 subtests failed.
+make: *** [Makefile:862: test_dynamic] Error 255
+error running make test

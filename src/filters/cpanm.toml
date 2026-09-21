@@ -1,0 +1,95 @@
+[filters.cpanm]
+description = "Compact cpanm output — drop per-dist fetch/configure/build progress, keep failures and the summary"
+match_command = "^cpanm\\b"
+strip_ansi = true
+filter_stderr = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^--> Working on ",
+  "^==> Found dependencies: ",
+  "^<== Installed dependencies for ",
+  "^(?:Fetching|Configuring|Building|Building and testing|Unpacking|Entering) .* \\.\\.\\. OK$",
+  "^Successfully (?:re)?installed ",
+  "^Checking (?:dependencies from|if you have) ",
+  "^Searching .* on (?:cpanmetadb|mirror) \\.\\.\\.",
+  "^! Finding .* on (?:cpanmetadb|mirror .*) failed\\.$",
+  "^!\\s*$",
+  "^! To turn off this warning",
+  "^!\\s+- ",
+  "^!\\s{4,}\\S",
+]
+max_lines = 40
+on_empty = "cpanm: ok"
+
+[[tests.cpanm]]
+name = "installdeps keeps the missing module and the summary"
+input = """
+! Finding Acme::Does::Not::Exist::RtkSample on cpanmetadb failed.
+! Finding Acme::Does::Not::Exist::RtkSample (1.0) on mirror http://www.cpan.org failed.
+! Couldn't find module or a distribution Acme::Does::Not::Exist::RtkSample (1.0)
+--> Working on .
+Configuring /home/user/Acme-RtkSample ... OK
+==> Found dependencies: Acme::Does::Not::Exist::RtkSample, Try::Tiny, List::MoreUtils
+--> Working on Try::Tiny
+Fetching http://www.cpan.org/authors/id/E/ET/ETHER/Try-Tiny-0.32.tar.gz ... OK
+Configuring Try-Tiny-0.32 ... OK
+Building and testing Try-Tiny-0.32 ... OK
+Successfully installed Try-Tiny-0.32
+--> Working on List::MoreUtils
+Fetching http://www.cpan.org/authors/id/R/RE/REHSACK/List-MoreUtils-0.430.tar.gz ... OK
+Configuring List-MoreUtils-0.430 ... OK
+==> Found dependencies: Exporter::Tiny, Test::LeakTrace, List::MoreUtils::XS
+Building and testing List-MoreUtils-0.430 ... OK
+Successfully installed List-MoreUtils-0.430
+! Installing the dependencies failed: Module 'Acme::Does::Not::Exist::RtkSample' is not installed
+! Bailing out the installation for ..
+5 distributions installed
+"""
+expected = """
+! Couldn't find module or a distribution Acme::Does::Not::Exist::RtkSample (1.0)
+! Installing the dependencies failed: Module 'Acme::Does::Not::Exist::RtkSample' is not installed
+! Bailing out the installation for ..
+5 distributions installed
+"""
+
+[[tests.cpanm]]
+name = "a failed build keeps the FAIL line and the log path"
+input = """
+--> Working on Foo::Bar
+Fetching http://www.cpan.org/authors/id/X/XX/XX/Foo-Bar-1.00.tar.gz ... OK
+Configuring Foo-Bar-1.00 ... OK
+Building and testing Foo-Bar-1.00 ... FAIL
+! Installing Foo::Bar failed. See /home/user/.cpanm/work/1/build.log for details. Retry with --force to force install it.
+"""
+expected = """
+Building and testing Foo-Bar-1.00 ... FAIL
+! Installing Foo::Bar failed. See /home/user/.cpanm/work/1/build.log for details. Retry with --force to force install it.
+"""
+
+[[tests.cpanm]]
+name = "local::lib advice collapses to its first line"
+input = """
+!
+! Can't write to /opt/perl5/lib/site_perl and /opt/perl5/bin: Installing modules to /home/user/perl5
+! To turn off this warning, you have to do one of the following:
+!   - run me as a root or with --sudo option (to install to /opt/perl5/lib/site_perl and /opt/perl5/bin)
+!   - Configure local::lib in your existing shell to set PERL_MM_OPT etc.
+!   - Install local::lib by running the following commands
+!
+!         cpanm --local-lib=~/perl5 local::lib && eval $(perl -I ~/perl5/lib/perl5/ -Mlocal::lib)
+!
+ETHER/Try-Tiny-0.32.tar.gz
+"""
+expected = """
+! Can't write to /opt/perl5/lib/site_perl and /opt/perl5/bin: Installing modules to /home/user/perl5
+ETHER/Try-Tiny-0.32.tar.gz
+"""
+
+[[tests.cpanm]]
+name = "everything up to date"
+input = """
+--> Working on .
+Configuring /home/user/Acme-RtkSample ... OK
+<== Installed dependencies for .. Finishing.
+"""
+expected = "cpanm: ok"

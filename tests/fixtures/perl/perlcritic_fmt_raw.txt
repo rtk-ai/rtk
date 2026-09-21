@@ -1,0 +1,55 @@
+lib/Acme/RtkSample.pm:1:1:1:CodeLayout::RequireTidyCode:Code is not tidy
+lib/Acme/RtkSample.pm:1:1:2:Documentation::RequirePod:file requires POD
+lib/Acme/RtkSample.pm:1:1:2:Editor::RequireEmacsFileVariables:Use Emacs file variables to declare coding style
+lib/Acme/RtkSample.pm:1:1:1:Modules::RequirePerlVersion:Missing Perl version
+lib/Acme/RtkSample.pm:4:1:3:RequireFatalWarnings:Warnings are enabled but not fatal
+lib/Acme/RtkSample.pm:8:1:2:ProhibitUnusedDefinitions:Sub Acme::RtkSample::new is never called from bin/ or lib/
+lib/Acme/RtkSample.pm:8:1:4:Subroutines::RequireArgUnpacking:Always unpack @_ first
+lib/Acme/RtkSample.pm:15:1:2:ProhibitUnusedDefinitions:Sub Acme::RtkSample::add is never called from bin/ or lib/
+lib/Acme/RtkSample.pm:16:9:3:Variables::ProhibitUnusedVarsStricter:$self is declared but not used
+lib/Acme/RtkSample.pm:20:1:1:CognitiveComplexity::ProhibitExcessCognitiveComplexity:Subroutine 'sorted_names' with complexity score of '1'
+lib/Acme/RtkSample.pm:20:1:2:ProhibitUnusedDefinitions:Sub Acme::RtkSample::sorted_names is never called from bin/ or lib/
+lib/Acme/RtkSample.pm:22:5:5:Subroutines::ProhibitReturnSort:"return" statement followed by "sort"
+lib/Acme/RtkSample.pm:25:1:1:CognitiveComplexity::ProhibitExcessCognitiveComplexity:Subroutine 'read_first_line' with complexity score of '1'
+lib/Acme/RtkSample.pm:25:1:2:ProhibitUnusedDefinitions:Sub Acme::RtkSample::read_first_line is never called from bin/ or lib/
+lib/Acme/RtkSample.pm:26:9:3:Variables::ProhibitUnusedVarsStricter:$self is declared but not used
+lib/Acme/RtkSample.pm:27:5:5:InputOutput::ProhibitBarewordFileHandles:Bareword file handle opened
+lib/Acme/RtkSample.pm:27:5:5:InputOutput::ProhibitTwoArgOpen:Two-argument "open" used
+lib/Acme/RtkSample.pm:27:5:4:InputOutput::RequireBriefOpen:Close filehandles as soon as possible after opening them
+lib/Acme/RtkSample.pm:27:23:3:ErrorHandling::RequireCarping:"die" used instead of "croak"
+lib/Acme/RtkSample.pm:27:23:4:ErrorHandling::RequireUseOfExceptions:Found use of die. Use an exception instead
+lib/Acme/RtkSample.pm:29:5:2:InputOutput::RequireCheckedClose:Return value of "close" ignored
+lib/Acme/RtkSample.pm:29:5:1:InputOutput::RequireCheckedSyscalls:Return value of flagged function ignored - close
+lib/Acme/RtkSample.pm:34:1:1:CognitiveComplexity::ProhibitExcessCognitiveComplexity:Subroutine 'classify' with complexity score of '8'
+lib/Acme/RtkSample.pm:34:1:2:ProhibitUnusedDefinitions:Sub Acme::RtkSample::classify is never called from bin/ or lib/
+lib/Acme/RtkSample.pm:35:9:3:Variables::ProhibitUnusedVarsStricter:$self is declared but not used
+lib/Acme/RtkSample.pm:36:15:2:Plicease::ProhibitUnicodeDigitInRegexp:Using non-ASCII \d
+lib/Acme/RtkSample.pm:36:15:3:RegularExpressions::RequireDefault:Regular expression without "/a" or "/aa" flag
+lib/Acme/RtkSample.pm:36:15:2:RegularExpressions::RequireDotMatchAnything:Regular expression without "/s" flag
+lib/Acme/RtkSample.pm:36:15:3:RegularExpressions::RequireExtendedFormatting:Regular expression without "/x" flag
+lib/Acme/RtkSample.pm:36:15:2:RegularExpressions::RequireLineBoundaryMatching:Regular expression without "/m" flag
+lib/Acme/RtkSample.pm:37:18:2:ValuesAndExpressions::ProhibitMagicNumbers:100 is not one of the allowed literal values (0, 1, 2). Use the Readonly or Const::Fast module or the "constant" pragma instead
+lib/Acme/RtkSample.pm:38:22:2:ValuesAndExpressions::ProhibitMagicNumbers:1000 is not one of the allowed literal values (0, 1, 2). Use the Readonly or Const::Fast module or the "constant" pragma instead
+lib/Acme/RtkSample.pm:43:23:2:ValuesAndExpressions::ProhibitMagicNumbers:10 is not one of the allowed literal values (0, 1, 2). Use the Readonly or Const::Fast module or the "constant" pragma instead
+lib/Acme/RtkSample.pm:52:1:2:ProhibitUnusedDefinitions:Sub Acme::RtkSample::mask is never called from bin/ or lib/
+lib/Acme/RtkSample.pm:53:9:3:Variables::ProhibitUnusedVarsStricter:$self is declared but not used
+lib/Acme/RtkSample.pm:54:15:5:Bangs::ProhibitBitwiseOperators:Use of bitwise operator
+lib/Acme/RtkSample.pm:54:17:2:ValuesAndExpressions::ProhibitMagicNumbers:0xff is not one of the allowed literal values (0, 1, 2). Use the Readonly or Const::Fast module or the "constant" pragma instead
+lib/Acme/RtkSample.pm:57:1:2:ProhibitUnusedDefinitions:Sub Acme::RtkSample::stringy is never called from bin/ or lib/
+lib/Acme/RtkSample.pm:58:8:3:Variables::ProhibitUnusedVarsStricter:$self is declared but not used
+lib/Acme/RtkSample.pm:59:13:5:BuiltinFunctions::ProhibitStringyEval:Expression form of "eval"
+lib/Acme/RtkSample.pm:59:18:1:ValuesAndExpressions::ProhibitInterpolationOfLiterals:Useless interpolation of literal string
+lib/Acme/RtkSample/Util.pm:1:1:1:CodeLayout::RequireTidyCode:Code is not tidy
+lib/Acme/RtkSample/Util.pm:1:1:2:Documentation::RequirePod:file requires POD
+lib/Acme/RtkSample/Util.pm:1:1:2:Editor::RequireEmacsFileVariables:Use Emacs file variables to declare coding style
+lib/Acme/RtkSample/Util.pm:1:1:1:Modules::RequirePerlVersion:Missing Perl version
+lib/Acme/RtkSample/Util.pm:1:1:2:Modules::RequireVersionVar:No package-scoped "$VERSION" variable found
+lib/Acme/RtkSample/Util.pm:4:1:3:RequireFatalWarnings:Warnings are enabled but not fatal
+lib/Acme/RtkSample/Util.pm:6:1:2:ProhibitUnusedDefinitions:Sub Acme::RtkSample::Util::trim is never called from bin/ or lib/
+lib/Acme/RtkSample/Util.pm:8:11:3:RegularExpressions::RequireDefault:Regular expression without "/a" or "/aa" flag
+lib/Acme/RtkSample/Util.pm:8:11:2:RegularExpressions::RequireDotMatchAnything:Regular expression without "/s" flag
+lib/Acme/RtkSample/Util.pm:8:11:3:RegularExpressions::RequireExtendedFormatting:Regular expression without "/x" flag
+lib/Acme/RtkSample/Util.pm:8:11:2:RegularExpressions::RequireLineBoundaryMatching:Regular expression without "/m" flag
+lib/Acme/RtkSample/Util.pm:12:1:1:CognitiveComplexity::ProhibitExcessCognitiveComplexity:Subroutine 'pairs' with complexity score of '1'
+lib/Acme/RtkSample/Util.pm:12:1:2:ProhibitUnusedDefinitions:Sub Acme::RtkSample::Util::pairs is never called from bin/ or lib/
+lib/Acme/RtkSample/Util.pm:15:5:2:Compatibility::PerlMinimumVersionAndWhy:_Pulp__for_loop_variable_using_my requires 5.004

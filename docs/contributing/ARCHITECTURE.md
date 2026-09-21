@@ -168,6 +168,7 @@ Database: ~/.local/share/rtk/history.db
   PYTHON (cmds/python/)    ruff, pytest, mypy, pip
   GO (cmds/go/)            go test/build/vet, golangci-lint
   RUBY (cmds/ruby/)        rake, rspec, rubocop
+  PERL (cmds/perl/)        prove, yath, perlcritic, cover, dzil, perldoc
   DOTNET (cmds/dotnet/)    dotnet build/test, binlog
   CLOUD (cmds/cloud/)      aws, docker/kubectl, curl, wget, psql
   SYSTEM (cmds/system/)    ls, tree, read, grep, find, json, log, env, deps
