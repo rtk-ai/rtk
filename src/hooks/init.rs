@@ -430,9 +430,14 @@ const RTK_INSTRUCTIONS: &str = r##"<!-- rtk-instructions v2 -->
 
 ## Golden Rule
 
-**Always prefix commands with `rtk`**. If RTK has a dedicated filter, it uses it. If not, it passes through unchanged. This means RTK is always safe to use.
+**Prefix external programs with `rtk`**. If RTK has a dedicated filter, it uses it. If not, it passes the program through unchanged. This is safe for programs you would run from `PATH`.
 
-**Important**: Even in command chains with `&&`, use `rtk`:
+Do not prefix shell builtins or keywords — `test`, `[`, `read`, `cd`, `echo`,
+`export`, `eval`, `source`, `printf`. Commands such as `test`, `read`, and
+`env` also have RTK subcommands with different meanings; invoke the native
+command directly when you need it.
+
+**Important**: In command chains with `&&`, prefix each external program with `rtk`:
 ```bash
 # ❌ Wrong
 git add . && git commit -m "msg" && git push
@@ -7126,7 +7131,7 @@ const COPILOT_INSTRUCTIONS: &str = r#"<!-- rtk-instructions v2 -->
 
 ## Rule
 
-Always prefix shell commands with `rtk`:
+Prefix external programs with `rtk`:
 
 ```bash
 # Instead of:              Use:
@@ -7136,6 +7141,11 @@ cargo test                 rtk cargo test
 docker ps                  rtk docker ps
 kubectl get pods           rtk kubectl get pods
 ```
+
+Do not prefix shell builtins or keywords — `test`, `[`, `read`, `cd`, `echo`,
+`export`, `eval`, `source`, `printf`. Commands such as `test`, `read`, and
+`env` also have RTK subcommands with different meanings; invoke the native
+command directly when you need it.
 
 ## Meta commands (use directly)
 
@@ -7440,24 +7450,6 @@ mod tests {
         assert!(!is_rtk_authored_md("my own notes about rtk\n"));
         assert!(!is_rtk_authored_md(""));
 
-        // The payloads v0.49.0 and the builds after it wrote with nothing claiming them.
-        // Should the awareness text ever be reworded, these assertions go rather than gaining
-        // a digest: every file written from then on carries the ownership line instead.
-        for payload in [
-            RTK_AWARENESS_DEFAULT,
-            RTK_AWARENESS_HIGH,
-            RTK_AWARENESS_FULL,
-        ] {
-            let remedy = "the awareness text was reworded: delete these two assertions rather \
-                          than adding a digest for the new wording -- every file written from \
-                          then on carries the ownership line, so nothing needs recognising by \
-                          content";
-            assert!(is_rtk_authored_md(payload), "{remedy}");
-            assert!(
-                is_rtk_authored_md(&payload.replace('\n', "\r\n")),
-                "{remedy}"
-            );
-        }
         // A line of spaces is not content: the claim is on the first line that is.
         assert!(is_rtk_authored_md(&format!(
             "   \n{RTK_MD_OWNED_HEADER}\n\npayload\n"
@@ -8517,10 +8509,33 @@ mod tests {
 
     #[test]
     fn test_awareness_activation_rule_only_in_full() {
-        const ACTIVATION: &str = "Prefix every shell command with `rtk`";
+        const ACTIVATION: &str = "Prefix external programs with `rtk`";
         assert!(!RTK_AWARENESS_DEFAULT.contains(ACTIVATION));
         assert!(!RTK_AWARENESS_HIGH.contains(ACTIVATION));
         assert!(RTK_AWARENESS_FULL.contains(ACTIVATION));
+    }
+
+    #[test]
+    fn test_agent_guidance_excludes_shell_builtins_from_prefix_rule() {
+        for (name, content) in [
+            ("awareness-full", RTK_AWARENESS_FULL),
+            ("legacy", RTK_INSTRUCTIONS),
+            ("copilot", COPILOT_INSTRUCTIONS),
+        ] {
+            assert!(
+                content.contains("Prefix external programs with `rtk`"),
+                "{name} must scope the prefix rule to external programs"
+            );
+            assert!(
+                content.contains("Do not prefix shell builtins or keywords"),
+                "{name} must exclude shell builtins from the prefix rule"
+            );
+            assert!(
+                !content.contains("Always prefix shell commands with `rtk`")
+                    && !content.contains("Prefix every shell command with `rtk`"),
+                "{name} must not promise that every shell command is safe to prefix"
+            );
+        }
     }
 
     #[test]
