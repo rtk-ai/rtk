@@ -2965,12 +2965,12 @@ fn run_codex_mode(global: bool, ctx: InitContext) -> Result<()> {
             PathBuf::from(RTK_MD),
             PathBuf::from(CODEX_DIR).join(HOOKS_JSON),
         );
-        // Only the hook path. A symlinked `AGENTS.md` or `RTK.md` may be the user's own
-        // arrangement, which `atomic_write` preserves deliberately, or may have come with a
-        // clone -- git stores symlinks -- in which case init appends its `@RTK.md` line to
-        // whatever the link names, outside the project. That is accepted: the line is inert
-        // text, where `.codex/hooks.json` is a hook that runs shell commands, and RTK creates
-        // `.codex` itself rather than following something the user put there.
+        // Guard both project instruction writes and the hook. A symlinked `AGENTS.md` can come
+        // from a clone and redirect the append outside the project, so fail closed with the
+        // resolved target in the diagnostic instead of silently changing a user's file.
+        ensure_inside_project(&paths.0)?;
+        // `RTK.md` remains user-owned in project mode and is deliberately handled by its
+        // ownership marker; unlike `AGENTS.md`, it may be an existing user symlink.
         //
         // Its backup sibling is vouched for as well: `fs::copy` follows a symlink at the
         // destination, so a planted `hooks.json.bak` carried the existing hooks.json out of
@@ -7690,6 +7690,31 @@ mod tests {
                 .next()
                 .is_none(),
             "and nothing may be written there"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_project_scoped_agents_write_refuses_symlink_outside() {
+        use std::os::unix::fs::symlink;
+
+        let project = TempDir::new().expect("project");
+        let elsewhere = TempDir::new().expect("elsewhere");
+        let target = elsewhere.path().join(AGENTS_MD);
+        fs::write(&target, "user notes\n").expect("target");
+        symlink(&target, project.path().join(AGENTS_MD)).expect("symlink");
+
+        let error = ensure_inside_root(project.path(), Path::new(AGENTS_MD))
+            .expect_err("a symlinked AGENTS.md outside the project must be refused");
+        let message = error.to_string();
+        assert!(message.contains("outside the project"), "{message}");
+        assert!(
+            message.contains(&target.display().to_string()),
+            "the refusal must name the resolved target: {message}"
+        );
+        assert_eq!(
+            fs::read_to_string(&target).expect("read target"),
+            "user notes\n"
         );
     }
 
