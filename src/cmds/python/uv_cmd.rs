@@ -75,8 +75,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         result.exit_code,
     );
 
-    runner::print_with_hint(&filtered, &result.raw, &result.raw, "uv", result.exit_code);
-    timer.track(&original_cmd, &rtk_cmd, &result.raw, &filtered);
+    let shown =
+        runner::print_with_hint(&filtered, &result.raw, &result.raw, "uv", result.exit_code);
+    timer.track(&original_cmd, &rtk_cmd, &result.raw, &shown);
 
     Ok(result.exit_code)
 }
