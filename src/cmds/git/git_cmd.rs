@@ -1746,6 +1746,7 @@ fn run_log(
     global_args: &[String],
 ) -> Result<i32> {
     let tokens = tokenize_git_log_args(args);
+    let reads_stdin = log_reads_stdin(&tokens);
 
     if tokens.iter().any(|t| log_wants_raw_shape(t, &tokens)) {
         let capped = raw_log_is_capped(&tokens);
@@ -1760,7 +1761,12 @@ fn run_log(
         let timer = tracking::TimedExecution::start();
         let mut cmd = git_cmd(global_args);
         cmd.args(&passthrough_args);
-        let result = exec_capture(&mut cmd).context("Failed to run git log")?;
+        let result = if reads_stdin {
+            exec_capture_stdin(&mut cmd)
+        } else {
+            exec_capture(&mut cmd)
+        }
+        .context("Failed to run git log")?;
         print!("{}", result.stdout);
         if !result.stderr.trim().is_empty() {
             eprint!("{}", result.stderr);
@@ -1848,7 +1854,12 @@ fn run_log(
         cmd.arg(arg);
     }
 
-    let result = exec_capture(&mut cmd).context("Failed to run git log")?;
+    let result = if reads_stdin {
+        exec_capture_stdin(&mut cmd)
+    } else {
+        exec_capture(&mut cmd)
+    }
+    .context("Failed to run git log")?;
 
     if !result.success() {
         eprintln!("{}", result.stderr);
@@ -1968,6 +1979,12 @@ fn tokenize_git_diff_args(args: &[String]) -> Vec<Token<'_>> {
 
 fn tokenize_git_log_args(args: &[String]) -> Vec<Token<'_>> {
     arg_tokenizer::tokenize_grammar(args, &log_takes_value, Dialect::Posix)
+}
+
+fn log_reads_stdin(tokens: &[Token<'_>]) -> bool {
+    arg_tokenizer::before_dashdash(tokens)
+        .iter()
+        .any(|t| t.kind == TokenKind::Long && t.text == "stdin")
 }
 
 #[cfg(test)]
@@ -5418,6 +5435,15 @@ A  added.rs
     fn test_parse_user_limit_none() {
         let args: Vec<String> = vec!["--oneline".into()];
         assert_eq!(parse_user_limit(&args), None);
+    }
+
+    #[test]
+    fn test_log_reads_stdin_respects_pathspec_boundary() {
+        let reads = vec!["--stdin".to_string()];
+        assert!(log_reads_stdin(&tokenize_git_log_args(&reads)));
+
+        let pathspec = vec!["--".to_string(), "--stdin".to_string()];
+        assert!(!log_reads_stdin(&tokenize_git_log_args(&pathspec)));
     }
 
     #[test]

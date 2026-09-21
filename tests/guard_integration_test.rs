@@ -71,6 +71,34 @@ fn rtk_output_in_dir(dir: &std::path::Path, args: &[&str]) -> (String, String, O
     )
 }
 
+fn rtk_input_in_dir(
+    dir: &std::path::Path,
+    args: &[&str],
+    input: &str,
+) -> (String, String, Option<i32>) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .env("LC_ALL", "C")
+        .args(args)
+        .current_dir(dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rtk");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(input.as_bytes())
+        .expect("write stdin");
+    let out = child.wait_with_output().expect("wait rtk");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code(),
+    )
+}
+
 fn rtk_in_dir(dir: &std::path::Path, args: &[&str]) -> (String, Option<i32>) {
     let (stdout, _, code) = rtk_output_in_dir(dir, args);
     (stdout, code)
@@ -115,6 +143,21 @@ fn git_in_dir(dir: &std::path::Path, args: &[&str]) {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+fn git_stdout(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("spawn git");
+    assert!(
+        out.status.success(),
+        "git command failed: {args:?}\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
 fn read_text_normalized(path: &std::path::Path) -> String {
@@ -210,6 +253,44 @@ fn git_log_dash_p_pathspec_after_double_dash_is_not_patch_flag() {
         stdout.contains("add dash-p file"),
         "expected the commit touching the -p pathspec: {stdout:?}"
     );
+}
+
+#[test]
+fn git_log_stdin_is_forwarded_to_filtered_and_raw_paths() {
+    let dir = init_git_repo();
+    std::fs::write(dir.path().join("needle.txt"), "needle\n").expect("write needle");
+    git_in_dir(dir.path(), &["add", "needle.txt"]);
+    git_in_dir(dir.path(), &["commit", "-q", "-m", "needle commit"]);
+    let selected = git_stdout(dir.path(), &["rev-parse", "HEAD"]);
+
+    std::fs::write(dir.path().join("filler.txt"), "filler\n").expect("write filler");
+    git_in_dir(dir.path(), &["add", "filler.txt"]);
+    git_in_dir(dir.path(), &["commit", "-q", "-m", "filler commit"]);
+
+    let (filtered, filtered_stderr, filtered_code) = rtk_input_in_dir(
+        dir.path(),
+        &["git", "log", "--stdin", "--no-walk", "--oneline"],
+        &format!("{selected}\n"),
+    );
+    assert_eq!(filtered_code, Some(0), "filtered stderr: {filtered_stderr}");
+    assert!(
+        filtered.contains("needle commit"),
+        "filtered output: {filtered:?}"
+    );
+    assert!(
+        !filtered.contains("filler commit"),
+        "filtered output: {filtered:?}"
+    );
+
+    let (raw, raw_stderr, raw_code) = rtk_input_in_dir(
+        dir.path(),
+        &["git", "log", "--stdin", "--no-walk", "-p"],
+        &format!("{selected}\n"),
+    );
+    assert_eq!(raw_code, Some(0), "raw stderr: {raw_stderr}");
+    assert!(raw.contains("needle commit"), "raw output: {raw:?}");
+    assert!(raw.contains("needle.txt"), "raw output: {raw:?}");
+    assert!(!raw.contains("filler commit"), "raw output: {raw:?}");
 }
 
 #[test]
