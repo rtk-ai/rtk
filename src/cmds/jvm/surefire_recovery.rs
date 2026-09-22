@@ -10,14 +10,38 @@
 //! failures against the filtered text. Failures the text already mentions are
 //! left alone; only the ones stdout missed are appended, in `[ERROR]`-prefixed
 //! native style. When stdout already tells the whole story — the common case —
-//! nothing is appended and the filtered output stays byte-identical. Reports
-//! older than the run's start are ignored (`parse_dir` mtime gate), so files
-//! left by a previous run never leak in.
+//! nothing is appended and the filtered output stays byte-identical.
+//!
+//! Only this run's reports are read: the mtime must fall between the run's
+//! start and the child's exit (`parse_dir` window), and when stdout announced
+//! its test classes (`[INFO] Running <class>`) only those suites count — so
+//! neither a previous run's files nor a concurrent build's (`-pl other-module`
+//! from an IDE or a second agent) leak in. Under `-q` there are no `Running`
+//! lines and the time window is the only gate.
+//!
+//! When the stdout filter capped its failure list (`… +N more failures`), the
+//! elided failures are absent from the text by design, not lost; the pass
+//! stays out of the way rather than re-render them as "missing".
 
 use crate::cmds::jvm::surefire_reports::{self, FailureKind, SurefireResult, TestFailure};
 use crate::core::truncate::CAP_WARNINGS;
+use crate::core::utils::strip_ansi;
+use regex::Regex;
+use std::collections::HashSet;
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::SystemTime;
+
+/// The stdout filter's own cap tails (`mvn_cmd.rs`): the failures past
+/// `MAX_MVN_FAILING_CLASSES` were seen and elided, not lost.
+static CAP_TAIL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^… \+\d+ more (?:failures|failing test classes)$").unwrap());
+
+/// `[INFO] Running com.example.FooTest`, optionally behind mvnd's
+/// `[module]`-style tags. Surefire prints `"Running " + class.getName()`.
+static RUNNING_CLASS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^(?:\[[^\]\n]*\] )*\[INFO\] Running ([\w.$]+)\s*$").unwrap());
 
 /// Cap on appended failure blocks — the same test-failure cap class as
 /// `MAX_MVN_FAILING_CLASSES` in `mvn_cmd.rs`.
@@ -44,11 +68,25 @@ fn report_dirs(cwd: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Parse and merge every report dir. `None` when no fresh report was found.
-fn collect(cwd: &Path, since: SystemTime) -> Option<SurefireResult> {
+/// Test classes this build announced on stdout. `None` when it announced
+/// none (`-q`, or no test phase reached), so the caller cannot scope by class.
+fn announced_suites(raw: &str) -> Option<HashSet<String>> {
+    let suites: HashSet<String> = RUNNING_CLASS
+        .captures_iter(&strip_ansi(raw))
+        .map(|c| c[1].to_string())
+        .collect();
+    (!suites.is_empty()).then_some(suites)
+}
+
+/// Parse and merge every report dir. `None` when no in-scope report was found.
+fn collect(
+    dirs: &[PathBuf],
+    window: &RangeInclusive<SystemTime>,
+    suites: Option<&HashSet<String>>,
+) -> Option<SurefireResult> {
     let mut merged: Option<SurefireResult> = None;
-    for dir in report_dirs(cwd) {
-        if let Some(parsed) = surefire_reports::parse_dir(&dir, since) {
+    for dir in dirs {
+        if let Some(parsed) = surefire_reports::parse_dir(dir, window, suites) {
             merged
                 .get_or_insert_with(SurefireResult::default)
                 .merge(parsed);
@@ -60,15 +98,32 @@ fn collect(cwd: &Path, since: SystemTime) -> Option<SurefireResult> {
 /// A failure counts as already visible when the text mentions its
 /// `Class.method`, either fully qualified (per-test lines:
 /// `[ERROR] com.example.FooTest.bar -- Time elapsed …`) or by short class
-/// name (failures summary: `[ERROR]   FooTest.bar:42 …`).
+/// name (failures summary: `[ERROR]   FooTest.bar:42 …`). Either form must
+/// stand as a whole name — see [`mentions_name`].
 fn text_mentions(text: &str, f: &TestFailure) -> bool {
     if f.test_class.is_empty() || f.test_method.is_empty() {
         // Malformed entry — never treat it as missing.
         return true;
     }
     let short = f.test_class.rsplit('.').next().unwrap_or(&f.test_class);
-    text.contains(&format!("{}.{}", f.test_class, f.test_method))
-        || text.contains(&format!("{}.{}", short, f.test_method))
+    mentions_name(text, &format!("{}.{}", f.test_class, f.test_method))
+        || mentions_name(text, &format!("{}.{}", short, f.test_method))
+}
+
+fn is_ident(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
+}
+
+/// `name` occurs in `text` as a whole name: no identifier character right
+/// after it (`bar` must not match `barAll`), and neither an identifier
+/// character nor a package dot right before it (`FooTest.bar` must not match
+/// `com.b.FooTest.bar` when checking a short name, nor `XFooTest.bar`).
+fn mentions_name(text: &str, name: &str) -> bool {
+    text.match_indices(name).any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + name.len()..].chars().next();
+        !before.is_some_and(|c| is_ident(c) || c == '.') && !after.is_some_and(is_ident)
+    })
 }
 
 fn push_prefixed(out: &mut String, text: &str) {
@@ -115,15 +170,26 @@ fn render(missing: &[&TestFailure]) -> String {
     out
 }
 
-/// Compare fresh XML reports against the filtered stdout and return the text
-/// with the failures stdout missed appended. `None` when there is nothing to
-/// add: no fresh reports, no failures, or every failure already visible.
+/// Compare this run's XML reports against the filtered stdout and return the
+/// text with the failures stdout missed appended. `raw` is the unfiltered
+/// stdout (for the announced test classes); `window` spans the run's start to
+/// the child's exit. `None` when there is nothing to add: no in-scope
+/// reports, no failures, every failure already visible, or the filter capped
+/// its failure list itself.
 pub(crate) fn recover_missing_failures(
     filtered: &str,
+    raw: &str,
     cwd: &Path,
-    since: SystemTime,
+    window: &RangeInclusive<SystemTime>,
 ) -> Option<String> {
-    let reports = collect(cwd, since)?;
+    if CAP_TAIL.is_match(filtered) {
+        return None;
+    }
+    let dirs = report_dirs(cwd);
+    if dirs.is_empty() {
+        return None;
+    }
+    let reports = collect(&dirs, window, announced_suites(raw).as_ref())?;
     let missing: Vec<&TestFailure> = reports
         .failures
         .iter()
@@ -171,8 +237,13 @@ mod tests {
         tmp
     }
 
+    fn any_time() -> RangeInclusive<SystemTime> {
+        SystemTime::UNIX_EPOCH..=SystemTime::now() + std::time::Duration::from_secs(3600)
+    }
+
+    /// Recover with `text` as both filtered and raw stdout.
     fn recover(text: &str, cwd: &Path) -> Option<String> {
-        recover_missing_failures(text, cwd, SystemTime::UNIX_EPOCH)
+        recover_missing_failures(text, text, cwd, &any_time())
     }
 
     #[test]
@@ -265,12 +336,81 @@ mod tests {
     #[test]
     fn stale_reports_are_ignored() {
         let tmp = project_with_reports(&["TEST-com.example.FailingTest.xml"]);
-        // `since` in the future -> every report is stale.
+        // Window in the future -> every report is stale.
         let future = SystemTime::now() + std::time::Duration::from_secs(3600);
+        let text = "[INFO] BUILD FAILURE\n";
         assert_eq!(
-            recover_missing_failures("[INFO] BUILD FAILURE\n", tmp.path(), future),
+            recover_missing_failures(text, text, tmp.path(), &(future..=future)),
             None
         );
+    }
+
+    #[test]
+    fn capped_failure_list_is_not_recovered() {
+        let tmp = project_with_reports(&["TEST-com.example.FailingTest.xml"]);
+        // The stdout filter elided FailingTest past its own class cap.
+        let text = "[ERROR] com.example.OtherTest.m -- Time elapsed: 0.1 s <<< FAILURE!\n\
+                    \n\
+                    … +1 more failing test classes\n\
+                    [INFO] BUILD FAILURE\n";
+        assert_eq!(recover(text, tmp.path()), None);
+    }
+
+    #[test]
+    fn longer_method_name_does_not_cover_its_prefix() {
+        let tmp = project_with_reports(&["TEST-com.example.FailingTest.xml"]);
+        let text = "[ERROR]   FailingTest.shouldReturnUserById:42 expected:<1> but was:<2>\n\
+                    [ERROR]   FailingTest.shouldHandleNull:55 Unexpected exception\n\
+                    [ERROR] Tests run: 7, Failures: 2, Errors: 0, Skipped: 0\n";
+        let out = recover(text, tmp.path()).expect("appended");
+        assert!(
+            out.contains("[ERROR]   com.example.FailingTest.shouldReturnUser <<< FAILURE!"),
+            "{out}"
+        );
+        assert!(out.contains("[ERROR] 1 test failure(s) found"), "{out}");
+    }
+
+    #[test]
+    fn same_short_name_in_another_package_does_not_cover() {
+        let tmp = project_with_reports(&["TEST-com.example.FailingTest.xml"]);
+        let text = "[ERROR] com.other.FailingTest.shouldReturnUser -- Time elapsed: 0.1 s <<< FAILURE!\n\
+                    [ERROR] com.other.FailingTest.shouldHandleNull -- Time elapsed: 0.1 s <<< FAILURE!\n\
+                    [ERROR] Tests run: 7, Failures: 2, Errors: 0, Skipped: 0\n";
+        let out = recover(text, tmp.path()).expect("appended");
+        assert!(out.contains("[ERROR] 2 test failure(s) found"), "{out}");
+    }
+
+    #[test]
+    fn parameterized_suffix_still_counts_as_covered() {
+        let tmp = project_with_reports(&["TEST-com.example.FailingTest.xml"]);
+        let text = "[ERROR]   FailingTest.shouldReturnUser(String)[1]:42 boom\n\
+                    [ERROR]   FailingTest.shouldHandleNull:55 boom\n\
+                    [ERROR] Tests run: 7, Failures: 2, Errors: 0, Skipped: 0\n";
+        assert_eq!(recover(text, tmp.path()), None);
+    }
+
+    #[test]
+    fn reports_of_classes_this_build_did_not_run_are_ignored() {
+        let tmp = project_with_reports(&["TEST-com.example.FailingTest.xml"]);
+        // A concurrent `-pl other-module` build wrote FailingTest's report;
+        // this build only ran OtherTest.
+        let raw = "[INFO] Running com.example.OtherTest\n\
+                   [INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0\n\
+                   [INFO] BUILD SUCCESS\n";
+        assert_eq!(
+            recover_missing_failures(raw, raw, tmp.path(), &any_time()),
+            None
+        );
+    }
+
+    #[test]
+    fn announced_class_is_recovered_even_behind_ansi_and_mvnd_tags() {
+        let tmp = project_with_reports(&["TEST-com.example.FailingTest.xml"]);
+        let raw = "[service-a] \x1b[1;34m[INFO]\x1b[m Running com.example.FailingTest\n\
+                   The forked VM terminated without properly saying goodbye.\n";
+        let out = recover_missing_failures("[INFO] BUILD FAILURE\n", raw, tmp.path(), &any_time())
+            .expect("appended");
+        assert!(out.contains("[ERROR] 2 test failure(s) found"), "{out}");
     }
 
     #[test]

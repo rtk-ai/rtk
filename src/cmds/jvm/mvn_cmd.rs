@@ -1841,7 +1841,9 @@ fn run_with_recovery(
         &args.join(" "),
         move |raw: &str| {
             let filtered = filter(raw, daemon);
-            match surefire_recovery::recover_missing_failures(&filtered, &cwd, started_at) {
+            // The child has exited: nothing this run wrote is newer than now.
+            let window = started_at..=SystemTime::now();
+            match surefire_recovery::recover_missing_failures(&filtered, raw, &cwd, &window) {
                 Some(recovered) if estimate_tokens(&recovered) <= estimate_tokens(raw) => {
                     recovered
                 }

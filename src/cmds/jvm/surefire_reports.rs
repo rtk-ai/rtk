@@ -1,9 +1,13 @@
 //! Parses Maven Surefire/Failsafe XML test reports (`TEST-*.xml`) with the
-//! quick-xml streaming parser. `parse_dir` is mtime-gated so reports left
-//! behind by a previous run are never mistaken for this run's.
+//! quick-xml streaming parser. `parse_dir` is gated on the run's mtime window
+//! (and optionally on the suites the run announced), so reports left behind
+//! by a previous run, or written by a concurrent one, are not mistaken for
+//! this run's.
 
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use std::collections::HashSet;
+use std::ops::RangeInclusive;
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -177,10 +181,16 @@ pub(crate) fn parse_content(xml: &str) -> Option<SurefireResult> {
     saw_testsuite.then_some(result)
 }
 
-/// Parse every `TEST-*.xml` in `dir` modified at or after `since` and merge
-/// the results. Stale files are skipped silently; unreadable or malformed
-/// ones are reported on stderr and skipped. `None` when nothing was parsed.
-pub(crate) fn parse_dir(dir: &Path, since: SystemTime) -> Option<SurefireResult> {
+/// Parse every `TEST-*.xml` in `dir` whose mtime falls inside `window` and
+/// whose suite (the `TEST-<suite>.xml` file stem) is in `suites`, when given,
+/// and merge the results. Files outside the window or scope are skipped
+/// silently; unreadable or malformed ones are reported on stderr and skipped.
+/// `None` when nothing was parsed.
+pub(crate) fn parse_dir(
+    dir: &Path,
+    window: &RangeInclusive<SystemTime>,
+    suites: Option<&HashSet<String>>,
+) -> Option<SurefireResult> {
     let mut paths: Vec<_> = std::fs::read_dir(dir)
         .ok()?
         .flatten()
@@ -188,7 +198,8 @@ pub(crate) fn parse_dir(dir: &Path, since: SystemTime) -> Option<SurefireResult>
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("TEST-") && n.ends_with(".xml"))
+                .and_then(|n| n.strip_prefix("TEST-")?.strip_suffix(".xml"))
+                .is_some_and(|suite| suites.is_none_or(|s| s.contains(suite)))
         })
         .collect();
     paths.sort();
@@ -198,7 +209,7 @@ pub(crate) fn parse_dir(dir: &Path, since: SystemTime) -> Option<SurefireResult>
         let fresh = path
             .metadata()
             .and_then(|m| m.modified())
-            .is_ok_and(|m| m >= since);
+            .is_ok_and(|m| window.contains(&m));
         if !fresh {
             continue;
         }
@@ -231,6 +242,14 @@ mod tests {
         std::fs::read_to_string(Path::new(FIXTURES).join(name)).expect("read fixture")
     }
 
+    fn far_future() -> SystemTime {
+        SystemTime::now() + Duration::from_secs(24 * 60 * 60)
+    }
+
+    fn any_time() -> RangeInclusive<SystemTime> {
+        SystemTime::UNIX_EPOCH..=far_future()
+    }
+
     fn copy_fixture(tmp: &tempfile::TempDir, name: &str, mtime: Option<SystemTime>) {
         let dst = tmp.path().join(name);
         std::fs::copy(Path::new(FIXTURES).join(name), &dst).expect("copy fixture");
@@ -247,7 +266,7 @@ mod tests {
     #[test]
     fn parse_dir_missing_returns_none() {
         let dir = Path::new("/definitely/does/not/exist/rtk-test");
-        assert!(parse_dir(dir, SystemTime::UNIX_EPOCH).is_none());
+        assert!(parse_dir(dir, &any_time(), None).is_none());
     }
 
     #[test]
@@ -257,7 +276,7 @@ mod tests {
         copy_fixture(&tmp, "TEST-com.example.FailingTest.xml", None);
         copy_fixture(&tmp, "TEST-com.example.SkippedTest.xml", None);
 
-        let result = parse_dir(tmp.path(), SystemTime::UNIX_EPOCH).expect("parses");
+        let result = parse_dir(tmp.path(), &any_time(), None).expect("parses");
         assert_eq!(result.summary.run, 3 + 4 + 2);
         assert_eq!(result.summary.failures, 2);
         assert_eq!(result.summary.skipped, 1);
@@ -273,9 +292,43 @@ mod tests {
         copy_fixture(&tmp, "TEST-com.example.PassingTest.xml", Some(stale));
         copy_fixture(&tmp, "TEST-com.example.FailingTest.xml", Some(fresh));
 
-        let result = parse_dir(tmp.path(), now).expect("parses");
+        let result = parse_dir(tmp.path(), &(now..=far_future()), None).expect("parses");
         assert_eq!(result.summary.run, 4, "only the fresh FailingTest counts");
         assert_eq!(result.summary.failures, 2);
+    }
+
+    #[test]
+    fn parse_dir_time_gate_skips_files_written_after_the_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let end = SystemTime::now();
+        let start = end - Duration::from_secs(60);
+        copy_fixture(
+            &tmp,
+            "TEST-com.example.PassingTest.xml",
+            Some(end - Duration::from_secs(1)),
+        );
+        // A concurrent build wrote this one after our process exited.
+        copy_fixture(
+            &tmp,
+            "TEST-com.example.FailingTest.xml",
+            Some(end + Duration::from_secs(5)),
+        );
+
+        let result = parse_dir(tmp.path(), &(start..=end), None).expect("parses");
+        assert_eq!(result.summary.failures, 0, "late report ignored");
+        assert!(result.failures.is_empty());
+    }
+
+    #[test]
+    fn parse_dir_suite_scope_skips_unannounced_suites() {
+        let tmp = tempfile::tempdir().unwrap();
+        copy_fixture(&tmp, "TEST-com.example.PassingTest.xml", None);
+        copy_fixture(&tmp, "TEST-com.example.FailingTest.xml", None);
+        let scope = HashSet::from(["com.example.PassingTest".to_string()]);
+
+        let result = parse_dir(tmp.path(), &any_time(), Some(&scope)).expect("parses");
+        assert_eq!(result.summary.failures, 0, "FailingTest was not in scope");
+        assert!(result.failures.is_empty());
     }
 
     #[test]
@@ -284,7 +337,7 @@ mod tests {
         let now = SystemTime::now();
         let stale = now - Duration::from_secs(60 * 60);
         copy_fixture(&tmp, "TEST-com.example.FailingTest.xml", Some(stale));
-        assert!(parse_dir(tmp.path(), now).is_none());
+        assert!(parse_dir(tmp.path(), &(now..=far_future()), None).is_none());
     }
 
     #[test]
@@ -297,7 +350,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = parse_dir(tmp.path(), SystemTime::UNIX_EPOCH).expect("parses");
+        let result = parse_dir(tmp.path(), &any_time(), None).expect("parses");
         assert_eq!(result.summary.run, 3, "PassingTest only");
         assert!(result.failures.is_empty());
     }
