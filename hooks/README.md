@@ -46,7 +46,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`cline/`](cline/README.md)** — Rules file (prompt-level), `.clinerules` project-local installation
 - **[`windsurf/`](windsurf/README.md)** — Rules file (prompt-level), `.windsurfrules` workspace-scoped
 - **[`codex/`](codex/README.md)** — Rust binary hook (`rtk hook codex`), `PreToolUse.updatedInput`, `.codex/hooks.json` / `$CODEX_HOME/hooks.json`, plus `AGENTS.md` awareness
-- **[`opencode/`](opencode/README.md)** — TypeScript plugin, `zx` library, `tool.execute.before` event, in-place mutation
+- **[`opencode/`](opencode/README.md)** — TypeScript plugins, one per OpenCode plugin API (V1 `tool.execute.before` via OpenCode's injected Bun shell, V2 `Plugin.define`/`execute.before` via `node:child_process`), in-place mutation; installer picks by detected OpenCode major version
 - **[`pi/`](pi/README.md)** — TypeScript extension, `tool_call` event, local `isBashToolCallEvent` guard, in-place mutation, `~/.pi/agent/extensions/`; **shared with Oh My Pi (OMP)** — OMP installs the same file at `.omp/extensions/` via its `legacy-pi-compat` layer
 - **[`hermes/`](hermes/README.md)** — Python plugin, `pre_tool_call` hook, in-place terminal command mutation
 - **[`vibe/`](vibe/README.md)** — Rust binary hook (`rtk hook vibe`), `pre_tool` entry in `~/.vibe/hooks.toml`, `hook_specific_output.tool_input` rewrite plus `system_message` for UI visibility
@@ -250,7 +250,10 @@ The `allow` value is required by Codex to accept `updatedInput`; Codex still run
 
 ### OpenCode (TypeScript Plugin)
 
-Mutates `args.command` in-place via the zx library:
+Two payloads, selected by detected OpenCode major version:
+
+**V1** — named `Plugin` export returning a hook map, uses the Bun shell
+injected by OpenCode's plugin context, mutates `args.command` in-place:
 
 ```typescript
 const result = await $`rtk rewrite ${command}`.quiet().nothrow()
@@ -258,6 +261,17 @@ const rewritten = String(result.stdout).trim()
 if (rewritten && rewritten !== command) {
   (args as Record<string, unknown>).command = rewritten
 }
+```
+
+**V2** — `export default Plugin.define({ id, setup })`, `ctx.tool.hook`
+registration, `node:child_process`, mutates `args.command` in-place:
+
+```typescript
+await ctx.tool.hook("execute.before", async (event) => {
+  const args = event.input as Record<string, unknown>
+  const rewritten = await rtkRewrite(String(args.command))
+  if (rewritten) args.command = rewritten
+})
 ```
 
 ### Hermes (Python Plugin)

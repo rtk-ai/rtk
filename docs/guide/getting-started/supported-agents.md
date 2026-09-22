@@ -130,7 +130,10 @@ rtk init --global --gemini
 rtk init --global --opencode
 ```
 
-Creates `~/.config/opencode/plugins/rtk.ts`. Uses the `tool.execute.before` hook.
+Creates `~/.config/opencode/plugins/rtk.ts`, using the plugin API that matches the
+detected OpenCode major version:
+- `tool.execute.before` (V1)
+- `Plugin.define`/`ctx.tool.hook("execute.before")` (V2).
 
 ### Pi
 
