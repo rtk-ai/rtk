@@ -185,7 +185,10 @@ impl FilterStrategy for MinimalFilter {
 
             // Handle Python docstrings (keep them in minimal mode)
             if *lang == Language::Python && trimmed.starts_with("\"\"\"") {
-                in_docstring = !in_docstring;
+                // Only enter docstring mode if it does not also close on this line.
+                if in_docstring || !trimmed[3..].contains("\"\"\"") {
+                    in_docstring = !in_docstring;
+                }
                 result.push_str(line);
                 result.push('\n');
                 continue;
@@ -471,6 +474,40 @@ fn main() {
         let result = filter.filter(code, &Language::Rust);
         assert!(!result.contains("// This is a comment"));
         assert!(result.contains("fn main()"));
+    }
+
+    #[test]
+    fn test_minimal_python_single_line_docstrings() {
+        for docstring in [
+            "\"\"\"Short docstring.\"\"\"",
+            "\"\"\"\"\"\"",
+            "\"\"\"Unicode snowman: ☃.\"\"\"",
+            "\"\"\"Short docstring.\"\"\"  # inline comment",
+        ] {
+            let input = format!(
+                "def foo():\n    {docstring}\n    # remove this\n    x = 1\n    # remove this too\n    return x\n"
+            );
+            assert_eq!(
+                MinimalFilter.filter(&input, &Language::Python),
+                format!("def foo():\n    {docstring}\n    x = 1\n    return x"),
+                "docstring: {docstring}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_minimal_python_multiline_docstrings() {
+        for opening in ["\"\"\"", "\"\"\"Summary."] {
+            let input = format!(
+                "def foo():\n    {opening}\n    # keep this docstring content\n    \"\"\"\n    # remove this\n    return 1\n"
+            );
+            assert_eq!(
+                MinimalFilter.filter(&input, &Language::Python),
+                format!(
+                    "def foo():\n    {opening}\n    # keep this docstring content\n    \"\"\"\n    return 1"
+                )
+            );
+        }
     }
 
     // --- truncation accuracy ---
