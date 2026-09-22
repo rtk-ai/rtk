@@ -69,10 +69,10 @@ pub(crate) fn track_tee_read(cmd: &str) {
 ///
 /// | Exit | Stdout   | Meaning                                                      |
 /// |------|----------|--------------------------------------------------------------|
-/// | 0    | rewritten| Rewrite allowed — hook may auto-allow the rewritten command. |
+/// | 0    | rewritten| Allow rule matched — hook may auto-allow the rewritten command. |
 /// | 1    | (none)   | No RTK equivalent — hook passes through unchanged.           |
 /// | 2    | (none)   | Deny rule matched — hook defers to Claude Code native deny.  |
-/// | 3    | rewritten| Ask rule matched — hook rewrites but lets Claude Code prompt.|
+/// | 3    | rewritten| Ask rule matched, or no rule matched (the default, #1155) — hook rewrites but lets Claude Code prompt.|
 ///
 /// The decision itself is [`decision::decide`], shared with the in-process
 /// `rtk hook <agent>` path; this function is only its exit-code rendering.
