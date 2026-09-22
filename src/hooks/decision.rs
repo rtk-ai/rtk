@@ -6,16 +6,20 @@
 //! | Entry point | Verdict source | Identity rewrite |
 //! |---|---|---|
 //! | `rtk hook <agent>` (`hook_cmd`) | `check_command_for(cmd, host)` | suppressed |
-//! | `rtk rewrite` (`rewrite_cmd`, run as a subprocess by the shell/TS/Python delegates) | `check_command` (always `Host::Claude`) | reported |
+//! | `rtk rewrite` (`rewrite_cmd`, run as a subprocess by the shell/TS/Python delegates) | Claude Code's loaded rules | reported |
 //! | `rtk hook check` (`main.rs`) | whatever the named `--agent` consults, via [`AgentPath`] | suppressed |
 //!
 //! [`decide`] is the shared answer. What legitimately differs between callers
 //! stays outside it: the verdict is passed in rather than looked up, so each
 //! host consults its own permission rules and tests stay independent of the
 //! machine's settings (#3146); and the no-op-rewrite policy lives in
-//! [`decide_for_agent`], which every hook shares and the CLI does not.
+//! [`decide_for_agent`], which every hook shares and the CLI does not. The
+//! rule-aware entry point below also rechecks an already-prefixed `rtk …`
+//! command after unwrapping it, so an `rtk:*` allow cannot hide a stricter
+//! permission on the command that actually executes (#3970).
 
-use super::permissions::{Host, PermissionVerdict, check_command_for};
+use super::permissions::{Host, PermissionVerdict, check_command_with_rules, load_rules_for};
+use crate::discover::lexer::{shell_split, split_for_permissions};
 use crate::discover::registry::rewrite_command;
 
 /// What a hook should do with a command.
@@ -103,6 +107,145 @@ pub(crate) fn decide_with_params(
 /// through here so they cannot drift apart.
 pub(crate) fn decide_for_agent(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
     suppress_identity(cmd, decide(cmd, verdict))
+}
+
+/// Decide with an already-loaded host rule set and account for commands that
+/// are manually prefixed with `rtk`.
+///
+/// The returned verdict is the one for the command that must be handed to the
+/// host.  A stricter inner verdict is represented as an `AskRewrite` of the
+/// unwrapped command, so the host re-evaluates its own deny/ask/allow rules on
+/// the command that will actually execute.  The `suppress_identity` argument
+/// keeps the long-standing distinction between in-process hooks (which defer
+/// on an unchanged `rtk …` command) and the `rtk rewrite` CLI (which reports
+/// the identity result to its exit-code consumers).
+pub(crate) fn decide_with_permission_rules(
+    cmd: &str,
+    deny_rules: &[String],
+    ask_rules: &[String],
+    allow_rules: &[String],
+    suppress_identity: bool,
+) -> (HookDecision, PermissionVerdict) {
+    let raw_verdict = check_command_with_rules(cmd, deny_rules, ask_rules, allow_rules);
+
+    let (decision, effective_verdict) = if let Some(executed_cmd) =
+        command_executed_by_rtk_prefix(cmd)
+        && let executed_verdict =
+            check_command_with_rules(&executed_cmd, deny_rules, ask_rules, allow_rules)
+        && is_stricter_verdict(&executed_verdict, &raw_verdict)
+    {
+        // Do not auto-allow this command: returning the unwrapped spelling
+        // leaves the host's native permission flow in charge of the command
+        // that will really run.  This is also how an inner deny reaches the
+        // host even when `Bash(rtk:*)` is present in its allow list.
+        (HookDecision::AskRewrite(executed_cmd), executed_verdict)
+    } else {
+        let decision = if suppress_identity {
+            decide_for_agent(cmd, raw_verdict.clone())
+        } else {
+            decide(cmd, raw_verdict.clone())
+        };
+        (decision, raw_verdict)
+    };
+
+    (decision, effective_verdict)
+}
+
+/// Permission strictness, from least to most restrictive.
+///
+/// `Ask` and `Default` both leave approval to the host, so they intentionally
+/// share a rank.  Keeping the selected raw verdict distinct preserves the
+/// existing protocol output for equal-strength decisions.
+fn verdict_strictness(verdict: &PermissionVerdict) -> u8 {
+    match verdict {
+        PermissionVerdict::Allow => 0,
+        PermissionVerdict::Ask | PermissionVerdict::Default => 1,
+        PermissionVerdict::Deny => 2,
+    }
+}
+
+fn is_stricter_verdict(candidate: &PermissionVerdict, current: &PermissionVerdict) -> bool {
+    verdict_strictness(candidate) > verdict_strictness(current)
+}
+
+/// Return the command a model-authored `rtk` prefix ultimately executes.
+///
+/// This is intentionally limited to a leading, word-bounded `rtk` token in
+/// each permission segment.  Quoted text and command arguments containing the
+/// letters `rtk` are never altered.  The two RTK execution wrappers are
+/// unwrapped as well: `rtk proxy <cmd>` runs `<cmd>` directly, while `rtk run`
+/// invokes the positional command (or the `-c/--command` shell string).
+pub(crate) fn command_executed_by_rtk_prefix(cmd: &str) -> Option<String> {
+    let segments = split_for_permissions(cmd);
+    if segments.is_empty() {
+        return None;
+    }
+
+    let mut result = String::with_capacity(cmd.len());
+    let mut copied_until = 0;
+    let mut search_from = 0;
+    let mut changed = false;
+
+    for segment in segments {
+        let relative_start = cmd.get(search_from..)?.find(segment)?;
+        let start = search_from + relative_start;
+        result.push_str(&cmd[copied_until..start]);
+
+        if let Some(replacement) = unwrap_rtk_segment(segment) {
+            result.push_str(&replacement);
+            changed |= replacement != segment;
+        } else {
+            result.push_str(segment);
+        }
+
+        copied_until = start + segment.len();
+        search_from = copied_until;
+    }
+
+    result.push_str(&cmd[copied_until..]);
+    changed.then_some(result)
+}
+
+fn unwrap_rtk_segment(segment: &str) -> Option<String> {
+    let trimmed = segment.trim();
+    let rest = trimmed.strip_prefix("rtk")?;
+    if !rest.is_empty() && !rest.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+
+    let rest = rest.trim_start();
+    if rest.is_empty() {
+        return None;
+    }
+
+    if rest
+        .strip_prefix("proxy")
+        .and_then(strip_word_suffix)
+        .is_some()
+    {
+        let words = shell_split(rest);
+        return (words.len() > 1).then(|| words[1..].join(" "));
+    }
+
+    if let Some(run_args) = rest.strip_prefix("run").and_then(strip_word_suffix) {
+        let words = shell_split(rest);
+        if words
+            .get(1)
+            .is_some_and(|arg| arg == "-c" || arg == "--command")
+        {
+            return (words.len() > 2).then(|| words[2..].join(" "));
+        }
+        return (!run_args.is_empty()).then(|| run_args.to_string());
+    }
+
+    Some(rest.to_string())
+}
+
+fn strip_word_suffix(value: &str) -> Option<&str> {
+    if value.is_empty() || !value.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    Some(value.trim_start())
 }
 
 /// Turn a rewrite that changed nothing into a [`HookDecision::Defer`].
@@ -229,11 +372,12 @@ impl AgentPath {
     ];
 
     /// The verdict this agent's hook would judge `cmd` against.
+    #[cfg(test)]
     fn verdict(&self, cmd: &str) -> PermissionVerdict {
         match self {
-            Self::InProcess(host) => check_command_for(cmd, *host),
+            Self::InProcess(host) => super::permissions::check_command_for(cmd, *host),
             // `rtk rewrite` always reads Claude Code's rules.
-            Self::ViaRewrite => check_command_for(cmd, Host::Claude),
+            Self::ViaRewrite => super::permissions::check_command_for(cmd, Host::Claude),
             // No hook, so no rules to consult.
             Self::RulesOnly => PermissionVerdict::Default,
         }
@@ -242,7 +386,12 @@ impl AgentPath {
     /// What this agent's hook would do with `cmd` — the same answer it gives at
     /// runtime, including discarding a rewrite that changed nothing.
     pub(crate) fn decide(&self, cmd: &str) -> HookDecision {
-        decide_for_agent(cmd, self.verdict(cmd))
+        let (deny_rules, ask_rules, allow_rules) = match self {
+            Self::InProcess(host) => load_rules_for(*host),
+            Self::ViaRewrite => load_rules_for(Host::Claude),
+            Self::RulesOnly => (Vec::new(), Vec::new(), Vec::new()),
+        };
+        decide_with_permission_rules(cmd, &deny_rules, &ask_rules, &allow_rules, true).0
     }
 }
 
@@ -416,7 +565,7 @@ mod tests {
             Some(AgentPath::InProcess(Host::Codex))
         ));
         assert_eq!(
-            check_command_for("git status", Host::Codex),
+            super::super::permissions::check_command_for("git status", Host::Codex),
             PermissionVerdict::Default
         );
         let (deny, ask, allow) = super::super::permissions::load_rules_for(Host::Codex);

@@ -76,6 +76,13 @@ Deny > Ask > Allow (explicit) > Default (ask)
 
 Rules are loaded from all Claude Code `settings.json` files (project + global, including `.local` variants). Only `Bash(...)` rules are extracted; other scopes (Read, Write) are ignored.
 
+When a model sends an already-prefixed command such as `rtk rm file`, RTK also
+checks the unwrapped command that its fallback path will execute. If that inner
+verdict is stricter, the hook returns the unwrapped command without an RTK
+auto-allow field, leaving the host's native permission rules in charge. This
+prevents an allow rule such as `Bash(rtk:*)` from bypassing a deny or prompt for
+`rm` (see [#3970](https://github.com/rtk-ai/rtk/issues/3970)).
+
 | Verdict | Trigger | rewrite_cmd exit | Hook behavior |
 |---------|---------|-----------------|---------------|
 | Deny | `permissions.deny` rule matched | 2 | Passthrough — host tool handles denial |

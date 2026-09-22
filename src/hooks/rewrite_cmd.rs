@@ -1,7 +1,7 @@
 //! Translates a raw shell command into its RTK-optimized equivalent.
 
 use super::decision::{self, HookDecision};
-use super::permissions::check_command;
+use super::permissions::{self, Host, PermissionVerdict};
 use std::io::Write;
 
 const TEE_READERS: &[&str] = &[
@@ -74,16 +74,22 @@ pub(crate) fn track_tee_read(cmd: &str) {
 /// | 2    | (none)   | Deny rule matched — hook defers to Claude Code native deny.  |
 /// | 3    | rewritten| Ask rule matched — hook rewrites but lets Claude Code prompt.|
 ///
-/// The decision itself is [`decision::decide`], shared with the in-process
-/// `rtk hook <agent>` path; this function is only its exit-code rendering.
+/// The decision itself is [`decision::decide_with_permission_rules`], shared
+/// with the in-process `rtk hook <agent>` path; this function is only its
+/// exit-code rendering.  That shared path rechecks an already-prefixed
+/// command after unwrapping it so a host allow rule for `rtk:*` cannot bypass
+/// a stricter rule for the command RTK will execute.
 pub fn run(cmd: &str) -> anyhow::Result<()> {
     // `rtk rewrite` is a subprocess entry point with no way to be told which
     // host is asking, so every delegate that shells out to it -- hermes, omp,
     // opencode, openclaw, pi -- is judged against `~/.claude`'s rules. The
     // in-process `rtk hook <agent>` path is host-parameterized instead
     // (`permissions::Host`).
-    let decided = decision::decide(cmd, check_command(cmd));
-    if !matches!(decided, HookDecision::Deny) {
+    let (decided, effective_verdict) = {
+        let (deny_rules, ask_rules, allow_rules) = permissions::load_rules_for(Host::Claude);
+        decision::decide_with_permission_rules(cmd, &deny_rules, &ask_rules, &allow_rules, false)
+    };
+    if effective_verdict != PermissionVerdict::Deny {
         track_tee_read(cmd);
     }
     match decided {
