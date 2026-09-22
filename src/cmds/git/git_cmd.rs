@@ -1568,10 +1568,27 @@ fn raw_log_passthrough_args(args: &[String], capped: bool) -> Vec<OsString> {
     out
 }
 
-/// True when RTK's default limit applies: the user named no limit of their own and did not
-/// bound the walk with a revision range.
+/// True when RTK's default limit applies: the user named no limit of their own, did not
+/// bound the walk with a revision range, and did not request reverse order.
+///
+/// Git applies `-N` while walking before pickaxe/path filters.  With `--reverse`, that means
+/// `git log -10 --reverse -S needle` can inspect only the newest ten commits, reverse them, and
+/// then find no matching commit at all.  Raw-shape output cannot be safely capped after the fact
+/// without changing the user's patch/stat format, so reverse walks are passed through in full;
+/// this preserves native Git's selected history instead of silently dropping it.
 fn raw_log_is_capped(tokens: &[Token<'_>]) -> bool {
-    !has_limit_flag(tokens) && !bounds_the_walk(tokens)
+    !has_limit_flag(tokens) && !bounds_the_walk(tokens) && !has_reverse_flag(tokens)
+}
+
+/// Whether the last reverse-order flag enables reverse traversal. Git accepts both
+/// `--reverse` and `--no-reverse`, so honor the same last-flag-wins behavior as the command.
+fn has_reverse_flag(tokens: &[Token<'_>]) -> bool {
+    tokens
+        .iter()
+        .rfind(|token| {
+            token.kind == TokenKind::Long && matches!(token.text, "reverse" | "no-reverse")
+        })
+        .is_some_and(|token| token.text == "reverse")
 }
 
 /// Whether the walk holds more commits than RTK's default limit shows -- the question the
@@ -5785,6 +5802,15 @@ A  added.rs
             ["log", "-10", "--stat", "--", "src/main.rs"]
         );
 
+        // `--reverse` must not receive `-10`: Git applies that limit to the walk before
+        // pickaxe/path selection, which can make an older matching commit disappear entirely.
+        assert_eq!(built(&["-p", "--reverse"]), ["log", "-p", "--reverse"]);
+        // An explicit opt-out restores the normal cap when it is the last reverse flag.
+        assert_eq!(
+            built(&["-p", "--reverse", "--no-reverse"]),
+            ["log", "-10", "-p", "--reverse", "--no-reverse"]
+        );
+
         // A limit the user set is left alone, in every spelling has_limit_flag knows.
         for limit in [&["-5"][..], &["-n", "5"][..], &["--max-count=5"][..]] {
             let args: Vec<&str> = std::iter::once("-p").chain(limit.iter().copied()).collect();
@@ -5862,6 +5888,19 @@ A  added.rs
         assert!(built(&["-p", "./a..b"]));
         // And an explicit limit still wins over both.
         assert!(!built(&["-p", "-5"]));
+    }
+
+    #[test]
+    fn test_reverse_flag_detection_uses_last_flag() {
+        let flags = |args: &[&str]| {
+            let owned: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
+            has_reverse_flag(&tokenize_git_log_args(&owned))
+        };
+        assert!(flags(&["--reverse"]));
+        assert!(!flags(&["--reverse", "--no-reverse"]));
+        assert!(flags(&["--no-reverse", "--reverse"]));
+        // A pathspec after `--` is positional, not a second reverse flag.
+        assert!(flags(&["--reverse", "--", "--no-reverse"]));
     }
 
     #[test]

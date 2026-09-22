@@ -74,6 +74,36 @@ fn repo_with(commits: usize) -> Repo {
     }
 }
 
+fn repo_with_old_pickaxe_match() -> Repo {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("repo");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&path).expect("mkdir repo");
+    std::fs::create_dir_all(&home).expect("mkdir home");
+    git_ok(&path, &home, &["init", "-q", "-b", "main"]);
+    std::fs::write(path.join("old.txt"), "hello NEEDLE_XYZ world\n").expect("write needle");
+    git_ok(&path, &home, &["add", "old.txt"]);
+    git_ok(
+        &path,
+        &home,
+        &["commit", "-qm", "commit 0: introduces the needle"],
+    );
+    for i in 1..=20 {
+        std::fs::write(path.join("filler.txt"), format!("line {i}\n")).expect("write filler");
+        git_ok(&path, &home, &["add", "filler.txt"]);
+        git_ok(
+            &path,
+            &home,
+            &["commit", "-qm", &format!("filler commit {i}")],
+        );
+    }
+    Repo {
+        _dir: dir,
+        path,
+        home,
+    }
+}
+
 /// Every output shape that once swallowed the notice.
 const CAPPED_SHAPES: &[&[&str]] = &[
     &["-p"],
@@ -166,6 +196,28 @@ fn a_walk_shorter_than_the_cap_says_nothing() {
     assert!(
         stderr.contains(NOTICE),
         "eleven commits, cap of ten: {stderr:?}"
+    );
+}
+
+#[test]
+fn reverse_pickaxe_does_not_drop_an_older_matching_commit() {
+    // With the old injected `-10`, Git walked only the newest ten commits before applying
+    // `-S`, so this older match produced an apparently successful empty response.
+    let repo = repo_with_old_pickaxe_match();
+    let out = rtk_log(
+        &repo.path,
+        &repo.home,
+        &["-p", "--reverse", "-S", "NEEDLE_XYZ"],
+    );
+    assert!(
+        out.status.success(),
+        "reverse pickaxe failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("NEEDLE_XYZ"),
+        "the oldest matching patch was lost; stdout was {stdout:?}"
     );
 }
 
