@@ -167,10 +167,13 @@ impl FilterStrategy for MinimalFilter {
         for line in content.lines() {
             let trimmed = line.trim();
 
-            // Handle block comments
+            // Block comments. This filter drops whole lines, so only a line that starts
+            // with the marker can be a comment line. A marker further in may sit inside a
+            // string ("src/*.rs") or follow code (`x = 1; /* ms */`), and dropping that
+            // line, or everything after it, silently loses code (#3425).
             if let (Some(start), Some(end)) = (patterns.block_start, patterns.block_end) {
                 if !in_docstring
-                    && trimmed.contains(start)
+                    && trimmed.starts_with(start)
                     && !trimmed.starts_with(patterns.doc_block_start.unwrap_or("###"))
                 {
                     in_block_comment = true;
@@ -185,6 +188,16 @@ impl FilterStrategy for MinimalFilter {
 
             // Handle Python docstrings (keep them in minimal mode)
             if *lang == Language::Python && trimmed.starts_with("\"\"\"") {
+                in_docstring = !in_docstring;
+                result.push_str(line);
+                result.push('\n');
+                continue;
+            }
+
+            // A triple-quoted string that opens or closes mid-line (`QUERY = """`) is
+            // content, not a comment: keep the line and track the string so its body and
+            // closing quotes stay, and comments after it are still stripped.
+            if *lang == Language::Python && trimmed.matches("\"\"\"").count() % 2 == 1 {
                 in_docstring = !in_docstring;
                 result.push_str(line);
                 result.push('\n');
@@ -456,6 +469,58 @@ mod tests {
         assert!(
             result.contains("/* not a comment */"),
             "Aggressive filter must not strip comment-like patterns in JSON"
+        );
+    }
+
+    // --- block comments: only whole-line comments may be dropped (#3425) ---
+
+    #[test]
+    fn test_minimal_block_marker_inside_string_keeps_code() {
+        let code = "fn main() {\n    let p = Glob::new(\"src/*.rs\");\n    delete_all_user_data();\n    println!(\"done\");\n}\n";
+        assert_eq!(
+            MinimalFilter.filter(code, &Language::Rust),
+            code.trim_end(),
+            "a glob containing /* must not open a comment that swallows the rest of the file"
+        );
+    }
+
+    #[test]
+    fn test_minimal_block_marker_inside_single_quoted_string_keeps_code() {
+        let code = "const files = glob.sync('src/**/*.ts');\nremoveAll(files);\n";
+        assert_eq!(
+            MinimalFilter.filter(code, &Language::TypeScript),
+            code.trim_end()
+        );
+    }
+
+    #[test]
+    fn test_minimal_trailing_block_comment_keeps_the_code_before_it() {
+        let code = "int x = 1; /* units: ms */\nint y = x * 2;\n";
+        assert_eq!(MinimalFilter.filter(code, &Language::C), code.trim_end());
+    }
+
+    #[test]
+    fn test_minimal_whole_line_block_comment_is_still_removed() {
+        let code = "/* license header\n * spanning lines\n */\nfn main() {}\n";
+        assert_eq!(MinimalFilter.filter(code, &Language::Rust), "fn main() {}");
+    }
+
+    #[test]
+    fn test_minimal_python_triple_quoted_assignment_keeps_its_opening_line() {
+        let code = "QUERY = \"\"\"\nSELECT * FROM users WHERE admin=1\n\"\"\"\nprint(QUERY)\n";
+        assert_eq!(
+            MinimalFilter.filter(code, &Language::Python),
+            code.trim_end(),
+            "dropping `QUERY = \"\"\"` turns the SQL into a bare statement"
+        );
+    }
+
+    #[test]
+    fn test_minimal_python_comment_after_triple_quoted_string_is_removed() {
+        let code = "X = \"\"\"\na\n\"\"\"\n# drop me\ndef f():\n    \"\"\"Doc\n    # docstring content\n    \"\"\"\n    return 1\n";
+        assert_eq!(
+            MinimalFilter.filter(code, &Language::Python),
+            "X = \"\"\"\na\n\"\"\"\ndef f():\n    \"\"\"Doc\n    # docstring content\n    \"\"\"\n    return 1"
         );
     }
 
