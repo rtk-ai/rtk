@@ -34,6 +34,8 @@ pub fn check_command(cmd: &str) -> PermissionVerdict {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Host {
     Claude,
+    Codex,
+    Trae,
     Cursor,
     Gemini,
     Droid,
@@ -57,7 +59,11 @@ pub(crate) fn load_rules_for(host: Host) -> (Vec<String>, Vec<String>, Vec<Strin
         Host::Cursor => load_cursor_rules(),
         Host::Gemini => load_gemini_rules(),
         Host::Droid => load_droid_rules(),
-        Host::Vibe => (Vec::new(), Vec::new(), Vec::new()),
+        // Hosts with no RTK-side rule source. Codex enforces its native
+        // execution rules after updatedInput. Do not interpret these hosts'
+        // rules as Claude Bash patterns or borrow another host's settings.
+        // No RTK-side match means Default, not an explicit Allow.
+        Host::Codex | Host::Trae | Host::Vibe => (Vec::new(), Vec::new(), Vec::new()),
     }
 }
 
@@ -177,10 +183,10 @@ fn append_bash_rules(rules_value: Option<&Value>, target: &mut Vec<String>) {
         return;
     };
     for rule in arr {
-        if let Some(s) = rule.as_str() {
-            if s.starts_with("Bash(") {
-                target.push(extract_bash_pattern(s).to_string());
-            }
+        if let Some(s) = rule.as_str()
+            && s.starts_with("Bash(")
+        {
+            target.push(extract_bash_pattern(s).to_string());
         }
     }
 }
@@ -278,12 +284,11 @@ fn gemini_settings() -> Option<Value> {
                     .and_then(Value::as_bool)
             })
             .unwrap_or(false);
-    if trusted {
-        if let Some(root) = find_project_root() {
-            if let Some(v) = read_json(&root.join(GEMINI_DIR).join(SETTINGS_JSON)) {
-                return Some(v);
-            }
-        }
+    if trusted
+        && let Some(root) = find_project_root()
+        && let Some(v) = read_json(&root.join(GEMINI_DIR).join(SETTINGS_JSON))
+    {
+        return Some(v);
     }
     global
 }
@@ -388,10 +393,10 @@ fn find_project_root() -> Option<PathBuf> {
 ///
 /// Returns the original string unchanged if it does not match the expected format.
 pub(crate) fn extract_bash_pattern(rule: &str) -> &str {
-    if let Some(inner) = rule.strip_prefix("Bash(") {
-        if let Some(pattern) = inner.strip_suffix(')') {
-            return pattern;
-        }
+    if let Some(inner) = rule.strip_prefix("Bash(")
+        && let Some(pattern) = inner.strip_suffix(')')
+    {
+        return pattern;
     }
     rule
 }

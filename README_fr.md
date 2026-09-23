@@ -72,6 +72,14 @@ Les nombres de tokens rapportes par RTK sont estimes avec `octets / 4` : RTK n'e
 brew install rtk
 ```
 
+### winget (Windows)
+
+La manière la plus simple d'installer sur Windows — une seule commande, aucune modification de PATH requise :
+
+```powershell
+winget install rtk-ai.rtk
+```
+
 ### Installation rapide (Linux/macOS)
 
 ```bash
@@ -96,11 +104,13 @@ rtk gain        # Doit afficher les statistiques d'economies
 ## Demarrage rapide
 
 ```bash
-# 1. Installer le hook pour Claude Code (recommande)
-rtk init --global
+# 1. Installer le hook pour l'outil d'IA correspondant
+rtk init --global               # Claude Code (par defaut)
 # Suivre les instructions pour enregistrer dans ~/.claude/settings.json
+rtk init --agent trae           # Trae (projet)
+rtk init --global --agent trae  # Trae (global)
 
-# 2. Redemarrer Claude Code, puis tester
+# 2. Redemarrer l'outil d'IA correspondant, puis tester
 git status  # Automatiquement reecrit en rtk git status
 ```
 

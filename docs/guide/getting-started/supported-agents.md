@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, and Mistral Vibe
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, Mistral Vibe, and Trae
 sidebar:
   order: 3
 ---
@@ -29,6 +29,7 @@ Agent runs "cargo test"
 | Agent | Integration tier | Can rewrite transparently? |
 |-------|-----------------|---------------------------|
 | Claude Code | Shell hook (`PreToolUse`) | Yes |
+| Trae | Rust binary (`PreToolUse`, matcher `RunCommand`) | Yes |
 | VS Code Copilot Chat | Shell hook (`PreToolUse`) | Yes |
 | GitHub Copilot CLI | Shell hook (`PreToolUse`) | Yes |
 | Cursor | Shell hook (`preToolUse`) | Yes |
@@ -41,7 +42,7 @@ Agent runs "cargo test"
 | Factory Droid | Shell hook (`PreToolUse`, matcher `Execute`) | Yes |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
-| Codex CLI | AGENTS.md instructions | N/A |
+| Codex CLI | Rust binary (`PreToolUse`) | Yes |
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rules file (prompt-level) | N/A |
 | Mistral Vibe | Rust binary (`pre_tool`) | Yes |
@@ -64,6 +65,30 @@ Restart Claude Code. Verify:
 ```bash
 rtk init --show    # shows hook status
 ```
+
+### Trae
+
+```bash
+rtk init --agent trae             # project-scoped (.trae/hooks.json)
+rtk init --global --agent trae    # user-scoped (~/.trae/hooks.json)
+```
+
+Global installation also updates `~/.trae-cn/hooks.json` when the `.trae-cn` directory already exists. Both modes install the native `rtk hook trae` command as a `PreToolUse` hook for `RunCommand`.
+
+Configuration files and hook input may include a UTF-8 BOM. Existing `rtk.exe hook trae` registrations are also recognized during install and uninstall.
+
+If a global install fails while writing a target, the error lists any targets already updated. After fixing the reported filesystem error, rerun the install; completed targets will not receive duplicate hooks.
+
+The hook returns `hookSpecificOutput.updatedInput`, preserving fields such as `description` and `timeout` while replacing only `command`. It deliberately omits `permissionDecision`, leaving command approval to Trae. Commands containing command substitution, process substitution, heredocs, or file-target redirects are left unchanged so Trae evaluates the original command natively.
+
+Uninstall:
+
+```bash
+rtk init --uninstall --agent trae
+rtk init --uninstall --global --agent trae
+```
+
+Uninstall removes only RTK-managed hook entries; unrelated Trae hooks and configuration are preserved.
 
 ### Cursor
 
@@ -210,9 +235,25 @@ rtk init --global --agent windsurf    # creates .windsurfrules in current projec
 ### Codex CLI
 
 ```bash
-rtk init --codex           # project-scoped (AGENTS.md)
-rtk init --global --codex  # user-global (~/.codex/AGENTS.md)
+rtk init --codex           # project-scoped (.codex/hooks.json + AGENTS.md)
+rtk init --global --codex  # user-global ($CODEX_HOME or ~/.codex/)
+rtk init --codex --uninstall           # remove project-scoped integration
+rtk init --global --codex --uninstall  # remove user-global integration
 ```
+
+Restart Codex after installation. Project-scoped hooks must be trusted when Codex prompts. The native `rtk hook codex` processor rewrites supported `Bash` commands through `PreToolUse.updatedInput`; Codex then applies its normal approval and sandbox checks to the rewritten command.
+
+Project-scoped install writes `RTK.md` to the project root, a name RTK does not own there, so it marks the files it wrote. An `RTK.md` is RTK's when it carries that marker, when it opens with the heading RTK wrote before the marker existed, or when it is byte-for-byte one of the payloads RTK shipped in between: install replaces it and uninstall removes it. Any other `RTK.md` is yours — install moves it to `RTK.md.bak` (numbered if that name is taken) and says so, and uninstall keeps it and tells you where it is. In global scope `RTK.md` lives in `$CODEX_HOME` and is always RTK's.
+
+Project-scoped install also refuses, without writing anything, when `.codex/hooks.json` or the `hooks.json.bak` it would write beside it resolves outside the project through a symlink, since registering a hook there would run commands from a directory you never named. Uninstall leaves such a hook registered rather than reaching outside for it, and says so. Use the global scope, with `$CODEX_HOME` set if you want a different directory, to configure Codex outside the project.
+
+`AGENTS.md` and `RTK.md` are not restricted this way, and git stores symlinks, so a repository you clone can ship either as a link pointing outside the clone.
+
+A symlinked `AGENTS.md` is followed and left in place: install appends its `@RTK.md` line to whatever the link names, wherever that is, and the file it rewrites ends up owned by you and readable only by you. That line is inert text, unlike `.codex/hooks.json`, which registers a hook that runs shell commands.
+
+A symlinked `RTK.md` depends on what it points at. If the target is not one RTK wrote, the link itself is moved to `RTK.md.bak` and a fresh file takes its place, so nothing outside is touched. If the target is one RTK wrote — a shared or global `RTK.md`, say — install follows the link and rewrites that file in full.
+
+If you install RTK into repositories you have not read, check what `AGENTS.md` and `RTK.md` are first.
 
 ### Kilo Code
 
@@ -261,7 +302,7 @@ Strips only RTK's `[[hooks]]` block and the `~/.vibe/prompts/rtk.md` file. Any o
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
+Rules file integrations (Cline, Windsurf, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Trae, Cursor, Gemini, Codex, Factory Droid) apply rewrites before execution whenever RTK supports and can safely attest the command. Plugin integrations (OpenCode, Pi, Hermes) use in-place mutation via the agent's extension or plugin API.
 
 ## Windows support
 
@@ -271,7 +312,7 @@ The shell hook (`rtk-rewrite.sh`) requires a Unix shell. On native Windows:
 - Filters work normally (`rtk cargo test`, `rtk git status`)
 - Auto-rewrite does not work — the AI assistant is instructed to use RTK but commands are not intercepted
 
-For full hook support on Windows, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install). Inside WSL, all agents with shell hook integration (Claude Code, Cursor, Gemini) work identically to Linux.
+For full shell-hook support on Windows, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install). Inside WSL, agents with shell hook integration (Claude Code, Cursor, Gemini) work identically to Linux. Native Rust hook integrations such as Trae do not depend on `rtk-rewrite.sh`.
 
 ## Graceful degradation
 

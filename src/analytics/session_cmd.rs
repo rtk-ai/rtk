@@ -3,7 +3,7 @@
 use crate::core::utils::format_tokens;
 use crate::discover::is_already_rtk;
 use crate::discover::provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
-use crate::discover::registry::{classify_command, split_command_chain, Classification};
+use crate::discover::registry::{Classification, classify_command, split_command_chain};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;

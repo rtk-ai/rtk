@@ -72,6 +72,14 @@ RTK 报告的 token 数量按 `字节数 / 4` 估算：RTK 不内置分词器，
 brew install rtk
 ```
 
+### winget（Windows）
+
+Windows 上最简单的安装方式 — 一条命令，无需配置 PATH：
+
+```powershell
+winget install rtk-ai.rtk
+```
+
 ### 快速安装（Linux/macOS）
 
 ```bash
@@ -94,10 +102,12 @@ rtk gain        # 应显示 token 节省统计
 ## 快速开始
 
 ```bash
-# 1. 为 Claude Code 安装 hook（推荐）
-rtk init --global
+# 1. 为对应的 AI 工具安装 hook
+rtk init --global               # Claude Code（默认）
+rtk init --agent trae           # Trae（项目级）
+rtk init --global --agent trae  # Trae（全局）
 
-# 2. 重启 Claude Code，然后测试
+# 2. 重启相应的 AI 工具，然后测试
 git status  # 自动重写为 rtk git status
 ```
 

@@ -1,8 +1,8 @@
 //! Data types for reporting which commands RTK can and cannot optimize.
 
 use crate::hooks::constants::{
-    COPILOT_HOOK_FILE, CURSOR_DIR, GITHUB_DIR, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
-    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_SUBDIR, REWRITE_HOOK_FILE,
+    COPILOT_HOOK_FILE, CURSOR_DIR, GITHUB_DIR, HERMES_DIR, HERMES_PLUGIN_MANIFEST_FILE,
+    HERMES_PLUGIN_NAME, HERMES_PLUGINS_SUBDIR, HOOKS_SUBDIR, REWRITE_HOOK_FILE,
 };
 use serde::Serialize;
 use std::path::Path;
@@ -10,7 +10,7 @@ use std::path::Path;
 /// RTK support status for a command.
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
 pub enum RtkStatus {
-    /// Dedicated handler with filtering (e.g., git status → git.rs:run_status())
+    /// Dedicated handler with filtering (e.g., git status → git_cmd.rs:run_status())
     Existing,
     /// Works via external_subcommand passthrough, no filtering (e.g., cargo fmt → Other)
     Passthrough,

@@ -91,24 +91,38 @@ pub fn maybe_warn() {
     let _ = check_and_warn();
 }
 
+/// Message to print for `status`, if any.
+/// `suppress_missing` only hides [`HookStatus::Missing`]; outdated stays visible.
+fn warning_text(status: HookStatus, suppress_missing: bool) -> Option<&'static str> {
+    match status {
+        HookStatus::Ok => None,
+        HookStatus::Missing if suppress_missing => None,
+        HookStatus::Missing => {
+            Some("[rtk] /!\\ No hook installed — run `rtk init -g` for automatic token savings")
+        }
+        HookStatus::Outdated => Some("[rtk] /!\\ Hook outdated — run `rtk init -g` to update"),
+    }
+}
+
 /// Single source of truth: delegates to `status()` then rate-limits the warning.
 fn check_and_warn() -> Option<()> {
-    let warning = match status() {
-        HookStatus::Ok => return Some(()),
-        HookStatus::Missing => {
-            "[rtk] /!\\ No hook installed — run `rtk init -g` for automatic token savings"
-        }
-        HookStatus::Outdated => "[rtk] /!\\ Hook outdated — run `rtk init -g` to update",
-    };
+    // Probe first so the common HookStatus::Ok path never reads config.toml.
+    // Suppression is consulted only when a missing-hook warning would print.
+    let status = status();
+    if status == HookStatus::Ok {
+        return Some(());
+    }
+    let suppress_missing =
+        status == HookStatus::Missing && crate::core::config::hook_warning_suppressed();
+    let warning = warning_text(status, suppress_missing)?;
 
     // Rate limit: warn once per day
     let marker = warn_marker_path()?;
-    if let Ok(meta) = std::fs::metadata(&marker) {
-        if let Ok(modified) = meta.modified() {
-            if modified.elapsed().map(|e| e.as_secs()).unwrap_or(u64::MAX) < WARN_INTERVAL_SECS {
-                return Some(());
-            }
-        }
+    if let Ok(meta) = std::fs::metadata(&marker)
+        && let Ok(modified) = meta.modified()
+        && modified.elapsed().map(|e| e.as_secs()).unwrap_or(u64::MAX) < WARN_INTERVAL_SECS
+    {
+        return Some(());
     }
 
     eprintln!("{}", warning);
@@ -123,10 +137,10 @@ fn check_and_warn() -> Option<()> {
 pub fn parse_hook_version(content: &str) -> u8 {
     // Version tag must be in the first 5 lines (shebang + header convention)
     for line in content.lines().take(5) {
-        if let Some(rest) = line.strip_prefix("# rtk-hook-version:") {
-            if let Ok(v) = rest.trim().parse::<u8>() {
-                return v;
-            }
+        if let Some(rest) = line.strip_prefix("# rtk-hook-version:")
+            && let Ok(v) = rest.trim().parse::<u8>()
+        {
+            return v;
         }
     }
     0 // No version tag = version 0 (outdated)
@@ -135,11 +149,7 @@ pub fn parse_hook_version(content: &str) -> u8 {
 fn hook_installed_path() -> Option<PathBuf> {
     let claude_dir = resolve_claude_dir().ok()?;
     let path = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
-    if path.exists() {
-        Some(path)
-    } else {
-        None
-    }
+    if path.exists() { Some(path) } else { None }
 }
 
 fn warn_marker_path() -> Option<PathBuf> {
@@ -152,7 +162,7 @@ mod tests {
     use super::*;
     use crate::hooks::constants::{
         CODEX_DIR, CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, HERMES_DIR,
-        HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME,
+        HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HERMES_PLUGINS_SUBDIR,
         OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
     };
 
@@ -317,6 +327,29 @@ mod tests {
         )
         .unwrap();
         assert!(!other_integration_installed(tmp.path()));
+    }
+
+    #[test]
+    fn test_warning_text_scopes_suppression_to_missing() {
+        assert_eq!(warning_text(HookStatus::Ok, false), None);
+        assert_eq!(warning_text(HookStatus::Ok, true), None);
+        assert!(
+            warning_text(HookStatus::Missing, false).is_some(),
+            "missing hook must warn when the flag is off"
+        );
+        assert_eq!(
+            warning_text(HookStatus::Missing, true),
+            None,
+            "suppress_hook_warning must hide HookStatus::Missing"
+        );
+        assert!(
+            warning_text(HookStatus::Outdated, false).is_some(),
+            "outdated hook must warn when the flag is off"
+        );
+        assert!(
+            warning_text(HookStatus::Outdated, true).is_some(),
+            "suppress_hook_warning must not hide the outdated-hook upgrade prompt"
+        );
     }
 
     #[test]

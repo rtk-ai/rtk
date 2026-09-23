@@ -3,7 +3,7 @@
 use super::constants::NOISE_DIRS;
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::CAP_INVENTORY;
-use crate::core::utils::resolved_command;
+use crate::core::utils::{ChildArgExt, resolved_command};
 use anyhow::Result;
 use regex::Regex;
 use std::sync::LazyLock;
@@ -68,7 +68,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     for flag in &flags {
         if flag.starts_with("--") {
             if *flag != "--all" {
-                cmd.arg(flag);
+                cmd.child_arg(flag);
             }
         } else {
             let stripped = flag.trim_start_matches('-');
@@ -77,17 +77,15 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
                 .filter(|c| *c != 'l' && *c != 'a' && *c != 'h')
                 .collect();
             if !extra.is_empty() {
-                cmd.arg(format!("-{}", extra));
+                cmd.child_arg(format!("-{}", extra));
             }
         }
     }
 
     if paths.is_empty() {
-        cmd.arg(".");
+        cmd.child_arg(".");
     } else {
-        for p in &paths {
-            cmd.arg(p);
-        }
+        cmd.child_args(&paths);
     }
 
     let label = if args.is_empty() {
@@ -516,12 +514,13 @@ mod tests {
             !hint.contains("full output"),
             "must not point at already-seen output: {hint}"
         );
-        // Tee availability depends on environment; when present the hint is
-        // the standard one-shot retrieval command over the hidden-only file.
+        // Recovery availability depends on environment; when present the hint
+        // is the standard one-shot retrieval command over the hidden entries.
         if hint.lines().count() > 1 {
             assert!(
-                hint.contains("[see remaining: tail -n +1 "),
-                "tee hint must be the standard tail form: {hint}"
+                hint.contains("[see remaining: tail -n +1 ")
+                    || hint.contains("hidden: rtk recall "),
+                "recovery hint must be a standard retrieval form: {hint}"
             );
         }
     }
@@ -530,15 +529,21 @@ mod tests {
     fn test_hidden_hint_note_variants() {
         let t = vec!["x  1B".to_string()];
         let f = vec!["target/".to_string()];
-        assert!(hidden_hint(&t, &[])
-            .expect("hint")
-            .starts_with("... (1 more)"));
-        assert!(hidden_hint(&[], &f)
-            .expect("hint")
-            .starts_with("... (1 filtered)"));
-        assert!(hidden_hint(&t, &f)
-            .expect("hint")
-            .starts_with("... (1 more, 1 filtered)"));
+        assert!(
+            hidden_hint(&t, &[])
+                .expect("hint")
+                .starts_with("... (1 more)")
+        );
+        assert!(
+            hidden_hint(&[], &f)
+                .expect("hint")
+                .starts_with("... (1 filtered)")
+        );
+        assert!(
+            hidden_hint(&t, &f)
+                .expect("hint")
+                .starts_with("... (1 more, 1 filtered)")
+        );
     }
 
     #[test]

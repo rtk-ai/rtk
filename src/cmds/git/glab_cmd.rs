@@ -10,7 +10,7 @@
 //! - Merge status: `merge_status` ("can_be_merged") (not `mergeable`)
 //! - Pipeline: `head_pipeline.status` (not `statusCheckRollup`)
 
-use super::git;
+use super::git_cmd;
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{ok_confirmation, resolved_command, strip_ansi, truncate};
@@ -334,7 +334,9 @@ fn format_mr_list(json: &Value, ultra_compact: bool) -> String {
     if all_lines.len() > MAX_LIST {
         filtered.push_str(&format!("  … +{} more\n", all_lines.len() - MAX_LIST));
         let all_text = all_lines.join("\n");
-        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_text, "glab-mrs", MAX_LIST + 1) {
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_text, "glab-mrs", MAX_LIST + 1)
+        {
             filtered.push_str(&format!("  {}\n", hint));
         }
     }
@@ -394,24 +396,24 @@ fn format_mr_view(json: &Value, ultra_compact: bool) -> String {
         }
     }
 
-    if let Some(pipeline) = json.get("head_pipeline") {
-        if !pipeline.is_null() {
-            let pipeline_status = pipeline["status"].as_str().unwrap_or("unknown");
-            let p_icon = pipeline_icon(pipeline_status, ultra_compact);
-            filtered.push_str(&format!("  Pipeline: {} {}\n", p_icon, pipeline_status));
-        }
+    if let Some(pipeline) = json.get("head_pipeline")
+        && !pipeline.is_null()
+    {
+        let pipeline_status = pipeline["status"].as_str().unwrap_or("unknown");
+        let p_icon = pipeline_icon(pipeline_status, ultra_compact);
+        filtered.push_str(&format!("  Pipeline: {} {}\n", p_icon, pipeline_status));
     }
 
     filtered.push_str(&format!("  {}\n", web_url));
 
-    if let Some(desc) = json["description"].as_str() {
-        if !desc.is_empty() {
-            let desc_filtered = filter_markdown_body(desc);
-            if !desc_filtered.is_empty() {
-                filtered.push('\n');
-                for line in desc_filtered.lines() {
-                    filtered.push_str(&format!("  {}\n", line));
-                }
+    if let Some(desc) = json["description"].as_str()
+        && !desc.is_empty()
+    {
+        let desc_filtered = filter_markdown_body(desc);
+        if !desc_filtered.is_empty() {
+            filtered.push('\n');
+            for line in desc_filtered.lines() {
+                filtered.push_str(&format!("  {}\n", line));
             }
         }
     }
@@ -487,7 +489,7 @@ fn mr_diff(args: &[String], _verbose: u8) -> Result<i32> {
             if stdout.trim().is_empty() {
                 "No diff\n".to_string()
             } else {
-                git::compact_diff(stdout, 500)
+                git_cmd::compact_diff(stdout, 500)
             }
         },
         RunOptions::stdout_only().early_exit_on_failure(),
@@ -567,7 +569,9 @@ fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
     if all_lines.len() > MAX_LIST {
         filtered.push_str(&format!("  … +{} more\n", all_lines.len() - MAX_LIST));
         let all_text = all_lines.join("\n");
-        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_text, "glab-issues", MAX_LIST + 1) {
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_text, "glab-issues", MAX_LIST + 1)
+        {
             filtered.push_str(&format!("  {}\n", hint));
         }
     }
@@ -606,14 +610,14 @@ fn format_issue_view(json: &Value) -> String {
     filtered.push_str(&format!("  Status: {}\n", state));
     filtered.push_str(&format!("  URL: {}\n", web_url));
 
-    if let Some(desc) = json["description"].as_str() {
-        if !desc.is_empty() {
-            let desc_filtered = filter_markdown_body(desc);
-            if !desc_filtered.is_empty() {
-                filtered.push_str("\n  Description:\n");
-                for line in desc_filtered.lines() {
-                    filtered.push_str(&format!("    {}\n", line));
-                }
+    if let Some(desc) = json["description"].as_str()
+        && !desc.is_empty()
+    {
+        let desc_filtered = filter_markdown_body(desc);
+        if !desc_filtered.is_empty() {
+            filtered.push_str("\n  Description:\n");
+            for line in desc_filtered.lines() {
+                filtered.push_str(&format!("    {}\n", line));
             }
         }
     }

@@ -26,7 +26,7 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 **Per-segment rewriting** — Each segment goes through:
 
 1. Strip trailing redirects (`2>&1`, `>/dev/null`) — matched via lexer tokens, set aside, re-appended after rewriting
-2. Short-circuit special cases — `head -20 file` → `rtk read file --max-lines 20`, `tail -n 5 file` → `rtk read file --tail-lines 5`. These can't go through generic prefix replacement because it would produce `rtk read -20 file` (wrong flag position)
+2. Short-circuit special cases — `head -20 file` → `rtk read file --head-lines 20`, `tail -n 5 file` → `rtk read file --tail-lines 5`. These can't go through generic prefix replacement because it would produce `rtk read -20 file` (wrong flag position)
 3. Classify the command — strip env prefixes (`FOO="bar baz"`), normalize paths (`/usr/bin/grep` → `grep`), strip git global opts (`git -C /tmp` → `git`), then match against 60+ regex patterns from `rules.rs`
 4. Apply the rewrite — find the matching rule, replace the command prefix with `rtk <cmd>`, re-prepend the env prefix, re-append the redirect suffix
 
@@ -75,6 +75,32 @@ The `ENV_PREFIX` regex strips env variable assignments and `env` from the front 
 - Chained: `A="x y" B=1 env git status`
 
 The prefix is stripped twice: once in `classify_command()` to match the underlying command against rules, and again in `rewrite_segment()` to extract it for re-prepending to the rewritten command.
+
+## Process Wrapper Handling
+
+A process wrapper runs another command without changing which command runs, so
+the rewrite peels it, rewrites what it wraps, and re-prepends the wrapper text
+byte for byte: `timeout 300 cargo test` becomes `timeout 300 rtk cargo test`.
+`PROCESS_WRAPPERS` in `registry.rs` describes each wrapper's own arguments —
+options that take a value, options that do not, values that may be attached to
+their option, and any positional argument the wrapper consumes before the
+command (`timeout`'s duration).
+
+Two rules keep the peeling honest. An option the table does not describe drops
+the rewrite, because an unknown option may consume the following word and make
+the wrong token look like the command. Shell syntax before the command (a
+redirect, a subshell, a glob) does the same, because the wrapper's argv can no
+longer be read off the token list.
+
+`stdbuf` is deliberately not a wrapper here: it exists to make the wrapped
+command emit output incrementally, and routing through rtk buffers that output
+until the child exits, so rewriting it would remove the only reason to type it.
+
+Wrapping also changes who receives a signal. `timeout 300 rtk cargo test`
+signals rtk rather than cargo, so `core::stream` relays SIGINT/SIGTERM to the
+child and lets the normal filter-and-print path finish. Without that relay a
+killed run prints nothing at all, which is strictly worse than the unwrapped
+command.
 
 ## Adding a New Rewrite Rule
 

@@ -198,17 +198,17 @@ impl FilterStrategy for MinimalFilter {
             }
 
             // Skip single-line comments (but keep doc comments)
-            if let Some(line_comment) = patterns.line {
-                if trimmed.starts_with(line_comment) {
-                    // Keep doc comments
-                    if let Some(doc) = patterns.doc_line {
-                        if trimmed.starts_with(doc) {
-                            result.push_str(line);
-                            result.push('\n');
-                        }
-                    }
-                    continue;
+            if let Some(line_comment) = patterns.line
+                && trimmed.starts_with(line_comment)
+            {
+                // Keep doc comments
+                if let Some(doc) = patterns.doc_line
+                    && trimmed.starts_with(doc)
+                {
+                    result.push_str(line);
+                    result.push('\n');
                 }
+                continue;
             }
 
             // Skip empty lines at this point, we'll normalize later
@@ -318,6 +318,12 @@ pub fn get_filter(level: FilterLevel) -> Box<dyn FilterStrategy> {
 }
 
 pub fn smart_truncate(content: &str, max_lines: usize, _lang: &Language) -> String {
+    // A zero budget shows nothing, matching `--tail-lines 0`/`--head-lines 0`.
+    // Returning early also keeps `max_lines - 1` below from underflowing.
+    if max_lines == 0 {
+        return String::new();
+    }
+
     let lines: Vec<&str> = content.lines().collect();
     if lines.len() <= max_lines {
         return content.to_string();
@@ -346,7 +352,7 @@ pub fn smart_truncate(content: &str, max_lines: usize, _lang: &Language) -> Stri
         // Non-important lines beyond max_lines/2 are silently skipped —
         // no inline markers that could be mistaken for file content.
 
-        if kept_lines >= max_lines - 1 {
+        if kept_lines + 1 >= max_lines {
             break;
         }
     }
