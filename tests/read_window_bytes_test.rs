@@ -113,7 +113,7 @@ fn read_windows_still_apply_text_filtering_and_line_numbers() {
         ),
         (
             ["--tail-lines", "1", "--line-numbers"].as_slice(),
-            "1 │ fn gamma() {}\n",
+            "4 │ fn gamma() {}\n",
         ),
     ] {
         let output = read_stdin(input, args);

@@ -249,7 +249,9 @@ src/ls.rs:25:fn run_tree(...)                src/ls.rs
 rtk ast-grep run -p '<pattern>' [chemin] [options]
 ```
 
-Regroupe les correspondances par fichier, plafonnees a 5 par fichier et 50 au total ; le surplus est remplace par une note de comptage ("N more match line(s) in X" / "N more file(s) not shown"). ast-grep imprime une ligne par ligne source d'une correspondance, et une correspondance structurelle s'etend sur plusieurs lignes : le decompte porte donc sur les lignes, pas sur les correspondances. Les sorties que rtk ne sait pas decouper (`ast-grep scan`, `--heading`) passent telles quelles. Sur une recherche reelle dans ce depot, ~85% de reduction.
+Regroupe les correspondances par fichier, plafonnees a 5 par fichier et 50 au total ; le surplus est remplace par une note de comptage ("N more match line(s) in X" / "N more match line(s) in M more file(s) not shown"), suivie d'un indice `[full output: ...]` qui pointe vers la sortie complete -- aucune ligne n'est perdue tant que la recuperation est active (`[retriever] mode`), sinon la note de comptage reste seule. ast-grep imprime une ligne par ligne source d'une correspondance, et une correspondance structurelle s'etend sur plusieurs lignes : le decompte porte donc sur les lignes, pas sur les correspondances. Sur une recherche reelle dans ce depot, ~85% de reduction.
+
+Seul `run` est filtre : soit nomme explicitement, soit implicite quand aucun positionnel avant `--` ne porte le nom d'une autre sous-commande. `scan`, `test`, `new`, `lsp`, `completions`, `docs` et `run --stdin` passent tels quels : leur sortie n'a pas cette forme, et `lsp` dialogue sur stdin.
 
 `--json` n'est pas filtre -- une demande explicite de sortie structuree passe telle quelle, sans compression.
 
@@ -439,11 +441,13 @@ Affiche le resume du commit + stat + diff compact.
 
 > **Attention (redirection vers un fichier).** Pour un blob volumineux
 > (`rtk git show HEAD:gros-fichier`), la sortie est fenetree : seul un apercu
-> est affiche, suivi d'un indice `[see remaining: git show 'HEAD:...' | tail -n +N]`.
+> est affiche, suivi d'un indice
+> `[see remaining: rtk proxy git show 'HEAD:...' | tail -n +N]`.
 > Un `rtk git show HEAD:x > fichier` ecrit a la main peut donc tronquer
 > silencieusement le contenu (le code de sortie reste 0). Pour capturer le
-> fichier complet, utilisez `git show` directement, ou suivez l'indice de
-> recuperation.
+> fichier complet, suivez l'indice de recuperation, ou passez par
+> `rtk proxy git show`. Un `git show` nu ne suffit pas quand le hook RTK est
+> actif : il est reecrit en `rtk git show`, qui fenetre a nouveau la sortie.
 
 ---
 

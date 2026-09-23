@@ -184,7 +184,7 @@ fn setup_repo() -> Repo {
 
 /// rtk windowed the blob iff its recovery hint is present (unique to blob windowing).
 fn was_windowed(out: &Output) -> bool {
-    String::from_utf8_lossy(&out.stdout).contains("[see remaining: git ")
+    String::from_utf8_lossy(&out.stdout).contains("[see remaining: rtk proxy git ")
 }
 
 /// The object categories the fuzzer draws from, with their expected classification.
@@ -497,6 +497,100 @@ fn git_show_blob_classification_differential() {
     );
 }
 
+/// Split a hint's shell words, undoing the POSIX single-quoting `compact_blob_show` applies.
+/// Only the quoting rtk itself emits is handled -- enough to run the hint as it is printed.
+fn split_hint_words(cmd: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut started = false;
+    let mut quoted = false;
+    for c in cmd.chars() {
+        match c {
+            '\'' => {
+                quoted = !quoted;
+                started = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if started {
+                    words.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            c => {
+                current.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        words.push(current);
+    }
+    words
+}
+
+/// The hint must be *runnable*, not merely well-formed: run the command it names and check it
+/// returns exactly the lines the window held back.
+///
+/// Parsing `N` out of the hint and slicing git's own output (as the byte-exactness check below
+/// does) cannot see the failure this guards -- a hint naming a command that re-windows the blob
+/// and hands `tail` nothing but the hint itself.
+///
+/// One half of that guarantee. This runs the hint's argv directly and applies the `tail` in
+/// process, so it establishes that the named command returns the rest of the blob -- not that
+/// the hook leaves the hint alone, since no hook runs here. The other half is the unit test
+/// `test_compact_blob_show_hint_survives_rtks_own_hook`, which puts the emitted hint through
+/// the real `rewrite_command`. Neither test is sufficient on its own: a hint the hook rewrites
+/// would still pass this one, and a hint the hook ignores but that returns nothing would still
+/// pass that one.
+#[test]
+fn windowed_blob_hint_command_returns_the_rest() {
+    let repo = setup_repo();
+    let (path, home) = (repo.path.as_path(), repo.home.as_path());
+
+    let out = rtk_show(path, home, &["HEAD:large.txt"]);
+    assert!(out.status.success());
+    let shown = String::from_utf8(out.stdout).expect("windowed head is UTF-8");
+    let hint = shown
+        .rsplit_once("[see remaining: ")
+        .map(|(_, rest)| rest.trim_end().trim_end_matches(']'))
+        .expect("a windowed head carries a hint");
+    let (recall, tail_part) = hint.split_once(" | tail -n +").expect("tail hint");
+    let n: usize = tail_part.trim().parse().expect("N parses");
+
+    let words = split_hint_words(recall);
+    assert_eq!(words.first().map(String::as_str), Some("rtk"), "{hint}");
+    let mut cmd = Command::new(RTK_BIN);
+    cmd.args(&words[1..]).current_dir(path);
+    isolate(&mut cmd, home);
+    let recalled = cmd.output().expect("run the hint's own command");
+    assert!(
+        recalled.status.success(),
+        "the hint's command failed: {}",
+        String::from_utf8_lossy(&recalled.stderr)
+    );
+    let recalled = String::from_utf8(recalled.stdout).expect("recalled blob is UTF-8");
+
+    let head = &shown[..shown.find("... (+").expect("truncation marker")];
+    let tail: String = recalled
+        .lines()
+        .skip(n - 1)
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let full = String::from_utf8(git(path, home, &["show", "HEAD:large.txt"]).stdout)
+        .expect("blob is UTF-8");
+
+    assert!(
+        tail.lines().count() > 1,
+        "the hint returned {} line(s) -- it must return the rest of the blob, not just itself",
+        tail.lines().count()
+    );
+    assert_eq!(
+        format!("{head}{tail}"),
+        full,
+        "running the hint must reconstruct the blob byte-for-byte"
+    );
+}
+
 /// A companion check that the recovery hint reconstructs a windowed blob BYTE-for-byte:
 /// `head_shown` ++ `git show <rev:path> | tail -n +N` == full `git show <rev:path>`.
 #[test]
@@ -508,7 +602,7 @@ fn windowed_blob_recovery_is_byte_exact() {
     assert!(out.status.success());
     let shown = String::from_utf8(out.stdout).expect("windowed head is UTF-8");
     assert!(
-        shown.contains("[see remaining: git "),
+        shown.contains("[see remaining: rtk proxy git "),
         "expected a windowed head"
     );
 
@@ -555,7 +649,7 @@ fn cluster_flag_before_blob_windows_and_recovers_byte_exact() {
     assert!(out.status.success());
     let shown = String::from_utf8(out.stdout).expect("windowed head is UTF-8");
     assert!(
-        shown.contains("[see remaining: git "),
+        shown.contains("[see remaining: rtk proxy git "),
         "cluster + blob must still window (blocker regression)"
     );
     // The hint points at the blob arg alone — verify it names `HEAD:large.txt`, not the

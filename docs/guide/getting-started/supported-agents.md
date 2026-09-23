@@ -243,6 +243,18 @@ rtk init --global --codex --uninstall  # remove user-global integration
 
 Restart Codex after installation. Project-scoped hooks must be trusted when Codex prompts. The native `rtk hook codex` processor rewrites supported `Bash` commands through `PreToolUse.updatedInput`; Codex then applies its normal approval and sandbox checks to the rewritten command.
 
+Project-scoped install writes `RTK.md` to the project root, a name RTK does not own there, so it marks the files it wrote. An `RTK.md` is RTK's when it carries that marker, when it opens with the heading RTK wrote before the marker existed, or when it is byte-for-byte one of the payloads RTK shipped in between: install replaces it and uninstall removes it. Any other `RTK.md` is yours — install moves it to `RTK.md.bak` (numbered if that name is taken) and says so, and uninstall keeps it and tells you where it is. In global scope `RTK.md` lives in `$CODEX_HOME` and is always RTK's.
+
+Project-scoped install also refuses, without writing anything, when `.codex/hooks.json` or the `hooks.json.bak` it would write beside it resolves outside the project through a symlink, since registering a hook there would run commands from a directory you never named. Uninstall leaves such a hook registered rather than reaching outside for it, and says so. Use the global scope, with `$CODEX_HOME` set if you want a different directory, to configure Codex outside the project.
+
+`AGENTS.md` and `RTK.md` are not restricted this way, and git stores symlinks, so a repository you clone can ship either as a link pointing outside the clone.
+
+A symlinked `AGENTS.md` is followed and left in place: install appends its `@RTK.md` line to whatever the link names, wherever that is, and the file it rewrites ends up owned by you and readable only by you. That line is inert text, unlike `.codex/hooks.json`, which registers a hook that runs shell commands.
+
+A symlinked `RTK.md` depends on what it points at. If the target is not one RTK wrote, the link itself is moved to `RTK.md.bak` and a fresh file takes its place, so nothing outside is touched. If the target is one RTK wrote — a shared or global `RTK.md`, say — install follows the link and rewrites that file in full.
+
+If you install RTK into repositories you have not read, check what `AGENTS.md` and `RTK.md` are first.
+
 ### Kilo Code
 
 ```bash

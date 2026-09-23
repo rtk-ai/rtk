@@ -23,6 +23,31 @@ pub fn run(
         eprintln!("Reading: {} (filter: {})", file.display(), level);
     }
 
+    // `head -n N` stops as soon as it has N lines. Reading the file whole first gives the same
+    // answer on a regular file and no answer at all on a device node or a FIFO nobody closes,
+    // which is reachable now that `head -n N` rewrites to this.
+    if level == FilterLevel::None
+        && !line_numbers
+        && let Some(head) = head_lines
+    {
+        let window = read_head_lines(file, head)?;
+        io::stdout()
+            .lock()
+            .write_all(&window)
+            .context("Failed to write line window")?;
+        timer.track_bytes(
+            &format!("cat {}", file.display()),
+            "rtk read",
+            // The bytes `cat` would have written. Unknowable without reading the file, which is
+            // the whole point of not doing that, so it is taken from the size on disk -- and
+            // for the unbounded sources above there is no size, only a 0 that would book the
+            // window as pure cost. Claim nothing there.
+            regular_file_len(file).unwrap_or(window.len()),
+            &String::from_utf8_lossy(&window),
+        );
+        return Ok(());
+    }
+
     // Read file content
     let bytes =
         fs::read(file).with_context(|| format!("Failed to read file: {}", file.display()))?;
@@ -257,6 +282,57 @@ fn apply_numbered_line_window(
     format_with_line_numbers(content)
 }
 
+/// How much is pulled from the file at a time. Only the lines asked for are ever read, so the
+/// chunk bounds how far past the `n`th newline that read can reach.
+const READ_CHUNK: usize = 8192;
+
+/// The first `n` newline-terminated lines of `file`, read in chunks and stopped at the `n`th
+/// newline so an endless source is never read past what was asked for. Short input, or input
+/// whose last line is unterminated, comes back whole, matching [`head_window`].
+///
+/// Only the unfiltered head window is served this way. A filter level or `--line-numbers`
+/// still needs the file whole -- `--tail-lines` inherently so -- and none of those is reachable
+/// from a `head` rewrite, which is what made this path the one that had to stop early.
+fn read_head_lines(file: &Path, n: usize) -> Result<Vec<u8>> {
+    let mut handle =
+        fs::File::open(file).with_context(|| format!("Failed to read file: {}", file.display()))?;
+    let mut window = Vec::new();
+    let mut chunk = [0u8; READ_CHUNK];
+    let mut seen = 0;
+    while seen < n {
+        let read = match handle.read(&mut chunk) {
+            Ok(read) => read,
+            // `fs::read`, which this replaces, retries this itself; a bare `read` does not,
+            // and turning a signal into a failed read would lose the window entirely.
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("Failed to read file: {}", file.display()));
+            }
+        };
+        if read == 0 {
+            break;
+        }
+        for &byte in &chunk[..read] {
+            window.push(byte);
+            if byte == b'\n' {
+                seen += 1;
+                if seen == n {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(window)
+}
+
+/// `file`'s size on disk, and `None` for anything whose size says nothing about how much it
+/// will produce -- a device node, a FIFO, a socket.
+fn regular_file_len(file: &Path) -> Option<usize> {
+    let meta = fs::metadata(file).ok()?;
+    meta.is_file().then_some(meta.len() as usize)
+}
+
 /// First `n` lines, sliced on byte offsets rather than round-tripped through
 /// `lines()`, so CRLF endings and an unterminated final line survive verbatim.
 /// `\n` is ASCII, so valid UTF-8 input also stays valid after slicing.
@@ -317,6 +393,106 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    /// `read_head_lines` must agree with `head_window` byte-for-byte on every shape, since it
+    /// replaces it on the unfiltered path -- CRLF endings and an unterminated last line
+    /// included.
+    ///
+    /// The inputs have to span more than one `READ_CHUNK`, because reading across chunks is
+    /// the only thing the rewrite added: a set that all fits in the first chunk passes just as
+    /// happily with the loop stopped after that chunk.
+    #[test]
+    fn test_read_head_lines_matches_head_window() -> Result<()> {
+        let long_line = "x".repeat(READ_CHUNK * 2);
+        // A newline sitting exactly on a chunk boundary, and on either side of it.
+        let boundary = |at: usize| format!("{}\n{}\n", "y".repeat(at - 1), "z".repeat(100));
+
+        let mut contents: Vec<String> = [
+            "",
+            "a",
+            "a\n",
+            "a\nb\nc\n",
+            "a\nb\nc",
+            "a\r\nb\r\nc\r\n",
+            "\n\n\n",
+        ]
+        .iter()
+        .map(|c| (*c).to_string())
+        .collect();
+        contents.push(long_line.clone());
+        contents.push(format!("{long_line}\n"));
+        contents.push(boundary(READ_CHUNK));
+        contents.push(boundary(READ_CHUNK + 1));
+        contents.push(boundary(READ_CHUNK - 1));
+        // Many short lines over several chunks, so the Nth newline lands deep in.
+        contents.push((0..4000).map(|i| format!("line {i}\n")).collect());
+        // A CRLF straddling a chunk boundary: the `\r` and its `\n` must not come apart.
+        contents.push(format!(
+            "{}\r\n{}\r\n",
+            "w".repeat(READ_CHUNK - 1),
+            "v".repeat(50)
+        ));
+
+        for content in &contents {
+            let mut file = NamedTempFile::new()?;
+            file.write_all(content.as_bytes())?;
+            file.flush()?;
+            for n in [0, 1, 2, 3, 10, 1000, 4000] {
+                assert_eq!(
+                    read_head_lines(file.path(), n)?,
+                    head_window(content.as_bytes(), n),
+                    "content of {} bytes, n {n}",
+                    content.len()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The point of reading in chunks: a source with no end still returns. A FIFO nobody ever
+    /// closes stands in for the `/dev/urandom` case, which `head -n N` now rewrites to.
+    #[cfg(unix)]
+    #[test]
+    fn test_read_head_lines_returns_from_an_endless_source() -> Result<()> {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir()?;
+        let fifo = dir.path().join("endless");
+        // Shelled out rather than called through libc: `unsafe` is not allowed outside proxy
+        // mode's signal handling.
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()?
+                .success(),
+            "mkfifo failed"
+        );
+
+        let writer_path = fifo.clone();
+        let writer = std::thread::spawn(move || {
+            let Ok(mut handle) = fs::OpenOptions::new().write(true).open(&writer_path) else {
+                return;
+            };
+            // Never closes on its own: the read side has to stop itself.
+            while handle.write_all(b"line\n").is_ok() {}
+        });
+
+        assert_eq!(read_head_lines(&fifo, 3)?, b"line\nline\nline\n");
+        drop(writer);
+        Ok(())
+    }
+
+    /// A device node reports a size of 0, which would book the window as pure cost.
+    #[test]
+    fn test_regular_file_len_only_answers_for_a_regular_file() -> Result<()> {
+        let mut file = NamedTempFile::new()?;
+        file.write_all(b"hello\n")?;
+        file.flush()?;
+        assert_eq!(regular_file_len(file.path()), Some(6));
+        assert_eq!(regular_file_len(Path::new("/nonexistent-rtk-test")), None);
+        #[cfg(unix)]
+        assert_eq!(regular_file_len(Path::new("/dev/null")), None);
+        Ok(())
+    }
 
     #[test]
     fn test_read_rust_file() -> Result<()> {
