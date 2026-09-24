@@ -157,6 +157,19 @@ pub struct MinimalFilter;
 
 static MULTIPLE_BLANK_LINES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
 
+/// Collect a run of code found between block comments, dropping it when it is
+/// only whitespace. The segment that opens the line keeps its indentation.
+fn push_code_segment<'a>(kept: &mut Vec<&'a str>, segment: &'a str, at_line_start: bool) {
+    let segment = if at_line_start {
+        segment.trim_end()
+    } else {
+        segment.trim()
+    };
+    if !segment.trim().is_empty() {
+        kept.push(segment);
+    }
+}
+
 impl FilterStrategy for MinimalFilter {
     fn filter(&self, content: &str, lang: &Language) -> String {
         let patterns = lang.comment_patterns();
@@ -169,15 +182,47 @@ impl FilterStrategy for MinimalFilter {
 
             // Handle block comments
             if let (Some(start), Some(end)) = (patterns.block_start, patterns.block_end) {
-                if !in_docstring
+                let opens_here = !in_docstring
                     && trimmed.contains(start)
-                    && !trimmed.starts_with(patterns.doc_block_start.unwrap_or("###"))
-                {
-                    in_block_comment = true;
-                }
-                if in_block_comment {
-                    if trimmed.contains(end) {
-                        in_block_comment = false;
+                    && !trimmed.starts_with(patterns.doc_block_start.unwrap_or("###"));
+                if in_block_comment || opens_here {
+                    // Walk the whole line so every block comment on it is
+                    // stripped and the code between them is kept. An
+                    // unterminated `start` leaves in_block_comment set for the
+                    // next line, as before.
+                    let mut rest = line;
+                    let mut kept: Vec<&str> = Vec::new();
+                    // Only the first segment keeps the line's indentation.
+                    let mut at_line_start = !in_block_comment;
+                    loop {
+                        if in_block_comment {
+                            match rest.find(end) {
+                                Some(i) => {
+                                    in_block_comment = false;
+                                    rest = &rest[i + end.len()..];
+                                }
+                                None => {
+                                    rest = "";
+                                    break;
+                                }
+                            }
+                        } else {
+                            match rest.find(start) {
+                                Some(i) => {
+                                    let (code, tail) = rest.split_at(i);
+                                    push_code_segment(&mut kept, code, at_line_start);
+                                    at_line_start = false;
+                                    in_block_comment = true;
+                                    rest = &tail[start.len()..];
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+                    push_code_segment(&mut kept, rest, at_line_start);
+                    if !kept.is_empty() {
+                        result.push_str(&kept.join(" "));
+                        result.push('\n');
                     }
                     continue;
                 }
@@ -549,5 +594,75 @@ fn main() {
         let input = "a\nb\nc";
         let output = smart_truncate(input, 3, &Language::Unknown);
         assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_inline_block_comment_preserves_code() {
+        let filter = MinimalFilter;
+        let input = "int x = 5; /* inline comment */\nint y = 10;\n";
+        let output = filter.filter(input, &Language::C);
+        assert!(
+            output.contains("int x = 5;"),
+            "code before inline block comment must be kept, got: {output}"
+        );
+        assert!(
+            output.contains("int y = 10;"),
+            "subsequent code must be kept"
+        );
+        assert!(
+            !output.contains("inline comment"),
+            "comment text must be stripped"
+        );
+    }
+
+    #[test]
+    fn test_multiline_block_comment_closing_preserves_code_after() {
+        let filter = MinimalFilter;
+        let input = "/* multi-line\n   comment */ int z = 3;\nint w = 4;\n";
+        let output = filter.filter(input, &Language::C);
+        assert!(
+            output.contains("int z = 3;"),
+            "code after closing */ must be kept, got: {output}"
+        );
+        assert!(
+            output.contains("int w = 4;"),
+            "subsequent code must be kept"
+        );
+    }
+
+    #[test]
+    fn test_full_line_block_comment_still_stripped() {
+        let filter = MinimalFilter;
+        let input = "int a = 1;\n/* full line comment */\nint b = 2;\n";
+        let output = filter.filter(input, &Language::C);
+        assert!(output.contains("int a = 1;"));
+        assert!(output.contains("int b = 2;"));
+        assert!(!output.contains("full line comment"));
+    }
+
+    #[test]
+    fn test_several_block_comments_on_one_line() {
+        let filter = MinimalFilter;
+        let input =
+            "void f() {\n    int v1 = 1; /* c1 */ int v2 = 2; /* c2 */ int v3 = 3; /* c3 */\n}\n";
+        let output = filter.filter(input, &Language::C);
+        assert_eq!(
+            output,
+            "void f() {\n    int v1 = 1; int v2 = 2; int v3 = 3;\n}"
+        );
+    }
+
+    #[test]
+    fn test_block_comment_unterminated_after_earlier_one_on_same_line() {
+        let filter = MinimalFilter;
+        let input = "int a = 1; /* done */ int b = 2; /* opens here\n   still comment\n   closes */ int c = 3;\nint d = 4;\n";
+        let output = filter.filter(input, &Language::C);
+        assert!(output.contains("int a = 1; int b = 2;"), "got: {output}");
+        assert!(output.contains("int c = 3;"), "got: {output}");
+        assert!(output.contains("int d = 4;"), "got: {output}");
+        assert!(
+            !output.contains("opens here") && !output.contains("still comment"),
+            "comment body must be stripped, got: {output}"
+        );
     }
 }
