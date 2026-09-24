@@ -1,0 +1,38 @@
+[filters.scp]
+description = "Compact scp output — strip connection banners and progress noise, keep errors"
+match_command = "^scp\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Warning: Permanently added",
+  "^Connection to .+ closed",
+  "^Authenticated to",
+  "^debug1:",
+  "^OpenSSH_",
+  "^Executing: ",
+  "^Sink: ",
+  "^Sending file modes:",
+]
+max_lines = 100
+truncate_lines_at = 120
+
+[[tests.scp]]
+name = "strips banners, keeps transfer errors"
+input = """
+Warning: Permanently added '192.168.1.10' (ED25519) to the list of known hosts.
+
+scp: /remote/path/file.txt: Permission denied
+"""
+expected = "scp: /remote/path/file.txt: Permission denied"
+
+[[tests.scp]]
+name = "silent successful transfer stays silent"
+input = """
+Warning: Permanently added 'pihole' (ED25519) to the list of known hosts.
+"""
+expected = ""
+
+[[tests.scp]]
+name = "empty input passes through"
+input = ""
+expected = ""
