@@ -1,5 +1,6 @@
 //! Filters Go command output — test results, build errors, vet warnings.
 
+use crate::buf_cmd::{self, BufBin};
 use crate::core::guard::never_worse;
 use crate::core::runner;
 use crate::core::stream::{CaptureResult, exec_capture};
@@ -133,6 +134,15 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
     if let Some((tool, tool_args)) = match_go_tool(args) {
         match tool {
             GoTool::GolangciLint => return run_go_tool_golangci_lint(tool_args, verbose),
+            GoTool::Buf => {
+                // Lossy: buf's own flags are ASCII, but a non-UTF-8 argument has its invalid
+                // bytes replaced with U+FFFD on every path, passthrough included.
+                let args: Vec<String> = tool_args
+                    .iter()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect();
+                return buf_cmd::run_with(BufBin::GoTool, &args, verbose);
+            }
         }
     }
 
@@ -200,12 +210,14 @@ fn has_golangci_format_flag(args: &[OsString]) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum GoTool {
     GolangciLint,
+    Buf,
 }
 
 impl GoTool {
     fn from_name(name: &str) -> Option<Self> {
         match name {
             "golangci-lint" => Some(Self::GolangciLint),
+            "buf" => Some(Self::Buf),
             _ => None,
         }
     }
@@ -1095,6 +1107,22 @@ utils.go:15:5: unreachable code"#;
         let (tool, rest) = match_go_tool(&args).expect("should match");
         assert_eq!(tool, GoTool::GolangciLint);
         assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn test_match_go_tool_buf() {
+        let args = os(&["tool", "buf", "lint", "--path", "x"]);
+        let (tool, rest) = match_go_tool(&args).expect("should match");
+        assert_eq!(tool, GoTool::Buf);
+        assert_eq!(rest, &os(&["lint", "--path", "x"])[..]);
+    }
+
+    #[test]
+    fn test_match_go_tool_buf_keeps_dashdash() {
+        // `GoCommands::Other` keeps raw args, so buf_cmd still sees the user's `--` boundary.
+        let args = os(&["tool", "buf", "lint", "--", "--error-format=json"]);
+        let (_, rest) = match_go_tool(&args).expect("should match");
+        assert_eq!(rest, &os(&["lint", "--", "--error-format=json"])[..]);
     }
 
     #[test]
