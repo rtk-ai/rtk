@@ -845,6 +845,22 @@ fn collect_test_outcomes(
 // Convenience wrapper (uses singleton — for run_fallback)
 // ---------------------------------------------------------------------------
 
+/// Normalize a command string for TOML filter lookup — same basename logic as
+/// `run_fallback` so `/path/to/make` matches the `make` filter.
+pub fn lookup_command_for_filter(command: &str) -> String {
+    let trimmed = command.trim();
+    let first_space = trimmed.find(char::is_whitespace);
+    let (first_word, rest) = match first_space {
+        Some(pos) => (&trimmed[..pos], &trimmed[pos..]),
+        None => (trimmed, ""),
+    };
+    let base = std::path::Path::new(first_word)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| first_word.to_string());
+    format!("{}{}", base, rest)
+}
+
 /// Find a matching filter from the global registry. Initialises the registry
 /// lazily on first call. Returns `None` if no filter matches.
 pub fn find_matching_filter(command: &str) -> Option<&'static CompiledFilter> {
@@ -1347,6 +1363,28 @@ match_command = "^terraform"
         );
         let found = find_filter_in("kubectl get pods", &filters);
         assert!(found.is_none());
+    }
+
+    #[test]
+    fn test_lookup_command_for_filter_uses_basename() {
+        assert_eq!(
+            lookup_command_for_filter("/usr/local/bin/make all"),
+            "make all"
+        );
+    }
+
+    #[test]
+    fn test_builtin_make_filter_matches_path_invocation() {
+        let lookup = lookup_command_for_filter("/usr/local/bin/make all");
+        let found = find_matching_filter(&lookup).expect("make built-in filter");
+        assert_eq!(found.name, "make");
+    }
+
+    #[test]
+    fn test_builtin_ng_test_filter_matches_path_invocation() {
+        let lookup = lookup_command_for_filter("node_modules/.bin/ng test auth");
+        let found = find_matching_filter(&lookup).expect("ng-test built-in filter");
+        assert_eq!(found.name, "ng-test");
     }
 
     #[test]
@@ -2059,6 +2097,7 @@ match_command = "^make\\b"
             "markdownlint",
             "mix-compile",
             "mix-format",
+            "ng-test",
             "ping",
             "pio-run",
             "poetry-install",
@@ -2102,8 +2141,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            63,
-            "Expected exactly 63 built-in filters, got {}. \
+            64,
+            "Expected exactly 64 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
