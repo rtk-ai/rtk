@@ -184,8 +184,19 @@ rtk read file.rs -l aggressive  # Signatures only (strips bodies)
 rtk smart file.rs               # 2-line heuristic code summary
 rtk find "*.rs" .               # Compact find results
 rtk grep "pattern" .            # Grouped search results
+rtk grep "pattern" . --agent-safe # 80 matches, 5/file, 240 Unicode chars/line
+rtk grep "pattern" . --files-only
+rtk grep "pattern" . --count-by-file
+rtk grep "pattern" . --top-files 10
+rtk grep "pattern" . --json     # deterministic rtk.grep.v1 JSON
 rtk diff file1 file2            # Condensed diff (exit 1 if files differ)
 ```
+
+`rtk grep` agent-safe mode is opt-in via `--agent-safe`, `RTK_AGENT_SAFE=1`,
+or `[agent] safe_mode = true`. Explicit limits override its defaults;
+`--all` disables match caps and `--full-lines` disables clipping. Structured
+capture is bounded to 10 MiB per output stream. `rtk rg --json` remains native
+ripgrep JSON.
 
 ### Git
 ```bash
