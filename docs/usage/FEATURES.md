@@ -818,6 +818,20 @@ Sortie JSON compressee.
 
 ---
 
+### `rtk buf` -- Protobuf (buf)
+
+```bash
+rtk buf lint [args...]
+rtk buf build [args...]
+rtk buf breaking --against <ref> [args...]
+rtk buf format -d [args...]
+rtk buf generate [args...]
+```
+
+Diagnostics JSON regroupes par regle (erreurs de compilation en cascade fusionnees), `format -d` resume par fichier, echecs de `generate` tronques. Aussi via `rtk go tool buf`.
+
+---
+
 ## Commandes Formatage
 
 ### `rtk prettier` -- Prettier
@@ -1314,6 +1328,7 @@ rtk verify
 | `pip list/install` | `rtk pip ...` |
 | `go test/build/vet` | `rtk go ...` |
 | `golangci-lint` | `rtk golangci-lint` |
+| `buf lint/build/breaking/format/generate` | `rtk buf ...` |
 | `docker ps/images/logs` | `rtk docker ...` |
 | `kubectl get/logs` | `rtk kubectl ...` |
 | `curl` | `rtk curl` |
@@ -1474,7 +1489,7 @@ Octets de sortie bash supprimes (voir [A propos de la reduction de sortie bash](
 | **Git** | status, log, diff, show, add, commit, push, pull | 75-92% |
 | **GitHub** | pr, issue, run, api | 79-87% |
 | **Tests** | cargo test, vitest, playwright, pytest, go test | 90-99% |
-| **Build/Lint** | cargo build, tsc, eslint, prettier, next, ruff, clippy | 70-87% |
+| **Build/Lint** | cargo build, tsc, eslint, prettier, next, ruff, clippy, golangci-lint, buf | 70-87% |
 | **Paquets** | pnpm, npm, pip, deps, prisma | 60-80% |
 | **Conteneurs** | docker, kubectl | 70-80% |
 | **Donnees** | json, env, log, curl, wget | 60-80% |
