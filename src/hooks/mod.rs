@@ -17,18 +17,15 @@ pub mod rewrite_cmd;
 pub mod trust;
 pub mod verify_cmd;
 
-fn is_rtk_binary(binary: &str) -> bool {
-    let binary_name = binary.rsplit(['/', '\\']).next().unwrap_or(binary);
-    matches!(binary_name, "rtk" | "rtk.exe")
-}
-
 fn is_rtk_hook_command(command: &str, agent: &str) -> bool {
-    let parts = crate::discover::lexer::shell_split(command);
-    let [parsed_binary, hook, target] = parts.as_slice() else {
+    let suffix = format!(" hook {agent}");
+    let Some(binary) = command.trim().strip_suffix(&suffix) else {
         return false;
     };
-
-    is_rtk_binary(parsed_binary) && hook == "hook" && target == agent
+    let binary = binary.trim().trim_matches(['"', '\'']);
+    let binary = binary.replace("\\ ", " ");
+    let binary_name = binary.rsplit(['/', '\\']).next().unwrap_or(&binary);
+    matches!(binary_name.to_ascii_lowercase().as_str(), "rtk" | "rtk.exe")
 }
 
 pub fn is_claude_hook_command(command: &str) -> bool {
@@ -56,6 +53,19 @@ mod tests {
         ));
         assert!(is_claude_hook_command(
             "/Users/jane/My\\ Apps/rtk hook claude"
+        ));
+    }
+
+    #[test]
+    fn claude_hook_command_matches_windows_absolute_rtk_exe() {
+        assert!(is_claude_hook_command(
+            r"C:\Users\codex\.local\bin\rtk.exe hook claude"
+        ));
+        assert!(is_claude_hook_command(
+            r#""C:\Program Files\RTK\rtk.exe" hook claude"#
+        ));
+        assert!(is_claude_hook_command(
+            r#""C:\Program Files\RTK\RTK.EXE" hook claude"#
         ));
     }
 

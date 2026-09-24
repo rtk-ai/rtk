@@ -42,7 +42,7 @@ Agent runs "cargo test"
 | Factory Droid | Shell hook (`PreToolUse`, matcher `Execute`) | Yes |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
-| Codex CLI | Rust binary (`PreToolUse`) | Yes |
+| Codex CLI | Rust binary (`rtk hook codex`) + AGENTS.md / RTK.md | Yes (`updatedInput`) |
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rules file (prompt-level) | N/A |
 | Mistral Vibe | Rust binary (`pre_tool`) | Yes |
@@ -243,6 +243,8 @@ rtk init --global --codex --uninstall  # remove user-global integration
 
 Restart Codex after installation. Project-scoped hooks must be trusted when Codex prompts. The native `rtk hook codex` processor rewrites supported `Bash` commands through `PreToolUse.updatedInput`; Codex then applies its normal approval and sandbox checks to the rewritten command.
 
+On native Windows, the hook also accepts `Shell` and `PowerShell` payloads. It rewrites only an explicit allow-rule match or host `bypassPermissions` request; default/ask commands remain unchanged for Codex's native approval flow. Codex App internal tool calls may bypass CLI `hooks.json`; the generated `RTK.md` explains when to prefix an eligible external command with `rtk` manually.
+
 Project-scoped install writes `RTK.md` to the project root, a name RTK does not own there, so it marks the files it wrote. An `RTK.md` is RTK's when it carries that marker, when it opens with the heading RTK wrote before the marker existed, or when it is byte-for-byte one of the payloads RTK shipped in between: install replaces it and uninstall removes it. Any other `RTK.md` is yours — install moves it to `RTK.md.bak` (numbered if that name is taken) and says so, and uninstall keeps it and tells you where it is. In global scope `RTK.md` lives in `$CODEX_HOME` and is always RTK's.
 
 Project-scoped install also refuses, without writing anything, when `.codex/hooks.json` or the `hooks.json.bak` it would write beside it resolves outside the project through a symlink, since registering a hook there would run commands from a directory you never named. Uninstall leaves such a hook registered rather than reaching outside for it, and says so. Use the global scope, with `$CODEX_HOME` set if you want a different directory, to configure Codex outside the project.
@@ -306,11 +308,12 @@ Rules file integrations (Cline, Windsurf, Kilo Code, Antigravity) rely on the mo
 
 ## Windows support
 
-The shell hook (`rtk-rewrite.sh`) requires a Unix shell. On native Windows:
+Native Windows supports binary hooks for Claude Code and Codex:
 
-- `rtk init -g` automatically falls back to **CLAUDE.md injection mode** (prompt-level instructions)
+- `rtk init -g` configures Claude Code with `rtk hook claude`
+- `rtk init -g --codex` configures Codex with `rtk hook codex`
+- Bash, Shell, and PowerShell matcher payloads are supported
 - Filters work normally (`rtk cargo test`, `rtk git status`)
-- Auto-rewrite does not work — the AI assistant is instructed to use RTK but commands are not intercepted
 
 For full shell-hook support on Windows, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install). Inside WSL, agents with shell hook integration (Claude Code, Cursor, Gemini) work identically to Linux. Native Rust hook integrations such as Trae do not depend on `rtk-rewrite.sh`.
 

@@ -34,6 +34,8 @@ pub const TRAE_DIR: &str = ".trae";
 pub const TRAE_CN_DIR: &str = ".trae-cn";
 pub const CODEX_DIR: &str = ".codex";
 pub const GEMINI_DIR: &str = ".gemini";
+/// Codex hooks configuration file (analogous to Claude Code's settings.json).
+pub const CODEX_HOOKS_JSON: &str = "hooks.json";
 
 pub const GITHUB_DIR: &str = ".github";
 pub const COPILOT_HOOK_FILE: &str = "rtk-rewrite.json";

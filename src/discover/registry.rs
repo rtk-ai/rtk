@@ -89,12 +89,12 @@ static PNPM_GLOBAL_OPT: LazyLock<Regex> = LazyLock::new(|| {
 // to the native `head`/`tail` binary — which already handles multi-file with
 // `==> name <==` banners that a single `rtk read` window cannot reproduce.
 static HEAD_N: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^head\s+-(\d+)\s+(\S+)$").unwrap());
+static HEAD_N_SPACE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^head\s+-n\s+(\d+)\s+(\S+)$").unwrap());
 static HEAD_LINES: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^head\s+--lines=(\d+)\s+(\S+)$").unwrap());
 // `-n N` and `--lines N` are the spellings `tail` already accepted below; `head`
 // silently fell through to no rewrite at all without them.
-static HEAD_N_SPACE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^head\s+-n\s+(\d+)\s+(\S+)$").unwrap());
 static HEAD_LINES_SPACE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^head\s+--lines\s+(\d+)\s+(\S+)$").unwrap());
 // Bare `head FILE` means ten lines, not the whole file. Restricted to a single
@@ -155,6 +155,13 @@ static TAIL_LINES_EQ: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^tail\s+--lines=(\d+)\s+(\S+)$").unwrap());
 static TAIL_LINES_SPACE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^tail\s+--lines\s+(\d+)\s+(\S+)$").unwrap());
+static TAIL_PLAIN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^tail\s+(\S+)$").unwrap());
+static RTK_DISABLED_ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(^|[;&|]{1,2}\s*)(?:\$env:RTK_DISABLED\s*=|set\s+RTK_DISABLED\s*=|(?:[A-Z_][A-Z0-9_]*=\S+\s+)*RTK_DISABLED=)",
+    )
+    .unwrap()
+});
 
 const GOLANGCI_GLOBAL_OPT_WITH_VALUE: &[&str] = &[
     "-c",
@@ -242,6 +249,14 @@ pub fn classify_command(cmd: &str) -> Classification {
                     .to_string(),
             };
         }
+    }
+
+    // `rg --files` lists candidate files. It is not a grep/search operation,
+    // and rewriting it to `rtk grep --files` breaks common discovery pipelines.
+    if is_ripgrep_file_listing(cmd_clean) {
+        return Classification::Unsupported {
+            base_command: "rg".to_string(),
+        };
     }
 
     // Fast check with RegexSet — take the last (most specific) match
@@ -562,6 +577,22 @@ fn split_token_spans(cmd: &str) -> Vec<(&str, usize)> {
     coalesce_words(cmd, &tokenize(cmd))
 }
 
+fn is_ripgrep_file_listing(cmd: &str) -> bool {
+    let tokens = split_token_spans(cmd);
+    tokens.first().is_some_and(|(token, _)| *token == "rg")
+        && tokens.iter().skip(1).any(|(token, _)| *token == "--files")
+}
+
+fn has_powershell_expression_arg(args: &[(&str, usize, usize)]) -> bool {
+    args.iter().skip(1).any(|(token, _, _)| {
+        token.starts_with('$')
+            || token.starts_with('(')
+            || token.contains("$(")
+            || token.contains("::")
+            || token.contains('|')
+    })
+}
+
 /// Normalize absolute binary paths: `/usr/bin/grep -rn foo` → `grep -rn foo` (#485)
 /// Only strips if the first word contains a `/` (Unix path).
 fn strip_absolute_path(cmd: &str) -> String {
@@ -721,6 +752,23 @@ pub(crate) fn rewrite_command_precompiled(
     let normalized = collapse_line_continuations(cmd);
     let trimmed = normalized.trim();
     if trimmed.is_empty() {
+        return None;
+    }
+
+    // A physical newline is a statement boundary in both PowerShell and POSIX
+    // shells. The lexer intentionally treats whitespace uniformly, so trying to
+    // rewrite a multi-line payload here can merge separate commands and corrupt
+    // quoting. Keep the entire payload native; explicit `\\` continuations were
+    // already collapsed above and remain eligible for rewriting.
+    if normalized.contains(['\n', '\r']) {
+        return None;
+    }
+
+    if has_rtk_disabled_assignment(trimmed) {
+        eprintln!(
+            "[rtk] RTK_DISABLED=1 detected — skipping filter for this command. \
+             Remove RTK_DISABLED=1 to restore token savings."
+        );
         return None;
     }
 
@@ -1379,7 +1427,65 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
             return None;
         }
     }
+    if let Some(caps) = TAIL_PLAIN.captures(cmd) {
+        let file = caps.get(1)?.as_str();
+        if !file.starts_with('-') {
+            return Some(format!("rtk read {} --tail-lines 10", file));
+        }
+    }
     None
+}
+
+fn has_rtk_disabled_assignment(cmd: &str) -> bool {
+    RTK_DISABLED_ASSIGNMENT.is_match(cmd)
+}
+
+fn cat_reads_agent_instruction_file(cmd_part: &str) -> bool {
+    let Some(rest) = cmd_part.strip_prefix("cat ") else {
+        return false;
+    };
+    split_arg_token_spans(rest)
+        .iter()
+        .any(|(token, _, _)| !token.starts_with('-') && is_agent_instruction_file_token(token))
+}
+
+fn is_agent_instruction_file_token(token: &str) -> bool {
+    let trimmed = token.trim_matches(|c| c == '"' || c == '\'');
+    let name = trimmed
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(trimmed)
+        .to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "skill.md" | "agents.md" | "claude.md" | "rtk.md" | "instructions.md"
+    )
+}
+
+fn is_database_client_command(cmd_part: &str) -> bool {
+    let tokens = split_arg_token_spans(cmd_part);
+    let Some((first, _, _)) = tokens.first() else {
+        return false;
+    };
+    let unquoted = first.trim_matches(|c| c == '"' || c == '\'');
+    let basename = unquoted
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(unquoted)
+        .to_ascii_lowercase();
+    let command = basename.strip_suffix(".exe").unwrap_or(&basename);
+    matches!(
+        command,
+        "mysql"
+            | "mysqldump"
+            | "mariadb"
+            | "psql"
+            | "sqlcmd"
+            | "sqlite3"
+            | "mongosh"
+            | "mongo"
+            | "redis-cli"
+    )
 }
 
 /// Transparent wrappers that RULES can also match as a whole string, so an
@@ -1645,6 +1751,14 @@ fn rewrite_segment_inner(
             if rest.is_empty() {
                 return None;
             }
+            // Direct `python -m pytest` must preserve the shell-selected interpreter on
+            // Windows. Under `uv run`, however, uv remains the environment authority, so
+            // routing the inner pytest through RTK keeps that environment while filtering.
+            if prefix == "uv run"
+                && let Some(rewritten) = rewrite_python_module_pytest(rest)
+            {
+                return Some(format!("{prefix} {rewritten}"));
+            }
             if let Some(rewritten) =
                 rewrite_segment_inner(rest, excluded, transparent_prefixes, context, depth + 1)
             {
@@ -1704,6 +1818,21 @@ fn rewrite_segment_inner(
         return rewrite_line_range(cmd_part).map(|r| join_redirect_suffix(&r, redirect_suffix));
     }
 
+    if cat_reads_agent_instruction_file(cmd_part) {
+        return None;
+    }
+
+    if is_database_client_command(cmd_part) {
+        return None;
+    }
+
+    // `python -m pytest` deliberately selects the Python resolved by the shell.
+    // Rewriting it to `rtk pytest` may instead select an unrelated pytest.exe,
+    // which changes site-packages and sys.path on Windows.
+    if is_python_module_pytest(cmd_part) {
+        return None;
+    }
+
     // Most cat flags (-v, -A, -e, -t, -s, -b, --show-all, etc.) have different
     // semantics than rtk read or no equivalent at all. Only `-n` (line numbers)
     // maps correctly to `rtk read -n`. Skip rewrite for any other flag.
@@ -1712,6 +1841,10 @@ fn rewrite_segment_inner(
         if args.starts_with('-') && !args.starts_with("-n ") && !args.starts_with("-n\t") {
             return None;
         }
+    }
+
+    if let Some(rewritten) = rewrite_cmd_builtin(cmd_part, redirect_suffix) {
+        return Some(rewritten);
     }
 
     // Use classify_command for correct ignore/prefix handling
@@ -1751,8 +1884,19 @@ fn rewrite_segment_inner(
         Classification::Ignored => return None,
     };
 
-    // Find the matching rule (rtk_cmd values are unique across all rules)
-    let rule = RULES.iter().find(|r| r.rtk_cmd == rtk_equivalent)?;
+    // Find the matching rule whose rewrite_prefixes match the command.
+    // Multiple rules may share the same rtk_cmd (e.g. "rtk read" for cat and Get-Content),
+    // so we prefer the one whose prefix actually matches. Fall back to first rtk_cmd match
+    // for rules with special handling (e.g. golangci-lint with flags before subcommand).
+    let rule = RULES
+        .iter()
+        .find(|r| {
+            r.rtk_cmd == rtk_equivalent
+                && r.rewrite_prefixes
+                    .iter()
+                    .any(|p| strip_word_prefix(cmd_part, p).is_some())
+        })
+        .or_else(|| RULES.iter().find(|r| r.rtk_cmd == rtk_equivalent))?;
     if context == RewriteContext::PipelineFinal
         && (!rule.pipeline_safety.final_safe() || !pipeline_command_is_safe(rule.rtk_cmd, cmd_part))
     {
@@ -1778,6 +1922,10 @@ fn rewrite_segment_inner(
         return Some(rewritten);
     }
 
+    if is_powershell_cmdlet(cmd_part) {
+        return rewrite_powershell_cmdlet(cmd_part, redirect_suffix);
+    }
+
     // #196: gh with --json/--jq/--template produces structured output that
     // rtk gh would corrupt — skip rewrite so the caller gets raw JSON.
     if rule.rtk_cmd == "rtk gh" {
@@ -1788,6 +1936,18 @@ fn rewrite_segment_inner(
         {
             return None;
         }
+    }
+
+    // The Playwright wrapper injects the JSON test reporter and resolves the
+    // Node package-manager binary. Only test runs share those semantics; version
+    // probes and install commands must retain their original executable/output.
+    if rule.rtk_cmd == "rtk playwright"
+        && !rule.rewrite_prefixes.iter().any(|prefix| {
+            strip_word_prefix(cmd_part, prefix).and_then(|rest| rest.split_whitespace().next())
+                == Some("test")
+        })
+    {
+        return None;
     }
 
     // For the Composer-resolved php tools, normalize the leading invocation
@@ -1816,6 +1976,315 @@ fn rewrite_segment_inner(
     }
 
     None
+}
+
+fn rewrite_cmd_builtin(cmd_part: &str, redirect_suffix: &str) -> Option<String> {
+    let args = split_arg_token_spans(cmd_part);
+    let (cmd, _, _) = args.first().copied()?;
+    match cmd.to_ascii_lowercase().as_str() {
+        "dir" => rewrite_cmd_dir(&args, redirect_suffix),
+        "type" => rewrite_cmd_type(&args, redirect_suffix),
+        "findstr" => rewrite_cmd_findstr(&args, redirect_suffix),
+        _ => None,
+    }
+}
+
+fn rewrite_cmd_dir(args: &[(&str, usize, usize)], redirect_suffix: &str) -> Option<String> {
+    let mut output_args: Vec<&str> = Vec::new();
+    for (token, _, _) in args.iter().skip(1).copied() {
+        if token.eq_ignore_ascii_case("/b") {
+            continue;
+        } else if token.eq_ignore_ascii_case("/s") {
+            output_args.push("-R");
+        } else if token.to_ascii_lowercase().starts_with("/a") {
+            output_args.push("-a");
+        } else if token.starts_with('/') {
+            return None;
+        } else {
+            output_args.push(token);
+        }
+    }
+
+    if output_args.is_empty() {
+        Some(format!("rtk ls{}", redirect_suffix))
+    } else {
+        Some(format!(
+            "rtk ls {}{}",
+            output_args.join(" "),
+            redirect_suffix
+        ))
+    }
+}
+
+fn rewrite_cmd_type(args: &[(&str, usize, usize)], redirect_suffix: &str) -> Option<String> {
+    if args.len() != 2 {
+        return None;
+    }
+    let path = args[1].0;
+    if is_agent_instruction_file_token(path) {
+        return None;
+    }
+    if path.starts_with('/') || !looks_like_file_path(path) {
+        return None;
+    }
+    Some(format!("rtk read {}{}", path, redirect_suffix))
+}
+
+fn rewrite_cmd_findstr(args: &[(&str, usize, usize)], redirect_suffix: &str) -> Option<String> {
+    let mut output_args: Vec<&str> = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        let token = args[i].0;
+        if token.eq_ignore_ascii_case("/i") {
+            output_args.push("-i");
+        } else if token.eq_ignore_ascii_case("/n") {
+            output_args.push("-n");
+        } else if token.starts_with('/') {
+            return None;
+        } else {
+            output_args.push(token);
+        }
+        i += 1;
+    }
+
+    if output_args.len() < 2 {
+        return None;
+    }
+    Some(format!(
+        "rtk grep {}{}",
+        output_args.join(" "),
+        redirect_suffix
+    ))
+}
+
+fn is_python_module_pytest(cmd: &str) -> bool {
+    let args = split_arg_token_spans(cmd);
+    let Some((interpreter, _, _)) = args.first().copied() else {
+        return false;
+    };
+    let interpreter = interpreter.to_ascii_lowercase();
+    let Some(version) = interpreter.strip_prefix("python") else {
+        return false;
+    };
+    let is_python = version.is_empty()
+        || version
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | '-'));
+    is_python
+        && args.get(1).is_some_and(|arg| arg.0 == "-m")
+        && args
+            .get(2)
+            .is_some_and(|arg| arg.0.eq_ignore_ascii_case("pytest"))
+}
+
+fn rewrite_python_module_pytest(cmd: &str) -> Option<String> {
+    if !is_python_module_pytest(cmd) {
+        return None;
+    }
+    let args = split_arg_token_spans(cmd);
+    let (_, _, pytest_end) = args.get(2).copied()?;
+    let trailing = cmd.get(pytest_end..)?.trim_start();
+    if trailing.is_empty() {
+        Some("rtk pytest".to_string())
+    } else {
+        Some(format!("rtk pytest {trailing}"))
+    }
+}
+
+fn looks_like_file_path(token: &str) -> bool {
+    let unquoted = token.trim_matches('"').trim_matches('\'');
+    unquoted.contains('.')
+        || unquoted.contains('\\')
+        || unquoted.contains('/')
+        || unquoted.starts_with('.')
+}
+
+fn rewrite_powershell_cmdlet(cmd_part: &str, redirect_suffix: &str) -> Option<String> {
+    let args = split_arg_token_spans(cmd_part);
+    // PowerShell binds comma expressions as arrays; native tools receive a
+    // joined value instead. Defer even quoted commas rather than guess binding.
+    if has_powershell_expression_arg(&args)
+        || args.iter().skip(1).any(|(token, _, _)| token.contains(','))
+    {
+        return None;
+    }
+    let (cmdlet, _, _) = args.first().copied()?;
+    if cmdlet.eq_ignore_ascii_case("Get-Content") || cmdlet.eq_ignore_ascii_case("gc") {
+        return rewrite_powershell_get_content(&args, redirect_suffix);
+    }
+    if cmdlet.eq_ignore_ascii_case("Select-String") || cmdlet.eq_ignore_ascii_case("sls") {
+        return rewrite_powershell_select_string(&args, redirect_suffix);
+    }
+    if cmdlet.eq_ignore_ascii_case("Get-ChildItem") || cmdlet.eq_ignore_ascii_case("gci") {
+        return rewrite_powershell_get_child_item(&args, redirect_suffix);
+    }
+    None
+}
+
+fn is_powershell_cmdlet(cmd_part: &str) -> bool {
+    let args = split_arg_token_spans(cmd_part);
+    let Some((cmdlet, _, _)) = args.first().copied() else {
+        return false;
+    };
+    matches!(
+        cmdlet.to_ascii_lowercase().as_str(),
+        "get-content" | "gc" | "select-string" | "sls" | "get-childitem" | "gci"
+    )
+}
+
+fn rewrite_powershell_get_content(
+    args: &[(&str, usize, usize)],
+    redirect_suffix: &str,
+) -> Option<String> {
+    let mut output_args: Vec<&str> = Vec::new();
+    let mut paths: Vec<&str> = Vec::new();
+    let mut i = 1;
+
+    while i < args.len() {
+        let token = args[i].0;
+        if is_ps_flag(token, &["Path", "LiteralPath"]) {
+            i += 1;
+            paths.push(args.get(i)?.0);
+        } else if token.starts_with('-') {
+            // Beyond -Path/-LiteralPath, PowerShell flags carry semantics that
+            // `rtk read` cannot preserve. In particular, -Raw promises one
+            // unmodified string and line-window flags promise exact physical
+            // lines rather than a smart non-contiguous source excerpt.
+            return None;
+        } else {
+            paths.push(token);
+        }
+        i += 1;
+    }
+
+    if paths.is_empty() {
+        return None;
+    }
+
+    if paths
+        .iter()
+        .any(|path| is_agent_instruction_file_token(path))
+    {
+        return None;
+    }
+
+    output_args.extend(paths);
+    Some(format!(
+        "rtk read {}{}",
+        output_args.join(" "),
+        redirect_suffix
+    ))
+}
+
+fn rewrite_powershell_select_string(
+    args: &[(&str, usize, usize)],
+    redirect_suffix: &str,
+) -> Option<String> {
+    let mut pattern: Option<&str> = None;
+    let mut paths: Vec<&str> = Vec::new();
+    let mut extra: Vec<&str> = Vec::new();
+    let mut positionals: Vec<&str> = Vec::new();
+    let mut i = 1;
+
+    while i < args.len() {
+        let token = args[i].0;
+        if is_ps_flag(token, &["Pattern"]) {
+            i += 1;
+            pattern = Some(args.get(i)?.0);
+        } else if is_ps_flag(token, &["Path", "LiteralPath"]) {
+            i += 1;
+            paths.push(args.get(i)?.0);
+        } else if is_ps_flag(token, &["CaseSensitive"]) {
+            extra.push("--case-sensitive");
+        } else if is_ps_flag(token, &["SimpleMatch"]) {
+            extra.push("--fixed-strings");
+        } else if token.starts_with('-') {
+            return None;
+        } else {
+            positionals.push(token);
+        }
+        i += 1;
+    }
+
+    if pattern.is_none() {
+        pattern = positionals.first().copied();
+        if positionals.len() > 1 {
+            paths.extend(positionals.iter().skip(1).copied());
+        }
+    } else {
+        paths.extend(positionals);
+    }
+
+    let pattern = pattern?;
+    // The compact grep route accepts one path. Never silently discard the rest.
+    if paths.len() > 1 {
+        return None;
+    }
+    let mut output_args = vec![pattern];
+    if let Some(path) = paths.first().copied() {
+        output_args.push(path);
+    }
+    output_args.extend(extra);
+    Some(format!(
+        "rtk grep {}{}",
+        output_args.join(" "),
+        redirect_suffix
+    ))
+}
+
+fn rewrite_powershell_get_child_item(
+    args: &[(&str, usize, usize)],
+    redirect_suffix: &str,
+) -> Option<String> {
+    let mut output_args: Vec<&str> = Vec::new();
+    let mut paths: Vec<&str> = Vec::new();
+    let mut i = 1;
+
+    while i < args.len() {
+        let token = args[i].0;
+        if is_ps_flag(token, &["Path", "LiteralPath"]) {
+            i += 1;
+            paths.push(args.get(i)?.0);
+        } else if is_ps_flag(token, &["Recurse"]) {
+            output_args.push("-R");
+        } else if is_ps_flag(token, &["Force"]) {
+            output_args.push("-a");
+        } else if token.starts_with('-') {
+            return None;
+        } else {
+            paths.push(token);
+        }
+        i += 1;
+    }
+
+    output_args.extend(paths);
+    let args = output_args.join(" ");
+    if args.is_empty() {
+        Some(format!("rtk ls{}", redirect_suffix))
+    } else {
+        Some(format!("rtk ls {}{}", args, redirect_suffix))
+    }
+}
+
+fn is_ps_flag(token: &str, names: &[&str]) -> bool {
+    let Some(name) = token.strip_prefix('-') else {
+        return false;
+    };
+    names
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+}
+
+fn split_arg_token_spans(cmd: &str) -> Vec<(&str, usize, usize)> {
+    tokenize(cmd)
+        .into_iter()
+        .filter(|token| token.kind == TokenKind::Arg)
+        .filter_map(|token| {
+            let start = token.offset;
+            let end = start.checked_add(token.value.len())?;
+            cmd.get(start..end).map(|raw| (raw, start, end))
+        })
+        .collect()
 }
 
 /// The tool-name portion of a matched rewrite prefix: the shortest token-suffix of
@@ -2104,7 +2573,15 @@ mod tests {
     }
 
     mod multiline_blocks {
-        use super::rewrite_command_no_prefixes;
+        // Exercise the Bash-aware multiline parser directly. The public
+        // cross-shell rewrite entry point intentionally keeps physical
+        // newlines native because it cannot distinguish Bash from PowerShell.
+        fn rewrite_command_no_prefixes(cmd: &str, _excluded: &[String]) -> Option<String> {
+            if super::super::has_heredoc(cmd) {
+                return None;
+            }
+            super::super::rewrite_multiline_block(cmd, &[], &[])
+        }
 
         #[test]
         fn test_rewrites_each_line() {
@@ -2626,7 +3103,7 @@ mod tests {
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -2639,7 +3116,7 @@ mod tests {
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -2652,7 +3129,7 @@ mod tests {
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 80.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -2673,7 +3150,7 @@ mod tests {
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 80.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -2686,7 +3163,7 @@ mod tests {
                 rtk_equivalent: "rtk cargo",
                 category: "Cargo",
                 estimated_savings_pct: 90.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -2699,7 +3176,7 @@ mod tests {
                 rtk_equivalent: "rtk tsc",
                 category: "Build",
                 estimated_savings_pct: 83.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -2712,7 +3189,7 @@ mod tests {
                 rtk_equivalent: "rtk read",
                 category: "Files",
                 estimated_savings_pct: 60.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -2772,7 +3249,7 @@ mod tests {
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -2798,7 +3275,7 @@ mod tests {
                 rtk_equivalent: "rtk cargo",
                 category: "Cargo",
                 estimated_savings_pct: 80.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -2811,7 +3288,7 @@ mod tests {
                 rtk_equivalent: "rtk cargo",
                 category: "Cargo",
                 estimated_savings_pct: 80.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -2839,7 +3316,7 @@ mod tests {
                 rtk_equivalent: "rtk cargo",
                 category: "Cargo",
                 estimated_savings_pct: 80.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -2882,7 +3359,17 @@ mod tests {
                 rtk_equivalent: "rtk find",
                 category: "Files",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_rg_files_is_not_search() {
+        assert_eq!(
+            classify_command("rg --files docs scratch scripts ."),
+            Classification::Unsupported {
+                base_command: "rg".to_string()
             }
         );
     }
@@ -2941,7 +3428,7 @@ mod tests {
                 rtk_equivalent: "rtk mypy",
                 category: "Build",
                 estimated_savings_pct: 80.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -2954,7 +3441,7 @@ mod tests {
                 rtk_equivalent: "rtk mypy",
                 category: "Build",
                 estimated_savings_pct: 80.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -3209,6 +3696,14 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_rg_files_passthrough() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --files docs scratch scripts .", &[]),
+            None
+        );
+    }
+
+    #[test]
     fn test_classify_ctest() {
         assert_eq!(
             classify_command("ctest -R smoke --output-on-failure"),
@@ -3218,6 +3713,30 @@ mod tests {
                 estimated_savings_pct: 80.0,
                 status: RtkStatus::Existing,
             }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_files_pipeline_rewrites_safe_final_filter() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --files docs scratch scripts . | rg summary", &[]),
+            Some("rg --files docs scratch scripts . | rtk rg summary".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_files_pipeline_filter_rewrites_safe_final_filter() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --files | rg 'read|cat|file'", &[]),
+            Some("rg --files | rtk rg 'read|cat|file'".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_glob_search_still_rewrites() {
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"rg -n "DB_HOST" server/src -g "*.ts""#, &[]),
+            Some(r#"rtk rg -n "DB_HOST" server/src -g "*.ts""#.into())
         );
     }
 
@@ -3421,6 +3940,89 @@ mod tests {
     }
 
     #[test]
+    fn test_windows_claude_codex_baseline_command_matrix() {
+        let cases = [
+            ("git status", "rtk git status"),
+            ("git diff", "rtk git diff"),
+            ("git log -5", "rtk git log -5"),
+            ("git show HEAD", "rtk git show HEAD"),
+            ("git add .", "rtk git add ."),
+            (
+                r#"git commit -m "fix hooks""#,
+                r#"rtk git commit -m "fix hooks""#,
+            ),
+            ("git push origin main", "rtk git push origin main"),
+            ("git pull --rebase", "rtk git pull --rebase"),
+            ("cat package.json", "rtk read package.json"),
+            (
+                "head -20 src/main.rs",
+                "rtk read src/main.rs --head-lines 20",
+            ),
+            (
+                "tail -20 logs/app.log",
+                "rtk read logs/app.log --tail-lines 20",
+            ),
+            ("tail logs/app.log", "rtk read logs/app.log --tail-lines 10"),
+            (
+                r#"grep -rn "fn main" src/"#,
+                r#"rtk grep -rn "fn main" src/"#,
+            ),
+            (r#"rg "fn main" src/"#, r#"rtk rg "fn main" src/"#),
+            ("cargo test", "rtk cargo test"),
+            ("pytest", "rtk pytest"),
+            ("npm test", "rtk npm test"),
+            ("npm run build", "rtk npm run build"),
+            ("pnpm install", "rtk pnpm install"),
+            ("Get-Content file.txt", "rtk read file.txt"),
+            ("gc file.txt", "rtk read file.txt"),
+            ("Get-ChildItem", "rtk ls"),
+            ("gci src", "rtk ls src"),
+            ("Select-String pattern", "rtk grep pattern"),
+            ("sls pattern", "rtk grep pattern"),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                Some(expected.into()),
+                "failed for {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_powershell_expression_paths_passthrough() {
+        let cases = [
+            r#"Get-Content -LiteralPath (Join-Path $env:USERPROFILE '.codex\RTK.md')"#,
+            r#"Get-ChildItem -LiteralPath $env:USERPROFILE"#,
+            r#"Select-String -Path ($files | ForEach-Object FullName) -Pattern rtk"#,
+        ];
+
+        for input in cases {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                None,
+                "PowerShell expression should pass through unchanged: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_multiline_shell_payloads_passthrough() {
+        for input in [
+            "Get-Content -LiteralPath 'a.txt' -Raw\nGet-Content -LiteralPath 'b.txt' -Raw",
+            "rg -n needle src\nGet-Content -LiteralPath 'src\\main.rs' -TotalCount 40",
+            "git status\ncargo test",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                None,
+                "multi-line payload must preserve native statement boundaries: {input}"
+            );
+        }
+    }
+
+    #[test]
     fn test_rewrite_cat_with_incompatible_flags_skipped() {
         // cat flags with different semantics than rtk read — skip rewrite
         assert_eq!(rewrite_command_no_prefixes("cat -A file.cpp", &[]), None);
@@ -3476,6 +4078,21 @@ mod tests {
                 Some("rtk playwright test".into()),
                 "Failed for command: {}",
                 command
+            );
+        }
+    }
+
+    #[test]
+    fn test_playwright_non_test_commands_passthrough() {
+        for command in [
+            "playwright --version",
+            "playwright install chromium",
+            "npx playwright --version",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                None,
+                "non-test Playwright command must preserve native resolution and output: {command}"
             );
         }
     }
@@ -3893,6 +4510,22 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_rtk_disabled_powershell_assignment_chain() {
+        assert_eq!(
+            rewrite_command_no_prefixes("$env:RTK_DISABLED='1'; Get-ChildItem -Force", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rtk_disabled_cmd_assignment_chain() {
+        assert_eq!(
+            rewrite_command_no_prefixes("set RTK_DISABLED=1&& git status", &[]),
+            None
+        );
+    }
+
+    #[test]
     fn test_rewrite_rtk_disabled_warns_on_stderr() {
         assert_eq!(
             rewrite_command_no_prefixes("RTK_DISABLED=1 git status", &[]),
@@ -3948,6 +4581,84 @@ mod tests {
     }
 
     #[test]
+    fn test_cat_agent_instruction_files_passthrough() {
+        for name in [
+            "AGENTS.md",
+            "SKILL.md",
+            "CLAUDE.md",
+            "RTK.md",
+            "instructions.md",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(&format!("cat {name}"), &[]),
+                None,
+                "cat must not rewrite instruction file {name}"
+            );
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r#"cat "C:\Users\Administrator\.codex\skills\team\SKILL.md""#,
+                &[]
+            ),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("cat src/main.rs", &[]),
+            Some("rtk read src/main.rs".into())
+        );
+    }
+
+    #[test]
+    fn test_windows_instruction_file_reads_passthrough() {
+        for name in [
+            "AGENTS.md",
+            "SKILL.md",
+            "CLAUDE.md",
+            "RTK.md",
+            "instructions.md",
+        ] {
+            for input in [
+                format!("type {name}"),
+                format!("Get-Content {name}"),
+                format!("gc {name}"),
+            ] {
+                assert_eq!(
+                    rewrite_command_no_prefixes(&input, &[]),
+                    None,
+                    "instruction/control file reads must stay native: {input}"
+                );
+            }
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"type "C:\Users\Administrator\.codex\RTK.md""#, &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r#"Get-Content -LiteralPath "C:\Users\Administrator\.codex\skills\team\SKILL.md""#,
+                &[]
+            ),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r#"Get-Content -TotalCount 20 C:\Users\Administrator\.codex\RTK.md"#,
+                &[]
+            ),
+            None
+        );
+
+        assert_eq!(
+            rewrite_command_no_prefixes("type src\\main.rs", &[]),
+            Some("rtk read src\\main.rs".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("Get-Content src\\main.rs", &[]),
+            Some("rtk read src\\main.rs".into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_env_quoted_value_with_spaces() {
         assert_eq!(
             rewrite_command_no_prefixes(
@@ -3990,7 +4701,7 @@ mod tests {
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -4386,8 +5097,19 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_tail_plain_file_skipped() {
-        assert_eq!(rewrite_command_no_prefixes("tail src/main.rs", &[]), None);
+    fn test_rewrite_tail_plain_single_file() {
+        assert_eq!(
+            rewrite_command_no_prefixes("tail src/main.rs", &[]),
+            Some("rtk read src/main.rs --tail-lines 10".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_tail_plain_multi_file_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("tail src/main.rs src/lib.rs", &[]),
+            None
+        );
     }
 
     // --- Issue #1362: head/tail with multiple files falls back to native command ---
@@ -4721,7 +5443,7 @@ mod tests {
                 rtk_equivalent: "rtk swift",
                 category: "Build",
                 estimated_savings_pct: 90.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         ));
     }
@@ -4850,8 +5572,29 @@ mod tests {
     fn test_rewrite_psql() {
         assert_eq!(
             rewrite_command_no_prefixes("psql -U postgres -d mydb", &[]),
-            Some("rtk psql -U postgres -d mydb".into())
+            None
         );
+    }
+
+    #[test]
+    fn test_rewrite_database_clients_skip_auto_hook_rewrite() {
+        for cmd in [
+            "mysql -e 'select 1'",
+            "mysqldump mydb",
+            "mariadb -e 'select 1'",
+            "psql -c 'select 1'",
+            "sqlcmd -Q 'select 1'",
+            "sqlite3 test.db '.tables'",
+            "mongosh --eval 'db.stats()'",
+            "redis-cli ping",
+            r#""C:\Program Files\MySQL\bin\mysql.exe" -e "select 1""#,
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                None,
+                "database client should not be auto-rewritten: {cmd}"
+            );
+        }
     }
 
     // --- Python tooling ---
@@ -4969,7 +5712,7 @@ mod tests {
     fn test_rewrite_python_m_pytest() {
         assert_eq!(
             rewrite_command_no_prefixes("python -m pytest -x tests/", &[]),
-            Some("rtk pytest -x tests/".into())
+            None
         );
     }
 
@@ -5768,6 +6511,45 @@ mod tests {
     }
 
     #[test]
+    fn test_pnpm_lifecycle_commands_never_become_install() {
+        let passthrough = [
+            "pnpm check",
+            "pnpm test",
+            "pnpm build",
+            "pnpm scope:check",
+            "pnpm --filter @wiseteacher/web test -- sample.test.ts",
+            "pnpm --filter @wiseteacher/api typecheck",
+            "pnpm --dir apps/web typecheck",
+        ];
+        for command in passthrough {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                None,
+                "unsupported lifecycle command must stay native: {command}"
+            );
+        }
+
+        let specialized = [
+            (
+                "pnpm exec tsc -p tsconfig.json --noEmit",
+                "rtk tsc -p tsconfig.json --noEmit",
+            ),
+            (
+                "pnpm exec vitest run sample.test.ts",
+                "rtk vitest sample.test.ts",
+            ),
+            ("pnpm install --production", "rtk pnpm install --production"),
+        ];
+        for (command, expected) in specialized {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected.to_string()),
+                "supported pnpm rewrite must preserve its operation: {command}"
+            );
+        }
+    }
+
+    #[test]
     fn test_rewrite_npm_bare_subcommand() {
         let commands = vec!["exec", "run", "run-script", "x"];
         for command in commands {
@@ -5886,7 +6668,7 @@ mod tests {
                 rtk_equivalent: "rtk gradlew",
                 category: "Build",
                 estimated_savings_pct: 90.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -6558,7 +7340,7 @@ mod tests {
                 rtk_equivalent: "rtk grep",
                 category: "Files",
                 estimated_savings_pct: 75.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -6571,7 +7353,7 @@ mod tests {
                 rtk_equivalent: "rtk ls",
                 category: "Files",
                 estimated_savings_pct: 65.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -6584,7 +7366,7 @@ mod tests {
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -6598,7 +7380,7 @@ mod tests {
                 rtk_equivalent: "rtk find",
                 category: "Files",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -6621,7 +7403,7 @@ mod tests {
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -6634,7 +7416,7 @@ mod tests {
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -6647,7 +7429,7 @@ mod tests {
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -6713,7 +7495,7 @@ mod tests {
                 rtk_equivalent: "rtk wc",
                 category: "Files",
                 estimated_savings_pct: 60.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -6726,7 +7508,7 @@ mod tests {
                 rtk_equivalent: "rtk wc",
                 category: "Files",
                 estimated_savings_pct: 60.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -6755,7 +7537,7 @@ mod tests {
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: RtkStatus::Existing
             }
         );
     }
@@ -7157,7 +7939,7 @@ mod tests {
     fn test_python3_m_pytest() {
         assert_eq!(
             rewrite_command_no_prefixes("python3 -m pytest tests/", &[]),
-            Some("rtk pytest tests/".into())
+            None
         );
     }
 
@@ -7575,6 +8357,21 @@ mod tests {
         );
     }
 
+    // --- PowerShell cmdlet rewrite tests ---
+
+    #[test]
+    fn test_classify_get_child_item() {
+        assert_eq!(
+            classify_command("Get-ChildItem"),
+            Classification::Supported {
+                rtk_equivalent: "rtk ls",
+                category: "Files",
+                estimated_savings_pct: 65.0,
+                status: RtkStatus::Existing
+            }
+        );
+    }
+
     /// `jj` is covered only by a TOML filter, never by the native RULES table,
     /// so the bare case pins the TOML branch of the rewrite path and keeps the
     /// wrapper assertions below from passing vacuously when TOML is disabled.
@@ -7593,6 +8390,229 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("nohup /opt/tools/jj log", &[]),
             Some("nohup rtk /opt/tools/jj log".into()),
+        );
+    }
+
+    #[test]
+    fn test_classify_gci() {
+        assert_eq!(
+            classify_command("gci"),
+            Classification::Supported {
+                rtk_equivalent: "rtk ls",
+                category: "Files",
+                estimated_savings_pct: 65.0,
+                status: RtkStatus::Existing
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_get_content() {
+        assert_eq!(
+            classify_command("Get-Content file.txt"),
+            Classification::Supported {
+                rtk_equivalent: "rtk read",
+                category: "Files",
+                estimated_savings_pct: 60.0,
+                status: RtkStatus::Existing
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_select_string() {
+        assert_eq!(
+            classify_command("Select-String pattern"),
+            Classification::Supported {
+                rtk_equivalent: "rtk grep",
+                category: "Files",
+                estimated_savings_pct: 75.0,
+                status: RtkStatus::Existing
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_get_content() {
+        assert_eq!(
+            rewrite_command_no_prefixes("Get-Content file.txt", &[]),
+            Some("rtk read file.txt".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_get_content_path_option() {
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"Get-Content -Path "file with spaces.txt""#, &[]),
+            Some(r#"rtk read "file with spaces.txt""#.into())
+        );
+    }
+
+    #[test]
+    fn test_runlog_powershell_read_and_list_arrays_passthrough() {
+        for command in [
+            "Get-ChildItem -Force .agents,.codex",
+            "Get-ChildItem -LiteralPath 'a','b'",
+            "gci -Path 'a', 'b'",
+            "Get-Content -LiteralPath 'a.txt','b.txt'",
+            "Get-Content -Path 'a.txt', 'b.txt'",
+            "gc 'a.txt','b.txt'",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                None,
+                "PowerShell must retain ownership of array binding: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_get_content_semantic_flags_passthrough() {
+        assert_eq!(
+            rewrite_command_no_prefixes("Get-Content -TotalCount 20 src\\main.rs", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("gc -Tail 15 src\\main.rs", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("Get-Content -Raw package.json", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_get_content_unsupported_option_skips() {
+        assert_eq!(
+            rewrite_command_no_prefixes("Get-Content -Encoding utf8 src\\main.rs", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_select_string() {
+        assert_eq!(
+            rewrite_command_no_prefixes("Select-String pattern", &[]),
+            Some("rtk grep pattern".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_select_string_named_pattern_and_path() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r#"Select-String -Pattern "fn main" -Path src\main.rs"#,
+                &[]
+            ),
+            Some(r#"rtk grep "fn main" src\main.rs"#.into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r#"Select-String -Path src\main.rs -Pattern "fn main""#,
+                &[]
+            ),
+            Some(r#"rtk grep "fn main" src\main.rs"#.into())
+        );
+    }
+
+    #[test]
+    fn test_select_string_array_arguments_passthrough() {
+        for command in [
+            "Select-String -LiteralPath 'a.kt','b.kt' -SimpleMatch -Pattern 'TopAppBar'",
+            "Select-String -Path 'a.kt', 'b.kt' -Pattern 'TopAppBar'",
+            "sls -Pattern 'TopAppBar','BottomAppBar' -LiteralPath 'a.kt'",
+            "Select-String -Pattern 'TopAppBar' -Path a.kt b.kt",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                None,
+                "PowerShell must retain ownership of array binding: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_select_string_unsupported_option_skips() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r#"Select-String -Pattern "fn main" -Context 2 src\main.rs"#,
+                &[]
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_sls() {
+        assert_eq!(
+            rewrite_command_no_prefixes("sls pattern", &[]),
+            Some("rtk grep pattern".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_get_child_item_path_and_flags() {
+        assert_eq!(
+            rewrite_command_no_prefixes("Get-ChildItem -Path src", &[]),
+            Some("rtk ls src".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("gci -Recurse -Force src", &[]),
+            Some("rtk ls -R -a src".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_cmd_builtins_safe_shapes() {
+        assert_eq!(
+            rewrite_command_no_prefixes("dir", &[]),
+            Some("rtk ls".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("dir /b src", &[]),
+            Some("rtk ls src".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("dir /s /a src", &[]),
+            Some("rtk ls -R -a src".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("type Cargo.toml", &[]),
+            Some("rtk read Cargo.toml".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("findstr /i RTK Cargo.toml", &[]),
+            Some("rtk grep -i RTK Cargo.toml".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_cmd_builtins_skip_ambiguous_shapes() {
+        assert_eq!(rewrite_command_no_prefixes("type python", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("type a.txt b.txt", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("findstr /r RTK Cargo.toml", &[]),
+            None
+        );
+        assert_eq!(rewrite_command_no_prefixes("dir /q src", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_powershell_object_pipeline_skips() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r#"Get-ChildItem -LiteralPath "D:\AI\RTK" -Force | ForEach-Object { $_.FullName }"#,
+                &[]
+            ),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r#"Get-Content -Raw -LiteralPath package.json | ConvertFrom-Json"#,
+                &[]
+            ),
+            None
         );
     }
 

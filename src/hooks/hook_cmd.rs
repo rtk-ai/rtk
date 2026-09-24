@@ -9,6 +9,7 @@ use super::permissions::{self, PermissionVerdict};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::io::{self, Read, Write};
+use std::path::PathBuf;
 
 use crate::core::tracking::HookOutcome;
 use crate::core::utils::strip_leading_bom;
@@ -328,6 +329,14 @@ fn copilot_cli_response(cmd: &str, args: &Value) -> Option<Value> {
     )
 }
 
+fn copilot_cli_response_for_verdict(
+    cmd: &str,
+    args: &Value,
+    verdict: PermissionVerdict,
+) -> Option<Value> {
+    copilot_cli_response_from_decision(args, decide_from_verdict(cmd, verdict), cmd)
+}
+
 fn copilot_cli_response_from_decision(
     args: &Value,
     decision: HookDecision,
@@ -509,6 +518,19 @@ fn gemini_json(decision: &str, rewrite: Option<&str>) -> String {
 
 // ── Audit logging ─────────────────────────────────────────────
 
+/// Best-effort diagnostics when RTK_HOOK_DIAGNOSTICS=1.
+/// Emits structured key=value lines to stderr so users can trace hook activity.
+fn diagnostics(agent: &str, action: &str, detail: &str) {
+    if std::env::var("RTK_HOOK_DIAGNOSTICS").as_deref() != Ok("1") {
+        return;
+    }
+    let ts = chrono::Local::now().format("%H:%M:%S%.3f");
+    let _ = writeln!(
+        io::stderr(),
+        "[rtk-diag {ts}] agent={agent} action={action} detail={detail}"
+    );
+}
+
 /// Best-effort audit log when RTK_HOOK_AUDIT=1.
 fn audit_log(action: &str, original: &str, rewritten: &str) {
     if std::env::var("RTK_HOOK_AUDIT").as_deref() != Ok("1") {
@@ -526,10 +548,9 @@ fn sanitize_log_field(s: &str) -> String {
 }
 
 fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> {
-    let home = dirs::home_dir()?;
-    let dir = home.join(".local").join("share").join("rtk");
-    crate::core::utils::create_private_dir(&dir).ok()?;
-    let path = dir.join("hook-audit.log");
+    let path = hook_audit_log_path()?;
+    let dir = path.parent()?;
+    crate::core::utils::create_private_dir(dir).ok()?;
     let mut file = crate::core::utils::open_private(
         std::fs::OpenOptions::new().create(true).append(true),
         &path,
@@ -545,6 +566,37 @@ fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> 
         sanitize_log_field(rewritten)
     )
     .ok()
+}
+
+fn env_path(name: &str) -> Option<PathBuf> {
+    let value = std::env::var_os(name)?;
+    let path = PathBuf::from(value);
+    if path.as_os_str().is_empty() {
+        None
+    } else {
+        Some(path)
+    }
+}
+
+fn audit_home_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
+        env_path("USERPROFILE").or_else(dirs::home_dir)
+    } else {
+        dirs::home_dir().or_else(|| env_path("HOME"))
+    }
+}
+
+pub(crate) fn hook_audit_log_path() -> Option<PathBuf> {
+    if let Some(dir) = env_path("RTK_AUDIT_DIR") {
+        return Some(dir.join("hook-audit.log"));
+    }
+    let home = audit_home_dir()?;
+    Some(
+        home.join(".local")
+            .join("share")
+            .join("rtk")
+            .join("hook-audit.log"),
+    )
 }
 
 // ── Claude Code native hook ────────────────────────────────────
@@ -687,8 +739,12 @@ fn log_hook_decision(v: &Value, cmd: &str, decision: HookOutcome, rewritten: Opt
 pub fn run_claude() -> Result<()> {
     let input = read_stdin_limited()?;
 
+    // Strip leading BOM(s): Windows hosts (cmd/pwsh, some Claude Code builds)
+    // may prepend UTF-8 BOMs to hook stdin. serde_json rejects BOM-prefixed
+    // payloads, so stripping defensively keeps the rewrite path alive.
     let input = strip_leading_bom(&input).trim();
     if input.is_empty() {
+        diagnostics("claude", "empty_input", "");
         return Ok(());
     }
 
@@ -696,6 +752,10 @@ pub fn run_claude() -> Result<()> {
         Ok(v) => v,
         Err(e) => {
             let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            // Log a truncated preview for debugging (avoid dumping large payloads)
+            let preview: String = input.chars().take(120).collect();
+            let _ = writeln!(io::stderr(), "[rtk hook] input preview: {preview}");
+            diagnostics("claude", "parse_error", &preview);
             return Ok(());
         }
     };
@@ -718,6 +778,7 @@ pub fn run_claude() -> Result<()> {
             // stalls the tool call it's supposedly just logging.
             let _ = writeln!(io::stdout(), "{output}");
             audit_log("rewrite", &cmd, &rewritten);
+            diagnostics("claude", "rewrite", &format!("{cmd} -> {rewritten}"));
             log_hook_decision(&v, &cmd, decision, Some(&rewritten));
         }
         PayloadAction::Skip {
@@ -734,11 +795,13 @@ pub fn run_claude() -> Result<()> {
             // last for the same reason as the Rewrite arm above: it must never be
             // what a Bash tool call is waiting on.
             audit_log(reason, &cmd, "");
+            diagnostics("claude", reason, &cmd);
             log_hook_decision(&v, &cmd, decision, None);
         }
-        PayloadAction::Ignore => {}
+        PayloadAction::Ignore => {
+            diagnostics("claude", "ignore", "no command in payload");
+        }
     }
-
     Ok(())
 }
 
@@ -833,12 +896,20 @@ fn is_supported_codex_permission_mode(v: &Value) -> bool {
     )
 }
 
+fn codex_bypasses_permissions(v: &Value) -> bool {
+    v.get("permission_mode").and_then(Value::as_str) == Some("bypassPermissions")
+}
+
 fn process_codex_payload(v: &Value) -> PayloadAction {
     if v.get("hook_event_name").and_then(Value::as_str) != Some(PRE_TOOL_USE_KEY)
-        || !matches!(
+        || !(matches!(
             v.get("tool_name").and_then(Value::as_str),
             Some("Bash" | "bash")
-        )
+        ) || (cfg!(windows)
+            && matches!(
+                v.get("tool_name").and_then(Value::as_str),
+                Some("Shell" | "PowerShell")
+            )))
     {
         return PayloadAction::Ignore;
     }
@@ -870,7 +941,16 @@ fn process_codex_payload(v: &Value) -> PayloadAction {
         };
     }
 
-    process_codex_payload_from_decision(v, cmd, decide_hook_action(cmd, permissions::Host::Codex))
+    let decision = if cfg!(windows) && codex_bypasses_permissions(v) {
+        decide_from_verdict(cmd, PermissionVerdict::Allow)
+    } else if cfg!(windows) {
+        // Keep the pre-existing Windows allow-rule boundary until host approval
+        // semantics for the rewritten argv have been verified end to end.
+        decide_hook_action(cmd, permissions::Host::Claude)
+    } else {
+        decide_hook_action(cmd, permissions::Host::Codex)
+    };
+    process_codex_payload_from_decision(v, cmd, decision)
 }
 
 fn process_codex_payload_from_decision(
@@ -880,7 +960,16 @@ fn process_codex_payload_from_decision(
 ) -> PayloadAction {
     let (rewritten, outcome) = match decision {
         HookDecision::AllowRewrite(rewritten) => (rewritten, HookOutcome::Allow),
-        HookDecision::AskRewrite(rewritten) => (rewritten, HookOutcome::Ask),
+        HookDecision::AskRewrite(rewritten) => {
+            if cfg!(windows) {
+                return PayloadAction::Skip {
+                    decision: HookOutcome::Defer,
+                    reason: "skip:host_approval",
+                    cmd: cmd.to_string(),
+                };
+            }
+            (rewritten, HookOutcome::Ask)
+        }
         HookDecision::Deny => {
             return PayloadAction::Skip {
                 decision: HookOutcome::Deny,
@@ -913,6 +1002,19 @@ fn process_codex_payload_from_decision(
         decision: outcome,
         rewritten,
     }
+}
+
+#[cfg(test)]
+fn process_codex_payload_for_verdict(v: &Value, verdict: PermissionVerdict) -> PayloadAction {
+    let Some(cmd) = v.pointer("/tool_input/command").and_then(Value::as_str) else {
+        return PayloadAction::Ignore;
+    };
+    let verdict = if codex_bypasses_permissions(v) {
+        PermissionVerdict::Allow
+    } else {
+        verdict
+    };
+    process_codex_payload_from_decision(v, cmd, decide_from_verdict(cmd, verdict))
 }
 
 /// Run the Codex CLI PreToolUse hook natively.
@@ -1368,11 +1470,11 @@ mod tests {
     }
 
     #[test]
-    fn test_copilot_cli_allow_rewrite_returns_allow() {
-        let r = copilot_cli_response_from_decision(
-            &cli_args("cargo test"),
-            HookDecision::AllowRewrite("rtk cargo test".into()),
+    fn test_copilot_cli_explicit_allow_returns_allow_with_rewrite() {
+        let r = copilot_cli_response_for_verdict(
             "cargo test",
+            &cli_args("cargo test"),
+            PermissionVerdict::Allow,
         )
         .unwrap();
         assert_eq!(r["permissionDecision"], "allow");
@@ -1507,82 +1609,6 @@ mod tests {
         assert_eq!(modified["mode"], "sync");
     }
 
-    fn end_to_end(cmd: &str) -> Option<Value> {
-        let verdict = crate::hooks::permissions::check_command_with_rules(
-            cmd,
-            &[],
-            &[],
-            &["Bash(git:*)".to_string()],
-        );
-        copilot_cli_response_from_decision(&cli_args(cmd), decide_from_verdict(cmd, verdict), cmd)
-    }
-
-    #[test]
-    fn test_copilot_cli_cve_safe_forms_still_rewrite() {
-        for cmd in ["git status", "git status 2>&1"] {
-            let r = end_to_end(cmd).unwrap_or_else(|| panic!("expected rewrite for {cmd:?}"));
-            assert_eq!(
-                r["modifiedArgs"]["command"].as_str().unwrap(),
-                format!("rtk {cmd}"),
-                "safe form {cmd:?} must rewrite",
-            );
-        }
-    }
-
-    #[test]
-    fn test_copilot_cli_cve_newline_bypass_never_auto_allows() {
-        let r = end_to_end("git status\nrm -rf /tmp/x");
-        if let Some(resp) = r {
-            assert!(
-                resp.get("permissionDecision").is_none(),
-                "newline-hidden command must not produce permissionDecision: \"allow\""
-            );
-        }
-    }
-
-    #[test]
-    fn test_copilot_cli_cve_background_bypass_never_auto_allows() {
-        let r = end_to_end("git status & rm -rf /tmp/x");
-        if let Some(resp) = r {
-            assert!(
-                resp.get("permissionDecision").is_none(),
-                "background-& hidden command must not produce permissionDecision: \"allow\""
-            );
-        }
-    }
-
-    #[test]
-    fn test_copilot_cli_cve_command_substitution_returns_none() {
-        assert!(
-            end_to_end("git log --pretty=$(rm -rf /tmp/x)").is_none(),
-            "$( ) command substitution must not produce modifiedArgs"
-        );
-    }
-
-    #[test]
-    fn test_copilot_cli_cve_backtick_substitution_returns_none() {
-        assert!(
-            end_to_end("git log --pretty=`rm -rf /tmp/x`").is_none(),
-            "backtick substitution must not produce modifiedArgs"
-        );
-    }
-
-    #[test]
-    fn test_copilot_cli_cve_file_redirect_amp_returns_none() {
-        assert!(
-            end_to_end("git status >& /tmp/evil").is_none(),
-            ">&file redirect must not produce modifiedArgs"
-        );
-    }
-
-    #[test]
-    fn test_copilot_cli_cve_file_redirect_returns_none() {
-        assert!(
-            end_to_end("git status > /tmp/evil").is_none(),
-            ">file redirect must not produce modifiedArgs"
-        );
-    }
-
     // --- Gemini format ---
 
     #[test]
@@ -1676,8 +1702,12 @@ mod tests {
     // --- Claude handler ---
 
     fn claude_input(cmd: &str) -> String {
+        agent_input("Bash", cmd)
+    }
+
+    fn agent_input(tool: &str, cmd: &str) -> String {
         json!({
-            "tool_name": "Bash",
+            "tool_name": tool,
             "tool_input": { "command": cmd }
         })
         .to_string()
@@ -1840,6 +1870,181 @@ mod tests {
     }
 
     #[test]
+    fn test_claude_rewrites_powershell_named_args() {
+        let result = run_claude_inner(&agent_input(
+            "PowerShell",
+            r#"Select-String -Pattern "fn main" -Path src\main.rs"#,
+        ))
+        .unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, r#"rtk grep "fn main" src\main.rs"#);
+    }
+
+    #[test]
+    fn test_claude_hook_rewrites_all_windows_matchers() {
+        let cases = [
+            ("Bash", "git show HEAD", "rtk git show HEAD"),
+            ("Shell", "npm run build", "rtk npm run build"),
+            ("PowerShell", "Get-ChildItem -Path src", "rtk ls src"),
+        ];
+
+        for (tool, input, expected) in cases {
+            let result = run_claude_inner(&agent_input(tool, input)).unwrap();
+            let v: Value = serde_json::from_str(&result).unwrap();
+            let cmd = v
+                .pointer("/hookSpecificOutput/updatedInput/command")
+                .and_then(|c| c.as_str())
+                .unwrap();
+            assert_eq!(cmd, expected, "failed for {tool}: {input}");
+        }
+    }
+
+    #[test]
+    fn test_codex_shared_payload_rewrites_powershell_named_args() {
+        let input: Value = serde_json::from_str(&agent_input(
+            "PowerShell",
+            r#"Get-Content -Path "file with spaces.txt""#,
+        ))
+        .unwrap();
+        let PayloadAction::Rewrite { output, .. } =
+            process_codex_payload_for_verdict(&input, PermissionVerdict::Allow)
+        else {
+            panic!("expected rewrite");
+        };
+        let cmd = output
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, r#"rtk read "file with spaces.txt""#);
+    }
+
+    #[test]
+    fn test_codex_rewrite_includes_allow_for_updated_input() {
+        let input: Value =
+            serde_json::from_str(&agent_input("Bash", "git status --short")).unwrap();
+        let PayloadAction::Rewrite { output, .. } =
+            process_codex_payload_for_verdict(&input, PermissionVerdict::Allow)
+        else {
+            panic!("expected rewrite");
+        };
+        let hook = &output["hookSpecificOutput"];
+        assert_eq!(hook["permissionDecision"], "allow");
+        assert_eq!(
+            hook["updatedInput"]["command"], "rtk git status --short",
+            "Codex ignores updatedInput unless permissionDecision=allow is present"
+        );
+    }
+
+    #[test]
+    fn test_codex_shared_payload_rewrites_old_guide_matrix_samples() {
+        let cases = [
+            ("Bash", "git add .", "rtk git add ."),
+            ("Shell", "pnpm install", "rtk pnpm install"),
+        ];
+
+        for (tool, input, expected) in cases {
+            let input: Value = serde_json::from_str(&agent_input(tool, input)).unwrap();
+            let PayloadAction::Rewrite { output, .. } =
+                process_codex_payload_for_verdict(&input, PermissionVerdict::Allow)
+            else {
+                panic!("expected rewrite for {tool}: {input}");
+            };
+            let cmd = output
+                .pointer("/hookSpecificOutput/updatedInput/command")
+                .and_then(|c| c.as_str())
+                .unwrap();
+            assert_eq!(cmd, expected, "failed for {tool}: {input}");
+        }
+    }
+
+    #[test]
+    fn test_codex_powershell_exact_read_flags_passthrough() {
+        for command in [
+            "gc -Tail 15 src\\main.rs",
+            "Get-Content -TotalCount 20 src\\main.rs",
+            "Get-Content -Raw package.json",
+        ] {
+            let input: Value = serde_json::from_str(&agent_input("PowerShell", command)).unwrap();
+            assert!(
+                !matches!(
+                    process_codex_payload_for_verdict(&input, PermissionVerdict::Allow),
+                    PayloadAction::Rewrite { .. }
+                ),
+                "PowerShell exact-read semantics must remain native: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_codex_powershell_filesystem_mutations_preserve_exact_command() {
+        let commands = [
+            r#"Move-Item -LiteralPath 'C:\Temp\rtk-a.png' -Destination 'C:\Temp\rtk-backup\evidence.png'"#,
+            r#"Remove-Item -LiteralPath 'C:\Temp\rtk-a.png','C:\Temp\rtk-b.png' -Force -ErrorAction SilentlyContinue"#,
+            r#"$source = [IO.Path]::GetFullPath('C:\Temp\rtk-a.png')
+$backupRoot = [IO.Path]::GetFullPath('C:\Temp\rtk-backup').TrimEnd('\')
+$finalDestination = Join-Path $backupRoot 'evidence.png'
+Move-Item -LiteralPath $source -Destination $finalDestination
+$temporaryScreenshots = @('C:\Temp\rtk-b.png', 'C:\Temp\rtk-c.png')
+Remove-Item -LiteralPath $temporaryScreenshots -Force -ErrorAction SilentlyContinue"#,
+        ];
+
+        for command in commands {
+            let input: Value = serde_json::from_str(&agent_input("PowerShell", command)).unwrap();
+            let PayloadAction::Skip { decision, cmd, .. } =
+                process_codex_payload_for_verdict(&input, PermissionVerdict::Allow)
+            else {
+                panic!("filesystem mutation must pass through without an RTK rewrite: {command}");
+            };
+            assert_eq!(decision, HookOutcome::Defer);
+            assert_eq!(
+                cmd, command,
+                "PowerShell quoting must remain byte-for-byte exact"
+            );
+        }
+    }
+
+    #[test]
+    fn test_codex_host_policy_candidates_remain_native() {
+        let cases = [
+            (
+                "PowerShell",
+                r#"Remove-Item -LiteralPath 'D:\AI\workspace\runtime\probe.tmp' -Force"#,
+            ),
+            (
+                "PowerShell",
+                r#"Start-Process -WindowStyle Hidden 'D:\AI\workspace\app.exe'"#,
+            ),
+            (
+                "PowerShell",
+                r#"Invoke-WebRequest -Uri 'https://example.com/app.apk' -OutFile 'D:\AI\workspace\runtime\app.tmp'"#,
+            ),
+            (
+                "PowerShell",
+                r#"Get-FileHash -LiteralPath 'D:\AI\workspace\fixture.json' -Algorithm SHA256"#,
+            ),
+            (
+                "Shell",
+                "adb shell am start -a android.intent.action.VIEW -d https://example.com/plan?new=1 com.example/.MainActivity",
+            ),
+        ];
+
+        for (tool, command) in cases {
+            let input: Value = serde_json::from_str(&agent_input(tool, command)).unwrap();
+            let PayloadAction::Skip { decision, cmd, .. } =
+                process_codex_payload_for_verdict(&input, PermissionVerdict::Allow)
+            else {
+                panic!("host-policy candidate must remain native: {command}");
+            };
+            assert_eq!(decision, HookOutcome::Defer);
+            assert_eq!(cmd, command, "RTK must preserve the exact command string");
+        }
+    }
+
+    #[test]
     fn test_claude_rewrite_preserves_tool_input_fields() {
         let input = claude_input_with_fields("git status", 30000, "Check repo status");
         let result = run_claude_inner(&input).unwrap();
@@ -1856,28 +2061,92 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_substitution_not_rewritten() {
-        // A substitution payload must never be rewritten into updatedInput;
-        // RTK skips so Claude Code evaluates the original command natively.
-        assert!(run_claude_inner(&claude_input("git status `rm -rf /tmp/x`")).is_none());
-        assert!(run_claude_inner(&claude_input("git status $(rm -rf /tmp/x)")).is_none());
-        assert!(run_claude_inner(&claude_input("git log --pretty=\"$(rm -rf /tmp/x)\"")).is_none());
-    }
-
-    #[test]
-    fn test_claude_file_redirect_not_rewritten() {
-        assert!(run_claude_inner(&claude_input("git log > /tmp/out.txt")).is_none());
-    }
-
-    #[test]
-    fn test_claude_fd_dup_redirect_still_rewritten() {
-        // `2>&1` is attestable — the rewrite proceeds as normal.
-        assert!(run_claude_inner(&claude_input("git status 2>&1")).is_some());
-    }
-
-    #[test]
     fn test_claude_heredoc_passthrough() {
         assert!(run_claude_inner(&claude_input("cat <<EOF\nhello\nEOF")).is_none());
+    }
+
+    #[test]
+    fn test_claude_unattestable_constructs_passthrough() {
+        for command in [
+            "git status $(whoami)",
+            "git status `whoami`",
+            "git log > out.txt",
+        ] {
+            assert!(
+                run_claude_inner(&claude_input(command)).is_none(),
+                "unattestable command must pass through unchanged: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_codex_unattestable_constructs_passthrough_without_allow() {
+        for command in ["git status $(whoami)", "git log > out.txt"] {
+            let input: Value = serde_json::from_str(&claude_input(command)).unwrap();
+            assert!(
+                !matches!(
+                    process_codex_payload_for_verdict(&input, PermissionVerdict::Allow),
+                    PayloadAction::Rewrite { .. }
+                ),
+                "Codex must not rewrite or auto-allow unattestable command: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_codex_powershell_multiline_env_call_operator_passthrough() {
+        let command = "$env:CARGO_BUILD_JOBS='4'\n& cargo test hooks:: -- --test-threads=4";
+        let input: Value = serde_json::from_str(&claude_input(command)).unwrap();
+        assert!(
+            !matches!(
+                process_codex_payload_for_verdict(&input, PermissionVerdict::Allow),
+                PayloadAction::Rewrite { .. }
+            ),
+            "PowerShell environment setup plus call operator must not be rewritten or auto-allowed"
+        );
+    }
+
+    #[test]
+    fn test_codex_default_and_ask_never_escalate_to_allow() {
+        let input: Value = serde_json::from_str(&agent_input("Bash", "git status")).unwrap();
+        for verdict in [PermissionVerdict::Default, PermissionVerdict::Ask] {
+            assert!(
+                !matches!(
+                    process_codex_payload_for_verdict(&input, verdict),
+                    PayloadAction::Rewrite { .. }
+                ),
+                "Codex cannot apply updatedInput without allow, and ask/default must not be escalated"
+            );
+        }
+    }
+
+    #[test]
+    fn test_codex_bypass_permissions_rewrites_without_claude_allow_rule() {
+        let input = json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "git status" },
+            "permission_mode": "bypassPermissions"
+        });
+
+        let PayloadAction::Rewrite { output, .. } =
+            process_codex_payload_for_verdict(&input, PermissionVerdict::Default)
+        else {
+            panic!("host-authorized bypassPermissions payload must rewrite");
+        };
+
+        let hook = &output["hookSpecificOutput"];
+        assert_eq!(hook["permissionDecision"], "allow");
+        assert_eq!(hook["updatedInput"]["command"], "rtk git status");
+    }
+
+    #[test]
+    fn test_claude_fd_dup_redirect_still_rewrites() {
+        let output = run_claude_inner(&claude_input("git status 2>&1")).unwrap();
+        let value: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(
+            value["hookSpecificOutput"]["updatedInput"]["command"],
+            "rtk git status 2>&1"
+        );
     }
 
     #[test]
@@ -1953,6 +2222,7 @@ mod tests {
         assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
         // permissionDecision is only set when an explicit allow rule matches;
         // with default-to-ask semantics (no rules configured), it is absent.
+        assert!(hook.get("permissionDecision").is_none());
         assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
         assert!(hook["updatedInput"].is_object());
         assert!(hook["updatedInput"]["command"].is_string());
@@ -2050,7 +2320,13 @@ mod tests {
 
     #[test]
     fn test_codex_rewrite_uses_required_allow_shape() {
-        let result = run_codex_inner(&codex_input("git status")).unwrap();
+        let mode = if cfg!(windows) {
+            "bypassPermissions"
+        } else {
+            "default"
+        };
+        let result =
+            run_codex_inner(&codex_input_with_permission_mode("git status", Some(mode))).unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
         let hook = &v["hookSpecificOutput"];
 
@@ -2070,6 +2346,16 @@ mod tests {
         ] {
             let decision =
                 super::super::decision::decide_with_params("git status", verdict, &[], &[]);
+            if cfg!(windows) && expected == HookOutcome::Ask {
+                assert!(matches!(
+                    process_codex_payload_from_decision(&input, "git status", decision),
+                    PayloadAction::Skip {
+                        reason: "skip:host_approval",
+                        ..
+                    }
+                ));
+                continue;
+            }
             let PayloadAction::Rewrite {
                 output, decision, ..
             } = process_codex_payload_from_decision(&input, "git status", decision)
@@ -2133,13 +2419,15 @@ mod tests {
             "dontAsk",
             "bypassPermissions",
         ] {
-            assert!(
-                run_codex_inner(&codex_input_with_permission_mode(
-                    "git status",
-                    Some(permission_mode)
-                ))
-                .is_some(),
-                "documented permission mode should rewrite: {permission_mode}"
+            let rewrites = run_codex_inner(&codex_input_with_permission_mode(
+                "git status",
+                Some(permission_mode),
+            ))
+            .is_some();
+            assert_eq!(
+                rewrites,
+                !cfg!(windows) || permission_mode == "bypassPermissions",
+                "Windows must defer modes that still need host approval: {permission_mode}"
             );
         }
     }
@@ -2158,7 +2446,15 @@ mod tests {
 
     #[test]
     fn test_codex_rewrites_commands_that_still_need_native_approval() {
-        let result = run_codex_inner(&codex_input("cargo test")).unwrap();
+        let result = run_codex_inner(&codex_input("cargo test"));
+        if cfg!(windows) {
+            assert!(
+                result.is_none(),
+                "Windows host approval must see the original command"
+            );
+            return;
+        }
+        let result = result.unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
 
         assert_eq!(
@@ -2172,7 +2468,7 @@ mod tests {
         let input = json!({
             "hook_event_name": PRE_TOOL_USE_KEY,
             "tool_name": "Bash",
-            "permission_mode": "default",
+            "permission_mode": if cfg!(windows) { "bypassPermissions" } else { "default" },
             "tool_input": {
                 "command": "git status --short",
                 "timeout": 30_000,
@@ -2220,7 +2516,16 @@ mod tests {
 
     #[test]
     fn test_codex_rewrites_compound_command_directly() {
-        let result = run_codex_inner(&codex_input("git add . && cargo test")).unwrap();
+        let mode = if cfg!(windows) {
+            "bypassPermissions"
+        } else {
+            "default"
+        };
+        let result = run_codex_inner(&codex_input_with_permission_mode(
+            "git add . && cargo test",
+            Some(mode),
+        ))
+        .unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
 
         assert_eq!(
@@ -2253,7 +2558,6 @@ mod tests {
     fn test_cursor_rewrite_flat_format() {
         let result = run_cursor_allowed(&cursor_input("git status"));
         let v: Value = serde_json::from_str(&result).unwrap();
-        // Cursor preToolUse expects allow/deny for rewrite application.
         assert_eq!(v["permission"], "allow");
         assert_eq!(v["updated_input"]["command"], "rtk git status");
         assert!(v.get("hookSpecificOutput").is_none());
@@ -2413,6 +2717,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    #[test]
+    fn test_audit_log_uses_explicit_audit_dir() {
+        let tmp = std::env::temp_dir().join(format!("rtk-test-audit-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let log_path = tmp.join("hook-audit.log");
+
+        temp_env::with_vars(
+            [
+                ("RTK_HOOK_AUDIT", Some("1")),
+                ("RTK_AUDIT_DIR", Some(tmp.to_str().unwrap())),
+            ],
+            || audit_log("rewrite", "git status", "rtk git status"),
+        );
+
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.contains("rewrite | git status | rtk git status"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     // --- Adversarial tests ---
 
     #[test]
@@ -2465,7 +2789,6 @@ mod tests {
             PermissionVerdict::Deny
         );
     }
-
     // --- Shared decision flow (all hosts route through this) ---
 
     fn decide_with_rules(

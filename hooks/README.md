@@ -332,7 +332,7 @@ New integrations must follow the [Exit Code Contract](#exit-code-contract) and [
 
 | Tier | Mechanism | Maintenance | Examples |
 |------|-----------|-------------|----------|
-| **Full hook** | Shell script or Rust binary, intercepts commands via agent's hook API | High — must track agent API changes | Claude Code, Cursor, Copilot, Gemini, Codex |
+| **Full hook** | Shell script or Rust binary, intercepts commands via agent's hook API | High — must track agent API changes | Claude Code, Codex, Cursor, Copilot, Gemini |
 | **Plugin** | TypeScript/JS/Python plugin in agent's plugin system | Medium — agent manages loading | OpenCode, Hermes, Pi, Oh My Pi |
 | **Rules file** | Prompt-level instructions the agent reads | Low — no code to break | Cline, Windsurf |
 

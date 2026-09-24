@@ -296,16 +296,7 @@ pub struct MonthStats {
     pub avg_time_ms: u64,
 }
 
-/// Type alias for command statistics tuple: (command, count, saved_tokens, weighted_savings_rate, avg_time_ms)
-///
-/// # Warning
-/// The 4th field is a **weighted** savings rate: `SUM(saved_tokens) / SUM(input_tokens) * 100.0`,
-/// guarded so that a group whose every row has zero input reports 0.0 rather than NULL.
-/// Do NOT aggregate this column with `AVG()` — that would produce an unweighted mean that
-/// under-weights high-volume commands. Always recompute it as
-/// `CASE WHEN SUM(input_tokens) > 0 THEN SUM(saved_tokens) / SUM(input_tokens) * 100.0 ELSE 0.0 END`
-/// instead. `saved_tokens` is signed, so the rate can be negative where the 3rd field, being
-/// unsigned, is clamped to 0.
+/// Type alias for command statistics tuple: (command, count, saved_tokens, weighted_savings_pct, avg_time_ms)
 type CommandStats = (String, usize, usize, f64, u64);
 
 /// Current tracking-DB schema version, stored in the SQLite `user_version` pragma.
@@ -996,7 +987,6 @@ impl Tracker {
         )?;
 
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
-            // added: params
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)? as usize,
@@ -1626,6 +1616,13 @@ pub(crate) fn get_db_path() -> Result<PathBuf> {
         return Ok(PathBuf::from(custom_path));
     }
 
+    #[cfg(test)]
+    if std::env::var("RTK_TEST_USE_REAL_DB").as_deref() != Ok("1") {
+        return Ok(std::env::temp_dir()
+            .join("rtk")
+            .join(format!("test-history-{}.db", std::process::id())));
+    }
+
     // Priority 2: Configuration file. Reads the process-wide cached config (see
     // `config::cached_config`), not a fresh `Config::load()`: this runs inside
     // `Tracker::new()`, which `log_hook_decision` now calls on every single
@@ -2090,13 +2087,9 @@ mod command_label_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::sync::Mutex;
 
-    /// Serializes tests that mutate the process-global `RTK_DB_PATH` env var.
-    /// Must be a single shared static: a `static` declared inside each test
-    /// function body is a distinct static per function, not a shared lock, so
-    /// tests using separate locals don't actually serialize against each other
-    /// and can race on the same global env var under parallel `cargo test`.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     // 1. estimate_tokens — verify ~4 chars/token ratio
@@ -2327,21 +2320,45 @@ mod tests {
     fn test_db_path_env_and_default() {
         use std::env;
         let _guard = ENV_LOCK.lock().unwrap();
-
         let custom_path = env::temp_dir().join("rtk_test_custom.db");
         temp_env::with_var("RTK_DB_PATH", Some(&custom_path), || {
             let db_path = get_db_path().expect("Failed to get db path");
             assert_eq!(db_path, custom_path);
         });
 
-        temp_env::with_var_unset("RTK_DB_PATH", || {
-            let db_path = get_db_path().expect("Failed to get db path");
-            assert!(
-                db_path.ends_with("rtk/history.db"),
-                "expected default path ending with rtk/history.db, got: {}",
-                db_path.display()
-            );
-        });
+        temp_env::with_vars(
+            [("RTK_DB_PATH", None), ("RTK_TEST_USE_REAL_DB", Some("1"))],
+            || {
+                let db_path = get_db_path().expect("Failed to get db path");
+                assert!(
+                    db_path.ends_with("rtk/history.db"),
+                    "expected default path ending with rtk/history.db, got: {}",
+                    db_path.display()
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn test_db_path_test_build_defaults_to_temp() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        temp_env::with_vars(
+            [
+                ("RTK_DB_PATH", None::<&str>),
+                ("RTK_TEST_USE_REAL_DB", None),
+            ],
+            || {
+                let db_path = get_db_path().expect("Failed to get db path");
+                assert!(
+                    db_path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("test-history-")),
+                    "test builds must not default to the user gain DB: {}",
+                    db_path.display()
+                );
+            },
+        );
     }
 
     // 8b. Tracker::new() gates schema migration behind PRAGMA user_version, so a
@@ -2541,6 +2558,35 @@ mod tests {
         assert_eq!(
             failures.total, 0,
             "parse_failures table should be empty after reset"
+        );
+    }
+
+    #[test]
+    fn test_by_command_savings_pct_is_weighted_by_tokens() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
+
+        tracker
+            .record("rg huge", "rtk grep", 1000, 600, 1)
+            .expect("Failed to record large grep");
+        tracker
+            .record("rg tiny", "rtk grep", 10, 0, 1)
+            .expect("Failed to record tiny grep");
+
+        let summary = tracker.get_summary().expect("Failed to get summary");
+        let grep = summary
+            .by_command
+            .iter()
+            .find(|(cmd, _, _, _, _)| cmd == "rtk grep")
+            .expect("rtk grep summary missing");
+
+        assert_eq!(grep.1, 2);
+        assert_eq!(grep.2, 410);
+        let expected = 410.0 / 1010.0 * 100.0;
+        assert!(
+            (grep.3 - expected).abs() < 0.01,
+            "by-command pct must be weighted by input tokens; got {:.3}, expected {:.3}",
+            grep.3,
+            expected
         );
     }
 

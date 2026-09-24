@@ -201,7 +201,7 @@ fn run_forget() -> Result<()> {
     let marker_path = super::telemetry::telemetry_marker_path();
 
     // Compute device hash before deleting the salt
-    let device_hash = if salt_path.exists() {
+    let _device_hash = if salt_path.exists() {
         Some(super::telemetry::generate_device_hash())
     } else {
         None
@@ -229,7 +229,8 @@ fn run_forget() -> Result<()> {
     }
 
     // Send server-side erasure request
-    if let Some(hash) = device_hash {
+    #[cfg(feature = "telemetry")]
+    if let Some(hash) = _device_hash {
         match send_erasure_request(&hash) {
             Ok(()) => {
                 println!("Erasure request sent to server.");
@@ -246,6 +247,7 @@ fn run_forget() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "telemetry")]
 fn send_erasure_request(device_hash: &str) -> Result<()> {
     let url = match super::telemetry::endpoint_url() {
         Some(u) => format!("{}/erasure", u),

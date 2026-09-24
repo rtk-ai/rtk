@@ -1,7 +1,7 @@
 //! Shows users how many tokens RTK has saved them over time.
 
 use crate::core::display_helpers::{format_duration, print_period_table};
-use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
+use crate::core::tracking::{CommandRecord, DayStats, MonthStats, Tracker, WeekStats};
 use crate::core::utils::{format_tokens, truncate};
 use crate::hooks::hook_check;
 use anyhow::{Context, Result};
@@ -284,24 +284,7 @@ pub fn run(
                 println!("{}", styled("Recent Commands", true)); // added: styled header
                 println!("──────────────────────────────────────────────────────────");
                 for rec in recent {
-                    let time = rec.timestamp.with_timezone(&Local).format("%m-%d %H:%M");
-                    let cmd_short = truncate(&rec.rtk_cmd, 25);
-                    // added: tier indicators by savings level
-                    let sign = if rec.savings_pct >= 70.0 {
-                        "▲"
-                    } else if rec.savings_pct >= 30.0 {
-                        "■"
-                    } else {
-                        "•"
-                    };
-                    println!(
-                        "{} {} {:<25} -{:.0}% ({})",
-                        time,
-                        sign,
-                        cmd_short,
-                        rec.savings_pct,
-                        format_tokens(rec.saved_tokens)
-                    );
+                    println!("{}", format_recent_command_line(&rec));
                 }
                 println!();
             }
@@ -364,6 +347,31 @@ fn styled(text: &str, strong: bool) -> String {
     } else {
         text.to_string()
     }
+}
+
+fn format_recent_command_line(rec: &CommandRecord) -> String {
+    let time = rec.timestamp.with_timezone(&Local).format("%m-%d %H:%M");
+    let cmd_short = if rec.rtk_cmd.len() > 25 {
+        format!("{}...", &rec.rtk_cmd[..22])
+    } else {
+        rec.rtk_cmd.clone()
+    };
+    // added: tier indicators by savings level
+    let sign = if rec.savings_pct >= 70.0 {
+        "▲"
+    } else if rec.savings_pct >= 30.0 {
+        "■"
+    } else {
+        "•"
+    };
+    format!(
+        "{} {} {:<25} {:.0}% ({})",
+        time,
+        sign,
+        cmd_short,
+        rec.savings_pct,
+        format_tokens(rec.saved_tokens)
+    )
 }
 
 /// Print a key-value pair in KPI layout. // added
@@ -904,6 +912,21 @@ fn confirm_reset() -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn test_format_recent_command_line_shows_positive_savings_pct() {
+        let rec = CommandRecord {
+            timestamp: Utc.with_ymd_and_hms(2026, 6, 18, 8, 0, 0).unwrap(),
+            rtk_cmd: "rtk read".to_string(),
+            saved_tokens: 9_500,
+            savings_pct: 86.0,
+        };
+
+        let line = format_recent_command_line(&rec);
+        assert!(line.contains("86% (9.5K)"), "{line}");
+        assert!(!line.contains("-86%"), "{line}");
+    }
 
     #[test]
     fn test_recall_verdict_needs_a_sample_before_judging() {
