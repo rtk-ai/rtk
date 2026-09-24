@@ -30,8 +30,17 @@ pub fn print_with_hint(
     tee_label: &str,
     exit_code: i32,
 ) -> String {
-    let hint = crate::core::tee::tee_and_hint(tee_raw, tee_label, exit_code);
+    let hint = runner_tee_needed(filtered, exit_code)
+        .then(|| crate::core::tee::tee_and_hint(tee_raw, tee_label, exit_code))
+        .flatten();
     emit_guarded(filtered, hint.as_deref(), guard_raw)
+}
+
+/// A successful run whose filter already attached its own recovery hint (a capped listing
+/// stored via `force_tee_hint`) needs no second copy from the runner's success tee, which only
+/// the legacy `tee` mode with `tee_on_success` writes. Failures always keep the raw copy.
+fn runner_tee_needed(filtered: &str, exit_code: i32) -> bool {
+    exit_code != 0 || !crate::core::tee::has_recovery_hint(filtered)
 }
 
 #[derive(Default)]
@@ -988,6 +997,20 @@ fn is_bun_count_line(trimmed: &str) -> bool {
         (Some(count), Some("pass" | "fail" | "skip" | "todo" | "error"), None)
             if count.chars().all(|c| c.is_ascii_digit())
     )
+}
+
+#[cfg(test)]
+mod success_tee_tests {
+    use super::*;
+
+    #[test]
+    fn success_tee_skipped_when_the_filter_already_attached_a_hint() {
+        let hinted = "summary\n[full output: rtk recall 66bedcd92f99]";
+        assert!(!runner_tee_needed(hinted, 0));
+        assert!(runner_tee_needed("summary", 0));
+        // Failures keep the runner's raw copy regardless.
+        assert!(runner_tee_needed(hinted, 1));
+    }
 }
 
 #[cfg(test)]
