@@ -1,0 +1,122 @@
+[filters.gitleaks]
+description = "Compact gitleaks output — keep finding metadata and summary"
+match_command = "^gitleaks\\s+(dir|git)\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s*[-=]+$",
+  "^\\|?\\s*\\++",
+  "^\\s*\\[\\w+\\].*$",
+  "^\\[v\\w+\\]$",
+]
+replace = [
+  { pattern = "^\\s*Finding:\\s*", replacement = "Finding: " },
+  { pattern = "^\\s*RuleID:\\s*", replacement = "RuleID: " },
+  { pattern = "^\\s*Description:\\s*", replacement = "Description: " },
+  { pattern = "^\\s*Secret:\\s*", replacement = "Secret: " },
+  { pattern = "^\\s*Entropy:\\s*", replacement = "Entropy: " },
+  { pattern = "^\\s*File:\\s*", replacement = "File: " },
+  { pattern = "^\\s*Line:\\s*", replacement = "Line: " },
+  { pattern = "^\\s*Commit:\\s*", replacement = "Commit: " },
+  { pattern = "^\\s*Author:\\s*", replacement = "Author: " },
+  { pattern = "^\\s*Fingerprint:\\s*", replacement = "Fingerprint: " },
+]
+keep_lines_matching = [
+  "^\\s*Finding:",
+  "^\\s*RuleID:",
+  "^\\s*Description:",
+  "^\\s*Secret:",
+  "^\\s*Entropy:",
+  "^\\s*File:",
+  "^\\s*Line:",
+  "^\\s*Commit:",
+  "^\\s*Author:",
+  "^\\s*Fingerprint:",
+  "^\\s*(?:ERRO|ERROR|FATAL|WARN|WARNING)\\b",
+  "^\\s*No (leaks|secrets) found",
+  "^\\s*\\d+ (?:leaks?|findings?) found",
+  "^\\s*Found \\d+ (?:leaks?|findings?)",
+]
+max_lines = 120
+
+[[tests.gitleaks]]
+name = "dir scan keeps finding essentials and dir-mode file location"
+input = """
+INFO[0000] using default config at: /tmp/gitleaks.toml
+INFO[0000] 1. scanning path . (dir)
+--------------------------------------------------
+Finding:     API_KEY=************************
+RuleID:      generic-api-key
+Secret:      ************************
+Entropy:     3.76
+File:        services/auth/config.env
+Line:        42
+Fingerprint:  b1c8d6e9f6c5b24f9a7aeb7c1e4c4d58ef4f2a1f0:services/auth/config.env:generic-api-key:42
+----------------------
+Finding:     STRIPE_KEY=************************
+RuleID:      stripe-access-token
+Secret:      ************************
+Entropy:      3.92
+File:        server/.env
+Line:        8
+Fingerprint:  c3b4a8a1d0e7f7c2d5f6d8a9b2f3c4d5e6f70809a:server/.env:stripe-access-token:8
+2 leaks found
+"""
+expected = """Finding: API_KEY=************************
+RuleID: generic-api-key
+Secret: ************************
+Entropy: 3.76
+File: services/auth/config.env
+Line: 42
+Fingerprint: b1c8d6e9f6c5b24f9a7aeb7c1e4c4d58ef4f2a1f0:services/auth/config.env:generic-api-key:42
+Finding: STRIPE_KEY=************************
+RuleID: stripe-access-token
+Secret: ************************
+Entropy: 3.92
+File: server/.env
+Line: 8
+Fingerprint: c3b4a8a1d0e7f7c2d5f6d8a9b2f3c4d5e6f70809a:server/.env:stripe-access-token:8
+2 leaks found"""
+
+[[tests.gitleaks]]
+name = "git scan keeps commit and author with concise finding fields"
+input = """
+INFO[0000] scanning git history for repo ./project
+----------------------------
+Finding:     PASSWORD=****************
+RuleID:      generic-password
+Description: Passwords in cleartext
+Secret:      ****************
+Entropy:     4.01
+File:        src/main.go
+Line:        17
+Commit:      6e6ee6596d337bb656496425fb98644eb62b4a82
+Author:      Dev Ops <devops@example.com>
+Fingerprint: 6e6ee6596d337bb656496425fb98644eb62b4a82:src/main.go:generic-password:17
+--------------------------------
+Found 1 leak in git history
+"""
+expected = """Finding: PASSWORD=****************
+RuleID: generic-password
+Description: Passwords in cleartext
+Secret: ****************
+Entropy: 4.01
+File: src/main.go
+Line: 17
+Commit: 6e6ee6596d337bb656496425fb98644eb62b4a82
+Author: Dev Ops <devops@example.com>
+Fingerprint: 6e6ee6596d337bb656496425fb98644eb62b4a82:src/main.go:generic-password:17
+Found 1 leak in git history"""
+
+[[tests.gitleaks]]
+name = "gitleaks pass-through summary is preserved"
+input = """
+INFO[0000] scanning target .
+No secrets found
+"""
+expected = "No secrets found"
+
+[[tests.gitleaks]]
+name = "unexpected diagnostics are preserved instead of reported clean"
+input = "ERRO[0000] failed to load config"
+expected = "ERRO[0000] failed to load config"
