@@ -5,6 +5,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 use tempfile::NamedTempFile;
 
 use crate::core::utils::{from_json_str, strip_leading_bom};
@@ -29,8 +30,13 @@ use super::integrity;
 use super::{is_claude_hook_command, is_codex_hook_command, is_trae_hook_command};
 use crate::core::config::AwarenessLevel;
 
-// Embedded OpenCode plugin (auto-rewrite)
+// Embedded OpenCode plugin for V1 (legacy plugin API)
 const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
+
+// Embedded OpenCode plugin for V2 (`Plugin.define` API). OpenCode V1 and V2
+// use mutually incompatible plugin APIs, so `rtk init -g --opencode` installs
+// the variant that matches the detected OpenCode major version.
+const OPENCODE_PLUGIN_V2: &str = include_str!("../../hooks/opencode/rtk-v2.ts");
 
 // Embedded Pi extension (auto-rewrite)
 const PI_PLUGIN: &str = include_str!("../../hooks/pi/rtk.ts");
@@ -5071,8 +5077,28 @@ fn prepare_opencode_plugin_path() -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Write OpenCode plugin file if missing or outdated
+/// Write OpenCode plugin file if missing or outdated.
+///
+/// The installed content depends on the detected OpenCode major version: V2
+/// uses a different, incompatible plugin API. When the version cannot be
+/// detected, the legacy V1 plugin is installed to preserve existing behavior.
 fn ensure_opencode_plugin_installed(path: &Path, ctx: InitContext) -> Result<bool> {
+    let opencode_dir = path
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or_else(|| Path::new("."));
+    let content = opencode_plugin_content_for_major(detect_opencode_major_version(opencode_dir));
+    ensure_opencode_plugin_installed_with_content(path, content, ctx)
+}
+
+/// Write an explicit OpenCode plugin payload if missing or outdated. Split out
+/// from [`ensure_opencode_plugin_installed`] so the selection logic is testable
+/// without an OpenCode installation on the host.
+fn ensure_opencode_plugin_installed_with_content(
+    path: &Path,
+    content: &str,
+    ctx: InitContext,
+) -> Result<bool> {
     let InitContext { dry_run, .. } = ctx;
     // Ensure parent dir exists (skip in dry-run)
     if !dry_run && let Some(parent) = path.parent() {
@@ -5083,7 +5109,65 @@ fn ensure_opencode_plugin_installed(path: &Path, ctx: InitContext) -> Result<boo
             )
         })?;
     }
-    write_if_changed(path, OPENCODE_PLUGIN, "OpenCode plugin", ctx)
+    write_if_changed(path, content, "OpenCode plugin", ctx)
+}
+
+/// Pick the OpenCode plugin payload for a detected major version. V2 (and any
+/// newer major) gets the `Plugin.define` variant; V1 and undetected versions
+/// keep the legacy plugin, which preserves the prior installation behavior.
+fn opencode_plugin_content_for_major(major: Option<u32>) -> &'static str {
+    match major {
+        Some(major) if major >= 2 => OPENCODE_PLUGIN_V2,
+        _ => OPENCODE_PLUGIN,
+    }
+}
+
+/// Detect the installed OpenCode major version, preferring the CLI and falling
+/// back to the plugin package OpenCode installs inside its config directory.
+fn detect_opencode_major_version(opencode_dir: &Path) -> Option<u32> {
+    opencode_cli_major_version().or_else(|| opencode_major_from_packages(opencode_dir))
+}
+
+/// Infer the OpenCode major version from the plugin package OpenCode installs
+/// in its config directory. `@opencode/plugin` ships with V2;
+/// `@opencode-ai/plugin` with V1.
+fn opencode_major_from_packages(opencode_dir: &Path) -> Option<u32> {
+    let has_package = |name: &str| {
+        opencode_dir
+            .join("node_modules")
+            .join(name)
+            .join("package.json")
+            .is_file()
+    };
+    if has_package("@opencode/plugin") {
+        return Some(2);
+    }
+    if has_package("@opencode-ai/plugin") {
+        return Some(1);
+    }
+    None
+}
+
+/// Read the major version from `opencode --version` (for example `opencode
+/// v2.0.12`). Returns `None` when the CLI is missing or the output is
+/// unparseable.
+fn opencode_cli_major_version() -> Option<u32> {
+    let output = Command::new("opencode").arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_major_version(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Extract the leading major component from a version string such as
+/// `2.0.12`, `v2.0.12`, or `opencode v2.0.12`.
+fn parse_major_version(input: &str) -> Option<u32> {
+    let start = input.find(|c: char| c.is_ascii_digit())?;
+    let digits: String = input[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
 }
 
 /// Remove OpenCode plugin file
@@ -8353,18 +8437,105 @@ mod tests {
         fs::create_dir_all(plugin_path.parent().unwrap()).unwrap();
         assert!(!plugin_path.exists());
 
-        let changed =
-            ensure_opencode_plugin_installed(&plugin_path, InitContext::default()).unwrap();
+        let changed = ensure_opencode_plugin_installed_with_content(
+            &plugin_path,
+            OPENCODE_PLUGIN,
+            InitContext::default(),
+        )
+        .unwrap();
         assert!(changed);
         let content = fs::read_to_string(&plugin_path).unwrap();
         assert_eq!(content, OPENCODE_PLUGIN);
 
         fs::write(&plugin_path, "// old").unwrap();
-        let changed_again =
-            ensure_opencode_plugin_installed(&plugin_path, InitContext::default()).unwrap();
+        let changed_again = ensure_opencode_plugin_installed_with_content(
+            &plugin_path,
+            OPENCODE_PLUGIN,
+            InitContext::default(),
+        )
+        .unwrap();
         assert!(changed_again);
         let content_updated = fs::read_to_string(&plugin_path).unwrap();
         assert_eq!(content_updated, OPENCODE_PLUGIN);
+    }
+
+    #[test]
+    fn test_opencode_plugin_v2_install_and_switch() {
+        let temp = TempDir::new().unwrap();
+        let opencode_dir = temp.path().join("opencode");
+        let plugin_path = opencode_plugin_path(&opencode_dir);
+        fs::create_dir_all(plugin_path.parent().unwrap()).unwrap();
+
+        // Install the V2 payload over an existing V1 file: same target path,
+        // different content.
+        fs::write(&plugin_path, OPENCODE_PLUGIN).unwrap();
+        let changed = ensure_opencode_plugin_installed_with_content(
+            &plugin_path,
+            OPENCODE_PLUGIN_V2,
+            InitContext::default(),
+        )
+        .unwrap();
+        assert!(changed);
+        assert_eq!(
+            fs::read_to_string(&plugin_path).unwrap(),
+            OPENCODE_PLUGIN_V2
+        );
+
+        // Re-running with the same content is a no-op.
+        let changed_again = ensure_opencode_plugin_installed_with_content(
+            &plugin_path,
+            OPENCODE_PLUGIN_V2,
+            InitContext::default(),
+        )
+        .unwrap();
+        assert!(!changed_again);
+    }
+
+    #[test]
+    fn test_opencode_plugin_content_for_major() {
+        assert_eq!(opencode_plugin_content_for_major(None), OPENCODE_PLUGIN);
+        assert_eq!(opencode_plugin_content_for_major(Some(1)), OPENCODE_PLUGIN);
+        assert_eq!(
+            opencode_plugin_content_for_major(Some(2)),
+            OPENCODE_PLUGIN_V2
+        );
+        assert_eq!(
+            opencode_plugin_content_for_major(Some(3)),
+            OPENCODE_PLUGIN_V2
+        );
+    }
+
+    #[test]
+    fn test_parse_major_version() {
+        assert_eq!(parse_major_version("2.0.12"), Some(2));
+        assert_eq!(parse_major_version("v2.0.12"), Some(2));
+        assert_eq!(parse_major_version("opencode v2.0.12"), Some(2));
+        assert_eq!(parse_major_version("1.18.29"), Some(1));
+        assert_eq!(parse_major_version("10.0.0"), Some(10));
+        assert_eq!(parse_major_version("no version here"), None);
+        assert_eq!(parse_major_version(""), None);
+    }
+
+    #[test]
+    fn test_opencode_major_from_packages() {
+        let temp = TempDir::new().unwrap();
+        let opencode_dir = temp.path().join("opencode");
+
+        // Nothing installed: unknown.
+        assert_eq!(opencode_major_from_packages(&opencode_dir), None);
+
+        // V2 ships `@opencode/plugin`, V1 ships `@opencode-ai/plugin`.
+        let write_package = |name: &str| {
+            let dir = opencode_dir.join("node_modules").join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("package.json"), "{}").unwrap();
+        };
+        write_package("@opencode/plugin");
+        assert_eq!(opencode_major_from_packages(&opencode_dir), Some(2));
+
+        fs::remove_dir_all(opencode_dir.join("node_modules")).unwrap();
+        write_package("@opencode-ai/plugin");
+        assert_eq!(opencode_major_from_packages(&opencode_dir), Some(1));
     }
 
     #[test]
