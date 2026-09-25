@@ -61,6 +61,9 @@ Every percentage below measures **bash output bytes removed** — the only thing
 | `eslint` | 84% | Violations grouped by rule |
 | `pnpm list` | 70-90% | Compact dependency tree |
 | `pnpm outdated` | 70% | Package + current + latest only |
+| `aube install` | 70% | Progress and banners stripped |
+| `aube test` / `aubr` | 70% | Script echo lines stripped |
+| `aube list` | 70% | Compact dependency tree |
 | `next build` | 80% | Route summary + errors only |
 | `prisma migrate` | 75% | Migration status only |
 | `playwright test` | 90% | Failures + trace links only |
