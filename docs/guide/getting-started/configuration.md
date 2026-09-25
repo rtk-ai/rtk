@@ -72,7 +72,7 @@ For full details on what is collected, opt-out options, and GDPR rights, see [Te
 |-------|-------------------|--------------|
 | `default` | How to read condensed output. Nothing about RTK. | Hook-based agent, RTK stays invisible. |
 | `high` | `default` + what RTK is and `rtk gain`, `rtk proxy`, `RTK_DISABLED=1`, `rtk discover`. | You want to ask the agent about savings or to bypass RTK. |
-| `full` | `high` + "prefix every command with `rtk`". | Agent without a hook, or you want the agent to drive RTK itself. |
+| `full` | `high` + "prefix external programs with `rtk`"; leave shell builtins and keywords unprefixed. | Agent without a hook, or you want the agent to drive RTK itself. |
 
 ```toml
 [awareness]

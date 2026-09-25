@@ -15,7 +15,7 @@ Relationship to `src/hooks/`: that component **creates** these files; this direc
 `rtk-awareness.md`, `rtk-awareness-high.md`, `rtk-awareness-full.md` are the agent-neutral
 instruction files embedded by `rtk init` (`RTK.md`, `GEMINI.md`, rules files, `AGENTS.md` blocks).
 `awareness.level` in `config.toml` picks one for hook-based agents; agents without a hook always get
-`rtk-awareness-full.md`, the only one that tells the agent to prefix commands with `rtk`.
+`rtk-awareness-full.md`, the only one that tells the agent to prefix external programs with `rtk`.
 
 ## Purpose
 
