@@ -6210,7 +6210,7 @@ fn show_claude_config() -> Result<()> {
     println!("  rtk init -g --hook-only     # Hook only, no RTK.md");
     println!("  rtk init --codex            # Configure local AGENTS.md + RTK.md + hooks.json");
     println!("  rtk init -g --codex         # Configure global AGENTS.md + RTK.md + hooks.json");
-    println!("  rtk init -g --opencode      # OpenCode plugin only");
+    println!("  rtk init -g --opencode      # Claude setup + OpenCode plugin");
     println!("  rtk init -g --agent cursor  # Install Cursor Agent hooks");
 
     Ok(())

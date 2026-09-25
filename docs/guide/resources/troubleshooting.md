@@ -47,7 +47,7 @@ rtk gain    # should now show token savings stats
    ```bash
    rtk init --global    # Claude Code
    rtk init --global --cursor    # Cursor
-   rtk init --global --opencode  # OpenCode
+   rtk init --global --opencode  # Claude Code + OpenCode plugin
    ```
 
 3. Restart your AI assistant.
