@@ -21,9 +21,9 @@ use super::constants::{
     HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME,
     HERMES_PLUGINS_SUBDIR, HOOKS_JSON, HOOKS_SUBDIR, OMP_DIR, OMP_LOCAL_DIR, PI_AGENT_STATE_FILE,
     PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
-    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, TRAE_HOOK_COMMAND, VIBE_BASH_MATCH,
-    VIBE_DIR, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_HOOKS_FILE, VIBE_PROMPT_FILE,
-    VIBE_PROMPTS_SUBDIR,
+    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, SETTINGS_LOCAL_JSON, TRAE_HOOK_COMMAND,
+    VIBE_BASH_MATCH, VIBE_DIR, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_HOOKS_FILE,
+    VIBE_PROMPT_FILE, VIBE_PROMPTS_SUBDIR,
 };
 use super::integrity;
 use super::{is_claude_hook_command, is_codex_hook_command, is_trae_hook_command};
@@ -1049,6 +1049,127 @@ fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
     Ok(removed)
 }
 
+/// Strip stale `Bash(rtk ...)` permission rules from one settings file.
+///
+/// Returns the removed rule strings. Backs up the file (`.bak`) before
+/// writing, same as `remove_hook_from_settings`. Missing files, empty files,
+/// and files with no `permissions` block are silently treated as a no-op.
+fn clean_stale_rtk_permissions_at(path: &Path, ctx: InitContext) -> Result<Vec<String>> {
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
+
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let content = strip_leading_bom(&content);
+    if content.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut root: serde_json::Value = match from_json_str(content) {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!(
+                "[warn] {}: failed to parse as JSON, skipping permission cleanup",
+                path.display()
+            );
+            return Ok(Vec::new());
+        }
+    };
+
+    let removed = super::permissions::strip_stale_rtk_rules(&mut root);
+    if removed.is_empty() {
+        return Ok(removed);
+    }
+
+    if dry_run {
+        println!(
+            "[dry-run] would remove {} stale rtk permission rule(s) from {}",
+            removed.len(),
+            path.display()
+        );
+        if verbose > 0 {
+            for rule in &removed {
+                println!("[dry-run]   - {}", rule);
+            }
+        }
+        return Ok(removed);
+    }
+
+    let backup_path = path.with_extension("json.bak");
+    fs::copy(path, &backup_path)
+        .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
+
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize settings file")?;
+    atomic_write(path, &serialized)?;
+
+    if verbose > 0 {
+        eprintln!(
+            "Removed {} stale rtk permission rule(s) from {}",
+            removed.len(),
+            path.display()
+        );
+    }
+
+    Ok(removed)
+}
+
+/// Recursively sweep `root_dir` for `.claude/settings.json` and
+/// `.claude/settings.local.json` files and strip stale `rtk` permission
+/// rules from each.
+///
+/// Opt-in only (`rtk init --uninstall --sweep-permissions <DIR>`) — a plain
+/// `--uninstall` only ever touches the current project and the global
+/// config, never walks arbitrary directories on disk. `.claude` is a hidden
+/// directory and `settings.local.json` is typically gitignored, so the walk
+/// disables both the default hidden-file skip and gitignore filtering —
+/// otherwise it would silently miss the exact files it's meant to clean.
+pub fn sweep_stale_rtk_permissions(root_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
+    let mut report = Vec::new();
+
+    let walker = ignore::WalkBuilder::new(root_dir)
+        .hidden(false)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .build();
+
+    for entry in walker.flatten() {
+        let path = entry.path();
+        let is_settings_file = matches!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some(SETTINGS_JSON) | Some(SETTINGS_LOCAL_JSON)
+        );
+        if !is_settings_file {
+            continue;
+        }
+        let in_claude_dir = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            == Some(CLAUDE_DIR);
+        if !in_claude_dir {
+            continue;
+        }
+
+        let removed = clean_stale_rtk_permissions_at(path, ctx)?;
+        if !removed.is_empty() {
+            report.push(format!(
+                "{}: removed {} stale rtk permission rule(s)",
+                path.display(),
+                removed.len()
+            ));
+        }
+    }
+
+    Ok(report)
+}
+
 /// Full uninstall for Claude, Gemini, Codex, Cursor, Pi, or OMP artifacts.
 #[allow(dead_code)] // Kept as the default-policy API for in-crate callers and tests.
 pub fn uninstall(
@@ -1265,6 +1386,23 @@ pub fn uninstall_with_patch_mode(
     // 4. Remove hook entry from settings.json
     if remove_hook_from_settings(ctx)? {
         removed.push("settings.json: removed RTK hook entry".to_string());
+    }
+
+    // 4b. Remove stale `Bash(rtk ...)` permission rules left behind in the
+    // current project's and the global settings files. Uninstalling RTK
+    // (or the binary itself) never touched these on its own, so they'd
+    // otherwise silently keep auto-allowing a command that no longer exists.
+    // Other projects' `.claude/settings.local.json` aren't touched here —
+    // run `rtk init -g --uninstall --sweep-permissions <DIR>` for that.
+    for path in super::permissions::get_settings_paths() {
+        let rules_removed = clean_stale_rtk_permissions_at(&path, ctx)?;
+        if !rules_removed.is_empty() {
+            removed.push(format!(
+                "{}: removed {} stale rtk permission rule(s)",
+                path.display(),
+                rules_removed.len()
+            ));
+        }
     }
 
     // 5. Remove OpenCode plugin

@@ -440,6 +440,14 @@ enum Commands {
         /// Preview changes without writing any files (combine with -v to show content)
         #[arg(long = "dry-run", conflicts_with = "show")]
         dry_run: bool,
+
+        /// Recursively remove stale `Bash(rtk ...)` permission rules from
+        /// every .claude/settings.json and settings.local.json under DIR.
+        /// Independent of --uninstall/--global: RTK's own uninstall already
+        /// cleans the current project and the global config on its own; use
+        /// this to sweep other checked-out repos in one pass.
+        #[arg(long, value_name = "DIR")]
+        sweep_permissions: Option<PathBuf>,
     },
 
     /// Download with compact output (strips progress bars)
@@ -2394,6 +2402,7 @@ fn run_cli() -> Result<i32> {
             codex,
             copilot,
             dry_run,
+            sweep_permissions,
         } => {
             let ctx = hooks::init::InitContext {
                 verbose: cli.verbose,
@@ -2411,7 +2420,25 @@ fn run_cli() -> Result<i32> {
             } else {
                 hooks::init::PatchMode::Ask
             };
-            if show {
+            if let Some(dir) = sweep_permissions {
+                let report = hooks::init::sweep_stale_rtk_permissions(&dir, ctx)?;
+                if report.is_empty() {
+                    println!(
+                        "No stale rtk permission rules found under {}",
+                        dir.display()
+                    );
+                } else {
+                    let header = if dry_run {
+                        "[dry-run] would clean stale rtk permission rules:"
+                    } else {
+                        "Cleaned stale rtk permission rules:"
+                    };
+                    println!("{}", header);
+                    for line in &report {
+                        println!("  - {}", line);
+                    }
+                }
+            } else if show {
                 hooks::init::show_config(codex, agent == Some(AgentTarget::Omp))?;
             } else if uninstall && copilot {
                 if global {
