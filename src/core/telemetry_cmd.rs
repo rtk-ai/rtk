@@ -217,10 +217,7 @@ fn run_forget() -> Result<()> {
     }
 
     // Purge local tracking database (GDPR Art. 17 — right to erasure applies to local data too)
-    let db_path = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(super::constants::RTK_DATA_DIR)
-        .join(super::constants::HISTORY_DB);
+    let db_path = super::constants::data_dir_under(".").join(super::constants::HISTORY_DB);
     if db_path.exists() {
         match std::fs::remove_file(&db_path) {
             Ok(()) => println!("Local tracking database deleted: {}", db_path.display()),

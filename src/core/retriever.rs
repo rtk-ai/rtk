@@ -176,13 +176,10 @@ fn db_path(cfg: &RetrieverConfig) -> Result<PathBuf> {
         return Ok(p.clone());
     }
     // A test that names no store must never reach the developer's own: its rows
-    // would ship as real usage through the telemetry ping.
-    #[cfg(test)]
-    let base = std::env::temp_dir().join(format!("rtk-test-store-{}", std::process::id()));
-    #[cfg(not(test))]
-    let base = dirs::data_local_dir()
-        .ok_or_else(|| anyhow::anyhow!("no local data directory available"))?
-        .join(super::constants::RTK_DATA_DIR);
+    // would ship as real usage through the telemetry ping. `data_dir` answers
+    // with a scratch directory in a test build.
+    let base = super::constants::data_dir()
+        .ok_or_else(|| anyhow::anyhow!("no local data directory available"))?;
     Ok(base.join(RECALL_DB))
 }
 

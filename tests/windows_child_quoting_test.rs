@@ -3,7 +3,8 @@
 //! an MSYS/Cygwin child intact. Skipped when no Git for Windows grep is around.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
+mod common;
 
 /// `git.exe` sits in `<root>/cmd`, `<root>/mingw64/bin` or `<root>/bin`, so walk
 /// up until an ancestor also has `usr/bin/grep.exe` under it.
@@ -53,7 +54,7 @@ fn quoted_pattern_reaches_msys_grep_intact() {
     path.push(";");
     path.push(std::env::var_os("PATH").unwrap_or_default());
 
-    let out = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let out = common::rtk_command()
         .args(["grep", "-c", r#""type""#, "q.jsonl"])
         .current_dir(dir.path())
         .env("PATH", &path)
