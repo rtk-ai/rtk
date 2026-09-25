@@ -256,7 +256,7 @@ fn report_hook_status(verbose: u8) -> Result<()> {
         IntegrityStatus::NoBaseline => {
             println!("WARN  no baseline hash found");
             println!("      Hook exists but was installed before integrity checks.");
-            println!("      Run `rtk init -g` to establish baseline.");
+            println!("      Preview legacy hook migration: rtk init -g --dry-run --no-patch");
         }
         IntegrityStatus::NotInstalled => {
             println!("SKIP  RTK hook not installed");
@@ -363,7 +363,7 @@ pub fn runtime_check() -> Result<()> {
     Ok(())
 }
 
-fn settings_has_claude_hook(content: &str) -> bool {
+pub(super) fn settings_has_claude_hook(content: &str) -> bool {
     let Ok(root) = crate::core::utils::from_json_str::<serde_json::Value>(content) else {
         return false;
     };
