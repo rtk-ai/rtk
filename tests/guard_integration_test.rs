@@ -599,3 +599,91 @@ fn git_show_quiet_loses_to_a_patch_request_from_either_side() {
         );
     }
 }
+
+/// Writes an executable `name` in `dir` that runs `body`.
+#[cfg(unix)]
+fn fake_tool(dir: &std::path::Path, name: &str, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{}\n", body)).expect("write fake tool");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+}
+
+/// A golangci-lint that answers `--version`, then reports `issues` as JSON on stdout.
+/// Its filter runs without a tee label, which is the plain print path the guard sits on.
+#[cfg(unix)]
+fn fake_golangci(dir: &std::path::Path, issues: &str) {
+    fake_tool(
+        dir,
+        "golangci-lint",
+        &format!(
+            r#"if [ "$1" = "--version" ]; then
+  echo "golangci-lint has version 1.64.8"
+  exit 0
+fi
+echo '{{"Issues":[{issues}]}}'"#
+        ),
+    );
+}
+
+/// Runs rtk with `dir` first on PATH, so the fake tool shadows any real one. Tracking and
+/// the recovery store go to `dir` too: a byte count is only about the filter if the run
+/// cannot reach the developer's own database.
+#[cfg(unix)]
+fn rtk_stdout_bytes_with_stub(dir: &std::path::Path, args: &[&str]) -> Vec<u8> {
+    let path = format!(
+        "{}:{}",
+        dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args(args)
+        .env("LC_ALL", "C")
+        .env("PATH", path)
+        .env("RTK_DB_PATH", dir.join("rtk.db"))
+        .env("RTK_TEE_DIR", dir.join("tee"))
+        .output()
+        .expect("spawn rtk");
+    out.stdout
+}
+
+/// The guard's promise is about what reaches the user, so it has to hold at the printer
+/// too: an empty report is already smaller than any summary of it, and the bytes rtk
+/// emits for it must be the tool's own, not one more.
+#[cfg(unix)]
+#[test]
+fn guard_fallback_emits_exactly_the_command_bytes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fake_golangci(dir.path(), "");
+
+    let out = rtk_stdout_bytes_with_stub(dir.path(), &["golangci-lint", "run"]);
+
+    assert_eq!(
+        out,
+        b"{\"Issues\":[]}\n",
+        "guard fallback emitted {:?}",
+        String::from_utf8_lossy(&out)
+    );
+}
+
+/// The other half: a filter that leaves its last line unterminated still gets its one
+/// newline, so tightening the fallback cannot cost a line ending anywhere else.
+#[cfg(unix)]
+#[test]
+fn filtered_report_ends_with_exactly_one_newline() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fake_golangci(
+        dir.path(),
+        r#"{"FromLinter":"errcheck","Text":"unchecked","Pos":{"Filename":"main.go","Line":1,"Column":1},"SourceLines":["x()"],"Severity":""}"#,
+    );
+
+    let out = String::from_utf8(rtk_stdout_bytes_with_stub(
+        dir.path(),
+        &["golangci-lint", "run"],
+    ))
+    .expect("utf-8 stdout");
+
+    assert!(out.contains("errcheck"), "expected a summary, got {out:?}");
+    assert!(out.ends_with('\n'), "summary must be terminated: {out:?}");
+    assert!(!out.ends_with("\n\n"), "one terminator, not two: {out:?}");
+}

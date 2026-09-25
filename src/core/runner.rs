@@ -14,13 +14,46 @@ use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 /// (never emit more tokens than the command), print it, and return what was
 /// emitted so the caller tracks exactly that.
 pub fn emit_guarded(filtered: &str, hint: Option<&str>, raw: &str) -> String {
+    let shown = guarded_output(filtered, hint, raw);
+    print!("{}", shown);
+    shown
+}
+
+/// The exact bytes `emit_guarded` writes: the guarded body, terminated.
+///
+/// Filters disagree on whether their last line already carries its terminator,
+/// so it is supplied rather than assumed. Supplying one unconditionally costs a
+/// byte the command never emitted whenever the body ends in a newline of its
+/// own -- the shape every guard fallback takes, a command's output being
+/// newline-terminated in the ordinary case. A command whose own output is
+/// unterminated still gets the one newline a printed line needs; that byte is
+/// the price of not gluing the next prompt to the output.
+///
+/// An empty body prints nothing at all. A filter with nothing to report, like a
+/// command with nothing to say, should not cost a blank line.
+fn guarded_output(filtered: &str, hint: Option<&str>, raw: &str) -> String {
     let body = match hint {
         Some(h) => format!("{}\n{}", filtered, h),
         None => filtered.to_string(),
     };
-    let shown = crate::core::guard::never_worse(raw, &body).to_string();
-    println!("{}", shown);
-    shown
+    // Both sides weighed as they will be printed. The printer's terminator is paid by
+    // whichever form wins, so charging it to one side only decides close calls on a
+    // byte that is not the difference between them.
+    let body = terminated(&body);
+    let raw = terminated(raw);
+    crate::core::guard::never_worse(&raw, &body).to_string()
+}
+
+/// `text` under a trailing newline, and none at all when it is empty.
+///
+/// Only ever adds the missing one: a text that ends in a blank line keeps it,
+/// since the blank line is the command's output and not a stray terminator.
+fn terminated(text: &str) -> Cow<'_, str> {
+    if text.is_empty() || text.ends_with('\n') {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(format!("{}\n", text))
+    }
 }
 
 pub fn print_with_hint(
@@ -32,6 +65,70 @@ pub fn print_with_hint(
 ) -> String {
     let hint = crate::core::tee::tee_and_hint(tee_raw, tee_label, exit_code);
     emit_guarded(filtered, hint.as_deref(), guard_raw)
+}
+
+#[cfg(test)]
+mod guarded_output_tests {
+    use super::*;
+
+    const HINT: &str = "[full output: ~/.local/share/rtk/tee/1_go_test.log]";
+
+    /// Long enough that the guard keeps the filtered form, so a test about the
+    /// terminator is not really a test about the fallback.
+    fn bulky_raw() -> String {
+        "go: downloading example.com/module v1.2.3\n".repeat(20)
+    }
+
+    /// The guard hands back the command's own output when the filtered form would cost
+    /// more, and that output is already newline-terminated: terminating it again is a
+    /// byte the command never emitted.
+    #[test]
+    fn terminated_fallback_costs_exactly_the_command() {
+        for raw in ["ok\n", "ok  ex\n", "PASS\n", "a\nb\n"] {
+            let out = guarded_output("a summary longer than the output it summarises", None, raw);
+            assert_eq!(out, raw, "guard fallback must emit the raw bytes unchanged");
+        }
+    }
+
+    /// Most filters leave their last line unterminated and count on the printer for it.
+    #[test]
+    fn unterminated_body_gains_one_newline() {
+        assert_eq!(guarded_output("3 passed", None, &bulky_raw()), "3 passed\n");
+    }
+
+    #[test]
+    fn hint_is_terminated_once() {
+        let out = guarded_output("3 passed", Some(HINT), &bulky_raw());
+        assert_eq!(out, format!("3 passed\n{}\n", HINT));
+    }
+
+    #[test]
+    fn already_terminated_hint_gains_nothing() {
+        let out = guarded_output("3 passed", Some(&format!("{}\n", HINT)), &bulky_raw());
+        assert_eq!(out, format!("3 passed\n{}\n", HINT));
+    }
+
+    /// A body that ties with the command's output only because its terminator has not
+    /// been added yet outgrows that output the moment it is printed.
+    #[test]
+    fn the_terminator_counts_toward_the_guard() {
+        assert_eq!(guarded_output("abcdefgh", None, "abc\ndef\n"), "abc\ndef\n");
+    }
+
+    /// The other side of the same scale: a command that left its own output unterminated
+    /// owes the printer the same byte, so it must not win a tie the filtered form loses
+    /// only for having been charged it alone.
+    #[test]
+    fn an_unterminated_raw_is_weighed_terminated_too() {
+        assert_eq!(guarded_output("abcdefgh", None, "12345678"), "abcdefgh\n");
+    }
+
+    /// A command that printed nothing must not gain a blank line.
+    #[test]
+    fn empty_stays_empty() {
+        assert_eq!(guarded_output("", None, ""), "");
+        assert_eq!(guarded_output("", None, &bulky_raw()), "");
+    }
 }
 
 #[derive(Default)]
@@ -143,14 +240,14 @@ where
     // only ever shrinks there, so it cannot push the total past what the command emitted.
     let shown = if let Some(label) = opts.tee_label {
         print_with_hint(&filtered, raw, raw_for_tracking, label, exit_code)
-    } else {
+    } else if opts.no_trailing_newline {
+        // The filters that opt out own their line endings: what they return is already
+        // exactly what the command would have printed, terminator included.
         let guarded = crate::core::guard::never_worse(raw_for_tracking, &filtered).to_string();
-        if opts.no_trailing_newline {
-            print!("{}", guarded);
-        } else {
-            println!("{}", guarded);
-        }
+        print!("{}", guarded);
         guarded
+    } else {
+        emit_guarded(&filtered, None, raw_for_tracking)
     };
 
     // Stdout-only filters parse structured stdout; stderr still carries diagnostics
