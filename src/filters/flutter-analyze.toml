@@ -1,0 +1,39 @@
+[filters.flutter-analyze]
+description = "Compact Flutter/Dart analyze output — strip SDK warm-up noise, cap large issue lists"
+match_command = "^(?:fvm\\s+)?(?:flutter|dart)\\s+analyze\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Building flutter tool\\.\\.\\.",
+  "^Resolving dependencies\\.\\.\\.",
+  "^Downloading packages\\.\\.\\.",
+  "^Waiting for another flutter command to release the startup lock\\.\\.\\.",
+]
+truncate_lines_at = 300
+max_lines = 60
+on_empty = "flutter analyze: ok"
+
+[[tests.flutter-analyze]]
+name = "clean run passes through unchanged"
+input = "Analyzing my_app...\nNo issues found! (ran in 1.7s)"
+expected = "Analyzing my_app...\nNo issues found! (ran in 1.7s)"
+
+[[tests.flutter-analyze]]
+name = "issues found, blank separator lines stripped"
+input = "Analyzing my_app...\n\n   info • Unnecessary new keyword • lib/widgets/button.dart:5:3 • unnecessary_new\nwarning • The value of the field '_x' is never used • lib/utils.dart:22:1 • unused_field\n\n2 issues found. (ran in 2.3s)"
+expected = "Analyzing my_app...\n   info • Unnecessary new keyword • lib/widgets/button.dart:5:3 • unnecessary_new\nwarning • The value of the field '_x' is never used • lib/utils.dart:22:1 • unused_field\n2 issues found. (ran in 2.3s)"
+
+[[tests.flutter-analyze]]
+name = "strips first-run SDK warm-up noise"
+input = "Building flutter tool...\nResolving dependencies...\nAnalyzing my_app...\nNo issues found! (ran in 5.1s)"
+expected = "Analyzing my_app...\nNo issues found! (ran in 5.1s)"
+
+[[tests.flutter-analyze]]
+name = "empty after stripping falls back to on_empty"
+input = "Building flutter tool...\n"
+expected = "flutter analyze: ok"
+
+[[tests.flutter-analyze]]
+name = "fvm-wrapped invocation matches"
+input = "Analyzing my_app...\nNo issues found! (ran in 2.0s)"
+expected = "Analyzing my_app...\nNo issues found! (ran in 2.0s)"
