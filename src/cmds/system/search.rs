@@ -192,6 +192,10 @@ fn extract_pattern_path<T: AsRef<str>>(
 
     let mut e_patterns: Vec<String> = Vec::new();
     let mut patterns_from_file = false;
+    // rg's `--files` lists the paths it *would* search instead of searching, so it takes no
+    // pattern at all and every positional is a path. grep has no `--files` (its
+    // `--files-with-matches`/`--files-without-match` do search), hence the engine check.
+    let mut lists_paths = false;
     let mut positionals: Vec<String> = Vec::new();
     let mut flags: Vec<String> = Vec::new();
     let mut has_format_flag = false;
@@ -213,6 +217,9 @@ fn extract_pattern_path<T: AsRef<str>>(
             TokenKind::Long => {
                 if t.text == "file" {
                     patterns_from_file = true;
+                }
+                if t.text == "files" && engine == Engine::Rg {
+                    lists_paths = true;
                 }
                 if is_format_flag_token(engine, t.kind, t.text) {
                     has_format_flag = true;
@@ -352,7 +359,12 @@ fn extract_pattern_path<T: AsRef<str>>(
     // `-e`/`--regexp` and `-f`/`--file` both supply the patterns, so every positional is a
     // path. Taking the first one as the pattern instead left `paths` empty, which made the
     // engine read stdin (a hang under an agent harness) or walk the cwd.
-    let (patterns, paths) = if !e_patterns.is_empty() || patterns_from_file {
+    //
+    // `rg --files` supplies no pattern to take, so it lands in the same branch: it has to come
+    // first, or the first positional is read as the pattern, `paths` comes out empty, and
+    // `reads_piped_stdin` below is then true for every piped shell -- sending the listing down
+    // the streaming path, which folds nothing (#4237).
+    let (patterns, paths) = if lists_paths || !e_patterns.is_empty() || patterns_from_file {
         (e_patterns, positionals)
     } else {
         let paths = positionals.iter().skip(1).cloned().collect();
@@ -1514,6 +1526,31 @@ mod tests {
             assert!(patterns.is_empty(), "{args:?} -> {patterns:?}");
             assert_eq!(paths, vec!["a.txt"], "{args:?}");
         }
+    }
+
+    #[test]
+    fn test_extract_rg_files_takes_no_pattern() {
+        // `rg --files` lists the paths it would search, so it has no pattern to take. Reading
+        // the first positional as one left `paths` empty, which made `reads_piped_stdin` true
+        // under any piped shell and sent the listing down the streaming path that folds
+        // nothing (#4237).
+        for (args, want_paths) in [
+            (vec!["--files"], Vec::<&str>::new()),
+            (vec!["--files", "src"], vec!["src"]),
+            (vec!["--files", "src/cmds/system"], vec!["src/cmds/system"]),
+            (vec!["--files", "-g", "*.rs", "src"], vec!["src"]),
+        ] {
+            let (patterns, paths, _, _, _) = extract_pattern_path(&args, Engine::Rg);
+            assert!(patterns.is_empty(), "{args:?} -> {patterns:?}");
+            assert_eq!(paths, want_paths, "{args:?}");
+        }
+
+        // grep has no `--files`; its `--files-with-matches` does search, so the first
+        // positional is still the pattern there.
+        let (patterns, paths, _, _, _) =
+            extract_pattern_path(&["--files-with-matches", "needle", "."], Engine::Grep);
+        assert_eq!(patterns, vec!["needle"]);
+        assert_eq!(paths, vec!["."]);
     }
 
     #[test]

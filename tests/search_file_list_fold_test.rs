@@ -224,3 +224,69 @@ fn rg_l_from_piped_stdin_is_verbatim() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(stdout.trim_end(), "<stdin>", "{stdout}");
 }
+
+/// `rtk rg --files <path>` never reads stdin -- the positional is a path, not a pattern --
+/// so a piped shell must not change how its output is folded (#4237).
+#[test]
+fn rg_files_folds_the_same_whatever_stdin_is() {
+    if !rg_available() {
+        return;
+    }
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let dir = fixture();
+    let src = dir.path().join("src");
+    let prefix = src_prefix(dir.path());
+    let path = src.to_str().unwrap();
+
+    // stdin closed: the reference shape.
+    let expected = String::from_utf8_lossy(
+        &rtk()
+            .args(["rg", "--files", path])
+            .stdin(Stdio::null())
+            .output()
+            .expect("rtk rg --files")
+            .stdout,
+    )
+    .into_owned();
+    assert!(
+        expected.starts_with(&format!("{prefix} (4 files)\n")),
+        "{expected}"
+    );
+
+    // A pipe carrying data, and a redirected file: neither may change the output. Before the
+    // fix both took the streaming path and printed every path verbatim, with no header.
+    let data = dir.path().join("in.txt");
+    std::fs::write(&data, "needle\n").unwrap();
+
+    let mut child = rtk()
+        .args(["rg", "--files", path])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn rtk rg --files");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"needle\n")
+        .expect("write stdin");
+    let out = child.wait_with_output().expect("wait");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        expected,
+        "a piped stdin must not change the fold"
+    );
+
+    let out = rtk()
+        .args(["rg", "--files", path])
+        .stdin(Stdio::from(std::fs::File::open(&data).expect("open input")))
+        .output()
+        .expect("rtk rg --files < input");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        expected,
+        "a redirected stdin must not change the fold"
+    );
+}
