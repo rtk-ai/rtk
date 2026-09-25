@@ -62,6 +62,7 @@ RTK intercepts shell commands and compresses their output before your agent read
 | `pytest` | Failures only, traceback trimmed |
 | `go test` | NDJSON parsed, failures only |
 | `docker ps` | Essential fields only |
+| `xcrun simctl listapps` | Every app’s identity, name, version and path in a shorter native property list |
 
 ## How Savings Work
 

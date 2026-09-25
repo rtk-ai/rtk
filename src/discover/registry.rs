@@ -7642,4 +7642,30 @@ mod tests {
             None,
         );
     }
+
+    #[test]
+    fn test_simctl_app_inventory_rewrite_is_narrow() {
+        assert_eq!(
+            rewrite_command_no_prefixes("xcrun simctl listapps booted", &[]),
+            Some("rtk xcrun simctl listapps booted".into()),
+        );
+        assert!(matches!(
+            classify_command("xcrun simctl listapps booted"),
+            Classification::Supported {
+                rtk_equivalent: "rtk xcrun",
+                ..
+            }
+        ));
+        for command in [
+            "xcrun simctl list devices --json",
+            "xcrun simctl spawn booted log stream",
+            "xcrun simctl pbcopy booted",
+            "xcrun simctl listapps-extra booted",
+            "xcrun clang --version",
+            "xcrun --find simctl",
+            "xcrun simctl listapps booted | plutil -convert json -o - -",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(command, &[]), None, "{command}");
+        }
+    }
 }
