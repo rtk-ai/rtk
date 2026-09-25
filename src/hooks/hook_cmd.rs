@@ -756,6 +756,64 @@ fn run_claude_inner(input: &str) -> Option<String> {
     }
 }
 
+// ── WorkBuddy native hook ──────────────────────────────────────
+
+fn process_workbuddy_payload(v: &Value) -> Option<Value> {
+    if v.get("hook_event_name")
+        .is_some_and(|event| event != PRE_TOOL_USE_KEY)
+        || !matches!(
+            v.get("tool_name").and_then(Value::as_str),
+            Some("Bash" | "execute_command")
+        )
+    {
+        return None;
+    }
+    let cmd = v
+        .pointer("/tool_input/command")
+        .and_then(Value::as_str)
+        .filter(|cmd| !cmd.is_empty())?;
+    let rewritten = match decide_hook_action(cmd, permissions::Host::WorkBuddy) {
+        HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten) => rewritten,
+        HookDecision::Deny | HookDecision::Defer => return None,
+    };
+    // WorkBuddy owns approval. Do not turn RTK's Default/Ask into auto-allow
+    // or force a prompt on every rewrite. Only change the command arguments.
+    let mut output = pre_tool_use_rewrite_output(v, &rewritten, None);
+    output["continue"] = json!(true);
+    Some(output)
+}
+
+/// Native WorkBuddy adapter. No Claude permission settings are consulted.
+pub fn run_workbuddy() -> Result<()> {
+    let input = read_stdin_limited()?;
+    let input = strip_leading_bom(&input).trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(error) => {
+            let _ = writeln!(
+                io::stderr(),
+                "[rtk hook] Failed to parse JSON input: {error}"
+            );
+            return Ok(());
+        }
+    };
+    if let Some(output) = process_workbuddy_payload(&v) {
+        if let (Some(original), Some(rewritten)) = (
+            v.pointer("/tool_input/command").and_then(Value::as_str),
+            output
+                .pointer("/hookSpecificOutput/updatedInput/command")
+                .and_then(Value::as_str),
+        ) {
+            audit_log("rewrite", original, rewritten);
+        }
+        let _ = writeln!(io::stdout(), "{output}");
+    }
+    Ok(())
+}
+
 // ── Trae native hook ───────────────────────────────────────────
 
 struct TraeRewrite {

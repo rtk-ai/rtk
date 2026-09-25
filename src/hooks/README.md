@@ -94,6 +94,7 @@ Rules are loaded from all Claude Code `settings.json` files (project + global, i
 | Copilot CLI (rtk hook copilot) | No updatedInput | deny-with-suggestion (unchanged) |
 | Codex (`rtk hook codex`) | Native approval runs after rewrite | Emit required protocol `allow` with `updatedInput`; Codex then evaluates the rewritten command normally |
 | Trae (`rtk hook trae`) | Host-owned approval | Return only `updatedInput`; omit `permissionDecision` |
+| WorkBuddy (`rtk hook workbuddy`) | Host-owned approval | Return `continue: true` and `updatedInput`; omit `permissionDecision` |
 | Mistral Vibe (rtk hook vibe) | No native ask surface | passthrough — Vibe's own approval prompt fires on the rewritten command |
 
 ### Implementation

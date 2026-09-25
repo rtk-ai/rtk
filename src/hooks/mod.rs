@@ -43,6 +43,10 @@ pub fn is_trae_hook_command(command: &str) -> bool {
     is_rtk_hook_command(command, "trae")
 }
 
+pub fn is_workbuddy_hook_command(command: &str) -> bool {
+    is_rtk_hook_command(command, "workbuddy")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

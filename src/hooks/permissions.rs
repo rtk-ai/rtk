@@ -36,6 +36,7 @@ pub enum Host {
     Claude,
     Codex,
     Trae,
+    WorkBuddy,
     Cursor,
     Gemini,
     Droid,
@@ -63,7 +64,9 @@ pub(crate) fn load_rules_for(host: Host) -> (Vec<String>, Vec<String>, Vec<Strin
         // execution rules after updatedInput. Do not interpret these hosts'
         // rules as Claude Bash patterns or borrow another host's settings.
         // No RTK-side match means Default, not an explicit Allow.
-        Host::Codex | Host::Trae | Host::Vibe => (Vec::new(), Vec::new(), Vec::new()),
+        Host::Codex | Host::Trae | Host::Vibe | Host::WorkBuddy => {
+            (Vec::new(), Vec::new(), Vec::new())
+        }
     }
 }
 
