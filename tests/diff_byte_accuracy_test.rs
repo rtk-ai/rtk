@@ -14,13 +14,16 @@ const BOTH_FILES_SEPARATOR: &str = "\n---\n";
 const WHITESPACE_ONLY_MESSAGE: &str = "whitespace or line endings";
 const IDENTICAL_MESSAGE: &str = "[ok] Files are identical";
 const DIFF_EXIT_CODE: i32 = 1;
+const BINARY_SNIFF_BYTES: usize = 4 * 1024;
 
 fn run_rtk_diff(file1: &Path, file2: &Path) -> Output {
+    let tracking_db = file1.with_extension("rtk-test.sqlite");
     let file1 = file1.display().to_string();
     let file2 = file2.display().to_string();
 
     Command::new(RTK_BIN)
         .args([DIFF_SUBCOMMAND, &file1, &file2])
+        .env("RTK_DB_PATH", tracking_db)
         .output()
         .expect("run rtk diff")
 }
@@ -94,8 +97,87 @@ fn non_utf8_files_are_compared_instead_of_reported_as_io_errors() {
         assert!(output.stderr.is_empty());
         if expected == 1 {
             let stdout = String::from_utf8(output.stdout).unwrap();
-            assert!(stdout.contains("Binary files"), "{stdout}");
-            assert!(stdout.contains("differ"), "{stdout}");
+            assert!(!stdout.contains("Binary files"), "{stdout}");
+            assert!(!stdout.contains(IDENTICAL_MESSAGE), "{stdout}");
         }
     }
+}
+
+#[test]
+fn nul_free_legacy_text_is_rendered_as_a_text_diff() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let left = dir.path().join("left.txt");
+    let right = dir.path().join("right.txt");
+    fs::write(&left, b"bonjour caf\xe9\nligne deux\n").expect("write left fixture");
+    fs::write(&right, b"bonsoir caf\xe9\nligne deux\n").expect("write right fixture");
+
+    let output = run_rtk_diff(&left, &right);
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+
+    assert_eq!(output.status.code(), Some(DIFF_EXIT_CODE), "{stdout}");
+    assert!(!stdout.contains("Binary files"), "{stdout}");
+    assert!(stdout.contains("bonjour caf"), "{stdout}");
+    assert!(stdout.contains("bonsoir caf"), "{stdout}");
+    assert!(
+        stdout.contains('\u{fffd}'),
+        "legacy bytes should be rendered lossily: {stdout}"
+    );
+}
+
+#[test]
+fn nul_bytes_are_reported_as_binary_even_when_valid_utf8() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let left = dir.path().join("left.bin");
+    let right = dir.path().join("right.bin");
+    fs::write(&left, b"before\0after\n").expect("write left fixture");
+    fs::write(&right, b"before\0changed\n").expect("write right fixture");
+
+    let output = run_rtk_diff(&left, &right);
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+
+    assert_eq!(output.status.code(), Some(DIFF_EXIT_CODE), "{stdout}");
+    assert!(stdout.contains("Binary files"), "{stdout}");
+    assert!(
+        !stdout.contains("before"),
+        "binary contents must not be rendered: {stdout}"
+    );
+}
+
+#[test]
+fn binary_sniffing_is_limited_to_the_initial_block() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let left = dir.path().join("left.dat");
+    let right = dir.path().join("right.dat");
+
+    let mut inside_left = vec![b'a'; BINARY_SNIFF_BYTES + 1];
+    inside_left[BINARY_SNIFF_BYTES - 1] = 0;
+    let mut inside_right = inside_left.clone();
+    inside_right[BINARY_SNIFF_BYTES] = b'b';
+    fs::write(&left, inside_left).expect("write inside-prefix left fixture");
+    fs::write(&right, inside_right).expect("write inside-prefix right fixture");
+
+    let binary_output = run_rtk_diff(&left, &right);
+    let binary_stdout = String::from_utf8(binary_output.stdout).expect("binary stdout utf8");
+    assert_eq!(
+        binary_output.status.code(),
+        Some(DIFF_EXIT_CODE),
+        "{binary_stdout}"
+    );
+    assert!(binary_stdout.contains("Binary files"), "{binary_stdout}");
+
+    let mut outside_left = vec![b'a'; BINARY_SNIFF_BYTES + 2];
+    outside_left[BINARY_SNIFF_BYTES] = 0;
+    let mut outside_right = outside_left.clone();
+    outside_right[BINARY_SNIFF_BYTES + 1] = b'b';
+    fs::write(&left, outside_left).expect("write outside-prefix left fixture");
+    fs::write(&right, outside_right).expect("write outside-prefix right fixture");
+
+    let text_output = run_rtk_diff(&left, &right);
+    let text_stdout = String::from_utf8(text_output.stdout).expect("text stdout utf8");
+    assert_eq!(
+        text_output.status.code(),
+        Some(DIFF_EXIT_CODE),
+        "{text_stdout}"
+    );
+    assert!(!text_stdout.contains("Binary files"), "{text_stdout}");
 }

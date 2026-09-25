@@ -37,6 +37,11 @@ const IDENTICAL_FILES_MESSAGE: &str = "[ok] Files are identical\n";
 /// the two files differ — the distinction a caller's `if diff a b` relies on.
 const DIFF_EXIT_TROUBLE: i32 = 2;
 
+/// GNU diff samples an initial I/O block for NUL bytes instead of scanning the
+/// entire operand. A fixed 4 KiB prefix matches the usual filesystem block and
+/// keeps the result deterministic across platforms.
+const BINARY_SNIFF_BYTES: usize = 4 * 1024;
+
 /// Ultra-condensed diff - only changed lines, no context.
 /// Returns the diff-convention exit code: 0 if identical, 1 if files differ,
 /// 2 if an operand cannot be read.
@@ -65,27 +70,29 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
         }
     };
 
-    let (content1, content2) = match (std::str::from_utf8(&bytes1), std::str::from_utf8(&bytes2)) {
-        (Ok(first), Ok(second)) => (first, second),
-        _ => {
-            let different = bytes1 != bytes2;
-            let message = if different {
-                format!(
-                    "Binary files {} and {} differ\n",
-                    file1.display(),
-                    file2.display()
-                )
-            } else {
-                String::new()
-            };
-            print!("{}", message);
-            timer.track(&command, "rtk diff", &message, &message);
-            return Ok(i32::from(different));
-        }
-    };
+    let different = bytes1 != bytes2;
+    if appears_binary(&bytes1) || appears_binary(&bytes2) {
+        let message = if different {
+            format!(
+                "Binary files {} and {} differ\n",
+                file1.display(),
+                file2.display()
+            )
+        } else {
+            String::new()
+        };
+        print!("{}", message);
+        timer.track(&command, "rtk diff", &message, &message);
+        return Ok(i32::from(different));
+    }
+
+    // Match GNU diff's binary heuristic: NUL-free input is text even when it
+    // uses a legacy encoding. Lossy decoding keeps the line structure visible.
+    let content1 = String::from_utf8_lossy(&bytes1);
+    let content2 = String::from_utf8_lossy(&bytes2);
     let both_files = format!("{}\n---\n{}", content1, content2);
 
-    let comparison = compare_files(content1, content2);
+    let comparison = compare_files_with_identity(&content1, &content2, !different);
     let fallback = classic_fallback(&comparison);
     let (rtk, exit_code) = render_diff(file1, file2, &comparison);
     let shown = select_file_diff_output(&comparison, &fallback, &both_files, &rtk);
@@ -97,6 +104,10 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
         shown,
     );
     Ok(exit_code)
+}
+
+fn appears_binary(bytes: &[u8]) -> bool {
+    bytes[..bytes.len().min(BINARY_SNIFF_BYTES)].contains(&0)
 }
 
 /// What comparing the two files established, before anything is rendered.
@@ -118,15 +129,30 @@ enum FileComparison {
     Lines(DiffResult),
 }
 
+#[cfg(test)]
 fn compare_files(content1: &str, content2: &str) -> FileComparison {
+    compare_files_with_identity(content1, content2, content1 == content2)
+}
+
+fn compare_files_with_identity(
+    content1: &str,
+    content2: &str,
+    bytes_identical: bool,
+) -> FileComparison {
     // Byte equality is the only safe basis for claiming identity, and it must be
     // checked before `lines()` touches the input. `str::lines()` strips a
     // trailing `\r` and treats the final newline as optional, so a CRLF-vs-LF or
     // missing-trailing-newline difference collapses to identical line vectors.
     // Reporting "identical" with exit 0 for files that differ silently passes
     // any verification gate built on `diff`.
-    if content1 == content2 {
+    if bytes_identical {
         return FileComparison::Identical;
+    }
+
+    if content1 == content2 {
+        return FileComparison::InvisibleDifference(
+            "files differ in non-UTF-8 bytes that decode to the same replacement text".to_string(),
+        );
     }
 
     let lines1: Vec<&str> = content1.lines().collect();
