@@ -1,7 +1,9 @@
 //! Detects whether RTK hooks are installed and warns if they are outdated.
 
-use super::constants::{HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON};
-use super::init::resolve_claude_dir;
+use super::constants::{
+    GROK_HOOK_FILE, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+};
+use super::init::{resolve_claude_dir, resolve_grok_home};
 use super::is_claude_hook_command;
 use crate::core::constants::RTK_DATA_DIR;
 use crate::core::utils::from_json_str;
@@ -22,8 +24,13 @@ pub enum HookStatus {
 }
 
 /// Return the current hook status without printing anything.
-/// Returns `Ok` if no Claude Code is detected (not applicable).
+/// Returns `Ok` if no Claude Code is detected (not applicable), or if a
+/// Grok Build hook is installed.
 pub fn status() -> HookStatus {
+    if grok_rewrite_hook_exists() {
+        return HookStatus::Ok;
+    }
+
     // Don't warn users who don't have Claude Code installed
     let claude_dir = match resolve_claude_dir() {
         Ok(d) => d,
@@ -152,6 +159,12 @@ fn hook_installed_path() -> Option<PathBuf> {
     if path.exists() { Some(path) } else { None }
 }
 
+fn grok_rewrite_hook_exists() -> bool {
+    resolve_grok_home()
+        .map(|home| home.join(HOOKS_SUBDIR).join(GROK_HOOK_FILE).is_file())
+        .unwrap_or(false)
+}
+
 fn warn_marker_path() -> Option<PathBuf> {
     let data_dir = dirs::data_local_dir()?.join(RTK_DATA_DIR);
     Some(data_dir.join(".hook_warn_last"))
@@ -161,8 +174,8 @@ fn warn_marker_path() -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::hooks::constants::{
-        CODEX_DIR, CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, HERMES_DIR,
-        HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HERMES_PLUGINS_SUBDIR,
+        CODEX_DIR, CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, GROK_DIR, GROK_HOOK_FILE,
+        HERMES_DIR, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HERMES_PLUGINS_SUBDIR,
         OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
     };
 
@@ -183,6 +196,7 @@ mod tests {
                 .join(HERMES_PLUGINS_SUBDIR)
                 .join(HERMES_PLUGIN_NAME)
                 .join(HERMES_PLUGIN_MANIFEST_FILE),
+            home.join(GROK_DIR).join(HOOKS_SUBDIR).join(GROK_HOOK_FILE),
         ];
         paths.iter().any(|p| p.exists())
     }
@@ -310,6 +324,19 @@ mod tests {
             .join(HERMES_PLUGIN_MANIFEST_FILE);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"plugin").unwrap();
+        assert!(other_integration_installed(tmp.path()));
+    }
+
+    #[test]
+    fn test_other_integration_grok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp
+            .path()
+            .join(GROK_DIR)
+            .join(HOOKS_SUBDIR)
+            .join(GROK_HOOK_FILE);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{}").unwrap();
         assert!(other_integration_installed(tmp.path()));
     }
 

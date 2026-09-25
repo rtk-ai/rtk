@@ -35,6 +35,7 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 | Pi | `rtk init --agent pi` | `.pi/extensions/rtk.ts` | -- |
 | Oh My Pi (OMP) | `rtk init --agent omp` | `.omp/extensions/rtk.ts` (shared Pi extension) | -- |
 | Hermes | `rtk init --agent hermes` | Python plugin in `~/.hermes/plugins/rtk-rewrite/` | `config.yaml` `plugins.enabled` |
+| Grok Build | `rtk init -g --agent grok` | `$GROK_HOME/hooks/rtk-rewrite.json` + `rules/rtk.md` | -- |
 
 
 ## Integrity Verification

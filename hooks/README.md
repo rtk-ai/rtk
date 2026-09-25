@@ -50,6 +50,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`pi/`](pi/README.md)** — TypeScript extension, `tool_call` event, local `isBashToolCallEvent` guard, in-place mutation, `~/.pi/agent/extensions/`; **shared with Oh My Pi (OMP)** — OMP installs the same file at `.omp/extensions/` via its `legacy-pi-compat` layer
 - **[`hermes/`](hermes/README.md)** — Python plugin, `pre_tool_call` hook, in-place terminal command mutation
 - **[`vibe/`](vibe/README.md)** — Rust binary hook (`rtk hook vibe`), `pre_tool` entry in `~/.vibe/hooks.toml`, `hook_specific_output.tool_input` rewrite plus `system_message` for UI visibility
+- **[`grok/`](grok/README.md)** — Rust binary hook (`rtk hook grok`), `PreToolUse.updatedInput` without `permissionDecision`, `$GROK_HOME/hooks/rtk-rewrite.json`
 
 ## Supported Agents
 
@@ -69,6 +70,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | Oh My Pi (OMP) | TypeScript extension (`tool_call` event, shared with Pi) | In-place mutation | Yes |
 | Hermes | Python plugin (`pre_tool_call`) | In-place mutation | Yes |
 | Mistral Vibe | Rust binary (`rtk hook vibe`) | Transparent rewrite | Yes (`hook_specific_output.tool_input`) |
+| Grok Build CLI | Rust binary (`rtk hook grok`) | Transparent rewrite | Yes (`updatedInput`, no `permissionDecision`) |
 
 ## JSON Formats by Agent
 
@@ -247,6 +249,33 @@ The `allow` value is required by Codex to accept `updatedInput`; Codex still run
 ```
 
 **No rewrite**: exit 0 with empty stdout (Vibe's contract for "no opinion" from a `pre_tool` hook).
+
+### Grok Build CLI (Rust Binary)
+
+**Input** (stdin; snake_case Claude-compat and camelCase Grok payloads are both accepted):
+
+```json
+{
+  "hook_event_name": "PreToolUse",
+  "tool_name": "run_terminal_command",
+  "tool_input": { "command": "git status" }
+}
+```
+
+**Output** (when rewritten):
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "updatedInput": { "command": "rtk git status" }
+  }
+}
+```
+
+No `permissionDecision`. Grok applies `updatedInput` and keeps its native permission flow.
+
+**No rewrite**: exit 0 with empty stdout.
 
 ### OpenCode (TypeScript Plugin)
 

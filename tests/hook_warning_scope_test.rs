@@ -67,6 +67,20 @@ fn commands_that_report_hook_state_do_not_repeat_the_reminder() {
 }
 
 #[test]
+fn grok_hook_counts_as_installed() {
+    let home = fresh_home();
+    let grok_hooks = home.path().join(".grok").join("hooks");
+    std::fs::create_dir_all(&grok_hooks).expect("grok hooks dir");
+    std::fs::write(grok_hooks.join("rtk-rewrite.json"), b"{}\n").expect("grok hook file");
+
+    let stderr = run(home.path(), &["git", "status"]);
+    assert!(
+        !stderr.contains(REMINDER),
+        "a Grok hook must suppress the Claude-missing reminder: {stderr}"
+    );
+}
+
+#[test]
 fn filtered_commands_still_get_the_reminder() {
     for args in [vec!["ls"], vec!["git", "status"]] {
         let home = fresh_home();
