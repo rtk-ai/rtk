@@ -6264,6 +6264,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_rewrite_rules_require_a_complete_subcommand() {
+        for command in [
+            "git branchless",
+            "git statuses",
+            "git logger",
+            "git showcase",
+            "cargo installer",
+            "cargo builder",
+            "gh prs",
+            "gh issues",
+            "glab mrs",
+            "docker psql",
+            "kubectl getall",
+            "oc status-check",
+            "ruff checker",
+            "go vetting",
+            "terraform planner",
+            "pio runner",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                None,
+                "unexpected rewrite for {command:?}"
+            );
+        }
+    }
+
     // --- exclude_commands (#243) ---
 
     #[test]
