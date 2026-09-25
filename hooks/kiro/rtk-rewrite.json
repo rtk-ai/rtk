@@ -1,0 +1,27 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "RTK Rewrite",
+      "trigger": "PreToolUse",
+      "description": "Suggests rtk equivalents for shell commands.",
+      "matcher": "execute_bash",
+      "action": {
+        "type": "command",
+        "command": "rtk hook kiro",
+        "timeout": 5
+      }
+    },
+    {
+      "name": "RTK Rewrite (shell)",
+      "trigger": "PreToolUse",
+      "description": "Suggests rtk equivalents for shell commands.",
+      "matcher": "shell",
+      "action": {
+        "type": "command",
+        "command": "rtk hook kiro",
+        "timeout": 5
+      }
+    }
+  ]
+}

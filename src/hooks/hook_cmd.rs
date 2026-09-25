@@ -1174,6 +1174,142 @@ fn run_droid_inner_with_rules(
     droid_response_from_decision(&v, cmd, decide_from_verdict(cmd, verdict)).map(|o| o.to_string())
 }
 
+// ── Kiro IDE/CLI PreToolUse hook ───────────────────────────────
+//
+// Kiro's PreToolUse hook does NOT support transparent rewrite (no `updatedInput`
+// equivalent). The hook uses deny-with-suggestion instead: it exits with
+// `KIRO_BLOCK_EXIT` (2) and writes the suggested `rtk <cmd>` to stderr, which Kiro
+// forwards to the agent. The agent re-issues the command in its `rtk` form and the
+// retry passes through untouched (already-`rtk` commands never rewrite).
+
+/// Extract the shell command from a Kiro PreToolUse payload.
+///
+/// Tolerates a missing `tool_name` (field may be absent in some Kiro CLI
+/// versions). Uses JSON pointer `/tool_input/command` and filters empty commands.
+fn kiro_shell_command(v: &Value) -> Option<&str> {
+    let tool_name = v.get("tool_name").and_then(|t| t.as_str()).unwrap_or("");
+    // Accept Kiro's shell tool names; tolerate missing/empty tool_name
+    // (the hook file matcher already gates invocations to the shell tool).
+    if !matches!(
+        tool_name,
+        "executeBash" | "execute_bash" | "runCommand" | "shell" | ""
+    ) {
+        return None;
+    }
+    v.pointer("/tool_input/command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+}
+
+/// Orchestrate the decision for a Kiro payload: extract command, decide.
+///
+/// `Some(rtk_command)` means the agent should be told to re-issue that command;
+/// `None` means step aside and let the original run untouched.
+fn process_kiro_payload(v: &Value) -> Option<String> {
+    let cmd = kiro_shell_command(v)?;
+    kiro_rewrite_for_decision(cmd, decide_hook_action(cmd, permissions::Host::Kiro))
+}
+
+/// Map a `HookDecision` to the Kiro hook JSON response.
+///
+/// - `Deny` → audit log + `None` (step aside, let Kiro handle the original).
+/// - `Defer` → `None` (no rewrite, command runs unchanged).
+/// - `AllowRewrite`/`AskRewrite` → the `rtk` equivalent to suggest.
+///
+/// Returns the rewritten command when the agent should be told to re-issue it,
+/// or `None` when RTK must step aside and let the original command run.
+fn kiro_rewrite_for_decision(cmd: &str, decision: HookDecision) -> Option<String> {
+    let rewritten = match decision {
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            return None;
+        }
+        HookDecision::Defer => return None,
+        HookDecision::AllowRewrite(r) | HookDecision::AskRewrite(r) => r,
+    };
+
+    audit_log("rewrite", cmd, &rewritten);
+    Some(rewritten)
+}
+
+/// Exit code that makes Kiro block a `PreToolUse` tool call and feed the
+/// hook's stderr back to the agent.
+const KIRO_BLOCK_EXIT: i32 = 2;
+
+/// Build the deny-with-suggestion message sent to the agent on stderr.
+///
+/// Kiro forwards hook stderr to the model when the hook exits with
+/// [`KIRO_BLOCK_EXIT`], so this text must read as an actionable instruction:
+/// the agent is expected to re-issue the command in its `rtk` form, which the
+/// hook then lets through untouched (already-`rtk` commands never rewrite).
+fn kiro_block_message(rewritten: &str) -> String {
+    format!("RTK: use `{rewritten}` instead. Re-run the command with the `rtk` prefix.")
+}
+
+/// Run the Kiro IDE/CLI PreToolUse hook natively.
+///
+/// Returns the process exit code:
+///
+/// - `0` — step aside. The original command runs untouched. This covers every
+///   no-rewrite case *and* every failure path (oversized stdin, malformed JSON,
+///   non-shell tool, empty input), so a broken hook never blocks the user.
+/// - [`KIRO_BLOCK_EXIT`] — a rewrite exists. Kiro blocks the raw command and
+///   forwards the stderr suggestion to the agent, which re-issues it as
+///   `rtk <cmd>`. That retry is idempotent: already-`rtk` commands never
+///   rewrite, so the hook lets the second attempt through and cannot loop.
+///
+/// Deny-with-suggestion is used instead of Kiro's `ask` decision because `ask`
+/// runs the *original* command on approval — it costs a user confirmation and
+/// saves nothing, since Kiro has no transparent-rewrite field.
+pub fn run_kiro() -> Result<i32> {
+    let input = match read_stdin_limited() {
+        Ok(s) => s,
+        Err(_) => return Ok(0), // oversized/unreadable stdin — never block
+    };
+    let input = strip_leading_bom(&input).trim();
+    if input.is_empty() {
+        return Ok(0);
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(0);
+        }
+    };
+
+    match process_kiro_payload(&v) {
+        Some(rewritten) => {
+            let _ = writeln!(io::stderr(), "{}", kiro_block_message(&rewritten));
+            Ok(KIRO_BLOCK_EXIT)
+        }
+        None => Ok(0),
+    }
+}
+
+/// Hermetic test path: no Kiro permission settings (empty rules → Default verdict).
+///
+/// Returns the `rtk` command the agent would be told to re-issue, or `None`
+/// when RTK steps aside.
+#[cfg(test)]
+fn run_kiro_inner(input: &str) -> Option<String> {
+    run_kiro_inner_with_rules(input, &[], &[], &[])
+}
+
+#[cfg(test)]
+fn run_kiro_inner_with_rules(
+    input: &str,
+    deny_rules: &[String],
+    ask_rules: &[String],
+    allow_rules: &[String],
+) -> Option<String> {
+    let v: Value = serde_json::from_str(input).ok()?;
+    let cmd = kiro_shell_command(&v)?;
+    let verdict = permissions::check_command_with_rules(cmd, deny_rules, ask_rules, allow_rules);
+    kiro_rewrite_for_decision(cmd, decide_from_verdict(cmd, verdict))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2913,6 +3049,309 @@ mod tests {
         // so Droid runs them unchanged.
         let input = droid_input("Execute", "definitely-not-a-real-binary --foo");
         assert!(run_droid_inner(&input).is_none());
+    }
+
+    // ── Kiro hook tests ────────────────────────────────────────────
+
+    fn kiro_input(tool: &str, cmd: &str) -> String {
+        json!({
+            "session_id": "kiro-session-001",
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool,
+            "tool_input": { "command": cmd }
+        })
+        .to_string()
+    }
+
+    // --- Parsing: kiro_shell_command ---
+
+    #[test]
+    fn test_kiro_shell_command_valid_execute_bash() {
+        let v: Value = serde_json::from_str(&kiro_input("executeBash", "git status")).unwrap();
+        assert_eq!(kiro_shell_command(&v), Some("git status"));
+    }
+
+    #[test]
+    fn test_kiro_shell_command_valid_execute_bash_snake() {
+        let v: Value = serde_json::from_str(&kiro_input("execute_bash", "cargo test")).unwrap();
+        assert_eq!(kiro_shell_command(&v), Some("cargo test"));
+    }
+
+    #[test]
+    fn test_kiro_shell_command_valid_run_command() {
+        let v: Value = serde_json::from_str(&kiro_input("runCommand", "ls -la")).unwrap();
+        assert_eq!(kiro_shell_command(&v), Some("ls -la"));
+    }
+
+    #[test]
+    fn test_kiro_shell_command_valid_shell() {
+        let v: Value = serde_json::from_str(&kiro_input("shell", "cat file.txt")).unwrap();
+        assert_eq!(kiro_shell_command(&v), Some("cat file.txt"));
+    }
+
+    #[test]
+    fn test_kiro_shell_command_missing_tool_name() {
+        // Tolerates absent tool_name
+        let v: Value = serde_json::from_str(r#"{"tool_input": {"command": "git diff"}}"#).unwrap();
+        assert_eq!(kiro_shell_command(&v), Some("git diff"));
+    }
+
+    #[test]
+    fn test_kiro_shell_command_empty_command() {
+        let v: Value = serde_json::from_str(&kiro_input("executeBash", "")).unwrap();
+        assert_eq!(kiro_shell_command(&v), None);
+    }
+
+    #[test]
+    fn test_kiro_shell_command_missing_command_field() {
+        let v: Value =
+            serde_json::from_str(r#"{"tool_name": "executeBash", "tool_input": {}}"#).unwrap();
+        assert_eq!(kiro_shell_command(&v), None);
+    }
+
+    #[test]
+    fn test_kiro_shell_command_non_shell_tool() {
+        let v: Value = serde_json::from_str(&kiro_input("editFile", "git status")).unwrap();
+        assert_eq!(kiro_shell_command(&v), None);
+    }
+
+    #[test]
+    fn test_kiro_shell_command_non_shell_read_tool() {
+        let v: Value = serde_json::from_str(&kiro_input("readFile", "git status")).unwrap();
+        assert_eq!(kiro_shell_command(&v), None);
+    }
+
+    // --- Decision: rewritable → deny-with-suggestion ---
+
+    #[test]
+    fn test_kiro_rewritable_command_suggests_rtk() {
+        let input = kiro_input("executeBash", "git status");
+        assert_eq!(
+            run_kiro_inner(&input),
+            Some("rtk git status".to_string()),
+            "rewritable command must yield the rtk suggestion"
+        );
+    }
+
+    #[test]
+    fn test_kiro_rewritable_cargo_test() {
+        let input = kiro_input("executeBash", "cargo test");
+        assert_eq!(run_kiro_inner(&input), Some("rtk cargo test".to_string()));
+    }
+
+    // --- Decision: no equivalent → None ---
+
+    #[test]
+    fn test_kiro_no_equivalent_passthrough() {
+        let input = kiro_input("executeBash", "definitely-not-a-real-binary --foo");
+        assert!(
+            run_kiro_inner(&input).is_none(),
+            "commands with no registry equivalent must produce no output"
+        );
+    }
+
+    // --- Decision: already-rtk → None ---
+
+    #[test]
+    fn test_kiro_already_rtk_passthrough() {
+        let input = kiro_input("executeBash", "rtk git status");
+        assert!(
+            run_kiro_inner(&input).is_none(),
+            "already rtk-prefixed commands must not double-prefix"
+        );
+    }
+
+    // --- Decision: heredoc → None ---
+
+    #[test]
+    fn test_kiro_heredoc_passthrough() {
+        let input = kiro_input("executeBash", "cat <<EOF\nhello\nEOF");
+        assert!(
+            run_kiro_inner(&input).is_none(),
+            "heredoc commands must defer (no output)"
+        );
+    }
+
+    // --- Decision: command substitution → None ---
+
+    #[test]
+    fn test_kiro_substitution_defers() {
+        for cmd in ["git status $(rm -rf /tmp/x)", "git status `rm -rf /tmp/x`"] {
+            let input = kiro_input("executeBash", cmd);
+            assert!(
+                run_kiro_inner(&input).is_none(),
+                "substitution must defer for: `{cmd}`"
+            );
+        }
+    }
+
+    // --- Decision: file redirect → None ---
+
+    #[test]
+    fn test_kiro_file_redirect_defers() {
+        let input = kiro_input("executeBash", "git log > /tmp/out.txt");
+        assert!(
+            run_kiro_inner(&input).is_none(),
+            "file redirects must defer (no output)"
+        );
+    }
+
+    // --- Decision: Deny → None ---
+
+    #[test]
+    fn test_kiro_deny_steps_aside() {
+        // A denied command must produce NO suggestion so Kiro runs the original.
+        assert!(
+            kiro_rewrite_for_decision("rm -rf /tmp/x", HookDecision::Deny).is_none(),
+            "deny must step aside (no suggestion)"
+        );
+    }
+
+    #[test]
+    fn test_kiro_deny_via_rules() {
+        let input = kiro_input("executeBash", "git push --force");
+        let deny = vec!["git push".to_string()];
+        assert!(
+            run_kiro_inner_with_rules(&input, &deny, &[], &[]).is_none(),
+            "denied commands must produce no output"
+        );
+    }
+
+    // --- Errors: invalid JSON → no rewrite ---
+
+    #[test]
+    fn test_kiro_invalid_json_passthrough() {
+        // run_kiro_inner returns None when JSON is invalid (serde_json::from_str fails)
+        assert!(
+            run_kiro_inner("this is not valid json at all!!!").is_none(),
+            "invalid JSON must produce no output"
+        );
+    }
+
+    #[test]
+    fn test_kiro_empty_object_passthrough() {
+        assert!(
+            run_kiro_inner("{}").is_none(),
+            "empty object (no tool_input) must produce no output"
+        );
+    }
+
+    // --- Errors: BOM → parse ok ---
+
+    #[test]
+    fn test_kiro_bom_single_stripped() {
+        let raw = format!("\u{feff}{}", kiro_input("executeBash", "git status"));
+        let trimmed = strip_leading_bom(&raw).trim();
+        let v: Value = serde_json::from_str(trimmed).unwrap();
+        assert_eq!(kiro_shell_command(&v), Some("git status"));
+    }
+
+    #[test]
+    fn test_kiro_bom_double_stripped() {
+        let raw = format!(
+            "\u{feff}\u{feff}{}",
+            kiro_input("executeBash", "git status")
+        );
+        let trimmed = strip_leading_bom(&raw).trim();
+        let v: Value = serde_json::from_str(trimmed).unwrap();
+        assert_eq!(kiro_shell_command(&v), Some("git status"));
+    }
+
+    // --- Errors: empty stdin → no rewrite ---
+
+    #[test]
+    fn test_kiro_empty_input_passthrough() {
+        assert!(
+            run_kiro_inner("").is_none(),
+            "empty stdin must produce no output"
+        );
+    }
+
+    #[test]
+    fn test_kiro_whitespace_only_passthrough() {
+        assert!(
+            run_kiro_inner("   \n\t  ").is_none(),
+            "whitespace-only stdin must produce no output"
+        );
+    }
+
+    // --- Deny-with-suggestion: stderr message + exit code contract ---
+
+    #[test]
+    fn test_kiro_block_message_contains_suggestion() {
+        // Validates: the stderr text fed back to the agent names the rtk command
+        // and instructs the agent to re-issue it.
+        let msg = kiro_block_message("rtk git status");
+        assert!(
+            msg.contains("rtk git status"),
+            "block message must contain the rtk command, got: `{msg}`"
+        );
+        assert!(
+            msg.contains("Re-run"),
+            "block message must instruct the agent to re-issue the command, got: `{msg}`"
+        );
+    }
+
+    #[test]
+    fn test_kiro_block_exit_is_two() {
+        // Kiro blocks a PreToolUse call and forwards stderr to the model only
+        // on exit code 2. This contract must not drift.
+        assert_eq!(KIRO_BLOCK_EXIT, 2);
+    }
+
+    #[test]
+    fn test_kiro_already_rtk_no_loop() {
+        // Feeding the SUGGESTED command back through the hook must step aside,
+        // so the agent's retry runs untouched (no infinite block/retry loop).
+        let first = process_kiro_payload(
+            &serde_json::from_str(&kiro_input("executeBash", "git status")).unwrap(),
+        )
+        .expect("rewrite expected on the first pass");
+        assert_eq!(first, "rtk git status");
+
+        let retry: Value = serde_json::from_str(&kiro_input("executeBash", &first)).unwrap();
+        assert!(
+            process_kiro_payload(&retry).is_none(),
+            "re-issued `{first}` must not be blocked again"
+        );
+    }
+
+    // --- Compound commands ---
+
+    #[test]
+    fn test_kiro_compound_command_rewrite() {
+        let input = kiro_input("executeBash", "git status && cargo test");
+        let out = run_kiro_inner(&input).expect("rewrite expected for compound");
+        assert!(
+            out.contains("rtk git status") && out.contains("rtk cargo test"),
+            "compound rewrite should prefix each segment, got: `{out}`"
+        );
+    }
+
+    // --- Env prefix preserved ---
+
+    #[test]
+    fn test_kiro_env_prefix_preserved() {
+        let input = kiro_input("executeBash", "RUST_LOG=debug cargo test");
+        let out = run_kiro_inner(&input).expect("rewrite expected");
+        assert!(
+            out.contains("RUST_LOG=debug") && out.contains("rtk cargo test"),
+            "env prefix must be preserved, got: `{out}`"
+        );
+    }
+
+    // --- With rules ---
+
+    #[test]
+    fn test_kiro_allowed_command_still_suggests() {
+        // Kiro has no transparent rewrite; even AllowRewrite yields a suggestion
+        // the agent must re-issue.
+        let input = kiro_input("executeBash", "git status");
+        assert_eq!(
+            run_kiro_inner_with_rules(&input, &[], &[], &["git status".to_string()]),
+            Some("rtk git status".to_string()),
+            "AllowRewrite must still produce the suggestion"
+        );
     }
 
     fn vibe_input(tool: &str, cmd: &str) -> String {

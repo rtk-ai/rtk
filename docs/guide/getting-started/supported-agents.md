@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, Mistral Vibe, and Trae
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, Kiro, Mistral Vibe, and Trae
 sidebar:
   order: 3
 ---
@@ -40,6 +40,7 @@ Agent runs "cargo test"
 | Oh My Pi (OMP) | TypeScript extension (`tool_call` event, shared with Pi) | Yes |
 | Hermes | Python plugin (`terminal` command mutation) | Yes |
 | Factory Droid | Shell hook (`PreToolUse`, matcher `Execute`) | Yes |
+| Kiro IDE / CLI | Steering file (prompt-level) + optional shell hook (`PreToolUse`) | No (deny-with-suggestion, agent retries) |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
 | Codex CLI | Rust binary (`PreToolUse`) | Yes |
@@ -217,6 +218,40 @@ rtk init --uninstall --agent droid
 ```
 
 Removes only RTK's hook entry; other hooks and settings are untouched.
+
+### Kiro IDE / CLI
+
+```bash
+rtk init --agent kiro            # steering + hook in <repo>/.kiro
+rtk init --agent kiro --global    # steering + hook in ~/.kiro
+```
+
+Installs a dual mechanism:
+
+1. **Steering file** (primary) — `.kiro/steering/rtk.md` (project) or `~/.kiro/steering/rtk.md` (global). Always-included prompt guidance instructing the Kiro agent to prefix shell commands with `rtk`. Works in both Kiro IDE and Kiro CLI.
+2. **PreToolUse hook** (optional reinforcement) — `hooks/rtk-rewrite.json`, matching both `execute_bash` and `shell`. Runs `rtk hook kiro` natively. Since Kiro's hook contract does not support transparent command replacement, it uses **deny-with-suggestion**: the hook exits with code `2` and writes the equivalent `rtk <cmd>` to stderr. Kiro blocks the raw command and forwards that text to the agent, which re-issues the command in its `rtk` form. The retry passes through untouched (already-`rtk` commands never rewrite), so there is no loop.
+
+   `ask` is deliberately not used: approving an `ask` runs the *original* command, costing a user confirmation and saving nothing. Deny-with-suggestion routes the correction to the agent instead of the user.
+
+#### Scopes
+
+| Artifact | `--global` | Default (project) |
+| --- | --- | --- |
+| Steering (`steering/rtk.md`) | `~/.kiro/steering/` — applies to every project | `<repo>/.kiro/steering/` |
+| Hook (`hooks/rtk-rewrite.json`) | `~/.kiro/hooks/` | `<repo>/.kiro/hooks/` |
+
+Kiro CLI reads hooks from both scopes. Kiro IDE reads hooks only from `.kiro/hooks/` in the open workspace, so a global install gives the IDE the steering but not the hook; run `rtk init --agent kiro` in a repository to add the hook there.
+
+The steering file is the recommended path — it is low-maintenance, covers platforms where the hook is unavailable, and works identically in IDE and CLI sessions. The hook adds an extra layer of enforcement when available.
+
+Uninstall:
+
+```bash
+rtk init --uninstall --agent kiro
+rtk init --uninstall --agent kiro --global
+```
+
+Removes only RTK's steering file and hook config from the selected scope. Other files in `.kiro/steering/` or `.kiro/hooks/` are untouched.
 
 ### Cline / Roo Code
 

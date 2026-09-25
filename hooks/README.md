@@ -4,7 +4,7 @@
 
 **Deployed hook artifacts** — the files and agent-specific configuration installed on user machines by `rtk init`. External scripts and plugins are thin delegates to `rtk rewrite`; native processors such as Codex call the same Rust rewrite registry directly. Zero filtering logic is duplicated in this directory.
 
-Owns: per-agent hook scripts and configuration files for 12 supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, Oh My Pi, Mistral Vibe, Trae).
+Owns: per-agent hook scripts and configuration files for 13 supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, Oh My Pi, Kiro, Mistral Vibe, Trae).
 
 Does **not** own: hook installation/uninstallation (that's `src/hooks/init.rs`), the rewrite pattern registry (that's `discover/registry`), or integrity verification (that's `src/hooks/integrity.rs`).
 
@@ -49,6 +49,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`opencode/`](opencode/README.md)** — TypeScript plugin, `zx` library, `tool.execute.before` event, in-place mutation
 - **[`pi/`](pi/README.md)** — TypeScript extension, `tool_call` event, local `isBashToolCallEvent` guard, in-place mutation, `~/.pi/agent/extensions/`; **shared with Oh My Pi (OMP)** — OMP installs the same file at `.omp/extensions/` via its `legacy-pi-compat` layer
 - **[`hermes/`](hermes/README.md)** — Python plugin, `pre_tool_call` hook, in-place terminal command mutation
+- **[`kiro/`](kiro/README.md)** — Steering file + PreToolUse hook, `rtk hook kiro` binary command, deny-with-suggestion fallback
 - **[`vibe/`](vibe/README.md)** — Rust binary hook (`rtk hook vibe`), `pre_tool` entry in `~/.vibe/hooks.toml`, `hook_specific_output.tool_input` rewrite plus `system_message` for UI visibility
 
 ## Supported Agents
@@ -68,6 +69,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | Pi | TypeScript extension (`tool_call` event) | In-place mutation | Yes |
 | Oh My Pi (OMP) | TypeScript extension (`tool_call` event, shared with Pi) | In-place mutation | Yes |
 | Hermes | Python plugin (`pre_tool_call`) | In-place mutation | Yes |
+| Kiro IDE/CLI | Steering file + Rust binary (`rtk hook kiro`) | Deny-with-suggestion | No (agent retries) |
 | Mistral Vibe | Rust binary (`rtk hook vibe`) | Transparent rewrite | Yes (`hook_specific_output.tool_input`) |
 
 ## JSON Formats by Agent
@@ -270,6 +272,29 @@ rewritten = result.stdout.strip()
 if result.returncode in {0, 3} and rewritten and rewritten != command:
     args["command"] = rewritten
 ```
+
+### Kiro IDE/CLI (Rust Binary)
+
+**Input** (stdin):
+
+```json
+{
+  "session_id": "0f2c…",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "executeBash",
+  "tool_input": { "command": "git status" }
+}
+```
+
+**Output** (stderr + exit 2, when rewritten — deny-with-suggestion): the hook writes no JSON. Kiro has no transparent-rewrite field, so the hook blocks the raw command and lets the agent retry:
+
+```
+RTK: use `rtk git status` instead. Re-run the command with the `rtk` prefix.
+```
+
+Kiro forwards hook stderr to the model on exit code `2`. The agent re-issues `rtk git status`, which produces no rewrite (already `rtk`-prefixed) and runs untouched — one round trip, no loop.
+
+**No rewrite** (no output, exit 0): When there is no equivalent RTK command, the hook produces no output and exits 0 — the original command executes unmodified.
 
 ## Command Rewrite Registry
 

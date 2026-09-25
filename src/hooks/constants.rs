@@ -79,6 +79,19 @@ pub const HERMES_PLUGIN_NAME: &str = "rtk-rewrite";
 pub const HERMES_PLUGIN_INIT_FILE: &str = "__init__.py";
 pub const HERMES_PLUGIN_MANIFEST_FILE: &str = "plugin.yaml";
 
+/// Kiro config directory (project: <cwd>/.kiro, global: ~/.kiro).
+pub const KIRO_DIR: &str = ".kiro";
+/// Steering subdirectory holding always-included prompt guidance.
+pub const KIRO_STEERING_SUBDIR: &str = "steering";
+/// Steering file installed by RTK.
+pub const KIRO_STEERING_FILE: &str = "rtk.md";
+/// Agent-hooks subdirectory.
+pub const KIRO_HOOKS_SUBDIR: &str = "hooks";
+/// RTK hook config file name (agent-hook JSON, v1 `hooks` array format).
+pub const KIRO_HOOK_FILE: &str = "rtk-rewrite.json";
+/// Native Rust hook command dispatched by the Kiro PreToolUse hook.
+pub const KIRO_HOOK_COMMAND: &str = "rtk hook kiro";
+
 pub const VIBE_DIR: &str = ".vibe";
 pub const VIBE_HOOKS_FILE: &str = "hooks.toml";
 pub const VIBE_PROMPTS_SUBDIR: &str = "prompts";
