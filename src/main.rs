@@ -955,11 +955,19 @@ enum Commands {
 
     /// Rewrite a raw command to its RTK equivalent (single source of truth for hooks)
     ///
-    /// Exits 0 and prints the rewritten command if supported.
-    /// Exits 1 with no output if the command has no RTK equivalent.
+    /// Exit codes (a hook must handle all four):
     ///
-    /// Used by Claude Code, Gemini CLI, and other LLM hooks:
-    ///   REWRITTEN=$(rtk rewrite "$CMD") || exit 0
+    /// 0 - rewrite printed, an allow rule matched: the hook may auto-allow it.
+    ///
+    /// 1 - nothing printed, no RTK equivalent: run the command unchanged.
+    ///
+    /// 2 - nothing printed, a deny rule matched: defer to the agent's own deny.
+    ///
+    /// 3 - rewrite printed, an ask rule matched or no rule matched at all (the
+    /// default): use the rewrite, but let the agent prompt the user.
+    ///
+    /// Exit 3 is still a rewrite, so `$(rtk rewrite "$CMD") || exit 0` drops it.
+    /// See hooks/claude/rtk-rewrite.sh for reference handling.
     Rewrite {
         /// Raw command to rewrite (e.g. "git status", "cargo test && git push")
         /// Accepts multiple args: `rtk rewrite ls -al` is equivalent to `rtk rewrite "ls -al"`
