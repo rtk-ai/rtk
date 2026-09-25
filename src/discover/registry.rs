@@ -3,6 +3,7 @@
 use crate::cmds::system::search::{Engine, is_bare_file_list};
 use crate::core::utils::composer_bin_dirs;
 use regex::{Regex, RegexSet};
+use std::borrow::Cow;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -174,7 +175,8 @@ struct GolangciRunParts<'a> {
 
 /// Classify a single (already-split) command.
 pub fn classify_command(cmd: &str) -> Classification {
-    let trimmed = cmd.trim();
+    let normalized = normalize_command_tabs(cmd);
+    let trimmed = normalized.trim();
     if trimmed.is_empty() {
         return Classification::Ignored;
     }
@@ -451,12 +453,8 @@ fn strip_git_global_opts(cmd: &str) -> String {
 /// flags are preserved (e.g. `pnpm -r install` → `rtk pnpm -r install`).
 /// Returns the original string unchanged if not a pnpm command.
 fn strip_pnpm_global_opts(cmd: &str) -> String {
-    // Require a single ASCII space after `pnpm` — the exact boundary the rewrite's
-    // `strip_word_prefix` enforces — so classify and rewrite can never diverge on a
-    // tab or other whitespace separator (that would resurrect the class of bug
-    // #3275 closes: Supported on one side, un-rewritable on the other). Extra
-    // spaces are still tolerated via `trim_start` (`pnpm  -r  install`), since
-    // `PNPM_GLOBAL_OPT` is `^`-anchored and a leading space would skip the strip.
+    // Both classification and rewriting normalize unquoted tabs to spaces.
+    // Trim extra spaces before applying the anchored global-option pattern.
     if !cmd.starts_with("pnpm ") {
         return cmd.to_string();
     }
@@ -729,6 +727,9 @@ pub(crate) fn rewrite_command_precompiled(
         return None;
     }
 
+    let normalized_tabs = normalize_command_tabs(trimmed);
+    let trimmed = normalized_tabs.as_ref();
+
     if trimmed.contains('\n') {
         return rewrite_multiline_block(trimmed, compiled, normalized_prefixes);
     }
@@ -812,6 +813,20 @@ impl Iterator for QuoteScan<'_> {
         }
         None
     }
+}
+
+/// Give classification, rewrite prefixes, and their guards the same spelling of
+/// shell blanks. Quoted or escaped tabs are argument data and must stay intact.
+fn normalize_command_tabs(cmd: &str) -> Cow<'_, str> {
+    let mut normalized = Cow::Borrowed(cmd);
+    if cmd.contains('\t') {
+        for (i, byte, in_single, in_double) in QuoteScan::new(cmd) {
+            if byte == b'\t' && !in_single && !in_double {
+                normalized.to_mut().replace_range(i..i + 1, " ");
+            }
+        }
+    }
+    normalized
 }
 
 /// Byte offset where an unquoted `#` at the start of a word begins a trailing
@@ -3199,19 +3214,92 @@ mod tests {
     }
 
     #[test]
-    fn test_pnpm_tab_separator_no_classify_rewrite_divergence() {
-        // A non-space separator must NOT be stripped: the rewrite's
-        // `strip_word_prefix` only accepts an ASCII space, so classify has to
-        // agree and stay Unsupported. If the strip tolerated `\t` (or any other
-        // whitespace), classify would say Supported(rtk pnpm) while rewrite
-        // returned None — the exact classify/rewrite divergence #3275 closes.
-        let cmd = "pnpm\t-r install";
-        assert!(
-            matches!(classify_command(cmd), Classification::Unsupported { .. }),
-            "tab-separated pnpm must stay Unsupported, got: {:?}",
-            classify_command(cmd)
+    fn test_normalize_command_tabs_preserves_non_separators() {
+        for cmd in [
+            "git status",
+            "git diff 'tab\tname'",
+            "git diff \"tab\tname\"",
+            "git diff tab\\\tname",
+            "git\u{00a0}status",
+            "git\rstatus",
+            "git\nstatus",
+        ] {
+            assert!(matches!(normalize_command_tabs(cmd), Cow::Borrowed(_)));
+            assert_eq!(normalize_command_tabs(cmd), cmd);
+        }
+        assert_eq!(normalize_command_tabs("git\tstatus"), "git status");
+    }
+
+    #[test]
+    fn test_tab_separators_classify_and_rewrite_consistently() {
+        for (cmd, expected) in [
+            ("git\tstatus", "rtk git status"),
+            ("cargo\tbuild", "rtk cargo build"),
+            ("npm\trun build", "rtk npm run build"),
+            ("pnpm\tinstall", "rtk pnpm install"),
+            ("pnpm\t-r install", "rtk pnpm -r install"),
+            ("pnpm\t--filter @app list", "rtk pnpm --filter @app list"),
+            ("git\t--no-pager log", "rtk git --no-pager log"),
+            ("npx\ttsc --noEmit", "rtk tsc --noEmit"),
+            ("pnpm\texec\ttsc --noEmit", "rtk tsc --noEmit"),
+        ] {
+            assert_eq!(
+                classify_command(cmd),
+                classify_command(&cmd.replace('\t', " ")),
+                "classification differs for {cmd:?}",
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "rewrite differs for {cmd:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_tab_separators_preserve_argument_contents() {
+        for suffix in [
+            "'tab\tname'",
+            "\"tab\tname\"",
+            "tab\\\tname",
+            "'日本語\tname'",
+        ] {
+            let cmd = format!("git\tdiff -- {suffix}");
+            assert_eq!(
+                rewrite_command_no_prefixes(&cmd, &[]),
+                Some(format!("rtk git diff -- {suffix}")),
+                "argument changed for {cmd:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_tab_separators_preserve_rewrite_guards() {
+        for cmd in [
+            "pnpm\t-r lint",
+            "pnpm\t-x install",
+            "cat\t-v file.txt",
+            "head\t-n 3 a.txt b.txt",
+            "gh\tpr view --json title",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd:?}");
+        }
+        assert_eq!(
+            classify_command("cat\tfile.txt > out.txt"),
+            classify_command("cat file.txt > out.txt"),
         );
-        assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("git\tstatus", &["git status".into()]),
+            None,
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("head\t-n 3 file.txt", &[]),
+            Some("rtk read file.txt --head-lines 3".into()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("git\tstatus && cargo\tbuild", &[]),
+            Some("rtk git status && rtk cargo build".into()),
+        );
     }
 
     #[test]
