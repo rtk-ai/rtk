@@ -133,6 +133,12 @@ Four rules, each of which cost a real bug before it was written down:
 
 The dialect is the one axis that is not per-flag, so it stays a parameter: `tokenize_grammar(args, takes_value, Dialect::Msbuild)`.
 
+**Tokenizing a shell string, not an argv.** `discover` starts from a raw command line, one layer below: shell string → `discover::lexer::words_and_spans` (quote-aware words plus each word's byte offset) → `tokenize_grammar`.
+
+Those words are **unresolved shell words, not an argv**: word splitting has happened, but each word is still a slice of the original string with its quote characters and backslash escapes literal. `--config "a path/x.yml"` is one word, and that word is `"a path/x.yml"` — quotes included; `--config=a\ b` stays `--config=a\ b`. So `Token::text`, `Token::attached` and `Token::value()` carry the quoting too. **Reading a token as a value needs resolving** — put it through `discover::lexer::resolve_word_text` first, or a `--config` path is looked up with literal quote characters in it. Slicing `cmd` by offset needs no resolving. Comparing a token against a keyword is in between: it is sound for the unquoted spelling but misses a quoted one, so `golangci-lint "run"` matches no keyword and falls through to passthrough — acceptable when the fallback is "unfiltered but correct", not when a missed match would rewrite the command wrongly. `shell_split` returns a real argv but discards the offsets, so it is not a substitute when you need both.
+
+Keep the span vector alongside the words — `Token::source_index` indexes the words you passed in, so `spans[token.source_index]` is the way back down to a slice of the original string (`discover::registry::parse_golangci_run_parts`). Note that `discover::lexer::TokenKind` and `arg_tokenizer::TokenKind` are different types with the same name.
+
 ## Consumer Contracts
 
 Core provides infrastructure that `cmds/` and other components consume. These contracts define expected usage.
