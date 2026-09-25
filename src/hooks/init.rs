@@ -6423,6 +6423,44 @@ fn print_gemini_manual_setup(settings_path: &Path) {
     );
 }
 
+fn is_gemini_rtk_hook_command(cmd: &str, hook_cmd: &str) -> bool {
+    let trimmed = cmd.trim();
+    trimmed == hook_cmd
+        || trimmed.contains(GEMINI_HOOK_FILE)
+        || trimmed == "rtk hook gemini"
+        || trimmed.ends_with("rtk hook gemini")
+}
+
+fn gemini_group_covers_shell(group: &serde_json::Value) -> bool {
+    match group.get("matcher") {
+        None | Some(serde_json::Value::Null) => true,
+        Some(matcher) => matcher.as_str().is_some_and(|pattern| {
+            pattern.is_empty()
+                || pattern == "*"
+                || pattern == "run_shell_command"
+                || pattern
+                    .split(['|', ','])
+                    .any(|name| name.trim() == "run_shell_command")
+        }),
+    }
+}
+
+fn gemini_hook_already_present(root: &serde_json::Value, hook_cmd: &str) -> bool {
+    hook_present(
+        root,
+        BEFORE_TOOL_KEY,
+        HookEntries::Grouped,
+        gemini_group_covers_shell,
+        |hook| is_command_hook(hook, |cmd| is_gemini_rtk_hook_command(cmd, hook_cmd)),
+    )
+}
+
+fn remove_gemini_hook_from_json(root: &mut serde_json::Value, hook_cmd: &str) -> bool {
+    remove_hook_entries(root, BEFORE_TOOL_KEY, HookEntries::Grouped, |hook| {
+        is_command_hook(hook, |cmd| is_gemini_rtk_hook_command(cmd, hook_cmd))
+    })
+}
+
 /// Patch ~/.gemini/settings.json with the BeforeTool hook.
 ///
 /// Returns `Ok(true)` when the existing settings.json could not be parsed
@@ -6472,15 +6510,7 @@ fn patch_gemini_settings(
         serde_json::json!({})
     };
 
-    let before_tool_pointer = format!("/hooks/{}", BEFORE_TOOL_KEY);
-    if let Some(hooks) = settings.pointer(&before_tool_pointer)
-        && let Some(arr) = hooks.as_array()
-        && arr.iter().any(|h| {
-            h.pointer("/hooks/0/command")
-                .and_then(|v| v.as_str())
-                .is_some_and(|c| c.contains("rtk"))
-        })
-    {
+    if gemini_hook_already_present(&settings, &hook_cmd) {
         if verbose > 0 {
             eprintln!("Gemini settings.json already has RTK hook");
         }
@@ -6602,35 +6632,24 @@ fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
         removed.push(format!("GEMINI.md: {}", gemini_md.display()));
     }
 
-    // Remove hook from settings.json
+    // Remove only RTK's hook entry from settings.json (keep sibling user hooks).
     let settings_path = gemini_dir.join(SETTINGS_JSON);
+    let expected_hook_cmd = hook_path.to_string_lossy().to_string();
     if settings_path.exists() {
         let content = fs::read_to_string(&settings_path)?;
-        if let Ok(mut settings) = from_json_str::<serde_json::Value>(&content) {
-            let bt_pointer = format!("/hooks/{}", BEFORE_TOOL_KEY);
-            if let Some(arr) = settings
-                .pointer_mut(&bt_pointer)
-                .and_then(|v| v.as_array_mut())
-            {
-                let before = arr.len();
-                arr.retain(|h| {
-                    !h.pointer("/hooks/0/command")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|c| c.contains("rtk"))
-                });
-                if arr.len() < before {
-                    if dry_run {
-                        println!(
-                            "[dry-run] would remove RTK hook from Gemini settings.json: {}",
-                            settings_path.display()
-                        );
-                    } else {
-                        let new_content = serde_json::to_string_pretty(&settings)?;
-                        fs::write(&settings_path, new_content)?;
-                    }
-                    removed.push("Gemini settings.json: removed RTK hook entry".to_string());
-                }
+        if let Ok(mut settings) = from_json_str::<serde_json::Value>(&content)
+            && remove_gemini_hook_from_json(&mut settings, &expected_hook_cmd)
+        {
+            if dry_run {
+                println!(
+                    "[dry-run] would remove RTK hook from Gemini settings.json: {}",
+                    settings_path.display()
+                );
+            } else {
+                let new_content = serde_json::to_string_pretty(&settings)?;
+                fs::write(&settings_path, new_content)?;
             }
+            removed.push("Gemini settings.json: removed RTK hook entry".to_string());
         }
     }
 
@@ -11802,6 +11821,52 @@ mod tests {
                 result.err()
             );
         });
+    }
+
+    #[test]
+    fn test_gemini_hook_ownership_is_exact_and_preserves_siblings() {
+        let hook_cmd = "/home/user/.gemini/hooks/rtk-hook-gemini.sh";
+        let mut root = serde_json::json!({
+            "hooks": {
+                "BeforeTool": [{
+                    "matcher": "run_shell_command",
+                    "hooks": [
+                        {"type": "command", "command": hook_cmd},
+                        {"type": "command", "command": "/opt/audit/log-shell.sh"}
+                    ]
+                }]
+            },
+            "theme": "dark"
+        });
+        assert!(gemini_hook_already_present(&root, hook_cmd));
+        assert!(remove_gemini_hook_from_json(&mut root, hook_cmd));
+        assert!(!remove_gemini_hook_from_json(&mut root, hook_cmd));
+        assert_eq!(
+            root["hooks"]["BeforeTool"],
+            serde_json::json!([
+                {"matcher": "run_shell_command", "hooks": [
+                    {"type": "command", "command": "/opt/audit/log-shell.sh"}
+                ]}
+            ])
+        );
+        assert_eq!(root["theme"], "dark");
+    }
+
+    #[test]
+    fn test_gemini_hook_presence_ignores_unrelated_rtk_substring_paths() {
+        let hook_cmd = "/home/user/.gemini/hooks/rtk-hook-gemini.sh";
+        let root = serde_json::json!({"hooks": {"BeforeTool": [
+            {"matcher": "run_shell_command", "hooks": [
+                {"type": "command", "command": "/opt/smartkit/check.sh"}
+            ]}
+        ]}});
+        assert!(
+            !gemini_hook_already_present(&root, hook_cmd),
+            "a path that merely contains \"rtk\" must not count as RTK's hook"
+        );
+        let mut doomed = root.clone();
+        assert!(!remove_gemini_hook_from_json(&mut doomed, hook_cmd));
+        assert_eq!(doomed, root);
     }
 
     #[test]
