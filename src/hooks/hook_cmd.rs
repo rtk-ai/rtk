@@ -229,13 +229,16 @@ fn heal_legacy_hook_file(path: &std::path::Path) -> bool {
 }
 
 /// The decision every hook applies -- [`decision::decide_for_agent`] -- plus the
-/// recall bookkeeping the hook path performs for any command it does not deny.
+/// recall bookkeeping the hook path performs for any command it defers.
 fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
     if verdict == PermissionVerdict::Deny {
         return HookDecision::Deny;
     }
-    crate::hooks::rewrite_cmd::track_tee_read(cmd);
-    decision::decide_for_agent(cmd, verdict)
+    let decision = decision::decide_for_agent(cmd, verdict);
+    if matches!(decision, HookDecision::Defer) {
+        crate::hooks::rewrite_cmd::track_tee_read(cmd);
+    }
+    decision
 }
 
 fn decide_hook_action(cmd: &str, host: permissions::Host) -> HookDecision {

@@ -22,6 +22,31 @@ fn expand_home(token: &str) -> String {
     token.to_string()
 }
 
+pub(crate) fn tee_slug_from_path(
+    path: &std::path::Path,
+    tee_dir: &std::path::Path,
+) -> Option<(String, String)> {
+    let path_str = path.to_str()?;
+    let trimmed = path_str.trim_matches(|c| c == '"' || c == '\'');
+    let expanded = expand_home(trimmed);
+    let p = std::path::Path::new(&expanded);
+    if p.extension().and_then(|e| e.to_str()) != Some("log") {
+        return None;
+    }
+    if !p.starts_with(tee_dir) {
+        return None;
+    }
+    let stem = p.file_stem()?.to_str()?;
+    if let Some((epoch, slug)) = stem.split_once('_')
+        && !epoch.is_empty()
+        && epoch.chars().all(|c| c.is_ascii_digit())
+        && !slug.is_empty()
+    {
+        return Some((slug.to_string(), expanded));
+    }
+    None
+}
+
 fn tee_read_slug(cmd: &str, tee_dir: &std::path::Path) -> Option<(String, String)> {
     let first = cmd.split_whitespace().next()?;
     let reader = first.rsplit('/').next().unwrap_or(first);
@@ -29,25 +54,20 @@ fn tee_read_slug(cmd: &str, tee_dir: &std::path::Path) -> Option<(String, String
         return None;
     }
     for token in cmd.split_whitespace() {
-        let t = token.trim_matches(|c| c == '"' || c == '\'');
-        if !t.ends_with(".log") {
-            continue;
-        }
-        let expanded = expand_home(t);
-        let path = std::path::Path::new(&expanded);
-        if !path.starts_with(tee_dir) {
-            continue;
-        }
-        let stem = path.file_stem()?.to_str()?;
-        if let Some((epoch, slug)) = stem.split_once('_')
-            && !epoch.is_empty()
-            && epoch.chars().all(|c| c.is_ascii_digit())
-            && !slug.is_empty()
-        {
-            return Some((slug.to_string(), expanded));
+        if let Some(res) = tee_slug_from_path(std::path::Path::new(token), tee_dir) {
+            return Some(res);
         }
     }
     None
+}
+
+pub(crate) fn track_tee_path(path: &std::path::Path) {
+    let Some(tee_dir) = crate::core::tee_file::resolved_tee_dir() else {
+        return;
+    };
+    if let Some((slug, path_str)) = tee_slug_from_path(path, &tee_dir) {
+        crate::core::retriever::record_tee_recall(&slug, &path_str);
+    }
 }
 
 pub(crate) fn track_tee_read(cmd: &str) {
@@ -83,7 +103,7 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
     // in-process `rtk hook <agent>` path is host-parameterized instead
     // (`permissions::Host`).
     let decided = decision::decide(cmd, check_command(cmd));
-    if !matches!(decided, HookDecision::Deny) {
+    if matches!(decided, HookDecision::Defer) {
         track_tee_read(cmd);
     }
     match decided {
@@ -166,6 +186,31 @@ mod tests {
             tee_read_slug(cmd, dir).map(|(s, _)| s),
             Some("gh-prs".to_string())
         );
+    }
+
+    #[test]
+    fn test_tee_slug_from_path() {
+        let dir = std::path::Path::new("/home/u/.local/share/rtk/tee");
+        let path = std::path::Path::new("/home/u/.local/share/rtk/tee/1788000000_find.log");
+        assert_eq!(
+            tee_slug_from_path(path, dir),
+            Some((
+                "find".to_string(),
+                "/home/u/.local/share/rtk/tee/1788000000_find.log".to_string()
+            ))
+        );
+
+        // Outside tee dir
+        let outside = std::path::Path::new("/var/log/1788000000_find.log");
+        assert_eq!(tee_slug_from_path(outside, dir), None);
+
+        // Non-.log extension
+        let non_log = std::path::Path::new("/home/u/.local/share/rtk/tee/1788000000_find.txt");
+        assert_eq!(tee_slug_from_path(non_log, dir), None);
+
+        // No epoch prefix
+        let no_epoch = std::path::Path::new("/home/u/.local/share/rtk/tee/find.log");
+        assert_eq!(tee_slug_from_path(no_epoch, dir), None);
     }
 
     fn rewrite_command_no_prefixes(cmd: &str) -> Option<String> {

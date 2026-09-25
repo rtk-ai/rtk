@@ -520,7 +520,7 @@ fn run_streaming_search(
     max_results: usize,
     real_cmd: &str,
     detected_flags: DetectedFlags,
-) -> Result<i32> {
+) -> Result<(i32, String)> {
     let filter = SearchStreamFilter {
         show_file: detected_flags
             .show_file
@@ -544,7 +544,76 @@ fn run_streaming_search(
         &result.raw_stdout,
         &result.filtered,
     );
-    Ok(result.exit_code)
+    Ok((result.exit_code, result.raw_stderr))
+}
+
+fn run_passthrough_stream_stdin(cmd: &mut Command) -> Result<(i32, String)> {
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+
+    cmd.stdin(Stdio::inherit());
+    cmd.stdout(Stdio::inherit());
+    cmd.stderr(Stdio::piped());
+
+    struct ChildGuard(Option<std::process::Child>);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                child.wait().ok();
+            }
+        }
+    }
+
+    let mut child = ChildGuard(Some(cmd.spawn().context("search failed to spawn")?));
+    let mut child_stderr = child
+        .0
+        .as_mut()
+        .unwrap()
+        .stderr
+        .take()
+        .context("search failed to capture stderr")?;
+
+    let stderr_thread = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+        let mut captured = Vec::new();
+        let mut buf = [0u8; 8192];
+        let mut parent_stderr = std::io::stderr().lock();
+        loop {
+            let n = match child_stderr.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            };
+            let chunk = &buf[..n];
+            if let Err(e) = parent_stderr.write_all(chunk)
+                && e.kind() != std::io::ErrorKind::BrokenPipe
+            {
+                return Err(e);
+            }
+            let _ = parent_stderr.flush();
+            captured.extend_from_slice(chunk);
+        }
+        Ok(captured)
+    });
+
+    let status = child
+        .0
+        .take()
+        .unwrap()
+        .wait()
+        .context("search failed to wait for child")?;
+    let stderr_bytes = match stderr_thread.join() {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(e)) => {
+            eprintln!("rtk: error forwarding stderr: {e}");
+            Vec::new()
+        }
+        Err(_) => Vec::new(),
+    };
+
+    let exit_code = stream::status_to_exit_code(status);
+    let stderr_str = crate::core::utils::decode_process_output(&stderr_bytes);
+    Ok((exit_code, stderr_str))
 }
 
 /// Runs the agent's command verbatim for forms RTK does not group: format/shape
@@ -555,7 +624,7 @@ fn passthrough<T: AsRef<str>>(
     args: &[T],
     real_cmd: &str,
     stream_stdin: bool,
-) -> Result<i32> {
+) -> Result<(i32, String)> {
     let mut cmd = resolved_command(engine.bin());
     if stream_stdin && !std::io::stdout().is_terminal() {
         // Keep passthrough output live when stdout is piped.
@@ -565,21 +634,81 @@ fn passthrough<T: AsRef<str>>(
         cmd.child_arg(a.as_ref());
     }
 
-    let exit_code = if stream_stdin {
-        stream::run_streaming(&mut cmd, StdinMode::Inherit, FilterMode::Passthrough)
-            .context("search failed")?
-            .exit_code
+    let (exit_code, stderr) = if stream_stdin {
+        run_passthrough_stream_stdin(&mut cmd)?
     } else {
         let result = exec_capture_stdin(&mut cmd).context("search failed")?;
         print!("{}", strip_ansi(&result.stdout));
         if !result.stderr.is_empty() {
             eprint!("{}", result.stderr);
         }
-        result.exit_code
+        (result.exit_code, result.stderr)
     };
 
     timer.track_passthrough(real_cmd, &format!("rtk {} (passthrough)", real_cmd));
-    Ok(exit_code)
+    Ok((exit_code, stderr))
+}
+
+struct TeeCandidate {
+    slug: String,
+    expanded_path: String,
+    raw_arg: String,
+}
+
+fn extract_tee_candidates<T: AsRef<str>>(
+    args: &[T],
+    engine: Engine,
+    paths: &[String],
+    tee_dir: &std::path::Path,
+) -> Vec<TeeCandidate> {
+    let tokens = tokenize_search_args(args, engine);
+    let mut candidate_strings: Vec<String> = Vec::new();
+
+    // 1. Positional file operands from extract_pattern_path
+    for p in paths {
+        candidate_strings.push(p.clone());
+    }
+
+    // 2. Auxiliary file arguments: -f / --file / --ignore-file
+    for t in &tokens {
+        match t.kind {
+            TokenKind::Short if t.text == "f" => {
+                if let Some(attached) = t.attached {
+                    let val = attached.strip_prefix('=').unwrap_or(attached);
+                    candidate_strings.push(val.to_string());
+                } else if let Some(val) = t.value(&tokens) {
+                    candidate_strings.push(val.to_string());
+                }
+            }
+            TokenKind::Long
+                if t.text == "file" || (engine == Engine::Rg && t.text == "ignore-file") =>
+            {
+                if let Some(attached) = t.attached {
+                    let val = attached.strip_prefix('=').unwrap_or(attached);
+                    candidate_strings.push(val.to_string());
+                } else if let Some(val) = t.value(&tokens) {
+                    candidate_strings.push(val.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut candidates = Vec::new();
+    for raw in candidate_strings {
+        if let Some((slug, expanded)) =
+            crate::hooks::rewrite_cmd::tee_slug_from_path(std::path::Path::new(&raw), tee_dir)
+        {
+            candidates.push(TeeCandidate {
+                slug,
+                expanded_path: expanded,
+                raw_arg: raw,
+            });
+        }
+    }
+    candidates.sort_by(|a, b| a.expanded_path.cmp(&b.expanded_path));
+    candidates.dedup_by(|a, b| a.expanded_path == b.expanded_path);
+    candidates
 }
 
 pub fn run(
@@ -611,7 +740,8 @@ pub fn run(
     });
     if dangling_value_flag {
         let real_cmd = format!("{} {}", engine.bin(), args.join(" "));
-        return passthrough(&timer, engine, args, &real_cmd, false);
+        let (code, _) = passthrough(&timer, engine, args, &real_cmd, false)?;
+        return Ok(code);
     }
 
     if asks_for_help {
@@ -631,8 +761,42 @@ pub fn run(
     let (patterns, paths, extra_args, extra_args_has_format_flag, detected_flags) =
         extract_pattern_path(args, engine);
 
+    let tee_candidates = crate::core::tee_file::resolved_tee_dir()
+        .map(|dir| extract_tee_candidates(args, engine, &paths, &dir))
+        .unwrap_or_default();
+    let record_tee_candidates = |code: i32, stderr: &str| {
+        if code <= 1 {
+            let clean_stderr = strip_ansi(stderr);
+            for candidate in &tee_candidates {
+                let path = std::path::Path::new(&candidate.expanded_path);
+                // Must be an existing regular file that can actually be opened for reading.
+                // Catches nonexistent files, directories, and chmod 000 unreadable files
+                // even when diagnostics are suppressed (grep -qs or rg -q --no-messages).
+                if !path.is_file() || std::fs::File::open(path).is_err() {
+                    continue;
+                }
+                // Reject if the engine reported an error referencing this specific path.
+                // Uses exact candidate path/raw_arg matching, never unconstrained basename matching.
+                let trimmed_raw = candidate.raw_arg.trim_matches(|c| c == '"' || c == '\'');
+                if !clean_stderr.is_empty()
+                    && (clean_stderr.contains(&candidate.expanded_path)
+                        || clean_stderr.contains(&candidate.raw_arg)
+                        || clean_stderr.contains(trimmed_raw))
+                {
+                    continue;
+                }
+                crate::core::retriever::record_tee_recall(
+                    &candidate.slug,
+                    &candidate.expanded_path,
+                );
+            }
+        }
+    };
+
     if patterns.is_empty() {
-        return passthrough(&timer, engine, args, &real_cmd, false);
+        let (code, stderr) = passthrough(&timer, engine, args, &real_cmd, false)?;
+        record_tee_candidates(code, &stderr);
+        return Ok(code);
     }
 
     let pattern_display = if patterns.len() == 1 {
@@ -652,11 +816,13 @@ pub fn run(
 
     // format/shape flags (-c/-l/-o/...): already-minimal native output, passthrough.
     if extra_args_has_format_flag {
-        return passthrough(&timer, engine, args, &real_cmd, reads_piped_stdin);
+        let (code, stderr) = passthrough(&timer, engine, args, &real_cmd, reads_piped_stdin)?;
+        record_tee_candidates(code, &stderr);
+        return Ok(code);
     }
 
     if reads_piped_stdin {
-        return run_streaming_search(
+        let (code, stderr) = run_streaming_search(
             &timer,
             engine,
             &extra_args,
@@ -665,7 +831,9 @@ pub fn run(
             max_results,
             &real_cmd,
             detected_flags,
-        );
+        )?;
+        record_tee_candidates(code, &stderr);
+        return Ok(code);
     }
 
     let result = engine_capture(engine, &extra_args, &patterns, &paths)?;
@@ -676,7 +844,9 @@ pub fn run(
     // Unparseable shape re-runs verbatim below (with its own stderr), so handle it
     // before surfacing this run's stderr (#2333).
     if unparsed_signal(&raw_output) > 0 {
-        return passthrough(&timer, engine, args, &real_cmd, false);
+        let (code, stderr) = passthrough(&timer, engine, args, &real_cmd, false)?;
+        record_tee_candidates(code, &stderr);
+        return Ok(code);
     }
 
     if !result.stderr.is_empty() {
@@ -685,6 +855,7 @@ pub fn run(
 
     if result.stdout.trim().is_empty() {
         timer.track(&real_cmd, &rtk_label, &raw_output, "");
+        record_tee_candidates(exit_code, &result.stderr);
         return Ok(exit_code);
     }
 
@@ -834,6 +1005,7 @@ pub fn run(
 
     print!("{}", output);
     timer.track(&real_cmd, &rtk_label, &raw_output, &output);
+    record_tee_candidates(exit_code, &result.stderr);
 
     Ok(exit_code)
 }
@@ -2118,5 +2290,102 @@ mod tests {
         assert!(f(&["--before-context=2"]));
         assert!(f(&["--context=1"]));
         assert!(!f(&["--color", "auto"]));
+    }
+
+    #[test]
+    fn test_extract_tee_candidates() {
+        let temp = tempfile::tempdir().unwrap();
+        let tee_dir = temp.path().join("tee");
+        std::fs::create_dir_all(&tee_dir).unwrap();
+
+        let tee_file = tee_dir.join("1788000000_sample.log");
+        let tee_str = tee_file.to_str().unwrap();
+
+        // 1. Bare path operand in paths
+        let c1 = extract_tee_candidates(
+            &["pattern", tee_str],
+            Engine::Grep,
+            &[tee_str.to_string()],
+            &tee_dir,
+        );
+        assert_eq!(c1.len(), 1);
+        assert_eq!(c1[0].slug, "sample");
+
+        // 2. Auxiliary flag: -f <path>
+        let c2 = extract_tee_candidates(
+            &["-f", tee_str, "target.txt"],
+            Engine::Grep,
+            &["target.txt".to_string()],
+            &tee_dir,
+        );
+        assert_eq!(c2.len(), 1);
+        assert_eq!(c2[0].slug, "sample");
+
+        // 3. Attached flag: -f<path>
+        let c3 = extract_tee_candidates(
+            &[&format!("-f{tee_str}"), "target.txt"],
+            Engine::Grep,
+            &["target.txt".to_string()],
+            &tee_dir,
+        );
+        assert_eq!(c3.len(), 1);
+        assert_eq!(c3[0].slug, "sample");
+
+        // 4. Long attached flag: --ignore-file=<path>
+        let c4 = extract_tee_candidates(
+            &[&format!("--ignore-file={tee_str}"), "pat"],
+            Engine::Rg,
+            &[],
+            &tee_dir,
+        );
+        assert_eq!(c4.len(), 1);
+        assert_eq!(c4[0].slug, "sample");
+
+        // 5. Long flag: --file <path>
+        let c5 = extract_tee_candidates(
+            &["--file", tee_str, "target.txt"],
+            Engine::Grep,
+            &["target.txt".to_string()],
+            &tee_dir,
+        );
+        assert_eq!(c5.len(), 1);
+        assert_eq!(c5[0].slug, "sample");
+
+        // --- Negative regressions (ROOT PROBLEM A) ---
+        // 6. --replace=<path> is NOT a file operand
+        let c6 = extract_tee_candidates(
+            &[&format!("--replace={tee_str}"), "pat", "target.txt"],
+            Engine::Rg,
+            &["target.txt".to_string()],
+            &tee_dir,
+        );
+        assert_eq!(c6.len(), 0);
+
+        // 7. Pattern containing =<path> is NOT a file operand
+        let c7 = extract_tee_candidates(
+            &[&format!("pattern={tee_str}"), "target.txt"],
+            Engine::Grep,
+            &["target.txt".to_string()],
+            &tee_dir,
+        );
+        assert_eq!(c7.len(), 0);
+
+        // 8. Unrelated flag: --color=<path> is NOT a file operand
+        let c8 = extract_tee_candidates(
+            &[&format!("--color={tee_str}"), "pat", "target.txt"],
+            Engine::Grep,
+            &["target.txt".to_string()],
+            &tee_dir,
+        );
+        assert_eq!(c8.len(), 0);
+
+        // 9. Pattern flag -e <path> is NOT an auxiliary file
+        let c9 = extract_tee_candidates(
+            &["-e", tee_str, "target.txt"],
+            Engine::Grep,
+            &["target.txt".to_string()],
+            &tee_dir,
+        );
+        assert_eq!(c9.len(), 0);
     }
 }

@@ -45,6 +45,7 @@ pub fn run(
             regular_file_len(file).unwrap_or(window.len()),
             &String::from_utf8_lossy(&window),
         );
+        crate::hooks::rewrite_cmd::track_tee_path(file);
         return Ok(());
     }
 
@@ -65,6 +66,7 @@ pub fn run(
             &String::from_utf8_lossy(&bytes),
             &String::from_utf8_lossy(window),
         );
+        crate::hooks::rewrite_cmd::track_tee_path(file);
         return Ok(());
     }
     let content = String::from_utf8(bytes)
@@ -122,6 +124,7 @@ pub fn run(
     let shown = never_worse(&raw, &rtk_output);
     print!("{}", shown);
     timer.track(&format!("cat {}", file.display()), "rtk read", &raw, shown);
+    crate::hooks::rewrite_cmd::track_tee_path(file);
     Ok(())
 }
 
