@@ -1,0 +1,54 @@
+Deleting database /home/user/Acme-RtkSample/cover_db
+cover: running make test "OPTIMIZE=-O0 -fprofile-arcs -ftest-coverage" "OTHERLDFLAGS=-fprofile-arcs -ftest-coverage"
+cp lib/Acme/RtkSample/Util.pm blib/lib/Acme/RtkSample/Util.pm
+cp lib/Acme/RtkSample.pm blib/lib/Acme/RtkSample.pm
+PERL_DL_NONLAZY=1 "/opt/perl5/perl5.44.0/bin/perl" "-MExtUtils::Command::MM" "-MTest::Harness" "-e" "undef *Test::Harness::Switches; test_harness(0, 'blib/lib', 'blib/arch')" t-pass/*.t t/02-fail-more.t
+t-pass/00-load.t ....... ok
+t-pass/01-basic.t ...... ok
+t-pass/06-todo-skip.t .. ok
+
+#   Failed test 'two plus two is five'
+#   at t/02-fail-more.t line 10.
+#          got: '4'
+#     expected: '5'
+
+#   Failed test 'sorted names structure'
+#   at t/02-fail-more.t line 11.
+#     Structures begin differing at:
+#          $got->{list}[2] = 'c'
+#     $expected->{list}[2] = 'd'
+
+#   Failed test 'twenty is big'
+#   at t/02-fail-more.t line 16.
+#                   'medium'
+#     doesn't match '(?^:^big$)'
+# Looks like you failed 3 tests of 5.
+t/02-fail-more.t ....... 
+Dubious, test returned 3 (wstat 768, 0x300)
+Failed 3/5 subtests 
+
+Test Summary Report
+-------------------
+t-pass/06-todo-skip.t (Wstat: 0 Tests: 4 Failed: 0)
+  TODO passed:   1
+t/02-fail-more.t     (Wstat: 768 (exited 3) Tests: 5 Failed: 3)
+  Failed tests:  2-4
+  Non-zero exit status: 3
+Files=4, Tests=14,  1 wallclock secs ( 0.02 usr  0.00 sys +  0.43 cusr  0.07 csys =  0.52 CPU)
+Result: FAIL
+Failed 1/4 test programs. 3/14 subtests failed.
+make: *** [Makefile:835: test_dynamic] Error 3
+Reading database from /home/user/Acme-RtkSample/cover_db
+
+
+---------------------------- ------ ------ ------ ------ ------ ------ ------
+File                           stmt   bran   cond    sub    pod   time  total
+---------------------------- ------ ------ ------ ------ ------ ------ ------
+blib/lib/Acme/RtkSample.pm     73.5   75.0    n/a   77.7    0.0   99.2   66.1
+...ib/Acme/RtkSample/Util.pm   64.2    n/a    n/a   75.0    0.0    0.7   60.0
+Total                          70.8   75.0    n/a   76.9    0.0  100.0   64.6
+---------------------------- ------ ------ ------ ------ ------ ------ ------
+
+
+HTML output written to /home/user/Acme-RtkSample/cover_db/coverage.html
+done.

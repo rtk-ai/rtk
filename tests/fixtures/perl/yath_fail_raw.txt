@@ -1,0 +1,65 @@
+( PASSED )  job  1    t/00-load.t
+( PASSED )  job  2    t/01-basic.t
+[  FAIL  ]  job  3  + two plus two is five
+(  DIAG  )  job  3      Failed test 'two plus two is five'
+(  DIAG  )  job  3      at t/02-fail-more.t line 10.
+(  DIAG  )  job  3             got: '4'
+(  DIAG  )  job  3        expected: '5'
+[  FAIL  ]  job  3  + sorted names structure
+(  DIAG  )  job  3      Failed test 'sorted names structure'
+(  DIAG  )  job  3      at t/02-fail-more.t line 11.
+(  DIAG  )  job  3        Structures begin differing at:
+(  DIAG  )  job  3             $got->{list}[2] = 'c'
+(  DIAG  )  job  3        $expected->{list}[2] = 'd'
+[  FAIL  ]  job  3  + twenty is big
+(  DIAG  )  job  3      Failed test 'twenty is big'
+(  DIAG  )  job  3      at t/02-fail-more.t line 16.
+(  DIAG  )  job  3                      'medium'
+(  DIAG  )  job  3        doesn't match '(?^:^big$)'
+(  DIAG  )  job  3    Looks like you failed 3 tests of 5.
+( FAILED )  job  3    t/02-fail-more.t
+< REASON >  job  3    Test script returned error (Err: 3)
+< REASON >  job  3    Assertion failures were encountered (Count: 3)
+[  FAIL  ]  job  4  + pairs round-trips
+[  DEBUG ]  job  4    t/03-fail-t2.t line 7
+(  DIAG  )  job  4    +------+-----+----+-------+
+(  DIAG  )  job  4    | PATH | GOT | OP | CHECK |
+(  DIAG  )  job  4    +------+-----+----+-------+
+(  DIAG  )  job  4    | {b}  | 2   | eq | 3     |
+(  DIAG  )  job  4    +------+-----+----+-------+
+(  DIAG  )  job  4    Seeded srand with seed '20260921' from local date.
+( FAILED )  job  4    t/03-fail-t2.t
+< REASON >  job  4    Test script returned error (Err: 1)
+< REASON >  job  4    Assertion failures were encountered (Count: 1)
+( STDERR )  job  5    cannot open /nonexistent/rtk-sample.txt at /home/user/Acme-RtkSample/lib/Acme/RtkSample.pm line 28.
+(  DIAG  )  job  5    Looks like your test exited with 2 just after 1.
+( FAILED )  job  5    t/04-die.t
+< REASON >  job  5    Test script returned error (Err: 2)
+< REASON >  job  5    Planned for 3 assertions, but saw 1
+( STDERR )  job  6    Global symbol "$undeclared_total" requires explicit package name (did you forget to declare "my $undeclared_total"?) at t/05-compile-error.t line 9.
+( STDERR )  job  6    Execution of /home/user/perl5/bin/yath aborted due to compilation errors.
+( FAILED )  job  6    t/05-compile-error.t
+< REASON >  job  6    Test script returned error (Err: 255)
+< REASON >  job  6    No plan was declared, and no assertions were made.
+( PASSED )  job  7    t/06-todo-skip.t
+
+The following jobs failed:
++--------------------------------------+----------------------+
+| Job ID                               | Test File            |
++--------------------------------------+----------------------+
+| 419A8A68-B5C9-11F1-8432-9383E59959EA | t/03-fail-t2.t       |
+| 419A88E2-B5C9-11F1-8432-9383E59959EA | t/02-fail-more.t     |
+| 419A8BDA-B5C9-11F1-8432-9383E59959EA | t/04-die.t           |
+| 419A8D42-B5C9-11F1-8432-9383E59959EA | t/05-compile-error.t |
++--------------------------------------+----------------------+
+
+                                Yath Result Summary
+-----------------------------------------------------------------------------------
+     Fail Count: 4
+     File Count: 7
+Assertion Count: 27
+      Wall Time: 0.76 seconds
+       CPU Time: 0.48 seconds (usr: 0.09s | sys: 0.02s | cusr: 0.26s | csys: 0.11s)
+      CPU Usage: 63%
+    -->  Result: FAILED  <--
+[0m

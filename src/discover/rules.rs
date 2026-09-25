@@ -661,6 +661,68 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^prove(?:\s|$)",
+        rtk_cmd: "rtk prove",
+        pipeline_safety: PipelineSafety::ProducerOnly,
+        rewrite_prefixes: &["prove"],
+        category: "Tests",
+        savings_pct: 70.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^yath(?:\s|$)",
+        rtk_cmd: "rtk yath",
+        pipeline_safety: PipelineSafety::ProducerOnly,
+        rewrite_prefixes: &["yath"],
+        category: "Tests",
+        savings_pct: 70.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^perlcritic(?:\s|$)",
+        rtk_cmd: "rtk perlcritic",
+        pipeline_safety: PipelineSafety::ProducerOnly,
+        rewrite_prefixes: &["perlcritic"],
+        category: "Lint",
+        savings_pct: 60.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^perldoc(?:\s|$)",
+        rtk_cmd: "rtk perldoc",
+        pipeline_safety: PipelineSafety::ProducerOnly,
+        rewrite_prefixes: &["perldoc"],
+        category: "Docs",
+        savings_pct: 15.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^cover(?:\s|$)",
+        rtk_cmd: "rtk cover",
+        pipeline_safety: PipelineSafety::ProducerOnly,
+        rewrite_prefixes: &["cover"],
+        category: "Tests",
+        savings_pct: 70.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^dzil(?:\s|$)",
+        rtk_cmd: "rtk dzil",
+        pipeline_safety: PipelineSafety::ProducerOnly,
+        rewrite_prefixes: &["dzil"],
+        category: "Build",
+        savings_pct: 60.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^cpanm\b",
+        rtk_cmd: "rtk cpanm",
+        rewrite_prefixes: &["cpanm"],
+        category: "PackageManager",
+        savings_pct: 70.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^(?:php\s+)?(?:\./)?(?:(?:vendor/)?bin/)?phpstan\s+analy[sz]e\b",
         rtk_cmd: "rtk phpstan",
         pipeline_safety: PipelineSafety::ProducerOnly,
@@ -1161,6 +1223,7 @@ pub const IGNORED_PREFIXES: &[&str] = &[
     "python -c",
     "node -e",
     "ruby -e",
+    "perl -e",
     "rtk ",
     "pwd",
     "bash ",

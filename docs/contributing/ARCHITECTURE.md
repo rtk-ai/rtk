@@ -170,6 +170,7 @@ Savings by ecosystem:
   PYTHON (cmds/python/)    70-90%    ruff, pytest, mypy, pip
   GO (cmds/go/)            75-90%    go test/build/vet, golangci-lint
   RUBY (cmds/ruby/)        60-90%    rake, rspec, rubocop
+  PERL (cmds/perl/)        20-90%    prove, yath, perlcritic, cover, dzil, perldoc
   DOTNET (cmds/dotnet/)    70-85%    dotnet build/test, binlog
   CLOUD (cmds/cloud/)      60-80%    aws, docker/kubectl, curl, wget, psql
   SYSTEM (cmds/system/)    50-90%    ls, tree, read, grep, find, json, log, env, deps

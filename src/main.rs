@@ -16,6 +16,7 @@ use cmds::js::{
     prisma_cmd, tsc_cmd, vitest_cmd,
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
+use cmds::perl::{cover_cmd, dzil_cmd, perlcritic_cmd, perldoc_cmd, prove_cmd, yath_cmd};
 use cmds::php::{
     ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpt_cmd, phpunit_cmd, pint_cmd,
 };
@@ -798,6 +799,48 @@ enum Commands {
     /// PHP command runner with compact output for artisan and syntax checks
     Php {
         /// PHP arguments (e.g., artisan about, -l app/Http/Controller.php)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// yath (Test2::Harness) with compact output
+    Yath {
+        /// yath arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// perlcritic with violations grouped by file and policy
+    Perlcritic {
+        /// perlcritic arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// perldoc with author, license and history sections trimmed
+    Perldoc {
+        /// perldoc arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// dzil (Dist::Zilla) with build progress dropped and test output compacted
+    Dzil {
+        /// dzil arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// cover (Devel::Cover) showing only what is not covered
+    Cover {
+        /// cover arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// prove (Perl TAP harness) with compact output
+    Prove {
+        /// prove arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2827,6 +2870,18 @@ fn run_cli() -> Result<i32> {
 
         Commands::Php { args } => php_cmd::run(&args, cli.verbose)?,
 
+        Commands::Yath { args } => yath_cmd::run(&args, cli.verbose)?,
+
+        Commands::Perlcritic { args } => perlcritic_cmd::run(&args, cli.verbose)?,
+
+        Commands::Perldoc { args } => perldoc_cmd::run(&args, cli.verbose)?,
+
+        Commands::Dzil { args } => dzil_cmd::run(&args, cli.verbose)?,
+
+        Commands::Cover { args } => cover_cmd::run(&args, cli.verbose)?,
+
+        Commands::Prove { args } => prove_cmd::run(&args, cli.verbose)?,
+
         Commands::Phpunit { args } => phpunit_cmd::run(&args, cli.verbose)?,
 
         Commands::Phpstan { args } => phpstan_cmd::run(&args, cli.verbose)?,
@@ -3275,6 +3330,12 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Sqlfluff { .. }
             | Commands::Pytest { .. }
             | Commands::Php { .. }
+            | Commands::Yath { .. }
+            | Commands::Perlcritic { .. }
+            | Commands::Perldoc { .. }
+            | Commands::Dzil { .. }
+            | Commands::Cover { .. }
+            | Commands::Prove { .. }
             | Commands::Phpunit { .. }
             | Commands::Phpstan { .. }
             | Commands::Pest { .. }
@@ -3836,6 +3897,12 @@ mod tests {
             "mvnd",
             "sbt",
             "php",
+            "yath",
+            "perlcritic",
+            "perldoc",
+            "dzil",
+            "cover",
+            "prove",
             "phpunit",
             "phpstan",
             "pest",

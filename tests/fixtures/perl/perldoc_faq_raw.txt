@@ -1,0 +1,47 @@
+Found in /opt/perl5/perl5.44.0/lib/5.44.0/pod/perlfaq4.pod
+  How do I shuffle an array randomly?
+    If you either have Perl 5.8.0 or later installed, or if you have
+    Scalar-List-Utils 1.03 or later installed, you can say:
+
+        use List::Util 'shuffle';
+
+        @shuffled = shuffle(@list);
+
+    If not, you can use a Fisher-Yates shuffle.
+
+        sub fisher_yates_shuffle {
+            my $deck = shift;  # $deck is a reference to an array
+            return unless @$deck; # must not be empty!
+
+            my $i = @$deck;
+            while (--$i) {
+                my $j = int rand ($i+1);
+                @$deck[$i,$j] = @$deck[$j,$i];
+            }
+        }
+
+        # shuffle my mpeg collection
+        #
+        my @mpeg = <audio/*/*.mp3>;
+        fisher_yates_shuffle( \@mpeg );    # randomize @mpeg in place
+        print @mpeg;
+
+    Note that the above implementation shuffles an array in place, unlike
+    the List::Util::shuffle() which takes a list and returns a new shuffled
+    list.
+
+    You've probably seen shuffling algorithms that work using splice,
+    randomly picking another element to swap the current element with
+
+        srand;
+        @new = ();
+        @old = 1 .. 10;  # just a demo
+        while (@old) {
+            push(@new, splice(@old, rand @old, 1));
+        }
+
+    This is bad because splice is already O(N), and since you do it N times,
+    you just invented a quadratic algorithm; that is, O(N**2). This does not
+    scale, although Perl is so efficient that you probably won't notice this
+    until you have rather largish arrays.
+
