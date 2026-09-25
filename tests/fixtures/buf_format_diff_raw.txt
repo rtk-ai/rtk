@@ -1,0 +1,300 @@
+diff -u acme/v1/fmt1.proto.orig acme/v1/fmt1.proto
+--- acme/v1/fmt1.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt1.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt1{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt1 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}
+diff -u acme/v1/fmt10.proto.orig acme/v1/fmt10.proto
+--- acme/v1/fmt10.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt10.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt10{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt10 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}
+diff -u acme/v1/fmt11.proto.orig acme/v1/fmt11.proto
+--- acme/v1/fmt11.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt11.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt11{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt11 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}
+diff -u acme/v1/fmt12.proto.orig acme/v1/fmt12.proto
+--- acme/v1/fmt12.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt12.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt12{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt12 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}
+diff -u acme/v1/fmt13.proto.orig acme/v1/fmt13.proto
+--- acme/v1/fmt13.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt13.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt13{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt13 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}
+diff -u acme/v1/fmt14.proto.orig acme/v1/fmt14.proto
+--- acme/v1/fmt14.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt14.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt14{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt14 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}
+diff -u acme/v1/fmt15.proto.orig acme/v1/fmt15.proto
+--- acme/v1/fmt15.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt15.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt15{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt15 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}
+diff -u acme/v1/fmt16.proto.orig acme/v1/fmt16.proto
+--- acme/v1/fmt16.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt16.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt16{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt16 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}
+diff -u acme/v1/fmt17.proto.orig acme/v1/fmt17.proto
+--- acme/v1/fmt17.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt17.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt17{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt17 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}
+diff -u acme/v1/fmt18.proto.orig acme/v1/fmt18.proto
+--- acme/v1/fmt18.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt18.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt18{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt18 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}
+diff -u acme/v1/fmt19.proto.orig acme/v1/fmt19.proto
+--- acme/v1/fmt19.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt19.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt19{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt19 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}
+diff -u acme/v1/fmt2.proto.orig acme/v1/fmt2.proto
+--- acme/v1/fmt2.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt2.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt2{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt2 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}
+diff -u acme/v1/fmt20.proto.orig acme/v1/fmt20.proto
+--- acme/v1/fmt20.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt20.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt20{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt20 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}
+diff -u acme/v1/fmt21.proto.orig acme/v1/fmt21.proto
+--- acme/v1/fmt21.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt21.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt21{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt21 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}
+diff -u acme/v1/fmt22.proto.orig acme/v1/fmt22.proto
+--- acme/v1/fmt22.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt22.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt22{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt22 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}
+diff -u acme/v1/fmt23.proto.orig acme/v1/fmt23.proto
+--- acme/v1/fmt23.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt23.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt23{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt23 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}
+diff -u acme/v1/fmt24.proto.orig acme/v1/fmt24.proto
+--- acme/v1/fmt24.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt24.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt24{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt24 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}
+diff -u acme/v1/fmt25.proto.orig acme/v1/fmt25.proto
+--- acme/v1/fmt25.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt25.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt25{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt25 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}
+diff -u acme/v1/fmt3.proto.orig acme/v1/fmt3.proto
+--- acme/v1/fmt3.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt3.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt3{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt3 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}
+diff -u acme/v1/fmt4.proto.orig acme/v1/fmt4.proto
+--- acme/v1/fmt4.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt4.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt4{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt4 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}
+diff -u acme/v1/fmt5.proto.orig acme/v1/fmt5.proto
+--- acme/v1/fmt5.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt5.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt5{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt5 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}
+diff -u acme/v1/fmt6.proto.orig acme/v1/fmt6.proto
+--- acme/v1/fmt6.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt6.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt6{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt6 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}
+diff -u acme/v1/fmt7.proto.orig acme/v1/fmt7.proto
+--- acme/v1/fmt7.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt7.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt7{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt7 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}
+diff -u acme/v1/fmt8.proto.orig acme/v1/fmt8.proto
+--- acme/v1/fmt8.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt8.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt8{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt8 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}
+diff -u acme/v1/fmt9.proto.orig acme/v1/fmt9.proto
+--- acme/v1/fmt9.proto.orig	2026-09-24 14:21:56
++++ acme/v1/fmt9.proto	2026-09-24 14:21:56
+@@ -1 +1,7 @@
+-syntax="proto3";package acme.v1;message   Fmt9{string a=1;string b=2;int32   c=3;}
++syntax = "proto3";
++package acme.v1;
++message Fmt9 {
++  string a = 1;
++  string b = 2;
++  int32 c = 3;
++}

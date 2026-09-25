@@ -1,0 +1,140 @@
+{"path":"acme/v1/broken1.proto","start_line":3,"start_column":1,"end_line":3,"end_column":40,"type":"COMPILE","message":"imported file does not exist"}
+{"path":"acme/v1/broken1.proto","start_line":5,"start_column":3,"end_line":5,"end_column":11,"type":"COMPILE","message":"cannot find `Missing1` in this scope"}
+{"path":"acme/v1/broken1.proto","start_line":6,"start_column":3,"end_line":6,"end_column":11,"type":"COMPILE","message":"cannot find `Missing2` in this scope"}
+{"path":"acme/v1/broken1.proto","start_line":7,"start_column":3,"end_line":7,"end_column":11,"type":"COMPILE","message":"cannot find `Missing3` in this scope"}
+{"path":"acme/v1/broken1.proto","start_line":8,"start_column":3,"end_line":8,"end_column":11,"type":"COMPILE","message":"cannot find `Missing4` in this scope"}
+{"path":"acme/v1/broken1.proto","start_line":9,"start_column":3,"end_line":9,"end_column":11,"type":"COMPILE","message":"cannot find `Missing5` in this scope"}
+{"path":"acme/v1/broken1.proto","start_line":10,"start_column":3,"end_line":10,"end_column":11,"type":"COMPILE","message":"cannot find `Missing6` in this scope"}
+{"path":"acme/v1/broken10.proto","start_line":3,"start_column":1,"end_line":3,"end_column":40,"type":"COMPILE","message":"imported file does not exist"}
+{"path":"acme/v1/broken10.proto","start_line":5,"start_column":3,"end_line":5,"end_column":11,"type":"COMPILE","message":"cannot find `Missing1` in this scope"}
+{"path":"acme/v1/broken10.proto","start_line":6,"start_column":3,"end_line":6,"end_column":11,"type":"COMPILE","message":"cannot find `Missing2` in this scope"}
+{"path":"acme/v1/broken10.proto","start_line":7,"start_column":3,"end_line":7,"end_column":11,"type":"COMPILE","message":"cannot find `Missing3` in this scope"}
+{"path":"acme/v1/broken10.proto","start_line":8,"start_column":3,"end_line":8,"end_column":11,"type":"COMPILE","message":"cannot find `Missing4` in this scope"}
+{"path":"acme/v1/broken10.proto","start_line":9,"start_column":3,"end_line":9,"end_column":11,"type":"COMPILE","message":"cannot find `Missing5` in this scope"}
+{"path":"acme/v1/broken10.proto","start_line":10,"start_column":3,"end_line":10,"end_column":11,"type":"COMPILE","message":"cannot find `Missing6` in this scope"}
+{"path":"acme/v1/broken11.proto","start_line":3,"start_column":1,"end_line":3,"end_column":40,"type":"COMPILE","message":"imported file does not exist"}
+{"path":"acme/v1/broken11.proto","start_line":5,"start_column":3,"end_line":5,"end_column":11,"type":"COMPILE","message":"cannot find `Missing1` in this scope"}
+{"path":"acme/v1/broken11.proto","start_line":6,"start_column":3,"end_line":6,"end_column":11,"type":"COMPILE","message":"cannot find `Missing2` in this scope"}
+{"path":"acme/v1/broken11.proto","start_line":7,"start_column":3,"end_line":7,"end_column":11,"type":"COMPILE","message":"cannot find `Missing3` in this scope"}
+{"path":"acme/v1/broken11.proto","start_line":8,"start_column":3,"end_line":8,"end_column":11,"type":"COMPILE","message":"cannot find `Missing4` in this scope"}
+{"path":"acme/v1/broken11.proto","start_line":9,"start_column":3,"end_line":9,"end_column":11,"type":"COMPILE","message":"cannot find `Missing5` in this scope"}
+{"path":"acme/v1/broken11.proto","start_line":10,"start_column":3,"end_line":10,"end_column":11,"type":"COMPILE","message":"cannot find `Missing6` in this scope"}
+{"path":"acme/v1/broken12.proto","start_line":3,"start_column":1,"end_line":3,"end_column":40,"type":"COMPILE","message":"imported file does not exist"}
+{"path":"acme/v1/broken12.proto","start_line":5,"start_column":3,"end_line":5,"end_column":11,"type":"COMPILE","message":"cannot find `Missing1` in this scope"}
+{"path":"acme/v1/broken12.proto","start_line":6,"start_column":3,"end_line":6,"end_column":11,"type":"COMPILE","message":"cannot find `Missing2` in this scope"}
+{"path":"acme/v1/broken12.proto","start_line":7,"start_column":3,"end_line":7,"end_column":11,"type":"COMPILE","message":"cannot find `Missing3` in this scope"}
+{"path":"acme/v1/broken12.proto","start_line":8,"start_column":3,"end_line":8,"end_column":11,"type":"COMPILE","message":"cannot find `Missing4` in this scope"}
+{"path":"acme/v1/broken12.proto","start_line":9,"start_column":3,"end_line":9,"end_column":11,"type":"COMPILE","message":"cannot find `Missing5` in this scope"}
+{"path":"acme/v1/broken12.proto","start_line":10,"start_column":3,"end_line":10,"end_column":11,"type":"COMPILE","message":"cannot find `Missing6` in this scope"}
+{"path":"acme/v1/broken13.proto","start_line":3,"start_column":1,"end_line":3,"end_column":40,"type":"COMPILE","message":"imported file does not exist"}
+{"path":"acme/v1/broken13.proto","start_line":5,"start_column":3,"end_line":5,"end_column":11,"type":"COMPILE","message":"cannot find `Missing1` in this scope"}
+{"path":"acme/v1/broken13.proto","start_line":6,"start_column":3,"end_line":6,"end_column":11,"type":"COMPILE","message":"cannot find `Missing2` in this scope"}
+{"path":"acme/v1/broken13.proto","start_line":7,"start_column":3,"end_line":7,"end_column":11,"type":"COMPILE","message":"cannot find `Missing3` in this scope"}
+{"path":"acme/v1/broken13.proto","start_line":8,"start_column":3,"end_line":8,"end_column":11,"type":"COMPILE","message":"cannot find `Missing4` in this scope"}
+{"path":"acme/v1/broken13.proto","start_line":9,"start_column":3,"end_line":9,"end_column":11,"type":"COMPILE","message":"cannot find `Missing5` in this scope"}
+{"path":"acme/v1/broken13.proto","start_line":10,"start_column":3,"end_line":10,"end_column":11,"type":"COMPILE","message":"cannot find `Missing6` in this scope"}
+{"path":"acme/v1/broken14.proto","start_line":3,"start_column":1,"end_line":3,"end_column":40,"type":"COMPILE","message":"imported file does not exist"}
+{"path":"acme/v1/broken14.proto","start_line":5,"start_column":3,"end_line":5,"end_column":11,"type":"COMPILE","message":"cannot find `Missing1` in this scope"}
+{"path":"acme/v1/broken14.proto","start_line":6,"start_column":3,"end_line":6,"end_column":11,"type":"COMPILE","message":"cannot find `Missing2` in this scope"}
+{"path":"acme/v1/broken14.proto","start_line":7,"start_column":3,"end_line":7,"end_column":11,"type":"COMPILE","message":"cannot find `Missing3` in this scope"}
+{"path":"acme/v1/broken14.proto","start_line":8,"start_column":3,"end_line":8,"end_column":11,"type":"COMPILE","message":"cannot find `Missing4` in this scope"}
+{"path":"acme/v1/broken14.proto","start_line":9,"start_column":3,"end_line":9,"end_column":11,"type":"COMPILE","message":"cannot find `Missing5` in this scope"}
+{"path":"acme/v1/broken14.proto","start_line":10,"start_column":3,"end_line":10,"end_column":11,"type":"COMPILE","message":"cannot find `Missing6` in this scope"}
+{"path":"acme/v1/broken15.proto","start_line":3,"start_column":1,"end_line":3,"end_column":40,"type":"COMPILE","message":"imported file does not exist"}
+{"path":"acme/v1/broken15.proto","start_line":5,"start_column":3,"end_line":5,"end_column":11,"type":"COMPILE","message":"cannot find `Missing1` in this scope"}
+{"path":"acme/v1/broken15.proto","start_line":6,"start_column":3,"end_line":6,"end_column":11,"type":"COMPILE","message":"cannot find `Missing2` in this scope"}
+{"path":"acme/v1/broken15.proto","start_line":7,"start_column":3,"end_line":7,"end_column":11,"type":"COMPILE","message":"cannot find `Missing3` in this scope"}
+{"path":"acme/v1/broken15.proto","start_line":8,"start_column":3,"end_line":8,"end_column":11,"type":"COMPILE","message":"cannot find `Missing4` in this scope"}
+{"path":"acme/v1/broken15.proto","start_line":9,"start_column":3,"end_line":9,"end_column":11,"type":"COMPILE","message":"cannot find `Missing5` in this scope"}
+{"path":"acme/v1/broken15.proto","start_line":10,"start_column":3,"end_line":10,"end_column":11,"type":"COMPILE","message":"cannot find `Missing6` in this scope"}
+{"path":"acme/v1/broken16.proto","start_line":3,"start_column":1,"end_line":3,"end_column":40,"type":"COMPILE","message":"imported file does not exist"}
+{"path":"acme/v1/broken16.proto","start_line":5,"start_column":3,"end_line":5,"end_column":11,"type":"COMPILE","message":"cannot find `Missing1` in this scope"}
+{"path":"acme/v1/broken16.proto","start_line":6,"start_column":3,"end_line":6,"end_column":11,"type":"COMPILE","message":"cannot find `Missing2` in this scope"}
+{"path":"acme/v1/broken16.proto","start_line":7,"start_column":3,"end_line":7,"end_column":11,"type":"COMPILE","message":"cannot find `Missing3` in this scope"}
+{"path":"acme/v1/broken16.proto","start_line":8,"start_column":3,"end_line":8,"end_column":11,"type":"COMPILE","message":"cannot find `Missing4` in this scope"}
+{"path":"acme/v1/broken16.proto","start_line":9,"start_column":3,"end_line":9,"end_column":11,"type":"COMPILE","message":"cannot find `Missing5` in this scope"}
+{"path":"acme/v1/broken16.proto","start_line":10,"start_column":3,"end_line":10,"end_column":11,"type":"COMPILE","message":"cannot find `Missing6` in this scope"}
+{"path":"acme/v1/broken17.proto","start_line":3,"start_column":1,"end_line":3,"end_column":40,"type":"COMPILE","message":"imported file does not exist"}
+{"path":"acme/v1/broken17.proto","start_line":5,"start_column":3,"end_line":5,"end_column":11,"type":"COMPILE","message":"cannot find `Missing1` in this scope"}
+{"path":"acme/v1/broken17.proto","start_line":6,"start_column":3,"end_line":6,"end_column":11,"type":"COMPILE","message":"cannot find `Missing2` in this scope"}
+{"path":"acme/v1/broken17.proto","start_line":7,"start_column":3,"end_line":7,"end_column":11,"type":"COMPILE","message":"cannot find `Missing3` in this scope"}
+{"path":"acme/v1/broken17.proto","start_line":8,"start_column":3,"end_line":8,"end_column":11,"type":"COMPILE","message":"cannot find `Missing4` in this scope"}
+{"path":"acme/v1/broken17.proto","start_line":9,"start_column":3,"end_line":9,"end_column":11,"type":"COMPILE","message":"cannot find `Missing5` in this scope"}
+{"path":"acme/v1/broken17.proto","start_line":10,"start_column":3,"end_line":10,"end_column":11,"type":"COMPILE","message":"cannot find `Missing6` in this scope"}
+{"path":"acme/v1/broken18.proto","start_line":3,"start_column":1,"end_line":3,"end_column":40,"type":"COMPILE","message":"imported file does not exist"}
+{"path":"acme/v1/broken18.proto","start_line":5,"start_column":3,"end_line":5,"end_column":11,"type":"COMPILE","message":"cannot find `Missing1` in this scope"}
+{"path":"acme/v1/broken18.proto","start_line":6,"start_column":3,"end_line":6,"end_column":11,"type":"COMPILE","message":"cannot find `Missing2` in this scope"}
+{"path":"acme/v1/broken18.proto","start_line":7,"start_column":3,"end_line":7,"end_column":11,"type":"COMPILE","message":"cannot find `Missing3` in this scope"}
+{"path":"acme/v1/broken18.proto","start_line":8,"start_column":3,"end_line":8,"end_column":11,"type":"COMPILE","message":"cannot find `Missing4` in this scope"}
+{"path":"acme/v1/broken18.proto","start_line":9,"start_column":3,"end_line":9,"end_column":11,"type":"COMPILE","message":"cannot find `Missing5` in this scope"}
+{"path":"acme/v1/broken18.proto","start_line":10,"start_column":3,"end_line":10,"end_column":11,"type":"COMPILE","message":"cannot find `Missing6` in this scope"}
+{"path":"acme/v1/broken19.proto","start_line":3,"start_column":1,"end_line":3,"end_column":40,"type":"COMPILE","message":"imported file does not exist"}
+{"path":"acme/v1/broken19.proto","start_line":5,"start_column":3,"end_line":5,"end_column":11,"type":"COMPILE","message":"cannot find `Missing1` in this scope"}
+{"path":"acme/v1/broken19.proto","start_line":6,"start_column":3,"end_line":6,"end_column":11,"type":"COMPILE","message":"cannot find `Missing2` in this scope"}
+{"path":"acme/v1/broken19.proto","start_line":7,"start_column":3,"end_line":7,"end_column":11,"type":"COMPILE","message":"cannot find `Missing3` in this scope"}
+{"path":"acme/v1/broken19.proto","start_line":8,"start_column":3,"end_line":8,"end_column":11,"type":"COMPILE","message":"cannot find `Missing4` in this scope"}
+{"path":"acme/v1/broken19.proto","start_line":9,"start_column":3,"end_line":9,"end_column":11,"type":"COMPILE","message":"cannot find `Missing5` in this scope"}
+{"path":"acme/v1/broken19.proto","start_line":10,"start_column":3,"end_line":10,"end_column":11,"type":"COMPILE","message":"cannot find `Missing6` in this scope"}
+{"path":"acme/v1/broken2.proto","start_line":3,"start_column":1,"end_line":3,"end_column":40,"type":"COMPILE","message":"imported file does not exist"}
+{"path":"acme/v1/broken2.proto","start_line":5,"start_column":3,"end_line":5,"end_column":11,"type":"COMPILE","message":"cannot find `Missing1` in this scope"}
+{"path":"acme/v1/broken2.proto","start_line":6,"start_column":3,"end_line":6,"end_column":11,"type":"COMPILE","message":"cannot find `Missing2` in this scope"}
+{"path":"acme/v1/broken2.proto","start_line":7,"start_column":3,"end_line":7,"end_column":11,"type":"COMPILE","message":"cannot find `Missing3` in this scope"}
+{"path":"acme/v1/broken2.proto","start_line":8,"start_column":3,"end_line":8,"end_column":11,"type":"COMPILE","message":"cannot find `Missing4` in this scope"}
+{"path":"acme/v1/broken2.proto","start_line":9,"start_column":3,"end_line":9,"end_column":11,"type":"COMPILE","message":"cannot find `Missing5` in this scope"}
+{"path":"acme/v1/broken2.proto","start_line":10,"start_column":3,"end_line":10,"end_column":11,"type":"COMPILE","message":"cannot find `Missing6` in this scope"}
+{"path":"acme/v1/broken20.proto","start_line":3,"start_column":1,"end_line":3,"end_column":40,"type":"COMPILE","message":"imported file does not exist"}
+{"path":"acme/v1/broken20.proto","start_line":5,"start_column":3,"end_line":5,"end_column":11,"type":"COMPILE","message":"cannot find `Missing1` in this scope"}
+{"path":"acme/v1/broken20.proto","start_line":6,"start_column":3,"end_line":6,"end_column":11,"type":"COMPILE","message":"cannot find `Missing2` in this scope"}
+{"path":"acme/v1/broken20.proto","start_line":7,"start_column":3,"end_line":7,"end_column":11,"type":"COMPILE","message":"cannot find `Missing3` in this scope"}
+{"path":"acme/v1/broken20.proto","start_line":8,"start_column":3,"end_line":8,"end_column":11,"type":"COMPILE","message":"cannot find `Missing4` in this scope"}
+{"path":"acme/v1/broken20.proto","start_line":9,"start_column":3,"end_line":9,"end_column":11,"type":"COMPILE","message":"cannot find `Missing5` in this scope"}
+{"path":"acme/v1/broken20.proto","start_line":10,"start_column":3,"end_line":10,"end_column":11,"type":"COMPILE","message":"cannot find `Missing6` in this scope"}
+{"path":"acme/v1/broken3.proto","start_line":3,"start_column":1,"end_line":3,"end_column":40,"type":"COMPILE","message":"imported file does not exist"}
+{"path":"acme/v1/broken3.proto","start_line":5,"start_column":3,"end_line":5,"end_column":11,"type":"COMPILE","message":"cannot find `Missing1` in this scope"}
+{"path":"acme/v1/broken3.proto","start_line":6,"start_column":3,"end_line":6,"end_column":11,"type":"COMPILE","message":"cannot find `Missing2` in this scope"}
+{"path":"acme/v1/broken3.proto","start_line":7,"start_column":3,"end_line":7,"end_column":11,"type":"COMPILE","message":"cannot find `Missing3` in this scope"}
+{"path":"acme/v1/broken3.proto","start_line":8,"start_column":3,"end_line":8,"end_column":11,"type":"COMPILE","message":"cannot find `Missing4` in this scope"}
+{"path":"acme/v1/broken3.proto","start_line":9,"start_column":3,"end_line":9,"end_column":11,"type":"COMPILE","message":"cannot find `Missing5` in this scope"}
+{"path":"acme/v1/broken3.proto","start_line":10,"start_column":3,"end_line":10,"end_column":11,"type":"COMPILE","message":"cannot find `Missing6` in this scope"}
+{"path":"acme/v1/broken4.proto","start_line":3,"start_column":1,"end_line":3,"end_column":40,"type":"COMPILE","message":"imported file does not exist"}
+{"path":"acme/v1/broken4.proto","start_line":5,"start_column":3,"end_line":5,"end_column":11,"type":"COMPILE","message":"cannot find `Missing1` in this scope"}
+{"path":"acme/v1/broken4.proto","start_line":6,"start_column":3,"end_line":6,"end_column":11,"type":"COMPILE","message":"cannot find `Missing2` in this scope"}
+{"path":"acme/v1/broken4.proto","start_line":7,"start_column":3,"end_line":7,"end_column":11,"type":"COMPILE","message":"cannot find `Missing3` in this scope"}
+{"path":"acme/v1/broken4.proto","start_line":8,"start_column":3,"end_line":8,"end_column":11,"type":"COMPILE","message":"cannot find `Missing4` in this scope"}
+{"path":"acme/v1/broken4.proto","start_line":9,"start_column":3,"end_line":9,"end_column":11,"type":"COMPILE","message":"cannot find `Missing5` in this scope"}
+{"path":"acme/v1/broken4.proto","start_line":10,"start_column":3,"end_line":10,"end_column":11,"type":"COMPILE","message":"cannot find `Missing6` in this scope"}
+{"path":"acme/v1/broken5.proto","start_line":3,"start_column":1,"end_line":3,"end_column":40,"type":"COMPILE","message":"imported file does not exist"}
+{"path":"acme/v1/broken5.proto","start_line":5,"start_column":3,"end_line":5,"end_column":11,"type":"COMPILE","message":"cannot find `Missing1` in this scope"}
+{"path":"acme/v1/broken5.proto","start_line":6,"start_column":3,"end_line":6,"end_column":11,"type":"COMPILE","message":"cannot find `Missing2` in this scope"}
+{"path":"acme/v1/broken5.proto","start_line":7,"start_column":3,"end_line":7,"end_column":11,"type":"COMPILE","message":"cannot find `Missing3` in this scope"}
+{"path":"acme/v1/broken5.proto","start_line":8,"start_column":3,"end_line":8,"end_column":11,"type":"COMPILE","message":"cannot find `Missing4` in this scope"}
+{"path":"acme/v1/broken5.proto","start_line":9,"start_column":3,"end_line":9,"end_column":11,"type":"COMPILE","message":"cannot find `Missing5` in this scope"}
+{"path":"acme/v1/broken5.proto","start_line":10,"start_column":3,"end_line":10,"end_column":11,"type":"COMPILE","message":"cannot find `Missing6` in this scope"}
+{"path":"acme/v1/broken6.proto","start_line":3,"start_column":1,"end_line":3,"end_column":40,"type":"COMPILE","message":"imported file does not exist"}
+{"path":"acme/v1/broken6.proto","start_line":5,"start_column":3,"end_line":5,"end_column":11,"type":"COMPILE","message":"cannot find `Missing1` in this scope"}
+{"path":"acme/v1/broken6.proto","start_line":6,"start_column":3,"end_line":6,"end_column":11,"type":"COMPILE","message":"cannot find `Missing2` in this scope"}
+{"path":"acme/v1/broken6.proto","start_line":7,"start_column":3,"end_line":7,"end_column":11,"type":"COMPILE","message":"cannot find `Missing3` in this scope"}
+{"path":"acme/v1/broken6.proto","start_line":8,"start_column":3,"end_line":8,"end_column":11,"type":"COMPILE","message":"cannot find `Missing4` in this scope"}
+{"path":"acme/v1/broken6.proto","start_line":9,"start_column":3,"end_line":9,"end_column":11,"type":"COMPILE","message":"cannot find `Missing5` in this scope"}
+{"path":"acme/v1/broken6.proto","start_line":10,"start_column":3,"end_line":10,"end_column":11,"type":"COMPILE","message":"cannot find `Missing6` in this scope"}
+{"path":"acme/v1/broken7.proto","start_line":3,"start_column":1,"end_line":3,"end_column":40,"type":"COMPILE","message":"imported file does not exist"}
+{"path":"acme/v1/broken7.proto","start_line":5,"start_column":3,"end_line":5,"end_column":11,"type":"COMPILE","message":"cannot find `Missing1` in this scope"}
+{"path":"acme/v1/broken7.proto","start_line":6,"start_column":3,"end_line":6,"end_column":11,"type":"COMPILE","message":"cannot find `Missing2` in this scope"}
+{"path":"acme/v1/broken7.proto","start_line":7,"start_column":3,"end_line":7,"end_column":11,"type":"COMPILE","message":"cannot find `Missing3` in this scope"}
+{"path":"acme/v1/broken7.proto","start_line":8,"start_column":3,"end_line":8,"end_column":11,"type":"COMPILE","message":"cannot find `Missing4` in this scope"}
+{"path":"acme/v1/broken7.proto","start_line":9,"start_column":3,"end_line":9,"end_column":11,"type":"COMPILE","message":"cannot find `Missing5` in this scope"}
+{"path":"acme/v1/broken7.proto","start_line":10,"start_column":3,"end_line":10,"end_column":11,"type":"COMPILE","message":"cannot find `Missing6` in this scope"}
+{"path":"acme/v1/broken8.proto","start_line":3,"start_column":1,"end_line":3,"end_column":40,"type":"COMPILE","message":"imported file does not exist"}
+{"path":"acme/v1/broken8.proto","start_line":5,"start_column":3,"end_line":5,"end_column":11,"type":"COMPILE","message":"cannot find `Missing1` in this scope"}
+{"path":"acme/v1/broken8.proto","start_line":6,"start_column":3,"end_line":6,"end_column":11,"type":"COMPILE","message":"cannot find `Missing2` in this scope"}
+{"path":"acme/v1/broken8.proto","start_line":7,"start_column":3,"end_line":7,"end_column":11,"type":"COMPILE","message":"cannot find `Missing3` in this scope"}
+{"path":"acme/v1/broken8.proto","start_line":8,"start_column":3,"end_line":8,"end_column":11,"type":"COMPILE","message":"cannot find `Missing4` in this scope"}
+{"path":"acme/v1/broken8.proto","start_line":9,"start_column":3,"end_line":9,"end_column":11,"type":"COMPILE","message":"cannot find `Missing5` in this scope"}
+{"path":"acme/v1/broken8.proto","start_line":10,"start_column":3,"end_line":10,"end_column":11,"type":"COMPILE","message":"cannot find `Missing6` in this scope"}
+{"path":"acme/v1/broken9.proto","start_line":3,"start_column":1,"end_line":3,"end_column":40,"type":"COMPILE","message":"imported file does not exist"}
+{"path":"acme/v1/broken9.proto","start_line":5,"start_column":3,"end_line":5,"end_column":11,"type":"COMPILE","message":"cannot find `Missing1` in this scope"}
+{"path":"acme/v1/broken9.proto","start_line":6,"start_column":3,"end_line":6,"end_column":11,"type":"COMPILE","message":"cannot find `Missing2` in this scope"}
+{"path":"acme/v1/broken9.proto","start_line":7,"start_column":3,"end_line":7,"end_column":11,"type":"COMPILE","message":"cannot find `Missing3` in this scope"}
+{"path":"acme/v1/broken9.proto","start_line":8,"start_column":3,"end_line":8,"end_column":11,"type":"COMPILE","message":"cannot find `Missing4` in this scope"}
+{"path":"acme/v1/broken9.proto","start_line":9,"start_column":3,"end_line":9,"end_column":11,"type":"COMPILE","message":"cannot find `Missing5` in this scope"}
+{"path":"acme/v1/broken9.proto","start_line":10,"start_column":3,"end_line":10,"end_column":11,"type":"COMPILE","message":"cannot find `Missing6` in this scope"}

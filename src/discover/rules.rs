@@ -570,6 +570,32 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 85.0,
         ..RtkRule::DEFAULT
     },
+    RtkRule {
+        pattern: r"^buf\s+(lint|build|breaking|format|generate)(?:\s|$)",
+        rtk_cmd: "rtk buf",
+        pipeline_safety: PipelineSafety::ProducerOnly,
+        rewrite_prefixes: &["buf"],
+        category: "Go",
+        savings_pct: 75.0,
+        subcmd_savings: &[
+            ("lint", 90.0),
+            ("build", 90.0),
+            ("breaking", 85.0),
+            ("format", 90.0),
+            ("generate", 75.0),
+        ],
+        ..RtkRule::DEFAULT
+    },
+    // No subcmd_savings: the telemetry label for `rtk go tool buf lint` is `rtk go tool`.
+    RtkRule {
+        pattern: r"^go\s+tool\s+buf\s+(lint|build|breaking|format|generate)(?:\s|$)",
+        rtk_cmd: "rtk go tool buf",
+        pipeline_safety: PipelineSafety::ProducerOnly,
+        rewrite_prefixes: &["go tool buf"],
+        category: "Go",
+        savings_pct: 75.0,
+        ..RtkRule::DEFAULT
+    },
     // Scala/SBT
     RtkRule {
         pattern: r#"^sbt\s+["']?(testOnly|testQuick|test|compile|run|clean|assembly|package)(?:[\s"']|$)"#,
