@@ -441,6 +441,6 @@ print(f'rtk estimate: {len(text) // 4}')
 
 ## See Also
 
-- [README.md](../README.md) - Full rtk documentation
-- [CLAUDE.md](../CLAUDE.md) - Claude Code integration guide
+- [README.md](../../README.md) - Full rtk documentation
+- [CLAUDE.md](../../CLAUDE.md) - Claude Code integration guide
 - [ARCHITECTURE.md](../contributing/ARCHITECTURE.md) - Technical architecture
