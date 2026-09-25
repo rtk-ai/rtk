@@ -23,9 +23,11 @@ pub enum PermissionVerdict {
 
 /// Check `cmd` against Claude Code's deny/ask/allow permission rules.
 ///
-/// Precedence: Deny > Ask > Allow > Default (ask).
-/// Returns `Default` when no rules match — callers should treat this as ask
-/// to match Claude Code's least-privilege default.
+/// This convenience wrapper is retained for diagnostics and callers that do
+/// not need to reuse a loaded rule set. Hook paths use `load_rules_for` plus
+/// `check_command_with_rules` so the raw and unwrapped commands share one
+/// settings read.
+#[allow(dead_code)]
 pub fn check_command(cmd: &str) -> PermissionVerdict {
     check_command_for(cmd, Host::Claude)
 }
@@ -42,6 +44,7 @@ pub enum Host {
     Vibe,
 }
 
+#[allow(dead_code)]
 pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
     let (deny_rules, ask_rules, allow_rules) = load_rules_for(host);
     check_command_with_rules(cmd, &deny_rules, &ask_rules, &allow_rules)

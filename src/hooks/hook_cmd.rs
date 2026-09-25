@@ -228,18 +228,23 @@ fn heal_legacy_hook_file(path: &std::path::Path) -> bool {
         .is_ok()
 }
 
-/// The decision every hook applies -- [`decision::decide_for_agent`] -- plus the
-/// recall bookkeeping the hook path performs for any command it does not deny.
-fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
-    if verdict == PermissionVerdict::Deny {
-        return HookDecision::Deny;
-    }
-    crate::hooks::rewrite_cmd::track_tee_read(cmd);
-    decision::decide_for_agent(cmd, verdict)
+fn decide_hook_action(cmd: &str, host: permissions::Host) -> HookDecision {
+    let (deny_rules, ask_rules, allow_rules) = permissions::load_rules_for(host);
+    decide_hook_action_with_rules(cmd, &deny_rules, &ask_rules, &allow_rules)
 }
 
-fn decide_hook_action(cmd: &str, host: permissions::Host) -> HookDecision {
-    decide_from_verdict(cmd, permissions::check_command_for(cmd, host))
+fn decide_hook_action_with_rules(
+    cmd: &str,
+    deny_rules: &[String],
+    ask_rules: &[String],
+    allow_rules: &[String],
+) -> HookDecision {
+    let (decision, effective_verdict) =
+        decision::decide_with_permission_rules(cmd, deny_rules, ask_rules, allow_rules, true);
+    if effective_verdict != PermissionVerdict::Deny {
+        crate::hooks::rewrite_cmd::track_tee_read(cmd);
+    }
+    decision
 }
 
 fn handle_vscode(cmd: &str, input: &Value) -> Result<()> {
@@ -397,10 +402,7 @@ fn run_gemini_inner_with_rules(
     allow: &[String],
 ) -> serde_json::Result<String> {
     run_gemini_inner_impl(input, |cmd| {
-        decide_from_verdict(
-            cmd,
-            permissions::check_command_with_rules(cmd, deny, ask, allow),
-        )
+        decide_hook_action_with_rules(cmd, deny, ask, allow)
     })
 }
 
@@ -1065,8 +1067,7 @@ fn run_cursor_inner_with_rules(
         None => return "{}".to_string(),
     };
 
-    let verdict = permissions::check_command_with_rules(&cmd, deny_rules, ask_rules, allow_rules);
-    match decide_from_verdict(&cmd, verdict) {
+    match decide_hook_action_with_rules(&cmd, deny_rules, ask_rules, allow_rules) {
         HookDecision::AllowRewrite(rewritten) => cursor_allow(&rewritten),
         HookDecision::AskRewrite(rewritten) => cursor_ask(&rewritten),
         _ => "{}".to_string(),
@@ -1170,8 +1171,12 @@ fn run_droid_inner_with_rules(
 ) -> Option<String> {
     let v: Value = droid_payload(input).ok().flatten()?;
     let cmd = droid_execute_command(&v)?;
-    let verdict = permissions::check_command_with_rules(cmd, deny_rules, ask_rules, allow_rules);
-    droid_response_from_decision(&v, cmd, decide_from_verdict(cmd, verdict)).map(|o| o.to_string())
+    droid_response_from_decision(
+        &v,
+        cmd,
+        decide_hook_action_with_rules(cmd, deny_rules, ask_rules, allow_rules),
+    )
+    .map(|o| o.to_string())
 }
 
 #[cfg(test)]
@@ -1550,13 +1555,11 @@ mod tests {
     }
 
     fn end_to_end(cmd: &str) -> Option<Value> {
-        let verdict = crate::hooks::permissions::check_command_with_rules(
+        copilot_cli_response_from_decision(
+            &cli_args(cmd),
+            decide_hook_action_with_rules(cmd, &[], &[], &["Bash(git:*)".to_string()]),
             cmd,
-            &[],
-            &[],
-            &["Bash(git:*)".to_string()],
-        );
-        copilot_cli_response_from_decision(&cli_args(cmd), decide_from_verdict(cmd, verdict), cmd)
+        )
     }
 
     #[test]
@@ -2516,8 +2519,94 @@ mod tests {
         ask: &[String],
         allow: &[String],
     ) -> HookDecision {
-        let verdict = permissions::check_command_with_rules(cmd, deny, ask, allow);
-        decide_from_verdict(cmd, verdict)
+        decide_hook_action_with_rules(cmd, deny, ask, allow)
+    }
+
+    #[test]
+    fn prefixed_command_rechecks_a_stricter_inner_deny_rule() {
+        let decision = decide_with_rules(
+            "rtk rm file",
+            &["rm:*".to_string()],
+            &[],
+            &["rtk:*".to_string()],
+        );
+
+        assert_eq!(
+            decision,
+            HookDecision::AskRewrite("rm file".to_string()),
+            "the host must receive the command its deny rule names"
+        );
+    }
+
+    #[test]
+    fn prefixed_command_does_not_auto_allow_an_unconfigured_inner_command() {
+        let decision = decide_with_rules("rtk chmod 600 secret", &[], &[], &["rtk:*".to_string()]);
+
+        assert_eq!(
+            decision,
+            HookDecision::AskRewrite("chmod 600 secret".to_string()),
+            "an rtk-wide allow must not cover the inner command"
+        );
+    }
+
+    #[test]
+    fn proxy_prefix_rechecks_the_raw_inner_command() {
+        let decision = decide_with_rules(
+            "rtk proxy rm -rf /tmp/x",
+            &["rm:*".to_string()],
+            &[],
+            &["rtk:*".to_string()],
+        );
+
+        assert_eq!(
+            decision,
+            HookDecision::AskRewrite("rm -rf /tmp/x".to_string())
+        );
+    }
+
+    #[test]
+    fn equally_permissive_inner_command_keeps_identity_passthrough() {
+        let decision = decide_with_rules(
+            "rtk git status",
+            &[],
+            &[],
+            &["rtk:*".to_string(), "git:*".to_string()],
+        );
+
+        assert_eq!(decision, HookDecision::Defer);
+    }
+
+    #[test]
+    fn executed_command_unwraps_compound_and_proxy_forms() {
+        assert_eq!(
+            decision::command_executed_by_rtk_prefix("rtk rm file && rtk chmod 600 secret"),
+            Some("rm file && chmod 600 secret".to_string())
+        );
+        assert_eq!(
+            decision::command_executed_by_rtk_prefix("rtk proxy rm -rf /tmp/x"),
+            Some("rm -rf /tmp/x".to_string())
+        );
+        assert_eq!(
+            decision::command_executed_by_rtk_prefix("rtk proxy \"rm -rf /tmp/x\""),
+            Some("rm -rf /tmp/x".to_string())
+        );
+        assert_eq!(
+            decision::command_executed_by_rtk_prefix("rtk run -c \"rm -rf /tmp/x\""),
+            Some("rm -rf /tmp/x".to_string())
+        );
+    }
+
+    #[test]
+    fn executed_command_does_not_strip_quoted_rtk_text() {
+        assert_eq!(
+            decision::command_executed_by_rtk_prefix("echo 'rtk rm file'"),
+            None
+        );
+        assert_eq!(
+            decision::command_executed_by_rtk_prefix("rtk"),
+            None,
+            "a bare rtk token has no inner command to re-check"
+        );
     }
 
     fn all_allowed() -> Vec<String> {

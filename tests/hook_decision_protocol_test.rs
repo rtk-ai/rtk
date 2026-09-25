@@ -234,6 +234,15 @@ mod rewrite_exit_codes {
         assert_eq!(stdout, "rtk git status");
     }
 
+    /// The subprocess decision path must apply the same #3970 guard as the
+    /// in-process hook: exit 3 carries the unwrapped command to the host so
+    /// its native deny rule can see `rm`, not the allowed `rtk` prefix.
+    #[test]
+    fn prefixed_allow_rechecks_inner_deny_before_reporting_rewrite() {
+        let sb = Sandbox::with_rules(&["rm:*"], &[], &["rtk:*"]);
+        assert_eq!(sb.rewrite("rtk rm /tmp/evil"), (3, "rm /tmp/evil".into()));
+    }
+
     #[test]
     fn compound_command_rewrites_every_segment() {
         let sb = Sandbox::bare();
@@ -398,6 +407,50 @@ mod decision_consistency {
             sb.hook_claude_rewrite("rtk git status"),
             None,
             "rtk hook claude defers on the no-op rewrite"
+        );
+    }
+
+    /// SECURITY (#3970): an `rtk:*` allow must not hide the command executed by
+    /// RTK's fallback path from the host's deny rules.  The hook returns the
+    /// unwrapped command without an auto-allow field so Claude re-evaluates it
+    /// natively as `rm`, not as the allowed `rtk` wrapper.
+    #[test]
+    fn prefixed_command_is_rechecked_against_inner_host_rule() {
+        let sb = Sandbox::with_rules(&["rm:*"], &[], &["rtk:*"]);
+        let stdout = sb.hook_claude("rtk rm /tmp/evil");
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).expect("hook must emit valid JSON");
+
+        assert_eq!(
+            value.pointer("/hookSpecificOutput/updatedInput/command"),
+            Some(&serde_json::Value::String("rm /tmp/evil".to_string()))
+        );
+        assert!(
+            value
+                .pointer("/hookSpecificOutput/permissionDecision")
+                .is_none(),
+            "the inner deny must remain with Claude's native permission flow"
+        );
+    }
+
+    #[test]
+    fn prefixed_command_does_not_auto_allow_an_unconfigured_inner_command() {
+        let sb = Sandbox::with_rules(&[], &[], &["rtk:*"]);
+        let stdout = sb.hook_claude("rtk chmod 600 /tmp/secret");
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).expect("hook must emit valid JSON");
+
+        assert_eq!(
+            value.pointer("/hookSpecificOutput/updatedInput/command"),
+            Some(&serde_json::Value::String(
+                "chmod 600 /tmp/secret".to_string()
+            ))
+        );
+        assert!(
+            value
+                .pointer("/hookSpecificOutput/permissionDecision")
+                .is_none(),
+            "an rtk-wide allow must not auto-approve the inner command"
         );
     }
 }
