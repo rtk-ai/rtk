@@ -197,6 +197,7 @@ fn open(cfg: &RetrieverConfig) -> Result<Connection> {
     // best-effort: NFS / read-only filesystems may reject WAL
     let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
     init_schema(&conn)?;
+    expire(&conn, cfg);
     Ok(conn)
 }
 
@@ -226,6 +227,7 @@ fn open_existing(cfg: &RetrieverConfig) -> Result<Option<Connection>> {
     let conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     let _ = conn.execute_batch("PRAGMA busy_timeout=5000;");
     init_schema(&conn)?;
+    expire(&conn, cfg);
     Ok(Some(conn))
 }
 
@@ -438,6 +440,20 @@ fn record_tee_recall_with(cfg: &RetrieverConfig, slug: &str, path: &str) {
 pub fn record_tee_recall(slug: &str, path: &str) {
     let cfg = Config::load().unwrap_or_default().retriever;
     record_tee_recall_with(&cfg, slug, path);
+}
+
+/// Enforce retention on every open, not only after an insert.
+///
+/// `evict` used to run from `store_inner` alone, so `retention_days` measured
+/// continued use rather than elapsed time: a machine that stops storing output
+/// — project finished, laptop shelved, filter disabled — kept every row forever
+/// while `rtk config recall` still advertised a 30-day window (#4144). Running
+/// it here bounds staleness by "rtk ran at all" instead, and costs one DELETE
+/// over at most `max_entries` rows. Best-effort like `evict`: a read-only or
+/// locked store just keeps its rows.
+fn expire(conn: &Connection, cfg: &RetrieverConfig) {
+    // No row is exempt here: the sweep is not protecting a just-written entry.
+    evict(conn, cfg, "");
 }
 
 fn evict(conn: &Connection, cfg: &RetrieverConfig, keep_hash: &str) {
@@ -1188,6 +1204,37 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM recall", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 3, "FIFO cap should retain only max_entries");
+    }
+
+    #[test]
+    fn test_retention_applies_without_a_new_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            retention_days: 30,
+            ..temp_cfg(dir.path())
+        };
+        let fresh = store_inner(&cfg, b"fresh\n", "cmd-fresh", Some(0), 1).unwrap();
+        let stale = store_inner(&cfg, b"stale\n", "cmd-stale", Some(0), 1).unwrap();
+        {
+            let conn = open(&cfg).unwrap();
+            conn.execute(
+                "UPDATE recall SET created_at = created_at - ?1 WHERE hash = ?2",
+                params![31i64 * 86_400, stale.hash],
+            )
+            .unwrap();
+        }
+
+        // A machine that stopped storing output still opens the store to read
+        // it (`rtk recall`, `rtk gain`), and that alone must apply retention.
+        let conn = open_existing(&cfg).unwrap().expect("store exists");
+        assert!(
+            load_by_hash(&conn, &stale.hash).unwrap().is_none(),
+            "a row past retention_days must not survive a read-only open"
+        );
+        assert!(
+            load_by_hash(&conn, &fresh.hash).unwrap().is_some(),
+            "a row inside the window must be untouched"
+        );
     }
 
     #[test]
