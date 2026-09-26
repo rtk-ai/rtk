@@ -5,6 +5,7 @@ pub mod provider;
 pub mod registry;
 mod report;
 pub mod rules;
+pub(crate) mod shell_wrapper;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -161,8 +162,14 @@ fn estimate_hook_coverage(permission_cmd: &str, rewrite_cmd: &str, ctx: &Coverag
     if !ctx.hook_installed {
         return false;
     }
-    let verdict = permissions::check_command_with_rules(
+    let scan = registry::scan_shell_wrappers_precompiled(
         permission_cmd,
+        &ctx.exclude_patterns,
+        &ctx.normalized_transparent_prefixes,
+    );
+    let verdict = permissions::check_with_wrapper_scan(
+        permission_cmd,
+        &scan,
         &ctx.rules.deny,
         &ctx.rules.ask,
         &ctx.rules.allow,
