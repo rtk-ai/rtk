@@ -22,13 +22,32 @@ fn is_rtk_binary(binary: &str) -> bool {
     matches!(binary_name, "rtk" | "rtk.exe")
 }
 
+/// `rtk hook <agent>` with any of rtk's own flags that leave the hook as it is:
+/// `--ultra-compact` and `--skip-env` (global, so before or after the subcommand)
+/// and `-v`/`--verbose`.
 fn is_rtk_hook_command(command: &str, agent: &str) -> bool {
+    use crate::core::arg_tokenizer::{self, TokenKind};
+
     let parts = crate::discover::lexer::shell_split(command);
-    let [parsed_binary, hook, target] = parts.as_slice() else {
+    let Some((parsed_binary, args)) = parts.split_first() else {
         return false;
     };
+    if !is_rtk_binary(parsed_binary) {
+        return false;
+    }
 
-    is_rtk_binary(parsed_binary) && hook == "hook" && target == agent
+    let mut positionals = Vec::new();
+    for token in arg_tokenizer::tokenize(args) {
+        match token.kind {
+            TokenKind::Long
+                if token.attached.is_none()
+                    && matches!(token.text, "ultra-compact" | "skip-env" | "verbose") => {}
+            TokenKind::Short if token.text == "v" => {}
+            TokenKind::Positional => positionals.push(token.text),
+            _ => return false,
+        }
+    }
+    positionals == ["hook", agent]
 }
 
 pub fn is_claude_hook_command(command: &str) -> bool {
@@ -56,5 +75,24 @@ mod tests {
         assert!(!is_claude_hook_command("not-rtk hook claude"));
         assert!(!is_claude_hook_command("/opt/homebrew/bin/rtk hook cursor"));
         assert!(!is_claude_hook_command("echo rtk hook claude"));
+        assert!(!is_claude_hook_command("rtk hook claude extra"));
+        assert!(!is_claude_hook_command("rtk hook claude --unknown"));
+        assert!(!is_claude_hook_command("rtk hook claude --ultra-compact=1"));
+        assert!(!is_claude_hook_command("rtk hook -- claude"));
+        assert!(!is_claude_hook_command("rtk hook"));
+    }
+
+    #[test]
+    fn claude_hook_command_accepts_rtk_flags() {
+        assert!(is_claude_hook_command("rtk hook claude --ultra-compact"));
+        assert!(is_claude_hook_command("rtk hook claude --skip-env"));
+        assert!(is_claude_hook_command(
+            "rtk hook claude --ultra-compact --skip-env"
+        ));
+        assert!(is_claude_hook_command("rtk --ultra-compact hook claude"));
+        assert!(is_claude_hook_command("rtk -vv hook claude"));
+        assert!(is_claude_hook_command(
+            "/usr/local/bin/rtk --skip-env hook claude --verbose"
+        ));
     }
 }
