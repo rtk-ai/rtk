@@ -440,10 +440,15 @@ static ERROR_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     ]
 });
 
+/// A bare "fail" ("FAIL: test_login broke"), which `ERROR_PATTERNS` does not cover. Only a
+/// test run reads it: the shared list stays as it is, so `rtk err` is unchanged.
+static TEST_FAIL_MARKER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bfails?\b").unwrap());
+
 struct ErrorStreamFilter {
     in_error_block: bool,
     blank_count: usize,
     emitted_any: bool,
+    reads_fail_marker: bool,
 }
 
 impl ErrorStreamFilter {
@@ -452,13 +457,22 @@ impl ErrorStreamFilter {
             in_error_block: false,
             blank_count: 0,
             emitted_any: false,
+            reads_fail_marker: false,
+        }
+    }
+
+    fn for_test_run() -> Self {
+        Self {
+            reads_fail_marker: true,
+            ..Self::new()
         }
     }
 }
 
 impl StreamFilter for ErrorStreamFilter {
     fn feed_line(&mut self, line: &str) -> Option<String> {
-        let is_error = ERROR_PATTERNS.iter().any(|p| p.is_match(line));
+        let is_error = ERROR_PATTERNS.iter().any(|p| p.is_match(line))
+            || (self.reads_fail_marker && TEST_FAIL_MARKER.is_match(line));
         if is_error {
             self.in_error_block = true;
             self.blank_count = 0;
@@ -594,11 +608,11 @@ pub fn run_test_cmd(
     if verbose > 0 {
         eprintln!("Running tests: {}", display);
     }
-    run_filtered(
+    run_filtered_with_exit(
         cmd,
         tool,
         display,
-        move |raw| extract_test_summary(raw, eco),
+        move |raw, exit_code| extract_test_summary(raw, eco, exit_code),
         RunOptions::with_tee(tee_label),
     )
 }
@@ -816,7 +830,7 @@ const DENO_POLICY: BlockPolicy = BlockPolicy {
     },
 };
 
-fn extract_test_summary(output: &str, eco: TestEcosystem) -> String {
+fn extract_test_summary(output: &str, eco: TestEcosystem, exit_code: i32) -> String {
     // Test runners colorize even when piped (deno does), so anchor on clean text.
     let cleaned = crate::core::utils::strip_ansi(output);
     let lines: Vec<&str> = cleaned.lines().collect();
@@ -985,6 +999,8 @@ fn extract_test_summary(output: &str, eco: TestEcosystem) -> String {
         for r in &result {
             output.push_str(&format!("  {}\n", r));
         }
+    } else if output.is_empty() && exit_code != 0 {
+        output.push_str(&unrecognised_failure(&lines, exit_code));
     } else {
         output.push_str("OUTPUT (last 5 lines):\n");
         let start = lines.len().saturating_sub(5);
@@ -996,6 +1012,51 @@ fn extract_test_summary(output: &str, eco: TestEcosystem) -> String {
     }
 
     output
+}
+
+/// A failed run that no runner summary and no runner diagnostic explains. Its last lines are
+/// usually the passing tail (`FAIL: test_login broke`, then fifty `PASS:` lines), so show what
+/// the output itself says went wrong -- the same error blocks `rtk err` shows -- and only
+/// without one fall back to the exit code and the tail (#2420).
+///
+/// A run that succeeded never comes here: a "warning" or "0 failed" in a green run is not a
+/// failure, and it keeps showing its tail.
+fn unrecognised_failure(lines: &[&str], exit_code: i32) -> String {
+    let mut filter = ErrorStreamFilter::for_test_run();
+    let detected: Vec<String> = lines
+        .iter()
+        .filter_map(|line| filter.feed_line(line))
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+
+    let mut out = String::new();
+    if detected.is_empty() {
+        out.push_str(&format!(
+            "[FAIL] Command failed (exit code: {})\n",
+            exit_code
+        ));
+        let tail: Vec<&&str> = lines
+            .iter()
+            .rev()
+            .filter(|line| !line.trim().is_empty())
+            .take(10)
+            .collect();
+        for line in tail.into_iter().rev() {
+            out.push_str(&format!("  {}\n", line));
+        }
+    } else {
+        out.push_str("[FAIL] DETECTED FAILURES:\n");
+        for line in detected.iter().take(MAX_RUNNER_LINES) {
+            out.push_str(&format!("  {}", line));
+        }
+        if detected.len() > MAX_RUNNER_LINES {
+            out.push_str(&format!(
+                "  ... +{} more\n",
+                detected.len() - MAX_RUNNER_LINES
+            ));
+        }
+    }
+    out
 }
 
 /// True for bun's summary count lines: " 6 pass", " 4 fail", " 2 skip", " 1 todo",
@@ -1223,7 +1284,7 @@ mod err_test_runner_tests {
     #[test]
     fn test_extract_bun_test_failures() {
         let raw = "bun test v1.1.0\nsrc/math.test.ts:\n✗ adds numbers [1ms]\n 3 pass\n 1 fail\nRan 4 tests across 1 file.";
-        let out = extract_test_summary(raw, TestEcosystem::Bun);
+        let out = extract_test_summary(raw, TestEcosystem::Bun, 1);
         assert!(out.contains("[FAIL]"), "expected failure block, got: {out}");
         assert!(out.contains("adds numbers"));
         assert!(out.contains("1 fail"));
@@ -1232,7 +1293,7 @@ mod err_test_runner_tests {
     #[test]
     fn test_extract_deno_test_failures() {
         let raw = "running 2 tests\ntest add ... ok\ntest sub ... FAILED\nfailures:\n    sub\ntest result: FAILED. 1 passed; 1 failed; 0 ignored";
-        let out = extract_test_summary(raw, TestEcosystem::Deno);
+        let out = extract_test_summary(raw, TestEcosystem::Deno, 1);
         assert!(out.contains("[FAIL]"), "expected failure block, got: {out}");
         assert!(out.contains("test result:"));
     }
@@ -1241,12 +1302,130 @@ mod err_test_runner_tests {
         s.split_whitespace().count()
     }
 
+    // --- a runner nothing recognises (#2420) ---
+
+    /// The output of the script in the issue: the failure is the first line, the
+    /// last five lines are all passing cases.
+    fn failure_above_a_passing_tail() -> String {
+        let mut raw = String::from("FAIL: test_login broke\n");
+        for i in 1..=50 {
+            raw.push_str(&format!("PASS: case_{i}\n"));
+        }
+        raw
+    }
+
+    #[test]
+    fn test_generic_runner_surfaces_a_failure_above_a_passing_tail() {
+        let out = extract_test_summary(&failure_above_a_passing_tail(), TestEcosystem::Unknown, 1);
+        assert!(out.contains("[FAIL] DETECTED FAILURES:"), "{out}");
+        assert!(out.contains("FAIL: test_login broke"), "{out}");
+        assert!(!out.contains("PASS: case_"), "{out}");
+    }
+
+    #[test]
+    fn test_generic_runner_keeps_the_context_under_an_error_line() {
+        let raw = "running tests\nsetup complete\nerror: assertion failed at test_foo\n  expected: 42\n  got: 0\ncleanup done";
+        let out = extract_test_summary(raw, TestEcosystem::Unknown, 1);
+        assert!(out.contains("error: assertion failed at test_foo"), "{out}");
+        assert!(out.contains("expected: 42"), "{out}");
+        assert!(out.contains("got: 0"), "{out}");
+        assert!(!out.contains("setup complete"), "{out}");
+        assert!(!out.contains("cleanup done"), "{out}");
+    }
+
+    #[test]
+    fn test_generic_runner_without_a_failure_line_reports_the_exit_code_and_tail() {
+        let raw = (1..=15)
+            .map(|i| format!("step {i} done"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let out = extract_test_summary(&raw, TestEcosystem::Unknown, 2);
+        assert!(
+            out.contains("[FAIL] Command failed (exit code: 2)"),
+            "{out}"
+        );
+        assert!(out.contains("step 15 done"), "{out}");
+        assert!(out.contains("step 6 done"), "{out}");
+        assert!(!out.contains("step 5 done"), "the tail is ten lines: {out}");
+    }
+
+    #[test]
+    fn test_generic_runner_caps_the_lines_it_detects() {
+        let raw = (1..=MAX_RUNNER_LINES + 7)
+            .map(|i| format!("error: case {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let out = extract_test_summary(&raw, TestEcosystem::Unknown, 1);
+        assert!(out.contains("error: case 1\n"), "{out}");
+        assert!(out.contains("... +7 more"), "{out}");
+        assert!(
+            !out.contains(&format!("error: case {}", MAX_RUNNER_LINES + 1)),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn test_generic_runner_green_run_keeps_its_tail_and_gets_no_failure_banner() {
+        // "failed" and "warning" in a run that exited 0 are not failures.
+        let raw = "warning: deprecated flag\nSummary: 0 failed, 10 passed\nall done";
+        let out = extract_test_summary(raw, TestEcosystem::Unknown, 0);
+        assert!(!out.contains("[FAIL]"), "{out}");
+        assert!(out.starts_with("OUTPUT (last 5 lines):"), "{out}");
+        assert!(out.contains("Summary: 0 failed, 10 passed"), "{out}");
+    }
+
+    #[test]
+    fn test_recognised_runner_summary_ignores_the_exit_code() {
+        let raw = "running 1 test\ntest t ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored\n";
+        let out = extract_test_summary(raw, TestEcosystem::Cargo, 101);
+        assert!(out.contains("SUMMARY:"), "{out}");
+        assert!(out.contains("test result: FAILED"), "{out}");
+        assert!(!out.contains("DETECTED FAILURES"), "{out}");
+    }
+
+    #[test]
+    fn test_recognised_runner_that_died_before_its_summary_still_surfaces_the_error() {
+        // A compile error stops `cargo test` before any "test result:" line.
+        let raw = "   Compiling demo v0.1.0\nerror[E0425]: cannot find value `x` in this scope\n --> src/lib.rs:3:5\n  |\n3 |     x\n  |     ^ not found\nerror: could not compile `demo`";
+        let out = extract_test_summary(raw, TestEcosystem::Cargo, 101);
+        assert!(out.contains("error[E0425]"), "{out}");
+        assert!(out.contains("src/lib.rs:3:5"), "{out}");
+        assert!(!out.contains("Compiling demo"), "{out}");
+    }
+
+    #[test]
+    fn test_bare_fail_is_read_by_test_runs_only() {
+        // The shared error list is not widened: `rtk err` still ignores a bare "fail".
+        assert!(
+            ErrorStreamFilter::new()
+                .feed_line("FAIL: test_login")
+                .is_none()
+        );
+        assert!(
+            ErrorStreamFilter::for_test_run()
+                .feed_line("FAIL: test_login")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn test_bare_fail_is_a_word_not_a_fragment() {
+        let mut filter = ErrorStreamFilter::for_test_run();
+        for line in [
+            "test_fail_case ... ok",
+            "handles_bad_input_fails_gracefully",
+            "failsafe on",
+        ] {
+            assert!(filter.feed_line(line).is_none(), "{line}");
+        }
+    }
+
     #[test]
     fn test_bun_module_load_error_survives_with_no_fail_marker() {
         // Bun prints no "(fail)" line when a test file cannot load, so the
         // diagnostic is the only thing that says why rtk is exiting non-zero.
         let raw = include_str!("../../tests/fixtures/bun_test_load_error_raw.txt");
-        let out = extract_test_summary(raw, TestEcosystem::Bun);
+        let out = extract_test_summary(raw, TestEcosystem::Bun, 1);
         assert!(out.contains("[FAIL]"), "{out}");
         assert!(out.contains("Cannot find module"), "{out}");
         assert!(out.contains("0 pass"), "{out}");
@@ -1299,15 +1478,17 @@ mod err_test_runner_tests {
     /// above say why each element matters; this catches anything else moving.
     #[test]
     fn test_golden_output_for_each_runtime() {
-        let cases: [(TestEcosystem, &str, &str); 4] = [
+        let cases: [(TestEcosystem, &str, i32, &str); 4] = [
             (
                 TestEcosystem::Bun,
                 include_str!("../../tests/fixtures/bun_test_green_raw.txt"),
+                0,
                 "SUMMARY:\n   3 pass\n   0 fail\n  Ran 3 tests across 1 file. [5.00ms]\n",
             ),
             (
                 TestEcosystem::Bun,
                 include_str!("../../tests/fixtures/bun_test_failures_raw.txt"),
+                1,
                 concat!(
                     "[FAIL] FAILURES:\n",
                     "  \u{2717} t2 fails [0.13ms]\n",
@@ -1337,11 +1518,13 @@ mod err_test_runner_tests {
             (
                 TestEcosystem::Deno,
                 include_str!("../../tests/fixtures/deno_test_green_raw.txt"),
+                0,
                 "SUMMARY:\n  ok | 2 passed | 0 failed (1ms)\n",
             ),
             (
                 TestEcosystem::Deno,
                 include_str!("../../tests/fixtures/deno_test_failures_raw.txt"),
+                1,
                 concat!(
                     "[FAIL] FAILURES:\n",
                     "  plain assertion => ./fails_test.ts:2:6\n",
@@ -1360,8 +1543,12 @@ mod err_test_runner_tests {
                 ),
             ),
         ];
-        for (eco, raw, expected) in cases {
-            assert_eq!(extract_test_summary(raw, eco), expected, "{eco:?}");
+        for (eco, raw, exit_code, expected) in cases {
+            assert_eq!(
+                extract_test_summary(raw, eco, exit_code),
+                expected,
+                "{eco:?}"
+            );
         }
     }
 
@@ -1379,7 +1566,7 @@ mod err_test_runner_tests {
                 "0 failed",
             ),
         ] {
-            let out = extract_test_summary(raw, eco);
+            let out = extract_test_summary(raw, eco, 0);
             assert!(!out.contains("[FAIL]"), "{eco:?}: {out}");
             assert!(out.contains(ok_marker), "{eco:?}: {out}");
             // Nothing a test logged may be quoted back as a diagnostic.
@@ -1395,6 +1582,7 @@ mod err_test_runner_tests {
         let bun = extract_test_summary(
             include_str!("../../tests/fixtures/bun_test_failures_raw.txt"),
             TestEcosystem::Bun,
+            1,
         );
         assert!(bun.contains("[FAIL]"), "{bun}");
         // Assertion failures: marker, expected/received, and the frame locating it.
@@ -1417,6 +1605,7 @@ mod err_test_runner_tests {
         let deno = extract_test_summary(
             include_str!("../../tests/fixtures/deno_test_failures_raw.txt"),
             TestEcosystem::Deno,
+            1,
         );
         assert!(deno.contains("[FAIL]"), "{deno}");
         assert!(deno.contains("AssertionError"), "{deno}");
@@ -1441,7 +1630,7 @@ mod err_test_runner_tests {
                 include_str!("../../tests/fixtures/deno_test_failures_raw.txt"),
             ),
         ] {
-            let out = extract_test_summary(raw, eco);
+            let out = extract_test_summary(raw, eco, 1);
             let savings = 100.0 - (count_tokens(&out) as f64 / count_tokens(raw) as f64 * 100.0);
             assert!(savings >= 20.0, "{eco:?}: got {savings:.1}%");
         }
@@ -1453,7 +1642,7 @@ mod err_test_runner_tests {
         // FAILURES section and no "error:"-introduced diagnostic, so the TS code
         // and the frame under it are all there is to report.
         let raw = include_str!("../../tests/fixtures/deno_test_typecheck_raw.txt");
-        let out = extract_test_summary(raw, TestEcosystem::Deno);
+        let out = extract_test_summary(raw, TestEcosystem::Deno, 1);
         assert!(out.contains("TS2322 [ERROR]"), "{out}");
         assert!(out.contains("typ_test.ts:1:7"), "{out}");
         // The echoed source and its caret stay out, as they do for bun.
@@ -1465,7 +1654,7 @@ mod err_test_runner_tests {
         // Deno leak failures carry no "at " frame, so nothing but the next
         // entry header closes the block.
         let raw = include_str!("../../tests/fixtures/deno_test_twoleak_raw.txt");
-        let out = extract_test_summary(raw, TestEcosystem::Deno);
+        let out = extract_test_summary(raw, TestEcosystem::Deno, 1);
         assert_eq!(out.matches("t3 leaks =>").count(), 1, "{out}");
         assert!(out.contains("FAILED | 1 passed | 2 failed"), "{out}");
         assert!(!out.contains("error: Test failed"), "{out}");
@@ -1478,11 +1667,13 @@ mod err_test_runner_tests {
         let bun = extract_test_summary(
             include_str!("../../tests/fixtures/bun_test_load_error_raw.txt"),
             TestEcosystem::Bun,
+            1,
         );
         assert!(bun.contains("Cannot find module"), "{bun}");
         let deno = extract_test_summary(
             include_str!("../../tests/fixtures/deno_test_load_error_raw.txt"),
             TestEcosystem::Deno,
+            1,
         );
         assert!(deno.contains("Module not found"), "{deno}");
     }
