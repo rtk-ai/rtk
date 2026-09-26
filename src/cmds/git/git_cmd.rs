@@ -2564,9 +2564,10 @@ fn build_commit_command(args: &[String], global_args: &[String]) -> Command {
     cmd
 }
 
-/// Parse the first line of `git commit` success output and return a compact token.
+/// Parse the first line of `git commit` success output and return a compact token:
+/// `[<branch>] ok <hash>`, so the caller can check which branch took the commit.
 /// Handles: `[main abc1234def] message`, `[main (root-commit) abc1234def] msg`,
-/// localized variants, and multibyte branch names.
+/// `[detached HEAD abc1234def] msg`, localized variants, and multibyte branch names.
 fn parse_commit_output(line: &str) -> String {
     // Locate the brackets rather than assume the line starts with '[': git prints hook output
     // first, and slicing from byte 1 would panic on a multi-byte leading character.
@@ -2578,12 +2579,20 @@ fn parse_commit_output(line: &str) -> String {
     }
 
     let bracket_content = &line[open + 1..bracket_end];
-    let hash = bracket_content.split_whitespace().next_back().unwrap_or("");
-    if hash.chars().count() >= 7 {
-        let short_hash: String = hash.chars().take(7).collect();
-        format!("ok {}", short_hash)
-    } else {
-        "ok".to_string()
+    let mut words = bracket_content.split_whitespace();
+    let hash = words.next_back().unwrap_or("");
+    if hash.chars().count() < 7 {
+        return "ok".to_string();
+    }
+    let short_hash: String = hash.chars().take(7).collect();
+
+    // Before the hash git prints the branch, or "detached HEAD", then a parenthesised
+    // "(root-commit)" marker. Both are translated, so cut at the parenthesis rather than match
+    // words: the first word alone would name a detached HEAD "detached".
+    let head = words.collect::<Vec<_>>().join(" ");
+    match head.split(" (").next().filter(|branch| !branch.is_empty()) {
+        Some(branch) => format!("[{}] ok {}", branch, short_hash),
+        None => format!("ok {}", short_hash),
     }
 }
 
@@ -6305,27 +6314,60 @@ no changes added to commit (use "git add" and/or "git commit -a")
     #[test]
     fn test_parse_commit_output_normal() {
         let line = "[main abc1234def] add feature";
-        assert_eq!(parse_commit_output(line), "ok abc1234");
+        assert_eq!(parse_commit_output(line), "[main] ok abc1234");
     }
 
     #[test]
     fn test_parse_commit_output_root_commit() {
         let line = "[main (root-commit) abc1234def] initial commit";
-        assert_eq!(parse_commit_output(line), "ok abc1234");
+        assert_eq!(parse_commit_output(line), "[main] ok abc1234");
+    }
+
+    #[test]
+    fn test_parse_commit_output_branch_with_slash() {
+        let line = "[feature/JIRA-12-login abc1234def] add login";
+        assert_eq!(
+            parse_commit_output(line),
+            "[feature/JIRA-12-login] ok abc1234"
+        );
+    }
+
+    /// A detached HEAD has no branch: git prints "detached HEAD" in its place, and the first
+    /// word alone ("detached") would name a branch that does not exist.
+    #[test]
+    fn test_parse_commit_output_detached_head() {
+        let line = "[detached HEAD abc1234def] fix during rebase";
+        assert_eq!(parse_commit_output(line), "[detached HEAD] ok abc1234");
+        let root = "[detached HEAD (root-commit) abc1234def] first";
+        assert_eq!(parse_commit_output(root), "[detached HEAD] ok abc1234");
+    }
+
+    /// Both "detached HEAD" and "(root-commit)" are translated, so neither may be matched by
+    /// text: the marker is cut at its parenthesis, whatever it says.
+    #[test]
+    fn test_parse_commit_output_localized_root_marker() {
+        let line = "[main (commit racine) abc1234def] premier commit";
+        assert_eq!(parse_commit_output(line), "[main] ok abc1234");
+    }
+
+    /// Nothing before the hash: no branch to show, so none is invented.
+    #[test]
+    fn test_parse_commit_output_hash_only() {
+        assert_eq!(parse_commit_output("[abc1234def] message"), "ok abc1234");
     }
 
     /// Regression test: multibyte branch name must not panic (was byte-slicing before fix)
     #[test]
     fn test_parse_commit_output_multibyte_branch() {
         let line = "[分支名 abc1234def] 提交消息";
-        assert_eq!(parse_commit_output(line), "ok abc1234");
+        assert_eq!(parse_commit_output(line), "[分支名] ok abc1234");
     }
 
     /// Regression test: Thai branch name (3 bytes per char)
     #[test]
     fn test_parse_commit_output_thai_branch() {
         let line = "[สาขา abc1234def] commit message";
-        assert_eq!(parse_commit_output(line), "ok abc1234");
+        assert_eq!(parse_commit_output(line), "[สาขา] ok abc1234");
     }
 
     /// Regression: git prints hook output before its own summary. A first line
@@ -6343,7 +6385,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
     fn test_parse_commit_output_after_multibyte_hook_prefix() {
         assert_eq!(
             parse_commit_output("✅ [main abc1234def] add feature"),
-            "ok abc1234"
+            "[main] ok abc1234"
         );
     }
 
@@ -6382,7 +6424,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
     #[test]
     fn test_classify_commit_success_extracts_hash() {
         match classify_commit_outcome(true, "[main abc1234def] add feature", 0) {
-            CommitOutcome::Ok(s) => assert_eq!(s, "ok abc1234"),
+            CommitOutcome::Ok(s) => assert_eq!(s, "[main] ok abc1234"),
             CommitOutcome::Failed(_) => panic!("successful commit must be Ok"),
         }
     }

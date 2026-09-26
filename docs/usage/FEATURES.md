@@ -471,7 +471,7 @@ rtk git add [args...]    # Supporte -A, -p, --all, etc.
 rtk git commit -m "message" [args...]    # Supporte -a, --amend, --allow-empty, etc.
 ```
 
-**Sortie :** `ok abc1234` (confirmation + hash court)
+**Sortie :** `[main] ok abc1234` (branche + confirmation + hash court)
 
 ---
 

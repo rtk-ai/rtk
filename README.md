@@ -193,7 +193,7 @@ rtk git status                  # Compact status
 rtk git log -n 10               # One-line commits
 rtk git diff                    # Condensed diff
 rtk git add                     # -> "ok"
-rtk git commit -m "msg"         # -> "ok abc1234"
+rtk git commit -m "msg"         # -> "[main] ok abc1234"
 rtk git push                    # -> "ok main"
 rtk git pull                    # -> "ok 3 files +10 -2"
 ```
