@@ -497,6 +497,17 @@ fn native_walk(
         }
     }
 
+    if !want_dirs {
+        let seen: HashSet<String> = files.iter().cloned().collect();
+        for display in
+            tracked_ignored_matches(path, pattern, max_depth, case_insensitive, search_hidden)
+        {
+            if !seen.contains(&display) {
+                files.push(display);
+            }
+        }
+    }
+
     let filtered = if disclose {
         disclose_filtered(
             path,
@@ -511,6 +522,65 @@ fn native_walk(
         Vec::new()
     };
     (files, filtered)
+}
+
+/// `.gitignore` never applies to tracked files, but the walker cannot see git's
+/// index, so a force-added file under an ignored directory is pruned along with
+/// that directory (#4244). Ask git for tracked files matching ignore rules.
+fn tracked_ignored_matches(
+    root: &str,
+    pattern: &str,
+    max_depth: Option<usize>,
+    case_insensitive: bool,
+    search_hidden: bool,
+) -> Vec<String> {
+    let root_path = Path::new(root);
+    if !root_path.is_dir() {
+        return Vec::new();
+    }
+    let Ok(output) = crate::core::utils::resolved_command("git")
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--ignored",
+            "--exclude-standard",
+        ])
+        .current_dir(root_path)
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|rel| !rel.is_empty())
+        .filter_map(|rel| {
+            let rel = Path::new(rel);
+            if max_depth.is_some_and(|max| rel.components().count() > max) {
+                return None;
+            }
+            if !search_hidden
+                && rel
+                    .components()
+                    .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+            {
+                return None;
+            }
+            let name = rel.file_name()?.to_string_lossy();
+            if !name_matches(pattern, &name, case_insensitive) {
+                return None;
+            }
+            let full = root_path.join(rel);
+            // Skips deleted-but-tracked files and submodule gitlinks.
+            if !std::fs::symlink_metadata(&full).is_ok_and(|m| !m.is_dir()) {
+                return None;
+            }
+            Some(relative_display(&full, root))
+        })
+        .collect()
 }
 
 fn entry_display(
@@ -1409,6 +1479,45 @@ mod tests {
         let (files, filtered) = native_walk(&root_s, ".gitignore", None, false, false, false);
         assert_eq!(files, vec![".gitignore".to_string()]);
         assert_eq!(filtered, vec!["build/".to_string()]);
+    }
+
+    #[test]
+    fn force_tracked_files_under_ignored_dirs_are_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let git = |argv: &[&str]| {
+            std::process::Command::new("git")
+                .args(argv)
+                .current_dir(root)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        if !git(&["init", "-q"]) {
+            return; // no git: .gitignore cannot apply, nothing to assert
+        }
+        let sub = root.join("data").join("subdir");
+        std::fs::write(root.join(".gitignore"), "data/\n").unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src").join("target.py"), "x").unwrap();
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("target.py"), "y").unwrap();
+        std::fs::write(sub.join("untracked.py"), "z").unwrap();
+        assert!(git(&["add", "-f", "data/subdir/target.py"]));
+        let root_s = root.to_string_lossy().into_owned();
+
+        let (mut files, _) = native_walk(&root_s, "TARGET*", None, false, true, false);
+        files.sort();
+        assert_eq!(files, vec!["data/subdir/target.py", "src/target.py"]);
+
+        let (files, _) = native_walk(&root_s, "untracked.py", None, false, false, false);
+        assert!(files.is_empty(), "{files:?}");
+
+        let (files, _) = native_walk(&root_s, "*.py", Some(2), false, false, false);
+        assert_eq!(files, vec!["src/target.py"]);
+
+        let (files, _) = native_walk(&root_s, "subdir", None, true, false, false);
+        assert!(files.is_empty(), "{files:?}");
     }
 
     #[test]
