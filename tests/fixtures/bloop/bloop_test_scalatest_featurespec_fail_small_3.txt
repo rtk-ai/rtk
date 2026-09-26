@@ -1,0 +1,37 @@
+Compiling root (1 Scala source)
+Compiled root (1483ms)
+Compiling root-test (1 Scala source)
+Compiled root-test (1077ms)
+CalculatorSuite:
+Feature: Calculator arithmetic
+  Scenario: add returns the sum
+    Given two operands 
+    When the operation runs 
+    Then the result is 5 
+  Scenario: sub returns the difference *** FAILED ***
+  6 did not equal 7 (CalculatorSuite.scala:18)
+    Given two operands 
+    When the operation runs 
+    Then the result is 7 
+  Scenario: mul returns the product
+    Given two operands 
+    When the operation runs 
+    Then the result is 42 
+  Scenario: div returns the quotient *** FAILED ***
+  5 did not equal 4 (CalculatorSuite.scala:30)
+    Given two operands 
+    When the operation runs 
+    Then the result is 4 
+Execution took 21ms
+4 tests, 2 passed, 2 failed
+
+==================================================================================================================================================================================
+Total duration: 21ms
+1 failed
+
+Failed:
+- example.CalculatorSuite:
+  * Feature: Calculator arithmetic Scenario: sub returns the difference - 6 did not equal 7
+  * Feature: Calculator arithmetic Scenario: div returns the quotient - 5 did not equal 4
+==================================================================================================================================================================================
+The test execution was successfully closed.

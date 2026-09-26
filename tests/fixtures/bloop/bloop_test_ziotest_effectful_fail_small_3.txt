@@ -1,0 +1,57 @@
+Compiling root (1 Scala source)
+Compiled root (1420ms)
+Compiling root-test (1 Scala source)
+Compiled root-test (1428ms)
++ Calculator
+  + add returns the sum
+  - sub returns the difference
+    ✗ 6 was not equal to 7
+    result == 7
+    result = 6
+    at /tmp/workspace/ziotest-effectful-fail-small/src/test/scala/example/CalculatorSpec.scala:16 
+
+  + mul returns the product
+  - div returns the quotient
+    ✗ 5 was not equal to 4
+    result == 4
+    result = 5
+    at /tmp/workspace/ziotest-effectful-fail-small/src/test/scala/example/CalculatorSpec.scala:26 
+
+Execution took 93ms
+4 tests, 2 passed, 2 failed
+
+2 tests passed. 2 tests failed. 0 tests ignored.
+
+
+  - Calculator / sub returns the difference
+    ✗ 6 was not equal to 7
+    result == 7
+    result = 6
+    at /tmp/workspace/ziotest-effectful-fail-small/src/test/scala/example/CalculatorSpec.scala:16 
+
+  - Calculator / div returns the quotient
+    ✗ 5 was not equal to 4
+    result == 4
+    result = 5
+    at /tmp/workspace/ziotest-effectful-fail-small/src/test/scala/example/CalculatorSpec.scala:26 
+
+Executed in 188 ms
+
+The test execution was successfully closed.
+====================================================================================================
+Total duration: 93ms
+1 failed
+
+Failed:
+- example.CalculatorSpec:
+  * Calculator - sub returns the difference -   - sub returns the difference
+    ✗ 6 was not equal to 7
+    result == 7
+    result = 6
+    at /tmp/workspace/ziotest-effectful-fail-small/src/test/scala/example/CalculatorSpec.scala:16 
+  * Calculator - div returns the quotient -   - div returns the quotient
+    ✗ 5 was not equal to 4
+    result == 4
+    result = 5
+    at /tmp/workspace/ziotest-effectful-fail-small/src/test/scala/example/CalculatorSpec.scala:26 
+====================================================================================================
