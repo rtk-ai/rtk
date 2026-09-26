@@ -8,7 +8,8 @@ use std::sync::LazyLock;
 
 use super::lexer::{
     ParsedToken, PipeKind, TokenKind, advance_quote_state, coalesce_words, is_crlf_at,
-    redirect_has_file_target, shell_split, split_on_operators, tokenize, tokenize_with_newlines,
+    redirect_has_file_target, shell_split, split_on_chain_operators, tokenize,
+    tokenize_with_newlines,
 };
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 
@@ -358,7 +359,9 @@ pub fn split_command_chain(cmd: &str) -> Vec<&str> {
         return vec![trimmed];
     }
 
-    split_on_operators(trimmed, true)
+    // Discovery counts each pipeline as one unit because that is the unit the
+    // hook evaluates. Only split independent clauses joined by &&, ||, or ;.
+    split_on_chain_operators(trimmed)
 }
 
 fn normalize_php_tool_command(cmd: &str) -> String {
@@ -2020,7 +2023,7 @@ mod tests {
 
     // Three compound-command segmenters look at the same kind of input for
     // different, deliberate purposes — split_for_permissions (the permission
-    // gate, most conservative), split_on_operators/split_command_chain
+    // gate, most conservative), split_on_chain_operators/split_command_chain
     // (analytics/discovery classification), and rewrite_compound's inline
     // token walk (actual rewrite). See the comparison table on
     // split_for_permissions's doc comment. These tests pin today's actual,
@@ -2036,7 +2039,7 @@ mod tests {
             let cmd = "git status & rm -rf ~";
             // Permission gate: splits on background `&` — both sides checked independently.
             assert_eq!(split_for_permissions(cmd), vec!["git status", "rm -rf ~"]);
-            // Analytics: does not split on `&` at all (only Operator/Pipe kinds).
+            // Analytics: does not split on `&` at all (only Operator kinds).
             assert_eq!(split_command_chain(cmd), vec!["git status & rm -rf ~"]);
             // Rewrite: does split on `&` (each side is its own rtk-rewrite
             // candidate), but only "git status" is a known rtk command family —
@@ -2083,10 +2086,11 @@ mod tests {
                 split_for_permissions(cmd),
                 vec!["git status", "grep x", "cargo build"]
             );
-            // Analytics: split_command_chain stops entirely at the first `|`,
-            // discarding everything after it (including the later `&&` clause) —
-            // it only needs to classify what's in front of the pipe.
-            assert_eq!(split_command_chain(cmd), vec!["git status"]);
+            // Analytics: each pipeline is one unit; later chain clauses still count.
+            assert_eq!(
+                split_command_chain(cmd),
+                vec!["git status | grep x", "cargo build"]
+            );
             // Rewrite: pipelines are handled specially (rewrite_pipeline_final_stage),
             // and clauses after the pipeline are still walked and rewritten.
             assert_eq!(
@@ -2924,8 +2928,19 @@ mod tests {
     }
 
     #[test]
-    fn test_split_pipe_first_only() {
-        assert_eq!(split_command_chain("a | b"), vec!["a"]);
+    fn test_split_pipeline_as_single_unit() {
+        assert_eq!(
+            split_command_chain("cargo test | tail -50"),
+            vec!["cargo test | tail -50"]
+        );
+    }
+
+    #[test]
+    fn test_split_pipeline_with_following_chain() {
+        assert_eq!(
+            split_command_chain("a | b && c ; d |& e"),
+            vec!["a | b", "c", "d |& e"]
+        );
     }
 
     #[test]
