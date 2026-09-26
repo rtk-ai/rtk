@@ -2482,20 +2482,20 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     Ok(0)
 }
 
+fn build_add_command(args: &[String], global_args: &[String]) -> Command {
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("add");
+    cmd.args(args);
+    cmd
+}
+
 fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = git_cmd(global_args);
-    cmd.arg("add");
-
-    // Pass all arguments directly to git (flags like -A, -p, --all, etc.)
-    if args.is_empty() {
-        cmd.arg(".");
-    } else {
-        for arg in args {
-            cmd.arg(arg);
-        }
-    }
+    // Pass all arguments directly to git (flags like -A, -p, --all, etc.).
+    // In particular, an empty argument list must stay empty: `git add` is a
+    // documented no-op, while adding `.` would stage the entire worktree.
+    let mut cmd = build_add_command(args, global_args);
 
     let result = exec_capture(&mut cmd).context("Failed to run git add")?;
 
@@ -3823,6 +3823,13 @@ mod tests {
         let cmd = git_cmd(&global_args);
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(args, vec!["-C", "/tmp"]);
+    }
+
+    #[test]
+    fn test_git_add_without_pathspec_preserves_git_noop() {
+        let cmd = build_add_command(&[], &[]);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, vec!["add"]);
     }
 
     #[test]
