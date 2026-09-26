@@ -1746,6 +1746,9 @@ fn run_log(
     global_args: &[String],
 ) -> Result<i32> {
     let tokens = tokenize_git_log_args(args);
+    let reads_stdin = tokens
+        .iter()
+        .any(|token| token.kind == TokenKind::Long && token.text == "stdin");
 
     if tokens.iter().any(|t| log_wants_raw_shape(t, &tokens)) {
         let capped = raw_log_is_capped(&tokens);
@@ -1760,7 +1763,12 @@ fn run_log(
         let timer = tracking::TimedExecution::start();
         let mut cmd = git_cmd(global_args);
         cmd.args(&passthrough_args);
-        let result = exec_capture(&mut cmd).context("Failed to run git log")?;
+        let result = if reads_stdin {
+            exec_capture_stdin(&mut cmd)
+        } else {
+            exec_capture(&mut cmd)
+        }
+        .context("Failed to run git log")?;
         print!("{}", result.stdout);
         if !result.stderr.trim().is_empty() {
             eprint!("{}", result.stderr);
@@ -1848,7 +1856,12 @@ fn run_log(
         cmd.arg(arg);
     }
 
-    let result = exec_capture(&mut cmd).context("Failed to run git log")?;
+    let result = if reads_stdin {
+        exec_capture_stdin(&mut cmd)
+    } else {
+        exec_capture(&mut cmd)
+    }
+    .context("Failed to run git log")?;
 
     if !result.success() {
         eprintln!("{}", result.stderr);
