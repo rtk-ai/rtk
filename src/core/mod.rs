@@ -10,6 +10,7 @@ pub mod guard;
 pub mod retriever;
 pub mod runner;
 pub mod stream;
+pub mod structured;
 pub mod tee;
 pub mod tee_file;
 pub mod telemetry;
