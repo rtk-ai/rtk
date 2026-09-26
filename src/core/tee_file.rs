@@ -102,6 +102,10 @@ fn get_tee_dir(cfg: &RetrieverConfig) -> Option<PathBuf> {
     if let Some(ref dir) = cfg.tee_directory {
         return Some(dir.clone());
     }
+    default_tee_dir()
+}
+
+fn default_tee_dir() -> Option<PathBuf> {
     dirs::data_local_dir().map(|d| d.join(RTK_DATA_DIR).join("tee"))
 }
 
@@ -125,6 +129,11 @@ fn cleanup_old_files(dir: &Path, max_files: usize) {
 }
 
 fn create_tee_dir(tee_dir: &Path) -> Option<()> {
+    // A configured tee directory (and its parent) may be shared with others:
+    // only a directory created here is made owner-only.
+    if default_tee_dir().as_deref() != Some(tee_dir) {
+        return crate::core::utils::create_configured_dir(tee_dir).ok();
+    }
     if let Some(parent) = tee_dir.parent() {
         let _ = crate::core::utils::create_private_dir(parent);
     }
@@ -317,6 +326,33 @@ mod tests {
         let mode = |p: &std::path::Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&path), 0o600, "tee file must be owner-only");
         assert_eq!(mode(&tee_dir), 0o700, "tee dir must be owner-only");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_write_tee_file_keeps_existing_dir_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let tee_dir = tmpdir.path().join("shared");
+        fs::create_dir_all(&tee_dir).unwrap();
+        fs::set_permissions(&tee_dir, fs::Permissions::from_mode(0o775)).unwrap();
+        fs::set_permissions(tmpdir.path(), fs::Permissions::from_mode(0o775)).unwrap();
+
+        let path = write_tee_file(
+            "secret output
+",
+            "grep",
+            &tee_dir,
+            MAX_FILE_SIZE,
+            20,
+        )
+        .expect("tee file written");
+
+        let mode = |p: &std::path::Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600, "tee file must be owner-only");
+        assert_eq!(mode(&tee_dir), 0o775, "existing tee dir keeps its mode");
+        assert_eq!(mode(tmpdir.path()), 0o775, "its parent keeps its mode");
     }
 
     #[test]
