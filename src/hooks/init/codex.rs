@@ -2,7 +2,6 @@
 
 use super::*;
 use crate::hooks::constants::{CODEX_DIR, CODEX_HOOK_COMMAND, HOOKS_JSON, PRE_TOOL_USE_KEY};
-use std::path::Component;
 
 /// The line that says an `RTK.md` is RTK's to rewrite and to remove.
 ///
@@ -152,11 +151,12 @@ impl BackupSlot {
 /// an extension instead of extending it, and rather than through `display()`, which is lossy:
 /// on a path that is not valid UTF-8 the probe and the write would disagree.
 fn numbered_backup_path(path: &Path, attempt: usize) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(".bak");
-    if attempt > 0 {
-        name.push(format!(".{attempt}"));
+    let first = backup_path_for(path);
+    if attempt == 0 {
+        return first;
     }
+    let mut name = first.into_os_string();
+    name.push(format!(".{attempt}"));
     PathBuf::from(name)
 }
 
@@ -194,271 +194,21 @@ fn free_backup_slot(path: &Path) -> Result<BackupSlot> {
     )
 }
 
-/// How many hops one path's symlink chain is followed before the walk gives up.
-///
-/// The bound is per component, not per walk: [`resolve_symlink_components_within`] spends a
-/// fresh budget on the descent into each target it jumps to. It sits below the kernel's own
-/// limit on purpose -- RTK has to be able to say where a write lands, and a chain this deep
-/// under a path RTK joins itself is not one a user maintains.
-const MAX_SYMLINK_HOPS: usize = 16;
-
-/// What one `readlink` established.
-///
-/// [`Unreadable`](Self::Unreadable) is not [`NotALink`](Self::NotALink): `lstat` already said
-/// this is a symlink, so reporting the read failure as "no link here" would hand a caller a
-/// path nothing resolved and let it compare that as if it had.
-enum SymlinkHop {
-    NotALink,
-    To(PathBuf),
-    Unreadable,
-}
-
-/// What following one path's symlink chain established.
-enum SymlinkChain {
-    /// The path is not a symlink.
-    Settled,
-    /// Followed to a target that is not itself a symlink.
-    Target(PathBuf),
-    /// Still a symlink after [`MAX_SYMLINK_HOPS`]: a cycle, or a chain too deep to vouch for.
-    Exhausted,
-    /// A link on the chain could not be read, so where it leads is unknown.
-    Unreadable,
-}
-
-/// How far a component walk got, and whether it can be trusted as an answer.
-enum Resolution {
-    /// Every symlink along the path was followed to a target that is not a link.
-    Fully(PathBuf),
-    /// The walk gave up: a cycle, a chain too deep, or a link it could not read. The path is
-    /// as far as it got, which a caller that only acts may still use -- the kernel finishes
-    /// the resolution -- but which says nothing about where the write lands.
-    Unresolved(PathBuf),
-}
-
-/// Read one symlink hop, resolving a relative link against the link's own directory.
-fn symlink_hop(path: &Path) -> SymlinkHop {
-    if !fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        return SymlinkHop::NotALink;
-    }
-    let Ok(target) = fs::read_link(path) else {
-        return SymlinkHop::Unreadable;
-    };
-    if target.is_absolute() {
-        return SymlinkHop::To(target);
-    }
-    match path.parent() {
-        Some(parent) => SymlinkHop::To(parent.join(target)),
-        None => SymlinkHop::Unreadable,
-    }
-}
-
-/// Follow a chain of symlinks whose final target does not exist yet, stopping at the first
-/// entry that is not a symlink. `canonicalize` reports `ELOOP` for a cycle, so the hop limit
-/// is the only terminator available here.
-fn follow_symlink_chain(path: &Path) -> SymlinkChain {
-    let mut current = match symlink_hop(path) {
-        SymlinkHop::NotALink => return SymlinkChain::Settled,
-        SymlinkHop::Unreadable => return SymlinkChain::Unreadable,
-        SymlinkHop::To(target) => target,
-    };
-    // Inclusive: the bound counts hops followed, and an exclusive range would stop one short
-    // of the chain length the documentation promises.
-    for _ in 1..=MAX_SYMLINK_HOPS {
-        match symlink_hop(&current) {
-            SymlinkHop::NotALink => return SymlinkChain::Target(current),
-            SymlinkHop::Unreadable => return SymlinkChain::Unreadable,
-            SymlinkHop::To(next) => current = next,
-        }
-    }
-    SymlinkChain::Exhausted
-}
-
-/// Jumping to a link's target abandons the components walked so far, and that target may
-/// itself sit behind symlinked ancestors this walk never visited, so it is resolved from the
-/// top. `budget` bounds that descent: the paths involved can form a cycle that
-/// [`follow_symlink_chain`]'s own hop limit does not see, because each jump hands it a
-/// different path.
-fn resolve_symlink_components_within(path: &Path, budget: usize) -> Resolution {
-    let mut resolved = PathBuf::new();
-    let mut settled = true;
-    for component in path.components() {
-        resolved.push(component);
-        match follow_symlink_chain(&resolved) {
-            SymlinkChain::Settled => {}
-            SymlinkChain::Exhausted | SymlinkChain::Unreadable => settled = false,
-            SymlinkChain::Target(target) => match budget.checked_sub(1) {
-                Some(remaining) => match resolve_symlink_components_within(&target, remaining) {
-                    Resolution::Fully(path) => resolved = path,
-                    Resolution::Unresolved(path) => {
-                        resolved = path;
-                        settled = false;
-                    }
-                },
-                None => {
-                    resolved = target;
-                    settled = false;
-                }
-            },
-        }
-    }
-    if settled {
-        Resolution::Fully(resolved)
-    } else {
-        Resolution::Unresolved(resolved)
-    }
-}
-
-/// Refuse a project-scoped write whose path leaves the project.
-///
-/// `.codex/hooks.json` and its backup sibling are relative names RTK joins itself, so a
-/// symlinked component is the only way they can resolve elsewhere -- and then `rtk init
-/// --codex` would register a hook, which runs shell commands, in a directory the user never
-/// named. The global mode exists for writing outside the project.
-///
-/// This answers for the tree as it stands when asked. A process rewriting these paths while
-/// init runs can still move the write afterwards; the case it is built for is a repository
-/// that ships the links, which is settled before init starts.
-fn ensure_inside_project(path: &Path) -> Result<()> {
-    let root = std::env::current_dir().context("Failed to resolve the current directory")?;
-    ensure_inside_root(&root, path)
-}
-
-/// [`ensure_inside_project`] against an explicit root.
-fn ensure_inside_root(root: &Path, path: &Path) -> Result<()> {
-    let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    // Anchored to the root before resolving: these paths are relative, and
-    // `canonicalize_path_for_comparison` hands a relative path straight back when none of its
-    // components exist yet, which no absolute root can ever contain.
-    let site = root.join(path);
-
-    ensure_chain_sits_inside(&root, path, &site)?;
-
-    match resolve_symlink_components_within(&site, MAX_SYMLINK_HOPS) {
-        // A walk that gave up cannot say where the write lands, and a path RTK cannot place
-        // is one it must not write to.
-        Resolution::Unresolved(_) => anyhow::bail!(
-            "{} passes through a symlink RTK cannot follow to an end, \
-             so RTK cannot say where a write to it would land.\n\
-             Remove the symlink, or use --global to configure Codex outside the project.",
-            path.display()
-        ),
-        Resolution::Fully(resolved) => {
-            let resolved = canonicalize_path_for_comparison(&lexically_normalized(&resolved));
-            if !resolved.starts_with(&root) {
-                anyhow::bail!(
-                    "{} resolves to {}, outside the project at {}.\n\
-                     Remove the symlink, or use --global to configure Codex outside the project.",
-                    path.display(),
-                    resolved.display(),
-                    root.display()
-                );
-            }
-            Ok(())
-        }
-    }
-}
-
-/// Every link the write site itself passes through has to *sit* inside the project, not only
-/// end up pointing back into it.
-///
-/// `atomic_write` cannot canonicalize a chain whose end does not exist, and then writes at the
-/// path as the filesystem reads it, replacing the last link rather than following it. A link
-/// anywhere along that chain is therefore a place the write can land, and one the project does
-/// not contain is one an attacker may own: pointing it back inside passes a check that only
-/// looked at the far end, while leaving the middle free to be re-aimed afterwards.
-///
-/// Only the chain of the site itself is judged this way. Links on *ancestor* components are
-/// traversed, never sited -- whole directory trees hang off one on macOS, so refusing those
-/// would refuse every absolute target under `/var` or `/tmp`.
-fn ensure_chain_sits_inside(root: &Path, named: &Path, site: &Path) -> Result<()> {
-    let mut hop = site.to_path_buf();
-    for _ in 0..=MAX_SYMLINK_HOPS {
-        match symlink_hop(&hop) {
-            SymlinkHop::NotALink => return Ok(()),
-            SymlinkHop::Unreadable => anyhow::bail!(
-                "{} passes through a symlink at {} that RTK cannot read, \
-                 so RTK cannot say where a write to it would land.\n\
-                 Remove the symlink, or use --global to configure Codex outside the project.",
-                named.display(),
-                hop.display()
-            ),
-            SymlinkHop::To(next) => {
-                let at = link_site(&hop);
-                if !at.starts_with(root) {
-                    anyhow::bail!(
-                        "{} is a symlink at {}, outside the project at {}.\n\
-                         Remove the symlink, or use --global to configure Codex outside the project.",
-                        named.display(),
-                        at.display(),
-                        root.display()
-                    );
-                }
-                hop = next;
-            }
-        }
-    }
-    anyhow::bail!(
-        "{} passes through more symlinks than RTK follows, \
-         so RTK cannot say where a write to it would land.\n\
-         Remove the symlink, or use --global to configure Codex outside the project.",
-        named.display()
-    )
-}
-
-/// Where a symlink sits, as a path free of `.` and `..`.
-///
-/// Resolving the parent and re-attaching the name gives the link's own location rather than
-/// its target's, whether or not the parent itself holds links.
-fn link_site(link: &Path) -> PathBuf {
-    match (link.parent(), link.file_name()) {
-        (Some(parent), Some(name)) => canonicalize_path_for_comparison(parent).join(name),
-        _ => lexically_normalized(link),
-    }
-}
-
-/// `path` with `.` dropped and `..` folded into the component before it.
-///
-/// Only sound once the path holds no symlink, which is where the containment walk uses it:
-/// `link/..` is the parent of the link's target, not of the link. Comparing without it would
-/// mean comparing a path nothing resolved, because `canonicalize`'s fallback gives up and
-/// returns its argument untouched as soon as a missing component is followed by `..`.
-fn lexically_normalized(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            // Only a named component can be folded away: `..` after a root, or after another
-            // `..` on a relative path, names somewhere else and has to survive.
-            Component::ParentDir
-                if matches!(
-                    normalized.components().next_back(),
-                    Some(Component::Normal(_))
-                ) =>
-            {
-                normalized.pop();
-            }
-            kept => normalized.push(kept),
-        }
-    }
-    normalized
-}
-
 pub(super) fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
+    let _scope = (!global).then(|| ProjectScope::enter(ctx));
     let InitContext { dry_run, .. } = ctx;
     let mut hook_left_in_place = None;
     let removed = if global {
         let codex_dir = resolve_codex_dir()?;
         uninstall_codex_at(&codex_dir, ctx)?
     } else {
-        // Only the hook path is guarded, and only it is given up when the guard trips:
-        // `AGENTS.md` and `RTK.md` are project-root names RTK joins itself, they are
-        // demonstrably where uninstall left them, and refusing to clean them because some
-        // other path is a symlink leaves the user with artifacts and no command to remove
-        // them -- `--global` acts on `~/.codex`, which is not where these are.
+        // Only the hook path is given up when its guard trips: `AGENTS.md` and `RTK.md` are
+        // project-root names RTK joins itself, and refusing to clean them because the hook
+        // path is a symlink leaves the user with artifacts and no command to remove them --
+        // `--global` acts on `~/.codex`, which is not where these are. An `AGENTS.md` that
+        // leads outside the project is confirmed like any other project write.
         let hooks_json_path = Path::new(CODEX_DIR).join(HOOKS_JSON);
-        let hooks_json_path = match ensure_inside_project(&hooks_json_path)
-            .and_then(|()| ensure_inside_project(&backup_path_for(&hooks_json_path)))
-        {
+        let hooks_json_path = match ensure_project_json_inside(&hooks_json_path, "Codex") {
             Ok(()) => Some(hooks_json_path.as_path()),
             Err(error) => {
                 hook_left_in_place = Some(error);
@@ -472,7 +222,13 @@ pub(super) fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
             hooks_json_path,
             &[RTK_MD_REF],
             ctx,
-        )?
+        )
+        .map_err(|error| match &hook_left_in_place {
+            Some(hook) => error.context(format!(
+                "The Codex hook config was also left in place: {hook:#}"
+            )),
+            None => error,
+        })?
     };
 
     println!(
@@ -534,6 +290,7 @@ fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>>
 }
 
 pub(super) fn run_codex_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let _scope = (!global).then(|| ProjectScope::enter(ctx));
     let (agents_md_path, rtk_md_path, hooks_json_path) = if global {
         let codex_dir = resolve_codex_dir()?;
         (
@@ -547,18 +304,11 @@ pub(super) fn run_codex_mode(global: bool, ctx: InitContext) -> Result<()> {
             PathBuf::from(RTK_MD),
             PathBuf::from(CODEX_DIR).join(HOOKS_JSON),
         );
-        // Only the hook path. A symlinked `AGENTS.md` or `RTK.md` may be the user's own
-        // arrangement, which `atomic_write` preserves deliberately, or may have come with a
-        // clone -- git stores symlinks -- in which case init appends its `@RTK.md` line to
-        // whatever the link names, outside the project. That is accepted: the line is inert
-        // text, where `.codex/hooks.json` is a hook that runs shell commands, and RTK creates
-        // `.codex` itself rather than following something the user put there.
-        //
-        // Its backup sibling is vouched for as well: `fs::copy` follows a symlink at the
-        // destination, so a planted `hooks.json.bak` carried the existing hooks.json out of
-        // the project even when `.codex` itself was a real directory.
-        ensure_inside_project(&paths.2)?;
-        ensure_inside_project(&backup_path_for(&paths.2))?;
+        // The hook runs shell commands, so it and its backup must stay inside the project.
+        // A symlinked `AGENTS.md` or `RTK.md` may be the user's own arrangement or may have
+        // come with a clone -- git stores symlinks -- so one that leads outside the project is
+        // named and confirmed before anything is written.
+        ensure_project_json_inside(&paths.2, "Codex")?;
         paths
     };
 
@@ -607,17 +357,6 @@ pub(super) fn run_codex_mode_with_paths(
     ctx: InitContext,
 ) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
-    if global
-        && !dry_run
-        && let Some(parent) = agents_md_path.parent()
-    {
-        fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "Failed to create Codex config directory: {}",
-                parent.display()
-            )
-        })?;
-    }
 
     // ISSUE #892: In global mode, use absolute path so @RTK.md resolves
     // from any CWD (worktrees, nested projects). Codex resolves @ references
@@ -632,13 +371,25 @@ pub(super) fn run_codex_mode_with_paths(
         RTK_MD_REF.to_string()
     };
 
-    back_up_foreign_rtk_md(&rtk_md_path, RtkMdScope::for_global(global), ctx)?;
-    write_if_changed(
-        &rtk_md_path,
-        &codex_rtk_md_content(ctx.awareness),
-        RTK_MD,
-        ctx,
-    )?;
+    let rtk_md_scope = RtkMdScope::for_global(global);
+    // Under --dry-run a user's RTK.md stays where it is, but the real run moves it aside and
+    // writes a new file: preview that one, not the user's.
+    let set_aside = dry_run && rtk_md_path.exists() && !rtk_md_scope.owns(&rtk_md_path);
+    back_up_foreign_rtk_md(&rtk_md_path, rtk_md_scope, ctx)?;
+    if set_aside {
+        println!(
+            "[dry-run] would create {}: {}",
+            RTK_MD,
+            rtk_md_path.display()
+        );
+    } else {
+        write_if_changed(
+            &rtk_md_path,
+            &codex_rtk_md_content(ctx.awareness),
+            RTK_MD,
+            ctx,
+        )?;
+    }
     let added_ref = patch_agents_md(&agents_md_path, &rtk_md_ref, ctx)?;
     let hook_added = patch_codex_hooks_json(&hooks_json_path, ctx)?;
 
@@ -871,9 +622,18 @@ fn uninstall_codex_with_paths(
         }
 
         if agents_changed {
-            atomic_write(agents_md_path, &working_content).with_context(|| {
-                format!("Failed to write AGENTS.md: {}", agents_md_path.display())
-            })?;
+            let report = Report::new(format!(
+                "[dry-run] would remove rtk-instructions block from AGENTS.md: {}",
+                agents_md_path.display()
+            ));
+            write_reported(
+                agents_md_path,
+                WriteKind::Instructions,
+                &working_content,
+                ctx,
+                report,
+            )
+            .with_context(|| format!("Failed to write AGENTS.md: {}", agents_md_path.display()))?;
         }
     }
 
@@ -910,7 +670,6 @@ pub(super) fn codex_hook_already_present(root: &serde_json::Value) -> bool {
 }
 
 fn patch_codex_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
-    let InitContext { dry_run, .. } = ctx;
     let mut root = read_json_file(path)?.unwrap_or_else(|| serde_json::json!({}));
 
     if codex_hook_already_present(&root) {
@@ -919,22 +678,17 @@ fn patch_codex_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
 
     insert_hook_entry(&mut root, CODEX_HOOK_COMMAND)?;
 
-    if !dry_run && let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "Failed to create Codex config directory: {}",
-                parent.display()
-            )
-        })?;
-    }
     update_json_file(
         path,
         &root,
         ctx,
         "Codex hooks.json",
-        &format!("[dry-run] would patch Codex hooks: {}", path.display()),
-        true,
-        Written::Line(format!("Patched Codex hooks: {}", path.display())),
+        Report::new(format!(
+            "[dry-run] would patch Codex hooks: {}",
+            path.display()
+        ))
+        .with_content()
+        .done_verbose(format!("Patched Codex hooks: {}", path.display())),
     )?;
 
     Ok(true)
@@ -959,12 +713,12 @@ fn remove_codex_hook_from_file(path: &Path, ctx: InitContext) -> Result<bool> {
         &root,
         ctx,
         "Codex hooks.json",
-        &format!(
+        Report::new(format!(
             "[dry-run] would remove RTK hook entry from {}",
             path.display()
-        ),
-        true,
-        Written::Line(format!("Removed Codex RTK hook: {}", path.display())),
+        ))
+        .with_content()
+        .done_verbose(format!("Removed Codex RTK hook: {}", path.display())),
     )?;
 
     Ok(true)
@@ -995,50 +749,6 @@ mod tests {
         assert!(!is_codex_hook_command("rtk hook claude"));
         assert!(!is_codex_hook_command("echo rtk hook codex"));
         assert!(!is_codex_hook_command("\"rtk\"evil hook codex"));
-    }
-
-    #[test]
-    fn test_codex_mode_rejects_auto_patch() {
-        let err = run(
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            true,
-            PatchMode::Auto,
-            InitContext::default(),
-        )
-        .unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "--codex cannot be combined with --auto-patch"
-        );
-    }
-
-    #[test]
-    fn test_codex_mode_rejects_no_patch() {
-        let err = run(
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            true,
-            PatchMode::Skip,
-            InitContext::default(),
-        )
-        .unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "--codex cannot be combined with --no-patch"
-        );
     }
 
     #[test]
@@ -1472,6 +1182,35 @@ mod tests {
     }
 
     #[test]
+    fn test_codex_uninstall_dry_run_leaves_the_agents_md_block_in_place() {
+        let dir = TempDir::new().expect("tempdir");
+        let rtk_md = dir.path().join(RTK_MD);
+        let agents_md = dir.path().join(AGENTS_MD);
+        let hooks_json = dir.path().join(CODEX_DIR).join(HOOKS_JSON);
+        let original = format!("# Agents\n\n{RTK_BLOCK_START} -->\nold\n{RTK_BLOCK_END}\n");
+        fs::write(&agents_md, &original).expect("write");
+
+        let removed = uninstall_codex_with_paths(
+            &agents_md,
+            &rtk_md,
+            RtkMdScope::ProjectRoot,
+            Some(&hooks_json),
+            &[RTK_MD_REF],
+            InitContext {
+                dry_run: true,
+                ..InitContext::default()
+            },
+        )
+        .expect("uninstall");
+
+        assert!(
+            removed.iter().any(|item| item.contains("rtk-instructions")),
+            "the block is still reported: {removed:?}"
+        );
+        assert_eq!(fs::read_to_string(&agents_md).expect("read"), original);
+    }
+
+    #[test]
     fn test_codex_uninstall_removes_rtks_own_rtk_md() {
         let dir = TempDir::new().expect("tempdir");
         let rtk_md = dir.path().join(RTK_MD);
@@ -1611,12 +1350,12 @@ mod tests {
         let hooks_json = Path::new(CODEX_DIR).join(HOOKS_JSON);
 
         // Nothing created yet: the ordinary first-install case must pass.
-        ensure_inside_root(project.path(), Path::new(AGENTS_MD)).expect("plain AGENTS.md");
-        ensure_inside_root(project.path(), Path::new(RTK_MD)).expect("plain RTK.md");
-        ensure_inside_root(project.path(), &hooks_json).expect("plain .codex/hooks.json");
+        ensure_inside_root(project.path(), Path::new(AGENTS_MD), "Codex").expect("plain AGENTS.md");
+        ensure_inside_root(project.path(), Path::new(RTK_MD), "Codex").expect("plain RTK.md");
+        ensure_inside_root(project.path(), &hooks_json, "Codex").expect("plain .codex/hooks.json");
 
         symlink(elsewhere.path(), project.path().join(CODEX_DIR)).expect("symlink");
-        let error = ensure_inside_root(project.path(), &hooks_json)
+        let error = ensure_inside_root(project.path(), &hooks_json, "Codex")
             .expect_err("a symlinked .codex must be refused");
         assert!(error.to_string().contains("outside the project"), "{error}");
         assert!(
@@ -1628,8 +1367,8 @@ mod tests {
         );
     }
 
-    /// `fs::copy` follows a symlink at the destination, so the backup sibling carries the
-    /// existing hooks out of the project while `.codex` itself is an ordinary directory.
+    /// A backup sibling that leads out of the project is refused like the hooks file itself,
+    /// while `.codex` is an ordinary directory.
     #[cfg(unix)]
     #[test]
     fn test_the_backup_destination_must_stay_inside_the_project_too() {
@@ -1642,8 +1381,8 @@ mod tests {
 
         fs::create_dir(project.path().join(CODEX_DIR)).expect("mkdir");
         // A real directory, and a backup path that does not exist yet, are both inside.
-        ensure_inside_root(project.path(), &hooks_json).expect("real .codex");
-        ensure_inside_root(project.path(), &backup).expect("plain backup path");
+        ensure_inside_root(project.path(), &hooks_json, "Codex").expect("real .codex");
+        ensure_inside_root(project.path(), &backup, "Codex").expect("plain backup path");
 
         // The link is dangling, as it would be before the first backup is taken: resolving
         // only its existing ancestors would report it as sitting right where the link does.
@@ -1652,7 +1391,7 @@ mod tests {
             project.path().join(&backup),
         )
         .expect("symlink");
-        let error = ensure_inside_root(project.path(), &backup)
+        let error = ensure_inside_root(project.path(), &backup, "Codex")
             .expect_err("a symlinked backup destination must be refused");
         assert!(error.to_string().contains("outside the project"), "{error}");
     }
@@ -1679,7 +1418,7 @@ mod tests {
         )
         .expect("second hop");
 
-        let error = ensure_inside_root(project.path(), &backup)
+        let error = ensure_inside_root(project.path(), &backup, "Codex")
             .expect_err("a chain that leaves the project must be refused");
         let message = error.to_string();
         assert!(message.contains("outside the project"), "{message}");
@@ -1713,7 +1452,7 @@ mod tests {
         symlink(outside.join("x"), project.join(CODEX_DIR).join(HOOKS_JSON)).expect("first");
         symlink(project.join("kept.json"), outside.join("x")).expect("middle");
 
-        let error = ensure_inside_root(&project, &Path::new(CODEX_DIR).join(HOOKS_JSON))
+        let error = ensure_inside_root(&project, &Path::new(CODEX_DIR).join(HOOKS_JSON), "Codex")
             .expect_err("a link outside the project is a write outside the project");
         let message = error.to_string();
         assert!(
@@ -1920,11 +1659,11 @@ mod tests {
         let backup = backup_path_for(&Path::new(CODEX_DIR).join(HOOKS_JSON));
         symlink("../shared/link", project.path().join(&backup)).expect("first hop");
         symlink("hooks.json.bak", project.path().join("shared/link")).expect("second hop");
-        ensure_inside_root(project.path(), &backup).expect("a chain that stays inside");
+        ensure_inside_root(project.path(), &backup, "Codex").expect("a chain that stays inside");
 
         symlink("b", project.path().join("a")).expect("a");
         symlink("a", project.path().join("b")).expect("b");
-        let error = ensure_inside_root(project.path(), Path::new("a"))
+        let error = ensure_inside_root(project.path(), Path::new("a"), "Codex")
             .expect_err("a cycle resolves nowhere, so RTK cannot vouch for it");
         assert!(error.to_string().contains("symlinks"), "{error}");
     }
@@ -1945,7 +1684,7 @@ mod tests {
         .expect("dangling .codex");
 
         let hooks_json = Path::new(CODEX_DIR).join(HOOKS_JSON);
-        let error = ensure_inside_root(project.path(), &hooks_json)
+        let error = ensure_inside_root(project.path(), &hooks_json, "Codex")
             .expect_err("a dangling .codex link out of the project must be refused");
         assert!(error.to_string().contains("outside the project"), "{error}");
     }
@@ -1962,13 +1701,13 @@ mod tests {
         fs::create_dir(project.path().join(CODEX_DIR)).expect("mkdir");
         symlink("gone/../../../stolen.json", project.path().join(&backup)).expect("symlink");
 
-        let error = ensure_inside_root(project.path(), &backup)
+        let error = ensure_inside_root(project.path(), &backup, "Codex")
             .expect_err("a target that climbs out of the project must be refused");
         assert!(error.to_string().contains("outside the project"), "{error}");
     }
 
     /// A chain can point back into the project and still be written outside it: with its end
-    /// missing, `atomic_write` cannot canonicalize either and lands on the last link itself,
+    /// missing, `write_file` cannot canonicalize either and lands on the last link itself,
     /// wherever that link happens to sit.
     #[cfg(unix)]
     #[test]
@@ -1985,7 +1724,7 @@ mod tests {
         .expect("dangling hop home");
 
         let hooks_json = Path::new(CODEX_DIR).join(HOOKS_JSON);
-        let error = ensure_inside_root(project.path(), &hooks_json)
+        let error = ensure_inside_root(project.path(), &hooks_json, "Codex")
             .expect_err("the hop through the outside link must be refused");
         assert!(error.to_string().contains("outside the project"), "{error}");
     }
@@ -2027,9 +1766,8 @@ mod tests {
         );
     }
 
-    /// Uninstall rewrites `hooks.json` through [`backup_and_atomic_write`], whose `fs::copy`
-    /// follows a symlink at the destination, so its backup sibling needs vouching for even
-    /// when `.codex` itself is an ordinary directory.
+    /// Uninstall rewrites `hooks.json` and backs it up first, so its backup sibling is
+    /// vouched for too, even when `.codex` itself is an ordinary directory.
     #[cfg(unix)]
     #[test]
     fn test_uninstall_refuses_a_backup_sibling_that_leaves_the_project() {
@@ -2147,8 +1885,8 @@ mod tests {
         );
     }
 
-    /// The same, for the backup sibling: `fs::copy` follows a symlink at the destination, so
-    /// vouching only for `hooks.json` leaves the existing hooks free to travel.
+    /// The same, for the backup sibling: a project write that leads out of the project is
+    /// refused, whichever of the two files it is.
     #[cfg(unix)]
     #[test]
     fn test_install_refuses_a_backup_sibling_that_leaves_the_project() {
@@ -2243,7 +1981,7 @@ mod tests {
         let backup = backup_path_for(&Path::new(CODEX_DIR).join(HOOKS_JSON));
         symlink(project.join("kept.json"), project.join(&backup)).expect("symlink");
 
-        ensure_inside_root(&project, &backup).expect("a target that comes back inside");
+        ensure_inside_root(&project, &backup, "Codex").expect("a target that comes back inside");
     }
 
     #[test]

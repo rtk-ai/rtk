@@ -39,22 +39,11 @@ fn run_vibe_mode_at(
     ctx: InitContext,
 ) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
-    if !dry_run {
-        fs::create_dir_all(vibe_dir)
-            .with_context(|| format!("Failed to create Vibe config dir: {}", vibe_dir.display()))?;
-    }
-
     let hooks_path = vibe_dir.join(VIBE_HOOKS_FILE);
     let hook_outcome = patch_vibe_hooks_toml(&hooks_path, patch_mode, ctx)?;
 
     if !hook_only {
-        let prompts_dir = vibe_dir.join(VIBE_PROMPTS_SUBDIR);
-        if !dry_run {
-            fs::create_dir_all(&prompts_dir).with_context(|| {
-                format!("Failed to create prompts dir: {}", prompts_dir.display())
-            })?;
-        }
-        let prompt_path = prompts_dir.join(VIBE_PROMPT_FILE);
+        let prompt_path = vibe_dir.join(VIBE_PROMPTS_SUBDIR).join(VIBE_PROMPT_FILE);
         write_if_changed(
             &prompt_path,
             awareness_content(ctx.awareness),
@@ -137,6 +126,17 @@ fn patch_vibe_hooks_toml(
         return Ok(VibeHookPatchOutcome::Skipped);
     }
 
+    // A file the patch would refuse is neither asked about nor patched, whatever the mode:
+    // say why, and leave it to the user as a declined prompt does.
+    if let Err(error) = ensure_patchable(hooks_path) {
+        eprintln!("[warn] {error:#}");
+        println!(
+            "Skipped. Add the RTK hook to {} manually.",
+            hooks_path.display()
+        );
+        return Ok(VibeHookPatchOutcome::Skipped);
+    }
+
     if patch_mode == PatchMode::Ask {
         if dry_run {
             println!(
@@ -169,18 +169,13 @@ fn patch_vibe_hooks_toml(
         format!("{existing}\n\n{entry}")
     };
 
-    if dry_run {
-        println!(
-            "[dry-run] would patch Vibe hooks.toml: {}",
-            hooks_path.display()
-        );
-        if verbose > 0 {
-            println!("[dry-run] appended entry:\n{entry}");
-        }
-    } else {
-        atomic_write(hooks_path, &new_content)
-            .with_context(|| format!("Failed to write {}", hooks_path.display()))?;
-    }
+    let report = Report::new(format!(
+        "[dry-run] would patch Vibe hooks.toml: {}",
+        hooks_path.display()
+    ))
+    .with_detail(format!("[dry-run] appended entry:\n{entry}"));
+    write_reported(hooks_path, WriteKind::Config, &new_content, ctx, report)
+        .with_context(|| format!("Failed to write {}", hooks_path.display()))?;
     Ok(VibeHookPatchOutcome::Installed)
 }
 
@@ -282,18 +277,25 @@ fn uninstall_vibe_at(vibe_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
         let content = fs::read_to_string(&hooks_path)
             .with_context(|| format!("Failed to read {}", hooks_path.display()))?;
         if let Some(new_content) = strip_vibe_rtk_entry(&content) {
-            if dry_run {
-                println!(
-                    "[dry-run] would remove RTK hook from Vibe hooks.toml: {}",
-                    hooks_path.display()
-                );
-            } else if new_content.trim().is_empty() {
+            let would = format!(
+                "[dry-run] would remove RTK hook from Vibe hooks.toml: {}",
+                hooks_path.display()
+            );
+            if !new_content.trim().is_empty() {
+                write_reported(
+                    &hooks_path,
+                    WriteKind::Config,
+                    &new_content,
+                    ctx,
+                    Report::new(would),
+                )
+                .with_context(|| format!("Failed to write {}", hooks_path.display()))?;
+            } else if dry_run {
+                println!("{would}");
+            } else {
                 // nosemgrep: filesystem-deletion -- uninstall removes hooks.toml only when it becomes empty after stripping the RTK entry
                 fs::remove_file(&hooks_path)
                     .with_context(|| format!("Failed to remove {}", hooks_path.display()))?;
-            } else {
-                atomic_write(&hooks_path, &new_content)
-                    .with_context(|| format!("Failed to write {}", hooks_path.display()))?;
             }
             removed.push(format!(
                 "Vibe hooks.toml: removed RTK entry ({})",
@@ -361,6 +363,26 @@ mod tests {
     use tempfile::TempDir;
 
     // Vibe tests
+
+    #[cfg(unix)]
+    #[test]
+    fn test_vibe_skips_a_read_only_hooks_file_without_asking() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::TempDir::new().unwrap();
+        let hooks = temp.path().join(VIBE_HOOKS_FILE);
+        fs::write(&hooks, "# user hooks\n").unwrap();
+        fs::set_permissions(&hooks, fs::Permissions::from_mode(0o444)).unwrap();
+        // Root can write it, and would then be asked on stdin.
+        if !read_only_is_enforced(&hooks) {
+            return;
+        }
+
+        let outcome = patch_vibe_hooks_toml(&hooks, PatchMode::Ask, InitContext::default());
+        fs::set_permissions(&hooks, fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert!(matches!(outcome, Ok(VibeHookPatchOutcome::Skipped)));
+        assert_eq!(fs::read_to_string(&hooks).unwrap(), "# user hooks\n");
+    }
 
     #[test]
     fn test_vibe_detects_rtk_entry_by_name_field() {

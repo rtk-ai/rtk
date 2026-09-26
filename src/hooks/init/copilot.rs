@@ -64,6 +64,7 @@ rtk proxy <cmd>       # Run raw (no filtering) but track usage
 ///
 /// Installs in the current working directory's `.github/` subdirectory.
 pub fn run_copilot(ctx: InitContext) -> Result<()> {
+    let _scope = ProjectScope::enter(ctx);
     run_copilot_at(Path::new("."), ctx)
 }
 
@@ -75,11 +76,7 @@ fn run_copilot_at(base: &Path, ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
     let github_dir = base.join(GITHUB_DIR);
     let hooks_dir = github_dir.join(HOOKS_SUBDIR);
-
-    if !dry_run {
-        fs::create_dir_all(&hooks_dir)
-            .with_context(|| format!("Failed to create {} directory", hooks_dir.display()))?;
-    }
+    ensure_project_file_inside(&hooks_dir.join(COPILOT_HOOK_FILE), "Copilot")?;
 
     // 1. Upsert RTK marker block in copilot-instructions.md (preserves user content).
     //    Done BEFORE writing the hook config so a malformed file aborts the install
@@ -113,6 +110,7 @@ fn run_copilot_at(base: &Path, ctx: InitContext) -> Result<()> {
 
 /// Entry point for `rtk init --uninstall --copilot` (project-scoped, like install).
 pub fn uninstall_copilot(ctx: InitContext) -> Result<()> {
+    let _scope = ProjectScope::enter(ctx);
     let InitContext { dry_run, .. } = ctx;
     let removed = uninstall_copilot_at(Path::new("."), ctx)?;
 
@@ -146,7 +144,13 @@ fn uninstall_copilot_at(base: &Path, ctx: InitContext) -> Result<Vec<String>> {
     let mut removed = Vec::new();
 
     let hook_path = github_dir.join(HOOKS_SUBDIR).join(COPILOT_HOOK_FILE);
-    if hook_path.exists() {
+    // Only an existing hook config that leads outside the project is given up: the
+    // instructions block is still RTK's to remove, and no other command reaches it.
+    let hook_refused = hook_path
+        .exists()
+        .then(|| ensure_project_file_inside(&hook_path, "Copilot").err())
+        .flatten();
+    if hook_refused.is_none() && hook_path.exists() {
         if dry_run {
             println!(
                 "[dry-run] would remove hook config: {}",
@@ -161,31 +165,74 @@ fn uninstall_copilot_at(base: &Path, ctx: InitContext) -> Result<Vec<String>> {
     }
 
     let instructions_path = github_dir.join(COPILOT_INSTRUCTIONS_FILE);
-    if instructions_path.exists() {
-        let content = fs::read_to_string(&instructions_path)
-            .with_context(|| format!("Failed to read {}", instructions_path.display()))?;
-        if content.contains(RTK_BLOCK_START) {
-            let (cleaned, did_remove) = remove_rtk_block(&content);
-            if did_remove {
-                if dry_run {
-                    println!(
-                        "[dry-run] would remove rtk-instructions block from {}",
-                        instructions_path.display()
-                    );
-                } else {
-                    atomic_write(&instructions_path, &cleaned).with_context(|| {
-                        format!("Failed to write {}", instructions_path.display())
-                    })?;
+    let block_removed = match remove_copilot_instructions_block(&instructions_path, ctx) {
+        Ok(block_removed) => block_removed,
+        Err(error) => {
+            return Err(match hook_refused {
+                Some(hook) => {
+                    error.context(format!("The hook config was also left in place: {hook:#}"))
                 }
-                removed.push(format!(
-                    "{}: removed rtk-instructions block",
-                    COPILOT_INSTRUCTIONS_FILE
-                ));
-            }
+                None => error,
+            });
         }
+    };
+    if block_removed {
+        removed.push(format!(
+            "{}: removed rtk-instructions block",
+            COPILOT_INSTRUCTIONS_FILE
+        ));
     }
 
+    if let Some(error) = hook_refused {
+        if dry_run {
+            eprintln!("[warn] {error:#}");
+            println!(
+                "[dry-run] would leave the hook config in place: {}",
+                hook_path.display()
+            );
+            return Ok(removed);
+        }
+        let left = if block_removed {
+            format!(
+                "The RTK block was removed from {}, but the hook config was left in place",
+                COPILOT_INSTRUCTIONS_FILE
+            )
+        } else {
+            "The hook config was left in place".to_string()
+        };
+        return Err(error.context(left));
+    }
     Ok(removed)
+}
+
+/// Remove the rtk-instructions block from the Copilot instructions file, if it has one.
+/// Returns whether it did (or, under `--dry-run`, would).
+fn remove_copilot_instructions_block(instructions_path: &Path, ctx: InitContext) -> Result<bool> {
+    if !instructions_path.exists() {
+        return Ok(false);
+    }
+    let content = fs::read_to_string(instructions_path)
+        .with_context(|| format!("Failed to read {}", instructions_path.display()))?;
+    if !content.contains(RTK_BLOCK_START) {
+        return Ok(false);
+    }
+    let (cleaned, did_remove) = remove_rtk_block(&content);
+    if !did_remove {
+        return Ok(false);
+    }
+    let report = Report::new(format!(
+        "[dry-run] would remove rtk-instructions block from {}",
+        instructions_path.display()
+    ));
+    write_reported(
+        instructions_path,
+        WriteKind::Instructions,
+        &cleaned,
+        ctx,
+        report,
+    )
+    .with_context(|| format!("Failed to write {}", instructions_path.display()))?;
+    Ok(true)
 }
 
 pub(crate) fn copilot_user_dir() -> Result<PathBuf> {
@@ -205,11 +252,6 @@ pub fn run_copilot_global(ctx: InitContext) -> Result<()> {
 fn run_copilot_global_at(copilot_dir: &Path, ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
     let hooks_dir = copilot_dir.join(HOOKS_SUBDIR);
-
-    if !dry_run {
-        fs::create_dir_all(&hooks_dir)
-            .with_context(|| format!("Failed to create {} directory", hooks_dir.display()))?;
-    }
 
     let instructions_path = copilot_dir.join(COPILOT_INSTRUCTIONS_FILE);
     write_rtk_block(
@@ -295,16 +337,18 @@ fn uninstall_copilot_global_at(copilot_dir: &Path, ctx: InitContext) -> Result<V
         if content.contains(RTK_BLOCK_START) {
             let (cleaned, did_remove) = remove_rtk_block(&content);
             if did_remove {
-                if dry_run {
-                    println!(
-                        "[dry-run] would remove rtk-instructions block from {}",
-                        instructions_path.display()
-                    );
-                } else {
-                    atomic_write(&instructions_path, &cleaned).with_context(|| {
-                        format!("Failed to write {}", instructions_path.display())
-                    })?;
-                }
+                let report = Report::new(format!(
+                    "[dry-run] would remove rtk-instructions block from {}",
+                    instructions_path.display()
+                ));
+                write_reported(
+                    &instructions_path,
+                    WriteKind::Instructions,
+                    &cleaned,
+                    ctx,
+                    report,
+                )
+                .with_context(|| format!("Failed to write {}", instructions_path.display()))?;
                 removed.push(format!(
                     "{}: removed rtk-instructions block",
                     COPILOT_INSTRUCTIONS_FILE

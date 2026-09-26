@@ -12,9 +12,15 @@ use crate::hooks::constants::{
 /// opt-in: it is updated too only when the user already has a `~/.trae-cn`
 /// directory.
 fn trae_hook_paths_at(home: &Path) -> Vec<PathBuf> {
-    let mut paths = vec![home.join(TRAE_DIR).join(HOOKS_JSON)];
-    if home.join(TRAE_CN_DIR).is_dir() {
-        paths.push(home.join(TRAE_CN_DIR).join(HOOKS_JSON));
+    let trae = home.join(TRAE_DIR).join(HOOKS_JSON);
+    let trae_cn = home.join(TRAE_CN_DIR).join(HOOKS_JSON);
+    // A Trae CN config that links to the Trae one is the same file: patching it a
+    // second time would back up RTK's own write over the user's backup.
+    let separate_cn =
+        home.join(TRAE_CN_DIR).is_dir() && write_landing(&trae_cn) != write_landing(&trae);
+    let mut paths = vec![trae];
+    if separate_cn {
+        paths.push(trae_cn);
     }
     paths
 }
@@ -28,11 +34,8 @@ fn resolve_trae_hook_paths(global: bool) -> Result<Vec<PathBuf>> {
     }
 }
 
-fn read_trae_hooks_json(path: &Path) -> Result<(serde_json::Value, bool)> {
-    match read_json_file(path)? {
-        Some(root) => Ok((root, true)),
-        None => Ok((serde_json::json!({ "version": 1 }), false)),
-    }
+fn read_trae_hooks_json(path: &Path) -> Result<serde_json::Value> {
+    Ok(read_json_file(path)?.unwrap_or_else(|| serde_json::json!({ "version": 1 })))
 }
 
 fn validate_trae_hooks_json(root: &serde_json::Value) -> Result<()> {
@@ -67,7 +70,6 @@ fn validate_trae_hooks_json(root: &serde_json::Value) -> Result<()> {
 fn patch_trae_hooks_json_paths(paths: &[PathBuf], ctx: InitContext) -> Result<Vec<PatchResult>> {
     struct PendingPatch {
         path: PathBuf,
-        existed: bool,
         serialized: String,
     }
 
@@ -77,7 +79,7 @@ fn patch_trae_hooks_json_paths(paths: &[PathBuf], ctx: InitContext) -> Result<Ve
 
     // Preflight every target before writing any one of them.
     for path in paths {
-        let (mut root, existed) = read_trae_hooks_json(path)?;
+        let mut root = read_trae_hooks_json(path)?;
         validate_trae_hooks_json(&root)?;
         let added_version = if root.get("version").is_none() {
             root.as_object_mut()
@@ -104,7 +106,6 @@ fn patch_trae_hooks_json_paths(paths: &[PathBuf], ctx: InitContext) -> Result<Ve
             serde_json::to_string_pretty(&root).context("Failed to serialize Trae hooks.json")?;
         pending.push(PendingPatch {
             path: path.clone(),
-            existed,
             serialized,
         });
         results.push(if ctx.dry_run {
@@ -115,42 +116,21 @@ fn patch_trae_hooks_json_paths(paths: &[PathBuf], ctx: InitContext) -> Result<Ve
     }
 
     for patch in pending {
-        if ctx.dry_run {
-            println!(
-                "[dry-run] would patch Trae hooks.json: {}",
-                patch.path.display()
-            );
-            if ctx.verbose > 0 {
-                println!("[dry-run] content:\n{}", patch.serialized);
-            }
-            continue;
-        }
-
-        let write_result: Result<()> = (|| {
-            let parent = patch.path.parent().with_context(|| {
-                format!(
-                    "Cannot write Trae hooks file {}: path has no parent directory",
-                    patch.path.display()
-                )
-            })?;
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create Trae directory {}", parent.display()))?;
-
-            if patch.existed {
-                let backup_path = patch.path.with_extension("json.bak");
-                fs::copy(&patch.path, &backup_path)
-                    .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
-                if ctx.verbose > 0 {
-                    eprintln!("Backup: {}", backup_path.display());
-                }
-            }
-
-            atomic_write(&patch.path, &patch.serialized)
-        })();
-        write_result.with_context(|| {
+        let report = Report::new(format!(
+            "[dry-run] would patch Trae hooks.json: {}",
+            patch.path.display()
+        ))
+        .with_content();
+        write_reported(
+            &patch.path,
+            WriteKind::Config,
+            &patch.serialized,
+            ctx,
+            report,
+        )
+        .with_context(|| {
             format!(
-                "Failed to update Trae hooks file {}. Already updated: {}",
-                patch.path.display(),
+                "Trae hooks not fully updated. Already updated: {}",
                 if applied.is_empty() {
                     "none".to_string()
                 } else {
@@ -158,7 +138,9 @@ fn patch_trae_hooks_json_paths(paths: &[PathBuf], ctx: InitContext) -> Result<Ve
                 }
             )
         })?;
-        applied.push(patch.path.display().to_string());
+        if !ctx.dry_run {
+            applied.push(patch.path.display().to_string());
+        }
     }
 
     Ok(results)
@@ -228,7 +210,11 @@ pub(super) fn remove_trae_hook_from_json(root: &mut serde_json::Value) -> bool {
 
 /// Install Trae's native PreToolUse hook in the project or user configuration.
 pub fn run_trae_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let _scope = (!global).then(|| ProjectScope::enter(ctx));
     let paths = resolve_trae_hook_paths(global)?;
+    for path in &paths {
+        ensure_project_json_inside(path, "Trae")?;
+    }
     let results = patch_trae_hooks_json_paths(&paths, ctx)?;
 
     if ctx.dry_run {
@@ -285,24 +271,20 @@ fn remove_trae_hooks_json_paths(paths: &[PathBuf], ctx: InitContext) -> Result<V
     }
 
     for removal in pending {
-        if ctx.dry_run {
-            println!(
-                "[dry-run] would remove RTK entry from Trae hooks.json: {}",
-                removal.path.display()
-            );
-            continue;
-        }
-
-        let write_result: Result<()> = (|| {
-            let backup_path = removal.path.with_extension("json.bak");
-            fs::copy(&removal.path, &backup_path)
-                .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
-            atomic_write(&removal.path, &removal.serialized)
-        })();
-        write_result.with_context(|| {
+        let report = Report::new(format!(
+            "[dry-run] would remove RTK entry from Trae hooks.json: {}",
+            removal.path.display()
+        ));
+        write_reported(
+            &removal.path,
+            WriteKind::Config,
+            &removal.serialized,
+            ctx,
+            report,
+        )
+        .with_context(|| {
             format!(
-                "Failed to update Trae hooks file {}. Already updated: {}",
-                removal.path.display(),
+                "Trae hooks not fully updated. Already updated: {}",
                 if applied.is_empty() {
                     "none".to_string()
                 } else {
@@ -310,7 +292,9 @@ fn remove_trae_hooks_json_paths(paths: &[PathBuf], ctx: InitContext) -> Result<V
                 }
             )
         })?;
-        applied.push(removal.path.display().to_string());
+        if !ctx.dry_run {
+            applied.push(removal.path.display().to_string());
+        }
     }
 
     Ok(results)
@@ -318,7 +302,11 @@ fn remove_trae_hooks_json_paths(paths: &[PathBuf], ctx: InitContext) -> Result<V
 
 /// Uninstall Trae's native hook from project or selected global configs.
 pub fn uninstall_trae_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let _scope = (!global).then(|| ProjectScope::enter(ctx));
     let paths = resolve_trae_hook_paths(global)?;
+    for path in &paths {
+        ensure_project_json_inside(path, "Trae")?;
+    }
     let removed = remove_trae_hooks_json_paths(&paths, ctx)?;
 
     if removed.iter().any(|removed| *removed) {
@@ -396,6 +384,36 @@ mod tests {
                 home.join(".trae").join("hooks.json"),
                 home.join(".trae-cn").join("hooks.json"),
             ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_trae_hook_paths_skip_a_dangling_trae_cn_file_linked_to_trae() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        fs::create_dir(home.join(".trae")).unwrap();
+        fs::create_dir(home.join(".trae-cn")).unwrap();
+        std::os::unix::fs::symlink("../.trae/hooks.json", home.join(".trae-cn/hooks.json"))
+            .unwrap();
+
+        assert_eq!(
+            trae_hook_paths_at(home),
+            vec![home.join(".trae").join("hooks.json")]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_trae_hook_paths_skip_a_trae_cn_dir_linked_to_trae() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        fs::create_dir(home.join(".trae")).unwrap();
+        std::os::unix::fs::symlink(".trae", home.join(".trae-cn")).unwrap();
+
+        assert_eq!(
+            trae_hook_paths_at(home),
+            vec![home.join(".trae").join("hooks.json")]
         );
     }
 

@@ -139,6 +139,7 @@ fn resolve_droid_install_target(droid_dir: &Path) -> Result<DroidHookFile> {
 /// - Global (`-g`): under `~/.factory` (or `$FACTORY_HOME_OVERRIDE/.factory`).
 /// - Project: under `<cwd>/.factory` so the hook can be committed.
 pub fn run_droid_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let _scope = (!global).then(|| ProjectScope::enter(ctx));
     let droid_dir = if global {
         resolve_droid_dir()?
     } else {
@@ -152,14 +153,10 @@ pub fn run_droid_mode(global: bool, ctx: InitContext) -> Result<()> {
 fn run_droid_mode_at(droid_dir: &Path, global: bool, ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
 
-    let target = resolve_droid_install_target(droid_dir)?;
-
-    if !dry_run {
-        let dir = target.path.parent().unwrap_or(droid_dir);
-        fs::create_dir_all(dir).with_context(|| {
-            format!("Failed to create Droid config directory: {}", dir.display())
-        })?;
+    for candidate in droid_hook_file_candidates(droid_dir) {
+        ensure_project_json_inside(&candidate.path, "Droid")?;
     }
+    let target = resolve_droid_install_target(droid_dir)?;
 
     let patched = patch_droid_hook_file(&target, ctx)?;
 
@@ -219,9 +216,11 @@ fn patch_droid_hook_file(file: &DroidHookFile, ctx: InitContext) -> Result<bool>
         &root,
         ctx,
         "Droid hook file",
-        &format!("[dry-run] would patch Droid hook file: {}", path.display()),
-        true,
-        Written::Backup,
+        Report::new(format!(
+            "[dry-run] would patch Droid hook file: {}",
+            path.display()
+        ))
+        .with_content(),
     )?;
     Ok(true)
 }
@@ -304,6 +303,7 @@ fn insert_droid_hook_entry(root: &mut serde_json::Value, layout: DroidLayout) ->
 
 /// Uninstall Factory Droid integration: strip RTK hook entry from settings.json.
 pub fn uninstall_droid(global: bool, ctx: InitContext) -> Result<()> {
+    let _scope = (!global).then(|| ProjectScope::enter(ctx));
     let InitContext { dry_run, .. } = ctx;
     let droid_dir = if global {
         resolve_droid_dir()?
@@ -335,6 +335,9 @@ pub fn uninstall_droid(global: bool, ctx: InitContext) -> Result<()> {
 }
 
 fn uninstall_droid_at(droid_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
+    for candidate in droid_hook_file_candidates(droid_dir) {
+        ensure_project_json_inside(&candidate.path, "Droid")?;
+    }
     let mut removed = Vec::new();
     let mut errors = Vec::new();
     for candidate in droid_hook_file_candidates(droid_dir) {
@@ -376,12 +379,11 @@ fn remove_droid_hook_from_file(file: &DroidHookFile, ctx: InitContext) -> Result
         &root,
         ctx,
         "Droid hook file",
-        &format!(
+        Report::new(format!(
             "[dry-run] would remove RTK entry from Droid hook file: {}",
             path.display()
-        ),
-        false,
-        Written::Line(format!("Removed RTK hook from {}", path.display())),
+        ))
+        .done_verbose(format!("Removed RTK hook from {}", path.display())),
     )?;
     Ok(true)
 }
