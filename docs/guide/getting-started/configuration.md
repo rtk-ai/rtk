@@ -13,6 +13,7 @@ sidebar:
 |----------|------|
 | Linux | `~/.config/rtk/config.toml` |
 | macOS | `~/Library/Application Support/rtk/config.toml` |
+| Windows | `%APPDATA%\rtk\config.toml` (e.g. `C:\Users\<you>\AppData\Roaming\rtk\config.toml`) |
 
 ```bash
 rtk config            # show current configuration
