@@ -216,6 +216,7 @@ pub struct TelemetryConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LimitsConfig {
     /// Max total grep results to show (default: 200)
     pub grep_max_results: usize,
@@ -609,6 +610,14 @@ exclude_commands = ["curl"]
         let config: Config = toml::from_str(toml).expect("valid toml");
         assert_eq!(config.hooks.exclude_commands, vec!["curl"]);
         assert!(config.hooks.transparent_prefixes.is_empty());
+    }
+
+    #[test]
+    fn test_partial_limits_section_keeps_the_other_defaults() {
+        let config = Config::from_toml("[limits]\nstatus_max_files = 2\n").expect("valid toml");
+        assert_eq!(config.limits.status_max_files, 2);
+        assert_eq!(config.limits.status_max_untracked, 10);
+        assert_eq!(config.limits.grep_max_results, 200);
     }
 
     #[test]

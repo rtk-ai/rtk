@@ -4,6 +4,7 @@ use crate::core::arg_tokenizer::{
     self, Attachment, Dialect, Token, TokenKind, ValueSpec, is_digit_run,
 };
 use crate::core::args_utils;
+use crate::core::config;
 use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
 use crate::core::stream::{
@@ -2198,14 +2199,56 @@ fn truncate_line(line: &str, width: usize) -> String {
 }
 
 pub(crate) fn format_status_output(porcelain: &str) -> String {
-    format_status_inner(porcelain, None)
+    let limits = config::limits();
+    format_status_inner(
+        porcelain,
+        None,
+        limits.status_max_files,
+        limits.status_max_untracked,
+    )
 }
 
 pub(crate) fn format_status_output_detached(porcelain: &str, detached_ref: &str) -> String {
-    format_status_inner(porcelain, Some(detached_ref))
+    let limits = config::limits();
+    format_status_inner(
+        porcelain,
+        Some(detached_ref),
+        limits.status_max_files,
+        limits.status_max_untracked,
+    )
 }
 
-fn format_status_inner(porcelain: &str, detached: Option<&str>) -> String {
+/// A conflicted path (`DD`/`AU`/`UD`/`UA`/`DU`/`AA`/`UU`). Never counted against the caps: a
+/// merge that stages many files must not push the conflicts left to resolve off the listing.
+fn is_unmerged_entry(line: &str) -> bool {
+    matches!(
+        line.get(..2),
+        Some("DD" | "AU" | "UD" | "UA" | "DU" | "AA" | "UU")
+    )
+}
+
+/// Note for entries left off the listing, plus the recall hint for them when the store is on.
+/// The stored copy lists what was shown first, so the hint recalls exactly the hidden tail.
+fn status_overflow_note(shown: &[&str], hidden: &[&str]) -> String {
+    let note = format!("... +{} more", hidden.len());
+    let full = shown
+        .iter()
+        .chain(hidden)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+    match crate::core::tee::force_tee_tail_hint(&full, "git-status", shown.len() + 1) {
+        Some(hint) => format!("{note} {hint}"),
+        None => note,
+    }
+}
+
+fn format_status_inner(
+    porcelain: &str,
+    detached: Option<&str>,
+    max_files: usize,
+    max_untracked: usize,
+) -> String {
     let lines: Vec<&str> = porcelain
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -2227,8 +2270,27 @@ fn format_status_inner(porcelain: &str, detached: Option<&str>) -> String {
         }
     }
 
-    for line in lines.iter().skip(1) {
-        output.push((*line).to_string());
+    let (mut tracked, mut untracked) = (0usize, 0usize);
+    let (mut shown, mut hidden) = (Vec::new(), Vec::new());
+    for &line in lines.iter().skip(1) {
+        let (seen, cap) = if line.starts_with("??") {
+            (&mut untracked, max_untracked)
+        } else if is_unmerged_entry(line) {
+            shown.push(line);
+            continue;
+        } else {
+            (&mut tracked, max_files)
+        };
+        *seen += 1;
+        if *seen <= cap {
+            shown.push(line);
+        } else {
+            hidden.push(line);
+        }
+    }
+    output.extend(shown.iter().map(|line| (*line).to_string()));
+    if !hidden.is_empty() {
+        output.push(status_overflow_note(&shown, &hidden));
     }
 
     if lines.len() == 1 && lines[0].starts_with("##") {
@@ -6602,13 +6664,22 @@ no changes added to commit (use "git add" and/or "git commit -a")
 
     // --- truncation accuracy ---
 
+    /// The status formatter with explicit caps and the recall store off, so a capped listing
+    /// writes nothing to the developer's own store and its note is exactly the count.
+    fn format_status_capped(porcelain: &str, max_files: usize, max_untracked: usize) -> String {
+        let _guard = crate::core::utils::TEST_ENV_LOCK.lock().unwrap();
+        temp_env::with_var("RTK_RECALL", Some("0"), || {
+            format_status_inner(porcelain, None, max_files, max_untracked)
+        })
+    }
+
     #[test]
     fn test_format_status_output_shows_every_file_when_many_are_dirty() {
         let mut porcelain = String::from("## main...origin/main\n");
         for i in 0..25 {
             porcelain.push_str(&format!("M  staged_file_{}.rs\n", i));
         }
-        let result = format_status_output(&porcelain);
+        let result = format_status_capped(&porcelain, 100, 100);
         assert!(
             result.contains("staged_file_24.rs"),
             "Expected the last staged file to remain visible, got:\n{}",
@@ -6621,7 +6692,129 @@ no changes added to commit (use "git add" and/or "git commit -a")
         );
         assert!(
             !result.contains("... +"),
-            "Status output must not hide dirty paths behind overflow markers:\n{}",
+            "Status output must not hide dirty paths below the configured caps:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_format_status_caps_tracked_files_at_max_files() {
+        let mut porcelain = String::from("## main...origin/main\n");
+        for i in 0..25 {
+            porcelain.push_str(&format!("M  staged_file_{}.rs\n", i));
+        }
+        let result = format_status_capped(&porcelain, 15, 10);
+        assert!(
+            result.contains("staged_file_14.rs"),
+            "the 15th file is the last one shown:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("staged_file_15.rs"),
+            "the 16th file must be hidden:\n{}",
+            result
+        );
+        assert_eq!(
+            result.lines().last(),
+            Some("... +10 more"),
+            "the note must count what was hidden:\n{}",
+            result
+        );
+        assert_eq!(result.lines().count(), 17, "branch + 15 files + note");
+    }
+
+    #[test]
+    fn test_format_status_caps_untracked_files_separately() {
+        let mut porcelain = String::from("## main\n");
+        for i in 0..5 {
+            porcelain.push_str(&format!(" M modified_{}.rs\n", i));
+        }
+        for i in 0..15 {
+            porcelain.push_str(&format!("?? untracked_{}.txt\n", i));
+        }
+        let result = format_status_capped(&porcelain, 15, 10);
+        assert!(
+            result.contains("modified_4.rs"),
+            "tracked files stay under their own cap:\n{}",
+            result
+        );
+        assert!(
+            result.contains("untracked_9.txt"),
+            "the 10th untracked file is the last one shown:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("untracked_10.txt"),
+            "the 11th untracked file must be hidden:\n{}",
+            result
+        );
+        assert_eq!(result.lines().last(), Some("... +5 more"));
+    }
+
+    #[test]
+    fn test_format_status_note_counts_both_buckets() {
+        let mut porcelain = String::from("## develop\n");
+        for i in 0..20 {
+            porcelain.push_str(&format!("M  file_{}.rs\n", i));
+        }
+        for i in 0..15 {
+            porcelain.push_str(&format!("?? new_{}.txt\n", i));
+        }
+        let result = format_status_capped(&porcelain, 15, 10);
+        assert_eq!(
+            result.lines().last(),
+            Some("... +10 more"),
+            "5 tracked + 5 untracked hidden:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_format_status_exactly_at_the_caps_hides_nothing() {
+        let mut porcelain = String::from("## main\n");
+        for i in 0..15 {
+            porcelain.push_str(&format!("M  file_{}.rs\n", i));
+        }
+        for i in 0..10 {
+            porcelain.push_str(&format!("?? new_{}.txt\n", i));
+        }
+        let result = format_status_capped(&porcelain, 15, 10);
+        assert!(!result.contains("... +"), "nothing was cut:\n{}", result);
+        assert_eq!(result.lines().count(), 26, "branch + 15 + 10 entries");
+    }
+
+    #[test]
+    fn test_format_status_zero_caps_summarise_only() {
+        let porcelain = "## main\nM  a.rs\n M b.rs\n?? c.txt\n";
+        assert_eq!(format_status_capped(porcelain, 0, 0), "* main\n... +3 more");
+    }
+
+    #[test]
+    fn test_format_status_never_hides_unmerged_paths() {
+        // A merge stages every file it touched: the conflicts sort in among them and
+        // must not be pushed past the cap.
+        let mut porcelain = String::from("## main\n");
+        for i in 0..20 {
+            porcelain.push_str(&format!("M  file_{:02}.rs\n", i));
+        }
+        porcelain.push_str("UU zz_both_modified.rs\nAA zz_both_added.rs\nDU zz_deleted.rs\n");
+        let result = format_status_capped(&porcelain, 15, 10);
+        for conflict in [
+            "UU zz_both_modified.rs",
+            "AA zz_both_added.rs",
+            "DU zz_deleted.rs",
+        ] {
+            assert!(
+                result.contains(conflict),
+                "conflict `{}` was hidden:\n{}",
+                conflict,
+                result
+            );
+        }
+        assert_eq!(
+            result.lines().last(),
+            Some("... +5 more"),
+            "only the 5 staged files past the cap are hidden:\n{}",
             result
         );
     }
