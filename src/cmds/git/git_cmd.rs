@@ -205,10 +205,6 @@ fn requests_patch_output(token: &Token<'_>) -> bool {
     }
 }
 
-/// `args` with the patch-shape flags removed, so a stat-only header cannot be outranked by
-/// them wherever git would have read them. Rebuilt per token rather than per arg: every short
-/// flag in a `-xyz` cluster shares one `source_index`, so dropping the whole arg would take
-/// its siblings with it -- `-pl 100` lost the `-l` and left `100` behind as a bogus revision.
 /// `args` with any `--oneline` removed, by the token's own `source_index` so a pathspec of that
 /// name past `--` is left alone.
 fn args_without_oneline(args: &[String], tokens: &[Token<'_>]) -> Vec<String> {
@@ -227,21 +223,30 @@ fn args_without_oneline(args: &[String], tokens: &[Token<'_>]) -> Vec<String> {
         .collect()
 }
 
-fn args_without_patch_shape(args: &[String], tokens: &[Token<'_>]) -> Vec<String> {
+/// `args` with every flag `drop` selects removed. Rebuilt per token rather than per arg:
+/// every short flag in a `-xyz` cluster shares one `source_index`, so dropping the whole arg
+/// would take its siblings with it -- `-pl 100` lost the `-l` and left `100` behind as a
+/// bogus revision. Past `--` every token is a `Positional`, so a pathspec spelled like one of
+/// these flags is left alone.
+fn args_without_flags(
+    args: &[String],
+    tokens: &[Token<'_>],
+    drop: impl Fn(&Token<'_>) -> bool,
+) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(args.len());
     for (index, arg) in args.iter().enumerate() {
         let owned: Vec<&Token<'_>> = tokens
             .iter()
             .filter(|t| t.source_index == index && t.kind != TokenKind::Positional)
             .collect();
-        if owned.is_empty() || !owned.iter().any(|t| requests_patch_output(t)) {
+        if owned.is_empty() || !owned.iter().any(|t| drop(t)) {
             out.push(arg.clone());
             continue;
         }
-        // A cluster keeps whatever letters were not shape flags, with their attached value.
+        // A cluster keeps whatever letters were not dropped, with their attached value.
         let kept: Vec<&&Token<'_>> = owned
             .iter()
-            .filter(|t| t.kind == TokenKind::Short && !requests_patch_output(t))
+            .filter(|t| t.kind == TokenKind::Short && !drop(t))
             .collect();
         if kept.is_empty() {
             continue;
@@ -256,6 +261,12 @@ fn args_without_patch_shape(args: &[String], tokens: &[Token<'_>]) -> Vec<String
         out.push(rebuilt);
     }
     out
+}
+
+/// `args` with the patch-shape flags removed, so a stat-only header cannot be outranked by
+/// them wherever git would have read them.
+fn args_without_patch_shape(args: &[String], tokens: &[Token<'_>]) -> Vec<String> {
+    args_without_flags(args, tokens, requests_patch_output)
 }
 
 fn run_diff(
@@ -1547,6 +1558,12 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
 
 /// RTK's default `git log` limit, applied whenever the user names none.
 const DEFAULT_LOG_LIMIT: usize = 10;
+/// The lowest exit code with which git reports that it refused a command rather than ran it:
+/// 128 is a fatal error, 129 a usage error, and 128 + n a death by signal.
+const REFUSAL_EXIT_CODE: i32 = 128;
+/// The two lengths `%H` can print, one per object format git has.
+const SHA1_NAME_LEN: usize = 40;
+const SHA256_NAME_LEN: usize = 64;
 const DEFAULT_LOG_LIMIT_ARG: &str = "-10";
 
 /// `git log <args>` for the raw passthrough, carrying RTK's default limit unless the user named
@@ -1590,10 +1607,10 @@ fn raw_log_is_capped(tokens: &[Token<'_>]) -> bool {
 /// the user's flags last, where git's last-flag-wins hands the format back to them -- harmless
 /// except for `--pretty`/`--format`/`--oneline`, since an empty `--pretty=format:` prints a
 /// commit as no bytes at all and would read as "nothing left". Those three are dropped from
-/// what is forwarded, along with `--skip`, which RTK's own has to absorb, `--exit-code`, which
-/// would make the probe report failure on a walk git was perfectly happy with, `--output`,
-/// which is a redirect that would truncate the file the command just wrote, and the
-/// patch-shape flags, which are work with no answer in them.
+/// what is forwarded, along with `--skip`, which RTK's own has to absorb, `--exit-code` and
+/// `--check`, which would make the probe report failure on a walk git was perfectly happy
+/// with, `--output`, which is a redirect that would truncate the file the command just wrote,
+/// and the patch-shape flags, which are work with no answer in them.
 ///
 /// `None` when git refuses the command: RTK then says nothing rather than guessing.
 fn walk_exceeds_limit(
@@ -1607,20 +1624,33 @@ fn walk_exceeds_limit(
     // No `--no-patch`: git refuses it beside `--name-only`/`--name-status`, and the strip in
     // `log_probe_args` has already taken the patch-shape flags out of what is forwarded.
     cmd.args(["--pretty=format:%H"]);
-    // `--skip` is counted where the walk starts; a diff-based filter is applied after it. So
-    // for those the skip lands on commits the filter would have dropped and the probe reports
-    // on a commit the user was never going to see -- `git log -p -S needle` matching twice
-    // claimed a cap of ten. `--max-count` is applied last, after every filter, so there the
-    // question becomes how many came back rather than whether one did.
+    // `--skip` is counted where the walk starts, before a diff-based filter is applied, while
+    // `--max-count` is applied last, after every filter. So the two kinds of walk have to be
+    // asked different questions.
+    //
+    // Without such a filter, skipping past the limit and seeing whether anything is left
+    // answers it outright. With one, that skip would land on commits the filter was going to
+    // drop and report on a commit the user was never going to see -- `git log -p -S needle`
+    // matching twice claimed a cap of ten -- so the question becomes how many came back, and
+    // the user's own `--skip` still has to be reproduced exactly as they wrote it, or the
+    // count covers commits they had already skipped past.
+    // `--graph` is not forwarded, but it is not only a rail: it turns on parent rewriting,
+    // and a walk narrowed to one path returned 11 commits without it and 549 with it. Asking
+    // for that back plainly, because `--parents` turns on the same rewriting and prints
+    // nothing beside a `%H` record -- not even on a merge, which has parents to print.
+    if wants_graph(tokens) {
+        cmd.arg("--parents");
+    }
     let counting = selects_by_diff(tokens);
+    let skip = user_skip(tokens);
     if counting {
         cmd.arg(format!("--max-count={}", limit.saturating_add(1)));
+        if skip > 0 {
+            cmd.arg(format!("--skip={skip}"));
+        }
     } else {
         cmd.args(["--max-count=1".to_string()]);
-        cmd.arg(format!(
-            "--skip={}",
-            limit.saturating_add(user_skip(tokens))
-        ));
+        cmd.arg(format!("--skip={}", limit.saturating_add(skip)));
     }
     cmd.args(log_probe_args(args, tokens));
 
@@ -1631,23 +1661,42 @@ fn walk_exceeds_limit(
     if !counting {
         return Some(!result.stdout.trim().is_empty());
     }
-    // One line per commit is RTK's own `--pretty` talking, but the user's `--stat`,
-    // `--name-only` or `--graph` still add lines of their own, so commits are counted by
-    // shape. ANSI first: `color.ui=always` puts an escape in front of the rail.
+    // One record per commit is RTK's own `--pretty` talking, but the user's `--stat`,
+    // `--name-only` or `--graph` still add records of their own, so commits are counted by
+    // shape. NUL separates records as much as the newline does: under `-z` it is the only
+    // thing that separates them, and read by line the whole walk is a single line matching
+    // nothing at all. Counted here rather than by keeping `-z` out of what the probe
+    // forwards, because `-z` is a short flag and the cluster it may be written in
+    // (`-zS<string>`) carries the bounds the probe needs. ANSI first: `color.ui=always` puts
+    // an escape in front of the rail.
     let shown = strip_ansi(&result.stdout)
-        .lines()
-        .filter(|line| is_commit_name(line))
+        .split(['\n', '\0'])
+        .filter(|record| is_commit_name(record))
         .count();
     Some(shown > limit)
 }
 
-/// True for a `--pretty=format:%H` line, ignoring any `--graph` rail in front of it. No upper
-/// bound on the length: a SHA-256 object name is 64 characters, and rejecting it counted every
-/// commit in such a repository as none.
-fn is_commit_name(line: &str) -> bool {
-    let name =
-        line.trim_matches(|c: char| c.is_whitespace() || matches!(c, '*' | '|' | '/' | '\\'));
-    name.len() >= 7 && name.chars().all(|c| c.is_ascii_hexdigit())
+/// True for a `--pretty=format:%H` record, which nothing the probe forwards may indent or
+/// decorate -- `--graph` and `--line-prefix`, the two that would, are dropped before it runs.
+///
+/// Two things that are not commit names have to stay out, because the counting probe turns
+/// each match into a commit it believes the user saw.
+///
+/// Exactly an object name's length, never merely hex-shaped: `%H` does not abbreviate, for
+/// neither `--abbrev-commit` nor `--abbrev=<n>` nor `core.abbrev` (that is `%h`), so anything
+/// shorter came from beside the walk. Under `-z`, `--name-only` puts every path in a record
+/// of its own at column 0, and a file called `cafebabe01` counted as a commit. A path of
+/// exactly 40 or 64 hex characters is indistinguishable from an object name here and still
+/// counts as one; nothing in a record says which it is, and the length is what turns away
+/// every path shaped like a name without being one.
+///
+/// And at column 0, never indented: a probe that keeps a merge-diff flag because the walk
+/// selects on it prints a patch, whose context lines carry one space in front -- enough that
+/// a file of 40-character checksums read as a walk of its own.
+fn is_commit_name(record: &str) -> bool {
+    let name = record.trim_end_matches(|c: char| c.is_whitespace());
+    matches!(name.len(), SHA1_NAME_LEN | SHA256_NAME_LEN)
+        && name.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// True when the walk is narrowed by what the commits changed rather than by where they are.
@@ -1670,27 +1719,55 @@ fn selects_by_diff(tokens: &[Token<'_>]) -> bool {
 /// The user arguments [`walk_exceeds_limit`] forwards: everything that bounds the walk, and
 /// nothing that decides what git does with it.
 ///
-/// Three classes come out. `--pretty`/`--format`/`--oneline`, because RTK's own `--pretty` is
+/// Four classes come out. `--pretty`/`--format`/`--oneline`, because RTK's own `--pretty` is
 /// written first and would otherwise lose the last-flag-wins arbitration -- an empty
 /// `--pretty=format:` then prints a commit as no bytes at all, which reads as "nothing left"
 /// (`--summary` and `--dirstat` print nothing of their own for a plain modification, so the
 /// probe would have only that format to go on). `--skip`, because RTK's has to absorb it for
-/// the same reason. And `--output=<file>`, which is not a format at all but a redirect: left
-/// in, the probe reruns it and truncates the file the command it follows has just written.
+/// the same reason. `--output=<file>`, which is not a format at all but a redirect: left in,
+/// the probe reruns it and truncates the file the command it follows has just written. And
+/// `--exit-code`/`--check`, whose whole job is to report what the diff held as a non-zero
+/// exit, which the probe reads as git having refused the command.
 ///
-/// The patch-shape flags go too, through the same strip the `show` header uses. The probe
-/// reads only whether git printed anything, so a patch is work with no answer in it -- and
-/// with `diff.external` or a `textconv` driver configured, work that runs the user's own
-/// program one more time than they asked for.
+/// Two decorations go as well, because both put something in front of every record and the
+/// commit names came back unreadable behind it: `--line-prefix`, whose text that is, and
+/// `--graph`, whose rail is drawn with characters a patch also starts its lines with -- `|`
+/// before a diff body, `-` before a removed line -- so no trimming rule can serve both.
+/// Dropping `--graph` is not free, though: it also turns on parent rewriting, which decides
+/// which commits the walk returns and not merely their order. [`walk_exceeds_limit`] asks for
+/// that back by other means.
+///
+/// `--reverse` goes because it moves `--max-count`. git drains the whole walk into a list
+/// before it starts showing commits, so the count bounds the walk rather than what came
+/// through the filter, and the probe measured something else entirely: 11 records became 6
+/// against a selection of 836. Dropping it is safe because how many commits a walk selects
+/// does not depend on the order they are shown in.
+///
+/// It does not make `--reverse` whole: RTK's own limit rides on the same git behaviour in the
+/// run the user sees, so a selection that fits under the cap but sits outside the newest
+/// commits the limit walked is shown as nothing at all. The probe cannot see that, because by
+/// then the count it measures is the honest one.
+///
+/// Everything that makes git print a patch goes too, by the token rather than by the argument
+/// -- see [`probe_prints_a_patch`], which spares the flags the walk is selecting on.
 fn log_probe_args(args: &[String], tokens: &[Token<'_>]) -> Vec<String> {
+    // What the walk selects on has to survive, so the count measures the walk the user ran.
+    let keep_merge_diffs = selects_by_diff(tokens);
     let mut dropped: Vec<usize> = Vec::new();
     for token in tokens {
-        if token.kind != TokenKind::Long
-            || !matches!(
-                token.text,
-                "pretty" | "format" | "oneline" | "skip" | "output" | "exit-code"
-            )
-        {
+        if token.kind != TokenKind::Long {
+            continue;
+        }
+        let drop = match token.text {
+            "pretty" | "format" | "oneline" | "skip" | "output" | "exit-code" | "check"
+            | "line-prefix" | "graph" | "reverse" => true,
+            // Dropped here rather than by the predicate below, which cannot take a flag's
+            // separate-token value with it: `--diff-merges combined` would leave the
+            // `combined` behind, and git would read it as a revision.
+            "diff-merges" => !keep_merge_diffs && diffs_merge_commits(token, tokens),
+            _ => false,
+        };
+        if !drop {
             continue;
         }
         dropped.push(token.source_index);
@@ -1709,7 +1786,58 @@ fn log_probe_args(args: &[String], tokens: &[Token<'_>]) -> Vec<String> {
         .collect();
     // Re-tokenized, because the drop above shifted every index `tokens` holds.
     let kept_tokens = tokenize_git_log_args(&kept);
-    args_without_patch_shape(&kept, &kept_tokens)
+    args_without_flags(&kept, &kept_tokens, |token| {
+        probe_prints_a_patch(token, &kept_tokens, keep_merge_diffs)
+    })
+}
+
+/// True when `token` gives a merge commit a diff of its own.
+///
+/// These decide which commits come back, not just how they are printed. A diff-based filter
+/// picks commits by the diffs the walk produces, so handing merges a diff changes the
+/// selection outright: on a repository whose merges carry content from neither parent,
+/// `git log -S evil` selects nothing and `git log -c -S evil` selects 149.
+fn diffs_merge_commits(token: &Token<'_>, tokens: &[Token<'_>]) -> bool {
+    // Every `--diff-merges` format but `off`/`none` gives merges a diff, `first-parent` and
+    // `separate` as much as the combined ones. git takes the value attached or as the next
+    // token, so both spellings are read.
+    if token.kind == TokenKind::Long && token.text == "diff-merges" {
+        return !matches!(token.value(tokens), None | Some("none" | "off"));
+    }
+    match token.kind {
+        TokenKind::Long => matches!(token.text, "cc" | "remerge-diff"),
+        TokenKind::Short => token.text == "c",
+        _ => false,
+    }
+}
+
+/// The shapes that make the probe print a patch, which is work with no answer in it -- and
+/// with `diff.external` or a `textconv` driver configured, work that runs the user's own
+/// program one more time than they asked for.
+///
+/// Wider than the strip the `diff`/`show` header uses: `--binary` and the merge-diff family
+/// print a patch without outranking a stat header, so that strip leaves them in. Selected
+/// here by token rather than dropped by `source_index` like the flags above, because `-c` is
+/// a short flag: `-cw` and `-cS<string>` put it in one argument with letters that bound the
+/// walk the probe has to measure.
+///
+/// `keep_merge_diffs` holds the merge-diff family back from the saving, because under a
+/// diff-based filter they are what the walk selects on and the counting probe's answer *is*
+/// that number. Dropping them there measured a walk the user never ran and went silent on a
+/// cap that had taken 139 of 149 selected commits away.
+fn probe_prints_a_patch(token: &Token<'_>, tokens: &[Token<'_>], keep_merge_diffs: bool) -> bool {
+    if diffs_merge_commits(token, tokens) {
+        return !keep_merge_diffs;
+    }
+    requests_patch_output(token) || (token.kind, token.text) == (TokenKind::Long, "binary")
+}
+
+/// True when the user asked for `--graph`, whose parent rewriting the probe has to reproduce
+/// even though the rail itself is dropped. Only before `--`: past it the word is a pathspec.
+fn wants_graph(tokens: &[Token<'_>]) -> bool {
+    arg_tokenizer::before_dashdash(tokens)
+        .iter()
+        .any(|t| t.kind == TokenKind::Long && t.text == "graph")
 }
 
 /// The user's own `--skip`, which RTK's has to absorb: git takes the last one, and RTK's is
@@ -1771,16 +1899,25 @@ fn run_log(
             &result.stdout,
             &result.stdout,
         );
-        // Before the exit check, not after: `--exit-code` makes a perfectly successful
-        // `git log` exit 1, and returning first left that cap unannounced. A command git
-        // really did refuse silences the notice anyway -- the probe fails on it too.
+        // Asked whenever git ran the walk, and never skipped on empty output:
+        // `--output=<file>` sends the whole run to a file and `--summary --pretty=format:`
+        // prints nothing for a plain modification, and both of those are capped walks with a
+        // notice owed. The probe walks the history a second time when a filter like `-S`
+        // matches little, which is the price of an answer that does not depend on what the
+        // run happened to print.
         //
-        // Asked unconditionally, never skipped on empty output: `--output=<file>` sends the
-        // whole run to a file and `--summary --pretty=format:` prints nothing for a plain
-        // modification, and both of those are capped walks with a notice owed. The probe
-        // walks the history a second time when a filter like `-S` matches little, which is
-        // the price of an answer that does not depend on what the run happened to print.
-        if walk_exceeds_limit(global_args, args, &tokens, DEFAULT_LOG_LIMIT) == Some(true) {
+        // A walk git refused is owed nothing, and the probe cannot be asked about it: it
+        // drops `--pretty`/`--format`/`--output` and so answers for a command git never
+        // accepted, which put the notice under git's own `fatal:` line. Failure is not the
+        // test, though: git refuses with 128 (fatal), 129 (usage) or 128 + n (a signal), and
+        // keeps the small codes for what the diff machinery found in a walk it ran and
+        // printed in full -- 1 for `--exit-code`'s differences, 2 for `--check`'s whitespace
+        // errors. Reading the boundary rather than the flags keeps the next such flag from
+        // silencing the notice again.
+        let refused = result.exit_code >= REFUSAL_EXIT_CODE;
+        if !refused
+            && walk_exceeds_limit(global_args, args, &tokens, DEFAULT_LOG_LIMIT) == Some(true)
+        {
             eprintln!(
                 "[rtk] capped at {} commits; pass -n <count> for more",
                 DEFAULT_LOG_LIMIT
@@ -6829,5 +6966,113 @@ To https://github.com/foo/bar.git
             input_tokens,
             output_tokens
         );
+    }
+
+    #[test]
+    fn a_commit_name_is_a_whole_object_name_at_column_zero() {
+        let sha1 = "b53fa8ead03f86409e0686c75ded61f3ec85be36";
+        let sha256 = "b53fa8ead03f86409e0686c75ded61f3ec85be36b53fa8ead03f86409e0686c7";
+        assert!(is_commit_name(sha1));
+        assert!(is_commit_name(sha256));
+        // A trailing newline is already gone by the time a record gets here, but `-z` and
+        // CRLF can leave other blanks behind.
+        assert!(is_commit_name(&format!("{sha1}\r")));
+
+        // Indented: diff context from a probe that kept a merge-diff flag, and the rail of a
+        // `--graph` that should never have reached the probe at all.
+        assert!(!is_commit_name(&format!(" {sha1}")));
+        assert!(!is_commit_name(&format!("* {sha1}")));
+        assert!(!is_commit_name(&format!("| {sha1}")));
+        // A removed line of a checksum file, which no leading-character rule could tell from
+        // a rail -- the reason `--graph` is dropped rather than trimmed.
+        assert!(!is_commit_name(&format!("-{sha1}")));
+
+        // Short of a whole object name: a path record under `-z`, or an abbreviation `%H`
+        // never produces.
+        assert!(!is_commit_name("cafebabe11"));
+        assert!(!is_commit_name("deadbeef1234567"));
+        assert!(!is_commit_name("plain 12"));
+        assert!(!is_commit_name(""));
+    }
+
+    fn probe_args(args: &[&str]) -> Vec<String> {
+        let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let tokens = tokenize_git_log_args(&owned);
+        log_probe_args(&owned, &tokens)
+    }
+
+    #[test]
+    fn log_probe_args_drops_the_merge_diff_family_off_an_unfiltered_walk() {
+        // Nothing here selects by diff, so a merge's patch is work with no answer in it.
+        assert!(probe_args(&["-p", "-c"]).is_empty());
+        assert!(probe_args(&["-p", "--cc"]).is_empty());
+        assert!(probe_args(&["-p", "--remerge-diff"]).is_empty());
+        assert!(probe_args(&["-p", "--diff-merges=c"]).is_empty());
+        assert!(probe_args(&["-p", "--diff-merges=remerge"]).is_empty());
+        // The separate-token spelling has to take its value with it, or git reads the
+        // `combined` left behind as a revision.
+        assert!(probe_args(&["-p", "--diff-merges", "combined"]).is_empty());
+        // `off` gives merges no diff, so there is nothing to save by dropping it.
+        assert_eq!(
+            probe_args(&["-p", "--diff-merges=off"]),
+            vec!["--diff-merges=off"]
+        );
+    }
+
+    #[test]
+    fn log_probe_args_keeps_the_merge_diff_family_on_a_diff_selected_walk() {
+        // Here they decide which commits come back, and the counting probe's answer is that
+        // number, so every spelling has to reach git unchanged.
+        for filter in [
+            vec!["-S", "evil"],
+            vec!["-G", "evil"],
+            vec!["--diff-filter=A"],
+        ] {
+            for flag in [
+                vec!["-c"],
+                vec!["--cc"],
+                vec!["--remerge-diff"],
+                vec!["--diff-merges=c"],
+                vec!["--diff-merges=dense-combined"],
+                vec!["--diff-merges", "remerge"],
+            ] {
+                let mut args = vec!["-p"];
+                args.extend_from_slice(&flag);
+                args.extend_from_slice(&filter);
+                let got = probe_args(&args);
+                let want: Vec<String> = flag
+                    .iter()
+                    .chain(filter.iter())
+                    .map(|a| a.to_string())
+                    .collect();
+                assert_eq!(got, want, "probe args for {args:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn log_probe_args_never_drops_a_short_flag_by_argument() {
+        // A cluster is rebuilt from its letters, so the ones that bound the walk survive.
+        // `-pw` and `-pS<string>` are the clusters git log actually accepts.
+        assert_eq!(probe_args(&["-pw"]), vec!["-w"]);
+        assert_eq!(probe_args(&["-pSNEEDLE"]), vec!["-SNEEDLE"]);
+        assert_eq!(
+            probe_args(&["-pw", "HEAD~5..HEAD"]),
+            vec!["-w", "HEAD~5..HEAD"]
+        );
+        // git refuses `-c` in a cluster outright, so the command has already failed by the
+        // time the probe runs; RTK still must not turn the rest of it into a bogus revision.
+        assert_eq!(probe_args(&["-cw"]), vec!["-w"]);
+
+        // Past `--` it is a pathspec, not a flag.
+        assert_eq!(probe_args(&["-p", "--", "-c"]), vec!["--", "-c"]);
+    }
+
+    #[test]
+    fn log_probe_args_drops_a_line_prefix_in_either_spelling() {
+        // Its text lands in front of every record, and the commit names came back unreadable
+        // behind it.
+        assert!(probe_args(&["-p", "--line-prefix=zz"]).is_empty());
+        assert!(probe_args(&["-p", "--line-prefix", "zz"]).is_empty());
     }
 }

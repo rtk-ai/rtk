@@ -5,8 +5,14 @@
 //! An integration test rather than a unit one because the failure it guards lives in the
 //! interaction between the user's own output format and RTK's ability to see what it printed:
 //! `--oneline` leaves no commit header to count, `log.decorate` and `--graph` disfigure the
-//! one that exists, `-z` runs the whole walk onto one line, and `--line-prefix` puts something
-//! in front of it. Every one of those once silenced the notice.
+//! one that exists, `-z` separates records with a NUL instead of a newline, and
+//! `--line-prefix` puts its own text in front of them. Every one of those once silenced the
+//! notice.
+//!
+//! The shapes that narrow a walk by what its commits changed get their own tests, because
+//! those take a different probe: `--skip` is applied before a diff-based filter, so the cap
+//! has to be measured by counting rather than by asking for the commit past it, and counting
+//! is what every mis-read record above breaks.
 
 use std::path::Path;
 use std::process::{Command, Output};
@@ -82,17 +88,19 @@ const CAPPED_SHAPES: &[&[&str]] = &[
     &["--patch-with-stat"],
     &["--patch-with-raw"],
     &["--binary"],
+    &["--cc"],
+    &["-c"],
+    &["--diff-merges=c"],
+    &["--diff-merges", "c"],
     &["--oneline", "-p"],
     &["--graph", "-p"],
     &["--stat", "-p"],
     &["--raw", "-z"],
-    &["--name-only"],
-    &["--name-status"],
-    &["--patch-with-stat"],
+    &["--name-only", "-z"],
+    &["--reverse", "-p"],
     &["--line-prefix=zz", "-p"],
     &["-p", "--", "f.txt"],
     &["-p", "f.txt"],
-    &["--patch-with-stat"],
 ];
 
 #[test]
@@ -257,6 +265,9 @@ fn the_probe_does_not_rerun_the_users_diff_program() {
         vec!["-p", "--ext-diff"],
         vec!["--patch-with-stat", "--ext-diff"],
         vec!["--patch-with-raw", "--ext-diff"],
+        vec!["--binary", "--ext-diff"],
+        vec!["--cc", "--ext-diff"],
+        vec!["-c", "--ext-diff"],
     ] {
         let _ = std::fs::remove_file(&counter);
         let mut cmd = Command::new(RTK_BIN);
@@ -363,14 +374,22 @@ fn repo_with_a_needle(commits: usize, needles: usize) -> Repo {
 }
 
 /// How many commits `git log` itself selects for these arguments.
+///
+/// `--no-patch`, and one line counted per object name rather than per line of output: the
+/// merge-diff flags print a combined patch that `--oneline` does not suppress, and counting
+/// raw lines read 14 selected commits as 149.
 fn native_commit_count(repo: &Repo, args: &[&str]) -> usize {
     let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(&repo.path).arg("log").arg("--oneline");
+    cmd.arg("-C").arg(&repo.path).arg("log");
+    cmd.args(["--no-patch", "--pretty=format:%H"]);
     cmd.args(args);
     isolate(&mut cmd, &repo.home);
     let out = cmd.output().expect("run git");
-    assert!(out.status.success(), "git log --oneline {args:?} failed");
-    String::from_utf8_lossy(&out.stdout).lines().count()
+    assert!(out.status.success(), "git log {args:?} failed");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| matches!(line.len(), 40 | 64) && line.chars().all(|c| c.is_ascii_hexdigit()))
+        .count()
 }
 
 #[test]
@@ -413,4 +432,566 @@ fn a_command_git_refuses_reports_gits_error_and_no_cap_notice() {
         !stderr.trim().is_empty(),
         "git's own error must reach the user"
     );
+}
+
+/// A repo where the first `needles` commits each *add* an occurrence of the string, so a
+/// pickaxe selects one commit per occurrence rather than only the two that change its
+/// presence -- the shape needed to put a diff-selected walk past the cap.
+fn repo_growing_a_needle(commits: usize, needles: usize) -> Repo {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("repo");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&path).expect("mkdir repo");
+    std::fs::create_dir_all(&home).expect("mkdir home");
+    git_ok(&path, &home, &["init", "-q", "-b", "main"]);
+    let mut body = String::new();
+    for i in 0..commits {
+        if i < needles {
+            body.push_str(&format!("NEEDLE {i}\n"));
+        } else {
+            body.push_str(&format!("plain {i}\n"));
+        }
+        std::fs::write(path.join("f.txt"), &body).expect("write");
+        git_ok(&path, &home, &["add", "f.txt"]);
+        git_ok(&path, &home, &["commit", "-qm", &format!("c{i}")]);
+    }
+    Repo {
+        _dir: dir,
+        path,
+        home,
+    }
+}
+
+#[test]
+fn a_nul_separated_diff_selected_walk_announces_the_cap() {
+    // `-z` terminates each record with a NUL instead of a newline, so a walk read by line is
+    // one line holding no commit -- and the diff-selected probe counts commits rather than
+    // asking whether one came back.
+    let repo = repo_growing_a_needle(25, 17);
+    for filter in [vec!["-S", "NEEDLE"], vec!["-G", "NEEDLE"]] {
+        let native = native_commit_count(&repo, &filter);
+        assert!(native > 10, "{filter:?} must select past the cap: {native}");
+        for shape in [
+            vec!["-p", "-z"],
+            vec!["--name-only", "-z"],
+            vec!["-z", "-p"],
+        ] {
+            let mut args = shape.clone();
+            args.extend_from_slice(&filter);
+            let out = rtk_log(&repo.path, &repo.home, &args);
+            assert!(out.status.success(), "rtk git log {args:?} failed");
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                stderr.contains(NOTICE),
+                "{args:?} selects {native} commits; stderr was {stderr:?}"
+            );
+        }
+    }
+
+    // `-z` written inside the cluster that carries the pickaxe: the probe needs `-S` and so
+    // cannot drop the argument the two share.
+    let out = rtk_log(&repo.path, &repo.home, &["-p", "-zSNEEDLE"]);
+    assert!(out.status.success(), "rtk git log -p -zSNEEDLE failed");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(NOTICE), "clustered -zS: {stderr:?}");
+
+    // Still silent when the filter selects less than the cap: the NUL split must not invent
+    // commits any more than the newline one did.
+    let shallow = repo_growing_a_needle(25, 3);
+    let out = rtk_log(&shallow.path, &shallow.home, &["-p", "-z", "-S", "NEEDLE"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("[rtk]"), "three matches: {stderr:?}");
+}
+
+#[test]
+fn a_walk_git_refused_carries_no_cap_notice() {
+    // The probe drops `--pretty`/`--format`/`--output`, so it answers for a command git may
+    // have rejected outright -- and the notice would then describe a walk nobody saw.
+    let repo = repo_with(25);
+    // A redirect into a directory that does not exist: git refuses it, and the probe drops
+    // `--output` and would not.
+    let unwritable = format!(
+        "--output={}",
+        repo.path.join("nodir").join("o.txt").display()
+    );
+    for shape in [
+        vec!["-p", "--pretty=bogus"],
+        vec!["-p", "--format=bogus"],
+        vec!["-p", unwritable.as_str()],
+    ] {
+        let out = rtk_log(&repo.path, &repo.home, &shape);
+        assert!(!out.status.success(), "git must refuse {shape:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !stderr.contains("[rtk]"),
+            "cap notice on a refused command {shape:?}: {stderr:?}"
+        );
+        assert!(
+            !stderr.trim().is_empty(),
+            "git's own error must reach the user for {shape:?}"
+        );
+    }
+}
+
+/// A repo whose every commit adds a line with trailing whitespace, so `--check` has something
+/// to report and exits non-zero on a walk git ran in full.
+fn repo_with_whitespace_errors(commits: usize) -> Repo {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("repo");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&path).expect("mkdir repo");
+    std::fs::create_dir_all(&home).expect("mkdir home");
+    git_ok(&path, &home, &["init", "-q", "-b", "main"]);
+    let mut body = String::new();
+    for i in 0..commits {
+        body.push_str(&format!("line {i} \n"));
+        std::fs::write(path.join("f.txt"), &body).expect("write");
+        git_ok(&path, &home, &["add", "f.txt"]);
+        git_ok(&path, &home, &["commit", "-qm", &format!("c{i}")]);
+    }
+    Repo {
+        _dir: dir,
+        path,
+        home,
+    }
+}
+
+#[test]
+fn a_check_run_still_announces_the_cap() {
+    // `--check` reports the whitespace errors it found as a non-zero exit, on a walk git ran
+    // and printed in full -- neither the probe nor the notice may read that as a refusal.
+    let repo = repo_with_whitespace_errors(25);
+    let out = rtk_log(&repo.path, &repo.home, &["-p", "--check"]);
+    assert!(!out.status.success(), "--check must report the whitespace");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(NOTICE), "{stderr:?}");
+
+    // And still says nothing when the cap cut nothing.
+    let short = repo_with_whitespace_errors(3);
+    let out = rtk_log(&short.path, &short.home, &["-p", "--check"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("[rtk]"), "three commits: {stderr:?}");
+}
+
+/// A repo whose tracked file is a list of full-length object names, the way a checksum file
+/// or a lockfile carries them, with a needle in three of its twenty commits.
+fn repo_of_checksums() -> Repo {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("repo");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&path).expect("mkdir repo");
+    std::fs::create_dir_all(&home).expect("mkdir home");
+    git_ok(&path, &home, &["init", "-q", "-b", "main"]);
+
+    let checksum = |n: usize| format!("{n:040x}");
+    let mut body = String::new();
+    for i in 0..10 {
+        body.push_str(&format!("{}\n", checksum(0xdead_0000 + i)));
+    }
+    let commit = |body: &str, message: &str| {
+        std::fs::write(path.join("f.txt"), body).expect("write");
+        git_ok(&path, &home, &["add", "f.txt"]);
+        git_ok(&path, &home, &["commit", "-qm", message]);
+    };
+    commit(&body, "base");
+    for i in 0..3 {
+        body.push_str(&format!("NEEDLE {i}\n"));
+        for j in 1..4 {
+            body.push_str(&format!("{}\n", checksum(0xcafe_0000 + i * 16 + j)));
+        }
+        commit(&body, &format!("n{i}"));
+    }
+    for i in 0..16 {
+        body.push_str(&format!("plain {i}\n"));
+        commit(&body, &format!("p{i}"));
+    }
+    Repo {
+        _dir: dir,
+        path,
+        home,
+    }
+}
+
+#[test]
+fn a_file_of_bare_hex_words_is_not_counted_as_a_walk() {
+    // A diff-based filter keeps the merge-diff flags in what the probe forwards, because the
+    // walk is selecting on them, so the probe still prints a patch here -- and its context
+    // lines are these checksums with one space in front. Three commits selected out of
+    // twenty must not read as more than the cap.
+    let repo = repo_of_checksums();
+    let path = &repo.path;
+    let home = &repo.home;
+
+    for shape in [
+        vec!["--binary", "-S", "NEEDLE"],
+        vec!["--cc", "-S", "NEEDLE"],
+        vec!["-c", "-S", "NEEDLE"],
+        vec!["-p", "-S", "NEEDLE"],
+    ] {
+        let out = rtk_log(path, home, &shape);
+        assert!(out.status.success(), "rtk git log {shape:?} failed");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !stderr.contains("[rtk]"),
+            "three commits selected, cap of ten: {shape:?} said {stderr:?}"
+        );
+    }
+}
+
+/// A repo whose merges carry content that is in neither parent, so the merge-diff flags
+/// change which commits a diff-based filter selects rather than only how they are printed.
+fn repo_with_evil_merges(rounds: usize) -> Repo {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("repo");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&path).expect("mkdir repo");
+    std::fs::create_dir_all(&home).expect("mkdir home");
+    git_ok(&path, &home, &["init", "-q", "-b", "main"]);
+    let commit = |message: &str| {
+        git_ok(&path, &home, &["add", "-A"]);
+        git_ok(&path, &home, &["commit", "-qm", message]);
+    };
+    std::fs::write(path.join("f.txt"), "base\n").expect("write");
+    commit("base");
+    for i in 0..rounds {
+        let branch = format!("side{i}");
+        git_ok(&path, &home, &["checkout", "-q", "-b", &branch, "main"]);
+        std::fs::write(path.join("f.txt"), format!("base\nside {i}\n")).expect("write");
+        commit(&format!("s{i}"));
+        git_ok(&path, &home, &["checkout", "-q", "main"]);
+        std::fs::write(path.join("g.txt"), format!("main {i}\n")).expect("write");
+        commit(&format!("m{i}"));
+        git_ok(
+            &path,
+            &home,
+            &["merge", "-q", "--no-commit", "--no-ff", &branch],
+        );
+        // The evil part: content the merge introduces that neither parent has, which only a
+        // walk that diffs merges can see.
+        std::fs::write(path.join("h.txt"), format!("evil {i}\n")).expect("write");
+        commit(&format!("merge s{i}"));
+    }
+    Repo {
+        _dir: dir,
+        path,
+        home,
+    }
+}
+
+#[test]
+fn a_merge_diff_walk_is_measured_with_its_merges_still_in_it() {
+    // `-c`, `--cc`, `--remerge-diff` and `--diff-merges=<anything but off>` hand merge commits
+    // a diff of their own, and a diff-based filter selects on the diffs the walk produces --
+    // so these decide which commits come back, not just how they look. The counting probe's
+    // answer *is* that number, so it has to run the walk with them still in it.
+    let repo = repo_with_evil_merges(14);
+    let plain = native_commit_count(&repo, &["-S", "evil"]);
+    assert_eq!(plain, 0, "without a merge diff the needle is invisible");
+
+    let mut past_the_cap = 0;
+    for flag in [
+        vec!["-c"],
+        vec!["--cc"],
+        vec!["--remerge-diff"],
+        vec!["--diff-merges=c"],
+        vec!["--diff-merges=remerge"],
+        vec!["--diff-merges", "combined"],
+    ] {
+        for filter in [vec!["-S", "evil"], vec!["--diff-filter=A"]] {
+            let mut selecting = flag.clone();
+            selecting.extend_from_slice(&filter);
+            let native = native_commit_count(&repo, &selecting);
+            assert!(native > 0, "{selecting:?} must select something");
+            past_the_cap += usize::from(native > 10);
+
+            let mut args = vec!["-p"];
+            args.extend_from_slice(&selecting);
+            let out = rtk_log(&repo.path, &repo.home, &args);
+            assert!(out.status.success(), "rtk git log {args:?} failed");
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(
+                stderr.contains(NOTICE),
+                native > 10,
+                "{args:?} selects {native} commits; stderr was {stderr:?}"
+            );
+        }
+    }
+    assert!(
+        past_the_cap >= 8,
+        "only {past_the_cap} of the twelve combinations reached past the cap, so the \
+         blocker they pin would go unnoticed"
+    );
+
+    // And still silent when those same flags leave the selection under the cap.
+    let small = repo_with_evil_merges(2);
+    let native = native_commit_count(&small, &["-c", "-S", "evil"]);
+    assert!(native <= 10, "two rounds must stay under the cap: {native}");
+    let out = rtk_log(&small.path, &small.home, &["-p", "-c", "-S", "evil"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("[rtk]"), "{native} selected: {stderr:?}");
+}
+
+#[test]
+fn a_path_that_looks_like_an_object_name_is_not_counted_as_a_commit() {
+    // Under `-z` a name-listing shape puts every path in a record of its own at column 0,
+    // where no indent marks it out from a commit name. Only its length does: `%H` never
+    // abbreviates, so anything shorter than a whole object name came from beside the walk.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("repo");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&path).expect("mkdir repo");
+    std::fs::create_dir_all(&home).expect("mkdir home");
+    git_ok(&path, &home, &["init", "-q", "-b", "main"]);
+
+    let hex_names: Vec<String> = (1..=5)
+        .map(|i| format!("cafebabe0{i}"))
+        .chain(std::iter::once("deadbeef01".to_string()))
+        .collect();
+    let commit = |message: &str| {
+        git_ok(&path, &home, &["add", "-A"]);
+        git_ok(&path, &home, &["commit", "-qm", message]);
+    };
+    for name in &hex_names {
+        std::fs::write(path.join(name), "seed\n").expect("write");
+    }
+    commit("base");
+    for i in 0..3 {
+        // Every hex-named file in the same commit: `--pickaxe-all` then lists all of them,
+        // so one selected commit yields a whole run of path records.
+        for name in &hex_names {
+            let target = path.join(name);
+            let body = std::fs::read_to_string(&target).expect("read") + &format!("NEEDLE {i}\n");
+            std::fs::write(&target, body).expect("write");
+        }
+        commit(&format!("n{i}"));
+    }
+    for i in 0..16 {
+        let target = path.join(&hex_names[5]);
+        let body = std::fs::read_to_string(&target).expect("read") + &format!("plain {i}\n");
+        std::fs::write(&target, body).expect("write");
+        commit(&format!("p{i}"));
+    }
+
+    let repo = Repo {
+        _dir: dir,
+        path,
+        home,
+    };
+    let filter = ["-S", "NEEDLE", "--pickaxe-all"];
+    let native = native_commit_count(&repo, &filter);
+    assert_eq!(native, 3, "the needle must select three commits");
+
+    for shape in [
+        vec!["--name-only", "-z"],
+        vec!["--name-status", "-z"],
+        vec!["--raw", "-z"],
+    ] {
+        let mut args = shape.clone();
+        args.extend_from_slice(&filter);
+        let out = rtk_log(&repo.path, &repo.home, &args);
+        assert!(out.status.success(), "rtk git log {args:?} failed");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !stderr.contains("[rtk]"),
+            "{native} commits selected, cap of ten: {args:?} said {stderr:?}"
+        );
+    }
+}
+
+#[test]
+fn a_line_prefix_does_not_hide_a_diff_selected_cap() {
+    // `--line-prefix` puts its own text in front of every record the probe reads, so the
+    // commit names came back unreadable behind it and the cap went unannounced.
+    let repo = repo_growing_a_needle(25, 17);
+    let filter = ["-S", "NEEDLE"];
+    let native = native_commit_count(&repo, &filter);
+    assert!(native > 10, "{filter:?} must select past the cap: {native}");
+
+    for prefix in [vec!["--line-prefix=zz"], vec!["--line-prefix", "zz"]] {
+        let mut args = vec!["-p"];
+        args.extend_from_slice(&prefix);
+        args.extend_from_slice(&filter);
+        let out = rtk_log(&repo.path, &repo.home, &args);
+        assert!(out.status.success(), "rtk git log {args:?} failed");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(NOTICE),
+            "{args:?} selects {native} commits; stderr was {stderr:?}"
+        );
+    }
+}
+
+#[test]
+fn a_graphed_diff_selected_walk_is_measured_like_any_other() {
+    // `--graph` draws its rail with the characters a patch also starts its lines with, so no
+    // trimming rule tells a commit from diff content behind one. The probe drops it instead,
+    // which it can because the rail only reorders the walk.
+    let repo = repo_growing_a_needle(25, 17);
+    let filter = ["-S", "NEEDLE"];
+    let native = native_commit_count(&repo, &filter);
+    assert!(native > 10, "{filter:?} must select past the cap: {native}");
+
+    for shape in [
+        vec!["--graph", "-p"],
+        vec!["--graph", "--cc"],
+        vec!["-c", "--graph"],
+    ] {
+        let mut args = shape.clone();
+        args.extend_from_slice(&filter);
+        let out = rtk_log(&repo.path, &repo.home, &args);
+        assert!(out.status.success(), "rtk git log {args:?} failed");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(NOTICE),
+            "{args:?} selects {native} commits; stderr was {stderr:?}"
+        );
+    }
+
+    // And a graphed walk whose filter selects under the cap still says nothing, even when the
+    // file it walks is full of things shaped like object names.
+    let checksums = repo_of_checksums();
+    let shallow = ["-S", "NEEDLE"];
+    let few = native_commit_count(&checksums, &shallow);
+    assert_eq!(few, 3, "the needle must select three commits");
+    for shape in [vec!["--graph", "--cc"], vec!["--graph", "-c"]] {
+        let mut args = shape.clone();
+        args.extend_from_slice(&shallow);
+        let out = rtk_log(&checksums.path, &checksums.home, &args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !stderr.contains("[rtk]"),
+            "{few} selected, cap of ten: {args:?} said {stderr:?}"
+        );
+    }
+}
+
+#[test]
+fn a_diff_selected_walk_under_a_user_skip_is_measured_from_where_they_started() {
+    // git counts `--skip` before applying a diff-based filter, so the counting probe has to
+    // reproduce the user's own skip: without it the count covers commits they had already
+    // skipped past, and a walk the cap never touched announced one.
+    let repo = repo_growing_a_needle(25, 17);
+    for (skip, want_notice) in [("20", false), ("5", true)] {
+        let filter = vec!["--skip", skip, "-S", "NEEDLE"];
+        let native = native_commit_count(&repo, &filter);
+        assert_eq!(
+            native > 10,
+            want_notice,
+            "skip={skip} leaves {native} selected"
+        );
+
+        let mut args = vec!["-p"];
+        args.extend_from_slice(&filter);
+        let out = rtk_log(&repo.path, &repo.home, &args);
+        assert!(out.status.success(), "rtk git log {args:?} failed");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            stderr.contains(NOTICE),
+            want_notice,
+            "{args:?} leaves {native} selected; stderr was {stderr:?}"
+        );
+    }
+}
+
+/// A repo whose merges leave one path untouched, so those merges are TREESAME to both their
+/// parents for it. Under `--full-history` they are kept only when parent rewriting is on.
+fn repo_with_treesame_merges(rounds: usize) -> Repo {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("repo");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&path).expect("mkdir repo");
+    std::fs::create_dir_all(&home).expect("mkdir home");
+    git_ok(&path, &home, &["init", "-q", "-b", "main"]);
+    let commit = |message: &str| {
+        git_ok(&path, &home, &["add", "-A"]);
+        git_ok(&path, &home, &["commit", "-qm", message]);
+    };
+    std::fs::write(path.join("p.txt"), "p\n").expect("write");
+    commit("base");
+    for i in 0..rounds {
+        let branch = format!("side{i}");
+        git_ok(&path, &home, &["checkout", "-q", "-b", &branch, "main"]);
+        std::fs::write(path.join(format!("side{i}.txt")), "s\n").expect("write");
+        commit(&format!("s{i}"));
+        git_ok(&path, &home, &["checkout", "-q", "main"]);
+        std::fs::write(path.join(format!("main{i}.txt")), "m\n").expect("write");
+        commit(&format!("m{i}"));
+        git_ok(
+            &path,
+            &home,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "-m",
+                &format!("merge s{i}"),
+                &branch,
+            ],
+        );
+    }
+    Repo {
+        _dir: dir,
+        path,
+        home,
+    }
+}
+
+#[test]
+fn a_graphed_walk_keeps_the_commits_its_parent_rewriting_adds() {
+    // `--graph` is not only a rail: it turns on parent rewriting, which decides which commits
+    // the walk returns. Dropping it for the probe without asking for that back measured a
+    // different walk -- one path here holds a single commit without the rewriting and
+    // fifteen with it.
+    let repo = repo_with_treesame_merges(14);
+    let plain = native_commit_count(&repo, &["--full-history", "--", "p.txt"]);
+    let rewritten = native_commit_count(&repo, &["--full-history", "--parents", "--", "p.txt"]);
+    assert_eq!(plain, 1, "without parent rewriting the path has one commit");
+    assert!(
+        rewritten > 10,
+        "with it the merges come back too: {rewritten}"
+    );
+
+    let out = rtk_log(
+        &repo.path,
+        &repo.home,
+        &["--graph", "--full-history", "--stat", "--", "p.txt"],
+    );
+    assert!(out.status.success(), "rtk git log failed");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(NOTICE),
+        "the graphed walk holds {rewritten} commits; stderr was {stderr:?}"
+    );
+
+    // And without the rail the same path is one commit, which the cap never touches.
+    let out = rtk_log(
+        &repo.path,
+        &repo.home,
+        &["--full-history", "--stat", "--", "p.txt"],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("[rtk]"), "one commit: {stderr:?}");
+}
+
+#[test]
+fn a_reversed_diff_selected_walk_is_still_measured_by_what_it_selects() {
+    // `--reverse` makes git drain the whole walk before it shows anything, so `--max-count`
+    // bounds the walk rather than what came through the filter -- the counting probe asked
+    // for eleven and was handed a number with no relation to the selection.
+    let repo = repo_growing_a_needle(25, 17);
+    let filter = ["-S", "NEEDLE"];
+    let native = native_commit_count(&repo, &filter);
+    assert!(native > 10, "{filter:?} must select past the cap: {native}");
+
+    for shape in [vec!["-p", "--reverse"], vec!["--reverse", "--stat"]] {
+        let mut args = shape.clone();
+        args.extend_from_slice(&filter);
+        let out = rtk_log(&repo.path, &repo.home, &args);
+        assert!(out.status.success(), "rtk git log {args:?} failed");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(NOTICE),
+            "{args:?} selects {native} commits; stderr was {stderr:?}"
+        );
+    }
 }
