@@ -1,0 +1,15 @@
+# nfpm config for the Alpine .apk release asset (see build-apk in workflows/release.yml).
+# Packages the static x86_64-unknown-linux-musl binary, so there are no runtime deps.
+name: rtk
+arch: amd64 # nfpm maps this to x86_64 for apk
+platform: linux
+version: ${VERSION}
+maintainer: Patrick Szymkowiak
+description: Rust Token Killer - High-performance CLI proxy to minimize LLM token consumption
+homepage: https://www.rtk-ai.app
+license: Apache-2.0
+contents:
+  - src: target/x86_64-unknown-linux-musl/release/rtk
+    dst: /usr/bin/rtk
+    file_info:
+      mode: 0755
