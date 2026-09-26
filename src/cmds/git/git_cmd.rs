@@ -1547,7 +1547,20 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
 
 /// RTK's default `git log` limit, applied whenever the user names none.
 const DEFAULT_LOG_LIMIT: usize = 10;
+/// Closes every commit in the format RTK asks for when the user named none, which is what
+/// lets the filtered path find commit boundaries in what git printed.
+const LOG_ENTRY_MARKER: &str = "---END---";
 const DEFAULT_LOG_LIMIT_ARG: &str = "-10";
+/// The limit the filtered path allows a user-chosen format, which is counted in lines: a
+/// compact shape fits many more commits in the same reading budget.
+const COMPACT_LOG_LIMIT: usize = 50;
+
+/// The one wording for a cap RTK applied, so both paths say the same thing and name the same
+/// escape. `unit` is what was counted: commits where RTK knows where they end, lines where
+/// the shape is the user's and it does not.
+fn cap_notice(limit: usize, unit: &str) -> String {
+    format!("[rtk] capped at {limit} {unit}; pass -n <count> for more")
+}
 
 /// `git log <args>` for the raw passthrough, carrying RTK's default limit unless the user named
 /// one. [`run_passthrough`] streams straight to the terminal, so the limit has to be in the args
@@ -1615,6 +1628,14 @@ fn walk_exceeds_limit(
     let counting = selects_by_diff(tokens);
     if counting {
         cmd.arg(format!("--max-count={}", limit.saturating_add(1)));
+        // The user's `--skip` is stripped from what is forwarded because the other branch
+        // writes one of RTK's own and git takes the last. This branch writes none, so it has
+        // to come back: without it the probe counts matches the user is already past, and a
+        // pickaxe walk that returned everything it selected claimed a cap.
+        let skip = user_skip(tokens);
+        if skip > 0 {
+            cmd.arg(format!("--skip={}", skip));
+        }
     } else {
         cmd.args(["--max-count=1".to_string()]);
         cmd.arg(format!(
@@ -1739,6 +1760,191 @@ fn bounds_the_walk(tokens: &[Token<'_>]) -> bool {
     })
 }
 
+/// True when `--output=<file>` sends the walk to a file instead of to RTK, which leaves RTK
+/// with nothing to read it out of.
+fn redirects_output(tokens: &[Token<'_>]) -> bool {
+    tokens
+        .iter()
+        .any(|t| t.kind == TokenKind::Long && t.text == "output")
+}
+
+/// True when the filtered path can ask git for one commit past its limit and drop it again,
+/// which answers whether the cap cut without walking the history twice.
+///
+/// Two shapes cannot. `--output=<file>` puts the walk in the user's file, where the extra
+/// commit would stay. And `--reverse` flips the order *after* the limit has chosen the
+/// commits, so the extra one arrives first and dropping the overflow would drop HEAD.
+fn fetches_one_past_the_limit(tokens: &[Token<'_>]) -> bool {
+    !redirects_output(tokens)
+        && !tokens
+            .iter()
+            .any(|t| t.kind == TokenKind::Long && t.text == "reverse")
+}
+
+/// True when the user chose the output shape, which is what decides whether RTK can find the
+/// commit boundaries in what git printed.
+fn log_has_format_flag(tokens: &[Token<'_>]) -> bool {
+    tokens
+        .iter()
+        .any(|t| t.kind == TokenKind::Long && matches!(t.text, "format" | "oneline" | "pretty"))
+}
+
+/// True when the user asked for merge commits, so RTK must not add `--no-merges`. Any
+/// `--min-parents=N` with N >= 2 asks for merges; pinning it to 2 let `--min-parents=3`
+/// collect RTK's `--no-merges` as well, and the two constraints select nothing at all.
+fn log_wants_merges(tokens: &[Token<'_>]) -> bool {
+    tokens.iter().any(|t| {
+        t.kind == TokenKind::Long
+            && (t.text == "merges"
+                || t.text == "no-merges"
+                || (t.text == "min-parents"
+                    && t.attached
+                        .is_some_and(|v| v.parse::<u32>().is_ok_and(|n| n >= 2))))
+    })
+}
+
+/// The arguments [`walk_exceeds_limit`] is asked about from the filtered path: the user's own,
+/// behind RTK's `--no-merges` when the filtered path put one on the command it ran.
+///
+/// Without it the probe measures a wider walk than the one that was printed, and a history of
+/// merges over a handful of ordinary commits claims a cap that never cut. It goes *first*
+/// because git refuses an option that follows a positional -- and because a bare `--` in the
+/// user's arguments would otherwise turn it into a second pathspec, where it would not error
+/// at all and would quietly put the merges back.
+fn filtered_probe_args(args: &[String], wants_merges: bool) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len() + 1);
+    if !wants_merges {
+        out.push("--no-merges".to_string());
+    }
+    out.extend(args.iter().cloned());
+    out
+}
+
+/// Whether [`filter_log_output`] left content behind: it renders the first `limit`
+/// marker-delimited blocks and no more, so anything past that window with something in it was
+/// dropped.
+///
+/// Deliberately not a commit count on either side of the window. A commit whose message quotes
+/// the marker splits in two, and then the render really does drop a commit even though the
+/// history is shorter than the cap -- while a stray marker at the very end of the last block
+/// shown drops nothing at all. Asking what the render discarded gets both right; counting
+/// markers, or counting non-empty blocks, each got one of them wrong.
+fn render_dropped_entries(stdout: &str, limit: usize) -> bool {
+    stdout
+        .split(LOG_ENTRY_MARKER)
+        .skip(limit)
+        .any(|block| !block.trim().is_empty())
+}
+
+/// What the run would have printed had RTK not asked for one entry past its limit. The extra
+/// one is never rendered, so it does not belong on the raw side of the savings ledger either.
+///
+/// Only trims when there is something past the limit to trim, so a walk that ended on its own
+/// is measured exactly as before.
+fn raw_through_the_limit(stdout: &str, limit: usize) -> &str {
+    let mut markers = stdout.match_indices(LOG_ENTRY_MARKER);
+    match (markers.nth(limit.saturating_sub(1)), markers.next()) {
+        (Some((at, marker)), Some(_)) => &stdout[..at + marker.len()],
+        _ => stdout,
+    }
+}
+
+/// An upper bound on the commits git returned, for a shape RTK did not choose and so cannot
+/// read commit boundaries out of. `None` when nothing can be concluded.
+///
+/// Git separates commits with a newline, or with a NUL under `-z` -- which runs the whole walk
+/// onto one line, and is why counting lines will not do here. A `--pretty=format:` template
+/// leaves the last commit unterminated, so the separators can be one short of the commits,
+/// never more than one and never the other way round.
+///
+/// The exception is a template that renders to nothing at all: `--format=` prints fifty
+/// commits as zero bytes, separators and all. A template that merely *expands* to nothing
+/// still gets its separator, so for every format RTK can see prints something, empty output
+/// bounds the walk at zero.
+fn at_most_commits(stdout: &str, tokens: &[Token<'_>]) -> Option<usize> {
+    if stdout.is_empty() {
+        return format_certainly_prints(tokens).then_some(0);
+    }
+    Some(stdout.split(['\n', '\0']).count())
+}
+
+/// True when the arguments alone show that the user's format renders a commit as at least one
+/// byte, which is what lets empty output mean an empty walk.
+///
+/// A literal template says so: it is written out, and any non-empty one carries its separator.
+/// A bare name does not -- `--pretty=<name>` reaches `pretty.<name>` in the user's config,
+/// which can resolve to `tformat:` and print nothing at all, so those are left undecided
+/// rather than read as an empty history.
+fn format_certainly_prints(tokens: &[Token<'_>]) -> bool {
+    let Some(chosen) = tokens
+        .iter()
+        .rfind(|t| t.kind == TokenKind::Long && matches!(t.text, "format" | "pretty" | "oneline"))
+    else {
+        return false;
+    };
+    if chosen.text == "oneline" {
+        return true;
+    }
+    chosen.value(tokens).is_some_and(|value| {
+        let spelled_out = value.starts_with("format:") || value.starts_with("tformat:");
+        let template = value
+            .strip_prefix("format:")
+            .or_else(|| value.strip_prefix("tformat:"))
+            .unwrap_or(value);
+        !template.is_empty() && (spelled_out || template.contains('%'))
+    })
+}
+
+/// The notice the filtered path owes for the limit it injected, or `None` when that limit took
+/// nothing away.
+///
+/// Where RTK chose the format it reads the answer off the run it already made: it asked git
+/// for one commit more than it shows and closes every commit with a marker, so the extra one
+/// being there is the whole answer. That costs no second walk, which matters most for exactly
+/// the walks where a second one is expensive -- `-S`, `-G` and the other diff-based filters
+/// re-scan the whole history.
+///
+/// The shapes that cannot be read that way have to ask git, but only where the run leaves the
+/// question open.
+/// Under a format the user chose, the cap is counted in lines, because RTK cannot find the
+/// commit boundaries: a multi-line `--pretty` loses whole commits long before the fiftieth
+/// line, and that cut is visible in the output. Short of the cap the run still settles it,
+/// through the separator bound rather than the line count. Only between the two does the
+/// probe run. And `--output=<file>` sends the walk somewhere RTK can neither filter nor
+/// count, so there it always does.
+fn filtered_cap_notice(
+    global_args: &[String],
+    args: &[String],
+    tokens: &[Token<'_>],
+    stdout: &str,
+    limit: usize,
+) -> Option<String> {
+    let probed = || {
+        let probe_args = filtered_probe_args(args, log_wants_merges(tokens));
+        let probe_tokens = tokenize_git_log_args(&probe_args);
+        walk_exceeds_limit(global_args, &probe_args, &probe_tokens, limit) == Some(true)
+    };
+
+    if log_has_format_flag(tokens) {
+        if stdout.lines().count() > limit {
+            return Some(cap_notice(limit, "lines"));
+        }
+        // Short of the limit git was given, so git ran out of history before the limit could
+        // bite and no second walk is needed to say so. Worth the bound: this is where a
+        // `-S`/`-G` filter that matches little ends up, and re-walking for it costs as much
+        // as the command did. `--output=<file>` is excluded because RTK never saw that walk
+        // at all; the bound would read the empty stdout as an empty history.
+        if !redirects_output(tokens) && at_most_commits(stdout, tokens).is_some_and(|n| n < limit) {
+            return None;
+        }
+        return probed().then(|| cap_notice(limit, "commits"));
+    }
+    if !fetches_one_past_the_limit(tokens) {
+        return probed().then(|| cap_notice(limit, "commits"));
+    }
+    render_dropped_entries(stdout, limit).then(|| cap_notice(limit, "commits"))
+}
+
 fn run_log(
     args: &[String],
     _max_lines: Option<usize>,
@@ -1781,10 +1987,7 @@ fn run_log(
         // walks the history a second time when a filter like `-S` matches little, which is
         // the price of an answer that does not depend on what the run happened to print.
         if walk_exceeds_limit(global_args, args, &tokens, DEFAULT_LOG_LIMIT) == Some(true) {
-            eprintln!(
-                "[rtk] capped at {} commits; pass -n <count> for more",
-                DEFAULT_LOG_LIMIT
-            );
+            eprintln!("{}", cap_notice(DEFAULT_LOG_LIMIT, "commits"));
         }
         if !result.success() {
             return Ok(result.exit_code);
@@ -1797,10 +2000,7 @@ fn run_log(
     let mut cmd = git_cmd(global_args);
     cmd.arg("log");
 
-    // Check if user provided format flags
-    let has_format_flag = tokens
-        .iter()
-        .any(|t| t.kind == TokenKind::Long && matches!(t.text, "format" | "oneline" | "pretty"));
+    let has_format_flag = log_has_format_flag(&tokens);
 
     // Check if user provided limit flag (-N, -n N, --max-count=N, --max-count N)
     let has_limit_flag = has_limit_flag(&tokens);
@@ -1809,37 +2009,34 @@ fn run_log(
     // Use %b (body) to preserve first line of commit body for agent context
     // (BREAKING CHANGE, Closes #xxx, design notes)
     if !has_format_flag {
-        cmd.args(["--pretty=format:%h %s (%ar) <%an>%n%b%n---END---"]);
+        cmd.arg(format!(
+            "--pretty=format:%h %s (%ar) <%an>%n%b%n{LOG_ENTRY_MARKER}"
+        ));
     }
 
-    // Determine limit: respect user's explicit -N flag, use sensible defaults otherwise
-    let (limit, user_set_limit) = if has_limit_flag {
+    // Determine limit: respect user's explicit -N flag, use sensible defaults otherwise.
+    // `overfetched` travels with the limit rather than being worked out again later: it is
+    // what licenses trimming the run back down, and deriving that a second time got it wrong
+    // for a user-set limit, where nothing was over-fetched and the trim cut real commits.
+    let (limit, user_set_limit, overfetched) = if has_limit_flag {
         // User explicitly passed -N / -n N / --max-count=N → respect their choice
         let n = parse_limit_from_tokens(&tokens).unwrap_or(10);
-        (n, true)
+        (n, true, false)
     } else if has_format_flag {
         // --oneline / --pretty without -N: user wants compact output, allow more
-        cmd.arg("-50");
-        (50, false)
+        cmd.arg(format!("-{COMPACT_LOG_LIMIT}"));
+        (COMPACT_LOG_LIMIT, false, false)
     } else {
-        // No flags at all: default to 10
-        cmd.arg(DEFAULT_LOG_LIMIT_ARG);
-        (10, false)
+        // One commit more than will be shown, so the run answers for itself whether the cap
+        // cut: the extra entry is fetched, counted and dropped, and no second walk of the
+        // history is needed to find out.
+        let extra = fetches_one_past_the_limit(&tokens);
+        cmd.arg(format!("-{}", DEFAULT_LOG_LIMIT + usize::from(extra)));
+        (DEFAULT_LOG_LIMIT, false, extra)
     };
 
-    // Only add --no-merges if user didn't explicitly request merge commits. Any
-    // `--min-parents=N` with N >= 2 asks for merges; pinning it to 2 let `--min-parents=3`
-    // collect RTK's `--no-merges` as well, and the two constraints select nothing at all.
-    let wants_merges = tokens.iter().any(|t| {
-        t.kind == TokenKind::Long
-            && (t.text == "merges"
-                || t.text == "no-merges"
-                || (t.text == "min-parents"
-                    && t.attached
-                        .is_some_and(|v| v.parse::<u32>().is_ok_and(|n| n >= 2))))
-    });
     // Don't add --no-merges if user explicitly requested merges or an exact count (-n N / --max-count)
-    if !wants_merges && !has_limit_flag {
+    if !log_wants_merges(&tokens) && !has_limit_flag {
         cmd.arg("--no-merges");
     }
 
@@ -1850,7 +2047,10 @@ fn run_log(
 
     let result = exec_capture(&mut cmd).context("Failed to run git log")?;
 
-    if !result.success() {
+    // A nonzero code is not on its own a reason to throw the walk away: `--exit-code` makes
+    // a perfectly successful `git log` exit 1, and returning here dropped the whole log and
+    // the notice owed on it. Git having printed a walk means it ran the walk.
+    if !result.success() && result.stdout.is_empty() {
         eprintln!("{}", result.stderr);
         return Ok(result.exit_code);
     }
@@ -1859,17 +2059,47 @@ fn run_log(
         eprintln!("Git log output:");
     }
 
+    // The entry past the limit was fetched to answer one question and is not part of the
+    // walk the user asked for, so everything downstream works from the trimmed run: the
+    // render, the fallback that prints raw when filtering would cost more, and the savings
+    // ledger. Printing it would contradict the very notice it is there to produce.
+    let shown_raw = if overfetched {
+        raw_through_the_limit(&result.stdout, limit)
+    } else {
+        result.stdout.as_str()
+    };
+
     // Post-process: truncate long messages, cap lines only if RTK set the default
-    let filtered = filter_log_output(&result.stdout, limit, user_set_limit, has_format_flag);
-    let filtered = never_worse(&result.stdout, &filtered).to_string();
+    let filtered = filter_log_output(shown_raw, limit, user_set_limit, has_format_flag);
+    let filtered = never_worse(shown_raw, &filtered).to_string();
     println!("{}", filtered);
+
+    // This path bounds the walk too, and what it prints carries no sign that anything is
+    // missing: an agent reading ten entries takes them for the whole history. The notice
+    // goes to stderr, because stdout is the filtered log an agent parses.
+    //
+    // The gate is the condition this path capped under, which is wider than the raw-shape
+    // one: a revision range leaves that path uncapped but not this one, so `git log
+    // HEAD~20..HEAD` really does show ten of the twenty asked for and really does owe a word.
+    if !user_set_limit
+        && let Some(notice) = filtered_cap_notice(global_args, args, &tokens, &result.stdout, limit)
+    {
+        eprintln!("{notice}");
+    }
 
     timer.track(
         &format!("git log {}", args.join(" ")),
         &format!("rtk git log {}", args.join(" ")),
-        &result.stdout,
+        shown_raw,
         &filtered,
     );
+
+    if !result.success() {
+        if !result.stderr.trim().is_empty() {
+            eprint!("{}", result.stderr);
+        }
+        return Ok(result.exit_code);
+    }
 
     Ok(0)
 }
@@ -2143,7 +2373,7 @@ pub(crate) fn filter_log_output(
     }
 
     // RTK injected format: split output into commit blocks separated by ---END---
-    let commits: Vec<&str> = output.split("---END---").collect();
+    let commits: Vec<&str> = output.split(LOG_ENTRY_MARKER).collect();
     let max_commits = if user_set_limit { commits.len() } else { limit };
 
     let mut result = Vec::new();
@@ -6117,6 +6347,52 @@ A  added.rs
         let args = vec!["-n".to_string(), "2".to_string()];
         let tokens = tokenize_git_log_args(&args);
         assert!(has_limit_flag(&tokens));
+    }
+
+    #[test]
+    fn filtered_probe_puts_rtks_no_merges_ahead_of_every_user_argument() {
+        // Two failures ride on the position, not on the presence. Behind a bare pathspec git
+        // refuses the whole command -- "option '--no-merges' must come before non-option
+        // arguments" -- and the probe reports nothing. Behind a `--` it does not error at
+        // all: git reads it as a second pathspec, and the probe quietly measures a walk with
+        // the merges still in it.
+        for args in [
+            vec!["f.txt".to_string()],
+            vec!["--".to_string(), "f.txt".to_string()],
+            vec!["--oneline".to_string(), "f.txt".to_string()],
+        ] {
+            let built = filtered_probe_args(&args, false);
+            assert_eq!(
+                built.first().map(String::as_str),
+                Some("--no-merges"),
+                "{args:?} must carry RTK's --no-merges first, got {built:?}"
+            );
+            assert_eq!(&built[1..], &args[..], "{args:?} must be forwarded intact");
+        }
+    }
+
+    #[test]
+    fn filtered_probe_leaves_no_merges_out_when_the_user_asked_for_merges() {
+        let args = vec!["--merges".to_string()];
+        assert_eq!(filtered_probe_args(&args, true), args);
+    }
+
+    #[test]
+    fn the_savings_baseline_drops_the_entry_fetched_only_to_measure_the_cap() {
+        // RTK asks git for one entry past its limit and never renders it, so counting it on
+        // the raw side of the ledger would credit RTK with compressing its own request.
+        let entry = |n: usize| format!("abc{n} subject (1 day ago) <a>\n\n{LOG_ENTRY_MARKER}");
+        let shown: String = (0..3).map(entry).collect::<Vec<_>>().join("\n");
+        let overfetched = format!("{shown}\n{}", entry(3));
+
+        assert_eq!(raw_through_the_limit(&overfetched, 3), shown);
+        // A walk that ended on its own is measured exactly as it always was.
+        assert_eq!(raw_through_the_limit(&shown, 3), shown);
+        assert_eq!(raw_through_the_limit("", 3), "");
+        assert_eq!(
+            raw_through_the_limit("no markers here", 3),
+            "no markers here"
+        );
     }
 
     #[test]
