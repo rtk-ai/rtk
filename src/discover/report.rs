@@ -114,6 +114,12 @@ pub struct DiscoverReport {
     pub measured_since: Option<String>,
     pub since_days: u64,
     pub supported: Vec<SupportedEntry>,
+    /// Commands RTK handles that the rewriter passed over for how they were
+    /// run — feeding a pipe whose consumer throws the output away, or written
+    /// in a form the rewriter does not match. The saving is real and reachable
+    /// by changing the command, so it is kept apart from `supported`, which is
+    /// what the hook would do on its own.
+    pub opportunities: Vec<SupportedEntry>,
     pub unsupported: Vec<UnsupportedEntry>,
     pub parse_errors: usize,
     pub rtk_disabled_count: usize,
@@ -142,6 +148,17 @@ impl DiscoverReport {
 
     pub fn total_supported_count(&self) -> usize {
         self.supported.iter().map(|s| s.count).sum()
+    }
+
+    pub fn total_opportunity_tokens(&self) -> usize {
+        self.opportunities
+            .iter()
+            .map(|s| s.estimated_savings_tokens)
+            .sum()
+    }
+
+    pub fn total_opportunity_count(&self) -> usize {
+        self.opportunities.iter().map(|s| s.count).sum()
     }
 }
 
@@ -220,6 +237,36 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
             "Total: {} commands -> ~{} saveable\n",
             report.total_supported_count(),
             format_tokens(report.total_saveable_tokens()),
+        ));
+    }
+
+    // Handled by RTK, but out of reach where they ran
+    if !report.opportunities.is_empty() {
+        out.push_str("\nOPPORTUNITIES -- RTK handles these, but not as they were run\n");
+        out.push_str(&"-".repeat(72));
+        out.push('\n');
+        out.push_str(&format!(
+            "{:<24} {:>5}    {:<18} {:<13} {:>12}\n",
+            "Command", "Count", "RTK Equivalent", "Status", "Est. Savings"
+        ));
+
+        for entry in report.opportunities.iter().take(limit) {
+            out.push_str(&format!(
+                "{:<24} {:>5}    {:<18} {:<13} ~{}\n",
+                truncate_str(&entry.command, 23),
+                entry.count,
+                entry.rtk_equivalent,
+                entry.rtk_status.as_str(),
+                format_tokens(entry.estimated_savings_tokens),
+            ));
+        }
+
+        out.push_str(&"-".repeat(72));
+        out.push('\n');
+        out.push_str(&format!(
+            "Total: {} commands -> ~{} saveable by changing how they are run\n",
+            report.total_opportunity_count(),
+            format_tokens(report.total_opportunity_tokens()),
         ));
     }
 
@@ -335,6 +382,7 @@ mod tests {
             measured_since: None,
             since_days: 30,
             supported: vec![],
+            opportunities: vec![],
             unsupported: vec![],
             parse_errors: 0,
             rtk_disabled_count: 0,
@@ -342,6 +390,54 @@ mod tests {
             rtk_disabled_examples: vec![],
             agent_status: AgentIntegrationStatus::default(),
         }
+    }
+
+    fn entry(command: &str, count: usize, tokens: usize) -> SupportedEntry {
+        SupportedEntry {
+            command: command.to_string(),
+            count,
+            rtk_equivalent: "rtk cargo",
+            category: "build",
+            estimated_savings_tokens: tokens,
+            estimated_savings_pct: 60.0,
+            rtk_status: RtkStatus::Existing,
+        }
+    }
+
+    /// The two tables answer different questions — one is what the hook would
+    /// do, the other what it would take a changed command to collect — so the
+    /// report has to keep them apart and total them apart.
+    #[test]
+    fn test_opportunities_are_reported_separately_from_missed_savings() {
+        let mut report = make_report(100, 10);
+        report.supported = vec![entry("grep FAILED", 3, 900)];
+        report.opportunities = vec![entry("cargo test", 7, 2100)];
+
+        let output = format_text(&report, 20, false);
+
+        assert!(output.contains("MISSED SAVINGS"));
+        assert!(output.contains("OPPORTUNITIES"));
+        assert!(output.contains("cargo test"), "opportunity row is rendered");
+        assert!(
+            output.contains("Total: 3 commands"),
+            "missed savings total counts only its own rows"
+        );
+        assert!(
+            output.contains("Total: 7 commands"),
+            "opportunities carry their own total"
+        );
+        assert!(
+            output.find("MISSED SAVINGS") < output.find("OPPORTUNITIES"),
+            "what the hook would do comes first"
+        );
+    }
+
+    /// A history where the hook reached everything it handles leaves the bucket
+    /// empty, and an empty table would be noise.
+    #[test]
+    fn test_no_opportunities_table_when_there_are_none() {
+        let report = make_report(100, 10);
+        assert!(!format_text(&report, 20, false).contains("OPPORTUNITIES"));
     }
 
     #[test]
