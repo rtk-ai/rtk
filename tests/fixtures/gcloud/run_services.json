@@ -1,0 +1,4 @@
+[
+  {"metadata":{"name":"redacted-api"},"status":{"latestReadyRevisionName":"redacted-api-00007","conditions":[{"type":"Ready","status":"True"}]}},
+  {"metadata":{"name":"redacted-worker"},"status":{"latestReadyRevisionName":"redacted-worker-00003","conditions":[{"type":"Ready","status":"False"}]}}
+]
