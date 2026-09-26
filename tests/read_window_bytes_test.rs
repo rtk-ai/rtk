@@ -122,6 +122,27 @@ fn read_windows_still_apply_text_filtering_and_line_numbers() {
     }
 }
 
+#[test]
+fn read_stdin_python_minimal_strips_comments() {
+    let input = b"import glob\nfiles = glob.glob(\"src/**/*.py\")\n# c\nx = 1\n";
+    let output = read_stdin(input, &["--level", "minimal"]);
+
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(
+        output.stdout,
+        b"import glob\nfiles = glob.glob(\"src/**/*.py\")\nx = 1"
+    );
+}
+
+#[test]
+fn read_stdin_python_shebang_uses_python_filter() {
+    let input = b"#!/usr/bin/env python3\n# c\nx = 1\n";
+    let output = read_stdin(input, &["--level", "minimal"]);
+
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(output.stdout, b"x = 1");
+}
+
 #[cfg(unix)]
 #[test]
 fn rewritten_head_spellings_match_native_on_non_utf8_files() {
