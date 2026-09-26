@@ -199,6 +199,25 @@ fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
     failures
 }
 
+/// The runner exited non-zero having reported no tests at all.
+///
+/// Not a fabrication: with `--reporter=json` vitest emits a valid report saying
+/// zero suites ran, so `PASS (0) FAIL (0)` is faithful. It just reads green for
+/// a run that errored (no test files matched, bad config), and the exit code is
+/// the only thing that says otherwise. Keyed on "zero tests AND failed", so a
+/// suite that genuinely ran is never annotated.
+fn ran_nothing(exit_code: i32, stdout: &str) -> bool {
+    if exit_code == 0 {
+        return false;
+    }
+    match VitestParser::parse(stdout) {
+        ParseResult::Full(d) | ParseResult::Degraded(d, _) => {
+            d.passed == 0 && d.failed == 0 && d.skipped == 0
+        }
+        ParseResult::Passthrough(_) => false,
+    }
+}
+
 pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
     let mut passthrough_requested = false;
@@ -250,7 +269,20 @@ pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32>
     );
     let tee_label = format!("{}_run", framework);
 
-    let rendered = render_test_output(&filtered, &combined, &tee_label, result.exit_code);
+    let mut rendered = render_test_output(&filtered, &combined, &tee_label, result.exit_code);
+    if !passthrough_requested && ran_nothing(result.exit_code, &result.stdout) {
+        // vitest faithfully reported zero tests and exited non-zero (no test
+        // files matched, bad config). The summary is accurate but "PASS (0)"
+        // reads green, so say what the exit code means rather than leaving a
+        // reader to infer it. Suppressing the summary here would be worse: it
+        // is the only place the 0-test fact appears.
+        rendered = format!(
+            "{}\n[{} exited {} without running any tests]",
+            rendered.trim_end(),
+            framework,
+            result.exit_code
+        );
+    }
     let shown = crate::core::runner::emit_guarded(&rendered, None, &combined);
 
     timer.track(
@@ -412,6 +444,34 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    // --- ran_nothing: annotate an errored run, never a real one ---
+    // Fixtures are real `vitest run --reporter=json` output. A hand-written
+    // one omitted fields the parser needs and silently fell to Passthrough,
+    // which would have made the test pass for the wrong reason.
+
+    #[test]
+    fn test_ran_nothing_flags_zero_test_failure() {
+        // vitest emits a valid report saying nothing ran, and exits 1 (no test
+        // files matched). The summary is faithful but "PASS (0)" reads green,
+        // so the exit code needs saying out loud.
+        let json = include_str!("../../../tests/fixtures/vitest_no_test_files_raw.json");
+        assert!(ran_nothing(1, json));
+    }
+
+    #[test]
+    fn test_ran_nothing_leaves_a_real_run_alone() {
+        // A suite that actually ran reports tests either way, so a normal red
+        // result must never be annotated.
+        let json = include_str!("../../../tests/fixtures/vitest_one_pass_one_fail_raw.json");
+        assert!(!ran_nothing(1, json));
+    }
+
+    #[test]
+    fn test_ran_nothing_ignores_success() {
+        let json = include_str!("../../../tests/fixtures/vitest_no_test_files_raw.json");
+        assert!(!ran_nothing(0, json), "exit 0 is never annotated");
+    }
     use super::*;
 
     fn args(values: &[&str]) -> Vec<String> {
