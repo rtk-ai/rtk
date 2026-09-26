@@ -1548,6 +1548,10 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
 /// RTK's default `git log` limit, applied whenever the user names none.
 const DEFAULT_LOG_LIMIT: usize = 10;
 const DEFAULT_LOG_LIMIT_ARG: &str = "-10";
+// `%x1e` is emitted as an ASCII record-separator control byte. It cannot be
+// confused with normal prose such as `---END---` inside a commit body.
+const LOG_RECORD_SEPARATOR: &str = "\x1e";
+const LEGACY_LOG_RECORD_SEPARATOR: &str = "---END---";
 
 /// `git log <args>` for the raw passthrough, carrying RTK's default limit unless the user named
 /// one. [`run_passthrough`] streams straight to the terminal, so the limit has to be in the args
@@ -1809,7 +1813,7 @@ fn run_log(
     // Use %b (body) to preserve first line of commit body for agent context
     // (BREAKING CHANGE, Closes #xxx, design notes)
     if !has_format_flag {
-        cmd.args(["--pretty=format:%h %s (%ar) <%an>%n%b%n---END---"]);
+        cmd.args(["--pretty=format:%h %s (%ar) <%an>%n%b%n%x1e"]);
     }
 
     // Determine limit: respect user's explicit -N flag, use sensible defaults otherwise
@@ -2130,7 +2134,7 @@ pub(crate) fn filter_log_output(
     let truncate_width = if user_set_limit { 120 } else { 80 };
 
     // When user specified their own format (--oneline, --pretty, --format),
-    // RTK did not inject ---END--- markers. Use simple line-based truncation.
+    // RTK did not inject record-separator markers. Use simple line-based truncation.
     if user_format {
         let lines: Vec<&str> = output.lines().collect();
         let max_lines = if user_set_limit { lines.len() } else { limit };
@@ -2142,8 +2146,15 @@ pub(crate) fn filter_log_output(
             .join("\n");
     }
 
-    // RTK injected format: split output into commit blocks separated by ---END---
-    let commits: Vec<&str> = output.split("---END---").collect();
+    // RTK injected format: split output into commit blocks separated by the
+    // control-byte marker. Keep the legacy text marker as a fallback for pipe
+    // input and older captured output so this helper remains backwards-compatible.
+    let separator = if output.contains(LOG_RECORD_SEPARATOR) {
+        LOG_RECORD_SEPARATOR
+    } else {
+        LEGACY_LOG_RECORD_SEPARATOR
+    };
+    let commits: Vec<&str> = output.split(separator).collect();
     let max_commits = if user_set_limit { commits.len() } else { limit };
 
     let mut result = Vec::new();
@@ -5321,6 +5332,20 @@ A  added.rs
         assert!(result.contains("def5678"));
         // 3 lines: header1, body1 indented, header2
         assert_eq!(result.lines().count(), 3);
+    }
+
+    #[test]
+    fn test_filter_log_output_does_not_split_literal_legacy_marker_in_body() {
+        let output = format!(
+            "abc1234 subject (2 days ago) <author>\nfirst body line\n---END---\nsecond body line\n{}\ndef5678 next commit (1 day ago) <other>\n{}\n",
+            LOG_RECORD_SEPARATOR, LOG_RECORD_SEPARATOR
+        );
+        let result = filter_log_output(&output, 10, false, false);
+        assert!(result.contains("  first body line"));
+        assert!(result.contains("  ---END---"));
+        assert!(result.contains("  second body line"));
+        assert!(result.contains("def5678 next commit"));
+        assert_eq!(result.lines().count(), 5);
     }
 
     #[test]
