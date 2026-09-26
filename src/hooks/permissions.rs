@@ -5,6 +5,7 @@ use super::constants::{
 use super::init::resolve_claude_dir;
 use crate::core::stream::exec_capture;
 use crate::discover::lexer::{is_word_boundary_whitespace, split_for_permissions};
+use crate::discover::registry::peel_for_matching;
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -77,10 +78,18 @@ pub(crate) fn check_command_with_rules(
     let segments = split_compound_command(cmd);
 
     // Deny takes highest priority and pre-empts every other construct.
+    //
+    // A deny rule is matched against the command behind any assignment or
+    // wrapper as well as against the segment as written — `HUSKY=0 git push`
+    // and `timeout 30 git push` are both `git push` to a rule that names it.
+    // Ask gets the same reading below; allow does not, so the peel can only
+    // make a verdict stricter.
     for segment in &segments {
         let segment = segment.trim();
         for pattern in deny_rules {
-            if command_matches_pattern(segment, pattern) {
+            if command_matches_pattern(segment, pattern)
+                || command_matches_pattern(peel_for_matching(segment), pattern)
+            {
                 return PermissionVerdict::Deny;
             }
         }
@@ -108,7 +117,9 @@ pub(crate) fn check_command_with_rules(
         // Ask — if any segment matches an ask rule, the final verdict is Ask.
         if !any_ask {
             for pattern in ask_rules {
-                if command_matches_pattern(segment, pattern) {
+                if command_matches_pattern(segment, pattern)
+                    || command_matches_pattern(peel_for_matching(segment), pattern)
+                {
                     any_ask = true;
                     break;
                 }
@@ -816,6 +827,99 @@ mod tests {
             check_command_with_rules("rm -rf /", &deny, &[], &[]),
             PermissionVerdict::Deny
         );
+    }
+
+    /// Claude Code matches a deny or ask rule past any leading assignment and
+    /// past a fixed set of wrappers, so a rule written for `git push` also
+    /// stops the same command behind `HUSKY=0`, `timeout 30` or `command`.
+    /// This is that table, row for row, with the host's documented verdict as
+    /// the expected one — the first row is the control that always matched.
+    #[test]
+    fn test_deny_matches_past_assignments_and_wrappers() {
+        let deny = vec!["git push *".to_string(), "rm *".to_string()];
+        for cmd in [
+            "git push origin main",
+            "HUSKY=0 git push origin main",
+            "FOO=bar rm -rf tmp/",
+            "command git push",
+            "builtin git push",
+            "timeout 30 git push",
+            "time git push",
+            "nice git push",
+            "nohup git push",
+            "stdbuf -oL git push",
+            "noglob git push",
+            "xargs git push",
+            // Several at once, as an agent that is trying writes them.
+            "HUSKY=0 nohup timeout 30 git push origin main",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &[]),
+                PermissionVerdict::Deny,
+                "a deny rule for the command behind the prefix did not fire: {cmd}"
+            );
+        }
+    }
+
+    /// The same reading for ask: a missed ask falls to Default, which the
+    /// hook renders identically today, so this is what makes the difference
+    /// observable.
+    #[test]
+    fn test_ask_matches_past_assignments_and_wrappers() {
+        let ask = vec!["git push *".to_string()];
+        for cmd in [
+            "HUSKY=0 git push",
+            "timeout 30 git push",
+            "stdbuf -oL git push",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &[], &ask, &[]),
+                PermissionVerdict::Ask,
+                "an ask rule for the command behind the prefix did not fire: {cmd}"
+            );
+        }
+    }
+
+    /// Allow is deliberately not read the same way. The host matches allow
+    /// past known-safe variables only, and peeling a wrapper for it would
+    /// let `timeout 30 <cmd>` inherit `<cmd>`'s allow rule — so the peel can
+    /// only ever make a verdict stricter, never looser.
+    #[test]
+    fn test_allow_is_not_matched_past_assignments_or_wrappers() {
+        let allow = vec!["git status".to_string()];
+        assert_eq!(
+            check_command_with_rules("git status", &[], &[], &allow),
+            PermissionVerdict::Allow,
+            "control: the plain command is allowed"
+        );
+        for cmd in [
+            "HUSKY=0 git status",
+            "timeout 30 git status",
+            "nice git status",
+        ] {
+            assert_ne!(
+                check_command_with_rules(cmd, &[], &[], &allow),
+                PermissionVerdict::Allow,
+                "allow was widened through a prefix: {cmd}"
+            );
+        }
+    }
+
+    /// Two things the host does not strip, so neither does the gate: `xargs`
+    /// with any option (only the bare form is matched past), and git's own
+    /// global options — the host's documentation uses `git -C . push` as its
+    /// example of what `Bash(git push *)` does not stop. Peeling either would
+    /// make RTK stricter than the host it mirrors.
+    #[test]
+    fn test_deny_does_not_peel_what_the_host_keeps() {
+        let deny = vec!["git push *".to_string()];
+        for cmd in ["xargs -n1 git push", "git -C . push origin main"] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &[]),
+                PermissionVerdict::Default,
+                "peeled past something the host does not: {cmd}"
+            );
+        }
     }
 
     // --- Allow rules tests ---
