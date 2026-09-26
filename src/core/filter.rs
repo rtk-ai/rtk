@@ -309,15 +309,15 @@ impl FilterStrategy for MinimalFilter {
                 }
             }
 
-            // Handle Python docstrings (keep them in minimal mode)
-            if *lang == Language::Python && trimmed.starts_with("\"\"\"") {
-                in_docstring = !in_docstring;
-                result.push_str(line);
-                result.push('\n');
-                continue;
-            }
-
-            if in_docstring {
+            // Handle Python docstrings (keep them in minimal mode).
+            // Every `"""` on the line flips the state, so a docstring that opens
+            // and closes on one line, or whose closing `"""` is appended to
+            // content, leaves `in_docstring` correct instead of stuck on and
+            // leaking the rest of the file verbatim.
+            if *lang == Language::Python && (in_docstring || trimmed.starts_with("\"\"\"")) {
+                if trimmed.matches("\"\"\"").count() % 2 == 1 {
+                    in_docstring = !in_docstring;
+                }
                 result.push_str(line);
                 result.push('\n');
                 continue;
@@ -923,5 +923,127 @@ fn main() {
         let input = "a\nb\nc";
         let output = smart_truncate(input, 3, &Language::Unknown);
         assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_python_single_line_docstring_does_not_corrupt_state() {
+        let filter = MinimalFilter;
+        let input = r#"def add(a, b):
+    """Return the sum."""
+    # this comment should be stripped
+    return a + b
+"#;
+        let output = filter.filter(input, &Language::Python);
+        assert!(
+            output.contains("Return the sum"),
+            "docstring should be kept"
+        );
+        assert!(
+            !output.contains("this comment should be stripped"),
+            "comment after single-line docstring must be stripped"
+        );
+        assert!(output.contains("return a + b"), "code must be kept");
+    }
+
+    #[test]
+    fn test_python_multiline_docstring_closing_on_content_line() {
+        let filter = MinimalFilter;
+        let input = r#"def subtract(self, a, b):
+    """Subtract b from a
+    and return result."""
+    # subtract comment
+    return a - b
+
+def multiply(self, a, b):
+    # multiply comment, no docstring before
+    return a * b
+"#;
+        let output = filter.filter(input, &Language::Python);
+        assert!(
+            output.contains("Subtract b from a"),
+            "docstring content should be kept"
+        );
+        assert!(
+            output.contains("and return result."),
+            "docstring closing line should be kept"
+        );
+        assert!(
+            !output.contains("subtract comment"),
+            "comment after multi-line docstring must be stripped"
+        );
+        assert!(
+            !output.contains("multiply comment"),
+            "comment in unrelated method must be stripped"
+        );
+        assert!(output.contains("return a - b"), "code must be kept");
+        assert!(output.contains("return a * b"), "code must be kept");
+    }
+
+    #[test]
+    fn test_python_docstring_closing_with_trailing_text() {
+        let filter = MinimalFilter;
+        let input = r#"def trailing(a, b):
+    """Subtract b from a
+    and return result."""  # note after the closing quotes
+    # trailing comment
+    return a - b
+
+def after(a, b):
+    # unrelated method comment
+    return a * b
+"#;
+        let output = filter.filter(input, &Language::Python);
+        assert!(
+            output.contains("and return result."),
+            "docstring closing line should be kept"
+        );
+        assert!(
+            !output.contains("trailing comment"),
+            "comment after a docstring closed mid-line must be stripped"
+        );
+        assert!(
+            !output.contains("unrelated method comment"),
+            "docstring state must not leak into the next method"
+        );
+        assert!(output.contains("return a - b"), "code must be kept");
+        assert!(output.contains("return a * b"), "code must be kept");
+    }
+
+    #[test]
+    fn test_python_sequential_single_line_docstrings() {
+        let filter = MinimalFilter;
+        let input = r#"def one():
+    """One."""
+    # first comment
+    return 1
+
+def two():
+    """Two."""
+    # second comment
+    return 2
+"#;
+        let output = filter.filter(input, &Language::Python);
+        assert!(output.contains("One."), "first docstring should be kept");
+        assert!(output.contains("Two."), "second docstring should be kept");
+        assert!(
+            !output.contains("first comment") && !output.contains("second comment"),
+            "no comment should survive between sequential docstrings, got: {output}"
+        );
+    }
+
+    #[test]
+    fn test_python_empty_docstring_does_not_corrupt_state() {
+        let filter = MinimalFilter;
+        let input = r#"def empty():
+    """"""
+    # empty docstring comment
+    return None
+"#;
+        let output = filter.filter(input, &Language::Python);
+        assert!(
+            !output.contains("empty docstring comment"),
+            "comment after an empty docstring must be stripped, got: {output}"
+        );
+        assert!(output.contains("return None"), "code must be kept");
     }
 }
