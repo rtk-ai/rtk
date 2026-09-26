@@ -63,17 +63,26 @@ static COMPILED: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         .collect()
 });
 static ENV_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
+    // NOTE: `sudo` is intentionally NOT stripped here. Rewriting `sudo docker ps`
+    // to `sudo rtk docker ps` breaks at runtime because `rtk` is not on root's
+    // secure_path, and (where it is) would run rtk itself as root. sudo commands
+    // are left untouched so they pass through unchanged. See #146.
+    Regex::new(&format!(r#"^(?:{})+"#, env_word())).unwrap()
+});
+/// One word of [`ENV_PREFIX`]: a single `env` or assignment, so the permission
+/// gate can read the command behind each in turn ([`matching_readings`]).
+static ENV_WORD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(&format!(r#"^(?:{})"#, env_word())).unwrap());
+
+/// An `env` word or an assignment, with the blanks after it.
+fn env_word() -> String {
     let double_quoted = r#""(?:[^"\\]|\\.)*""#;
     let single_quoted = r#"'(?:[^'\\]|\\.)*'"#;
     let unquoted = r#"[^\s]*"#;
     let env_value = format!("(?:{}|{}|{})", double_quoted, single_quoted, unquoted);
     let env_assign = format!(r#"[A-Z_][A-Z0-9_]*={}"#, env_value);
-    // NOTE: `sudo` is intentionally NOT stripped here. Rewriting `sudo docker ps`
-    // to `sudo rtk docker ps` breaks at runtime because `rtk` is not on root's
-    // secure_path, and (where it is) would run rtk itself as root. sudo commands
-    // are left untouched so they pass through unchanged. See #146.
-    Regex::new(&format!(r#"^(?:env\s+|{}\s+)+"#, env_assign)).unwrap()
-});
+    format!(r#"env\s+|{}\s+"#, env_assign)
+}
 // Git global options that appear before the subcommand: -C <path>, -c <key=val>,
 // --git-dir <dir>, --work-tree <dir>, and flag-only options (#163)
 static GIT_GLOBAL_OPT: LazyLock<Regex> = LazyLock::new(|| {
@@ -1442,6 +1451,33 @@ const PROCESS_WRAPPERS: &[ProcessWrapper] = &[
     },
 ];
 
+/// Wrappers a permission rule looks past but the rewrite does not go through.
+///
+/// `stdbuf` exists to make the wrapped command emit output incrementally, and
+/// routing through rtk buffers that output until the child exits, so it is
+/// never rewritten — but `stdbuf -oL git push` is still `git push` to a deny
+/// rule. A bare `xargs` is the same: it runs the command it is given, and the
+/// option-less form is the one Claude Code matches past. Any option makes the
+/// grammar below give up, which is what keeps `xargs -I{} …` out.
+const MATCH_ONLY_WRAPPERS: &[ProcessWrapper] = &[
+    ProcessWrapper {
+        name: "stdbuf",
+        value_opts: &["-i", "-o", "-e", "--input", "--output", "--error"],
+        flag_opts: &[],
+        attached_opts: &["-i", "-o", "-e"],
+        positionals: 0,
+        numeric_opts: false,
+    },
+    ProcessWrapper {
+        name: "xargs",
+        value_opts: &[],
+        flag_opts: &[],
+        attached_opts: &[],
+        positionals: 0,
+        numeric_opts: false,
+    },
+];
+
 struct SafePipeConsumer {
     name: &'static str,
     unsafe_flags: &'static [&'static str],
@@ -1907,13 +1943,23 @@ fn tool_form(cmd_clean: &str, rtk_equivalent: &str) -> String {
 }
 
 fn strip_process_wrapper_prefix(cmd: &str) -> Option<(&str, &str)> {
+    strip_wrapper_prefix_from_any(&[PROCESS_WRAPPERS], cmd)
+}
+
+/// Peel one wrapper from any of `tables` off the front of `cmd`, giving
+/// `(wrapper text, wrapped command)`; `cmd` is tokenized once.
+fn strip_wrapper_prefix_from_any<'a>(
+    tables: &[&[ProcessWrapper]],
+    cmd: &'a str,
+) -> Option<(&'a str, &'a str)> {
     let tokens = tokenize(cmd);
     let first = tokens.first()?;
     if first.kind != TokenKind::Arg {
         return None;
     }
-    let wrapper = PROCESS_WRAPPERS
+    let wrapper = tables
         .iter()
+        .flat_map(|table| table.iter())
         .find(|candidate| candidate.name == command_basename(&first.value))?;
     let inner = wrapper_inner_command(wrapper, &tokens)?;
     if tokens[..inner_index(&tokens, inner)]
@@ -1928,6 +1974,106 @@ fn strip_process_wrapper_prefix(cmd: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((prefix, rest))
+}
+
+/// The command a line runs, read past each prefix a deny or ask rule should
+/// see past, one reading per prefix peeled ([`MatchingReadings`]).
+///
+/// Claude Code matches those rules past any leading assignment and past a
+/// fixed set of wrappers — `timeout`, `time`, `nice`, `nohup`, `stdbuf`,
+/// `command`, `builtin`, `noglob` and a bare `xargs` — so a rule written for
+/// `git push` also stops `HUSKY=0 timeout 30 git push`. Every peel here is one
+/// the rewrite already applies — its env peel, its keyword prefixes, its
+/// wrapper table — so where both look through a prefix they read the same
+/// command behind it, plus the two wrappers RTK looks through without
+/// rewriting through. The rewrite also looks through `uv run` and a user's
+/// `transparent_prefixes`, which the host does not strip and neither does
+/// this.
+///
+/// The line is drawn at the shell: anything that only runs the next word as
+/// the command is peeled, which also takes in `env`, `exec` and `nocorrect`
+/// where the host's list stops short. A program's own arguments are not —
+/// `git -C . push` stays `git`, as the host documents — since that would
+/// mean knowing every program's option grammar. Nor is `env` or a keyword
+/// prefix written with an option of its own (`env -i`, `command -p`,
+/// `exec -a x`), or `env` written as a path (`/usr/bin/env`): the peel stops
+/// there, as the rewrite's does. The process wrappers are read with their
+/// options and through a path (`timeout -s KILL 30`, `/usr/bin/nohup`).
+///
+/// Deny and ask only. Allow matches past known-safe variables alone, and
+/// peeling a wrapper for it would let `timeout 30 <cmd>` inherit `<cmd>`'s
+/// allow rule.
+pub(crate) fn matching_readings(cmd: &str) -> MatchingReadings<'_> {
+    let mut readings = vec![cmd.trim()];
+    let mut rest = cmd.trim();
+    loop {
+        let before = rest;
+        for step in [PeelStep::Assignments, PeelStep::Keyword, PeelStep::Wrapper] {
+            if let Some(inner) = step.peel(rest) {
+                if readings.len() > MAX_MATCHING_PEELS {
+                    return MatchingReadings {
+                        readings,
+                        complete: false,
+                    };
+                }
+                rest = inner;
+                readings.push(rest);
+            }
+        }
+        if rest == before {
+            return MatchingReadings {
+                readings,
+                complete: true,
+            };
+        }
+    }
+}
+
+/// One kind of prefix [`matching_readings`] peels: the rewrite's env peel,
+/// its keyword prefixes, and its wrapper table plus the match-only wrappers.
+#[derive(Clone, Copy)]
+enum PeelStep {
+    Assignments,
+    Keyword,
+    Wrapper,
+}
+
+impl PeelStep {
+    /// What is left of `cmd` once this prefix is peeled, `None` when it has
+    /// none.
+    fn peel(self, cmd: &str) -> Option<&str> {
+        match self {
+            PeelStep::Assignments => ENV_WORD.find(cmd).map(|word| cmd[word.end()..].trim()),
+            PeelStep::Keyword => SHELL_KEYWORD_PREFIXES
+                .iter()
+                .find_map(|prefix| strip_word_prefix(cmd, prefix)),
+            PeelStep::Wrapper => {
+                strip_wrapper_prefix_from_any(&[PROCESS_WRAPPERS, MATCH_ONLY_WRAPPERS], cmd)
+                    .map(|(_, inner)| inner)
+            }
+        }
+    }
+}
+
+/// How many prefixes [`matching_readings`] peels before it stops. Each
+/// assignment is one, so the cap sits well above the longest run of
+/// variables a line sets before its command; deeper stacks are no command
+/// anyone types. Past the cap the command behind them is unread, which the
+/// gate answers with a prompt where a deny or ask rule exists, never an
+/// allow.
+pub(crate) const MAX_MATCHING_PEELS: usize = 32;
+
+/// The command a line runs read every way a deny or ask rule may name it:
+/// as written, then after each prefix peeled in turn (`env HUSKY=0 git
+/// push` is also `HUSKY=0 git push` and `git push`). A reading need not be
+/// a command the shell would run as written — `nohup HUSKY=0 git push` makes
+/// nohup look for a program named `HUSKY=0` — so a rule naming it can only
+/// make the verdict stricter.
+pub(crate) struct MatchingReadings<'a> {
+    pub(crate) readings: Vec<&'a str>,
+    /// False when the peel stopped at [`MAX_MATCHING_PEELS`] with prefixes
+    /// left: the innermost command was not read.
+    pub(crate) complete: bool,
 }
 
 fn inner_index(tokens: &[ParsedToken], inner: &ParsedToken) -> usize {
@@ -7420,6 +7566,13 @@ mod tests {
             rewrite_command_no_prefixes("stdbuf -oL cargo test", &[]),
             None
         );
+    }
+
+    /// The gate reads past `xargs`; the rewrite never does, since `xargs rtk
+    /// git status` would run rtk once per input item.
+    #[test]
+    fn test_xargs_is_not_a_process_wrapper() {
+        assert_eq!(rewrite_command_no_prefixes("xargs git status", &[]), None);
     }
 
     #[test]
