@@ -510,7 +510,75 @@ fn native_walk(
     } else {
         Vec::new()
     };
+
+    absorb_tracked_ignored(
+        path,
+        pattern,
+        max_depth,
+        want_dirs,
+        case_insensitive,
+        search_hidden,
+        &mut files,
+    );
     (files, filtered)
+}
+
+/// `git add -f` tracks files that a `.gitignore` rule still matches. The
+/// ignore-aware walk prunes them regardless, so re-add the tracked matches it
+/// skipped: a force-added file is meant to be discoverable (#4244).
+fn absorb_tracked_ignored(
+    root: &str,
+    pattern: &str,
+    max_depth: Option<usize>,
+    want_dirs: bool,
+    case_insensitive: bool,
+    search_hidden: bool,
+    files: &mut Vec<String>,
+) {
+    if want_dirs || !Path::new(root).is_dir() {
+        return;
+    }
+    for display in tracked_ignored_files(root) {
+        let depth = display.split('/').filter(|c| !c.is_empty()).count();
+        if max_depth.is_some_and(|max| depth > max) {
+            continue;
+        }
+        let name = Path::new(&display)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if name.is_empty()
+            || (name.starts_with('.') && !search_hidden)
+            || !name_matches(pattern, &name, case_insensitive)
+            || !Path::new(root).join(&display).is_file()
+        {
+            continue;
+        }
+        if !files.contains(&display) {
+            files.push(display);
+        }
+    }
+}
+
+/// Paths in the git index whose name a `.gitignore` rule matches, relative to
+/// `root`. Empty when `root` is not in a repository or git is unavailable.
+fn tracked_ignored_files(root: &str) -> Vec<String> {
+    let mut cmd = crate::core::utils::resolved_command("git");
+    cmd.current_dir(root)
+        .args(["ls-files", "--cached", "--ignored", "--exclude-standard", "-z"])
+        .stderr(std::process::Stdio::null());
+    let Ok(output) = cmd.output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    output
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect()
 }
 
 fn entry_display(
@@ -1409,6 +1477,43 @@ mod tests {
         let (files, filtered) = native_walk(&root_s, ".gitignore", None, false, false, false);
         assert_eq!(files, vec![".gitignore".to_string()]);
         assert_eq!(filtered, vec!["build/".to_string()]);
+    }
+
+    #[test]
+    fn force_tracked_gitignored_file_is_returned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        if !git(&["init", "-q"]) {
+            return; // no git: .gitignore cannot apply, nothing to assert
+        }
+        std::fs::write(root.join(".gitignore"), "data/\n").unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src").join("target.py"), "x").unwrap();
+        std::fs::create_dir_all(root.join("data").join("subdir")).unwrap();
+        std::fs::write(root.join("data").join("subdir").join("target.py"), "y").unwrap();
+        std::fs::write(root.join("data").join("untracked.py"), "z").unwrap();
+        assert!(git(&["add", "-A"]), "git add -A");
+        assert!(git(&["add", "-f", "data/subdir/target.py"]), "git add -f");
+
+        let root_s = root.to_string_lossy().into_owned();
+        let (mut files, _) = native_walk(&root_s, "target*", None, false, true, false);
+        files.sort();
+        assert_eq!(
+            files,
+            vec![
+                "data/subdir/target.py".to_string(),
+                "src/target.py".to_string()
+            ],
+            "a force-tracked file inside a gitignored directory must survive the walk"
+        );
     }
 
     #[test]
