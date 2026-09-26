@@ -12,8 +12,8 @@ use std::collections::HashMap;
 
 use provider::{ClaudeProvider, SessionProvider};
 use registry::{
-    Classification, ExcludePattern, category_avg_tokens, classify_command, split_command_chain,
-    strip_disabled_prefix,
+    Classification, ExcludePattern, category_avg_tokens, classify_command,
+    guess_unsupported_category, split_command_chain, strip_disabled_prefix,
 };
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
@@ -253,6 +253,27 @@ struct SupportedBucket {
 struct UnsupportedBucket {
     count: usize,
     example: String,
+    /// Output tokens measured from `ExtractedCommand::output_len` (`len / 4`)
+    /// summed over entries that had a length.
+    measured_tokens: usize,
+    /// Entries without a measured `output_len`, estimated by category average.
+    unmeasured_count: usize,
+}
+
+/// Order unsupported entries for display: estimated impact descending, then
+/// count descending, then `base_command` ascending. The tie-breakers matter
+/// because equal-impact entries otherwise render in `HashMap` iteration order,
+/// which varies run to run. Impact is measured `output_len / 4` plus
+/// `count x category_avg_tokens` for entries lacking a measured length -- not
+/// raw count, so a rarely-called command with huge output can outrank a
+/// frequent tiny one.
+fn sort_unsupported(entries: &mut [UnsupportedEntry]) {
+    entries.sort_by(|a, b| {
+        b.estimated_impact_tokens
+            .cmp(&a.estimated_impact_tokens)
+            .then_with(|| b.count.cmp(&a.count))
+            .then_with(|| a.base_command.cmp(&b.base_command))
+    });
 }
 
 pub fn run(
@@ -486,9 +507,16 @@ pub fn run(
                             UnsupportedBucket {
                                 count: 0,
                                 example: part.to_string(),
+                                measured_tokens: 0,
+                                unmeasured_count: 0,
                             }
                         });
                         bucket.count += 1;
+                        if let Some(len) = ext_cmd.output_len {
+                            bucket.measured_tokens += len / 4;
+                        } else {
+                            bucket.unmeasured_count += 1;
+                        }
                     }
                     Classification::Ignored => {
                         // Ground truth from the transcript itself — the model really
@@ -556,15 +584,25 @@ pub fn run(
 
     let mut unsupported: Vec<UnsupportedEntry> = unsupported_map
         .into_iter()
-        .map(|(base, bucket)| UnsupportedEntry {
-            base_command: base,
-            count: bucket.count,
-            example: bucket.example,
+        .map(|(base, bucket)| {
+            let category = guess_unsupported_category(&base);
+            let avg_tokens = category_avg_tokens(category, &base);
+            UnsupportedEntry {
+                base_command: base,
+                count: bucket.count,
+                example: bucket.example,
+                // Measured output tokens where the transcript recorded a length,
+                // plus count x category average only for entries without one --
+                // a failed category guess can no longer collapse the score to a
+                // bare count sort.
+                estimated_impact_tokens: bucket.measured_tokens
+                    + bucket.unmeasured_count * avg_tokens,
+            }
         })
         .collect();
 
-    // Sort by count descending
-    unsupported.sort_by_key(|b| std::cmp::Reverse(b.count));
+    // Deterministic display order: impact desc, count desc, base_command asc.
+    sort_unsupported(&mut unsupported);
 
     // Build RTK_DISABLED examples sorted by frequency (top 5)
     let rtk_disabled_examples: Vec<String> = {
@@ -655,6 +693,28 @@ mod tests {
             exclude_patterns: vec![],
             normalized_transparent_prefixes: vec![],
         }
+    }
+
+    #[test]
+    fn test_sort_unsupported_is_deterministic() {
+        let entry = |base: &str, count: usize, impact: usize| UnsupportedEntry {
+            base_command: base.to_string(),
+            count,
+            example: base.to_string(),
+            estimated_impact_tokens: impact,
+        };
+        let mut entries = vec![
+            entry("zebra", 1, 100),
+            entry("alpha", 1, 100),
+            entry("beta", 5, 100),
+            entry("gamma", 2, 200),
+        ];
+
+        sort_unsupported(&mut entries);
+
+        let order: Vec<&str> = entries.iter().map(|e| e.base_command.as_str()).collect();
+        // Impact desc; equal impact breaks count desc, then base_command asc.
+        assert_eq!(order, vec!["gamma", "beta", "alpha", "zebra"]);
     }
 
     #[test]

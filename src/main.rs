@@ -1185,6 +1185,9 @@ enum KubectlCommands {
         /// All namespaces
         #[arg(short = 'A', long)]
         all: bool,
+        /// Bypass the unchanged-state cache and show full detail
+        #[arg(long)]
+        force: bool,
     },
     /// List services
     Services {
@@ -1193,6 +1196,9 @@ enum KubectlCommands {
         /// All namespaces
         #[arg(short = 'A', long)]
         all: bool,
+        /// Bypass the unchanged-state cache and show full detail
+        #[arg(long)]
+        force: bool,
     },
     /// Show pod logs (deduplicated)
     Logs {
@@ -1220,6 +1226,9 @@ enum OcCommands {
         /// All namespaces
         #[arg(short = 'A', long)]
         all: bool,
+        /// Bypass the unchanged-state cache and show full detail
+        #[arg(long)]
+        force: bool,
     },
     /// List services
     Services {
@@ -1228,6 +1237,9 @@ enum OcCommands {
         /// All namespaces
         #[arg(short = 'A', long)]
         all: bool,
+        /// Bypass the unchanged-state cache and show full detail
+        #[arg(long)]
+        force: bool,
     },
     /// Show pod logs (deduplicated)
     Logs {
@@ -1733,13 +1745,16 @@ fn shell_split(input: &str) -> Vec<String> {
     discover::lexer::shell_split(input)
 }
 
-fn build_k8s_namespace_args(namespace: Option<String>, all: bool) -> Vec<String> {
+fn build_k8s_namespace_args(namespace: Option<String>, all: bool, force: bool) -> Vec<String> {
     let mut args = Vec::new();
     if all {
         args.push("-A".to_string());
     } else if let Some(n) = namespace {
         args.push("-n".to_string());
         args.push(n);
+    }
+    if force {
+        args.push("--force".to_string());
     }
     args
 }
@@ -2323,12 +2338,20 @@ fn run_cli() -> Result<i32> {
 
         Commands::Kubectl { command } => match command {
             KubectlCommands::Get { args } => container::run_kubectl_get(&args, cli.verbose)?,
-            KubectlCommands::Pods { namespace, all } => {
-                let args = build_k8s_namespace_args(namespace, all);
+            KubectlCommands::Pods {
+                namespace,
+                all,
+                force,
+            } => {
+                let args = build_k8s_namespace_args(namespace, all, force);
                 container::run(container::ContainerCmd::KubectlPods, &args, cli.verbose)?
             }
-            KubectlCommands::Services { namespace, all } => {
-                let args = build_k8s_namespace_args(namespace, all);
+            KubectlCommands::Services {
+                namespace,
+                all,
+                force,
+            } => {
+                let args = build_k8s_namespace_args(namespace, all, force);
                 container::run(container::ContainerCmd::KubectlServices, &args, cli.verbose)?
             }
             KubectlCommands::Logs { pod, container: c } => {
@@ -2340,12 +2363,20 @@ fn run_cli() -> Result<i32> {
 
         Commands::Oc { command } => match command {
             OcCommands::Get { args } => container::run_oc_get(&args, cli.verbose)?,
-            OcCommands::Pods { namespace, all } => {
-                let args = build_k8s_namespace_args(namespace, all);
+            OcCommands::Pods {
+                namespace,
+                all,
+                force,
+            } => {
+                let args = build_k8s_namespace_args(namespace, all, force);
                 container::k8s_pods("oc", &args, cli.verbose)?
             }
-            OcCommands::Services { namespace, all } => {
-                let args = build_k8s_namespace_args(namespace, all);
+            OcCommands::Services {
+                namespace,
+                all,
+                force,
+            } => {
+                let args = build_k8s_namespace_args(namespace, all, force);
                 container::k8s_services("oc", &args, cli.verbose)?
             }
             OcCommands::Logs { pod, container: c } => {
