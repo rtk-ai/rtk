@@ -7,9 +7,10 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use super::lexer::{
-    ParsedToken, PipeKind, QuoteScan, TokenKind, ansi_c_quote_defeats_lexer, coalesce_words,
-    is_crlf_at, is_word_boundary_whitespace, redirect_has_file_target, shell_split,
-    split_for_classify, split_for_permissions, tokenize, tokenize_with_newlines,
+    CaseTracker, ParsedToken, PipeKind, QuoteScan, TokenKind, ansi_c_quote_defeats_lexer,
+    coalesce_words, is_crlf_at, is_word_boundary_whitespace, opens_substitution,
+    redirect_has_file_target, shell_split, split_for_classify, split_for_permissions, tokenize,
+    tokenize_with_newlines,
 };
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 
@@ -1292,12 +1293,23 @@ fn rewrite_compound(
     let mut result = String::with_capacity(cmd.len() + 32);
     let mut any_changed = false;
     let mut seg_start: usize = 0;
+    let mut substitution_depth: usize = 0;
+    let mut cases = CaseTracker::default();
 
     for tok in &tokens {
         if tok.offset < seg_start {
             continue;
         }
+        // Nothing but whitespace since the last boundary means this token is
+        // the command, which is where `case` is the keyword and not a word.
+        let at_command_position = cmd[seg_start..tok.offset].trim().is_empty();
+        let in_case_pattern = cases.in_pattern();
+        cases.observe(tok, at_command_position);
         match tok.kind {
+            // Inside a substitution nothing ends a command out here: the whole
+            // `$( )` is one word of the command being built, and an operator
+            // within it separates commands whose output becomes that word.
+            TokenKind::Operator | TokenKind::Pipe(_) if substitution_depth > 0 => {}
             TokenKind::Operator => {
                 any_changed |= emit_segment(
                     &mut result,
@@ -1354,7 +1366,35 @@ fn rewrite_compound(
                     }
                 }
             }
-            TokenKind::Shellism if tok.value == "&" => {
+            // `$( )`, `<( )` and `>( )` all run a command in service of the
+            // outer one — as text it is built from, or as a file it reads.
+            // Filtering that output would change what the outer command parses
+            // rather than what reaches anyone, so the body is stepped over, and
+            // so is the `)` that ends it.
+            TokenKind::Shellism
+                if tok.value == "("
+                    && opens_substitution(cmd, tok.offset)
+                    && substitution_depth == 0 =>
+            {
+                substitution_depth += 1;
+            }
+            TokenKind::Shellism if tok.value == "(" && substitution_depth > 0 => {
+                substitution_depth += 1;
+            }
+            TokenKind::Shellism if tok.value == ")" && substitution_depth > 0 => {
+                substitution_depth -= 1;
+            }
+            // `case x in (ls) …` is the same statement as `case x in ls) …`:
+            // the bracket opens the pattern, not a subshell. Rewriting inside
+            // it would make the one-word pattern two words, which bash rejects.
+            TokenKind::Shellism if tok.value == "(" && in_case_pattern => {}
+            // A subshell runs the commands it wraps, so each one is its own
+            // rewrite candidate. Gluing the bracket to the text beside it left
+            // `(git status` matching nothing while `cargo build)` matched, which
+            // rewrote one command of a pair and dropped the other.
+            TokenKind::Shellism
+                if matches!(tok.value.as_str(), "&" | "(" | ")") && substitution_depth == 0 =>
+            {
                 any_changed |= emit_segment(
                     &mut result,
                     cmd,
@@ -2095,104 +2135,259 @@ mod tests {
         super::rewrite_command(cmd, excluded, &[])
     }
 
-    // Three compound-command segmenters look at the same kind of input for
-    // different, deliberate purposes — split_for_permissions (the permission
-    // gate, most conservative), split_for_classify/split_command_chain
-    // (analytics/discovery classification), and rewrite_compound's inline
-    // token walk (actual rewrite). See the comparison table on
-    // split_for_permissions's doc comment. These tests pin today's actual,
-    // intentionally-divergent behavior for each, side by side, so a future
-    // edit to any one of them that accidentally drifts its policy fails here
-    // immediately instead of silently diverging further from the other two.
-    mod segmenter_consistency {
+    // Three consumers read the same command line for different purposes: the
+    // permission gate (`split_for_permissions`), classification
+    // (`split_for_classify`/`split_command_chain`), and the rewrite
+    // (`rewrite_compound`'s token walk). They used to disagree about what a
+    // command even was, and each disagreement was a bug waiting: a command the
+    // gate never saw, a command the report never counted, a command the rewrite
+    // glued to a bracket and then failed to match.
+    //
+    // These tests put all three side by side on one input. Where they agree,
+    // that agreement is the point and is asserted. Where they still differ, the
+    // difference is named and its reason given — a divergence nobody can state
+    // a reason for is a bug.
+    mod segmenter_agreement {
         use super::{rewrite_command_no_prefixes, split_command_chain};
         use crate::discover::lexer::split_for_permissions;
 
+        /// `&` ends a command as surely as `;` does.
         #[test]
-        fn background_ampersand() {
+        fn background_ampersand_ends_a_command_for_everyone() {
             let cmd = "git status & rm -rf ~";
-            // Permission gate: splits on background `&` — both sides checked independently.
             assert_eq!(split_for_permissions(cmd), vec!["git status", "rm -rf ~"]);
-            // Analytics: does not split on `&` at all (only Operator/Pipe kinds).
-            assert_eq!(split_command_chain(cmd), vec!["git status & rm -rf ~"]);
-            // Rewrite: does split on `&` (each side is its own rtk-rewrite
-            // candidate), but only "git status" is a known rtk command family —
-            // "rm -rf ~" has no rtk equivalent, so it's left unprefixed, not
-            // because it wasn't segmented.
+            assert_eq!(split_command_chain(cmd), vec!["git status", "rm -rf ~"]);
+            // `rm -rf ~` has no rtk equivalent, so it is left alone because no
+            // rule matches it — not because it was never segmented.
             assert_eq!(
                 rewrite_command_no_prefixes(cmd, &[]),
                 Some("rtk git status & rm -rf ~".into())
             );
         }
 
+        /// A subshell runs the commands it wraps, so all three see those
+        /// commands. Gluing the bracket to the text beside it used to lose the
+        /// first one: `(git status` matched no rule while `cargo build)` did,
+        /// so one command of a pair was filtered and the other silently was not.
         #[test]
-        fn subshell_grouping() {
+        fn a_subshell_is_a_boundary_for_everyone() {
             let cmd = "(git status; cargo build)";
-            // Permission gate: strips `(`/`)` as boundaries — both commands checked cleanly.
             assert_eq!(
                 split_for_permissions(cmd),
                 vec!["git status", "cargo build"]
             );
-            // Analytics: does not treat `(`/`)` as boundaries, only splits on `;` —
-            // the parens stay glued to the segment text on each side.
-            assert_eq!(
-                split_command_chain(cmd),
-                vec!["(git status", "cargo build)"]
-            );
-            // Rewrite: same non-splitting-on-parens behavior. The leading `(`
-            // glued to "git status" defeats rewrite_segment's own command
-            // matching (it no longer starts with "git"), so that side is left
-            // unprefixed; the trailing `)` glued after "cargo build" does not
-            // defeat matching on that side, so it gets prefixed. This asymmetry
-            // is a real, existing quirk of gluing grouping chars to segment
-            // text rather than stripping them — pinned here, not fixed here.
+            assert_eq!(split_command_chain(cmd), vec!["git status", "cargo build"]);
             assert_eq!(
                 rewrite_command_no_prefixes(cmd, &[]),
-                Some("(git status; rtk cargo build)".into())
+                Some("(rtk git status; rtk cargo build)".into())
+            );
+            // A lone command in a subshell is still a command.
+            assert_eq!(
+                rewrite_command_no_prefixes("(git status)", &[]),
+                Some("(rtk git status)".into())
             );
         }
 
+        /// The one `(` that opens no subshell. A `case` pattern may be written
+        /// `(ls)` as readily as `ls)`, and treating that bracket as a subshell
+        /// makes the pattern a command position: the rewrite then turns a
+        /// one-word pattern into two words, which bash refuses to parse — the
+        /// same way `;;` split into `; ;` did in #3197.
         #[test]
-        fn pipe_then_and() {
+        fn a_case_pattern_is_not_a_subshell() {
+            for cmd in [
+                "case $x in (ls) echo 1;; esac",
+                // Every arm re-enters pattern position, not just the first.
+                "case $x in a) echo 1;; (ls) echo 2;; esac",
+                "case $x in a) echo 1;;& (ls) echo 2;; esac",
+                "case $x in a) echo 1;& (ls) echo 2;; esac",
+            ] {
+                assert_eq!(
+                    rewrite_command_no_prefixes(cmd, &[]),
+                    None,
+                    "a case pattern was rewritten as if it were a subshell: {cmd}"
+                );
+            }
+
+            // The `)` still ends the pattern, so the arm's own commands are
+            // rewritten whether or not the pattern was bracketed.
+            assert_eq!(
+                rewrite_command_no_prefixes("case a in (a) git status;; esac", &[]),
+                Some("case a in (a) rtk git status;; esac".into())
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes("case a in a) git status;; esac", &[]),
+                Some("case a in a) rtk git status;; esac".into())
+            );
+
+            // `case` is the keyword only in command position, and a real
+            // subshell is still a subshell.
+            assert_eq!(
+                rewrite_command_no_prefixes("echo case; (git status)", &[]),
+                Some("echo case; (rtk git status)".into())
+            );
+
+            // The gate and analytics read the pattern the same way, so neither
+            // reports an `ls` that no shell ever runs.
+            let bracketed = "case $x in (ls) echo 1;; esac";
+            let expected = vec!["case $x in (ls", "echo 1", "esac"];
+            assert_eq!(split_for_permissions(bracketed), expected);
+            assert_eq!(split_command_chain(bracketed), expected);
+        }
+
+        /// Every stage of a pipeline is a command that ran, and all three see
+        /// all of them. What the rewrite then does with a stage is a per-rule
+        /// question (`PipelineSafety`) applied after segmentation, not a
+        /// disagreement about where the commands are: here only `grep` is safe
+        /// to run at the end of a pipe, so only it is taken.
+        #[test]
+        fn every_pipeline_stage_is_a_command_for_everyone() {
             let cmd = "git status | grep x && cargo build";
-            // Permission gate: always splits on `|` — every stage checked independently.
-            assert_eq!(
-                split_for_permissions(cmd),
-                vec!["git status", "grep x", "cargo build"]
-            );
-            // Analytics: the same segments as the gate. Classification has no
-            // reason to see less of a command line than the rules that guard
-            // it, and seeing less meant reporting on less.
-            assert_eq!(
-                split_command_chain(cmd),
-                vec!["git status", "grep x", "cargo build"]
-            );
-            // Rewrite: pipelines are handled specially (rewrite_pipeline_final_stage),
-            // and clauses after the pipeline are still walked and rewritten.
+            let stages = vec!["git status", "grep x", "cargo build"];
+            assert_eq!(split_for_permissions(cmd), stages);
+            assert_eq!(split_command_chain(cmd), stages);
             assert_eq!(
                 rewrite_command_no_prefixes(cmd, &[]),
                 Some("git status | rtk grep x && rtk cargo build".into())
             );
         }
 
+        /// Divergence, with a reason. The gate cuts a segment at its first
+        /// redirect so nothing can ride in behind one; the other two keep it,
+        /// because the rewritten line has to reproduce the command's real shape
+        /// and the report has to show what was really run. All three still
+        /// agree on where one command ends and the next begins.
         #[test]
-        fn redirect_in_segment() {
+        fn a_redirect_is_dropped_only_by_the_gate() {
             let cmd = "git status 2>&1 && cargo build";
-            // Permission gate: truncates the segment at its first redirect.
             assert_eq!(
                 split_for_permissions(cmd),
                 vec!["git status", "cargo build"]
             );
-            // Analytics: keeps the redirect attached to the segment.
             assert_eq!(
                 split_command_chain(cmd),
                 vec!["git status 2>&1", "cargo build"]
             );
-            // Rewrite: also keeps the redirect — rewritten output must
-            // reproduce the command's actual shape, redirect included.
             assert_eq!(
                 rewrite_command_no_prefixes(cmd, &[]),
                 Some("rtk git status 2>&1 && rtk cargo build".into())
+            );
+        }
+
+        /// Divergence, with a reason. A command inside `$( )` runs, so the gate
+        /// descends into it and holds it to the deny rules. The other two stay
+        /// out: the text around a substitution is not a command of its own, so
+        /// descending would invent a `git log $` nobody ran, and what the
+        /// substitution captures is a string the outer command is built from —
+        /// filtering it would change that string rather than what reaches
+        /// anyone.
+        #[test]
+        fn only_the_gate_descends_into_a_substitution() {
+            let cmd = "git log $(git rev-parse HEAD~1)";
+            assert!(
+                split_for_permissions(cmd).contains(&"git rev-parse HEAD~1"),
+                "the gate has to see a command that runs, wherever it sits"
+            );
+            assert_eq!(split_command_chain(cmd), vec![cmd]);
+            // The outer command is rewritten and the captured one is left
+            // exactly as written, which is the whole point of staying out.
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some("rtk git log $(git rev-parse HEAD~1)".into())
+            );
+        }
+
+        /// An operator inside a substitution separates commands whose output
+        /// becomes one word of the command being built. Reading it as a
+        /// boundary out here rewrites into the captured string, so `echo` would
+        /// print a command line nobody wrote.
+        #[test]
+        fn an_operator_inside_a_substitution_is_not_a_boundary() {
+            for cmd in [
+                "echo $(git status && git log)",
+                "echo $(git status; git log)",
+                "echo $(git status || git log)",
+                "echo $(git status | grep x)",
+            ] {
+                assert_eq!(
+                    rewrite_command_no_prefixes(cmd, &[]),
+                    None,
+                    "nothing in {cmd:?} is rewritable from outside the substitution"
+                );
+                assert_eq!(split_command_chain(cmd), vec![cmd], "{cmd}");
+            }
+        }
+
+        /// `<( )` and `>( )` serve the outer command the same way `$( )` does,
+        /// handing it a file to read instead of text to build with. Reading
+        /// only `$` left `diff <(a) <(b)` classified as four commands, two of
+        /// them the fragments `diff <` and `<`, and filtered the output that
+        /// `diff` was about to compare.
+        #[test]
+        fn process_substitution_is_a_substitution_too() {
+            let cmd = "diff <(git status) <(git log)";
+            assert_eq!(split_command_chain(cmd), vec![cmd]);
+            // The outer command is taken; what it is about to compare is not.
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some("rtk diff <(git status) <(git log)".into())
+            );
+
+            let writing = "tee >(cargo build) < in.txt";
+            assert_eq!(split_command_chain(writing), vec![writing]);
+            assert_eq!(rewrite_command_no_prefixes(writing, &[]), None);
+        }
+
+        /// Brackets nest. Counting only the `(` that follows a `$` closed the
+        /// substitution one bracket early, so the real closing `)` read as a
+        /// boundary and went missing from the segment.
+        #[test]
+        fn a_bracket_nested_in_a_substitution_still_closes_it() {
+            let cmd = "$(cd /tmp && (git status; git log))";
+            assert_eq!(split_command_chain(cmd), vec![cmd]);
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None);
+
+            // The same nesting, with a command after it that must still be seen.
+            let chained = "$(cd /tmp && (git status)) && cargo build";
+            assert_eq!(
+                split_command_chain(chained),
+                vec!["$(cd /tmp && (git status))", "cargo build"]
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes(chained, &[]),
+                Some("$(cd /tmp && (git status)) && rtk cargo build".into())
+            );
+
+            // A rewritable command after the inner `)` but still inside the
+            // substitution. Miscount the nesting and the `&&` reads as a
+            // boundary out here, so `git status` is rewritten into the captured
+            // text — the only shape where the rewrite side of the count shows.
+            assert_eq!(
+                rewrite_command_no_prefixes("$( (ls) && git status )", &[]),
+                None
+            );
+        }
+
+        /// Divergence, with a reason. `{` opens a group only at a command
+        /// position; anywhere else it is brace expansion, and `ls {a,b}.txt` is
+        /// one command. `(` carries no such ambiguity, which is why it became a
+        /// boundary and `{` did not. The gate copes by stripping the bracket
+        /// before it matches rules, so nothing hides behind one.
+        #[test]
+        fn a_brace_group_is_not_a_boundary_outside_the_gate() {
+            assert_eq!(
+                rewrite_command_no_prefixes("ls {a,b}.txt", &[]),
+                Some("rtk ls {a,b}.txt".into()),
+                "brace expansion is part of the command, not a boundary"
+            );
+            let cmd = "{ git status; cargo build; }";
+            assert_eq!(
+                split_command_chain(cmd),
+                vec!["{ git status", "cargo build", "}"]
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some("{ git status; rtk cargo build; }".into())
             );
         }
     }
@@ -7696,13 +7891,23 @@ mod tests {
     #[test]
     fn test_process_wrapper_refuses_shell_syntax() {
         for input in [
-            "time (cargo build)",
             "timeout 300 >out.log cargo test",
             "timeout 300 $(which cargo) test",
             "timeout 300 */bin/cargo test",
         ] {
             assert_eq!(rewrite_command_no_prefixes(input, &[]), None, "{}", input);
         }
+    }
+
+    /// A wrapper cannot peel a `(`, but it does not have to: the subshell is a
+    /// boundary, so the commands inside it are rewritten where they stand and
+    /// the wrapper keeps wrapping the subshell.
+    #[test]
+    fn test_a_wrapper_around_a_subshell_rewrites_inside_it() {
+        assert_eq!(
+            rewrite_command_no_prefixes("time (cargo build)", &[]),
+            Some("time (rtk cargo build)".into())
+        );
     }
 
     #[test]
