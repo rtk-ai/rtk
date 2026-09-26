@@ -25,7 +25,7 @@ use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
 use cmds::system::{
     ast_grep_cmd, ctest_cmd, deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls,
-    pipe_cmd, read, search, summary, tree, wc_cmd,
+    pipe_cmd, read, search, summary, tree, typesafe_cmd, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -139,6 +139,25 @@ enum Commands {
         /// Force model download
         #[arg(long)]
         force_download: bool,
+    },
+
+    /// Call the TypeSafe API with one typed question (compact output)
+    Typesafe {
+        /// Primitive: noul | choice | score
+        #[arg(value_parser = ["noul", "choice", "score"])]
+        primitive: String,
+        /// State to evaluate (`-` reads stdin, `@path` reads a file)
+        #[arg(short, long, default_value = "")]
+        state: String,
+        /// Instructions for the model
+        #[arg(short, long)]
+        instructions: String,
+        /// Criteria: choice=`key:desc,key:desc` | score=`lvl,lvl` | noul=`true,false`
+        #[arg(short, long)]
+        criteria: String,
+        /// Print the raw JSON response instead of the compact form
+        #[arg(long)]
+        raw: bool,
     },
 
     /// Git commands with compact output
@@ -2020,6 +2039,29 @@ fn run_cli() -> Result<i32> {
             0
         }
 
+        Commands::Typesafe {
+            primitive,
+            state,
+            instructions,
+            criteria,
+            raw,
+        } => {
+            let criteria_items: Vec<String> = if criteria.is_empty() {
+                Vec::new()
+            } else {
+                criteria.split(',').map(|s| s.to_string()).collect()
+            };
+            typesafe_cmd::run(
+                &primitive,
+                &state,
+                &instructions,
+                &criteria_items,
+                raw,
+                cli.verbose,
+            )?;
+            0
+        }
+
         Commands::Git {
             directory,
             config_override,
@@ -3246,6 +3288,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Tree { .. }
             | Commands::Read { .. }
             | Commands::Smart { .. }
+            | Commands::Typesafe { .. }
             | Commands::Git { .. }
             | Commands::Gh { .. }
             | Commands::Glab { .. }
