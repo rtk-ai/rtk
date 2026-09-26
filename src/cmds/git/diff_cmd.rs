@@ -5156,6 +5156,10 @@ diff --git a/b.rs b/b.rs
             include_str!("../../../tests/fixtures/diff/diff_ru_310_colon_dirs_raw.txt"),
         ),
         (
+            "diff_ru_310_colon_dirs_root",
+            include_str!("../../../tests/fixtures/diff/diff_ru_310_colon_dirs_root_raw.txt"),
+        ),
+        (
             "hg_diff_nodates_tab",
             include_str!("../../../tests/fixtures/diff/hg_diff_nodates_tab_raw.txt"),
         ),
@@ -6537,6 +6541,17 @@ diff --git a/b.rs b/b.rs
             assert!(out.contains(label), "missing {label:?}:\n{out}");
         }
         assert_eq!(out.matches("[file] ").count(), 3, "got:\n{out}");
+    }
+
+    #[test]
+    fn bare_only_in_with_a_colon_root_uses_header_pair_roots() {
+        let fixture =
+            include_str!("../../../tests/fixtures/diff/diff_ru_310_colon_dirs_root_raw.txt");
+        let out = condense_unified_diff_strict(fixture).expect("must parse");
+        assert!(
+            out.contains("[file] e: y/only.txt (only in one side)"),
+            "got:\n{out}"
+        );
     }
 
     #[test]
