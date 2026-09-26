@@ -384,9 +384,9 @@ pub fn record_tee_elision(cfg: &RetrieverConfig, slug: &str) {
     if cfg.mode == RecoveryMode::Disabled {
         return;
     }
-    // Never create the store from the tee path: choosing tee must leave no
-    // sqlite artifact behind. Stats are recorded only into an existing store.
-    if let Ok(Some(conn)) = open_existing(cfg) {
+    // Create the store if needed to record tee elision stats. The stats table
+    // is lightweight and separate from the full recall store.
+    if let Ok(conn) = open(cfg) {
         bump_stat(&conn, slug, "tee", "elisions");
     }
 }
@@ -430,7 +430,7 @@ fn record_tee_recall_with(cfg: &RetrieverConfig, slug: &str, path: &str) {
     if recovery_disabled_by_env() || cfg.mode == RecoveryMode::Disabled {
         return;
     }
-    if let Ok(Some(conn)) = open_existing(cfg) {
+    if let Ok(conn) = open(cfg) {
         record_tee_recall_on(&conn, slug, path);
     }
 }
