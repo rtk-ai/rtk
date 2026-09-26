@@ -83,6 +83,20 @@ Rules are loaded from all Claude Code `settings.json` files (project + global, i
 | Allow | `permissions.allow` rule matched | 0 | Rewrite + auto-allow |
 | Default | No rule matched | 3 | Rewrite + let host tool prompt user |
 
+A delegate that shells out to `rtk rewrite` and applies its own exec policy to
+the result can set `RTK_REWRITE_HOST=<agent>` on that subprocess. For an agent
+whose `AgentPath` records it as owning approval — OpenClaw is the only one —
+`Default` renders as exit 0 instead of 3, because a `Default` verdict means no
+rule matched and RTK asking as well would be a second gate sourced from Claude
+Code's settings the runtime never opted into (#3908). An explicit `Ask` rule is
+the user's own instruction, so it still renders as exit 3 and the host still
+prompts. The verdict source is unchanged, and `Deny` still renders as exit 2 for
+every delegate, so naming a host can never relax an explicit deny or discard an
+explicit ask. An unknown or unset value keeps the table above — and a caller
+that does *not* own approval should scrub the variable before invoking `rtk
+rewrite`, since it is inherited by every child process. See `decision.rs`'s
+`ApprovalOwner`.
+
 ### Per-tool support
 
 | Tool | ask support | Behavior on Default |
@@ -95,6 +109,7 @@ Rules are loaded from all Claude Code `settings.json` files (project + global, i
 | Codex (`rtk hook codex`) | Native approval runs after rewrite | Emit required protocol `allow` with `updatedInput`; Codex then evaluates the rewritten command normally |
 | Trae (`rtk hook trae`) | Host-owned approval | Return only `updatedInput`; omit `permissionDecision` |
 | Mistral Vibe (rtk hook vibe) | No native ask surface | passthrough — Vibe's own approval prompt fires on the rewritten command |
+| OpenClaw (`openclaw/index.ts` → `rtk rewrite`) | Host-owned approval (`RTK_REWRITE_HOST=openclaw`) | Rewrite with no RTK prompt when no rule matched; an explicit `Ask` still exits 3 and the plugin prompts. OpenClaw's `tools.exec.mode`/`security`/`ask` decide. A `Deny` still exits 2 and the plugin blocks the call |
 
 ### Implementation
 
@@ -107,4 +122,4 @@ Rules are loaded from all Claude Code `settings.json` files (project + global, i
 Hook processors in `hook_cmd.rs` must return `Ok(())` on every path — success, no-match, parse error, and unexpected input. Returning `Err` propagates to `main()` and exits non-zero, which blocks the agent's command from executing. This violates the non-blocking guarantee documented in `hooks/README.md`.
 
 ## Adding New Functionality
-To add support for a new AI coding agent: (1) add the hook installation logic to `init.rs` following the existing agent patterns, (2) if the agent requires a custom hook protocol (like Gemini's `BeforeTool` or Vibe's `pre_tool`), add a processor function in `hook_cmd.rs` and a matching `HookCommands::<Agent>` variant + `AgentTarget::<Agent>` enum entry in `main.rs`, (3) if the agent has installable permission surfaces (denylist / allowlist), wire them into `permissions.rs::check_command_for` via a new `Host::<Agent>` variant, and (4) update `integrity.rs` with the expected hash for the new hook file. Note that `hook_check.rs::maybe_warn()` only checks the Claude Code hook — other agents don't have an outdated-hook warning path. Test by running `rtk init` in a fresh environment and verifying the hook rewrites commands correctly in the target agent.
+To add support for a new AI coding agent: (1) add the hook installation logic to `src/hooks/init/` following the existing agent patterns, (2) if the agent requires a custom hook protocol (like Gemini's `BeforeTool` or Vibe's `pre_tool`), add a processor function in `hook_cmd.rs` and a matching `HookCommands::<Agent>` variant + `AgentTarget::<Agent>` enum entry in `main.rs`, (3) if the agent has installable permission surfaces (denylist / allowlist), wire them into `permissions.rs::check_command_for` via a new `Host::<Agent>` variant, and (4) update `integrity.rs` with the expected hash for the new hook file. Note that `hook_check.rs::maybe_warn()` only checks the Claude Code hook — other agents don't have an outdated-hook warning path. Test by running `rtk init` in a fresh environment and verifying the hook rewrites commands correctly in the target agent.

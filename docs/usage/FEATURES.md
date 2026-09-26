@@ -267,6 +267,10 @@ rtk diff <fichier1> <fichier2>
 rtk diff <fichier1>              # Stdin comme second fichier
 ```
 
+Pour comparer deux fichiers : code de sortie **0** si identiques, **1** si differents,
+**2** si un fichier ne peut pas etre lu. Les fichiers non UTF-8 sont compares octet
+par octet ; seuls leurs noms sont affiches lorsqu'ils different.
+
 ---
 
 ### `rtk wc` -- Comptage compact

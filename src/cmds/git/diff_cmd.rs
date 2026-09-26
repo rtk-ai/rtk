@@ -32,26 +32,66 @@ static MARKED_PROSE_RE: LazyLock<Regex> =
 
 const IDENTICAL_FILES_MESSAGE: &str = "[ok] Files are identical\n";
 
+/// POSIX diff's "trouble" exit code: an operand could not be read at all
+/// (missing, permission denied, is-a-directory). Distinct from 1, which says
+/// the two files differ — the distinction a caller's `if diff a b` relies on.
+const DIFF_EXIT_TROUBLE: i32 = 2;
+
 /// Ultra-condensed diff - only changed lines, no context.
-/// Returns the diff-convention exit code: 0 if identical, 1 if files differ.
+/// Returns the diff-convention exit code: 0 if identical, 1 if files differ,
+/// 2 if an operand cannot be read.
 pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+    let command = format!("diff {} {}", file1.display(), file2.display());
 
     if verbose > 0 {
         eprintln!("Comparing: {} vs {}", file1.display(), file2.display());
     }
 
-    let content1 = fs::read_to_string(file1)?;
-    let content2 = fs::read_to_string(file2)?;
+    // Read bytes first so non-UTF-8 data is not mistaken for an I/O failure.
+    let (bytes1, bytes2) = match fs::read(file1)
+        .map_err(|error| (file1, error))
+        .and_then(|first| {
+            fs::read(file2)
+                .map(|second| (first, second))
+                .map_err(|error| (file2, error))
+        }) {
+        Ok(contents) => contents,
+        Err((path, error)) => {
+            let message = format!("rtk diff: {}: {}", path.display(), error);
+            eprintln!("{}", message);
+            timer.track(&command, "rtk diff", &message, &message);
+            return Ok(DIFF_EXIT_TROUBLE);
+        }
+    };
+
+    let (content1, content2) = match (std::str::from_utf8(&bytes1), std::str::from_utf8(&bytes2)) {
+        (Ok(first), Ok(second)) => (first, second),
+        _ => {
+            let different = bytes1 != bytes2;
+            let message = if different {
+                format!(
+                    "Binary files {} and {} differ\n",
+                    file1.display(),
+                    file2.display()
+                )
+            } else {
+                String::new()
+            };
+            print!("{}", message);
+            timer.track(&command, "rtk diff", &message, &message);
+            return Ok(i32::from(different));
+        }
+    };
     let both_files = format!("{}\n---\n{}", content1, content2);
 
-    let comparison = compare_files(&content1, &content2);
+    let comparison = compare_files(content1, content2);
     let fallback = classic_fallback(&comparison);
     let (rtk, exit_code) = render_diff(file1, file2, &comparison);
     let shown = select_file_diff_output(&comparison, &fallback, &both_files, &rtk);
     print!("{}", shown);
     timer.track(
-        &format!("diff {} {}", file1.display(), file2.display()),
+        &command,
         "rtk diff",
         tracking_baseline(&fallback, &both_files, shown),
         shown,

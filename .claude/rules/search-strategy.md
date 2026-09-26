@@ -32,7 +32,7 @@ src/
 │   ├── runner.rs              ← Command execution runner
 │   └── stream.rs              ← Streaming output handling
 ├── hooks/                     ← Hook system
-│   ├── init.rs                ← rtk init command
+│   ├── init/                  ← rtk init command
 │   ├── rewrite_cmd.rs         ← rtk rewrite command
 │   ├── hook_cmd.rs            ← Gemini/Copilot hook processors
 │   ├── hook_check.rs          ← Hook status detection
@@ -62,7 +62,7 @@ src/
 ├── discover/                  ← Claude Code history analysis
 ├── learn/                     ← CLI correction detection
 ├── parser/                    ← Parser infrastructure
-└── filters/                   ← 63 TOML filter configs
+└── filters/                   ← 62 TOML filter configs
 ```
 
 ## Common Search Patterns
@@ -146,7 +146,7 @@ Glob pattern="tests/fixtures/*.txt"
 ### Configuration issues
 
 1. `src/core/config.rs` → `RtkConfig` struct
-2. `src/hooks/init.rs` → `rtk init` command
+2. `src/hooks/init/` → `rtk init` command
 3. Config file: `~/.config/rtk/config.toml`
 4. Filter files: `~/.config/rtk/filters/` (global) or `.rtk/filters/` (project)
 

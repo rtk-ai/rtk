@@ -121,6 +121,12 @@ rewrite_cmd::run(cmd)                              [src/hooks/rewrite_cmd.rs]
   |     → None → exit(1)          (no RTK equivalent, passthrough)
   |     → Some + Allow → print, exit(0)
   |     → Some + Ask   → print, exit(3)
+  |  4. ApprovalOwner::from_env() — RTK_REWRITE_HOST names the calling
+  |     delegate. For one that gates the rewritten command itself
+  |     (OpenClaw), a Default ask renders as exit(0) instead of exit(3); an
+  |     explicit Ask rule still exits 3 so the host can prompt. Deny and
+  |     passthrough are untouched, so this never relaxes a deny or drops an
+  |     explicit ask.
   |
   v
 rewrite_command(cmd, excluded)                     [src/discover/registry.rs]

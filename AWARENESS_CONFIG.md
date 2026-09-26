@@ -61,7 +61,7 @@ pub struct Config {
 ```
 
 Unknown value (`level = "max"`) is a TOML parse error, same strictness as `tee.mode`.
-Known gap, out of scope here: `init.rs` calls `Config::load().unwrap_or_default()`
+Known gap, out of scope here: `src/hooks/init/` calls `Config::load().unwrap_or_default()`
 (lines ~461/473), so a malformed config silently falls back to defaults during init.
 Worth a warning on stderr in the same PR, since a typo in `level` would otherwise
 silently install `default` and the user would not know why.
@@ -70,7 +70,7 @@ No CLI flag in phase 1. Config is the source of truth; switching level = edit co
 `rtk init -g`. `write_if_changed` already rewrites `RTK.md` when content differs.
 Optional phase 2: `rtk init --awareness high` as a one-run override (no persistence).
 
-## Wiring in `src/hooks/init.rs`
+## Wiring in `src/hooks/init/`
 
 ```rust
 const RTK_AWARENESS_DEFAULT: &str = include_str!("../../hooks/rtk-awareness.md");
@@ -211,7 +211,7 @@ tokens; behavior and exit code are unchanged.
 - `level = "max"` → `Err`.
 - Round-trip: `Config::default()` serializes `[awareness]\nlevel = "default"` (so `rtk config` shows it).
 
-`src/hooks/init.rs`:
+`src/hooks/init/`:
 - `awareness_content` maps each variant to its constant.
 - `HIGH.starts_with(DEFAULT.trim_end())` — `high` is `default` plus a tail.
 - `FULL.contains(DEFAULT.trim_end())` — the output contract is verbatim in `full`.

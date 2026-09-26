@@ -69,7 +69,22 @@ impl Sandbox {
     }
 
     fn run(&self, args: &[&str]) -> (i32, String, String) {
-        let out = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        self.run_with_env(args, &[])
+    }
+
+    /// [`Sandbox::run`] with extra environment variables, for the knobs a
+    /// delegate sets on the `rtk rewrite` subprocess rather than in argv.
+    fn run_with_env(&self, args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rtk"));
+        // Keep the host channel out of the inherited environment. Exporting it
+        // in a developer's shell would otherwise turn the suite red on that
+        // machine, or hide a real regression, rather than testing the code; a
+        // test that wants it opts in through `env` below.
+        command.env_remove("RTK_REWRITE_HOST");
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let out = command
             .args(args)
             .current_dir(&self.project)
             .env("HOME", &self.home)
@@ -121,6 +136,68 @@ impl Sandbox {
     fn rewrite(&self, cmd: &str) -> (i32, String) {
         let (code, stdout, _) = self.run(&["rewrite", cmd]);
         (code, stdout)
+    }
+
+    /// `rtk rewrite` as a delegate that announces which agent it speaks for.
+    fn rewrite_as(&self, host: &str, cmd: &str) -> (i32, String) {
+        let (code, stdout, _) = self.run_with_env(&["rewrite", cmd], &[("RTK_REWRITE_HOST", host)]);
+        (code, stdout)
+    }
+
+    /// Run a shipped shell hook the way an agent does: the hook input on stdin
+    /// and the built `rtk` first on PATH. The environment is cleared first, so
+    /// nothing inherited -- a `BASH_ENV`, another `rtk`, an audit or data
+    /// directory -- can change what runs or where it writes; config, data and
+    /// cache all live in this sandbox.
+    #[cfg(unix)]
+    fn run_hook(&self, hook: &str, cmd: &str, env: &[(&str, &str)]) -> (i32, String, String) {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let rtk_dir = std::path::Path::new(env!("CARGO_BIN_EXE_rtk"))
+            .parent()
+            .expect("rtk binary has a parent directory")
+            .to_path_buf();
+        // The built rtk first, then the caller's PATH for bash, jq and coreutils.
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        let path =
+            std::env::join_paths(std::iter::once(rtk_dir).chain(std::env::split_paths(&inherited)))
+                .expect("PATH entries join");
+        let input = self.project.join("hook-input.json");
+        std::fs::write(
+            &input,
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": { "command": cmd },
+            })
+            .to_string(),
+        )
+        .expect("write hook input");
+        let mut command = Command::new("bash");
+        command
+            .env_clear()
+            .arg(root.join(hook))
+            .current_dir(&self.project)
+            .env("PATH", path)
+            .env("HOME", &self.home)
+            .env("XDG_CONFIG_HOME", self.home.join(".config"))
+            .env("XDG_DATA_HOME", self.home.join(".local/share"))
+            .env("XDG_CACHE_HOME", self.home.join(".cache"))
+            .env("CLAUDE_CONFIG_DIR", &self.claude_home)
+            .env("RTK_DB_PATH", self.project.join("rtk.db"))
+            .env("RTK_TEE_DIR", self.tee_dir())
+            .env("RTK_RECALL_DB", self.recall_db())
+            .env("LC_ALL", "C");
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let out = command
+            .stdin(std::fs::File::open(&input).expect("open hook input"))
+            .output()
+            .expect("run hook");
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
     }
 }
 
@@ -528,5 +605,270 @@ mod hook_check {
             stderr.contains("Denied by a permission rule"),
             "stderr: {stderr}"
         );
+    }
+}
+
+/// `RTK_REWRITE_HOST` — which delegate is asking, and what that may change.
+///
+/// A delegate that applies its own exec policy to the rewritten command reads
+/// RTK's exit 3 as a *second* approval gate sourced from another agent's
+/// settings file (#3908). Naming itself collapses the *default* ask — the case
+/// where no rule matched — to allow, and nothing else. An explicit ask rule is
+/// the user's own instruction, so it still exits 3 and the host still prompts.
+///
+/// The load-bearing half is what it must **not** change. Every case below that
+/// pins an exit 2 or an exit 1 exists because a host flag that can turn a
+/// denied command into an allowed rewrite is worse than the prompt it removes.
+mod rewrite_host_scoping {
+    use super::Sandbox;
+
+    /// Deny rules on commands RTK can rewrite, so a deny that stopped applying
+    /// shows up as an allowed rewrite instead of hiding behind a passthrough.
+    const DENY_RULES: &[&str] = &["du *", "git push *"];
+
+    /// The hooks that turn exit 0 into an affirmative allow must not let an
+    /// inherited `RTK_REWRITE_HOST` reach `rtk rewrite`, or a variable meant
+    /// for OpenClaw auto-approves every rewritable command in another agent's
+    /// session. Each hook runs as the agent runs it, with the variable set. It
+    /// must still hand back the rewrite -- proof that the hook, `jq` and the
+    /// built `rtk` all ran, so a missing tool fails here rather than passing --
+    /// and must not answer with an allow.
+    #[cfg(unix)]
+    #[test]
+    fn affirmative_allow_hooks_ignore_an_inherited_host() {
+        let bare = Sandbox::bare();
+        // Each host reads its own keys, so each hook is held to its own shape: a
+        // Claude hook answering in Cursor's keys would be ignored by Claude Code.
+        for (hook, command_at, permission_at) in [
+            (
+                "hooks/claude/rtk-rewrite.sh",
+                "/hookSpecificOutput/updatedInput/command",
+                "/hookSpecificOutput/permissionDecision",
+            ),
+            (
+                ".claude/hooks/rtk-rewrite.sh",
+                "/hookSpecificOutput/updatedInput/command",
+                "/hookSpecificOutput/permissionDecision",
+            ),
+            (
+                "hooks/cursor/rtk-rewrite.sh",
+                "/updated_input/command",
+                "/permission",
+            ),
+        ] {
+            let (code, stdout, stderr) =
+                bare.run_hook(hook, "git status", &[("RTK_REWRITE_HOST", "openclaw")]);
+            let reply: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+                panic!("{hook} gave no JSON ({e}), exit {code}: stdout {stdout:?}, stderr {stderr:?}")
+            });
+            assert_eq!(
+                reply.pointer(command_at).and_then(|v| v.as_str()),
+                Some("rtk git status"),
+                "{hook} did not hand back the rewrite at {command_at}: {reply}"
+            );
+            assert_ne!(
+                reply.pointer(permission_at).and_then(|v| v.as_str()),
+                Some("allow"),
+                "{hook} auto-allowed under an inherited host: {reply}"
+            );
+        }
+    }
+
+    /// The default ask collapses to allow: that is the whole of what the host
+    /// name buys, and the reason the plugin no longer prompts for a command no
+    /// rule matched (#3908).
+    #[test]
+    fn openclaw_collapses_the_default_ask_to_allow() {
+        let bare = Sandbox::bare();
+        assert_eq!(
+            bare.rewrite_as("openclaw", "git status"),
+            (0, "rtk git status".into()),
+            "default verdict must not raise an ask for a self-approving host"
+        );
+    }
+
+    /// An explicit `ask` rule is the user's own instruction and is *not*
+    /// relaxed: the host still gets exit 3 and can prompt. Relaxing it would
+    /// discard a rule the user wrote while honouring the deny from the same
+    /// file.
+    #[test]
+    fn openclaw_keeps_an_explicit_ask_rule() {
+        let asked = Sandbox::with_rules(&[], &["git status"], &[]);
+        assert_eq!(
+            asked.rewrite_as("openclaw", "git status"),
+            (3, "rtk git status".into()),
+            "an explicit ask rule must survive the host-name relaxation"
+        );
+    }
+
+    /// The suite is hermetic against the variable: `run_with_env` scrubs it, so
+    /// exporting `RTK_REWRITE_HOST=openclaw` in a developer's shell cannot turn
+    /// `default_verdict_exits_three_never_zero` red on that machine and green
+    /// elsewhere. Without the scrub, the child inherits
+    /// the value and this call exits 0.
+    #[test]
+    fn an_exported_host_cannot_relax_a_caller_that_did_not_set_it() {
+        temp_env::with_var("RTK_REWRITE_HOST", Some("openclaw"), || {
+            let bare = Sandbox::bare();
+            assert_eq!(
+                bare.rewrite("git status"),
+                (3, "rtk git status".into()),
+                "an inherited host name must not relax the strict caller"
+            );
+        });
+    }
+
+    /// An explicit allow is already exit 0 and stays there.
+    #[test]
+    fn openclaw_leaves_an_explicit_allow_alone() {
+        let sb = Sandbox::with_rules(&[], &[], &["git status"]);
+        assert_eq!(
+            sb.rewrite_as("openclaw", "git status"),
+            (0, "rtk git status".into())
+        );
+    }
+
+    /// The deny matrix: a denied command exits 2 under every host name, with
+    /// or without one. No arrangement may turn it into exit 0 (the delegate
+    /// applies the rewrite) or exit 1 (the delegate runs the original).
+    #[test]
+    fn no_host_can_turn_a_deny_into_an_allow_or_a_passthrough() {
+        let sb = Sandbox::with_rules(DENY_RULES, &[], &[]);
+        for cmd in ["du -sh .", "git push", "git push origin main"] {
+            assert_eq!(
+                sb.rewrite(cmd),
+                (2, String::new()),
+                "baseline, no host: {cmd}"
+            );
+            for host in ["openclaw", "claude", "pi", "hermes", "opencode", "omp"] {
+                assert_eq!(
+                    sb.rewrite_as(host, cmd),
+                    (2, String::new()),
+                    "host {host} must still deny: {cmd}"
+                );
+            }
+        }
+    }
+
+    /// A deny on one segment denies the compound, for a self-approving host
+    /// too (#1213). Without this, `git push && rm -rf /tmp/zz` is handed back
+    /// whole and applied.
+    #[test]
+    fn openclaw_denies_a_compound_carrying_a_denied_segment() {
+        let sb = Sandbox::with_rules(DENY_RULES, &[], &[]);
+        assert_eq!(
+            sb.rewrite_as("openclaw", "git push && rm -rf /tmp/zz"),
+            (2, String::new())
+        );
+    }
+
+    /// Constructs the permission gate cannot decompose stay passthrough, so
+    /// the collapse can never hand back an allowed rewrite carrying an
+    /// unchecked command.
+    #[test]
+    fn openclaw_keeps_unattestable_constructs_passthrough() {
+        let sb = Sandbox::bare();
+        for cmd in [
+            "git status $(rm -rf /tmp/x)",
+            "git status `rm -rf /tmp/x`",
+            "git log > /tmp/out.txt",
+            "cat <<EOF",
+        ] {
+            assert_eq!(
+                sb.rewrite_as("openclaw", cmd),
+                (1, String::new()),
+                "cmd: {cmd}"
+            );
+        }
+    }
+
+    /// No rewrite rule, no rewrite — the host name does not invent one.
+    #[test]
+    fn openclaw_leaves_a_non_rewritable_command_alone() {
+        let sb = Sandbox::bare();
+        assert_eq!(sb.rewrite_as("openclaw", "htop"), (1, String::new()));
+    }
+
+    /// Every other delegate keeps the #1155 gate: a default verdict exits 3.
+    #[test]
+    fn other_delegates_keep_the_default_ask_gate() {
+        let sb = Sandbox::bare();
+        for host in ["claude", "pi", "hermes", "opencode", "omp", "vibe"] {
+            assert_eq!(
+                sb.rewrite_as(host, "git status"),
+                (3, "rtk git status".into()),
+                "host {host} must not collapse the default verdict"
+            );
+        }
+    }
+
+    /// An unknown, misspelled, empty or differently-cased name fails closed:
+    /// it keeps the default gate rather than borrowing a host's behaviour.
+    #[test]
+    fn an_unrecognized_host_keeps_the_default_gate() {
+        let bare = Sandbox::bare();
+        for host in ["open-claw", "OpenClaw", "openclaw ", "", "nope"] {
+            assert_eq!(
+                bare.rewrite_as(host, "git status"),
+                (3, "rtk git status".into()),
+                "host {host:?} must fall back to the ask gate"
+            );
+        }
+
+        // And it must not weaken a deny either, since the fallback is the
+        // stricter of the two behaviours, not another host's rule set.
+        let denied = Sandbox::with_rules(DENY_RULES, &[], &[]);
+        assert_eq!(
+            denied.rewrite_as("open-claw", "git push"),
+            (2, String::new())
+        );
+    }
+
+    /// The version boundary, stated as a property of the transport.
+    ///
+    /// A delegate built for a newer rtk runs against whatever rtk the user has
+    /// installed. `RTK_REWRITE_HOST` is chosen over an argv flag because an
+    /// older binary ignores an unknown variable, while `Commands::Rewrite`'s
+    /// positional is `trailing_var_arg = true, allow_hyphen_values = true` and
+    /// swallows any flag into the command text — which changes what the
+    /// permission gate is shown, and so what it decides.
+    ///
+    /// This pins that RTK ships no argv token for the host: `--host openclaw`
+    /// is command text here exactly as it is on an older binary, so the two
+    /// versions cannot disagree about it.
+    #[test]
+    fn the_host_is_not_an_argv_token_so_versions_cannot_disagree() {
+        let sb = Sandbox::bare();
+        let (code, stdout, _) = sb.run(&["rewrite", "--host", "openclaw", "git status"]);
+        assert_eq!(
+            (code, stdout.as_str()),
+            (1, ""),
+            "`--host` must stay command text, as it is on every older rtk"
+        );
+
+        // The same corruption the flag form would cause to a deny rule, shown
+        // here rather than shipped: the gate is offered `--host openclaw git
+        // push`, which no `Bash(git push *)` rule matches.
+        let denied = Sandbox::with_rules(DENY_RULES, &[], &[]);
+        let (flag_code, _, _) = denied.run(&["rewrite", "--host", "openclaw", "git push"]);
+        assert_eq!(
+            flag_code, 1,
+            "flag-in-command-text loses the deny — the reason the host travels in the environment"
+        );
+        assert_eq!(
+            denied.rewrite_as("openclaw", "git push"),
+            (2, String::new()),
+            "the environment transport keeps it"
+        );
+    }
+
+    /// The host name changes the rewrite gate only. A denied command still
+    /// records no recall, exactly as without a host.
+    #[test]
+    fn a_denied_command_records_no_recall_under_a_self_approving_host() {
+        let denied = Sandbox::with_rules(&["tail *"], &[], &[]);
+        let (code, _) = denied.rewrite_as("openclaw", &format!("tail -n +52 {}", denied.tee_log()));
+        assert_eq!(code, 2, "the deny rule must match, or this proves nothing");
+        assert!(!denied.recorded_a_recall());
     }
 }

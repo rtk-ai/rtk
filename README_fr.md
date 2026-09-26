@@ -145,7 +145,7 @@ rtk read file.rs                # Lecture intelligente
 rtk read file.rs -l aggressive  # Signatures uniquement
 rtk find "*.rs" .               # Resultats compacts
 rtk grep "pattern" .            # Resultats groupes par fichier
-rtk diff file1 file2            # Diff condense
+rtk diff file1 file2            # Diff condense (code 0 : identiques, 1 : differents, 2 : erreur de lecture)
 ```
 
 ### Git

@@ -325,7 +325,7 @@ fn test_real_git_log() {
 - `src/cmds/system/` - ls.rs, tree.rs, read.rs, grep_cmd.rs, find_cmd.rs, etc.
 
 **Hook & analytics** (`src/hooks/`, `src/analytics/`):
-- `src/hooks/init.rs` - rtk init command
+- `src/hooks/init/` - rtk init command
 - `src/analytics/gain.rs` - rtk gain command
 
 **Tests**:

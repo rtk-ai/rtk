@@ -12,8 +12,10 @@
 //! [`decide`] is the shared answer. What legitimately differs between callers
 //! stays outside it: the verdict is passed in rather than looked up, so each
 //! host consults its own permission rules and tests stay independent of the
-//! machine's settings (#3146); and the no-op-rewrite policy lives in
-//! [`decide_for_agent`], which every hook shares and the CLI does not.
+//! machine's settings (#3146); the no-op-rewrite policy lives in
+//! [`decide_for_agent`], which every hook shares and the CLI does not; and
+//! whether the caller runs its own approval gate on the result lives in
+//! [`ApprovalOwner`], which only ever relaxes the *default* ask.
 
 use super::permissions::{Host, PermissionVerdict, check_command_for};
 use crate::discover::registry::rewrite_command;
@@ -33,6 +35,85 @@ pub(crate) enum HookDecision {
     Defer,
     /// A deny rule matched — stay out of the way of the host's native deny.
     Deny,
+}
+
+/// The environment variable a delegate sets to say which agent it speaks for.
+///
+/// Deliberately not a CLI flag. `Commands::Rewrite`'s positional is
+/// `trailing_var_arg = true, allow_hyphen_values = true`, so an rtk that does
+/// not know a flag folds it into the command text it is asked to judge — and
+/// the permission gate then sees `--host openclaw git push` where the user
+/// wrote `git push`, which no `Bash(git push *)` deny rule matches. A delegate
+/// ships independently of the binary, so that skew is the normal case during
+/// an upgrade, not an edge one. An rtk that does not know this variable
+/// ignores it and keeps its current behaviour, which is the only arrangement
+/// where old and new cannot disagree about a deny.
+/// `the_host_is_not_an_argv_token_so_versions_cannot_disagree` in
+/// `tests/hook_decision_protocol_test.rs` pins both halves.
+pub(crate) const REWRITE_HOST_ENV: &str = "RTK_REWRITE_HOST";
+
+/// Who decides whether the rewritten command may actually run.
+///
+/// `rtk rewrite` reports a decision through an exit code, and delegates read
+/// that code in one of two ways. Most treat it as the permission decision
+/// itself. OpenClaw does not: it applies `tools.exec.mode`, `security` and
+/// `ask` to whatever the `before_tool_call` hook hands back, so an `Ask` from
+/// RTK becomes a *second* prompt, sourced from Claude Code's settings files,
+/// on a runtime that never opted into them (#3908).
+///
+/// This only ever relaxes the *default* ask. It is applied by
+/// [`ApprovalOwner::apply`], which matches on a [`HookDecision::AskRewrite`]
+/// carrying [`PermissionVerdict::Default`] alone. A `Default` verdict means no
+/// rule matched, so RTK is imposing another agent's settings on a runtime that
+/// never opted into them — that is the prompt #3908 is about. An explicit
+/// [`PermissionVerdict::Ask`] is the user's own instruction and is left for the
+/// host to honour, and a [`HookDecision::Deny`] and a [`HookDecision::Defer`]
+/// are structurally out of reach — a host name cannot turn a denied command
+/// into an allowed rewrite, nor discard an explicit ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApprovalOwner {
+    /// RTK's exit code is the permission decision. The default, and what every
+    /// delegate but OpenClaw wants.
+    Rtk,
+    /// The delegate gates the rewritten command itself, so RTK asking too
+    /// would be the second gate. Its deny gate still applies.
+    Delegate,
+}
+
+impl ApprovalOwner {
+    /// Read [`REWRITE_HOST_ENV`], resolving the name through [`AgentPath`] so
+    /// there is one list of agent names rather than a second one here.
+    ///
+    /// Fails closed. An unknown name, a differently-cased one, an agent that
+    /// does not reach RTK through `rtk rewrite` at all, or no variable set
+    /// gives [`ApprovalOwner::Rtk`] — the stricter behaviour, and today's. A
+    /// typo must never borrow another host's rules or drop a gate, which is
+    /// what an unknown-value fallback to a *named* host would do.
+    pub(crate) fn from_env() -> Self {
+        match std::env::var(REWRITE_HOST_ENV) {
+            Ok(name) => match AgentPath::lookup(&name) {
+                Some(AgentPath::ViaRewrite(owner)) => owner,
+                _ => Self::Rtk,
+            },
+            Err(_) => Self::Rtk,
+        }
+    }
+
+    /// Relax the default ask into an allow when the delegate owns approval.
+    ///
+    /// Only a [`PermissionVerdict::Default`] verdict relaxes: it means no rule
+    /// matched, so RTK is imposing another agent's settings on a runtime that
+    /// never opted into them (#3908). An explicit [`PermissionVerdict::Ask`] is
+    /// the user's own instruction and is left for the host to honour; every
+    /// other decision passes through by construction.
+    pub(crate) fn apply(self, decision: HookDecision, verdict: PermissionVerdict) -> HookDecision {
+        match (self, verdict, decision) {
+            (Self::Delegate, PermissionVerdict::Default, HookDecision::AskRewrite(rewritten)) => {
+                HookDecision::AllowRewrite(rewritten)
+            }
+            (_, _, other) => other,
+        }
+    }
 }
 
 /// Decide what to do with `cmd`, given a permission verdict for it.
@@ -156,10 +237,15 @@ pub(crate) enum AgentPath {
     /// `rtk hook <agent>` — decides in this process, against the host's own
     /// permission rules.
     InProcess(Host),
-    /// A plugin or shell script that shells out to `rtk rewrite`. That entry
-    /// point has no way to be told which host is asking, so it always reads
-    /// Claude Code's rules.
-    ViaRewrite,
+    /// A plugin or shell script that shells out to `rtk rewrite`. Every one of
+    /// them is judged against Claude Code's rules, because that entry point has
+    /// no rule source of its own — including the deny rules, which is what
+    /// keeps an explicit deny enforced for all of them.
+    ///
+    /// They differ only in what they do with the answer, which is what the
+    /// [`ApprovalOwner`] records: a delegate that gates the rewritten command
+    /// itself does not want RTK to ask as well for a command no rule matched.
+    ViaRewrite(ApprovalOwner),
     /// A rules-file install — RTK ships instructions telling the agent to
     /// prefix commands itself. There is no hook and no permission surface, so
     /// only the rewrite rules apply.
@@ -200,7 +286,13 @@ impl AgentPath {
             "cursor" => Some(Self::InProcess(Host::Cursor)),
             "droid" => Some(Self::InProcess(Host::Droid)),
             "gemini" => Some(Self::InProcess(Host::Gemini)),
-            "hermes" | "omp" | "openclaw" | "opencode" | "pi" => Some(Self::ViaRewrite),
+            // OpenClaw applies its own exec policy to whatever the
+            // `before_tool_call` hook returns, so RTK asking as well is a
+            // second gate on a runtime that never opted into Claude Code's
+            // settings (#3908). Its deny gate is unaffected -- see
+            // `ApprovalOwner`.
+            "openclaw" => Some(Self::ViaRewrite(ApprovalOwner::Delegate)),
+            "hermes" | "omp" | "opencode" | "pi" => Some(Self::ViaRewrite(ApprovalOwner::Rtk)),
             "vibe" => Some(Self::InProcess(Host::Vibe)),
             _ => None,
         }
@@ -232,17 +324,31 @@ impl AgentPath {
     fn verdict(&self, cmd: &str) -> PermissionVerdict {
         match self {
             Self::InProcess(host) => check_command_for(cmd, *host),
-            // `rtk rewrite` always reads Claude Code's rules.
-            Self::ViaRewrite => check_command_for(cmd, Host::Claude),
+            // `rtk rewrite` always reads Claude Code's rules, for every
+            // delegate. Naming a host changes what is done with the verdict,
+            // never where the verdict comes from.
+            Self::ViaRewrite(_) => check_command_for(cmd, Host::Claude),
             // No hook, so no rules to consult.
             Self::RulesOnly => PermissionVerdict::Default,
         }
     }
 
+    /// Who owns approval for this agent — [`ApprovalOwner::Rtk`] for every
+    /// path but a delegate that gates the rewritten command itself.
+    fn approval_owner(&self) -> ApprovalOwner {
+        match self {
+            Self::ViaRewrite(owner) => *owner,
+            Self::InProcess(_) | Self::RulesOnly => ApprovalOwner::Rtk,
+        }
+    }
+
     /// What this agent's hook would do with `cmd` — the same answer it gives at
-    /// runtime, including discarding a rewrite that changed nothing.
+    /// runtime, including discarding a rewrite that changed nothing and
+    /// relaxing the default ask the agent would only ask about twice.
     pub(crate) fn decide(&self, cmd: &str) -> HookDecision {
-        decide_for_agent(cmd, self.verdict(cmd))
+        let verdict = self.verdict(cmd);
+        self.approval_owner()
+            .apply(decide_for_agent(cmd, verdict), verdict)
     }
 }
 
@@ -431,5 +537,137 @@ mod tests {
             AgentPath::RulesOnly.verdict("git status"),
             PermissionVerdict::Default
         );
+    }
+
+    /// The load-bearing property of [`ApprovalOwner`]: it relaxes the
+    /// *default* ask and touches nothing else. A deny reaching `AllowRewrite`
+    /// would auto-apply a command the user forbade, so it is asserted directly
+    /// rather than left to the exit-code layer. An explicit ask is a rule the
+    /// user wrote and must survive.
+    #[test]
+    fn a_delegate_owning_approval_relaxes_the_default_ask_only() {
+        let rewritten = || "rtk git status".to_string();
+        assert_eq!(
+            ApprovalOwner::Delegate.apply(
+                HookDecision::AskRewrite(rewritten()),
+                PermissionVerdict::Default
+            ),
+            HookDecision::AllowRewrite(rewritten())
+        );
+        assert_eq!(
+            ApprovalOwner::Delegate.apply(
+                HookDecision::AskRewrite(rewritten()),
+                PermissionVerdict::Ask
+            ),
+            HookDecision::AskRewrite(rewritten())
+        );
+        assert_eq!(
+            ApprovalOwner::Delegate.apply(HookDecision::Deny, PermissionVerdict::Default),
+            HookDecision::Deny
+        );
+        assert_eq!(
+            ApprovalOwner::Delegate.apply(HookDecision::Defer, PermissionVerdict::Default),
+            HookDecision::Defer
+        );
+        assert_eq!(
+            ApprovalOwner::Delegate.apply(
+                HookDecision::AllowRewrite(rewritten()),
+                PermissionVerdict::Allow
+            ),
+            HookDecision::AllowRewrite(rewritten())
+        );
+    }
+
+    /// The default owner is the identity, so nothing moves for the delegates
+    /// that read RTK's exit code as the permission decision.
+    #[test]
+    fn rtk_owning_approval_changes_no_decision() {
+        for (verdict, decision) in [
+            (
+                PermissionVerdict::Ask,
+                HookDecision::AskRewrite("rtk git status".to_string()),
+            ),
+            (
+                PermissionVerdict::Allow,
+                HookDecision::AllowRewrite("rtk git status".to_string()),
+            ),
+            (PermissionVerdict::Deny, HookDecision::Deny),
+            (PermissionVerdict::Default, HookDecision::Defer),
+        ] {
+            let expected = match &decision {
+                HookDecision::AskRewrite(r) => HookDecision::AskRewrite(r.clone()),
+                HookDecision::AllowRewrite(r) => HookDecision::AllowRewrite(r.clone()),
+                HookDecision::Deny => HookDecision::Deny,
+                HookDecision::Defer => HookDecision::Defer,
+            };
+            assert_eq!(ApprovalOwner::Rtk.apply(decision, verdict), expected);
+        }
+    }
+
+    /// OpenClaw is the only agent that owns approval, and it is still judged
+    /// against Claude Code's rules -- including their deny list, which is what
+    /// keeps an explicit deny enforced there.
+    #[test]
+    fn openclaw_is_the_only_agent_that_owns_approval() {
+        for name in AgentPath::AGENTS {
+            let owner = AgentPath::lookup(name)
+                .expect("listed agent resolves")
+                .approval_owner();
+            let expected = if *name == "openclaw" {
+                ApprovalOwner::Delegate
+            } else {
+                ApprovalOwner::Rtk
+            };
+            assert_eq!(owner, expected, "agent: {name}");
+        }
+
+        assert!(matches!(
+            AgentPath::lookup("openclaw"),
+            Some(AgentPath::ViaRewrite(ApprovalOwner::Delegate))
+        ));
+        assert_eq!(
+            AgentPath::lookup("openclaw")
+                .expect("openclaw resolves")
+                .verdict("git status"),
+            check_command_for("git status", Host::Claude),
+            "naming a host must not change whose rules are read"
+        );
+    }
+
+    /// The environment name resolves through [`AgentPath::lookup`], so there
+    /// is one vocabulary; everything else is the stricter default.
+    #[test]
+    fn the_host_environment_variable_fails_closed() {
+        temp_env::with_var(REWRITE_HOST_ENV, Some("openclaw"), || {
+            assert_eq!(ApprovalOwner::from_env(), ApprovalOwner::Delegate);
+        });
+        for name in [
+            // Not a delegate at all: an in-process host cannot claim the
+            // relaxation by naming itself on the `rtk rewrite` path.
+            "claude",
+            "cursor",
+            "codex",
+            "vibe", // Delegates that keep RTK's gate.
+            "pi",
+            "hermes",
+            "opencode",
+            "omp", // Nothing that resolves at all.
+            "open-claw",
+            "OpenClaw",
+            "openclaw ",
+            "",
+            "nope",
+        ] {
+            temp_env::with_var(REWRITE_HOST_ENV, Some(name), || {
+                assert_eq!(
+                    ApprovalOwner::from_env(),
+                    ApprovalOwner::Rtk,
+                    "name: {name:?}"
+                );
+            });
+        }
+        temp_env::with_var_unset(REWRITE_HOST_ENV, || {
+            assert_eq!(ApprovalOwner::from_env(), ApprovalOwner::Rtk);
+        });
     }
 }

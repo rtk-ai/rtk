@@ -188,6 +188,14 @@ openclaw plugins install ./openclaw
 
 Plugin in the `openclaw/` directory. Uses the `before_tool_call` hook, delegates to `rtk rewrite`.
 
+**Permissions.** RTK keeps the deny gate; OpenClaw owns approval. The plugin runs `rtk rewrite` with `RTK_REWRITE_HOST=openclaw`, which tells RTK that this host applies its own exec policy (`tools.exec.mode`, `security`, `ask`) to whatever the hook returns. RTK therefore does not prompt for a command that matched **no** rule, instead of raising a second approval derived from Claude Code's `settings.json` on a runtime that never opted into it ([#3908](https://github.com/rtk-ai/rtk/issues/3908)).
+
+A command matching a `permissions.deny` rule in those same Claude Code settings files is still refused, and the plugin blocks the tool call — naming the host only relaxes a *default* ask. As in Claude Code, a rule matches the command as written rather than every way of invoking the program (`Bash(git push *)` does not stop `git -C . push`), so a deny rule is not a security boundary. A command matching a `permissions.ask` rule you wrote still prompts when RTK rewrites it, because RTK keeps returning exit 3 for it. Commands containing a command substitution or a redirect to a file are never rewritten, on any host.
+
+The exec tool's own checks see the rewritten command. OpenClaw carries hook adjustments forward into the parameters passed to the exec tool, so `tools.exec.mode`, `tools.exec.security`, `tools.exec.ask` and the exec-approvals allowlist are all matched against `rtk git push`, not `git push`; write those rules against the `rtk` form. That was already true before the permission change. A trusted tool policy (`api.registerTrustedToolPolicy(...)`) is the exception: OpenClaw runs trusted policies before ordinary `before_tool_call` hooks, so one of those still sees the original command.
+
+No minimum rtk version: an rtk that predates `RTK_REWRITE_HOST` ignores it and keeps its previous behaviour, which is a prompt rather than a missing gate — an older rtk prompts for more commands, since it cannot collapse the default ask.
+
 ### Hermes
 
 ```bash

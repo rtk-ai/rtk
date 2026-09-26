@@ -44,6 +44,30 @@ fn assert_eq_grep_with_and_without_n(args: &[&str]) {
     assert_eq_grep(&with_n);
 }
 
+/// A file list (`-l`/`-L`) is the one passthrough RTK reshapes: when two or more paths share
+/// a directory, that prefix is folded into a `<prefix> (N files)` header. Rebuild the paths
+/// from the header and require the result to equal grep's list, path for path and in order;
+/// with fewer than two paths there is no header and the output must be byte-identical.
+fn assert_eq_grep_file_list(args: &[&str]) {
+    let (rtk, rc) = rtk_grep(args);
+    let (grep, gc) = grep_plain(args);
+    assert_eq!(rc, gc, "exit code mismatch for {args:?}");
+    let unfolded = match rtk.lines().next().and_then(|h| h.strip_suffix(" files)")) {
+        Some(head) => {
+            let (prefix, n) = head.rsplit_once(" (").expect("header shape");
+            let tails: Vec<&str> = rtk.lines().skip(1).collect();
+            assert_eq!(
+                tails.len(),
+                n.parse::<usize>().unwrap(),
+                "count for {args:?}"
+            );
+            tails.iter().map(|t| format!("{prefix}{t}\n")).collect()
+        }
+        None => rtk.clone(),
+    };
+    assert_eq!(unfolded, grep, "file list mismatch for {args:?}:\n{rtk}");
+}
+
 fn write(dir: &std::path::Path, name: &str, body: &str) -> String {
     let p = dir.join(name);
     std::fs::write(&p, body).expect("write");
@@ -212,9 +236,9 @@ fn dash_m_max_count_is_per_file_like_grep_n() {
 
 // Regression: the `-l` short used to be bound to RTK's --max-len, so `grep -l PAT`
 // made clap read PAT as a usize and error out (0% savings via raw fallback).
-// `-l` is GNU grep's --files-with-matches; `rtk grep -l` must match `grep -l`
-// byte-for-byte (explicit file args => deterministic order). Also covers `-l`
-// trailing (arg-order sensitivity) and `-L` (--files-without-match).
+// `-l` is GNU grep's --files-with-matches; `rtk grep -l` must list exactly what
+// `grep -l` lists (explicit file args => deterministic order), modulo the shared-prefix
+// fold. Also covers `-l` trailing (arg-order sensitivity) and `-L` (--files-without-match).
 #[test]
 fn dash_l_and_dash_cap_l_match_grep() {
     let d = tempfile::tempdir().unwrap();
@@ -223,15 +247,15 @@ fn dash_l_and_dash_cap_l_match_grep() {
     let f3 = write(d.path(), "hit2.txt", "tenant_id again\n");
     let f4 = write(d.path(), "port.txt", "listen on 8080\n");
 
-    assert_eq_grep(&["-l", "tenant_id", &f1, &f2, &f3]); // -l leading (the token that broke)
-    assert_eq_grep(&["tenant_id", &f1, &f2, &f3, "-l"]); // -l trailing
-    assert_eq_grep(&["-L", "tenant_id", &f1, &f2, &f3]); // -L files-without-match
+    assert_eq_grep_file_list(&["-l", "tenant_id", &f1, &f2, &f3]); // -l leading (the token that broke)
+    assert_eq_grep_file_list(&["tenant_id", &f1, &f2, &f3, "-l"]); // -l trailing
+    assert_eq_grep_file_list(&["-L", "tenant_id", &f1, &f2, &f3]); // -L files-without-match
 
     // A numeric pattern is the only form that failed silently: bound to `usize`,
     // `-l` swallowed it as max_len and read the first path as the pattern, so rtk
     // printed nothing and exited 1 while grep listed the file. A non-numeric
     // pattern stops at clap's parse error and falls back to raw grep, which is
     // byte-identical here and so invisible to the assertions above.
-    assert_eq_grep(&["-l", "8080", &f4, &f2]);
-    assert_eq_grep(&["-L", "8080", &f4, &f2]);
+    assert_eq_grep_file_list(&["-l", "8080", &f4, &f2]);
+    assert_eq_grep_file_list(&["-L", "8080", &f4, &f2]);
 }
