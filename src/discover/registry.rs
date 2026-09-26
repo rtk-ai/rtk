@@ -1443,6 +1443,33 @@ const PROCESS_WRAPPERS: &[ProcessWrapper] = &[
     },
 ];
 
+/// Wrappers a permission rule looks past but the rewrite does not go through.
+///
+/// `stdbuf` exists to make the wrapped command emit output incrementally, and
+/// routing through rtk buffers that output until the child exits, so it is
+/// never rewritten — but `stdbuf -oL git push` is still `git push` to a deny
+/// rule. A bare `xargs` is the same: it runs the command it is given, and the
+/// option-less form is the one Claude Code matches past. Any option makes the
+/// grammar below give up, which is what keeps `xargs -I{} …` out.
+const MATCH_ONLY_WRAPPERS: &[ProcessWrapper] = &[
+    ProcessWrapper {
+        name: "stdbuf",
+        value_opts: &["-i", "-o", "-e", "--input", "--output", "--error"],
+        flag_opts: &[],
+        attached_opts: &["-i", "-o", "-e"],
+        positionals: 0,
+        numeric_opts: false,
+    },
+    ProcessWrapper {
+        name: "xargs",
+        value_opts: &[],
+        flag_opts: &[],
+        attached_opts: &[],
+        positionals: 0,
+        numeric_opts: false,
+    },
+];
+
 struct SafePipeConsumer {
     name: &'static str,
     unsafe_flags: &'static [&'static str],
@@ -1897,12 +1924,21 @@ fn tool_form(cmd_clean: &str, rtk_equivalent: &str) -> String {
 }
 
 fn strip_process_wrapper_prefix(cmd: &str) -> Option<(&str, &str)> {
+    strip_wrapper_prefix_from(PROCESS_WRAPPERS, cmd)
+}
+
+/// Peel one wrapper from `table` off the front of `cmd`, giving
+/// `(wrapper text, wrapped command)`.
+fn strip_wrapper_prefix_from<'a>(
+    table: &[ProcessWrapper],
+    cmd: &'a str,
+) -> Option<(&'a str, &'a str)> {
     let tokens = tokenize(cmd);
     let first = tokens.first()?;
     if first.kind != TokenKind::Arg {
         return None;
     }
-    let wrapper = PROCESS_WRAPPERS
+    let wrapper = table
         .iter()
         .find(|candidate| candidate.name == command_basename(&first.value))?;
     let inner = wrapper_inner_command(wrapper, &tokens)?;
@@ -1918,6 +1954,41 @@ fn strip_process_wrapper_prefix(cmd: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((prefix, rest))
+}
+
+/// The command behind every prefix a deny or ask rule should see past.
+///
+/// Claude Code matches those rules past any leading assignment and past a
+/// fixed set of wrappers — `timeout`, `time`, `nice`, `nohup`, `stdbuf`,
+/// `command`, `builtin`, `noglob` and a bare `xargs` — so a rule written for
+/// `git push` also stops `HUSKY=0 timeout 30 git push`. This is that
+/// normalisation, built from the peels the rewrite already applies so there is
+/// one definition of what the command is, plus the two wrappers RTK looks
+/// through without rewriting through.
+///
+/// Deny and ask only. Allow matches past known-safe variables alone, and
+/// peeling a wrapper for it would let `timeout 30 <cmd>` inherit `<cmd>`'s
+/// allow rule.
+pub(crate) fn peel_for_matching(cmd: &str) -> &str {
+    let mut rest = cmd.trim();
+    loop {
+        let before = rest;
+        rest = strip_disabled_prefix(rest).1;
+        if let Some(inner) = SHELL_KEYWORD_PREFIXES
+            .iter()
+            .find_map(|prefix| strip_word_prefix(rest, prefix))
+        {
+            rest = inner;
+        }
+        if let Some((_, inner)) = strip_wrapper_prefix_from(PROCESS_WRAPPERS, rest)
+            .or_else(|| strip_wrapper_prefix_from(MATCH_ONLY_WRAPPERS, rest))
+        {
+            rest = inner;
+        }
+        if rest == before {
+            return rest;
+        }
+    }
 }
 
 fn inner_index(tokens: &[ParsedToken], inner: &ParsedToken) -> usize {
