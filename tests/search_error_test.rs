@@ -106,6 +106,43 @@ fn no_match_stays_exit_1_and_empty() {
 }
 
 #[test]
+fn ultra_compact_grep_returns_matches_not_error() {
+    let d = tempfile::tempdir().unwrap();
+    let f1 = d.path().join("sample.txt");
+    let f2 = d.path().join("sample2.txt");
+    std::fs::write(&f1, "alpha permissions one\nbeta permissions two\n").unwrap();
+    std::fs::write(&f2, "permissions here\nmore permissions\n").unwrap();
+
+    let normal = rtk(&["grep", "-r", "permissions", d.path().to_str().unwrap()]);
+    let compact = rtk(&[
+        "--ultra-compact",
+        "grep",
+        "-r",
+        "permissions",
+        d.path().to_str().unwrap(),
+    ]);
+
+    assert_eq!(
+        compact.status.code(),
+        Some(0),
+        "--ultra-compact grep must exit 0 when matches exist"
+    );
+    let stderr = String::from_utf8_lossy(&compact.stderr);
+    assert!(
+        !stderr.contains("No such file"),
+        "--ultra-compact must not cause ENOENT: {stderr}"
+    );
+    assert!(
+        !compact.stdout.is_empty(),
+        "--ultra-compact grep must return matches, not silently drop them"
+    );
+    assert_eq!(
+        compact.stdout, normal.stdout,
+        "--ultra-compact must not alter grep match output"
+    );
+}
+
+#[test]
 fn rg_bad_regex_surfaces_error_exit_2() {
     if !rg_available() {
         return;
