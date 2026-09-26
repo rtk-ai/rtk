@@ -141,36 +141,6 @@ pub struct DiscoverReport {
     pub agent_status: AgentIntegrationStatus,
 }
 
-impl DiscoverReport {
-    pub fn total_saveable_tokens(&self) -> usize {
-        self.supported
-            .iter()
-            .map(|s| s.estimated_savings_tokens)
-            .sum()
-    }
-
-    pub fn total_supported_count(&self) -> usize {
-        self.supported.iter().map(|s| s.count).sum()
-    }
-
-    pub fn total_opportunity_tokens(&self) -> usize {
-        self.opportunities
-            .iter()
-            .map(|s| s.estimated_savings_tokens)
-            .sum()
-    }
-
-    pub fn total_opportunity_count(&self) -> usize {
-        self.opportunities.iter().map(|s| s.count).sum()
-    }
-
-    /// How many rows in a table were sized by the category average rather than
-    /// by an output somebody measured.
-    fn estimated_occurrences(entries: &[SupportedEntry]) -> usize {
-        entries.iter().map(|s| s.estimated_occurrences).sum()
-    }
-}
-
 /// Format report as text.
 pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> String {
     let mut out = String::with_capacity(2048);
@@ -219,67 +189,21 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
         return out;
     }
 
-    // Missed savings
-    if !report.supported.is_empty() {
-        out.push_str("\nMISSED SAVINGS -- Commands RTK already handles\n");
-        out.push_str(&"-".repeat(72));
-        out.push('\n');
-        out.push_str(&format!(
-            "{:<24} {:>5}    {:<18} {:<13} {:>12}\n",
-            "Command", "Count", "RTK Equivalent", "Status", "Est. Savings"
-        ));
+    append_savings_table(
+        &mut out,
+        "MISSED SAVINGS -- Commands RTK already handles",
+        &report.supported,
+        "saveable",
+        limit,
+    );
 
-        for entry in report.supported.iter().take(limit) {
-            out.push_str(&format!(
-                "{:<24} {:>5}    {:<18} {:<13} ~{}\n",
-                truncate_str(&entry.command, 23),
-                entry.count,
-                entry.rtk_equivalent,
-                entry.rtk_status.as_str(),
-                format_tokens(entry.estimated_savings_tokens),
-            ));
-        }
-
-        out.push_str(&"-".repeat(72));
-        out.push('\n');
-        out.push_str(&format!(
-            "Total: {} commands -> ~{} saveable\n",
-            report.total_supported_count(),
-            format_tokens(report.total_saveable_tokens()),
-        ));
-        append_estimate_note(&mut out, &report.supported);
-    }
-
-    // Handled by RTK, but out of reach where they ran
-    if !report.opportunities.is_empty() {
-        out.push_str("\nOPPORTUNITIES -- RTK handles these, but not as they were run\n");
-        out.push_str(&"-".repeat(72));
-        out.push('\n');
-        out.push_str(&format!(
-            "{:<24} {:>5}    {:<18} {:<13} {:>12}\n",
-            "Command", "Count", "RTK Equivalent", "Status", "Est. Savings"
-        ));
-
-        for entry in report.opportunities.iter().take(limit) {
-            out.push_str(&format!(
-                "{:<24} {:>5}    {:<18} {:<13} ~{}\n",
-                truncate_str(&entry.command, 23),
-                entry.count,
-                entry.rtk_equivalent,
-                entry.rtk_status.as_str(),
-                format_tokens(entry.estimated_savings_tokens),
-            ));
-        }
-
-        out.push_str(&"-".repeat(72));
-        out.push('\n');
-        out.push_str(&format!(
-            "Total: {} commands -> ~{} saveable by changing how they are run\n",
-            report.total_opportunity_count(),
-            format_tokens(report.total_opportunity_tokens()),
-        ));
-        append_estimate_note(&mut out, &report.opportunities);
-    }
+    append_savings_table(
+        &mut out,
+        "OPPORTUNITIES -- RTK handles these, but not as they were run",
+        &report.opportunities,
+        "saveable by changing how they are run",
+        limit,
+    );
 
     // Unhandled
     if !report.unsupported.is_empty() {
@@ -337,13 +261,50 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
     out
 }
 
+/// Write one savings table: the same columns and totals either way, since the
+/// two differ only in what they are called and what their total means.
+fn append_savings_table(
+    out: &mut String,
+    heading: &str,
+    entries: &[SupportedEntry],
+    total_suffix: &str,
+    limit: usize,
+) {
+    if entries.is_empty() {
+        return;
+    }
+    let rule = "-".repeat(72);
+    out.push_str(&format!("\n{heading}\n{rule}\n"));
+    out.push_str(&format!(
+        "{:<24} {:>5}    {:<18} {:<13} {:>12}\n",
+        "Command", "Count", "RTK Equivalent", "Status", "Est. Savings"
+    ));
+    for entry in entries.iter().take(limit) {
+        out.push_str(&format!(
+            "{:<24} {:>5}    {:<18} {:<13} ~{}\n",
+            truncate_str(&entry.command, 23),
+            entry.count,
+            entry.rtk_equivalent,
+            entry.rtk_status.as_str(),
+            format_tokens(entry.estimated_savings_tokens),
+        ));
+    }
+    let commands: usize = entries.iter().map(|e| e.count).sum();
+    let tokens: usize = entries.iter().map(|e| e.estimated_savings_tokens).sum();
+    out.push_str(&format!(
+        "{rule}\nTotal: {commands} commands -> ~{} {total_suffix}\n",
+        format_tokens(tokens)
+    ));
+    append_estimate_note(out, entries);
+}
+
 /// Say how much of a table's figure was measured and how much was averaged, so
 /// a reader can tell a number taken from a tool result from one taken from a
 /// per-category constant. A command that feeds a pipe is never the last of its
 /// line and so is always averaged, which makes the opportunities table the one
 /// this matters most for.
 fn append_estimate_note(out: &mut String, entries: &[SupportedEntry]) {
-    let estimated = DiscoverReport::estimated_occurrences(entries);
+    let estimated: usize = entries.iter().map(|e| e.estimated_occurrences).sum();
     let total: usize = entries.iter().map(|e| e.count).sum();
     if estimated == 0 || total == 0 {
         return;
