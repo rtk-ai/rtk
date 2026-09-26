@@ -15,12 +15,26 @@ use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 /// emitted so the caller tracks exactly that.
 pub fn emit_guarded(filtered: &str, hint: Option<&str>, raw: &str) -> String {
     let body = match hint {
+        Some(h) if filtered.is_empty() => h.to_string(),
         Some(h) => format!("{}\n{}", filtered, h),
         None => filtered.to_string(),
     };
     let shown = crate::core::guard::never_worse(raw, &body).to_string();
     println!("{}", shown);
     shown
+}
+
+#[cfg(test)]
+mod emit_guarded_tests {
+    use super::emit_guarded;
+
+    #[test]
+    fn empty_filtered_body_does_not_precede_hint_with_a_blank_line() {
+        let hint = "[full output: /tmp/rtk-tee.log]";
+        let shown = emit_guarded("", Some(hint), &"raw output\n".repeat(100));
+
+        assert_eq!(shown, hint);
+    }
 }
 
 pub fn print_with_hint(
