@@ -447,6 +447,11 @@ fn warn_if_missing_table(context: &str, err: &rusqlite::Error) {
 /// random, just cheap and evenly distributed across calls — `DefaultHasher`
 /// over an already-unique string avoids pulling in a `rand` dependency just for
 /// a sampling backstop.
+/// How many inserts `record()`/`record_parse_failure()` accept between retention
+/// sweeps — see `Tracker::maybe_cleanup`. Also the bound on how many rows can sit
+/// past the 90-day window at any moment.
+const RECORD_CLEANUP_SAMPLE_RATE: u64 = 100;
+
 fn should_sample_cleanup(key: &str, rate: u32) -> bool {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -580,7 +585,8 @@ impl Tracker {
     /// Record a command execution with token counts and timing.
     ///
     /// Calculates savings metrics and stores the record in the database.
-    /// Automatically cleans up records older than 90 days after insertion.
+    /// Records older than 90 days are swept periodically, not on every call —
+    /// see `maybe_cleanup`.
     ///
     /// # Arguments
     ///
@@ -638,8 +644,44 @@ impl Tracker {
         )
         .inspect_err(|e| warn_if_missing_table("record", e))?;
 
-        self.cleanup_old()?;
+        self.maybe_cleanup();
         Ok(())
+    }
+
+    /// Run the 90-day retention sweep on every `RECORD_CLEANUP_SAMPLE_RATE`-th
+    /// insert instead of after every single one.
+    ///
+    /// `cleanup_old()` is three `DELETE`s, each its own autocommit transaction
+    /// and so its own WAL commit, on top of the one the `INSERT` already paid —
+    /// four fsyncs per recorded command where one would do, on a path that runs
+    /// for every `rtk <cmd>` under the project's <10ms budget (rtk-ai/rtk#2208).
+    /// Rows older than 90 days are rare, so nearly all of that is spent deleting
+    /// nothing.
+    ///
+    /// Gated on `last_insert_rowid()`, which the `INSERT` just above already
+    /// produced: no extra read, no clock, and an exact 1-in-N cadence rather
+    /// than a probabilistic one. That also makes the slack self-scaling — the
+    /// sweep fires per N rows written, not per unit time, so a busy install
+    /// sweeps often and a quiet one (which isn't growing the table anyway)
+    /// sweeps rarely, and at most ~N rows can sit past the retention window
+    /// between sweeps regardless of how fast commands come in.
+    ///
+    /// `should_sample_cleanup` isn't reused here because it needs a key that is
+    /// distinct per call: `record()` has no `tool_use_id`-like handle, and the
+    /// candidates it does have are either repeated verbatim across calls (the
+    /// command text) or read off the clock, which that function's own comment
+    /// explains is the input to avoid.
+    ///
+    /// Best-effort, like `maybe_cleanup_hook_decisions`: the `INSERT` has already
+    /// committed by the time this runs, so a failing sweep must not be reported
+    /// as the record itself having failed.
+    fn maybe_cleanup(&self) {
+        if !(self.conn.last_insert_rowid() as u64).is_multiple_of(RECORD_CLEANUP_SAMPLE_RATE) {
+            return;
+        }
+        if let Err(e) = self.cleanup_old() {
+            eprintln!("rtk: warning: retention sweep failed: {e}");
+        }
     }
 
     fn cleanup_old(&self) -> Result<()> {
@@ -691,7 +733,7 @@ impl Tracker {
             ],
         )
         .inspect_err(|e| warn_if_missing_table("record_parse_failure", e))?;
-        self.cleanup_old()?;
+        self.maybe_cleanup();
         Ok(())
     }
 
@@ -3037,6 +3079,71 @@ mod tests {
             (avg - expected).abs() < 1e-6,
             "expected ({ls_rate:.1} + 24 - 50) / 3 = {expected:.1}%, got {avg:.1}% \
              (an unweighted inner AVG(savings_pct) would give (19 + 12.5 - 50) / 3 = -6.2%)"
+        );
+    }
+
+    // rtk-ai/rtk#2208: the retention sweep used to run after every single
+    // `record()`, three DELETEs (three extra WAL commits) per recorded command
+    // to delete nothing almost every time. It now runs once per
+    // `RECORD_CLEANUP_SAMPLE_RATE` inserts, so these two tests pin both halves:
+    // the skipped calls really do skip, and the sweep really does still happen.
+    fn insert_expired_row(tracker: &Tracker) {
+        let expired = (Utc::now() - chrono::Duration::days(DEFAULT_HISTORY_DAYS + 1)).to_rfc3339();
+        tracker
+            .conn
+            .execute(
+                "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, \
+                 input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms) \
+                 VALUES (?1, 'expired', 'rtk expired', '', 10, 5, 5, 50.0, 1)",
+                params![expired],
+            )
+            .expect("insert expired row");
+    }
+
+    fn expired_rows(tracker: &Tracker) -> i64 {
+        tracker
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM commands WHERE original_cmd = 'expired'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count expired rows")
+    }
+
+    #[test]
+    fn test_record_skips_the_sweep_between_samples() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        insert_expired_row(&tracker);
+
+        tracker
+            .record("ls -la", "rtk ls", 1000, 200, 3)
+            .expect("record");
+
+        assert_eq!(
+            expired_rows(&tracker),
+            1,
+            "a single record() must not pay for the retention sweep"
+        );
+    }
+
+    #[test]
+    fn test_record_still_sweeps_within_one_sample_window() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        insert_expired_row(&tracker);
+
+        // Whatever the rate is, one full window of inserts has to cross a
+        // sampling boundary — the sweep is a cadence, not a coin flip.
+        for _ in 0..RECORD_CLEANUP_SAMPLE_RATE {
+            tracker
+                .record("ls -la", "rtk ls", 1000, 200, 3)
+                .expect("record");
+        }
+
+        assert_eq!(
+            expired_rows(&tracker),
+            0,
+            "rows past the retention window must still be swept"
         );
     }
 }
