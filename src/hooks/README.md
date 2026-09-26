@@ -45,6 +45,10 @@ The integrity system prevents unauthorized hook modifications:
 2. At runtime: `integrity::runtime_check()` re-computes hash and compares; blocks execution if tampered
 3. On demand: `rtk verify` prints detailed verification status (PASS/FAIL/WARN/SKIP)
 
+On Windows, hook path resolution falls back to `USERPROFILE`, then `HOME`, if
+the native home directory lookup fails. `CLAUDE_CONFIG_DIR` still takes
+precedence. An installed legacy hook remains subject to integrity checks.
+
 Five integrity states:
 - **Verified**: Hash matches stored value
 - **Tampered**: Hash mismatch (blocks execution)

@@ -1391,19 +1391,29 @@ pub(super) fn resolve_home_subdir(subdir: &str) -> Result<PathBuf> {
 }
 
 pub fn resolve_claude_dir() -> Result<PathBuf> {
+    let windows_home = if cfg!(windows) {
+        std::env::var_os("USERPROFILE")
+            .filter(|path| !path.is_empty())
+            .or_else(|| std::env::var_os("HOME").filter(|path| !path.is_empty()))
+            .map(PathBuf::from)
+    } else {
+        None
+    };
     resolve_claude_dir_from(
         std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
         dirs::home_dir(),
+        windows_home,
     )
 }
 
 pub(super) fn resolve_claude_dir_from(
     claude_dir: Option<PathBuf>,
     home_dir: Option<PathBuf>,
+    windows_home: Option<PathBuf>,
 ) -> Result<PathBuf> {
     resolve_config_dir(
         claude_dir.map(PathBuf::into_os_string),
-        home_dir,
+        home_dir.or_else(|| windows_home.filter(|path| !path.as_os_str().is_empty())),
         CLAUDE_DIR,
         "Cannot determine Claude config directory. Set $CLAUDE_CONFIG_DIR or $HOME.",
     )

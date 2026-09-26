@@ -1392,6 +1392,7 @@ mod tests {
         let result = resolve_claude_dir_from(
             Some(PathBuf::from("/custom/rtk-claude")),
             Some(PathBuf::from("/home/user")),
+            Some(PathBuf::from("/fallback/user")),
         )
         .unwrap();
         assert_eq!(result, PathBuf::from("/custom/rtk-claude"));
@@ -1402,6 +1403,7 @@ mod tests {
         let result = resolve_claude_dir_from(
             Some(PathBuf::from("/custom/claude-config")),
             Some(PathBuf::from("/home/user")),
+            None,
         )
         .unwrap();
         assert_eq!(result, PathBuf::from("/custom/claude-config"));
@@ -1409,22 +1411,51 @@ mod tests {
 
     #[test]
     fn test_resolve_claude_dir_falls_back_to_home() {
-        let result = resolve_claude_dir_from(None, Some(PathBuf::from("/home/user"))).unwrap();
+        let result =
+            resolve_claude_dir_from(None, Some(PathBuf::from("/home/user")), None).unwrap();
         assert_eq!(result, PathBuf::from("/home/user/.claude"));
     }
 
     #[test]
     fn test_resolve_claude_dir_ignores_empty_overrides() {
-        let empty =
-            resolve_claude_dir_from(Some(PathBuf::new()), Some(PathBuf::from("/home/user")))
-                .unwrap();
+        let empty = resolve_claude_dir_from(
+            Some(PathBuf::new()),
+            Some(PathBuf::from("/home/user")),
+            None,
+        )
+        .unwrap();
         assert_eq!(empty, PathBuf::from("/home/user/.claude"));
     }
 
     #[test]
     fn test_resolve_claude_dir_errors_without_home() {
-        let err = resolve_claude_dir_from(None, None).unwrap_err();
+        let err = resolve_claude_dir_from(None, None, None).unwrap_err();
         assert!(err.to_string().contains("Cannot determine Claude config"));
+    }
+
+    #[test]
+    fn test_resolve_claude_dir_falls_back_when_windows_home_lookup_fails() {
+        let profile = PathBuf::from("C:/Users/test-user");
+        let result = resolve_claude_dir_from(None, None, Some(profile.clone()))
+            .expect("USERPROFILE should resolve the hook directory without the Windows API");
+        assert_eq!(result, profile.join(".claude"));
+    }
+
+    #[test]
+    fn test_resolve_claude_dir_preserves_native_home_precedence() {
+        let home = PathBuf::from("C:/Users/native-user");
+        let result = resolve_claude_dir_from(
+            None,
+            Some(home.clone()),
+            Some(PathBuf::from("C:/Users/fallback-user")),
+        )
+        .expect("native home remains authoritative");
+        assert_eq!(result, home.join(".claude"));
+    }
+
+    #[test]
+    fn test_resolve_claude_dir_rejects_empty_windows_home() {
+        assert!(resolve_claude_dir_from(None, None, Some(PathBuf::new())).is_err());
     }
 
     #[test]
