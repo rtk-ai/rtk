@@ -157,7 +157,7 @@ rtk vitest                      # Vitest compacto
 rtk pytest                      # Tests Python (-90%)
 rtk go test                     # Tests Go (-90%)
 rtk cargo test                  # Tests Rust (-90%)
-rtk test <cmd>                  # Só falhas (-90%)
+rtk test <cmd> [args...]        # Só falhas (-90%), argv direto
 ```
 
 ### Build & Lint

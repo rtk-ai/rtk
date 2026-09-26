@@ -217,8 +217,9 @@ rtk go test                     # Go tests (NDJSON, -90%)
 rtk cargo test                  # Cargo tests (-90%)
 rtk rake test                   # Ruby minitest (-90%)
 rtk rspec                       # RSpec tests (JSON, -60%+)
-rtk err <cmd>                   # Filter errors only from any command
-rtk test <cmd>                  # Generic test wrapper - failures only (-90%)
+rtk err <cmd> [args...]         # Direct argv execution, errors/warnings only
+rtk test <cmd> [args...]        # Direct argv execution, failures only (-90%)
+rtk err --shell fish '<script>' # Explicit shell for shell-specific syntax
 ```
 
 ### Build & Lint
@@ -305,9 +306,35 @@ rtk env -f AWS                  # Filtered env vars
 rtk log app.log                 # Deduplicated logs
 rtk curl <url>                  # Truncate + save full output
 rtk wget <url>                  # Download, strip progress bars
-rtk summary <long command>      # Heuristic summary
+rtk summary <cmd> [args...]     # Direct argv execution + heuristic summary
+rtk run <cmd> [args...]         # Raw direct execution (no filtering/tracking)
+rtk run -c '<script>'           # Shell string via sh (cmd on Windows)
+rtk run --shell fish -c '<script>' # Explicit shell for shell-specific syntax
 rtk proxy <command>             # Raw passthrough + tracking
 ```
+
+`rtk run`, `rtk err`, `rtk test`, and `rtk summary` preserve positional
+argument boundaries and do not expand globs, variables, or operators by
+default. Use `-c` with `rtk run`, or `--shell <name>` with the filtered
+wrappers, only when a command intentionally requires shell syntax. Pass an
+explicit shell script as one quoted argument; RTK does not infer the parser
+from `$SHELL` because the environment value may differ from the actual command
+executor.
+
+A program that cannot be run answers the way the shell used to: `127` with a
+`command not found` line, `126` for a path that exists but is a directory or is
+not executable.
+
+**Windows note.** The `cmd /C` string these commands used to build also
+searched the working directory and carried `cmd`'s builtins (`echo`, `dir`,
+`type`, `set`, `copy`, `del`, …). Direct execution resolves through `%PATH%`
+and `PATHEXT` only, so `rtk err dir`, `rtk summary echo hi`, and a tool sitting
+in the current directory now need the explicit form: `rtk run -c 'dir'`, or
+`rtk err --shell cmd 'echo hi'`. On Unix nothing equivalent is lost — `sh` does
+not search `.`, and `echo`, `test` and `pwd` all exist as real binaries. One
+more difference on both platforms: the child sees the resolved absolute path in
+`argv[0]` where the shell used to pass the spelling as typed, which matters
+only to multi-call binaries and to tools that print usage from `argv[0]`.
 
 ### Token Savings Analytics
 ```bash
