@@ -1,4 +1,6 @@
-#![cfg(unix)]
+//! Runs on every platform: each test that shells out to `grep` or `rg`
+//! skips itself when that engine is not installed, so Windows CI exercises
+//! the filters instead of compiling an empty test binary.
 //! Regressions from the #2333 grep overhaul: -A/-B/-C must keep context lines,
 //! -c/-o must not leak ripgrep's NUL separator.
 
@@ -66,7 +68,7 @@ fn count_output_has_no_nul_separator() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("nul.txt");
+    let f = dir.path().join("nul_bytes.txt");
     std::fs::write(&f, "TODO one\nnope\nTODO two\n").unwrap();
     let out = rtk()
         .args(["grep", "-c", "TODO", f.to_str().unwrap()])
@@ -149,7 +151,7 @@ fn only_matching_output_has_no_nul_separator() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("nul.txt");
+    let f = dir.path().join("nul_bytes.txt");
     std::fs::write(&f, "TODO one\nnope\nTODO two\n").unwrap();
     let out = rtk()
         .args(["grep", "-o", "TODO", f.to_str().unwrap()])
