@@ -118,17 +118,10 @@ impl Language {
                 doc_line: None,
                 doc_block_start: None,
             },
-            Language::Data => CommentPatterns {
+            Language::Data | Language::Unknown => CommentPatterns {
                 line: None,
                 block_start: None,
                 block_end: None,
-                doc_line: None,
-                doc_block_start: None,
-            },
-            Language::Unknown => CommentPatterns {
-                line: Some("//"),
-                block_start: Some("/*"),
-                block_end: Some("*/"),
                 doc_line: None,
                 doc_block_start: None,
             },
@@ -564,6 +557,16 @@ mod tests {
             result.contains("**/package.json"),
             "**/package.json should not be treated as block comment end"
         );
+    }
+
+    #[test]
+    fn test_unknown_language_no_comment_stripping() {
+        // Reproduces #4249: extensionless files like .gitignore with "/*.log"
+        // were corrupted because /* was treated as C block comment start
+        let gitignore = "node_modules\n/*.log\n!/src\ndist/\n";
+        let filter = MinimalFilter;
+        let result = filter.filter(gitignore, &Language::Unknown);
+        assert_eq!(result, "node_modules\n/*.log\n!/src\ndist/");
     }
 
     #[test]
