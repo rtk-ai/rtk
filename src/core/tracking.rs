@@ -1486,9 +1486,15 @@ impl Tracker {
             };
         match oldest {
             Some(ts) => {
-                let first = chrono::NaiveDateTime::parse_from_str(&ts, "%Y-%m-%dT%H:%M:%S")
-                    .or_else(|_| chrono::NaiveDateTime::parse_from_str(&ts, "%Y-%m-%d %H:%M:%S"))
-                    .map(|dt| dt.and_utc())
+                let first = chrono::DateTime::parse_from_rfc3339(&ts)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .or_else(|_| {
+                        chrono::NaiveDateTime::parse_from_str(&ts, "%Y-%m-%dT%H:%M:%S")
+                            .or_else(|_| {
+                                chrono::NaiveDateTime::parse_from_str(&ts, "%Y-%m-%d %H:%M:%S")
+                            })
+                            .map(|dt| dt.and_utc())
+                    })
                     .unwrap_or_else(|_| chrono::Utc::now());
                 let days = (chrono::Utc::now() - first).num_days();
                 Ok(days.max(0))
@@ -3038,5 +3044,56 @@ mod tests {
             "expected ({ls_rate:.1} + 24 - 50) / 3 = {expected:.1}%, got {avg:.1}% \
              (an unweighted inner AVG(savings_pct) would give (19 + 12.5 - 50) / 3 = -6.2%)"
         );
+    }
+
+    // rtk-ai/rtk#2710: `record()` stores `Utc::now().to_rfc3339()`, which carries
+    // fractional seconds and an offset ("2026-06-28T12:00:00.123456+00:00"). The
+    // `%Y-%m-%dT%H:%M:%S` / `%Y-%m-%d %H:%M:%S` `NaiveDateTime` formats cannot
+    // consume either, so both parses failed, the `unwrap_or_else` fell back to
+    // `Utc::now()`, and the age came out as `now - now` = 0 for every install.
+    #[test]
+    fn test_first_seen_days_reads_rfc3339_timestamps() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        insert_command_at(
+            &tracker,
+            &(Utc::now() - chrono::Duration::days(30)).to_rfc3339(),
+        );
+
+        assert_eq!(
+            tracker.first_seen_days().expect("first_seen_days"),
+            30,
+            "a 30-day-old RFC3339 row must report 30 days, not 0"
+        );
+    }
+
+    // Databases written by older rtk versions stored the naive formats; they must
+    // keep parsing now that RFC3339 is tried first.
+    #[test]
+    fn test_first_seen_days_still_reads_legacy_naive_timestamps() {
+        for legacy in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"] {
+            let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+            let ts = (Utc::now() - chrono::Duration::days(7))
+                .format(legacy)
+                .to_string();
+            insert_command_at(&tracker, &ts);
+
+            assert_eq!(
+                tracker.first_seen_days().expect("first_seen_days"),
+                7,
+                "legacy timestamp {ts} must still parse"
+            );
+        }
+    }
+
+    fn insert_command_at(tracker: &Tracker, timestamp: &str) {
+        tracker
+            .conn
+            .execute(
+                "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, \
+                 input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms) \
+                 VALUES (?1, 'ls', 'rtk ls', '', 100, 20, 80, 80.0, 1)",
+                params![timestamp],
+            )
+            .expect("insert command row");
     }
 }
