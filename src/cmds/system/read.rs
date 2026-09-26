@@ -3,6 +3,7 @@
 use crate::core::filter::{self, FilterLevel, Language};
 use crate::core::guard::never_worse;
 use crate::core::tracking;
+use crate::core::utils::strip_leading_bom;
 use anyhow::{Context, Result};
 use std::fs;
 use std::io::{self, Read as IoRead, Write};
@@ -82,11 +83,10 @@ pub fn run(
     }
 
     // Apply filter
-    let filter = filter::get_filter(level);
-    let mut filtered = filter.filter(&content, &lang);
+    let mut filtered = filter_keeping_bom(&content, level, &lang);
 
     // Safety: if filter emptied a non-empty file, fall back to raw content
-    if filtered.trim().is_empty() && !content.trim().is_empty() {
+    if filtered.trim().is_empty() && !strip_leading_bom(&content).trim().is_empty() {
         eprintln!(
             "rtk: warning: filter produced empty output for {} ({} bytes), showing raw content",
             file.display(),
@@ -171,8 +171,7 @@ pub fn run_stdin(
     }
 
     // Apply filter
-    let filter = filter::get_filter(level);
-    let mut filtered = filter.filter(&content, &lang);
+    let mut filtered = filter_keeping_bom(&content, level, &lang);
 
     if verbose > 0 {
         let original_lines = content.lines().count();
@@ -203,6 +202,18 @@ pub fn run_stdin(
 
     timer.track("cat - (stdin)", "rtk read -", &raw, shown);
     Ok(())
+}
+
+/// Filters `content` without its leading UTF-8 byte order mark, if any. The filters work line
+/// by line and would read the mark as part of line 1, so a comment or an import there was
+/// misread. The mark goes back in front of a non-empty result.
+fn filter_keeping_bom(content: &str, level: FilterLevel, lang: &Language) -> String {
+    let body = strip_leading_bom(content);
+    let filtered = filter::get_filter(level).filter(body, lang);
+    if filtered.trim().is_empty() {
+        return filtered;
+    }
+    format!("{}{}", &content[..content.len() - body.len()], filtered)
 }
 
 fn format_with_line_numbers(content: &str) -> String {
@@ -661,6 +672,46 @@ fn main() {{
         let output = apply_line_window(input, Some(2), None, None, &Language::Unknown);
         assert!(output.starts_with("a\n"));
         assert!(output.contains("more lines"));
+    }
+
+    #[test]
+    fn test_filter_keeping_bom_reads_line_one() {
+        let js = "// header\nlet a = 1;\n";
+        let out = filter_keeping_bom(
+            &format!("\u{feff}{js}"),
+            FilterLevel::Minimal,
+            &Language::JavaScript,
+        );
+        assert!(!out.contains("header"), "comment on line 1 kept: {out:?}");
+        assert_eq!(
+            out,
+            format!(
+                "\u{feff}{}",
+                filter_keeping_bom(js, FilterLevel::Minimal, &Language::JavaScript)
+            )
+        );
+
+        let py = "\u{feff}import os\ndef f():\n    return 1\n";
+        let out = filter_keeping_bom(py, FilterLevel::Aggressive, &Language::Python);
+        assert!(
+            out.starts_with("\u{feff}import os"),
+            "import on line 1 dropped: {out:?}"
+        );
+    }
+
+    #[test]
+    fn test_filter_keeping_bom_leaves_text_unchanged_at_level_none() {
+        let text = "\u{feff}# title\nbody\n";
+        assert_eq!(
+            filter_keeping_bom(text, FilterLevel::None, &Language::Unknown),
+            text
+        );
+    }
+
+    #[test]
+    fn test_filter_keeping_bom_empty_result_has_no_bom() {
+        let out = filter_keeping_bom("\u{feff}// only\n", FilterLevel::Minimal, &Language::Rust);
+        assert!(out.trim().is_empty(), "{out:?}");
     }
 
     fn rtk_bin() -> std::path::PathBuf {
