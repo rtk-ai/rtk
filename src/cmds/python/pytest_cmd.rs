@@ -103,7 +103,8 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
         } else if trimmed.starts_with("===")
             && (trimmed.contains("passed")
                 || trimmed.contains("failed")
-                || trimmed.contains("skipped"))
+                || trimmed.contains("skipped")
+                || trimmed.contains("collected"))
         {
             summary_line = trimmed.to_string();
             continue;
@@ -112,9 +113,10 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
             && !trimmed.starts_with("===")
             && !trimmed.starts_with("FAILED")
             && !trimmed.starts_with("ERROR")
-            && (trimmed.contains(" passed")
+            && ((trimmed.contains(" passed")
                 || trimmed.contains(" failed")
                 || trimmed.contains(" skipped"))
+                || trimmed.contains(" collected"))
             && trimmed.contains(" in ")
         {
             summary_line = trimmed.to_string();
@@ -177,6 +179,7 @@ struct PytestCounts {
     skipped: usize,
     xfailed: usize,
     xpassed: usize,
+    collected: usize,
 }
 
 fn build_pytest_summary(
@@ -192,9 +195,13 @@ fn build_pytest_summary(
         skipped,
         xfailed,
         xpassed,
+        collected,
     } = counts;
 
     if passed == 0 && failed == 0 && skipped == 0 && xfailed == 0 && xpassed == 0 {
+        if collected > 0 {
+            return format!("Pytest: {collected} tests collected");
+        }
         return PYTEST_NO_TESTS.to_string();
     }
 
@@ -308,6 +315,12 @@ fn parse_summary_line(summary: &str) -> PytestCounts {
     for part in summary.split(',') {
         let words: Vec<&str> = part.split_whitespace().collect();
         for (i, word) in words.iter().enumerate() {
+            if *word == "collected" && i >= 2 {
+                if let Ok(n) = words[i - 2].parse::<usize>() {
+                    counts.collected = n;
+                }
+                continue;
+            }
             if i == 0 {
                 continue;
             }
@@ -413,6 +426,17 @@ collected 0 items
 
         let result = filter_pytest_output(output);
         assert!(result.contains("No tests collected"));
+    }
+
+    #[test]
+    fn test_filter_pytest_collect_only_reports_collected_count() {
+        let output = r#"tests/test_foo.py::test_one
+tests/test_foo.py::test_two
+
+========================= 15 tests collected in 0.17s =========================="#;
+
+        let result = filter_pytest_output(output);
+        assert_eq!(result, "Pytest: 15 tests collected");
     }
 
     #[test]
