@@ -1189,8 +1189,8 @@ fn rewrite_compound(
                     any_changed = true;
                 }
                 result.push_str(&rewritten);
-                if tok.value == ";" {
-                    result.push(';');
+                if tok.value.starts_with(';') {
+                    result.push_str(&tok.value);
                     let after = tok.offset + tok.value.len();
                     if after < cmd.len() {
                         result.push(' ');
@@ -3389,6 +3389,118 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("rg \"fn main\"", &[]),
             Some("rtk rg \"fn main\"".into())
+        );
+    }
+
+    /// `;;`, `;&` and `;;&` terminate a `case` arm. The rewrite rebuilds the
+    /// text around each operator it splits on, so a terminator that lexes as
+    /// two operators comes back as `; ;` — which bash rejects — or as `; &`,
+    /// which runs the arm in the background instead of falling through.
+    #[test]
+    fn test_case_terminators_survive_a_rewrite() {
+        for (cmd, expected) in [
+            (
+                "ls /tmp; case x in a) echo 1;; *) echo 2;; esac",
+                "rtk ls /tmp; case x in a) echo 1;; *) echo 2;; esac",
+            ),
+            (
+                "ls /tmp; case x in a) echo 1;& *) echo 2;; esac",
+                "rtk ls /tmp; case x in a) echo 1;& *) echo 2;; esac",
+            ),
+            (
+                "ls /tmp; case x in a) echo 1;;& *) echo 2;; esac",
+                "rtk ls /tmp; case x in a) echo 1;;& *) echo 2;; esac",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                Some(expected),
+                "case terminator was not preserved: {cmd}"
+            );
+        }
+    }
+
+    /// A `case` reached through a block keyword is the shape this was reported
+    /// from, and it is not the shape above: there the rewritable command comes
+    /// first and the `case` trails it, here the `case` is passed over on the
+    /// way to the command. Both have to keep their terminators, so both are
+    /// pinned, and `while`/`until` are here because they broke the same way.
+    #[test]
+    fn test_case_terminators_survive_inside_a_block() {
+        for (cmd, expected) in [
+            (
+                "for f in a.mjs b.test.mjs; do case \"$f\" in *.test.mjs) continue;; esac; grep -q x README.md || echo miss; done",
+                "for f in a.mjs b.test.mjs; do case \"$f\" in *.test.mjs) continue;; esac; rtk grep -q x README.md || echo miss; done",
+            ),
+            (
+                "case x in x) echo A;; esac; ls /tmp",
+                "case x in x) echo A;; esac; rtk ls /tmp",
+            ),
+            (
+                "if true; then case x in x) echo a;; esac; ls /tmp; fi",
+                "if true; then case x in x) echo a;; esac; rtk ls /tmp; fi",
+            ),
+            (
+                "while read -r l; do case \"$l\" in a) continue;; esac; ls /tmp; done",
+                "while read -r l; do case \"$l\" in a) continue;; esac; rtk ls /tmp; done",
+            ),
+            (
+                "until false; do case x in a) break;; esac; ls /tmp; done",
+                "until false; do case x in a) break;; esac; rtk ls /tmp; done",
+            ),
+            // A function body is a block too, and `f()` is the one place a
+            // `()` pair defines rather than groups.
+            (
+                "f() { case x in x) echo a;; esac; }; f; ls /tmp",
+                "f() { case x in x) echo a;; esac; }; f; rtk ls /tmp",
+            ),
+            (
+                "f () { case x in x) echo a;; esac; }; f; ls /tmp",
+                "f () { case x in x) echo a;; esac; }; f; rtk ls /tmp",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                Some(expected),
+                "case terminator was not preserved: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_case_terminators_lex_as_one_operator() {
+        for (input, expected) in [(";;", ";;"), (";&", ";&"), (";;&", ";;&"), (";", ";")] {
+            let tokens = tokenize(input);
+            assert_eq!(tokens.len(), 1, "{input} should lex as one token");
+            assert_eq!(tokens[0].kind, TokenKind::Operator);
+            assert_eq!(tokens[0].value, expected);
+            assert_eq!(tokens[0].offset, 0);
+        }
+
+        // No gap before `esac` does not glue it into the operator: bash reads
+        // `;;esac` as two words, and so must the lexer, or the terminator
+        // swallows the keyword that closes the statement.
+        let tokens = tokenize(";;esac");
+        assert_eq!(tokens.len(), 2, ";;esac should lex as two tokens");
+        assert_eq!(
+            (tokens[0].kind, tokens[0].value.as_str()),
+            (TokenKind::Operator, ";;")
+        );
+        assert_eq!(
+            (tokens[1].kind, tokens[1].value.as_str()),
+            (TokenKind::Arg, "esac")
+        );
+        assert_eq!(tokens[1].offset, 2);
+
+        // A separator followed by a real background operator is still two
+        // tokens, since the `&` is not glued to the `;`.
+        let tokens = tokenize("a ; & b");
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|t| matches!(t.kind, TokenKind::Operator | TokenKind::Shellism))
+                .count(),
+            2
         );
     }
 
