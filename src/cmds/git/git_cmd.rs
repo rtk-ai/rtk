@@ -5396,6 +5396,15 @@ A  added.rs
         assert_eq!(parse_user_limit(&args), Some(20));
     }
 
+    /// #2665: git takes the count glued to `-n`, and `rtk git log -n20` was capped at RTK's own
+    /// 10 while `-n 20` was not, because only the separate-token form counted as a limit.
+    #[test]
+    fn test_parse_user_limit_n_combined() {
+        let args: Vec<String> = vec!["-n20".into()];
+        assert_eq!(parse_user_limit(&args), Some(20));
+        assert!(has_limit_flag(&tokenize_git_log_args(&args)));
+    }
+
     #[test]
     fn test_parse_user_limit_n_space() {
         let args: Vec<String> = vec!["-n".into(), "15".into()];

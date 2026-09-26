@@ -308,6 +308,7 @@ fn a_user_limit_or_a_revision_range_is_not_capped() {
     let repo = repo_with(25);
     for shape in [
         vec!["-p", "-n", "20"],
+        vec!["-p", "-n20"],
         vec!["-p", "-20"],
         vec!["-p", "--max-count=20"],
         vec!["-p", "HEAD~20..HEAD"],
@@ -323,6 +324,32 @@ fn a_user_limit_or_a_revision_range_is_not_capped() {
             .filter(|l| l.starts_with("commit "))
             .count();
         assert_eq!(commits, 20, "{shape:?} must return all 20 commits");
+    }
+}
+
+#[test]
+fn a_glued_n_limit_is_the_users_limit_on_the_compact_listing() {
+    // #2665: `-n20` was not read as a limit, so RTK's own cap of 10 cut the compact listing
+    // short of the 20 asked for, without a word. Every spelling of the count must agree.
+    let repo = repo_with(25);
+    let listed = |args: &[&str]| {
+        String::from_utf8_lossy(&rtk_log(&repo.path, &repo.home, args).stdout)
+            .lines()
+            .filter(|l| {
+                l.split_whitespace()
+                    .next()
+                    .is_some_and(|h| h.len() >= 7 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+            })
+            .count()
+    };
+
+    assert_eq!(
+        listed(&[]),
+        10,
+        "the cap on an unbounded walk, for contrast"
+    );
+    for shape in [vec!["-n20"], vec!["-n", "20"], vec!["-20"]] {
+        assert_eq!(listed(&shape), 20, "{shape:?} must return all 20 commits");
     }
 }
 
