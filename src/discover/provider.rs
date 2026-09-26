@@ -52,6 +52,28 @@ impl ClaudeProvider {
         Ok(claude_dir.join("projects"))
     }
 
+    /// Does a project directory match the filter?
+    ///
+    /// **Case-insensitive on Windows, where the drive letter's case is not ours to
+    /// predict.** Claude Code writes `c--DEV-proj` from a lowercased cwd, while
+    /// `encode_project_path` receives `C:\DEV\proj` from `current_dir()` and produces
+    /// `C--DEV-proj`. An exact match then selects nothing, and `discover` reports
+    /// "No missed savings found. RTK usage looks good!" over zero sessions -- the same
+    /// silent-zero as the drive-letter colon in #2919, one character along. MEASURED on
+    /// Windows 11: bare `rtk discover` scanned 0 sessions where `--project ewc3labs-hq`
+    /// scanned 3 and found 3,872 commands.
+    ///
+    /// Everywhere else paths are case-sensitive, so the comparison stays exact.
+    fn project_dir_matches(dir_name: &str, filter: &str) -> bool {
+        if cfg!(windows) {
+            dir_name
+                .to_ascii_lowercase()
+                .contains(&filter.to_ascii_lowercase())
+        } else {
+            dir_name.contains(filter)
+        }
+    }
+
     fn discover_sessions_in_projects_dir(
         projects_dir: &Path,
         project_filter: Option<&str>,
@@ -94,7 +116,7 @@ impl ClaudeProvider {
             // Apply project filter: substring match on directory name
             if let Some(filter) = project_filter {
                 let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !dir_name.contains(filter) {
+                if !Self::project_dir_matches(dir_name, filter) {
                     continue;
                 }
             }
@@ -364,6 +386,62 @@ mod tests {
         assert_eq!(
             ClaudeProvider::encode_project_path("/Users/foo/bar"),
             "-Users-foo-bar"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_project_dir_matches_ignores_drive_letter_case_on_windows() {
+        // Claude Code's folder for C:\DEV\ewc3labs-hq is `c--DEV-ewc3labs-hq`,
+        // while encode_project_path produces `C--DEV-ewc3labs-hq` from what
+        // current_dir() hands back. Exact matching drops every session.
+        assert!(ClaudeProvider::project_dir_matches(
+            "c--DEV-ewc3labs-hq",
+            "C--DEV-ewc3labs-hq"
+        ));
+        // And the filter must still be a filter.
+        assert!(!ClaudeProvider::project_dir_matches(
+            "c--DEV-ewc3labs-hq",
+            "C--DEV-some-other-repo"
+        ));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn test_project_dir_matches_stays_exact_off_windows() {
+        // Paths are case-sensitive here, so two projects differing only in case
+        // are two projects.
+        assert!(ClaudeProvider::project_dir_matches(
+            "-home-w-ewc3labs-hq",
+            "-home-w-ewc3labs-hq"
+        ));
+        assert!(!ClaudeProvider::project_dir_matches(
+            "-home-w-ewc3labs-hq",
+            "-home-w-EWC3labs-hq"
+        ));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_discover_finds_sessions_despite_drive_letter_case() {
+        // End to end through the directory walk, which is where the silent zero
+        // actually happened.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project = tmp.path().join("c--DEV-ewc3labs-hq");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("session.jsonl"), "{}\n").unwrap();
+
+        let found = ClaudeProvider::discover_sessions_in_projects_dir(
+            tmp.path(),
+            Some("C--DEV-ewc3labs-hq"),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            found.len(),
+            1,
+            "a session must be found when only the drive letter's case differs"
         );
     }
 
