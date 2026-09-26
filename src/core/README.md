@@ -55,6 +55,11 @@ Docstrings are kept at `minimal`. `aggressive` has no string awareness: it
 keeps a line inside a string when that line looks like an import or a
 signature.
 
+The Python path carries nested f-string and t-string replacement fields across
+lines. Quotes and braces inside a field's nested strings cannot close the outer
+string. Whole-line comments in replacement expressions are removed; `#` lines
+in string contents or format specifications are kept as literal text.
+
 ## Tracking Database Schema
 
 ```sql

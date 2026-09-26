@@ -157,67 +157,111 @@ pub struct MinimalFilter;
 
 static MULTIPLE_BLANK_LINES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
 
-/// Advances triple-quoted string state across one line, returning the delimiter
-/// still open at end of line. The two quote kinds are tracked separately so a
-/// `'''` inside a `"""` string is text rather than a close. Outside a string, a
-/// one-line string literal is skipped whole and a `#` ends the scan, so a `"""`
-/// written inside `'"""'` or after a trailing comment opens nothing. A backslash
-/// escapes the next byte in every kind of string, raw ones included.
-fn advance_triple_quote(line: &str, open: Option<&'static str>) -> Option<&'static str> {
-    let bytes = line.as_bytes();
-    let mut state = open;
-    let mut i = 0;
+#[derive(Clone, Copy)]
+enum PythonContext {
+    String {
+        quote: u8,
+        triple: bool,
+        interpolated: bool,
+    },
+    Field {
+        nesting: usize,
+    },
+    FormatSpec,
+}
 
-    while i < bytes.len() {
-        let rest = &bytes[i..];
-        if let Some(current) = state {
-            if rest[0] == b'\\' {
-                i += 2;
-            } else if rest.starts_with(current.as_bytes()) {
-                state = None;
-                i += 3;
-            } else {
-                i += 1;
-            }
-            continue;
-        }
+#[derive(Default)]
+struct PythonStringState {
+    // A field can contain another string (including another f/t-string). Keep
+    // these on a stack across lines rather than counting braces in string text.
+    contexts: Vec<PythonContext>,
+}
 
-        match rest[0] {
-            b'#' => break,
-            b'"' if rest.starts_with(b"\"\"\"") => {
-                state = Some("\"\"\"");
-                i += 3;
-            }
-            b'\'' if rest.starts_with(b"'''") => {
-                state = Some("'''");
-                i += 3;
-            }
-            quote @ (b'"' | b'\'') => {
-                let interpolated = has_interpolation_prefix(&bytes[..i]);
-                let mut depth = 0usize;
-                i += 1;
-                while i < bytes.len() {
-                    match bytes[i] {
-                        b'\\' => i += 1,
-                        b'{' if interpolated => {
-                            if depth == 0 && bytes.get(i + 1) == Some(&b'{') {
-                                i += 1;
-                            } else {
-                                depth += 1;
-                            }
+impl PythonStringState {
+    fn in_literal(&self) -> bool {
+        matches!(
+            self.contexts.last(),
+            Some(PythonContext::String { .. } | PythonContext::FormatSpec)
+        )
+    }
+
+    fn advance(&mut self, line: &str) {
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            match self.contexts.last().copied() {
+                Some(PythonContext::String {
+                    quote,
+                    triple,
+                    interpolated,
+                }) => {
+                    let delimiter_len = if triple { 3 } else { 1 };
+                    if bytes[i] == b'\\' {
+                        // A backslash escapes quotes even in raw strings, but
+                        // does not escape an f/t-string replacement field.
+                        i += if interpolated && bytes.get(i + 1) == Some(&b'{') {
+                            1
+                        } else {
+                            2
+                        };
+                    } else if bytes[i..].starts_with(&[quote; 3][..delimiter_len]) {
+                        self.contexts.pop();
+                        i += delimiter_len;
+                    } else if interpolated && bytes[i] == b'{' {
+                        if bytes.get(i + 1) == Some(&b'{') {
+                            i += 2;
+                        } else {
+                            self.contexts.push(PythonContext::Field { nesting: 0 });
+                            i += 1;
                         }
-                        b'}' if interpolated && depth > 0 => depth -= 1,
-                        b if b == quote && depth == 0 => break,
+                    } else {
+                        i += 1;
+                    }
+                }
+                Some(PythonContext::FormatSpec) => {
+                    // Quotes and # are literal format text. Nested replacement
+                    // fields still use the expression rules below.
+                    match bytes[i] {
+                        b'{' => self.contexts.push(PythonContext::Field { nesting: 0 }),
+                        b'}' => {
+                            self.contexts.pop();
+                        }
                         _ => {}
                     }
                     i += 1;
                 }
-                i += 1;
+                _ => match bytes[i] {
+                    b'#' => break,
+                    quote @ (b'"' | b'\'') => {
+                        let triple = bytes[i..].starts_with(&[quote; 3]);
+                        self.contexts.push(PythonContext::String {
+                            quote,
+                            triple,
+                            interpolated: has_interpolation_prefix(&bytes[..i]),
+                        });
+                        i += if triple { 3 } else { 1 };
+                    }
+                    byte => {
+                        if let Some(PythonContext::Field { nesting }) = self.contexts.last_mut() {
+                            match byte {
+                                b'(' | b'[' | b'{' => *nesting += 1,
+                                b')' | b']' | b'}' if *nesting > 0 => *nesting -= 1,
+                                b'}' => {
+                                    self.contexts.pop();
+                                }
+                                b':' if *nesting == 0 => {
+                                    self.contexts.pop();
+                                    self.contexts.push(PythonContext::FormatSpec);
+                                }
+                                _ => {}
+                            }
+                        }
+                        i += 1;
+                    }
+                },
             }
-            _ => i += 1,
         }
     }
-    state
 }
 
 /// True when the identifier ending at `before` is an f-string or t-string prefix.
@@ -240,37 +284,26 @@ fn has_interpolation_prefix(before: &[u8]) -> bool {
 /// `QUERY = """` both contains and "closes" the delimiter, and a single-line
 /// docstring toggles the state once and never back.
 ///
-/// Minimal keeps docstrings, so the only thing to remove here is `#` comments,
-/// and the only state needed is whether we are inside a triple-quoted string.
+/// Minimal keeps docstrings. Track strings and their replacement fields so
+/// only whole-line `#` comments outside literal text are removed.
 fn filter_python_minimal(content: &str) -> String {
     let mut result = String::with_capacity(content.len());
-    let mut open_string: Option<&'static str> = None;
+    let mut state = PythonStringState::default();
 
     for line in content.lines() {
         let trimmed = line.trim();
-
-        // Inside a string every line is literal text, including one that starts
-        // with `#`.
-        if open_string.is_some() {
-            result.push_str(line);
-            result.push('\n');
-            open_string = advance_triple_quote(line, open_string);
+        if !state.in_literal() && trimmed.starts_with('#') {
             continue;
         }
 
-        // A comment's contents are not code, so any delimiter in it is not real.
-        if trimmed.starts_with('#') {
-            continue;
-        }
-
-        if trimmed.is_empty() {
+        if !state.in_literal() && trimmed.is_empty() {
             result.push('\n');
             continue;
         }
 
         result.push_str(line);
         result.push('\n');
-        open_string = advance_triple_quote(line, None);
+        state.advance(line);
     }
 
     let result = MULTIPLE_BLANK_LINES.replace_all(&result, "\n\n");
@@ -762,6 +795,95 @@ if"{" == v:
             result
         );
         assert!(!result.contains("# strip me"));
+    }
+
+    #[test]
+    fn test_minimal_python_nested_field_literals() {
+        for prefix in ["f", "fr", "rf", "F", "t", "tr", "rt", "T"] {
+            for outer in ["\"", "'"] {
+                for inner in ["\"", "'", "\"\"\"", "'''"] {
+                    for brace in ["{", "}", "{{", "}}"] {
+                        let value =
+                            format!("value = {prefix}{outer}{{{inner}{brace}{inner}}}{outer}");
+                        let kept = format!("{value} + \"\"\"\n# keep this string content\n\"\"\"");
+                        let code = format!("{kept}\n# drop this comment\n");
+                        assert_eq!(MinimalFilter.filter(&code, &Language::Python), kept);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_minimal_python_multiline_replacement_fields() {
+        for prefix in ["f", "t"] {
+            for quote in ["\"", "'"] {
+                let kept =
+                    format!("value = {prefix}{quote}{{\n    n\n}}{quote} + \"\"\"\n# keep\n\"\"\"");
+                let code = format!("{kept}\n# drop\n");
+                assert_eq!(MinimalFilter.filter(&code, &Language::Python), kept);
+            }
+        }
+    }
+
+    #[test]
+    fn test_minimal_python_nested_interpolation_and_comments() {
+        let code = r####"value = f"{f"{
+    """
+# keep the nested string
+"""  # a trailing comment containing } """
+    # drop this field comment containing } """
+}"}" + """
+# keep the following string
+"""
+# drop the final comment
+"####;
+        let expected = code
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("# drop"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(MinimalFilter.filter(code, &Language::Python), expected);
+    }
+
+    #[test]
+    fn test_minimal_python_triple_interpolation_reuses_delimiter() {
+        let code = r####"value = f"""{ """
+# keep inner string
+""" } outer text
+# keep outer string
+"""
+# drop
+"####;
+        let expected = code.trim_end().strip_suffix("\n# drop").unwrap();
+        assert_eq!(MinimalFilter.filter(code, &Language::Python), expected);
+    }
+
+    #[test]
+    fn test_minimal_python_field_format_specs() {
+        for expression in [
+            r#"f'{n:"<10}'"#,
+            r#"f"{n:{width}.{precision}f}""#,
+            r#"f"{items[1:3]}""#,
+            r#"f"{{escaped}} { {"}": "{"} }""#,
+            r#"f"{(lambda x: "{")(n)}""#,
+            r#"f"\{ "{" }""#,
+        ] {
+            let kept = format!("value = {expression} + \"\"\"\n# keep\n\"\"\"");
+            let code = format!("{kept}\n# drop\n");
+            assert_eq!(MinimalFilter.filter(&code, &Language::Python), kept);
+        }
+    }
+
+    #[test]
+    fn test_minimal_python_multiline_format_spec_is_literal() {
+        let code = r####"value = f"""{n:
+# keep format text, including the quote "
+{width}}"""
+# drop
+"####;
+        let expected = code.trim_end().strip_suffix("\n# drop").unwrap();
+        assert_eq!(MinimalFilter.filter(code, &Language::Python), expected);
     }
 
     #[test]
