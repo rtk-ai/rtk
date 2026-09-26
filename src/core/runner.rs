@@ -1,9 +1,10 @@
 //! Shared command execution skeleton for filter modules.
 
+use crate::core::child_command::ChildCommand;
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::borrow::Cow;
-use std::process::Command;
+
 use std::sync::LazyLock;
 
 use crate::core::stream::{self, FilterMode, StdinMode, StreamFilter};
@@ -113,7 +114,7 @@ pub enum RunMode<'a> {
 }
 
 fn run_captured_filter<F>(
-    mut cmd: Command,
+    mut cmd: ChildCommand,
     tool_name: &str,
     cmd_label: &str,
     filter_fn: F,
@@ -270,7 +271,7 @@ fn last_lines_offset(text: &str, n: usize) -> Option<(usize, usize)> {
 }
 
 pub fn run(
-    cmd: Command,
+    cmd: ChildCommand,
     tool_name: &str,
     args_display: &str,
     mode: RunMode<'_>,
@@ -283,7 +284,7 @@ pub fn run(
 }
 
 fn run_inner(
-    mut cmd: Command,
+    mut cmd: ChildCommand,
     tool_name: &str,
     args_display: &str,
     mode: RunMode<'_>,
@@ -341,7 +342,7 @@ fn run_inner(
 }
 
 pub fn run_filtered<F>(
-    cmd: Command,
+    cmd: ChildCommand,
     tool_name: &str,
     args_display: &str,
     filter_fn: F,
@@ -360,7 +361,7 @@ where
 }
 
 pub fn run_filtered_with_exit<F>(
-    cmd: Command,
+    cmd: ChildCommand,
     tool_name: &str,
     args_display: &str,
     filter_fn: F,
@@ -383,7 +384,9 @@ pub fn run_passthrough(tool: &str, args: &[std::ffi::OsString], verbose: u8) -> 
         eprintln!("{} passthrough: {:?}", tool, args);
     }
     let mut cmd = crate::core::utils::resolved_command(tool);
-    crate::core::utils::ChildArgExt::child_args(&mut cmd, args);
+    // Unparsed: rtk knows no grammar for this tool, so every element takes the
+    // literal default.
+    cmd.args(args);
     let args_str = tracking::args_display(args);
     run(
         cmd,
@@ -395,7 +398,7 @@ pub fn run_passthrough(tool: &str, args: &[std::ffi::OsString], verbose: u8) -> 
 }
 
 pub fn run_streamed(
-    cmd: Command,
+    cmd: ChildCommand,
     tool_name: &str,
     args_display: &str,
     filter: Box<dyn StreamFilter + '_>,
@@ -515,7 +518,7 @@ impl StreamFilter for ErrorStreamFilter {
 /// slug, so passing a real name keeps `rtk gain --history` showing invocations
 /// that exist and stops recovery files colliding across ecosystems.
 pub fn run_err_cmd(
-    cmd: Command,
+    cmd: ChildCommand,
     tool: &str,
     display: &str,
     tee_label: &str,
@@ -584,7 +587,7 @@ pub fn is_watch_mode(args: &[String]) -> bool {
 /// Run a prebuilt test command (no shell), showing only failures.
 /// `display` is used only for logging and tracking, never executed.
 pub fn run_test_cmd(
-    cmd: Command,
+    cmd: ChildCommand,
     tool: &str,
     display: &str,
     tee_label: &str,

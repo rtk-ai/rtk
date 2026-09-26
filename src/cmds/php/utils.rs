@@ -1,14 +1,15 @@
+use crate::core::child_command::ChildCommand;
 use crate::core::utils::{composer_tool_paths, resolve_binary, resolved_command};
 use regex::Regex;
 use std::path::Path;
-use std::process::Command;
+
 use std::sync::LazyLock;
 
 static ANSI_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").unwrap());
 static CONTROL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]").unwrap());
 
-pub fn php_tool_command(tool: &str) -> Command {
+pub fn php_tool_command(tool: &str) -> ChildCommand {
     for local_tool in composer_tool_paths(tool) {
         let local_tool_name = local_tool.to_string_lossy().into_owned();
         // Route through resolved_command (the sanctioned constructor) rather than

@@ -5,6 +5,7 @@
 //! capable of state-machine parsing (block collapse, continuation tracking,
 //! mode toggle) that TOML DSL cannot express.
 
+use crate::core::child_command::ChildCommand;
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, strip_ansi};
@@ -13,7 +14,7 @@ use regex::Regex;
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::Path;
-use std::process::Command;
+
 use std::sync::LazyLock;
 
 /// Cap on emitted failing test-class blocks and `[ERROR] Failures:` summary
@@ -1806,17 +1807,17 @@ fn mvn_binary(daemon: bool) -> &'static str {
     }
 }
 
-fn new_mvn_command(args: &[String], daemon: bool) -> Command {
+fn new_mvn_command(args: &[String], daemon: bool) -> ChildCommand {
     let mut cmd = if daemon {
         resolved_command("mvnd")
     } else if cfg!(windows) {
         if Path::new(".\\mvnw.cmd").exists() {
-            Command::new(".\\mvnw.cmd")
+            ChildCommand::new(".\\mvnw.cmd")
         } else {
             resolved_command("mvn")
         }
     } else if Path::new("./mvnw").exists() {
-        Command::new("./mvnw")
+        ChildCommand::new("./mvnw")
     } else {
         resolved_command("mvn")
     };

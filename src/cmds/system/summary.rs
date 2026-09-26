@@ -1,5 +1,6 @@
 //! Runs a command and produces a heuristic summary of its output.
 
+use crate::core::child_command::ChildCommand;
 use crate::core::guard::never_worse;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
@@ -20,7 +21,9 @@ pub fn run(command: &str, verbose: u8) -> Result<i32> {
         eprintln!("Running and summarizing: {}", command);
     }
 
-    let mut cmd = if cfg!(target_os = "windows") {
+    // The shell receives one command *string*, not an argument vector, so
+    // `ChildCommand`'s per-argument encoding must not be applied to it.
+    let shell = if cfg!(target_os = "windows") {
         let mut c = Command::new("cmd");
         c.args(["/C", command]);
         c
@@ -29,6 +32,7 @@ pub fn run(command: &str, verbose: u8) -> Result<i32> {
         c.args(["-c", command]);
         c
     };
+    let mut cmd = ChildCommand::from(shell);
     let result = exec_capture(&mut cmd).context("Failed to execute command")?;
 
     let raw = format!("{}\n{}", result.stdout, result.stderr);

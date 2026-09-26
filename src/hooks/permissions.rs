@@ -3,6 +3,7 @@ use super::constants::{
     SETTINGS_JSON, SETTINGS_LOCAL_JSON,
 };
 use super::init::resolve_claude_dir;
+use crate::core::child_command::ChildCommand;
 use crate::core::stream::exec_capture;
 use crate::discover::lexer::{is_word_boundary_whitespace, split_for_permissions};
 use serde_json::Value;
@@ -378,7 +379,7 @@ fn find_project_root() -> Option<PathBuf> {
     }
 
     // Fallback: git (spawns a subprocess, slower but handles monorepo layouts).
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = ChildCommand::new("git");
     cmd.args(["rev-parse", "--show-toplevel"]);
     let result = exec_capture(&mut cmd).ok()?;
 

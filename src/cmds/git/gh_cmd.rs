@@ -3,6 +3,7 @@
 //! Provides token-optimized alternatives to verbose `gh` commands.
 //! Focuses on extracting essential information from JSON outputs.
 
+use crate::core::child_command::ChildCommand;
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::CAP_LIST;
 use crate::core::utils::{ok_confirmation, resolved_command, truncate};
@@ -10,7 +11,7 @@ use crate::git_cmd;
 use anyhow::Result;
 use regex::Regex;
 use serde_json::Value;
-use std::process::Command;
+
 use std::sync::LazyLock;
 
 static HTML_COMMENT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<!--.*?-->").unwrap());
@@ -171,7 +172,7 @@ fn parse_optional_identifier(args: &[String]) -> (Option<String>, Vec<String>) {
     }
 }
 
-fn run_gh_json<F>(cmd: Command, label: &str, filter_fn: F) -> Result<i32>
+fn run_gh_json<F>(cmd: ChildCommand, label: &str, filter_fn: F) -> Result<i32>
 where
     F: Fn(&Value) -> String,
 {

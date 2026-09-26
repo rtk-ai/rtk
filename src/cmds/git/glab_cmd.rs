@@ -11,13 +11,14 @@
 //! - Pipeline: `head_pipeline.status` (not `statusCheckRollup`)
 
 use super::git_cmd;
+use crate::core::child_command::ChildCommand;
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{ok_confirmation, resolved_command, strip_ansi, truncate};
 use anyhow::Result;
 use regex::Regex;
 use serde_json::Value;
-use std::process::Command;
+
 use std::sync::LazyLock;
 
 static HTML_COMMENT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<!--.*?-->").unwrap());
@@ -240,7 +241,7 @@ fn should_passthrough_view(extra_args: &[String]) -> bool {
 /// Run a glab command that emits JSON and filter through `filter_fn`.
 /// On JSON parse failure (glab returns plain text for empty results),
 /// fall back to the raw stdout.
-fn run_glab_json<F>(cmd: Command, label: &str, filter_fn: F) -> Result<i32>
+fn run_glab_json<F>(cmd: ChildCommand, label: &str, filter_fn: F) -> Result<i32>
 where
     F: Fn(&Value) -> String,
 {

@@ -922,7 +922,7 @@ fn print_omp_extension_status(label: &str, path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
+    use crate::core::child_command::ChildCommand;
     use tempfile::TempDir;
 
     /// Install the Pi extension (hook-only; no AGENTS.md injection).
@@ -1211,7 +1211,7 @@ mod tests {
             return;
         }
 
-        let revisions = Command::new("git")
+        let revisions = ChildCommand::new("git")
             .current_dir(manifest_dir)
             .args([
                 "rev-list",
@@ -1239,7 +1239,7 @@ mod tests {
 
         for commit in commits {
             let object = format!("{commit}:hooks/pi/rtk.ts");
-            let file = Command::new("git")
+            let file = ChildCommand::new("git")
                 .current_dir(manifest_dir)
                 .args(["show", object.as_str()])
                 .output()

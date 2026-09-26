@@ -4,18 +4,19 @@
 //! compresses its output by grouping matches by file, capping, and teeing overflow.
 
 use crate::core::arg_tokenizer::{self, Dialect, Token, TokenKind, ValueSpec};
+use crate::core::child_command::ChildCommand;
 use crate::core::guard::never_worse;
 use crate::core::stream::{
     self, CaptureResult, FilterMode, StdinMode, StreamFilter, exec_capture, exec_capture_stdin,
 };
 use crate::core::tracking;
-use crate::core::utils::{ChildArgExt, resolved_command, strip_ansi};
+use crate::core::utils::{resolved_command, strip_ansi};
 use crate::core::{args_utils, config};
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
 use std::io::IsTerminal;
-use std::process::Command;
+
 use std::sync::LazyLock;
 
 /// True if stdin is something the engine actually reads: a regular file, FIFO or socket --
@@ -430,21 +431,21 @@ fn engine_command<T: AsRef<str>>(
     patterns: &[String],
     paths: &[String],
     line_buffered: bool,
-) -> Command {
+) -> ChildCommand {
     let mut cmd = resolved_command(engine.bin());
-    cmd.child_args(engine.parse_flags());
+    cmd.args(engine.parse_flags());
     for a in extra_args {
-        cmd.child_arg(a.as_ref());
+        cmd.arg(a.as_ref());
     }
     if line_buffered {
         // The engine writes through a pipe, so flush each match immediately.
-        cmd.child_arg("--line-buffered");
+        cmd.arg("--line-buffered");
     }
     for p in patterns {
-        cmd.child_args(["-e", p]);
+        cmd.args(["-e", p]);
     }
-    cmd.child_arg("--");
-    cmd.child_args(paths);
+    cmd.arg("--");
+    cmd.glob_args(paths);
     cmd
 }
 
@@ -565,10 +566,12 @@ fn passthrough<T: AsRef<str>>(
     let mut cmd = resolved_command(engine.bin());
     if stream_stdin && !std::io::stdout().is_terminal() {
         // Keep passthrough output live when stdout is piped.
-        cmd.child_arg("--line-buffered");
+        cmd.arg("--line-buffered");
     }
+    // Unsplit: this vector still holds the search pattern, so it takes the
+    // literal default rather than risking the child reinterpreting a regex.
     for a in args {
-        cmd.child_arg(a.as_ref());
+        cmd.arg(a.as_ref());
     }
 
     if stream_stdin {
@@ -709,7 +712,7 @@ pub fn run(
 
     if asks_for_help {
         let mut cmd = resolved_command(engine.bin());
-        cmd.child_args(args);
+        cmd.args(args);
         let result = exec_capture(&mut cmd).context("search failed")?;
         print!("{}", result.stdout);
         if !result.stderr.is_empty() {

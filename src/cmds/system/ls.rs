@@ -3,7 +3,7 @@
 use super::constants::NOISE_DIRS;
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::CAP_INVENTORY;
-use crate::core::utils::{ChildArgExt, resolved_command};
+use crate::core::utils::resolved_command;
 use anyhow::Result;
 use regex::Regex;
 use std::sync::LazyLock;
@@ -68,7 +68,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     for flag in &flags {
         if flag.starts_with("--") {
             if *flag != "--all" {
-                cmd.child_arg(flag);
+                cmd.arg(flag);
             }
         } else {
             let stripped = flag.trim_start_matches('-');
@@ -77,15 +77,17 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
                 .filter(|c| *c != 'l' && *c != 'a' && *c != 'h')
                 .collect();
             if !extra.is_empty() {
-                cmd.child_arg(format!("-{}", extra));
+                cmd.arg(format!("-{}", extra));
             }
         }
     }
 
     if paths.is_empty() {
-        cmd.child_arg(".");
+        cmd.arg(".");
     } else {
-        cmd.child_args(&paths);
+        // Split on a leading dash rather than parsed, so `-I <pattern>` and
+        // `--ignore <pattern>` leave their value here: literal default.
+        cmd.args(&paths);
     }
 
     let label = if args.is_empty() {
