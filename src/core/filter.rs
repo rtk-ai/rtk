@@ -85,12 +85,14 @@ impl Language {
                 doc_line: Some("///"),
                 doc_block_start: Some("/**"),
             },
+            // Python is filtered by `filter_python_minimal` and never reaches the
+            // block-comment walk, where `"""` would be misread as a comment.
             Language::Python => CommentPatterns {
                 line: Some("#"),
-                block_start: Some("\"\"\""),
-                block_end: Some("\"\"\""),
+                block_start: None,
+                block_end: None,
                 doc_line: None,
-                doc_block_start: Some("\"\"\""),
+                doc_block_start: None,
             },
             Language::JavaScript
             | Language::TypeScript
@@ -156,82 +158,144 @@ impl FilterStrategy for NoFilter {
 pub struct MinimalFilter;
 
 static MULTIPLE_BLANK_LINES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
+/// An encoding declaration (PEP 263), with the pattern Python's tokenizer uses:
+/// ASCII only in the encoding name.
+static PYTHON_CODING_LINE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[ \t\x0c]*#.*?coding[:=][ \t]*[-A-Za-z0-9_.]+").unwrap());
 
-/// Advances triple-quoted string state across one line, returning the delimiter
-/// still open at end of line. The two quote kinds are tracked separately so a
-/// `'''` inside a `"""` string is text rather than a close. Outside a string, a
-/// one-line string literal is skipped whole and a `#` ends the scan, so a `"""`
-/// written inside `'"""'` or after a trailing comment opens nothing. A backslash
-/// escapes the next byte in every kind of string, raw ones included.
-fn advance_triple_quote(line: &str, open: Option<&'static str>) -> Option<&'static str> {
-    let bytes = line.as_bytes();
-    let mut state = open;
-    let mut i = 0;
-
-    while i < bytes.len() {
-        let rest = &bytes[i..];
-        if let Some(current) = state {
-            if rest[0] == b'\\' {
-                i += 2;
-            } else if rest.starts_with(current.as_bytes()) {
-                state = None;
-                i += 3;
-            } else {
-                i += 1;
-            }
-            continue;
-        }
-
-        match rest[0] {
-            b'#' => break,
-            b'"' if rest.starts_with(b"\"\"\"") => {
-                state = Some("\"\"\"");
-                i += 3;
-            }
-            b'\'' if rest.starts_with(b"'''") => {
-                state = Some("'''");
-                i += 3;
-            }
-            quote @ (b'"' | b'\'') => {
-                let interpolated = has_interpolation_prefix(&bytes[..i]);
-                let mut depth = 0usize;
-                i += 1;
-                while i < bytes.len() {
-                    match bytes[i] {
-                        b'\\' => i += 1,
-                        b'{' if interpolated => {
-                            if depth == 0 && bytes.get(i + 1) == Some(&b'{') {
-                                i += 1;
-                            } else {
-                                depth += 1;
-                            }
-                        }
-                        b'}' if interpolated && depth > 0 => depth -= 1,
-                        b if b == quote && depth == 0 => break,
-                        _ => {}
-                    }
-                    i += 1;
-                }
-                i += 1;
-            }
-            _ => i += 1,
-        }
-    }
-    state
+/// One open token of a Python line scan: a string literal, or a replacement
+/// field inside an f-string or t-string. Scan state is a stack of these, carried
+/// from line to line, because a string or a field can hold the other.
+enum PyToken {
+    Str {
+        quote: u8,
+        triple: bool,
+        interpolated: bool,
+    },
+    /// `depth` counts the brackets opened inside the field.
+    Field { depth: usize },
+    /// The format spec of a field, after its `:`: literal text in which `{`
+    /// opens a nested field and `}` closes the field the spec belongs to.
+    Spec,
 }
 
-/// True when the identifier ending at `before` is an f-string or t-string prefix.
-/// A replacement field in those may reuse the outer quote (PEP 701), so the
-/// quote only ends the string outside `{...}`.
-fn has_interpolation_prefix(before: &[u8]) -> bool {
+/// True when the identifier ending at `before` is an f-string or t-string
+/// prefix (`f`, `Rt`, ...). Any other identifier, such as the `if` in `if"x"`,
+/// is not one.
+fn is_interpolated_prefix(before: &[u8]) -> bool {
     let start = before
         .iter()
         .rposition(|b| !(b.is_ascii_alphanumeric() || *b == b'_'))
         .map_or(0, |p| p + 1);
-    matches!(
-        before[start..].to_ascii_lowercase().as_slice(),
-        b"f" | b"fr" | b"rf" | b"t" | b"tr" | b"rt"
-    )
+    let prefix = &before[start..];
+    ["f", "fr", "rf", "t", "tr", "rt"]
+        .iter()
+        .any(|p| prefix.eq_ignore_ascii_case(p.as_bytes()))
+}
+
+/// Advances the scan state across one physical line.
+///
+/// Outside a string a `#` ends the line and a quote opens a string, so a `"""`
+/// inside `'"""'` or after a trailing comment opens nothing. Inside a string a
+/// backslash keeps the next byte from closing it; in an f-string it never
+/// escapes a brace (`\{{` is a backslash then an escaped brace). The braces of
+/// a `\N{...}` escape are scanned as a field, which changes nothing: a
+/// character name holds no quote, colon or `#`. A one-line string ends with its
+/// line unless a backslash continues it or one of its replacement fields is
+/// still open.
+///
+/// Returns whether the line ends with a backslash outside string text and
+/// comments (in code or a replacement field), which joins it to the next line.
+fn scan_python_line(line: &str, stack: &mut Vec<PyToken>) -> bool {
+    let bytes = line.as_bytes();
+    let mut continued = false;
+    let mut joins_next = false;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        match stack.last_mut() {
+            Some(&mut PyToken::Str {
+                quote,
+                triple,
+                interpolated,
+            }) => match b {
+                b'\\' => match bytes.get(i + 1) {
+                    None => {
+                        continued = true;
+                        i += 1;
+                    }
+                    Some(b'{' | b'}') if interpolated => i += 1,
+                    Some(_) => i += 2,
+                },
+                b'{' | b'}' if interpolated => {
+                    if bytes.get(i + 1) == Some(&b) {
+                        i += 2;
+                    } else {
+                        if b == b'{' {
+                            stack.push(PyToken::Field { depth: 0 });
+                        }
+                        i += 1;
+                    }
+                }
+                _ if b == quote && (!triple || bytes[i..].starts_with(&[quote; 3])) => {
+                    stack.pop();
+                    i += if triple { 3 } else { 1 };
+                }
+                _ => i += 1,
+            },
+            Some(PyToken::Spec) => {
+                match b {
+                    b'{' => stack.push(PyToken::Field { depth: 0 }),
+                    b'}' => {
+                        stack.pop();
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            _ => {
+                match b {
+                    b'#' => break,
+                    b'"' | b'\'' => {
+                        let triple = bytes[i..].starts_with(&[b; 3]);
+                        stack.push(PyToken::Str {
+                            quote: b,
+                            triple,
+                            interpolated: is_interpolated_prefix(&bytes[..i]),
+                        });
+                        i += if triple { 3 } else { 1 };
+                        continue;
+                    }
+                    b'(' | b'[' | b'{' => {
+                        if let Some(PyToken::Field { depth }) = stack.last_mut() {
+                            *depth += 1;
+                        }
+                    }
+                    b')' | b']' | b'}' => match stack.last_mut() {
+                        Some(PyToken::Field { depth: 0 }) if b == b'}' => {
+                            stack.pop();
+                        }
+                        Some(PyToken::Field { depth }) => *depth = depth.saturating_sub(1),
+                        _ => {}
+                    },
+                    b':' => {
+                        if let Some(top @ PyToken::Field { depth: 0 }) = stack.last_mut() {
+                            *top = PyToken::Spec;
+                        }
+                    }
+                    b'\\' if i + 1 == bytes.len() => joins_next = true,
+                    _ => {}
+                }
+                i += 1;
+            }
+        }
+    }
+
+    if !continued && let Some(PyToken::Str { triple: false, .. }) = stack.last() {
+        stack.pop();
+    }
+    joins_next
 }
 
 /// Python has no block comments. `"""` opens a *string*, which may be a
@@ -240,41 +304,89 @@ fn has_interpolation_prefix(before: &[u8]) -> bool {
 /// `QUERY = """` both contains and "closes" the delimiter, and a single-line
 /// docstring toggles the state once and never back.
 ///
-/// Minimal keeps docstrings, so the only thing to remove here is `#` comments,
-/// and the only state needed is whether we are inside a triple-quoted string.
+/// Minimal keeps docstrings, so the only thing to remove here is `#` comment
+/// lines, and the only state needed is which strings and fields are open. A
+/// file Python cannot parse, such as one being edited, is followed only as far
+/// as the scan can track it; nothing is promised past the point where it breaks.
 fn filter_python_minimal(content: &str) -> String {
     let mut result = String::with_capacity(content.len());
-    let mut open_string: Option<&'static str> = None;
+    let mut open: Vec<PyToken> = Vec::new();
+    // The last kept line ends with a backslash that joins it to the next line.
+    let mut joined = false;
+    // A blank line was kept since the last kept line of code; starting true
+    // keeps blank lines from opening the output.
+    let mut blank_kept = true;
+    // The last kept line of code joined onto a blank line.
+    let mut ends_in_joined_blank = false;
+    // Python may read an encoding declaration on line 2 (set by line 1).
+    let mut coding_on_line_two = false;
 
-    for line in content.lines() {
+    // Python ends a line at `\n`, `\r\n` or a lone `\r`; `lines()` only knows
+    // the first two.
+    for (number, line) in content
+        .lines()
+        .flat_map(|line| line.split('\r'))
+        .enumerate()
+    {
         let trimmed = line.trim();
 
-        // Inside a string every line is literal text, including one that starts
-        // with `#`.
-        if open_string.is_some() {
-            result.push_str(line);
+        // A `#!` at the very start of the file names the interpreter, and an
+        // encoding declaration sets how Python decodes the file. Python reads
+        // one on line 1, or on line 2 when line 1 is blank or a comment that
+        // declares none. Such lines carry meaning, so none is dropped as a
+        // comment.
+        let declares_coding = number < 2 && PYTHON_CODING_LINE.is_match(line);
+        let meaningful = match number {
+            0 => line.starts_with("#!") || declares_coding,
+            1 => coding_on_line_two && declares_coding,
+            _ => false,
+        };
+        if number == 0 {
+            let head = line.trim_start_matches([' ', '\t', '\x0c']);
+            coding_on_line_two = (head.is_empty() || head.starts_with('#')) && !declares_coding;
+        }
+
+        // Inside a string or a replacement field every line is kept as it is,
+        // blank ones and ones that start with `#` included. Outside, a
+        // comment's contents are not code, so any delimiter in it is not real,
+        // except that a comment right after a backslash continuation ends that
+        // logical line: dropping it would join the continuation to the next
+        // statement. Runs of blank lines outside strings are cut to one.
+        if open.is_empty() {
+            if trimmed.starts_with('#') && !joined && !meaningful {
+                continue;
+            }
+            if trimmed.is_empty() {
+                ends_in_joined_blank |= joined;
+                joined = false;
+                if !blank_kept {
+                    blank_kept = true;
+                    result.push('\n');
+                }
+                continue;
+            }
+        }
+
+        // A declaration kept from line 2 that comes first and starts with `#!`
+        // would become a shebang the file does not have: a blank line in front
+        // keeps it on line 2, where Python still reads it.
+        if number == 1 && meaningful && result.is_empty() && line.starts_with("#!") {
             result.push('\n');
-            open_string = advance_triple_quote(line, open_string);
-            continue;
         }
-
-        // A comment's contents are not code, so any delimiter in it is not real.
-        if trimmed.starts_with('#') {
-            continue;
-        }
-
-        if trimmed.is_empty() {
-            result.push('\n');
-            continue;
-        }
-
         result.push_str(line);
         result.push('\n');
-        open_string = advance_triple_quote(line, None);
+        blank_kept = false;
+        ends_in_joined_blank = false;
+        joined = scan_python_line(line, &mut open);
     }
 
-    let result = MULTIPLE_BLANK_LINES.replace_all(&result, "\n\n");
-    result.trim().to_string()
+    result.truncate(result.trim_end().len());
+    // A continuation needs a line after it, and a file that ends with one
+    // keeps the blank line that follows it.
+    if ends_in_joined_blank {
+        result.push_str("\n\n");
+    }
+    result
 }
 
 impl FilterStrategy for MinimalFilter {
@@ -286,7 +398,6 @@ impl FilterStrategy for MinimalFilter {
         let patterns = lang.comment_patterns();
         let mut result = String::with_capacity(content.len());
         let mut in_block_comment = false;
-        let mut in_docstring = false;
 
         for line in content.lines() {
             let trimmed = line.trim();
@@ -295,8 +406,7 @@ impl FilterStrategy for MinimalFilter {
             if let (Some(start), Some(end)) = (patterns.block_start, patterns.block_end) {
                 // starts_with, not contains: `/*` inside a string literal or
                 // glob (e.g. "src/*.rs") must not open a comment block (#2385)
-                if !in_docstring
-                    && trimmed.starts_with(start)
+                if trimmed.starts_with(start)
                     && !trimmed.starts_with(patterns.doc_block_start.unwrap_or("###"))
                 {
                     in_block_comment = true;
@@ -307,20 +417,6 @@ impl FilterStrategy for MinimalFilter {
                     }
                     continue;
                 }
-            }
-
-            // Handle Python docstrings (keep them in minimal mode)
-            if *lang == Language::Python && trimmed.starts_with("\"\"\"") {
-                in_docstring = !in_docstring;
-                result.push_str(line);
-                result.push('\n');
-                continue;
-            }
-
-            if in_docstring {
-                result.push_str(line);
-                result.push('\n');
-                continue;
             }
 
             // Skip single-line comments (but keep doc comments)
@@ -746,6 +842,259 @@ if"{" == v:
             "string state inverted, so string text was stripped:\n{}",
             result
         );
+    }
+
+    #[test]
+    fn test_minimal_python_keeps_blank_lines_inside_strings() {
+        let code = "s = \"\"\"a\n\n\n\nb\"\"\"\n\n\n\nx = 1\n";
+        let result = MinimalFilter.filter(code, &Language::Python);
+        assert_eq!(result, "s = \"\"\"a\n\n\n\nb\"\"\"\n\nx = 1");
+    }
+
+    #[test]
+    fn test_minimal_python_keeps_the_line_after_a_final_continuation() {
+        for code in ["x = 1 \\\n\n", "x = 1 \\\n   \n", "x = 1 \\\r\x0c\r# c\r"] {
+            let result = MinimalFilter.filter(code, &Language::Python);
+            assert_eq!(result, "x = 1 \\\n\n", "input {code:?}");
+        }
+        let result = MinimalFilter.filter("x = 1 \\\n# c\n", &Language::Python);
+        assert_eq!(result, "x = 1 \\\n# c");
+        let result = MinimalFilter.filter("x = 1 \\\n\ny = 2\n", &Language::Python);
+        assert_eq!(result, "x = 1 \\\n\ny = 2");
+    }
+
+    #[test]
+    fn test_minimal_python_keeps_shebang_and_coding_lines() {
+        let code = "#!/usr/bin/env python3\n# -*- coding: latin-1 -*-\n# drop\nx = 1\n";
+        let result = MinimalFilter.filter(code, &Language::Python);
+        assert_eq!(
+            result,
+            "#!/usr/bin/env python3\n# -*- coding: latin-1 -*-\nx = 1"
+        );
+        let code = "# vim: set fileencoding=utf-8 :\n# drop\n# coding: ascii\nx = 1\n";
+        let result = MinimalFilter.filter(code, &Language::Python);
+        assert_eq!(result, "# vim: set fileencoding=utf-8 :\nx = 1");
+        let code = "x = 1\n#!/not/a/shebang\n";
+        assert_eq!(MinimalFilter.filter(code, &Language::Python), "x = 1");
+        // Lines Python does not read as a shebang or an encoding declaration.
+        for code in [
+            "   #!/usr/bin/env python3\nx = 1\n",
+            "# coding: \u{e9}t\u{e9}\nx = 1\n",
+            "x = 1\n# coding: ascii\n",
+            "# -*- coding: latin-1 -*-\n# coding: ascii\nx = 1\n",
+        ] {
+            let result = MinimalFilter.filter(code, &Language::Python);
+            assert!(
+                !result.contains("#!/usr")
+                    && !result.contains("coding: ascii")
+                    && !result.contains("coding: \u{e9}"),
+                "{code:?} gave {result:?}"
+            );
+        }
+        let code = "\n# coding: latin-1\nx = 1\n";
+        assert_eq!(
+            MinimalFilter.filter(code, &Language::Python),
+            "# coding: latin-1\nx = 1"
+        );
+        for (code, expected) in [
+            (
+                "\x0c# c\n# coding: latin-1\nx = 1\n",
+                "# coding: latin-1\nx = 1",
+            ),
+            (
+                "  # c\n# coding: latin-1\nx = 1\n",
+                "# coding: latin-1\nx = 1",
+            ),
+            // A `#!` that is not at the start of the file must not end up there.
+            (
+                "  #!/usr/bin/python -*- coding: latin-1 -*-\nx = 1\n",
+                "  #!/usr/bin/python -*- coding: latin-1 -*-\nx = 1",
+            ),
+            (
+                "# Copyright\n#!/usr/bin/python -*- coding: latin-1 -*-\nx = 1\n",
+                "\n#!/usr/bin/python -*- coding: latin-1 -*-\nx = 1",
+            ),
+            (
+                "\n#!/usr/bin/python -*- coding: latin-1 -*-\nx = 1\n",
+                "\n#!/usr/bin/python -*- coding: latin-1 -*-\nx = 1",
+            ),
+            (
+                "# c\r#!/x coding: latin-1\rx = 1\r",
+                "\n#!/x coding: latin-1\nx = 1",
+            ),
+            // The first kept line keeps its indentation.
+            ("# c\n    x = 1\n", "    x = 1"),
+            // Behind a real shebang, a line-2 declaration stays on line 2.
+            (
+                "#!/usr/bin/python\n#!x coding: latin-1\nx = 1\n",
+                "#!/usr/bin/python\n#!x coding: latin-1\nx = 1",
+            ),
+            ("\n\n\nx = 1\n", "x = 1"),
+        ] {
+            assert_eq!(
+                MinimalFilter.filter(code, &Language::Python),
+                expected,
+                "{code:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_minimal_python_byte_order_mark_makes_line_one_code() {
+        // `trim()` does not strip U+FEFF, so the mark makes line 1 a code line:
+        // it is kept as it is, and so is a blank line after it.
+        for (code, expected) in [
+            ("\u{feff}", "\u{feff}"),
+            ("\u{feff}x = 1\n", "\u{feff}x = 1"),
+            ("\u{feff}\nx = 1\n", "\u{feff}\nx = 1"),
+            ("\u{feff}# c\nx = 1\n", "\u{feff}# c\nx = 1"),
+        ] {
+            assert_eq!(
+                MinimalFilter.filter(code, &Language::Python),
+                expected,
+                "{code:?}"
+            );
+        }
+    }
+
+    /// Every line of a case that contains `keep` must come out whole, and no
+    /// `# drop` comment may come out at all.
+    #[test]
+    fn test_minimal_python_string_scan_keeps_string_lines_and_drops_comments() {
+        let cases = [
+            (
+                "backslash before an escaped brace in an f-string",
+                "OPEN = rf\"\\{{\"; HELP = \"\"\"\n# keep usage\n\"\"\"\n# drop\n",
+            ),
+            (
+                "backslash before an escaped brace, non-raw (an invalid escape, a SyntaxWarning since 3.12)",
+                "x = f\"a\\{{\" + \"\"\"\n# keep\n\"\"\"\n# drop\n",
+            ),
+            (
+                "escaped brace at depth zero",
+                "x = f\"{{\" + \"\"\"\n# keep\n\"\"\"\n# drop\n",
+            ),
+            (
+                "escaped quote in a one-line string",
+                "x = 'a\\'b' + \"\"\"\n# keep\n\"\"\"\n# drop\n",
+            ),
+            (
+                "keyword before a quote is not a prefix",
+                "if\"{\" == v: s = \"\"\"\n# keep\n\"\"\"\n# drop\n",
+            ),
+            (
+                "triple quote inside a field of a triple-quoted f-string",
+                "x = f\"\"\"{'\"\"\"'}\n# keep\n\"\"\"\n# drop\n",
+            ),
+            (
+                "colon inside brackets of a field is not a format spec",
+                "x = f\"{ {1: 'x'}['\"'] }\" + '''\n# keep\n'''\n# drop\n",
+            ),
+            (
+                "format spec of a triple-quoted f-string spanning lines",
+                "x = f'{f\"\"\"{y:\nz}\"\"\"}'\n# drop\ndef f():\n    \"\"\"\n    # keep\n    \"\"\"\n",
+            ),
+            (
+                "format spec left open across a backslash-continued line",
+                "msg = f\"\"\"{f'{d:%Y-%m-%d \\\n%A}'}\n# keep text\n\"\"\"\n# drop\n",
+            ),
+            (
+                "triple-quoted string nested in a field spanning lines",
+                "x = f\"{'''\ntext\n'''}\" + \"\"\"\n# keep\n\"\"\"\n# drop\n",
+            ),
+            (
+                "format spec text across lines starting with a quote and a hash",
+                "x = f\"\"\"{y:\n'#>10}\"\"\" + \"\"\"\n# keep\n\"\"\"\n# drop\n",
+            ),
+            (
+                "open brace inside a same-quote string nested in a field",
+                "d = f\"{\"{\"}\" + \"\"\"\n# keep\n\"\"\"\n# drop\n",
+            ),
+            (
+                "field spanning lines in a single-quoted f-string",
+                "a = f'{\n    n\n}' + \"\"\"\n# keep\n\"\"\"\n# drop\n",
+            ),
+            (
+                "hash inside a field starts a comment, even before a quote",
+                "x = f'''{\n    y  # }'''\n    + 1}\n# keep\n'''\n# drop\n",
+            ),
+            (
+                "CRLF line endings with a continued one-line string",
+                "x = \"abc \\\r\n# keep continued\"\r\n# drop\r\n",
+            ),
+            (
+                "comment line after a backslash continuation",
+                "x = 1 \\\n# keep, it ends the joined line\ny = 2\n# drop\n",
+            ),
+            (
+                "blank line ends a backslash continuation",
+                "x = 1 \\\n\n# drop\ny = 2\n",
+            ),
+            (
+                "comment ending in a backslash does not continue",
+                "x = 1  # note \\\n# drop\ny = 2\n",
+            ),
+            (
+                "lone CR line endings",
+                "x = 1\r# drop\rs = \"\"\"\r# keep\r\"\"\"\r# drop\r",
+            ),
+            (
+                "field nested in a format spec",
+                "x = f\"\"\"{x:{'}\"\"\"'}}\n# keep\n\"\"\"\n# drop\n",
+            ),
+            (
+                "comment line inside a field spanning lines is kept, like every line of an open field",
+                "x = f\"{\n    # keep comment in field\n    x\n}\"\n# drop\n",
+            ),
+            (
+                "continued one-line string followed by a triple quote",
+                "x = \"abc \\\ninside\"; y = \"\"\"\n# keep\n\"\"\"\n# drop\n",
+            ),
+            (
+                "field spanning lines",
+                "a = f\"{\n    n\n}\" + \"\"\"\n# keep\n\"\"\"\n# drop\n",
+            ),
+            (
+                "open brace inside a string nested in a field",
+                "a = f\"{'{'}\" + \"\"\"\n# keep\n\"\"\"\n# drop\n",
+            ),
+            (
+                "close brace inside a same-quote nested string",
+                "c = f\"{\"}\"}\" + \"\"\"\n# keep\n\"\"\"\n# drop\n",
+            ),
+            (
+                "brackets inside a field",
+                "x = f\"{ {'#': 1}[\"#\"] }\" + \"\"\"\n# keep\n\"\"\"\n# drop\n",
+            ),
+            (
+                "unterminated one-line string (invalid Python) ends with its line",
+                "x = 'abc\n# drop\ndef f():\n    \"\"\"\n    # keep prose\n    \"\"\"\n",
+            ),
+            (
+                "hash and quote in a format spec",
+                "a = f\"{n:#x}\" + f\"{n:'>10}\" + \"\"\"\n# keep\n\"\"\"\n# drop\n",
+            ),
+            (
+                "backslash-newline continues a one-line string",
+                "x = \"abc \\\n# keep continued\"\n# drop\n",
+            ),
+        ];
+
+        for (name, code) in cases {
+            let result = MinimalFilter.filter(code, &Language::Python);
+            for line in code.lines().flat_map(|line| line.split('\r')) {
+                if line.contains("keep") {
+                    assert!(
+                        result.lines().any(|kept| kept == line),
+                        "{name}: a line that must be kept was stripped: {line:?}\n{result}"
+                    );
+                }
+            }
+            assert!(
+                !result.contains("# drop"),
+                "{name}: comment outside every string was kept:\n{result}"
+            );
+        }
     }
 
     #[test]
