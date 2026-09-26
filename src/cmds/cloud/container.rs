@@ -1,5 +1,6 @@
 //! Filters Docker and kubectl output into compact summaries.
 
+use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
 use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
 use crate::core::stream::exec_capture;
@@ -24,9 +25,9 @@ pub enum ContainerCmd {
 
 pub fn run(cmd: ContainerCmd, args: &[String], verbose: u8) -> Result<i32> {
     match cmd {
-        ContainerCmd::DockerPs => docker_ps(verbose),
-        ContainerCmd::DockerPsAll => docker_ps_all(verbose),
-        ContainerCmd::DockerImages => docker_images(verbose),
+        ContainerCmd::DockerPs => docker_ps(args, verbose),
+        ContainerCmd::DockerPsAll => docker_ps_all(args, verbose),
+        ContainerCmd::DockerImages => docker_images(args, verbose),
         ContainerCmd::DockerLogs => docker_logs(args, verbose),
         ContainerCmd::KubectlPods => k8s_pods("kubectl", args, verbose),
         ContainerCmd::KubectlServices => k8s_services("kubectl", args, verbose),
@@ -55,11 +56,74 @@ where
     )
 }
 
-fn docker_ps(_verbose: u8) -> Result<i32> {
+/// `docker ps` value-taking flags, from `docker ps --help` (Docker 29.2.1). A short flag takes
+/// a separate value even inside a cluster: `docker ps -qf status=exited` is accepted.
+fn docker_ps_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    match kind {
+        TokenKind::Long => matches!(name, "filter" | "format" | "last").then(ValueSpec::value),
+        TokenKind::Short => matches!(name, "f" | "n").then(ValueSpec::value),
+        _ => None,
+    }
+}
+
+/// `docker images` value-taking flags, from `docker images --help` (Docker 29.2.1).
+fn docker_images_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    match kind {
+        TokenKind::Long => matches!(name, "filter" | "format").then(ValueSpec::value),
+        TokenKind::Short => (name == "f").then(ValueSpec::value),
+        _ => None,
+    }
+}
+
+/// `docker logs` value-taking flags, from `docker logs --help` (Docker 29.2.1).
+fn docker_logs_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    match kind {
+        TokenKind::Long => matches!(name, "since" | "tail" | "until").then(ValueSpec::value),
+        TokenKind::Short => (name == "n").then(ValueSpec::value),
+        _ => None,
+    }
+}
+
+/// `args` without the user-supplied `--format` and its value, so RTK's template is the only one
+/// docker reads. Dropped by `source_index`: a `--format` that is another flag's value stays put.
+fn without_user_format(
+    args: &[String],
+    takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
+) -> Vec<String> {
+    let tokens = arg_tokenizer::tokenize_grammar(args, takes_value, Dialect::Posix);
+    let dropped: Vec<usize> = arg_tokenizer::before_dashdash(&tokens)
+        .iter()
+        .filter(|t| t.kind == TokenKind::Long && t.text == "format")
+        .flat_map(|t| {
+            let value = t.linked.and_then(|index| tokens.get(index));
+            std::iter::once(t.source_index).chain(value.map(|v| v.source_index))
+        })
+        .collect();
+    args.iter()
+        .enumerate()
+        .filter(|(index, _)| !dropped.contains(index))
+        .map(|(_, arg)| arg.clone())
+        .collect()
+}
+
+/// Whether the user already picked a line count for `docker logs`, as `--tail` or `-n`.
+fn logs_sets_tail(options: &[String]) -> bool {
+    let tokens = arg_tokenizer::tokenize_grammar(options, &docker_logs_takes_value, Dialect::Posix);
+    arg_tokenizer::before_dashdash(&tokens).iter().any(|t| {
+        matches!(
+            (t.kind, t.text),
+            (TokenKind::Long, "tail") | (TokenKind::Short, "n")
+        )
+    })
+}
+
+fn docker_ps(args: &[String], _verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let base =
-        exec_capture(resolved_command("docker").args(["ps"])).context("Failed to run docker ps")?;
+    let mut base_args = vec!["ps".to_string()];
+    base_args.extend_from_slice(args);
+    let base = exec_capture(resolved_command("docker").args(&base_args))
+        .context("Failed to run docker ps")?;
     if !base.success() {
         eprint!("{}", base.stderr);
         print!("{}", base.stdout);
@@ -68,13 +132,15 @@ fn docker_ps(_verbose: u8) -> Result<i32> {
     }
     let raw = base.stdout;
 
-    let stdout = match exec_capture(resolved_command("docker").args([
-        "ps",
-        "--format",
-        "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}",
-    ]))
-    .ok()
-    .filter(|r| r.success())
+    let mut format_args = vec!["ps".to_string()];
+    format_args.extend(without_user_format(args, &docker_ps_takes_value));
+    format_args.extend([
+        "--format".to_string(),
+        "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}".to_string(),
+    ]);
+    let stdout = match exec_capture(resolved_command("docker").args(&format_args))
+        .ok()
+        .filter(|r| r.success())
     {
         Some(r) => r.stdout,
         None => {
@@ -111,10 +177,12 @@ fn docker_ps(_verbose: u8) -> Result<i32> {
     Ok(0)
 }
 
-fn docker_ps_all(_verbose: u8) -> Result<i32> {
+fn docker_ps_all(args: &[String], _verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let base = exec_capture(resolved_command("docker").args(["ps", "-a"]))
+    let mut base_args = vec!["ps".to_string(), "-a".to_string()];
+    base_args.extend_from_slice(args);
+    let base = exec_capture(resolved_command("docker").args(&base_args))
         .context("Failed to run docker ps -a")?;
     if !base.success() {
         eprint!("{}", base.stderr);
@@ -129,14 +197,15 @@ fn docker_ps_all(_verbose: u8) -> Result<i32> {
     }
     let raw = base.stdout;
 
-    let stdout = match exec_capture(resolved_command("docker").args([
-        "ps",
-        "-a",
-        "--format",
-        "{{.State}}\t{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}",
-    ]))
-    .ok()
-    .filter(|r| r.success())
+    let mut format_args = vec!["ps".to_string(), "-a".to_string()];
+    format_args.extend(without_user_format(args, &docker_ps_takes_value));
+    format_args.extend([
+        "--format".to_string(),
+        "{{.State}}\t{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}".to_string(),
+    ]);
+    let stdout = match exec_capture(resolved_command("docker").args(&format_args))
+        .ok()
+        .filter(|r| r.success())
     {
         Some(r) => r.stdout,
         None => {
@@ -236,10 +305,12 @@ fn format_container_line_from_parts(parts: &[&str], with_ports: bool) -> Option<
     ))
 }
 
-fn docker_images(_verbose: u8) -> Result<i32> {
+fn docker_images(args: &[String], _verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let base = exec_capture(resolved_command("docker").args(["images"]))
+    let mut base_args = vec!["images".to_string()];
+    base_args.extend_from_slice(args);
+    let base = exec_capture(resolved_command("docker").args(&base_args))
         .context("Failed to run docker images")?;
     if !base.success() {
         eprint!("{}", base.stderr);
@@ -254,13 +325,15 @@ fn docker_images(_verbose: u8) -> Result<i32> {
     }
     let raw = base.stdout;
 
-    let stdout = match exec_capture(resolved_command("docker").args([
-        "images",
-        "--format",
-        "{{.Repository}}:{{.Tag}}\t{{.Size}}",
-    ]))
-    .ok()
-    .filter(|r| r.success())
+    let mut format_args = vec!["images".to_string()];
+    format_args.extend(without_user_format(args, &docker_images_takes_value));
+    format_args.extend([
+        "--format".to_string(),
+        "{{.Repository}}:{{.Tag}}\t{{.Size}}".to_string(),
+    ]);
+    let stdout = match exec_capture(resolved_command("docker").args(&format_args))
+        .ok()
+        .filter(|r| r.success())
     {
         Some(r) => r.stdout,
         None => {
@@ -342,8 +415,14 @@ fn docker_logs(args: &[String], _verbose: u8) -> Result<i32> {
         return Ok(0);
     }
 
+    let options = &args[1..];
     let mut cmd = resolved_command("docker");
-    cmd.args(["logs", "--tail", "100", container]);
+    cmd.arg("logs");
+    if !logs_sets_tail(options) {
+        cmd.args(["--tail", "100"]);
+    }
+    cmd.args(options);
+    cmd.arg(container);
 
     let label = format!("logs {}", container);
     runner::run_filtered(
@@ -857,6 +936,65 @@ pub fn run_oc_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn owned(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    #[test]
+    fn docker_structured_query_replaces_only_user_format() {
+        let args = owned(&[
+            "--filter",
+            "name=web",
+            "--format",
+            "{{.Names}}",
+            "--no-trunc",
+        ]);
+        assert_eq!(
+            without_user_format(&args, &docker_ps_takes_value),
+            ["--filter", "name=web", "--no-trunc"]
+        );
+
+        let clustered = owned(&["-qf", "status=exited", "--format={{.ID}}"]);
+        assert_eq!(
+            without_user_format(&clustered, &docker_ps_takes_value),
+            ["-qf", "status=exited"]
+        );
+    }
+
+    #[test]
+    fn docker_format_consumed_as_a_filter_value_is_kept() {
+        // docker reads this as a filter named "--format" and rejects it; stripping it would
+        // leave a bare `--filter` and change the error the user sees.
+        let args = owned(&["--filter", "--format"]);
+        assert_eq!(
+            without_user_format(&args, &docker_images_takes_value),
+            ["--filter", "--format"]
+        );
+    }
+
+    #[test]
+    fn docker_logs_detects_every_tail_spelling() {
+        let sets_tail: [&[&str]; 5] = [
+            &["--tail", "5"],
+            &["--tail=5"],
+            &["-n", "5"],
+            &["-n5"],
+            &["-fn", "5"],
+        ];
+        for options in sets_tail {
+            assert!(logs_sets_tail(&owned(options)), "{options:?} sets the tail");
+        }
+
+        // docker reads `--since --tail` as a since value of "--tail", not as a tail.
+        let keeps_default: [&[&str]; 3] = [&["-f"], &["--since", "--tail"], &["--until", "-n"]];
+        for options in keeps_default {
+            assert!(
+                !logs_sets_tail(&owned(options)),
+                "{options:?} keeps the default tail"
+            );
+        }
+    }
 
     // ── format_compose_ps ──────────────────────────────────
 
