@@ -1422,6 +1422,32 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_claude_dir_expands_a_literal_tilde() {
+        let result = resolve_claude_dir_from(
+            Some(PathBuf::from("~/.claude")),
+            Some(PathBuf::from("/home/user")),
+        )
+        .expect("tilde override resolves");
+        assert_eq!(result, PathBuf::from("/home/user").join(".claude"));
+    }
+
+    #[test]
+    fn test_resolve_claude_dir_rejects_a_relative_override() {
+        for value in [".claude", "~user/.claude"] {
+            let err = resolve_claude_dir_from(
+                Some(PathBuf::from(value)),
+                Some(PathBuf::from("/home/user")),
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("$CLAUDE_CONFIG_DIR must be an absolute path"),
+                "{value}: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn test_resolve_claude_dir_errors_without_home() {
         let err = resolve_claude_dir_from(None, None).unwrap_err();
         assert!(err.to_string().contains("Cannot determine Claude config"));

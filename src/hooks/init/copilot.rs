@@ -193,6 +193,7 @@ pub(crate) fn copilot_user_dir() -> Result<PathBuf> {
         std::env::var_os(COPILOT_HOME_ENV),
         dirs::home_dir(),
         COPILOT_USER_DIR,
+        COPILOT_HOME_ENV,
         "Cannot determine Copilot config directory. Set $COPILOT_HOME or $HOME.",
     )
 }

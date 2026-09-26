@@ -1372,12 +1372,33 @@ pub(super) fn resolve_config_dir(
     override_dir: Option<OsString>,
     home_dir: Option<PathBuf>,
     subdir: &str,
+    override_var: &str,
     error: &'static str,
 ) -> Result<PathBuf> {
     if let Some(dir) = override_dir.filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(dir));
+        return rooted_override_dir(dir, home_dir.as_deref(), override_var);
     }
     home_dir.map(|home| home.join(subdir)).context(error)
+}
+
+/// An override directory as it sits in the environment: a leading `~` that no shell
+/// expanded (quoted, or set in an env file) is expanded here, and a path that is still
+/// relative is rejected instead of resolving against the current directory.
+fn rooted_override_dir(dir: OsString, home_dir: Option<&Path>, var: &str) -> Result<PathBuf> {
+    let path = PathBuf::from(&dir);
+    let expanded = match path.strip_prefix("~") {
+        Ok(rest) => home_dir
+            .with_context(|| format!("Cannot expand `~` in ${var}: home directory unknown"))?
+            .join(rest),
+        Err(_) => path,
+    };
+    if !expanded.has_root() {
+        anyhow::bail!(
+            "${var} must be an absolute path, got `{}`",
+            dir.to_string_lossy()
+        );
+    }
+    Ok(expanded)
 }
 
 pub(super) fn resolve_home_subdir(subdir: &str) -> Result<PathBuf> {
@@ -1405,6 +1426,7 @@ pub(super) fn resolve_claude_dir_from(
         claude_dir.map(PathBuf::into_os_string),
         home_dir,
         CLAUDE_DIR,
+        "CLAUDE_CONFIG_DIR",
         "Cannot determine Claude config directory. Set $CLAUDE_CONFIG_DIR or $HOME.",
     )
 }
