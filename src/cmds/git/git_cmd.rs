@@ -324,15 +324,11 @@ fn run_diff(
         return Ok(0);
     }
 
-    // Default RTK behavior: stat first, then compacted diff. `--no-patch --stat` forces the
-    // header to be stat-only whatever the user asked for -- `git diff --stat -p` (or -U3, -W,
-    // ...) emits the patch too, and RTK then printed it again, compacted, for 2.4x the raw
-    // output. The flags go before the user's own `--`, where git still reads them as options.
-    // The user's own command runs first, because only it can give git's verdict on what they
-    // typed. The stat header below runs with the patch-shape flags stripped, so it answers a
-    // *different* command: `git diff -Uabc nonexistent-ref` is `error: --unified expects a
-    // numerical value` (129) to git, and the stripped probe reported `ambiguous argument` (128)
-    // instead. A probe is decoration; it must never be the thing that reports failure.
+    // Default RTK behavior: stat first, then compacted diff. The header probe uses `--stat`
+    // (not `--no-patch --stat`) with the user's patch-shape flags stripped, so a user
+    // `git diff --stat -p` does not double-print the patch for 2.4x raw output. `--stat`
+    // alone suppresses the patch; `--no-patch --stat` prints nothing on Apple Git 2.39.2
+    // (#4226). The user's own command runs first — a probe must never report failure.
     let mut diff_cmd = git_cmd(global_args);
     diff_cmd.arg("diff");
     for arg in args {
@@ -354,12 +350,13 @@ fn run_diff(
         return Ok(diff_result.exit_code);
     }
 
-    // `--no-patch --stat` forces the header to be stat-only whatever the user asked for --
-    // `git diff --stat -p` (or -U3, -W, ...) emits the patch too, and RTK then printed it
-    // again, compacted, for 2.4x the raw output. The flags go before the user's own `--`,
-    // where git still reads them as options. A failure here costs the header, not the command.
+    // Stat-only header probe (patch-shape flags already stripped). A failure here costs the
+    // header, not the command.
     let mut cmd = git_cmd(global_args);
-    cmd.args(["diff", "--no-patch", "--stat"]);
+    // `--stat` alone suppresses the patch. Prefer it over `--no-patch --stat`:
+    // on git 2.39.2 (Apple Git) that pair prints nothing, so the header vanished
+    // (#4226). `args_without_patch_shape` already strips the user's `-p`/`-U`/`-W`.
+    cmd.args(["diff", "--stat"]);
     for arg in args_without_patch_shape(args, &tokens) {
         cmd.arg(arg);
     }
@@ -696,7 +693,9 @@ fn run_show(
         global_args,
         &stat_args,
         &stat_tokens,
-        &["--no-patch", "--stat", "--pretty=format:"],
+        // Same as run_diff: `--stat` alone is enough; `--no-patch --stat` is empty on
+        // Apple Git 2.39.2 (#4226).
+        &["--stat", "--pretty=format:"],
         true,
     );
     let stat_result = exec_capture(&mut stat_cmd).context("Failed to run git show --stat")?;
