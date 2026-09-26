@@ -32,6 +32,10 @@ pub fn run_err(command: &[String], shell: Option<&str>, verbose: u8) -> Result<i
 /// Arguments execute directly, preserving every boundary Clap parsed. With
 /// `shell`, the single supplied script runs through that shell instead.
 pub fn run_test(command: &[String], shell: Option<&str>, verbose: u8) -> Result<i32> {
+    if command.is_empty() && shell.is_none() {
+        return Ok(1);
+    }
+
     let display = display_args(command);
     let program = program_name(command, shell);
     let eco = TestEcosystem::detect(&display);
