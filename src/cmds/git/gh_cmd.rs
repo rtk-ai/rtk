@@ -107,9 +107,16 @@ fn filter_markdown_segment(text: &str) -> String {
     s
 }
 
-/// Check if args contain --json flag (user wants specific JSON fields, not RTK filtering)
-fn has_json_flag(args: &[String]) -> bool {
-    args.iter().any(|a| a == "--json")
+/// Flags that make gh emit exactly what the caller asked for: raw JSON fields,
+/// a jq expression, or a Go template. rtk never reshapes those — it runs gh
+/// unchanged and only tracks the call, the same stance `gh api` takes. Both the
+/// `--json f` and `--json=f` spellings count, since gh accepts either and a
+/// missed one would send the request through a filter that rewrites the shape.
+fn wants_raw_output(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        let name = a.split_once('=').map_or(a.as_str(), |(name, _)| name);
+        matches!(name, "--json" | "--jq" | "-q" | "--template" | "-t")
+    })
 }
 
 /// Extract a positional identifier (PR/issue number) from args, returning it
@@ -190,8 +197,9 @@ where
 }
 
 pub fn run(subcommand: &str, args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
-    // When user explicitly passes --json, they want raw gh JSON output, not RTK filtering
-    if has_json_flag(args) {
+    // An explicit --json/--jq/--template means the caller picked the shape;
+    // hand back gh's own bytes instead of rtk's summary.
+    if wants_raw_output(args) {
         return run_passthrough("gh", subcommand, args);
     }
 
@@ -1127,8 +1135,8 @@ mod tests {
     }
 
     #[test]
-    fn test_has_json_flag_present() {
-        assert!(has_json_flag(&[
+    fn test_wants_raw_output_present() {
+        assert!(wants_raw_output(&[
             "view".into(),
             "--json".into(),
             "number,url".into()
@@ -1136,8 +1144,26 @@ mod tests {
     }
 
     #[test]
-    fn test_has_json_flag_absent() {
-        assert!(!has_json_flag(&["view".into(), "42".into()]));
+    fn test_wants_raw_output_absent() {
+        assert!(!wants_raw_output(&["view".into(), "42".into()]));
+    }
+
+    #[test]
+    fn test_wants_raw_output_covers_jq_template_and_equals_form() {
+        for arg in [
+            "--json=number",
+            "--jq",
+            "--jq=.[].number",
+            "-q",
+            "--template",
+            "--template={{.title}}",
+            "-t",
+        ] {
+            assert!(
+                wants_raw_output(&["view".into(), arg.into()]),
+                "{arg} must pass gh's own output through"
+            );
+        }
     }
 
     #[test]
