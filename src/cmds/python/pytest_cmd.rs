@@ -3,7 +3,7 @@
 use crate::core::config;
 use crate::core::runner;
 use crate::core::truncate::CAP_WARNINGS;
-use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
+use crate::core::utils::{fallback_tail, resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
 
 const MAX_XFAIL: usize = CAP_WARNINGS;
@@ -26,6 +26,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         c
     };
 
+    let is_passthrough_cmd = is_passthrough_flag(args);
+
     let has_tb_flag = args.iter().any(|a| a.starts_with("--tb"));
     let has_quiet_flag = args.iter().any(|a| a == "-q" || a == "--quiet");
     // Only treat a short `-r…` as pytest's report flag (not `--randomly-seed` etc.)
@@ -33,17 +35,19 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         .iter()
         .any(|a| a.starts_with("-r") && !a.starts_with("--"));
 
-    if !has_tb_flag {
-        cmd.arg("--tb=short");
-    }
-    if !has_quiet_flag {
-        cmd.arg("-q");
-    }
-    // Surface xfailed/xpassed (and their reasons) in the short summary section
-    // so the compact output can report expected failures and — crucially —
-    // unexpected passes (XPASS), which signal a behavior change.
-    if !has_report_flag {
-        cmd.arg("-rxX");
+    if !is_passthrough_cmd {
+        if !has_tb_flag {
+            cmd.arg("--tb=short");
+        }
+        if !has_quiet_flag {
+            cmd.arg("-q");
+        }
+        // Surface xfailed/xpassed (and their reasons) in the short summary section
+        // so the compact output can report expected failures and — crucially —
+        // unexpected passes (XPASS), which signal a behavior change.
+        if !has_report_flag {
+            cmd.arg("-rxX");
+        }
     }
 
     for arg in args {
@@ -58,14 +62,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         cmd,
         "pytest",
         &args.join(" "),
-        |raw, exit_code| {
+        move |raw, exit_code| {
             let clean = strip_ansi(raw);
-            let filtered = filter_pytest_output(&clean);
-            // Any other failure parsed as empty means the run broke before reporting.
-            if exit_code != 0 && exit_code != PYTEST_EXIT_NO_TESTS && filtered == PYTEST_NO_TESTS {
-                return truncate(clean.trim(), config::limits().passthrough_max_chars);
+            if is_passthrough_cmd {
+                return fallback_tail(&clean, "pytest", 60);
             }
-            filtered
+            resolve_pytest_summary(&clean, exit_code)
         },
         runner::RunOptions::stdout_only().tee("pytest"),
     )
@@ -73,6 +75,28 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
 const PYTEST_NO_TESTS: &str = "Pytest: No tests collected";
 const PYTEST_EXIT_NO_TESTS: i32 = 5;
+
+// pytest's own exit codes guarantee 0 only when at least one test was
+// collected and passed, so "No tests collected" can never be true at exit 0.
+// A verbosity level that prints no summary line at all — e.g. rtk's injected
+// `-q` stacking with a project's `addopts = -q` into `-qq` — hits the parser's
+// zero-counts fallback despite tests having actually run; fall back to the
+// raw output instead of asserting the impossible.
+fn resolve_pytest_summary(clean: &str, exit_code: i32) -> String {
+    let filtered = filter_pytest_output(clean);
+    if exit_code != PYTEST_EXIT_NO_TESTS && filtered == PYTEST_NO_TESTS {
+        return truncate(clean.trim(), config::limits().passthrough_max_chars);
+    }
+    filtered
+}
+
+// --version / --help / -h: pytest prints info and exits, there's nothing to
+// filter. Passing these through raw (like the JVM/PHP wrappers do) avoids
+// parsing that output as "no tests collected".
+fn is_passthrough_flag(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| matches!(a.as_str(), "--version" | "--help" | "-h"))
+}
 
 pub(crate) fn filter_pytest_output(output: &str) -> String {
     let mut state = ParseState::Header;
@@ -89,7 +113,11 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
         if trimmed.starts_with("===") && trimmed.contains("test session starts") {
             state = ParseState::Header;
             continue;
-        } else if trimmed.starts_with("===") && trimmed.contains("FAILURES") {
+        } else if trimmed.starts_with("===")
+            && (trimmed.contains("FAILURES") || trimmed.contains("ERRORS"))
+        {
+            // pytest reports collection/fixture errors in their own "ERRORS"
+            // section, structured just like "FAILURES" (___ header + body).
             state = ParseState::Failures;
             continue;
         } else if trimmed.starts_with("===") && trimmed.contains("short test summary") {
@@ -103,7 +131,8 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
         } else if trimmed.starts_with("===")
             && (trimmed.contains("passed")
                 || trimmed.contains("failed")
-                || trimmed.contains("skipped"))
+                || trimmed.contains("skipped")
+                || trimmed.contains("error"))
         {
             summary_line = trimmed.to_string();
             continue;
@@ -114,7 +143,8 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
             && !trimmed.starts_with("ERROR")
             && (trimmed.contains(" passed")
                 || trimmed.contains(" failed")
-                || trimmed.contains(" skipped"))
+                || trimmed.contains(" skipped")
+                || trimmed.contains(" error"))
             && trimmed.contains(" in ")
         {
             summary_line = trimmed.to_string();
@@ -177,6 +207,7 @@ struct PytestCounts {
     skipped: usize,
     xfailed: usize,
     xpassed: usize,
+    errors: usize,
 }
 
 fn build_pytest_summary(
@@ -192,13 +223,15 @@ fn build_pytest_summary(
         skipped,
         xfailed,
         xpassed,
+        errors,
     } = counts;
 
-    if passed == 0 && failed == 0 && skipped == 0 && xfailed == 0 && xpassed == 0 {
+    if passed == 0 && failed == 0 && skipped == 0 && xfailed == 0 && xpassed == 0 && errors == 0 {
         return PYTEST_NO_TESTS.to_string();
     }
 
-    let extras_present = skipped > 0 || xfailed > 0 || xpassed > 0 || !xfail_lines.is_empty();
+    let extras_present =
+        skipped > 0 || xfailed > 0 || xpassed > 0 || errors > 0 || !xfail_lines.is_empty();
 
     if failed == 0 && passed > 0 && !extras_present {
         return format!("Pytest: {} passed", passed);
@@ -206,6 +239,13 @@ fn build_pytest_summary(
 
     let mut result = String::new();
     result.push_str(&format!("Pytest: {} passed, {} failed", passed, failed));
+    if errors > 0 {
+        result.push_str(&format!(
+            ", {} error{}",
+            errors,
+            if errors == 1 { "" } else { "s" }
+        ));
+    }
     if skipped > 0 {
         result.push_str(&format!(", {} skipped", skipped));
     }
@@ -252,11 +292,14 @@ fn build_pytest_summary(
                 // Extract test name between ___
                 let test_name = first_line.trim_matches('_').trim();
                 result.push_str(&format!("{}. [FAIL] {}\n", i + 1, test_name));
-            } else if first_line.starts_with("FAILED") {
+            } else if first_line.starts_with("FAILED") || first_line.starts_with("ERROR") {
                 // Summary format: "FAILED tests/test_foo.py::test_bar - AssertionError"
+                // or "ERROR tests/test_foo.py - ImportError"
                 let parts: Vec<&str> = first_line.split(" - ").collect();
                 if let Some(test_path) = parts.first() {
-                    let test_name = test_path.trim_start_matches("FAILED ");
+                    let test_name = test_path
+                        .trim_start_matches("FAILED ")
+                        .trim_start_matches("ERROR ");
                     result.push_str(&format!("{}. [FAIL] {}\n", i + 1, test_name));
                 }
                 if parts.len() > 1 {
@@ -325,6 +368,8 @@ fn parse_summary_line(summary: &str) -> PytestCounts {
                 counts.failed = n;
             } else if word.contains("skipped") {
                 counts.skipped = n;
+            } else if word.contains("error") {
+                counts.errors = n;
             }
         }
     }
@@ -509,6 +554,88 @@ FAILED tests/test_foo.py::test_something - AssertionError
             "Should show actual test counts. Got: {}",
             result
         );
+    }
+
+    #[test]
+    fn test_filter_pytest_collection_error_quiet_mode() {
+        // Bare "N error in Xs" summary line (no === wrapper, e.g. -v/-q runs
+        // hitting a collection error) was misreported as "No tests collected".
+        let output = r#"=== test session starts ===
+platform linux -- Python 3.12.11, pytest-8.1.0
+collected 0 items / 1 error
+
+=== ERRORS ===
+_______________ ERROR collecting tests/test_foo.py ________________
+ImportError: cannot import name 'thing' from 'module'
+
+=== short test summary info ===
+ERROR tests/test_foo.py - ImportError: cannot import name 'thing' from 'module'
+1 error in 0.05s"#;
+
+        let result = filter_pytest_output(output);
+        assert!(
+            !result.contains("No tests collected"),
+            "Should not report 'No tests collected' on a collection error. Got: {}",
+            result
+        );
+        assert!(result.contains("1 error"), "got: {}", result);
+        assert!(result.contains("test_foo.py"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_filter_pytest_error_and_failures_mixed() {
+        let output = r#"=== test session starts ===
+collected 4 items
+
+tests/test_foo.py .F                                               [100%]
+
+=== ERRORS ===
+_______________ ERROR collecting tests/test_bar.py ________________
+ImportError: boom
+
+=== FAILURES ===
+___ test_something ___
+E   AssertionError: expected 5
+
+=== short test summary info ===
+FAILED tests/test_foo.py::test_something - AssertionError: expected 5
+ERROR tests/test_bar.py - ImportError: boom
+=== 1 passed, 1 failed, 1 error in 0.10s ==="#;
+
+        let result = filter_pytest_output(output);
+        assert!(
+            result.contains("1 passed, 1 failed, 1 error"),
+            "got: {}",
+            result
+        );
+        assert!(result.contains("test_bar.py"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_double_quiet_no_summary_line_falls_back_at_exit_zero() {
+        // rtk's injected -q stacked with a project's `addopts = -q` becomes
+        // -qq, which prints no final summary line even though tests ran and
+        // passed (exit 0). pytest can never legitimately exit 0 with zero
+        // tests collected, so this must not render "No tests collected".
+        let output = "=== test session starts ===\nplatform darwin -- Python 3.11.0\ncollected 20 items\n\n....................\n";
+        let result = resolve_pytest_summary(output, 0);
+        assert_ne!(result, PYTEST_NO_TESTS, "got: {}", result);
+        assert!(result.contains("20 items"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_no_tests_collected_still_reported_at_exit_five() {
+        let output =
+            "=== test session starts ===\ncollected 0 items\n\n=== no tests ran in 0.00s ===";
+        assert_eq!(resolve_pytest_summary(output, 5), PYTEST_NO_TESTS);
+    }
+
+    #[test]
+    fn test_is_passthrough_flag() {
+        assert!(is_passthrough_flag(&["--version".to_string()]));
+        assert!(is_passthrough_flag(&["--help".to_string()]));
+        assert!(is_passthrough_flag(&["-h".to_string()]));
+        assert!(!is_passthrough_flag(&["tests/test_foo.py".to_string()]));
     }
 
     #[test]
