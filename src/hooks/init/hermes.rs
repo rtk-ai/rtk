@@ -521,6 +521,7 @@ fn resolve_hermes_home_from_env(
         hermes_home,
         home_dir,
         HERMES_DIR,
+        "HERMES_HOME",
         "Cannot determine Hermes home directory. Set $HERMES_HOME or $HOME.",
     )
 }
@@ -1020,9 +1021,9 @@ mod tests {
         let home_dir = PathBuf::from("/tmp/home");
 
         let resolved =
-            resolve_hermes_home_from_env(Some(home_dir), Some(hermes_home.clone())).unwrap();
+            resolve_hermes_home_from_env(Some(home_dir.clone()), Some(hermes_home)).unwrap();
 
-        assert_eq!(resolved, PathBuf::from(hermes_home));
+        assert_eq!(resolved, home_dir.join("custom hermes home"));
     }
 
     #[test]

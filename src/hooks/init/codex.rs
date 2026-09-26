@@ -709,6 +709,7 @@ fn resolve_codex_dir_from(
         codex_home.map(PathBuf::into_os_string),
         home_dir,
         CODEX_DIR,
+        "CODEX_HOME",
         "Cannot determine Codex config directory. Set $CODEX_HOME or $HOME.",
     )
 }
