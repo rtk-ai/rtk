@@ -1820,10 +1820,21 @@ fn rewrite_segment_inner(
     // Try each rewrite prefix (longest first) with word-boundary check
     for &prefix in rule.rewrite_prefixes {
         if let Some(rest) = strip_word_prefix(strip_target, prefix) {
-            let rewritten = if rest.is_empty() {
-                format!("{}{}", rule.rtk_cmd, redirect_suffix)
+            // `rtk lint` runs eslint when the args name no linter, so eslint is
+            // the one tool that may be stripped. Peeling `biome` off instead
+            // turns `biome check src/` into `rtk lint check src/`, which tries to
+            // run `check` as the linter — keep the name so the biome filter is
+            // reachable through the hook and not only by typing it by hand.
+            let keep_tool = rule.rtk_cmd == "rtk lint" && tool_portion(prefix, rule) == "biome";
+            let head = if keep_tool {
+                format!("{} biome", rule.rtk_cmd)
             } else {
-                format!("{} {}{}", rule.rtk_cmd, rest, redirect_suffix)
+                rule.rtk_cmd.to_string()
+            };
+            let rewritten = if rest.is_empty() {
+                format!("{}{}", head, redirect_suffix)
+            } else {
+                format!("{} {}{}", head, rest, redirect_suffix)
             };
             return Some(rewritten);
         }
@@ -5538,45 +5549,30 @@ mod tests {
     #[test]
     fn test_rewrite_lint() {
         let commands = vec![
-            "npm exec biome",
             "npm exec eslint",
-            "npm rum biome",
             "npm rum eslint",
             "npm rum lint",
-            "npm run biome",
             "npm run eslint",
             "npm run lint",
-            "npm run-script biome",
             "npm run-script eslint",
             "npm run-script lint",
-            "npm urn biome",
             "npm urn eslint",
             "npm urn lint",
-            "npm x biome",
             "npm x eslint",
-            "pnpm dlx biome",
             "pnpm dlx eslint",
-            "pnpm exec biome",
             "pnpm exec eslint",
-            "pnpm run biome",
             "pnpm run eslint",
             "pnpm run lint",
-            "pnpm run-script biome",
             "pnpm run-script eslint",
             "pnpm run-script lint",
-            "npm biome",
             "npm eslint",
             "npm lint",
-            "npx biome",
             "npx eslint",
             "npx lint",
-            "pnpm biome",
             "pnpm eslint",
             "pnpm lint",
-            "pnpx biome",
             "pnpx eslint",
             "pnpx lint",
-            "biome",
             "eslint",
             "lint",
         ];
@@ -5588,6 +5584,47 @@ mod tests {
                 command
             );
         }
+    }
+
+    // Biome is not `rtk lint`'s default linter, so unlike eslint its name has to
+    // survive the rewrite — `rtk lint check src/` would run `check` as the linter.
+    #[test]
+    fn test_rewrite_biome_keeps_the_linter_name() {
+        let commands = vec![
+            "npm exec biome",
+            "npm rum biome",
+            "npm run biome",
+            "npm run-script biome",
+            "npm urn biome",
+            "npm x biome",
+            "pnpm dlx biome",
+            "pnpm exec biome",
+            "pnpm run biome",
+            "pnpm run-script biome",
+            "npm biome",
+            "npx biome",
+            "pnpm biome",
+            "pnpx biome",
+            "biome",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some("rtk lint biome".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
+
+        // …and the subcommand and paths ride along behind it.
+        assert_eq!(
+            rewrite_command_no_prefixes("biome check src/", &[]),
+            Some("rtk lint biome check src/".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("npx biome lint --write .", &[]),
+            Some("rtk lint biome lint --write .".into())
+        );
     }
 
     #[test]
