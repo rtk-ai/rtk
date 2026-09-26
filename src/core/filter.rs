@@ -126,9 +126,9 @@ impl Language {
                 doc_block_start: None,
             },
             Language::Unknown => CommentPatterns {
-                line: Some("//"),
-                block_start: Some("/*"),
-                block_end: Some("*/"),
+                line: None,
+                block_start: None,
+                block_end: None,
                 doc_line: None,
                 doc_block_start: None,
             },
