@@ -1549,6 +1549,22 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
 const DEFAULT_LOG_LIMIT: usize = 10;
 const DEFAULT_LOG_LIMIT_ARG: &str = "-10";
 
+/// The byte RTK injects between commit blocks in its own `git log` format, and splits the
+/// output back apart on. A NUL, because git cannot put one inside `%b`: it refuses to write
+/// the commit at all ("error: a NUL byte in commit log message not allowed"), so no commit
+/// body can forge a block boundary.
+///
+/// A printable marker could. `---END---` -- what this replaces -- in a body split one commit
+/// into two blocks, and the block count then ran ahead of the commit count: the extra block
+/// spent one of the `limit` slots, so the oldest commit git returned was never rendered, and
+/// the text after the marker landed in the header branch, printed flush left as if it were a
+/// commit of its own (#4160).
+const LOG_BLOCK_SEPARATOR: &str = "\x00";
+
+/// RTK's own `git log` format, ending in [`LOG_BLOCK_SEPARATOR`] as `%x00`. Keep the two in
+/// step: git's pretty-format escape and the Rust byte have to name the same byte.
+const LOG_PRETTY_FORMAT: &str = "--pretty=format:%h %s (%ar) <%an>%n%b%n%x00";
+
 /// `git log <args>` for the raw passthrough, carrying RTK's default limit unless the user named
 /// one. [`run_passthrough`] streams straight to the terminal, so the limit has to be in the args
 /// or it never applies: a patch request became the whole history, 411k lines against 50 for
@@ -1809,7 +1825,7 @@ fn run_log(
     // Use %b (body) to preserve first line of commit body for agent context
     // (BREAKING CHANGE, Closes #xxx, design notes)
     if !has_format_flag {
-        cmd.args(["--pretty=format:%h %s (%ar) <%an>%n%b%n---END---"]);
+        cmd.args([LOG_PRETTY_FORMAT]);
     }
 
     // Determine limit: respect user's explicit -N flag, use sensible defaults otherwise
@@ -2130,7 +2146,7 @@ pub(crate) fn filter_log_output(
     let truncate_width = if user_set_limit { 120 } else { 80 };
 
     // When user specified their own format (--oneline, --pretty, --format),
-    // RTK did not inject ---END--- markers. Use simple line-based truncation.
+    // RTK did not inject its block separator. Use simple line-based truncation.
     if user_format {
         let lines: Vec<&str> = output.lines().collect();
         let max_lines = if user_set_limit { lines.len() } else { limit };
@@ -2142,8 +2158,8 @@ pub(crate) fn filter_log_output(
             .join("\n");
     }
 
-    // RTK injected format: split output into commit blocks separated by ---END---
-    let commits: Vec<&str> = output.split("---END---").collect();
+    // RTK injected format: split output into commit blocks on the separator it injected
+    let commits: Vec<&str> = output.split(LOG_BLOCK_SEPARATOR).collect();
     let max_commits = if user_set_limit { commits.len() } else { limit };
 
     let mut result = Vec::new();
@@ -5302,8 +5318,11 @@ A  added.rs
 
     #[test]
     fn test_filter_log_output() {
-        let output = "abc1234 This is a commit message (2 days ago) <author>\n\n---END---\ndef5678 Another commit (1 week ago) <other>\n\n---END---\n";
-        let result = filter_log_output(output, 10, false, false);
+        let output = format!(
+            "abc1234 This is a commit message (2 days ago) <author>\n\n{sep}\ndef5678 Another commit (1 week ago) <other>\n\n{sep}\n",
+            sep = LOG_BLOCK_SEPARATOR
+        );
+        let result = filter_log_output(&output, 10, false, false);
         assert!(result.contains("abc1234"));
         assert!(result.contains("def5678"));
         assert_eq!(result.lines().count(), 2);
@@ -5312,8 +5331,11 @@ A  added.rs
     #[test]
     fn test_filter_log_output_with_body() {
         // Commit with body: first non-trailer body line should appear indented
-        let output = "abc1234 feat: add feature (2 days ago) <author>\nBREAKING CHANGE: removed old API\nSigned-off-by: Author <a@b.com>\n---END---\ndef5678 fix: typo (1 day ago) <other>\n\n---END---\n";
-        let result = filter_log_output(output, 10, false, false);
+        let output = format!(
+            "abc1234 feat: add feature (2 days ago) <author>\nBREAKING CHANGE: removed old API\nSigned-off-by: Author <a@b.com>\n{sep}\ndef5678 fix: typo (1 day ago) <other>\n\n{sep}\n",
+            sep = LOG_BLOCK_SEPARATOR
+        );
+        let result = filter_log_output(&output, 10, false, false);
         assert!(result.contains("abc1234"));
         assert!(result.contains("BREAKING CHANGE: removed old API"));
         assert!(!result.contains("Signed-off-by:"));
@@ -5326,12 +5348,52 @@ A  added.rs
     #[test]
     fn test_filter_log_output_skips_trailers() {
         // Body with only trailers should not produce a body line
-        let output = "abc1234 chore: bump (1 day ago) <bot>\nSigned-off-by: Bot <bot@ci>\nCo-authored-by: Human <h@b>\n---END---\n";
-        let result = filter_log_output(output, 10, false, false);
+        let output = format!(
+            "abc1234 chore: bump (1 day ago) <bot>\nSigned-off-by: Bot <bot@ci>\nCo-authored-by: Human <h@b>\n{sep}\n",
+            sep = LOG_BLOCK_SEPARATOR
+        );
+        let result = filter_log_output(&output, 10, false, false);
         assert!(result.contains("abc1234"));
         assert!(!result.contains("Signed-off-by:"));
         assert!(!result.contains("Co-authored-by:"));
         assert_eq!(result.lines().count(), 1);
+    }
+
+    /// Regression (#4160): a commit body carrying the printable marker RTK used to split on
+    /// must not open a block of its own. The extra block spent one of the `limit` slots, so the
+    /// oldest commit git returned was dropped, and the text after the marker was rendered flush
+    /// left as a commit header.
+    #[test]
+    fn test_filter_log_output_body_containing_former_marker() {
+        let newest = format!(
+            "aaa1111 newest: body contains RTK's own separator (0 seconds ago) <t>\nfirst body line\n---END---\nsecond body line\n{sep}\n",
+            sep = LOG_BLOCK_SEPARATOR
+        );
+        let older = (1..=9)
+            .map(|i| {
+                format!(
+                    "bbb{i}{i}{i}{i} commit {i} (0 seconds ago) <t>\n\n{sep}\n",
+                    sep = LOG_BLOCK_SEPARATOR
+                )
+            })
+            .collect::<String>();
+
+        let result = filter_log_output(&format!("{newest}{older}"), 10, false, false);
+
+        let headers: Vec<&str> = result.lines().filter(|l| !l.starts_with("  ")).collect();
+        assert_eq!(
+            headers.len(),
+            10,
+            "all ten commits must survive the body marker, got:\n{result}"
+        );
+        assert!(
+            result.contains("bbb9999"),
+            "oldest commit must not be dropped for the body's marker, got:\n{result}"
+        );
+        assert!(
+            result.contains("\n  second body line"),
+            "text after the marker belongs to the body, indented, got:\n{result}"
+        );
     }
 
     #[test]
@@ -5346,7 +5408,12 @@ A  added.rs
     #[test]
     fn test_filter_log_output_cap_lines() {
         let output = (0..20)
-            .map(|i| format!("hash{} message {} (1 day ago) <author>\n\n---END---", i, i))
+            .map(|i| {
+                format!(
+                    "hash{i} message {i} (1 day ago) <author>\n\n{sep}",
+                    sep = LOG_BLOCK_SEPARATOR
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let result = filter_log_output(&output, 5, false, false);
@@ -5357,7 +5424,12 @@ A  added.rs
     fn test_filter_log_output_user_limit_no_cap() {
         // When user explicitly passes -N, all N lines should be returned (no re-truncation)
         let output = (0..20)
-            .map(|i| format!("hash{} message {} (1 day ago) <author>\n\n---END---", i, i))
+            .map(|i| {
+                format!(
+                    "hash{i} message {i} (1 day ago) <author>\n\n{sep}",
+                    sep = LOG_BLOCK_SEPARATOR
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let result = filter_log_output(&output, 20, true, false);
@@ -6416,8 +6488,8 @@ no changes added to commit (use "git add" and/or "git commit -a")
     }
 
     /// Regression test: --oneline and other user format flags must preserve all commits.
-    /// Before fix, filter_log_output split on ---END--- which doesn't exist when
-    /// the user specifies their own format, resulting in only 2 commits surviving.
+    /// Before fix, filter_log_output split on RTK's block separator, which doesn't exist
+    /// when the user specifies their own format, resulting in only 2 commits surviving.
     #[test]
     fn test_filter_log_output_user_format_oneline() {
         let oneline_output = "abc1234 feat: add feature\n\
@@ -6427,7 +6499,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
                               mno7890 test: add tests\n";
 
         let result = filter_log_output(oneline_output, 10, false, true);
-        // All 5 lines must survive — no ---END--- splitting
+        // All 5 lines must survive — no separator splitting
         assert_eq!(result.lines().count(), 5);
         assert!(result.contains("abc1234"));
         assert!(result.contains("mno7890"));
@@ -6701,8 +6773,8 @@ no changes added to commit (use "git add" and/or "git commit -a")
             .collect::<Vec<_>>()
             .join("\n");
         let output = format!(
-            "abc1234 feat: big change (1 day ago) <author>\n{}\n---END---\n",
-            body_lines
+            "abc1234 feat: big change (1 day ago) <author>\n{body_lines}\n{sep}\n",
+            sep = LOG_BLOCK_SEPARATOR
         );
         let result = filter_log_output(&output, 10, false, false);
         assert!(

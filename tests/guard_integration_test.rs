@@ -599,3 +599,51 @@ fn git_show_quiet_loses_to_a_patch_request_from_either_side() {
         );
     }
 }
+
+/// Regression (#4160): RTK asked git for a printable block marker and split its own output on
+/// it, so a commit body containing that literal forged a block boundary -- the extra block
+/// spent one of the limit slots, dropping the oldest commit git returned, and the text after
+/// the marker was printed flush left, in the position a commit header occupies.
+#[test]
+fn git_log_body_containing_rtk_block_marker_keeps_every_commit() {
+    let dir = init_git_repo();
+    for i in 1..=9 {
+        std::fs::write(dir.path().join("f.txt"), format!("{i}\n")).expect("write f.txt");
+        git_in_dir(dir.path(), &["add", "-A"]);
+        git_in_dir(dir.path(), &["commit", "-q", "-m", &format!("commit {i}")]);
+    }
+    std::fs::write(dir.path().join("f.txt"), "newest\n").expect("write f.txt");
+    git_in_dir(dir.path(), &["add", "-A"]);
+    git_in_dir(
+        dir.path(),
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "newest: body contains RTK's own separator",
+            "-m",
+            "first body line\n---END---\nsecond body line",
+        ],
+    );
+
+    let (stdout, stderr, code) = rtk_output_in_dir(dir.path(), &["git", "log"]);
+
+    assert_eq!(code, Some(0), "rtk stderr: {stderr}");
+    let headers: Vec<&str> = stdout
+        .lines()
+        .filter(|l| !l.starts_with("  ") && !l.trim().is_empty())
+        .collect();
+    assert_eq!(
+        headers.len(),
+        10,
+        "git returned ten commits, every one needs a header: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("commit 1 "),
+        "the oldest commit must not be dropped for the body's marker: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("\n  second body line"),
+        "text after the marker belongs to the body, indented: {stdout:?}"
+    );
+}
