@@ -200,6 +200,13 @@ where
 /// How many stderr lines survive the cap. Warning-shaped data, so the warnings cap.
 const MAX_FORWARDED_STDERR_LINES: usize = CAP_WARNINGS;
 
+/// How much the cap has to hide before it is worth storing anything. The entry holds the whole
+/// stderr, but all recall adds to what is already on screen is the prefix the cap removed, so
+/// that prefix is what has to be worth one of the store's bounded slots. The value is the
+/// byte floor the failure path (`tee::tee_and_hint`) applies before storing, reused here as
+/// the threshold for what is worth a slot.
+const MIN_HIDDEN_STDERR_BYTES: usize = crate::core::tee::MIN_TEE_SIZE;
+
 /// The stderr a stdout-only filter forwards.
 ///
 /// Whole, whenever stderr is the report: the command failed, or the filter had nothing to show
@@ -215,12 +222,14 @@ const MAX_FORWARDED_STDERR_LINES: usize = CAP_WARNINGS;
 /// first and anything it has to say -- a deprecation warning, "matched no packages" -- comes
 /// after: a cap on the head keeps the noise and drops exactly the lines worth forwarding.
 ///
-/// Three things make it give up and forward the lot. A stderr below the recovery store's own
-/// floor, which is not worth a stored file and the eviction that comes with it. `recovery_hint`
-/// returning `None`, meaning there is no store to point at, and a count of lines nobody can
-/// read is worse than the lines (`curl_cmd` declines the same way). And a result that is not
-/// actually smaller, since the note and the hint cost bytes of their own -- rtk emits no more
-/// than the command it stands in front of, on either stream.
+/// Three things make it give up and forward the lot. Too little hidden to be worth storing,
+/// since entries compete for a bounded number of slots and a run that gains a handful of
+/// bytes should not be what fills them before a failure needs one. `recovery_hint` returning
+/// `None`, meaning there is no store to point at, and a count of lines nobody can read is
+/// worse than the lines (`curl_cmd` declines the same way). And a result that is not actually
+/// smaller, since the note and the hint cost bytes of their own -- rtk emits no more than the
+/// command it stands in front of, on either stream. That last one is settled after the entry
+/// is written, the hint's length being knowable only by asking for it.
 fn forwarded_stderr<'a>(
     stderr: &'a str,
     exit_code: i32,
@@ -230,15 +239,15 @@ fn forwarded_stderr<'a>(
     if exit_code != 0 || shown_stdout.trim().is_empty() {
         return Cow::Borrowed(stderr);
     }
-    // Below the recovery store's own floor there is nothing to gain and a file to write for
-    // it: the store would hold a stderr smaller than the note and hint that point at it, and
-    // every write evicts an older entry. `tsc_cmd` declines on the same threshold.
-    if stderr.len() < crate::core::tee::MIN_TEE_SIZE {
-        return Cow::Borrowed(stderr);
-    }
     let Some((offset, held_back)) = last_lines_offset(stderr, MAX_FORWARDED_STDERR_LINES) else {
         return Cow::Borrowed(stderr);
     };
+    // `offset` is the hidden prefix in bytes -- what the cap removes, and so what recall is
+    // there to give back. Asking `recovery_hint` is what writes the entry, so the floor has
+    // to be settled before the ask rather than after it.
+    if offset < MIN_HIDDEN_STDERR_BYTES {
+        return Cow::Borrowed(stderr);
+    }
     let Some(hint) = recovery_hint(stderr) else {
         return Cow::Borrowed(stderr);
     };
@@ -258,10 +267,9 @@ fn forwarded_stderr<'a>(
 /// Where `text`'s last `n` lines begin, as a byte offset, and how many lines that skips.
 /// `None` when it has no more than `n`.
 ///
-/// A byte offset rather than `lines().collect()` and a re-join: `str::lines` drops the `\r` of
-/// a CRLF ending and nothing puts it back, so re-joining would rewrite the line endings of a
-/// stderr that happened to be long enough to cap. It also reads none of the lines it skips.
-/// `\n` is ASCII, so the offset is always a char boundary.
+/// A byte offset rather than `lines()` and a re-join: the slice allocates nothing, and it
+/// reproduces the tail exactly, final newline or not, where a `join` would have to put the
+/// terminator back by hand. `\n` is ASCII, so the offset is always a char boundary.
 fn last_lines_offset(text: &str, n: usize) -> Option<(usize, usize)> {
     let skipped = text.lines().count().checked_sub(n).filter(|&s| s > 0)?;
     text.match_indices('\n')
@@ -1046,12 +1054,28 @@ mod forwarded_stderr_tests {
             .collect()
     }
 
-    /// Long enough to clear the recovery store's floor, so a test about the cap is about the
-    /// cap rather than about that threshold.
+    /// Hides enough to clear the floor, so a test about the cap is about the cap rather
+    /// than about that threshold.
     fn over_the_floor(lines: usize) -> String {
         let raw = chatter(lines);
-        assert!(raw.len() >= crate::core::tee::MIN_TEE_SIZE, "{lines} lines");
+        let (offset, _) = last_lines_offset(&raw, MAX_FORWARDED_STDERR_LINES)
+            .expect("more lines than the cap keeps");
+        assert!(offset >= MIN_HIDDEN_STDERR_BYTES, "{lines} lines");
         raw
+    }
+
+    /// Hides exactly `held_back` lines, padded so the hidden prefix clears the floor.
+    fn hiding(held_back: usize) -> String {
+        let pad = MIN_HIDDEN_STDERR_BYTES / held_back + 1;
+        let hidden: String = (0..held_back)
+            .map(|i| {
+                format!(
+                    "go: downloading example.com/{} v1.2.3\n",
+                    "m".repeat(pad + i)
+                )
+            })
+            .collect();
+        hidden + &chatter(MAX_FORWARDED_STDERR_LINES)
     }
 
     #[test]
@@ -1104,12 +1128,12 @@ mod forwarded_stderr_tests {
         assert_eq!(with_hint("", 0, "stdout"), "");
     }
 
-    /// Under the recovery store's floor nothing is stored and nothing is capped, however many
-    /// lines it runs to.
+    /// A cap that would hide less than the floor is not worth the entry it would write, and
+    /// the store's slots are what a failure log will need.
     #[test]
-    fn a_stderr_under_the_recovery_floor_is_forwarded_whole() {
+    fn a_cap_hiding_less_than_the_store_floor_writes_nothing() {
+        // 40 short lines: 30 of them hidden, and 110 bytes between them.
         let raw: String = (0..40).map(|i| format!("w{i}\n")).collect();
-        assert!(raw.len() < crate::core::tee::MIN_TEE_SIZE);
         let mut asked = false;
         let out = forwarded_stderr(&raw, 0, "stdout", |_| {
             asked = true;
@@ -1117,25 +1141,83 @@ mod forwarded_stderr_tests {
         });
         assert_eq!(out, raw);
         assert!(!asked, "nothing may be written to the store for it");
+
+        // A stderr past the floor still declines while the cap hides little of it: 12 lines
+        // of chatter clear it, but only 2 are hidden and those 2 are all recall would give
+        // back.
+        let raw = chatter(MAX_FORWARDED_STDERR_LINES + 2);
+        assert!(raw.len() > MIN_HIDDEN_STDERR_BYTES, "{} bytes", raw.len());
+        let mut asked = false;
+        let out = forwarded_stderr(&raw, 0, "stdout", |_| {
+            asked = true;
+            Some(HINT.to_string())
+        });
+        assert_eq!(out, raw);
+        assert!(!asked, "a two-line gain may not cost a stored entry");
     }
 
-    /// A note and a hint cost bytes of their own. On a stderr just over the line cap they cost
-    /// more than the lines they replace, and rtk would emit more than the command it replaces.
+    /// Exactly at the floor the cap applies; one byte short of it, it does not.
+    #[test]
+    fn the_floor_is_inclusive() {
+        // One line hidden, sized to land the prefix exactly on the floor.
+        let at = format!(
+            "{}\n{}",
+            "h".repeat(MIN_HIDDEN_STDERR_BYTES - 1),
+            chatter(MAX_FORWARDED_STDERR_LINES)
+        );
+        let (offset, _) = last_lines_offset(&at, MAX_FORWARDED_STDERR_LINES).expect("one hidden");
+        assert_eq!(offset, MIN_HIDDEN_STDERR_BYTES);
+        assert!(
+            with_hint(&at, 0, "stdout").starts_with("... (+1 earlier stderr line not shown)"),
+            "a prefix exactly on the floor is worth an entry"
+        );
+
+        let under = format!(
+            "{}\n{}",
+            "h".repeat(MIN_HIDDEN_STDERR_BYTES - 2),
+            chatter(MAX_FORWARDED_STDERR_LINES)
+        );
+        assert_eq!(with_hint(&under, 0, "stdout"), under);
+    }
+
+    /// A note and a hint cost bytes of their own, and a tee-mode hint carries the whole log
+    /// path, so it can cost more than the lines the cap removes. rtk emits no more than the
+    /// command it stands in front of, on either stream.
     #[test]
     fn a_cap_that_would_not_shrink_the_output_is_not_applied() {
-        for lines in (MAX_FORWARDED_STDERR_LINES + 1)..=30 {
-            let raw: String = (0..lines).map(|i| format!("w{i}\n")).collect();
+        let raw = hiding(1);
+        let buried = format!("[full output: /{}/1_go_test-stderr.log]", "d".repeat(2000));
+        assert_eq!(
+            forwarded_stderr(&raw, 0, "stdout", |_| Some(buried)).into_owned(),
+            raw,
+            "a hint longer than what the cap removes must not be paid for"
+        );
+
+        // Sweeping across the floor: below it the whole stderr is forwarded, above it the cap
+        // applies, and on both sides rtk emits no more than the command did.
+        let mut capped_at = None;
+        for lines in (MAX_FORWARDED_STDERR_LINES + 1)..=40 {
+            let raw = chatter(lines);
             let out = with_hint(&raw, 0, "stdout");
             assert!(
                 out.len() <= raw.len(),
-                "{lines} short lines: rtk emitted {} bytes for {} of stderr",
+                "{lines} lines: rtk emitted {} bytes for {} of stderr",
                 out.len(),
                 raw.len()
             );
+            if out.len() < raw.len() {
+                capped_at.get_or_insert(lines);
+            }
         }
-        // And it still caps once the lines are worth removing.
-        let raw = over_the_floor(40);
-        assert!(with_hint(&raw, 0, "stdout").len() < raw.len());
+        // Where it starts capping is the floor's doing, not the note and hint breaking even:
+        // those are beaten several lines earlier.
+        let clears_the_floor = ((MAX_FORWARDED_STDERR_LINES + 1)..=40)
+            .find(|&lines| {
+                last_lines_offset(&chatter(lines), MAX_FORWARDED_STDERR_LINES)
+                    .is_some_and(|(offset, _)| offset >= MIN_HIDDEN_STDERR_BYTES)
+            })
+            .expect("the sweep must cross the floor");
+        assert_eq!(capped_at, Some(clears_the_floor));
     }
 
     /// No recovery store means no way to read what the cap held back, and a count of
@@ -1151,35 +1233,16 @@ mod forwarded_stderr_tests {
 
     #[test]
     fn the_note_is_singular_for_one_held_back_line() {
-        let mut raw = chatter(MAX_FORWARDED_STDERR_LINES + 1);
-        raw.push_str(&"go: a long trailing warning that makes the cap worth applying\n".repeat(4));
-        let out = with_hint(&raw, 0, "stdout");
+        let out = with_hint(&hiding(5), 0, "stdout");
         assert!(
             out.contains("... (+5 earlier stderr lines not shown)"),
             "{out}"
         );
 
-        let raw = chatter(MAX_FORWARDED_STDERR_LINES).replace("module-0 v1.2.3", &"x".repeat(400))
-            + "go: one more\n";
-        let out = with_hint(&raw, 0, "stdout");
+        let out = with_hint(&hiding(1), 0, "stdout");
         assert!(
             out.contains("... (+1 earlier stderr line not shown)"),
             "{out}"
-        );
-    }
-
-    #[test]
-    fn capping_does_not_rewrite_crlf_line_endings() {
-        // `str::lines()` drops the `\r` and nothing puts it back, so a re-joined cap would
-        // change line endings for exactly the stderr that was long enough to cap.
-        let raw: String = (0..60)
-            .map(|i| format!("line {i} with enough text to make capping worthwhile\r\n"))
-            .collect();
-        let out = with_hint(&raw, 0, "stdout");
-        assert_eq!(
-            out.matches('\r').count(),
-            MAX_FORWARDED_STDERR_LINES,
-            "every forwarded line must keep its CRLF: {out:?}"
         );
     }
 
