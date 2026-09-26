@@ -356,12 +356,45 @@ fn flush_arg(tokens: &mut Vec<ParsedToken>, current: &mut String, offset: usize)
     }
 }
 
+/// Which grammar a command string is written in.
+///
+/// RTK lexes a host's command string as bash — that is the tool the agent
+/// called, and `is_word_boundary_whitespace`, `advance_quote_state` and
+/// [`NewlineMode::Bash`] all model bash. Only one string in the pipeline is
+/// known to be something else: the script inside a quoted `fish -c '…'`
+/// wrapper, whose shell the wrapper itself names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShellDialect {
+    Posix,
+    Fish,
+}
+
 /// True for constructs the permission gate can't decompose, so they must never
 /// be auto-allowed: command/process substitution, or a real file-target redirect
 /// (fd-dup like `2>&1` and `/dev/null` are exempt). Separators and subshells are
 /// handled by [`split_for_permissions`], not flagged here.
 pub fn contains_unattestable_construct(cmd: &str) -> bool {
+    contains_unattestable_construct_in(cmd, ShellDialect::Posix)
+}
+
+/// [`contains_unattestable_construct`] for a string whose dialect is known.
+///
+/// In fish, two more shapes carry meaning this lexer does not model: `(cmd)` is
+/// command substitution rather than a subshell, and `and`, `or`, `end` and
+/// friends are control flow rather than command names. Both are refused — but
+/// only where the wrapper says the script is fish. Refusing them in bash would
+/// drop the rewrite for every ordinary `(cd dir && cmd)` and every line that
+/// merely contains an `if … fi` block.
+pub(crate) fn contains_unattestable_construct_in(cmd: &str, dialect: ShellDialect) -> bool {
     if contains_substitution(cmd) {
+        return true;
+    }
+    // The fish check needs newlines as boundaries, so a keyword opening a line
+    // is at command position; the redirect scan below keeps the bash-shaped
+    // tokens it has always used, where a newline is part of the word.
+    if dialect == ShellDialect::Fish
+        && contains_fish_only_construct(&tokenize_inner(cmd, NewlineMode::Conservative))
+    {
         return true;
     }
     let tokens = tokenize(cmd);
@@ -369,6 +402,46 @@ pub fn contains_unattestable_construct(cmd: &str) -> bool {
         .iter()
         .enumerate()
         .any(|(i, tok)| tok.kind == TokenKind::Redirect && redirect_has_file_target(&tokens, i))
+}
+
+/// Fish's own syntax: bare `(…)` substitution anywhere, a control keyword at a
+/// command boundary, or the `&|` pipe. Newlines are boundaries here, so a
+/// keyword opening a line of a multi-line script is seen.
+fn contains_fish_only_construct(tokens: &[ParsedToken]) -> bool {
+    const FISH_CONTROL_KEYWORDS: &[&str] = &[
+        "and", "or", "not", "begin", "end", "if", "else", "switch", "case", "for", "while",
+        "function",
+    ];
+
+    let mut command_position = true;
+    // Byte just past a `&` token, to spot the `&|` pair below.
+    let mut ampersand_end = None;
+    for token in tokens {
+        // `&|` pipes stdout and stderr in fish. This lexer reads it as a
+        // background `&` followed by a pipe, and the rewrite re-emits the two
+        // spaced, which fish rejects outright — so leave the script alone.
+        if matches!(token.kind, TokenKind::Pipe(_)) && ampersand_end == Some(token.offset) {
+            return true;
+        }
+        ampersand_end = match &token.kind {
+            TokenKind::Shellism if token.value == "&" => Some(token.offset + token.value.len()),
+            _ => None,
+        };
+        match token.kind {
+            TokenKind::Shellism if matches!(token.value.as_str(), "(" | ")") => return true,
+            TokenKind::Operator | TokenKind::Pipe(_) => command_position = true,
+            TokenKind::Shellism if token.value == "&" => command_position = true,
+            TokenKind::Arg if command_position => {
+                if FISH_CONTROL_KEYWORDS.contains(&token.value.as_str()) {
+                    return true;
+                }
+                command_position = false;
+            }
+            _ => {}
+        }
+    }
+
+    false
 }
 
 /// Quote-aware: bash runs backtick/`$(...)` unquoted and inside double quotes,
@@ -1412,6 +1485,64 @@ mod tests {
     }
 
     // --- contains_unattestable_construct (security) -------------------------
+
+    #[test]
+    fn test_fish_dialect_refuses_fish_only_constructs() {
+        for script in [
+            "git status (pwd)",
+            "git status; and cargo test",
+            "if test -d src; git status; end",
+            "not git status",
+            "for f in (ls)\n  echo $f\nend",
+        ] {
+            assert!(
+                contains_unattestable_construct_in(script, ShellDialect::Fish),
+                "fish script must not be attested: {script:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_posix_dialect_keeps_subshells_and_keywords_attestable() {
+        // The same shapes are ordinary bash. Flagging them here would drop the
+        // rewrite for every command line that merely contains one.
+        for cmd in [
+            "(cd sub && git status)",
+            "git log -20 && (cd www && npm test)",
+            "git status; if true; then echo x; fi",
+            "cargo build; for f in *.rs; do echo $f; done",
+            "git status; and cargo test",
+        ] {
+            assert!(
+                !contains_unattestable_construct(cmd),
+                "bash command must stay attestable: {cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_fish_dialect_refuses_the_stdout_and_stderr_pipe() {
+        // `&|` is one fish operator; re-emitted as `& |` it stops parsing.
+        for script in ["git status &| cargo test", "git status&|cargo test"] {
+            assert!(
+                contains_unattestable_construct_in(script, ShellDialect::Fish),
+                "fish `&|` must not be attested: {script:?}"
+            );
+        }
+        // A background `&` followed by a separate command is still fine.
+        assert!(!contains_unattestable_construct_in(
+            "git status & cargo test",
+            ShellDialect::Fish
+        ));
+    }
+
+    #[test]
+    fn test_fish_dialect_attests_a_portable_script() {
+        assert!(!contains_unattestable_construct_in(
+            "git status; cargo test",
+            ShellDialect::Fish
+        ));
+    }
 
     #[test]
     fn test_unattestable_backtick() {

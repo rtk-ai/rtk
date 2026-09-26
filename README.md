@@ -367,6 +367,28 @@ The most effective way to use rtk. The hook transparently intercepts Bash comman
 
 **Scope note:** this only applies to Bash tool calls. Claude Code built-in tools such as `Read`, `Grep`, and `Glob` bypass the hook, so use shell commands or explicit `rtk` commands when you want RTK filtering there.
 
+Simple quoted shell wrappers are also rewritten without changing the selected
+shell:
+
+```bash
+bash -c "head foo && grep -R bar ."
+# → bash -c "rtk read foo --head-lines 10 && rtk grep -R bar ."
+```
+
+This support is intentionally conservative: it covers exact `sh -c`,
+`bash -c`, `zsh -c` and `fish -c` wrappers with a quoted portable script.
+Because the wrapper names the shell, a `fish -c` script is read as fish: its
+own syntax — `(cmd)` substitution, `and`/`or`/`end` control flow — defers
+instead of being rewritten under POSIX assumptions:
+
+```bash
+fish -c 'git status; cargo test'      # → fish -c 'rtk git status; rtk cargo test'
+fish -c 'git status; and cargo test'  # unchanged
+```
+
+Shell expansion in an outer double quote, additional shell options, redirects
+to files, and nested wrappers pass through unchanged.
+
 ### Setup
 
 ```bash
