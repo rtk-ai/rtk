@@ -119,7 +119,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     // Dispatch to appropriate filter based on formatter
     let filtered = match formatter.as_str() {
-        "prettier" => prettier_cmd::filter_prettier_output(&raw),
+        "prettier" => prettier_cmd::filter_prettier_output_with_exit(&raw, result.exit_code),
         "ruff" => ruff_cmd::filter_ruff_format(&raw),
         "black" => filter_black_output(&raw),
         _ => raw.trim().to_string(),
