@@ -520,6 +520,15 @@ pub fn quote_arg_for_child(arg: &str) -> String {
     out
 }
 
+/// Whether an argument must reach a Windows child quoted: std encodes `"`
+/// differently from libuv, and an MSYS/Cygwin child expands `*`, `?`, `[` and
+/// `{` in any argument it receives unquoted, even one the caller had quoted.
+// Windows-only in production; the rule stays unit-tested on every platform.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn needs_child_quoting(arg: &str) -> bool {
+    arg.contains(['"', '*', '?', '[', '{'])
+}
+
 /// Pass caller-supplied arguments to a child so that MSYS/Cygwin children on
 /// Windows receive them intact.
 ///
@@ -552,14 +561,14 @@ impl ChildArgExt for Command {
     }
 }
 
-/// Windows: `"` is the only character std encodes differently from libuv, so
-/// re-encode just those arguments and leave the rest on std's path. `.bat`/`.cmd`
+/// Windows: re-encode the arguments `needs_child_quoting` flags and leave the
+/// rest on std's path. `.bat`/`.cmd`
 /// shims stay on it too — cmd.exe parses by its own rules and `raw_arg` would
 /// bypass the escaping std applies for them.
 #[cfg(windows)]
 fn push_child_arg(cmd: &mut Command, arg: &OsStr) {
     match arg.to_str() {
-        Some(s) if s.contains('"') && !is_batch_program(cmd) => {
+        Some(s) if needs_child_quoting(s) && !is_batch_program(cmd) => {
             std::os::windows::process::CommandExt::raw_arg(cmd, quote_arg_for_child(s));
         }
         _ => {
@@ -1263,6 +1272,25 @@ mod tests {
     #[test]
     fn test_quote_arg_keeps_a_space_inside_the_wrapping() {
         assert_eq!(quote_arg_for_child(r#"a b "c""#), r#""a b \"c\"""#);
+    }
+
+    #[test]
+    fn test_needs_child_quoting_flags_quotes_and_msys_glob_characters() {
+        for arg in [r#""type""#, ".{0,20}foo", "./x/*", "file?.txt", "[ab]c"] {
+            assert!(needs_child_quoting(arg), "{arg}");
+        }
+        for arg in ["-c", "q.jsonl", "-not", "C:\\a\\b", "a b", "x]y}"] {
+            assert!(!needs_child_quoting(arg), "{arg}");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_child_arg_quotes_msys_glob_patterns() {
+        let mut cmd = Command::new("grep");
+        cmd.child_args(["-E", ".{0,20}foo", "./x/*", "q.jsonl"]);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["-E", r#"".{0,20}foo""#, r#""./x/*""#, "q.jsonl"]);
     }
 
     #[cfg(target_os = "windows")]
