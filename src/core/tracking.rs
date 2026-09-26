@@ -1621,9 +1621,20 @@ fn db_sidecars(db_path: &std::path::Path) -> Vec<PathBuf> {
 }
 
 pub(crate) fn get_db_path() -> Result<PathBuf> {
+    if let Some(db_path) = configured_db_path() {
+        return Ok(db_path);
+    }
+
+    // Priority 3: Default platform-specific location
+    let data_dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
+    Ok(data_dir.join(RTK_DATA_DIR).join(HISTORY_DB))
+}
+
+/// The tracking DB path set by `RTK_DB_PATH` or `tracking.database_path`, if any.
+fn configured_db_path() -> Option<PathBuf> {
     // Priority 1: Environment variable RTK_DB_PATH
     if let Ok(custom_path) = std::env::var("RTK_DB_PATH") {
-        return Ok(PathBuf::from(custom_path));
+        return Some(PathBuf::from(custom_path));
     }
 
     // Priority 2: Configuration file. Reads the process-wide cached config (see
@@ -1633,17 +1644,10 @@ pub(crate) fn get_db_path() -> Result<PathBuf> {
     // same hook invocation, via `hooks::decision::decide`) already reads config too, so
     // without caching that's two full disk-read-plus-TOML-parse round trips per
     // Bash tool call instead of one.
-    if let Some(db_path) = crate::core::config::cached_config()
+    crate::core::config::cached_config()
         .tracking
         .database_path
         .clone()
-    {
-        return Ok(db_path);
-    }
-
-    // Priority 3: Default platform-specific location
-    let data_dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
-    Ok(data_dir.join(RTK_DATA_DIR).join(HISTORY_DB))
 }
 
 /// Whether to gate schema migrations behind `user_version` (the hot-path
@@ -1681,7 +1685,12 @@ fn open_and_prepare(mode: MigrationMode) -> Result<Connection> {
     // RTK-covered ones), so avoiding that redundant open on the already-set-up
     // common case matters for the <10ms budget.
     if let Some(parent) = db_path.parent() {
-        crate::core::utils::create_private_dir(parent)?;
+        // A configured path may sit in a directory shared with others: leave it as is.
+        if configured_db_path().is_some() {
+            crate::core::utils::create_configured_dir(parent)?;
+        } else {
+            crate::core::utils::create_private_dir(parent)?;
+        }
     }
     if db_path.exists() {
         crate::core::utils::restrict_file(&db_path);
