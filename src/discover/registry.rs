@@ -1235,16 +1235,6 @@ fn rewrite_compound(
     transparent_prefixes: &[String],
 ) -> Option<String> {
     let tokens = tokenize(cmd);
-    let has_pipe = tokens
-        .iter()
-        .any(|token| matches!(token.kind, TokenKind::Pipe(_)));
-    let has_opaque_grouping = tokens.iter().any(|token| {
-        token.kind == TokenKind::Shellism && matches!(token.value.as_str(), "(" | ")" | "{" | "}")
-    });
-    if has_pipe && has_opaque_grouping {
-        return None;
-    }
-
     let mut result = String::with_capacity(cmd.len() + 32);
     let mut any_changed = false;
     let mut seg_start: usize = 0;
@@ -1281,29 +1271,51 @@ fn rewrite_compound(
             TokenKind::Pipe(_) => {
                 let analysis = analyze_pipeline(cmd, &tokens, seg_start, tok.offset);
                 let pipeline = cmd[seg_start..analysis.end_offset].trim();
-                let rewritten_pipeline = rewrite_pipeline_final_stage(
-                    cmd,
-                    seg_start,
-                    analysis,
-                    excluded,
-                    transparent_prefixes,
-                )
-                .or_else(|| {
-                    rewrite_pipeline_producer(
+                let pipeline_has_opaque_grouping = tokens.iter().any(|token| {
+                    token.offset >= seg_start
+                        && token.offset < analysis.end_offset
+                        && token.kind == TokenKind::Shellism
+                        && matches!(token.value.as_str(), "(" | ")" | "{" | "}")
+                });
+                let rewritten_pipeline = if pipeline_has_opaque_grouping {
+                    None
+                } else {
+                    rewrite_pipeline_final_stage(
                         cmd,
                         seg_start,
-                        tok.offset,
                         analysis,
                         excluded,
                         transparent_prefixes,
                     )
-                });
+                    .or_else(|| {
+                        rewrite_pipeline_producer(
+                            cmd,
+                            seg_start,
+                            tok.offset,
+                            analysis,
+                            excluded,
+                            transparent_prefixes,
+                        )
+                    })
+                };
 
                 if let Some(rewritten) = rewritten_pipeline {
                     any_changed = true;
                     result.push_str(&rewritten);
                 } else {
                     result.push_str(pipeline);
+                }
+
+                if let Some(next_clause_offset) = analysis.next_clause_offset {
+                    let opaque_tail = tokens.iter().any(|token| {
+                        token.offset >= next_clause_offset
+                            && token.kind == TokenKind::Shellism
+                            && matches!(token.value.as_str(), "(" | ")" | "{" | "}")
+                    });
+                    if opaque_tail {
+                        result.push_str(&cmd[next_clause_offset..]);
+                        return if any_changed { Some(result) } else { None };
+                    }
                 }
 
                 match analysis.next_clause_offset {
@@ -3703,6 +3715,35 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("git log | head -20 | tail -5", &[]),
             Some("rtk git log | head -20 | tail -5".into())
+        );
+    }
+
+    #[test]
+    fn test_pipeline_rewrite_not_disabled_by_later_case_clause() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git status | cat; case x in x) echo 1;; esac", &[]),
+            Some("rtk git status | cat; case x in x) echo 1;; esac".into())
+        );
+    }
+
+    #[test]
+    fn test_pipeline_with_opaque_grouping_itself_stays_raw() {
+        assert_eq!(rewrite_command_no_prefixes("(git status) | cat", &[]), None);
+    }
+
+    #[test]
+    fn test_safe_pipeline_before_case_rewrites_producer() {
+        assert_eq!(
+            rewrite_command_no_prefixes("ls -la | head -3; case x in x) echo 1;; esac", &[]),
+            Some("rtk ls -la | head -3; case x in x) echo 1;; esac".into())
+        );
+    }
+
+    #[test]
+    fn test_pipeline_rewrite_not_disabled_by_grouping_in_other_clause() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git status | cat; (echo grouped)", &[]),
+            Some("rtk git status | cat; (echo grouped)".into())
         );
     }
 
