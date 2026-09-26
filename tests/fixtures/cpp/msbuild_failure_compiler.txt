@@ -1,0 +1,26 @@
+Microsoft (R) Build Engine version 17.8.5+b5c6332e2 for .NET Framework
+Copyright (C) Microsoft Corporation. All rights reserved.
+
+Build started 1/15/2026 9:05:00 AM.
+Project "C:\src\MyProject.sln" on node 1 (Build target(s)).
+ClCompile:
+  main.cpp
+  util.cpp
+  parser.cpp
+C:\src\MyProject\src\main.cpp(42): error C2065: 'foo': undeclared identifier [C:\src\MyProject\MyProject.vcxproj]
+C:\src\MyProject\src\main.cpp(43): warning C4244: conversion from 'double' to 'int', possible loss of data [C:\src\MyProject\MyProject.vcxproj]
+C:\src\MyProject\src\parser.cpp(120): error C2143: syntax error: missing ';' before 'return' [C:\src\MyProject\MyProject.vcxproj]
+C:\src\MyProject\src\parser.cpp(121): fatal error C1004: unexpected end-of-file found [C:\src\MyProject\MyProject.vcxproj]
+Done Building Project "C:\src\MyProject\MyProject.vcxproj" (default targets) -- FAILED.
+Done Building Project "C:\src\MyProject.sln" (default targets) -- FAILED.
+
+Build FAILED.
+
+C:\src\MyProject\src\main.cpp(42): error C2065: 'foo': undeclared identifier [C:\src\MyProject\MyProject.vcxproj]
+C:\src\MyProject\src\main.cpp(43): warning C4244: conversion from 'double' to 'int', possible loss of data [C:\src\MyProject\MyProject.vcxproj]
+C:\src\MyProject\src\parser.cpp(120): error C2143: syntax error: missing ';' before 'return' [C:\src\MyProject\MyProject.vcxproj]
+C:\src\MyProject\src\parser.cpp(121): fatal error C1004: unexpected end-of-file found [C:\src\MyProject\MyProject.vcxproj]
+    1 Warning(s)
+    3 Error(s)
+
+Time Elapsed 00:00:03.22
