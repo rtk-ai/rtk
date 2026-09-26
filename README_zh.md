@@ -155,7 +155,7 @@ rtk jest                        # Jest 紧凑输出
 rtk vitest                      # Vitest 紧凑输出
 rtk pytest                      # Python 测试（-90%）
 rtk go test                     # Go 测试（-90%）
-rtk test <cmd>                  # 仅显示失败（-90%）
+rtk test <cmd> [args...]        # 仅显示失败（-90%），直接执行 argv
 ```
 
 ### 构建 & 检查

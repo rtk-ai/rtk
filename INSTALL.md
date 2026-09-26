@@ -320,7 +320,7 @@ rtk playwright test # Filtered Playwright output (-94%)
 rtk pytest          # Filtered Python tests (-90%)
 rtk rake test       # Filtered Ruby tests (-90%)
 rtk rspec           # Filtered RSpec tests (-60%)
-rtk test <cmd>      # Generic test wrapper - failures only (-90%)
+rtk test <cmd> [args...]  # Generic test wrapper - failures only (-90%)
 ```
 
 ### Statistics

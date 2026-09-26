@@ -240,13 +240,19 @@ enum Commands {
 
     /// Run command and show only errors/warnings
     Err {
+        /// Execute one quoted command string with this shell instead of direct argv execution
+        #[arg(long, value_name = "SHELL")]
+        shell: Option<String>,
         /// Command to run
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
     },
 
     /// Run tests and show only failures
     Test {
+        /// Execute one quoted command string with this shell instead of direct argv execution
+        #[arg(long, value_name = "SHELL")]
+        shell: Option<String>,
         /// Test command (e.g. cargo test)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
@@ -328,8 +334,11 @@ enum Commands {
 
     /// Run command and show heuristic summary
     Summary {
+        /// Execute one quoted command string with this shell instead of direct argv execution
+        #[arg(long, value_name = "SHELL")]
+        shell: Option<String>,
         /// Command to run and summarize
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
     },
 
@@ -698,12 +707,20 @@ enum Commands {
         min_occurrences: usize,
     },
 
-    /// Execute a shell command via sh -c (raw, no filtering or tracking)
+    /// Execute argv directly, or a command string through an explicit shell
     Run {
-        /// Command string to execute (use -c for shell-like invocation)
-        #[arg(short = 'c', long = "command")]
+        /// Command string to execute through a shell
+        #[arg(short = 'c', long = "command", conflicts_with = "args")]
         command: Option<String>,
-        /// Positional command arguments (alternative to -c)
+        /// Shell used with -c (defaults to sh on Unix and cmd on Windows)
+        #[arg(
+            long,
+            value_name = "SHELL",
+            requires = "command",
+            conflicts_with = "args"
+        )]
+        shell: Option<String>,
+        /// Program and literal arguments for direct execution (alternative to -c)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1561,6 +1578,22 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
         parse_error.exit();
     }
 
+    // `rtk test` deliberately shadows the POSIX `test` binary, so it cannot join
+    // that list — but a misused `--shell` is RTK's own flag, not something to
+    // hand to `test`. Without this, `rtk test --shell` execs the real `test`
+    // with no arguments and exits 0, silently ignoring the request (#4125).
+    //
+    // Scoped to `test` alone: `--shell` is a flag other tools carry too, and an
+    // argv-wide scan would refuse to run `just --shell bash` or
+    // `hyperfine --shell=none` — including the spellings the hook itself emits.
+    if args[0] == "test"
+        && args
+            .iter()
+            .any(|arg| arg == "--shell" || arg.starts_with("--shell="))
+    {
+        parse_error.exit();
+    }
+
     let raw_command = args.join(" ");
     let error_message = core::utils::strip_ansi(&parse_error.to_string());
 
@@ -1931,6 +1964,94 @@ fn is_native_test_expression(command: &[String]) -> bool {
     }
 }
 
+/// Strip the shell grouping a command carries, returning how many negations were
+/// removed along with the command itself.
+///
+/// `!` and `( … )` are both `test`'s syntax and the shell's, and
+/// [`is_native_test_expression`] already treats them as possible native
+/// prefixes. A command behind them is not a native expression, so it runs
+/// through the test filter — and the negation and grouping the joined `sh -c`
+/// string used to get from the shell have to come from somewhere.
+///
+/// They nest, so they are stripped in one loop until neither applies: a single
+/// pass of each leaves `! ( cmd )` with `(` as its program, which is not found
+/// — and the negation would then turn that 127 into a reported *pass* for a
+/// command that never ran.
+fn split_leading_negations(command: Vec<String>) -> (usize, Vec<String>) {
+    let mut command = command;
+    let mut negations = 0;
+
+    loop {
+        let bangs = command.iter().take_while(|token| *token == "!").count();
+        // All `!` and nothing to negate: leave it alone so the runner reports it.
+        if bangs > 0 && bangs < command.len() {
+            negations += bangs;
+            command = command[bangs..].to_vec();
+            continue;
+        }
+        if let Some(grouped) = strip_outer_group(&command) {
+            command = grouped;
+            continue;
+        }
+        return (negations, command);
+    }
+}
+
+/// Peel one `( … )` that wraps the whole command.
+///
+/// The parentheses must balance across the command, so `( a ) b ( c )` — where
+/// the first `(` closes before the end — keeps both of them.
+fn strip_outer_group(command: &[String]) -> Option<Vec<String>> {
+    if command.len() <= 2 || command.first()? != "(" || command.last()? != ")" {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    for (index, token) in command.iter().enumerate() {
+        match token.as_str() {
+            "(" => depth += 1,
+            ")" => depth = depth.checked_sub(1)?,
+            _ => {}
+        }
+        if depth == 0 && index + 1 < command.len() {
+            return None;
+        }
+    }
+
+    (depth == 0).then(|| command[1..command.len() - 1].to_vec())
+}
+
+/// `--shell` runs one complete script, so it takes exactly one positional.
+///
+/// Clap cannot express "exactly one value for this positional when that flag is
+/// present", and `run` spells the same rule as `conflicts_with`/`requires`
+/// around its own `-c`. Enforcing it here keeps the other three surfaces
+/// answering with a usage error instead of failing mid-execution — reported by
+/// the subcommand that was asked, so the usage line names it.
+fn require_single_script(subcommand: &str, shell: Option<&str>, command: &[String]) {
+    use clap::CommandFactory;
+
+    if shell.is_none() || command.len() == 1 {
+        return;
+    }
+
+    let mut cli = Cli::command();
+    let mut surface = cli
+        .find_subcommand_mut(subcommand)
+        .expect("every caller names its own subcommand")
+        .clone()
+        // Taken on its own, the subcommand's usage line reads `test …` — the
+        // name of the POSIX utility `rtk test` shadows. Spell the binary the
+        // caller actually typed.
+        .bin_name(format!("rtk {subcommand}"));
+    surface
+        .error(
+            ErrorKind::WrongNumberOfValues,
+            core::shell::SHELL_ARITY_MESSAGE,
+        )
+        .exit();
+}
+
 fn run_cli() -> Result<i32> {
     // Fire-and-forget telemetry ping (1/day, non-blocking)
     core::telemetry::maybe_ping();
@@ -2225,18 +2346,33 @@ fn run_cli() -> Result<i32> {
             }
         }
 
-        Commands::Err { command } => {
-            let cmd = command.join(" ");
-            runner::run_err(&cmd, cli.verbose)?
+        Commands::Err { shell, command } => {
+            require_single_script("err", shell.as_deref(), &command);
+            runner::run_err(&command, shell.as_deref(), cli.verbose)
+                .context("Failed to run err command")?
         }
 
-        Commands::Test { command } => {
-            if is_native_test_expression(&command) {
+        Commands::Test { shell, command } => {
+            require_single_script("test", shell.as_deref(), &command);
+            // A native `test` expression (`rtk test -f Cargo.toml`) still goes
+            // to the real `test` binary; `--shell` means the caller asked for a
+            // script, so it never takes that path.
+            if shell.is_none() && is_native_test_expression(&command) {
                 let args: Vec<OsString> = command.into_iter().map(OsString::from).collect();
                 core::runner::run_passthrough("test", &args, cli.verbose)?
             } else {
-                let cmd = command.join(" ");
-                runner::run_test(&cmd, cli.verbose)?
+                // `rtk test ! <cmd>` negates the command's exit status. The
+                // joined `sh -c` string used to get that from the shell; direct
+                // execution applies it here instead, so the boundaries survive
+                // and no shell is interposed for it.
+                let (negations, command) = split_leading_negations(command);
+                let code = runner::run_test(&command, shell.as_deref(), cli.verbose)
+                    .context("Failed to run test command")?;
+                if negations % 2 == 1 {
+                    i32::from(code == 0)
+                } else {
+                    code
+                }
             }
         }
 
@@ -2355,9 +2491,10 @@ fn run_cli() -> Result<i32> {
             OcCommands::Other(args) => container::run_oc_passthrough(&args, cli.verbose)?,
         },
 
-        Commands::Summary { command } => {
-            let cmd = command.join(" ");
-            summary::run(&cmd, cli.verbose)?
+        Commands::Summary { shell, command } => {
+            require_single_script("summary", shell.as_deref(), &command);
+            summary::run(&command, shell.as_deref(), cli.verbose)
+                .context("Failed to run summary command")?
         }
 
         Commands::Grep {
@@ -2976,24 +3113,55 @@ fn run_cli() -> Result<i32> {
             0
         }
 
-        Commands::Run { command, args } => {
-            let raw = match command {
-                Some(c) => c,
-                None if !args.is_empty() => args.join(" "),
-                None => String::new(),
-            };
-            if raw.trim().is_empty() {
+        Commands::Run {
+            command,
+            shell,
+            args,
+        } => {
+            if command
+                .as_deref()
+                .is_none_or(|script| script.trim().is_empty())
+                && args.is_empty()
+            {
                 0
             } else {
-                use std::process::Command as ProcCommand;
-                let shell = if cfg!(windows) { "cmd" } else { "sh" };
-                let flag = if cfg!(windows) { "/C" } else { "-c" };
-                let status = ProcCommand::new(shell)
-                    .arg(flag)
-                    .arg(&raw)
-                    .status()
-                    .with_context(|| format!("Failed to execute: {}", raw))?;
-                core::utils::exit_code_from_status(&status, "run")
+                let (launch, description, program) = match command {
+                    Some(script) => (
+                        core::shell::shell_command(&script, shell.as_deref())
+                            .context("Failed to prepare run shell command")?,
+                        format!("shell command: {script}"),
+                        core::shell::program_name(&[], shell.as_deref()).to_string(),
+                    ),
+                    None => (
+                        core::shell::direct_command(&args)
+                            .context("Failed to prepare direct run command")?,
+                        core::shell::display_args(&args),
+                        core::shell::program_name(&args, None).to_string(),
+                    ),
+                };
+                match launch {
+                    core::shell::Launch::Ready(mut prepared) => match prepared.status() {
+                        Ok(status) => core::utils::exit_code_from_status(&status, "run"),
+                        Err(error) => {
+                            let error = anyhow::Error::new(error)
+                                .context(format!("Failed to execute {description}"));
+                            match core::shell::spawn_failure(&program, &error) {
+                                Some(outcome) => {
+                                    eprint!("{}", outcome.message);
+                                    outcome.code
+                                }
+                                None => return Err(error),
+                            }
+                        }
+                    },
+                    // `rtk run` is a raw passthrough, so it reports a program it
+                    // cannot run the way a shell does: the message on stderr and
+                    // the shell's own exit code.
+                    core::shell::Launch::Unrunnable(outcome) => {
+                        eprint!("{}", outcome.message);
+                        outcome.code
+                    }
+                }
             }
         }
 
@@ -3769,7 +3937,10 @@ mod tests {
         // RTK meta-commands should produce parse errors (not fall through to raw execution).
         // Skip "proxy" because it uses trailing_var_arg (accepts any args by design).
         for cmd in core::constants::RTK_META_COMMANDS {
-            if matches!(*cmd, "proxy" | "run" | "rewrite" | "session") {
+            if matches!(
+                *cmd,
+                "proxy" | "run" | "rewrite" | "session" | "err" | "summary"
+            ) {
                 continue; // these use trailing_var_arg (accept any args by design)
             }
             let result = Cli::try_parse_from(["rtk", cmd, "--nonexistent-flag-xyz"]);
@@ -3800,7 +3971,6 @@ mod tests {
             "aws",
             "psql",
             "pnpm",
-            "err",
             "test",
             "env",
             "find",
@@ -3810,7 +3980,6 @@ mod tests {
             "docker",
             "kubectl",
             "oc",
-            "summary",
             "grep",
             "wget",
             "wc",
@@ -3878,8 +4047,13 @@ mod tests {
     fn test_run_command_with_dash_c() {
         let cli = Cli::try_parse_from(["rtk", "run", "-c", "git status && echo done"]).unwrap();
         match cli.command {
-            Commands::Run { command, args } => {
+            Commands::Run {
+                command,
+                shell,
+                args,
+            } => {
                 assert_eq!(command, Some("git status && echo done".to_string()));
+                assert!(shell.is_none());
                 assert!(args.is_empty());
             }
             _ => panic!("Expected Run command"),
@@ -3890,8 +4064,13 @@ mod tests {
     fn test_run_command_positional_args() {
         let cli = Cli::try_parse_from(["rtk", "run", "echo", "hello"]).unwrap();
         match cli.command {
-            Commands::Run { command, args } => {
+            Commands::Run {
+                command,
+                shell,
+                args,
+            } => {
                 assert!(command.is_none());
+                assert!(shell.is_none());
                 assert_eq!(args, vec!["echo", "hello"]);
             }
             _ => panic!("Expected Run command"),
@@ -3907,6 +4086,29 @@ mod tests {
                 _ => panic!("Expected Ctest command"),
             }
         }
+    }
+
+    #[test]
+    fn test_run_command_with_explicit_shell() {
+        let cli =
+            Cli::try_parse_from(["rtk", "run", "--shell", "fish", "-c", "echo (pwd)"]).unwrap();
+        match cli.command {
+            Commands::Run {
+                command,
+                shell,
+                args,
+            } => {
+                assert_eq!(command, Some("echo (pwd)".to_string()));
+                assert_eq!(shell, Some("fish".to_string()));
+                assert!(args.is_empty());
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_run_shell_requires_command_string() {
+        assert!(Cli::try_parse_from(["rtk", "run", "--shell", "fish", "echo"]).is_err());
     }
 
     #[test]

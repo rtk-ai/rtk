@@ -533,6 +533,63 @@ pub fn run_err_cmd(
     )
 }
 
+/// Render a program that could not be run through the err filter's own failure
+/// path.
+///
+/// The interposed shell used to produce this: `[FAIL] Command failed (exit
+/// code: 127)` over its `command not found` line, or 126 over `Permission
+/// denied`. Direct execution answers for the program itself, so RTK renders it
+/// instead of bailing out with an `anyhow` chain on stderr.
+pub fn run_err_unrunnable(
+    tool: &str,
+    display: &str,
+    outcome: &crate::core::shell::Unrunnable,
+    verbose: u8,
+) -> i32 {
+    report_unrunnable(tool, display, outcome, verbose, |raw, code| {
+        ErrorStreamFilter::new()
+            .on_exit(code, raw)
+            .unwrap_or_default()
+    })
+}
+
+/// [`run_err_unrunnable`] for the test runner, rendered by the test summarizer.
+pub fn run_test_unrunnable(
+    tool: &str,
+    display: &str,
+    outcome: &crate::core::shell::Unrunnable,
+    eco: TestEcosystem,
+    verbose: u8,
+) -> i32 {
+    report_unrunnable(tool, display, outcome, verbose, |raw, _| {
+        extract_test_summary(raw, eco)
+    })
+}
+
+fn report_unrunnable(
+    tool: &str,
+    display: &str,
+    outcome: &crate::core::shell::Unrunnable,
+    verbose: u8,
+    render: impl FnOnce(&str, i32) -> String,
+) -> i32 {
+    if verbose > 0 {
+        eprintln!("Running: {}", display);
+    }
+    let timer = tracking::TimedExecution::start();
+    let rendered = render(&outcome.message, outcome.code);
+    println!("{}", rendered.trim_end());
+
+    let label = format!("{} {}", tool, display);
+    timer.track(
+        &label,
+        &format!("rtk {}", label),
+        &outcome.message,
+        &rendered,
+    );
+    outcome.code
+}
+
 /// Test-output ecosystem, chosen once at the boundary. Modules that know
 /// their runner statically pass the variant directly; shell-string entry
 /// points convert once via `detect`. Matching on the enum makes substring

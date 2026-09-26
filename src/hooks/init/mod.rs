@@ -209,7 +209,7 @@ rtk playwright test     # Playwright failures only (94%)
 rtk pytest              # Python test failures only (90%)
 rtk rake test           # Ruby test failures only (90%)
 rtk rspec               # RSpec test failures only (60%)
-rtk test <cmd>          # Generic test wrapper - failures only
+rtk test <cmd> [args...] # Generic test wrapper - failures only
 ```
 
 ### Git (59-80% savings)
@@ -260,14 +260,18 @@ rtk find <pattern>      # Find grouped by directory (70%)
 
 ### Analysis & Debug (70-90% savings)
 ```bash
-rtk err <cmd>           # Filter errors only from any command
+rtk err <cmd> [args...] # Filter errors only; argv runs directly, no shell
 rtk log <file>          # Deduplicated logs with counts
 rtk json <file>         # JSON structure without values
 rtk deps                # Dependency overview
 rtk env                 # Environment variables compact
-rtk summary <cmd>       # Smart summary of command output
+rtk summary <cmd> [args...]  # Smart summary of command output
 rtk diff                # Ultra-compact diffs
 ```
+
+`rtk err`, `rtk test` and `rtk summary` execute the program directly, so shell
+syntax (`&&`, `|`, `*`, `$VAR`) is not interpreted. Pass a script explicitly:
+`rtk err --shell sh 'npm run build && npm test'`.
 
 ### Infrastructure (85% savings)
 ```bash
