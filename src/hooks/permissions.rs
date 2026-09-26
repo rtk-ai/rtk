@@ -146,21 +146,41 @@ pub(crate) fn check_command_with_rules(
 /// 3. `~/.claude/settings.json`
 /// 4. `~/.claude/settings.local.json`
 ///
-/// Missing files and malformed JSON are silently skipped.
+/// Missing and empty files are skipped. A file that exists but cannot be read
+/// or parsed may hold deny rules that can no longer be applied, so it fails
+/// closed: a warning is printed and every command gets at least `Ask`.
 fn load_permission_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
+    load_permission_rules_from(&get_settings_paths())
+}
+
+fn load_permission_rules_from(paths: &[PathBuf]) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut deny_rules = Vec::new();
     let mut ask_rules = Vec::new();
     let mut allow_rules = Vec::new();
 
-    for path in get_settings_paths() {
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
+    for path in paths {
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                eprintln!(
+                    "[rtk] warning: failed to read permissions from {}: {}",
+                    path.display(),
+                    e
+                );
+                ask_rules.push("*".to_string());
+                continue;
+            }
         };
+        if content.trim().is_empty() {
+            continue;
+        }
         let Ok(json) = crate::core::utils::from_json_str::<Value>(&content) else {
             eprintln!(
                 "[rtk] warning: failed to parse permissions from {}",
                 path.display()
             );
+            ask_rules.push("*".to_string());
             continue;
         };
         let Some(permissions) = json.get("permissions") else {
@@ -543,6 +563,99 @@ mod tests {
                 project.join(CLAUDE_DIR).join(SETTINGS_LOCAL_JSON),
             ]
         );
+    }
+
+    fn rules_from_files(files: &[(&str, Option<&str>)]) -> (Vec<String>, Vec<String>, Vec<String>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths: Vec<PathBuf> = files
+            .iter()
+            .map(|(name, content)| {
+                let path = tmp.path().join(name);
+                match content {
+                    Some(content) => std::fs::write(&path, content).unwrap(),
+                    // A directory in place of the file: it exists but cannot be read.
+                    None => std::fs::create_dir(&path).unwrap(),
+                }
+                path
+            })
+            .collect();
+        load_permission_rules_from(&paths)
+    }
+
+    #[test]
+    fn test_valid_settings_file_rules_apply() {
+        let (deny, ask, allow) = rules_from_files(&[(
+            "settings.json",
+            Some(r#"{"permissions":{"deny":["Bash(git push *)"]}}"#),
+        )]);
+        assert_eq!(
+            check_command_with_rules("git push origin main", &deny, &ask, &allow),
+            PermissionVerdict::Deny
+        );
+        assert_eq!(
+            check_command_with_rules("git status", &deny, &ask, &allow),
+            PermissionVerdict::Default
+        );
+    }
+
+    #[test]
+    fn test_unparseable_settings_file_fails_closed_to_ask() {
+        let (deny, ask, allow) = rules_from_files(&[
+            (
+                "settings.json",
+                Some(r#"{"permissions":{"deny":["Bash(git push *)"],}}"#),
+            ),
+            (
+                "settings.local.json",
+                Some(r#"{"permissions":{"allow":["Bash(git status)"]}}"#),
+            ),
+        ]);
+        assert_eq!(
+            check_command_with_rules("git push origin main", &deny, &ask, &allow),
+            PermissionVerdict::Ask
+        );
+        assert_eq!(
+            check_command_with_rules("git status", &deny, &ask, &allow),
+            PermissionVerdict::Ask
+        );
+    }
+
+    #[test]
+    fn test_unreadable_settings_file_fails_closed_to_ask() {
+        let (deny, ask, allow) = rules_from_files(&[("settings.json", None)]);
+        assert_eq!(
+            check_command_with_rules("git push origin main", &deny, &ask, &allow),
+            PermissionVerdict::Ask
+        );
+    }
+
+    #[test]
+    fn test_unreadable_settings_file_keeps_other_files_deny_rules() {
+        let (deny, ask, allow) = rules_from_files(&[
+            ("settings.json", None),
+            (
+                "settings.local.json",
+                Some(r#"{"permissions":{"deny":["Bash(rm *)"]}}"#),
+            ),
+        ]);
+        assert_eq!(
+            check_command_with_rules("rm -rf build", &deny, &ask, &allow),
+            PermissionVerdict::Deny
+        );
+    }
+
+    #[test]
+    fn test_missing_and_empty_settings_files_add_no_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let empty = tmp.path().join("settings.local.json");
+        std::fs::write(
+            &empty, "  
+",
+        )
+        .unwrap();
+        let (deny, ask, allow) =
+            load_permission_rules_from(&[tmp.path().join("settings.json"), empty]);
+        assert!(deny.is_empty() && ask.is_empty() && allow.is_empty());
     }
 
     #[test]
