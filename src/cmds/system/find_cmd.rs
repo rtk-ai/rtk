@@ -1361,7 +1361,13 @@ mod tests {
     #[test]
     fn run_from_args_propagates_find_exit_status() {
         let argv = ["/definitely/missing/xyz", "-mtime", "+0"];
-        let expected = std::process::Command::new("find")
+        // Resolve `find` exactly the way rtk's passthrough does. A bare
+        // `Command::new("find")` resolves differently on Windows (System32
+        // precedes PATH in the CreateProcess search order, picking up
+        // find.exe whose exit codes differ from GNU find), which breaks the
+        // like-for-like comparison this test relies on.
+        let mut baseline = crate::core::utils::resolved_command("find");
+        let expected = baseline
             .args(argv)
             .output()
             .map(|o| o.status.code().unwrap_or(1))
