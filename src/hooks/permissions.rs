@@ -80,7 +80,9 @@ pub(crate) fn check_command_with_rules(
     for segment in &segments {
         let segment = segment.trim();
         for pattern in deny_rules {
-            if command_matches_pattern(segment, pattern) {
+            if command_matches_pattern(segment, pattern)
+                || command_matches_pattern(strip_grammar_residue(segment), pattern)
+            {
                 return PermissionVerdict::Deny;
             }
         }
@@ -108,7 +110,9 @@ pub(crate) fn check_command_with_rules(
         // Ask — if any segment matches an ask rule, the final verdict is Ask.
         if !any_ask {
             for pattern in ask_rules {
-                if command_matches_pattern(segment, pattern) {
+                if command_matches_pattern(segment, pattern)
+                    || command_matches_pattern(strip_grammar_residue(segment), pattern)
+                {
                     any_ask = true;
                     break;
                 }
@@ -403,6 +407,31 @@ pub(crate) fn extract_bash_pattern(rule: &str) -> &str {
 
 /// Check if `cmd` matches a Claude Code permission pattern.
 ///
+/// `split_for_permissions` does not treat `{`/`}` as boundaries, so
+/// `... && { rm -rf / ; }` arrives as `{ rm -rf /` and no exact deny pattern
+/// matches it.
+///
+/// Deny and ask only, never allow: stripping can only make a rule fire on more
+/// segments, so a verdict can get stricter but never looser. On the allow side
+/// it would let `{ ls` inherit an `ls` rule and turn a prompt into an
+/// auto-approve.
+fn strip_grammar_residue(segment: &str) -> &str {
+    let mut rest = segment.trim();
+    loop {
+        // Only a standalone word is grammar. `!rm` is history expansion, not
+        // negation, and `{foo` is a brace expansion, not a group.
+        let stripped = match rest.split_once([' ', '\t']) {
+            Some(("{" | "}" | "!" | "(" | ")", tail)) => tail,
+            _ => return rest,
+        };
+        let next = stripped.trim_start();
+        if next == rest {
+            return rest;
+        }
+        rest = next;
+    }
+}
+
 /// Pattern forms:
 /// - `*` → matches everything
 /// - `prefix:*` or `prefix *` (trailing `*`, no other wildcards) → prefix match with word boundary
@@ -411,8 +440,17 @@ pub(crate) fn extract_bash_pattern(rule: &str) -> &str {
 pub(crate) fn command_matches_pattern(cmd: &str, pattern: &str) -> bool {
     // Shares the lexer's word-boundary definition rather than
     // str::split_whitespace(), so a bare `\r` in `cmd` never collapses into a space.
+    //
+    // A line continuation is removed first: bash elides `\<newline>` entirely
+    // and joins the words either side, so splitting on the newline alone would
+    // leave a stray `\` in front of the command that no pattern matches.
+    //
+    // Only the LF form: against CRLF the backslash escapes the `\r` and the
+    // `\n` still terminates the command, in bash and in the lexer alike, so
+    // the words either side are already separate segments.
     let normalize = |s: &str| {
-        s.split(is_word_boundary_whitespace)
+        s.replace("\\\n", "")
+            .split(is_word_boundary_whitespace)
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
             .join(" ")
@@ -1274,6 +1312,227 @@ mod tests {
         assert_eq!(
             check_command_with_rules("rm -rf /", &[], &[], &allow),
             PermissionVerdict::Default
+        );
+    }
+
+    #[test]
+    fn test_ansi_c_quote_divergence_is_never_auto_allowed() {
+        let allow = vec!["git:*".to_string()];
+        let cmd = r#"git status $'\'' ; rm -rf /"#;
+
+        assert_eq!(
+            check_command_with_rules(cmd, &[], &[], &allow),
+            PermissionVerdict::Ask,
+            "a command whose quoting the lexer cannot follow must prompt, \
+             never auto-allow: {cmd}"
+        );
+
+        // The plain form still allows, so the guard is about the divergence
+        // and not about `git` or about quoting in general.
+        assert_eq!(
+            check_command_with_rules("git status", &[], &[], &allow),
+            PermissionVerdict::Allow
+        );
+        assert_eq!(
+            check_command_with_rules("git commit -m 'a b'", &[], &[], &allow),
+            PermissionVerdict::Allow
+        );
+
+        // An escaped `$` opens no ANSI-C span, so there is no divergence and
+        // nothing to prompt about.
+        assert_eq!(
+            check_command_with_rules(r"git status \$'x'", &[], &[], &allow),
+            PermissionVerdict::Allow,
+            "an escaped dollar is a literal, not the start of ANSI-C quoting"
+        );
+    }
+
+    #[test]
+    fn test_leading_redirect_still_reaches_the_deny_rules() {
+        let deny = vec!["git push --force".to_string()];
+
+        for cmd in [
+            "2>&1 git push --force",
+            "1>&2 git push --force",
+            ">out git push --force",
+            "2>/dev/null git push --force",
+            // Grammar in front of the redirect.
+            "{ 2>&1 git push --force ; }",
+            "! 2>&1 git push --force",
+            "ls && { 2>&1 git push --force ; }",
+            // Operands the tokenizer splits across several adjacent tokens.
+            ">$HOME/x git push --force",
+            "<&0 git push --force",
+            // A boundary ends the operand even with no gap, or the command
+            // right behind it is swallowed along with the filename.
+            ">a|git push --force",
+            ">a;git push --force",
+            ">a&&git push --force",
+            ">out& git push --force",
+            "2>&1& git push --force",
+            // No space after the `&`, which would create a token gap.
+            "2>&1&git push --force",
+            ">&2&git push --force",
+            // Two redirects glued together.
+            "2>&1<&0 git push --force",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &[]),
+                PermissionVerdict::Deny,
+                "a leading redirect must not hide the command from deny rules: {cmd}"
+            );
+        }
+
+        // A trailing redirect keeps its existing treatment.
+        assert_eq!(
+            check_command_with_rules("git push --force 2>&1", &deny, &[], &[]),
+            PermissionVerdict::Deny
+        );
+    }
+
+    /// Stepping over a leading redirect widens the allow side too: the command
+    /// behind it matches the rule that covers it. Deliberate and rule-faithful,
+    /// pinned here so it cannot change silently and so the boundary against a
+    /// real file target stays visible.
+    #[test]
+    fn test_leading_redirect_lets_an_allowed_command_be_allowed() {
+        let allow = vec!["git:*".to_string()];
+
+        for cmd in [
+            "2>&1 git status",
+            "2>/dev/null git status",
+            ">/dev/null git status",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &[], &[], &allow),
+                PermissionVerdict::Allow,
+                "fd-dup and /dev/null carry no data, so the command behind them \
+                 is the whole command: {cmd}"
+            );
+        }
+
+        // A real file target is still undecomposable, so it prompts.
+        assert_eq!(
+            check_command_with_rules(">out git status", &[], &[], &allow),
+            PermissionVerdict::Ask
+        );
+
+        // `<&N` and `<&-` duplicate a descriptor, so like `>&N` they carry no
+        // file target and need no prompt.
+        for cmd in ["<&0 git status", "0<&1 git status", "0<&- git status"] {
+            assert_eq!(
+                check_command_with_rules(cmd, &[], &[], &allow),
+                PermissionVerdict::Allow,
+                "a descriptor duplication is not a file target: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_brace_group_does_not_hide_a_denied_command() {
+        let deny = vec!["rm -rf /".to_string()];
+
+        for cmd in [
+            "git status && { rm -rf / ; }",
+            "git status && ! rm -rf /",
+            "{ rm -rf / ; }",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &[]),
+                PermissionVerdict::Deny,
+                "shell grammar in front of a command must not defeat a deny rule: {cmd}"
+            );
+        }
+    }
+
+    /// The class behind the cases above: a prefix built from redirects,
+    /// grouping, negation and separators does not change which command runs,
+    /// so none of them may hide it from a deny rule.
+    #[test]
+    fn test_no_prefix_construct_can_hide_a_denied_command() {
+        // Generated rather than listed, so no spacing variant depends on
+        // someone remembering to write it out.
+        const REDIRECTS: &[&str] = &[
+            "2>&1",
+            "1>&2",
+            ">&2",
+            "2>&-",
+            ">out",
+            ">>out",
+            "<in",
+            "2>/dev/null",
+            ">/dev/null",
+            ">$HOME/x",
+            "<&0",
+            // An explicit fd number belongs to the redirect, on both arms.
+            "0<&1",
+            "0<&-",
+            "3<&0",
+            "1<in",
+            "0</dev/null",
+            "0>&1",
+            "3>out",
+        ];
+        const SEPARATORS: &[&str] = &[
+            " ", "&", "&&", ";", "|", "||", "& ", "&& ", "; ", "| ", "|| ",
+        ];
+        // Not segment boundaries, so the command stays glued to them.
+        const GRAMMAR: &[&str] = &["{ ", "! ", "{ ! ", "! { ", "} "];
+
+        let mut prefixes = vec![String::new()];
+        for redirect in REDIRECTS {
+            for separator in SEPARATORS {
+                prefixes.push(format!("{redirect}{separator}"));
+                for grammar in GRAMMAR {
+                    prefixes.push(format!("{grammar}{redirect}{separator}"));
+                    prefixes.push(format!("ls && {grammar}{redirect}{separator}"));
+                }
+            }
+            // Two redirects glued with no separator between them.
+            for second in REDIRECTS {
+                prefixes.push(format!("{redirect}{second} "));
+            }
+        }
+        // A line continuation is elided by bash, joining the words either side.
+        for lead in ["", "ls && ", "ls; ", "ls | "] {
+            prefixes.push(format!("{lead}\\\n"));
+            prefixes.push(format!("{lead}\\\r\n"));
+        }
+        for grammar in GRAMMAR {
+            prefixes.push((*grammar).to_string());
+            prefixes.push(format!("ls && {grammar}"));
+        }
+        for lead in ["ls && ", "ls; ", "ls | ", "ls & "] {
+            prefixes.push(lead.to_string());
+        }
+
+        let deny = vec!["rm -rf /".to_string()];
+        for prefix in &prefixes {
+            let cmd = format!("{prefix}rm -rf /");
+            assert_eq!(
+                check_command_with_rules(&cmd, &deny, &[], &[]),
+                PermissionVerdict::Deny,
+                "prefix {prefix:?} hid the denied command: {cmd:?} segmented to {:?}",
+                split_compound_command(&cmd)
+            );
+        }
+        assert!(
+            prefixes.len() > 600,
+            "matrix collapsed to {}",
+            prefixes.len()
+        );
+    }
+
+    #[test]
+    fn test_grammar_residue_never_widens_allow() {
+        let allow = vec!["git:*".to_string()];
+
+        // One segment, so nothing else can hold Allow back: if the stripped
+        // form ever reaches the allow loop, this flips to Allow.
+        assert_eq!(
+            check_command_with_rules("! git status", &[], &[], &allow),
+            PermissionVerdict::Default,
+            "negation must not inherit the allow rule of the command it negates"
         );
     }
 }
