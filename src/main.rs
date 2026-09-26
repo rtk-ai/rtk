@@ -2226,8 +2226,11 @@ fn run_cli() -> Result<i32> {
         }
 
         Commands::Err { command } => {
-            let cmd = command.join(" ");
-            runner::run_err(&cmd, cli.verbose)?
+            if runner::err_uses_argv(&command) {
+                runner::run_err_argv(&command, cli.verbose)?
+            } else {
+                runner::run_err(&command.join(" "), cli.verbose)?
+            }
         }
 
         Commands::Test { command } => {
