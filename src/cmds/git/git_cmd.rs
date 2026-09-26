@@ -32,6 +32,7 @@ pub enum GitCommand {
     Fetch,
     Stash { subcommand: Option<String> },
     Worktree,
+    Remote,
 }
 
 /// Create a git Command with global options (e.g. -C, -c, --git-dir, --work-tree)
@@ -130,6 +131,7 @@ pub fn run(
             run_stash(subcommand.as_deref(), args, verbose, global_args)
         }
         GitCommand::Worktree => run_worktree(args, verbose, global_args),
+        GitCommand::Remote => run_remote(args, verbose, global_args),
     }
 }
 
@@ -3739,6 +3741,141 @@ fn filter_worktree_list(output: &str) -> String {
     result.join("\n")
 }
 
+fn run_remote(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    if verbose > 0 {
+        eprintln!("git remote");
+    }
+
+    const REMOTE_VERBS: &[&str] = &[
+        "add",
+        "remove",
+        "rename",
+        "set-url",
+        "set-head",
+        "set-branches",
+        "prune",
+        "update",
+    ];
+
+    // Compact only the pure listing form (`remote -v`). Anything else, verbs
+    // or stray flags, passes through so no argument is ever dropped.
+    let is_listing = !args.is_empty() && args.iter().all(|a| a == "-v" || a == "--verbose");
+
+    if is_listing {
+        let mut cmd = git_cmd(global_args);
+        cmd.args(["remote", "-v"]);
+        let result = exec_capture(&mut cmd).context("Failed to run git remote -v")?;
+
+        if !result.success() {
+            if !result.stderr.trim().is_empty() {
+                eprintln!("{}", result.stderr);
+            }
+            timer.track(
+                "git remote -v",
+                "rtk git remote",
+                &result.stdout,
+                &result.stderr,
+            );
+            return Ok(result.exit_code);
+        }
+
+        let filtered = filter_remote_output(&result.stdout);
+        let filtered = never_worse(&result.stdout, &filtered).to_string();
+        println!("{}", filtered);
+        timer.track("git remote -v", "rtk git remote", &result.stdout, &filtered);
+
+        return Ok(0);
+    }
+
+    // Plain `git remote` lists names; verb subcommands mutate. Actions are
+    // summarized as "ok", names pass through as-is.
+    let is_action = args
+        .first()
+        .is_some_and(|v| REMOTE_VERBS.contains(&v.as_str()));
+
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("remote");
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    if is_action {
+        let result = exec_capture(&mut cmd).context("Failed to run git remote")?;
+        let combined = result.combined();
+        let msg = if result.success() { "ok" } else { &combined };
+        timer.track(
+            &format!("git remote {}", args.join(" ")),
+            &format!("rtk git remote {}", args.join(" ")),
+            &combined,
+            msg,
+        );
+        if !result.success() {
+            eprintln!("FAILED: git remote {}", args.join(" "));
+            if !result.stderr.trim().is_empty() {
+                eprintln!("{}", result.stderr);
+            }
+            return Ok(result.exit_code);
+        }
+        // Breadcrumb: the remote name is args[1]; prune/update have none.
+        match args.get(1) {
+            Some(name) => println!("ok {name}"),
+            None => println!("ok"),
+        }
+        return Ok(0);
+    }
+
+    let status = cmd.status().context("Failed to run git remote")?;
+    let args_str = args.join(" ");
+    timer.track_passthrough(
+        &format!("git remote {args_str}"),
+        &format!("rtk git remote {args_str} (passthrough)"),
+    );
+    Ok(exit_code_from_status(&status, "git"))
+}
+
+/// Parses one `git remote -v` line: `name<TAB>url (fetch|push)`.
+/// The separator is the first tab because URLs may contain spaces (local paths).
+fn parse_remote_line(line: &str) -> Option<(&str, &str)> {
+    let (name, rest) = line.split_once('\t')?;
+    let url = rest
+        .strip_suffix(" (fetch)")
+        .or_else(|| rest.strip_suffix(" (push)"))?;
+    if name.is_empty() || url.is_empty() {
+        return None;
+    }
+    Some((name, url))
+}
+
+/// Collapses the adjacent (fetch)/(push) pair git prints per remote into one
+/// line. A remote with a distinct push URL keeps both lines unchanged so no
+/// URL is dropped and no label lies, and anything that does not match the
+/// expected format passes through as-is.
+fn filter_remote_output(output: &str) -> String {
+    let mut result = Vec::new();
+    let mut lines = output.lines().peekable();
+    while let Some(line) = lines.next() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some((name, url)) = parse_remote_line(line) {
+            // git prints the push line right after the fetch line per remote.
+            let push_twin = lines.peek().copied().and_then(parse_remote_line);
+            if let Some((push_name, push_url)) = push_twin
+                && push_name == name
+                && push_url == url
+            {
+                lines.next();
+                result.push(format!("{name}\t{url} (fetch/push)"));
+                continue;
+            }
+        }
+        result.push(line.to_string());
+    }
+    result.join("\n")
+}
+
 /// Runs an unsupported git subcommand by passing it through directly
 pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
@@ -5172,6 +5309,92 @@ mod tests {
         }
         // A worktree path spelled like the flag is a path, not a request.
         assert!(!report(&["remove", "--", "-n"]));
+    }
+
+    #[test]
+    fn test_filter_remote_output_collapses_fetch_push() {
+        let output = "origin\thttps://github.com/foo/bar.git (fetch)\norigin\thttps://github.com/foo/bar.git (push)\nupstream\tgit@github.com:baz/qux.git (fetch)\nupstream\tgit@github.com:baz/qux.git (push)\n";
+        let result = filter_remote_output(output);
+        assert_eq!(
+            result,
+            "origin\thttps://github.com/foo/bar.git (fetch/push)\nupstream\tgit@github.com:baz/qux.git (fetch/push)"
+        );
+    }
+
+    #[test]
+    fn test_filter_remote_output_keeps_divergent_push_url() {
+        let output = "origin\thttps://github.com/foo/bar.git (fetch)\norigin\tgit@github.com:foo/bar.git (push)\n";
+        let result = filter_remote_output(output);
+        // Both lines stay verbatim: relabeling the fetch line (fetch/push)
+        // would contradict the push line below it.
+        assert_eq!(
+            result,
+            "origin\thttps://github.com/foo/bar.git (fetch)\norigin\tgit@github.com:foo/bar.git (push)"
+        );
+    }
+
+    #[test]
+    fn test_filter_remote_output_preserves_url_with_spaces() {
+        let output = "spaced\t/tmp/up stream.git (fetch)\nspaced\t/tmp/up stream.git (push)\n";
+        assert_eq!(
+            filter_remote_output(output),
+            "spaced\t/tmp/up stream.git (fetch/push)"
+        );
+    }
+
+    #[test]
+    fn test_filter_remote_output_passes_through_unparsed_lines() {
+        // No tab separator, or a missing (fetch)/(push) suffix: kept verbatim,
+        // and the fetch line above them stays unlabelled for lack of a twin.
+        let output = "origin\thttps://github.com/foo/bar.git (fetch)\nmalformed line\norigin\thttps://github.com/foo/bar.git (unknown)";
+        assert_eq!(filter_remote_output(output), output);
+    }
+
+    #[test]
+    fn test_run_remote_propagates_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let global = vec!["-C".to_string(), dir.path().to_string_lossy().into_owned()];
+        let code = run_remote(&["-v".to_string()], 0, &global).expect("run_remote");
+        assert_ne!(
+            code, 0,
+            "git remote -v failure outside a repo must propagate"
+        );
+    }
+
+    #[test]
+    fn test_run_remote_add_with_verbose_flag_is_not_silently_dropped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let global = vec!["-C".to_string(), dir.path().to_string_lossy().into_owned()];
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(dir.path())
+            .status()
+            .expect("git init");
+        let code = run_remote(
+            &["add".to_string(), "upstream".to_string(), "-v".to_string()],
+            0,
+            &global,
+        )
+        .expect("run_remote");
+        let remotes = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .arg("remote")
+            .output()
+            .expect("git remote");
+        let listing = String::from_utf8_lossy(&remotes.stdout);
+        if code == 0 {
+            assert_eq!(
+                listing.trim(),
+                "upstream",
+                "success must mean the remote was actually added"
+            );
+        } else {
+            assert!(
+                !listing.contains("upstream"),
+                "git failure must propagate as code {code}, not a fake success"
+            );
+        }
     }
 
     #[test]
