@@ -33,6 +33,9 @@ impl RtkStatus {
 pub struct SupportedEntry {
     pub command: String,
     pub count: usize,
+    /// How many of `count` were sized by the category average rather than by a
+    /// measured output. See `SupportedBucket::estimated_occurrences`.
+    pub estimated_occurrences: usize,
     pub rtk_equivalent: &'static str,
     pub category: &'static str,
     pub estimated_savings_tokens: usize,
@@ -160,6 +163,12 @@ impl DiscoverReport {
     pub fn total_opportunity_count(&self) -> usize {
         self.opportunities.iter().map(|s| s.count).sum()
     }
+
+    /// How many rows in a table were sized by the category average rather than
+    /// by an output somebody measured.
+    fn estimated_occurrences(entries: &[SupportedEntry]) -> usize {
+        entries.iter().map(|s| s.estimated_occurrences).sum()
+    }
 }
 
 /// Format report as text.
@@ -238,6 +247,7 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
             report.total_supported_count(),
             format_tokens(report.total_saveable_tokens()),
         ));
+        append_estimate_note(&mut out, &report.supported);
     }
 
     // Handled by RTK, but out of reach where they ran
@@ -268,6 +278,7 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
             report.total_opportunity_count(),
             format_tokens(report.total_opportunity_tokens()),
         ));
+        append_estimate_note(&mut out, &report.opportunities);
     }
 
     // Unhandled
@@ -324,6 +335,26 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
     }
 
     out
+}
+
+/// Say how much of a table's figure was measured and how much was averaged, so
+/// a reader can tell a number taken from a tool result from one taken from a
+/// per-category constant. A command that feeds a pipe is never the last of its
+/// line and so is always averaged, which makes the opportunities table the one
+/// this matters most for.
+fn append_estimate_note(out: &mut String, entries: &[SupportedEntry]) {
+    let estimated = DiscoverReport::estimated_occurrences(entries);
+    let total: usize = entries.iter().map(|e| e.count).sum();
+    if estimated == 0 || total == 0 {
+        return;
+    }
+    if estimated == total {
+        out.push_str("  every figure above is a per-category average, not a measured output\n");
+    } else {
+        out.push_str(&format!(
+            "  {estimated} of {total} sized by per-category average, the rest measured\n"
+        ));
+    }
 }
 
 fn append_agent_notes(out: &mut String, status: AgentIntegrationStatus) {
@@ -396,6 +427,7 @@ mod tests {
         SupportedEntry {
             command: command.to_string(),
             count,
+            estimated_occurrences: 0,
             rtk_equivalent: "rtk cargo",
             category: "build",
             estimated_savings_tokens: tokens,
@@ -430,6 +462,40 @@ mod tests {
             output.find("MISSED SAVINGS") < output.find("OPPORTUNITIES"),
             "what the hook would do comes first"
         );
+    }
+
+    /// A figure taken from a tool result and one taken from a per-category
+    /// constant read the same in the table, so the report has to say which is
+    /// which — otherwise the total claims a precision it does not have.
+    #[test]
+    fn test_a_table_says_how_much_of_it_was_averaged() {
+        let mut report = make_report(100, 10);
+        let mut mixed = entry("cargo test", 10, 3000);
+        mixed.estimated_occurrences = 4;
+        report.supported = vec![mixed];
+
+        let mut all_averaged = entry("grep -n", 7, 500);
+        all_averaged.estimated_occurrences = 7;
+        report.opportunities = vec![all_averaged];
+
+        let output = format_text(&report, 20, false);
+        assert!(
+            output.contains("4 of 10 sized by per-category average"),
+            "a mixed table says how much of it was averaged, got:\n{output}"
+        );
+        assert!(
+            output.contains("every figure above is a per-category average"),
+            "a wholly averaged table says so outright, got:\n{output}"
+        );
+    }
+
+    /// Nothing to disclose when every figure came from a measured output.
+    #[test]
+    fn test_no_estimate_note_when_everything_was_measured() {
+        let mut report = make_report(100, 10);
+        report.supported = vec![entry("cargo test", 3, 900)];
+        let output = format_text(&report, 20, false);
+        assert!(!output.contains("per-category average"), "{output}");
     }
 
     /// A history where the hook reached everything it handles leaves the bucket
@@ -473,6 +539,7 @@ mod tests {
         SupportedEntry {
             command: "git status".to_string(),
             count: 1,
+            estimated_occurrences: 0,
             rtk_equivalent: "rtk git",
             category: "Git",
             estimated_savings_tokens: 10,

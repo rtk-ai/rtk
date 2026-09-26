@@ -649,7 +649,7 @@ pub fn prefix_contains_rtk_disabled(prefix_part: &str) -> bool {
 
 /// Check if a command has RTK_DISABLED= prefix in its env prefix portion.
 pub fn cmd_has_rtk_disabled_prefix(cmd: &str) -> bool {
-    let (prefix_part, _) = strip_disabled_prefix(cmd);
+    let (prefix_part, _) = split_env_prefix(cmd);
     prefix_contains_rtk_disabled(prefix_part)
 }
 
@@ -730,11 +730,6 @@ fn skip_blanks(s: &str, from: usize) -> usize {
         i += 1;
     }
     i
-}
-
-/// Strip RTK_DISABLED=X and other env prefixes, returns `(env_prefix, actual_command)`.
-pub fn strip_disabled_prefix(cmd: &str) -> (&str, &str) {
-    split_env_prefix(cmd)
 }
 
 fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
@@ -843,7 +838,7 @@ fn uses_rtk_disabled(cmd: &str) -> bool {
     !has_heredoc(cmd)
         && split_for_permissions(cmd)
             .iter()
-            .any(|seg| prefix_contains_rtk_disabled(strip_disabled_prefix(seg).0))
+            .any(|seg| prefix_contains_rtk_disabled(split_env_prefix(seg).0))
 }
 
 /// Core of `rewrite_command`, taking already-compiled exclude patterns and
@@ -1774,7 +1769,7 @@ fn rewrite_segment_inner(
         return None;
     }
 
-    let (env_prefix, rest_after_env) = strip_disabled_prefix(trimmed);
+    let (env_prefix, rest_after_env) = split_env_prefix(trimmed);
     if !env_prefix.is_empty() {
         // #345: RTK_DISABLED=1 in env prefix → skip rewrite entirely. The
         // warning that goes with it (#508) is raised by `rewrite_command`,
@@ -1868,7 +1863,7 @@ fn rewrite_segment_inner(
     {
         // head/tail rewrite to `rtk read`, so honour exclude_commands here too:
         // this branch returns before the checks below. Any env prefix has already
-        // been peeled by strip_disabled_prefix above.
+        // been peeled by split_env_prefix above.
         if is_excluded(cmd_part, excluded) {
             return None;
         }
@@ -4790,7 +4785,7 @@ mod tests {
             rewrite_command_no_prefixes("tail -20 src/main.rs", &excluded),
             None
         );
-        // An env prefix is peeled by strip_disabled_prefix before this branch,
+        // An env prefix is peeled by split_env_prefix before this branch,
         // so the exclusion still applies to the wrapped head/tail.
         assert_eq!(
             rewrite_command_no_prefixes("RUST_LOG=debug tail -20 src/main.rs", &excluded),
@@ -7505,16 +7500,16 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_disabled_prefix() {
+    fn test_split_env_prefix_keeps_the_bypass_visible() {
         assert_eq!(
-            strip_disabled_prefix("RTK_DISABLED=1 git status"),
+            split_env_prefix("RTK_DISABLED=1 git status"),
             ("RTK_DISABLED=1 ", "git status")
         );
         assert_eq!(
-            strip_disabled_prefix("FOO=1 RTK_DISABLED=1 cargo test"),
+            split_env_prefix("FOO=1 RTK_DISABLED=1 cargo test"),
             ("FOO=1 RTK_DISABLED=1 ", "cargo test")
         );
-        assert_eq!(strip_disabled_prefix("git status"), ("", "git status"));
+        assert_eq!(split_env_prefix("git status"), ("", "git status"));
     }
 
     /// A quoted value is one word however many blanks it holds. Reading it with
