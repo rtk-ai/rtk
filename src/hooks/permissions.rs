@@ -5,6 +5,7 @@ use super::constants::{
 use super::init::resolve_claude_dir;
 use crate::core::stream::exec_capture;
 use crate::discover::lexer::{is_word_boundary_whitespace, split_for_permissions};
+use crate::discover::registry::WrapperScan;
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -44,7 +45,15 @@ pub enum Host {
 
 pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
     let (deny_rules, ask_rules, allow_rules) = load_rules_for(host);
-    check_command_with_rules(cmd, &deny_rules, &ask_rules, &allow_rules)
+    let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
+    check_command_with_params(
+        cmd,
+        &deny_rules,
+        &ask_rules,
+        &allow_rules,
+        &excluded,
+        &transparent_prefixes,
+    )
 }
 
 /// Load `host`'s deny/ask/allow Bash rules from disk, doing the settings-file I/O
@@ -136,6 +145,70 @@ pub(crate) fn check_command_with_rules(
     } else {
         PermissionVerdict::Default
     }
+}
+
+/// [`check_command_with_rules`], extended with the quoted shell wrappers RTK's
+/// own rewriter would look inside.
+///
+/// A host's allow rule matched the outer command — it never parsed the quoted
+/// script. Rewriting inside that script must not widen what the rule approved:
+///
+/// - deny rules are evaluated against the inner commands too, and an inner deny
+///   outranks an outer allow;
+/// - seeing a wrapper at all caps the verdict at `Ask`, so a `*` allow rule
+///   cannot approve a script the host never saw. That includes one the strict
+///   parser refused (`bash -lc`), which RTK does not rewrite but the host did
+///   not decompose either.
+///
+/// `scan` comes from [`registry::scan_shell_wrappers`], i.e. from the rewrite
+/// walk itself rather than from a second parse of the raw command. That is what
+/// keeps this from disagreeing with the rewriter about where a wrapper may
+/// begin: a wrapper behind `command`, `env`, `nice`, or an entry in the user's
+/// own unbounded `transparent_prefixes` is reached by both or by neither. A
+/// word that is merely an argument is not such a position, so
+/// `echo bash -c '...'` stays untouched (#3828).
+pub(crate) fn check_with_wrapper_scan(
+    cmd: &str,
+    scan: &WrapperScan,
+    deny_rules: &[String],
+    ask_rules: &[String],
+    allow_rules: &[String],
+) -> PermissionVerdict {
+    let verdict = check_command_with_rules(cmd, deny_rules, ask_rules, allow_rules);
+    if verdict == PermissionVerdict::Deny {
+        return verdict;
+    }
+
+    // The same deny machinery the outer command gets, applied to each script.
+    for script in scan.scripts() {
+        if check_command_with_rules(script, deny_rules, &[], &[]) == PermissionVerdict::Deny {
+            return PermissionVerdict::Deny;
+        }
+    }
+
+    if scan.saw_wrapper() && verdict == PermissionVerdict::Allow {
+        return PermissionVerdict::Ask;
+    }
+    verdict
+}
+
+/// [`check_with_wrapper_scan`] with the scan taken from `cmd` under the given
+/// rewrite config.
+///
+/// The config is passed in rather than read here for the reason
+/// [`decision::decide_with_params`](crate::hooks::decision::decide_with_params)
+/// gives: a test that let `hook_rewrite_params` answer would change verdict with
+/// the developer's own `exclude_commands` and `transparent_prefixes` (#3146).
+pub(crate) fn check_command_with_params(
+    cmd: &str,
+    deny_rules: &[String],
+    ask_rules: &[String],
+    allow_rules: &[String],
+    excluded: &[String],
+    transparent_prefixes: &[String],
+) -> PermissionVerdict {
+    let scan = crate::discover::registry::scan_shell_wrappers(cmd, excluded, transparent_prefixes);
+    check_with_wrapper_scan(cmd, &scan, deny_rules, ask_rules, allow_rules)
 }
 
 /// Load deny, ask, and allow Bash rules from all Claude Code settings files.
@@ -1274,6 +1347,169 @@ mod tests {
         assert_eq!(
             check_command_with_rules("rm -rf /", &[], &[], &allow),
             PermissionVerdict::Default
+        );
+    }
+    /// The scan is what the rewriter saw, so the two can never disagree about
+    /// where a wrapper begins. `check_command_with_params` runs the same walk
+    /// the hook's rewrite will.
+    fn wrapper_verdict(
+        cmd: &str,
+        deny: &[String],
+        allow: &[String],
+        transparent_prefixes: &[String],
+    ) -> PermissionVerdict {
+        check_command_with_params(cmd, deny, &[], allow, &[], transparent_prefixes)
+    }
+
+    #[test]
+    fn test_shell_wrapper_never_auto_allowed() {
+        let allow = vec!["*".to_string()];
+        assert_eq!(
+            wrapper_verdict(r#"bash -c "head foo && grep -R bar .""#, &[], &allow, &[]),
+            PermissionVerdict::Ask
+        );
+    }
+
+    #[test]
+    fn test_shell_wrapper_inner_deny_wins() {
+        let deny = vec!["rm:*".to_string()];
+        let allow = vec!["*".to_string()];
+        assert_eq!(
+            wrapper_verdict(
+                "bash -c 'git status; rm -rf /tmp/example'",
+                &deny,
+                &allow,
+                &[]
+            ),
+            PermissionVerdict::Deny
+        );
+    }
+
+    #[test]
+    fn test_unsupported_shell_wrapper_candidate_never_auto_allowed() {
+        let allow = vec!["*".to_string()];
+        for command in [
+            "bash -lc 'git status'",
+            "bash -e -c 'git status'",
+            // Options taking a separate argument used to hide the `-c` behind
+            // them, so these reached Allow (#3828 review).
+            "bash -o pipefail -c 'git status'",
+            "bash -O extglob -c 'git status'",
+            "bash --rcfile /dev/null -c 'git status'",
+        ] {
+            assert_eq!(
+                wrapper_verdict(command, &[], &allow, &[]),
+                PermissionVerdict::Ask,
+                "unsupported command-string wrapper must ask: {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_shell_wrapper_inner_deny_wins_inside_outer_compound() {
+        let deny = vec!["rm:*".to_string()];
+        let allow = vec!["*".to_string()];
+        assert_eq!(
+            wrapper_verdict(
+                "bash -c 'git status; rm -rf /tmp/example' && cargo test",
+                &deny,
+                &allow,
+                &[]
+            ),
+            PermissionVerdict::Deny
+        );
+    }
+
+    /// The regression this gate exists for: the rewriter reaches a wrapper
+    /// after stripping env assignments, shell keywords, routable wrappers,
+    /// process wrappers (#2375) and user `transparent_prefixes`. Deriving the
+    /// boundary separately here meant a prefixed wrapper was rewritten *and*
+    /// auto-allowed with its inner deny skipped (#3828 review).
+    #[test]
+    fn test_prefixed_shell_wrapper_inner_deny_wins() {
+        let deny = vec!["rm:*".to_string()];
+        let allow = vec!["*".to_string()];
+        let prefixes = vec!["direnv exec .".to_string()];
+        for prefix in [
+            "command",
+            "env",
+            "exec",
+            "builtin",
+            "noglob",
+            "uv run",
+            "FOO=bar",
+            "nice",
+            "nohup",
+            "timeout 30",
+            "direnv exec .",
+        ] {
+            let command = format!("{prefix} bash -c 'git status; rm -rf /tmp/example'");
+            assert_eq!(
+                wrapper_verdict(&command, &deny, &allow, &prefixes),
+                PermissionVerdict::Deny,
+                "inner deny must outrank an outer allow: {command:?}"
+            );
+        }
+    }
+
+    /// Same walk, same cap: a prefixed wrapper is no more auto-allowable than a
+    /// bare one.
+    #[test]
+    fn test_prefixed_shell_wrapper_never_auto_allowed() {
+        let allow = vec!["*".to_string()];
+        let prefixes = vec!["direnv exec .".to_string()];
+        for command in [
+            "command bash -c 'git status'",
+            "env bash -c 'git status'",
+            "timeout 30 bash -c 'git status'",
+            "direnv exec . bash -c 'git status'",
+            // Unparseable behind a prefix, so never rewritten — but the host's
+            // rule did not decompose it either.
+            "command bash -lc 'git status'",
+        ] {
+            assert_eq!(
+                wrapper_verdict(command, &[], &allow, &prefixes),
+                PermissionVerdict::Ask,
+                "prefixed wrapper must not be auto-allowed: {command:?}"
+            );
+        }
+    }
+
+    /// A word that merely *mentions* a shell is not a position the rewriter can
+    /// reach, so it must not be treated as a wrapper. Scanning every word start
+    /// would deny this.
+    #[test]
+    fn test_wrapper_shaped_argument_is_not_a_wrapper() {
+        let deny = vec!["rm:*".to_string()];
+        let allow = vec!["*".to_string()];
+        for command in [
+            "echo bash -c 'rm -rf /tmp/example'",
+            "printf '%s' bash -c 'rm -rf /tmp/example'",
+        ] {
+            assert_eq!(
+                wrapper_verdict(command, &deny, &allow, &[]),
+                PermissionVerdict::Allow,
+                "an argument that looks like a wrapper is not one: {command:?}"
+            );
+        }
+    }
+
+    /// `exclude_commands` is the escape hatch for any sharp edge in the wrapper
+    /// path: an excluded wrapper is not rewritten, so it raises no new
+    /// permission surface either (#3828 review).
+    #[test]
+    fn test_excluded_shell_wrapper_raises_no_permission_surface() {
+        let allow = vec!["*".to_string()];
+        assert_eq!(
+            check_command_with_params(
+                "bash -c 'git status'",
+                &[],
+                &[],
+                &allow,
+                &["bash".to_string()],
+                &[]
+            ),
+            PermissionVerdict::Allow
         );
     }
 }

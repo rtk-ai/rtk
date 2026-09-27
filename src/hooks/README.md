@@ -76,6 +76,21 @@ Deny > Ask > Allow (explicit) > Default (ask)
 
 Rules are loaded from all Claude Code `settings.json` files (project + global, including `.local` variants). Only `Bash(...)` rules are extracted; other scopes (Read, Write) are ignored.
 
+Quoted `sh -c`, `bash -c`, and `zsh -c` scripts add a
+second command-parsing boundary. RTK checks deny rules against both the outer
+wrapper and the parsed inner segments. A wrapper rewrite is never auto-allowed:
+its strongest RTK verdict is `Ask`. Ask-capable hosts prompt, while other
+hosts retain their existing native permission flow. Unsupported or ambiguous
+wrapper syntax is left unchanged for the host to evaluate.
+
+The gate does not look for that boundary itself. `registry::scan_shell_wrappers`
+runs the rewrite walk and reports the scripts it entered, and
+`check_with_wrapper_scan` judges those — so the gate cannot disagree with the
+rewriter about where a wrapper may begin. That matters because the rewriter
+reaches one behind an env assignment, a shell keyword, a process wrapper, or any
+entry in the user's own `transparent_prefixes`, and enumerating those in the gate
+would leave the config-driven ones open.
+
 | Verdict | Trigger | rewrite_cmd exit | Hook behavior |
 |---------|---------|-----------------|---------------|
 | Deny | `permissions.deny` rule matched | 2 | Passthrough — host tool handles denial |
@@ -116,6 +131,7 @@ rewrite`, since it is inherited by every child process. See `decision.rs`'s
 - `permissions.rs` — loads deny/ask/allow rules, evaluates precedence, returns `PermissionVerdict`
 - `rewrite_cmd.rs` — maps verdict to exit code (consumed by shell hook)
 - `hook_cmd.rs` — maps decisions to each agent's JSON protocol, including Codex `updatedInput`
+- `discover/shell_wrapper.rs` — the conservative script-span parser; `registry` drives it and reports what it found to the gate
 
 ## Exit Code Contract
 
