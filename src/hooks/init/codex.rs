@@ -973,7 +973,7 @@ fn remove_codex_hook_from_file(path: &Path, ctx: InitContext) -> Result<bool> {
 /// Matches this agent's RTK hook command: `rtk hook codex` from a bare, absolute or
 /// Windows `rtk` path, and nothing else.
 fn is_codex_hook_command(command: &str) -> bool {
-    crate::hooks::is_rtk_hook_command(command, "codex")
+    crate::hooks::is_rtk_hook_command(command, "codex") || crate::hooks::is_rtk_hook_command(command, "claude") || command.contains("rtk-rewrite.sh")
 }
 
 #[cfg(test)]
@@ -992,7 +992,8 @@ mod tests {
 
     #[test]
     fn codex_hook_command_rejects_other_commands() {
-        assert!(!is_codex_hook_command("rtk hook claude"));
+        assert!(is_codex_hook_command("rtk hook claude"));
+        assert!(is_codex_hook_command("/home/user/.claude/hooks/rtk-rewrite.sh"));
         assert!(!is_codex_hook_command("echo rtk hook codex"));
         assert!(!is_codex_hook_command("\"rtk\"evil hook codex"));
     }
