@@ -908,7 +908,7 @@ pub(super) fn codex_hook_already_present(root: &serde_json::Value) -> bool {
         PRE_TOOL_USE_KEY,
         HookEntries::Grouped,
         |group| group_covers_tool(group, "Bash"),
-        |hook| is_command_hook(hook, is_codex_hook_command),
+        |hook| is_command_hook(hook, is_native_codex_hook_command),
     )
 }
 
@@ -920,6 +920,9 @@ fn patch_codex_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
         return Ok(false);
     }
 
+    remove_hook_entries(&mut root, PRE_TOOL_USE_KEY, HookEntries::Grouped, |hook| {
+        is_command_hook(hook, is_legacy_codex_hook_command)
+    });
     insert_hook_entry(&mut root, CODEX_HOOK_COMMAND)?;
 
     if !dry_run && let Some(parent) = path.parent() {
@@ -975,8 +978,24 @@ fn remove_codex_hook_from_file(path: &Path, ctx: InitContext) -> Result<bool> {
 
 /// Matches this agent's RTK hook command: `rtk hook codex` from a bare, absolute or
 /// Windows `rtk` path, and nothing else.
+fn is_native_codex_hook_command(command: &str) -> bool {
+    crate::hooks::is_rtk_hook_command(command, "codex")
+}
+
+fn is_legacy_codex_hook_command(command: &str) -> bool {
+    crate::hooks::is_rtk_hook_command(command, "claude")
+        || crate::discover::lexer::shell_split(command)
+            .as_slice()
+            .first()
+            .is_some_and(|path| {
+                std::path::Path::new(path)
+                    .file_name()
+                    .is_some_and(|name| name == "rtk-rewrite.sh")
+            })
+}
+
 fn is_codex_hook_command(command: &str) -> bool {
-    crate::hooks::is_rtk_hook_command(command, "codex") || crate::hooks::is_rtk_hook_command(command, "claude") || command.contains("rtk-rewrite.sh")
+    is_native_codex_hook_command(command) || is_legacy_codex_hook_command(command)
 }
 
 #[cfg(test)]
@@ -997,8 +1016,15 @@ mod tests {
     #[test]
     fn codex_hook_command_rejects_other_commands() {
         assert!(is_codex_hook_command("rtk hook claude"));
-        assert!(is_codex_hook_command("/home/user/.claude/hooks/rtk-rewrite.sh"));
+        assert!(is_codex_hook_command(
+            "/home/user/.claude/hooks/rtk-rewrite.sh"
+        ));
         assert!(!is_codex_hook_command("echo rtk hook codex"));
+        assert!(!is_codex_hook_command("echo rtk-rewrite.sh"));
+        assert!(!is_codex_hook_command("/custom/rtk-rewrite.sh.backup"));
+        assert!(!is_codex_hook_command(
+            "python3 /custom/audit.py --label rtk-rewrite.sh"
+        ));
         assert!(!is_codex_hook_command("\"rtk\"evil hook codex"));
     }
 
