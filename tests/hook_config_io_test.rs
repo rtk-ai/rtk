@@ -105,3 +105,61 @@ fn codex_status_handles_global_and_local_empty_bom_and_invalid_files() {
     assert_eq!(fs::read_to_string(&global_path).unwrap(), "{broken");
     assert_eq!(fs::read_to_string(&local_path).unwrap(), "{broken");
 }
+
+#[test]
+fn project_hook_only_cli_patches_only_project_settings() {
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("project");
+    let global = temp.path().join("global-claude");
+    fs::create_dir_all(project.join(".claude")).unwrap();
+    fs::create_dir_all(&global).unwrap();
+    let project_settings = project.join(".claude/settings.json");
+    let global_settings = global.join("settings.json");
+    let original = r#"{"permissions":{"allow":["Bash(ls)"]}}"#;
+    fs::write(&project_settings, original).unwrap();
+    fs::write(&global_settings, "{}").unwrap();
+
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+            .args(args)
+            .current_dir(&project)
+            .env("HOME", temp.path())
+            .env("CLAUDE_CONFIG_DIR", &global)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .env("RTK_DB_PATH", temp.path().join("rtk.db"))
+            .env("RTK_TELEMETRY_DISABLED", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+
+    let manual = run(&["init", "--hook-only", "--no-patch"]);
+    assert!(manual.contains(&project_settings.display().to_string()));
+    assert_eq!(fs::read_to_string(&project_settings).unwrap(), original);
+
+    run(&["init", "--hook-only", "--auto-patch"]);
+    let installed = fs::read_to_string(&project_settings).unwrap();
+    let root: serde_json::Value = serde_json::from_str(&installed).unwrap();
+    assert_eq!(root["permissions"]["allow"][0], "Bash(ls)");
+    assert_eq!(
+        root["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+        "rtk hook claude"
+    );
+    assert_eq!(
+        fs::read_to_string(project_settings.with_extension("json.bak")).unwrap(),
+        original
+    );
+    assert_eq!(fs::read_to_string(&global_settings).unwrap(), "{}");
+    assert!(!project.join("CLAUDE.md").exists());
+    assert!(!project.join(".claude/RTK.md").exists());
+
+    let status = run(&["init", "--show"]);
+    assert!(status.contains("[ok] Project settings.json: RTK hook configured"));
+    run(&["init", "--hook-only", "--auto-patch"]);
+    assert_eq!(fs::read_to_string(&project_settings).unwrap(), installed);
+}

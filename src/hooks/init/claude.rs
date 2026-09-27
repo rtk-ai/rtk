@@ -194,16 +194,30 @@ fn patch_settings_json_command(
     include_opencode: bool,
     ctx: InitContext,
 ) -> Result<PatchResult> {
+    let claude_dir = resolve_claude_dir()?;
+    patch_settings_json_command_at(&claude_dir, hook_command, mode, include_opencode, ctx)
+}
+
+/// Register the native Claude hook in a selected configuration directory.
+fn patch_settings_json_command_at(
+    claude_dir: &Path,
+    hook_command: &str,
+    mode: PatchMode,
+    include_opencode: bool,
+    ctx: InitContext,
+) -> Result<PatchResult> {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
-    let claude_dir = resolve_claude_dir()?;
     let settings_path = claude_dir.join(SETTINGS_JSON);
 
     let mut root = read_json_file(&settings_path)?.unwrap_or_else(|| serde_json::json!({}));
 
-    // Check idempotency
-    if hook_already_present(&root, hook_command) {
+    // A legacy script registration is not a working native hook. Upgrade the
+    // settings entry as part of this same backed-up, atomic settings write.
+    let legacy_removed = remove_legacy_hook_entries_from_json(&mut root);
+    let native_present = hook_already_present(&root, hook_command);
+    if native_present && !legacy_removed {
         if verbose > 0 {
             eprintln!("settings.json: hook already present");
         }
@@ -213,7 +227,7 @@ fn patch_settings_json_command(
     // Handle mode
     match mode {
         PatchMode::Skip => {
-            print_manual_instructions(hook_command, include_opencode);
+            print_manual_instructions(&settings_path, hook_command, include_opencode);
             return Ok(PatchResult::Skipped);
         }
         PatchMode::Ask => {
@@ -224,7 +238,7 @@ fn patch_settings_json_command(
                     settings_path.display()
                 );
             } else if !prompt_user_consent(&settings_path)? {
-                print_manual_instructions(hook_command, include_opencode);
+                print_manual_instructions(&settings_path, hook_command, include_opencode);
                 return Ok(PatchResult::Declined);
             }
         }
@@ -233,7 +247,9 @@ fn patch_settings_json_command(
         }
     }
 
-    insert_hook_entry(&mut root, hook_command)?;
+    if !native_present {
+        insert_hook_entry(&mut root, hook_command)?;
+    }
 
     if !dry_run {
         ensure_parent_dir(&settings_path)?;
@@ -542,14 +558,15 @@ pub(super) fn run_hook_only_mode(
     ctx: InitContext,
 ) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
-    if !global {
-        eprintln!("[warn] Warning: --hook-only only makes sense with --global");
-        eprintln!("    For local projects, use default mode or --claude-md");
-        return Ok(());
-    }
-
-    // Migrate old hook script if present
-    migrate_old_hook_script(ctx);
+    let claude_dir = if global {
+        // Legacy script migration belongs to the user-global installation.
+        migrate_old_hook_script(ctx);
+        resolve_claude_dir()?
+    } else {
+        std::env::current_dir()
+            .context("Failed to determine the current project directory")?
+            .join(CLAUDE_DIR)
+    };
 
     let opencode_plugin_path = if install_opencode {
         let path = prepare_opencode_plugin_path()?;
@@ -559,23 +576,30 @@ pub(super) fn run_hook_only_mode(
         None
     };
 
+    // Patch the selected project or user-global settings.json with the native command.
+    let patch_result = patch_settings_json_command_at(
+        &claude_dir,
+        CLAUDE_HOOK_COMMAND,
+        patch_mode,
+        install_opencode,
+        ctx,
+    )?;
+
     if !dry_run {
-        println!("\nRTK hook registered (hook-only mode).\n");
-        println!("  Command: {}", CLAUDE_HOOK_COMMAND);
-        if let Some(path) = &opencode_plugin_path {
-            println!("  OpenCode: {}", path.display());
+        if matches!(
+            patch_result,
+            PatchResult::Patched | PatchResult::AlreadyPresent
+        ) {
+            let scope = if global { "global" } else { "project" };
+            println!("\nRTK hook registered ({scope} hook-only mode).\n");
+            println!("  Command: {}", CLAUDE_HOOK_COMMAND);
+            if let Some(path) = &opencode_plugin_path {
+                println!("  OpenCode: {}", path.display());
+            }
+            println!(
+                "  Note: No RTK.md created. Claude won't know about meta commands (gain, discover, proxy)."
+            );
         }
-        println!(
-            "  Note: No RTK.md created. Claude won't know about meta commands (gain, discover, proxy)."
-        );
-    }
-
-    // Patch settings.json with binary command
-    let patch_result =
-        patch_settings_json_command(CLAUDE_HOOK_COMMAND, patch_mode, install_opencode, ctx)?;
-
-    // Report result
-    if !dry_run {
         match patch_result {
             PatchResult::Patched => {
                 // Already printed by patch_settings_json_command
@@ -1205,6 +1229,122 @@ mod tests {
             !tmp.path().join(SETTINGS_JSON).exists(),
             "settings.json must not be created for local init"
         );
+    }
+
+    #[test]
+    fn test_local_hook_only_mode_only_patches_project_settings() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        fs::create_dir(&project).unwrap();
+
+        with_missing_claude_dir_override(&tmp, |global_dir| {
+            let _cwd = CwdGuard::enter(&project);
+            run_hook_only_mode(false, PatchMode::Auto, false, InitContext::default()).unwrap();
+
+            let local_dir = project.join(CLAUDE_DIR);
+            let settings = read_json_file(&local_dir.join(SETTINGS_JSON))
+                .unwrap()
+                .expect("project settings.json must be created");
+            assert!(hook_already_present(&settings, CLAUDE_HOOK_COMMAND));
+            assert!(
+                !global_dir.exists(),
+                "global Claude config must be untouched"
+            );
+            assert!(!project.join(CLAUDE_MD).exists());
+            assert!(!local_dir.join(RTK_MD).exists());
+            assert!(!project.join(".rtk").exists());
+        });
+    }
+
+    #[test]
+    fn test_local_hook_only_mode_preserves_settings_and_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        let local_dir = project.join(CLAUDE_DIR);
+        fs::create_dir_all(&local_dir).unwrap();
+        let path = local_dir.join(SETTINGS_JSON);
+        let original = r#"{"permissions":{"allow":["Bash(ls)"]},"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo user"}]}]}}"#;
+        fs::write(&path, original).unwrap();
+
+        with_claude_dir_override(&tmp, |global_dir| {
+            let _cwd = CwdGuard::enter(&project);
+            run_hook_only_mode(false, PatchMode::Auto, false, InitContext::default()).unwrap();
+            let installed = fs::read_to_string(&path).unwrap();
+            let root = read_json_file(&path).unwrap().unwrap();
+            assert_eq!(root["permissions"]["allow"][0], "Bash(ls)");
+            assert_eq!(root["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
+            assert!(hook_already_present(&root, CLAUDE_HOOK_COMMAND));
+            assert_eq!(
+                fs::read_to_string(path.with_extension("json.bak")).unwrap(),
+                original
+            );
+
+            run_hook_only_mode(false, PatchMode::Auto, false, InitContext::default()).unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), installed);
+            assert!(!global_dir.join(SETTINGS_JSON).exists());
+        });
+    }
+
+    #[test]
+    fn test_local_hook_only_mode_upgrades_legacy_script_entry() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        let local_dir = project.join(CLAUDE_DIR);
+        fs::create_dir_all(&local_dir).unwrap();
+        let path = local_dir.join(SETTINGS_JSON);
+        let original = r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":".claude/hooks/rtk-rewrite.sh"}]}]}}"#;
+        fs::write(&path, original).unwrap();
+
+        with_missing_claude_dir_override(&tmp, |global_dir| {
+            let _cwd = CwdGuard::enter(&project);
+            run_hook_only_mode(false, PatchMode::Auto, false, InitContext::default()).unwrap();
+            let installed = fs::read_to_string(&path).unwrap();
+            assert_eq!(installed.matches(CLAUDE_HOOK_COMMAND).count(), 1);
+            assert!(!installed.contains(REWRITE_HOOK_FILE));
+            assert_eq!(
+                fs::read_to_string(path.with_extension("json.bak")).unwrap(),
+                original
+            );
+            assert!(!global_dir.exists());
+        });
+    }
+
+    #[test]
+    fn test_local_hook_only_mode_rejects_invalid_settings_without_changes() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        let local_dir = project.join(CLAUDE_DIR);
+        fs::create_dir_all(&local_dir).unwrap();
+        let settings_path = local_dir.join(SETTINGS_JSON);
+        fs::write(&settings_path, "{invalid").unwrap();
+
+        with_missing_claude_dir_override(&tmp, |global_dir| {
+            let _cwd = CwdGuard::enter(&project);
+            let error = run_hook_only_mode(false, PatchMode::Auto, false, InitContext::default())
+                .expect_err("invalid project settings must fail");
+            assert!(format!("{error:#}").contains(&settings_path.display().to_string()));
+            assert_eq!(fs::read_to_string(&settings_path).unwrap(), "{invalid");
+            assert!(!settings_path.with_extension("json.bak").exists());
+            assert!(!global_dir.exists());
+        });
+    }
+
+    #[test]
+    fn test_local_hook_only_mode_dry_run_does_not_create_settings() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        fs::create_dir(&project).unwrap();
+        let ctx = InitContext {
+            dry_run: true,
+            ..Default::default()
+        };
+
+        with_missing_claude_dir_override(&tmp, |global_dir| {
+            let _cwd = CwdGuard::enter(&project);
+            run_hook_only_mode(false, PatchMode::Auto, false, ctx).unwrap();
+            assert!(!project.join(CLAUDE_DIR).exists());
+            assert!(!global_dir.exists());
+        });
     }
 
     #[test]

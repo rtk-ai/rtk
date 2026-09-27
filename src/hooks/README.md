@@ -26,6 +26,7 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 |------|---------|---------|----------|
 | Default (global) | `rtk init -g` | Hook, SHA-256 hash, RTK.md | settings.json, CLAUDE.md |
 | Hook only | `rtk init -g --hook-only` | Hook, SHA-256 hash | settings.json |
+| Hook only (project) | `rtk init --hook-only` | `.claude/settings.json` if missing | `.claude/settings.json` |
 | Claude-MD (legacy) | `rtk init --claude-md` | 134-line RTK block | CLAUDE.md |
 | Windsurf | `rtk init -g --agent windsurf` | `.windsurfrules` | -- |
 | Cline | `rtk init --agent cline` | `.clinerules` | -- |

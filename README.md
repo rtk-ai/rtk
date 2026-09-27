@@ -401,6 +401,7 @@ rtk init -g                 # Install hook + RTK.md (recommended)
 rtk init -g --opencode      # OpenCode plugin (instead of Claude Code)
 rtk init -g --auto-patch    # Non-interactive (CI/CD)
 rtk init -g --hook-only     # Hook only, no RTK.md
+rtk init --hook-only        # Hook only in this project
 rtk init --show             # Verify installation
 ```
 
