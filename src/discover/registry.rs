@@ -6,13 +6,13 @@ use regex::{Regex, RegexSet};
 use std::path::Path;
 use std::sync::LazyLock;
 
-use super::lexer::{
+use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
+use crate::core::cmdline::lexer::{
     CaseTracker, ParsedToken, PipeKind, QuoteScan, SubstitutionDepth, TokenKind,
     ansi_c_quote_defeats_lexer, coalesce_words, is_crlf_at, is_word_boundary_whitespace,
     redirect_has_file_target, shell_split, split_for_classify, split_for_permissions, tokenize,
     tokenize_with_newlines, word_spans,
 };
-use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 
 const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
 
@@ -1336,7 +1336,7 @@ fn rewrite_pipeline_producer(
 
 /// Rewrite a compound command (with `&&`, `||`, `;`, `|`) by rewriting each
 /// segment. Third of three compound-command segmenters — see the comparison
-/// table on [`crate::discover::lexer::split_for_permissions`]. Deliberately
+/// table on [`crate::core::cmdline::lexer::split_for_permissions`]. Deliberately
 /// less conservative than that gate: standalone `(`/`)` isn't a segment
 /// boundary, and redirects are preserved verbatim rather than truncated.
 /// Rewrite the command occupying `cmd[start..end]`, keeping the whitespace
@@ -2231,7 +2231,7 @@ mod tests {
     // a reason for is a bug.
     mod segmenter_agreement {
         use super::{rewrite_command_no_prefixes, split_command_chain};
-        use crate::discover::lexer::split_for_permissions;
+        use crate::core::cmdline::lexer::split_for_permissions;
 
         /// `&` ends a command as surely as `;` does.
         #[test]

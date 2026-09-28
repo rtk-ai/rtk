@@ -14,7 +14,7 @@ This module has two jobs:
 
 When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 
-**Tokenization** — The lexer (`lexer.rs`) turns the raw string into typed tokens. It's a single-pass state machine that understands shell quoting, escapes, redirects, and operators. This is critical because naive string splitting breaks on quoted content like `git commit -m "fix && update"`.
+**Tokenization** — The lexer (`core/cmdline/lexer.rs`) turns the raw string into typed tokens. It's a single-pass state machine that understands shell quoting, escapes, redirects, and operators. This is critical because naive string splitting breaks on quoted content like `git commit -m "fix && update"`.
 
 ```
 "cargo test 2>&1 && git status"
@@ -39,20 +39,9 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 
 **Result**: `rtk cargo fmt --all && rtk cargo test 2>&1 | tail -20`. Bash handles the `&&` and `|` at execution time — each `rtk` invocation is a separate process.
 
-## Shared Lexer Toolkit
+## Shell Lexer
 
-`lexer.rs` is layer 1 of RTK's command parsing (raw string → quote/operator-aware tokens and words) — layer 2, already-split argv → flags/values, is `core/arg_tokenizer.rs`. It's not private to this module: `hooks/permissions.rs`, `hooks/mod.rs`, and `main.rs`'s `rtk proxy` all build on it instead of re-scanning commands themselves.
-
-| Function | Purpose | Used outside `discover/` by |
-|---|---|---|
-| `tokenize(cmd)` | Full shell-syntax tokens: quotes, escapes, operators, pipes, redirects, shellisms | — |
-| `tokenize_with_newlines(cmd)` | Like `tokenize`, plus a `\n` `Operator` token per unquoted newline (a lone `\r` stays glued to its word, matching real bash) | — |
-| `shell_split(cmd)` | Quote-aware split into argv-ready words (quotes stripped, escapes resolved) | `hooks/mod.rs::is_claude_hook_command`, `main.rs`'s `rtk proxy '...'` |
-| `split_for_permissions(cmd)` | Segments a compound command for the **permission gate** — deliberately the most conservative of three segmenters (see its doc comment for the full comparison table) | `hooks/permissions.rs::check_command_with_rules` |
-| `split_for_classify(cmd)` | Segments for classification only — not safe for permission/security decisions | — (`pub(crate)`; its caller `registry.rs::split_command_chain` is this module) |
-| `contains_unattestable_construct(cmd)` | True for command/process substitution, quoting the lexer reads differently from bash (`$'\''`), or a file-target redirect — constructs the permission gate can't decompose and must never auto-allow | `hooks/permissions.rs::check_command_with_rules` |
-
-The permission gate, discover/analytics classification, and rewrite all agree on where a command begins and ends — one `segment(cmd, Policy)` decides, and the three `Policy` constants name the only differences that remain: whether a newline or a lone `\r` ends a segment, whether `$( )` is descended into, and whether a redirect is kept or excised. `split_for_permissions`'s doc comment carries the full comparison, and `registry.rs`'s `segmenter_agreement` tests hold each remaining difference to a stated reason. Those differences still matter at the call site: the gate must never under-segment, because a segment it never sees is a command its rules never check, so don't reuse `split_for_classify` or `rewrite_compound`'s segmenting for a permission/security decision — use `split_for_permissions`.
+Command segmentation, word splitting and quote scanning live in `core/cmdline/lexer.rs`; see [core/README.md](../core/README.md#shell-lexer-cmdlinelexerrs) for what it provides and who uses it.
 
 ## How History Analysis Works
 

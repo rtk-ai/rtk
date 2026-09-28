@@ -938,7 +938,7 @@ fn process_codex_payload(v: &Value) -> PayloadAction {
         };
     }
 
-    if crate::discover::lexer::contains_unattestable_construct(cmd) {
+    if crate::core::cmdline::lexer::contains_unattestable_construct(cmd) {
         return PayloadAction::Skip {
             decision: HookOutcome::Defer,
             reason: "skip:defer",
