@@ -6,7 +6,7 @@
 
 Domain-agnostic building blocks with **no knowledge of any specific command, hook, or agent**. If a module references "git", "cargo", "claude", or any external tool by name, it does not belong here. Core is a leaf in the dependency graph — it is consumed by all other components but imports from none of them.
 
-Owns: configuration loading, token tracking persistence, TOML filter engine, tee output recovery, display formatting, telemetry, and shared utilities.
+Owns: configuration loading, token tracking persistence, TOML filter engine, tee output recovery, display formatting, explicit shell/direct command construction, telemetry, and shared utilities.
 
 Does **not** own: command-specific filtering logic (that's `cmds/`), hook lifecycle management (that's `src/hooks/`), or analytics dashboards (that's `analytics/`).
 
@@ -30,6 +30,30 @@ Three-tier filter lookup (first match wins):
 1. `.rtk/filters.toml` (project-local, requires `rtk trust`)
 2. `~/.config/rtk/filters.toml` (user-global)
 3. Built-in filters concatenated by `build.rs` at compile time
+
+## Source File Comment Stripping
+
+`src/core/filter.rs` is a separate engine from the TOML DSL: it filters *source
+files* (used by `rtk read`) rather than command output. At `-l minimal` it
+strips comments using the per-language delimiters in
+`Language::comment_patterns()`.
+
+Python does not use that walk. It has no block comments — `"""` opens a
+*string*, which may be a docstring or an ordinary value — so it gets a
+string-aware path that removes `#` comments and leaves string contents alone.
+Matching `"""` as a block delimiter misread both of these:
+
+```python
+QUERY = """          # contains """ without starting with it
+SELECT 1
+"""
+
+"""Module doc."""    # opens and closes on one line
+```
+
+Docstrings are kept at `minimal`. `aggressive` has no string awareness: it
+keeps a line inside a string when that line looks like an import or a
+signature.
 
 ## Tracking Database Schema
 
@@ -136,6 +160,19 @@ The dialect is the one axis that is not per-flag, so it stays a parameter: `toke
 ## Consumer Contracts
 
 Core provides infrastructure that `cmds/` and other components consume. These contracts define expected usage.
+
+### Command Construction (`shell`)
+
+Use `shell::direct_command()` when the caller already has an argv vector. It
+preserves argument boundaries and never expands globs, variables, redirects,
+or operators. Use `shell::shell_command()` only for an intentional command
+string, with an explicit shell when syntax is shell-specific. The platform
+default remains `sh -c` on Unix and `cmd /C` on Windows for compatibility.
+
+Never infer the command parser from `$SHELL`: agent hosts and terminal wrappers
+can execute a different shell while preserving the user's login-shell value.
+Callers that accept `--shell` must require the complete script as one quoted
+argument instead of reconstructing it by joining parsed argv.
 
 ### Tracking (`TimedExecution`)
 

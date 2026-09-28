@@ -44,6 +44,9 @@ pub struct RunOptions<'a> {
     /// can read from a pipe (e.g. `cat file | rtk wc`); without it the child
     /// gets an empty stdin and reports zero.
     pub inherit_stdin: bool,
+    /// What the tool prints on a clean run in the output format rtk injected, e.g. ruff's
+    /// `[]`. See [`guard_stdout`]. Not consulted when `tee_label` is set.
+    pub clean_outputs: &'a [&'a str],
 }
 
 impl<'a> RunOptions<'a> {
@@ -79,6 +82,23 @@ impl<'a> RunOptions<'a> {
     pub fn inherit_stdin(mut self) -> Self {
         self.inherit_stdin = true;
         self
+    }
+
+    pub fn clean_outputs(mut self, outputs: &'a [&'a str]) -> Self {
+        self.clean_outputs = outputs;
+        self
+    }
+}
+
+/// The stdout to show: `filtered`, unless it costs more tokens than `raw`.
+///
+/// A `raw` that is exactly one of `clean_outputs` is the empty form of a format rtk injected,
+/// not output the user asked for, so the filter's summary is shown even though it is longer.
+fn guard_stdout<'a>(raw: &'a str, filtered: &'a str, clean_outputs: &[&str]) -> &'a str {
+    if clean_outputs.contains(&raw.trim()) {
+        filtered
+    } else {
+        crate::core::guard::never_worse(raw, filtered)
     }
 }
 
@@ -144,7 +164,7 @@ where
     let shown = if let Some(label) = opts.tee_label {
         print_with_hint(&filtered, raw, raw_for_tracking, label, exit_code)
     } else {
-        let guarded = crate::core::guard::never_worse(raw_for_tracking, &filtered).to_string();
+        let guarded = guard_stdout(raw_for_tracking, &filtered, opts.clean_outputs).to_string();
         if opts.no_trailing_newline {
             print!("{}", guarded);
         } else {
@@ -511,6 +531,63 @@ pub fn run_err_cmd(
         Box::new(ErrorStreamFilter::new()),
         RunOptions::with_tee(tee_label),
     )
+}
+
+/// Render a program that could not be run through the err filter's own failure
+/// path.
+///
+/// The interposed shell used to produce this: `[FAIL] Command failed (exit
+/// code: 127)` over its `command not found` line, or 126 over `Permission
+/// denied`. Direct execution answers for the program itself, so RTK renders it
+/// instead of bailing out with an `anyhow` chain on stderr.
+pub fn run_err_unrunnable(
+    tool: &str,
+    display: &str,
+    outcome: &crate::core::shell::Unrunnable,
+    verbose: u8,
+) -> i32 {
+    report_unrunnable(tool, display, outcome, verbose, |raw, code| {
+        ErrorStreamFilter::new()
+            .on_exit(code, raw)
+            .unwrap_or_default()
+    })
+}
+
+/// [`run_err_unrunnable`] for the test runner, rendered by the test summarizer.
+pub fn run_test_unrunnable(
+    tool: &str,
+    display: &str,
+    outcome: &crate::core::shell::Unrunnable,
+    eco: TestEcosystem,
+    verbose: u8,
+) -> i32 {
+    report_unrunnable(tool, display, outcome, verbose, |raw, _| {
+        extract_test_summary(raw, eco)
+    })
+}
+
+fn report_unrunnable(
+    tool: &str,
+    display: &str,
+    outcome: &crate::core::shell::Unrunnable,
+    verbose: u8,
+    render: impl FnOnce(&str, i32) -> String,
+) -> i32 {
+    if verbose > 0 {
+        eprintln!("Running: {}", display);
+    }
+    let timer = tracking::TimedExecution::start();
+    let rendered = render(&outcome.message, outcome.code);
+    println!("{}", rendered.trim_end());
+
+    let label = format!("{} {}", tool, display);
+    timer.track(
+        &label,
+        &format!("rtk {}", label),
+        &outcome.message,
+        &rendered,
+    );
+    outcome.code
 }
 
 /// Test-output ecosystem, chosen once at the boundary. Modules that know
@@ -988,6 +1065,26 @@ fn is_bun_count_line(trimmed: &str) -> bool {
         (Some(count), Some("pass" | "fail" | "skip" | "todo" | "error"), None)
             if count.chars().all(|c| c.is_ascii_digit())
     )
+}
+
+#[cfg(test)]
+mod guard_stdout_tests {
+    use super::*;
+
+    const SUMMARY: &str = "Ruff: No issues found";
+
+    #[test]
+    fn an_injected_clean_output_shows_the_summary() {
+        assert_eq!(guard_stdout("[]\n", SUMMARY, &["[]"]), SUMMARY);
+        assert_eq!(guard_stdout("[]\r\n", SUMMARY, &["[]"]), SUMMARY);
+    }
+
+    #[test]
+    fn any_other_short_output_still_goes_through_never_worse() {
+        assert_eq!(guard_stdout("{}\n", SUMMARY, &["[]"]), "{}\n");
+        assert_eq!(guard_stdout("[ ]\n", SUMMARY, &["[]"]), "[ ]\n");
+        assert_eq!(guard_stdout("[]\n", SUMMARY, &[]), "[]\n");
+    }
 }
 
 #[cfg(test)]

@@ -157,8 +157,132 @@ pub struct MinimalFilter;
 
 static MULTIPLE_BLANK_LINES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
 
+/// Advances triple-quoted string state across one line, returning the delimiter
+/// still open at end of line. The two quote kinds are tracked separately so a
+/// `'''` inside a `"""` string is text rather than a close. Outside a string, a
+/// one-line string literal is skipped whole and a `#` ends the scan, so a `"""`
+/// written inside `'"""'` or after a trailing comment opens nothing. A backslash
+/// escapes the next byte in every kind of string, raw ones included.
+fn advance_triple_quote(line: &str, open: Option<&'static str>) -> Option<&'static str> {
+    let bytes = line.as_bytes();
+    let mut state = open;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        let rest = &bytes[i..];
+        if let Some(current) = state {
+            if rest[0] == b'\\' {
+                i += 2;
+            } else if rest.starts_with(current.as_bytes()) {
+                state = None;
+                i += 3;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        match rest[0] {
+            b'#' => break,
+            b'"' if rest.starts_with(b"\"\"\"") => {
+                state = Some("\"\"\"");
+                i += 3;
+            }
+            b'\'' if rest.starts_with(b"'''") => {
+                state = Some("'''");
+                i += 3;
+            }
+            quote @ (b'"' | b'\'') => {
+                let interpolated = has_interpolation_prefix(&bytes[..i]);
+                let mut depth = 0usize;
+                i += 1;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'\\' => i += 1,
+                        b'{' if interpolated => {
+                            if depth == 0 && bytes.get(i + 1) == Some(&b'{') {
+                                i += 1;
+                            } else {
+                                depth += 1;
+                            }
+                        }
+                        b'}' if interpolated && depth > 0 => depth -= 1,
+                        b if b == quote && depth == 0 => break,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    state
+}
+
+/// True when the identifier ending at `before` is an f-string or t-string prefix.
+/// A replacement field in those may reuse the outer quote (PEP 701), so the
+/// quote only ends the string outside `{...}`.
+fn has_interpolation_prefix(before: &[u8]) -> bool {
+    let start = before
+        .iter()
+        .rposition(|b| !(b.is_ascii_alphanumeric() || *b == b'_'))
+        .map_or(0, |p| p + 1);
+    matches!(
+        before[start..].to_ascii_lowercase().as_slice(),
+        b"f" | b"fr" | b"rf" | b"t" | b"tr" | b"rt"
+    )
+}
+
+/// Python has no block comments. `"""` opens a *string*, which may be a
+/// docstring or an ordinary value, so it cannot be matched with the
+/// line-oriented block-comment rules the other languages use: a line such as
+/// `QUERY = """` both contains and "closes" the delimiter, and a single-line
+/// docstring toggles the state once and never back.
+///
+/// Minimal keeps docstrings, so the only thing to remove here is `#` comments,
+/// and the only state needed is whether we are inside a triple-quoted string.
+fn filter_python_minimal(content: &str) -> String {
+    let mut result = String::with_capacity(content.len());
+    let mut open_string: Option<&'static str> = None;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Inside a string every line is literal text, including one that starts
+        // with `#`.
+        if open_string.is_some() {
+            result.push_str(line);
+            result.push('\n');
+            open_string = advance_triple_quote(line, open_string);
+            continue;
+        }
+
+        // A comment's contents are not code, so any delimiter in it is not real.
+        if trimmed.starts_with('#') {
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            result.push('\n');
+            continue;
+        }
+
+        result.push_str(line);
+        result.push('\n');
+        open_string = advance_triple_quote(line, None);
+    }
+
+    let result = MULTIPLE_BLANK_LINES.replace_all(&result, "\n\n");
+    result.trim().to_string()
+}
+
 impl FilterStrategy for MinimalFilter {
     fn filter(&self, content: &str, lang: &Language) -> String {
+        if *lang == Language::Python {
+            return filter_python_minimal(content);
+        }
+
         let patterns = lang.comment_patterns();
         let mut result = String::with_capacity(content.len());
         let mut in_block_comment = false;
@@ -169,8 +293,10 @@ impl FilterStrategy for MinimalFilter {
 
             // Handle block comments
             if let (Some(start), Some(end)) = (patterns.block_start, patterns.block_end) {
+                // starts_with, not contains: `/*` inside a string literal or
+                // glob (e.g. "src/*.rs") must not open a comment block (#2385)
                 if !in_docstring
-                    && trimmed.contains(start)
+                    && trimmed.starts_with(start)
                     && !trimmed.starts_with(patterns.doc_block_start.unwrap_or("###"))
                 {
                     in_block_comment = true;
@@ -459,6 +585,185 @@ mod tests {
         );
     }
 
+    // --- Python triple-quoted strings in minimal mode ---
+
+    #[test]
+    fn test_minimal_python_keeps_multiline_string_assignment() {
+        let code = r#"QUERY = """
+SELECT id
+FROM users
+"""
+import os
+"#;
+        let result = MinimalFilter.filter(code, &Language::Python);
+        assert!(
+            result.contains(r#"QUERY = """#),
+            "the line opening the string was dropped, leaving its body as loose text:\n{}",
+            result
+        );
+        assert!(
+            result.contains("SELECT id"),
+            "string body lost:\n{}",
+            result
+        );
+        assert!(
+            result.contains("import os"),
+            "code after string lost:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_minimal_python_strips_comments_after_oneline_docstring() {
+        let code = r#""""Module doc."""
+import os
+# strip me
+def go():
+    return 1
+"#;
+        let result = MinimalFilter.filter(code, &Language::Python);
+        assert!(
+            !result.contains("# strip me"),
+            "a one-line docstring left the filter stuck in docstring mode, so no \
+             later comment was stripped:\n{}",
+            result
+        );
+        assert!(
+            result.contains(r#""""Module doc.""""#),
+            "docstring lost:\n{}",
+            result
+        );
+        assert!(result.contains("def go():"), "code lost:\n{}", result);
+    }
+
+    #[test]
+    fn test_minimal_python_keeps_hash_inside_docstring() {
+        let code = r#""""
+# not a comment, it is prose
+"""
+x = 1
+"#;
+        let result = MinimalFilter.filter(code, &Language::Python);
+        assert!(
+            result.contains("# not a comment, it is prose"),
+            "text inside a docstring was stripped as a comment:\n{}",
+            result
+        );
+        assert!(result.contains("x = 1"));
+    }
+
+    #[test]
+    fn test_minimal_python_single_quoted_docstring_does_not_close_double() {
+        let code = r#""""Doc mentioning ''' inline."""
+# strip me
+x = 1
+"#;
+        let result = MinimalFilter.filter(code, &Language::Python);
+        assert!(
+            !result.contains("# strip me"),
+            "a ''' inside a \"\"\" string confused the tracker:\n{}",
+            result
+        );
+        assert!(result.contains("x = 1"));
+    }
+
+    #[test]
+    fn test_minimal_python_still_strips_plain_comments() {
+        let code = r#"# leading comment
+import os
+x = 1  # trailing comment kept, matching prior behavior
+"#;
+        let result = MinimalFilter.filter(code, &Language::Python);
+        assert!(!result.contains("# leading comment"));
+        assert!(result.contains("import os"));
+        assert!(result.contains("x = 1"));
+    }
+
+    #[test]
+    fn test_minimal_python_triple_quote_in_one_line_string_opens_nothing() {
+        let code = r#"marker = '"""'
+# strip me
+def f():
+    """
+    # prose inside the docstring
+    """
+    return 1
+"#;
+        let result = MinimalFilter.filter(code, &Language::Python);
+        assert!(result.contains(r#"marker = '"""'"#));
+        assert!(
+            !result.contains("# strip me"),
+            "a \"\"\" inside a one-line string opened a string:\n{}",
+            result
+        );
+        assert!(
+            result.contains("# prose inside the docstring"),
+            "string state inverted, so docstring text was stripped:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_minimal_python_triple_quote_in_trailing_comment_opens_nothing() {
+        let code = r#"x = 1  # see """
+# strip me
+SCRIPT = """
+# shell comment inside the string
+"""
+"#;
+        let result = MinimalFilter.filter(code, &Language::Python);
+        assert!(
+            !result.contains("# strip me"),
+            "a \"\"\" inside a trailing comment opened a string:\n{}",
+            result
+        );
+        assert!(
+            result.contains("# shell comment inside the string"),
+            "string state inverted, so string text was stripped:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_minimal_python_fstring_field_reusing_quote_opens_nothing() {
+        let code = r#"v = f"{"""x"""}"
+# strip me
+w = f"{'"'}" + """
+# inside the string
+"""
+if"{" == v:
+    pass
+# strip me too
+"#;
+        let result = MinimalFilter.filter(code, &Language::Python);
+        assert!(
+            !result.contains("# strip me"),
+            "a quote inside an f-string field ended the string:\n{}",
+            result
+        );
+        assert!(
+            result.contains("# inside the string"),
+            "string state inverted, so string text was stripped:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_minimal_python_escaped_quote_does_not_close_string() {
+        let code = r#"s = r"""a\"""
+# still inside the string
+"""
+# strip me
+"#;
+        let result = MinimalFilter.filter(code, &Language::Python);
+        assert!(
+            result.contains("# still inside the string"),
+            "an escaped quote closed the string early:\n{}",
+            result
+        );
+        assert!(!result.contains("# strip me"));
+    }
+
     #[test]
     fn test_minimal_filter_removes_comments() {
         let code = r#"
@@ -471,6 +776,75 @@ fn main() {
         let result = filter.filter(code, &Language::Rust);
         assert!(!result.contains("// This is a comment"));
         assert!(result.contains("fn main()"));
+    }
+
+    // --- block comment detection (#2385) ---
+
+    #[test]
+    fn test_minimal_keeps_code_with_inline_block_marker() {
+        let code = "let glob = \"src/*.rs\";\nfn bar() {}\nfn baz() {}";
+        let filter = MinimalFilter;
+        let result = filter.filter(code, &Language::Rust);
+        assert!(
+            result.contains("let glob = \"src/*.rs\";"),
+            "line with /* in string literal must be kept, got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("fn bar()") && result.contains("fn baz()"),
+            "block-comment state must not leak past a non-comment line, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_minimal_same_line_block_comment_no_state_leak() {
+        let code = "/* inline comment */\nfn foo() {}";
+        let filter = MinimalFilter;
+        let result = filter.filter(code, &Language::Rust);
+        assert!(
+            !result.contains("inline comment"),
+            "comment-only line is dropped"
+        );
+        assert!(
+            result.contains("fn foo()"),
+            "code after same-line block comment must be kept, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_minimal_still_drops_multiline_block_comment() {
+        let code = "/* start\nstill comment\n*/\nfn after() {}";
+        let filter = MinimalFilter;
+        let result = filter.filter(code, &Language::Rust);
+        assert!(!result.contains("still comment"));
+        assert!(result.contains("fn after()"));
+    }
+
+    #[test]
+    fn test_minimal_keeps_python_inline_triple_quote_assignment() {
+        let code = "x = \"\"\"inline\"\"\"\ndef f():\n    pass";
+        let filter = MinimalFilter;
+        let result = filter.filter(code, &Language::Python);
+        assert!(
+            result.contains("x = "),
+            "assignment with inline triple-quote must be kept, got:\n{}",
+            result
+        );
+        assert!(result.contains("def f():"));
+    }
+
+    #[test]
+    fn test_minimal_keeps_url_with_trailing_line_comment() {
+        let code = "const API: &str = \"http://example.com/v1\";  // endpoint\nfn foo() {}";
+        let filter = MinimalFilter;
+        let result = filter.filter(code, &Language::Rust);
+        assert!(
+            result.contains("http://example.com/v1"),
+            "URL line must be kept, got:\n{}",
+            result
+        );
     }
 
     // --- truncation accuracy ---
