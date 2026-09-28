@@ -404,7 +404,7 @@ pip_cmd.rs        JSON PARSING          JSON API          70-85%
     {"name": "...", "version": "...", "requires": [...]}
     → Extract key fields only
 
-  uv fallback: run pip when it is on PATH; use uv pip only when pip is
+  Auto-detect uv: run pip when it is on PATH; use uv pip only when pip is
   missing, or is present but cannot be started (e.g. a stale shebang)
 ```
 
