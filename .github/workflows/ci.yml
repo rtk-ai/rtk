@@ -2,6 +2,11 @@ name: CI
 
 on:
   pull_request:
+    # master included because a stable release is cut from the merge itself.
+    # Its commits were each tested on develop, but the tree they add up to was
+    # not, and stable-release.yml publishes before the binaries are built, so
+    # anything that only breaks on the merged tree ships first and is found
+    # afterwards.
     branches: [develop, master]
 
 permissions:
@@ -12,10 +17,91 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ─── Path gate ───
+  # Only the two roots are gated; clippy and its four dependents skip
+  # transitively, because a job whose `needs` dependency skipped is skipped.
+
+  changes:
+    name: changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.scope.outputs.build }}
+      security: ${{ steps.scope.outputs.security }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Before the classifier: a failed job still delivers its outputs, so a
+      # guard failing after `build=false` was written would skip CI on a red
+      # gate.
+      - name: Self-test the classifier
+        run: bash .github/scripts/changed-scope.sh --self-test
+
+      - name: Check nothing rustc embeds is excluded
+        run: bash .github/scripts/check-embed-scope.sh
+
+      - name: Classify changed paths
+        id: scope
+        run: |
+          # On pull_request the checked-out ref is the merge commit, so HEAD^1
+          # is the base tip and HEAD^1..HEAD is exactly this PR. Anything else
+          # means the assumption broke, and then we build.
+          if [ "$(git rev-list --parents -n 1 HEAD | wc -w)" -lt 3 ]; then
+            echo "::notice::not a PR merge ref - building unconditionally"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          rc=0
+          bash .github/scripts/changed-scope.sh HEAD^1 HEAD || rc=$?
+          # Only status 3 means inert; bash's own failure statuses build.
+          if [ "$rc" -eq 3 ]; then BUILD=false; else BUILD=true; fi
+
+          # A PR supplies the config that decides this, so read the file list
+          # directly and ignore the config. Defence in depth, not a boundary:
+          # a PR that also edits this workflow is caught only by review.
+          if git diff --no-renames --name-only HEAD^1 HEAD \
+               -- .github/inert-paths.conf .github/scripts | grep -q .; then
+            echo "::notice::PR touches the path gate itself - building"
+            BUILD=true
+          fi
+
+          echo "build=${BUILD}" >> "$GITHUB_OUTPUT"
+
+          # Some scripts ship to contributors' machines without being build
+          # inputs, so they need the security scan even when the build gate
+          # skips them.
+          SECURITY="$BUILD"
+          if [ "$BUILD" = "false" ]; then
+            . .github/scripts/load-pathspecs.sh
+            if ! load_pathspecs .github/security-paths.conf; then
+              # Same direction as changed-scope.sh: a config that went missing
+              # must not read as "nothing to scan".
+              echo "::warning::security-paths.conf unreadable or empty - scanning"
+              SECURITY=true
+            elif [ -n "$(git diff --no-renames --name-only HEAD^1 HEAD -- "${PATHSPECS[@]}")" ]; then
+              SECURITY=true
+            fi
+          fi
+          echo "security=${SECURITY}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Path scope: build=\`${BUILD}\` security=\`${SECURITY}\`"
+            echo ""
+            echo '```'
+            git diff --no-renames --name-only HEAD^1 HEAD
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # ─── Fast gates (fail early, save CI minutes) ───
 
   check-test-presence:
     name: test presence
+    needs: changes
+    # Not `== 'true'`: if the gate job errors or is skipped its output is empty,
+    # and that must run CI rather than wave the PR through green.
+    if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,6 +114,10 @@ jobs:
 
   fmt:
     name: fmt
+    needs: changes
+    # Not `== 'true'`: if the gate job errors or is skipped its output is empty,
+    # and that must run CI rather than wave the PR through green.
+    if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -68,12 +158,38 @@ jobs:
 
   security:
     name: Security Scan
-    needs: clippy
+    needs: [changes, clippy]
+    # Runs on its own gate so script-only changes still get scanned, while
+    # keeping fail-fast for code. `build == false` is the gated-off case;
+    # clippy's own `skipped` cannot be used for it, because a failing `fmt`
+    # skips clippy too and that PR has nothing worth scanning.
+    if: >-
+      ${{ !cancelled()
+          && needs.changes.outputs.security != 'false'
+          && (needs.clippy.result == 'success'
+              || needs.changes.outputs.build == 'false') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      # Every scan below reads this. Resolved once, before the slow toolchain
+      # install, so a broken assumption costs seconds rather than minutes.
+      #
+      # A three-dot range against master would also sweep in everything merged
+      # into develop since the last release, and report files the PR never
+      # touched as critical -- which is how a scan trains people to ignore it.
+      - name: Resolve the PR diff base
+        run: |
+          # This workflow only ever runs on a pull_request, so HEAD is the merge
+          # commit and HEAD^1 is the base tip. If that stops holding, a security
+          # scan that cannot tell what changed has to fail, not report it clean.
+          if [ "$(git rev-list --parents -n 1 HEAD | wc -w)" -lt 3 ]; then
+            echo "::error::not a PR merge ref - cannot determine what to scan"
+            exit 1
+          fi
+          echo "BASE_SHA=$(git rev-parse HEAD^1)" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -101,7 +217,8 @@ jobs:
       - name: Critical files check
         run: |
           echo "### Critical Files Modified" >> $GITHUB_STEP_SUMMARY
-          CRITICAL=$(git diff --name-only origin/master...HEAD | grep -E "(runner|summary|tracking|init|pnpm_cmd|container)\.rs|Cargo\.toml|workflows/.*\.yml" || true)
+          CHANGED=$(git diff --no-renames --name-only "$BASE_SHA" HEAD)
+          CRITICAL=$(printf '%s\n' "$CHANGED" | grep -E "(runner|summary|tracking|init|pnpm_cmd|container)\.rs|Cargo\.toml|workflows/.*\.yml" || true)
           if [ -n "$CRITICAL" ]; then
             echo "**HIGH RISK**: The following critical files were modified:" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
@@ -118,10 +235,43 @@ jobs:
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
 
+      # The Rust pattern scan below cannot see shell. Without this, a
+      # .claude/hooks/ change routed here by security-paths.conf would report
+      # "no dangerous patterns" for anything a shell script can do.
+      #
+      # The Rust-only steps around it still run for such a change -- see #3761.
+      - name: Shell script scan
+        run: |
+          echo "### Shell Script Changes" >> $GITHUB_STEP_SUMMARY
+
+          # No `|| true`: a git failure must not read as "nothing changed".
+          CHANGED_SH=$(git diff --no-renames --name-only "$BASE_SHA" HEAD -- '*.sh' '*.bash')
+          if [ -z "$CHANGED_SH" ]; then
+            echo "No shell scripts changed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "Scanned:" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "$CHANGED_SH" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            SH_PATTERNS=$(git diff "$BASE_SHA" HEAD -- '*.sh' '*.bash' \
+              | grep -E "^\\+" \
+              | grep -E "eval |[|] *(ba)?sh\\b|/dev/tcp/|rm -rf +[\"']?/|chmod +777|curl [^|]*\\| *(ba)?sh|wget [^|]*\\| *(ba)?sh|base64 +-d|mktemp -u|\\bsudo " || true)
+            if [ -n "$SH_PATTERNS" ]; then
+              echo "**Risky shell constructs added:**" >> $GITHUB_STEP_SUMMARY
+              echo '```diff' >> $GITHUB_STEP_SUMMARY
+              echo "$SH_PATTERNS" | head -30 >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              echo "::warning::Risky shell constructs added - manual review required"
+            else
+              echo "No risky shell constructs added" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+
       - name: Dangerous patterns scan
         run: |
           echo "### Dangerous Code Patterns" >> $GITHUB_STEP_SUMMARY
-          PATTERNS=$(git diff origin/master...HEAD | grep -E "Command::new\(\"sh\"|Command::new\(\"bash\"|\.env\(\"LD_PRELOAD|\.env\(\"PATH|reqwest::|std::net::|TcpStream|UdpSocket|unsafe \{|\.unwrap\(\) |panic!\(|todo!\(|unimplemented!\(" || true)
+          DIFF=$(git diff "$BASE_SHA" HEAD)
+          PATTERNS=$(printf '%s\n' "$DIFF" | grep -E "Command::new\(\"sh\"|Command::new\(\"bash\"|\.env\(\"LD_PRELOAD|\.env\(\"PATH|reqwest::|std::net::|TcpStream|UdpSocket|unsafe \{|\.unwrap\(\) |panic!\(|todo!\(|unimplemented!\(" || true)
           if [ -n "$PATTERNS" ]; then
             echo "**Potentially dangerous patterns detected:**" >> $GITHUB_STEP_SUMMARY
             echo '```diff' >> $GITHUB_STEP_SUMMARY
@@ -143,7 +293,8 @@ jobs:
       - name: New dependencies check
         run: |
           echo "### Dependencies Changes" >> $GITHUB_STEP_SUMMARY
-          if git diff origin/master...HEAD Cargo.toml | grep -E "^\+.*=" | grep -v "^\+\+\+" > new_deps.txt; then
+          CARGO_DIFF=$(git diff "$BASE_SHA" HEAD -- Cargo.toml)
+          if printf '%s\n' "$CARGO_DIFF" | grep -E "^\+.*=" | grep -v "^\+\+\+" > new_deps.txt; then
             echo "**New dependencies added:**" >> $GITHUB_STEP_SUMMARY
             echo '```toml' >> $GITHUB_STEP_SUMMARY
             cat new_deps.txt >> $GITHUB_STEP_SUMMARY
