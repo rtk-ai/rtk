@@ -267,7 +267,7 @@ Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on
 
 Since v0.37.2, `rtk init -g` on native Windows installs Claude Code's native `rtk hook claude` entry instead of falling back to `CLAUDE.md` injection.
 
-For full hook support on Windows, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install). Inside WSL, all agents with shell hook integration (Claude Code, Cursor, Gemini) work identically to Linux.
+For agent integrations that still require the Unix shell hook, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install). There, shell-hook integrations work as they do on Linux.
 
 ## Graceful degradation
 
