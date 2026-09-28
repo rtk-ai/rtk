@@ -252,11 +252,22 @@ struct SupportedBucket {
 /// Aggregation bucket for unsupported commands.
 struct UnsupportedBucket {
     count: usize,
-    example: String,
+    /// Raw command spellings → occurrence count (for a stable display example).
+    example_counts: HashMap<String, usize>,
+}
+
+/// Pick the most frequent key; break ties lexicographically for stable reports.
+fn most_frequent(counts: HashMap<String, usize>) -> String {
+    counts
+        .into_iter()
+        .max_by(|(a, ca), (b, cb)| ca.cmp(cb).then_with(|| b.cmp(a)))
+        .map(|(k, _)| k)
+        .unwrap_or_default()
 }
 
 pub fn run(
     project: Option<&str>,
+
     all: bool,
     since_days: u64,
     limit: usize,
@@ -283,7 +294,10 @@ pub fn run(
         }
     };
 
-    let sessions = provider.discover_sessions(project_filter, Some(since_days))?;
+    let mut sessions = provider.discover_sessions(project_filter, Some(since_days))?;
+    // read_dir / WalkDir order is filesystem-dependent; sort so the same history
+    // always yields the same report (example commands, JSON), not just the same counts.
+    sessions.sort();
 
     if verbose > 0 {
         eprintln!("Scanning {} session files...", sessions.len());
@@ -490,10 +504,11 @@ pub fn run(
                         let bucket = unsupported_map.entry(base_command).or_insert_with(|| {
                             UnsupportedBucket {
                                 count: 0,
-                                example: part.to_string(),
+                                example_counts: HashMap::new(),
                             }
                         });
                         bucket.count += 1;
+                        *bucket.example_counts.entry(part.to_string()).or_insert(0) += 1;
                     }
                     Classification::Ignored => {
                         // Ground truth from the transcript itself — the model really
@@ -514,26 +529,19 @@ pub fn run(
         .into_values()
         .map(|bucket| {
             // Pick the most common command as the display name
-            let (command_with_status, status) = bucket
-                .command_counts
-                .into_iter()
-                .max_by_key(|(_, c)| *c)
-                .map(|(name, _)| {
-                    // Extract status from "command:Status" format
-                    if let Some(colon_pos) = name.rfind(':') {
-                        let cmd = name[..colon_pos].to_string();
-                        let status_str = &name[colon_pos + 1..];
-                        let status = match status_str {
-                            "Passthrough" => report::RtkStatus::Passthrough,
-                            "NotSupported" => report::RtkStatus::NotSupported,
-                            _ => report::RtkStatus::Existing,
-                        };
-                        (cmd, status)
-                    } else {
-                        (name, report::RtkStatus::Existing)
-                    }
-                })
-                .unwrap_or_else(|| (String::new(), report::RtkStatus::Existing));
+            let name = most_frequent(bucket.command_counts);
+            let (command_with_status, status) = if let Some(colon_pos) = name.rfind(':') {
+                let cmd = name[..colon_pos].to_string();
+                let status_str = &name[colon_pos + 1..];
+                let status = match status_str {
+                    "Passthrough" => report::RtkStatus::Passthrough,
+                    "NotSupported" => report::RtkStatus::NotSupported,
+                    _ => report::RtkStatus::Existing,
+                };
+                (cmd, status)
+            } else {
+                (name, report::RtkStatus::Existing)
+            };
 
             // Derive the effective savings rate from accumulated totals rather than
             // using the first-seen sub-command's rate. This gives a weighted average
@@ -561,10 +569,13 @@ pub fn run(
 
     let mut unsupported: Vec<UnsupportedEntry> = unsupported_map
         .into_iter()
-        .map(|(base, bucket)| UnsupportedEntry {
-            base_command: base,
-            count: bucket.count,
-            example: bucket.example,
+        .map(|(base, bucket)| {
+            let example = most_frequent(bucket.example_counts);
+            UnsupportedEntry {
+                base_command: base,
+                count: bucket.count,
+                example,
+            }
         })
         .collect();
 
@@ -829,5 +840,19 @@ mod tests {
         // falls back to the current-state heuristic, flagged as estimated.
         let coverage = hook_coverage("ls -la", "ls -la", "toolu_missing", &test_ctx(true));
         assert!(coverage.is_estimated());
+    }
+
+    #[test]
+    fn most_frequent_breaks_ties_lexicographically() {
+        // Equal counts must not depend on HashMap iteration order.
+        let mut counts = HashMap::new();
+        counts.insert("git status".to_string(), 1);
+        counts.insert("git log".to_string(), 1);
+        assert_eq!(most_frequent(counts), "git log");
+
+        let mut counts = HashMap::new();
+        counts.insert("git status".to_string(), 2);
+        counts.insert("git log".to_string(), 1);
+        assert_eq!(most_frequent(counts), "git status");
     }
 }
