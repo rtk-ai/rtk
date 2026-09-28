@@ -1286,6 +1286,11 @@ fn run_kimi_inner(input: &str) -> String {
         None => return "{}".to_string(),
     };
 
+    // Already rtk-prefixed: pass through
+    if cmd.starts_with("rtk ") || cmd == "rtk" {
+        return "{}".to_string();
+    }
+
     let rewritten = match crate::discover::registry::rewrite_command(cmd, &[], &[]) {
         Some(r) => r,
         None => return "{}".to_string(),
@@ -2824,16 +2829,6 @@ mod tests {
             "hook_event_name": "PreToolUse",
             "tool_name": tool,
             "tool_input": { "command": cmd }
-
-    // --- Kimi CLI hook ---
-
-fn kimi_input(tool: &str, cmd: &str) -> String {
-        json!({
-            "session_id": "test",
-            "cwd": "/tmp",
-            "hook_event_name": "PreToolUse",
-            "tool_name": tool,
-            "tool_input": { "command": cmd },
         })
         .to_string()
     }
@@ -3245,6 +3240,22 @@ fn kimi_input(tool: &str, cmd: &str) -> String {
         let v = run_antigravity_inner(&antigravity_input("definitely-not-a-real-binary --foo"));
         assert_eq!(v["decision"], "allow");
         assert!(v.get("overwrite").is_none());
+    }
+
+    // --- Kimi CLI hook ---
+
+    fn kimi_input(tool: &str, cmd: &str) -> String {
+        json!({
+            "session_id": "test",
+            "cwd": "/tmp",
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool,
+            "tool_input": { "command": cmd },
+        })
+        .to_string()
+    }
+
+    #[test]
     fn test_kimi_rewrite_emits_deny_with_suggestion() {
         let out = run_kimi_inner(&kimi_input("Shell", "git status"));
         let v: Value = serde_json::from_str(&out).unwrap();
