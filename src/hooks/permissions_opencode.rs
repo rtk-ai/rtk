@@ -1,7 +1,7 @@
 use super::constants::{CONFIG_DIR, OPENCODE_SUBDIR};
 use super::permissions::PermissionVerdict;
+use crate::core::cmdline::lexer::{contains_unattestable_construct, split_for_permissions};
 use crate::core::user_dirs;
-use crate::discover::lexer::{contains_unattestable_construct, split_for_permissions};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 

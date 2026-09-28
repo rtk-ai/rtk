@@ -12,8 +12,8 @@
 //! treat fish keywords as unattestable, because that lexer reads the host's
 //! command string as bash (see `lexer::ShellDialect`).
 
-use super::lexer::{self, ParsedToken, TokenKind};
 use super::shell_wrapper::is_shell_wrapper_candidate;
+use crate::core::cmdline::lexer::{self, ParsedToken, TokenKind};
 
 /// Keywords only fish accepts at command position. One of these, at a command
 /// boundary and with no POSIX marker anywhere, is what makes a script *provably*
