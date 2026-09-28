@@ -225,7 +225,7 @@ fn swappable(
             matches!(
                 verdict,
                 PermissionVerdict::Allow | PermissionVerdict::Ask | PermissionVerdict::Default
-            ) && !crate::discover::lexer::contains_unattestable_construct(cmd)
+            ) && !crate::core::cmdline::lexer::contains_unattestable_construct(cmd)
                 && !crate::discover::fish_script::is_unambiguous_fish(cmd)
                 && !runs_rtk(cmd)
                 && !cmd.contains(['\n', '\r', '\\'])
@@ -241,7 +241,7 @@ fn swappable(
 /// rewrite. `time`, `!` and braces do not count: the commands behind them read as usual.
 fn holds_compound_syntax(cmd: &str) -> bool {
     let input = cmd.trim();
-    crate::discover::lexer::split_for_classify(input)
+    crate::core::cmdline::lexer::split_for_classify(input)
         .iter()
         .any(|segment| {
             let first = segment.text.split_whitespace().next().unwrap_or_default();
@@ -282,7 +282,7 @@ fn runs_rtk(cmd: &str) -> bool {
 }
 
 fn changes_directory(cmd: &str) -> bool {
-    crate::discover::lexer::split_on_operators(cmd)
+    crate::core::cmdline::lexer::split_on_operators(cmd)
         .iter()
         .any(|segment| {
             segment
@@ -292,7 +292,7 @@ fn changes_directory(cmd: &str) -> bool {
 }
 
 fn sh_can_run(cmd: &str, program_exists: impl Fn(&str) -> bool) -> bool {
-    crate::discover::lexer::split_on_operators(cmd)
+    crate::core::cmdline::lexer::split_on_operators(cmd)
         .iter()
         .all(|segment| {
             segment
@@ -433,7 +433,7 @@ mod tests {
 
     #[test]
     fn a_line_is_cut_at_operators_and_nothing_else() {
-        use crate::discover::lexer::split_on_operators;
+        use crate::core::cmdline::lexer::split_on_operators;
         assert_eq!(
             split_on_operators(" a && b; c | d || e "),
             ["a", "b", "c", "d", "e"]
