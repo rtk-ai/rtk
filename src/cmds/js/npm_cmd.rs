@@ -7,6 +7,9 @@ use std::io::IsTerminal;
 
 /// Known npm subcommands that should NOT get "run" injected.
 /// Shared between production code and tests to avoid drift.
+///
+/// A tool with a list like this also belongs in `core::tracking::SUBCOMMAND_ROUTERS`,
+/// which keeps the subcommand in its telemetry label.
 const NPM_SUBCOMMANDS: &[&str] = &[
     "install",
     "i",

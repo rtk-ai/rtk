@@ -155,7 +155,7 @@ rtk jest                        # Jest 컴팩트
 rtk vitest                      # Vitest 컴팩트
 rtk pytest                      # Python 테스트 (-90%)
 rtk go test                     # Go 테스트 (-90%)
-rtk test <cmd>                  # 실패만 표시 (-90%)
+rtk test <cmd> [args...]        # 실패만 표시 (-90%), argv 직접 실행
 ```
 
 ### 빌드 & 린트

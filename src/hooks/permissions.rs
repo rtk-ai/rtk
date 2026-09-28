@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 /// Verdict from checking a command against Claude Code's permission rules.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum PermissionVerdict {
     /// An explicit allow rule matched — safe to auto-allow.
     Allow,
@@ -41,6 +41,7 @@ pub enum Host {
     Droid,
     Vibe,
     Grok,
+    Antigravity,
 }
 
 pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
@@ -60,12 +61,14 @@ pub(crate) fn load_rules_for(host: Host) -> (Vec<String>, Vec<String>, Vec<Strin
         Host::Cursor => load_cursor_rules(),
         Host::Gemini => load_gemini_rules(),
         Host::Droid => load_droid_rules(),
-        // Hosts with no RTK-side rule source. Codex, Trae, and Grok enforce
-        // their native execution rules after updatedInput (Grok and Trae omit
-        // `permissionDecision`). Do not interpret these hosts' rules as Claude
-        // Bash patterns or borrow another host's settings. No RTK-side match
-        // means Default, not an explicit Allow.
-        Host::Codex | Host::Trae | Host::Vibe | Host::Grok => (Vec::new(), Vec::new(), Vec::new()),
+        // Hosts with no RTK-side rule source. Codex, Trae, Grok, and
+        // Antigravity enforce their native execution rules after the rewrite
+        // (Grok and Trae omit `permissionDecision`). Do not interpret these
+        // hosts' rules as Claude Bash patterns or borrow another host's
+        // settings. No RTK-side match means Default, not an explicit Allow.
+        Host::Codex | Host::Trae | Host::Vibe | Host::Grok | Host::Antigravity => {
+            (Vec::new(), Vec::new(), Vec::new())
+        }
     }
 }
 
