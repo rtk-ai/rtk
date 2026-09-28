@@ -32,6 +32,7 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 | Codex | `rtk init --codex` | RTK.md + `.codex/hooks.json` (local) or `$CODEX_HOME/hooks.json` (global) | AGENTS.md + `PreToolUse` hook |
 | Cursor | `rtk init -g --agent cursor` | Cursor hook | hooks.json |
 | Trae | `rtk init --agent trae` (project) or `rtk init -g --agent trae` (global) | Native `rtk hook trae` registration | `.trae/hooks.json`; global also patches existing `~/.trae-cn/hooks.json` |
+| Google Antigravity | `rtk init --agent antigravity` / `rtk init -g --agent antigravity` | Antigravity Plugin in `plugins/rtk/` | plugin.json, hooks.json, rules/AGENTS.md (awareness) |
 | Pi | `rtk init --agent pi` | `.pi/extensions/rtk.ts` | -- |
 | Oh My Pi (OMP) | `rtk init --agent omp` | `.omp/extensions/rtk.ts` (shared Pi extension) | -- |
 | Hermes | `rtk init --agent hermes` | Python plugin in `~/.hermes/plugins/rtk-rewrite/` | `config.yaml` `plugins.enabled` |
@@ -110,6 +111,7 @@ rewrite`, since it is inherited by every child process. See `decision.rs`'s
 | Trae (`rtk hook trae`) | Host-owned approval | Return only `updatedInput`; omit `permissionDecision` |
 | Mistral Vibe (rtk hook vibe) | No native ask surface | passthrough — Vibe's own approval prompt fires on the rewritten command |
 | OpenClaw (`openclaw/index.ts` → `rtk rewrite`) | Host-owned approval (`RTK_REWRITE_HOST=openclaw`) | Rewrite with no RTK prompt when no rule matched; an explicit `Ask` still exits 3 and the plugin prompts. OpenClaw's `tools.exec.mode`/`security`/`ask` decide. A `Deny` still exits 2 and the plugin blocks the call |
+| Google Antigravity (rtk hook antigravity) | Native approval runs after rewrite | allow with overwrite.CommandLine — Antigravity evaluates permissions after hook |
 
 ### Implementation
 

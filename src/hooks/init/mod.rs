@@ -20,6 +20,7 @@ use super::is_claude_hook_command;
 use crate::core::config::AwarenessLevel;
 
 mod agents_md;
+mod antigravity;
 mod claude;
 mod codex;
 mod copilot;
@@ -52,12 +53,13 @@ use opencode::{
 };
 use pi::*;
 
+pub use antigravity::{run_antigravity_mode, uninstall_antigravity_mode};
 pub(crate) use copilot::{COPILOT_HOOK_JSON, copilot_user_dir};
 pub use copilot::{run_copilot, run_copilot_global, uninstall_copilot, uninstall_copilot_global};
 pub use droid::{run_droid_mode, uninstall_droid};
 pub use gemini::run_gemini;
 pub use hermes::{run_hermes_mode, uninstall_hermes};
-pub use instructions_agents::{run_antigravity_mode, run_kilocode_mode, run_kimi_mode};
+pub use instructions_agents::{run_kilocode_mode, run_kimi_mode};
 pub use pi::{run_omp_mode_with_patch_mode, run_pi_mode_with_patch_mode};
 pub use trae::{run_trae_mode, uninstall_trae_mode};
 pub use vibe::{run_vibe_mode, uninstall_vibe};

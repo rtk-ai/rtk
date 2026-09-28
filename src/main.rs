@@ -1007,6 +1007,8 @@ enum HookCommands {
     Copilot,
     /// Process Factory Droid PreToolUse hook (reads JSON from stdin)
     Droid,
+    /// Process Google Antigravity PreToolUse hook (reads JSON from stdin)
+    Antigravity,
     /// Process Mistral Vibe CLI pre_tool hook (reads JSON from stdin)
     Vibe,
     /// Check how a command would be rewritten by the hook engine (dry-run)
@@ -1942,6 +1944,8 @@ where
         uninstall_hermes(ctx)
     } else if agent == Some(AgentTarget::Trae) {
         hooks::init::uninstall_trae_mode(global, ctx)
+    } else if agent == Some(AgentTarget::Antigravity) {
+        hooks::init::uninstall_antigravity_mode(global, ctx)
     } else if agent == Some(AgentTarget::Droid) {
         hooks::init::uninstall_droid(global, ctx)
     } else if agent == Some(AgentTarget::Vibe) {
@@ -2587,12 +2591,7 @@ fn run_cli() -> Result<i32> {
                 }
                 hooks::init::run_kilocode_mode(ctx)?;
             } else if agent == Some(AgentTarget::Antigravity) {
-                if global {
-                    anyhow::bail!(
-                        "Antigravity is project-scoped. Use: rtk init --agent antigravity"
-                    );
-                }
-                hooks::init::run_antigravity_mode(ctx)?;
+                hooks::init::run_antigravity_mode(global, ctx)?;
             } else if agent == Some(AgentTarget::Kimi) {
                 if global {
                     anyhow::bail!("Kimi AI is project-scoped. Use: rtk init --agent kimi");
@@ -3060,6 +3059,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Droid => {
                 hooks::hook_cmd::run_droid()?;
+                0
+            }
+            HookCommands::Antigravity => {
+                hooks::hook_cmd::run_antigravity()?;
                 0
             }
             HookCommands::Vibe => {
