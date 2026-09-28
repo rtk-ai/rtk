@@ -11,8 +11,8 @@
   LLM, which retries with the suggested `rtk <cmd>` form.
 - Configuration lives in `~/.kimi/config.toml` as a `[[hooks]]` block
   (kimi-cli is global-config-based).
-- Rules live in `~/.kimi/rtk-rules.md` — reference them from your KIMI.md or
-  system prompt so the model uses `rtk` proactively.
+- The model should be prompted to use `rtk` proactively via AGENTS.md awareness
+  (see `#1478`).
 
 ## Install
 
