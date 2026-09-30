@@ -139,6 +139,74 @@ pub fn injection_point(tokens: &[Token<'_>], args_len: usize) -> usize {
         .unwrap_or(args_len)
 }
 
+/// A tool's complete list of long options, and which of its names spell the same option
+/// (GNU grep's `--colour` is `--color`).
+#[derive(Clone, Copy, Debug)]
+pub struct LongOptions<'a> {
+    names: &'a [&'a str],
+    /// `(alias, option)` pairs, both among `names`.
+    aliases: &'a [(&'a str, &'a str)],
+}
+
+impl<'a> LongOptions<'a> {
+    pub const fn new(names: &'a [&'a str]) -> Self {
+        Self {
+            names,
+            aliases: &[],
+        }
+    }
+
+    pub const fn with_aliases(self, aliases: &'a [(&'a str, &'a str)]) -> Self {
+        Self { aliases, ..self }
+    }
+
+    /// The option `name` spells: itself, or what it is an alias of.
+    fn option(&self, name: &'a str) -> &'a str {
+        self.aliases
+            .iter()
+            .find(|(alias, _)| *alias == name)
+            .map_or(name, |(_, option)| option)
+    }
+}
+
+/// True if a bare `Long` token (no attached `=value`) names no option of `options`, even as an
+/// abbreviation (see [`resolve_long`]): a flag the tool does not have, or an ambiguous prefix,
+/// either of which may have taken the next argument as its value without a `takes_value` table
+/// being able to tell. A caller that needs to know where values end treats this as "cannot
+/// tell". A flag written with its value attached cannot take the next argument, so it is never
+/// counted here.
+pub fn has_unknown_long(tokens: &[Token<'_>], options: &LongOptions<'_>) -> bool {
+    tokens.iter().any(|t| {
+        t.kind == TokenKind::Long && t.attached.is_none() && resolve_long(t.text, options).is_none()
+    })
+}
+
+/// The option `name` stands for, the way `getopt_long` reads it: an exact name, or else a
+/// prefix of names that all spell one option. `None` when it names nothing, or when the names
+/// it prefixes are different options. An alias resolves to the option it spells.
+pub fn resolve_long<'a>(name: &str, options: &LongOptions<'a>) -> Option<&'a str> {
+    if name.is_empty() {
+        return None;
+    }
+    if let Some(exact) = options.names.iter().find(|option| **option == name) {
+        return Some(options.option(exact));
+    }
+    let mut found = None;
+    for candidate in options
+        .names
+        .iter()
+        .filter(|option| option.starts_with(name))
+    {
+        let option = options.option(candidate);
+        match found {
+            None => found = Some(option),
+            Some(previous) if previous == option => {}
+            Some(_) => return None,
+        }
+    }
+    found
+}
+
 /// True if `tokens` has a `--` boundary at all.
 pub fn has_dashdash(tokens: &[Token<'_>]) -> bool {
     dashdash_index(tokens).is_some()
@@ -1177,5 +1245,60 @@ mod tests {
         let values: Vec<&str> =
             double_dash_flag_values(&tokens, Dialect::Msbuild, "logger").collect();
         assert_eq!(values, vec!["console;verbosity=normal", "trx"]);
+    }
+
+    #[test]
+    fn unknown_long_flags_are_reported_against_the_complete_list() {
+        let grammar = |kind: TokenKind, name: &str| {
+            (kind == TokenKind::Long && name == "include").then(ValueSpec::value)
+        };
+        let known = LongOptions::new(&["include", "recursive"]);
+        let tokens = tokenize_grammar(&["--include", "*.rs", "-r", "x"], &grammar, Dialect::Posix);
+        assert!(!has_unknown_long(&tokens, &known));
+        // A unique prefix is the flag it abbreviates.
+        let tokens = tokenize_grammar(&["--incl", "*.rs", "x"], &grammar, Dialect::Posix);
+        assert!(!has_unknown_long(&tokens, &known));
+        // A bare flag the list does not have, or an ambiguous prefix, may have taken the next
+        // argument as its value.
+        let tokens = tokenize_grammar(&["--frob", "*.rs", "x"], &grammar, Dialect::Posix);
+        assert!(has_unknown_long(&tokens, &known));
+        let tokens = tokenize_grammar(&["--in", "*.rs", "x"], &grammar, Dialect::Posix);
+        assert!(has_unknown_long(
+            &tokens,
+            &LongOptions::new(&["include", "invert-match"])
+        ));
+        // With its value attached it cannot have.
+        let tokens = tokenize_grammar(&["--frob=*.rs", "x"], &grammar, Dialect::Posix);
+        assert!(!has_unknown_long(&tokens, &known));
+        // Past `--` a dash-led argument is a positional, not a flag.
+        let tokens = tokenize_grammar(&["--", "--incl"], &grammar, Dialect::Posix);
+        assert!(!has_unknown_long(&tokens, &known));
+    }
+
+    #[test]
+    fn a_long_option_resolves_like_getopt_long() {
+        let known = LongOptions::new(&["lines", "words", "bytes", "chars", "max-line-length"]);
+        assert_eq!(resolve_long("lines", &known), Some("lines"));
+        assert_eq!(resolve_long("lin", &known), Some("lines"));
+        assert_eq!(resolve_long("byt", &known), Some("bytes"));
+        assert_eq!(resolve_long("m", &known), Some("max-line-length"));
+        assert_eq!(resolve_long("x", &known), None);
+        assert_eq!(resolve_long("", &known), None);
+        // Ambiguous, as `ls --hid` is between `--hide` and `--hide-control-chars`.
+        let hide = LongOptions::new(&["hide", "hide-control-chars"]);
+        assert_eq!(resolve_long("hid", &hide), None);
+        assert_eq!(resolve_long("hide", &hide), Some("hide"));
+    }
+
+    #[test]
+    fn names_of_one_option_are_not_ambiguous() {
+        // GNU grep: `--colo` is `--color` or `--colour`, and `--fixed` is `--fixed-strings` or
+        // `--fixed-regexp`, one option each; `--fi` also prefixes `--file`.
+        let grep = LongOptions::new(&["color", "colour", "file", "fixed-regexp", "fixed-strings"])
+            .with_aliases(&[("colour", "color"), ("fixed-regexp", "fixed-strings")]);
+        assert_eq!(resolve_long("colo", &grep), Some("color"));
+        assert_eq!(resolve_long("colour", &grep), Some("color"));
+        assert_eq!(resolve_long("fixed", &grep), Some("fixed-strings"));
+        assert_eq!(resolve_long("fi", &grep), None);
     }
 }

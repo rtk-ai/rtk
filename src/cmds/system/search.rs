@@ -3,19 +3,21 @@
 //! Runs the agent's exact engine (grep or rg) — never substituting one for the other — and
 //! compresses its output by grouping matches by file, capping, and teeing overflow.
 
-use crate::core::arg_tokenizer::{self, Dialect, Token, TokenKind, ValueSpec};
+use crate::core::arg_tokenizer::{self, Dialect, LongOptions, Token, TokenKind, ValueSpec};
+use crate::core::child_command::{
+    ChildCommand, OperandGrammar, OperandSplit, PathOperands, SplitArgv,
+};
+use crate::core::config;
 use crate::core::guard::never_worse;
 use crate::core::stream::{
     self, CaptureResult, FilterMode, StdinMode, StreamFilter, exec_capture, exec_capture_stdin,
 };
 use crate::core::tracking;
-use crate::core::utils::{ChildArgExt, resolved_command, strip_ansi};
-use crate::core::{args_utils, config};
+use crate::core::utils::{resolved_command, strip_ansi};
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
 use std::io::IsTerminal;
-use std::process::Command;
 use std::sync::LazyLock;
 
 /// True if stdin is something the engine actually reads: a regular file, FIFO or socket --
@@ -104,6 +106,7 @@ fn rg_takes_value(kind: TokenKind, name: &str) -> bool {
                 | "max-columns"
                 | "max-count"
                 | "max-depth"
+                | "maxdepth"
                 | "max-filesize"
                 | "path-separator"
                 | "pre"
@@ -137,8 +140,81 @@ fn unwrap_attached_value(engine: Engine, value: &str) -> &str {
     }
 }
 
-/// The module's single tokenizer entry point. Shared so a pre-check and `extract_pattern_path`
-/// cannot classify the same argument differently.
+/// Every long option GNU grep accepts, from its `--help` plus the undocumented
+/// `--fixed-regexp`, an alias of `--fixed-strings` as `--colour` is of `--color`. A unique
+/// prefix of an option is read as that option, as `getopt_long` reads it (`--incl` is
+/// `--include`, `--colo` is `--color`); a bare flag that names no option, or prefixes several,
+/// may take the next argument, so it leaves the paths unbounded, while one with its value
+/// attached keeps them bounded. rg takes no abbreviations and exits on an unknown flag, so its
+/// value table is enough.
+const GREP_LONG_OPTIONS: LongOptions<'static> = LongOptions::new(&[
+    "after-context",
+    "basic-regexp",
+    "before-context",
+    "binary",
+    "binary-files",
+    "byte-offset",
+    "color",
+    "colour",
+    "context",
+    "count",
+    "dereference-recursive",
+    "devices",
+    "directories",
+    "exclude",
+    "exclude-dir",
+    "exclude-from",
+    "extended-regexp",
+    "file",
+    "files-with-matches",
+    "files-without-match",
+    "fixed-regexp",
+    "fixed-strings",
+    "group-separator",
+    "help",
+    "ignore-case",
+    "include",
+    "initial-tab",
+    "invert-match",
+    "label",
+    "line-buffered",
+    "line-number",
+    "line-regexp",
+    "max-count",
+    "no-filename",
+    "no-group-separator",
+    "no-ignore-case",
+    "no-messages",
+    "null",
+    "null-data",
+    "only-matching",
+    "perl-regexp",
+    "quiet",
+    "recursive",
+    "regexp",
+    "silent",
+    "text",
+    "version",
+    "with-filename",
+    "word-regexp",
+])
+.with_aliases(&[("colour", "color"), ("fixed-regexp", "fixed-strings")]);
+
+/// The search engines' grammar: the paths are the free positionals after the pattern, which
+/// `-e`/`--regexp` or `-f`/`--file` replace (see [`extract`]).
+pub(crate) struct SearchGrammar(pub(crate) Engine);
+
+impl OperandGrammar for SearchGrammar {
+    type Parsed = Extracted;
+
+    fn split<T: AsRef<str>>(&self, args: &[T]) -> (OperandSplit, Extracted) {
+        extract(args, self.0)
+    }
+}
+
+/// The module's single tokenizer entry point. Shared so a pre-check and `extract`
+/// cannot classify the same argument differently. Tokens keep the text as typed, which is
+/// what the engine receives; [`classify`] gives the names classification reads.
 fn tokenize_search_args<'a, T: AsRef<str>>(args: &'a [T], engine: Engine) -> Vec<Token<'a>> {
     arg_tokenizer::tokenize_grammar(
         args,
@@ -147,14 +223,58 @@ fn tokenize_search_args<'a, T: AsRef<str>>(args: &'a [T], engine: Engine) -> Vec
     )
 }
 
+/// A long flag's full name, for classification only: the engine always receives the flag as
+/// typed. rg takes nothing but exact names; GNU grep takes any unique prefix, and a name that
+/// resolves to none keeps its spelling. BSD grep (macOS) has `--include-dir` as well, so
+/// `--incl` is ambiguous there: it only ever classifies, and BSD grep rejects the typed prefix
+/// itself.
+fn long_name(engine: Engine, name: &str) -> &str {
+    match engine {
+        Engine::Grep => arg_tokenizer::resolve_long(name, &GREP_LONG_OPTIONS).unwrap_or(name),
+        Engine::Rg => name,
+    }
+}
+
+/// The names tokens are classified by: a grep long flag's full name (see [`long_name`]),
+/// `None` when it names no option or prefixes several; the text otherwise. Computed once per
+/// argv for the checks that read names; the tokenizer's `takes_value` callback and the
+/// short-cluster value check resolve on their own.
+fn classify<'a>(engine: Engine, tokens: &[Token<'a>]) -> Vec<Option<&'a str>> {
+    tokens
+        .iter()
+        .map(|t| match (t.kind, engine) {
+            (TokenKind::Long, Engine::Grep) => {
+                arg_tokenizer::resolve_long(t.text, &GREP_LONG_OPTIONS)
+            }
+            _ => Some(t.text),
+        })
+        .collect()
+}
+
+/// The name `tokens[i]` is classified by: its resolved name, or its typed text when a grep long
+/// flag resolves to no option. Only rg's own names can then match, and of those only the
+/// output-shape ones do anything (grep given `--json` still runs verbatim, as it always has);
+/// rg's `--files`, which grep lacks, is matched for rg alone.
+fn name_at<'a>(tokens: &[Token<'a>], names: &[Option<&'a str>], i: usize) -> &'a str {
+    names[i].unwrap_or(tokens[i].text)
+}
+
 /// Every grep/rg value-taking flag claims even a literal `--` as its value, unlike git/cargo --
 /// verified against both engines for short and long, numeric- and file-typed flags alike.
 fn search_takes_value(engine: Engine, kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    let takes = match engine {
+    let name = match kind {
+        TokenKind::Long => long_name(engine, name),
+        _ => name,
+    };
+    takes_value_named(engine, kind, name).then(|| ValueSpec::value().claiming_dash_dash())
+}
+
+/// [`search_takes_value`] for a name already resolved.
+fn takes_value_named(engine: Engine, kind: TokenKind, name: &str) -> bool {
+    match engine {
         Engine::Grep => grep_takes_value(kind, name),
         Engine::Rg => rg_takes_value(kind, name),
-    };
-    takes.then(|| ValueSpec::value().claiming_dash_dash())
+    }
 }
 
 /// Unique, descriptive tee slug for a file's overflow matches. `idx` disambiguates
@@ -179,20 +299,55 @@ fn match_block(path: &str, entries: &[(usize, bool, String)]) -> String {
     s
 }
 
-/// Extracts `(patterns, paths, flags, has_format_flag, detected)` from the raw trailing args.
-/// `patterns` is the positional pattern plus all `-e`/`--regexp` values (empty → error); `paths`
-/// is the remaining positionals (empty → caller defaults to `["."]`); `flags` is everything else
-/// forwarded verbatim; `has_format_flag`/`detected` ([`DetectedFlags`]) are computed from this
-/// same token pass rather than a second scan over the reconstructed `flags` strings.
-fn extract_pattern_path<T: AsRef<str>>(
-    args: &[T],
-    engine: Engine,
-) -> (Vec<String>, Vec<String>, Vec<String>, bool, DetectedFlags) {
+/// What [`extract`] reads from the raw trailing args in the same token pass as the split of
+/// the paths, which are the remaining positionals (empty → caller defaults to `["."]`).
+/// `patterns` is the positional pattern plus all `-e`/`--regexp` values (empty → error);
+/// `flags` is everything else forwarded verbatim, as typed; `has_format_flag`/`detected`
+/// ([`DetectedFlags`]) come from the same pass rather than a second scan over the reconstructed
+/// `flags` strings, as do the pre-checks `asks_for_help`, `dangling_value_flag` and
+/// `bare_file_list`.
+pub(crate) struct Extracted {
+    patterns: Vec<String>,
+    flags: Vec<String>,
+    has_format_flag: bool,
+    detected: DetectedFlags,
+    /// `--version`/`--help` (rg's `-h` too) before any `--`: `rtk grep -- --version`
+    /// searches *for* that string.
+    asks_for_help: bool,
+    /// A value-taking flag with nothing left to take.
+    dangling_value_flag: bool,
+    /// See [`bare_file_list`].
+    bare_file_list: bool,
+}
+
+fn extract<T: AsRef<str>>(args: &[T], engine: Engine) -> (OperandSplit, Extracted) {
     let tokens = tokenize_search_args(args, engine);
+    let names = classify(engine, &tokens);
+    let name = |i: usize| name_at(&tokens, &names, i);
+    // A bare long flag with no name (unknown, or a prefix of several) may have taken the next
+    // argument; rg rejects those outright.
+    let bounded = engine == Engine::Rg
+        || !tokens
+            .iter()
+            .zip(&names)
+            .any(|(t, n)| t.kind == TokenKind::Long && t.attached.is_none() && n.is_none());
+    // `-h` is engine-specific: rg's is --help, grep's is --no-filename.
+    let boundary = arg_tokenizer::dashdash_index(&tokens).unwrap_or(tokens.len());
+    let asks_for_help = (0..boundary).any(|i| {
+        let t = &tokens[i];
+        (t.kind == TokenKind::Long && matches!(name(i), "version" | "help"))
+            || (t.kind == TokenKind::Short && t.text == "h" && engine == Engine::Rg)
+    });
+    let dangling_value_flag = (0..tokens.len()).any(|i| {
+        let t = &tokens[i];
+        matches!(t.kind, TokenKind::Long | TokenKind::Short)
+            && takes_value_named(engine, t.kind, name(i))
+            && t.value(&tokens).is_none()
+    });
 
     let mut e_patterns: Vec<String> = Vec::new();
-    let mut patterns_from_file = false;
-    let mut positionals: Vec<String> = Vec::new();
+    let mut no_positional_pattern = false;
+    let mut positionals: Vec<(usize, String)> = Vec::new();
     let mut flags: Vec<String> = Vec::new();
     let mut has_format_flag = false;
     // `None` until the user says either way; the last spelling wins, as both engines do.
@@ -205,41 +360,45 @@ fn extract_pattern_path<T: AsRef<str>>(
     while i < tokens.len() {
         let t = &tokens[i];
         match t.kind {
-            TokenKind::Long if t.text == "regexp" => {
+            TokenKind::Long if name(i) == "regexp" => {
                 if let Some(v) = t.value(&tokens) {
                     e_patterns.push(v.to_string());
                 }
             }
             TokenKind::Long => {
-                if t.text == "file" {
-                    patterns_from_file = true;
+                // Classified by its full name, forwarded as typed.
+                let long = name(i);
+                // grep's `-f FILE` and rg's `--files` (a listing, no search) both leave every
+                // positional a path.
+                if long == "file" || (engine == Engine::Rg && long == "files") {
+                    no_positional_pattern = true;
                 }
-                if is_format_flag_token(engine, t.kind, t.text) {
+                if is_format_flag_token(engine, t.kind, long) {
                     has_format_flag = true;
                 }
-                if is_show_file_token(t.kind, t.text) {
+                if is_show_file_token(t.kind, long) {
                     show_file_flag = Some(true);
                 }
-                if is_recursive_token(engine, t.kind, t.text) {
+                if is_recursive_token(engine, t.kind, long) {
                     recursive = true;
                 }
-                if is_show_line_on_token(t.kind, t.text) {
+                if is_show_line_on_token(t.kind, long) {
                     show_line_flag = Some(true);
                 }
                 // Neither negation is forwarded: RTK forces `-nH` so it can parse the output,
                 // and the user's `--no-filename`/`--no-line-number` would win as the later
                 // flag, leaving nothing parseable and forcing a second run of the whole search.
-                if is_show_file_off_token(engine, t.kind, t.text) {
+                if is_show_file_off_token(engine, t.kind, long) {
                     show_file_flag = Some(false);
                     i += 1;
                     continue;
                 }
-                if is_show_line_off_token(engine, t.kind, t.text) {
+                if is_show_line_off_token(engine, t.kind, long) {
                     show_line_flag = Some(false);
                     i += 1;
                     continue;
                 }
-                if is_context_token(engine, t.kind, t.text) {
+                if is_context_token(engine, t.kind, long) {
                     context = true;
                 }
                 match t.attached {
@@ -254,7 +413,7 @@ fn extract_pattern_path<T: AsRef<str>>(
             }
             // A value consumed by a preceding flag is handled there instead.
             TokenKind::Positional if t.is_free_positional() => {
-                positionals.push(t.text.to_string());
+                positionals.push((t.source_index, t.text.to_string()));
             }
             TokenKind::Short => {
                 // A cluster's boolean prefix (e.g. "r" in "-rA") stays glued into one
@@ -333,7 +492,7 @@ fn extract_pattern_path<T: AsRef<str>>(
                         }
                     } else {
                         if vt.text == "f" {
-                            patterns_from_file = true;
+                            no_positional_pattern = true;
                         }
                         flags.push(format!("-{}", vt.text));
                         if let Some(v) = value {
@@ -352,12 +511,17 @@ fn extract_pattern_path<T: AsRef<str>>(
     // `-e`/`--regexp` and `-f`/`--file` both supply the patterns, so every positional is a
     // path. Taking the first one as the pattern instead left `paths` empty, which made the
     // engine read stdin (a hang under an agent harness) or walk the cwd.
-    let (patterns, paths) = if !e_patterns.is_empty() || patterns_from_file {
-        (e_patterns, positionals)
-    } else {
-        let paths = positionals.iter().skip(1).cloned().collect();
-        let patterns = positionals.into_iter().take(1).collect();
-        (patterns, paths)
+    let (patterns, paths): (Vec<String>, Vec<(usize, String)>) =
+        if !e_patterns.is_empty() || no_positional_pattern {
+            (e_patterns, positionals)
+        } else {
+            let mut positionals = positionals.into_iter();
+            let patterns = positionals.next().map(|(_, pattern)| pattern);
+            (patterns.into_iter().collect(), positionals.collect())
+        };
+    let split = OperandSplit {
+        indices: paths.into_iter().map(|(index, _)| index).collect(),
+        bounded,
     };
 
     let detected = DetectedFlags {
@@ -367,7 +531,16 @@ fn extract_pattern_path<T: AsRef<str>>(
         context,
     };
 
-    (patterns, paths, flags, has_format_flag, detected)
+    let extracted = Extracted {
+        patterns,
+        flags,
+        has_format_flag,
+        detected,
+        asks_for_help,
+        dangling_value_flag,
+        bare_file_list: bare_file_list(engine, &tokens, &names),
+    };
+    (split, extracted)
 }
 
 fn unparsed_signal(stdout: &str) -> usize {
@@ -418,7 +591,7 @@ fn engine_capture<T: AsRef<str>>(
     engine: Engine,
     extra_args: &[T],
     patterns: &[String],
-    paths: &[String],
+    paths: &PathOperands,
 ) -> Result<CaptureResult> {
     let mut cmd = engine_command(engine, extra_args, patterns, paths, false);
     exec_capture_stdin(&mut cmd).context("search failed")
@@ -428,23 +601,23 @@ fn engine_command<T: AsRef<str>>(
     engine: Engine,
     extra_args: &[T],
     patterns: &[String],
-    paths: &[String],
+    paths: &PathOperands,
     line_buffered: bool,
-) -> Command {
+) -> ChildCommand {
     let mut cmd = resolved_command(engine.bin());
-    cmd.child_args(engine.parse_flags());
+    cmd.args(engine.parse_flags());
     for a in extra_args {
-        cmd.child_arg(a.as_ref());
+        cmd.arg(a.as_ref());
     }
     if line_buffered {
         // The engine writes through a pipe, so flush each match immediately.
-        cmd.child_arg("--line-buffered");
+        cmd.arg("--line-buffered");
     }
     for p in patterns {
-        cmd.child_args(["-e", p]);
+        cmd.args(["-e", p]);
     }
-    cmd.child_arg("--");
-    cmd.child_args(paths);
+    cmd.arg("--");
+    cmd.glob_args(paths);
     cmd
 }
 
@@ -505,7 +678,7 @@ impl StreamFilter for SearchStreamFilter {
 }
 
 /// The paths-based half of "should the filename be shown": multiple paths, or a directory among
-/// them, regardless of any flag. Combined with `extract_pattern_path`'s pre-computed
+/// them, regardless of any flag. Combined with `extract`'s pre-computed
 /// `DetectedFlags::show_file` (the flags-based half) at each call site.
 fn wants_show_file(paths: &[String], flags_show_file: bool) -> bool {
     paths.len() > 1 || paths.iter().any(|p| std::path::Path::new(p).is_dir()) || flags_show_file
@@ -517,7 +690,7 @@ fn run_streaming_search(
     engine: Engine,
     extra_args: &[String],
     patterns: &[String],
-    paths: &[String],
+    paths: &PathOperands,
     max_results: usize,
     real_cmd: &str,
     detected_flags: DetectedFlags,
@@ -561,14 +734,19 @@ fn passthrough<T: AsRef<str>>(
     real_cmd: &str,
     stream_stdin: bool,
     fold_file_list: bool,
+    split: Option<&SplitArgv>,
 ) -> Result<i32> {
     let mut cmd = resolved_command(engine.bin());
     if stream_stdin && !std::io::stdout().is_terminal() {
         // Keep passthrough output live when stdout is piped.
-        cmd.child_arg("--line-buffered");
+        cmd.arg("--line-buffered");
     }
-    for a in args {
-        cmd.child_arg(a.as_ref());
+    // `split` when the grammar has already told the paths apart from the pattern and the flag
+    // values, as for the grouped run; otherwise every argument is literal.
+    if let Some(argv) = split {
+        cmd.split_args(argv);
+    } else {
+        cmd.args(args.iter().map(|a| a.as_ref()));
     }
 
     if stream_stdin {
@@ -675,6 +853,8 @@ fn fold_path_prefix(raw: &str) -> Option<String> {
     Some(out)
 }
 
+/// `args` is the engine's argv with any `--` clap consumed already put back, which every check
+/// below relies on.
 pub fn run(
     engine: Engine,
     max_line_len: usize,
@@ -684,32 +864,28 @@ pub fn run(
     verbose: u8,
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
-    // Restored first: every check below classifies these args, and clap ate the boundary.
-    let args = &args_utils::restore_double_dash(args);
 
-    // --version / --help: pass through to the engine without filtering. Token-based and
-    // scoped before the boundary, because `rtk grep -- --version` searches *for* that string.
-    // `-h` is engine-specific: rg's is --help, grep's is --no-filename.
-    let help_tokens = tokenize_search_args(args, engine);
-    let asks_for_help = arg_tokenizer::before_dashdash(&help_tokens)
-        .iter()
-        .any(|t| {
-            (t.kind == TokenKind::Long && matches!(t.text, "version" | "help"))
-                || (t.kind == TokenKind::Short && t.text == "h" && engine == Engine::Rg)
-        });
-    let dangling_value_flag = help_tokens.iter().any(|t| {
-        matches!(t.kind, TokenKind::Long | TokenKind::Short)
-            && search_takes_value(engine, t.kind, t.text).is_some()
-            && t.value(&help_tokens).is_none()
-    });
+    // One token pass classifies everything below.
+    let (argv, extracted) = SplitArgv::new(&SearchGrammar(engine), args);
+    let Extracted {
+        patterns,
+        flags: extra_args,
+        has_format_flag: extra_args_has_format_flag,
+        detected: detected_flags,
+        asks_for_help,
+        dangling_value_flag,
+        bare_file_list: fold_file_list,
+    } = extracted;
+
     if dangling_value_flag {
         let real_cmd = format!("{} {}", engine.bin(), args.join(" "));
-        return passthrough(&timer, engine, args, &real_cmd, false, false);
+        return passthrough(&timer, engine, args, &real_cmd, false, false, None);
     }
 
+    // --version / --help: pass through to the engine without filtering.
     if asks_for_help {
         let mut cmd = resolved_command(engine.bin());
-        cmd.child_args(args);
+        cmd.args(args);
         let result = exec_capture(&mut cmd).context("search failed")?;
         print!("{}", result.stdout);
         if !result.stderr.is_empty() {
@@ -721,14 +897,21 @@ pub fn run(
     let real_cmd = format!("{} {}", engine.label(), args.join(" "));
     let rtk_label = format!("rtk {}", engine.label());
 
-    let (patterns, paths, extra_args, extra_args_has_format_flag, detected_flags) =
-        extract_pattern_path(args, engine);
-
     if patterns.is_empty() {
-        // `rg --files` lists paths without a pattern; fold it like `-l`.
-        let fold = is_bare_file_list(engine, args);
-        return passthrough(&timer, engine, args, &real_cmd, false, fold);
+        // No pattern argument: `-f` supplies the patterns, and `rg --files` lists the files
+        // under its paths, folded like `-l`. Either way every positional is a path.
+        let split = argv.is_bounded().then_some(&argv);
+        return passthrough(
+            &timer,
+            engine,
+            args,
+            &real_cmd,
+            false,
+            fold_file_list,
+            split,
+        );
     }
+    let operands = argv.operands();
 
     let pattern_display = if patterns.len() == 1 {
         patterns[0].clone()
@@ -736,19 +919,41 @@ pub fn run(
         patterns.join("|")
     };
 
-    let path_display = paths.join(" ");
+    let path_display = operands.join(" ");
 
     if verbose > 0 {
         eprintln!("grep: '{}' in {}", pattern_display, path_display);
     }
 
     let reads_piped_stdin =
-        stdin_is_readable() && (paths.is_empty() || paths.iter().any(|path| path == "-"));
+        stdin_is_readable() && (operands.is_empty() || operands.iter().any(|path| path == "-"));
+
+    // A bare flag grep does not have, or an ambiguous prefix of several (`--in`), may have
+    // taken an argument the grouped run would move: run the argv as typed, every argument
+    // literal.
+    if !argv.is_bounded() {
+        return passthrough(
+            &timer,
+            engine,
+            args,
+            &real_cmd,
+            reads_piped_stdin,
+            fold_file_list,
+            None,
+        );
+    }
 
     // format/shape flags (-c/-l/-o/...): already-minimal native output, passthrough.
     if extra_args_has_format_flag {
-        let fold = is_bare_file_list(engine, args);
-        return passthrough(&timer, engine, args, &real_cmd, reads_piped_stdin, fold);
+        return passthrough(
+            &timer,
+            engine,
+            args,
+            &real_cmd,
+            reads_piped_stdin,
+            fold_file_list,
+            Some(&argv),
+        );
     }
 
     if reads_piped_stdin {
@@ -757,14 +962,14 @@ pub fn run(
             engine,
             &extra_args,
             &patterns,
-            &paths,
+            &operands,
             max_results,
             &real_cmd,
             detected_flags,
         );
     }
 
-    let result = engine_capture(engine, &extra_args, &patterns, &paths)?;
+    let result = engine_capture(engine, &extra_args, &patterns, &operands)?;
 
     let exit_code = result.exit_code;
     let raw_output = result.stdout.clone();
@@ -772,7 +977,7 @@ pub fn run(
     // Unparseable shape re-runs verbatim below (with its own stderr), so handle it
     // before surfacing this run's stderr (#2333).
     if unparsed_signal(&raw_output) > 0 {
-        return passthrough(&timer, engine, args, &real_cmd, false, false);
+        return passthrough(&timer, engine, args, &real_cmd, false, false, Some(&argv));
     }
 
     if !result.stderr.is_empty() {
@@ -820,9 +1025,9 @@ pub fn run(
     // matches apart -- real rg prints it even when a single file matched. grep with no path
     // reads stdin instead (whatever stdin is), where a filename would be `(standard input)`,
     // so the same reasoning does not carry over.
-    let walks_cwd = engine == Engine::Rg && paths.is_empty();
+    let walks_cwd = engine == Engine::Rg && operands.is_empty();
     let show_file = detected_flags.show_file.unwrap_or_else(|| {
-        by_file.len() > 1 || walks_cwd || wants_show_file(&paths, detected_flags.recursive)
+        by_file.len() > 1 || walks_cwd || wants_show_file(&operands, detected_flags.recursive)
     });
     let show_line = detected_flags.show_line;
 
@@ -998,19 +1203,25 @@ fn is_format_flag_token(engine: Engine, kind: TokenKind, text: &str) -> bool {
 /// (`-q`), so the list is left verbatim.
 pub(crate) fn is_bare_file_list<T: AsRef<str>>(engine: Engine, args: &[T]) -> bool {
     let tokens = tokenize_search_args(args, engine);
+    bare_file_list(engine, &tokens, &classify(engine, &tokens))
+}
+
+/// [`is_bare_file_list`] over tokens already classified.
+fn bare_file_list<'a>(engine: Engine, tokens: &[Token<'a>], names: &[Option<&'a str>]) -> bool {
     let mut file_list = false;
-    for t in &tokens {
+    for (i, t) in tokens.iter().enumerate() {
+        let flag = name_at(tokens, names, i);
         let is_list = match t.kind {
-            TokenKind::Long => matches!(
-                t.text,
-                "files" | "files-with-matches" | "files-without-match"
-            ),
-            TokenKind::Short => t.text == "l" || (t.text == "L" && engine == Engine::Grep),
+            TokenKind::Long => {
+                matches!(flag, "files-with-matches" | "files-without-match")
+                    || (flag == "files" && engine == Engine::Rg)
+            }
+            TokenKind::Short => flag == "l" || (flag == "L" && engine == Engine::Grep),
             _ => false,
         };
         if is_list {
             file_list = true;
-        } else if is_format_flag_token(engine, t.kind, t.text) {
+        } else if is_format_flag_token(engine, t.kind, flag) {
             return false;
         }
     }
@@ -1093,7 +1304,7 @@ fn is_context_token(engine: Engine, kind: TokenKind, text: &str) -> bool {
     }
 }
 
-/// Flags detected during [`extract_pattern_path`]'s own token pass, replacing the
+/// Flags detected during [`extract`]'s own token pass, replacing the
 /// reconstructed-string scans `show_file`/`show_line`/`has_context_flag` used to rely on (see
 /// the ambiguity this avoids: a value-taking flag's own value,
 /// pushed into `flags` as a bare string, could otherwise be misread as one of these).
@@ -1114,17 +1325,17 @@ struct DetectedFlags {
 }
 
 /// Test-only convenience wrapper; the production call site gets this from the
-/// `has_format_flag` extract_pattern_path already returns, computed in the same token pass
+/// `has_format_flag` [`extract`] already returns, computed in the same token pass
 /// instead of tokenizing the reconstructed `flags` strings a second time.
 #[cfg(test)]
 fn has_format_flag<T: AsRef<str>>(engine: Engine, extra_args: &[T]) -> bool {
     // The module's shared tokenizer, so a value-taking flag's value (e.g. `-e --json`, where
     // "--json" is -e's pattern, not the real --json flag) is classified exactly as
-    // extract_pattern_path classifies it.
+    // extract classifies it.
     let tokens = tokenize_search_args(extra_args, engine);
-    tokens
-        .iter()
-        .any(|t| is_format_flag_token(engine, t.kind, t.text))
+    let names = classify(engine, &tokens);
+    (0..tokens.len())
+        .any(|i| is_format_flag_token(engine, tokens[i].kind, name_at(&tokens, &names, i)))
 }
 
 fn clean_line(line: &str, max_len: usize, context_re: Option<&Regex>, pattern: &str) -> String {
@@ -1194,6 +1405,30 @@ fn compact_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a split reads, with the paths as text, for assertions.
+    struct Seen {
+        patterns: Vec<String>,
+        paths: Vec<String>,
+        flags: Vec<String>,
+        has_format_flag: bool,
+        detected: DetectedFlags,
+    }
+
+    fn split_search<T: AsRef<str>>(args: &[T], engine: Engine) -> Seen {
+        let (split, extracted) = extract(args, engine);
+        Seen {
+            paths: split
+                .indices
+                .iter()
+                .map(|&i| args[i].as_ref().to_string())
+                .collect(),
+            patterns: extracted.patterns,
+            flags: extracted.flags,
+            has_format_flag: extracted.has_format_flag,
+            detected: extracted.detected,
+        }
+    }
 
     #[test]
     fn test_clean_line() {
@@ -1365,6 +1600,8 @@ mod tests {
         assert!(is_bare_file_list(Engine::Rg, &["--files", "src"]));
         // rg's -L is --follow, not a list.
         assert!(!is_bare_file_list(Engine::Rg, &["-L", "foo"]));
+        // grep has no `--files`: there it prefixes two options, and names nothing.
+        assert!(!is_bare_file_list(Engine::Grep, &["--files", "foo", "src"]));
         assert!(!is_bare_file_list(Engine::Grep, &["-rn", "foo", "."]));
     }
 
@@ -1384,15 +1621,20 @@ mod tests {
         assert!(!is_bare_file_list(Engine::Grep, &["-e", "-l", "."]));
     }
 
-    // --- extract_pattern_path ---
+    // --- extract ---
     //
     // parse_cluster/ClusterResult were replaced by arg_tokenizer::tokenize; the
-    // extract_pattern_path tests below exercise the same short-cluster/value-taking/`-e`
+    // extract tests below exercise the same short-cluster/value-taking/`-e`
     // behavior end-to-end instead of unit-testing the internal cluster scanner directly.
 
     #[test]
     fn test_extract_simple() {
-        let (patterns, paths, flags, _, _) = extract_pattern_path(&["foo", "src/"], Engine::Grep);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["foo", "src/"], Engine::Grep);
         assert_eq!(patterns, vec!["foo"]);
         assert_eq!(paths, vec!["src/"]);
         assert!(flags.is_empty());
@@ -1402,20 +1644,26 @@ mod tests {
     fn test_extract_engine_specific_long_value_flags() {
         // grep 3.11: `--include`/`--exclude-dir`/... require a separate value, and rg has no
         // such flags at all. Missing them made the glob the pattern and the pattern a file.
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["--include", "*.txt", "-r", "match", "."], Engine::Grep);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["--include", "*.txt", "-r", "match", "."], Engine::Grep);
         assert_eq!(patterns, vec!["match"]);
         assert_eq!(paths, vec!["."]);
         assert_eq!(flags, vec!["--include", "*.txt", "-r"]);
 
         // grep's --color[=WHEN] attaches its value; rg's --color takes the next token.
-        let (patterns, paths, _, _, _) =
-            extract_pattern_path(&["--color", "match", "a.txt"], Engine::Grep);
+        let Seen {
+            patterns, paths, ..
+        } = split_search(&["--color", "match", "a.txt"], Engine::Grep);
         assert_eq!(patterns, vec!["match"]);
         assert_eq!(paths, vec!["a.txt"]);
 
-        let (patterns, paths, _, _, _) =
-            extract_pattern_path(&["--color", "never", "match", "a.txt"], Engine::Rg);
+        let Seen {
+            patterns, paths, ..
+        } = split_search(&["--color", "never", "match", "a.txt"], Engine::Rg);
         assert_eq!(patterns, vec!["match"]);
         assert_eq!(paths, vec!["a.txt"]);
     }
@@ -1430,26 +1678,18 @@ mod tests {
         assert!(is_context_token(Engine::Grep, TokenKind::Long, "context"));
         assert!(!is_context_token(Engine::Grep, TokenKind::Short, "n"));
 
-        let (_, _, _, _, detected) = extract_pattern_path(&["-1", "TODO", "f.txt"], Engine::Grep);
+        let Seen { detected, .. } = split_search(&["-1", "TODO", "f.txt"], Engine::Grep);
         assert!(detected.context);
     }
 
     #[test]
     fn test_help_short_circuit_respects_the_boundary_and_the_engine() {
-        let asks = |engine: Engine, args: &[&str]| -> bool {
-            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-            let tokens = arg_tokenizer::tokenize_grammar(
-                &args,
-                &|kind, name| search_takes_value(engine, kind, name),
-                Dialect::Posix,
-            );
-            arg_tokenizer::before_dashdash(&tokens).iter().any(|t| {
-                (t.kind == TokenKind::Long && matches!(t.text, "version" | "help"))
-                    || (t.kind == TokenKind::Short && t.text == "h" && engine == Engine::Rg)
-            })
-        };
+        let asks = |engine: Engine, args: &[&str]| extract(args, engine).1.asks_for_help;
 
         assert!(asks(Engine::Grep, &["--version"]));
+        // GNU grep takes `--vers` for `--version`; rg takes no abbreviation.
+        assert!(asks(Engine::Grep, &["--vers"]));
+        assert!(!asks(Engine::Rg, &["--vers", "x"]));
         // Past `--` it is the pattern to search for, not a request for the banner.
         assert!(!asks(Engine::Grep, &["--", "--version", "f.txt"]));
         // `-h` is rg's --help but grep's --no-filename.
@@ -1462,27 +1702,30 @@ mod tests {
         // RTK forces `-H` so it can parse the output, so the user's `-h`/`--no-filename` has to
         // be applied when printing -- forwarded, it wins as the later flag, the NUL-separated
         // parse fails on every line, and the whole search runs a second time.
-        let (_, _, flags, _, detected) =
-            extract_pattern_path(&["--no-filename", "x", "a.txt"], Engine::Grep);
+        let Seen {
+            flags, detected, ..
+        } = split_search(&["--no-filename", "x", "a.txt"], Engine::Grep);
         assert_eq!(detected.show_file, Some(false));
         assert!(!flags.iter().any(|f| f == "--no-filename"));
 
-        let (_, _, flags, _, detected) = extract_pattern_path(&["-ih", "x", "a.txt"], Engine::Grep);
+        let Seen {
+            flags, detected, ..
+        } = split_search(&["-ih", "x", "a.txt"], Engine::Grep);
         assert_eq!(detected.show_file, Some(false));
         assert_eq!(flags, vec!["-i"], "the rest of the cluster survives");
 
         // Both engines arbitrate the pair by last-one-wins, so RTK must too.
-        let (_, _, _, _, detected) =
-            extract_pattern_path(&["-h", "-H", "x", "a.txt"], Engine::Grep);
+        let Seen { detected, .. } = split_search(&["-h", "-H", "x", "a.txt"], Engine::Grep);
         assert_eq!(detected.show_file, Some(true));
-        let (_, _, _, _, detected) =
-            extract_pattern_path(&["-H", "-h", "x", "a.txt"], Engine::Grep);
+        let Seen { detected, .. } = split_search(&["-H", "-h", "x", "a.txt"], Engine::Grep);
         assert_eq!(detected.show_file, Some(false));
-        let (_, _, _, _, detected) = extract_pattern_path(&["-Hh", "x", "a.txt"], Engine::Grep);
+        let Seen { detected, .. } = split_search(&["-Hh", "x", "a.txt"], Engine::Grep);
         assert_eq!(detected.show_file, Some(false), "within one cluster too");
 
         // rg's -N is its --no-line-number; withheld for the same reason as -h.
-        let (_, _, flags, _, detected) = extract_pattern_path(&["-nN", "x", "a.txt"], Engine::Rg);
+        let Seen {
+            flags, detected, ..
+        } = split_search(&["-nN", "x", "a.txt"], Engine::Rg);
         assert!(!detected.show_line);
         assert!(!flags.iter().any(|f| f.contains('N')));
     }
@@ -1491,10 +1734,10 @@ mod tests {
     fn test_rg_unwraps_an_equals_attached_short_value_but_grep_does_not() {
         // rg accepts `-A=1` and strips the `=`; GNU grep answers "invalid context length
         // argument", so RTK must not normalise it for grep.
-        let (_, _, flags, _, _) = extract_pattern_path(&["-A=1", "x", "a.txt"], Engine::Rg);
+        let Seen { flags, .. } = split_search(&["-A=1", "x", "a.txt"], Engine::Rg);
         assert_eq!(flags, vec!["-A", "1"]);
 
-        let (_, _, flags, _, _) = extract_pattern_path(&["-A=1", "x", "a.txt"], Engine::Grep);
+        let Seen { flags, .. } = split_search(&["-A=1", "x", "a.txt"], Engine::Grep);
         assert_eq!(flags, vec!["-A", "=1"]);
     }
 
@@ -1510,7 +1753,9 @@ mod tests {
             vec!["-fpats.txt", "a.txt"],
             vec!["--file=pats.txt", "a.txt"],
         ] {
-            let (patterns, paths, _, _, _) = extract_pattern_path(&args, Engine::Grep);
+            let Seen {
+                patterns, paths, ..
+            } = split_search(&args, Engine::Grep);
             assert!(patterns.is_empty(), "{args:?} -> {patterns:?}");
             assert_eq!(paths, vec!["a.txt"], "{args:?}");
         }
@@ -1519,22 +1764,31 @@ mod tests {
     #[test]
     fn test_extract_engine_specific_short_value_flags() {
         // `-E` is grep's boolean --extended-regexp but rg's --encoding, which takes a value.
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["-E", "match", "a.txt"], Engine::Grep);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["-E", "match", "a.txt"], Engine::Grep);
         assert_eq!(patterns, vec!["match"]);
         assert_eq!(paths, vec!["a.txt"]);
         assert_eq!(flags, vec!["-E"]);
 
-        let (patterns, paths, _, _, _) =
-            extract_pattern_path(&["-E", "utf8", "match", "a.txt"], Engine::Rg);
+        let Seen {
+            patterns, paths, ..
+        } = split_search(&["-E", "utf8", "match", "a.txt"], Engine::Rg);
         assert_eq!(patterns, vec!["match"]);
         assert_eq!(paths, vec!["a.txt"]);
     }
 
     #[test]
     fn test_extract_with_bool_flag() {
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["-i", "foo", "src/"], Engine::Grep);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["-i", "foo", "src/"], Engine::Grep);
         assert_eq!(patterns, vec!["foo"]);
         assert_eq!(paths, vec!["src/"]);
         assert_eq!(flags, vec!["-i"]);
@@ -1543,8 +1797,12 @@ mod tests {
     #[test]
     fn test_extract_value_taking_flag() {
         // -A 2 must not steal "error" as its value
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["-A", "2", "error", "src"], Engine::Grep);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["-A", "2", "error", "src"], Engine::Grep);
         assert_eq!(patterns, vec!["error"]);
         assert_eq!(paths, vec!["src"]);
         assert_eq!(flags, vec!["-A", "2"]);
@@ -1553,8 +1811,12 @@ mod tests {
     #[test]
     fn test_extract_cluster_keeps_r() {
         // -rn: r kept, passed straight to grep
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["-rn", "foo", "src"], Engine::Grep);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["-rn", "foo", "src"], Engine::Grep);
         assert_eq!(patterns, vec!["foo"]);
         assert_eq!(paths, vec!["src"]);
         assert_eq!(flags, vec!["-rn"]);
@@ -1563,8 +1825,12 @@ mod tests {
     #[test]
     fn test_extract_cluster_ending_in_e() {
         // -rne PATTERN: rn kept, e consumes PATTERN as the pattern
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["-rne", "PATTERN", "src"], Engine::Grep);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["-rne", "PATTERN", "src"], Engine::Grep);
         assert_eq!(patterns, vec!["PATTERN"]);
         assert_eq!(paths, vec!["src"]);
         assert_eq!(flags, vec!["-rn"]);
@@ -1573,8 +1839,12 @@ mod tests {
     #[test]
     fn test_extract_cluster_ending_in_value_flag() {
         // -rA 2: r kept as its own flag, A consumes 2 as context value
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["-rA", "2", "foo", "src"], Engine::Grep);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["-rA", "2", "foo", "src"], Engine::Grep);
         assert_eq!(patterns, vec!["foo"]);
         assert_eq!(paths, vec!["src"]);
         assert_eq!(flags, vec!["-r", "-A", "2"]);
@@ -1582,8 +1852,12 @@ mod tests {
 
     #[test]
     fn test_extract_multi_path() {
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["TODO", "src", "tests"], Engine::Grep);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["TODO", "src", "tests"], Engine::Grep);
         assert_eq!(patterns, vec!["TODO"]);
         assert_eq!(paths, vec!["src", "tests"]);
         assert!(flags.is_empty());
@@ -1592,8 +1866,12 @@ mod tests {
     #[test]
     fn test_extract_glob_value() {
         // -g '*.md' must not steal "agent" as its value
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["-i", "x", "agent", "-g", "*.md"], Engine::Rg);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["-i", "x", "agent", "-g", "*.md"], Engine::Rg);
         assert_eq!(patterns, vec!["x"]);
         assert_eq!(paths, vec!["agent"]);
         assert_eq!(flags, vec!["-i", "-g", "*.md"]);
@@ -1601,8 +1879,12 @@ mod tests {
 
     #[test]
     fn test_extract_e_flag() {
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["-e", "fn run", "src"], Engine::Grep);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["-e", "fn run", "src"], Engine::Grep);
         assert_eq!(patterns, vec!["fn run"]);
         assert_eq!(paths, vec!["src"]);
         assert!(flags.is_empty());
@@ -1610,8 +1892,12 @@ mod tests {
 
     #[test]
     fn test_extract_multi_e() {
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["-e", "foo", "-e", "bar", "src"], Engine::Grep);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["-e", "foo", "-e", "bar", "src"], Engine::Grep);
         assert_eq!(patterns, vec!["foo", "bar"]);
         assert_eq!(paths, vec!["src"]);
         assert!(flags.is_empty());
@@ -1620,8 +1906,12 @@ mod tests {
     #[test]
     fn test_extract_dashdash_boundary() {
         // After --, args are positional even if they look like flags
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["--", "--version"], Engine::Grep);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["--", "--version"], Engine::Grep);
         assert_eq!(patterns, vec!["--version"]);
         assert!(paths.is_empty());
         assert!(flags.is_empty());
@@ -1631,20 +1921,31 @@ mod tests {
     fn test_extract_e_claims_literal_dash_dash() {
         // grep/rg -e -- means "the pattern is the literal string --", not the end-of-options
         // boundary (confirmed against both real grep and real rg).
-        let (patterns, paths, flags, _, _) = extract_pattern_path(&["-e", "--", "f"], Engine::Grep);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["-e", "--", "f"], Engine::Grep);
         assert_eq!(patterns, vec!["--"]);
         assert_eq!(paths, vec!["f"]);
         assert!(flags.is_empty());
 
-        let (patterns, paths, _, _, _) =
-            extract_pattern_path(&["--regexp", "--", "f"], Engine::Grep);
+        let Seen {
+            patterns, paths, ..
+        } = split_search(&["--regexp", "--", "f"], Engine::Grep);
         assert_eq!(patterns, vec!["--"]);
         assert_eq!(paths, vec!["f"]);
     }
 
     #[test]
     fn test_extract_no_args() {
-        let (patterns, paths, flags, _, _) = extract_pattern_path::<&str>(&[], Engine::Grep);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search::<&str>(&[], Engine::Grep);
         assert!(patterns.is_empty());
         assert!(paths.is_empty());
         assert!(flags.is_empty());
@@ -1653,15 +1954,21 @@ mod tests {
     #[test]
     fn test_extract_default_path_empty() {
         // Caller is responsible for defaulting empty paths to ["."]
-        let (patterns, paths, _, _, _) = extract_pattern_path(&["foo"], Engine::Grep);
+        let Seen {
+            patterns, paths, ..
+        } = split_search(&["foo"], Engine::Grep);
         assert_eq!(patterns, vec!["foo"]);
         assert!(paths.is_empty());
     }
 
     #[test]
     fn test_extract_ending_e() {
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["-e", "foo", "-e", "bar", "src", "-e"], Engine::Grep);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["-e", "foo", "-e", "bar", "src", "-e"], Engine::Grep);
         assert_eq!(patterns, vec!["foo", "bar"]);
         assert_eq!(paths, vec!["src"]);
         assert_eq!(flags, vec!["-e"]);
@@ -1672,8 +1979,12 @@ mod tests {
     #[test]
     fn test_extract_inline_e_value() {
         // -ecarrot: e hits at j=0, inline="carrot", no r-stripping on value
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["-ecarrot", "file"], Engine::Grep);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["-ecarrot", "file"], Engine::Grep);
         assert_eq!(patterns, vec!["carrot"]);
         assert_eq!(paths, vec!["file"]);
         assert!(flags.is_empty());
@@ -1682,7 +1993,7 @@ mod tests {
     #[test]
     fn test_extract_inline_e_value_no_rstrip() {
         // -ecarrot: the 'r' in "carrot" must NOT be stripped (it's value, not a flag)
-        let (patterns, _, _, _, _) = extract_pattern_path(&["-ecarrot", "file"], Engine::Grep);
+        let Seen { patterns, .. } = split_search(&["-ecarrot", "file"], Engine::Grep);
         assert_eq!(
             patterns,
             vec!["carrot"],
@@ -1693,8 +2004,12 @@ mod tests {
     #[test]
     fn test_extract_inline_g_value() {
         // -g*.rs: g hits at j=0, inline="*.rs", no r-stripping on value
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["aaa", "sub", "-g*.rs"], Engine::Rg);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["aaa", "sub", "-g*.rs"], Engine::Rg);
         assert_eq!(patterns, vec!["aaa"]);
         assert_eq!(paths, vec!["sub"]);
         assert_eq!(flags, vec!["-g", "*.rs"]);
@@ -1703,7 +2018,7 @@ mod tests {
     #[test]
     fn test_extract_inline_g_value_no_rstrip() {
         // -g*.rs: the 'r' in "*.rs" must NOT be stripped
-        let (_, _, flags, _, _) = extract_pattern_path(&["aaa", "sub", "-g*.rs"], Engine::Rg);
+        let Seen { flags, .. } = split_search(&["aaa", "sub", "-g*.rs"], Engine::Rg);
         assert!(
             flags.contains(&"*.rs".to_string()),
             "r in glob value must not be stripped"
@@ -1714,8 +2029,12 @@ mod tests {
 
     #[test]
     fn test_extract_long_glob_value() {
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["compact", "sub", "--glob", "*.md"], Engine::Rg);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["compact", "sub", "--glob", "*.md"], Engine::Rg);
         assert_eq!(patterns, vec!["compact"]);
         assert_eq!(paths, vec!["sub"]);
         assert_eq!(flags, vec!["--glob", "*.md"]);
@@ -1723,8 +2042,12 @@ mod tests {
 
     #[test]
     fn test_extract_long_max_count() {
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["--max-count", "1", "fn", "file"], Engine::Grep);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["--max-count", "1", "fn", "file"], Engine::Grep);
         assert_eq!(patterns, vec!["fn"]);
         assert_eq!(paths, vec!["file"]);
         assert_eq!(flags, vec!["--max-count", "1"]);
@@ -1733,8 +2056,12 @@ mod tests {
     #[test]
     fn test_extract_short_type() {
         // -t rust: type filter, value must not become pattern
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["-t", "rust", "fn", "src"], Engine::Rg);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["-t", "rust", "fn", "src"], Engine::Rg);
         assert_eq!(patterns, vec!["fn"]);
         assert_eq!(paths, vec!["src"]);
         assert_eq!(flags, vec!["-t", "rust"]);
@@ -1743,8 +2070,12 @@ mod tests {
     #[test]
     fn test_extract_short_max_depth() {
         // -d 3: max-depth, value must not become pattern
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["-d", "3", "foo", "src"], Engine::Grep);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["-d", "3", "foo", "src"], Engine::Grep);
         assert_eq!(patterns, vec!["foo"]);
         assert_eq!(paths, vec!["src"]);
         assert_eq!(flags, vec!["-d", "3"]);
@@ -1753,8 +2084,12 @@ mod tests {
     #[test]
     fn test_extract_short_max_columns() {
         // -M 120: max-columns, value must not become pattern
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["-M", "120", "foo", "src"], Engine::Rg);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["-M", "120", "foo", "src"], Engine::Rg);
         assert_eq!(patterns, vec!["foo"]);
         assert_eq!(paths, vec!["src"]);
         assert_eq!(flags, vec!["-M", "120"]);
@@ -1763,8 +2098,12 @@ mod tests {
     #[test]
     fn test_extract_long_regexp() {
         // --regexp is the long form of -e; value goes to patterns
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["--regexp", "fn run", "src"], Engine::Grep);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["--regexp", "fn run", "src"], Engine::Grep);
         assert_eq!(patterns, vec!["fn run"]);
         assert_eq!(paths, vec!["src"]);
         assert!(flags.is_empty());
@@ -1773,16 +2112,21 @@ mod tests {
     #[test]
     fn test_extract_long_regexp_multi() {
         // --regexp can be combined with -e
-        let (patterns, paths, _, _, _) =
-            extract_pattern_path(&["--regexp", "foo", "-e", "bar", "src"], Engine::Grep);
+        let Seen {
+            patterns, paths, ..
+        } = split_search(&["--regexp", "foo", "-e", "bar", "src"], Engine::Grep);
         assert_eq!(patterns, vec!["foo", "bar"]);
         assert_eq!(paths, vec!["src"]);
     }
 
     #[test]
     fn test_extract_long_ignore_file() {
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["--ignore-file", ".myignore", "foo", "src"], Engine::Rg);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["--ignore-file", ".myignore", "foo", "src"], Engine::Rg);
         assert_eq!(patterns, vec!["foo"]);
         assert_eq!(paths, vec!["src"]);
         assert_eq!(flags, vec!["--ignore-file", ".myignore"]);
@@ -1790,8 +2134,12 @@ mod tests {
 
     #[test]
     fn test_extract_long_engine() {
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["--engine", "pcre2", "foo", "src"], Engine::Rg);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["--engine", "pcre2", "foo", "src"], Engine::Rg);
         assert_eq!(patterns, vec!["foo"]);
         assert_eq!(paths, vec!["src"]);
         assert_eq!(flags, vec!["--engine", "pcre2"]);
@@ -1799,8 +2147,12 @@ mod tests {
 
     #[test]
     fn test_extract_long_type_clear() {
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["--type-clear", "rust", "foo", "src"], Engine::Rg);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["--type-clear", "rust", "foo", "src"], Engine::Rg);
         assert_eq!(patterns, vec!["foo"]);
         assert_eq!(paths, vec!["src"]);
         assert_eq!(flags, vec!["--type-clear", "rust"]);
@@ -1808,8 +2160,12 @@ mod tests {
 
     #[test]
     fn test_extract_long_path_separator() {
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["--path-separator", "/", "foo", "src"], Engine::Rg);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["--path-separator", "/", "foo", "src"], Engine::Rg);
         assert_eq!(patterns, vec!["foo"]);
         assert_eq!(paths, vec!["src"]);
         assert_eq!(flags, vec!["--path-separator", "/"]);
@@ -1818,8 +2174,12 @@ mod tests {
     #[test]
     fn test_extract_long_flag_inline_eq_passthrough() {
         // --glob=*.rs is one token (inline =): passes through as-is, not consumed as pair
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["foo", "src", "--glob=*.rs"], Engine::Grep);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["foo", "src", "--glob=*.rs"], Engine::Grep);
         assert_eq!(patterns, vec!["foo"]);
         assert_eq!(paths, vec!["src"]);
         assert_eq!(flags, vec!["--glob=*.rs"]);
@@ -1907,29 +2267,39 @@ mod tests {
 
     #[test]
     fn test_dash_capital_t_is_engine_aware() {
-        let (patterns, paths, _, _, _) =
-            extract_pattern_path(&["-T", "pattern", "file.txt"], Engine::Grep);
+        let Seen {
+            patterns, paths, ..
+        } = split_search(&["-T", "pattern", "file.txt"], Engine::Grep);
         assert_eq!(patterns, vec!["pattern"]);
         assert_eq!(paths, vec!["file.txt"]);
 
         // Rg's -T genuinely does take a value (a file type to exclude).
-        let (patterns, paths, _, _, _) =
-            extract_pattern_path(&["-T", "markdown", "pattern", "src"], Engine::Rg);
+        let Seen {
+            patterns, paths, ..
+        } = split_search(&["-T", "markdown", "pattern", "src"], Engine::Rg);
         assert_eq!(patterns, vec!["pattern"]);
         assert_eq!(paths, vec!["src"]);
     }
 
     #[test]
     fn test_dash_r_is_engine_aware() {
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["-rREPLACEMENT", "pattern", "src"], Engine::Rg);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["-rREPLACEMENT", "pattern", "src"], Engine::Rg);
         assert_eq!(patterns, vec!["pattern"]);
         assert_eq!(paths, vec!["src"]);
         assert_eq!(flags, vec!["-r".to_string(), "REPLACEMENT".to_string()]);
 
         // Grep's -r/-R remain plain boolean flags, clustering as before.
-        let (patterns, paths, flags, _, _) =
-            extract_pattern_path(&["-rn", "foo", "src"], Engine::Grep);
+        let Seen {
+            patterns,
+            paths,
+            flags,
+            ..
+        } = split_search(&["-rn", "foo", "src"], Engine::Grep);
         assert_eq!(patterns, vec!["foo"]);
         assert_eq!(paths, vec!["src"]);
         assert_eq!(flags, vec!["-rn".to_string()]);
@@ -1937,32 +2307,31 @@ mod tests {
 
     #[test]
     fn test_detected_flags_ignore_a_value_taking_flags_own_value() {
-        let (_, _, _, _, detected) =
-            extract_pattern_path(&["--replace", "-Chart", "pattern", "src"], Engine::Rg);
+        let Seen { detected, .. } =
+            split_search(&["--replace", "-Chart", "pattern", "src"], Engine::Rg);
         assert!(
             !detected.context,
             "--replace's value must not be misread as a -C context flag"
         );
 
         // Same for show_file's -H/-r/-R and show_line's -n/-N letters.
-        let (_, _, _, _, detected) =
-            extract_pattern_path(&["--replace", "-Hart", "pattern", "src"], Engine::Rg);
+        let Seen { detected, .. } =
+            split_search(&["--replace", "-Hart", "pattern", "src"], Engine::Rg);
         assert_eq!(
             detected.show_file, None,
             "--replace's value must not trigger -H"
         );
 
-        let (_, _, _, _, detected) =
-            extract_pattern_path(&["--replace", "-normal", "pattern", "src"], Engine::Rg);
+        let Seen { detected, .. } =
+            split_search(&["--replace", "-normal", "pattern", "src"], Engine::Rg);
         assert!(!detected.show_line, "--replace's value must not trigger -n");
 
         // A genuine short context/show-file/show-line flag is still detected correctly.
-        let (_, _, _, _, detected) =
-            extract_pattern_path(&["-C", "3", "pattern", "src"], Engine::Grep);
+        let Seen { detected, .. } = split_search(&["-C", "3", "pattern", "src"], Engine::Grep);
         assert!(detected.context);
-        let (_, _, _, _, detected) = extract_pattern_path(&["-H", "pattern", "src"], Engine::Grep);
+        let Seen { detected, .. } = split_search(&["-H", "pattern", "src"], Engine::Grep);
         assert_eq!(detected.show_file, Some(true));
-        let (_, _, _, _, detected) = extract_pattern_path(&["-n", "pattern", "src"], Engine::Grep);
+        let Seen { detected, .. } = split_search(&["-n", "pattern", "src"], Engine::Grep);
         assert!(detected.show_line);
     }
 
@@ -1996,28 +2365,41 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_pattern_path_has_format_flag_matches_single_pass() {
-        // extract_pattern_path computes has_format_flag from its own token pass instead of
+    fn test_extract_has_format_flag_matches_single_pass() {
+        // extract computes has_format_flag from its own token pass instead of
         // tokenizing the reconstructed `flags` strings a second time; pin that it agrees with
         // has_format_flag's own (test-only) from-scratch computation on representative cases.
-        let (_, _, _, has_format, _) = extract_pattern_path(&["foo", "src", "-q"], Engine::Grep);
+        let Seen {
+            has_format_flag: has_format,
+            ..
+        } = split_search(&["foo", "src", "-q"], Engine::Grep);
         assert!(has_format, "-q (quiet) should be detected");
 
-        let (_, _, _, has_format, _) = extract_pattern_path(&["foo", "src", "-rl"], Engine::Grep);
+        let Seen {
+            has_format_flag: has_format,
+            ..
+        } = split_search(&["foo", "src", "-rl"], Engine::Grep);
         assert!(has_format, "-l inside the -rl cluster should be detected");
 
-        let (_, _, _, has_format, _) =
-            extract_pattern_path(&["foo", "src", "--json"], Engine::Grep);
+        let Seen {
+            has_format_flag: has_format,
+            ..
+        } = split_search(&["foo", "src", "--json"], Engine::Grep);
         assert!(has_format, "--json should be detected");
 
-        let (_, _, _, has_format, _) = extract_pattern_path(&["-e", "--json", "src"], Engine::Grep);
+        let Seen {
+            has_format_flag: has_format,
+            ..
+        } = split_search(&["-e", "--json", "src"], Engine::Grep);
         assert!(
             !has_format,
             "-e's value must not be misread as the real --json flag"
         );
 
-        let (_, _, _, has_format, _) =
-            extract_pattern_path(&["foo", "src", "-i", "-w"], Engine::Grep);
+        let Seen {
+            has_format_flag: has_format,
+            ..
+        } = split_search(&["foo", "src", "-i", "-w"], Engine::Grep);
         assert!(!has_format, "plain boolean flags aren't format flags");
     }
 
@@ -2062,7 +2444,7 @@ mod tests {
     fn detected_for(engine: Engine, args: &[&str]) -> DetectedFlags {
         let mut with_pattern = vec!["pattern"];
         with_pattern.extend_from_slice(args);
-        extract_pattern_path(&with_pattern, engine).4
+        split_search(&with_pattern, engine).detected
     }
 
     #[test]
@@ -2114,8 +2496,9 @@ mod tests {
         // Real grep 3.12 exits 2 on both spellings; swallowing them would report a match for a
         // command the engine refuses to run.
         for negation in ["-N", "--no-line-number"] {
-            let (_, _, flags, _, detected) =
-                extract_pattern_path(&["pattern", "-n", negation], Engine::Grep);
+            let Seen {
+                flags, detected, ..
+            } = split_search(&["pattern", "-n", negation], Engine::Grep);
             assert!(
                 detected.show_line,
                 "{negation} is not grep's, so -n still stands"
@@ -2353,5 +2736,91 @@ mod tests {
         assert!(f(&["--before-context=2"]));
         assert!(f(&["--context=1"]));
         assert!(!f(&["--color", "auto"]));
+    }
+
+    fn split_paths<'a>(engine: Engine, args: &[&'a str]) -> (Vec<&'a str>, bool) {
+        let (split, _) = SearchGrammar(engine).split(args);
+        (
+            split.indices.iter().map(|&i| args[i]).collect(),
+            split.bounded,
+        )
+    }
+
+    #[test]
+    fn the_paths_exclude_the_pattern_and_every_flag_value() {
+        assert_eq!(
+            split_paths(Engine::Grep, &["--include", "*.rs", "-r", "foo", "src*"]),
+            (vec!["src*"], true)
+        );
+        assert_eq!(
+            split_paths(Engine::Grep, &["-e", "x", "a*", "b*"]),
+            (vec!["a*", "b*"], true)
+        );
+        // rg's hidden `--maxdepth` alias takes a value like `--max-depth`.
+        assert_eq!(
+            split_paths(Engine::Rg, &["--maxdepth", "2", "foo", "src"]),
+            (vec!["src"], true)
+        );
+    }
+
+    #[test]
+    fn an_abbreviation_classifies_but_reaches_the_engine_as_typed() {
+        let seen = split_search(&["-r", "--incl", "*.rs", "x", "src"], Engine::Grep);
+        assert_eq!(seen.flags, ["-r", "--incl", "*.rs"]);
+        assert_eq!(seen.paths, ["src"]);
+        let seen = split_search(&["-r", "--incl=*.rs", "x", "src"], Engine::Grep);
+        assert_eq!(seen.flags, ["-r", "--incl=*.rs"]);
+        // Aliases are one option: `--colo` is `--color`/`--colour`, `--fixed` is
+        // `--fixed-strings`/`--fixed-regexp`. `--fi` also prefixes `--file`.
+        assert_eq!(
+            split_paths(Engine::Grep, &["--colo=never", "--fixed", "x", "src"]),
+            (vec!["src"], true)
+        );
+        assert!(!split_paths(Engine::Grep, &["--fi", "x", "src"]).1);
+    }
+
+    #[test]
+    fn rg_files_takes_every_positional_as_a_path() {
+        // `echo | rtk rg --files src/deep` lists `src/deep`: no pattern, so the pattern-less
+        // passthrough runs it, stdin left alone, rather than a search that reads the pipe.
+        let seen = split_search(&["--files", "src/deep", "lib"], Engine::Rg);
+        assert!(seen.patterns.is_empty());
+        assert_eq!(seen.paths, ["src/deep", "lib"]);
+        // grep has no `--files`; `--files` there prefixes two options and stays unbounded.
+        assert!(!split_paths(Engine::Grep, &["--files", "x", "src"]).1);
+    }
+
+    #[test]
+    fn patterns_from_a_file_leave_every_positional_a_path() {
+        // `rtk grep -r -f pats.txt src*` has no pattern argument: its paths are still split,
+        // and the pattern-less passthrough is handed that split.
+        let extracted = split_search(&["-r", "-f", "pats.txt", "src*"], Engine::Grep);
+        assert!(extracted.patterns.is_empty());
+        assert_eq!(
+            split_paths(Engine::Grep, &["-r", "-f", "pats.txt", "src*"]),
+            (vec!["src*"], true)
+        );
+    }
+
+    #[test]
+    fn an_abbreviated_grep_flag_is_read_as_the_flag_it_abbreviates() {
+        // GNU grep reads `--incl '*.rs'` as `--include '*.rs'`, and so does the split.
+        assert_eq!(
+            split_paths(Engine::Grep, &["-r", "--incl", "*.rs", "foo", "src"]),
+            (vec!["src"], true)
+        );
+        let extracted = split_search(&["--regex", "fn", "src"], Engine::Grep);
+        assert_eq!(extracted.patterns, ["fn"]);
+        assert_eq!(extracted.paths, ["src"]);
+        // An ambiguous prefix (`--in`: include, initial-tab, invert-match) or a flag grep does
+        // not have may take the next argument: that argv runs as typed.
+        assert!(!split_paths(Engine::Grep, &["--in", "*.rs", "foo", "src"]).1);
+        assert!(!split_paths(Engine::Grep, &["--frob", "*.rs", "foo", "src"]).1);
+        // With its value attached the flag cannot take another argument, so the grouped run
+        // keeps it.
+        assert_eq!(
+            split_paths(Engine::Grep, &["-r", "--incl=*.rs", "let ", "src"]),
+            (vec!["src"], true)
+        );
     }
 }

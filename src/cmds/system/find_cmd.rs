@@ -1,8 +1,8 @@
 //! Filters find results by grouping files by directory.
 
+use crate::core::child_command::{OperandGrammar, OperandSplit, PathOperands, SplitArgv};
 use crate::core::tracking;
 use crate::core::truncate::CAP_INVENTORY;
-use crate::core::utils::ChildArgExt;
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use std::collections::{HashMap, HashSet};
@@ -59,16 +59,54 @@ const VERBATIM_ACTIONS: &[&str] = &[
     "-fprint0", "-fprintf", "-ls", "-fls",
 ];
 
+/// find's grammar: `find [options] [roots...] [expression]`, the roots ending
+/// at the first expression token. It has no long options to abbreviate, so the
+/// split is always bounded. It walks the argv itself: find's expression is a
+/// language of its own (`-name x -o ( -type d )`), not flags with values, which
+/// is all the arg_tokenizer models.
+pub(crate) struct FindGrammar;
+
+/// Where find's leading options end (`-H`, `-L`, `-P`, `-D`, `-O`) and where its roots end.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct FindBounds {
+    options_end: usize,
+    roots_end: usize,
+}
+
+impl OperandGrammar for FindGrammar {
+    type Parsed = FindBounds;
+
+    fn split<T: AsRef<str>>(&self, args: &[T]) -> (OperandSplit, FindBounds) {
+        let options_end = leading_options_len(args);
+        let roots_end = args[options_end..]
+            .iter()
+            .position(|t| is_expression_token(t.as_ref()))
+            .map_or(args.len(), |split| options_end + split);
+        let split = OperandSplit {
+            indices: (options_end..roots_end).collect(),
+            bounded: true,
+        };
+        (
+            split,
+            FindBounds {
+                options_end,
+                roots_end,
+            },
+        )
+    }
+}
+
 enum Dispatch {
     Native(FindArgs),
     Compress {
         options: Vec<String>,
-        paths: Vec<String>,
+        paths: PathOperands,
         expr: Vec<String>,
         max: Option<usize>,
         file_type: Option<String>,
     },
-    Verbatim(Vec<String>),
+    /// The argv find runs as typed, split, with its bounds.
+    Verbatim(SplitArgv, FindBounds),
 }
 
 fn is_expression_token(token: &str) -> bool {
@@ -83,11 +121,13 @@ fn looks_like_path(token: &str) -> bool {
     token.contains('/') || (cfg!(windows) && token.contains('\\'))
 }
 
-/// Leading find options: `-H`, `-L`, `-P`, `-D debugopts`, `-Olevel`.
-fn leading_options_len(args: &[String]) -> usize {
+/// Leading find options: `-H`, `-L`, `-P`, `-D debugopts`, `-Olevel`, and a `--` that ends
+/// them, as GNU find reads it.
+fn leading_options_len<T: AsRef<str>>(args: &[T]) -> usize {
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
+        match args[i].as_ref() {
+            "--" => return i + 1,
             "-H" | "-L" | "-P" => i += 1,
             "-D" if i + 1 < args.len() => i += 2,
             t if t.len() > 2 && (t.starts_with("-D") || t.starts_with("-O")) => i += 1,
@@ -146,36 +186,42 @@ fn parse_subset(paths: &[String], expr: &[String]) -> Option<FindArgs> {
 /// token contains `*` or `?`, or is not an existing directory.
 fn dispatch(original: &[String]) -> Result<Dispatch> {
     let (args, max, file_type) = peel_trailing_rtk_flags(original);
-    let legacy = !args.is_empty()
-        && !is_expression_token(&args[0])
-        && !looks_like_path(&args[0])
-        && (has_glob_meta(&args[0]) || !Path::new(&args[0]).is_dir());
+    // A `--` ending an otherwise empty option list changes nothing: the syntax is decided, and
+    // the built-in walk chosen, as without it. It still reaches find whenever find runs.
+    // Taken from `original`, which starts the same way, so `args` stays free to move.
+    let dashdash = &original[..usize::from(args.first().is_some_and(|arg| arg == "--"))];
+    let rest = &args[dashdash.len()..];
+    let legacy = !rest.is_empty()
+        && !is_expression_token(&rest[0])
+        && !looks_like_path(&rest[0])
+        && (has_glob_meta(&rest[0]) || !Path::new(&rest[0]).is_dir());
     let args = if legacy {
-        legacy_to_find_syntax(&args)
+        [dashdash, &legacy_to_find_syntax(rest)].concat()
     } else {
         args
     };
 
-    let options = args[..leading_options_len(&args)].to_vec();
-    let rest = &args[options.len()..];
-    let split = rest
-        .iter()
-        .position(|t| is_expression_token(t))
-        .unwrap_or(rest.len());
-    let paths = rest[..split].to_vec();
-    let expr = rest[split..].to_vec();
+    let (argv, bounds) = SplitArgv::new(&FindGrammar, &args);
+    let options = args[..bounds.options_end].to_vec();
+    let expr = args[bounds.roots_end..].to_vec();
 
     if expr.iter().any(|t| VERBATIM_ACTIONS.contains(&t.as_str())) {
+        // find runs the argv as typed, rtk's trailing flags included, so that is what is split.
         let verbatim = if legacy {
-            legacy_to_find_syntax(original)
+            [
+                dashdash,
+                &legacy_to_find_syntax(&original[dashdash.len()..]),
+            ]
+            .concat()
         } else {
             original.to_vec()
         };
-        return Ok(Dispatch::Verbatim(verbatim));
+        let (argv, bounds) = SplitArgv::new(&FindGrammar, &verbatim);
+        return Ok(Dispatch::Verbatim(argv, bounds));
     }
-    if options.is_empty()
-        && let Some(mut parsed) = parse_subset(&paths, &expr)
-    {
+    let paths = argv.operands();
+    let no_options = options.is_empty() || !dashdash.is_empty();
+    if no_options && let Some(mut parsed) = parse_subset(&paths, &expr) {
         let repeated_max = max.is_some() && parsed.max_explicit;
         let repeated_type =
             file_type.is_some() && parsed.file_type != FindArgs::default().file_type;
@@ -239,14 +285,39 @@ fn peel_trailing_rtk_flags(args: &[String]) -> (Vec<String>, Option<usize>, Opti
     (args[..end].to_vec(), max, file_type)
 }
 
-fn run_verbatim(args: &[String], verbose: u8) -> Result<i32> {
+/// Actions that act on every file found: running a command on it or deleting it.
+const ACTING_ACTIONS: &[&str] = &["-delete", "-exec", "-execdir", "-ok", "-okdir"];
+
+/// Whether find may expand its roots itself, given its expression. Not when the expression
+/// acts on what it finds: `rtk find build* -delete` from PowerShell would otherwise delete
+/// whatever the child's glob matched, a list the user never saw. The roots then reach find
+/// exactly as typed.
+///
+/// A predicate's value spelled like an action (`-name -delete`) counts too. That errs on the
+/// literal side, and telling it apart would take every predicate's arity.
+fn roots_may_glob<T: AsRef<str>>(expr: &[T]) -> bool {
+    !expr
+        .iter()
+        .any(|arg| ACTING_ACTIONS.contains(&arg.as_ref()))
+}
+
+/// find with its output untouched, the roots split out as in the compressed run, and globbed
+/// there only when [`roots_may_glob`] allows it.
+fn run_verbatim(argv: &SplitArgv, bounds: FindBounds, verbose: u8) -> Result<i32> {
+    let args = argv.args();
+    let mut cmd = crate::core::utils::resolved_command("find");
+    if roots_may_glob(&args[bounds.roots_end..]) {
+        cmd.split_args(argv);
+    } else {
+        cmd.args(args);
+    }
     let os_args: Vec<std::ffi::OsString> = args.iter().map(std::ffi::OsString::from).collect();
-    crate::core::runner::run_passthrough("find", &os_args, verbose)
+    crate::core::runner::run_passthrough_command(cmd, "find", &os_args, verbose)
 }
 
 fn run_compress(
     options: &[String],
-    paths: &[String],
+    paths: &PathOperands,
     expr: &[String],
     max: Option<usize>,
     file_type: Option<&str>,
@@ -259,17 +330,16 @@ fn run_compress(
     let max_results = max.unwrap_or(CAP_INVENTORY);
     let max_explicit = max.is_some();
     let mut cmd = crate::core::utils::resolved_command("find");
-    cmd.child_args(options).child_args(paths);
+    cmd.args(options).glob_args(paths);
     if !expr.is_empty() {
-        cmd.child_arg("(");
-        cmd.child_args(expr);
-        cmd.child_arg(")");
+        cmd.arg("(");
+        cmd.args(expr);
+        cmd.arg(")");
     }
     if let Some(t) = file_type {
-        cmd.child_arg("-type").child_arg(t);
+        cmd.arg("-type").arg(t);
     }
-    cmd.child_arg("-print0")
-        .stdin(std::process::Stdio::inherit());
+    cmd.arg("-print0").stdin(std::process::Stdio::inherit());
     let output = cmd.output().context("Failed to execute find")?;
     let exit_code = crate::core::utils::exit_code_from_output(&output, "find");
     {
@@ -339,7 +409,7 @@ pub fn run_from_args(args: &[String], verbose: u8) -> Result<i32> {
             max,
             file_type,
         } => run_compress(&options, &paths, &expr, max, file_type.as_deref(), verbose),
-        Dispatch::Verbatim(args) => run_verbatim(&args, verbose),
+        Dispatch::Verbatim(argv, bounds) => run_verbatim(&argv, bounds, verbose),
     }
 }
 
@@ -746,6 +816,7 @@ fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::child_command::ChildCommand;
 
     /// Convert string slices to Vec<String> for test convenience.
     fn args(values: &[&str]) -> Vec<String> {
@@ -756,7 +827,7 @@ mod tests {
         match dispatch(a)? {
             Dispatch::Native(p) => Ok(p),
             Dispatch::Compress { .. } => anyhow::bail!("dispatched to compress"),
-            Dispatch::Verbatim(_) => anyhow::bail!("dispatched to verbatim"),
+            Dispatch::Verbatim(..) => anyhow::bail!("dispatched to verbatim"),
         }
     }
 
@@ -764,7 +835,7 @@ mod tests {
         match dispatch(&args(a)) {
             Ok(Dispatch::Native(_)) => "native",
             Ok(Dispatch::Compress { .. }) => "compress",
-            Ok(Dispatch::Verbatim(_)) => "verbatim",
+            Ok(Dispatch::Verbatim(..)) => "verbatim",
             Err(_) => "error",
         }
     }
@@ -772,8 +843,11 @@ mod tests {
     #[test]
     fn rtk_flags_before_actions_reach_find_so_it_refuses_them() {
         match dispatch(&args(&["*.rs", "src", "-delete", "-m", "1"])).unwrap() {
-            Dispatch::Verbatim(a) => {
-                assert_eq!(a, args(&["src", "-name", "*.rs", "-delete", "-m", "1"]))
+            Dispatch::Verbatim(a, _) => {
+                assert_eq!(
+                    a.args(),
+                    args(&["src", "-name", "*.rs", "-delete", "-m", "1"])
+                )
             }
             _ => panic!("expected verbatim"),
         }
@@ -782,7 +856,7 @@ mod tests {
         ]))
         .unwrap()
         {
-            Dispatch::Verbatim(a) => assert!(a.ends_with(&args(&["-t", "d"]))),
+            Dispatch::Verbatim(a, _) => assert!(a.args().ends_with(&args(&["-t", "d"]))),
             _ => panic!("expected verbatim"),
         }
     }
@@ -824,15 +898,15 @@ mod tests {
             Dispatch::Compress {
                 paths, expr, max, ..
             } => {
-                assert_eq!(paths, args(&["src"]));
+                assert_eq!(*paths, args(&["src"]));
                 assert_eq!(expr, args(&["-name", "*.rs", "-mtime", "+7"]));
                 assert_eq!(max, Some(5));
             }
             _ => panic!("expected compress"),
         }
         match dispatch(&args(&["*.rs", "-exec", "rm", "{}", ";"])).unwrap() {
-            Dispatch::Verbatim(a) => {
-                assert_eq!(a, args(&["-name", "*.rs", "-exec", "rm", "{}", ";"]))
+            Dispatch::Verbatim(a, _) => {
+                assert_eq!(a.args(), args(&["-name", "*.rs", "-exec", "rm", "{}", ";"]))
             }
             _ => panic!("expected verbatim"),
         }
@@ -1322,7 +1396,7 @@ mod tests {
         assert_eq!(p.pattern, "*");
         match dispatch(&args(&["/definitely/missing/xyz", "-mtime", "+0"])).unwrap() {
             Dispatch::Compress { paths, expr, .. } => {
-                assert_eq!(paths, args(&["/definitely/missing/xyz"]));
+                assert_eq!(*paths, args(&["/definitely/missing/xyz"]));
                 assert_eq!(expr, args(&["-mtime", "+0"]));
             }
             _ => panic!("expected compress"),
@@ -1361,7 +1435,7 @@ mod tests {
     #[test]
     fn run_from_args_propagates_find_exit_status() {
         let argv = ["/definitely/missing/xyz", "-mtime", "+0"];
-        let expected = std::process::Command::new("find")
+        let expected = ChildCommand::new("find")
             .args(argv)
             .output()
             .map(|o| o.status.code().unwrap_or(1))
@@ -1374,7 +1448,7 @@ mod tests {
     fn hidden_and_ignored_matches_are_collected_for_disclosure() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        if !std::process::Command::new("git")
+        if !ChildCommand::new("git")
             .args(["init", "-q"])
             .current_dir(root)
             .status()
@@ -1459,5 +1533,79 @@ mod tests {
         assert!(filtered_hint(&[]).is_none());
         let h = filtered_hint(&["secret.txt".to_string(), ".hidden/h.txt".to_string()]).unwrap();
         assert!(h.starts_with("... (2 filtered"), "{h}");
+    }
+
+    #[test]
+    fn roots_stay_literal_when_the_expression_acts_on_what_it_finds() {
+        for action in ACTING_ACTIONS {
+            assert!(!roots_may_glob(&[action]), "{action}");
+        }
+        assert!(!roots_may_glob(&["-exec", "rm", "{}", ";"]));
+        assert!(roots_may_glob(&["-ls"]));
+        assert!(roots_may_glob(&["-name", "*.o", "-print"]));
+        // Only the expression is read: a root is never an action.
+        match dispatch(&args(&["./build*", "-delete"])).unwrap() {
+            Dispatch::Verbatim(argv, bounds) => {
+                assert_eq!(bounds.roots_end, 1);
+                assert!(!roots_may_glob(&argv.args()[bounds.roots_end..]));
+            }
+            _ => panic!("expected verbatim"),
+        }
+    }
+
+    #[test]
+    fn a_lone_leading_double_dash_changes_nothing_but_what_find_receives() {
+        let native = |argv: &[&str]| match dispatch(&args(argv)).unwrap() {
+            Dispatch::Native(parsed) => Some((parsed.path, parsed.pattern)),
+            _ => None,
+        };
+        assert_eq!(native(&["--", "src"]), native(&["src"]));
+        assert!(native(&["src"]).is_some());
+        assert_eq!(native(&["--", "*.rs", "src"]), native(&["*.rs", "src"]));
+        // After a real option the system find runs, and gets the `--`.
+        match dispatch(&args(&["-L", "--", "src"])).unwrap() {
+            Dispatch::Compress { options, .. } => assert_eq!(options, args(&["-L", "--"])),
+            _ => panic!("expected compress"),
+        }
+        // A verbatim run keeps it where it was typed.
+        match dispatch(&args(&["--", "*.rs", "src", "-delete"])).unwrap() {
+            Dispatch::Verbatim(argv, _) => {
+                assert_eq!(
+                    argv.args(),
+                    args(&["--", "src", "-name", "*.rs", "-delete"])
+                )
+            }
+            _ => panic!("expected verbatim"),
+        }
+    }
+
+    #[test]
+    fn a_leading_double_dash_ends_finds_options() {
+        // clap drops the user's `--`; restored, it must not start the expression.
+        let argv = ["--", ".", "-name", "*.rs"];
+        let (split, bounds) = FindGrammar.split(&argv);
+        assert_eq!(split.indices, [1]);
+        assert_eq!(bounds.options_end, 1);
+        match dispatch(&args(&["-L", "--", ".", "-name", "*.rs"])).unwrap() {
+            Dispatch::Compress {
+                options,
+                paths,
+                expr,
+                ..
+            } => {
+                assert_eq!(options, args(&["-L", "--"]));
+                assert_eq!(*paths, args(&["."]));
+                assert_eq!(expr, args(&["-name", "*.rs"]));
+            }
+            _ => panic!("expected compress"),
+        }
+    }
+
+    #[test]
+    fn find_roots_end_at_the_first_expression_token() {
+        let argv = ["-L", "src*", "lib", "-name", "*.rs"];
+        let (split, _) = FindGrammar.split(&argv);
+        assert_eq!(split.indices, [1, 2]);
+        assert!(split.bounded);
     }
 }

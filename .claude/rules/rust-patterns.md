@@ -14,7 +14,15 @@ These override general Rust conventions:
 6. **Parse args with `arg_tokenizer`** — every new command, flag, or arg-handling fix classifies
    arguments through `tokenize`/`tokenize_with_options`, never a `starts_with('-')` or
    `arg == "--flag"` scan. See [`src/core/README.md`](../../src/core/README.md#argument-tokenizer-arg_tokenizerrs)
-   for the four rules that go with it.
+   for the four rules that go with it. The one exception is a grammar that mirrors a tool's own
+   argument loop where the tokenizer cannot express it (tree's value letters anywhere in a
+   cluster, find's expression): it may walk the argv itself, with the reason in its doc comment.
+7. **Spawn through `ChildCommand`** — build child processes with `resolved_command()` /
+   `ChildCommand`, never `std::process::Command::new`, and let a child glob only what a
+   tool's `OperandGrammar` split (`glob_args` with a `PathOperands`, `split_args` with a
+   `SplitArgv`). A raw `Command` needs a stated reason and a
+   `// nosemgrep: raw-std-command -- <reason>` marker. See
+   [`src/core/README.md`](../../src/core/README.md#child-arguments-child_commandrs).
 
 ## Error Handling
 

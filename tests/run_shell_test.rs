@@ -460,8 +460,49 @@ mod windows {
         assert!(String::from_utf8_lossy(&output.stdout).contains("windows_ok"));
     }
 
+    /// A command string runs through cmd, the Windows default, as
+    /// `cmd /S /C "<script>"`: cmd strips exactly that wrapping pair of quotes,
+    /// so the script's own quotes and its `&` reach cmd as written. `echo "a b"`
+    /// prints the quotes, and `&` runs the second command.
+    #[test]
+    fn command_string_reaches_cmd_as_written() {
+        let output = rtk()
+            .args(["run", "-c", r#"echo "a b" & echo c"#])
+            .output()
+            .expect("run rtk run -c");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout:?}");
+        // cmd's `echo` keeps the space before `&`, hence the trim.
+        let lines: Vec<&str> = stdout.lines().map(str::trim_end).collect();
+        assert_eq!(lines, [r#""a b""#, "c"], "{stdout:?}");
+    }
+
+    /// A script that starts with a quoted program path holding a space runs
+    /// that program (#4288): cmd receives `""<dir with space>\rtk copy.exe"
+    /// --version"`, strips the outer pair, and runs the quoted path.
+    #[test]
+    fn command_string_runs_a_quoted_program_path_with_a_space() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let spaced = dir.path().join("dir with space");
+        std::fs::create_dir(&spaced).expect("create spaced dir");
+        let program = spaced.join("rtk copy.exe");
+        std::fs::copy(env!("CARGO_BIN_EXE_rtk"), &program).expect("copy rtk");
+
+        let script = format!("\"{}\" --version", program.display());
+        let output = rtk()
+            .args(["run", "-c", &script])
+            .output()
+            .expect("run rtk run -c");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout:?} {stderr:?}");
+        assert!(stdout.starts_with("rtk "), "{stdout:?} {stderr:?}");
+    }
+
     /// An argument carrying a `"` reaches a non-batch child with the encoding
-    /// MSYS/Cygwin and libuv children expect (`child_args`, #3728).
+    /// MSYS/Cygwin and libuv children expect (`ChildCommand::args`, #3728).
     ///
     /// `cmd.exe` is the wrong witness for this — it parses its own way and
     /// echoes the encoding back verbatim — so the child here is `rtk` itself:

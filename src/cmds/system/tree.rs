@@ -7,9 +7,141 @@
 //! unless -a flag is present (respecting user intent).
 
 use super::constants::NOISE_DIRS;
+use crate::core::child_command::{OperandGrammar, OperandSplit, SplitArgv};
 use crate::core::runner::{self, RunOptions};
-use crate::core::utils::{ChildArgExt, resolved_command, tool_exists};
+use crate::core::utils::{resolved_command, tool_exists};
 use anyhow::Result;
+
+/// tree's boolean long options (`tree --help`, v2.3.2), which it matches exactly.
+const TREE_LONG_FLAGS: &[&str] = &[
+    "acl",
+    "condense",
+    "device",
+    "dirsfirst",
+    "du",
+    "fflinks",
+    "filesfirst",
+    "fromfile",
+    "fromtabfile",
+    "gitignore",
+    "help",
+    "hyperlink",
+    "ignore-case",
+    "info",
+    "inodes",
+    "matchdirs",
+    "metafirst",
+    "nolinks",
+    "noreport",
+    "opt-toggle",
+    "prune",
+    "selinux",
+    "si",
+    "version",
+];
+
+/// tree's value-taking long options. tree matches these by prefix: an argument that starts
+/// with one takes its value after an `=` right behind the name, and otherwise from the next
+/// argument (`--sortx=name src` sorts by `src`).
+const TREE_LONG_VALUES: &[&str] = &[
+    "authority",
+    "charset",
+    "compress",
+    "filelimit",
+    "gitfile",
+    "hintro",
+    "houtro",
+    "infofile",
+    "scheme",
+    "sort",
+    "timefmt",
+];
+
+/// tree's value-taking letters. Each takes the next argument, wherever it sits in its cluster
+/// and whatever that argument looks like (`-Pd '*.md'` and `-dP '*.md'` alike, `-P -d` takes
+/// `-d` as the pattern). `-L` alone also reads a level written right behind it (`-L1`).
+const TREE_VALUE_LETTERS: &[char] = &['H', 'I', 'L', 'P', 'T', 'o'];
+
+/// What tree's own option loop makes of an argv.
+///
+/// tree's parser is not getopt's: a value letter in the middle of a cluster takes the next
+/// argument, and value-taking long options match by prefix, neither of which the
+/// arg_tokenizer can express, so this walks the argv the way tree does.
+pub(crate) struct TreeArgs {
+    operands: Vec<usize>,
+    bounded: bool,
+    show_all: bool,
+    has_ignore: bool,
+}
+
+fn parse_tree_args<T: AsRef<str>>(args: &[T]) -> TreeArgs {
+    let mut parsed = TreeArgs {
+        operands: Vec::new(),
+        bounded: true,
+        show_all: false,
+        has_ignore: false,
+    };
+    let mut options = true;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_ref();
+        // The next argument not yet taken as a value.
+        let mut next = i + 1;
+        if !options || !arg.starts_with('-') || arg.len() == 1 {
+            parsed.operands.push(i);
+        } else if arg == "--" {
+            options = false;
+        } else if let Some(long) = arg.strip_prefix("--") {
+            if let Some(name) = TREE_LONG_VALUES
+                .iter()
+                .find(|name| long.starts_with(**name))
+            {
+                if !long[name.len()..].starts_with('=') {
+                    next += 1;
+                }
+            } else if matches!(long, "fromfile" | "fromtabfile") {
+                // The operands then name files holding a listing, not directories.
+                parsed.bounded = false;
+            } else if !TREE_LONG_FLAGS.contains(&long) {
+                // tree rejects it; nothing about the operands can be trusted.
+                parsed.bounded = false;
+            }
+        } else {
+            let mut letters = arg[1..].chars().peekable();
+            while let Some(letter) = letters.next() {
+                match letter {
+                    'a' => parsed.show_all = true,
+                    'L' if letters.peek().is_some_and(char::is_ascii_digit) => {
+                        while letters.next_if(char::is_ascii_digit).is_some() {}
+                    }
+                    letter if TREE_VALUE_LETTERS.contains(&letter) => {
+                        parsed.has_ignore |= letter == 'I';
+                        next += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        i = next;
+    }
+    parsed
+}
+
+/// tree's grammar, as [`parse_tree_args`] reads it.
+pub(crate) struct TreeGrammar;
+
+impl OperandGrammar for TreeGrammar {
+    type Parsed = TreeArgs;
+
+    fn split<T: AsRef<str>>(&self, args: &[T]) -> (OperandSplit, TreeArgs) {
+        let mut parsed = parse_tree_args(args);
+        let split = OperandSplit {
+            indices: std::mem::take(&mut parsed.operands),
+            bounded: parsed.bounded,
+        };
+        (split, parsed)
+    }
+}
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     if !tool_exists("tree") {
@@ -24,15 +156,13 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     let mut cmd = resolved_command("tree");
 
-    let show_all = args.iter().any(|a| a == "-a" || a == "--all");
-    let has_ignore = args.iter().any(|a| a == "-I" || a.starts_with("--ignore="));
-
-    if !show_all && !has_ignore {
+    let (argv, parsed) = SplitArgv::new(&TreeGrammar, args);
+    if !parsed.show_all && !parsed.has_ignore {
         let ignore_pattern = NOISE_DIRS.join("|");
         cmd.arg("-I").arg(&ignore_pattern);
     }
 
-    cmd.child_args(args);
+    cmd.split_args(&argv);
 
     runner::run_filtered(
         cmd,
@@ -163,5 +293,77 @@ mod tests {
         assert!(NOISE_DIRS.contains(&".next"));
         assert!(NOISE_DIRS.contains(&"dist"));
         assert!(NOISE_DIRS.contains(&"build"));
+    }
+
+    fn operands<'a>(args: &[&'a str]) -> (Vec<&'a str>, bool) {
+        let (split, _) = TreeGrammar.split(args);
+        (
+            split.indices.iter().map(|&i| args[i]).collect(),
+            split.bounded,
+        )
+    }
+
+    // Each row was checked against tree v2.3.2 itself.
+
+    #[test]
+    fn a_value_letter_takes_the_next_argument_wherever_it_sits() {
+        assert_eq!(operands(&["-P", "*.rs", "src*"]), (vec!["src*"], true));
+        assert_eq!(operands(&["-Pd", "*.md", "src"]), (vec!["src"], true));
+        assert_eq!(operands(&["-dP", "*.md", "src"]), (vec!["src"], true));
+        assert_eq!(operands(&["-PL", "*.md", "1", "."]), (vec!["."], true));
+        // Blindly: `-P -d` searches for `-d`.
+        assert_eq!(operands(&["-P", "-d", "src"]), (vec!["src"], true));
+        assert_eq!(
+            operands(&["-I", "target", "-L", "2", "."]),
+            (vec!["."], true)
+        );
+    }
+
+    #[test]
+    fn a_value_letter_takes_a_literal_double_dash() {
+        // tree v2.3.2 reads `-P -- src` as the pattern `--` and lists `src`.
+        assert_eq!(operands(&["-P", "--", "src"]), (vec!["src"], true));
+        assert_eq!(operands(&["--charset", "--", "src"]), (vec!["src"], true));
+        // `-I --` ignores `--`, and `-a` is a flag again.
+        let parsed = parse_tree_args(&["-I", "--", "-a"]);
+        assert!(parsed.has_ignore && parsed.show_all);
+    }
+
+    #[test]
+    fn a_level_may_be_attached_to_l() {
+        assert_eq!(operands(&["-L1", "."]), (vec!["."], true));
+        assert_eq!(operands(&["-L1d", "."]), (vec!["."], true));
+        assert_eq!(operands(&["-Ld", "1", "."]), (vec!["."], true));
+    }
+
+    #[test]
+    fn a_long_value_option_matches_by_prefix() {
+        assert_eq!(
+            operands(&["--charset", "ascii", "src"]),
+            (vec!["src"], true)
+        );
+        assert_eq!(operands(&["--sort=name", "src"]), (vec!["src"], true));
+        assert_eq!(operands(&["--sortx", "name", "src"]), (vec!["src"], true));
+        // Not `=` right behind the name, so the value is the next argument.
+        assert_eq!(operands(&["--sortx=name", "src"]), (vec![], true));
+        assert_eq!(operands(&["--noreport", "src"]), (vec!["src"], true));
+        assert_eq!(operands(&["--", "-d"]), (vec!["-d"], true));
+    }
+
+    #[test]
+    fn a_listing_file_or_an_unknown_flag_leaves_the_operands_unbounded() {
+        assert!(!operands(&["--fromfile", "list*.txt"]).1);
+        assert!(!operands(&["--noreportx", "src"]).1);
+    }
+
+    #[test]
+    fn show_all_and_ignore_are_read_from_clusters() {
+        // `rtk tree -ad` must not hide the noise directories.
+        let parsed = parse_tree_args(&["-ad"]);
+        assert!(parsed.show_all && !parsed.has_ignore);
+        let parsed = parse_tree_args(&["-dI", "x"]);
+        assert!(parsed.has_ignore && !parsed.show_all);
+        // A pattern is not a flag: `-P -a` searches for `-a`.
+        assert!(!parse_tree_args(&["-P", "-a"]).show_all);
     }
 }

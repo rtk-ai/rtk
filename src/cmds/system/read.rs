@@ -410,13 +410,9 @@ mod tests {
         let fifo = dir.path().join("endless");
         // Shelled out rather than called through libc: `unsafe` is not allowed outside proxy
         // mode's signal handling.
-        assert!(
-            std::process::Command::new("mkfifo")
-                .arg(&fifo)
-                .status()?
-                .success(),
-            "mkfifo failed"
-        );
+        // nosemgrep: raw-std-command -- makes a FIFO for the test, no argument to encode
+        let mkfifo = std::process::Command::new("mkfifo").arg(&fifo).status()?;
+        assert!(mkfifo.success(), "mkfifo failed");
 
         let writer_path = fifo.clone();
         let writer = std::thread::spawn(move || {
@@ -681,6 +677,7 @@ fn main() {{
         writeln!(f1, "alpha\nbravo").unwrap();
         writeln!(f2, "charlie\ndelta").unwrap();
 
+        // nosemgrep: raw-std-command -- runs the built rtk binary as an end-to-end check
         let output = std::process::Command::new(&bin)
             .args([
                 "read",
@@ -705,6 +702,7 @@ fn main() {{
         let mut f1 = NamedTempFile::with_suffix(".txt").unwrap();
         writeln!(f1, "valid content").unwrap();
 
+        // nosemgrep: raw-std-command -- runs the built rtk binary as an end-to-end check
         let output = std::process::Command::new(&bin)
             .args([
                 "read",
@@ -736,6 +734,7 @@ fn main() {{
         let bin = rtk_bin();
         assert!(bin.exists(), "Run `cargo build` first");
 
+        // nosemgrep: raw-std-command -- runs the built rtk binary as an end-to-end check
         let output = std::process::Command::new(&bin)
             .args(["read", "-", "-"])
             .stdin(std::process::Stdio::piped())

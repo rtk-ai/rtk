@@ -1,5 +1,6 @@
 //! Filters Docker and kubectl output into compact summaries.
 
+use crate::core::child_command::ChildCommand;
 use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
 use crate::core::stream::exec_capture;
@@ -9,7 +10,6 @@ use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::ffi::OsString;
-use std::process::Command;
 
 #[derive(Debug, Clone, Copy)]
 pub enum ContainerCmd {
@@ -34,7 +34,7 @@ pub fn run(cmd: ContainerCmd, args: &[String], verbose: u8) -> Result<i32> {
     }
 }
 
-fn run_k8s_json<F>(cmd: Command, tool: &str, label: &str, filter_fn: F) -> Result<i32>
+fn run_k8s_json<F>(cmd: ChildCommand, tool: &str, label: &str, filter_fn: F) -> Result<i32>
 where
     F: Fn(&Value) -> String,
 {

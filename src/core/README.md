@@ -128,12 +128,38 @@ Key functions available to all command modules:
 |----------|---------|
 | `truncate(s, max)` | Truncate string with `...` suffix |
 | `strip_ansi(text)` | Remove ANSI escape/color codes |
-| `resolved_command(name)` | Find command in PATH, returns `Command` |
+| `resolved_command(name)` | Find command in PATH, returns `ChildCommand` |
 | `tool_exists(name)` | Check if a CLI tool is available |
 | `detect_package_manager()` | Detect pnpm/yarn/npm from lockfiles |
-| `package_manager_exec(tool)` | Build `Command` using detected package manager |
+| `package_manager_exec(tool)` | Build `ChildCommand` using detected package manager |
 | `ruby_exec(tool)` | Auto-detect `bundle exec` when `Gemfile` exists |
 | `count_tokens(text)` | Estimate tokens: `ceil(chars / 4.0)` |
+
+### Child arguments (child_command.rs)
+
+In production code every child process is built as a `ChildCommand` (usually through `resolved_command`), never a `std::process::Command`; `.semgrep.yml`'s `raw-std-command` rule enforces it. On Windows an MSYS/Cygwin child (Git for Windows' `grep`, `find`, `ls`, …) re-parses its command line with its own rules, so each argument has to be encoded for it. `ChildCommand` owns that encoding and keeps its `Command` out of reach.
+
+Three ways to add arguments, and the choice matters:
+
+| Method | Use for | Effect on Windows |
+|--------|---------|-------------------|
+| `arg` / `args` | the default: flags, flag values, patterns, regexes | quoted whenever it holds a character Cygwin's `build_argv`/`globify` would reinterpret (a quote, `?*[(){}`, a leading `~` or `@`, a line break), so the child sees the bytes literally |
+| `glob_args` | a `PathOperands`: the path operands a tool's own grammar split out | the child may expand `?`, `*`, `[`, `{…}` and a leading `~`; still quoted for `'`, `"`, a leading `@`, a line break, and a backslash in an operand that also holds `?*[(){}` or a leading `~` unless it starts as a drive (`X:`) or UNC path (`\\host\`), whose backslashes `globify` keeps |
+| `split_args` | a `SplitArgv`: a whole argv with its `OperandGrammar` split, in order | its operands as `glob_args`, everything else as `args` |
+
+Pick `arg` when in doubt: a missed `glob_args` gives a glob that does not expand, which is visible, while a missed `arg` silently corrupts the argument.
+
+Globbing is correct on path operands only, and telling them from flag values takes the tool's grammar (`ls -I <pattern>`, `wc --files0-from <file>`, `tree -P <pattern>`). So a `PathOperands` or a `SplitArgv` comes only from a grammar's own split of the argv (`SplitArgv::new(grammar, argv)`, which also returns what the grammar read on the way, so the caller does not parse the argv again), and `OperandGrammar` is sealed: `find`, the search engines, `ls`, `wc` and `tree` implement it, each through `arg_tokenizer` except two that mirror the tool's own loop: `find`, whose roots end at its first expression token, and `tree`, whose value letters take the next argument from anywhere in a cluster and whose value-taking long options match by prefix.
+
+The GNU tools accept a unique prefix of a long option, and so does the split: `grep --incl` is read as `--include` (names of one option, such as `--color`/`--colour`, count once), but the flag reaches the tool as typed, since the resolution only classifies. A bare long flag that names no option, or prefixes several, may take the next argument, so it marks the split unbounded and its operands reach the child literally; with its value attached (`--frob=x`) a flag cannot take the next argument, and the split stays bounded.
+
+The child globs operands only when rtk was not started from an MSYS/Cygwin shell, told by `MSYSTEM` (`child_globs`): Git Bash has already expanded, or deliberately quoted, every operand, while PowerShell and cmd leave globbing to the program. A PowerShell started from inside Git Bash inherits `MSYSTEM`, so its operands stay literal.
+
+The literal quoting is libuv's, exact for a native child. An MSYS child differs in one case: a run of two or more backslashes that is not in front of a quote loses one backslash of each pair (#4326).
+
+A shell script is one argument to the shell, so `shell::shell_command` passes it with `arg` like any other: an MSYS/Cygwin `sh` or `bash` re-parses its command line the same way `grep` does. The exception is `cmd`, which parses its own command line and understands neither that quoting nor std's `\"` escape: it runs as `cmd /S /C "<script>"`, the script wrapped once and otherwise verbatim. Plain `/C` strips that pair too, except when exactly two quotes surround an executable's name; `/S` drops that heuristic, so cmd always strips exactly the wrapping pair.
+
+Other arguments to a program cmd.exe parses skip the literal quoting too, since cmd does not decode it: `.bat`/`.cmd` shims get std's batch-aware encoder, and `cmd` itself std's general-purpose one, which is not cmd-aware either.
 
 ## Argument Tokenizer (arg_tokenizer.rs)
 

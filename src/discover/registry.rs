@@ -4045,6 +4045,7 @@ mod tests {
             return;
         }
 
+        // nosemgrep: raw-std-command -- runs the built rtk binary as an end-to-end check
         let output = std::process::Command::new(&rtk_bin)
             .args(["rewrite", "RTK_DISABLED=1 git status"])
             .output()
