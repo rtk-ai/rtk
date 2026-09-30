@@ -266,19 +266,24 @@ pub fn run(
     let provider = ClaudeProvider;
 
     // Determine project filter
-    let project_filter = if all {
-        None
+    let scope = if all {
+        report::ScanScope::AllProjects
     } else if let Some(p) = project {
-        Some(p.to_string())
+        report::ScanScope::ProjectFilter(p.to_string())
     } else {
         // Default: current working directory
         let cwd = std::env::current_dir()?;
         let cwd_str = cwd.to_string_lossy().to_string();
-        let encoded = ClaudeProvider::encode_project_path(&cwd_str);
-        Some(encoded)
+        report::ScanScope::CurrentProject(ClaudeProvider::encode_project_path(&cwd_str))
+    };
+    let project_filter = match &scope {
+        report::ScanScope::AllProjects => None,
+        report::ScanScope::ProjectFilter(f) | report::ScanScope::CurrentProject(f) => {
+            Some(f.as_str())
+        }
     };
 
-    let sessions = provider.discover_sessions(project_filter.as_deref(), Some(since_days))?;
+    let sessions = provider.discover_sessions(project_filter, Some(since_days))?;
 
     if verbose > 0 {
         eprintln!("Scanning {} session files...", sessions.len());
@@ -579,6 +584,7 @@ pub fn run(
 
     let report = DiscoverReport {
         sessions_scanned: sessions.len(),
+        scope,
         total_commands,
         already_rtk,
         already_rtk_estimated,

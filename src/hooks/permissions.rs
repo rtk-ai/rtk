@@ -41,6 +41,7 @@ pub enum Host {
     Gemini,
     Droid,
     Vibe,
+    Antigravity,
 }
 
 pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
@@ -64,7 +65,7 @@ pub(crate) fn load_rules_for(host: Host) -> (Vec<String>, Vec<String>, Vec<Strin
         // execution rules after updatedInput. Do not interpret these hosts'
         // rules as Claude Bash patterns or borrow another host's settings.
         // No RTK-side match means Default, not an explicit Allow.
-        Host::Codex | Host::Trae | Host::Vibe | Host::WorkBuddy => {
+        Host::Codex | Host::Trae | Host::Vibe | Host::WorkBuddy | Host::Antigravity => {
             (Vec::new(), Vec::new(), Vec::new())
         }
     }
