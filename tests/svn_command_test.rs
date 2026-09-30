@@ -46,6 +46,7 @@ printf '%s\n' \
         .args(["svn", "log"])
         .env("PATH", path)
         .env("SVN_ARGV_FILE", &argv_file)
+        .env("RTK_SUPPRESS_HOOK_WARNING", "1")
         .env("RTK_DB_PATH", temp.path().join("history.db"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -130,6 +131,7 @@ exit 7
     let output = Command::new(env!("CARGO_BIN_EXE_rtk"))
         .args(["svn", "log", "-l", "1"])
         .env("PATH", path)
+        .env("RTK_SUPPRESS_HOOK_WARNING", "1")
         .env("RTK_DB_PATH", temp.path().join("history.db"))
         .output()
         .expect("run failing fake svn");
@@ -175,6 +177,7 @@ printf '%s\n' '-----------------------------------------------------------------
     let output = Command::new(env!("CARGO_BIN_EXE_rtk"))
         .args(["svn", "log"])
         .env("PATH", path)
+        .env("RTK_SUPPRESS_HOOK_WARNING", "1")
         .env("RTK_DB_PATH", temp.path().join("history.db"))
         .output()
         .expect("run localized fake svn");
@@ -182,8 +185,10 @@ printf '%s\n' '-----------------------------------------------------------------
 
     assert!(output.status.success());
     assert_eq!(stdout.matches(" | dev | 2026-01-01 | 1 ligne").count(), 10);
-    assert!(!stdout
-        .contains("------------------------------------------------------------------------"));
+    assert!(
+        !stdout
+            .contains("------------------------------------------------------------------------")
+    );
     assert!(stdout.contains("[default log limit: 10; add -l/--limit to show more]"));
 }
 
@@ -213,6 +218,7 @@ printf '%s\n' 'warning after large output' >&2
     let output = Command::new(env!("CARGO_BIN_EXE_rtk"))
         .args(["svn", "log", "-l", "100000"])
         .env("PATH", path)
+        .env("RTK_SUPPRESS_HOOK_WARNING", "1")
         .env("RTK_DB_PATH", temp.path().join("history.db"))
         .output()
         .expect("run large fake svn");
@@ -228,4 +234,98 @@ printf '%s\n' 'warning after large output' >&2
     ] {
         assert!(stderr.contains(expected), "missing stderr: {expected}");
     }
+}
+
+#[test]
+fn svn_log_relays_cancellation_and_reaps_child() {
+    for signal in ["-TERM", "-INT"] {
+        assert_svn_cancellation(signal, false);
+    }
+}
+
+#[test]
+fn svn_log_escalates_when_child_ignores_cancellation() {
+    assert_svn_cancellation("-TERM", true);
+}
+
+fn assert_svn_cancellation(signal: &str, ignore_signal: bool) {
+    use std::os::unix::process::ExitStatusExt;
+    use std::time::Instant;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fake_svn = temp.path().join("svn");
+    let pid_file = temp.path().join("svn.pid");
+    let trap = if ignore_signal {
+        "trap '' TERM INT\n"
+    } else {
+        ""
+    };
+    fs::write(
+        &fake_svn,
+        format!("#!/bin/sh\n{trap}echo $$ > \"$SVN_PID_FILE\"\nexec sleep 300\n"),
+    )
+    .expect("write fake svn");
+    fs::set_permissions(&fake_svn, fs::Permissions::from_mode(0o755)).expect("chmod svn");
+    let path = std::env::join_paths(std::iter::once(temp.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .expect("compose PATH");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args(["svn", "log"])
+        .env("PATH", path)
+        .env("SVN_PID_FILE", &pid_file)
+        .env("RTK_SUPPRESS_HOOK_WARNING", "1")
+        .env("RTK_DB_PATH", temp.path().join("history.db"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn rtk svn log");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !pid_file.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    if !pid_file.exists() {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("SVN child never started");
+    }
+    let svn_pid = fs::read_to_string(&pid_file).expect("read child PID");
+    // The shim runs only after RTK has installed the relay and spawned it.
+    let sent = Command::new("kill")
+        .args([signal, &child.id().to_string()])
+        .status()
+        .expect("send cancellation");
+    assert!(sent.success());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll RTK") {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+    let alive = Command::new("kill")
+        .args(["-0", svn_pid.trim()])
+        .stderr(Stdio::null())
+        .status()
+        .expect("check child liveness")
+        .success();
+    // Clean up even on the broken implementation, so a failing test cannot
+    // leave the shim alive or hang the rest of the suite.
+    if alive {
+        let _ = Command::new("kill")
+            .args(["-KILL", svn_pid.trim()])
+            .status();
+    }
+    if status.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    assert!(!alive, "cancelled RTK left its SVN child running");
+    let status = status.expect("RTK did not finish after cancellation");
+    let expected = if signal == "-INT" { 2 } else { 15 };
+    assert_eq!(status.signal(), Some(expected));
 }

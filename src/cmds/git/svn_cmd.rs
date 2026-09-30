@@ -2,8 +2,9 @@
 
 use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunMode, RunOptions};
+use crate::core::stream::ChildSignalRelay;
 use crate::core::tracking::TimedExecution;
-use crate::core::truncate::{reduced, CAP_LIST};
+use crate::core::truncate::{CAP_LIST, reduced};
 use crate::core::utils::{decode_process_output, exit_code_from_status, resolved_command};
 use anyhow::{Context, Result};
 use std::borrow::Cow;
@@ -23,7 +24,9 @@ const LOG_CAPTURE_LIMIT: usize = 10 * 1024 * 1024;
 /// passthrough so adding first-class routing cannot change SVN behavior.
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     if args.first().is_some_and(|arg| arg == "log") && !requests_raw_log_output(&args[1..]) {
-        return run_log(args, verbose);
+        let result = run_log(args, verbose);
+        crate::core::stream::die_by_relayed_signal();
+        return result;
     }
 
     run_passthrough(args, verbose)
@@ -45,6 +48,7 @@ fn run_log(args: &[String], verbose: u8) -> Result<i32> {
 
     let timer = TimedExecution::start();
     let mut child = cmd.spawn().context("Failed to run svn")?;
+    let _signal_relay = ChildSignalRelay::install(child.id());
     let mut child_stdout = child.stdout.take().context("No svn stdout handle")?;
     let child_stderr = child.stderr.take().context("No svn stderr handle")?;
 
@@ -99,12 +103,12 @@ fn run_log(args: &[String], verbose: u8) -> Result<i32> {
         }
     }
 
-    if stdout_passthrough && stdout_sink_open {
-        if let Err(error) = visible_stdout.flush() {
-            if error.kind() != io::ErrorKind::BrokenPipe {
-                stdout_write_error = Some(error);
-            }
-        }
+    if stdout_passthrough
+        && stdout_sink_open
+        && let Err(error) = visible_stdout.flush()
+        && error.kind() != io::ErrorKind::BrokenPipe
+    {
+        stdout_write_error = Some(error);
     }
 
     // Always reap the child and join the stderr relay before returning an I/O
@@ -228,12 +232,7 @@ fn relay_stderr(mut child_stderr: impl Read) -> StderrRelayResult {
                     // if the stdout path needed to emit a cap warning.
                     let stderr_handle = io::stderr();
                     let mut visible_stderr = stderr_handle.lock();
-                    write_visible(
-                        &mut visible_stderr,
-                        chunk,
-                        &mut sink_open,
-                        &mut write_error,
-                    );
+                    write_visible(&mut visible_stderr, chunk, &mut sink_open, &mut write_error);
                     if let Err(error) = visible_stderr.flush() {
                         if error.kind() == io::ErrorKind::BrokenPipe {
                             sink_open = false;
@@ -298,20 +297,28 @@ fn log_args_with_default_limit(args: &[String]) -> Vec<String> {
 }
 
 fn has_explicit_log_window(args: &[String]) -> bool {
-    args.iter().take_while(|arg| arg.as_str() != "--").any(|arg| {
-        arg == "-l"
-            || arg == "-r"
-            || arg == "-c"
-            || arg == "--limit"
-            || arg == "--revision"
-            || arg == "--change"
-            || arg.starts_with("--limit=")
-            || arg.starts_with("--revision=")
-            || arg.starts_with("--change=")
-            || arg.strip_prefix("-l").is_some_and(|value| !value.is_empty())
-            || arg.strip_prefix("-r").is_some_and(|value| !value.is_empty())
-            || arg.strip_prefix("-c").is_some_and(|value| !value.is_empty())
-    })
+    args.iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| {
+            arg == "-l"
+                || arg == "-r"
+                || arg == "-c"
+                || arg == "--limit"
+                || arg == "--revision"
+                || arg == "--change"
+                || arg.starts_with("--limit=")
+                || arg.starts_with("--revision=")
+                || arg.starts_with("--change=")
+                || arg
+                    .strip_prefix("-l")
+                    .is_some_and(|value| !value.is_empty())
+                || arg
+                    .strip_prefix("-r")
+                    .is_some_and(|value| !value.is_empty())
+                || arg
+                    .strip_prefix("-c")
+                    .is_some_and(|value| !value.is_empty())
+        })
 }
 
 fn log_reaches_default_limit(output: &str) -> bool {
@@ -538,10 +545,7 @@ fn redacted_args_display(args: &[String]) -> String {
         } else if arg.starts_with("--password=") {
             displayed.push("--password=[REDACTED]".to_string());
         } else if let Some(value) = arg.strip_prefix("--config-option=") {
-            displayed.push(format!(
-                "--config-option={}",
-                redact_config_option(value)
-            ));
+            displayed.push(format!("--config-option={}", redact_config_option(value)));
         } else {
             displayed.push(redact_url_userinfo(arg).into_owned());
         }
@@ -609,8 +613,7 @@ mod tests {
     #[test]
     fn real_svn_log_clears_admission_threshold() {
         let output = filter_log_output(REAL_SVN_LOG);
-        let savings =
-            100.0 - (output.len() as f64 / REAL_SVN_LOG.len() as f64 * 100.0);
+        let savings = 100.0 - (output.len() as f64 / REAL_SVN_LOG.len() as f64 * 100.0);
 
         assert!(
             savings >= 20.0,
@@ -690,10 +693,7 @@ mod tests {
         );
         let output = filter_log_output(&input);
 
-        assert_eq!(
-            output,
-            "r1 | dev | 2026-01-01 | 1 line\r\n\r\nmessage\r\n"
-        );
+        assert_eq!(output, "r1 | dev | 2026-01-01 | 1 line\r\n\r\nmessage\r\n");
         assert!(!output.replace("\r\n", "").contains('\n'));
     }
 

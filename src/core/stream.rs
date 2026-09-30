@@ -388,6 +388,9 @@ mod signal_relay {
     }
 }
 
+// Custom capture paths must share streaming cancellation and escalation.
+pub(crate) use signal_relay::Relay as ChildSignalRelay;
+
 // #2375
 #[cfg(unix)]
 pub fn die_by_relayed_signal() {
