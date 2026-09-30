@@ -25,15 +25,14 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 
 **Quoted shell wrappers** — An exact `sh -c`, `bash -c`, `zsh -c` or `fish -c` segment whose script is one balanced quoted argument has that script rewritten in place, leaving the shell path, quote delimiters, spacing, suffix arguments and redirects byte-identical (`shell_wrapper.rs`). Recursion is capped at one level, so a wrapper inside a wrapper stays raw. A script carrying a newline, heredoc, `$((`, or any construct the lexer cannot attest defers unchanged. The wrapper names the shell, so the script is attested under *that* shell's grammar (`ShellDialect`): inside `fish -c`, `(cmd)` is substitution and `and`/`or`/`end` are control flow, and either one defers — while the same shapes in a host command string or a POSIX wrapper stay ordinary bash and keep rewriting.
 
-**Per-segment rewriting** — Each segment goes through:
+**Per-segment rewriting** — The line is lexed once, into a `CompoundLex`, and each line of a block, segment and pipeline stage is a range of those tokens, from its first word to the end of its last: an escaped or quoted blank belongs to that word, so `head\ ` names the program `head␠`. A walk over a segment peels its transparent layers left to right on those same tokens: an env run (`FOO="bar baz"`), a built-in wrapper (`noglob`, `uv run`), a process wrapper (`timeout 5`), a user prefix. A prefix matched as text can end inside a token, as a user prefix `x 'a` ends inside the quote it opens; the command after it is then read from a fresh lex of its own text.
 
-1. Strip trailing redirects (`2>&1`, `>/dev/null`) — matched via lexer tokens, set aside, re-appended after rewriting
-2. Short-circuit special cases — `head -20 file` → `rtk read file --head-lines 20`, `tail -n 5 file` → `rtk read file --tail-lines 5`. These can't go through generic prefix replacement because it would produce `rtk read -20 file` (wrong flag position)
-3. Classify the command — strip env prefixes (`FOO="bar baz"`), normalize paths (`/usr/bin/grep` → `grep`), strip git global opts (`git -C /tmp` → `git`), then match against 60+ regex patterns from `rules.rs`
-4. Apply the rewrite — find the matching rule, replace the command prefix with `rtk <cmd>`, re-prepend the env prefix, re-append the redirect suffix
+The command under the layers is then decided on. Its trailing redirects (`2>&1`, `>/dev/null`) are left out of the match. `head -20 file` and `tail -n 5 file` short-circuit to `rtk read file --head-lines 20` and `rtk read file --tail-lines 5`, because generic prefix replacement would produce `rtk read -20 file` (wrong flag position). Anything else is classified: env prefixes looked past, paths normalized (`/usr/bin/grep` → `grep`), git global opts stripped (`git -C /tmp` → `git`), then matched against 60+ regex patterns from `rules.rs`, and the matching rule's prefix becomes `rtk <cmd>`.
+
+Each decision is one edit against the line (`core/cmdline/edit.rs`): `Replace` renames the decided command's span, and `Insert` puts `rtk ` in front of it. Every other byte is kept as written, so the layers, the redirects, the operators and the blanks between them come out as the author wrote them.
 
 **Guards along the way:**
-- `RTK_DISABLED=1` in the env prefix → skip rewrite
+- `RTK_DISABLED=1` in the env prefix → skip rewrite (under a routable wrapper such as `uv run`, the wrapper itself is still rewritten: `uv run RTK_DISABLED=1 git status` becomes `rtk uv run RTK_DISABLED=1 git status`)
 - `gh` with `--json`/`--jq`/`--template` → skip (structured output, rtk would corrupt it)
 - `cat` with flags other than `-n` → skip (different semantics than `rtk read`)
 - `cat`/`head`/`tail` with `>` or `>>` → skip (write operation, not a read)
@@ -65,17 +64,11 @@ The classification logic is shared between discover and rewrite — same pattern
 - Escaped quotes: `FOO="he said \"hello\""`
 - Chained: `A="x y" B=1 env git status`
 
-The prefix is stripped twice: once in `classify_command()` to match the underlying command against rules, and again in `rewrite_segment()` to extract it for re-prepending to the rewritten command.
+`classify_command()` looks past the prefix to match the underlying command against rules, and the rewrite's walk peels it as a layer. Only the command after it is edited, so the prefix stays exactly as written.
 
 ## Process Wrapper Handling
 
-A process wrapper runs another command without changing which command runs, so
-the rewrite peels it, rewrites what it wraps, and re-prepends the wrapper text
-byte for byte: `timeout 300 cargo test` becomes `timeout 300 rtk cargo test`.
-`PROCESS_WRAPPERS` in `registry.rs` describes each wrapper's own arguments —
-options that take a value, options that do not, values that may be attached to
-their option, and any positional argument the wrapper consumes before the
-command (`timeout`'s duration).
+A process wrapper runs another command without changing which command runs, so the rewrite peels it and edits only the command it wraps, leaving the wrapper's text as written: `timeout 300 cargo test` becomes `timeout 300 rtk cargo test`. `PROCESS_WRAPPERS` in `registry.rs` describes each wrapper's own arguments — options that take a value, options that do not, values that may be attached to their option, and any positional argument the wrapper consumes before the command (`timeout`'s duration).
 
 Two rules keep the peeling honest. An option the table does not describe drops
 the rewrite, because an unknown option may consume the following word and make
