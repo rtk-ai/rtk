@@ -392,6 +392,18 @@ fn build_capped_listing(files: &[String], max_results: usize) -> String {
     listing
 }
 
+/// Dotfiles such as `.env` are commonly gitignored, and native `find` still returns them,
+/// so a dotfile-targeted search must not silently apply git exclusions.
+fn find_walk_builder(path: &Path, search_hidden: bool) -> WalkBuilder {
+    let mut builder = WalkBuilder::new(path);
+    builder
+        .hidden(!search_hidden)
+        .git_ignore(!search_hidden)
+        .git_global(!search_hidden)
+        .git_exclude(!search_hidden);
+    builder
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     pattern: &str,
@@ -456,16 +468,18 @@ fn native_walk(
     case_insensitive: bool,
     git_global: bool,
 ) -> (Vec<String>, Vec<String>) {
-    // When the pattern targets dotfiles (e.g. -name ".claude.json"), we must walk hidden
-    // entries; otherwise skip them to keep results tidy (#1101).
+    // When the pattern targets dotfiles (e.g. -name ".claude.json" or ".env"),
+    // walk hidden entries and skip git exclusions. Dotfiles are commonly
+    // gitignored, and native `find` still returns them (#1101, #3291).
     let search_hidden = pattern.starts_with('.');
+    let respect_git = !search_hidden;
 
     let mut builder = WalkBuilder::new(path);
     builder
-        .hidden(!search_hidden) // skip hidden files/dirs unless pattern targets dotfiles
-        .git_ignore(true) // respect .gitignore
-        .git_global(git_global)
-        .git_exclude(true);
+        .hidden(!search_hidden)
+        .git_ignore(respect_git)
+        .git_global(git_global && respect_git)
+        .git_exclude(respect_git);
     if let Some(depth) = max_depth {
         builder.max_depth(Some(depth));
     }
@@ -746,6 +760,8 @@ fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::TempDir;
 
     /// Convert string slices to Vec<String> for test convenience.
     fn args(values: &[&str]) -> Vec<String> {
@@ -1189,6 +1205,42 @@ mod tests {
     }
 
     #[test]
+    fn find_dotfile_pattern_includes_gitignored_files() {
+        let temp = TempDir::new().unwrap();
+        // `ignore` only applies .gitignore inside a git repository.
+        fs::create_dir(temp.path().join(".git")).unwrap();
+        fs::write(temp.path().join(".gitignore"), ".env\nignored.txt\n").unwrap();
+        fs::write(temp.path().join(".env"), "SECRET=test-only\n").unwrap();
+        fs::write(temp.path().join("ignored.txt"), "x\n").unwrap();
+
+        let names = |search_hidden| -> Vec<String> {
+            find_walk_builder(temp.path(), search_hidden)
+                .build()
+                .filter_map(Result::ok)
+                .filter_map(|entry| {
+                    entry
+                        .path()
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(str::to_string)
+                })
+                .collect()
+        };
+
+        let dotfile_search = names(true);
+        assert!(
+            dotfile_search.iter().any(|n| n == ".env"),
+            "dotfile search must include files excluded by .gitignore, got {dotfile_search:?}"
+        );
+
+        let ordinary_search = names(false);
+        assert!(
+            !ordinary_search.iter().any(|n| n == "ignored.txt"),
+            "ordinary search must continue to respect .gitignore, got {ordinary_search:?}"
+        );
+    }
+
+    #[test]
     fn find_regular_pattern_skips_hidden() {
         // Non-dot pattern should not error (hidden dirs remain skipped)
         let result = run("*.rs", "src", 5, true, None, "f", false, 0);
@@ -1408,7 +1460,12 @@ mod tests {
 
         let (files, filtered) = native_walk(&root_s, ".gitignore", None, false, false, false);
         assert_eq!(files, vec![".gitignore".to_string()]);
-        assert_eq!(filtered, vec!["build/".to_string()]);
+        // A dotfile pattern disables git exclusions, so ignored paths are walked
+        // instead of being disclosed as filtered.
+        assert!(
+            !filtered.iter().any(|p| p == "secret.txt" || p == "build/"),
+            "{filtered:?}"
+        );
     }
 
     #[test]
