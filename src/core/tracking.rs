@@ -1879,15 +1879,22 @@ impl TimedExecution {
         }
     }
 
-    /// Like [`track`](Self::track), but the input size is supplied as a raw byte
-    /// count instead of a `&str`. For callers whose captured input is non-UTF-8
-    /// bytes (e.g. a Latin-1 blob): measuring the decoded string would count the
-    /// transcoded (inflated) length rather than what the wrapped command emitted,
-    /// overstating the reduction.
-    pub fn track_bytes(&self, original_cmd: &str, rtk_cmd: &str, input_len: usize, output: &str) {
+    /// Like [`track`](Self::track), but both sizes are supplied as raw byte counts
+    /// instead of `&str`. For callers handling non-UTF-8 bytes (a Latin-1 blob, a
+    /// window off a device node): a lossy decode inflates every invalid byte to the
+    /// replacement character's three, so measuring the decoded string counts neither
+    /// what the wrapped command emitted nor what RTK wrote. On the input side that
+    /// overstates the reduction; on the output side it can drive it below zero.
+    pub fn track_bytes(
+        &self,
+        original_cmd: &str,
+        rtk_cmd: &str,
+        input_len: usize,
+        output_len: usize,
+    ) {
         let elapsed_ms = self.start.elapsed().as_millis() as u64;
         let input_tokens = estimate_tokens_from_len(input_len);
-        let output_tokens = estimate_tokens(output);
+        let output_tokens = estimate_tokens_from_len(output_len);
 
         if let Ok(tracker) = Tracker::new() {
             let _ = tracker.record(

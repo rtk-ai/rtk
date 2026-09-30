@@ -609,7 +609,7 @@ fn run_show(
             let shown = compact_blob_show(text, blob_objects[0], global_args);
             print!("{}", shown);
             // Track savings against the bytes git actually wrote (`result.stdout`).
-            timer.track_bytes(&label, &rtk_label, result.stdout.len(), &shown);
+            timer.track_bytes(&label, &rtk_label, result.stdout.len(), shown.len());
             return Ok(0);
         }
         // Not windowable (multiple concatenated objects, a content-transforming flag, or
