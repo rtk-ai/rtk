@@ -1,6 +1,6 @@
 [filters.shellcheck]
 description = "Compact shellcheck output — strip blank lines, keep caret indicators for error position"
-match_command = "^shellcheck\\b"
+match_command = "^shellcheck(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

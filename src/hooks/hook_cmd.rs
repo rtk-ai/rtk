@@ -664,6 +664,11 @@ fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> 
 
 #[derive(Debug)]
 enum PayloadAction {
+    /// Ask about the command as it stands: nothing was rewritten.
+    AskAsWritten {
+        cmd: String,
+        output: Value,
+    },
     Rewrite {
         cmd: String,
         rewritten: String,
@@ -698,6 +703,17 @@ fn pre_tool_use_rewrite_output(
     }
 
     json!({ "hookSpecificOutput": hook_output })
+}
+
+/// What a person reads when the hook asks about a line it cannot read.
+const TOO_COMPLEX_REASON: &str =
+    "RTK could not read this command: it is too complex to tell what it runs";
+
+/// [`pre_tool_use_rewrite_output`] for an explicit ask with its own `reason`.
+fn pre_tool_use_ask_output(v: &Value, command: &str, reason: &str) -> Value {
+    let mut output = pre_tool_use_rewrite_output(v, command, Some("ask"));
+    output["hookSpecificOutput"]["permissionDecisionReason"] = Value::String(reason.to_string());
+    output
 }
 
 fn process_claude_payload(v: &Value) -> PayloadAction {
@@ -740,6 +756,26 @@ fn process_claude_payload_from_decision(
         }
         HookDecision::AllowRewrite(r) => (r, Some("allow"), HookOutcome::Allow),
         HookDecision::AskRewrite(r, AskOwner::Host) => (r, None, HookOutcome::Ask),
+        // A line too complex to read comes back as it stands: the hook asks and
+        // covers nothing, and the prompt says why.
+        HookDecision::AskRewrite(r, AskOwner::Unread) => {
+            // A mode that never prompts has settled what to do with what it can't vouch
+            // for, and an ask would stop the run instead.
+            if matches!(
+                v.get("permission_mode").and_then(Value::as_str),
+                Some("bypassPermissions" | "dontAsk" | "auto")
+            ) {
+                return PayloadAction::Skip {
+                    decision: HookOutcome::Defer,
+                    reason: "skip:too_complex",
+                    cmd: cmd.to_string(),
+                };
+            }
+            return PayloadAction::AskAsWritten {
+                cmd: cmd.to_string(),
+                output: pre_tool_use_ask_output(v, &r, TOO_COMPLEX_REASON),
+            };
+        }
         // The host would judge the command RTK built, not the parts inside it
         // (a fish wrap is one `rtk run` command), so the hook asks itself.
         HookDecision::AskRewrite(r, AskOwner::Hook) => (r, Some("ask"), HookOutcome::Ask),
@@ -843,6 +879,11 @@ pub fn run_claude() -> Result<()> {
             audit_log("rewrite", &cmd, &rewritten);
             log_hook_decision(&v, &cmd, decision, Some(&rewritten));
         }
+        PayloadAction::AskAsWritten { cmd, output } => {
+            let _ = writeln!(io::stdout(), "{output}");
+            audit_log("skip:too_complex", &cmd, "");
+            log_hook_decision(&v, &cmd, HookOutcome::Defer, None);
+        }
         PayloadAction::Skip {
             decision,
             cmd,
@@ -870,7 +911,9 @@ fn run_claude_inner(input: &str) -> Option<String> {
     let input = strip_leading_bom(input);
     let v: Value = serde_json::from_str(input).ok()?;
     match process_claude_payload(&v) {
-        PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+        PayloadAction::Rewrite { output, .. } | PayloadAction::AskAsWritten { output, .. } => {
+            Some(output.to_string())
+        }
         _ => None,
     }
 }
@@ -985,7 +1028,7 @@ fn process_codex_payload(v: &Value) -> PayloadAction {
         };
     }
 
-    if crate::core::cmdline::lexer::contains_unattestable_construct(cmd) {
+    if crate::core::cmdline::lexer::line_is_unattestable(cmd) {
         return PayloadAction::Skip {
             decision: HookOutcome::Defer,
             reason: "skip:defer",
@@ -1075,7 +1118,8 @@ pub fn run_codex() -> Result<()> {
             let _ = writeln!(io::stdout(), "{output}");
         }
         PayloadAction::Skip { cmd, reason, .. } => audit_log(reason, &cmd, ""),
-        PayloadAction::Ignore => {}
+        // Only a verdict the Claude hook reads leads here.
+        PayloadAction::AskAsWritten { .. } | PayloadAction::Ignore => {}
     }
 
     Ok(())
@@ -2017,6 +2061,52 @@ mod tests {
         assert_eq!(project_path, "");
     }
 
+    #[test]
+    fn a_line_too_complex_to_read_is_asked_about_and_not_counted_as_a_rewrite() {
+        let v = json!({"tool_input": {"command": "a[1 # 2]=b"}});
+        let action = process_claude_payload_from_decision(
+            &v,
+            "a[1 # 2]=b",
+            HookDecision::AskRewrite("a[1 # 2]=b".to_string(), AskOwner::Unread),
+        );
+        let PayloadAction::AskAsWritten { output, .. } = action else {
+            panic!("expected AskAsWritten");
+        };
+        assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "ask");
+        assert_eq!(
+            output["hookSpecificOutput"]["permissionDecisionReason"],
+            TOO_COMPLEX_REASON
+        );
+    }
+
+    #[test]
+    fn a_line_too_complex_to_read_goes_to_a_host_that_never_prompts() {
+        let unread = || HookDecision::AskRewrite("a[1 # 2]=b".to_string(), AskOwner::Unread);
+        for mode in ["bypassPermissions", "dontAsk", "auto"] {
+            let v = json!({"permission_mode": mode, "tool_input": {"command": "a[1 # 2]=b"}});
+            let action = process_claude_payload_from_decision(&v, "a[1 # 2]=b", unread());
+            assert!(
+                matches!(
+                    action,
+                    PayloadAction::Skip {
+                        decision: HookOutcome::Defer,
+                        reason: "skip:too_complex",
+                        ..
+                    }
+                ),
+                "{mode}"
+            );
+        }
+        for mode in ["default", "acceptEdits", "plan"] {
+            let v = json!({"permission_mode": mode, "tool_input": {"command": "a[1 # 2]=b"}});
+            let action = process_claude_payload_from_decision(&v, "a[1 # 2]=b", unread());
+            assert!(
+                matches!(action, PayloadAction::AskAsWritten { .. }),
+                "{mode}"
+            );
+        }
+    }
+
     // The decision field on PayloadAction feeds directly into hook_decisions —
     // exercise the full Allow/Ask/Deny/Defer matrix against the pure
     // process_claude_payload_from_decision (no real permission config needed).
@@ -2424,6 +2514,7 @@ mod tests {
                 "skip:unsupported_permission_mode",
             ),
             ("git status $(whoami)", Some("default"), "skip:defer"),
+            ("ls \"$\\\n(whoami)\"", Some("default"), "skip:defer"),
             ("htop", Some("default"), "skip:no_rewrite"),
         ] {
             let input: Value =

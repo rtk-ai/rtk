@@ -240,34 +240,36 @@ fn swappable(
 /// and the checks here read words, not that grammar: such a line takes the ordinary
 /// rewrite. `time`, `!` and braces do not count: the commands behind them read as usual.
 fn holds_compound_syntax(cmd: &str) -> bool {
-    let input = cmd.trim();
-    crate::core::cmdline::lexer::split_for_classify(input)
-        .iter()
-        .any(|segment| {
-            let first = segment.text.split_whitespace().next().unwrap_or_default();
-            matches!(
-                input[..segment.start].trim_end().bytes().last(),
-                Some(b'(' | b')')
-            ) || matches!(
-                first,
-                "[[" | "case"
-                    | "coproc"
-                    | "do"
-                    | "done"
-                    | "elif"
-                    | "else"
-                    | "esac"
-                    | "fi"
-                    | "for"
-                    | "function"
-                    | "if"
-                    | "in"
-                    | "select"
-                    | "then"
-                    | "until"
-                    | "while"
-            )
-        })
+    use crate::core::cmdline::lexer::{join_continuations, split_for_classify, trim_ifs};
+    let Ok(joined) = join_continuations(cmd) else {
+        return true;
+    };
+    let input = trim_ifs(&joined);
+    split_for_classify(input).iter().any(|segment| {
+        let first = segment.text.split_whitespace().next().unwrap_or_default();
+        matches!(
+            trim_ifs(&input[..segment.start]).bytes().last(),
+            Some(b'(' | b')')
+        ) || matches!(
+            first,
+            "[[" | "case"
+                | "coproc"
+                | "do"
+                | "done"
+                | "elif"
+                | "else"
+                | "esac"
+                | "fi"
+                | "for"
+                | "function"
+                | "if"
+                | "in"
+                | "select"
+                | "then"
+                | "until"
+                | "while"
+        )
+    })
 }
 
 fn runs_rtk(cmd: &str) -> bool {
@@ -373,6 +375,16 @@ mod tests {
     }
 
     #[test]
+    fn a_line_too_complex_to_read_is_not_swapped() {
+        assert!(holds_compound_syntax("./run-suite.sh; a[1 # 2]=b"));
+        assert!(!decide(
+            "./run-suite.sh; a[1 # 2]=b",
+            PermissionVerdict::TooComplex,
+            &[]
+        ));
+    }
+
+    #[test]
     fn an_ask_rule_swaps_like_any_other() {
         assert!(decide("./run-suite.sh", PermissionVerdict::Ask, &[]));
         assert!(decide("git log -3", PermissionVerdict::Ask, &[]));
@@ -396,6 +408,7 @@ mod tests {
             "function f { ls; }",
             "[[ \"$b\" =~ ^(a|b)$ ]] && git log -3",
             "[[ -f f ]] && git status",
+            "time \\\n(ls)",
             "(ls",
             " (ls) && git status",
             "time for a in b; do ls; done",
@@ -445,6 +458,8 @@ mod tests {
             split_on_operators("a |& b ;; c ;& d ;;& e"),
             ["a", "b", "c", "d", "e"]
         );
+        assert_eq!(split_on_operators("a # b; c\nd"), ["a # b; c\nd"]);
+        assert_eq!(split_on_operators("a;\u{a0}"), ["a", "\u{a0}"]);
         assert!(split_on_operators(" ; ").is_empty());
     }
 
