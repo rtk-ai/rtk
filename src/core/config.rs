@@ -141,6 +141,12 @@ pub struct HooksConfig {
     /// not anything else.
     #[serde(default)]
     pub transparent_prefixes: Vec<String>,
+    /// Suppress the "No hook installed" warning only.
+    /// Useful when running rtk via CLAUDE.md instructions instead of hooks,
+    /// or with tools like OpenCode that don't use Claude Code hooks.
+    /// Does not mute the "Hook outdated" upgrade prompt.
+    #[serde(default)]
+    pub suppress_hook_warning: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -272,6 +278,37 @@ pub fn hook_rewrite_params() -> (Vec<String>, Vec<String>) {
 pub(crate) fn cached_config() -> &'static Config {
     static CACHE: std::sync::OnceLock<Config> = std::sync::OnceLock::new();
     CACHE.get_or_init(|| Config::load().unwrap_or_default())
+}
+
+/// Check if the missing-hook warning is suppressed via env var or config.
+///
+/// `RTK_SUPPRESS_HOOK_WARNING` is a three-way override: truthy values
+/// (`1`/`true`/`yes`/`on`) force on, falsy values (`0`/`false`/`no`/`off`)
+/// force off, case-insensitive. Unset, empty, or unrecognised values fall
+/// through to `hooks.suppress_hook_warning` instead of vetoing it.
+pub fn hook_warning_suppressed() -> bool {
+    parse_suppress_hook_warning_env(std::env::var("RTK_SUPPRESS_HOOK_WARNING").ok().as_deref())
+        .unwrap_or_else(|| cached_config().hooks.suppress_hook_warning)
+}
+
+/// Parse `RTK_SUPPRESS_HOOK_WARNING`. `None` means fall through to config.
+fn parse_suppress_hook_warning_env(raw: Option<&str>) -> Option<bool> {
+    let value = raw?.trim();
+    if value.eq_ignore_ascii_case("1")
+        || value.eq_ignore_ascii_case("true")
+        || value.eq_ignore_ascii_case("yes")
+        || value.eq_ignore_ascii_case("on")
+    {
+        Some(true)
+    } else if value.eq_ignore_ascii_case("0")
+        || value.eq_ignore_ascii_case("false")
+        || value.eq_ignore_ascii_case("no")
+        || value.eq_ignore_ascii_case("off")
+    {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 impl Config {
@@ -545,6 +582,7 @@ exclude_commands = ["curl", "gh"]
     fn test_hooks_config_default_empty() {
         let config = Config::default();
         assert!(config.hooks.exclude_commands.is_empty());
+        assert!(!config.hooks.suppress_hook_warning);
         assert!(config.hooks.transparent_prefixes.is_empty());
     }
 
@@ -582,6 +620,80 @@ history_days = 90
 "#;
         let config: Config = toml::from_str(toml).expect("valid toml");
         assert!(config.hooks.exclude_commands.is_empty());
+        assert!(!config.hooks.suppress_hook_warning);
+    }
+
+    #[test]
+    fn test_suppress_hook_warning_deserialize() {
+        let toml = r#"
+[hooks]
+suppress_hook_warning = true
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(config.hooks.suppress_hook_warning);
+    }
+
+    #[test]
+    fn test_suppress_hook_warning_default_false() {
+        let toml = r#"
+[hooks]
+exclude_commands = ["curl"]
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(!config.hooks.suppress_hook_warning);
+    }
+
+    #[test]
+    fn test_suppress_hook_warning_env_truthy_overrides_config() {
+        for raw in [
+            "1", "true", "TRUE", "True", "yes", "YES", "on", "On", " true ",
+        ] {
+            assert_eq!(
+                parse_suppress_hook_warning_env(Some(raw)),
+                Some(true),
+                "{raw:?} must force suppression on"
+            );
+            assert!(
+                parse_suppress_hook_warning_env(Some(raw)).unwrap_or(false),
+                "{raw:?} must win over config=false"
+            );
+        }
+    }
+
+    #[test]
+    fn test_suppress_hook_warning_env_falsy_overrides_config() {
+        for raw in [
+            "0", "false", "FALSE", "False", "no", "NO", "off", "Off", " 0 ",
+        ] {
+            assert_eq!(
+                parse_suppress_hook_warning_env(Some(raw)),
+                Some(false),
+                "{raw:?} must force suppression off"
+            );
+            assert!(
+                !parse_suppress_hook_warning_env(Some(raw)).unwrap_or(true),
+                "{raw:?} must win over config=true"
+            );
+        }
+    }
+
+    #[test]
+    fn test_suppress_hook_warning_env_falls_back_to_config() {
+        for raw in [None, Some(""), Some("   "), Some("maybe"), Some("2")] {
+            assert_eq!(
+                parse_suppress_hook_warning_env(raw),
+                None,
+                "{raw:?} must not override config"
+            );
+            assert!(
+                parse_suppress_hook_warning_env(raw).unwrap_or(true),
+                "{raw:?} must keep config=true"
+            );
+            assert!(
+                !parse_suppress_hook_warning_env(raw).unwrap_or(false),
+                "{raw:?} must keep config=false"
+            );
+        }
     }
 
     #[test]

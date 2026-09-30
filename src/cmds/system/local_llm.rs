@@ -184,10 +184,12 @@ fn extract_functions(content: &str, lang: &Language) -> Vec<String> {
     for line in content.lines() {
         if let Some(caps) = re.captures(line) {
             let name = caps.get(1).or(caps.get(2)).map(|m| m.as_str().to_string());
-            if let Some(n) = name {
-                if !n.starts_with("test_") && n != "main" && n != "new" {
-                    functions.push(n);
-                }
+            if let Some(n) = name
+                && !n.starts_with("test_")
+                && n != "main"
+                && n != "new"
+            {
+                functions.push(n);
             }
         }
     }

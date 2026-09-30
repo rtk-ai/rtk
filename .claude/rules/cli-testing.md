@@ -30,7 +30,7 @@ mod tests {
 Two patterns coexist, pick based on what the filter needs:
 
 1. **Inline literal strings** (most common for `src/cmds/**` unit tests) — build a small
-   representative string directly in the test body. Used throughout `src/cmds/git/git.rs`,
+   representative string directly in the test body. Used throughout `src/cmds/git/git_cmd.rs`,
    `src/cmds/git/gh_cmd.rs`, etc. Good for quick coverage of a specific format/edge case.
 2. **Real captured fixtures via `include_str!`** — used when the raw output is large or
    format-sensitive enough that inline strings would be unreadable or drift from reality.
@@ -306,7 +306,7 @@ rtk/
 ├── src/
 │   ├── cmds/
 │   │   ├── git/
-│   │   │   ├── git.rs              # Filter implementation
+│   │   │   ├── git_cmd.rs              # Filter implementation
 │   │   │   │   └── #[cfg(test)] mod tests { ... }
 │   │   ├── jvm/                    # gradlew, mvn — reference example for include_str! fixtures
 │   │   ├── php/                    # php, artisan, phpunit, phpstan, pest, paratest, ecs, pint

@@ -4,7 +4,7 @@
 
 ## Specifics
 
-- **git.rs** uses `trailing_var_arg = true` + `allow_hyphen_values = true` so native git flags (`--oneline`, `--cached`, etc.) pass through correctly
+- **git_cmd.rs** uses `trailing_var_arg = true` + `allow_hyphen_values = true` so native git flags (`--oneline`, `--cached`, etc.) pass through correctly
 - Flag grammar (which flags take a value, what `-u`/`-p` mean) is per-subcommand, not shared wholesale between `log`/`diff`/`show`/`stash show` — see [`src/core/README.md`](../../core/README.md#argument-tokenizer-arg_tokenizerrs)
 - **svn_cmd.rs** defaults native `svn log` to 10 revisions with a recovery hint unless the caller supplies a limit/revision/change window, then removes only structurally proven separators; `svn status`, `svn diff`, search/detailed log shapes, global-option-first invocations, and unsupported or mutating subcommands remain exact passthrough
 - Filtered SVN logs inherit stdin and relay stderr chunks live for authentication/certificate prompts; password-bearing arguments are redacted from verbose/tracking labels without changing the forwarded argv
@@ -24,8 +24,8 @@
 
 ## Cross-command
 
-- `gh_cmd.rs` imports `compact_diff()` from `git.rs` for diff formatting; markdown helpers (`filter_markdown_body`, `filter_markdown_segment`) are defined in `gh_cmd.rs` itself
-- `glab_cmd.rs` also uses `compact_diff()` from `git.rs` for `mr diff`; its `filter_markdown_body` is currently **duplicated** from `gh_cmd.rs` (shared-module refactor deferred)
+- `gh_cmd.rs` imports `compact_diff()` from `git_cmd.rs` for diff formatting; markdown helpers (`filter_markdown_body`, `filter_markdown_segment`) are defined in `gh_cmd.rs` itself
+- `glab_cmd.rs` also uses `compact_diff()` from `git_cmd.rs` for `mr diff`; its `filter_markdown_body` is currently **duplicated** from `gh_cmd.rs` (shared-module refactor deferred)
 - `diff_cmd.rs` is a standalone ultra-condensed diff (separate from `git diff`)
 
 ## glab vs gh JSON schema quick-ref

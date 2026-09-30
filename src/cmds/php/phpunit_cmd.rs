@@ -210,7 +210,9 @@ mod tests {
     #[test]
     fn test_numbered_failure_heading_anchored() {
         // Real PHPUnit failure headings match.
-        assert!(is_numbered_failure_heading("1) App\\Tests\\UserTest::testEmail"));
+        assert!(is_numbered_failure_heading(
+            "1) App\\Tests\\UserTest::testEmail"
+        ));
         assert!(is_numbered_failure_heading("12) Foo::bar"));
         // Detail lines that merely start with a digit and contain ')' must not.
         assert!(!is_numbered_failure_heading(
@@ -280,7 +282,11 @@ Tests: 9, Assertions: 15, Failures: 2."#;
     fn test_phpunit_success() {
         let result = filter_phpunit_output(REAL_PHPUNIT_SUCCESS);
         assert!(result.contains("PHPUnit"), "got: {}", result);
-        assert!(result.contains("OK (9 tests, 20 assertions)"), "got: {}", result);
+        assert!(
+            result.contains("OK (9 tests, 20 assertions)"),
+            "got: {}",
+            result
+        );
     }
 
     #[test]

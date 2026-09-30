@@ -7,7 +7,7 @@ use super::constants::PRE_TOOL_USE_KEY;
 use super::decision::{self, HookDecision};
 use super::permissions::{self, PermissionVerdict};
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::{self, Read, Write};
 
 use crate::core::tracking::HookOutcome;
@@ -79,7 +79,7 @@ pub fn run_copilot() -> Result<()> {
     };
 
     match detect_format(&v) {
-        HookFormat::VsCode { command } => handle_vscode(&command),
+        HookFormat::VsCode { command } => handle_vscode(&command, &v),
         HookFormat::CopilotCli { command, args } => {
             for path in heal_legacy_copilot_configs() {
                 audit_log("self_heal", &path.display().to_string(), "");
@@ -103,16 +103,14 @@ fn detect_format(v: &Value) -> HookFormat {
         if matches!(
             tool_name,
             "runTerminalCommand" | "run_in_terminal" | "Bash" | "bash"
-        ) {
-            if let Some(cmd) = v
-                .pointer("/tool_input/command")
-                .and_then(|c| c.as_str())
-                .filter(|c| !c.is_empty())
-            {
-                return HookFormat::VsCode {
-                    command: cmd.to_string(),
-                };
-            }
+        ) && let Some(cmd) = v
+            .pointer("/tool_input/command")
+            .and_then(|c| c.as_str())
+            .filter(|c| !c.is_empty())
+        {
+            return HookFormat::VsCode {
+                command: cmd.to_string(),
+            };
         }
         return HookFormat::PassThrough;
     }
@@ -124,27 +122,24 @@ fn detect_format(v: &Value) -> HookFormat {
     // registers this schema itself, like JetBrains/IntelliJ's Copilot plugin
     // (toolName "run_in_terminal").
     if let Some(tool_name) = v.get("toolName").and_then(|t| t.as_str()) {
-        if matches!(tool_name, "bash" | "powershell" | "run_in_terminal") {
-            if let Some(tool_args_str) = v.get("toolArgs").and_then(|t| t.as_str()) {
-                if let Ok(tool_args) = serde_json::from_str::<Value>(tool_args_str) {
-                    if let Some(cmd) = tool_args
-                        .get("command")
-                        .and_then(|c| c.as_str())
-                        .filter(|c| !c.is_empty())
-                    {
-                        return if tool_name == "run_in_terminal" {
-                            HookFormat::CopilotIde {
-                                command: cmd.to_string(),
-                            }
-                        } else {
-                            HookFormat::CopilotCli {
-                                command: cmd.to_string(),
-                                args: tool_args,
-                            }
-                        };
-                    }
+        if matches!(tool_name, "bash" | "powershell" | "run_in_terminal")
+            && let Some(tool_args_str) = v.get("toolArgs").and_then(|t| t.as_str())
+            && let Ok(tool_args) = serde_json::from_str::<Value>(tool_args_str)
+            && let Some(cmd) = tool_args
+                .get("command")
+                .and_then(|c| c.as_str())
+                .filter(|c| !c.is_empty())
+        {
+            return if tool_name == "run_in_terminal" {
+                HookFormat::CopilotIde {
+                    command: cmd.to_string(),
                 }
-            }
+            } else {
+                HookFormat::CopilotCli {
+                    command: cmd.to_string(),
+                    args: tool_args,
+                }
+            };
         }
         return HookFormat::PassThrough;
     }
@@ -247,15 +242,19 @@ fn decide_hook_action(cmd: &str, host: permissions::Host) -> HookDecision {
     decide_from_verdict(cmd, permissions::check_command_for(cmd, host))
 }
 
-fn handle_vscode(cmd: &str) -> Result<()> {
-    if let Some(output) = vscode_response(cmd) {
+fn handle_vscode(cmd: &str, input: &Value) -> Result<()> {
+    if let Some(output) = vscode_response(cmd, input) {
         let _ = writeln!(io::stdout(), "{output}");
     }
     Ok(())
 }
 
-fn vscode_response(cmd: &str) -> Option<Value> {
-    vscode_response_from_decision(decide_hook_action(cmd, permissions::Host::Claude), cmd)
+fn vscode_response(cmd: &str, input: &Value) -> Option<Value> {
+    vscode_response_from_decision(
+        decide_hook_action(cmd, permissions::Host::Claude),
+        cmd,
+        input,
+    )
 }
 
 /// Build the VS Code Copilot Chat / Copilot CLI (PascalCase compat) hook response.
@@ -266,7 +265,11 @@ fn vscode_response(cmd: &str) -> Option<Value> {
 /// the host's own native prompt/allowlist flow in control — see #3037, where
 /// asserting `"ask"` here made Copilot CLI 1.0.66+ force a blocking dialog with
 /// no "remember" option on every rewritten command.
-fn vscode_response_from_decision(decision: HookDecision, cmd: &str) -> Option<Value> {
+fn vscode_response_from_decision(
+    decision: HookDecision,
+    cmd: &str,
+    input: &Value,
+) -> Option<Value> {
     let (rewritten, allow) = match decision {
         HookDecision::Deny => {
             audit_log("deny", cmd, "");
@@ -279,15 +282,11 @@ fn vscode_response_from_decision(decision: HookDecision, cmd: &str) -> Option<Va
 
     audit_log("rewrite", cmd, &rewritten);
 
-    let mut hook_output = json!({
-        "hookEventName": PRE_TOOL_USE_KEY,
-        "permissionDecisionReason": "RTK auto-rewrite",
-        "updatedInput": { "command": rewritten }
-    });
-    if allow {
-        hook_output["permissionDecision"] = json!("allow");
-    }
-    Some(json!({ "hookSpecificOutput": hook_output }))
+    Some(pre_tool_use_rewrite_output(
+        input,
+        &rewritten,
+        allow.then_some("allow"),
+    ))
 }
 
 fn handle_copilot_cli(cmd: &str, args: &Value) -> Result<()> {
@@ -439,6 +438,75 @@ fn run_gemini_inner_impl(
         }
         HookDecision::Defer => gemini_json("ask_user", None),
     })
+}
+
+// ── Google Antigravity hook ───────────────────────────────────
+
+/// Run the Google Antigravity PreToolUse hook.
+///
+/// Antigravity PreToolUse hook contract:
+/// - stdin: JSON with `toolCall: { name: "run_command", args: { CommandLine: "..." } }`
+/// - Passthrough: emit `{"decision": "allow"}`
+/// - Rewrite: emit `{"decision": "allow", "reason": "...", "overwrite": { "CommandLine": "..." }}`
+/// - Deny: emit `{"decision": "deny", "reason": "..."}`
+///
+/// Fail-open design: invalid JSON, non-command tools, or unparseable payloads
+/// emit `{"decision": "allow"}` so RTK never blocks agent operations.
+pub fn run_antigravity() -> Result<()> {
+    let input = read_stdin_limited()?;
+    let output = run_antigravity_inner(&input);
+    let _ = writeln!(io::stdout(), "{output}");
+    Ok(())
+}
+
+fn run_antigravity_inner(input: &str) -> Value {
+    let input = strip_leading_bom(input).trim();
+    if input.is_empty() {
+        return json!({ "decision": "allow" });
+    }
+
+    let parsed: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(_) => return json!({ "decision": "allow" }),
+    };
+
+    let tool_name = parsed
+        .pointer("/toolCall/name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if tool_name != "run_command" {
+        return json!({ "decision": "allow" });
+    }
+
+    let cmd = parsed
+        .pointer("/toolCall/args/CommandLine")
+        .or_else(|| parsed.pointer("/toolCall/args/command"))
+        .or_else(|| parsed.pointer("/toolCall/args/cmd"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if cmd.is_empty() {
+        return json!({ "decision": "allow" });
+    }
+
+    match decide_hook_action(cmd, permissions::Host::Antigravity) {
+        HookDecision::Deny => json!({
+            "decision": "deny",
+            "reason": "Blocked by RTK permission rule"
+        }),
+        HookDecision::AllowRewrite(ref rewritten) | HookDecision::AskRewrite(ref rewritten) => {
+            audit_log("rewrite", cmd, rewritten);
+            json!({
+                "decision": "allow",
+                "reason": "Rewritten by rtk for token optimization.",
+                "overwrite": {
+                    "CommandLine": rewritten
+                }
+            })
+        }
+        HookDecision::Defer => json!({ "decision": "allow" }),
+    }
 }
 
 // ── Vibe hook ─────────────────────────────────────────────────
@@ -620,14 +688,14 @@ fn process_claude_payload_from_decision(
                 decision: HookOutcome::Deny,
                 reason: "skip:deny_rule",
                 cmd: cmd.to_string(),
-            }
+            };
         }
         HookDecision::Defer => {
             return PayloadAction::Skip {
                 decision: HookOutcome::Defer,
                 reason: "skip:defer",
                 cmd: cmd.to_string(),
-            }
+            };
         }
         HookDecision::AllowRewrite(r) => (r, true),
         HookDecision::AskRewrite(r) => (r, false),
@@ -757,6 +825,78 @@ fn run_claude_inner(input: &str) -> Option<String> {
     }
 }
 
+// ── Trae native hook ───────────────────────────────────────────
+
+struct TraeRewrite {
+    original: String,
+    rewritten: String,
+    output: Value,
+}
+
+fn process_trae_payload(v: &Value) -> Option<TraeRewrite> {
+    if v.get("tool_name").and_then(Value::as_str) != Some("RunCommand") {
+        return None;
+    }
+
+    let command = v
+        .pointer("/tool_input/command")
+        .and_then(Value::as_str)
+        .filter(|command| !command.is_empty())?;
+    let rewritten = match decide_hook_action(command, permissions::Host::Trae) {
+        HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten) => rewritten,
+        HookDecision::Deny | HookDecision::Defer => return None,
+    };
+
+    let mut updated_input = v.get("tool_input")?.clone();
+    updated_input
+        .as_object_mut()?
+        .insert("command".into(), Value::String(rewritten.clone()));
+
+    Some(TraeRewrite {
+        original: command.to_string(),
+        rewritten,
+        output: json!({
+            "hookSpecificOutput": {
+                "hookEventName": PRE_TOOL_USE_KEY,
+                "updatedInput": updated_input
+            }
+        }),
+    })
+}
+
+/// Run the Trae PreToolUse hook natively.
+///
+/// Trae owns the command permission decision. RTK only returns an updated input
+/// when it can safely rewrite a `RunCommand` command.
+pub fn run_trae() -> Result<()> {
+    let input = read_stdin_limited()?;
+    let input = strip_leading_bom(&input).trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    if let Some(rewrite) = process_trae_payload(&v) {
+        audit_log("rewrite", &rewrite.original, &rewrite.rewritten);
+        let _ = writeln!(io::stdout(), "{}", rewrite.output);
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_trae_inner(input: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(input).ok()?;
+    process_trae_payload(&v).map(|rewrite| rewrite.output.to_string())
+}
+
 // ── Codex CLI native hook ─────────────────────────────────────
 
 fn is_supported_codex_permission_mode(v: &Value) -> bool {
@@ -819,14 +959,14 @@ fn process_codex_payload_from_decision(
                 decision: HookOutcome::Deny,
                 reason: "skip:deny_rule",
                 cmd: cmd.to_string(),
-            }
+            };
         }
         HookDecision::Defer => {
             return PayloadAction::Skip {
                 decision: HookOutcome::Defer,
                 reason: "skip:no_rewrite",
                 cmd: cmd.to_string(),
-            }
+            };
         }
     };
 
@@ -1226,10 +1366,33 @@ mod tests {
     // answers both from one JSON schema.
 
     #[test]
+    fn test_vscode_rewrite_preserves_tool_input_fields() {
+        let input = json!({
+            "tool_name": "run_in_terminal",
+            "tool_input": {
+                "command": "git status",
+                "timeout": 1234,
+                "description": "Inspect working tree",
+                "metadata": {"nested": [true, null]}
+            }
+        });
+        for decision in [
+            HookDecision::AllowRewrite("rtk git status".into()),
+            HookDecision::AskRewrite("rtk git status".into()),
+        ] {
+            let response = vscode_response_from_decision(decision, "git status", &input).unwrap();
+            let mut expected = input["tool_input"].clone();
+            expected["command"] = json!("rtk git status");
+            assert_eq!(response["hookSpecificOutput"]["updatedInput"], expected);
+        }
+    }
+
+    #[test]
     fn test_vscode_allow_rewrite_sets_permission_allow() {
         let r = vscode_response_from_decision(
             HookDecision::AllowRewrite("rtk git status".into()),
             "git status",
+            &vscode_input("Bash", "git status"),
         )
         .unwrap();
         assert_eq!(r["hookSpecificOutput"]["permissionDecision"], "allow");
@@ -1249,6 +1412,7 @@ mod tests {
         let r = vscode_response_from_decision(
             HookDecision::AskRewrite("rtk cargo test".into()),
             "cargo test",
+            &vscode_input("Bash", "cargo test"),
         )
         .unwrap();
         assert!(
@@ -1267,12 +1431,26 @@ mod tests {
 
     #[test]
     fn test_vscode_deny_returns_none() {
-        assert!(vscode_response_from_decision(HookDecision::Deny, "cargo test").is_none());
+        assert!(
+            vscode_response_from_decision(
+                HookDecision::Deny,
+                "cargo test",
+                &vscode_input("Bash", "cargo test")
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn test_vscode_defer_returns_none() {
-        assert!(vscode_response_from_decision(HookDecision::Defer, "cargo test").is_none());
+        assert!(
+            vscode_response_from_decision(
+                HookDecision::Defer,
+                "cargo test",
+                &vscode_input("Bash", "cargo test")
+            )
+            .is_none()
+        );
     }
 
     // --- Copilot CLI handler: transparent rewrite via modifiedArgs ---
@@ -1314,24 +1492,28 @@ mod tests {
 
     #[test]
     fn test_copilot_cli_deny_returns_none() {
-        assert!(copilot_cli_response_from_decision(
-            &cli_args("cargo test"),
-            HookDecision::Deny,
-            "cargo test",
-        )
-        .is_none());
+        assert!(
+            copilot_cli_response_from_decision(
+                &cli_args("cargo test"),
+                HookDecision::Deny,
+                "cargo test",
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn test_copilot_cli_defer_returns_none() {
         // Defer covers both "no rewrite available" and the unattestable-construct gate.
         // The hook must emit NO modifiedArgs for CVE bypass forms — no laundering.
-        assert!(copilot_cli_response_from_decision(
-            &cli_args("git status & rm -rf /tmp/x"),
-            HookDecision::Defer,
-            "git status & rm -rf /tmp/x",
-        )
-        .is_none());
+        assert!(
+            copilot_cli_response_from_decision(
+                &cli_args("git status & rm -rf /tmp/x"),
+                HookDecision::Defer,
+                "git status & rm -rf /tmp/x",
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1342,10 +1524,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(response["permissionDecision"], "deny");
-        assert!(response["permissionDecisionReason"]
-            .as_str()
-            .unwrap()
-            .contains("rtk git status"));
+        assert!(
+            response["permissionDecisionReason"]
+                .as_str()
+                .unwrap()
+                .contains("rtk git status")
+        );
         assert!(response.get("modifiedArgs").is_none());
     }
 
@@ -1359,10 +1543,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(response["permissionDecision"], "deny");
-        assert!(response["permissionDecisionReason"]
-            .as_str()
-            .unwrap()
-            .contains("rtk git status"));
+        assert!(
+            response["permissionDecisionReason"]
+                .as_str()
+                .unwrap()
+                .contains("rtk git status")
+        );
         assert!(response.get("modifiedArgs").is_none());
     }
 
@@ -1905,6 +2091,51 @@ mod tests {
         );
     }
 
+    // --- Trae handler ---
+
+    fn trae_input(cmd: &str) -> String {
+        json!({
+            "tool_name": "RunCommand",
+            "tool_input": {
+                "command": cmd,
+                "description": "Check repository status",
+                "timeout": 30000
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_trae_rewrite_preserves_tool_input_without_permission_override() {
+        let result = run_trae_inner(&trae_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let hook = &v["hookSpecificOutput"];
+
+        assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
+        assert_eq!(hook["updatedInput"]["command"], "rtk git status");
+        assert_eq!(
+            hook["updatedInput"]["description"],
+            "Check repository status"
+        );
+        assert_eq!(hook["updatedInput"]["timeout"], 30000);
+        assert!(hook.get("permissionDecision").is_none());
+        assert!(hook.get("permissionDecisionReason").is_none());
+    }
+
+    #[test]
+    fn test_trae_skips_non_run_command_and_unsafe_commands() {
+        let non_terminal = json!({
+            "tool_name": "ReadFile",
+            "tool_input": { "command": "git status" }
+        })
+        .to_string();
+        assert!(run_trae_inner(&non_terminal).is_none());
+        assert!(run_trae_inner(&trae_input("htop")).is_none());
+        assert!(run_trae_inner(&trae_input("cat <<EOF\nhello\nEOF")).is_none());
+        assert!(run_trae_inner(&trae_input("rtk git status")).is_none());
+        assert!(run_trae_inner("not valid json {{{").is_none());
+    }
+
     // --- Codex handler ---
 
     fn codex_input_with_permission_mode(cmd: &str, permission_mode: Option<&str>) -> String {
@@ -2027,11 +2258,13 @@ mod tests {
     #[test]
     fn test_codex_unknown_or_missing_permission_mode_passes_through() {
         assert!(run_codex_inner(&codex_input_with_permission_mode("git status", None)).is_none());
-        assert!(run_codex_inner(&codex_input_with_permission_mode(
-            "git status",
-            Some("futureMode")
-        ))
-        .is_none());
+        assert!(
+            run_codex_inner(&codex_input_with_permission_mode(
+                "git status",
+                Some("futureMode")
+            ))
+            .is_none()
+        );
     }
 
     #[test]
@@ -2254,8 +2487,9 @@ mod tests {
 
     #[test]
     fn test_audit_log_silent_when_disabled() {
-        std::env::remove_var("RTK_HOOK_AUDIT");
-        audit_log("test", "git status", "rtk git status");
+        temp_env::with_var_unset("RTK_HOOK_AUDIT", || {
+            audit_log("test", "git status", "rtk git status");
+        });
     }
 
     #[test]
@@ -2824,5 +3058,119 @@ mod tests {
     fn test_vibe_substitution_defers() {
         let input = vibe_input("bash", "echo $(rm -rf /)");
         assert!(run_vibe_inner(&input).is_none());
+    }
+
+    fn antigravity_input(cmd: &str) -> String {
+        json!({
+            "toolCall": {
+                "name": "run_command",
+                "args": {
+                    "CommandLine": cmd
+                }
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_antigravity_rewrite_git_status() {
+        let v = run_antigravity_inner(&antigravity_input("git status"));
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(v["overwrite"]["CommandLine"], "rtk git status");
+    }
+
+    #[test]
+    fn test_antigravity_passthrough_non_rewritable() {
+        let v = run_antigravity_inner(&antigravity_input("htop"));
+        assert_eq!(v["decision"], "allow");
+        assert!(v.get("overwrite").is_none());
+    }
+
+    #[test]
+    fn test_antigravity_non_command_tool_passthrough() {
+        let input = json!({
+            "toolCall": {
+                "name": "view_file",
+                "args": { "AbsolutePath": "/tmp/test.rs" }
+            }
+        })
+        .to_string();
+        let v = run_antigravity_inner(&input);
+        assert_eq!(v["decision"], "allow");
+        assert!(v.get("overwrite").is_none());
+    }
+
+    #[test]
+    fn test_antigravity_empty_and_corrupt_input_passthrough() {
+        assert_eq!(run_antigravity_inner("")["decision"], "allow");
+        assert_eq!(run_antigravity_inner("   ")["decision"], "allow");
+        assert_eq!(run_antigravity_inner("{not-json}")["decision"], "allow");
+    }
+
+    #[test]
+    fn test_antigravity_leading_bom_and_whitespace_trimmed() {
+        let raw = format!("\u{FEFF}   {}   ", antigravity_input("git status"));
+        let v = run_antigravity_inner(&raw);
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(v["overwrite"]["CommandLine"], "rtk git status");
+    }
+
+    #[test]
+    fn test_antigravity_complex_quoted_command_preserved() {
+        let cmd = "git log --format='%h %s' --all --decorate";
+        let v = run_antigravity_inner(&antigravity_input(cmd));
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(
+            v["overwrite"]["CommandLine"],
+            "rtk git log --format='%h %s' --all --decorate"
+        );
+    }
+
+    #[test]
+    fn test_antigravity_fallback_command_args_keys() {
+        let input = json!({
+            "toolCall": {
+                "name": "run_command",
+                "args": { "command": "git status" }
+            }
+        })
+        .to_string();
+        let v = run_antigravity_inner(&input);
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(v["overwrite"]["CommandLine"], "rtk git status");
+    }
+
+    #[test]
+    fn test_antigravity_pre_prefixed_command_defers() {
+        let v = run_antigravity_inner(&antigravity_input("rtk git status"));
+        assert_eq!(v["decision"], "allow");
+        assert!(
+            v.get("overwrite").is_none(),
+            "already prefixed command must not be rewritten again"
+        );
+    }
+
+    #[test]
+    fn test_antigravity_shell_redirection_and_subshells_defer() {
+        for cmd in [
+            "git status $(whoami)",
+            "git status `whoami`",
+            "git status > /tmp/out.txt",
+            "git status < /tmp/in.txt",
+        ] {
+            let v = run_antigravity_inner(&antigravity_input(cmd));
+            assert_eq!(v["decision"], "allow");
+            assert!(
+                v.get("overwrite").is_none(),
+                "unattestable shell construct must defer without overwrite for {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_antigravity_unknown_binary_passthrough() {
+        let v = run_antigravity_inner(&antigravity_input("definitely-not-a-real-binary --foo"));
+        assert_eq!(v["decision"], "allow");
+        assert!(v.get("overwrite").is_none());
     }
 }

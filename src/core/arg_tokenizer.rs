@@ -332,12 +332,11 @@ impl<'a, 'p, T: AsRef<str>> Scanner<'a, 'p, T> {
 
         if attached.is_none() && prefix != FlagPrefix::Slash {
             // `solo_only` cannot apply here: a Long flag is always the whole argument.
-            if let Some(spec) = (self.takes_value)(TokenKind::Long, name) {
-                if spec.attachment != Attachment::AttachedOnly
-                    && self.link_next_value(flag_index, self.i, spec)
-                {
-                    self.i += 1;
-                }
+            if let Some(spec) = (self.takes_value)(TokenKind::Long, name)
+                && spec.attachment != Attachment::AttachedOnly
+                && self.link_next_value(flag_index, self.i, spec)
+            {
+                self.i += 1;
             }
         }
     }

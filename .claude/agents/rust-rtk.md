@@ -315,7 +315,7 @@ fn test_real_git_log() {
 - `src/core/config.rs` - User configuration (~/.config/rtk/config.toml)
 
 **Command modules** (`src/cmds/<ecosystem>/`):
-- `src/cmds/git/` - git.rs, gh_cmd.rs, gt_cmd.rs, diff_cmd.rs
+- `src/cmds/git/` - git_cmd.rs, gh_cmd.rs, gt_cmd.rs, diff_cmd.rs
 - `src/cmds/rust/` - cargo_cmd.rs, runner.rs
 - `src/cmds/js/` - lint_cmd.rs, tsc_cmd.rs, next_cmd.rs, prettier_cmd.rs, playwright_cmd.rs, prisma_cmd.rs, vitest_cmd.rs, pnpm_cmd.rs, npm_cmd.rs
 - `src/cmds/python/` - ruff_cmd.rs, pytest_cmd.rs, mypy_cmd.rs, pip_cmd.rs
@@ -325,7 +325,7 @@ fn test_real_git_log() {
 - `src/cmds/system/` - ls.rs, tree.rs, read.rs, grep_cmd.rs, find_cmd.rs, etc.
 
 **Hook & analytics** (`src/hooks/`, `src/analytics/`):
-- `src/hooks/init.rs` - rtk init command
+- `src/hooks/init/` - rtk init command
 - `src/analytics/gain.rs` - rtk gain command
 
 **Tests**:

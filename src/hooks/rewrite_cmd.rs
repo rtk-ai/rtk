@@ -9,15 +9,15 @@ const TEE_READERS: &[&str] = &[
 ];
 
 fn expand_home(token: &str) -> String {
-    if let Some(rest) = token.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).to_string_lossy().into_owned();
-        }
+    if let Some(rest) = token.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest).to_string_lossy().into_owned();
     }
-    if let Some(rest) = token.strip_prefix("$HOME/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).to_string_lossy().into_owned();
-        }
+    if let Some(rest) = token.strip_prefix("$HOME/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest).to_string_lossy().into_owned();
     }
     token.to_string()
 }
@@ -39,10 +39,12 @@ fn tee_read_slug(cmd: &str, tee_dir: &std::path::Path) -> Option<(String, String
             continue;
         }
         let stem = path.file_stem()?.to_str()?;
-        if let Some((epoch, slug)) = stem.split_once('_') {
-            if !epoch.is_empty() && epoch.chars().all(|c| c.is_ascii_digit()) && !slug.is_empty() {
-                return Some((slug.to_string(), expanded));
-            }
+        if let Some((epoch, slug)) = stem.split_once('_')
+            && !epoch.is_empty()
+            && epoch.chars().all(|c| c.is_ascii_digit())
+            && !slug.is_empty()
+        {
+            return Some((slug.to_string(), expanded));
         }
     }
     None
@@ -70,17 +72,28 @@ pub(crate) fn track_tee_read(cmd: &str) {
 /// | 0    | rewritten| Rewrite allowed — hook may auto-allow the rewritten command. |
 /// | 1    | (none)   | No RTK equivalent — hook passes through unchanged.           |
 /// | 2    | (none)   | Deny rule matched — hook defers to Claude Code native deny.  |
-/// | 3    | rewritten| Ask rule matched — hook rewrites but lets Claude Code prompt.|
+/// | 3    | rewritten| Ask rule or no rule matched — hook rewrites, host prompts.   |
 ///
 /// The decision itself is [`decision::decide`], shared with the in-process
 /// `rtk hook <agent>` path; this function is only its exit-code rendering.
+///
+/// A delegate that gates the rewritten command itself can set
+/// [`decision::REWRITE_HOST_ENV`] to its own agent name, which renders a
+/// *default* ask (no rule matched) as exit 0 for it and nothing else — see
+/// [`decision::ApprovalOwner`]. An explicit `ask` rule the user wrote still
+/// renders as exit 3, so the host can keep prompting for the command the user
+/// asked about, and [`decision::ApprovalOwner::apply`] cannot transform a
+/// [`HookDecision::Deny`]: an explicit deny still reaches this function as
+/// `Deny` and still renders as exit 2, for every delegate, named or not.
 pub fn run(cmd: &str) -> anyhow::Result<()> {
-    // `rtk rewrite` is a subprocess entry point with no way to be told which
-    // host is asking, so every delegate that shells out to it -- hermes, omp,
-    // opencode, openclaw, pi -- is judged against `~/.claude`'s rules. The
-    // in-process `rtk hook <agent>` path is host-parameterized instead
-    // (`permissions::Host`).
-    let decided = decision::decide(cmd, check_command(cmd));
+    // `rtk rewrite` has one rule source for every delegate that shells out to
+    // it -- hermes, omp, opencode, openclaw, pi -- and that is `~/.claude`'s
+    // rules. The in-process `rtk hook <agent>` path is host-parameterized
+    // instead (`permissions::Host`). What a delegate may say about itself is
+    // only who owns approval, never whose rules apply.
+    let verdict = check_command(cmd);
+    let decided =
+        decision::ApprovalOwner::from_env().apply(decision::decide(cmd, verdict), verdict);
     if !matches!(decided, HookDecision::Deny) {
         track_tee_read(cmd);
     }
@@ -202,7 +215,7 @@ mod tests {
     /// See: https://github.com/rtk-ai/rtk/issues/1155
     mod exit_code_protocol {
         use super::registry;
-        use crate::hooks::permissions::{check_command_with_rules, PermissionVerdict};
+        use crate::hooks::permissions::{PermissionVerdict, check_command_with_rules};
 
         /// Exit code that `run()` returns for each verdict:
         ///   Allow  → 0 (exit Ok(()))

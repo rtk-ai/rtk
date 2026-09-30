@@ -242,16 +242,16 @@ fn parse_minitest_summary(summary: &str) -> (usize, usize, usize, usize, usize) 
     for part in summary.split(',') {
         let part = part.trim();
         let words: Vec<&str> = part.split_whitespace().collect();
-        if words.len() >= 2 {
-            if let Ok(n) = words[0].parse::<usize>() {
-                match words[1].trim_end_matches(',') {
-                    "runs" | "run" | "tests" | "test" => runs = n,
-                    "assertions" | "assertion" => assertions = n,
-                    "failures" | "failure" => failures = n,
-                    "errors" | "error" => errors = n,
-                    "skips" | "skip" => skips = n,
-                    _ => {}
-                }
+        if words.len() >= 2
+            && let Ok(n) = words[0].parse::<usize>()
+        {
+            match words[1].trim_end_matches(',') {
+                "runs" | "run" | "tests" | "test" => runs = n,
+                "assertions" | "assertion" => assertions = n,
+                "failures" | "failure" => failures = n,
+                "errors" | "error" => errors = n,
+                "skips" | "skip" => skips = n,
+                _ => {}
             }
         }
     }

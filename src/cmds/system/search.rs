@@ -4,11 +4,12 @@
 //! compresses its output by grouping matches by file, capping, and teeing overflow.
 
 use crate::core::arg_tokenizer::{self, Dialect, Token, TokenKind, ValueSpec};
+use crate::core::guard::never_worse;
 use crate::core::stream::{
-    self, exec_capture, exec_capture_stdin, CaptureResult, FilterMode, StdinMode, StreamFilter,
+    self, CaptureResult, FilterMode, StdinMode, StreamFilter, exec_capture, exec_capture_stdin,
 };
 use crate::core::tracking;
-use crate::core::utils::{resolved_command, strip_ansi};
+use crate::core::utils::{ChildArgExt, resolved_command, strip_ansi};
 use crate::core::{args_utils, config};
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -291,7 +292,10 @@ fn extract_pattern_path<T: AsRef<str>>(
                         recursive = true;
                     }
                 }
-                if cluster.iter().any(|c| is_context_token(engine, c.kind, c.text)) {
+                if cluster
+                    .iter()
+                    .any(|c| is_context_token(engine, c.kind, c.text))
+                {
                     context = true;
                 }
                 let (bool_chars, value_char) = match cluster.split_last() {
@@ -428,19 +432,19 @@ fn engine_command<T: AsRef<str>>(
     line_buffered: bool,
 ) -> Command {
     let mut cmd = resolved_command(engine.bin());
-    cmd.args(engine.parse_flags());
+    cmd.child_args(engine.parse_flags());
     for a in extra_args {
-        cmd.arg(a.as_ref());
+        cmd.child_arg(a.as_ref());
     }
     if line_buffered {
         // The engine writes through a pipe, so flush each match immediately.
-        cmd.arg("--line-buffered");
+        cmd.child_arg("--line-buffered");
     }
     for p in patterns {
-        cmd.args(["-e", p]);
+        cmd.child_args(["-e", p]);
     }
-    cmd.arg("--");
-    cmd.args(paths);
+    cmd.child_arg("--");
+    cmd.child_args(paths);
     cmd
 }
 
@@ -546,37 +550,129 @@ fn run_streaming_search(
 
 /// Runs the agent's command verbatim for forms RTK does not group: format/shape
 /// flags and pattern-less modes (`--files`, `--type-list`).
+///
+/// One exception: a bare file list (`-l`/`-L`/`--files`, see [`is_bare_file_list`]) has its
+/// shared directory prefix folded into a header when captured. The streaming form reads
+/// stdin, where the only "file" is `(standard input)`, so it has nothing to fold.
 fn passthrough<T: AsRef<str>>(
     timer: &tracking::TimedExecution,
     engine: Engine,
     args: &[T],
     real_cmd: &str,
     stream_stdin: bool,
+    fold_file_list: bool,
 ) -> Result<i32> {
     let mut cmd = resolved_command(engine.bin());
     if stream_stdin && !std::io::stdout().is_terminal() {
         // Keep passthrough output live when stdout is piped.
-        cmd.arg("--line-buffered");
+        cmd.child_arg("--line-buffered");
     }
     for a in args {
-        cmd.arg(a.as_ref());
+        cmd.child_arg(a.as_ref());
     }
 
-    let exit_code = if stream_stdin {
-        stream::run_streaming(&mut cmd, StdinMode::Inherit, FilterMode::Passthrough)
-            .context("search failed")?
-            .exit_code
-    } else {
-        let result = exec_capture_stdin(&mut cmd).context("search failed")?;
-        print!("{}", strip_ansi(&result.stdout));
-        if !result.stderr.is_empty() {
-            eprint!("{}", result.stderr);
-        }
-        result.exit_code
-    };
+    if stream_stdin {
+        let exit_code =
+            stream::run_streaming(&mut cmd, StdinMode::Inherit, FilterMode::Passthrough)
+                .context("search failed")?
+                .exit_code;
+        timer.track_passthrough(real_cmd, &format!("rtk {} (passthrough)", real_cmd));
+        return Ok(exit_code);
+    }
 
-    timer.track_passthrough(real_cmd, &format!("rtk {} (passthrough)", real_cmd));
-    Ok(exit_code)
+    let result = exec_capture_stdin(&mut cmd).context("search failed")?;
+    let cleaned = strip_ansi(&result.stdout);
+    let folded = if fold_file_list {
+        fold_path_prefix(&cleaned).filter(|f| never_worse(&cleaned, f) == f)
+    } else {
+        None
+    };
+    match &folded {
+        Some(folded) => print!("{}", folded),
+        None => print!("{}", cleaned),
+    }
+    if !result.stderr.is_empty() {
+        eprint!("{}", result.stderr);
+    }
+
+    match &folded {
+        // Real sizes, so the fold shows up in `rtk gain`.
+        Some(folded) => timer.track(
+            real_cmd,
+            &format!("rtk {}", engine.label()),
+            &cleaned,
+            folded,
+        ),
+        // 0/0 keeps an unchanged passthrough from diluting the savings statistics.
+        None => timer.track_passthrough(real_cmd, &format!("rtk {} (passthrough)", real_cmd)),
+    }
+    Ok(result.exit_code)
+}
+
+/// Folds the directory prefix every line of a file list shares into a one-line header, then
+/// emits each path's remaining tail in engine order:
+///
+/// ```text
+/// /home/u/proj/src/ (3 files)
+/// a/foo.rs
+/// a/bar.rs
+/// b/baz.rs
+/// ```
+///
+/// Agents search from absolute roots, so `-l` output restates the same long prefix on every
+/// line; that prefix is the whole redundancy of the list. The transform is lossless (each path
+/// is `prefix + tail`) and needs no cap or tee. `None` when there is nothing to fold: fewer
+/// than two lines, a line that is not a plain path (empty, NUL-joined under `-Z`, carrying a
+/// `\r` that `lines()` would drop, or an escape such as an rg `--hyperlink-format` OSC 8 link
+/// that `strip_ansi` leaves in place), or no shared directory component. The prefix is cut on whole components, never inside one, so
+/// `/a/foobar/x` and `/a/foobaz/y` share `/a/`, not `/a/fooba`.
+///
+/// KNOWN LIMITATION: only `/` separates components, so Windows-style `\` paths never fold.
+fn fold_path_prefix(raw: &str) -> Option<String> {
+    // Checked on the raw text: `lines()` would already have dropped a `\r` before `\n`.
+    if raw.contains(['\0', '\r', '\x1b']) {
+        return None;
+    }
+    let paths: Vec<&str> = raw.lines().collect();
+    if paths.len() < 2 || paths.iter().any(|p| p.is_empty()) {
+        return None;
+    }
+
+    fn dirs(path: &str) -> Vec<&str> {
+        match path.rsplit_once('/') {
+            Some((dir, _)) => dir.split('/').collect(),
+            None => Vec::new(),
+        }
+    }
+
+    let first = dirs(paths[0]);
+    let mut common = first.len();
+    for path in &paths[1..] {
+        let shared = dirs(path)
+            .iter()
+            .zip(&first)
+            .take(common)
+            .take_while(|(a, b)| a == b)
+            .count();
+        common = shared;
+        if common == 0 {
+            return None;
+        }
+    }
+
+    // An absolute path splits to a leading empty component, so `/a/b` rejoins with its slash;
+    // a bare `/` root is the one prefix that saves nothing.
+    let prefix = format!("{}/", first[..common].join("/"));
+    if prefix.len() <= 1 {
+        return None;
+    }
+
+    let mut out = format!("{} ({} files)\n", prefix, paths.len());
+    for path in &paths {
+        out.push_str(path.strip_prefix(&prefix).unwrap_or(path));
+        out.push('\n');
+    }
+    Some(out)
 }
 
 pub fn run(
@@ -595,10 +691,12 @@ pub fn run(
     // scoped before the boundary, because `rtk grep -- --version` searches *for* that string.
     // `-h` is engine-specific: rg's is --help, grep's is --no-filename.
     let help_tokens = tokenize_search_args(args, engine);
-    let asks_for_help = arg_tokenizer::before_dashdash(&help_tokens).iter().any(|t| {
-        (t.kind == TokenKind::Long && matches!(t.text, "version" | "help"))
-            || (t.kind == TokenKind::Short && t.text == "h" && engine == Engine::Rg)
-    });
+    let asks_for_help = arg_tokenizer::before_dashdash(&help_tokens)
+        .iter()
+        .any(|t| {
+            (t.kind == TokenKind::Long && matches!(t.text, "version" | "help"))
+                || (t.kind == TokenKind::Short && t.text == "h" && engine == Engine::Rg)
+        });
     let dangling_value_flag = help_tokens.iter().any(|t| {
         matches!(t.kind, TokenKind::Long | TokenKind::Short)
             && search_takes_value(engine, t.kind, t.text).is_some()
@@ -606,12 +704,12 @@ pub fn run(
     });
     if dangling_value_flag {
         let real_cmd = format!("{} {}", engine.bin(), args.join(" "));
-        return passthrough(&timer, engine, args, &real_cmd, false);
+        return passthrough(&timer, engine, args, &real_cmd, false, false);
     }
 
     if asks_for_help {
         let mut cmd = resolved_command(engine.bin());
-        cmd.args(args);
+        cmd.child_args(args);
         let result = exec_capture(&mut cmd).context("search failed")?;
         print!("{}", result.stdout);
         if !result.stderr.is_empty() {
@@ -627,7 +725,9 @@ pub fn run(
         extract_pattern_path(args, engine);
 
     if patterns.is_empty() {
-        return passthrough(&timer, engine, args, &real_cmd, false);
+        // `rg --files` lists paths without a pattern; fold it like `-l`.
+        let fold = is_bare_file_list(engine, args);
+        return passthrough(&timer, engine, args, &real_cmd, false, fold);
     }
 
     let pattern_display = if patterns.len() == 1 {
@@ -647,7 +747,8 @@ pub fn run(
 
     // format/shape flags (-c/-l/-o/...): already-minimal native output, passthrough.
     if extra_args_has_format_flag {
-        return passthrough(&timer, engine, args, &real_cmd, reads_piped_stdin);
+        let fold = is_bare_file_list(engine, args);
+        return passthrough(&timer, engine, args, &real_cmd, reads_piped_stdin, fold);
     }
 
     if reads_piped_stdin {
@@ -671,7 +772,7 @@ pub fn run(
     // Unparseable shape re-runs verbatim below (with its own stderr), so handle it
     // before surfacing this run's stderr (#2333).
     if unparsed_signal(&raw_output) > 0 {
-        return passthrough(&timer, engine, args, &real_cmd, false);
+        return passthrough(&timer, engine, args, &real_cmd, false, false);
     }
 
     if !result.stderr.is_empty() {
@@ -876,7 +977,9 @@ fn is_format_flag_token(engine: Engine, kind: TokenKind, text: &str) -> bool {
         // grep's `--initial-tab` pads and tabs every match line, so RTK's own `-H --null -n`
         // parse reads nothing back and leaked the injected flags into the output. ripgrep has
         // no such flag, and its `-T` is `--type-not`, a value-taking flag (see rg_takes_value).
-        TokenKind::Long => LONG.contains(&text) || (engine == Engine::Grep && text == "initial-tab"),
+        TokenKind::Long => {
+            LONG.contains(&text) || (engine == Engine::Grep && text == "initial-tab")
+        }
         // -c count, -l/-L lists, -o only-matching, -q quiet, -b byte-offset, -Z NUL are shared;
         // -L/-T/-z mean something unrelated to output shape for rg specifically (see above).
         TokenKind::Short => match text {
@@ -886,6 +989,32 @@ fn is_format_flag_token(engine: Engine, kind: TokenKind, text: &str) -> bool {
         },
         _ => false,
     }
+}
+
+/// True when the command's only shape flag is a file list -- `-l`/`--files-with-matches`,
+/// grep's `-L`/`--files-without-match`, or rg's `--files` -- so every stdout line is one
+/// plain path and [`fold_path_prefix`] applies. Any other shape flag changes the line
+/// (`-c` appends `:count`, `-Z`/`--null` joins with NUL, `--json` wraps it) or removes it
+/// (`-q`), so the list is left verbatim.
+pub(crate) fn is_bare_file_list<T: AsRef<str>>(engine: Engine, args: &[T]) -> bool {
+    let tokens = tokenize_search_args(args, engine);
+    let mut file_list = false;
+    for t in &tokens {
+        let is_list = match t.kind {
+            TokenKind::Long => matches!(
+                t.text,
+                "files" | "files-with-matches" | "files-without-match"
+            ),
+            TokenKind::Short => t.text == "l" || (t.text == "L" && engine == Engine::Grep),
+            _ => false,
+        };
+        if is_list {
+            file_list = true;
+        } else if is_format_flag_token(engine, t.kind, t.text) {
+            return false;
+        }
+    }
+    file_list
 }
 
 /// True for `-H`/`--with-filename`, an explicit request for the filename prefix (same meaning
@@ -1001,12 +1130,12 @@ fn has_format_flag<T: AsRef<str>>(engine: Engine, extra_args: &[T]) -> bool {
 fn clean_line(line: &str, max_len: usize, context_re: Option<&Regex>, pattern: &str) -> String {
     let trimmed = line.trim();
 
-    if let Some(re) = context_re {
-        if let Some(m) = re.find(trimmed) {
-            let matched = m.as_str();
-            if matched.len() <= max_len {
-                return matched.to_string();
-            }
+    if let Some(re) = context_re
+        && let Some(m) = re.find(trimmed)
+    {
+        let matched = m.as_str();
+        if matched.len() <= max_len {
+            return matched.to_string();
         }
     }
 
@@ -1081,8 +1210,6 @@ mod tests {
         assert!(compact.len() <= 60);
     }
 
-
-
     #[test]
     fn streaming_search_preserves_native_shape() {
         let mut filter = SearchStreamFilter {
@@ -1142,6 +1269,119 @@ mod tests {
         let line = "🎉🎊🎈🎁🎂🎄 some text 🎃🎆🎇✨";
         let cleaned = clean_line(line, 15, None, "text");
         assert!(!cleaned.is_empty());
+    }
+
+    // --- fold_path_prefix / is_bare_file_list ---
+
+    #[test]
+    fn fold_path_prefix_folds_shared_dir_into_header() {
+        let raw =
+            "/home/u/proj/src/a/foo.rs\n/home/u/proj/src/a/bar.rs\n/home/u/proj/src/b/baz.rs\n";
+        assert_eq!(
+            fold_path_prefix(raw).as_deref(),
+            Some("/home/u/proj/src/ (3 files)\na/foo.rs\na/bar.rs\nb/baz.rs\n")
+        );
+    }
+
+    #[test]
+    fn fold_path_prefix_keeps_engine_order_and_relative_paths() {
+        let raw = "src/z.rs\nsrc/a.rs\n";
+        assert_eq!(
+            fold_path_prefix(raw).as_deref(),
+            Some("src/ (2 files)\nz.rs\na.rs\n")
+        );
+    }
+
+    #[test]
+    fn fold_path_prefix_cuts_on_whole_components() {
+        // `/a/foobar` and `/a/foobaz` share `/a/`, never the byte run `/a/fooba`.
+        let raw = "/a/foobar/x\n/a/foobaz/y\n";
+        assert_eq!(
+            fold_path_prefix(raw).as_deref(),
+            Some("/a/ (2 files)\nfoobar/x\nfoobaz/y\n")
+        );
+    }
+
+    #[test]
+    fn fold_path_prefix_never_folds_into_a_filename() {
+        // The shared prefix is a directory only; a file that sits at the prefix root keeps its
+        // full name.
+        let raw = "/a/b/c.rs\n/a/b/d/e.rs\n";
+        assert_eq!(
+            fold_path_prefix(raw).as_deref(),
+            Some("/a/b/ (2 files)\nc.rs\nd/e.rs\n")
+        );
+    }
+
+    #[test]
+    fn fold_path_prefix_none_when_nothing_to_fold() {
+        assert_eq!(fold_path_prefix(""), None, "empty");
+        assert_eq!(fold_path_prefix("/a/b/c.rs\n"), None, "single line");
+        assert_eq!(fold_path_prefix("a.rs\nb.rs\n"), None, "bare filenames");
+        assert_eq!(
+            fold_path_prefix("/x/a.rs\n/y/b.rs\n"),
+            None,
+            "only `/` shared"
+        );
+        assert_eq!(
+            fold_path_prefix("src/a.rs\nlib/b.rs\n"),
+            None,
+            "no shared dir"
+        );
+        assert_eq!(fold_path_prefix("/a/b.rs\n\n/a/c.rs\n"), None, "blank line");
+        assert_eq!(
+            fold_path_prefix("/a/b.rs\0/a/c.rs\0"),
+            None,
+            "NUL-joined (-Z)"
+        );
+        assert_eq!(fold_path_prefix("/a/x\r\n/a/y\n"), None, "CR in a name");
+        assert_eq!(
+            fold_path_prefix("\x1b]8;;file:///a/x\x1b\\/a/x\n\x1b]8;;file:///a/y\x1b\\/a/y\n"),
+            None,
+            "OSC 8 hyperlink"
+        );
+    }
+
+    #[test]
+    fn fold_path_prefix_is_lossless() {
+        let raw = "/p/q/a.rs\n/p/q/r/b.rs\n/p/q/c.rs\n";
+        let folded = fold_path_prefix(raw).expect("folds");
+        let mut lines = folded.lines();
+        let header = lines.next().unwrap();
+        let prefix = header.strip_suffix(" (3 files)").unwrap();
+        let rebuilt: String = lines.map(|tail| format!("{prefix}{tail}\n")).collect();
+        assert_eq!(rebuilt, raw);
+    }
+
+    #[test]
+    fn bare_file_list_detects_list_flags_per_engine() {
+        assert!(is_bare_file_list(Engine::Grep, &["-rl", "foo", "."]));
+        assert!(is_bare_file_list(Engine::Grep, &["-L", "foo", "."]));
+        assert!(is_bare_file_list(
+            Engine::Grep,
+            &["--files-with-matches", "foo"]
+        ));
+        assert!(is_bare_file_list(Engine::Rg, &["-l", "foo"]));
+        assert!(is_bare_file_list(Engine::Rg, &["--files", "src"]));
+        // rg's -L is --follow, not a list.
+        assert!(!is_bare_file_list(Engine::Rg, &["-L", "foo"]));
+        assert!(!is_bare_file_list(Engine::Grep, &["-rn", "foo", "."]));
+    }
+
+    #[test]
+    fn bare_file_list_rejects_other_shape_flags() {
+        // Each of these changes or removes the path line, so the list must stay verbatim.
+        assert!(!is_bare_file_list(Engine::Grep, &["-lc", "foo", "."]));
+        assert!(!is_bare_file_list(Engine::Grep, &["-lZ", "foo", "."]));
+        assert!(!is_bare_file_list(
+            Engine::Grep,
+            &["-l", "--null", "foo", "."]
+        ));
+        assert!(!is_bare_file_list(Engine::Grep, &["-lq", "foo", "."]));
+        assert!(!is_bare_file_list(Engine::Rg, &["-l", "--json", "foo"]));
+        assert!(!is_bare_file_list(Engine::Rg, &["--files", "--null"]));
+        // `-e -l` is a pattern, not the list flag.
+        assert!(!is_bare_file_list(Engine::Grep, &["-e", "-l", "."]));
     }
 
     // --- extract_pattern_path ---
@@ -1227,8 +1467,7 @@ mod tests {
         assert_eq!(detected.show_file, Some(false));
         assert!(!flags.iter().any(|f| f == "--no-filename"));
 
-        let (_, _, flags, _, detected) =
-            extract_pattern_path(&["-ih", "x", "a.txt"], Engine::Grep);
+        let (_, _, flags, _, detected) = extract_pattern_path(&["-ih", "x", "a.txt"], Engine::Grep);
         assert_eq!(detected.show_file, Some(false));
         assert_eq!(flags, vec!["-i"], "the rest of the cluster survives");
 
@@ -1708,7 +1947,10 @@ mod tests {
         // Same for show_file's -H/-r/-R and show_line's -n/-N letters.
         let (_, _, _, _, detected) =
             extract_pattern_path(&["--replace", "-Hart", "pattern", "src"], Engine::Rg);
-        assert_eq!(detected.show_file, None, "--replace's value must not trigger -H");
+        assert_eq!(
+            detected.show_file, None,
+            "--replace's value must not trigger -H"
+        );
 
         let (_, _, _, _, detected) =
             extract_pattern_path(&["--replace", "-normal", "pattern", "src"], Engine::Rg);
@@ -1874,8 +2116,14 @@ mod tests {
         for negation in ["-N", "--no-line-number"] {
             let (_, _, flags, _, detected) =
                 extract_pattern_path(&["pattern", "-n", negation], Engine::Grep);
-            assert!(detected.show_line, "{negation} is not grep's, so -n still stands");
-            assert!(flags.iter().any(|f| f == negation), "{negation} must reach grep");
+            assert!(
+                detected.show_line,
+                "{negation} is not grep's, so -n still stands"
+            );
+            assert!(
+                flags.iter().any(|f| f == negation),
+                "{negation} must reach grep"
+            );
         }
     }
 

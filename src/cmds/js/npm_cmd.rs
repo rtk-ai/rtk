@@ -1,12 +1,15 @@
 //! Filters npm output and auto-injects the "run" subcommand when appropriate.
 
-use std::io::IsTerminal;
 use crate::core::runner;
 use crate::core::utils::resolved_command;
 use anyhow::Result;
+use std::io::IsTerminal;
 
 /// Known npm subcommands that should NOT get "run" injected.
 /// Shared between production code and tests to avoid drift.
+///
+/// A tool with a list like this also belongs in `core::tracking::SUBCOMMAND_ROUTERS`,
+/// which keeps the subcommand in its telemetry label.
 const NPM_SUBCOMMANDS: &[&str] = &[
     "install",
     "i",
@@ -167,13 +170,7 @@ fn run_filtered(
         opts = opts.inherit_stdin();
     }
 
-    runner::run_filtered(
-        cmd,
-        name,
-        &args_display,
-        filter_npm_output,
-        opts,
-    )
+    runner::run_filtered(cmd, name, &args_display, filter_npm_output, opts)
 }
 
 /// Filter npm run output - strip boilerplate, progress bars, npm WARN

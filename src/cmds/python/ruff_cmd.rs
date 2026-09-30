@@ -8,6 +8,8 @@ use anyhow::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
 
+/// A tool with a list like this also belongs in `core::tracking::SUBCOMMAND_ROUTERS`,
+/// which keeps the subcommand in its telemetry label.
 const RUFF_SUBCOMMANDS: &[&str] = &[
     "analyze",
     "check",
@@ -62,6 +64,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             || (a == "--output-format" && args.get(i + 1).is_some_and(|n| n == "json"))
     });
     let use_json_filter = !user_set_output_format || user_json_format;
+    // `[]` is a clean run only when rtk chose the format; a user who asked for JSON gets `[]` back.
+    let clean_outputs: &[&str] = if is_check && !user_set_output_format {
+        &["[]"]
+    } else {
+        &[]
+    };
 
     if is_check {
         if user_set_output_format {
@@ -109,7 +117,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
                 truncate(stdout.trim(), config::limits().passthrough_max_chars)
             }
         },
-        runner::RunOptions::stdout_only(),
+        runner::RunOptions::stdout_only().clean_outputs(clean_outputs),
     )
 }
 
@@ -285,11 +293,12 @@ pub fn filter_ruff_format(output: &str) -> String {
                     let words: Vec<&str> = part.split_whitespace().collect();
                     // Look for number before "file" or "files"
                     for (i, word) in words.iter().enumerate() {
-                        if (word == &"file" || word == &"files") && i > 0 {
-                            if let Ok(count) = words[i - 1].parse::<usize>() {
-                                files_checked = count;
-                                break;
-                            }
+                        if (word == &"file" || word == &"files")
+                            && i > 0
+                            && let Ok(count) = words[i - 1].parse::<usize>()
+                        {
+                            files_checked = count;
+                            break;
                         }
                     }
                     break;

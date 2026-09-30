@@ -62,3 +62,40 @@ fn one_line_crlf_vs_lf_diff_prints_whitespace_message() {
     // above raw drops it here. It is shown regardless of size.
     assert_explains_invisible_difference(ONE_LINE_LF_CONTENT, ONE_LINE_CRLF_CONTENT);
 }
+
+#[test]
+fn missing_operand_exits_two_and_names_the_failed_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let existing = dir.path().join("existing.txt");
+    let missing = dir.path().join("missing.txt");
+    fs::write(&existing, "content\n").unwrap();
+
+    for (left, right) in [(&missing, &existing), (&existing, &missing)] {
+        let output = run_rtk_diff(left, right);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{stderr}");
+        assert!(output.stdout.is_empty(), "read errors belong on stderr");
+        assert!(stderr.contains(&*missing.to_string_lossy()), "{stderr}");
+    }
+}
+
+#[test]
+fn non_utf8_files_are_compared_instead_of_reported_as_io_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let left = dir.path().join("left.bin");
+    let right = dir.path().join("right.bin");
+    fs::write(&left, b"\xff").unwrap();
+
+    // Reading succeeds even though UTF-8 conversion fails.
+    for (content, expected) in [(b"\xff", 0), (b"\xfe", 1)] {
+        fs::write(&right, content).unwrap();
+        let output = run_rtk_diff(&left, &right);
+        assert_eq!(output.status.code(), Some(expected));
+        assert!(output.stderr.is_empty());
+        if expected == 1 {
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            assert!(stdout.contains("Binary files"), "{stdout}");
+            assert!(stdout.contains("differ"), "{stdout}");
+        }
+    }
+}
