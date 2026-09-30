@@ -240,6 +240,7 @@ fn swappable(
 /// and the checks here read words, not that grammar: such a line takes the ordinary
 /// rewrite. `time`, `!` and braces do not count: the commands behind them read as usual.
 fn holds_compound_syntax(cmd: &str) -> bool {
+    use crate::core::cmdline::bash_grammar::reserved_word;
     use crate::core::cmdline::lexer::{join_continuations, split_for_classify, trim_ifs};
     let Ok(joined) = join_continuations(cmd) else {
         return true;
@@ -250,25 +251,7 @@ fn holds_compound_syntax(cmd: &str) -> bool {
         matches!(
             trim_ifs(&input[..segment.start]).bytes().last(),
             Some(b'(' | b')')
-        ) || matches!(
-            first,
-            "[[" | "case"
-                | "coproc"
-                | "do"
-                | "done"
-                | "elif"
-                | "else"
-                | "esac"
-                | "fi"
-                | "for"
-                | "function"
-                | "if"
-                | "in"
-                | "select"
-                | "then"
-                | "until"
-                | "while"
-        )
+        ) || (reserved_word(first).is_some() && !matches!(first, "time" | "!" | "{" | "}"))
     })
 }
 
