@@ -12,6 +12,9 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
+use super::bash_grammar::{Position, RESERVED_WORDS, Reserved, ReservedWord, reserved_word};
+use super::lexer::{is_name_byte, is_name_start};
+
 /// How many levels of nesting the reader follows.
 const MAX_NESTING: usize = 16;
 
@@ -129,7 +132,7 @@ struct CommandList {
     awaiting_in: bool,
     /// A pattern is being read, up to its `)`: `case` is a word in it.
     in_pattern: bool,
-    /// The word before is one of [`OPENS_A_COMMAND`], off a command's start.
+    /// The word before is one that [`opens_a_command`], off a command's start.
     after_opener: bool,
     /// A `case` or `esac` stood where it may be text. Then a `)` may close a pattern or
     /// this list, and only bash can tell.
@@ -157,15 +160,25 @@ struct CommandList {
 
 /// What a command can start after: in `function f {` the `{` stands where no
 /// command starts, and its list holds commands all the same.
-const OPENS_A_COMMAND: [&[u8]; 11] = [
-    b"if", b"then", b"elif", b"else", b"while", b"until", b"do", b"!", b"{", b"time", b"coproc",
-];
+fn opens_a_command(word: &ReservedWord) -> bool {
+    word.next == Position::Command
+}
+
+/// The reserved word that a plain word spells.
+fn reserved_in(word: &[u8]) -> Option<&'static ReservedWord> {
+    std::str::from_utf8(word).ok().and_then(reserved_word)
+}
 
 /// A compound's last word, where bash reads a reserved word.
-const CLOSES_A_COMPOUND: [&[u8]; 4] = [b"fi", b"done", b"esac", b"}"];
+fn closes_a_compound(word: &ReservedWord) -> bool {
+    word.next == Position::ReservedWord && word.word != Reserved::CloseTest
+}
 
-/// What a name follows, where bash reads a reserved word.
-const TAKES_A_NAME: [&[u8]; 3] = [b"for", b"select", b"function"];
+/// What a name follows, where bash reads a reserved word: `coproc`'s word may also be
+/// a command.
+fn takes_a_name(word: &ReservedWord) -> bool {
+    word.names && !opens_a_command(word)
+}
 
 impl CommandList {
     /// A byte of plain text.
@@ -182,11 +195,15 @@ impl CommandList {
         self.word_start = false;
     }
 
-    /// Whether the word read so far is `word`, as plain text.
-    fn word_is(&self, text: &[u8], at: usize, word: &[u8]) -> bool {
+    /// Whether the word read so far spells, as plain text, a reserved word `wanted` picks.
+    fn word_is(&self, text: &[u8], at: usize, wanted: impl Fn(&ReservedWord) -> bool) -> bool {
         // Any `\⏎` in it has to be few for this to stay cheap: this runs at each `)`.
         self.word.is_some_and(|(begin, plain)| {
-            plain && at - begin <= word.len() + 16 && joined(&text[begin..at]).as_ref() == word
+            plain
+                && RESERVED_WORDS.iter().filter(|row| wanted(row)).any(|row| {
+                    let word = row.spelling.as_bytes();
+                    at - begin <= word.len() + 16 && joined(&text[begin..at]).as_ref() == word
+                })
         })
     }
 
@@ -216,14 +233,15 @@ impl CommandList {
         }
         let word = joined(&text[begin..at]);
         let at_a_reserved_word = self.command_position || reserved_here;
-        if at_a_reserved_word
-            && (CLOSES_A_COMPOUND.contains(&word.as_ref()) || TAKES_A_NAME.contains(&word.as_ref()))
+        let row = reserved_in(&word);
+        if let Some(row) =
+            row.filter(|row| at_a_reserved_word && (closes_a_compound(row) || takes_a_name(row)))
         {
-            if word.as_ref() == b"esac" {
+            if row.word == Reserved::Esac {
                 self.open_cases = self.open_cases.saturating_sub(1);
                 self.in_pattern = false;
             }
-            self.name_next = TAKES_A_NAME.contains(&word.as_ref());
+            self.name_next = takes_a_name(row);
             self.reserved_next = !self.name_next;
             self.command_position = false;
             self.after_opener = false;
@@ -231,43 +249,48 @@ impl CommandList {
         }
         let an_argument = self.ran_a_word;
         self.ran_a_word |= may_only_run(&word);
-        match word.as_ref() {
-            b"[[" if !self.ran_a_word => self.in_condition = true,
-            b"]]" => {
+        match row.map(|row| row.word) {
+            Some(Reserved::OpenTest) if !self.ran_a_word => self.in_condition = true,
+            Some(Reserved::CloseTest) => {
                 if std::mem::take(&mut self.in_condition) {
                     self.ran_a_word = false;
                     self.reserved_next = true;
                 }
             }
-            word if OPENS_A_COMMAND.contains(&word) && (word == b"{" || !self.ran_a_word) => {
+            Some(word)
+                if row.is_some_and(opens_a_command)
+                    && (word == Reserved::OpenBrace || !self.ran_a_word) =>
+            {
                 let sure = self.command_position || reserved_here;
                 self.after_opener = !sure;
                 self.command_position = sure;
                 self.ran_a_word = false;
-                self.after_coproc = word == b"coproc";
+                self.after_coproc = word == Reserved::Coproc;
                 return;
             }
             // A pattern comes next, and it is no argument of a command.
-            b"in" if self.awaiting_in => {
+            Some(Reserved::In) if self.awaiting_in => {
                 self.awaiting_in = false;
                 self.ran_a_word = false;
                 self.in_pattern = true;
                 self.reserved_next = true;
             }
-            b"case" if self.in_pattern => {}
-            b"case" if at_a_reserved_word => {
+            Some(Reserved::Case) if self.in_pattern => {}
+            Some(Reserved::Case) if at_a_reserved_word => {
                 self.open_cases += 1;
                 self.awaiting_in = true;
             }
-            b"case" if self.after_opener => {
+            Some(Reserved::Case) if self.after_opener => {
                 self.open_cases += 1;
                 self.awaiting_in = true;
                 self.doubtful_case = true;
             }
             // Past `time -p`, say, with no command word to make it an argument: the `)`
             // it may open or close can't be told from the one that closes this list.
-            b"case" if !an_argument => self.doubtful_case = true,
-            b"esac" if !an_argument && self.open_cases > 0 => self.doubtful_case = true,
+            Some(Reserved::Case) if !an_argument => self.doubtful_case = true,
+            Some(Reserved::Esac) if !an_argument && self.open_cases > 0 => {
+                self.doubtful_case = true;
+            }
             _ => {}
         }
         self.command_position = false;
@@ -420,7 +443,9 @@ impl Reader<'_> {
                     list.text(at);
                     self.at += 1;
                 }
-                b')' if list.in_condition && !list.word_is(self.text, at, b"]]") => {
+                b')' if list.in_condition
+                    && !list.word_is(self.text, at, |row| row.word == Reserved::CloseTest) =>
+                {
                     list.text(at);
                     self.at += 1;
                 }
@@ -590,10 +615,9 @@ impl Reader<'_> {
         let at = self.at;
         // `if((a))` is the reserved word, then a command.
         let after_word = !list.word_start
-            && !OPENS_A_COMMAND
-                .iter()
-                .any(|word| list.word_is(self.text, at, word))
-            && !list.word_is(self.text, at, b"for");
+            && !list.word_is(self.text, at, |row| {
+                opens_a_command(row) || row.word == Reserved::For
+            });
         let after_equals = at > 0 && self.text[at - 1] == b'=';
         let paren = match (after_word, after_equals) {
             // All one word to bash, however deep, where it reads a glob. Past a command
@@ -1004,8 +1028,8 @@ fn may_only_run(word: &[u8]) -> bool {
         && !(word.first() == Some(&b'{') && word.last() == Some(&b'}'))
         && !word.first().is_some_and(|b| *b == b'-')
         && !word.iter().all(u8::is_ascii_digit)
-        && word != b"[["
-        && !OPENS_A_COMMAND.contains(&word)
+        && !reserved_in(word)
+            .is_some_and(|row| row.word == Reserved::OpenTest || opens_a_command(row))
 }
 
 /// A plain word as bash sees it, past any `\⏎` in it.
@@ -1029,9 +1053,7 @@ fn ends_in_a_lone_backslash(text: &[u8]) -> bool {
 }
 
 fn is_variable_name(word: &[u8]) -> bool {
-    word.first()
-        .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
-        && word.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+    word.first().is_some_and(|b| is_name_start(*b)) && word.iter().all(|b| is_name_byte(*b))
 }
 
 #[cfg(test)]
