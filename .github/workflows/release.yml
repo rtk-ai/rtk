@@ -395,7 +395,7 @@ jobs:
 
       # Pinned to a main commit, not the v2 tag: v2 has not moved since 2024-11-27
       # and is four fixes behind, including cargo binstall on ubuntu-slim runners.
-      - uses: vedantmgoyal9/winget-releaser@a43926ed822e5a076ac8a81e0a794915cbad51d1 # 2026-03-14
+      - uses: vedantmgoyal9/winget-releaser@a8fff44b123f115ce4c21543edf8b677376fc7e0 # 2026-03-14
         with:
           identifier: rtk-ai.rtk
           version: ${{ steps.version.outputs.version }}
