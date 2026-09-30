@@ -1,6 +1,7 @@
 //! Optional usage ping so we know which commands people run most.
 
-use super::constants::RTK_DATA_DIR;
+use super::config::rtk_config_path;
+use super::constants::{CONFIG_TOML, RTK_DATA_DIR};
 use crate::core::config;
 use crate::core::tracking;
 use crate::hooks::constants::CLAUDE_DIR;
@@ -449,9 +450,7 @@ fn build_meta_usage(tracker: &tracking::Tracker) -> serde_json::Value {
 
 /// Check if user has a config.toml file.
 fn detect_has_config() -> bool {
-    dirs::config_dir()
-        .map(|d| d.join("rtk/config.toml").exists())
-        .unwrap_or(false)
+    rtk_config_path(CONFIG_TOML).is_some_and(|path| path.exists())
 }
 
 /// Count commands in exclude_commands config.
@@ -514,8 +513,8 @@ fn count_custom_toml_filters() -> usize {
     }
 
     // Global: ~/.config/rtk/filters/*.toml
-    if let Some(config_dir) = dirs::config_dir()
-        && let Ok(entries) = std::fs::read_dir(config_dir.join("rtk/filters"))
+    if let Some(filters_dir) = rtk_config_path("filters")
+        && let Ok(entries) = std::fs::read_dir(filters_dir)
     {
         count += entries
             .filter_map(|e| e.ok())

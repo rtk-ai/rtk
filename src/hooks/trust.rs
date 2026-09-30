@@ -12,7 +12,8 @@
 //! - `RTK_TRUST_PROJECT_FILTERS=1` overrides for CI pipelines
 
 use super::integrity;
-use crate::core::constants::{RTK_DATA_DIR, TRUSTED_FILTERS_JSON};
+use crate::core::config::rtk_config_path;
+use crate::core::constants::{FILTERS_TOML, RTK_DATA_DIR, TRUSTED_FILTERS_JSON};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -205,12 +206,8 @@ pub fn gated_filter_paths() -> Vec<PathBuf> {
 
 pub fn gated_filter_paths_labeled() -> Vec<(&'static str, PathBuf)> {
     let mut paths = vec![("project", PathBuf::from(".rtk/filters.toml"))];
-    if let Some(dir) = dirs::config_dir() {
-        paths.push((
-            "global",
-            dir.join(RTK_DATA_DIR)
-                .join(crate::core::constants::FILTERS_TOML),
-        ));
+    if let Some(path) = rtk_config_path(FILTERS_TOML) {
+        paths.push(("global", path));
     }
     paths
 }
@@ -485,7 +482,7 @@ mod tests {
     fn test_gated_filter_paths_covers_project_and_global() {
         let paths = gated_filter_paths();
         assert_eq!(paths[0], PathBuf::from(".rtk/filters.toml"));
-        if dirs::config_dir().is_some() {
+        if rtk_config_path(FILTERS_TOML).is_some() {
             assert_eq!(paths.len(), 2);
             assert!(paths[1].ends_with("filters.toml"));
             assert!(paths[1].is_absolute());

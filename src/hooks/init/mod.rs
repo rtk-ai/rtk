@@ -17,7 +17,8 @@ use crate::core::utils::{from_json_str, strip_leading_bom};
 
 use super::integrity;
 use super::is_claude_hook_command;
-use crate::core::config::AwarenessLevel;
+use crate::core::config::{AwarenessLevel, rtk_config_path};
+use crate::core::constants::{FILTERS_TOML, RTK_DATA_DIR};
 
 mod agents_md;
 mod antigravity;
@@ -1284,9 +1285,11 @@ pub(super) fn generate_global_filters_template(ctx: InitContext) -> Result<()> {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
-    let config_dir = dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from(".config"));
-    let rtk_dir = config_dir.join(crate::core::constants::RTK_DATA_DIR);
-    let path = rtk_dir.join("filters.toml");
+    let path = rtk_config_path(FILTERS_TOML).unwrap_or_else(|| {
+        PathBuf::from(".config")
+            .join(RTK_DATA_DIR)
+            .join(FILTERS_TOML)
+    });
 
     if path.exists() {
         if verbose > 0 {
@@ -1303,8 +1306,10 @@ pub(super) fn generate_global_filters_template(ctx: InitContext) -> Result<()> {
         return Ok(());
     }
 
-    fs::create_dir_all(&rtk_dir)
-        .with_context(|| format!("Failed to create directory: {}", rtk_dir.display()))?;
+    if let Some(rtk_dir) = path.parent() {
+        fs::create_dir_all(rtk_dir)
+            .with_context(|| format!("Failed to create directory: {}", rtk_dir.display()))?;
+    }
     fs::write(&path, FILTERS_GLOBAL_TEMPLATE)
         .with_context(|| format!("Failed to write {}", path.display()))?;
 

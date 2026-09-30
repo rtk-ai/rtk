@@ -477,7 +477,7 @@ For per-agent setup details, override controls, and graceful degradation, see th
 
 ## Configuration
 
-`~/.config/rtk/config.toml` (macOS: `~/Library/Application Support/rtk/config.toml`):
+`~/.config/rtk/config.toml` (macOS: `~/Library/Application Support/rtk/config.toml`; relocate with `RTK_CONFIG_DIR` or `XDG_CONFIG_HOME`):
 
 ```toml
 [hooks]
