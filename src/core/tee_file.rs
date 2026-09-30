@@ -4,6 +4,7 @@
 use crate::core::config::Config;
 use crate::core::constants::RTK_DATA_DIR;
 use crate::core::retriever::RetrieverConfig;
+use crate::core::tee::{FULL_OUTPUT_HINT, SEE_REMAINING_HINT};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -246,12 +247,12 @@ fn write(cfg: &RetrieverConfig, content: &str, slug: &str) -> Option<PathBuf> {
 
 pub fn tee_and_hint(cfg: &RetrieverConfig, raw: &str, slug: &str) -> Option<String> {
     let path = write(cfg, raw, slug)?;
-    Some(format!("[full output: {}]", display_shell_path(&path)))
+    Some(format!("{FULL_OUTPUT_HINT}{}]", display_shell_path(&path)))
 }
 
 pub fn force_tee_hint(cfg: &RetrieverConfig, content: &str, slug: &str) -> Option<String> {
     let path = write(cfg, content, slug)?;
-    Some(format!("[full output: {}]", display_shell_path(&path)))
+    Some(format!("{FULL_OUTPUT_HINT}{}]", display_shell_path(&path)))
 }
 
 pub fn force_tee_tail_hint(
@@ -262,7 +263,7 @@ pub fn force_tee_tail_hint(
 ) -> Option<String> {
     let path = write(cfg, content, slug)?;
     Some(format!(
-        "[see remaining: tail -n +{} {}]",
+        "{SEE_REMAINING_HINT}tail -n +{} {}]",
         line_offset,
         display_shell_path(&path)
     ))

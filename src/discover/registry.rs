@@ -2548,6 +2548,7 @@ mod tests {
             vec![
                 "rtk ast-grep",
                 "rtk brew",
+                "rtk buf",
                 "rtk bundle",
                 "rtk cargo",
                 "rtk composer",
@@ -2559,6 +2560,7 @@ mod tests {
                 "rtk find",
                 "rtk git",
                 "rtk go",
+                "rtk go tool buf",
                 "rtk golangci-lint run",
                 "rtk grep",
                 "rtk hadolint",
@@ -5425,6 +5427,47 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("golangci-lint --color never run ./...", &[]),
             Some("rtk golangci-lint --color never run ./...".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_buf() {
+        assert_eq!(
+            rewrite_command_no_prefixes("buf lint --path x", &[]),
+            Some("rtk buf lint --path x".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("buf format -d", &[]),
+            Some("rtk buf format -d".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_go_tool_buf() {
+        assert_eq!(
+            rewrite_command_no_prefixes("go tool buf breaking --against x", &[]),
+            Some("rtk go tool buf breaking --against x".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_buf_leaves_others_alone() {
+        assert_eq!(rewrite_command_no_prefixes("buf dep update", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("go tool pprof x", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("go test ./...", &[]),
+            Some("rtk go test ./...".into())
+        );
+    }
+
+    #[test]
+    fn test_exclude_buf_and_go_tool_buf() {
+        let excluded = vec!["buf".to_string()];
+        assert_eq!(rewrite_command_no_prefixes("buf lint", &excluded), None);
+        // Excluding "buf" does not cover the `go tool buf` spelling.
+        assert_eq!(
+            rewrite_command_no_prefixes("go tool buf lint", &excluded),
+            Some("rtk go tool buf lint".into())
         );
     }
 

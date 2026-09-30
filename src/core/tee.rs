@@ -4,6 +4,27 @@ use crate::core::config::Config;
 pub(crate) use crate::core::retriever::MIN_FAILURE_BYTES as MIN_TEE_SIZE;
 use crate::core::retriever::{self, MIN_FAILURE_BYTES, RecoveryMode, RetrieverConfig, Stored};
 
+/// Every recovery hint is one line shaped `[full output: <where>]`, `[see remaining: <how>]`
+/// (legacy tee) or `[+N hidden: <where>]`; both stores build them from these, and
+/// [`has_recovery_hint`] reads them.
+pub(crate) const FULL_OUTPUT_HINT: &str = "[full output: ";
+pub(crate) const SEE_REMAINING_HINT: &str = "[see remaining: ";
+const HIDDEN_HINT: &str = " hidden: ";
+
+/// True when `text` already carries a recovery hint line, so storing the output again would
+/// only duplicate it.
+pub fn has_recovery_hint(text: &str) -> bool {
+    text.lines().any(|line| {
+        line.ends_with(']')
+            && (line.starts_with(FULL_OUTPUT_HINT)
+                || line.starts_with(SEE_REMAINING_HINT)
+                || line
+                    .strip_prefix("[+")
+                    .and_then(|rest| rest.split_once(HIDDEN_HINT))
+                    .is_some_and(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())))
+    })
+}
+
 fn active() -> Option<(RecoveryMode, RetrieverConfig)> {
     if retriever::recovery_disabled_by_env() {
         return None;
@@ -21,7 +42,7 @@ fn store_hint(
     exit_code: Option<i32>,
 ) -> Option<String> {
     match retriever::store(cfg, content.as_bytes(), slug, exit_code, 1) {
-        Stored::Saved(s) => Some(format!("[full output: rtk recall {}]", s.hash)),
+        Stored::Saved(s) => Some(format!("{FULL_OUTPUT_HINT}rtk recall {}]", s.hash)),
         Stored::Unavailable | Stored::Empty => None,
     }
 }
@@ -97,7 +118,7 @@ pub fn force_tee_tail_hint(
         RecoveryMode::Sqlite => {
             match retriever::store(&cfg, content.as_bytes(), command_slug, None, line_offset) {
                 Stored::Saved(s) if s.hidden_lines > 0 => Some(format!(
-                    "[+{} hidden: rtk recall {}]",
+                    "[+{}{HIDDEN_HINT}rtk recall {}]",
                     s.hidden_lines, s.hash
                 )),
                 Stored::Saved(_) | Stored::Unavailable | Stored::Empty => None,
@@ -109,6 +130,23 @@ pub fn force_tee_tail_hint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_every_recovery_hint_shape() {
+        assert!(has_recovery_hint(
+            "out\n[full output: rtk recall 66bedcd92f99]"
+        ));
+        assert!(has_recovery_hint(
+            "out\n[full output: ~/.local/share/rtk/tee/x.log]"
+        ));
+        assert!(has_recovery_hint(
+            "a\n[+12 hidden: rtk recall 66bedcd92f99]\nb"
+        ));
+        assert!(has_recovery_hint("a\n[see remaining: tail -n +21 ~/x.log]"));
+        assert!(!has_recovery_hint("out"));
+        assert!(!has_recovery_hint("see [full output: elsewhere] inline"));
+        assert!(!has_recovery_hint("[+x hidden: nope]"));
+    }
 
     #[test]
     fn test_disabled_env_emits_nothing() {

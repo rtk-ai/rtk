@@ -80,6 +80,9 @@ Every percentage below measures **bash output bytes removed** — the only thing
 |---------|----------------------|--------------|
 | `go test` | 80-90% | Failures only |
 | `golangci-lint run` | 75% | Violations grouped by file |
+| `buf lint` / `build` / `breaking` | 85-90% | Diagnostics grouped by rule, compile cascades collapsed |
+| `buf format -d` | 90% | One line per file with +/- counts |
+| `buf generate` (failure) | 75% | Plugin panic cut after its first frame, `Failure:` line kept |
 | `go build` | 75% | Errors only |
 
 ## Ruby
