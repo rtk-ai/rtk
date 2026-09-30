@@ -37,6 +37,9 @@ pub fn run_restore(args: &[String], verbose: u8) -> Result<i32> {
 
 pub fn run_format(args: &[String], verbose: u8) -> Result<i32> {
     let args = &args_utils::restore_double_dash(args);
+    if crate::core::runner::requests_help_args("dotnet", args) {
+        return run_passthrough(&forwarded_dotnet_args("format", args), verbose);
+    }
     let tokens = tokenize_dotnet_args(args);
     let timer = tracking::TimedExecution::start();
     let (report_path, cleanup_report_path) = resolve_format_report_path(&tokens);
@@ -74,6 +77,12 @@ pub fn run_format(args: &[String], verbose: u8) -> Result<i32> {
     }
 
     Ok(result.exit_code)
+}
+
+fn forwarded_dotnet_args(subcommand: &str, args: &[String]) -> Vec<OsString> {
+    let mut out = vec![OsString::from(subcommand)];
+    out.extend(args.iter().map(OsString::from));
+    out
 }
 
 pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
@@ -115,6 +124,10 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
 
 fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
     let args = &args_utils::restore_double_dash(args);
+    // Otherwise `--help` gets an injected `-bl:` and is read as an MSBuild log (#4198).
+    if crate::core::runner::requests_help_args("dotnet", args) {
+        return run_passthrough(&forwarded_dotnet_args(subcommand, args), verbose);
+    }
     let tokens = tokenize_dotnet_args(args);
     let timer = tracking::TimedExecution::start();
     let binlog_path = build_binlog_path(subcommand);

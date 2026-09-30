@@ -34,6 +34,27 @@ pub enum GitCommand {
     Worktree,
 }
 
+impl GitCommand {
+    /// The word git expects, for rebuilding the argv clap took apart.
+    fn git_name(&self) -> &'static str {
+        match self {
+            GitCommand::Diff => "diff",
+            GitCommand::Log => "log",
+            GitCommand::Status => "status",
+            GitCommand::Show => "show",
+            GitCommand::Add => "add",
+            GitCommand::Commit => "commit",
+            GitCommand::Checkout => "checkout",
+            GitCommand::Push => "push",
+            GitCommand::Pull => "pull",
+            GitCommand::Branch => "branch",
+            GitCommand::Fetch => "fetch",
+            GitCommand::Stash { .. } => "stash",
+            GitCommand::Worktree => "worktree",
+        }
+    }
+}
+
 /// Create a git Command with global options (e.g. -C, -c, --git-dir, --work-tree)
 /// prepended before any subcommand arguments.
 fn git_cmd(global_args: &[String]) -> Command {
@@ -114,6 +135,22 @@ pub fn run(
         other => (other, args_utils::restore_double_dash(args)),
     };
     let args = &args;
+
+    // These handlers use exec_capture, not runner::run, so the central guard never sees
+    // them (#4198).
+    if runner::requests_help_args("git", args) {
+        let mut forwarded: Vec<OsString> = global_args.iter().map(OsString::from).collect();
+        forwarded.push(OsString::from(cmd.git_name()));
+        if let GitCommand::Stash {
+            subcommand: Some(sub),
+        } = &cmd
+        {
+            forwarded.push(OsString::from(sub));
+        }
+        forwarded.extend(args.iter().map(OsString::from));
+        return runner::run_passthrough("git", &forwarded, verbose);
+    }
+
     match cmd {
         GitCommand::Diff => run_diff(args, max_lines, verbose, global_args),
         GitCommand::Log => run_log(args, max_lines, verbose, global_args),

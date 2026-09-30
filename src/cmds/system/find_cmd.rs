@@ -321,6 +321,10 @@ fn run_compress(
 
 /// Entry point from main.rs — dispatches on find's grammar then delegates.
 pub fn run_from_args(args: &[String], verbose: u8) -> Result<i32> {
+    // dispatch() would read a lone `--help` as find's legacy name pattern (#4198).
+    if crate::core::runner::requests_help_args("find", args) {
+        return run_verbatim(args, verbose);
+    }
     match dispatch(args)? {
         Dispatch::Native(parsed) => run(
             &parsed.pattern,

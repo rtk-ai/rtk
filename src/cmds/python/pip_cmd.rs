@@ -35,6 +35,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let subcommand = args.first().map(|s| s.as_str()).unwrap_or("");
 
     let (cmd_str, filtered, exit_code) = match subcommand {
+        _ if crate::core::runner::requests_help_args(base_cmd, args) => {
+            run_passthrough(base_cmd, args, verbose)?
+        }
         "list" => run_list(base_cmd, &args[1..], verbose)?,
         "outdated" => run_outdated(base_cmd, &args[1..], verbose)?,
         "install" | "uninstall" | "show" => {
