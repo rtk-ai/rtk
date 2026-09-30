@@ -24,6 +24,7 @@
 ///   7. max_lines            — absolute line cap
 ///   8. on_empty             — message if result is empty
 use super::constants::RTK_META_COMMANDS;
+use super::deferred;
 use crate::core::user_dirs;
 use crate::core::user_env;
 use regex::{Regex, RegexSet};
@@ -201,7 +202,7 @@ impl TomlFilterRegistry {
 
         match Self::parse_and_compile(BUILTIN_TOML, "builtin") {
             Ok(f) => filters.extend(f),
-            Err(e) => eprintln!("[rtk] warning: builtin filters: {}", e),
+            Err(e) => deferred::warn(format_args!("[rtk] warning: builtin filters: {}", e)),
         }
 
         TomlFilterRegistry { filters }
@@ -220,7 +221,7 @@ impl TomlFilterRegistry {
                 if let Some(content) = content {
                     match Self::parse_and_compile(&content, &label) {
                         Ok(f) => filters.extend(f),
-                        Err(e) => eprintln!("[rtk] warning: {}: {}", label, e),
+                        Err(e) => deferred::warn(format_args!("[rtk] warning: {}: {}", label, e)),
                     }
                 }
             }
@@ -243,17 +244,20 @@ impl TomlFilterRegistry {
         let mut compiled = Vec::new();
         for (name, def) in file.filters {
             if !is_fully_anchored(&def.match_command) {
-                eprintln!(
+                deferred::warn(format_args!(
                     "[rtk] warning: filter '{}' in {}: match_command '{}' has a top-level branch \
                      that does not start with '^'; it would match a path component mid-command. \
                      Filter ignored.",
                     name, source, def.match_command
-                );
+                ));
                 continue;
             }
             match compile_filter(name.clone(), def) {
                 Ok(f) => compiled.push(f),
-                Err(e) => eprintln!("[rtk] warning: filter '{}' in {}: {}", name, source, e),
+                Err(e) => deferred::warn(format_args!(
+                    "[rtk] warning: filter '{}' in {}: {}",
+                    name, source, e
+                )),
             }
         }
         Ok(compiled)
@@ -334,11 +338,11 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
     // will never activate (Clap routes before run_fallback). Warn the author.
     for cmd in RUST_HANDLED_COMMANDS {
         if match_regex.is_match(cmd) {
-            eprintln!(
+            deferred::warn(format_args!(
                 "[rtk] warning: filter '{}' match_command matches '{}' which is already \
                  handled by a Rust module — this filter will never activate for that command",
                 name, cmd
-            );
+            ));
             break;
         }
     }
