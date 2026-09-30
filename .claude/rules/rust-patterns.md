@@ -14,7 +14,9 @@ These override general Rust conventions:
 6. **Parse args with `arg_tokenizer`** — every new command, flag, or arg-handling fix classifies
    arguments through `tokenize`/`tokenize_grammar`, never a `starts_with('-')` or
    `arg == "--flag"` scan. See [`src/core/README.md`](../../src/core/README.md#argument-tokenizer-arg_tokenizerrs)
-   for the four rules that go with it.
+   for the four rules that go with it. One exception: reserved-word grammar (bash's own words,
+   such as `time -p --`, which bash compares before quote removal) is matched literally, not
+   through `arg_tokenizer`.
 
 ## Error Handling
 
