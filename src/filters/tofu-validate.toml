@@ -1,6 +1,6 @@
 [filters.tofu-validate]
 description = "Compact OpenTofu validate output"
-match_command = "^tofu\\s+validate(\\s|$)"
+match_command = "^tofu[ \\t\\n]+validate([ \\t\\n]|$)"
 strip_ansi = true
 match_output = [
   { pattern = "Success! The configuration is valid", message = "ok (valid)" },

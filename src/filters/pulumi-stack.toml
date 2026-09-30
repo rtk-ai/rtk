@@ -1,6 +1,6 @@
 [filters.pulumi-stack]
 description = "Compact Pulumi stack (ls/output) output"
-match_command = "^pulumi\\s+stack(\\s+(ls|output|history|select|init|rm|rename|tag|unselect|change-secrets-provider)\\b|\\s*$)"
+match_command = "^pulumi[ \\t\\n]+stack([ \\t\\n]+(ls|output|history|select|init|rm|rename|tag|unselect|change-secrets-provider)(?:[ \\t\\n]|$)|[ \\t\\n]*$)"
 strip_ansi = true
 match_output = [
   { pattern = "No stacks found", message = "pulumi stack: empty" },

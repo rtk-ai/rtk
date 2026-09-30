@@ -30,36 +30,30 @@ fn is_rtk_binary(binary: &str) -> bool {
 }
 
 fn is_rtk_hook_command(command: &str, agent: &str) -> bool {
-    let mut tokens = crate::core::cmdline::lexer::tokenize_with_newlines(command);
-    // Ignore only literal LF operator tokens at the command's boundaries.
-    // The lexer also reports the CR of a CRLF pair as an LF operator; checking
-    // the source byte leaves that token for the guard below, and the word check
-    // after shell_split would reject the CR anyway.
-    while tokens.first().is_some_and(|token| {
-        matches!(token.kind, crate::core::cmdline::lexer::TokenKind::Operator)
-            && token.value == "\n"
-            && command.as_bytes().get(token.offset) == Some(&b'\n')
-    }) {
-        tokens.remove(0);
-    }
-    while tokens.last().is_some_and(|token| {
-        matches!(token.kind, crate::core::cmdline::lexer::TokenKind::Operator)
-            && token.value == "\n"
-            && command.as_bytes().get(token.offset) == Some(&b'\n')
-    }) {
-        tokens.pop();
-    }
-    if tokens.iter().any(|token| match token.kind {
-        crate::core::cmdline::lexer::TokenKind::Operator
-        | crate::core::cmdline::lexer::TokenKind::Pipe(_)
-        | crate::core::cmdline::lexer::TokenKind::Redirect => true,
-        crate::core::cmdline::lexer::TokenKind::Shellism => token.value == "&",
+    use crate::core::cmdline::lexer::{TokenKind, shell_split, tokenize};
+
+    let tokens = tokenize(command);
+    // A space or line feed at either end of the entry ends nothing. A `\r` is a
+    // word byte, so the CR of a CRLF pair stays in the last word and the word
+    // check after `shell_split` rejects it.
+    let is_boundary = |kind: TokenKind| matches!(kind, TokenKind::Sep | TokenKind::Newline);
+    let start = tokens
+        .iter()
+        .position(|token| !is_boundary(token.kind))
+        .unwrap_or(tokens.len());
+    let end = tokens
+        .iter()
+        .rposition(|token| !is_boundary(token.kind))
+        .map_or(start, |last| last + 1);
+    if tokens[start..end].iter().any(|token| match token.kind {
+        TokenKind::Newline | TokenKind::Operator | TokenKind::Pipe(_) | TokenKind::Redirect => true,
+        TokenKind::Shellism => token.value == "&",
         _ => false,
     }) {
         return false;
     }
 
-    let parts = crate::core::cmdline::lexer::shell_split(command);
+    let parts = shell_split(command);
     let [parsed_binary, hook, target] = parts.as_slice() else {
         return false;
     };

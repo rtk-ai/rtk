@@ -1,6 +1,6 @@
 [filters.du]
 description = "Compact du output"
-match_command = "^du\\b"
+match_command = "^du(?:[ \\t\\n]|$)"
 strip_lines_matching = ["^\\s*$"]
 truncate_lines_at = 120
 max_lines = 40

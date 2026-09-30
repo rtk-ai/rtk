@@ -4,7 +4,8 @@ use super::constants::{
 };
 use super::init::resolve_claude_dir;
 use crate::core::cmdline::lexer::{
-    is_word_boundary_whitespace, split_for_permissions, split_for_wrappers,
+    TooComplex, every_reading, join_continuations, split_for_permissions, split_for_wrappers,
+    squeeze_blanks,
 };
 use crate::core::user_dirs;
 use crate::core::user_env;
@@ -28,13 +29,18 @@ pub enum PermissionVerdict {
     Ask,
     /// No rule matched — default to ask (matches Claude Code's least-privilege default).
     Default,
-    /// A deny rule matched inside a shell wrapper's script — RTK neither rewrites nor decides.
+    /// A deny rule matched inside a shell wrapper's script — RTK neither rewrites
+    /// nor decides.
     Defer,
+    /// The line, or a script it hands a shell, is
+    /// [too complex](crate::core::cmdline::lexer::TooComplex) to say what runs, and
+    /// no deny rule names a command on it: RTK cannot judge it.
+    TooComplex,
 }
 
 /// Check `cmd` against Claude Code's deny/ask/allow permission rules.
 ///
-/// Precedence: Deny > Defer > Ask > Allow > Default (ask).
+/// Precedence: Deny > Defer > TooComplex > Ask > Allow > Default (ask).
 /// Returns `Default` when no rules match — callers should treat this as ask
 /// to match Claude Code's least-privilege default.
 pub fn check_command(cmd: &str) -> PermissionVerdict {
@@ -127,7 +133,8 @@ impl DenyRules {
     }
 }
 
-/// One Claude settings scan, shared by the verdict and lazy wrap attestation.
+/// One Claude settings scan, shared by the verdict, lazy wrap attestation and the
+/// answer for a line too complex to read.
 ///
 /// The settings files [`load_permission_rules`] reads are the rules RTK can
 /// see, not all of Claude Code's: `--settings`, `--disallowedTools`, managed
@@ -164,7 +171,7 @@ pub(crate) struct ClaudeHookPermissions {
 }
 
 impl ClaudeHookPermissions {
-    /// Consulted only after the command passes the fish wrapper's gates.
+    /// Whether RTK can show that no deny rule is in play.
     pub(crate) fn deny_rules(&self) -> DenyRules {
         if self.scan.every_file_read && !self.scan.any_deny_entry {
             DenyRules::NoneConfigured
@@ -175,7 +182,12 @@ impl ClaudeHookPermissions {
 }
 
 /// Read the Claude hook's rules once, retaining the raw deny-entry and read
-/// status needed if the decision later considers a fish wrap.
+/// status the decision may need later.
+///
+/// A line too complex to read is left to the host, as [`PermissionVerdict::Defer`], where
+/// the hook's ask would add nothing to what Claude Code does: no deny entry, whatever its
+/// tool, in a read of every settings file, and rules that
+/// [allow all or nothing](allows_all_or_nothing).
 pub(crate) fn check_claude_hook_command(cmd: &str) -> ClaudeHookPermissions {
     let mut scan = SettingsScan::default();
     let (deny_rules, ask_rules, allow_rules) =
@@ -188,7 +200,24 @@ pub(crate) fn check_claude_hook_command(cmd: &str) -> ClaudeHookPermissions {
         &allow_rules,
         &transparent_prefixes,
     );
-    ClaudeHookPermissions { verdict, scan }
+    let mut permissions = ClaudeHookPermissions { verdict, scan };
+    if verdict == PermissionVerdict::TooComplex
+        && permissions.deny_rules() == DenyRules::NoneConfigured
+        && allows_all_or_nothing(&ask_rules, &allow_rules)
+    {
+        permissions.verdict = PermissionVerdict::Defer;
+    }
+    permissions
+}
+
+/// Whether the rules leave nothing to ask a person about a line nobody can read. With every
+/// command allowed, the user has already answered. With no rule at all, the host decides
+/// without RTK, and it may hold an allow rule RTK cannot see, as `--allowedTools` is. An
+/// ask rule holds something back, and an allow rule that names some commands could let
+/// the line through on a reading of it.
+fn allows_all_or_nothing(ask_rules: &[String], allow_rules: &[String]) -> bool {
+    ask_rules.is_empty()
+        && (allow_rules.is_empty() || allow_rules.iter().any(|pattern| pattern == "*"))
 }
 
 /// What [`load_permission_rules_tracking`] saw besides the rules themselves.
@@ -254,6 +283,49 @@ pub(crate) fn check_command_with_rules_and_prefixes(
     allow_rules: &[String],
     transparent_prefixes: &[String],
 ) -> PermissionVerdict {
+    // The line as bash runs it, its continuations joined: the text the
+    // rewrite emits, so what is checked is what runs.
+    match join_continuations(cmd) {
+        Ok(line) => check_line(
+            &line,
+            deny_rules,
+            ask_rules,
+            allow_rules,
+            transparent_prefixes,
+        ),
+        Err(refused) => check_too_complex_line(&refused, deny_rules, transparent_prefixes),
+    }
+}
+
+/// A line too complex to say what bash runs: what a deny rule says of a command on
+/// it, however it reads, or [`PermissionVerdict::TooComplex`]. Allow and ask rules
+/// play no part, since those readings can tell that a line names a command, never
+/// that it names no other.
+fn check_too_complex_line(
+    refused: &TooComplex<'_>,
+    deny_rules: &[String],
+    transparent_prefixes: &[String],
+) -> PermissionVerdict {
+    let verdicts = refused
+        .readings()
+        .map(|reading| check_line(&reading, deny_rules, &[], &[], transparent_prefixes));
+    if verdicts.contains(&PermissionVerdict::Deny) {
+        PermissionVerdict::Deny
+    } else if verdicts.contains(&PermissionVerdict::Defer) {
+        PermissionVerdict::Defer
+    } else {
+        PermissionVerdict::TooComplex
+    }
+}
+
+/// The verdict on a line read as bash reads it.
+fn check_line(
+    cmd: &str,
+    deny_rules: &[String],
+    ask_rules: &[String],
+    allow_rules: &[String],
+    transparent_prefixes: &[String],
+) -> PermissionVerdict {
     let segments = split_compound_command(cmd);
     // Each segment read every way a deny or ask rule may name it, once: as
     // written, then without the grammar a split leaves behind (`{`, `!`,
@@ -292,8 +364,7 @@ pub(crate) fn check_command_with_rules_and_prefixes(
     }
 
     let transparent_prefixes = registry::normalize_transparent_prefixes(transparent_prefixes);
-    let joined = registry::collapse_line_continuations(cmd);
-    let wrapper_segments = split_for_wrappers(&joined);
+    let wrapper_segments = split_for_wrappers(cmd);
     if let Some(verdict) =
         check_shell_wrapper_permissions(&wrapper_segments, deny_rules, &transparent_prefixes)
     {
@@ -340,7 +411,7 @@ pub(crate) fn check_command_with_rules_and_prefixes(
         }
     }
 
-    // Precedence: Deny > Defer > Ask > Allow > Default (ask).
+    // Precedence: Deny > Defer > TooComplex > Ask > Allow > Default (ask).
     // Allow requires (1) at least one segment seen, (2) all segments matched, (3) non-empty rules.
     if any_ask {
         PermissionVerdict::Ask
@@ -357,6 +428,7 @@ fn check_shell_wrapper_permissions(
     transparent_prefixes: &[String],
 ) -> Option<PermissionVerdict> {
     let mut contains_shell_wrapper = false;
+    let mut too_complex = false;
     for segment in segments {
         for (depth, position) in registry::shell_wrapper_positions(segment, transparent_prefixes)
             .into_iter()
@@ -374,27 +446,39 @@ fn check_shell_wrapper_permissions(
             let Some(script) = wrapper.script(position) else {
                 continue;
             };
+            // The shell the wrapper starts joins the continuations a single-
+            // quoted script carries, which the line around it kept as written.
+            let joined = join_continuations(script);
             // Both spellings, exactly as the outer loop above: a segment can open
             // with grammar that is not part of the command (`! rm …`, `{ rm …`),
             // and a rule naming the command has to reach it there too.
-            let inner_denied = split_for_permissions(script).iter().any(|inner_segment| {
-                let inner_segment = inner_segment.trim();
-                let readings = registry::shell_wrapper_positions(
-                    strip_grammar_residue(inner_segment),
-                    transparent_prefixes,
-                );
-                std::iter::once(inner_segment)
-                    .chain(readings)
-                    .any(|reading| {
-                        deny_rules
-                            .iter()
-                            .any(|pattern| command_matches_pattern(reading, pattern))
+            let inner_denied = !deny_rules.is_empty() && {
+                every_reading(&joined)
+                    .iter()
+                    .flat_map(|script| split_for_permissions(script))
+                    .any(|inner_segment| {
+                        let inner_segment = inner_segment.trim();
+                        let readings = registry::shell_wrapper_positions(
+                            strip_grammar_residue(inner_segment),
+                            transparent_prefixes,
+                        );
+                        std::iter::once(inner_segment)
+                            .chain(readings)
+                            .any(|reading| {
+                                deny_rules
+                                    .iter()
+                                    .any(|pattern| command_matches_pattern(reading, pattern))
+                            })
                     })
-            });
+            };
             if inner_denied {
                 return Some(PermissionVerdict::Defer);
             }
+            too_complex |= joined.is_err();
         }
+    }
+    if too_complex {
+        return Some(PermissionVerdict::TooComplex);
     }
 
     // A quoted shell script hides a second parsing boundary from the host rule.
@@ -763,34 +847,18 @@ fn strip_grammar_residue(segment: &str) -> &str {
     }
 }
 
-/// One space between words, line continuations elided.
-///
-/// Shares the lexer's word-boundary definition rather than
-/// `str::split_whitespace()`, so a bare `\r` in a command never collapses into
-/// a space.
-///
-/// A line continuation goes first: bash elides `\<newline>` entirely and joins
-/// the words either side, so splitting on the newline alone would leave a
-/// stray `\` in front of the command that no pattern matches. Only the LF
-/// form: against CRLF the backslash escapes the `\r` and the `\n` still
-/// terminates the command, in bash and in the lexer alike, so the words either
-/// side are already separate segments.
-fn normalize_command_text(text: &str) -> String {
-    text.replace("\\\n", "")
-        .split(is_word_boundary_whitespace)
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 /// Pattern forms:
 /// - `*` → matches everything
 /// - `prefix:*` or `prefix *` (trailing `*`, no other wildcards) → prefix match with word boundary
 /// - `* suffix`, `pre * suf` → glob matching where `*` matches any sequence of characters
 /// - `pattern` → exact match or prefix match (cmd must equal pattern or start with `{pattern} `)
 pub(crate) fn command_matches_pattern(cmd: &str, pattern: &str) -> bool {
-    let cmd_norm = normalize_command_text(cmd);
-    let pattern_norm = normalize_command_text(pattern);
+    // One space between words, as the lexer finds them: a bare `\r` is a
+    // word byte, never a space.
+    let cmd_norm = squeeze_blanks(cmd);
+    // A rule spelled across a continuation names what bash would join it into.
+    let joined_pattern = join_continuations(pattern);
+    let pattern_norm = squeeze_blanks(joined_pattern.as_deref().unwrap_or(pattern));
     let cmd = cmd_norm.as_str();
     let pattern = pattern_norm.as_str();
 
@@ -2522,6 +2590,194 @@ mod tests {
             ),
             PermissionVerdict::Ask
         );
+    }
+
+    #[test]
+    fn test_the_gate_reads_the_line_the_rewrite_emits() {
+        // Bash joins `$\⏎(` into `$(`, and so does the rewrite it emits: the
+        // substitution is read where it runs.
+        let allow = vec!["Bash(ls *)".to_string()];
+        assert_eq!(
+            check_command_with_rules("ls \"$\\\n(rm Y)\"", &[], &[], &allow),
+            PermissionVerdict::Ask
+        );
+        // Where it is too complex to say how bash joins it, the verdict says so.
+        assert_eq!(
+            check_command_with_rules("ls -l \"$[$'$\\\n(rm -rf Y)']\"", &[], &[], &allow),
+            PermissionVerdict::TooComplex
+        );
+    }
+
+    #[test]
+    fn test_comment_text_is_not_a_command() {
+        let deny = vec!["more:*".to_string()];
+        let allow = vec!["echo a".to_string()];
+        for cmd in [
+            "echo a # note",
+            "echo a # note; more",
+            // An apostrophe in that text changes nothing, nor does what else it holds.
+            "echo a # it's; more",
+            "echo a # $(b)",
+            "echo a # note; bash -c 'more y'",
+        ] {
+            for (deny_rules, ask_rules) in [(&deny, &vec![]), (&vec![], &deny)] {
+                assert_eq!(
+                    check_command_with_rules(cmd, deny_rules, ask_rules, &allow),
+                    PermissionVerdict::Allow,
+                    "{cmd:?}"
+                );
+            }
+        }
+        // The same inside a script a wrapper holds, which only ever asks, while a
+        // command in it goes to the host.
+        assert_eq!(
+            check_command_with_rules("bash -c 'echo a # note; more y'", &deny, &[], &[]),
+            PermissionVerdict::Ask
+        );
+        assert_eq!(
+            check_command_with_rules("bash -c 'echo a; more y'", &deny, &[], &[]),
+            PermissionVerdict::Defer
+        );
+        // A rule reads the command without it.
+        let note = vec!["echo a * note".to_string()];
+        assert_eq!(
+            check_command_with_rules("echo a; echo b # note", &note, &[], &[]),
+            PermissionVerdict::Default
+        );
+        // A script too complex to read stays that, whatever a rule names after it.
+        for (deny_rules, ask_rules) in [(&deny, &vec![]), (&vec![], &deny)] {
+            assert_eq!(
+                check_command_with_rules(
+                    "bash -c 'a[1 # 2]=b' # x; more",
+                    deny_rules,
+                    ask_rules,
+                    &allow
+                ),
+                PermissionVerdict::TooComplex
+            );
+        }
+        // Inside such a script a deny rule reads it every way it can be read: what the
+        // reader took for a comment may be code.
+        assert_eq!(
+            check_command_with_rules("bash -c 'a[1 # 2]=b # x; more y'", &deny, &[], &allow),
+            PermissionVerdict::Defer
+        );
+        // A bare `\r` is a word byte, so no comment opens after one.
+        assert_eq!(
+            check_command_with_rules("echo a\r#b; more", &deny, &[], &allow),
+            PermissionVerdict::Deny
+        );
+    }
+
+    #[test]
+    fn test_a_deny_rule_applies_where_the_line_is_not_joined() {
+        // The continuation sits inside an expansion double quotes hold, where
+        // RTK does not join the line; the command after it is still denied.
+        let deny = vec!["touch:*".to_string(), "git push --force".to_string()];
+        let allow = vec!["*".to_string()];
+        for cmd in [
+            "echo \"$['1\\\n+1']\"; touch f",
+            "echo \"$['\\\n']\"; touch f",
+            // A rule spelled on one line still names the command once the
+            // continuations are joined.
+            "echo \"$['1\\\n+1']\"; git push \\\n --force",
+            // An escaped backslash, then a line break: the command after it
+            // stands on its own, and a continuation inside it still joins.
+            "echo \"$['\\\n']\"; echo \\\\\ntouch f",
+            "echo \"$['\\\n']\" \\\n b; echo \\\\\ngit push \\\n--force",
+        ] {
+            assert!(join_continuations(cmd).is_err(), "{cmd:?}");
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &allow),
+                PermissionVerdict::Deny,
+                "{cmd:?}"
+            );
+        }
+        // A rule spelled across a continuation names what bash joins it into.
+        let spelled = vec!["git push \\\n --force".to_string()];
+        for cmd in ["git push --force", "git push \\\n --force"] {
+            assert_eq!(
+                check_command_with_rules(cmd, &spelled, &[], &allow),
+                PermissionVerdict::Deny,
+                "{cmd:?}"
+            );
+            assert_eq!(
+                check_command_with_rules(cmd, &[], &spelled, &allow),
+                PermissionVerdict::Ask,
+                "{cmd:?}"
+            );
+        }
+        // Inside single quotes a `\⏎` stays, as this rule spells it.
+        let quoted = vec!["touch 'a\\\nb'".to_string()];
+        assert_eq!(
+            check_command_with_rules(
+                "echo \"$['1\\\n+1']\"; touch 'a\\\nb'",
+                &quoted,
+                &[],
+                &allow
+            ),
+            PermissionVerdict::Deny
+        );
+        // No deny rule names a command there: it asks, and the allow rule does not
+        // apply to a line nothing can vouch for.
+        assert_eq!(
+            check_command_with_rules("echo \"$['1\\\n+1']\"; ls", &deny, &[], &allow),
+            PermissionVerdict::TooComplex
+        );
+        // An ask rule asks, as every such line does.
+        let ask = vec!["git push --force".to_string()];
+        assert_eq!(
+            check_command_with_rules(
+                "echo \"$['1\\\n+1']\"; git push \\\n --force",
+                &[],
+                &ask,
+                &allow
+            ),
+            PermissionVerdict::TooComplex
+        );
+        // A rule that defers on a wrapper's script keeps its answer.
+        let quoted = vec!["touch:*".to_string()];
+        assert_eq!(
+            check_command_with_rules("a[1 # 2]=b; bash -c 'touch f'", &quoted, &[], &allow),
+            PermissionVerdict::Defer
+        );
+        // Whichever wrapper comes first.
+        assert_eq!(
+            check_command_with_rules(
+                "bash -c 'a[1 # 2]=b'; bash -c 'touch f'",
+                &quoted,
+                &[],
+                &allow
+            ),
+            PermissionVerdict::Defer
+        );
+        // And so does a script too complex to read, where it denies.
+        assert_eq!(
+            check_command_with_rules("bash -c 'a[1 # 2]=b; touch f'", &quoted, &[], &allow),
+            PermissionVerdict::Defer
+        );
+        assert_eq!(
+            check_command_with_rules("bash -c 'a[1 # 2]=b; ls'", &quoted, &[], &allow),
+            PermissionVerdict::TooComplex
+        );
+    }
+
+    #[test]
+    fn test_only_some_rules_allow_all_or_nothing() {
+        let any = ["*".to_string()];
+        let some = ["git push:*".to_string()];
+        let both = ["git push:*".to_string(), "*".to_string()];
+        // The host does not read this as every command, and stops the line itself.
+        let not_any = [":*".to_string()];
+        assert!(allows_all_or_nothing(&[], &any));
+        assert!(allows_all_or_nothing(&[], &both));
+        assert!(allows_all_or_nothing(&[], &[]));
+        // An ask rule holds some commands back.
+        assert!(!allows_all_or_nothing(&some, &any));
+        assert!(!allows_all_or_nothing(&some, &[]));
+        // Some commands allowed is no answer for every command.
+        assert!(!allows_all_or_nothing(&[], &some));
+        assert!(!allows_all_or_nothing(&[], &not_any));
     }
 
     #[test]

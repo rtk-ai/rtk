@@ -27,8 +27,9 @@
 //! a fish wrap.
 
 use super::permissions::{DenyRules, Host, PermissionVerdict};
+use crate::core::cmdline::lexer::line_is_unattestable;
 use crate::core::user_env;
-use crate::discover::registry::rewrite_command;
+use crate::discover::registry::{line_opts_out, rewrite_command};
 
 /// What a hook should do with a command.
 ///
@@ -66,6 +67,10 @@ pub(crate) enum AskOwner {
     /// unprompted, no delegate relaxes it, and a rewrite that changed nothing
     /// keeps its ask.
     Hook,
+    /// Nothing can say what the command runs, since it is
+    /// [too complex](crate::core::cmdline::lexer::TooComplex) to read: it comes back
+    /// as written, and only the Claude hook gets this far. It is no rewrite to count.
+    Unread,
 }
 
 /// The environment variable a delegate sets to say which agent it speaks for.
@@ -160,6 +165,9 @@ impl ApprovalOwner {
 /// 1. **Deny wins outright.** Checked before anything else so a denied command
 ///    is never even considered for rewriting. A deny rule matched inside a
 ///    shell wrapper's script yields `Defer` instead: no rewrite, no decision.
+///    A line or script too complex to read, `TooComplex`, stops here as well: every
+///    caller defers, and the Claude hook answers for such a line before it gets here
+///    ([`decide_for_claude_hook_at`]).
 /// 2. **A provably-fish script is wrapped, where no deny rule can be in play.**
 ///    A host that evaluates the command string with a POSIX layer fails to
 ///    parse it before RTK is consulted at all, so it is handed back as
@@ -239,9 +247,9 @@ pub(crate) fn decide_with_wrap(
     )
 }
 
-/// `None` keeps callers without wrap authority out of the wrapper entirely.
-/// A Claude settings snapshot is attested only after the wrapper's pure gates
-/// and environment probes succeed.
+/// `attest` is `Some` for the Claude hook, and `None` keeps every other caller out
+/// of the wrapper entirely. Its settings snapshot is attested only after the wrapper's
+/// pure gates and environment probes succeed.
 fn decide_with_attestation(
     cmd: &str,
     verdict: PermissionVerdict,
@@ -254,7 +262,12 @@ fn decide_with_attestation(
         return HookDecision::Deny;
     }
 
-    if verdict == PermissionVerdict::Defer {
+    // Nothing can say what a line too complex to read runs, and no rewrite stands on
+    // that.
+    if matches!(
+        verdict,
+        PermissionVerdict::Defer | PermissionVerdict::TooComplex
+    ) {
         return HookDecision::Defer;
     }
 
@@ -286,7 +299,7 @@ fn decide_with_attestation(
         );
     }
 
-    if crate::core::cmdline::lexer::contains_unattestable_construct(cmd) {
+    if line_is_unattestable(cmd) {
         return HookDecision::Defer;
     }
 
@@ -345,6 +358,10 @@ pub(crate) fn decide_for_claude_hook_at(
     permissions: &super::permissions::ClaudeHookPermissions,
     cwd: Option<&str>,
 ) -> HookDecision {
+    if permissions.verdict == PermissionVerdict::TooComplex {
+        let (excluded, _) = rewrite_params_at(cwd);
+        return ask_about_unread_line(cmd, &excluded);
+    }
     decide_for_agent_at_with_attestation(
         cmd,
         permissions.verdict,
@@ -353,16 +370,36 @@ pub(crate) fn decide_for_claude_hook_at(
     )
 }
 
+/// What a hook that can show an ask for a line as it stands answers for a line too
+/// complex to read: it asks a person, unless the user opted out of the line. A hook
+/// calls this by choice, and every other caller defers. A delegate applies exit 3 without
+/// prompting, and another hook renders an ask as a rewrite, or as a deny that says to run
+/// the rewritten command, which here is the same one for ever.
+fn ask_about_unread_line(cmd: &str, excluded: &[String]) -> HookDecision {
+    if line_opts_out(cmd, excluded) {
+        HookDecision::Defer
+    } else {
+        HookDecision::AskRewrite(cmd.to_string(), AskOwner::Unread)
+    }
+}
+
+/// The rewrite parameters for a hook running in `cwd`: `exclude_commands` and
+/// `transparent_prefixes`, with `git` excluded in a Claude Code managed worktree.
+fn rewrite_params_at(cwd: Option<&str>) -> (Vec<String>, Vec<String>) {
+    let (mut excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
+    if cwd.is_some_and(in_claude_worktree) {
+        excluded.push("git".to_string());
+    }
+    (excluded, transparent_prefixes)
+}
+
 fn decide_for_agent_at_with_attestation(
     cmd: &str,
     verdict: PermissionVerdict,
     attest: Option<impl FnOnce() -> DenyRules>,
     cwd: Option<&str>,
 ) -> HookDecision {
-    let (mut excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
-    if cwd.is_some_and(in_claude_worktree) {
-        excluded.push("git".to_string());
-    }
+    let (excluded, transparent_prefixes) = rewrite_params_at(cwd);
     suppress_identity(
         cmd,
         decide_with_attestation(
@@ -694,6 +731,97 @@ mod tests {
             ),
             HookDecision::AskRewrite(_, AskOwner::Host)
         ));
+    }
+
+    /// A line too complex to read asks as it stands only through the Claude hook:
+    /// see `too_complex_lines` in `tests/hook_decision_protocol_test.rs`.
+    #[test]
+    fn a_line_too_complex_to_read_defers_unless_a_hook_chooses_to_ask() {
+        let cmd = "a[1 # 2]=b";
+        assert_eq!(
+            decide(cmd, PermissionVerdict::TooComplex, DenyRules::Unattested),
+            HookDecision::Defer
+        );
+        assert_eq!(
+            decide_for_agent(cmd, PermissionVerdict::TooComplex, DenyRules::Unattested),
+            HookDecision::Defer
+        );
+        assert_eq!(
+            decide_with_wrap(
+                cmd,
+                PermissionVerdict::TooComplex,
+                &[],
+                &[],
+                DenyRules::NoneConfigured,
+                |script| Some(script.to_string())
+            ),
+            HookDecision::Defer,
+            "a caller that can vouch for the deny rules neither shows an ask nor wraps it"
+        );
+        assert_eq!(
+            ask_about_unread_line(cmd, &[]),
+            HookDecision::AskRewrite(cmd.to_string(), AskOwner::Unread)
+        );
+    }
+
+    /// A line the user opted out of stays with the host, however complex.
+    #[test]
+    fn a_line_too_complex_to_read_keeps_its_opt_out() {
+        for (cmd, excluded) in [
+            ("RTK_DISABLED=1 a[1 # 2]=b", vec![]),
+            ("mytool a[1 # 2]=b", vec!["mytool".to_string()]),
+            ("RTK_\\\nDISABLED=1 a[1 # 2]=b", vec![]),
+            ("bash -c 'RTK_DISABLED=1 a[1 # 2]=b'", vec![]),
+            ("RTK_DISABLED=1 a[1 # 2]=b\n# note", vec![]),
+            ("RTK_DISABLED=1 a[1 # 2]=b\n#note", vec![]),
+            ("RTK_DISABLED=1 a[1 # 2]=b; # note", vec![]),
+        ] {
+            assert_eq!(
+                ask_about_unread_line(cmd, &excluded),
+                HookDecision::Defer,
+                "{cmd:?}"
+            );
+        }
+    }
+
+    /// An operand that spells the opt-out is no opt-out, nor is a script read wrongly,
+    /// and one command's opt-out says nothing of the others.
+    #[test]
+    fn a_line_too_complex_to_read_asks_past_an_operand() {
+        for cmd in [
+            "echo RTK_DISABLED=1; a[1 # 2]=b",
+            "bash -c 'a[1 # 2]=b; ls'",
+            "a[1 # 2]=b; RTK_DISABLED=1 true",
+            "RTK_DISABLED=1 a[1 # 2]=b; ls",
+            "a[1 # 2]=b # ; RTK_DISABLED=1 x",
+            ">#f",
+            "RTK_DISABLED=1 echo `echo \\\\ # a; more y`",
+        ] {
+            assert_eq!(
+                ask_about_unread_line(cmd, &[]),
+                HookDecision::AskRewrite(cmd.to_string(), AskOwner::Unread),
+                "{cmd:?}"
+            );
+        }
+    }
+
+    /// A substitution bash makes by joining a continuation is one: the
+    /// command defers as `ls "$(rm Y)"` does.
+    #[test]
+    fn a_substitution_split_by_a_continuation_defers() {
+        for cmd in ["ls \"$(rm Y)\"", "ls \"$\\\n(rm Y)\""] {
+            assert_eq!(
+                decide_with_params(
+                    cmd,
+                    PermissionVerdict::Default,
+                    &[],
+                    &[],
+                    DenyRules::NoneConfigured
+                ),
+                HookDecision::Defer,
+                "{cmd:?}"
+            );
+        }
     }
 
     #[test]

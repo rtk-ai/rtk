@@ -1,6 +1,6 @@
 [filters.df]
 description = "Compact df output — truncate wide columns, limit rows"
-match_command = "^df(\\s|$)"
+match_command = "^df([ \\t\\n]|$)"
 strip_ansi = true
 truncate_lines_at = 80
 max_lines = 20

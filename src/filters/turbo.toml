@@ -1,6 +1,6 @@
 [filters.turbo]
 description = "Compact Turborepo output — strip cache status noise, keep task results"
-match_command = "^turbo\\b"
+match_command = "^turbo(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

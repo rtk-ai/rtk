@@ -1,6 +1,6 @@
 [filters.sops]
 description = "Compact sops output"
-match_command = "^sops\\b"
+match_command = "^sops(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = ["^\\s*$"]
 max_lines = 40
