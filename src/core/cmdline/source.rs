@@ -13,7 +13,7 @@ use std::borrow::Cow;
 use std::ops::Range;
 
 use super::bash_grammar::{Position, RESERVED_WORDS, Reserved, ReservedWord, reserved_word};
-use super::lexer::{is_name_byte, is_name_start};
+use super::lexer::name_len;
 
 /// How many levels of nesting the reader follows.
 const MAX_NESTING: usize = 16;
@@ -1048,12 +1048,12 @@ fn joined(word: &[u8]) -> Cow<'_, [u8]> {
 }
 
 /// Whether a `\` right after `text` escapes something: an odd run ends `text`.
-fn ends_in_a_lone_backslash(text: &[u8]) -> bool {
+pub(super) fn ends_in_a_lone_backslash(text: &[u8]) -> bool {
     text.iter().rev().take_while(|b| **b == b'\\').count() % 2 == 1
 }
 
 fn is_variable_name(word: &[u8]) -> bool {
-    word.first().is_some_and(|b| is_name_start(*b)) && word.iter().all(|b| is_name_byte(*b))
+    std::str::from_utf8(word).is_ok_and(|word| name_len(word) == word.len())
 }
 
 #[cfg(test)]

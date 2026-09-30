@@ -13,6 +13,7 @@
 
 use super::integrity;
 use crate::core::constants::TRUSTED_FILTERS_JSON;
+use crate::core::deferred;
 use crate::core::user_dirs;
 use crate::core::user_env;
 use anyhow::{Context, Result};
@@ -114,9 +115,9 @@ pub fn check_trust_with_content(filter_path: &Path) -> Result<(TrustStatus, Opti
                 .with_context(|| format!("Failed to read filter: {}", filter_path.display()))?;
             return Ok((TrustStatus::EnvOverride, Some(content)));
         }
-        eprintln!(
-            "[rtk] WARNING: RTK_TRUST_PROJECT_FILTERS=1 ignored (CI environment not detected)"
-        );
+        deferred::warn(format_args!(
+            "[rtk] warning: RTK_TRUST_PROJECT_FILTERS=1 ignored (CI environment not detected)"
+        ));
     }
 
     let bytes = match std::fs::read(filter_path) {
@@ -128,10 +129,10 @@ pub fn check_trust_with_content(filter_path: &Path) -> Result<(TrustStatus, Opti
     let store = match read_store() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!(
-                "[rtk] WARNING: trust store unreadable ({}), treating all filters as untrusted",
+            deferred::warn(format_args!(
+                "[rtk] warning: trust store unreadable ({}), treating all filters as untrusted",
                 e
-            );
+            ));
             TrustStore::default()
         }
     };
@@ -147,10 +148,10 @@ pub fn check_trust_with_content(filter_path: &Path) -> Result<(TrustStatus, Opti
         match String::from_utf8(bytes) {
             Ok(content) => Ok((TrustStatus::Trusted, Some(content))),
             Err(_) => {
-                eprintln!(
-                    "[rtk] WARNING: trusted filter {} is not valid UTF-8 — treating as untrusted",
+                deferred::warn(format_args!(
+                    "[rtk] warning: trusted filter {} is not valid UTF-8 — treating as untrusted",
                     filter_path.display()
-                );
+                ));
                 Ok((TrustStatus::Untrusted, None))
             }
         }

@@ -105,7 +105,9 @@ fn a_word_byte_glued_to_an_fd_number_makes_it_a_word() {
             "git status &&\r\n\x0b2>&1",
             "rtk git status &&rtk \r\nrtk \x0b2>&1",
         ),
-        ("( git status )\x0b2>&1", "( rtk git status )rtk \x0b2>&1"),
+        // Behind a subshell's `)` no command starts, and the word is left as
+        // written.
+        ("( git status )\x0b2>&1", "( rtk git status )\x0b2>&1"),
         // Only space and tab around it: a plain fd redirect, left alone.
         ("a &&  2<&0", "rtk a &&  2<&0"),
     ] {
