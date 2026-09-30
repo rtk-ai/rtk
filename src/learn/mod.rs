@@ -4,6 +4,7 @@ pub mod detector;
 pub mod report;
 
 use crate::discover::provider::{ClaudeProvider, SessionProvider};
+use crate::discover::{ScanScope, zero_session_message};
 use anyhow::Result;
 use detector::{CommandExecution, deduplicate_corrections, find_corrections};
 use report::{format_console_report, write_rules_file};
@@ -19,24 +20,26 @@ pub fn run(
 ) -> Result<()> {
     let provider = ClaudeProvider;
 
-    // Determine project filter (same logic as discover)
-    let project_filter = if all {
-        None
+    // Same scope rules as discover: --all, -p <filter>, or the encoded cwd.
+    let scope = if all {
+        ScanScope::AllProjects
     } else if let Some(p) = project {
-        Some(p)
+        ScanScope::ProjectFilter(p)
     } else {
-        // Default: current working directory
         let cwd = std::env::current_dir()?;
         let cwd_str = cwd.to_string_lossy().to_string();
-        let encoded = ClaudeProvider::encode_project_path(&cwd_str);
-        Some(encoded)
+        ScanScope::CurrentProject(ClaudeProvider::encode_project_path(&cwd_str))
+    };
+    let project_filter = match &scope {
+        ScanScope::AllProjects => None,
+        ScanScope::ProjectFilter(f) | ScanScope::CurrentProject(f) => Some(f.as_str()),
     };
 
     // Discover sessions
-    let sessions = provider.discover_sessions(project_filter.as_deref(), Some(since))?;
+    let sessions = provider.discover_sessions(project_filter, Some(since))?;
 
     if sessions.is_empty() {
-        println!("No Claude Code sessions found in the last {} days.", since);
+        println!("{}", zero_session_message(&scope, since, "learn"));
         return Ok(());
     }
 

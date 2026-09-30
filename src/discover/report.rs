@@ -103,6 +103,27 @@ pub enum ScanScope {
     CurrentProject(String),
 }
 
+/// Explain a zero-session scan so the caller knows which knob to turn.
+///
+/// `command` is the rtk subcommand that performed the scan (`discover`, `learn`, …)
+/// and is used only in the `--all` hint for narrowed scopes.
+pub fn zero_session_message(scope: &ScanScope, since_days: u64, command: &str) -> String {
+    match scope {
+        ScanScope::AllProjects => format!(
+            "No Claude Code sessions found in any project in the last {} days.",
+            since_days
+        ),
+        ScanScope::ProjectFilter(filter) => format!(
+            "No sessions found for project filter `{}` in the last {} days (substring match on the transcript directory name). Try `rtk {} --all` to scan every project.",
+            filter, since_days, command
+        ),
+        ScanScope::CurrentProject(encoded) => format!(
+            "No sessions found for the current project (`{}`) in the last {} days. Try `rtk {} --all` to scan every project.",
+            encoded, since_days, command
+        ),
+    }
+}
+
 /// Full discover report.
 #[derive(Debug, Serialize)]
 pub struct DiscoverReport {
@@ -196,20 +217,13 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
     // Zero sessions is "nothing was looked at", not "nothing was missed": say what
     // the scan was scoped to, so the reader knows which knob to turn.
     if report.sessions_scanned == 0 {
-        match &report.scope {
-            ScanScope::AllProjects => out.push_str(&format!(
-                "\nNo Claude Code sessions found in any project in the last {} days.\n",
-                report.since_days
-            )),
-            ScanScope::ProjectFilter(filter) => out.push_str(&format!(
-                "\nNo sessions found for project filter `{}` in the last {} days (substring match on the transcript directory name). Try `rtk discover --all` to scan every project.\n",
-                filter, report.since_days
-            )),
-            ScanScope::CurrentProject(encoded) => out.push_str(&format!(
-                "\nNo sessions found for the current project (`{}`) in the last {} days. Try `rtk discover --all` to scan every project.\n",
-                encoded, report.since_days
-            )),
-        }
+        out.push('\n');
+        out.push_str(&zero_session_message(
+            &report.scope,
+            report.since_days,
+            "discover",
+        ));
+        out.push('\n');
         append_agent_notes(&mut out, report.agent_status);
         return out;
     }
@@ -548,6 +562,20 @@ mod tests {
         assert!(output.contains("rtk discover --all"));
         assert!(!output.contains("current project"));
         assert!(!output.contains("RTK usage looks good"));
+    }
+
+    #[test]
+    fn test_zero_session_message_names_the_calling_command() {
+        let scope = ScanScope::CurrentProject("-home-user-proj".to_string());
+        let learn = zero_session_message(&scope, 30, "learn");
+        assert!(learn.contains("rtk learn --all"));
+        assert!(!learn.contains("rtk discover --all"));
+
+        let filter = ScanScope::ProjectFilter("my-app".to_string());
+        let learn_filter = zero_session_message(&filter, 7, "learn");
+        assert!(learn_filter.contains("`my-app`"));
+        assert!(learn_filter.contains("last 7 days"));
+        assert!(learn_filter.contains("rtk learn --all"));
     }
 
     #[test]

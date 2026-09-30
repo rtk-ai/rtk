@@ -4,6 +4,7 @@ pub mod lexer;
 pub mod provider;
 pub mod registry;
 mod report;
+pub use report::{ScanScope, zero_session_message};
 pub mod rules;
 
 use anyhow::Result;
