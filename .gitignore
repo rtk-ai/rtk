@@ -51,3 +51,6 @@ claudedocs
 
 # icm 
 .fastembed_cache/
+
+# Local Kilo config (may contain machine-local settings/tokens)
+.kilo/

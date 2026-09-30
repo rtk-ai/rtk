@@ -15,8 +15,8 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
 use std::io::IsTerminal;
-use std::process::Command;
-use std::sync::LazyLock;
+use std::process::{Command, Stdio};
+use std::sync::{LazyLock, OnceLock};
 
 /// True if stdin is something the engine actually reads: a regular file, FIFO or socket --
 /// ripgrep's own `is_readable_stdin` rule, and confirmed for both engines (`rg foo < file`
@@ -402,14 +402,45 @@ impl Engine {
         self.bin()
     }
 
-    /// `-n -H --null` are parse aids (NUL keeps the regroup unambiguous, #1436);
-    /// `-I` skips binary noise (-a overrides).
-    fn parse_flags(self) -> &'static [&'static str] {
+    /// `-n -H` are parse aids; NUL separation is added when grep supports it (#1436).
+    /// `-I` skips binary noise (-a overrides). Unsupported parse aids leave the output
+    /// unparseable, which makes the caller use the native output unchanged.
+    fn parse_flags(self) -> Vec<&'static str> {
         match self {
-            Engine::Grep => &["-n", "-H", "-I", "--null"],
-            Engine::Rg => &["-n", "--with-filename", "--null"],
+            Engine::Grep => {
+                let mut flags = vec!["-n", "-H", "-I"];
+                if grep_capabilities().null_separator {
+                    flags.push("--null");
+                }
+                flags
+            }
+            Engine::Rg => vec!["-n", "--with-filename", "--null"],
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct GrepCapabilities {
+    null_separator: bool,
+    line_buffered: bool,
+}
+
+static GREP_CAPABILITIES: OnceLock<GrepCapabilities> = OnceLock::new();
+
+fn grep_capabilities() -> GrepCapabilities {
+    *GREP_CAPABILITIES.get_or_init(|| GrepCapabilities {
+        null_separator: grep_supports_option("--null"),
+        line_buffered: grep_supports_option("--line-buffered"),
+    })
+}
+
+fn grep_supports_option(option: &str) -> bool {
+    let mut cmd = resolved_command("grep");
+    cmd.args([option, "-e", "__rtk_capability_probe__"])
+        .stdin(Stdio::null());
+    cmd.output()
+        .map(|output| matches!(output.status.code(), Some(0 | 1)))
+        .unwrap_or(false)
 }
 
 /// Runs the agent's exact engine + flags for the grouping path, appending only the
@@ -436,7 +467,7 @@ fn engine_command<T: AsRef<str>>(
     for a in extra_args {
         cmd.child_arg(a.as_ref());
     }
-    if line_buffered {
+    if line_buffered && (engine == Engine::Rg || grep_capabilities().line_buffered) {
         // The engine writes through a pipe, so flush each match immediately.
         cmd.child_arg("--line-buffered");
     }
@@ -563,7 +594,10 @@ fn passthrough<T: AsRef<str>>(
     fold_file_list: bool,
 ) -> Result<i32> {
     let mut cmd = resolved_command(engine.bin());
-    if stream_stdin && !std::io::stdout().is_terminal() {
+    if stream_stdin
+        && !std::io::stdout().is_terminal()
+        && (engine == Engine::Rg || grep_capabilities().line_buffered)
+    {
         // Keep passthrough output live when stdout is piped.
         cmd.child_arg("--line-buffered");
     }

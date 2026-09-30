@@ -2,7 +2,7 @@
 
 use crate::core::tracking;
 use crate::core::truncate::CAP_INVENTORY;
-use crate::core::utils::ChildArgExt;
+use crate::core::utils::{ChildArgExt, decode_process_output};
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use std::collections::{HashMap, HashSet};
@@ -272,9 +272,10 @@ fn run_compress(
         .stdin(std::process::Stdio::inherit());
     let output = cmd.output().context("Failed to execute find")?;
     let exit_code = crate::core::utils::exit_code_from_output(&output, "find");
-    {
+    let stderr_output = decode_process_output(&output.stderr);
+    if !stderr_output.is_empty() {
         let mut stderr = std::io::stderr().lock();
-        stderr.write_all(&output.stderr)?;
+        stderr.write_all(stderr_output.as_bytes())?;
         stderr.flush()?;
     }
     let entries: Vec<&[u8]> = output

@@ -86,10 +86,13 @@ fn rg_available() -> bool {
 
 fn init_git_repo() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(dir.path().join("hooks")).expect("create isolated hooks directory");
     for args in [
         &["init", "-q", "-b", "main"][..],
         &["config", "user.email", "t@t.t"][..],
         &["config", "user.name", "t"][..],
+        &["config", "commit.gpgsign", "false"][..],
+        &["config", "core.hooksPath", "hooks"][..],
         &["commit", "-q", "--allow-empty", "-m", "init"][..],
     ] {
         let ok = Command::new("git")

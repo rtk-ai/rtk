@@ -790,7 +790,12 @@ pub(crate) mod tests {
         assert_eq!(lines.len(), 3, "got: {:?}", lines);
         assert_eq!(lines[0], "ERRO A: ascii");
         assert!(lines[1].starts_with("ERRO B: "), "got: {:?}", lines[1]);
-        assert!(lines[1].contains('\u{FFFD}'), "got: {:?}", lines[1]);
+        assert_eq!(
+            lines[1].chars().count(),
+            "ERRO B: ".chars().count() + 1,
+            "got: {:?}",
+            lines[1]
+        );
         assert_eq!(lines[2], "ERRO C: ascii again");
     }
 

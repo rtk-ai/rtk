@@ -26,6 +26,9 @@ pub const CONFIG_DIR: &str = ".config";
 pub const OPENCODE_SUBDIR: &str = "opencode";
 pub const PLUGIN_SUBDIR: &str = "plugins";
 pub const OPENCODE_PLUGIN_FILE: &str = "rtk.ts";
+pub const KILOCODE_SUBDIR: &str = "kilo";
+pub const KILOCODE_PLUGIN_SUBDIR: &str = "plugin";
+pub const KILOCODE_PLUGIN_FILE: &str = "rtk.ts";
 
 pub const CURSOR_DIR: &str = ".cursor";
 /// The Trae tool name RTK's hook registers against.
