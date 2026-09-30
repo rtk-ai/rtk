@@ -196,8 +196,9 @@ tokens; behavior and exit code are unchanged.
 
 - `rtk <unknown>` runs the command raw: `main.rs:1283` `run_fallback` executes any non-meta unknown
   subcommand (after TOML filter lookup). "Prefix is always safe" in `full` holds.
-- `RTK_DISABLED=1` is honored by the hook (`registry::cmd_has_rtk_disabled_prefix`) and documented
-  in `docs/guide/getting-started/configuration.md`.
+- `RTK_DISABLED=1` is honored by the hook: the rewrite leaves a command as written when it finds an
+  `RTK_DISABLED=` assignment in front of it, behind any wrapper it reads past
+  (`src/discover/registry.rs`), and it is documented in `docs/guide/getting-started/configuration.md`.
 - `rtk proxy` records the command in tracking with 0% reduction (CLAUDE.md, Proxy Mode).
 - `rtk discover` reads Claude Code history (`src/discover/`). For non-Claude agents the line is
   harmless but useless; acceptable cost for one shared file, or drop it in phase 2 if per-agent

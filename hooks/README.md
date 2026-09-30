@@ -329,7 +329,7 @@ Example: `cargo fmt --all && cargo test` becomes `rtk cargo fmt --all && rtk car
 ### Override Controls
 
 - **`RTK_DISABLED=1`**: Per-command override (`RTK_DISABLED=1 git status` runs raw)
-- **`exclude_commands`**: In `~/.config/rtk/config.toml`, list commands to never rewrite. Matches against the full command after stripping env prefixes. Subcommand patterns work (`"git push"` excludes `git push origin main`). Patterns starting with `^` are treated as regex.
+- **`exclude_commands`**: In `~/.config/rtk/config.toml`, list commands to never rewrite. A pattern matches the command either as typed (`^git log --format=\"%H\"` excludes `git log --format="%H"`) or as bash runs it: the command's words with their quotes and escapes removed, one space between two words and a backslash before a blank inside a word (`^git log --format=%H` excludes it too), up to the redirections behind it (`2>&1` is no part of it). The command is also read with the program's absolute path left out (`/usr/bin/pytest -x` is `pytest -x`), as the tool a rule routes it to (`python -m pytest` and `npx playwright test` are `pytest` and `playwright`), and behind the wrappers the rewrite peels (`timeout 5 pytest`, `'nice' pytest`, `uv run pytest`), also where a project filter takes every command. Subcommand patterns work (`"git push"` excludes `git push origin main`). Patterns starting with `^` are treated as regex, so `^pytest$` excludes a bare `pytest` and not `pytest ''`.
 - **Already-RTK**: `rtk git status` passes through unchanged (no `rtk rtk git`)
 
 ## Exit Code Contract
