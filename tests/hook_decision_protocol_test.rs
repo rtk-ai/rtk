@@ -63,6 +63,14 @@ impl Sandbox {
         }
     }
 
+    /// A sandbox whose project-level `.claude/settings.json` is exactly `settings`.
+    fn with_settings(settings: &str) -> Self {
+        let sandbox = Self::with_rules(&[], &[], &[]);
+        std::fs::write(sandbox.project.join(".claude/settings.json"), settings)
+            .expect("write settings");
+        sandbox
+    }
+
     /// A sandbox with no permission rules at all — every command lands on the
     /// `Default` verdict.
     fn bare() -> Self {
@@ -219,13 +227,21 @@ impl Sandbox {
 impl Sandbox {
     /// Feed a Claude PreToolUse payload to the in-process hook and return stdout.
     fn hook_claude(&self, cmd: &str) -> String {
-        use std::io::Write;
-        use std::process::Stdio;
+        self.hook_claude_with(cmd, &[])
+    }
+
+    fn hook_claude_with(&self, cmd: &str, env: &[(&str, &str)]) -> String {
         let payload = serde_json::json!({
             "tool_name": "Bash",
             "tool_input": { "command": cmd },
-        })
-        .to_string();
+        });
+        self.hook_claude_payload(&payload, env)
+    }
+
+    fn hook_claude_payload(&self, payload: &serde_json::Value, env: &[(&str, &str)]) -> String {
+        use std::io::Write;
+        use std::process::Stdio;
+        let payload = payload.to_string();
         let mut child = common::rtk_command()
             .args(["hook", "claude"])
             .current_dir(&self.project)
@@ -236,6 +252,7 @@ impl Sandbox {
             .env("RTK_TEE_DIR", self.tee_dir())
             .env("RTK_RECALL_DB", self.recall_db())
             .env("LC_ALL", "C")
+            .envs(env.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -254,7 +271,7 @@ impl Sandbox {
         assert_eq!(
             out.status.code(),
             Some(0),
-            "rtk hook claude exited non-zero for {cmd:?}: {}",
+            "rtk hook claude exited non-zero for {payload}: {}",
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).into_owned()
@@ -364,6 +381,182 @@ mod rewrite_exit_codes {
         let sb = Sandbox::bare();
         assert_eq!(sb.rewrite("cat <<EOF"), (1, String::new()));
         assert_eq!(sb.rewrite("git status <<EOF"), (1, String::new()));
+    }
+}
+
+/// A line the reader cannot follow is not rewritten, and only `rtk hook claude`
+/// can ask about it as it stands.
+mod too_complex_lines {
+    use super::*;
+
+    const LINE: &str = "a[1 # 2]=b";
+
+    fn answer(sandbox: &Sandbox, cmd: &str) -> serde_json::Value {
+        let output = sandbox.hook_claude(cmd);
+        serde_json::from_str::<serde_json::Value>(&output)
+            .unwrap_or_else(|_| panic!("no JSON for {cmd:?}: {output:?}"))["hookSpecificOutput"]
+            .clone()
+    }
+
+    /// An ask comes back as the line itself, and says why.
+    fn assert_asks(sandbox: &Sandbox, cmd: &str) {
+        let answer = answer(sandbox, cmd);
+        assert_eq!(answer["permissionDecision"], "ask");
+        assert_eq!(answer["updatedInput"]["command"], cmd);
+        assert!(
+            answer["permissionDecisionReason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("too complex")),
+            "{answer}"
+        );
+    }
+
+    #[test]
+    fn the_claude_hook_asks_where_a_rule_holds_something_back_or_names_some_commands() {
+        let rules: [(&[&str], &[&str], &[&str]); 5] = [
+            (&[], &[], &["git status"]),
+            (&["rm *"], &[], &["*"]),
+            (&[], &["rm *"], &["*"]),
+            (&["rm *"], &[], &[]),
+            (&[], &["rm *"], &[]),
+        ];
+        for (deny, ask, allow) in rules {
+            assert_asks(&Sandbox::with_rules(deny, ask, allow), LINE);
+        }
+    }
+
+    /// A wrapper's script too complex to read gets the same answer as a line.
+    #[test]
+    fn a_wrappers_script_is_answered_as_a_line_is() {
+        let script = format!("sh -c '{LINE}'");
+        assert_asks(&Sandbox::with_rules(&[], &[], &["git status"]), &script);
+        for sandbox in [Sandbox::with_rules(&[], &[], &["*"]), Sandbox::bare()] {
+            assert_eq!(sandbox.hook_claude(&script).trim(), "");
+        }
+    }
+
+    /// The rules of every settings file count together.
+    #[test]
+    fn a_rule_in_one_settings_file_holds_for_a_wildcard_in_another() {
+        for rule in ["ask", "deny"] {
+            let sandbox = Sandbox::with_rules(&[], &[], &["*"]);
+            std::fs::write(
+                sandbox.claude_home.join("settings.json"),
+                format!(r#"{{"permissions": {{"{rule}": ["Bash(rm *)"]}}}}"#),
+            )
+            .expect("write settings");
+            assert_asks(&sandbox, LINE);
+        }
+    }
+
+    /// A deny entry RTK reads no pattern from still holds something back.
+    #[test]
+    fn the_claude_hook_asks_past_a_deny_entry_for_another_tool() {
+        let sandbox = Sandbox::with_settings(
+            r#"{"permissions": {"deny": ["Read(./.env)"], "allow": ["Bash(*)"]}}"#,
+        );
+        assert_asks(&sandbox, LINE);
+    }
+
+    /// A line the user opted out of stays with the host, under a rule that would ask.
+    #[test]
+    fn the_claude_hook_says_nothing_of_a_line_that_opts_out() {
+        let sandbox = Sandbox::with_rules(&[], &[], &["git status"]);
+        assert_eq!(
+            sandbox
+                .hook_claude(&format!("RTK_DISABLED=1 {LINE}"))
+                .trim(),
+            ""
+        );
+    }
+
+    #[test]
+    fn the_claude_hook_asks_when_a_settings_file_cannot_be_read() {
+        let sandbox = Sandbox::bare();
+        std::fs::write(
+            sandbox.claude_home.join("settings.json"),
+            r#"{"permissions": {"allow": ["Bash(*)"]}}"#,
+        )
+        .expect("write settings");
+        assert_eq!(sandbox.hook_claude(LINE).trim(), "");
+        std::fs::write(sandbox.project.join(".claude/settings.json"), "{not json")
+            .expect("write settings");
+        assert_asks(&sandbox, LINE);
+    }
+
+    /// The host runs the line, or asks by itself, as it does without RTK. Rules for
+    /// another tool, and the tool's name alone, are no `Bash(…)` rule: the host reads
+    /// those itself.
+    #[test]
+    fn the_claude_hook_says_nothing_where_the_rules_leave_nothing_to_ask() {
+        for sandbox in [
+            Sandbox::with_rules(&[], &[], &["*"]),
+            Sandbox::bare(),
+            Sandbox::with_settings(r#"{"permissions": {"allow": ["Bash"]}}"#),
+            Sandbox::with_settings(r#"{"permissions": {"allow": ["Read(*)"]}}"#),
+            Sandbox::with_settings(r#"{"permissions": {"ask": ["Bash"], "allow": ["Bash(*)"]}}"#),
+        ] {
+            assert_eq!(sandbox.hook_claude(LINE).trim(), "");
+            let (code, stdout, stderr) = sandbox.run(&["hook", "check", "--agent", "claude", LINE]);
+            assert_eq!((code, stdout.as_str()), (1, ""), "{stderr}");
+            assert!(stderr.contains("No rewrite"), "{stderr}");
+            assert_eq!(sandbox.rewrite(LINE), (1, String::new()));
+        }
+    }
+
+    /// `git` is left alone in a Claude Code managed worktree, so a line of it has
+    /// opted out there, and only there.
+    #[test]
+    fn the_claude_hook_says_nothing_of_git_in_a_managed_worktree() {
+        let sandbox = Sandbox::with_rules(&[], &[], &["git status"]);
+        let line = "git log \"$['1\\\n+1']\"";
+        let at = |cwd: &str| {
+            sandbox.hook_claude_payload(
+                &serde_json::json!({
+                    "tool_name": "Bash",
+                    "tool_input": { "command": line },
+                    "cwd": cwd,
+                }),
+                &[],
+            )
+        };
+        assert_eq!(at("/repo/.claude/worktrees/feat").trim(), "");
+        assert!(at("/repo").contains("too complex"));
+    }
+
+    #[test]
+    fn a_deny_rule_comes_first() {
+        let sandbox = Sandbox::with_rules(&["touch:*"], &[], &["*"]);
+        let line = format!("{LINE}; touch f");
+        assert_eq!(sandbox.hook_claude(&line).trim(), "");
+        assert_eq!(sandbox.rewrite(&line).0, 2);
+    }
+
+    #[test]
+    // dirs::home_dir uses the Windows Known Folder API, so HOME cannot isolate this log.
+    #[cfg(unix)]
+    fn the_audit_log_counts_it_apart_from_a_rewrite() {
+        let sandbox = Sandbox::with_rules(&[], &[], &["git status"]);
+        sandbox.hook_claude_with(LINE, &[("RTK_HOOK_AUDIT", "1")]);
+        let log = sandbox.home.join(".local/share/rtk/hook-audit.log");
+        let audit = std::fs::read_to_string(&log).expect("the audit log");
+        assert!(audit.contains("skip:too_complex"), "{audit}");
+        assert!(!audit.contains("| rewrite |"), "{audit}");
+    }
+
+    #[test]
+    fn hook_check_says_it_is_no_rewrite() {
+        let sandbox = Sandbox::with_rules(&[], &[], &["git status"]);
+        let (code, stdout, stderr) = sandbox.run(&["hook", "check", "--agent", "claude", LINE]);
+        assert_eq!(code, 1, "{stdout}");
+        assert_eq!(stdout, "");
+        assert!(stderr.contains("Too complex"), "{stderr}");
+    }
+
+    #[test]
+    fn rtk_rewrite_leaves_it_to_the_host() {
+        let sandbox = Sandbox::with_rules(&[], &[], &["git status"]);
+        assert_eq!(sandbox.rewrite(LINE), (1, String::new()));
     }
 }
 

@@ -1,6 +1,6 @@
 [filters.ansible-playbook]
 description = "Compact ansible-playbook output"
-match_command = "^ansible-playbook\\b"
+match_command = "^ansible-playbook(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

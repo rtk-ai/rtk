@@ -1,6 +1,6 @@
 [filters.dotnet-build]
 description = "Compact dotnet build output — short-circuit on success, strip banners"
-match_command = "^dotnet\\s+build\\b"
+match_command = "^dotnet[ \\t\\n]+build(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

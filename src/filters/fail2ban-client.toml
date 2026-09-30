@@ -1,6 +1,6 @@
 [filters.fail2ban-client]
 description = "Compact fail2ban-client output"
-match_command = "^fail2ban-client\\b"
+match_command = "^fail2ban-client(?:[ \\t\\n]|$)"
 strip_lines_matching = ["^\\s*$"]
 max_lines = 30
 

@@ -1,6 +1,6 @@
 [filters.task]
 description = "Compact go-task output — strip task headers, keep command results"
-match_command = "^task\\b"
+match_command = "^task(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",
