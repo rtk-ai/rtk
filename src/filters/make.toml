@@ -1,6 +1,6 @@
 [filters.make]
 description = "Compact make output"
-match_command = "^make\\b"
+match_command = "^make(?:[ \\t\\n]|$)"
 strip_lines_matching = [
   "^make\\[\\d+\\]:",
   "^\\s*$",

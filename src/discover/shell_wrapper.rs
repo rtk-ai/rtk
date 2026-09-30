@@ -155,6 +155,12 @@ fn find_script_end(bytes: &[u8], start: usize, quote: u8) -> Option<usize> {
         if byte == quote {
             return Some(start + offset);
         }
+        // A `\` before a newline in a single-quoted script is a continuation
+        // the shell the wrapper starts joins: callers read the script through
+        // `join_continuations`, as that shell does.
+        if byte == b'\n' && quote == b'\'' && offset > 0 && bytes[start + offset - 1] == b'\\' {
+            continue;
+        }
         if matches!(byte, b'\0' | b'\n' | b'\r') {
             return None;
         }
@@ -171,6 +177,16 @@ mod tests {
 
     fn parsed_script(command: &str) -> Option<&str> {
         parse_shell_wrapper(command)?.script(command)
+    }
+
+    #[test]
+    fn test_parse_shell_wrapper_keeps_a_single_quoted_continuation() {
+        assert_eq!(
+            parsed_script("bash -c 'git \\\npush'"),
+            Some("git \\\npush")
+        );
+        assert_eq!(parsed_script("bash -c 'git\npush'"), None);
+        assert_eq!(parsed_script("bash -c \"git \\\npush\""), None);
     }
 
     #[test]
