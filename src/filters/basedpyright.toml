@@ -1,6 +1,6 @@
 [filters.basedpyright]
 description = "Compact basedpyright type checker output — strip blank lines, keep errors"
-match_command = "^basedpyright\\b"
+match_command = "^basedpyright(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

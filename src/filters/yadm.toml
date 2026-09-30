@@ -1,6 +1,6 @@
 [filters.yadm]
 description = "Compact yadm (git wrapper) output — same filtering as git"
-match_command = "^yadm\\b"
+match_command = "^yadm(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

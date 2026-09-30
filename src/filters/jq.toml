@@ -1,6 +1,6 @@
 [filters.jq]
 description = "Compact jq output — truncate large JSON results"
-match_command = "^jq\\b"
+match_command = "^jq(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",
