@@ -1,6 +1,6 @@
 //! Filters pytest output to show only failures and the summary line.
 
-use crate::core::arg_tokenizer::{Dialect, TokenKind, ValueSpec, tokenize_grammar};
+use crate::core::arg_tokenizer::{Dialect, Flag, Grammar, TokenKind, ValueSpec, tokenize_grammar};
 use crate::core::config;
 use crate::core::runner;
 use crate::core::shell::display_args;
@@ -67,18 +67,22 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     )
 }
 
+/// The pytest flags that take a value, so a value is never read as flags of its own
+/// (`-rfEq` asks for the report characters `fEq`; it does not ask for quiet output).
+const PYTEST_VALUE_FLAGS: &[Flag] = &[
+    Flag::long("tb").takes(ValueSpec::value()),
+    Flag::short("k").takes(ValueSpec::value()),
+    Flag::short("m").takes(ValueSpec::value()),
+    Flag::short("p").takes(ValueSpec::value()),
+    Flag::short("c").takes(ValueSpec::value()),
+    Flag::short("o").takes(ValueSpec::value()),
+    Flag::short("W").takes(ValueSpec::value()),
+    Flag::short("r").takes(ValueSpec::value()),
+];
+const PYTEST_GRAMMAR: Grammar = Grammar::new(Dialect::Posix, &[PYTEST_VALUE_FLAGS]);
+
 fn injected_args(args: &[String]) -> Vec<&'static str> {
-    let tokens = tokenize_grammar(
-        args,
-        &|kind, name| match (kind, name) {
-            (TokenKind::Long, "tb")
-            | (TokenKind::Short, "k" | "m" | "p" | "c" | "o" | "W" | "r") => {
-                Some(ValueSpec::value())
-            }
-            _ => None,
-        },
-        Dialect::Posix,
-    );
+    let tokens = tokenize_grammar(args, &PYTEST_GRAMMAR);
     let tb = tokens
         .iter()
         .filter(|t| t.kind == TokenKind::Long && t.text == "tb")
@@ -942,6 +946,21 @@ Failures:
      E       def test_x(:
      E                  ^
      E   SyntaxError: invalid syntax"#
+        );
+    }
+
+    #[test]
+    fn test_grammar_matches_its_table() {
+        crate::core::arg_tokenizer::assert_takes_value_table(
+            &PYTEST_GRAMMAR,
+            &[
+                (TokenKind::Long, &["tb"], Some(ValueSpec::value())),
+                (
+                    TokenKind::Short,
+                    &["k", "m", "p", "c", "o", "W", "r"],
+                    Some(ValueSpec::value()),
+                ),
+            ],
         );
     }
 

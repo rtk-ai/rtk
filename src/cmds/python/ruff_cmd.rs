@@ -1,7 +1,8 @@
 //! Filters Ruff linter and formatter output.
 
 use crate::core::arg_tokenizer::{
-    Dialect, Token, TokenKind, ValueSpec, before_dashdash, dashdash_index, tokenize_grammar,
+    Dialect, Flag, Grammar, Token, TokenKind, ValueSpec, before_dashdash, dashdash_index,
+    tokenize_grammar,
 };
 use crate::core::args_utils;
 use crate::core::config;
@@ -138,7 +139,7 @@ fn ruff_output_is_complete(route: RuffRoute, args: &[String]) -> bool {
 /// ruff's value-taking global options so an option value is never mistaken
 /// for the subcommand or a path.
 fn route_ruff_args(args: &[String]) -> RuffRoute {
-    let tokens = tokenize_grammar(args, &ruff_takes_value, Dialect::Posix);
+    let tokens = tokenize_grammar(args, &RUFF_GLOBAL_GRAMMAR);
     for token in before_dashdash(&tokens) {
         if token.kind == TokenKind::Positional {
             // The separate value of a global option is not the subcommand.
@@ -183,31 +184,23 @@ fn route_ruff_args(args: &[String]) -> RuffRoute {
 
 /// Whether `token` is one of ruff's own global options (`ruff --help`, 0.17).
 fn ruff_is_global_token(token: Token<'_>) -> bool {
-    match token.kind {
-        TokenKind::Long => {
-            RUFF_GLOBAL_VALUE_OPTIONS.contains(&token.text)
-                || RUFF_GLOBAL_FLAGS.contains(&token.text)
-        }
-        TokenKind::Short => RUFF_GLOBAL_SHORT_FLAGS.contains(&token.text),
-        _ => false,
-    }
+    token.is_one_of(RUFF_GLOBAL_FLAGS)
 }
 
-/// Ruff's only global options that consume a separate value
-/// (`ruff --help`, 0.17: `--config` and `--color`).
-const RUFF_GLOBAL_VALUE_OPTIONS: &[&str] = &["config", "color"];
+/// Ruff's global options (`ruff --help`, 0.17): `--config` and `--color` consume a separate
+/// value, the rest are booleans. Help and version are global too, but the scan answers them
+/// first (`requests_top_level`).
+const RUFF_GLOBAL_FLAGS: &[Flag] = &[
+    Flag::long("config").takes(ValueSpec::value()),
+    Flag::long("color").takes(ValueSpec::value()),
+    Flag::long("isolated"),
+    Flag::pair("v", "verbose"),
+    Flag::pair("q", "quiet"),
+    Flag::pair("s", "silent"),
+];
 
-/// Ruff's global flags, as long names without the leading dashes. Help and
-/// version are global too, but the scan answers them first
-/// (`requests_top_level`).
-const RUFF_GLOBAL_FLAGS: &[&str] = &["isolated", "verbose", "quiet", "silent"];
-
-/// The one-letter spellings of [`RUFF_GLOBAL_FLAGS`].
-const RUFF_GLOBAL_SHORT_FLAGS: &[&str] = &["v", "q", "s"];
-
-fn ruff_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    (kind == TokenKind::Long && RUFF_GLOBAL_VALUE_OPTIONS.contains(&name)).then(ValueSpec::value)
-}
+/// The grammar ruff's arguments are read with before the subcommand.
+const RUFF_GLOBAL_GRAMMAR: Grammar = Grammar::new(Dialect::Posix, &[RUFF_GLOBAL_FLAGS]);
 
 /// How an invocation routes once global option values are consumed.
 #[derive(Clone, Copy, Debug)]
@@ -538,6 +531,26 @@ fn compact_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_global_grammar_matches_its_table() {
+        crate::core::arg_tokenizer::assert_takes_value_table(
+            &RUFF_GLOBAL_GRAMMAR,
+            &[
+                (
+                    TokenKind::Long,
+                    &["color", "config"],
+                    Some(ValueSpec::value()),
+                ),
+                (
+                    TokenKind::Long,
+                    &["isolated", "quiet", "silent", "verbose"],
+                    None,
+                ),
+                (TokenKind::Short, &["q", "s", "v"], None),
+            ],
+        );
+    }
 
     #[test]
     fn known_ruff_subcommands_do_not_route_through_check() {
