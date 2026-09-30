@@ -7,8 +7,8 @@
 
 use super::frozen;
 use super::{
-    Attachment, Dialect, Token, TokenKind, ValueSpec, double_dash_flag_value, has_double_dash_flag,
-    has_flag, tokenize_grammar,
+    Attachment, Dialect, Flag, Grammar, SingleDash, Token, TokenKind, ValueSpec,
+    double_dash_flag_value, has_double_dash_flag, has_flag, tokenize_grammar,
 };
 
 /// Names the lookup helpers are queried for, spanning both cases of a name in [`ALPHABET`] —
@@ -52,6 +52,49 @@ fn specs(name: &str) -> [Option<ValueSpec>; 3] {
         _ => None,
     };
     [None, mixed, Some(ValueSpec::value())]
+}
+
+/// The three grammars of [`specs`], as `dialect` reads them. A grammar declares named flags
+/// rather than answering for any name, so this declares every flag name the alphabet can
+/// produce under `dialect` — found by tokenizing it with no grammar at all — each with the spec
+/// [`specs`] gives it. A getopt dialect gets getopt flags of the kind the name appeared as, an
+/// atomic one atomic flags; a spelling that is always the whole argument takes the spec without
+/// `solo_only`, as the scanner reads it anyway.
+fn grammars(dialect: Dialect) -> [Grammar; 3] {
+    let bare = Grammar::new(dialect, &[]);
+    let mut names: Vec<(TokenKind, &'static str)> = Vec::new();
+    for arg in ALPHABET {
+        for token in tokenize_grammar(std::slice::from_ref(arg), &bare) {
+            if matches!(token.kind, TokenKind::Short | TokenKind::Long)
+                && !names.contains(&(token.kind, token.text))
+            {
+                names.push((token.kind, token.text));
+            }
+        }
+    }
+    let leak = |flags: Vec<Flag>| -> &'static [&'static [Flag]] {
+        Box::leak(vec![&*Box::leak(flags.into_boxed_slice())].into_boxed_slice())
+    };
+    std::array::from_fn(|index| {
+        let flags = names
+            .iter()
+            .filter_map(|&(kind, name)| {
+                let spec = specs(name)[index]?;
+                let whole = ValueSpec {
+                    attachment: spec.attachment.whole_argument(),
+                    ..spec
+                };
+                Some(match (dialect.single_dash, kind) {
+                    (SingleDash::Cluster, TokenKind::Short) => Flag::short(name).takes(spec),
+                    (SingleDash::Cluster, _) => Flag::long(name).takes(whole),
+                    (SingleDash::Atomic | SingleDash::AtomicAliasingLong, _) => {
+                        Flag::atomic(Box::leak(vec![name].into_boxed_slice())).takes(whole)
+                    }
+                })
+            })
+            .collect();
+        Grammar::new(dialect, leak(flags))
+    })
 }
 
 fn frozen_spec(spec: ValueSpec) -> frozen::ValueSpec {
@@ -116,9 +159,10 @@ fn for_each_vector(mut body: impl FnMut(&[String])) -> usize {
 }
 
 fn assert_identical(dialect: Dialect, frozen_dialect: frozen::Dialect) -> usize {
+    let grammars = grammars(dialect);
     for_each_vector(|args| {
-        for index in 0..3 {
-            let new = tokenize_grammar(args, &|_, name| specs(name)[index], dialect);
+        for (index, grammar) in grammars.iter().enumerate() {
+            let new = tokenize_grammar(args, grammar);
             let old = frozen::tokenize_grammar(
                 args,
                 &|_, name| specs(name)[index].map(frozen_spec),
@@ -138,17 +182,17 @@ fn assert_identical(dialect: Dialect, frozen_dialect: frozen::Dialect) -> usize 
 
             for name in LOOKUP_NAMES {
                 assert_eq!(
-                    has_flag(&new, dialect, name),
+                    has_flag(&new, grammar, name),
                     frozen::has_flag(&old, frozen_dialect, name),
                     "has_flag({name}) differs for {args:?} (grammar {index})"
                 );
                 assert_eq!(
-                    has_double_dash_flag(&new, dialect, name),
+                    has_double_dash_flag(&new, grammar, name),
                     frozen::has_double_dash_flag(&old, frozen_dialect, name),
                     "has_double_dash_flag({name}) differs for {args:?} (grammar {index})"
                 );
                 assert_eq!(
-                    double_dash_flag_value(&new, dialect, name),
+                    double_dash_flag_value(&new, grammar, name),
                     frozen::double_dash_flag_value(&old, frozen_dialect, name),
                     "double_dash_flag_value({name}) differs for {args:?} (grammar {index})"
                 );
