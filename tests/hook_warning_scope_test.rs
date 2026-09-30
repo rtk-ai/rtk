@@ -17,6 +17,10 @@ const REMINDER: &str = "No hook installed";
 fn isolating_env(home: &Path) -> Vec<(String, std::ffi::OsString)> {
     vec![
         ("HOME".into(), home.as_os_str().to_owned()),
+        (
+            "CLAUDE_CONFIG_DIR".into(),
+            home.join(".claude").into_os_string(),
+        ),
         ("RTK_DB_PATH".into(), home.join("rtk.db").into_os_string()),
         (
             "XDG_CONFIG_HOME".into(),
@@ -46,6 +50,26 @@ fn fresh_home() -> tempfile::TempDir {
     // what makes a missing hook detectable.
     std::fs::create_dir_all(home.path().join(".claude")).expect("claude dir");
     home
+}
+
+#[test]
+fn init_fixture_overrides_inherited_claude_config_dir() {
+    let external = tempfile::tempdir().unwrap();
+    std::fs::write(external.path().join("RTK.md"), "outside fixture").unwrap();
+    let home = fresh_home();
+    let out = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        .args(["init", "-g", "--auto-patch"])
+        .env("CLAUDE_CONFIG_DIR", external.path())
+        .envs(isolating_env(home.path()))
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        std::fs::read_to_string(external.path().join("RTK.md")).unwrap(),
+        "outside fixture"
+    );
+    assert!(home.path().join(".claude/RTK.md").exists());
+    assert!(!external.path().join("settings.json").exists());
 }
 
 #[test]

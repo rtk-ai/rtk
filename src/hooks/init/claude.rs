@@ -4,8 +4,7 @@
 use super::opencode::{ensure_opencode_plugin_installed, prepare_opencode_plugin_path};
 use super::*;
 use crate::hooks::constants::{
-    CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CURSOR_DIR, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
-    SETTINGS_JSON,
+    CLAUDE_HOOK_COMMAND, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 
 /// Legacy mode (--claude-md): inject the full RTK_INSTRUCTIONS block into CLAUDE.md.
@@ -408,18 +407,15 @@ pub(super) fn run_default_mode(
 }
 
 /// Migrate old hook script to new binary command.
-/// Deletes `~/.claude/hooks/rtk-rewrite.sh` and `.rtk-hook.sha256` if present,
+/// Deletes the selected Claude config's legacy hook and hash if present,
 /// and removes the stale settings.json entry so the new `rtk hook claude` entry
 /// can be registered.
 fn migrate_old_hook_script(ctx: InitContext) {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
-    if let Some(home) = dirs::home_dir() {
-        let old_hook = home
-            .join(CLAUDE_DIR)
-            .join(HOOKS_SUBDIR)
-            .join(REWRITE_HOOK_FILE);
+    if let Ok(claude_dir) = resolve_claude_dir() {
+        let old_hook = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
         if old_hook.exists() {
             if dry_run {
                 println!(
@@ -444,10 +440,7 @@ fn migrate_old_hook_script(ctx: InitContext) {
             }
         }
         // Remove legacy hash file
-        let hash_file = home
-            .join(CLAUDE_DIR)
-            .join(HOOKS_SUBDIR)
-            .join(".rtk-hook.sha256");
+        let hash_file = claude_dir.join(HOOKS_SUBDIR).join(".rtk-hook.sha256");
         if hash_file.exists() {
             if dry_run {
                 println!(
@@ -457,19 +450,6 @@ fn migrate_old_hook_script(ctx: InitContext) {
             } else {
                 // nosemgrep: filesystem-deletion -- expected in hooks/init uninstall-path cleanup and tests.
                 let _ = std::fs::remove_file(&hash_file);
-            }
-        }
-        // Remove Cursor legacy hook
-        let cursor_hook = home.join(CURSOR_DIR).join("hooks").join(REWRITE_HOOK_FILE);
-        if cursor_hook.exists() {
-            if dry_run {
-                println!(
-                    "[dry-run] would remove legacy Cursor hook: {}",
-                    cursor_hook.display()
-                );
-            } else {
-                // nosemgrep: filesystem-deletion -- expected in hooks/init uninstall-path cleanup and tests.
-                let _ = std::fs::remove_file(&cursor_hook);
             }
         }
     }

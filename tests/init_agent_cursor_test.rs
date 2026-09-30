@@ -21,6 +21,50 @@ fn rtk(home: &Path) -> Command {
     cmd
 }
 
+#[test]
+fn claude_migration_only_removes_hooks_in_selected_config() {
+    for hook_only in [false, true] {
+        for dry in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let custom = home.path().join("custom-claude");
+            let default = home.path().join(".claude");
+            let cursor = home.path().join(".cursor");
+            for dir in [&custom, &default, &cursor] {
+                std::fs::create_dir_all(dir.join("hooks")).unwrap();
+                std::fs::write(dir.join("hooks/rtk-rewrite.sh"), "sentinel hook").unwrap();
+                std::fs::write(dir.join("hooks/.rtk-hook.sha256"), "sentinel hash").unwrap();
+            }
+            let mut cmd = rtk(home.path());
+            cmd.env("CLAUDE_CONFIG_DIR", &custom)
+                .args(["init", "-g", "--auto-patch"]);
+            if hook_only {
+                cmd.arg("--hook-only");
+            }
+            if dry {
+                cmd.arg("--dry-run");
+            }
+            let out = cmd.output().unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            for dir in [&default, &cursor] {
+                assert_eq!(
+                    std::fs::read_to_string(dir.join("hooks/rtk-rewrite.sh")).unwrap(),
+                    "sentinel hook"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(dir.join("hooks/.rtk-hook.sha256")).unwrap(),
+                    "sentinel hash"
+                );
+            }
+            assert_eq!(custom.join("hooks/rtk-rewrite.sh").exists(), dry);
+            assert_eq!(custom.join("hooks/.rtk-hook.sha256").exists(), dry);
+        }
+    }
+}
+
 /// Runs `rtk init <args> --dry-run`, asserts it succeeded, and returns stdout.
 fn dry_run(home: &Path, args: &[&str]) -> String {
     let out = rtk(home)
