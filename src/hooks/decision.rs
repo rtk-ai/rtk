@@ -136,7 +136,8 @@ impl ApprovalOwner {
 ///
 /// 1. **Deny wins outright.** Checked before anything else so a denied command
 ///    is never even considered for rewriting. A deny rule matched inside a
-///    shell wrapper's script yields `Defer` instead: no rewrite, no decision.
+///    shell wrapper's script, or one that script has too many prefixes to rule
+///    out, yields `Defer` instead: no rewrite, no decision.
 /// 2. **A provably-fish script is wrapped, where no deny rule can be in play.**
 ///    A host that evaluates the command string with a POSIX layer fails to
 ///    parse it before RTK is consulted at all, so it is handed back as
