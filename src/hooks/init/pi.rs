@@ -102,19 +102,13 @@ fn pi_plugin_path_for_scope(global: bool) -> Result<PathBuf> {
     }
 }
 
-/// Create the Pi extensions directory, or in dry-run mode, print a message only if
-/// the directory does not yet exist (avoids reporting no-op changes).
-fn ensure_pi_extensions_dir(parent: &Path, name: &str, ctx: InitContext) -> Result<()> {
-    let InitContext { dry_run, .. } = ctx;
-    if dry_run {
-        if !parent.exists() {
-            println!("[dry-run] would create {}: {}", name, parent.display());
-        }
-    } else {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create {}: {}", name, parent.display()))?;
+/// Under `--dry-run`, announce the extensions directory the install would create, only
+/// when it is missing so a no-op is not reported as a change. The real install creates
+/// it when writing the extension.
+fn announce_pi_extensions_dir(parent: &Path, name: &str, ctx: InitContext) {
+    if ctx.dry_run && !parent.exists() {
+        println!("[dry-run] would create {}: {}", name, parent.display());
     }
-    Ok(())
 }
 
 /// Check whether a managed Pi-compatible extension can be installed.
@@ -172,6 +166,13 @@ fn validate_stock_pi_plugin_path(
                 };
             }
 
+            // A file the write would refuse is neither asked about nor overwritten.
+            if patch_mode != PatchMode::Skip
+                && let Err(error) = ensure_writable(path)
+            {
+                eprintln!("[warn] {error:#}");
+                return Ok(false);
+            }
             let should_overwrite = match patch_mode {
                 PatchMode::Auto => true,
                 PatchMode::Skip => false,
@@ -221,11 +222,11 @@ fn extension_paths_alias(global: bool, path: &Path, agent: PiCompatibleAgent) ->
         PiCompatibleAgent::Omp => pi_plugin_path_for_scope(global)?,
     };
 
-    Ok(canonicalize_path_for_comparison(path) == canonicalize_path_for_comparison(&other_path))
+    Ok(write_landing(path) == write_landing(&other_path))
 }
 
 fn shared_agent_state_path(path: &Path) -> PathBuf {
-    canonicalize_path_for_comparison(path).with_file_name(PI_AGENT_STATE_FILE)
+    write_landing(path).with_file_name(PI_AGENT_STATE_FILE)
 }
 
 fn read_managed_agents(path: &Path) -> Result<ManagedAgentState> {
@@ -516,10 +517,13 @@ pub(super) fn uninstall_pi_with_patch_mode(
     patch_mode: PatchMode,
     ctx: InitContext,
 ) -> Result<()> {
+    let _scope = (!global).then(|| ProjectScope::enter(ctx));
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
     let plugin_path = pi_plugin_path_for_scope(global)?;
+    ensure_project_file_inside(&plugin_path, "Pi")?;
+    ensure_project_file_inside(&shared_agent_state_path(&plugin_path), "Pi")?;
 
     if !plugin_path.exists() {
         if dry_run {
@@ -606,8 +610,11 @@ pub fn run_pi_mode_with_patch_mode(
     patch_mode: PatchMode,
     ctx: InitContext,
 ) -> Result<()> {
+    let _scope = (!global).then(|| ProjectScope::enter(ctx));
     let InitContext { dry_run, .. } = ctx;
     let plugin_path = pi_plugin_path_for_scope(global)?;
+    ensure_project_file_inside(&plugin_path, "Pi")?;
+    ensure_project_file_inside(&shared_agent_state_path(&plugin_path), "Pi")?;
     let extension_was_present = plugin_path.exists();
 
     warn_if_extension_shared_on_install(global, &plugin_path, PiCompatibleAgent::Pi)?;
@@ -624,7 +631,7 @@ pub fn run_pi_mode_with_patch_mode(
     }
 
     if let Some(parent) = plugin_path.parent() {
-        ensure_pi_extensions_dir(
+        announce_pi_extensions_dir(
             parent,
             if global {
                 "Pi extensions directory"
@@ -632,7 +639,7 @@ pub fn run_pi_mode_with_patch_mode(
                 "local Pi extensions directory"
             },
             ctx,
-        )?;
+        );
     }
 
     let installed =
@@ -716,8 +723,11 @@ pub fn run_omp_mode_with_patch_mode(
     patch_mode: PatchMode,
     ctx: InitContext,
 ) -> Result<()> {
+    let _scope = (!global).then(|| ProjectScope::enter(ctx));
     let InitContext { dry_run, .. } = ctx;
     let path = omp_extension_path_for_scope(global)?;
+    ensure_project_file_inside(&path, "OMP")?;
+    ensure_project_file_inside(&shared_agent_state_path(&path), "OMP")?;
     let extension_was_present = path.exists();
 
     warn_if_extension_shared_on_install(global, &path, PiCompatibleAgent::Omp)?;
@@ -734,7 +744,7 @@ pub fn run_omp_mode_with_patch_mode(
     }
 
     if let Some(parent) = path.parent() {
-        ensure_pi_extensions_dir(
+        announce_pi_extensions_dir(
             parent,
             if global {
                 "OMP extensions directory"
@@ -742,7 +752,7 @@ pub fn run_omp_mode_with_patch_mode(
                 "local OMP extensions directory"
             },
             ctx,
-        )?;
+        );
     }
 
     let installed =
@@ -783,10 +793,13 @@ pub(super) fn uninstall_omp_with_patch_mode(
     patch_mode: PatchMode,
     ctx: InitContext,
 ) -> Result<()> {
+    let _scope = (!global).then(|| ProjectScope::enter(ctx));
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
     let path = omp_extension_path_for_scope(global)?;
+    ensure_project_file_inside(&path, "OMP")?;
+    ensure_project_file_inside(&shared_agent_state_path(&path), "OMP")?;
 
     if !path.exists() {
         if dry_run {

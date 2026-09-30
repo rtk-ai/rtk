@@ -27,14 +27,6 @@ fn hermes_plugin_dir(hermes_home: &Path) -> PathBuf {
 fn run_hermes_mode_at(hermes_home: &Path, ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
     let plugin_dir = hermes_plugin_dir(hermes_home);
-    if !dry_run {
-        fs::create_dir_all(&plugin_dir).with_context(|| {
-            format!(
-                "Failed to create Hermes plugin directory: {}",
-                plugin_dir.display()
-            )
-        })?;
-    }
 
     let init_path = plugin_dir.join(HERMES_PLUGIN_INIT_FILE);
     let manifest_path = plugin_dir.join(HERMES_PLUGIN_MANIFEST_FILE);
@@ -54,7 +46,7 @@ fn run_hermes_mode_at(hermes_home: &Path, ctx: InitContext) -> Result<()> {
         String::new()
     };
     let patched_config = patch_hermes_config(&existing_config);
-    write_if_changed(&config_path, &patched_config, "Hermes config", ctx)?;
+    patch_if_changed(&config_path, &patched_config, "Hermes config", ctx)?;
 
     if dry_run {
         print_dry_run_footer();
@@ -130,22 +122,20 @@ fn uninstall_hermes_at(hermes_home: &Path, ctx: InitContext) -> Result<Vec<Strin
         let patched_config = unpatch_hermes_config(&existing_config);
 
         if patched_config != existing_config {
-            if dry_run {
-                println!(
-                    "[dry-run] would update Hermes config: {}",
-                    config_path.display()
-                );
-                if verbose > 0 {
-                    println!("[dry-run] content:\n{}", patched_config);
-                }
-            } else {
-                atomic_write(&config_path, &patched_config).with_context(|| {
-                    format!("Failed to write Hermes config: {}", config_path.display())
-                })?;
-                if verbose > 0 {
-                    eprintln!("Updated Hermes config: {}", config_path.display());
-                }
-            }
+            let report = Report::new(format!(
+                "[dry-run] would update Hermes config: {}",
+                config_path.display()
+            ))
+            .with_content()
+            .done_verbose(format!("Updated Hermes config: {}", config_path.display()));
+            write_reported(
+                &config_path,
+                WriteKind::Config,
+                &patched_config,
+                ctx,
+                report,
+            )
+            .with_context(|| format!("Failed to write Hermes config: {}", config_path.display()))?;
             removed.push("Hermes config: removed RTK plugin entry".to_string());
         }
     }
