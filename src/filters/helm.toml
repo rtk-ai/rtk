@@ -1,6 +1,6 @@
 [filters.helm]
 description = "Compact helm output"
-match_command = "^helm\\b"
+match_command = "^helm(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

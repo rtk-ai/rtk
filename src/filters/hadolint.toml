@@ -1,6 +1,6 @@
 [filters.hadolint]
 description = "Compact hadolint Dockerfile linting output"
-match_command = "^hadolint\\b"
+match_command = "^hadolint(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

@@ -1,6 +1,6 @@
 [filters.ollama]
 description = "Strip ANSI spinners and cursor control from ollama output, keep final text"
-match_command = "^ollama\\s+run\\b"
+match_command = "^ollama[ \\t\\n]+run(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏\\s]*$",
