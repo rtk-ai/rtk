@@ -71,7 +71,7 @@ pub(crate) fn track_tee_read(cmd: &str) {
 /// | Exit | Stdout   | Meaning                                                                  |
 /// |------|----------|--------------------------------------------------------------------------|
 /// | 0    | rewritten| Allow rules cover every command — hook may auto-allow the rewrite.       |
-/// | 1    | (none)   | No rewrite, or a deny rule matched inside a shell wrapper's script ([`decision::decide`] deferred) — hook passes through. |
+/// | 1    | (none)   | No rewrite, or a deny rule matched inside a shell wrapper's script or could not be ruled out there ([`decision::decide`] deferred) — hook passes through. |
 /// | 2    | (none)   | Deny rule matched — hook defers to the host's native deny.               |
 /// | 3    | rewritten| Ask rule, or allow rules short of every command (also with no rules) — hook rewrites, host prompts. |
 ///
