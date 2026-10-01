@@ -787,7 +787,7 @@ fn export_csv(
 /// Silently returns None on any error (missing dirs, permission issues, etc.).
 fn check_rtk_disabled_bypass() -> Option<String> {
     use crate::discover::provider::{ClaudeProvider, SessionProvider};
-    use crate::discover::registry::cmd_has_rtk_disabled_prefix;
+    use crate::discover::{CoverageContext, line_has_counted_bypass};
 
     let provider = ClaudeProvider;
 
@@ -801,6 +801,10 @@ fn check_rtk_disabled_bypass() -> Option<String> {
 
     let mut total_bash: usize = 0;
     let mut bypassed: usize = 0;
+    // Same per-segment gate as `rtk discover` (rtk-ai/rtk#4277). Loading it reads
+    // config and permission files, so defer that until a line actually carries the
+    // prefix — lines without it cost only a substring check.
+    let mut coverage_ctx: Option<CoverageContext> = None;
 
     for session_path in &sessions {
         let extracted = match provider.extract_commands(session_path) {
@@ -810,7 +814,12 @@ fn check_rtk_disabled_bypass() -> Option<String> {
 
         for ext_cmd in &extracted {
             total_bash += 1;
-            if cmd_has_rtk_disabled_prefix(&ext_cmd.command) {
+            if ext_cmd.command.contains("RTK_DISABLED=")
+                && line_has_counted_bypass(
+                    &ext_cmd.command,
+                    coverage_ctx.get_or_insert_with(CoverageContext::load_without_hook_log),
+                )
+            {
                 bypassed += 1;
             }
         }

@@ -590,12 +590,6 @@ pub fn prefix_contains_rtk_disabled(prefix_part: &str) -> bool {
     prefix_part.contains("RTK_DISABLED=")
 }
 
-/// Check if a command has RTK_DISABLED= prefix in its env prefix portion.
-pub fn cmd_has_rtk_disabled_prefix(cmd: &str) -> bool {
-    let (prefix_part, _) = strip_disabled_prefix(cmd);
-    prefix_contains_rtk_disabled(prefix_part)
-}
-
 /// Strip RTK_DISABLED=X and other env prefixes, returns `(env_prefix, actual_command)`.
 pub fn strip_disabled_prefix(cmd: &str) -> (&str, &str) {
     let trimmed = cmd.trim();
@@ -6630,17 +6624,14 @@ mod tests {
     // --- #508: RTK_DISABLED detection helpers ---
 
     #[test]
-    fn test_cmd_has_rtk_disabled_prefix() {
-        assert!(cmd_has_rtk_disabled_prefix("RTK_DISABLED=1 git status"));
-        assert!(cmd_has_rtk_disabled_prefix(
-            "FOO=1 RTK_DISABLED=1 cargo test"
-        ));
-        assert!(cmd_has_rtk_disabled_prefix(
-            "RTK_DISABLED=true git log --oneline"
-        ));
-        assert!(!cmd_has_rtk_disabled_prefix("git status"));
-        assert!(!cmd_has_rtk_disabled_prefix("rtk git status"));
-        assert!(!cmd_has_rtk_disabled_prefix("SOME_VAR=1 git status"));
+    fn test_prefix_contains_rtk_disabled() {
+        let has = |cmd| prefix_contains_rtk_disabled(strip_disabled_prefix(cmd).0);
+        assert!(has("RTK_DISABLED=1 git status"));
+        assert!(has("FOO=1 RTK_DISABLED=1 cargo test"));
+        assert!(has("RTK_DISABLED=true git log --oneline"));
+        assert!(!has("git status"));
+        assert!(!has("rtk git status"));
+        assert!(!has("SOME_VAR=1 git status"));
     }
 
     #[test]
