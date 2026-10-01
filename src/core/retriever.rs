@@ -168,12 +168,17 @@ fn gunzip(data: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn db_path(cfg: &RetrieverConfig) -> Result<PathBuf> {
+/// The store path set by `RTK_RECALL_DB` or `database_path`, if any.
+fn configured_db_path(cfg: &RetrieverConfig) -> Option<PathBuf> {
     if let Ok(p) = std::env::var("RTK_RECALL_DB") {
-        return Ok(PathBuf::from(p));
+        return Some(PathBuf::from(p));
     }
-    if let Some(ref p) = cfg.database_path {
-        return Ok(p.clone());
+    cfg.database_path.clone()
+}
+
+fn db_path(cfg: &RetrieverConfig) -> Result<PathBuf> {
+    if let Some(p) = configured_db_path(cfg) {
+        return Ok(p);
     }
     // A test that names no store must never reach the developer's own: its rows
     // would ship as real usage through the telemetry ping.
@@ -189,7 +194,12 @@ fn db_path(cfg: &RetrieverConfig) -> Result<PathBuf> {
 fn open(cfg: &RetrieverConfig) -> Result<Connection> {
     let path = db_path(cfg)?;
     if let Some(parent) = path.parent() {
-        let _ = crate::core::utils::create_private_dir(parent);
+        // A configured path may sit in a directory shared with others: leave it as is.
+        let _ = if configured_db_path(cfg).is_some() {
+            crate::core::utils::create_configured_dir(parent)
+        } else {
+            crate::core::utils::create_private_dir(parent)
+        };
     }
     crate::core::utils::open_private(std::fs::OpenOptions::new().write(true).create(true), &path)
         .with_context(|| format!("pre-create private recall DB: {}", path.display()))?;
@@ -772,6 +782,31 @@ mod tests {
             database_path: Some(dir.join("recall_test.db")),
             ..RetrieverConfig::default()
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_configured_db_keeps_existing_parent_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let shared = dir.path().join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let cfg = temp_cfg(&shared);
+
+        open(&cfg).unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode(&shared),
+            0o775,
+            "a shared directory must not be tightened"
+        );
+        assert_eq!(
+            mode(&shared.join("recall_test.db")),
+            0o600,
+            "the DB stays owner-only"
+        );
     }
 
     #[test]

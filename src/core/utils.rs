@@ -293,6 +293,16 @@ pub fn create_private_dir(path: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Create a directory named by user configuration (an env var or a config path),
+/// owner-only (0700 on Unix) only when this call creates it. An existing directory
+/// may be shared with others, so its permissions are left alone.
+pub fn create_configured_dir(path: &std::path::Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        return Ok(());
+    }
+    create_private_dir(path)
+}
+
 /// Restrict an existing file to owner-only access (0600 on Unix).
 pub fn restrict_file(path: &std::path::Path) {
     set_owner_only(path, 0o600);
@@ -1527,6 +1537,27 @@ mod tests {
         set_owner_only(&dir, 0o755);
 
         create_private_dir(&dir).unwrap();
+        assert_eq!(mode_of(&dir), 0o700);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_create_configured_dir_leaves_existing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("shared");
+        fs::create_dir_all(&dir).unwrap();
+        set_owner_only(&dir, 0o775);
+
+        create_configured_dir(&dir).unwrap();
+        assert_eq!(mode_of(&dir), 0o775);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_create_configured_dir_new_dir_is_owner_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("a").join("b");
+        create_configured_dir(&dir).unwrap();
         assert_eq!(mode_of(&dir), 0o700);
     }
 
