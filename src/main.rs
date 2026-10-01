@@ -1905,6 +1905,8 @@ fn main() {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
+    #[cfg(unix)]
+    blocking_stdio::ensure();
 
     let code = match run_cli() {
         Ok(code) => code,
@@ -1914,6 +1916,61 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+/// A caller can hand rtk a stdout/stderr pipe with O_NONBLOCK set. Once output
+/// outgrows the pipe buffer, writes fail with EAGAIN and `print!` panics, which
+/// is SIGABRT + coredump under panic="abort". The flag lives on the open file
+/// description shared with the caller, so it is put back when rtk exits
+/// (`std::process::exit` runs atexit handlers after flushing stdout).
+#[cfg(unix)]
+mod blocking_stdio {
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    const FDS: [libc::c_int; 2] = [libc::STDOUT_FILENO, libc::STDERR_FILENO];
+    static CLEARED: AtomicU8 = AtomicU8::new(0);
+
+    pub fn ensure() {
+        let mut cleared = 0u8;
+        for (i, &fd) in FDS.iter().enumerate() {
+            #[allow(unsafe_code)]
+            // nosemgrep: unsafe-block
+            let ok = unsafe {
+                let flags = libc::fcntl(fd, libc::F_GETFL);
+                flags >= 0
+                    && flags & libc::O_NONBLOCK != 0
+                    && libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) == 0
+            };
+            if ok {
+                cleared |= 1 << i;
+            }
+        }
+        if cleared != 0 {
+            CLEARED.store(cleared, Ordering::Relaxed);
+            #[allow(unsafe_code)]
+            // nosemgrep: unsafe-block
+            unsafe {
+                libc::atexit(restore);
+            }
+        }
+    }
+
+    extern "C" fn restore() {
+        let cleared = CLEARED.load(Ordering::Relaxed);
+        for (i, &fd) in FDS.iter().enumerate() {
+            if cleared & (1 << i) == 0 {
+                continue;
+            }
+            #[allow(unsafe_code)]
+            // nosemgrep: unsafe-block
+            unsafe {
+                let flags = libc::fcntl(fd, libc::F_GETFL);
+                if flags >= 0 {
+                    libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+                }
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
