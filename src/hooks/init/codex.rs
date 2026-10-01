@@ -122,7 +122,7 @@ const MAX_BACKUP_ATTEMPTS: usize = 99;
 /// proceed without that answer, while a caller that renames never needed it, since a rename
 /// carries the content whether or not RTK can read it.
 #[derive(Debug)]
-enum BackupSlot {
+pub(super) enum BackupSlot {
     /// Free, and the source differs from every backup already present.
     Free(PathBuf),
     /// Identical content already sits here, so a copy would be redundant. A rename still has
@@ -162,7 +162,7 @@ fn numbered_backup_path(path: &Path, attempt: usize) -> PathBuf {
 
 /// Pick a `.bak` sibling for `path`, numbered when earlier backups are still there so a second
 /// run cannot overwrite the first one's rescue copy.
-fn free_backup_slot(path: &Path) -> Result<BackupSlot> {
+pub(super) fn free_backup_slot(path: &Path) -> Result<BackupSlot> {
     let source = fs::read(path).ok();
     for attempt in 0..=MAX_BACKUP_ATTEMPTS {
         let candidate = numbered_backup_path(path, attempt);
@@ -306,6 +306,32 @@ fn resolve_symlink_components_within(path: &Path, budget: usize) -> Resolution {
     } else {
         Resolution::Unresolved(resolved)
     }
+}
+
+impl Resolution {
+    /// The path the walk arrived at, trusted or not. For a caller that only acts on the path,
+    /// the kernel finishes whatever the walk could not.
+    fn into_path(self) -> PathBuf {
+        match self {
+            Resolution::Fully(path) | Resolution::Unresolved(path) => path,
+        }
+    }
+}
+
+/// The target of `path`'s symlink chain, or `None` when there is nothing to follow or nowhere
+/// this walk can vouch for. Callers pair it with the literal path, so an unresolved chain
+/// leaves them comparing the spelling they were given rather than one nothing resolved.
+pub(super) fn resolve_symlink_target(path: &Path) -> Option<PathBuf> {
+    match follow_symlink_chain(path) {
+        SymlinkChain::Target(target) => Some(target),
+        SymlinkChain::Settled | SymlinkChain::Exhausted | SymlinkChain::Unreadable => None,
+    }
+}
+
+/// Rebuild a path with every symlinked component replaced by its target, so a directory alias
+/// anywhere along the path -- not just its last component -- is followed.
+pub(super) fn resolve_symlink_components(path: &Path) -> PathBuf {
+    resolve_symlink_components_within(path, MAX_SYMLINK_HOPS).into_path()
 }
 
 /// Refuse a project-scoped write whose path leaves the project.

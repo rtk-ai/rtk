@@ -1189,12 +1189,9 @@ mod tests {
     #[test]
     fn test_local_init_no_hook() {
         let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let _cwd_guard = CwdGuard::enter(tmp.path());
 
         let result = run_default_mode(false, PatchMode::Auto, false, InitContext::default());
-        std::env::set_current_dir(&cwd).unwrap();
 
         result.unwrap();
         assert!(
