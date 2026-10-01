@@ -454,7 +454,7 @@ fn native_walk(
     max_depth: Option<usize>,
     want_dirs: bool,
     case_insensitive: bool,
-    git_global: bool,
+    ambient_ignores: bool,
 ) -> (Vec<String>, Vec<String>) {
     // When the pattern targets dotfiles (e.g. -name ".claude.json"), we must walk hidden
     // entries; otherwise skip them to keep results tidy (#1101).
@@ -464,7 +464,11 @@ fn native_walk(
     builder
         .hidden(!search_hidden) // skip hidden files/dirs unless pattern targets dotfiles
         .git_ignore(true) // respect .gitignore
-        .git_global(git_global)
+        // Rules from outside the tree walked: the global gitignore, and ignore
+        // files in the directories above it. A test turns them off, so the
+        // developer's own do not decide what it finds.
+        .git_global(ambient_ignores)
+        .parents(ambient_ignores)
         .git_exclude(true);
     if let Some(depth) = max_depth {
         builder.max_depth(Some(depth));
@@ -746,6 +750,8 @@ fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::test_isolation;
+    use crate::core::user_env;
 
     /// Convert string slices to Vec<String> for test convenience.
     fn args(values: &[&str]) -> Vec<String> {
@@ -1347,8 +1353,8 @@ mod tests {
 
     #[test]
     fn native_run_returns_zero_on_success() {
-        let tmp = tempfile::tempdir().unwrap();
-        temp_env::with_var("RTK_TEE_DIR", Some(tmp.path()), || {
+        let tmp = test_isolation::tempdir();
+        user_env::with_path("RTK_TEE_DIR", Some(tmp.path()), || {
             std::fs::write(tmp.path().join("a.txt"), "x").unwrap();
             let root = tmp.path().to_string_lossy().into_owned();
             assert_eq!(
@@ -1372,15 +1378,14 @@ mod tests {
 
     #[test]
     fn hidden_and_ignored_matches_are_collected_for_disclosure() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = test_isolation::tempdir();
         let root = tmp.path();
-        if !std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(root)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
+        // The developer's init template could seed `.git/info/exclude`, which
+        // the walk honours.
+        let mut init = std::process::Command::new("git");
+        init.args(["init", "-q"]).current_dir(root);
+        test_isolation::isolate_git(&mut init);
+        if !init.status().map(|s| s.success()).unwrap_or(false) {
             return; // no git: .gitignore cannot apply, nothing to assert
         }
         std::fs::write(root.join(".gitignore"), "secret.txt\nbuild/\n").unwrap();
@@ -1413,8 +1418,8 @@ mod tests {
 
     #[test]
     fn disclosure_survives_the_output_guard() {
-        let tee = tempfile::tempdir().unwrap();
-        temp_env::with_var("RTK_TEE_DIR", Some(tee.path()), || {
+        let tee = test_isolation::tempdir();
+        user_env::with_path("RTK_TEE_DIR", Some(tee.path()), || {
             let timer = tracking::TimedExecution::start();
             let shown = render(
                 vec!["visible.txt".to_string()],
@@ -1442,7 +1447,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn symlinked_root_still_discloses() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = test_isolation::tempdir();
         let root = tmp.path();
         std::fs::create_dir_all(root.join("sub").join(".hidden")).unwrap();
         std::fs::write(root.join("sub").join("a.txt"), "a").unwrap();

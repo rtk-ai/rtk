@@ -35,14 +35,6 @@ pub fn is_claude_hook_command(command: &str) -> bool {
     is_rtk_hook_command(command, "claude")
 }
 
-pub fn is_codex_hook_command(command: &str) -> bool {
-    is_rtk_hook_command(command, "codex")
-}
-
-pub fn is_trae_hook_command(command: &str) -> bool {
-    is_rtk_hook_command(command, "trae")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,44 +56,5 @@ mod tests {
         assert!(!is_claude_hook_command("not-rtk hook claude"));
         assert!(!is_claude_hook_command("/opt/homebrew/bin/rtk hook cursor"));
         assert!(!is_claude_hook_command("echo rtk hook claude"));
-    }
-
-    #[test]
-    fn trae_hook_command_matches_bare_and_absolute_rtk() {
-        assert!(is_trae_hook_command("rtk hook trae"));
-        assert!(is_trae_hook_command("/opt/homebrew/bin/rtk hook trae"));
-        assert!(is_trae_hook_command("\"/opt/homebrew/bin/rtk\" hook trae"));
-        assert!(!is_trae_hook_command("rtk hook claude"));
-    }
-
-    #[test]
-    fn trae_hook_command_matches_windows_rtk_and_rejects_other_commands() {
-        assert!(is_trae_hook_command("rtk.exe hook trae"));
-        assert!(is_trae_hook_command(
-            r#""C:\Program Files\rtk.exe" hook trae"#
-        ));
-        for command in [
-            "not-rtk.exe hook trae",
-            "echo rtk.exe hook trae",
-            "rtk.exe hook codex",
-        ] {
-            assert!(!is_trae_hook_command(command));
-        }
-    }
-
-    #[test]
-    fn codex_hook_command_matches_bare_absolute_and_windows_rtk() {
-        assert!(is_codex_hook_command("rtk hook codex"));
-        assert!(is_codex_hook_command("/opt/homebrew/bin/rtk hook codex"));
-        assert!(is_codex_hook_command(
-            "\"C:\\Program Files\\rtk.exe\" hook codex"
-        ));
-    }
-
-    #[test]
-    fn codex_hook_command_rejects_other_commands() {
-        assert!(!is_codex_hook_command("rtk hook claude"));
-        assert!(!is_codex_hook_command("echo rtk hook codex"));
-        assert!(!is_codex_hook_command("\"rtk\"evil hook codex"));
     }
 }

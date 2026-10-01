@@ -29,6 +29,8 @@
 //!
 //! See [docs/tracking.md](../docs/tracking.md) for full documentation.
 
+use crate::core::user_dirs;
+use crate::core::user_env;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
@@ -36,13 +38,14 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use std::time::Instant;
 
 // ── Project path helpers ── // added: project-scoped tracking support
 
 /// Get the canonical project path string for the current working directory.
 fn current_project_path_string() -> String {
-    std::env::current_dir()
+    user_dirs::current_dir()
         .ok()
         .and_then(|p| p.canonicalize().ok())
         .map(|p| p.to_string_lossy().to_string())
@@ -62,7 +65,7 @@ fn project_filter_params(project_path: Option<&str>) -> (Option<String>, Option<
     }
 }
 
-use super::constants::{DEFAULT_HISTORY_DAYS, HISTORY_DB, RTK_DATA_DIR};
+use super::constants::{DEFAULT_HISTORY_DAYS, HISTORY_DB};
 
 /// Main tracking interface for recording and querying command history.
 ///
@@ -451,6 +454,88 @@ fn should_sample_cleanup(key: &str, rate: u32) -> bool {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     key.hash(&mut hasher);
     hasher.finish().is_multiple_of(rate as u64)
+}
+
+/// Tools that route by a subcommand of their own, so the word after them is still RTK's
+/// routing rather than something the user typed.
+///
+/// A tool that gains subcommands belongs here too, or its label stops at the tool name.
+const SUBCOMMAND_ROUTERS: &[&str] = &[
+    "artisan",
+    "aws",
+    "bun",
+    "cargo",
+    "deno",
+    "docker",
+    "dotnet",
+    "gh",
+    "git",
+    "glab",
+    "go",
+    "gradlew",
+    "gt",
+    "helm",
+    "jest",
+    "kubectl",
+    "mvn",
+    "next",
+    "npm",
+    "php",
+    "pip",
+    "playwright",
+    "phpstan",
+    "pnpm",
+    "prisma",
+    "pulumi",
+    "pytest",
+    "rake",
+    "rspec",
+    "rubocop",
+    "ruff",
+    "sbt",
+    "swift",
+    "systemctl",
+    "terraform",
+    "uv",
+    "vitest",
+    "yarn",
+];
+
+/// A word shaped like a subcommand rather than an operand: no path separator, no `=`, no
+/// quote, no `..`, and not a flag.
+///
+/// Lowercase first, so a revision like `HEAD~3..HEAD` is not mistaken for one, but mixed case
+/// after it -- real subcommands are spelled `testOnly` (sbt) and `testOnly` is not the only
+/// one. A `:` is allowed for a Maven-style goal.
+static SUBCOMMAND_WORD: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"^[a-z][A-Za-z0-9:_-]*$").unwrap());
+
+/// The command label telemetry reports, built only from the words RTK itself chose.
+///
+/// `rtk_cmd` is RTK's own field, but most of what it holds is the user's command line --
+/// `rtk ls /usr/bin`, `rtk curl https://…`, `rtk:toml jq -r '<program>' <path>`. A fixed
+/// three-word prefix put all of those in the payload; `top_passthrough` had the same leak and
+/// was fixed by grouping on the tool alone.
+///
+/// Two words, because the first is always `rtk` (or `rtk:toml`) and carries nothing on its
+/// own. A third only for a tool that routes by its own subcommand, so `rtk git log` stays
+/// apart from `rtk git status`, and only when that word is shaped like a subcommand. The tool
+/// is taken as a basename, so `./gradlew` and `gradlew` are one label and no path survives.
+fn command_label(rtk_cmd: &str) -> String {
+    let mut words = rtk_cmd.split_whitespace();
+    let Some(prefix) = words.next() else {
+        return String::new();
+    };
+    let Some(tool) = words.next().map(|t| t.rsplit('/').next().unwrap_or(t)) else {
+        return prefix.to_string();
+    };
+    let subcommand = words
+        .next()
+        .filter(|word| SUBCOMMAND_ROUTERS.contains(&tool) && SUBCOMMAND_WORD.is_match(word));
+    match subcommand {
+        Some(subcommand) => format!("{prefix} {tool} {subcommand}"),
+        None => format!("{prefix} {tool}"),
+    }
 }
 
 impl Tracker {
@@ -1343,7 +1428,7 @@ impl Tracker {
         let rows = stmt.query_map(params![limit as i64], |row| {
             let cmd: String = row.get(0)?;
             let sav: f64 = row.get(1)?;
-            let short = cmd.split_whitespace().take(3).collect::<Vec<_>>().join(" ");
+            let short = command_label(&cmd);
             Ok((short, sav))
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
@@ -1537,19 +1622,28 @@ fn db_sidecars(db_path: &std::path::Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// The database to open: `RTK_DB_PATH` where set, otherwise the configured or
+/// default path. In a test build it is the file the test named in
+/// `RTK_DB_PATH` or its own configuration, or else its scratch database: an
+/// exported `RTK_DB_PATH` names the developer's real one and is never read,
+/// and neither is their `config.toml`.
+///
+/// A test exercising a command path reaches `TimedExecution::track`, which
+/// builds its own `Tracker` and takes no path, leaving it no way to redirect
+/// itself. The rows it writes are indistinguishable from real usage in the
+/// developer's history.
 pub(crate) fn get_db_path() -> Result<PathBuf> {
     // Priority 1: Environment variable RTK_DB_PATH
-    if let Ok(custom_path) = std::env::var("RTK_DB_PATH") {
+    if let Some(custom_path) = user_env::var("RTK_DB_PATH") {
         return Ok(PathBuf::from(custom_path));
     }
 
-    // Priority 2: Configuration file. Reads the process-wide cached config (see
-    // `config::cached_config`), not a fresh `Config::load()`: this runs inside
-    // `Tracker::new()`, which `log_hook_decision` now calls on every single
-    // PreToolUse hook invocation — `hook_rewrite_params()` (called earlier in the
-    // same hook invocation, via `hooks::decision::decide`) already reads config too, so
-    // without caching that's two full disk-read-plus-TOML-parse round trips per
-    // Bash tool call instead of one.
+    // Priority 2: Configuration file, through `config::cached_config` rather
+    // than a fresh `Config::load()`. This runs inside `Tracker::new()`, which
+    // `log_hook_decision` calls on every PreToolUse hook invocation after
+    // `hook_rewrite_params()` has already read the config, so without the
+    // cache each Bash tool call would read and parse it twice. (A test build
+    // loads afresh every time; see `cached_config`.)
     if let Some(db_path) = crate::core::config::cached_config()
         .tracking
         .database_path
@@ -1559,8 +1653,7 @@ pub(crate) fn get_db_path() -> Result<PathBuf> {
     }
 
     // Priority 3: Default platform-specific location
-    let data_dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
-    Ok(data_dir.join(RTK_DATA_DIR).join(HISTORY_DB))
+    Ok(user_dirs::data_under(".").join(HISTORY_DB))
 }
 
 /// Whether to gate schema migrations behind `user_version` (the hot-path
@@ -1868,16 +1961,146 @@ pub fn args_display(args: &[OsString]) -> String {
 }
 
 #[cfg(test)]
+mod command_label_tests {
+    use super::*;
+
+    /// The shapes that were putting the user's own words in the telemetry payload. Every one
+    /// is a real `rtk_cmd` from a history database.
+    #[test]
+    fn a_label_never_carries_an_operand() {
+        for (cmd, expected) in [
+            ("rtk ls /usr/bin", "rtk ls"),
+            (
+                "rtk ls /tmp/claude-1000/-home-user-project/abc/scratchpad",
+                "rtk ls",
+            ),
+            ("rtk curl https://mockhttp.org/robots.txt", "rtk curl"),
+            ("rtk tree src/core", "rtk tree"),
+            ("rtk wc src/main.rs", "rtk wc"),
+            ("rtk ls --all=x", "rtk ls"),
+            ("rtk grep some-secret-pattern", "rtk grep"),
+            (
+                "rtk rg --column hello /tmp/x/test.txt (passthrough)",
+                "rtk rg",
+            ),
+            // The TOML filter path puts the user's whole command line after its own prefix.
+            (
+                "rtk:toml jq -r .data.repository.x /home/user/threads.json",
+                "rtk:toml jq",
+            ),
+            ("rtk:toml du -sh /home/user/project", "rtk:toml du"),
+            ("rtk:toml /tmp/rtk-pr --flag", "rtk:toml rtk-pr"),
+        ] {
+            assert_eq!(command_label(cmd), expected, "{cmd}");
+        }
+    }
+
+    /// The granularity that makes the figure worth sending: a tool routing by its own
+    /// subcommand keeps it, since that word is RTK's routing and not the user's.
+    #[test]
+    fn a_routed_subcommand_survives() {
+        for (cmd, expected) in [
+            (
+                "rtk git log --oneline upstream/develop..HEAD",
+                "rtk git log",
+            ),
+            ("rtk git status --porcelain", "rtk git status"),
+            ("rtk git show HEAD:src/core/utils.rs", "rtk git show"),
+            (
+                "rtk gh issue comment 2493 --repo rtk-ai/rtk",
+                "rtk gh issue",
+            ),
+            ("rtk cargo test --all", "rtk cargo test"),
+            ("rtk docker compose up", "rtk docker compose"),
+            // A wrapper script and its bare name are the same tool.
+            ("rtk ./gradlew build", "rtk gradlew build"),
+            ("rtk gradlew build", "rtk gradlew build"),
+        ] {
+            assert_eq!(command_label(cmd), expected, "{cmd}");
+        }
+    }
+
+    /// A router's third word is only kept when it is shaped like a subcommand, so a revision,
+    /// a path or a flag in that position is still dropped.
+    #[test]
+    fn a_router_does_not_keep_an_operand_in_the_subcommand_slot() {
+        for cmd in [
+            "rtk git /home/user/repo",
+            "rtk git --git-dir=/home/user/.git",
+            "rtk git HEAD~3..HEAD",
+            "rtk docker 'my image'",
+            "rtk go https://example.com/pkg",
+        ] {
+            let label = command_label(cmd);
+            assert_eq!(label.split_whitespace().count(), 2, "{cmd} -> {label}");
+        }
+    }
+
+    /// `discover::rules` is the authority for the tools it describes: anything that declares
+    /// subcommands there routes by them, so its label must keep the third word. This fails
+    /// when a tool gains subcommands in that table and is not added here.
+    #[test]
+    fn command_label_matches_the_discover_rules() {
+        for rule in crate::discover::rules::RULES {
+            if rule.subcmd_savings.is_empty() && rule.subcmd_status.is_empty() {
+                continue;
+            }
+            let Some(tool) = rule.rtk_cmd.split_whitespace().nth(1) else {
+                continue;
+            };
+            assert!(
+                SUBCOMMAND_ROUTERS.contains(&tool),
+                "{} declares subcommands in discover::rules but is not a router here",
+                rule.rtk_cmd
+            );
+            // And the subcommands it declares reach the label. A label carries one routing
+            // word, so a two-word subcommand such as `bun pm ls` keeps its first -- coarser
+            // than the table, never an argument.
+            for (subcommand, _) in rule.subcmd_savings {
+                let Some(first) = subcommand.split_whitespace().next() else {
+                    continue;
+                };
+                let cmd = format!("rtk {tool} {subcommand} --some-flag /some/path");
+                assert_eq!(command_label(&cmd), format!("rtk {tool} {first}"), "{cmd}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_degenerate_label_does_not_panic() {
+        assert_eq!(command_label(""), "");
+        assert_eq!(command_label("rtk"), "rtk");
+        assert_eq!(command_label("   "), "");
+        assert_eq!(command_label("rtk   git   log  "), "rtk git log");
+    }
+
+    /// The property the whole change exists for, asserted over every shape above at once: a
+    /// label may not contain a character that only an argument brings.
+    #[test]
+    fn no_label_contains_argument_shaped_characters() {
+        for cmd in [
+            "rtk ls /usr/bin",
+            "rtk curl https://mockhttp.org/robots.txt",
+            "rtk:toml jq -r .x /home/user/f.json",
+            "rtk git log --oneline upstream/develop..HEAD",
+            "rtk ./gradlew build",
+            "rtk grep user@example.com",
+            "rtk read \"quoted path\"",
+            "rtk wc ~/notes.txt",
+        ] {
+            let label = command_label(cmd);
+            for bad in ['/', '=', '"', '\'', '@', '~'] {
+                assert!(!label.contains(bad), "{cmd} -> {label} carries {bad:?}");
+            }
+            assert!(!label.contains(".."), "{cmd} -> {label}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// Serializes tests that mutate the process-global `RTK_DB_PATH` env var.
-    /// Must be a single shared static: a `static` declared inside each test
-    /// function body is a distinct static per function, not a shared lock, so
-    /// tests using separate locals don't actually serialize against each other
-    /// and can race on the same global env var under parallel `cargo test`.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::core::test_isolation;
 
     // 1. estimate_tokens — verify ~4 chars/token ratio
     #[test]
@@ -2046,15 +2269,13 @@ mod tests {
     // record once 5+ other rows land first.
     #[test]
     fn test_timed_execution_records_time() {
-        use std::env;
-        let _guard = ENV_LOCK.lock().unwrap();
-        let db_path = env::temp_dir().join(format!(
+        let db_path = test_isolation::scratch_dir().join(format!(
             "rtk_test_timed_exec_records_{}.db",
             std::process::id()
         ));
         // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
         let _ = std::fs::remove_file(&db_path);
-        temp_env::with_var("RTK_DB_PATH", Some(&db_path), || {
+        user_env::with_path("RTK_DB_PATH", Some(&db_path), || {
             let timer = TimedExecution::start();
             std::thread::sleep(std::time::Duration::from_millis(10));
             timer.track("test cmd", "rtk test", "raw input data", "filtered");
@@ -2072,15 +2293,13 @@ mod tests {
     // Same isolation rationale as test_timed_execution_records_time above.
     #[test]
     fn test_timed_execution_passthrough() {
-        use std::env;
-        let _guard = ENV_LOCK.lock().unwrap();
-        let db_path = env::temp_dir().join(format!(
+        let db_path = test_isolation::scratch_dir().join(format!(
             "rtk_test_timed_exec_passthrough_{}.db",
             std::process::id()
         ));
         // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
         let _ = std::fs::remove_file(&db_path);
-        temp_env::with_var("RTK_DB_PATH", Some(&db_path), || {
+        user_env::with_path("RTK_DB_PATH", Some(&db_path), || {
             let timer = TimedExecution::start();
             timer.track_passthrough("git tag", "rtk git tag (passthrough)");
 
@@ -2105,22 +2324,16 @@ mod tests {
     // Combined into one test so the set and unset cases cannot interleave.
     #[test]
     fn test_db_path_env_and_default() {
-        use std::env;
-        let _guard = ENV_LOCK.lock().unwrap();
-
-        let custom_path = env::temp_dir().join("rtk_test_custom.db");
-        temp_env::with_var("RTK_DB_PATH", Some(&custom_path), || {
+        let custom_path = test_isolation::scratch_dir().join("rtk_test_custom.db");
+        user_env::with_path("RTK_DB_PATH", Some(&custom_path), || {
             let db_path = get_db_path().expect("Failed to get db path");
             assert_eq!(db_path, custom_path);
         });
 
-        temp_env::with_var_unset("RTK_DB_PATH", || {
+        user_env::with_vars(&[("RTK_DB_PATH", None)], || {
+            // This test's scratch database, never the developer's own.
             let db_path = get_db_path().expect("Failed to get db path");
-            assert!(
-                db_path.ends_with("rtk/history.db"),
-                "expected default path ending with rtk/history.db, got: {}",
-                db_path.display()
-            );
+            assert_eq!(db_path, test_isolation::db_path());
         });
     }
 
@@ -2129,14 +2342,11 @@ mod tests {
     // still works (and doesn't re-run/fail the migration).
     #[test]
     fn test_schema_migration_gated_by_user_version() {
-        use std::env;
-        let _guard = ENV_LOCK.lock().unwrap();
-
-        let db_path =
-            env::temp_dir().join(format!("rtk_test_schema_version_{}.db", std::process::id()));
+        let db_path = test_isolation::scratch_dir()
+            .join(format!("rtk_test_schema_version_{}.db", std::process::id()));
         // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
         let _ = std::fs::remove_file(&db_path);
-        temp_env::with_var("RTK_DB_PATH", Some(&db_path), || {
+        user_env::with_path("RTK_DB_PATH", Some(&db_path), || {
             let tracker = Tracker::new().expect("first open should run migrations");
             let version: i64 = tracker
                 .conn
@@ -2163,15 +2373,13 @@ mod tests {
     // init` relies on instead of a dedicated repair flag.
     //
     // Exercises the migration function directly on its own throwaway on-disk
-    // connection rather than going through ensure_schema_fresh()/Tracker::new()
-    // (which read the process-global RTK_DB_PATH env var): this test doesn't
-    // need the ENV_LOCK serialization those need, and — critically — never
-    // leaves the *shared default* tracking DB in a dropped-table state where
-    // an unrelated, concurrently-running test that opens Tracker::new()
-    // without its own RTK_DB_PATH override could observe it.
+    // connection rather than going through ensure_schema_fresh()/Tracker::new(),
+    // so it never leaves the *shared default* tracking DB in a dropped-table
+    // state where an unrelated, concurrently-running test that opens
+    // Tracker::new() without its own RTK_DB_PATH could observe it.
     #[test]
     fn test_run_schema_migrations_heals_dropped_table_when_forced() {
-        let db_path = std::env::temp_dir().join(format!(
+        let db_path = test_isolation::scratch_dir().join(format!(
             "rtk_test_heal_migrations_{}.db",
             std::process::id()
         ));

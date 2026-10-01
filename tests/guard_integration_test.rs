@@ -3,8 +3,10 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+mod common;
+
 fn rtk_stdin(args: &[&str], input: &str) -> String {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let mut child = common::rtk_command()
         .env("LC_ALL", "C")
         .args(args)
         .stdin(Stdio::piped())
@@ -58,7 +60,7 @@ fn guard_does_not_block_real_compression() {
 }
 
 fn rtk_output_in_dir(dir: &std::path::Path, args: &[&str]) -> (String, String, Option<i32>) {
-    let out = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let out = common::rtk_command()
         .env("LC_ALL", "C")
         .args(args)
         .current_dir(dir)
@@ -84,6 +86,14 @@ fn rg_available() -> bool {
         .unwrap_or(false)
 }
 
+/// git in `dir`, isolated as the rtk children these tests compare it with are.
+fn git(dir: &std::path::Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(dir);
+    common::isolate_git(&mut cmd);
+    cmd
+}
+
 fn init_git_repo() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     for args in [
@@ -92,9 +102,8 @@ fn init_git_repo() -> tempfile::TempDir {
         &["config", "user.name", "t"][..],
         &["commit", "-q", "--allow-empty", "-m", "init"][..],
     ] {
-        let ok = Command::new("git")
+        let ok = git(dir.path())
             .args(args)
-            .current_dir(dir.path())
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
@@ -104,11 +113,7 @@ fn init_git_repo() -> tempfile::TempDir {
 }
 
 fn git_in_dir(dir: &std::path::Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("spawn git");
+    let out = git(dir).args(args).output().expect("spawn git");
     assert!(
         out.status.success(),
         "git command failed: {args:?}\nstdout: {}\nstderr: {}",
@@ -171,9 +176,8 @@ fn git_log_patch_output_matches_raw_git() {
     git_in_dir(dir.path(), &["add", "history.txt"]);
     git_in_dir(dir.path(), &["commit", "-q", "-m", "add history fixture"]);
 
-    let raw = Command::new("git")
+    let raw = git(dir.path())
         .args(["log", "-p", "--all"])
-        .current_dir(dir.path())
         .output()
         .expect("spawn raw git log");
     assert!(raw.status.success());
@@ -331,9 +335,8 @@ fn git_log_malformed_digit_run_propagates_real_git_error() {
     // reaching the formatting code that would use it.
     let dir = init_git_repo();
 
-    let raw = Command::new("git")
+    let raw = git(dir.path())
         .args(["log", "-5x"])
-        .current_dir(dir.path())
         .output()
         .expect("spawn raw git log");
     assert!(!raw.status.success(), "expected real git to reject -5x");

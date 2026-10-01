@@ -1,5 +1,6 @@
 //! Matches shell commands against known RTK rewrite rules to decide how to handle them.
 
+use crate::cmds::system::search::{Engine, is_bare_file_list};
 use crate::core::utils::composer_bin_dirs;
 use regex::{Regex, RegexSet};
 use std::path::Path;
@@ -1532,6 +1533,18 @@ fn pipeline_command_is_safe(rtk_cmd: &str, cmd: &str) -> bool {
     !matches!(rtk_cmd, "rtk grep" | "rtk rg") || !search_uses_pattern_file(cmd)
 }
 
+/// A folded file list (`-l`/`-L`/`--files`) carries its shared prefix in a header line, so a
+/// display consumer that keeps only some lines (`tail`) would return tails with no prefix.
+fn producer_output_is_line_faithful(rtk_cmd: &str, cmd: &str) -> bool {
+    let engine = match rtk_cmd {
+        "rtk grep" => Engine::Grep,
+        "rtk rg" => Engine::Rg,
+        _ => return true,
+    };
+    let args: Vec<String> = shell_split(cmd).into_iter().skip(1).collect();
+    !is_bare_file_list(engine, &args)
+}
+
 pub(crate) enum ExcludePattern {
     Regex(Regex),
     Prefix(String),
@@ -1761,7 +1774,8 @@ fn rewrite_segment_inner(
     // #3171
     if context == RewriteContext::PipelineProducer
         && (!rule.pipeline_safety.producer_safe()
-            || !pipeline_command_is_safe(rule.rtk_cmd, cmd_part))
+            || !pipeline_command_is_safe(rule.rtk_cmd, cmd_part)
+            || !producer_output_is_line_faithful(rule.rtk_cmd, cmd_part))
     {
         return None;
     }
@@ -1999,6 +2013,7 @@ fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
 mod tests {
     use super::super::report::RtkStatus;
     use super::*;
+    use crate::core::test_isolation;
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         super::rewrite_command(cmd, excluded, &[])
@@ -3452,6 +3467,93 @@ mod tests {
     }
 
     #[test]
+    fn test_subcommand_rules_require_token_boundaries() {
+        // The pnpm case is covered separately. The sbt rule is included here
+        // because it is already boundary-safe and guards the full issue family
+        // against future regressions.
+        let false_positives = [
+            "git branchless status",
+            "gh prs",
+            "glab mrs",
+            "cargo builder",
+            "prettierish",
+            "next builder",
+            "playwrighting",
+            "prismax",
+            "docker psql",
+            "kubectl getall",
+            "oc status-check",
+            "ruff checker",
+            "sqlfluff linting",
+            "pip installer",
+            "uv pip installer",
+            "go vetting",
+            "sbt tester",
+            "rake tester",
+            "rails tester",
+            "pio runner",
+            "quarto renderer",
+            "shopify themepark",
+            "terraform planner",
+            "trunk builder",
+        ];
+
+        for command in false_positives {
+            assert!(
+                matches!(
+                    classify_command(command),
+                    Classification::Unsupported { .. }
+                ),
+                "{command} must not classify as a supported command"
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                None,
+                "{command} must not be rewritten"
+            );
+        }
+
+        let valid_commands = [
+            ("git branch status", "rtk git"),
+            ("gh pr list", "rtk gh"),
+            ("glab mr list", "rtk glab"),
+            ("cargo build --release", "rtk cargo"),
+            ("prettier --check .", "rtk prettier"),
+            ("next build --turbo", "rtk next"),
+            ("playwright test", "rtk playwright"),
+            ("prisma migrate status", "rtk prisma"),
+            ("docker ps", "rtk docker"),
+            ("kubectl get pods", "rtk kubectl"),
+            ("oc status", "rtk oc"),
+            ("ruff check .", "rtk ruff"),
+            ("sqlfluff lint .", "rtk sqlfluff"),
+            ("pip install flask", "rtk pip"),
+            ("uv pip install flask", "rtk uv"),
+            ("go test ./...", "rtk go"),
+            ("sbt test", "rtk sbt"),
+            ("rake test", "rtk rake"),
+            ("rake test:unit", "rtk rake"),
+            ("rails test:system", "rtk rake"),
+            ("bundle exec rake test:models", "rtk rake"),
+            ("bin/rails test:integration", "rtk rake"),
+            ("pio run", "rtk pio"),
+            ("quarto render docs", "rtk quarto"),
+            ("shopify theme push", "rtk shopify"),
+            ("terraform plan", "rtk terraform"),
+            ("trunk build", "rtk trunk"),
+        ];
+
+        for (command, expected_rtk_command) in valid_commands {
+            match classify_command(command) {
+                Classification::Supported { rtk_equivalent, .. } => {
+                    assert_eq!(rtk_equivalent, expected_rtk_command, "{command}");
+                }
+                classification => panic!("{command} classified as {classification:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn test_rewrite_playwright() {
         let commands = vec![
             "npm exec playwright",
@@ -3815,6 +3917,28 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_pipe_producer_file_list_stays_raw() {
+        // A folded list keeps its prefix in the first line, which `tail` drops.
+        for cmd in [
+            "grep -rl foo src | tail -3",
+            "grep -rL foo . | head -5",
+            "rg -l foo | tail",
+            "rg --files src | cat",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+        // `-c` with `-l` is not folded, and `-e -l` makes `-l` the pattern.
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -rlc foo src | tail -3", &[]),
+            Some("rtk grep -rlc foo src | tail -3".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -e -l src | tail -3", &[]),
+            Some("rtk grep -e -l src | tail -3".into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_pipe_producer_batch_rules_rewritten() {
         assert_eq!(
             rewrite_command_no_prefixes("pytest | tail -20", &[]),
@@ -3902,27 +4026,11 @@ mod tests {
 
     #[test]
     fn test_rewrite_rtk_disabled_subprocess_warns() {
-        let rtk_bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("debug")
-            .join("rtk");
-        if !rtk_bin.exists() {
-            return;
-        }
-        let rtk_mtime = std::fs::metadata(&rtk_bin)
-            .ok()
-            .and_then(|m| m.modified().ok());
-        let test_mtime = std::env::current_exe()
-            .ok()
-            .and_then(|p| std::fs::metadata(p).ok())
-            .and_then(|m| m.modified().ok());
-        if let (Some(rtk_t), Some(test_t)) = (rtk_mtime, test_mtime)
-            && rtk_t < test_t
-        {
+        if !test_isolation::rtk_binary_is_built() {
             return;
         }
 
-        let output = std::process::Command::new(&rtk_bin)
+        let output = test_isolation::rtk_command()
             .args(["rewrite", "RTK_DISABLED=1 git status"])
             .output()
             .expect("Failed to run rtk");

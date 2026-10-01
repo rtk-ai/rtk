@@ -4,6 +4,7 @@ use crate::core::guard::never_worse;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::CAP_WARNINGS;
+use crate::core::user_dirs;
 use crate::core::utils::{package_manager_exec, resolved_command};
 use crate::prettier_cmd;
 use crate::ruff_cmd;
@@ -12,7 +13,7 @@ use std::path::Path;
 
 /// Detect formatter from project files or explicit argument
 fn detect_formatter(args: &[String]) -> String {
-    detect_formatter_in_dir(args, Path::new("."))
+    detect_formatter_in_dir(args, &user_dirs::in_working_dir("."))
 }
 
 /// Detect formatter with explicit directory (for testing)

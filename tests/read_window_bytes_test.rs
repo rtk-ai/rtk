@@ -1,10 +1,15 @@
 use std::fs;
 use std::io::Write;
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, Output, Stdio};
 use std::time::{Duration, Instant};
+// The native `head` comparison and FIFO creation are Unix only.
+#[cfg(unix)]
+use std::process::Command;
+
+mod common;
 
 fn read_stdin(input: &[u8], args: &[&str]) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let mut child = common::rtk_command()
         .args(["read", "-"])
         .args(args)
         .stdin(Stdio::piped())
@@ -51,7 +56,7 @@ fn read_windows_preserve_non_utf8_files() {
         ("--head-lines", b"\xff\xfe bad\nline2\n".as_slice()),
         ("--tail-lines", b"line2\nline3\n".as_slice()),
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        let output = common::rtk_command()
             .arg("read")
             .arg(&file)
             .args([flag, "2"])
@@ -85,7 +90,7 @@ fn read_windows_preserve_binary_boundaries_for_files_and_stdin() {
             ("--head-lines", "99", input),
             ("--tail-lines", "99", input),
         ] {
-            let from_file = Command::new(env!("CARGO_BIN_EXE_rtk"))
+            let from_file = common::rtk_command()
                 .arg("read")
                 .arg(&file)
                 .args([flag, count])
@@ -118,14 +123,8 @@ fn read_windows_accept_invalid_bytes_outside_the_selected_window() {
 
 #[test]
 fn head_window_finishes_before_stdin_reaches_eof() {
-    let tracking_dir = tempfile::tempdir().expect("create tracking directory");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let mut child = common::rtk_command()
         .args(["read", "-", "--head-lines", "2"])
-        .env(
-            "CLAUDE_CONFIG_DIR",
-            tracking_dir.path().join("no-claude-config"),
-        )
-        .env("RTK_DB_PATH", tracking_dir.path().join("tracking.db"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -161,12 +160,10 @@ fn head_window_finishes_before_fifo_writer_reaches_eof() {
         .custom_flags(libc::O_NONBLOCK)
         .open(&fifo)
         .expect("open held-open FIFO");
-    let child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let child = common::rtk_command()
         .arg("read")
         .arg(&fifo)
         .args(["--head-lines", "2"])
-        .env("CLAUDE_CONFIG_DIR", dir.path().join("no-claude-config"))
-        .env("RTK_DB_PATH", dir.path().join("tracking.db"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -218,7 +215,7 @@ fn rewritten_head_spellings_match_native_on_non_utf8_files() {
     fs::write(&file, b"\xff\xfe bad\nline2\nline3\n").expect("write binary file");
     for flags in ["-2", "-n 2", "--lines 2", "--lines=2", ""] {
         let command = format!("head {flags} {}", file.display());
-        let rewrite = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        let rewrite = common::rtk_command()
             .current_dir(dir.path())
             .env("CLAUDE_CONFIG_DIR", &claude_dir)
             .env("XDG_CONFIG_HOME", &config_dir)
@@ -237,7 +234,7 @@ fn rewritten_head_spellings_match_native_on_non_utf8_files() {
             rewritten.trim(),
             format!("rtk read {} --head-lines {count}", file.display())
         );
-        let actual = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        let actual = common::rtk_command()
             .args(
                 rewritten
                     .trim()

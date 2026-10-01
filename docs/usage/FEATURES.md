@@ -267,6 +267,10 @@ rtk diff <fichier1> <fichier2>
 rtk diff <fichier1>              # Stdin comme second fichier
 ```
 
+Pour comparer deux fichiers : code de sortie **0** si identiques, **1** si differents,
+**2** si un fichier ne peut pas etre lu. Les fichiers non UTF-8 sont compares octet
+par octet ; seuls leurs noms sont affiches lorsqu'ils different.
+
 ---
 
 ### `rtk wc` -- Comptage compact
@@ -441,11 +445,13 @@ Affiche le resume du commit + stat + diff compact.
 
 > **Attention (redirection vers un fichier).** Pour un blob volumineux
 > (`rtk git show HEAD:gros-fichier`), la sortie est fenetree : seul un apercu
-> est affiche, suivi d'un indice `[see remaining: git show 'HEAD:...' | tail -n +N]`.
+> est affiche, suivi d'un indice
+> `[see remaining: rtk proxy git show 'HEAD:...' | tail -n +N]`.
 > Un `rtk git show HEAD:x > fichier` ecrit a la main peut donc tronquer
 > silencieusement le contenu (le code de sortie reste 0). Pour capturer le
-> fichier complet, utilisez `git show` directement, ou suivez l'indice de
-> recuperation.
+> fichier complet, suivez l'indice de recuperation, ou passez par
+> `rtk proxy git show`. Un `git show` nu ne suffit pas quand le hook RTK est
+> actif : il est reecrit en `rtk git show`, qui fenetre a nouveau la sortie.
 
 ---
 
@@ -588,8 +594,12 @@ Showing 10 of 15 pull requests in org/repo   #42 feat: add vitest (open, 2d)
 **Syntaxe :**
 ```bash
 rtk test <commande...>
+rtk test --shell fish '<commande fish>'
 ```
 
+Par défaut, la commande et ses arguments sont exécutés directement, sans
+expansion par un shell. `--shell` accepte une commande complète comme argument
+unique lorsque la syntaxe d'un shell est nécessaire.
 **Exemple :**
 ```bash
 rtk test cargo test
@@ -617,8 +627,11 @@ test utils::test_edge_case ... FAILED
 **Syntaxe :**
 ```bash
 rtk err <commande...>
+rtk err --shell fish '<commande fish>'
 ```
 
+Sans `--shell`, les limites des arguments sont préservées et les jokers,
+variables et opérateurs ne sont pas interprétés par un shell.
 **Exemple :**
 ```bash
 rtk err npm run build
@@ -1030,9 +1043,12 @@ Supprime les barres de progression et le bruit.
 
 ```bash
 rtk summary <commande...>
+rtk summary --shell fish '<commande fish>'
 ```
 
 Utile pour les commandes longues dont la sortie n'a pas de filtre dedie.
+La commande est exécutée directement par défaut ; `--shell` active
+explicitement l'interprétation d'une commande complète par le shell choisi.
 
 ---
 
