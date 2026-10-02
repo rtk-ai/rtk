@@ -227,26 +227,25 @@ pub(crate) fn words<'a>(input: &'a str, tokens: &[Token<'a>]) -> Vec<Word<'a>> {
     found
 }
 
-/// Where the text between `start` and `end` begins and ends once the blanks
-/// around it are left out: from the first of `tokens` in that range that is
-/// not a `Sep` or a `Newline` to the end of the last one. `None` when every
-/// token there is a blank.
+/// The positions in `tokens` of the first and the last that is not a `Sep` or
+/// a `Newline`. `None` when every token is a blank.
+pub(crate) fn content_bounds(tokens: &[Token<'_>]) -> Option<(usize, usize)> {
+    let first = tokens.iter().position(|t| !t.is_blank())?;
+    let last = tokens.iter().rposition(|t| !t.is_blank())?;
+    Some((first, last))
+}
+
+/// Where the text of `tokens` begins and ends once the blanks around it are
+/// left out: from the first token that is not a blank to the end of the last
+/// one. `None` when every token is a blank.
 ///
 /// A command ends where its last word does, and an escaped or quoted blank is
 /// part of a word: `head\ ` names the program `head␠`, so its span ends after
 /// the space. Trimming `$IFS` bytes off the text would drop that space and
-/// name `head`. `start` and `end` must fall on token boundaries.
-pub(crate) fn content_span(
-    tokens: &[Token<'_>],
-    start: usize,
-    end: usize,
-) -> Option<(usize, usize)> {
-    let from = tokens.partition_point(|t| t.offset < start);
-    let to = tokens.partition_point(|t| t.offset < end);
-    let inside = &tokens[from..to];
-    let first = inside.iter().find(|t| !t.is_blank())?;
-    let last = inside.iter().rev().find(|t| !t.is_blank())?;
-    Some((first.offset, last.end()))
+/// name `head`.
+fn content_span(tokens: &[Token<'_>]) -> Option<(usize, usize)> {
+    let (first, last) = content_bounds(tokens)?;
+    Some((tokens[first].offset, tokens[last].end()))
 }
 
 /// `input` without the blanks at either end, as [`content_span`] reads them,
@@ -254,7 +253,7 @@ pub(crate) fn content_span(
 /// a caller that needs both.
 pub(crate) fn tokenize_trimmed(input: &str) -> (&str, Vec<Token<'_>>) {
     let mut tokens = tokenize(input);
-    let Some((from, to)) = content_span(&tokens, 0, input.len()) else {
+    let Some((from, to)) = content_span(&tokens) else {
         return ("", Vec::new());
     };
     tokens.retain(|t| t.offset >= from && t.end() <= to);
@@ -262,13 +261,6 @@ pub(crate) fn tokenize_trimmed(input: &str) -> (&str, Vec<Token<'_>>) {
         tok.offset -= from;
     }
     (&input[from..to], tokens)
-}
-
-/// The first `end` bytes' share of `tokens`: every token that ends by `end`.
-/// When `end` falls on a token boundary, these are the tokens a lex of those
-/// bytes alone returns.
-pub(crate) fn tokens_until<'t, 'a>(tokens: &'t [Token<'a>], end: usize) -> &'t [Token<'a>] {
-    &tokens[..tokens.partition_point(|t| t.end() <= end)]
 }
 
 /// `text`'s runs between `$IFS` bytes joined by one space each, with nothing at
@@ -981,7 +973,7 @@ pub fn strip_quotes(s: &str) -> String {
 /// Turns a word's raw text (quotes/escapes still literal, as `tokenize()`
 /// preserves them) into argv-ready text: quote chars that open/close a span are
 /// stripped, backslash escapes resolved.
-pub(crate) fn resolve_word_text(raw: &str) -> String {
+pub(super) fn resolve_word_text(raw: &str) -> String {
     let bytes = raw.as_bytes();
     let mut result = String::with_capacity(raw.len());
     // Bytes are dropped one at a time and all of them are ASCII, so every run
@@ -1035,9 +1027,15 @@ pub(crate) fn resolve_word_text(raw: &str) -> String {
 /// straight to `Command::new`/exec or compare it against literal words
 /// (`hooks/mod.rs::is_claude_hook_command`, `rtk proxy` arg-splitting).
 pub fn shell_split(input: &str) -> Vec<String> {
-    words(input, &tokenize(input))
-        .into_iter()
-        .map(|w| resolve_word_text(w.text))
+    resolve_words(&words(input, &tokenize(input)))
+}
+
+/// The words with their quotes and escapes resolved, as `shell_split` gives
+/// them for the text they span.
+pub(crate) fn resolve_words(words: &[Word<'_>]) -> Vec<String> {
+    words
+        .iter()
+        .map(|word| resolve_word_text(word.text))
         .collect()
 }
 
@@ -1294,12 +1292,13 @@ mod tests {
         let tokens = tokenize(cmd);
         let pipe_end = cmd.find('|').expect("pipe") + 1;
         let semi = cmd.find(';').expect("semicolon");
+        let start = tokens.partition_point(|t| t.offset < pipe_end);
+        let stop = tokens.partition_point(|t| t.offset < semi);
         assert_eq!(
-            content_span(&tokens, pipe_end, semi).map(|(from, to)| &cmd[from..to]),
+            content_span(&tokens[start..stop]).map(|(from, to)| &cmd[from..to]),
             Some("head\\ ")
         );
-        assert_eq!(content_span(&tokens, semi + 1, semi + 1), None);
-        assert_eq!(tokens_until(&tokens, semi), &tokens[..tokens.len() - 3]);
+        assert_eq!(content_span(&[]), None);
     }
 
     /// The tokens that are not blanks, as `(kind, value)`.
@@ -2034,9 +2033,8 @@ mod tests {
     #[test]
     fn test_shell_split_coalesces_unquoted_glob_next_to_quoted_segment() {
         // An unquoted metacharacter directly adjacent to a quoted segment
-        // (no space between them) must stay one word — the same
-        // token-coalescing gap that split_token_spans needed for golangci-lint,
-        // now exercised through shell_split's output shape (quotes stripped).
+        // (no space between them) stays one word, and shell_split returns it
+        // with the quotes stripped.
         assert_eq!(
             shell_split(r#"echo *.yml"quoted end""#),
             vec!["echo", "*.ymlquoted end"]
