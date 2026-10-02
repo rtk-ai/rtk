@@ -36,13 +36,10 @@ pub fn run(
             .write_all(&window)
             .context("Failed to write line window")?;
         timer.track_bytes(
-            &format!("cat {}", file.display()),
+            &format!("head -{} {}", head, file.display()),
             "rtk read",
-            // The bytes `cat` would have written. Unknowable without reading the file, which is
-            // the whole point of not doing that, so it is taken from the size on disk -- and
-            // for the unbounded sources above there is no size, only a 0 that would book the
-            // window as pure cost. Claim nothing there.
-            regular_file_len(file).unwrap_or(window.len()),
+            // The fast path reads only N lines from the file, so the input is the window itself.
+            window.len(),
             &String::from_utf8_lossy(&window),
         );
         return Ok(());
@@ -59,8 +56,15 @@ pub fn run(
             .lock()
             .write_all(window)
             .context("Failed to write line window")?;
+        let original_cmd = if let Some(head) = head_lines {
+            format!("head -{} {}", head, file.display())
+        } else if let Some(tail) = tail_lines {
+            format!("tail -{} {}", tail, file.display())
+        } else {
+            format!("cat {}", file.display())
+        };
         timer.track(
-            &format!("cat {}", file.display()),
+            &original_cmd,
             "rtk read",
             &String::from_utf8_lossy(&bytes),
             &String::from_utf8_lossy(window),
@@ -121,7 +125,14 @@ pub fn run(
     };
     let shown = never_worse(&raw, &rtk_output);
     print!("{}", shown);
-    timer.track(&format!("cat {}", file.display()), "rtk read", &raw, shown);
+    let original_cmd = if let Some(head) = head_lines {
+        format!("head -{} {}", head, file.display())
+    } else if let Some(tail) = tail_lines {
+        format!("tail -{} {}", tail, file.display())
+    } else {
+        format!("cat {}", file.display())
+    };
+    timer.track(&original_cmd, "rtk read", &raw, shown);
     Ok(())
 }
 
@@ -279,6 +290,7 @@ fn read_head_lines(file: &Path, n: usize) -> Result<Vec<u8>> {
 
 /// `file`'s size on disk, and `None` for anything whose size says nothing about how much it
 /// will produce -- a device node, a FIFO, a socket.
+#[allow(dead_code)]
 fn regular_file_len(file: &Path) -> Option<usize> {
     let meta = fs::metadata(file).ok()?;
     meta.is_file().then_some(meta.len() as usize)
@@ -340,11 +352,15 @@ fn byte_line_window(
 }
 
 #[cfg(test)]
+#[allow(unused_imports)]
 mod tests {
     use super::*;
+    use crate::core::filter::FilterLevel;
     use crate::core::test_isolation;
+    use crate::core::tracking::Tracker;
+    use std::fs;
     use std::io::Write;
-    use tempfile::NamedTempFile;
+    use tempfile::{NamedTempFile, TempDir};
 
     /// `read_head_lines` must agree with `head_window` byte-for-byte on every shape, since it
     /// replaces it on the unfiltered path -- CRLF endings and an unterminated last line
@@ -733,5 +749,53 @@ fn main() {{
             "should warn about duplicate stdin, got stderr: {}",
             stderr
         );
+    }
+
+    /// Regression test for #4366: head/tail --lines tracking should use window size as baseline,
+    /// not the full file size. When `head -5 big.txt` is rewritten to `rtk read --head-lines 5`,
+    /// the tracking baseline should be the 5-line window, not the full file.
+    #[test]
+    fn test_head_tail_tracking_baseline_is_window_not_full_file() -> Result<()> {
+        use crate::core::tracking::Tracker;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new()?;
+        let file = tmp.path().join("big.txt");
+        // Create a file with ~800 bytes (400 lines of "x\n")
+        fs::write(&file, "x\n".repeat(400)).unwrap();
+
+        // Use in-memory tracker to avoid polluting the developer's DB
+        let tracker = Tracker::new_in_memory()?;
+
+        // Test --head-lines 5
+        run(&file, FilterLevel::None, None, Some(5), None, false, 0).unwrap();
+
+        // Verify tracking recorded head baseline, not cat
+        let recent = tracker.get_recent_filtered(1, None).unwrap();
+        let record = &recent[0];
+
+        // The rtk_cmd should contain the rewritten command with --head-lines
+        assert!(
+            record.rtk_cmd.contains("read") && record.rtk_cmd.contains("head"),
+            "rtk_cmd should contain 'read' and 'head', got: {}",
+            record.rtk_cmd
+        );
+
+        // Saved tokens should be near zero (no real savings for head/tail -
+        // input and output are the same window)
+        assert!(
+            record.saved_tokens < 100,
+            "saved_tokens should be near 0, got {}",
+            record.saved_tokens
+        );
+
+        // The savings percentage should also be near 0
+        assert!(
+            record.savings_pct < 1.0,
+            "savings_pct should be near 0%, got {}",
+            record.savings_pct
+        );
+
+        Ok(())
     }
 }

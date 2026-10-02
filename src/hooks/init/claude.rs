@@ -52,21 +52,30 @@ fn run_claude_md_mode_with(
 
     let action = write_rtk_block(&path, block, "rtk instructions", recovery_cmd, ctx)?;
 
+    // Install OpenCode plugin if requested, regardless of whether the block changed.
+    // This must happen before the Unchanged early return so that --opencode works
+    // even when the CLAUDE.md block is already up to date.
+    if global && install_opencode {
+        let opencode_plugin_path = prepare_opencode_plugin_path()?;
+        ensure_opencode_plugin_installed(&opencode_plugin_path, ctx)?;
+        if !dry_run {
+            println!(
+                "[ok] OpenCode plugin installed: {}",
+                opencode_plugin_path.display()
+            );
+        }
+    }
+
     if matches!(action, RtkBlockUpsert::Unchanged) {
+        if global && !dry_run {
+            println!("   Claude Code will now use rtk in all sessions");
+        } else if !dry_run {
+            println!("   Claude Code will use rtk in this project");
+        }
         return Ok(());
     }
 
     if global {
-        if install_opencode {
-            let opencode_plugin_path = prepare_opencode_plugin_path()?;
-            ensure_opencode_plugin_installed(&opencode_plugin_path, ctx)?;
-            if !dry_run {
-                println!(
-                    "[ok] OpenCode plugin installed: {}",
-                    opencode_plugin_path.display()
-                );
-            }
-        }
         if !dry_run {
             println!("   Claude Code will now use rtk in all sessions");
         }
@@ -199,6 +208,11 @@ fn patch_settings_json_command(
         verbose, dry_run, ..
     } = ctx;
     let claude_dir = resolve_claude_dir()?;
+    // Ensure the config directory exists (fixes #2519, #4046 Windows regression)
+    // Only create in non-dry-run mode; dry-run must not create directories.
+    if !dry_run {
+        fs::create_dir_all(&claude_dir)?;
+    }
     let settings_path = claude_dir.join(SETTINGS_JSON);
 
     let mut root = read_json_file(&settings_path)?.unwrap_or_else(|| serde_json::json!({}));
@@ -325,6 +339,11 @@ pub(super) fn run_default_mode(
     }
 
     let claude_dir = resolve_claude_dir()?;
+    // Ensure the config directory exists (fixes #2519, #4046 Windows regression)
+    // Only create in non-dry-run mode; dry-run must not create directories.
+    if !dry_run {
+        fs::create_dir_all(&claude_dir)?;
+    }
     let rtk_md_path = claude_dir.join(RTK_MD);
     let claude_md_path = claude_dir.join(CLAUDE_MD);
 

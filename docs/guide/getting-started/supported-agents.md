@@ -130,7 +130,8 @@ rtk init --global --gemini
 rtk init --global --opencode
 ```
 
-Creates `~/.config/opencode/plugins/rtk.ts`. Uses the `tool.execute.before` hook.
+Installs the Claude Code setup and creates `~/.config/opencode/plugins/rtk.ts`.
+The plugin uses the `tool.execute.before` hook.
 
 ### Pi
 
