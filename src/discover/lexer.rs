@@ -569,7 +569,6 @@ pub(crate) struct Policy {
     /// `&`, `(` and `)` end a segment.
     group_boundaries: bool,
     redirects: RedirectPolicy,
-    stop_at_pipe: bool,
 }
 
 impl Policy {
@@ -578,7 +577,6 @@ impl Policy {
         newline: NewlineMode::Conservative,
         group_boundaries: true,
         redirects: RedirectPolicy::Excise,
-        stop_at_pipe: false,
     };
 
     /// Classification only, never a security decision.
@@ -586,15 +584,7 @@ impl Policy {
         newline: NewlineMode::None,
         group_boundaries: false,
         redirects: RedirectPolicy::Keep,
-        stop_at_pipe: false,
     };
-
-    pub(crate) const fn stopping_at_pipe(self, stop_at_pipe: bool) -> Self {
-        Self {
-            stop_at_pipe,
-            ..self
-        }
-    }
 }
 
 /// One command's text within a compound command, with the byte range it came
@@ -604,9 +594,20 @@ pub(crate) struct Segment<'a> {
     pub(crate) text: &'a str,
     pub(crate) start: usize,
     pub(crate) end: usize,
+    /// Whether a `|` follows this command, so what it writes goes to another
+    /// command instead of to the person. Its output is produced in full and
+    /// then consumed, which is why filtering it can save tokens that never
+    /// reach anyone.
+    pub(crate) feeds_pipe: bool,
 }
 
-fn push_segment<'a>(out: &mut Vec<Segment<'a>>, input: &'a str, start: usize, end: usize) {
+fn push_segment<'a>(
+    out: &mut Vec<Segment<'a>>,
+    input: &'a str,
+    start: usize,
+    end: usize,
+    feeds_pipe: bool,
+) {
     let raw = &input[start..end];
     let text = raw.trim();
     if text.is_empty() {
@@ -617,6 +618,7 @@ fn push_segment<'a>(out: &mut Vec<Segment<'a>>, input: &'a str, start: usize, en
         text,
         start: start + lead,
         end: start + lead + text.len(),
+        feeds_pipe,
     });
 }
 
@@ -648,10 +650,13 @@ pub(crate) fn segment(cmd: &str, policy: Policy) -> Vec<Segment<'_>> {
 
         if is_boundary {
             let end = seg_end.take().unwrap_or(tok.offset);
-            push_segment(&mut out, trimmed, seg_start, end);
-            if policy.stop_at_pipe && matches!(tok.kind, TokenKind::Pipe(_)) {
-                return out;
-            }
+            push_segment(
+                &mut out,
+                trimmed,
+                seg_start,
+                end,
+                matches!(tok.kind, TokenKind::Pipe(_)),
+            );
             seg_start = tok.offset + tok.value.len();
             seg_has_text = false;
         } else if tok.kind == TokenKind::Redirect && policy.redirects == RedirectPolicy::Excise {
@@ -693,29 +698,29 @@ pub(crate) fn segment(cmd: &str, policy: Policy) -> Vec<Segment<'_>> {
     }
 
     let end = seg_end.unwrap_or(trimmed.len());
-    push_segment(&mut out, trimmed, seg_start, end);
+    push_segment(&mut out, trimmed, seg_start, end, false);
     out
 }
 
 /// Segments `cmd` for the **permission gate** (`permissions.rs::check_command_with_rules`):
 /// every segment this returns is independently checked against deny/ask/allow
 /// rules, so this is deliberately the most paranoid of the three compound-command
-/// segmenters in this codebase — see [`split_on_operators`] (analytics/discovery
+/// segmenters in this codebase — see [`split_for_classify`] (analytics/discovery
 /// classification) and `registry.rs::rewrite_compound`'s inline token walk (actual
 /// rewrite) for the other two, which intentionally segment the same kind of input
 /// differently:
 ///
-/// | | here (permission gate) | [`split_on_operators`] (analytics) | `rewrite_compound` (rewrite) |
+/// | | here (permission gate) | [`split_for_classify`] (analytics) | `rewrite_compound` (rewrite) |
 /// |---|---|---|---|
 /// | `&&` / `\|\|` / `;` | splits | splits | splits |
-/// | `\|` | always splits | stops at first `\|` | pipeline handled specially |
+/// | `\|` | always splits | always splits | pipeline handled specially |
 /// | background `&` | splits (Shellism boundary) | does not split | splits |
 /// | `( ... )` grouping | splits (Shellism boundary) | does not split | does not split standalone |
 /// | trailing redirect | truncates the segment | kept | kept (rewritten output preserves it) |
 /// | leading redirect | stepped over, command kept | kept | kept |
 /// | lone `\r` (no following `\n`) | splits | does not split | does not split |
 ///
-/// Like [`split_on_operators`] but also breaks on newline, background `&`,
+/// Like [`split_for_classify`] but also breaks on newline, background `&`,
 /// subshell `( ... )`, and a lone `\r` (`NewlineMode::Conservative`), and
 /// truncates each segment at the first redirect that follows command text —
 /// deliberately conservative so a hidden command can't evade the gate by
@@ -728,20 +733,15 @@ pub fn split_for_permissions(cmd: &str) -> Vec<&str> {
         .collect()
 }
 
-/// Split a shell command on operators (`&&`, `||`, `;`) and optionally pipes
-/// (`|`), quote-aware. `stop_at_pipe: true` returns only segments before the
-/// first `|` (rewrite's left-side-only case); `false` splits through pipes
-/// too (permission checking, every segment validated).
+/// Split a shell command on operators (`&&`, `||`, `;`) and pipes (`|`),
+/// quote-aware.
 ///
 /// For classification only — unlike [`split_for_permissions`] this never
 /// splits on background `&`/`( ... )` or truncates at a redirect (see that
 /// function's comparison table), so it must not be repurposed for
 /// permission/security decisions.
-pub fn split_on_operators(cmd: &str, stop_at_pipe: bool) -> Vec<&str> {
-    segment(cmd, Policy::CLASSIFY.stopping_at_pipe(stop_at_pipe))
-        .into_iter()
-        .map(|s| s.text)
-        .collect()
+pub(crate) fn split_for_classify(cmd: &str) -> Vec<Segment<'_>> {
+    segment(cmd, Policy::CLASSIFY)
 }
 
 #[cfg(test)]
@@ -1600,33 +1600,31 @@ mod tests {
         assert_eq!(strip_quotes("\"hello'"), "\"hello'");
     }
 
-    #[test]
-    fn test_split_on_operators_stop_at_pipe() {
-        assert_eq!(split_on_operators("a | b | c", true), vec!["a"]);
-        assert_eq!(split_on_operators("a && b | c", true), vec!["a", "b"]);
+    fn classify_texts(cmd: &str) -> Vec<&str> {
+        split_for_classify(cmd)
+            .into_iter()
+            .map(|s| s.text)
+            .collect()
     }
 
     #[test]
-    fn test_split_on_operators_through_pipes() {
-        assert_eq!(split_on_operators("a | b | c", false), vec!["a", "b", "c"]);
-        assert_eq!(
-            split_on_operators("a && b | c ; d", false),
-            vec!["a", "b", "c", "d"]
-        );
+    fn test_split_for_classify_through_pipes() {
+        assert_eq!(classify_texts("a | b | c"), vec!["a", "b", "c"]);
+        assert_eq!(classify_texts("a && b | c ; d"), vec!["a", "b", "c", "d"]);
     }
 
     #[test]
-    fn test_split_on_operators_quoted() {
+    fn test_split_for_classify_quoted() {
         assert_eq!(
-            split_on_operators(r#"echo "a && b" && cargo test"#, false),
+            classify_texts(r#"echo "a && b" && cargo test"#),
             vec![r#"echo "a && b""#, "cargo test"]
         );
     }
 
     #[test]
-    fn test_split_on_operators_empty() {
-        assert!(split_on_operators("", false).is_empty());
-        assert!(split_on_operators("  ", true).is_empty());
+    fn test_split_for_classify_empty() {
+        assert!(classify_texts("").is_empty());
+        assert!(classify_texts("  ").is_empty());
     }
 
     // --- contains_unattestable_construct (security) -------------------------
@@ -1791,13 +1789,11 @@ mod tests {
                 legacy_segmenters::split_for_permissions_legacy(cmd),
                 "permission segmentation changed for {cmd:?}"
             );
-            for stop_at_pipe in [true, false] {
-                assert_eq!(
-                    split_on_operators(cmd, stop_at_pipe),
-                    legacy_segmenters::split_on_operators_legacy(cmd, stop_at_pipe),
-                    "classify segmentation changed for {cmd:?} (stop_at_pipe={stop_at_pipe})"
-                );
-            }
+            assert_eq!(
+                classify_texts(cmd),
+                legacy_segmenters::split_on_operators_legacy(cmd, false),
+                "classify segmentation changed for {cmd:?}"
+            );
         }
     }
 
