@@ -4728,9 +4728,7 @@ mod tests {
         // the 8 KiB head plus a few-token recovery hint is the savings floor. (An earlier
         // revision introduced a synthetic ~107 KB fixture to chase a stale 60% figure
         // that only `.claude/rules/cli-testing.md` still cites; that churn is reverted.)
-        fn count_tokens(text: &str) -> usize {
-            text.split_whitespace().count()
-        }
+        use crate::core::tracking::estimate_tokens as count_tokens;
         let raw = include_str!("../../../tests/fixtures/git/blob_large.txt");
         assert!(raw.len() > MAX_BLOB_BYTES.0);
         let (head, _remaining, _offset) =
@@ -6213,9 +6211,7 @@ A  added.rs
 
     #[test]
     fn test_filter_log_output_token_savings() {
-        fn count_tokens(text: &str) -> usize {
-            text.split_whitespace().count()
-        }
+        use crate::core::tracking::estimate_tokens as count_tokens;
         // Simulate verbose git log output (default format with full metadata)
         let input = (0..20)
             .map(|i| {
@@ -6835,7 +6831,7 @@ To https://github.com/foo/bar.git
    abc1234..def5678  master -> master
 ";
         let result = run_push_filter(input, 0);
-        let count_tokens = |s: &str| s.split_whitespace().count();
+        use crate::core::tracking::estimate_tokens as count_tokens;
         let input_tokens = count_tokens(input);
         let output_tokens = count_tokens(&result);
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);

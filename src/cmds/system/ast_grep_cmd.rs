@@ -314,9 +314,7 @@ pub fn run(args: &[String]) -> Result<i32> {
 mod tests {
     use super::*;
 
-    fn count_tokens(s: &str) -> usize {
-        s.split_whitespace().count()
-    }
+    use crate::core::tracking::estimate_tokens as count_tokens;
 
     fn filtered(raw: &str, max_per_file: usize, max_total: usize) -> String {
         filter_ast_grep(raw, max_per_file, max_total).text

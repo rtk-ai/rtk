@@ -402,9 +402,7 @@ fn extract_branch_name(line: &str) -> String {
 mod tests {
     use super::*;
 
-    fn count_tokens(text: &str) -> usize {
-        text.split_whitespace().count()
-    }
+    use crate::core::tracking::estimate_tokens as count_tokens;
 
     #[test]
     fn test_filter_gt_log_exact_format() {

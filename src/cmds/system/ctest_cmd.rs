@@ -1097,9 +1097,7 @@ Total Test time (real) =   0.01 sec
         }
     }
 
-    fn count_tokens(s: &str) -> usize {
-        s.split_whitespace().count()
-    }
+    use crate::core::tracking::estimate_tokens as count_tokens;
 
     fn savings_pct(input: &str, output: &str) -> f64 {
         100.0 - (count_tokens(output) as f64 / count_tokens(input) as f64 * 100.0)
