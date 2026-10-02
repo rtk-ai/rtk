@@ -189,6 +189,18 @@ pub fn run(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
         "s3" if !args.is_empty() && (args[0] == "sync" || args[0] == "cp") => {
             run_s3_transfer(&args[0], &args[1..], verbose)
         }
+        "cloudwatch"
+            if !args.is_empty()
+                && args[0] == "get-metric-statistics"
+                && !has_explicit_output(&args[1..]) =>
+        {
+            run_aws_filtered(
+                &["cloudwatch", "get-metric-statistics"],
+                &args[1..],
+                verbose,
+                filter_cloudwatch_metric_statistics,
+            )
+        }
         "secretsmanager" if !args.is_empty() && args[0] == "get-secret-value" => run_aws_filtered(
             &["secretsmanager", "get-secret-value"],
             &args[1..],
@@ -214,6 +226,13 @@ fn is_structured_operation(args: &[String]) -> bool {
         || op == "scan"
         || op == "query"
         || op == "receive-message"
+}
+
+/// True when the user picked an output format; the filter is then skipped so the
+/// requested format reaches them (`run_aws_json` would otherwise replace it with JSON).
+fn has_explicit_output(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| a == "--output" || a.starts_with("--output="))
 }
 
 /// Generic strategy: force --output json for structured ops, compress via json_cmd compact (values preserved)
@@ -1497,6 +1516,148 @@ fn filter_s3_transfer(output: &str) -> FilterResult {
     }
 
     FilterResult::new(result_lines.join("\n"))
+}
+
+/// Datapoints shown at each end of the series; the middle is replaced by an overflow line.
+const METRIC_EDGE_POINTS: usize = 10;
+const METRIC_STATISTICS: [&str; 5] = ["Average", "Sum", "Minimum", "Maximum", "SampleCount"];
+
+fn filter_cloudwatch_metric_statistics(json_str: &str) -> Option<FilterResult> {
+    let v: Value = serde_json::from_str(json_str).ok()?;
+    let label = v["Label"].as_str()?;
+    let mut points: Vec<&Value> = v["Datapoints"].as_array()?.iter().collect();
+    if points.is_empty() {
+        return Some(FilterResult::new(format!("{} 0 datapoints", label)));
+    }
+    // CloudWatch returns datapoints unordered; timestamps share one ISO format, so text order is time order.
+    points.sort_by(|a, b| {
+        a["Timestamp"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["Timestamp"].as_str().unwrap_or(""))
+    });
+
+    let stats: Vec<&str> = METRIC_STATISTICS
+        .iter()
+        .copied()
+        .filter(|s| points.iter().any(|p| p[*s].is_number()))
+        .collect();
+    let mut extended: Vec<String> = points
+        .iter()
+        .filter_map(|p| p["ExtendedStatistics"].as_object())
+        .flat_map(|m| m.keys().cloned())
+        .collect();
+    extended.sort();
+    extended.dedup();
+
+    let mut units: Vec<&str> = points.iter().filter_map(|p| p["Unit"].as_str()).collect();
+    units.sort_unstable();
+    units.dedup();
+    let single_unit = if units.len() == 1 {
+        Some(units[0])
+    } else {
+        None
+    };
+
+    let total = points.len();
+    let first = points[0]["Timestamp"].as_str().unwrap_or("?");
+    let last = points[total - 1]["Timestamp"].as_str().unwrap_or("?");
+    let mut lines = vec![match single_unit {
+        Some(unit) => format!(
+            "{} ({}) {} datapoints {} .. {}",
+            label, unit, total, first, last
+        ),
+        None => format!("{} {} datapoints {} .. {}", label, total, first, last),
+    }];
+
+    for stat in &stats {
+        let values: Vec<f64> = points.iter().filter_map(|p| p[*stat].as_f64()).collect();
+        lines.push(summary_line(
+            stat,
+            &values,
+            matches!(*stat, "Sum" | "SampleCount"),
+        ));
+    }
+    for stat in &extended {
+        let values: Vec<f64> = points
+            .iter()
+            .filter_map(|p| p["ExtendedStatistics"][stat.as_str()].as_f64())
+            .collect();
+        lines.push(summary_line(stat, &values, false));
+    }
+
+    let row = |p: &Value| {
+        let mut line = p["Timestamp"].as_str().unwrap_or("?").to_string();
+        for stat in &stats {
+            if let Some(x) = p[*stat].as_f64() {
+                line.push_str(&format!(" {}={}", stat, format_metric_value(x)));
+            }
+        }
+        for stat in &extended {
+            if let Some(x) = p["ExtendedStatistics"][stat.as_str()].as_f64() {
+                line.push_str(&format!(" {}={}", stat, format_metric_value(x)));
+            }
+        }
+        if single_unit.is_none()
+            && let Some(unit) = p["Unit"].as_str()
+        {
+            line.push_str(&format!(" {}", unit));
+        }
+        line
+    };
+
+    let truncated = total > METRIC_EDGE_POINTS * 2;
+    if truncated {
+        lines.extend(points[..METRIC_EDGE_POINTS].iter().map(|p| row(p)));
+        lines.push(format!(
+            "… +{} more datapoints",
+            total - METRIC_EDGE_POINTS * 2
+        ));
+        lines.extend(points[total - METRIC_EDGE_POINTS..].iter().map(|p| row(p)));
+    } else {
+        lines.extend(points.iter().map(|p| row(p)));
+    }
+
+    let text = lines.join("\n");
+    Some(if truncated {
+        FilterResult::truncated(text)
+    } else {
+        FilterResult::new(text)
+    })
+}
+
+/// min/max of one statistic across the period; `with_total` only for additive statistics,
+/// since a total of per-period averages or maxima has no meaning.
+fn summary_line(stat: &str, values: &[f64], with_total: bool) -> String {
+    let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let mut line = format!(
+        "{} min={} max={}",
+        stat,
+        format_metric_value(min),
+        format_metric_value(max)
+    );
+    if with_total {
+        line.push_str(&format!(
+            " total={}",
+            format_metric_value(values.iter().sum())
+        ));
+    }
+    line
+}
+
+fn format_metric_value(x: f64) -> String {
+    if x.fract() == 0.0 && x.abs() < 1e15 {
+        return format!("{}", x as i64);
+    }
+    let rounded = format!("{:.4}", x);
+    let trimmed = rounded.trim_end_matches('0').trim_end_matches('.');
+    if trimmed == "0" || trimmed == "-0" {
+        // Keep tiny non-zero values visible instead of rounding them to 0.
+        format!("{:.3e}", x)
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn filter_secrets_get(json_str: &str) -> Option<FilterResult> {
@@ -2787,6 +2948,98 @@ upload: file10.txt to s3://bucket/file10.txt
         assert!(
             output.contains("isMpaEnabled"),
             "object keys must be preserved, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_filter_cloudwatch_metric_statistics_fixture() {
+        let input =
+            include_str!("../../../tests/fixtures/aws_cloudwatch_get_metric_statistics.json");
+        let result = filter_cloudwatch_metric_statistics(input).unwrap();
+        let lines: Vec<&str> = result.text.lines().collect();
+
+        assert!(result.truncated);
+        assert!(lines[0].starts_with("CPUUtilization (Percent) 100 datapoints "));
+        assert!(lines[1].starts_with("Average min="));
+        assert!(lines[2].starts_with("Maximum min="));
+        assert!(
+            !result.text.contains("total="),
+            "no total for Average/Maximum"
+        );
+        assert_eq!(lines[3 + METRIC_EDGE_POINTS], "… +80 more datapoints");
+
+        let rows: Vec<&str> = lines[3..]
+            .iter()
+            .copied()
+            .filter(|l| !l.starts_with('…'))
+            .collect();
+        let mut sorted = rows.clone();
+        sorted.sort();
+        assert_eq!(rows, sorted, "datapoints must be in time order");
+    }
+
+    #[test]
+    fn test_snapshot_cloudwatch_metric_statistics_format() {
+        let json = r#"{"Label": "Invocations", "Datapoints": [
+            {"Timestamp": "2026-01-01T00:05:00+00:00", "Sum": 12.0, "SampleCount": 3.0, "Unit": "Count"},
+            {"Timestamp": "2026-01-01T00:00:00+00:00", "Sum": 0.5, "SampleCount": 1.0, "Unit": "Count"}
+        ]}"#;
+        let result = filter_cloudwatch_metric_statistics(json).unwrap();
+        assert_eq!(
+            result.text,
+            "Invocations (Count) 2 datapoints 2026-01-01T00:00:00+00:00 .. 2026-01-01T00:05:00+00:00\n\
+             Sum min=0.5 max=12 total=12.5\n\
+             SampleCount min=1 max=3 total=4\n\
+             2026-01-01T00:00:00+00:00 Sum=0.5 SampleCount=1\n\
+             2026-01-01T00:05:00+00:00 Sum=12 SampleCount=3"
+        );
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn test_filter_cloudwatch_metric_statistics_extended_and_mixed_units() {
+        let json = r#"{"Label": "Latency", "Datapoints": [
+            {"Timestamp": "2026-01-01T00:00:00+00:00", "ExtendedStatistics": {"p99": 0.25}, "Unit": "Seconds"},
+            {"Timestamp": "2026-01-01T00:01:00+00:00", "ExtendedStatistics": {"p99": 0.00001}, "Unit": "Milliseconds"}
+        ]}"#;
+        let result = filter_cloudwatch_metric_statistics(json).unwrap();
+        let lines: Vec<&str> = result.text.lines().collect();
+        assert_eq!(
+            lines[0],
+            "Latency 2 datapoints 2026-01-01T00:00:00+00:00 .. 2026-01-01T00:01:00+00:00"
+        );
+        assert_eq!(lines[1], "p99 min=1.000e-5 max=0.25");
+        assert_eq!(lines[2], "2026-01-01T00:00:00+00:00 p99=0.25 Seconds");
+        assert_eq!(
+            lines[3],
+            "2026-01-01T00:01:00+00:00 p99=1.000e-5 Milliseconds"
+        );
+    }
+
+    #[test]
+    fn test_filter_cloudwatch_metric_statistics_empty() {
+        let result =
+            filter_cloudwatch_metric_statistics(r#"{"Label": "CPUUtilization", "Datapoints": []}"#)
+                .unwrap();
+        assert_eq!(result.text, "CPUUtilization 0 datapoints");
+    }
+
+    #[test]
+    fn test_filter_cloudwatch_metric_statistics_query_shaped_output_passes_through() {
+        assert!(filter_cloudwatch_metric_statistics(r#"[1.0, 2.0]"#).is_none());
+        assert!(filter_cloudwatch_metric_statistics("not json").is_none());
+    }
+
+    #[test]
+    fn test_filter_cloudwatch_metric_statistics_token_savings() {
+        let input =
+            include_str!("../../../tests/fixtures/aws_cloudwatch_get_metric_statistics.json");
+        let output = filter_cloudwatch_metric_statistics(input).unwrap().text;
+        let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "expected >=60% savings, got {:.1}%",
+            savings
         );
     }
 }
