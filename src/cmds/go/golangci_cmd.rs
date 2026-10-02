@@ -1,6 +1,6 @@
 //! Filters golangci-lint output, grouping issues by rule.
 
-use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
+use crate::core::arg_tokenizer::{self, Flag, Grammar, TokenKind, ValueSpec};
 use crate::core::args_utils;
 use crate::core::config;
 use crate::core::runner;
@@ -29,7 +29,14 @@ fn is_subcommand(name: &str) -> bool {
     )
 }
 
-/// golangci-lint's *global* grammar: the value-taking flags accepted before a subcommand. `-c`
+/// `--flag=v` or `--flag v`: every long flag below.
+const VALUE: ValueSpec = ValueSpec::value();
+
+/// Like [`VALUE`], but the short spelling takes a separate value only when it is the whole
+/// argument: every short flag below.
+const SOLO: ValueSpec = ValueSpec::solo_only();
+
+/// golangci-lint's *global* flags: the value-taking flags accepted before a subcommand. `-c`
 /// is `--config`'s shorthand; this list is wider than `--help`'s "Global Flags" section, which
 /// omits several of these.
 ///
@@ -37,69 +44,58 @@ fn is_subcommand(name: &str) -> bool {
 /// inside a cluster (`golangci-lint -vc foo.yml run` is "unknown shorthand flag: 'c' in -c",
 /// verified against 2.13.1). Reading one as value-taking there swallowed the next token --
 /// `-Egosec run` lost `run`, and with it the subcommand detection this list exists for.
-fn global_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    match kind {
-        TokenKind::Long => matches!(
-            name,
-            "color" | "config" | "cpu-profile-path" | "mem-profile-path" | "trace-path"
-        )
-        .then(ValueSpec::value),
-        TokenKind::Short => (name == "c").then(ValueSpec::solo_only),
-        _ => None,
-    }
-}
+const GLOBAL_FLAGS: &[Flag] = &[
+    Flag::long("color").takes(VALUE),
+    Flag::pair("c", "config").takes(SOLO),
+    Flag::long("cpu-profile-path").takes(VALUE),
+    Flag::long("mem-profile-path").takes(VALUE),
+    Flag::long("trace-path").takes(VALUE),
+];
 
-/// The `run` subcommand's grammar -- a wider list than [`global_takes_value`], which is scoped
-/// to the flags valid before a subcommand. Missing an entry here risks a value like
+/// golangci-lint's grammar before a subcommand.
+const GLOBAL_GRAMMAR: Grammar = Grammar::posix(&[GLOBAL_FLAGS]);
+
+/// The `run` subcommand's own flags -- a wider list than [`GLOBAL_FLAGS`], which is scoped to
+/// the flags valid before a subcommand. Missing an entry here risks a value like
 /// `--path-prefix --out-format` tokenizing as its own flag and being misdetected by
 /// [`has_output_flag`].
-fn run_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    // The one exception to one-grammar-per-command (`src/core/README.md`), earned by a strict
-    // subset: every flag valid before `run` stays valid after it. Grammars that merely
-    // intersect get a table each instead.
-    if let Some(spec) = global_takes_value(kind, name) {
-        return Some(spec);
-    }
-    if OUTPUT_PATH_FLAGS.contains(&name) && kind == TokenKind::Long {
-        return Some(ValueSpec::value());
-    }
-    match kind {
-        TokenKind::Long => matches!(
-            name,
-            "build-tags"
-                | "concurrency"
-                | "default"
-                | "disable"
-                | "enable"
-                | "enable-only"
-                | "issues-exit-code"
-                | "max-issues-per-linter"
-                | "max-same-issues"
-                | "modules-download-mode"
-                | "new-from-merge-base"
-                | "new-from-patch"
-                | "new-from-rev"
-                // v1-only legacy flag (golangci-lint 2.x's --help no longer lists it, replaced
-                // by output.json.path/etc.), kept for v1 installs since has_output_flag checks
-                // for it explicitly.
-                | "out-format"
-                | "path-mode"
-                | "path-prefix"
-                // Deprecated in 2.x but still value-taking there ("flag needs an argument"),
-                // and current in the 1.x installs run_filtered still supports.
-                | "deadline"
-                | "exclude"
-                | "presets"
-                | "skip-dirs"
-                | "skip-files"
-                | "timeout"
-        )
-        .then(ValueSpec::value),
-        // `-e`/`-p` are 1.x's --exclude/--presets; 2.x rejects them outright either way.
-        TokenKind::Short => matches!(name, "D" | "E" | "e" | "j" | "p").then(ValueSpec::solo_only),
-        _ => None,
-    }
-}
+const RUN_FLAGS: &[Flag] = &[
+    Flag::long("build-tags").takes(VALUE),
+    Flag::pair("j", "concurrency").takes(SOLO),
+    Flag::long("default").takes(VALUE),
+    Flag::pair("D", "disable").takes(SOLO),
+    Flag::pair("E", "enable").takes(SOLO),
+    Flag::long("enable-only").takes(VALUE),
+    Flag::long("issues-exit-code").takes(VALUE),
+    Flag::long("max-issues-per-linter").takes(VALUE),
+    Flag::long("max-same-issues").takes(VALUE),
+    Flag::long("modules-download-mode").takes(VALUE),
+    Flag::long("new-from-merge-base").takes(VALUE),
+    Flag::long("new-from-patch").takes(VALUE),
+    Flag::long("new-from-rev").takes(VALUE),
+    OUT_FORMAT,
+    Flag::long("path-mode").takes(VALUE),
+    Flag::long("path-prefix").takes(VALUE),
+    // Deprecated in 2.x but still value-taking there ("flag needs an argument"), and current in
+    // the 1.x installs run_filtered still supports.
+    Flag::long("deadline").takes(VALUE),
+    // `-e`/`-p` are 1.x's --exclude/--presets; 2.x rejects them outright either way.
+    Flag::pair("e", "exclude").takes(SOLO),
+    Flag::pair("p", "presets").takes(SOLO),
+    Flag::long("skip-dirs").takes(VALUE),
+    Flag::long("skip-files").takes(VALUE),
+    Flag::long("timeout").takes(VALUE),
+];
+
+/// v1-only legacy flag (golangci-lint 2.x's --help no longer lists it, replaced by
+/// output.json.path/etc.), kept for v1 installs since [`has_output_flag`] checks for it.
+const OUT_FORMAT: Flag = Flag::long("out-format").takes(VALUE);
+
+/// The `run` subcommand's grammar. Every flag valid before `run` stays valid after it, so `run`
+/// lists the global table next to its own, the way any subcommand after which its parent's
+/// flags stay valid shares them (`src/core/README.md`). Grammars that merely intersect get a
+/// table each.
+const RUN_GRAMMAR: Grammar = Grammar::posix(&[GLOBAL_FLAGS, OUTPUT_PATH_FLAGS, RUN_FLAGS]);
 
 #[derive(Debug, PartialEq, Eq)]
 struct RunInvocation {
@@ -257,7 +253,7 @@ fn classify_invocation(args: &[String]) -> Invocation {
 /// entirely at `--` or at a non-flag token that isn't a recognized subcommand — mirroring
 /// golangci-lint's own arg parsing just enough to locate `run`, not fully replicate it.
 fn find_subcommand_index(args: &[String]) -> Option<usize> {
-    let tokens = arg_tokenizer::tokenize_grammar(args, &global_takes_value, Dialect::Posix);
+    let tokens = arg_tokenizer::tokenize_grammar(args, &GLOBAL_GRAMMAR);
 
     for token in &tokens {
         match token.kind {
@@ -294,19 +290,22 @@ fn build_filtered_args(invocation: &RunInvocation, version: u32) -> Vec<String> 
 
 /// The nine `--output.<format>.path` sinks golangci-lint 2.x accepts, enumerated rather than
 /// pattern-matched: `starts_with("output.")` would also swallow spellings golangci rejects.
-/// One list, read by both the value-taking predicate and the collision check, so they cannot
+/// One table, listed by [`RUN_GRAMMAR`] and asked about by the collision check, so the two cannot
 /// drift apart.
-const OUTPUT_PATH_FLAGS: &[&str] = &[
-    "output.checkstyle.path",
-    "output.code-climate.path",
-    "output.html.path",
-    "output.json.path",
-    "output.junit-xml.path",
-    "output.sarif.path",
-    "output.tab.path",
-    "output.teamcity.path",
-    "output.text.path",
+const OUTPUT_PATH_FLAGS: &[Flag] = &[
+    Flag::long("output.checkstyle.path").takes(VALUE),
+    Flag::long("output.code-climate.path").takes(VALUE),
+    Flag::long("output.html.path").takes(VALUE),
+    OUTPUT_JSON_PATH,
+    Flag::long("output.junit-xml.path").takes(VALUE),
+    Flag::long("output.sarif.path").takes(VALUE),
+    Flag::long("output.tab.path").takes(VALUE),
+    Flag::long("output.teamcity.path").takes(VALUE),
+    Flag::long("output.text.path").takes(VALUE),
 ];
+
+/// The json sink, the one RTK itself injects.
+const OUTPUT_JSON_PATH: Flag = Flag::long("output.json.path").takes(VALUE);
 
 /// True when RTK's own `--output.json.path stdout` would collide with what the user asked for:
 /// they already configured the json sink (whatever its destination -- golangci takes one path
@@ -315,18 +314,11 @@ const OUTPUT_PATH_FLAGS: &[&str] = &[
 /// other format takes nothing away from stdout, so RTK still injects there or it is left with
 /// nothing to parse.
 fn has_output_flag(args: &[String]) -> bool {
-    let tokens = arg_tokenizer::tokenize_grammar(args, &run_takes_value, Dialect::Posix);
+    let tokens = arg_tokenizer::tokenize_grammar(args, &RUN_GRAMMAR);
     tokens.iter().any(|t| {
-        if t.kind != TokenKind::Long {
-            return false;
-        }
-        match t.text {
-            "out-format" | "output.json.path" => true,
-            other => {
-                OUTPUT_PATH_FLAGS.contains(&other)
-                    && t.value(&tokens).is_none_or(|dest| dest == "stdout")
-            }
-        }
+        t.is_one_of(&[OUT_FORMAT, OUTPUT_JSON_PATH])
+            || (t.is_one_of(OUTPUT_PATH_FLAGS)
+                && t.value(&tokens).is_none_or(|dest| dest == "stdout"))
     })
 }
 
@@ -467,6 +459,7 @@ fn compact_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::arg_tokenizer::assert_takes_value_table;
     use crate::core::tracking::estimate_tokens;
 
     #[test]
@@ -785,11 +778,11 @@ mod tests {
     }
 
     #[test]
-    fn test_golangci_run_takes_value_links_out_format_separate_token_value() {
+    fn test_golangci_run_grammar_links_out_format_separate_token_value() {
         // --out-format is a v1-only legacy flag; its value must still link, not tokenize as an
         // unlinked Positional.
         let args = vec!["--out-format".to_string(), "json".to_string()];
-        let tokens = arg_tokenizer::tokenize_grammar(&args, &run_takes_value, Dialect::Posix);
+        let tokens = arg_tokenizer::tokenize_grammar(&args, &RUN_GRAMMAR);
         assert!(
             tokens[0].linked.is_some(),
             "\"json\" must link to --out-format"
@@ -993,5 +986,85 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_global_grammar_matches_its_table() {
+        assert_takes_value_table(
+            &GLOBAL_GRAMMAR,
+            &[
+                (
+                    TokenKind::Long,
+                    &[
+                        "color",
+                        "config",
+                        "cpu-profile-path",
+                        "mem-profile-path",
+                        "trace-path",
+                    ],
+                    Some(ValueSpec::value()),
+                ),
+                (TokenKind::Short, &["c"], Some(ValueSpec::solo_only())),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_run_grammar_matches_its_table() {
+        assert_takes_value_table(
+            &RUN_GRAMMAR,
+            &[
+                (
+                    TokenKind::Long,
+                    &[
+                        // Global flags, valid after `run` too.
+                        "color",
+                        "config",
+                        "cpu-profile-path",
+                        "mem-profile-path",
+                        "trace-path",
+                        // Output sinks.
+                        "output.checkstyle.path",
+                        "output.code-climate.path",
+                        "output.html.path",
+                        "output.json.path",
+                        "output.junit-xml.path",
+                        "output.sarif.path",
+                        "output.tab.path",
+                        "output.teamcity.path",
+                        "output.text.path",
+                        // `run`'s own.
+                        "build-tags",
+                        "concurrency",
+                        "default",
+                        "disable",
+                        "enable",
+                        "enable-only",
+                        "issues-exit-code",
+                        "max-issues-per-linter",
+                        "max-same-issues",
+                        "modules-download-mode",
+                        "new-from-merge-base",
+                        "new-from-patch",
+                        "new-from-rev",
+                        "out-format",
+                        "path-mode",
+                        "path-prefix",
+                        "deadline",
+                        "exclude",
+                        "presets",
+                        "skip-dirs",
+                        "skip-files",
+                        "timeout",
+                    ],
+                    Some(ValueSpec::value()),
+                ),
+                (
+                    TokenKind::Short,
+                    &["c", "D", "E", "e", "j", "p"],
+                    Some(ValueSpec::solo_only()),
+                ),
+            ],
+        );
     }
 }

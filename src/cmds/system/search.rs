@@ -3,7 +3,7 @@
 //! Runs the agent's exact engine (grep or rg) — never substituting one for the other — and
 //! compresses its output by grouping matches by file, capping, and teeing overflow.
 
-use crate::core::arg_tokenizer::{self, Dialect, Token, TokenKind, ValueSpec};
+use crate::core::arg_tokenizer::{self, Flag, Grammar, Token, TokenKind, ValueSpec};
 use crate::core::guard::never_worse;
 use crate::core::stream::{
     self, CaptureResult, FilterMode, StdinMode, StreamFilter, exec_capture, exec_capture_stdin,
@@ -46,86 +46,208 @@ fn stdin_is_readable() -> bool {
     !std::io::stdin().is_terminal()
 }
 
+/// Every grep/rg value-taking flag claims even a literal `--` as its value, unlike git/cargo --
+/// verified against both engines for short and long, numeric- and file-typed flags alike.
+const VALUE: ValueSpec = ValueSpec::value().claiming_dash_dash();
+
 /// Which flags consume a value, transcribed per engine from that engine's own `--help`.
 /// grep and rg only intersect -- 13 of ~50 entries -- and disagree outright on `-T`, `-r`,
 /// `-E` and `--color`, so one merged table with per-flag exceptions misreads whichever engine
 /// it wasn't written for. `-e`/`--regexp`'s value is routed to `patterns` downstream, not
-/// `flags`; both tables still report it, since this only answers "does the next token belong
+/// `flags`; both tables still declare it, since this only answers "does the next token belong
 /// to this flag".
-fn grep_takes_value(kind: TokenKind, name: &str) -> bool {
-    match kind {
-        // `--color[=WHEN]`/`--colour[=WHEN]` attach their value, so they never consume a token.
-        TokenKind::Long => matches!(
-            name,
-            "after-context"
-                | "before-context"
-                | "binary-files"
-                | "context"
-                | "devices"
-                | "directories"
-                | "exclude"
-                | "exclude-dir"
-                | "exclude-from"
-                | "file"
-                | "group-separator"
-                | "include"
-                | "label"
-                | "max-count"
-                | "regexp"
-        ),
-        // `-X` is grep's undocumented matcher selector, still accepted and still value-taking.
-        TokenKind::Short => matches!(name, "A" | "B" | "C" | "D" | "X" | "d" | "e" | "f" | "m"),
-        _ => false,
-    }
-}
+///
+/// grep's `--color[=WHEN]`/`--colour[=WHEN]` attach their value, so they never consume a
+/// token and are not declared.
+///
+/// The boolean flags RTK checks for are declared too, each with the spellings its engine pairs,
+/// so a check reads the pairing from the grammar: the output-shape flags
+/// ([`GREP_FILE_LISTS`], [`GREP_SHAPES`]) and the help and version requests.
+const GREP_GRAMMAR: Grammar = Grammar::posix(&[GREP_FLAGS, GREP_FILE_LISTS, GREP_SHAPES]);
 
-fn rg_takes_value(kind: TokenKind, name: &str) -> bool {
-    match kind {
-        TokenKind::Long => matches!(
-            name,
-            "after-context"
-                | "before-context"
-                | "color"
-                | "colors"
-                | "context"
-                | "context-separator"
-                | "dfa-size-limit"
-                | "encoding"
-                | "engine"
-                | "field-context-separator"
-                | "field-match-separator"
-                | "file"
-                | "generate"
-                | "glob"
-                | "hostname-bin"
-                | "hyperlink-format"
-                | "iglob"
-                | "ignore-file"
-                | "max-columns"
-                | "max-count"
-                | "max-depth"
-                | "max-filesize"
-                | "path-separator"
-                | "pre"
-                | "pre-glob"
-                | "regex-size-limit"
-                | "regexp"
-                | "replace"
-                | "sort"
-                | "sortr"
-                | "threads"
-                | "type"
-                | "type-add"
-                | "type-clear"
-                | "type-not"
-        ),
-        TokenKind::Short => matches!(
-            name,
-            "A" | "B" | "C" | "E" | "M" | "T" | "d" | "e" | "f" | "g" | "j" | "m" | "r" | "t"
-        ),
-        _ => false,
-    }
-}
+/// grep's flags other than the output-shape ones.
+const GREP_FLAGS: &[Flag] = &[
+    AFTER_CONTEXT,
+    BEFORE_CONTEXT,
+    CONTEXT,
+    Flag::pair("D", "devices").takes(VALUE),
+    DIRECTORIES,
+    REGEXP,
+    FILE,
+    Flag::pair("m", "max-count").takes(VALUE),
+    Flag::long("binary-files").takes(VALUE),
+    Flag::long("exclude").takes(VALUE),
+    Flag::long("exclude-dir").takes(VALUE),
+    Flag::long("exclude-from").takes(VALUE),
+    Flag::long("group-separator").takes(VALUE),
+    Flag::long("include").takes(VALUE),
+    Flag::long("label").takes(VALUE),
+    // `-X` is grep's undocumented matcher selector, still accepted and still value-taking.
+    Flag::short("X").takes(VALUE),
+    WITH_FILENAME,
+    LINE_NUMBER,
+    GREP_NO_FILENAME,
+    RECURSIVE,
+    DEREFERENCE_RECURSIVE,
+    GREP_HELP,
+    VERSION,
+];
+
+/// rg's grammar; see [`GREP_GRAMMAR`].
+const RG_GRAMMAR: Grammar = Grammar::posix(&[RG_FLAGS, RG_FILE_LISTS, RG_SHAPES]);
+
+/// rg's flags other than the output-shape ones.
+const RG_FLAGS: &[Flag] = &[
+    AFTER_CONTEXT,
+    BEFORE_CONTEXT,
+    CONTEXT,
+    Flag::pair("E", "encoding").takes(VALUE),
+    Flag::pair("M", "max-columns").takes(VALUE),
+    Flag::pair("T", "type-not").takes(VALUE),
+    Flag::pair("d", "max-depth").takes(VALUE),
+    REGEXP,
+    FILE,
+    Flag::pair("g", "glob").takes(VALUE),
+    Flag::pair("j", "threads").takes(VALUE),
+    Flag::pair("m", "max-count").takes(VALUE),
+    Flag::pair("r", "replace").takes(VALUE),
+    Flag::pair("t", "type").takes(VALUE),
+    Flag::long("color").takes(VALUE),
+    Flag::long("colors").takes(VALUE),
+    Flag::long("context-separator").takes(VALUE),
+    Flag::long("dfa-size-limit").takes(VALUE),
+    Flag::long("engine").takes(VALUE),
+    Flag::long("field-context-separator").takes(VALUE),
+    Flag::long("field-match-separator").takes(VALUE),
+    Flag::long("generate").takes(VALUE),
+    Flag::long("hostname-bin").takes(VALUE),
+    Flag::long("hyperlink-format").takes(VALUE),
+    Flag::long("iglob").takes(VALUE),
+    Flag::long("ignore-file").takes(VALUE),
+    Flag::long("max-filesize").takes(VALUE),
+    Flag::long("path-separator").takes(VALUE),
+    Flag::long("pre").takes(VALUE),
+    Flag::long("pre-glob").takes(VALUE),
+    Flag::long("regex-size-limit").takes(VALUE),
+    Flag::long("sort").takes(VALUE),
+    Flag::long("sortr").takes(VALUE),
+    Flag::long("type-add").takes(VALUE),
+    Flag::long("type-clear").takes(VALUE),
+    WITH_FILENAME,
+    LINE_NUMBER,
+    RG_NO_FILENAME,
+    NO_LINE_NUMBER,
+    RG_HELP,
+    VERSION,
+];
+
+/// grep's file-list flags: every output line is one plain path (see [`is_bare_file_list`]).
+const GREP_FILE_LISTS: &[Flag] = &[FILES_WITH_MATCHES, GREP_FILES_WITHOUT_MATCH];
+
+/// rg's file-list flags; `--files` lists what rg would search, with no pattern.
+const RG_FILE_LISTS: &[Flag] = &[FILES_WITH_MATCHES, RG_FILES_WITHOUT_MATCH, FILES];
+
+/// grep's other output-shape flags: the minimal or reshaped forms the agent already chose
+/// (counts, offsets, NUL separators, `-q`), which RTK passes through (see
+/// [`is_format_flag_token`]). `--initial-tab` pads and tabs every match line, so RTK's own
+/// `-H --null -n` parse reads nothing back.
+const GREP_SHAPES: &[Flag] = &[
+    BYTE_OFFSET,
+    COUNT,
+    GREP_NULL,
+    GREP_NULL_DATA,
+    INITIAL_TAB,
+    ONLY_MATCHING,
+    QUIET,
+    SILENT,
+];
+
+/// rg's other output-shape flags; see [`GREP_SHAPES`].
+const RG_SHAPES: &[Flag] = &[
+    BYTE_OFFSET,
+    COLUMN,
+    COUNT,
+    COUNT_MATCHES,
+    JSON,
+    ONLY_MATCHING,
+    PASSTHRU,
+    QUIET,
+    RG_NULL,
+    RG_NULL_DATA,
+    VIMGREP,
+];
+
+/// `-A`/`--after-context`, both engines.
+const AFTER_CONTEXT: Flag = Flag::pair("A", "after-context").takes(VALUE);
+/// `-B`/`--before-context`, both engines.
+const BEFORE_CONTEXT: Flag = Flag::pair("B", "before-context").takes(VALUE);
+/// `-C`/`--context`, both engines.
+const CONTEXT: Flag = Flag::pair("C", "context").takes(VALUE);
+/// `-e`/`--regexp`, both engines.
+const REGEXP: Flag = Flag::pair("e", "regexp").takes(VALUE);
+/// `-f`/`--file`, both engines.
+const FILE: Flag = Flag::pair("f", "file").takes(VALUE);
+/// `-H`/`--with-filename`, both engines.
+const WITH_FILENAME: Flag = Flag::pair("H", "with-filename");
+/// `-n`/`--line-number`, both engines.
+const LINE_NUMBER: Flag = Flag::pair("n", "line-number");
+/// grep's `-h`/`--no-filename`; rg's `-h` is `--help`.
+const GREP_NO_FILENAME: Flag = Flag::pair("h", "no-filename");
+/// rg's `-I`/`--no-filename`; grep's `-I` is `--binary-files=without-match`.
+const RG_NO_FILENAME: Flag = Flag::pair("I", "no-filename");
+/// rg's `-N`/`--no-line-number`; GNU grep has neither spelling.
+const NO_LINE_NUMBER: Flag = Flag::pair("N", "no-line-number");
+/// grep's `-r`/`--recursive`; rg's `-r` is `--replace`.
+const RECURSIVE: Flag = Flag::pair("r", "recursive");
+/// grep's `-d ACTION`/`--directories=ACTION`, ACTION being `read`, `recurse` or `skip`; rg's
+/// `-d` is `--max-depth`.
+const DIRECTORIES: Flag = Flag::pair("d", "directories").takes(VALUE);
+/// grep's `-R`/`--dereference-recursive`.
+const DEREFERENCE_RECURSIVE: Flag = Flag::pair("R", "dereference-recursive");
+/// grep's `--help`, which has no short spelling: grep's `-h` is `--no-filename`.
+const GREP_HELP: Flag = Flag::long("help");
+/// rg's `-h`/`--help`.
+const RG_HELP: Flag = Flag::pair("h", "help");
+/// `-V`/`--version`, both engines.
+const VERSION: Flag = Flag::pair("V", "version");
+/// `-l`/`--files-with-matches`, both engines.
+const FILES_WITH_MATCHES: Flag = Flag::pair("l", "files-with-matches");
+/// grep's `-L`/`--files-without-match`.
+const GREP_FILES_WITHOUT_MATCH: Flag = Flag::pair("L", "files-without-match");
+/// rg's `--files-without-match`, which has no short spelling: rg's `-L` is `--follow`.
+const RG_FILES_WITHOUT_MATCH: Flag = Flag::long("files-without-match");
+/// rg's `--files`.
+const FILES: Flag = Flag::long("files");
+/// `-b`/`--byte-offset`, both engines.
+const BYTE_OFFSET: Flag = Flag::pair("b", "byte-offset");
+/// `-c`/`--count`, both engines.
+const COUNT: Flag = Flag::pair("c", "count");
+/// `-o`/`--only-matching`, both engines.
+const ONLY_MATCHING: Flag = Flag::pair("o", "only-matching");
+/// `-q`/`--quiet`, both engines.
+const QUIET: Flag = Flag::pair("q", "quiet");
+/// grep's `--silent`, a second long spelling of `-q`/`--quiet`.
+const SILENT: Flag = Flag::long("silent");
+/// grep's `-Z`/`--null`.
+const GREP_NULL: Flag = Flag::pair("Z", "null");
+/// rg's `-0`/`--null`. The tokenizer reads `-0` as a one-digit run, one `Short` token "0".
+const RG_NULL: Flag = Flag::pair("0", "null");
+/// grep's `-z`/`--null-data`; rg's `-z` is `--search-zip`.
+const GREP_NULL_DATA: Flag = Flag::pair("z", "null-data");
+/// rg's `--null-data`, which has no short spelling.
+const RG_NULL_DATA: Flag = Flag::long("null-data");
+/// grep's `-T`/`--initial-tab`; rg's `-T` is `--type-not`.
+const INITIAL_TAB: Flag = Flag::pair("T", "initial-tab");
+/// rg's `--column`.
+const COLUMN: Flag = Flag::long("column");
+/// rg's `--count-matches`.
+const COUNT_MATCHES: Flag = Flag::long("count-matches");
+/// rg's `--json`.
+const JSON: Flag = Flag::long("json");
+/// rg's `--passthru`.
+const PASSTHRU: Flag = Flag::long("passthru");
+/// rg's `--vimgrep`.
+const VIMGREP: Flag = Flag::long("vimgrep");
 
 /// rg accepts the attached spellings `-A=1`/`-e=PAT` and strips the `=` itself; GNU grep does
 /// not ("invalid context length argument"), so only rg's is unwrapped. Attached only: a
@@ -138,23 +260,11 @@ fn unwrap_attached_value(engine: Engine, value: &str) -> &str {
 }
 
 /// The module's single tokenizer entry point. Shared so a pre-check and `extract_pattern_path`
-/// cannot classify the same argument differently.
+/// cannot classify the same argument differently. Every predicate below that takes an `engine`
+/// asks about tokens this function read with that same engine: a flag one engine declares and
+/// the other does not is never true of the other engine's tokens.
 fn tokenize_search_args<'a, T: AsRef<str>>(args: &'a [T], engine: Engine) -> Vec<Token<'a>> {
-    arg_tokenizer::tokenize_grammar(
-        args,
-        &|kind, name| search_takes_value(engine, kind, name),
-        Dialect::Posix,
-    )
-}
-
-/// Every grep/rg value-taking flag claims even a literal `--` as its value, unlike git/cargo --
-/// verified against both engines for short and long, numeric- and file-typed flags alike.
-fn search_takes_value(engine: Engine, kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    let takes = match engine {
-        Engine::Grep => grep_takes_value(kind, name),
-        Engine::Rg => rg_takes_value(kind, name),
-    };
-    takes.then(|| ValueSpec::value().claiming_dash_dash())
+    arg_tokenizer::tokenize_grammar(args, engine.grammar())
 }
 
 /// Unique, descriptive tee slug for a file's overflow matches. `idx` disambiguates
@@ -179,17 +289,16 @@ fn match_block(path: &str, entries: &[(usize, bool, String)]) -> String {
     s
 }
 
-/// Extracts `(patterns, paths, flags, has_format_flag, detected)` from the raw trailing args.
-/// `patterns` is the positional pattern plus all `-e`/`--regexp` values (empty → error); `paths`
-/// is the remaining positionals (empty → caller defaults to `["."]`); `flags` is everything else
-/// forwarded verbatim; `has_format_flag`/`detected` ([`DetectedFlags`]) are computed from this
-/// same token pass rather than a second scan over the reconstructed `flags` strings.
-fn extract_pattern_path<T: AsRef<str>>(
-    args: &[T],
+/// Extracts `(patterns, paths, flags, has_format_flag, detected)` from the trailing args' tokens,
+/// read with `engine`'s grammar ([`tokenize_search_args`]). `patterns` is the positional
+/// pattern plus all `-e`/`--regexp` values (empty → error); `paths` is the remaining
+/// positionals (empty → caller defaults to `["."]`); `flags` is everything else forwarded
+/// verbatim; `has_format_flag`/`detected` ([`DetectedFlags`]) are computed from this same token
+/// pass rather than a second scan over the reconstructed `flags` strings.
+fn extract_pattern_path(
+    tokens: &[Token<'_>],
     engine: Engine,
 ) -> (Vec<String>, Vec<String>, Vec<String>, bool, DetectedFlags) {
-    let tokens = tokenize_search_args(args, engine);
-
     let mut e_patterns: Vec<String> = Vec::new();
     let mut patterns_from_file = false;
     let mut positionals: Vec<String> = Vec::new();
@@ -205,48 +314,48 @@ fn extract_pattern_path<T: AsRef<str>>(
     while i < tokens.len() {
         let t = &tokens[i];
         match t.kind {
-            TokenKind::Long if t.text == "regexp" => {
-                if let Some(v) = t.value(&tokens) {
+            TokenKind::Long if t.is(&REGEXP) => {
+                if let Some(v) = t.value(tokens) {
                     e_patterns.push(v.to_string());
                 }
             }
             TokenKind::Long => {
-                if t.text == "file" {
+                if t.is(&FILE) {
                     patterns_from_file = true;
                 }
-                if is_format_flag_token(engine, t.kind, t.text) {
+                if is_format_flag_token(engine, t) {
                     has_format_flag = true;
                 }
-                if is_show_file_token(t.kind, t.text) {
+                if is_show_file_token(t) {
                     show_file_flag = Some(true);
                 }
-                if is_recursive_token(engine, t.kind, t.text) {
-                    recursive = true;
+                if let Some(recurses) = recursion_set_by(engine, t, tokens) {
+                    recursive = recurses;
                 }
-                if is_show_line_on_token(t.kind, t.text) {
+                if is_show_line_on_token(t) {
                     show_line_flag = Some(true);
                 }
                 // Neither negation is forwarded: RTK forces `-nH` so it can parse the output,
                 // and the user's `--no-filename`/`--no-line-number` would win as the later
                 // flag, leaving nothing parseable and forcing a second run of the whole search.
-                if is_show_file_off_token(engine, t.kind, t.text) {
+                if is_show_file_off_token(engine, t) {
                     show_file_flag = Some(false);
                     i += 1;
                     continue;
                 }
-                if is_show_line_off_token(engine, t.kind, t.text) {
+                if is_show_line_off_token(engine, t) {
                     show_line_flag = Some(false);
                     i += 1;
                     continue;
                 }
-                if is_context_token(engine, t.kind, t.text) {
+                if is_context_token(engine, t) {
                     context = true;
                 }
                 match t.attached {
                     Some(v) => flags.push(format!("--{}={v}", t.text)),
                     None => {
                         flags.push(format!("--{}", t.text));
-                        if let Some(v) = t.value(&tokens) {
+                        if let Some(v) = t.value(tokens) {
                             flags.push(v.to_string());
                         }
                     }
@@ -269,41 +378,31 @@ fn extract_pattern_path<T: AsRef<str>>(
                     i += 1;
                 }
                 let cluster = &tokens[start..=i];
-                if cluster
-                    .iter()
-                    .any(|c| is_format_flag_token(engine, c.kind, c.text))
-                {
+                if cluster.iter().any(|c| is_format_flag_token(engine, c)) {
                     has_format_flag = true;
                 }
                 // Letter by letter, so `-hH` and `-Hh` land where the engine lands them: the
                 // later spelling wins.
                 for c in cluster {
-                    if is_show_file_token(c.kind, c.text) {
+                    if is_show_file_token(c) {
                         show_file_flag = Some(true);
-                    } else if is_show_file_off_token(engine, c.kind, c.text) {
+                    } else if is_show_file_off_token(engine, c) {
                         show_file_flag = Some(false);
                     }
-                    if is_show_line_on_token(c.kind, c.text) {
+                    if is_show_line_on_token(c) {
                         show_line_flag = Some(true);
-                    } else if is_show_line_off_token(engine, c.kind, c.text) {
+                    } else if is_show_line_off_token(engine, c) {
                         show_line_flag = Some(false);
                     }
-                    if is_recursive_token(engine, c.kind, c.text) {
-                        recursive = true;
+                    if let Some(recurses) = recursion_set_by(engine, c, tokens) {
+                        recursive = recurses;
                     }
                 }
-                if cluster
-                    .iter()
-                    .any(|c| is_context_token(engine, c.kind, c.text))
-                {
+                if cluster.iter().any(|c| is_context_token(engine, c)) {
                     context = true;
                 }
                 let (bool_chars, value_char) = match cluster.split_last() {
-                    Some((last, rest))
-                        if search_takes_value(engine, TokenKind::Short, last.text).is_some() =>
-                    {
-                        (rest, Some(last))
-                    }
+                    Some((last, rest)) if last.value_spec().is_some() => (rest, Some(last)),
                     _ => (cluster, None),
                 };
 
@@ -312,8 +411,7 @@ fn extract_pattern_path<T: AsRef<str>>(
                 let glued: String = bool_chars
                     .iter()
                     .filter(|c| {
-                        !is_show_file_off_token(engine, c.kind, c.text)
-                            && !is_show_line_off_token(engine, c.kind, c.text)
+                        !is_show_file_off_token(engine, c) && !is_show_line_off_token(engine, c)
                     })
                     .map(|c| c.text)
                     .collect();
@@ -324,15 +422,15 @@ fn extract_pattern_path<T: AsRef<str>>(
                 if let Some(vt) = value_char {
                     let value = match vt.attached {
                         Some(attached) => Some(unwrap_attached_value(engine, attached)),
-                        None => vt.value(&tokens),
+                        None => vt.value(tokens),
                     };
-                    if vt.text == "e" {
+                    if vt.is(&REGEXP) {
                         match value {
                             Some(v) => e_patterns.push(v.to_string()),
                             None => flags.push("-e".to_string()),
                         }
                     } else {
-                        if vt.text == "f" {
+                        if vt.is(&FILE) {
                             patterns_from_file = true;
                         }
                         flags.push(format!("-{}", vt.text));
@@ -400,6 +498,54 @@ impl Engine {
 
     pub fn label(self) -> &'static str {
         self.bin()
+    }
+
+    /// This engine's flag grammar.
+    fn grammar(self) -> &'static Grammar {
+        match self {
+            Engine::Grep => &GREP_GRAMMAR,
+            Engine::Rg => &RG_GRAMMAR,
+        }
+    }
+
+    /// The flags whose every output line is one plain path.
+    fn file_lists(self) -> &'static [Flag] {
+        match self {
+            Engine::Grep => GREP_FILE_LISTS,
+            Engine::Rg => RG_FILE_LISTS,
+        }
+    }
+
+    /// The output-shape flags other than the file lists.
+    fn shapes(self) -> &'static [Flag] {
+        match self {
+            Engine::Grep => GREP_SHAPES,
+            Engine::Rg => RG_SHAPES,
+        }
+    }
+
+    /// This engine's `--no-filename`: grep's `-h`, rg's `-I`.
+    fn no_filename(self) -> &'static Flag {
+        match self {
+            Engine::Grep => &GREP_NO_FILENAME,
+            Engine::Rg => &RG_NO_FILENAME,
+        }
+    }
+
+    /// This engine's `-N`/`--no-line-number`, which GNU grep does not have.
+    fn no_line_number(self) -> Option<&'static Flag> {
+        match self {
+            Engine::Grep => None,
+            Engine::Rg => Some(&NO_LINE_NUMBER),
+        }
+    }
+
+    /// This engine's help flag: `-h`/`--help` for rg, `--help` alone for grep.
+    fn help(self) -> &'static Flag {
+        match self {
+            Engine::Grep => &GREP_HELP,
+            Engine::Rg => &RG_HELP,
+        }
     }
 
     /// `-n -H --null` are parse aids (NUL keeps the regroup unambiguous, #1436);
@@ -504,11 +650,15 @@ impl StreamFilter for SearchStreamFilter {
     }
 }
 
-/// The paths-based half of "should the filename be shown": multiple paths, or a directory among
-/// them, regardless of any flag. Combined with `extract_pattern_path`'s pre-computed
-/// `DetectedFlags::show_file` (the flags-based half) at each call site.
-fn wants_show_file(paths: &[String], flags_show_file: bool) -> bool {
-    paths.len() > 1 || paths.iter().any(|p| std::path::Path::new(p).is_dir()) || flags_show_file
+/// The default for "should the filename be shown", when the user asked for neither `-H` nor
+/// `-h` (`DetectedFlags::show_file`): multiple paths, or a directory among them, or recursion
+/// with no path at all, where grep walks the working directory. GNU grep 3.12 prints a lone file
+/// operand's matches without the prefix under `-r`, `-R`, `--recursive` and
+/// `--dereference-recursive` alike, and with it under all four for a directory or no operand.
+fn wants_show_file(paths: &[String], recursive: bool) -> bool {
+    paths.len() > 1
+        || paths.iter().any(|p| std::path::Path::new(p).is_dir())
+        || (recursive && paths.is_empty())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -687,20 +837,12 @@ pub fn run(
     // Restored first: every check below classifies these args, and clap ate the boundary.
     let args = &args_utils::restore_double_dash(args);
 
-    // --version / --help: pass through to the engine without filtering. Token-based and
-    // scoped before the boundary, because `rtk grep -- --version` searches *for* that string.
-    // `-h` is engine-specific: rg's is --help, grep's is --no-filename.
-    let help_tokens = tokenize_search_args(args, engine);
-    let asks_for_help = arg_tokenizer::before_dashdash(&help_tokens)
-        .iter()
-        .any(|t| {
-            (t.kind == TokenKind::Long && matches!(t.text, "version" | "help"))
-                || (t.kind == TokenKind::Short && t.text == "h" && engine == Engine::Rg)
-        });
-    let dangling_value_flag = help_tokens.iter().any(|t| {
+    let tokens = tokenize_search_args(args, engine);
+    let asks_for_help = asks_for_help(engine, &tokens);
+    let dangling_value_flag = tokens.iter().any(|t| {
         matches!(t.kind, TokenKind::Long | TokenKind::Short)
-            && search_takes_value(engine, t.kind, t.text).is_some()
-            && t.value(&help_tokens).is_none()
+            && t.value_spec().is_some()
+            && t.value(&tokens).is_none()
     });
     if dangling_value_flag {
         let real_cmd = format!("{} {}", engine.bin(), args.join(" "));
@@ -722,11 +864,11 @@ pub fn run(
     let rtk_label = format!("rtk {}", engine.label());
 
     let (patterns, paths, extra_args, extra_args_has_format_flag, detected_flags) =
-        extract_pattern_path(args, engine);
+        extract_pattern_path(&tokens, engine);
 
     if patterns.is_empty() {
         // `rg --files` lists paths without a pattern; fold it like `-l`.
-        let fold = is_bare_file_list(engine, args);
+        let fold = tokens_are_bare_file_list(engine, &tokens);
         return passthrough(&timer, engine, args, &real_cmd, false, fold);
     }
 
@@ -747,7 +889,7 @@ pub fn run(
 
     // format/shape flags (-c/-l/-o/...): already-minimal native output, passthrough.
     if extra_args_has_format_flag {
-        let fold = is_bare_file_list(engine, args);
+        let fold = tokens_are_bare_file_list(engine, &tokens);
         return passthrough(&timer, engine, args, &real_cmd, reads_piped_stdin, fold);
     }
 
@@ -813,8 +955,8 @@ pub fn run(
         .count();
 
     // Mirror what the real command prints: the filename only when grep/rg would
-    // show one (multiple files, a directory, -r or -H), the line number only with
-    // -n. We force -nH--null for robust parsing, then drop what the engine itself
+    // show one (multiple files, a directory, a recursive walk of the cwd, or -H), the
+    // line number only with -n. We force -nH--null for robust parsing, then drop what the engine itself
     // would not have shown.
     // With no path given, rg walks the cwd, and there the filename is the only way to tell
     // matches apart -- real rg prints it even when a single file matched. grep with no path
@@ -952,65 +1094,42 @@ fn parse_match_line(line: &str) -> Option<(String, usize, bool, &str)> {
     })
 }
 
-/// Minimal/shape forms the agent already chose (`-c`/`-l`/`--json`/...). `engine`-aware: `-L`
-/// is grep's `--files-without-match` but rg's `--follow` (symlinks); `-z` is grep's
-/// `--null-data` but rg's `--search-zip` -- neither rg meaning is a shape flag.
-fn is_format_flag_token(engine: Engine, kind: TokenKind, text: &str) -> bool {
-    const LONG: &[&str] = &[
-        "byte-offset",
-        "column",
-        "count",
-        "count-matches",
-        "files",
-        "files-with-matches",
-        "files-without-match",
-        "json",
-        "null",
-        "null-data",
-        "only-matching",
-        "passthru",
-        "quiet",
-        "silent",
-        "vimgrep",
-    ];
-    match kind {
-        // grep's `--initial-tab` pads and tabs every match line, so RTK's own `-H --null -n`
-        // parse reads nothing back and leaked the injected flags into the output. ripgrep has
-        // no such flag, and its `-T` is `--type-not`, a value-taking flag (see rg_takes_value).
-        TokenKind::Long => {
-            LONG.contains(&text) || (engine == Engine::Grep && text == "initial-tab")
-        }
-        // -c count, -l/-L lists, -o only-matching, -q quiet, -b byte-offset, -Z NUL are shared;
-        // -L/-T/-z mean something unrelated to output shape for rg specifically (see above).
-        TokenKind::Short => match text {
-            "L" | "T" | "z" => engine == Engine::Grep,
-            "Z" | "b" | "c" | "l" | "o" | "q" => true,
-            _ => false,
-        },
-        _ => false,
-    }
+/// True for `--version` and the engine's help flag before the boundary: those pass through to
+/// the engine unfiltered. Past `--` they are the pattern, since `rtk grep -- --version`
+/// searches *for* that string. `-h` is rg's `--help` and grep's `--no-filename`. `tokens` are
+/// read with `engine`'s grammar ([`tokenize_search_args`]).
+fn asks_for_help(engine: Engine, tokens: &[Token<'_>]) -> bool {
+    arg_tokenizer::before_dashdash(tokens)
+        .iter()
+        .any(|t| t.is_one_of(&[*engine.help(), VERSION]))
+}
+
+/// Minimal/shape forms the agent already chose (`-c`/`-l`/`--json`/...): a file list or
+/// another shape flag, each as its own engine declares it ([`GREP_SHAPES`], [`RG_SHAPES`]).
+/// The same letter can mean something unrelated to output shape on the other engine: `-L` is
+/// grep's `--files-without-match` but rg's `--follow`, `-z` is grep's `--null-data` but rg's
+/// `--search-zip`, and `-T` is grep's `--initial-tab` but rg's value-taking `--type-not`.
+/// `token` is read with `engine`'s grammar ([`tokenize_search_args`]).
+fn is_format_flag_token(engine: Engine, token: &Token<'_>) -> bool {
+    token.is_one_of(engine.file_lists()) || token.is_one_of(engine.shapes())
 }
 
 /// True when the command's only shape flag is a file list -- `-l`/`--files-with-matches`,
-/// grep's `-L`/`--files-without-match`, or rg's `--files` -- so every stdout line is one
+/// `--files-without-match` (with grep's `-L`), or rg's `--files` -- so every stdout line is one
 /// plain path and [`fold_path_prefix`] applies. Any other shape flag changes the line
 /// (`-c` appends `:count`, `-Z`/`--null` joins with NUL, `--json` wraps it) or removes it
 /// (`-q`), so the list is left verbatim.
 pub(crate) fn is_bare_file_list<T: AsRef<str>>(engine: Engine, args: &[T]) -> bool {
-    let tokens = tokenize_search_args(args, engine);
+    tokens_are_bare_file_list(engine, &tokenize_search_args(args, engine))
+}
+
+/// [`is_bare_file_list`] for args already read with the engine's grammar.
+fn tokens_are_bare_file_list(engine: Engine, tokens: &[Token<'_>]) -> bool {
     let mut file_list = false;
-    for t in &tokens {
-        let is_list = match t.kind {
-            TokenKind::Long => matches!(
-                t.text,
-                "files" | "files-with-matches" | "files-without-match"
-            ),
-            TokenKind::Short => t.text == "l" || (t.text == "L" && engine == Engine::Grep),
-            _ => false,
-        };
-        if is_list {
+    for t in tokens {
+        if t.is_one_of(engine.file_lists()) {
             file_list = true;
-        } else if is_format_flag_token(engine, t.kind, t.text) {
+        } else if t.is_one_of(engine.shapes()) {
             return false;
         }
     }
@@ -1019,78 +1138,66 @@ pub(crate) fn is_bare_file_list<T: AsRef<str>>(engine: Engine, args: &[T]) -> bo
 
 /// True for `-H`/`--with-filename`, an explicit request for the filename prefix (same meaning
 /// for both engines).
-fn is_show_file_token(kind: TokenKind, text: &str) -> bool {
-    match kind {
-        TokenKind::Long => text == "with-filename",
-        TokenKind::Short => text == "H",
-        _ => false,
-    }
+fn is_show_file_token(token: &Token<'_>) -> bool {
+    token.is(&WITH_FILENAME)
 }
 
-/// True for grep's `-r`/`-R`/`--recursive`. Recursion is not a filename request: it only makes
-/// the search span several files, so grep shows the prefix by default -- an explicit `-h` still
-/// wins whichever side of it the recursion flag is typed on. ripgrep has none of these
-/// spellings (`-r` is `--replace`, a value-taking flag, see [`rg_takes_value`]).
-fn is_recursive_token(engine: Engine, kind: TokenKind, text: &str) -> bool {
-    engine == Engine::Grep
-        && match kind {
-            TokenKind::Long => text == "recursive",
-            TokenKind::Short => matches!(text, "R" | "r"),
-            _ => false,
-        }
+/// Whether `token` sets grep's directory action, and if so whether that action is recursion:
+/// `-r`/`--recursive` and `-R`/`--dereference-recursive` recurse, and `-d`/`--directories`
+/// recurses for `recurse` and not for `read` or `skip`. grep keeps the last one: `-r -d read`
+/// reads a directory operand as a file, and `-d read -r` walks it. grep also takes any prefix
+/// that names one action alone, so `rec` is `recurse` and `re` is an error.
+///
+/// Recursion is not a filename request: with no operand grep walks the working directory and
+/// shows the prefix by default, and an explicit `-h` still wins whichever side of it the
+/// recursion flag is typed on (see [`wants_show_file`] for when it counts). ripgrep has none of
+/// these spellings (`-r` is `--replace` and `-d` is `--max-depth`, see [`RG_GRAMMAR`]), so an rg
+/// token never sets it. `token` is read with `engine`'s grammar ([`tokenize_search_args`]).
+fn recursion_set_by(engine: Engine, token: &Token<'_>, tokens: &[Token<'_>]) -> Option<bool> {
+    if engine == Engine::Rg {
+        return None;
+    }
+    if token.is_one_of(&[RECURSIVE, DEREFERENCE_RECURSIVE]) {
+        return Some(true);
+    }
+    if token.is(&DIRECTORIES) {
+        let action = token.value(tokens).unwrap_or_default();
+        return Some(action.len() >= "rec".len() && "recurse".starts_with(action));
+    }
+    None
 }
 
 /// True for `-n`/`--line-number` (identical meaning for both engines).
-fn is_show_line_on_token(kind: TokenKind, text: &str) -> bool {
-    match kind {
-        TokenKind::Long => text == "line-number",
-        TokenKind::Short => text == "n",
-        _ => false,
-    }
+fn is_show_line_on_token(token: &Token<'_>) -> bool {
+    token.is(&LINE_NUMBER)
 }
 
-/// True for `-h`/`--no-filename` (negates [`is_show_file_token`]). RTK forces `-H` so it can
-/// parse the output, so the user's request has to be honoured at display time instead --
-/// leaving it in the engine command would defeat RTK's own parse and force a second run.
-fn is_show_file_off_token(engine: Engine, kind: TokenKind, text: &str) -> bool {
-    match kind {
-        TokenKind::Long => text == "no-filename",
-        // Divergent both ways: grep's `-h` is --no-filename where rg's is --help, and rg's
-        // `-I` is --no-filename where grep's is --binary-files=without-match.
-        TokenKind::Short => match text {
-            "h" => engine == Engine::Grep,
-            "I" => engine == Engine::Rg,
-            _ => false,
-        },
-        _ => false,
-    }
+/// True for `--no-filename` and its short spelling, grep's `-h` and rg's `-I` (negates
+/// [`is_show_file_token`]). RTK forces `-H` so it can parse the output, so the user's request
+/// has to be honoured at display time instead -- leaving it in the engine command would defeat
+/// RTK's own parse and force a second run. `token` is read with `engine`'s grammar
+/// ([`tokenize_search_args`]).
+fn is_show_file_off_token(engine: Engine, token: &Token<'_>) -> bool {
+    token.is(engine.no_filename())
 }
 
 /// True for `-N`/`--no-line-number` (negates [`is_show_line_on_token`]). ripgrep-only: GNU grep
-/// has neither spelling and exits 2 on both, so recognising them there would swallow a flag the
-/// engine itself refuses.
-fn is_show_line_off_token(engine: Engine, kind: TokenKind, text: &str) -> bool {
-    engine == Engine::Rg
-        && match kind {
-            TokenKind::Long => text == "no-line-number",
-            TokenKind::Short => text == "N",
-            _ => false,
-        }
+/// has neither spelling and exits 2 on both, so its grammar does not declare them and
+/// recognising them there would swallow a flag the engine itself refuses. `token` is read with
+/// `engine`'s grammar ([`tokenize_search_args`]).
+fn is_show_line_off_token(engine: Engine, token: &Token<'_>) -> bool {
+    engine.no_line_number().is_some_and(|flag| token.is(flag))
 }
 
 /// True for a context-window flag: `-A`/`-B`/`-C`, their long forms, or -- grep only -- the
 /// `-NUM` shorthand for `--context=NUM` (the tokenizer keeps that digit run as one `Short`
 /// token). ripgrep has no `-NUM`; its `-0` is `--null`, so reading a digit as context there
 /// changes the output shape for a flag that has nothing to do with context.
-fn is_context_token(engine: Engine, kind: TokenKind, text: &str) -> bool {
-    match kind {
-        TokenKind::Long => matches!(text, "after-context" | "before-context" | "context"),
-        TokenKind::Short => {
-            matches!(text, "A" | "B" | "C")
-                || (engine == Engine::Grep && arg_tokenizer::is_digit_run(text))
-        }
-        _ => false,
-    }
+fn is_context_token(engine: Engine, token: &Token<'_>) -> bool {
+    token.is_one_of(&[AFTER_CONTEXT, BEFORE_CONTEXT, CONTEXT])
+        || (token.kind == TokenKind::Short
+            && engine == Engine::Grep
+            && arg_tokenizer::is_digit_run(token.text))
 }
 
 /// Flags detected during [`extract_pattern_path`]'s own token pass, replacing the
@@ -1106,8 +1213,9 @@ struct DetectedFlags {
     show_file: Option<bool>,
     /// `-n`/`--line-number`, unless negated by `-N`/`--no-line-number`.
     show_line: bool,
-    /// grep's `-r`/`-R`/`--recursive`: not a filename request, only a reason for the engine to
-    /// show one by default, so it feeds `show_file`'s fallback rather than overriding it.
+    /// grep's `-r`/`-R` in either spelling: not a filename request, only a reason for the engine
+    /// to show one by default when it walks the working directory, so it feeds `show_file`'s
+    /// fallback ([`wants_show_file`]) rather than overriding it.
     recursive: bool,
     /// `-A`/`-B`/`-C` or their long forms.
     context: bool,
@@ -1122,9 +1230,7 @@ fn has_format_flag<T: AsRef<str>>(engine: Engine, extra_args: &[T]) -> bool {
     // "--json" is -e's pattern, not the real --json flag) is classified exactly as
     // extract_pattern_path classifies it.
     let tokens = tokenize_search_args(extra_args, engine);
-    tokens
-        .iter()
-        .any(|t| is_format_flag_token(engine, t.kind, t.text))
+    tokens.iter().any(|t| is_format_flag_token(engine, t))
 }
 
 fn clean_line(line: &str, max_len: usize, context_re: Option<&Regex>, pattern: &str) -> String {
@@ -1194,6 +1300,15 @@ fn compact_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::arg_tokenizer::assert_takes_value_table;
+
+    /// [`super::extract_pattern_path`] on `args`, tokenized as [`run`] tokenizes them.
+    fn extract_pattern_path<T: AsRef<str>>(
+        args: &[T],
+        engine: Engine,
+    ) -> (Vec<String>, Vec<String>, Vec<String>, bool, DetectedFlags) {
+        super::extract_pattern_path(&tokenize_search_args(args, engine), engine)
+    }
 
     #[test]
     fn test_clean_line() {
@@ -1424,11 +1539,11 @@ mod tests {
     fn test_context_detection_covers_greps_numeric_shorthand() {
         // grep's `-1` is `--context=1`. Missing it dropped the `--` separators between
         // non-contiguous context blocks, so two far-apart hunks read as one run.
-        assert!(is_context_token(Engine::Grep, TokenKind::Short, "1"));
-        assert!(is_context_token(Engine::Grep, TokenKind::Short, "12"));
-        assert!(is_context_token(Engine::Grep, TokenKind::Short, "C"));
-        assert!(is_context_token(Engine::Grep, TokenKind::Long, "context"));
-        assert!(!is_context_token(Engine::Grep, TokenKind::Short, "n"));
+        assert!(first_token_is(Engine::Grep, "-1", is_context_token));
+        assert!(first_token_is(Engine::Grep, "-12", is_context_token));
+        assert!(first_token_is(Engine::Grep, "-C3", is_context_token));
+        assert!(first_token_is(Engine::Grep, "--context", is_context_token));
+        assert!(!first_token_is(Engine::Grep, "-n", is_context_token));
 
         let (_, _, _, _, detected) = extract_pattern_path(&["-1", "TODO", "f.txt"], Engine::Grep);
         assert!(detected.context);
@@ -1437,16 +1552,7 @@ mod tests {
     #[test]
     fn test_help_short_circuit_respects_the_boundary_and_the_engine() {
         let asks = |engine: Engine, args: &[&str]| -> bool {
-            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-            let tokens = arg_tokenizer::tokenize_grammar(
-                &args,
-                &|kind, name| search_takes_value(engine, kind, name),
-                Dialect::Posix,
-            );
-            arg_tokenizer::before_dashdash(&tokens).iter().any(|t| {
-                (t.kind == TokenKind::Long && matches!(t.text, "version" | "help"))
-                    || (t.kind == TokenKind::Short && t.text == "h" && engine == Engine::Rg)
-            })
+            asks_for_help(engine, &tokenize_search_args(args, engine))
         };
 
         assert!(asks(Engine::Grep, &["--version"]));
@@ -1454,7 +1560,29 @@ mod tests {
         assert!(!asks(Engine::Grep, &["--", "--version", "f.txt"]));
         // `-h` is rg's --help but grep's --no-filename.
         assert!(asks(Engine::Rg, &["-h"]));
+        assert!(asks(Engine::Rg, &["--help"]));
+        assert!(asks(Engine::Grep, &["--help"]));
         assert!(!asks(Engine::Grep, &["-h", "TODO", "f.txt"]));
+        // `-V` is `--version`'s short spelling in both engines, alone or in a cluster.
+        assert!(asks(Engine::Grep, &["-V"]));
+        assert!(asks(Engine::Rg, &["-V"]));
+        assert!(asks(Engine::Rg, &["-nV", "TODO"]));
+        assert!(!asks(Engine::Rg, &["--", "-V"]));
+    }
+
+    #[test]
+    fn test_rg_dash_zero_is_the_null_shape_flag() {
+        // rg's `-0` is `--null`: rg joins each path to its line with a NUL, so RTK passes the
+        // command through rather than regrouping it. grep's `--null` is `-Z` instead.
+        assert!(has_format_flag(Engine::Rg, &["-0"]));
+        assert!(has_format_flag(Engine::Rg, &["-n0"]));
+        assert!(has_format_flag(Engine::Rg, &["--null"]));
+        assert!(!has_format_flag(Engine::Grep, &["-0"]));
+        assert!(has_format_flag(Engine::Grep, &["-Z"]));
+        assert!(!has_format_flag(Engine::Rg, &["-Z"]));
+        // A shape flag of one engine is not one of the other's.
+        assert!(!has_format_flag(Engine::Grep, &["--json"]));
+        assert!(!has_format_flag(Engine::Rg, &["--silent"]));
     }
 
     #[test]
@@ -1829,22 +1957,22 @@ mod tests {
 
     #[test]
     fn test_format_flag_detects_count_matches() {
-        assert!(has_format_flag(Engine::Grep, &["--count-matches"]));
+        assert!(has_format_flag(Engine::Rg, &["--count-matches"]));
     }
 
     #[test]
     fn test_format_flag_detects_json() {
-        assert!(has_format_flag(Engine::Grep, &["--json"]));
+        assert!(has_format_flag(Engine::Rg, &["--json"]));
     }
 
     #[test]
     fn test_format_flag_detects_passthru() {
-        assert!(has_format_flag(Engine::Grep, &["--passthru"]));
+        assert!(has_format_flag(Engine::Rg, &["--passthru"]));
     }
 
     #[test]
     fn test_format_flag_detects_files() {
-        assert!(has_format_flag(Engine::Grep, &["--files"]));
+        assert!(has_format_flag(Engine::Rg, &["--files"]));
     }
 
     // --- truncation accuracy ---
@@ -1902,7 +2030,6 @@ mod tests {
         assert!(has_format_flag(Engine::Rg, &["-o"]));
         assert!(has_format_flag(Engine::Rg, &["-q"]));
         assert!(has_format_flag(Engine::Rg, &["-b"]));
-        assert!(has_format_flag(Engine::Rg, &["-Z"]));
     }
 
     #[test]
@@ -1990,7 +2117,7 @@ mod tests {
         // `-e --json` means "--json" is -e's pattern argument (both tables take a value for
         // true), not the real --json format flag -- but the old per-arg scan matched "--json"
         // regardless of position.
-        assert!(!has_format_flag(Engine::Grep, &["-e", "--json"]));
+        assert!(!has_format_flag(Engine::Rg, &["-e", "--json"]));
         // Same for the long-flag form of a value-taking option.
         assert!(!has_format_flag(Engine::Grep, &["--regexp", "--quiet"]));
     }
@@ -2006,11 +2133,10 @@ mod tests {
         let (_, _, _, has_format, _) = extract_pattern_path(&["foo", "src", "-rl"], Engine::Grep);
         assert!(has_format, "-l inside the -rl cluster should be detected");
 
-        let (_, _, _, has_format, _) =
-            extract_pattern_path(&["foo", "src", "--json"], Engine::Grep);
+        let (_, _, _, has_format, _) = extract_pattern_path(&["foo", "src", "--json"], Engine::Rg);
         assert!(has_format, "--json should be detected");
 
-        let (_, _, _, has_format, _) = extract_pattern_path(&["-e", "--json", "src"], Engine::Grep);
+        let (_, _, _, has_format, _) = extract_pattern_path(&["-e", "--json", "src"], Engine::Rg);
         assert!(
             !has_format,
             "-e's value must not be misread as the real --json flag"
@@ -2038,8 +2164,8 @@ mod tests {
         assert!(has_format_flag(Engine::Grep, &["--silent"]));
         assert!(has_format_flag(Engine::Grep, &["-b"]));
         assert!(has_format_flag(Engine::Grep, &["--byte-offset"]));
-        assert!(has_format_flag(Engine::Grep, &["--column"]));
-        assert!(has_format_flag(Engine::Grep, &["--vimgrep"]));
+        assert!(has_format_flag(Engine::Rg, &["--column"]));
+        assert!(has_format_flag(Engine::Rg, &["--vimgrep"]));
         assert!(has_format_flag(Engine::Grep, &["-z"]));
         assert!(has_format_flag(Engine::Grep, &["--null-data"]));
     }
@@ -2057,6 +2183,13 @@ mod tests {
     /// rather than only in a test-only twin of it.
     fn detected(args: &[&str]) -> DetectedFlags {
         detected_for(Engine::Grep, args)
+    }
+
+    /// Whether `question` holds for the first token of `arg`, read with `engine`'s grammar.
+    fn first_token_is(engine: Engine, arg: &str, question: fn(Engine, &Token<'_>) -> bool) -> bool {
+        let args = [arg];
+        let tokens = tokenize_search_args(&args, engine);
+        question(engine, &tokens[0])
     }
 
     fn detected_for(engine: Engine, args: &[&str]) -> DetectedFlags {
@@ -2094,18 +2227,18 @@ mod tests {
         // `-T` pads and tabs every match line, so RTK's forced `-H --null -n` parse reads
         // nothing back and leaked the injected flags -- filename, a raw NUL and the line
         // number -- straight into the output.
-        assert!(is_format_flag_token(Engine::Grep, TokenKind::Short, "T"));
+        assert!(first_token_is(Engine::Grep, "-T", is_format_flag_token));
         // ripgrep's -T is --type-not, a value-taking flag, not a shape flag.
-        assert!(!is_format_flag_token(Engine::Rg, TokenKind::Short, "T"));
-        assert!(is_format_flag_token(
+        assert!(!first_token_is(Engine::Rg, "-T", is_format_flag_token));
+        assert!(first_token_is(
             Engine::Grep,
-            TokenKind::Long,
-            "initial-tab"
+            "--initial-tab",
+            is_format_flag_token
         ));
-        assert!(!is_format_flag_token(
+        assert!(!first_token_is(
             Engine::Rg,
-            TokenKind::Long,
-            "initial-tab"
+            "--initial-tab",
+            is_format_flag_token
         ));
     }
 
@@ -2139,14 +2272,74 @@ mod tests {
     }
 
     #[test]
-    fn recursion_alone_still_asks_for_the_filename() {
-        for args in [&["-r"][..], &["-R"][..], &["--recursive"][..]] {
+    fn recursion_alone_is_not_a_filename_request() {
+        for args in [
+            &["-r"][..],
+            &["-R"][..],
+            &["--recursive"][..],
+            &["--dereference-recursive"][..],
+        ] {
             let d = detected(args);
             assert_eq!(d.show_file, None, "{args:?} is not an explicit request");
             assert!(d.recursive, "{args:?} must feed show_file's fallback");
         }
         // ripgrep's `-r` is `--replace`, so its value must not be read as recursion.
         assert!(!detected_for(Engine::Rg, &["-r", "X"]).recursive);
+    }
+
+    /// GNU grep 3.12: `-d recurse` is `-r` (`--help` says of `-r` "like --directories=recurse"),
+    /// in every spelling of the flag and for any prefix of `recurse` that names it alone; `read`
+    /// and `skip` are not recursion, and the last of `-r`, `-R` and `-d` sets the action.
+    #[test]
+    fn directories_recurse_is_recursion() {
+        for args in [
+            &["-d", "recurse"][..],
+            &["-drecurse"][..],
+            &["--directories=recurse"][..],
+            &["--directories", "recurse"][..],
+            &["-d", "rec"][..],
+            &["-nd", "recurse"][..],
+            &["-d", "read", "-r"][..],
+            &["-d", "skip", "-R"][..],
+        ] {
+            let d = detected(args);
+            assert!(d.recursive, "{args:?} recurses");
+            assert_eq!(d.show_file, None, "{args:?} is not an explicit request");
+        }
+        for args in [
+            &["-d", "read"][..],
+            &["-d", "skip"][..],
+            &["--directories=read"][..],
+            &["-d", "re"][..],
+            &["-d", "=recurse"][..],
+            &["-d"][..],
+            &["-r", "-d", "read"][..],
+            &["-rd", "skip"][..],
+            &["-d", "recurse", "-d", "read"][..],
+        ] {
+            assert!(!detected(args).recursive, "{args:?} does not recurse");
+        }
+        // ripgrep's `-d` is `--max-depth`.
+        assert!(!detected_for(Engine::Rg, &["-d", "recurse"]).recursive);
+    }
+
+    /// GNU grep 3.12 under any recursion spelling: `needle x` for a lone file operand,
+    /// `d/in.txt:needle y` for a directory operand and for no operand at all.
+    #[test]
+    fn recursion_prefixes_only_a_walk() {
+        let dir = [std::env::temp_dir().to_string_lossy().into_owned()];
+        let lone = ["Cargo.toml".to_string()];
+        assert!(!wants_show_file(&lone, true), "a lone file");
+        assert!(wants_show_file(&dir, true), "a directory");
+        assert!(
+            wants_show_file(&[], true),
+            "no operand walks the working directory"
+        );
+        assert!(
+            !wants_show_file(&[], false),
+            "no operand, no recursion: stdin"
+        );
+        assert!(wants_show_file(&dir, false), "a directory prefixes anyway");
     }
 
     #[test]
@@ -2353,5 +2546,158 @@ mod tests {
         assert!(f(&["--before-context=2"]));
         assert!(f(&["--context=1"]));
         assert!(!f(&["--color", "auto"]));
+    }
+
+    #[test]
+    fn test_grep_grammar_matches_its_table() {
+        assert_takes_value_table(
+            &GREP_GRAMMAR,
+            &[
+                (
+                    TokenKind::Long,
+                    &[
+                        "after-context",
+                        "before-context",
+                        "binary-files",
+                        "context",
+                        "devices",
+                        "directories",
+                        "exclude",
+                        "exclude-dir",
+                        "exclude-from",
+                        "file",
+                        "group-separator",
+                        "include",
+                        "label",
+                        "max-count",
+                        "regexp",
+                    ],
+                    Some(ValueSpec::value().claiming_dash_dash()),
+                ),
+                (
+                    TokenKind::Short,
+                    &["A", "B", "C", "D", "X", "d", "e", "f", "m"],
+                    Some(ValueSpec::value().claiming_dash_dash()),
+                ),
+                (
+                    TokenKind::Long,
+                    &[
+                        "byte-offset",
+                        "count",
+                        "dereference-recursive",
+                        "files-with-matches",
+                        "files-without-match",
+                        "help",
+                        "initial-tab",
+                        "line-number",
+                        "no-filename",
+                        "null",
+                        "null-data",
+                        "only-matching",
+                        "quiet",
+                        "recursive",
+                        "silent",
+                        "version",
+                        "with-filename",
+                    ],
+                    None,
+                ),
+                (
+                    TokenKind::Short,
+                    &[
+                        "H", "L", "R", "T", "V", "Z", "b", "c", "h", "l", "n", "o", "q", "r", "z",
+                    ],
+                    None,
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_rg_grammar_matches_its_table() {
+        assert_takes_value_table(
+            &RG_GRAMMAR,
+            &[
+                (
+                    TokenKind::Long,
+                    &[
+                        "after-context",
+                        "before-context",
+                        "color",
+                        "colors",
+                        "context",
+                        "context-separator",
+                        "dfa-size-limit",
+                        "encoding",
+                        "engine",
+                        "field-context-separator",
+                        "field-match-separator",
+                        "file",
+                        "generate",
+                        "glob",
+                        "hostname-bin",
+                        "hyperlink-format",
+                        "iglob",
+                        "ignore-file",
+                        "max-columns",
+                        "max-count",
+                        "max-depth",
+                        "max-filesize",
+                        "path-separator",
+                        "pre",
+                        "pre-glob",
+                        "regex-size-limit",
+                        "regexp",
+                        "replace",
+                        "sort",
+                        "sortr",
+                        "threads",
+                        "type",
+                        "type-add",
+                        "type-clear",
+                        "type-not",
+                    ],
+                    Some(ValueSpec::value().claiming_dash_dash()),
+                ),
+                (
+                    TokenKind::Short,
+                    &[
+                        "A", "B", "C", "E", "M", "T", "d", "e", "f", "g", "j", "m", "r", "t",
+                    ],
+                    Some(ValueSpec::value().claiming_dash_dash()),
+                ),
+                (
+                    TokenKind::Long,
+                    &[
+                        "byte-offset",
+                        "column",
+                        "count",
+                        "count-matches",
+                        "files",
+                        "files-with-matches",
+                        "files-without-match",
+                        "help",
+                        "json",
+                        "line-number",
+                        "no-filename",
+                        "no-line-number",
+                        "null",
+                        "null-data",
+                        "only-matching",
+                        "passthru",
+                        "quiet",
+                        "version",
+                        "vimgrep",
+                        "with-filename",
+                    ],
+                    None,
+                ),
+                (
+                    TokenKind::Short,
+                    &["0", "H", "I", "N", "V", "b", "c", "h", "l", "n", "o", "q"],
+                    None,
+                ),
+            ],
+        );
     }
 }

@@ -47,7 +47,7 @@ Command segmentation, word splitting and quote scanning live in `core/cmdline/le
 `rtk discover` reads Claude Code JSONL session files. Each file contains `tool_use`/`tool_result` pairs for every command the LLM ran. The module:
 
 1. Extracts commands from the JSONL (via `SessionProvider` trait — currently only Claude Code)
-2. Splits compound commands using the same lexer-based tokenization
+2. Splits compound commands where the rewrite does: both read the line through `read_grammar`, so a `[[ ]]` expression, an arithmetic command and a `case` pattern hold no command of their own
 3. Classifies each command against the same rules used for live rewriting
 4. Aggregates results: which commands could have been rewritten, estimated token savings, adoption rate
 

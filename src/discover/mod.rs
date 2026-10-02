@@ -11,12 +11,12 @@ use std::collections::HashMap;
 
 use provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
 use registry::{
-    Classification, ExcludePattern, category_avg_tokens, classify_command,
+    Classification, ExcludePattern, category_avg_tokens, classify_command_at,
     split_command_chain_parts, split_env_prefix,
 };
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
-use crate::core::cmdline::lexer::{self, tokenize, words};
+use crate::core::cmdline::lexer::{self, CommandStart, tokenize, words};
 use crate::core::cmdline::rtk::rtk_invocation;
 use crate::core::tracking::{HookDecisionRecord, Tracker};
 use crate::core::user_dirs;
@@ -345,6 +345,17 @@ impl Tally {
         );
         for (index, chain_part) in parts.iter().enumerate() {
             let part = chain_part.text;
+            // A command reads another's output when the one before it feeds
+            // a pipe, and after that pipe `time` is the program `time`.
+            let consumes_a_pipe = index
+                .checked_sub(1)
+                .and_then(|prev| parts.get(prev))
+                .is_some_and(|prev| prev.feeds_pipe);
+            let start = if consumes_a_pipe {
+                CommandStart::PipeStage
+            } else {
+                CommandStart::Pipeline
+            };
             // `output_len` measures what came back from the tool call, which
             // is what the last command in the line wrote. An earlier one
             // either fed a pipe, and its output was consumed rather than
@@ -363,7 +374,7 @@ impl Tally {
             let (env_prefix, actual_cmd) = split_env_prefix(part);
             let bypassed = prefix_contains_rtk_disabled(env_prefix);
             let part = if bypassed {
-                match classify_command(actual_cmd) {
+                match classify_command_at(actual_cmd, start) {
                     Classification::Supported { .. } => {
                         // Only count as a "bypass" if the hook would actually have
                         // covered it absent the bypass — otherwise RTK_DISABLED=
@@ -398,7 +409,7 @@ impl Tally {
                 part
             };
 
-            match classify_command(part) {
+            match classify_command_at(part, start) {
                 Classification::Supported {
                     rtk_equivalent,
                     category,
@@ -406,13 +417,6 @@ impl Tally {
                     status,
                 } => {
                     let coverage = hook_coverage(&ext_cmd.command, part, &ext_cmd.tool_use_id, ctx);
-
-                    // A command reads another's output when the one before it
-                    // feeds a pipe.
-                    let consumes_a_pipe = index
-                        .checked_sub(1)
-                        .and_then(|prev| parts.get(prev))
-                        .is_some_and(|prev| prev.feeds_pipe);
 
                     let map = match disposition(
                         bypassed,
@@ -860,6 +864,60 @@ mod tests {
         let mut rows: Vec<_> = map.iter().map(|(k, b)| (*k, b.count)).collect();
         rows.sort();
         rows
+    }
+
+    /// A transcript whose Bash calls ran `commands`, one tool call each.
+    fn transcript(commands: &[&str]) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().expect("temp transcript");
+        for (i, command) in commands.iter().enumerate() {
+            let call = serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [{
+                    "type": "tool_use",
+                    "id": format!("toolu_{i}"),
+                    "name": "Bash",
+                    "input": {"command": command},
+                }]},
+            });
+            writeln!(file, "{call}").expect("write transcript");
+        }
+        file.flush().expect("flush transcript");
+        file
+    }
+
+    /// Nothing inside a `[[ ]]` expression, an arithmetic command or a `case`
+    /// pattern runs, so none of it is a missed command: the report splits a
+    /// line where the rewriter does.
+    #[test]
+    fn test_expressions_and_patterns_hold_no_missed_command() {
+        let file = transcript(&[
+            "[[ -f a || ls ]]",
+            "(( a || ls ))",
+            "case $x in ls) echo 1;; esac",
+            "ls && git status",
+        ]);
+        let commands = ClaudeProvider
+            .extract_commands(file.path())
+            .expect("read transcript");
+        assert_eq!(commands.len(), 4);
+        let mut tally = Tally::default();
+        for command in &commands {
+            tally.add(command, &test_ctx(false));
+        }
+
+        // One command each for the expression and the arithmetic, `case $x
+        // in`, `echo 1` and `esac` for the `case`, and two for the chain.
+        assert_eq!(tally.total_commands, 7);
+        assert_eq!(
+            counts(&tally.supported),
+            vec![("rtk git", 1), ("rtk ls", 1)]
+        );
+        assert!(
+            tally.opportunities.is_empty(),
+            "{:?}",
+            counts(&tally.opportunities)
+        );
     }
 
     /// The whole point of the split between the two tables: `grep` is rewritten

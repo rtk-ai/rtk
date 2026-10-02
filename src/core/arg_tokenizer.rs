@@ -1,8 +1,8 @@
 //! Shared tokenizer for re-classifying an already-`--`-restored passthrough args slice
 //! (see [`crate::core::args_utils::restore_double_dash`]) into flags, their values, and
 //! positionals, matching the GNU/POSIX-ish conventions used by git, cargo, rg, and friends.
-//! Callers keep their own list of which flags take a value (inherently per-tool) and pass it in
-//! as a predicate instead of reimplementing the token-walking around it.
+//! Each tool declares its flag grammar once, as [`Grammar`] data (which flags take a value, and
+//! how), and [`tokenize_grammar`] does the token-walking around it.
 //!
 //! Not merged with `restore_double_dash`: `Token<'a>` borrows straight from `args`, so
 //! tokenizing an owned `Vec<String>` built *inside* this module would tie every `Token` to a
@@ -25,7 +25,7 @@ pub enum TokenKind {
     /// leading `-`). A run of only digits (`-20`) is a widely-used shorthand for a numeric
     /// value in its own right (git log/head/tail's `-N` count) rather than a cluster of
     /// per-digit boolean flags, so it is kept as one `Short` token with the whole digit run as
-    /// `text`, never decomposed.
+    /// `text`.
     Short,
 }
 
@@ -40,9 +40,10 @@ pub struct Token<'a> {
     /// short cluster (`-A3` → `Short` "A" with `attached: Some("3")`).
     pub attached: Option<&'a str>,
     /// For `Long`/`Short`: index into the returned `Vec` of the `Positional` token consumed as
-    /// this flag's separate-token value (only set when `takes_value` returned `true` and there
-    /// was no attached value). For a consumed `Positional`: index of the flag token that owns
-    /// it. `None` for a free-standing positional, an unconsumed flag, or `DashDash`.
+    /// this flag's separate-token value (only set when the grammar gives this flag a separate
+    /// value and there was no attached value). For a consumed `Positional`: index of the flag
+    /// token that owns it. `None` for a free-standing positional, an unconsumed flag, or
+    /// `DashDash`.
     pub linked: Option<usize>,
     /// Index into the original `args` slice this token was produced from. Every `Short` token
     /// from the same `-xyz` cluster shares one `source_index` (they came from one arg); a
@@ -60,6 +61,50 @@ pub struct Token<'a> {
     /// syntax rather than dotnet's CLI syntax -- `/l:` is MSBuild's logger-assembly switch, not
     /// dotnet's `-l`/`--logger`. Always `false` otherwise.
     pub slash: bool,
+    /// For `Long`/`Short`: the flag this token is in the grammar that read it
+    /// ([`Grammar::flag`]), looked up once while tokenizing, so every question asked about the
+    /// token ([`Token::is`], [`Token::is_one_of`]) compares against it rather than searching the
+    /// grammar again. `None` for an undeclared flag, for every token [`tokenize`] produces, and
+    /// for `Positional`/`DashDash`.
+    pub flag: Option<&'static Flag>,
+    /// The flags of the grammar that read this token, which [`Token::is`] and
+    /// [`Token::is_one_of`] hold each flag they are asked about to.
+    declared: Declared,
+}
+
+/// A grammar's flag tables as a [`Token`] keeps them. Its `Debug` leaves the tables out, so a
+/// printed token stays one line.
+#[derive(Clone, Copy)]
+struct Declared(&'static [&'static [Flag]]);
+
+/// Tables compare by address: every token of one [`tokenize_grammar`] call holds the same one.
+/// Tokens of two calls compare equal only when their grammars' tables share an address, which
+/// Rust does not promise for two uses of one `const`.
+impl PartialEq for Declared {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.0, other.0)
+    }
+}
+
+impl Eq for Declared {}
+
+impl std::fmt::Debug for Declared {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Declared(..)")
+    }
+}
+
+impl Declared {
+    /// Panics, in a debug build, unless `flag` is declared in these tables exactly as given. A
+    /// flag a grammar does not declare, or a copy that differs from the declaration in one
+    /// field, can never be a token's flag; asking a token about one is a caller's mistake that
+    /// would otherwise read as a plain `false`.
+    fn assert_declares(self, flag: &Flag) {
+        debug_assert!(
+            self.0.iter().any(|table| table.contains(flag)),
+            "{flag:?} is not declared in the grammar these tokens were read with"
+        );
+    }
 }
 
 impl<'a> Token<'a> {
@@ -86,6 +131,36 @@ impl<'a> Token<'a> {
     /// some preceding flag's separate-token value (`Token::linked`).
     pub fn is_free_positional(&self) -> bool {
         self.kind == TokenKind::Positional && self.linked.is_none()
+    }
+
+    /// Whether this token is `flag`, as the grammar that read it declares it. Flags compare by
+    /// their spellings, which name one declaration per grammar (`assert_takes_value_table`
+    /// rejects a spelling declared twice).
+    ///
+    /// `flag` must be declared in the grammar the token was read with, as given. A debug build
+    /// panics on any other flag, whatever the token; a release build answers `false`, since no
+    /// token of that grammar can be that flag. The caller keeps the two together: a predicate
+    /// that asks for a flag only some grammars declare either takes tokens whose type names
+    /// the grammar, or states which grammar its tokens are read with.
+    pub fn is(&self, flag: &Flag) -> bool {
+        self.declared.assert_declares(flag);
+        self.flag.is_some_and(|own| own.same_declaration(flag))
+    }
+
+    /// Whether this token is one of `flags`, as the grammar that read it declares them. Every
+    /// flag in `flags` must be declared in that grammar, checked as for [`Token::is`].
+    pub fn is_one_of(&self, flags: &[Flag]) -> bool {
+        for flag in flags {
+            self.declared.assert_declares(flag);
+        }
+        self.flag
+            .is_some_and(|own| flags.iter().any(|flag| own.same_declaration(flag)))
+    }
+
+    /// How this token takes its value: its declared flag's [`Flag::value`] for this spelling,
+    /// `None` for a boolean or undeclared flag and for a non-flag token.
+    pub fn value_spec(&self) -> Option<ValueSpec> {
+        self.flag?.value(self.kind)
     }
 }
 
@@ -144,63 +219,71 @@ pub fn has_dashdash(tokens: &[Token<'_>]) -> bool {
     dashdash_index(tokens).is_some()
 }
 
-/// True if `name` (matched per `dialect`) appears as a `Long` token anywhere in `tokens`. Under
-/// `Dialect::Msbuild`, this matches `-flag`/`--flag`/`/flag` uniformly — correct only for
-/// legacy MSBuild.exe passthrough switches (`nologo`, `bl`, `v`); see [`has_double_dash_flag`]
-/// for anything else.
-pub fn has_flag(tokens: &[Token<'_>], dialect: Dialect, name: &str) -> bool {
+/// True if `name` appears as a `Long` token anywhere in `tokens`. Under [`Grammar::msbuild`],
+/// this matches `-flag`/`--flag`/`/flag` uniformly — correct only for legacy MSBuild.exe
+/// passthrough switches (`nologo`, `bl`, `v`); see [`has_double_dash_flag`] for anything else.
+///
+/// `grammar` is the one `tokens` were read with, and the lookup reads only its naming rules:
+/// `name` matches a token's text exactly under [`Grammar::posix`] and folding ASCII case under
+/// [`Grammar::msbuild`]. It does not consult the declared flags, so `name` need not be declared;
+/// a switch that takes no value, like MSBuild's `bl`, has nothing for a grammar to record. The
+/// same holds for [`has_double_dash_flag`], [`double_dash_flag_value`] and
+/// [`double_dash_flag_values`].
+pub fn has_flag(tokens: &[Token<'_>], grammar: &Grammar, name: &str) -> bool {
     tokens
         .iter()
-        .any(|t| t.kind == TokenKind::Long && flag_name_matches(t.text, name, dialect))
+        .any(|t| t.kind == TokenKind::Long && flag_name_matches(t.text, name, grammar.dialect))
 }
 
 /// Like [`double_dash_flag_value`], but only reports presence, not the value; only matches a
 /// token written with a literal `--` prefix (`Token::double_dash`), not `-flag`/`/flag` under
-/// [`Dialect::Msbuild`]. Under that dialect, a single-dash or slash spelling of a modern
+/// [`Grammar::msbuild`]. There, a single-dash or slash spelling of a modern
 /// System.CommandLine option (e.g. dotnet's `--logger`) doesn't just get rejected — it gets
 /// misparsed as an unrelated legacy MSBuild switch — so use this (not [`has_flag`]) for any
-/// option that isn't a genuine legacy MSBuild.exe passthrough switch.
-pub fn has_double_dash_flag(tokens: &[Token<'_>], dialect: Dialect, name: &str) -> bool {
-    tokens.iter().any(|t| is_double_dash_flag(t, dialect, name))
+/// option that isn't a genuine legacy MSBuild.exe passthrough switch. `name` matches per
+/// `grammar`'s naming rules, see [`has_flag`].
+pub fn has_double_dash_flag(tokens: &[Token<'_>], grammar: &Grammar, name: &str) -> bool {
+    tokens.iter().any(|t| is_double_dash_flag(t, grammar, name))
 }
 
-/// This flag's value, if `name` (matched per `dialect`) appears as a `Long` token written with
-/// a literal `--` prefix (`Token::double_dash`) anywhere in `tokens`. See
-/// [`has_double_dash_flag`] for why this distinction is load-bearing under `Dialect::Msbuild`.
+/// This flag's value, if `name` (matched per `grammar`'s naming rules, see [`has_flag`]) appears
+/// as a `Long` token written with a literal `--` prefix (`Token::double_dash`) anywhere in `tokens`. See
+/// [`has_double_dash_flag`] for why this distinction is load-bearing under [`Grammar::msbuild`].
 pub fn double_dash_flag_value<'a>(
     tokens: &[Token<'a>],
-    dialect: Dialect,
+    grammar: &Grammar,
     name: &str,
 ) -> Option<&'a str> {
     tokens
         .iter()
-        .find(|t| is_double_dash_flag(t, dialect, name))
+        .find(|t| is_double_dash_flag(t, grammar, name))
         .and_then(|t| t.value(tokens))
 }
 
-/// Every value for `name` (matched per `dialect`), in order, for a `--`-prefixed flag that can
-/// legitimately repeat (e.g. dotnet test's `--logger`, usable more than once) — unlike
-/// [`double_dash_flag_value`], which only reports the first match. Occurrences with no value are
-/// skipped rather than yielding `None`.
+/// Every value for `name` (matched per `grammar`'s naming rules, see [`has_flag`]), in order, for a `--`-prefixed
+/// flag that can legitimately repeat (e.g. dotnet test's `--logger`, usable more than once) —
+/// unlike [`double_dash_flag_value`], which only reports the first match. Occurrences with no
+/// value are skipped rather than yielding `None`.
 pub fn double_dash_flag_values<'a, 't>(
     tokens: &'t [Token<'a>],
-    dialect: Dialect,
+    grammar: &'t Grammar,
     name: &'t str,
 ) -> impl Iterator<Item = &'a str> + 't {
     tokens
         .iter()
-        .filter(move |t| is_double_dash_flag(t, dialect, name))
+        .filter(move |t| is_double_dash_flag(t, grammar, name))
         .filter_map(|t| t.value(tokens))
 }
 
 /// Shared match predicate behind [`has_double_dash_flag`]/[`double_dash_flag_value`]/
 /// [`double_dash_flag_values`]: a `Long` token written with a literal `--` prefix, matching
-/// `name` per `dialect`'s naming rules.
-fn is_double_dash_flag(t: &Token<'_>, dialect: Dialect, name: &str) -> bool {
-    t.kind == TokenKind::Long && t.double_dash && flag_name_matches(t.text, name, dialect)
+/// `name` per `grammar`'s naming rules.
+fn is_double_dash_flag(t: &Token<'_>, grammar: &Grammar, name: &str) -> bool {
+    t.kind == TokenKind::Long && t.double_dash && flag_name_matches(t.text, name, grammar.dialect)
 }
 
-/// Which CLI's flag grammar to apply. See [`tokenize_dialect`].
+/// The naming and value-attachment rules a [`Grammar`] reads its flags under. Chosen by the
+/// grammar's constructor: see [`Grammar::posix`] and [`Grammar::msbuild`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dialect {
     /// MSBuild/dotnet-CLI-ish. `-flag`, `--flag`, and `/flag` are all one atomic flag name —
@@ -209,13 +292,13 @@ pub enum Dialect {
     /// `TokenKind::Long` regardless of which prefix introduced it; `TokenKind::Short` is never
     /// produced in this dialect.
     Msbuild,
-    /// GNU/POSIX-ish: git, cargo, rg, golangci-lint. `-xyz` is a cluster of short flags,
-    /// scanned char by char; only `=` attaches a value to a long flag.
+    /// GNU/POSIX-ish: git, cargo, rg, golangci-lint. `--name` is a `Long` flag and `-x` a
+    /// `Short` one, only `=` attaches a value, and names match exactly.
     Posix,
 }
 
-/// How a flag's value may be written. The tokenizer branches on this; a caller states it once,
-/// per flag, in its `takes_value` predicate.
+/// How a flag's value may be written. The tokenizer branches on this; a tool states it once,
+/// per flag, in its [`Grammar`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Attachment {
     /// `--flag=v` only. The next argument is never this flag's value -- git's `-M`/`-U`/`-C`/
@@ -228,9 +311,22 @@ pub enum Attachment {
     AttachedOrSeparate { solo_only: bool },
 }
 
-/// What a caller's `takes_value` predicate says about one flag's value. Returned inside an
-/// `Option`, so "takes no value" is `None` and there is one table per tool rather than one per
-/// question asked about the same flag.
+impl Attachment {
+    /// This attachment for a spelling that is always the whole argument, where `solo_only`
+    /// has nothing left to restrict.
+    const fn whole_argument(self) -> Self {
+        match self {
+            Attachment::AttachedOrSeparate { .. } => {
+                Attachment::AttachedOrSeparate { solo_only: false }
+            }
+            Attachment::AttachedOnly => Attachment::AttachedOnly,
+        }
+    }
+}
+
+/// How one flag takes its value ([`Flag::value`]). Held in an `Option`, so "takes no value" is
+/// `None` and there is one table per tool rather than one per question asked about the same
+/// flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ValueSpec {
     pub attachment: Attachment,
@@ -274,7 +370,190 @@ impl ValueSpec {
             ..self
         }
     }
+
+    /// Whether a `Short` flag takes a separate value only when it is the whole argument.
+    const fn is_solo_only(self) -> bool {
+        matches!(
+            self.attachment,
+            Attachment::AttachedOrSeparate { solo_only: true }
+        )
+    }
 }
+
+/// One flag of a [`Grammar`], with a short and a long bare spelling (no leading dash, the
+/// [`Token::text`] convention), either of which may be absent when the flag has one spelling. A
+/// `Short` token only ever matches the short spelling and a `Long` token only ever matches the
+/// long one, the way getopt keeps `-v` and `--v` apart.
+///
+/// The flag records how each spelling takes its value ([`Flag::value`]): `None` for a boolean
+/// flag, and the [`ValueSpec`] given to [`Flag::takes`] otherwise, except that the long spelling
+/// is always the whole argument and so is never solo-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Flag {
+    short: Option<&'static str>,
+    long: Option<&'static str>,
+    short_value: Option<ValueSpec>,
+    long_value: Option<ValueSpec>,
+}
+
+impl Flag {
+    /// A boolean flag spelled `-name` only.
+    pub const fn short(name: &'static str) -> Self {
+        Self {
+            short: Some(name),
+            long: None,
+            short_value: None,
+            long_value: None,
+        }
+    }
+
+    /// A boolean flag spelled `--name` only.
+    pub const fn long(name: &'static str) -> Self {
+        Self {
+            short: None,
+            long: Some(name),
+            short_value: None,
+            long_value: None,
+        }
+    }
+
+    /// A boolean flag spelled both `-short` and `--long`.
+    pub const fn pair(short: &'static str, long: &'static str) -> Self {
+        Self {
+            short: Some(short),
+            long: Some(long),
+            short_value: None,
+            long_value: None,
+        }
+    }
+
+    /// This flag, taking a value as `spec` says. The short spelling records `spec` as given; the
+    /// long spelling records it without `solo_only`, which only restricts a `Short` flag inside
+    /// a cluster. A solo-only spec on a flag with no short spelling would restrict nothing, so
+    /// the call panics: such a flag declares [`ValueSpec::value`]. Evaluated in a `const` or
+    /// `static` initializer, as every flag of this crate is, the panic is a compile error; a
+    /// call evaluated at run time panics at run time.
+    pub const fn takes(self, spec: ValueSpec) -> Self {
+        assert!(
+            self.short.is_some() || !spec.is_solo_only(),
+            "a flag with no short spelling cannot be solo-only: declare ValueSpec::value()"
+        );
+        Self {
+            short_value: match self.short {
+                Some(_) => Some(spec),
+                None => None,
+            },
+            long_value: match self.long {
+                Some(_) => Some(ValueSpec {
+                    attachment: spec.attachment.whole_argument(),
+                    ..spec
+                }),
+                None => None,
+            },
+            ..self
+        }
+    }
+
+    /// How this flag takes its value when spelled as a `kind` token: `None` for a boolean flag,
+    /// for a spelling the flag does not have, and for any kind but `Short` and `Long`.
+    pub const fn value(&self, kind: TokenKind) -> Option<ValueSpec> {
+        match kind {
+            TokenKind::Short => self.short_value,
+            TokenKind::Long => self.long_value,
+            TokenKind::DashDash | TokenKind::Positional => None,
+        }
+    }
+
+    /// Whether `other` is this declaration: the same short and long spellings. A grammar
+    /// declares each spelling once, so two of its flags never share one.
+    fn same_declaration(&self, other: &Flag) -> bool {
+        self.short == other.short && self.long == other.long
+    }
+
+    /// Whether a `kind` token named `name` is this flag, under `dialect`'s naming rules.
+    fn is_spelled(&self, kind: TokenKind, name: &str, dialect: Dialect) -> bool {
+        match kind {
+            TokenKind::Short => self.short == Some(name),
+            TokenKind::Long => self
+                .long
+                .is_some_and(|long| flag_name_matches(name, long, dialect)),
+            TokenKind::DashDash | TokenKind::Positional => false,
+        }
+    }
+}
+
+/// One tool's (or one subcommand's) flag grammar, declared once as `const`/`static` data and
+/// handed to [`tokenize_grammar`]. Built only through its constructors ([`Grammar::posix`],
+/// [`Grammar::msbuild`]), each of which fixes a coherent dialect.
+///
+/// `flags` is a list of flag tables, searched in order, first match wins, and a grammar's
+/// table test (`assert_takes_value_table`) holds it to one declaration per spelling. A
+/// subcommand whose parent's flags all stay valid after it lists the parent's table next to its
+/// own (golangci-lint's `run` lists the global table).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Grammar {
+    dialect: Dialect,
+    flags: &'static [&'static [Flag]],
+}
+
+impl Grammar {
+    /// A getopt grammar: `-xyz` is a cluster of short flags, a value-taking one taking the rest
+    /// of the cluster or the next argument, and an all-digit `-N` is one numeric token.
+    pub const fn posix(flags: &'static [&'static [Flag]]) -> Self {
+        Self {
+            dialect: Dialect::Posix,
+            flags,
+        }
+    }
+
+    /// An MSBuild/dotnet grammar ([`Dialect::Msbuild`]). Every spelling (`-f`, `--f`, `/f`)
+    /// tokenizes as a `Long` token, so its flags are declared with a `long` spelling only, and
+    /// names match ASCII case-insensitively. A short spelling could never match a token, so the
+    /// call panics on one. Evaluated in a `const` or `static` initializer, as every grammar of
+    /// this crate is, the panic is a compile error; a call evaluated at run time panics at run
+    /// time.
+    pub const fn msbuild(flags: &'static [&'static [Flag]]) -> Self {
+        let mut table = 0;
+        while table < flags.len() {
+            let mut flag = 0;
+            while flag < flags[table].len() {
+                assert!(
+                    flags[table][flag].short.is_none(),
+                    "an MSBuild grammar reads every spelling as Long: declare Flag::long"
+                );
+                flag += 1;
+            }
+            table += 1;
+        }
+        Self {
+            dialect: Dialect::Msbuild,
+            flags,
+        }
+    }
+
+    /// The declared flag that a `kind` token named `name` is, if any: a `Short` token matches a
+    /// flag's short spelling, a `Long` token its long spelling (per this grammar's dialect's
+    /// naming rules), and no other kind matches anything. A linear search: [`tokenize_grammar`]
+    /// runs it once per flag token and keeps the answer in [`Token::flag`], which is what a
+    /// caller holding tokens reads.
+    pub fn flag(&self, kind: TokenKind, name: &str) -> Option<&'static Flag> {
+        self.flags
+            .iter()
+            .flat_map(|table| table.iter())
+            .find(|flag| flag.is_spelled(kind, name, self.dialect))
+    }
+
+    /// How a `kind` flag named `name` takes its value: that flag's [`Flag::value`] for this
+    /// spelling, `None` for a boolean or undeclared flag. The question a grammar's table test
+    /// asks; a caller holding tokens reads [`Token::value_spec`].
+    #[cfg(test)]
+    pub fn takes_value(&self, kind: TokenKind, name: &str) -> Option<ValueSpec> {
+        self.flag(kind, name)?.value(kind)
+    }
+}
+
+/// The grammar [`tokenize`] reads under: getopt, with no declared flags.
+const STRUCTURAL: Grammar = Grammar::posix(&[]);
 
 /// Tokenizes `args` structurally, for a caller asking only which arguments are flags, which are
 /// positionals, and where `--` is -- subcommand detection, boundary splitting.
@@ -283,98 +562,22 @@ impl ValueSpec {
 /// value or counts free positionals: without a grammar, `--grep -p` leaves `-p` looking like a
 /// flag of its own and `--filter X` leaves `X` looking like a positional path.
 pub fn tokenize<'a, T: AsRef<str>>(args: &'a [T]) -> Vec<Token<'a>> {
-    tokenize_scan(args, Dialect::Posix, &|_, _| None)
+    tokenize_grammar(args, &STRUCTURAL)
 }
 
-/// Tokenizes `args` under one tool's grammar. `takes_value(kind, name)` returns `Some(spec)` for
-/// a flag that takes a value and `None` for one that does not; never panics, a value-taking flag
-/// with nothing left to consume simply gets `attached: None, linked: None`.
+/// Tokenizes `args` under one tool's [`Grammar`]. Never panics: a value-taking flag with nothing
+/// left to consume simply gets `attached: None, linked: None`.
 ///
 /// Generic over `T: AsRef<str>`, not `OsStr`/`OsString`: `OsStr` exposes almost no
 /// string-manipulation API (no `strip_prefix`, `split_once`), so tokenizing it would mean
 /// re-deriving that machinery byte-by-byte the way `clap_lex` does internally.
-pub fn tokenize_grammar<'a, T: AsRef<str>>(
-    args: &'a [T],
-    takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
-    dialect: Dialect,
-) -> Vec<Token<'a>> {
-    tokenize_scan(args, dialect, takes_value)
-}
-
-/// Groups the mutable scan state threaded through [`tokenize_scan`]'s helper methods
-/// (`push_atomic_flag`/`link_next_value`), so a future piece of shared state means adding one
-/// field instead of a parameter to every helper and every call site.
-struct Scanner<'a, 'p, T> {
-    tokens: Vec<Token<'a>>,
-    args: &'a [T],
-    i: usize,
-    dialect: Dialect,
-    emitted_dash_dash: bool,
-    takes_value: &'p dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
-}
-
-impl<'a, 'p, T: AsRef<str>> Scanner<'a, 'p, T> {
-    /// Pushes one atomic (non-clustering) flag token — used for `--flag` in both dialects, and
-    /// for `-flag`/`/flag` in [`Dialect::Msbuild`]. `rest` is the flag text with its prefix
-    /// already stripped; `prefix` records which one it was. Only the `/flag` spelling is barred
-    /// from consuming a separate value: an MSBuild switch attaches its value with `:`
-    /// (`/bl:x.binlog`), so `/r` (MSBuild's `restore`) must not swallow the token after it the
-    /// way dotnet's own `-r <rid>` does.
-    fn push_atomic_flag(&mut self, rest: &'a str, prefix: FlagPrefix) {
-        let (name, attached) = split_attached(rest, self.dialect);
-        let flag_index = self.tokens.len();
-        let source_index = self.i;
-        self.tokens.push(Token {
-            attached,
-            ..token(TokenKind::Long, name, source_index, prefix)
-        });
-        self.i += 1;
-
-        if attached.is_none() && prefix != FlagPrefix::Slash {
-            // `solo_only` cannot apply here: a Long flag is always the whole argument.
-            if let Some(spec) = (self.takes_value)(TokenKind::Long, name)
-                && spec.attachment != Attachment::AttachedOnly
-                && self.link_next_value(flag_index, self.i, spec)
-            {
-                self.i += 1;
-            }
-        }
-    }
-
-    /// If `self.args[value_index]` exists and isn't the still-unseen boundary `--`, pushes it as
-    /// a `Positional` token linked to `flag_index` (and links `flag_index` back to it). Returns
-    /// whether a value was consumed; does *not* itself advance `self.i`. The still-unseen `--`
-    /// is swallowed as a value only when the flag's [`ValueSpec::claims_dash_dash`] says so.
-    fn link_next_value(&mut self, flag_index: usize, value_index: usize, spec: ValueSpec) -> bool {
-        let Some(next) = self.args.get(value_index) else {
-            return false;
-        };
-        if next.as_ref() == "--" && !self.emitted_dash_dash && !spec.claims_dash_dash {
-            return false;
-        }
-        let token_index = self.tokens.len();
-        self.tokens.push(Token {
-            linked: Some(flag_index),
-            ..positional(next.as_ref(), value_index)
-        });
-        self.tokens[flag_index].linked = Some(token_index);
-        true
-    }
-}
-
-/// Core implementation shared by both public entry points.
-fn tokenize_scan<'a, T: AsRef<str>>(
-    args: &'a [T],
-    dialect: Dialect,
-    takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
-) -> Vec<Token<'a>> {
+pub fn tokenize_grammar<'a, T: AsRef<str>>(args: &'a [T], grammar: &Grammar) -> Vec<Token<'a>> {
     let mut scanner = Scanner {
         tokens: Vec::with_capacity(args.len()),
         args,
         i: 0,
-        dialect,
         emitted_dash_dash: false,
-        takes_value,
+        grammar,
     };
 
     while scanner.i < scanner.args.len() {
@@ -382,8 +585,9 @@ fn tokenize_scan<'a, T: AsRef<str>>(
 
         // Posix stops classifying at `--`; Msbuild's `--` is a forwarding boundary, so it keeps
         // classifying flags past it (see TokenKind::DashDash).
-        if scanner.emitted_dash_dash && scanner.dialect == Dialect::Posix {
-            scanner.tokens.push(positional(arg, scanner.i));
+        if scanner.emitted_dash_dash && scanner.grammar.dialect == Dialect::Posix {
+            let token = scanner.positional(arg, scanner.i);
+            scanner.tokens.push(token);
             scanner.i += 1;
             continue;
         }
@@ -392,11 +596,11 @@ fn tokenize_scan<'a, T: AsRef<str>>(
             if scanner.emitted_dash_dash {
                 // A second (or later) literal "--" is never itself the boundary — it's just
                 // ordinary text at this point, in both dialects.
-                scanner.tokens.push(positional(arg, scanner.i));
+                let token = scanner.positional(arg, scanner.i);
+                scanner.tokens.push(token);
             } else {
-                scanner
-                    .tokens
-                    .push(token(TokenKind::DashDash, "", scanner.i, FlagPrefix::Dash));
+                let token = scanner.token(TokenKind::DashDash, "", scanner.i, FlagPrefix::Dash);
+                scanner.tokens.push(token);
                 scanner.emitted_dash_dash = true;
             }
             scanner.i += 1;
@@ -408,7 +612,7 @@ fn tokenize_scan<'a, T: AsRef<str>>(
             continue;
         }
 
-        if scanner.dialect == Dialect::Msbuild {
+        if scanner.grammar.dialect == Dialect::Msbuild {
             if let Some(rest) = arg.strip_prefix('/') {
                 // A real MSBuild switch name never contains another '/' -- without this guard,
                 // an absolute Unix path would misclassify as a Long flag (e.g. "tmp/results").
@@ -430,12 +634,10 @@ fn tokenize_scan<'a, T: AsRef<str>>(
             let cluster = &arg[1..];
 
             if is_digit_run(cluster) {
-                scanner.tokens.push(token(
-                    TokenKind::Short,
-                    cluster,
-                    scanner.i,
-                    FlagPrefix::Dash,
-                ));
+                scanner.tokens.push(Token {
+                    flag: scanner.grammar.flag(TokenKind::Short, cluster),
+                    ..scanner.token(TokenKind::Short, cluster, scanner.i, FlagPrefix::Dash)
+                });
                 scanner.i += 1;
                 continue;
             }
@@ -447,14 +649,13 @@ fn tokenize_scan<'a, T: AsRef<str>>(
                 let char_len = ch.len_utf8();
                 let char_text = &cluster[offset..offset + char_len];
                 let flag_index = scanner.tokens.len();
-                scanner.tokens.push(token(
-                    TokenKind::Short,
-                    char_text,
-                    source_index,
-                    FlagPrefix::Dash,
-                ));
+                let flag = scanner.grammar.flag(TokenKind::Short, char_text);
+                scanner.tokens.push(Token {
+                    flag,
+                    ..scanner.token(TokenKind::Short, char_text, source_index, FlagPrefix::Dash)
+                });
 
-                if let Some(spec) = (scanner.takes_value)(TokenKind::Short, char_text) {
+                if let Some(spec) = flag.and_then(|flag| flag.value(TokenKind::Short)) {
                     let remainder = &cluster[offset + char_len..];
                     if !remainder.is_empty() {
                         scanner.tokens[flag_index].attached = Some(remainder);
@@ -480,11 +681,102 @@ fn tokenize_scan<'a, T: AsRef<str>>(
             continue;
         }
 
-        scanner.tokens.push(positional(arg, scanner.i));
+        let token = scanner.positional(arg, scanner.i);
+        scanner.tokens.push(token);
         scanner.i += 1;
     }
 
     scanner.tokens
+}
+
+/// Groups the mutable scan state threaded through [`tokenize_grammar`]'s helper methods
+/// (`push_atomic_flag`/`link_next_value`), so a future piece of shared state means adding one
+/// field instead of a parameter to every helper and every call site.
+struct Scanner<'a, 'g, T> {
+    tokens: Vec<Token<'a>>,
+    args: &'a [T],
+    i: usize,
+    emitted_dash_dash: bool,
+    grammar: &'g Grammar,
+}
+
+impl<'a, 'g, T: AsRef<str>> Scanner<'a, 'g, T> {
+    /// Pushes one atomic (non-clustering) `Long` flag token: `--flag` in both dialects, and
+    /// `-flag`/`/flag` in [`Dialect::Msbuild`]. `rest` is the flag text with its prefix already
+    /// stripped; `prefix` records which one it was. The value attaches after the dialect's
+    /// separator (`--flag=v`, `-flag=v`, `/flag:v`) or, failing that, is the next argument.
+    /// Only the `/flag` spelling is barred from consuming a separate value: an MSBuild switch
+    /// attaches its value with `:` (`/bl:x.binlog`), so `/r` (MSBuild's `restore`) must not
+    /// swallow the token after it the way dotnet's own `-r <rid>` does.
+    fn push_atomic_flag(&mut self, rest: &'a str, prefix: FlagPrefix) {
+        let (name, attached) = split_attached(rest, self.grammar.dialect);
+        let flag_index = self.tokens.len();
+        let source_index = self.i;
+        let flag = self.grammar.flag(TokenKind::Long, name);
+        self.tokens.push(Token {
+            attached,
+            flag,
+            ..self.token(TokenKind::Long, name, source_index, prefix)
+        });
+        self.i += 1;
+
+        // `solo_only` cannot apply here: an atomic flag is always the whole argument.
+        if attached.is_none()
+            && prefix != FlagPrefix::Slash
+            && let Some(spec) = flag.and_then(|flag| flag.value(TokenKind::Long))
+            && spec.attachment != Attachment::AttachedOnly
+            && self.link_next_value(flag_index, self.i, spec)
+        {
+            self.i += 1;
+        }
+    }
+
+    /// If `self.args[value_index]` exists and isn't the still-unseen boundary `--`, pushes it as
+    /// a `Positional` token linked to `flag_index` (and links `flag_index` back to it). Returns
+    /// whether a value was consumed; does *not* itself advance `self.i`. The still-unseen `--`
+    /// is swallowed as a value only when the flag's [`ValueSpec::claims_dash_dash`] says so.
+    fn link_next_value(&mut self, flag_index: usize, value_index: usize, spec: ValueSpec) -> bool {
+        let Some(next) = self.args.get(value_index) else {
+            return false;
+        };
+        if next.as_ref() == "--" && !self.emitted_dash_dash && !spec.claims_dash_dash {
+            return false;
+        }
+        let token_index = self.tokens.len();
+        self.tokens.push(Token {
+            linked: Some(flag_index),
+            ..self.positional(next.as_ref(), value_index)
+        });
+        self.tokens[flag_index].linked = Some(token_index);
+        true
+    }
+
+    /// Base constructor for a freshly-scanned token of this scan's grammar: `attached`,
+    /// `linked` and `flag` default to `None`. Every token-construction site builds on this via
+    /// struct-update syntax instead of a full literal.
+    fn token(
+        &self,
+        kind: TokenKind,
+        text: &'a str,
+        source_index: usize,
+        prefix: FlagPrefix,
+    ) -> Token<'a> {
+        Token {
+            kind,
+            text,
+            attached: None,
+            linked: None,
+            source_index,
+            double_dash: prefix == FlagPrefix::DashDash,
+            slash: prefix == FlagPrefix::Slash,
+            flag: None,
+            declared: Declared(self.grammar.flags),
+        }
+    }
+
+    fn positional(&self, text: &'a str, source_index: usize) -> Token<'a> {
+        self.token(TokenKind::Positional, text, source_index, FlagPrefix::Dash)
+    }
 }
 
 /// Splits `s` into `(name, attached_value)` on the first dialect-appropriate separator:
@@ -501,20 +793,6 @@ fn split_attached(s: &str, dialect: Dialect) -> (&str, Option<&str>) {
     }
 }
 
-/// Base constructor for a freshly-scanned token: `attached`/`linked` default to `None`. Every
-/// token-construction site builds on this via struct-update syntax instead of a full literal.
-fn token(kind: TokenKind, text: &str, source_index: usize, prefix: FlagPrefix) -> Token<'_> {
-    Token {
-        kind,
-        text,
-        attached: None,
-        linked: None,
-        source_index,
-        double_dash: prefix == FlagPrefix::DashDash,
-        slash: prefix == FlagPrefix::Slash,
-    }
-}
-
 /// How a flag was spelled. Under [`Dialect::Msbuild`] all three tokenize as `Long`, but they
 /// are not interchangeable: MSBuild's `/flag` attaches its value with `:` and never consumes
 /// the next argument, while dotnet's own `-flag`/`--flag` do.
@@ -525,8 +803,91 @@ enum FlagPrefix {
     Slash,
 }
 
-fn positional(text: &str, source_index: usize) -> Token<'_> {
-    token(TokenKind::Positional, text, source_index, FlagPrefix::Dash)
+/// One row of an [`assert_takes_value_table`] table: every name listed is a declared flag of
+/// this kind, taking its value as the spec says, or none for `None` (a boolean flag).
+#[cfg(test)]
+pub(crate) type TakesValueRow = (TokenKind, &'static [&'static str], Option<ValueSpec>);
+
+/// Asserts that `grammar` answers [`Grammar::flag`] and [`Grammar::takes_value`] exactly as
+/// `table` says: for every name the table lists and a few names no table lists, under every
+/// token kind, a name listed under a kind is a declared flag taking that row's spec (or no
+/// value), and any other is not declared at all. Also asserts that `grammar` declares no
+/// spelling the table leaves out, so the table is the grammar's full contents, and none twice:
+/// the first declaration of a spelling wins, so a second one is dead data that looks live.
+/// Spellings compare under the grammar's naming rules, so `NoLogo` and `nologo` are one
+/// spelling under [`Grammar::msbuild`].
+#[cfg(test)]
+pub(crate) fn assert_takes_value_table(grammar: &Grammar, table: &[TakesValueRow]) {
+    // `Some(spec)` for a listed name, `None` for one the table does not list.
+    let row = |kind: TokenKind, name: &str| {
+        table
+            .iter()
+            .find(|(k, names, _)| *k == kind && names.contains(&name))
+            .map(|(_, _, spec)| *spec)
+    };
+    let unknown = ["", "-", "x", "zz", "20", "unknown-flag"];
+    let names = table
+        .iter()
+        .flat_map(|(_, names, _)| names.iter().copied())
+        .chain(unknown);
+    for name in names {
+        for kind in [
+            TokenKind::Short,
+            TokenKind::Long,
+            TokenKind::Positional,
+            TokenKind::DashDash,
+        ] {
+            let expected = row(kind, name);
+            assert_eq!(
+                grammar.flag(kind, name).is_some(),
+                expected.is_some(),
+                "{kind:?} {name:?} declared"
+            );
+            assert_eq!(
+                grammar.takes_value(kind, name),
+                expected.flatten(),
+                "{kind:?} {name:?}"
+            );
+        }
+    }
+    let mut spellings: Vec<(TokenKind, &str)> = Vec::new();
+    for flag in grammar.flags.iter().flat_map(|table| table.iter()) {
+        if let Some(short) = flag.short {
+            assert!(
+                row(TokenKind::Short, short).is_some(),
+                "-{short} is declared but not in the table"
+            );
+            spellings.push((TokenKind::Short, short));
+        }
+        if let Some(long) = flag.long {
+            assert!(
+                row(TokenKind::Long, long).is_some(),
+                "--{long} is declared but not in the table"
+            );
+            spellings.push((TokenKind::Long, long));
+        }
+    }
+    if let Some((kind, name)) = spelling_declared_twice(grammar.dialect, &spellings) {
+        panic!("{kind:?} {name:?} is declared twice");
+    }
+}
+
+/// The first `(kind, name)` in `spellings` that names the same flag as an earlier one under
+/// `dialect`'s naming rules.
+#[cfg(test)]
+fn spelling_declared_twice<'s>(
+    dialect: Dialect,
+    spellings: &[(TokenKind, &'s str)],
+) -> Option<(TokenKind, &'s str)> {
+    spellings
+        .iter()
+        .enumerate()
+        .find_map(|(index, &(kind, name))| {
+            spellings[..index]
+                .iter()
+                .any(|&(k, n)| k == kind && flag_name_matches(name, n, dialect))
+                .then_some((kind, name))
+        })
 }
 
 #[cfg(test)]
@@ -537,15 +898,24 @@ mod tests {
         args.iter().map(|s| s.to_string()).collect()
     }
 
+    /// No declared flags, MSBuild dialect.
+    const MSBUILD_BARE: Grammar = Grammar::msbuild(&[]);
+    /// git's `--grep <pattern>`.
+    const GREP_LONG: Grammar = Grammar::posix(&[&[Flag::long("grep").takes(ValueSpec::value())]]);
+    /// grep's `-A <n>`.
+    const A_SHORT: Grammar = Grammar::posix(&[&[Flag::short("A").takes(ValueSpec::value())]]);
+
     #[test]
     fn attached_only_bars_a_separate_value_in_both_kinds() {
         // Short: git's `-M`/`-U` take an optional attached number and never the next token.
+        const M: Flag = Flag::short("M").takes(ValueSpec::attached_only());
+        const MIN_PARENTS: Flag = Flag::long("min-parents").takes(ValueSpec::attached_only());
+        const SHORT: Grammar = Grammar::posix(&[&[M]]);
+        const LONG: Grammar = Grammar::posix(&[&[MIN_PARENTS]]);
+        const BOTH: Grammar = Grammar::posix(&[&[M, MIN_PARENTS]]);
+
         let args = owned(&["-M", "50", "f.txt"]);
-        let tokens = tokenize_grammar(
-            &args,
-            &|_, name| (name == "M").then(ValueSpec::attached_only),
-            Dialect::Posix,
-        );
+        let tokens = tokenize_grammar(&args, &SHORT);
         assert_eq!(tokens[0].text, "M");
         assert_eq!(tokens[0].linked, None, "-M must not claim the 50");
         assert_eq!(tokens[0].value(&tokens), None);
@@ -553,36 +923,28 @@ mod tests {
 
         // Long: previously unexpressible -- the old API could only bar a Short flag.
         let args = owned(&["--min-parents", "2"]);
-        let tokens = tokenize_grammar(
-            &args,
-            &|_, name| (name == "min-parents").then(ValueSpec::attached_only),
-            Dialect::Posix,
-        );
+        let tokens = tokenize_grammar(&args, &LONG);
         assert_eq!(tokens[0].linked, None);
         assert!(tokens[1].is_free_positional());
 
         // The attached spelling still works for both.
         let args = owned(&["-M50", "--min-parents=2"]);
-        let tokens = tokenize_grammar(
-            &args,
-            &|_, name| matches!(name, "M" | "min-parents").then(ValueSpec::attached_only),
-            Dialect::Posix,
-        );
+        let tokens = tokenize_grammar(&args, &BOTH);
         assert_eq!(tokens[0].value(&tokens), Some("50"));
         assert_eq!(tokens[1].value(&tokens), Some("2"));
     }
 
     #[test]
     fn solo_only_restricts_a_short_flag_to_the_whole_argument() {
-        let takes = |_: TokenKind, name: &str| (name == "n").then(ValueSpec::solo_only);
+        const N: Grammar = Grammar::posix(&[&[Flag::short("n").takes(ValueSpec::solo_only())]]);
 
         let solo = owned(&["-n", "2"]);
-        let tokens = tokenize_grammar(&solo, &takes, Dialect::Posix);
+        let tokens = tokenize_grammar(&solo, &N);
         assert_eq!(tokens[0].value(&tokens), Some("2"));
 
         // Clustered: real git rejects `git log -pn 2`, so the 2 stays a positional.
         let clustered = owned(&["-pn", "2"]);
-        let tokens = tokenize_grammar(&clustered, &takes, Dialect::Posix);
+        let tokens = tokenize_grammar(&clustered, &N);
         let n = tokens.iter().find(|t| t.text == "n").expect("n token");
         assert_eq!(n.value(&tokens), None);
         assert!(tokens.last().expect("positional").is_free_positional());
@@ -590,23 +952,18 @@ mod tests {
 
     #[test]
     fn claiming_dash_dash_is_per_flag_not_global() {
+        const E: Grammar = Grammar::posix(&[&[Flag::short("e").takes(ValueSpec::value())]]);
+        const E_CLAIMING: Grammar =
+            Grammar::posix(&[&[Flag::short("e").takes(ValueSpec::value().claiming_dash_dash())]]);
         let args = owned(&["-e", "--", "f.txt"]);
 
         // Default: `--` is the boundary, so -e gets no value and f.txt is past it.
-        let tokens = tokenize_grammar(
-            &args,
-            &|_, name| (name == "e").then(ValueSpec::value),
-            Dialect::Posix,
-        );
+        let tokens = tokenize_grammar(&args, &E);
         assert_eq!(tokens[0].value(&tokens), None);
         assert_eq!(tokens[1].kind, TokenKind::DashDash);
 
         // grep/rg: -e claims the literal `--` as its pattern.
-        let tokens = tokenize_grammar(
-            &args,
-            &|_, name| (name == "e").then(|| ValueSpec::value().claiming_dash_dash()),
-            Dialect::Posix,
-        );
+        let tokens = tokenize_grammar(&args, &E_CLAIMING);
         assert_eq!(tokens[0].value(&tokens), Some("--"));
         assert!(tokens.iter().all(|t| t.kind != TokenKind::DashDash));
     }
@@ -646,11 +1003,7 @@ mod tests {
         // Regression: `--grep -p` must treat "-p" as --grep's value, not the patch flag
         //.
         let args = owned(&["--grep", "-p"]);
-        let tokens = tokenize_grammar(
-            &args,
-            &|kind, name| (kind == TokenKind::Long && name == "grep").then(ValueSpec::value),
-            Dialect::Posix,
-        );
+        let tokens = tokenize_grammar(&args, &GREP_LONG);
 
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[0].kind, TokenKind::Long);
@@ -667,11 +1020,7 @@ mod tests {
         // still-unseen boundary "--" as its value -- `git log --grep -- pattern` fails with
         // "Option '--grep' requires a value" rather than treating "--" as the search pattern.
         let args = owned(&["--grep", "--", "pattern"]);
-        let tokens = tokenize_grammar(
-            &args,
-            &|kind, name| (kind == TokenKind::Long && name == "grep").then(ValueSpec::value),
-            Dialect::Posix,
-        );
+        let tokens = tokenize_grammar(&args, &GREP_LONG);
 
         assert_eq!(tokens[0].kind, TokenKind::Long);
         assert_eq!(tokens[0].text, "grep");
@@ -687,10 +1036,7 @@ mod tests {
     #[test]
     fn value_taking_short_flag_never_swallows_the_unseen_boundary_dashdash() {
         let args = owned(&["-A", "--", "pattern"]);
-        let takes = |kind: TokenKind, name: &str| {
-            (kind == TokenKind::Short && name == "A").then(ValueSpec::value)
-        };
-        let tokens = tokenize_grammar(&args, &takes, Dialect::Posix);
+        let tokens = tokenize_grammar(&args, &A_SHORT);
 
         assert_eq!(tokens[0].kind, TokenKind::Short);
         assert_eq!(tokens[0].text, "A");
@@ -706,10 +1052,9 @@ mod tests {
         // Msbuild is the dialect that keeps classifying flags after the boundary, so it's the
         // one where a flag could even encounter a second "--" as its candidate value.
         let args = owned(&["--", "--logger", "--"]);
-        let takes = |kind: TokenKind, name: &str| {
-            (kind == TokenKind::Long && name == "logger").then(ValueSpec::value)
-        };
-        let tokens = tokenize_grammar(&args, &takes, Dialect::Msbuild);
+        const LOGGER: Grammar =
+            Grammar::msbuild(&[&[Flag::long("logger").takes(ValueSpec::value())]]);
+        let tokens = tokenize_grammar(&args, &LOGGER);
 
         assert_eq!(tokens[0].kind, TokenKind::DashDash);
         assert_eq!(tokens[1].kind, TokenKind::Long);
@@ -724,10 +1069,9 @@ mod tests {
     }
 
     #[test]
-    fn attached_long_value_does_not_consult_predicate() {
+    fn attached_long_value_needs_no_grammar() {
         let args = owned(&["--grep=-p"]);
-        // A predicate that always panics would fail this test if consulted; false is enough
-        // to prove it wasn't needed either way, so assert the value came from the "=" form.
+        // No grammar declares `grep` here: the value comes from the "=" form alone.
         let tokens = tokenize(&args);
 
         assert_eq!(tokens.len(), 1);
@@ -761,11 +1105,11 @@ mod tests {
         // 84169e2).
         for flag in ["diff-algorithm", "diff-filter"] {
             let args = owned(&[&format!("--{flag}"), "-p"]);
-            let takes = |kind: TokenKind, name: &str| {
-                (kind == TokenKind::Long && (name == "diff-algorithm" || name == "diff-filter"))
-                    .then(ValueSpec::value)
-            };
-            let tokens = tokenize_grammar(&args, &takes, Dialect::Posix);
+            const DIFF: Grammar = Grammar::posix(&[&[
+                Flag::long("diff-algorithm").takes(ValueSpec::value()),
+                Flag::long("diff-filter").takes(ValueSpec::value()),
+            ]]);
+            let tokens = tokenize_grammar(&args, &DIFF);
 
             assert_eq!(tokens[0].linked, Some(1), "--{flag} should link its value");
             assert_eq!(tokens[1].text, "-p");
@@ -775,11 +1119,7 @@ mod tests {
     #[test]
     fn value_taking_flag_at_end_of_args_degrades_gracefully() {
         let args = owned(&["--grep"]);
-        let tokens = tokenize_grammar(
-            &args,
-            &|kind, name| (kind == TokenKind::Long && name == "grep").then(ValueSpec::value),
-            Dialect::Posix,
-        );
+        let tokens = tokenize_grammar(&args, &GREP_LONG);
 
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].attached, None);
@@ -817,10 +1157,7 @@ mod tests {
     #[test]
     fn short_cluster_value_flag_takes_attached_remainder() {
         let args = owned(&["-A3"]);
-        let takes = |kind: TokenKind, name: &str| {
-            (kind == TokenKind::Short && name == "A").then(ValueSpec::value)
-        };
-        let tokens = tokenize_grammar(&args, &takes, Dialect::Posix);
+        let tokens = tokenize_grammar(&args, &A_SHORT);
 
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].text, "A");
@@ -831,10 +1168,7 @@ mod tests {
     #[test]
     fn short_flag_without_attached_remainder_consumes_next_token() {
         let args = owned(&["-A", "3"]);
-        let takes = |kind: TokenKind, name: &str| {
-            (kind == TokenKind::Short && name == "A").then(ValueSpec::value)
-        };
-        let tokens = tokenize_grammar(&args, &takes, Dialect::Posix);
+        let tokens = tokenize_grammar(&args, &A_SHORT);
 
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[0].linked, Some(1));
@@ -846,10 +1180,7 @@ mod tests {
     fn short_cluster_stops_consuming_chars_after_value_taking_one() {
         // "-rA3": r is boolean, A takes the attached "3", nothing after A is scanned.
         let args = owned(&["-rA3"]);
-        let takes = |kind: TokenKind, name: &str| {
-            (kind == TokenKind::Short && name == "A").then(ValueSpec::value)
-        };
-        let tokens = tokenize_grammar(&args, &takes, Dialect::Posix);
+        let tokens = tokenize_grammar(&args, &A_SHORT);
 
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[0].text, "r");
@@ -888,13 +1219,13 @@ mod tests {
         assert!(tokens.iter().all(|t| t.kind == TokenKind::Positional));
     }
 
-    // --- Dialect::Msbuild ---
+    // --- &MSBUILD_BARE ---
 
     #[test]
     fn msbuild_single_dash_flag_is_atomic_not_a_cluster() {
         // dotnet's "-nologo" is one flag name, not a POSIX cluster of n/o/l/o/g/o.
         let args = owned(&["-nologo"]);
-        let tokens = tokenize_grammar(&args, &|_, _| None, Dialect::Msbuild);
+        let tokens = tokenize_grammar(&args, &MSBUILD_BARE);
 
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].kind, TokenKind::Long);
@@ -904,10 +1235,7 @@ mod tests {
     #[test]
     fn value_is_none_on_a_consumed_positional_and_safe_on_a_slice() {
         let args = owned(&["--grep", "x", "file.rs"]);
-        let takes_value = |kind: TokenKind, name: &str| {
-            (kind == TokenKind::Long && name == "grep").then(ValueSpec::value)
-        };
-        let tokens = tokenize_grammar(&args, &takes_value, Dialect::Posix);
+        let tokens = tokenize_grammar(&args, &GREP_LONG);
 
         assert_eq!(tokens[0].value(&tokens), Some("x"));
         // The consumed token links back at its owner; that owner's name is not its value.
@@ -923,11 +1251,9 @@ mod tests {
         // `/r` is MSBuild's boolean `restore`, not dotnet's `-r <rid>`: an MSBuild switch takes
         // its value attached with `:`, so `/r` must leave the next arg alone. Reading it as a
         // value hid a following `-bl:<file>` from dotnet's own binlog detection.
-        let takes_value = |kind: TokenKind, name: &str| {
-            (kind == TokenKind::Long && name == "r").then(ValueSpec::value)
-        };
+        const R: Grammar = Grammar::msbuild(&[&[Flag::long("r").takes(ValueSpec::value())]]);
         let slash = owned(&["/r", "-bl:my.binlog"]);
-        let tokens = tokenize_grammar(&slash, &takes_value, Dialect::Msbuild);
+        let tokens = tokenize_grammar(&slash, &R);
         assert_eq!(tokens[0].text, "r");
         assert_eq!(tokens[0].linked, None);
         assert_eq!(tokens[1].kind, TokenKind::Long);
@@ -936,14 +1262,14 @@ mod tests {
 
         // The dash spelling is dotnet's own `-r <rid>`, which does consume the next token.
         let dash = owned(&["-r", "linux-x64"]);
-        let tokens = tokenize_grammar(&dash, &takes_value, Dialect::Msbuild);
+        let tokens = tokenize_grammar(&dash, &R);
         assert_eq!(tokens[0].value(&tokens), Some("linux-x64"));
     }
 
     #[test]
     fn msbuild_slash_prefix_is_recognized_as_a_flag() {
         let args = owned(&["/nologo"]);
-        let tokens = tokenize_grammar(&args, &|_, _| None, Dialect::Msbuild);
+        let tokens = tokenize_grammar(&args, &MSBUILD_BARE);
 
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].kind, TokenKind::Long);
@@ -953,7 +1279,7 @@ mod tests {
     #[test]
     fn msbuild_slash_alone_is_positional() {
         let args = owned(&["/"]);
-        let tokens = tokenize_grammar(&args, &|_, _| None, Dialect::Msbuild);
+        let tokens = tokenize_grammar(&args, &MSBUILD_BARE);
 
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].kind, TokenKind::Positional);
@@ -963,11 +1289,10 @@ mod tests {
     #[test]
     fn msbuild_absolute_path_is_positional_not_a_flag() {
         // Real MSBuild never treats a multi-segment "/a/b" as a switch attempt.
-        let takes = |kind: TokenKind, name: &str| {
-            (kind == TokenKind::Long && name == "nologo").then(ValueSpec::value)
-        };
+        const NOLOGO: Grammar =
+            Grammar::msbuild(&[&[Flag::long("nologo").takes(ValueSpec::value())]]);
         let args = owned(&["/tmp/results"]);
-        let tokens = tokenize_grammar(&args, &takes, Dialect::Msbuild);
+        let tokens = tokenize_grammar(&args, &NOLOGO);
 
         assert_eq!(tokens[0].kind, TokenKind::Positional);
         assert_eq!(tokens[0].text, "/tmp/results");
@@ -978,7 +1303,7 @@ mod tests {
         // A genuine single-segment MSBuild switch (no internal '/') must still classify as Long,
         // including when it carries an attached value whose own text contains '/'.
         let args = owned(&["/nologo", "/p:OutDir=/tmp/out"]);
-        let tokens = tokenize_grammar(&args, &|_, _| None, Dialect::Msbuild);
+        let tokens = tokenize_grammar(&args, &MSBUILD_BARE);
 
         assert_eq!(tokens[0].kind, TokenKind::Long);
         assert_eq!(tokens[0].text, "nologo");
@@ -991,7 +1316,7 @@ mod tests {
     fn msbuild_colon_and_equals_both_attach_a_value() {
         for arg in ["--logger:trx", "--logger=trx"] {
             let args = owned(&[arg]);
-            let tokens = tokenize_grammar(&args, &|_, _| None, Dialect::Msbuild);
+            let tokens = tokenize_grammar(&args, &MSBUILD_BARE);
 
             assert_eq!(tokens[0].text, "logger", "for {arg}");
             assert_eq!(tokens[0].attached, Some("trx"), "for {arg}");
@@ -1001,10 +1326,9 @@ mod tests {
     #[test]
     fn msbuild_separate_token_value_still_works() {
         let args = owned(&["--results-directory", "/tmp/out"]);
-        let takes = |kind: TokenKind, name: &str| {
-            (kind == TokenKind::Long && name == "results-directory").then(ValueSpec::value)
-        };
-        let tokens = tokenize_grammar(&args, &takes, Dialect::Msbuild);
+        const RESULTS_DIRECTORY: Grammar =
+            Grammar::msbuild(&[&[Flag::long("results-directory").takes(ValueSpec::value())]]);
+        let tokens = tokenize_grammar(&args, &RESULTS_DIRECTORY);
 
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[0].linked, Some(1));
@@ -1017,7 +1341,7 @@ mod tests {
         // host); unlike Posix, that doesn't stop classification -- flags after it (e.g.
         // --report-trx, forwarded to the test host) must still be recognized as flags.
         let args = owned(&["--", "-nologo"]);
-        let tokens = tokenize_grammar(&args, &|_, _| None, Dialect::Msbuild);
+        let tokens = tokenize_grammar(&args, &MSBUILD_BARE);
 
         assert_eq!(tokens[0].kind, TokenKind::DashDash);
         assert_eq!(tokens[1].kind, TokenKind::Long);
@@ -1030,10 +1354,9 @@ mod tests {
         // still link to its flag even though it's past `--`, matching real forwarded-flag
         // semantics (unlike Posix, where nothing after `--` is ever a flag at all).
         let args = owned(&["--", "--results-directory", "/tmp/out"]);
-        let takes = |kind: TokenKind, name: &str| {
-            (kind == TokenKind::Long && name == "results-directory").then(ValueSpec::value)
-        };
-        let tokens = tokenize_grammar(&args, &takes, Dialect::Msbuild);
+        const RESULTS_DIRECTORY: Grammar =
+            Grammar::msbuild(&[&[Flag::long("results-directory").takes(ValueSpec::value())]]);
+        let tokens = tokenize_grammar(&args, &RESULTS_DIRECTORY);
 
         assert_eq!(tokens[0].kind, TokenKind::DashDash);
         assert_eq!(tokens[1].kind, TokenKind::Long);
@@ -1047,7 +1370,7 @@ mod tests {
         // classification doesn't stop at `--` (unlike Posix, where a second `--` already falls
         // into the seen_dash_dash positional catch-all for free).
         let args = owned(&["--", "a", "--", "b"]);
-        let tokens = tokenize_grammar(&args, &|_, _| None, Dialect::Msbuild);
+        let tokens = tokenize_grammar(&args, &MSBUILD_BARE);
 
         assert_eq!(tokens[0].kind, TokenKind::DashDash);
         assert_eq!(tokens[1].kind, TokenKind::Positional);
@@ -1068,14 +1391,14 @@ mod tests {
     #[test]
     fn msbuild_dialect_never_produces_short_tokens() {
         let args = owned(&["-a", "-bc", "/d", "--e"]);
-        let tokens = tokenize_grammar(&args, &|_, _| None, Dialect::Msbuild);
+        let tokens = tokenize_grammar(&args, &MSBUILD_BARE);
 
         assert!(tokens.iter().all(|t| t.kind != TokenKind::Short));
     }
 
     #[test]
     fn posix_dialect_unaffected_by_slash_or_colon() {
-        // The default (tokenize == Dialect::Posix) must not gain '/' or ':' handling.
+        // The default (tokenize == &STRUCTURAL) must not gain '/' or ':' handling.
         let args = owned(&["feature/auth", "--pretty:oops"]);
         let tokens = tokenize(&args);
 
@@ -1091,10 +1414,10 @@ mod tests {
     #[test]
     fn msbuild_has_flag_is_case_insensitive() {
         let args = owned(&["-NoLogo"]);
-        let tokens = tokenize_grammar(&args, &|_, _| None, Dialect::Msbuild);
+        let tokens = tokenize_grammar(&args, &MSBUILD_BARE);
 
-        assert!(has_flag(&tokens, Dialect::Msbuild, "nologo"));
-        assert!(has_flag(&tokens, Dialect::Msbuild, "NOLOGO"));
+        assert!(has_flag(&tokens, &MSBUILD_BARE, "nologo"));
+        assert!(has_flag(&tokens, &MSBUILD_BARE, "NOLOGO"));
     }
 
     #[test]
@@ -1103,8 +1426,8 @@ mod tests {
         let args = owned(&["--Grep"]);
         let tokens = tokenize(&args);
 
-        assert!(has_flag(&tokens, Dialect::Posix, "Grep"));
-        assert!(!has_flag(&tokens, Dialect::Posix, "grep"));
+        assert!(has_flag(&tokens, &STRUCTURAL, "Grep"));
+        assert!(!has_flag(&tokens, &STRUCTURAL, "grep"));
     }
 
     #[test]
@@ -1114,21 +1437,21 @@ mod tests {
         let args = owned(&["-n", "nologo"]);
         let tokens = tokenize(&args);
 
-        assert!(!has_flag(&tokens, Dialect::Posix, "nologo"));
-        assert!(!has_flag(&tokens, Dialect::Posix, "n"));
+        assert!(!has_flag(&tokens, &STRUCTURAL, "nologo"));
+        assert!(!has_flag(&tokens, &STRUCTURAL, "n"));
     }
 
     #[test]
     fn double_dash_flag_value_is_case_insensitive_but_prefix_strict() {
         let args = owned(&["--Logger:trx"]);
-        let tokens = tokenize_grammar(&args, &|_, _| None, Dialect::Msbuild);
+        let tokens = tokenize_grammar(&args, &MSBUILD_BARE);
 
         assert_eq!(
-            double_dash_flag_value(&tokens, Dialect::Msbuild, "logger"),
+            double_dash_flag_value(&tokens, &MSBUILD_BARE, "logger"),
             Some("trx")
         );
         assert_eq!(
-            double_dash_flag_value(&tokens, Dialect::Msbuild, "LOGGER"),
+            double_dash_flag_value(&tokens, &MSBUILD_BARE, "LOGGER"),
             Some("trx")
         );
     }
@@ -1140,24 +1463,24 @@ mod tests {
         // like -nologo) are double-dash-only -- "-results-directory"/"/results-directory" get
         // misparsed as unrelated MSBuild switches, not treated as this flag at all.
         let args = owned(&["-results-directory", "/tmp/out"]);
-        let tokens = tokenize_grammar(&args, &|_, _| None, Dialect::Msbuild);
+        let tokens = tokenize_grammar(&args, &MSBUILD_BARE);
 
-        assert!(has_flag(&tokens, Dialect::Msbuild, "results-directory"));
+        assert!(has_flag(&tokens, &MSBUILD_BARE, "results-directory"));
         assert!(!has_double_dash_flag(
             &tokens,
-            Dialect::Msbuild,
+            &MSBUILD_BARE,
             "results-directory"
         ));
         assert_eq!(
-            double_dash_flag_value(&tokens, Dialect::Msbuild, "results-directory"),
+            double_dash_flag_value(&tokens, &MSBUILD_BARE, "results-directory"),
             None
         );
 
         let args = owned(&["/results-directory", "/tmp/out"]);
-        let tokens = tokenize_grammar(&args, &|_, _| None, Dialect::Msbuild);
+        let tokens = tokenize_grammar(&args, &MSBUILD_BARE);
         assert!(!has_double_dash_flag(
             &tokens,
-            Dialect::Msbuild,
+            &MSBUILD_BARE,
             "results-directory"
         ));
     }
@@ -1169,13 +1492,283 @@ mod tests {
         // double_dash_flag_value, which only reports the first match, every occurrence must be
         // checkable.
         let args = owned(&["--logger:console;verbosity=normal", "--logger", "trx"]);
-        let takes = |kind: TokenKind, name: &str| {
-            (kind == TokenKind::Long && name == "logger").then(ValueSpec::value)
-        };
-        let tokens = tokenize_grammar(&args, &takes, Dialect::Msbuild);
+        const LOGGER: Grammar =
+            Grammar::msbuild(&[&[Flag::long("logger").takes(ValueSpec::value())]]);
+        let tokens = tokenize_grammar(&args, &LOGGER);
 
-        let values: Vec<&str> =
-            double_dash_flag_values(&tokens, Dialect::Msbuild, "logger").collect();
+        let values: Vec<&str> = double_dash_flag_values(&tokens, &LOGGER, "logger").collect();
         assert_eq!(values, vec!["console;verbosity=normal", "trx"]);
+    }
+
+    // --- Grammar ---
+
+    #[test]
+    fn grammar_matches_short_and_long_spellings_by_kind() {
+        const G: Grammar =
+            Grammar::posix(&[&[Flag::pair("u", "set-upstream-to").takes(ValueSpec::value())]]);
+        assert_eq!(
+            G.takes_value(TokenKind::Short, "u"),
+            Some(ValueSpec::value())
+        );
+        assert_eq!(
+            G.takes_value(TokenKind::Long, "set-upstream-to"),
+            Some(ValueSpec::value())
+        );
+        // `--u` is not `-u`, and `-set-upstream-to` is not `--set-upstream-to`.
+        assert_eq!(G.takes_value(TokenKind::Long, "u"), None);
+        assert_eq!(G.takes_value(TokenKind::Short, "set-upstream-to"), None);
+        assert_eq!(G.takes_value(TokenKind::Positional, "u"), None);
+        assert_eq!(G.takes_value(TokenKind::DashDash, "u"), None);
+    }
+
+    #[test]
+    fn grammar_boolean_flag_takes_no_value() {
+        const G: Grammar = Grammar::posix(&[&[Flag::pair("v", "verbose")]]);
+        assert!(G.flag(TokenKind::Short, "v").is_some());
+        assert_eq!(G.takes_value(TokenKind::Short, "v"), None);
+        assert_eq!(G.takes_value(TokenKind::Long, "verbose"), None);
+    }
+
+    #[test]
+    fn a_flag_records_solo_only_for_its_short_spelling_only() {
+        const G: Grammar =
+            Grammar::posix(&[&[Flag::pair("c", "config").takes(ValueSpec::solo_only())]]);
+        // `flag()` and `takes_value()` give one answer for each spelling.
+        for (kind, name, spec) in [
+            (TokenKind::Short, "c", ValueSpec::solo_only()),
+            (TokenKind::Long, "config", ValueSpec::value()),
+        ] {
+            let flag = G.flag(kind, name).expect("declared");
+            assert_eq!(flag.value(kind), Some(spec), "{kind:?} {name}");
+            assert_eq!(G.takes_value(kind, name), Some(spec), "{kind:?} {name}");
+        }
+        // A flag has no value under a spelling it does not have.
+        const SHORT_ONLY: Flag = Flag::short("n").takes(ValueSpec::solo_only());
+        assert_eq!(SHORT_ONLY.value(TokenKind::Long), None);
+        assert_eq!(SHORT_ONLY.value(TokenKind::Positional), None);
+
+        // The dash-dash claim is kept for the long spelling.
+        const CLAIMING: Flag =
+            Flag::pair("e", "regexp").takes(ValueSpec::solo_only().claiming_dash_dash());
+        assert_eq!(
+            CLAIMING.value(TokenKind::Long),
+            Some(ValueSpec::value().claiming_dash_dash())
+        );
+        // `attached_only` bars the separate form for both spellings.
+        const ATTACHED: Flag = Flag::pair("U", "unified").takes(ValueSpec::attached_only());
+        assert_eq!(
+            ATTACHED.value(TokenKind::Long),
+            Some(ValueSpec::attached_only())
+        );
+        assert_eq!(
+            ATTACHED.value(TokenKind::Short),
+            Some(ValueSpec::attached_only())
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot be solo-only")]
+    fn a_long_only_flag_cannot_be_solo_only() {
+        // In a `const` this is a compile error; called at run time it panics.
+        let spec = std::hint::black_box(ValueSpec::solo_only());
+        let _ = Flag::long("config").takes(spec);
+    }
+
+    #[test]
+    #[should_panic(expected = "declare Flag::long")]
+    fn an_msbuild_grammar_cannot_declare_a_short_spelling() {
+        // In a `const` this is a compile error; called at run time it panics.
+        static TABLES: &[&[Flag]] = &[&[Flag::long("logger"), Flag::pair("c", "configuration")]];
+        let _ = Grammar::msbuild(std::hint::black_box(TABLES));
+    }
+
+    #[test]
+    fn each_flag_token_carries_the_flag_its_grammar_declares() {
+        const V: Flag = Flag::pair("v", "verbose");
+        const N: Flag = Flag::short("n").takes(ValueSpec::value());
+        const G: Grammar = Grammar::posix(&[&[V, N]]);
+        let args = owned(&["-vn", "3", "--verbose", "-x", "--other", "file"]);
+        let tokens = tokenize_grammar(&args, &G);
+        let flags: Vec<Option<&Flag>> = tokens.iter().map(|t| t.flag).collect();
+        assert_eq!(
+            flags,
+            [Some(&V), Some(&N), None, Some(&V), None, None, None],
+            "{tokens:?}"
+        );
+        assert!(tokens[0].is(&V) && tokens[1].is_one_of(&[V, N]));
+        assert_eq!(tokens[1].value_spec(), Some(ValueSpec::value()));
+        assert_eq!(tokens[0].value_spec(), None);
+        // The structural tokenizer declares nothing.
+        assert!(tokenize(&args).iter().all(|t| t.flag.is_none()));
+    }
+
+    /// A copy of a declared flag that differs in one field is not the declaration: asking a
+    /// token about it panics in a debug build rather than answering `false` for ever.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "is not declared in the grammar")]
+    fn asking_about_a_flag_declared_differently_panics() {
+        const N: Flag = Flag::pair("n", "max-count").takes(ValueSpec::solo_only());
+        const G: Grammar = Grammar::posix(&[&[N]]);
+        const N_AS_VALUE: Flag = Flag::pair("n", "max-count").takes(ValueSpec::value());
+        let args = owned(&["-n", "2"]);
+        let tokens = tokenize_grammar(&args, &G);
+        let _ = tokens[0].is(&N_AS_VALUE);
+    }
+
+    /// A flag the grammar does not declare at all panics too, whichever token is asked: the
+    /// question is wrong before any token answers it.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "is not declared in the grammar")]
+    fn asking_about_an_undeclared_flag_panics() {
+        const V: Flag = Flag::pair("v", "verbose");
+        const G: Grammar = Grammar::posix(&[&[V]]);
+        let args = owned(&["file"]);
+        let tokens = tokenize_grammar(&args, &G);
+        let _ = tokens[0].is_one_of(&[V, Flag::short("q")]);
+    }
+
+    #[test]
+    fn a_spelling_declared_twice_is_reported() {
+        assert_eq!(
+            spelling_declared_twice(
+                Dialect::Posix,
+                &[
+                    (TokenKind::Short, "c"),
+                    (TokenKind::Long, "x"),
+                    (TokenKind::Short, "c")
+                ],
+            ),
+            Some((TokenKind::Short, "c"))
+        );
+        assert_eq!(
+            spelling_declared_twice(
+                Dialect::Msbuild,
+                &[(TokenKind::Long, "nologo"), (TokenKind::Long, "NoLogo")],
+            ),
+            Some((TokenKind::Long, "NoLogo")),
+            "MSBuild folds case"
+        );
+        // Case matters under getopt, and a short and a long spelling never collide.
+        assert_eq!(
+            spelling_declared_twice(
+                Dialect::Posix,
+                &[
+                    (TokenKind::Short, "v"),
+                    (TokenKind::Short, "V"),
+                    (TokenKind::Long, "v"),
+                ],
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn grammar_tables_are_searched_in_order_first_match_wins() {
+        const PARENT: &[Flag] = &[Flag::short("c").takes(ValueSpec::solo_only())];
+        const CHILD: &[Flag] = &[
+            Flag::short("c").takes(ValueSpec::value()),
+            Flag::short("p").takes(ValueSpec::value()),
+        ];
+        const PARENT_FIRST: Grammar = Grammar::posix(&[PARENT, CHILD]);
+        const CHILD_FIRST: Grammar = Grammar::posix(&[CHILD, PARENT]);
+
+        assert_eq!(
+            PARENT_FIRST.takes_value(TokenKind::Short, "c"),
+            Some(ValueSpec::solo_only())
+        );
+        assert_eq!(
+            CHILD_FIRST.takes_value(TokenKind::Short, "c"),
+            Some(ValueSpec::value())
+        );
+        // A flag only one table declares is found whichever table declares it.
+        assert_eq!(
+            PARENT_FIRST.takes_value(TokenKind::Short, "p"),
+            Some(ValueSpec::value())
+        );
+    }
+
+    #[test]
+    fn msbuild_grammar_matches_long_names_case_insensitively() {
+        const G: Grammar =
+            Grammar::msbuild(&[&[Flag::long("results-directory").takes(ValueSpec::value())]]);
+        for name in [
+            "results-directory",
+            "Results-Directory",
+            "RESULTS-DIRECTORY",
+        ] {
+            assert_eq!(
+                G.takes_value(TokenKind::Long, name),
+                Some(ValueSpec::value()),
+                "{name}"
+            );
+        }
+        // Posix does not fold case.
+        const POSIX: Grammar = Grammar::posix(&[&[Flag::long("grep").takes(ValueSpec::value())]]);
+        assert_eq!(POSIX.takes_value(TokenKind::Long, "Grep"), None);
+    }
+
+    #[test]
+    fn assert_takes_value_table_accepts_an_exact_table() {
+        const G: Grammar = Grammar::posix(&[&[
+            Flag::pair("n", "max-count").takes(ValueSpec::solo_only()),
+            Flag::long("grep").takes(ValueSpec::value()),
+        ]]);
+        assert_takes_value_table(
+            &G,
+            &[
+                (TokenKind::Short, &["n"], Some(ValueSpec::solo_only())),
+                (
+                    TokenKind::Long,
+                    &["max-count", "grep"],
+                    Some(ValueSpec::value()),
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn assert_takes_value_table_checks_boolean_flags() {
+        const G: Grammar = Grammar::posix(&[&[
+            Flag::pair("v", "verbose"),
+            Flag::pair("n", "max-count").takes(ValueSpec::solo_only()),
+        ]]);
+        assert_takes_value_table(
+            &G,
+            &[
+                (TokenKind::Short, &["v"], None),
+                (TokenKind::Long, &["verbose"], None),
+                (TokenKind::Short, &["n"], Some(ValueSpec::solo_only())),
+                (TokenKind::Long, &["max-count"], Some(ValueSpec::value())),
+            ],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "declared")]
+    fn assert_takes_value_table_rejects_a_boolean_listed_as_undeclared() {
+        // The table lists `-v` as a boolean flag the grammar does not declare.
+        const G: Grammar = Grammar::posix(&[&[Flag::long("verbose")]]);
+        assert_takes_value_table(
+            &G,
+            &[
+                (TokenKind::Short, &["v"], None),
+                (TokenKind::Long, &["verbose"], None),
+            ],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "declared but not in the table")]
+    fn assert_takes_value_table_rejects_a_declared_flag_the_table_omits() {
+        const G: Grammar = Grammar::posix(&[&[
+            Flag::long("grep").takes(ValueSpec::value()),
+            Flag::long("author").takes(ValueSpec::value()),
+        ]]);
+        assert_takes_value_table(
+            &G,
+            &[(TokenKind::Long, &["grep"], Some(ValueSpec::value()))],
+        );
     }
 }

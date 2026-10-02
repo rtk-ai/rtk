@@ -2,7 +2,10 @@
 //! segmenter that decides where one command ends and the next begins. Who uses
 //! each entry point is listed in `src/core/README.md`.
 
+use std::cell::OnceCell;
 use std::iter::{Peekable, once};
+
+use super::bash_grammar::{Compound, Position, Reserved, ReservedWord, reserved_word};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipeKind {
@@ -78,6 +81,42 @@ pub(crate) fn trim_ifs_end(s: &str) -> &str {
 /// quoted blank splits a word like any other.
 pub(crate) fn split_ifs(s: &str) -> impl Iterator<Item = &str> {
     s.split(is_ifs).filter(|part| !part.is_empty())
+}
+
+/// Whether `b` may start a bash NAME, what a variable, an assignment or a
+/// `$NAME` names: an ASCII letter or `_`. Bash's NAME rule is this function
+/// and [`is_name_byte`], and every reader of a NAME asks them.
+pub(crate) fn is_name_start(b: u8) -> bool {
+    b.is_ascii_alphabetic() || b == b'_'
+}
+
+/// Whether `b` may follow the first byte of a bash NAME: an ASCII letter, a
+/// digit or `_`.
+pub(crate) fn is_name_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// The length of the NAME `s` starts with, 0 when it starts with none.
+pub(crate) fn name_len(s: &str) -> usize {
+    match s.as_bytes() {
+        [first, rest @ ..] if is_name_start(*first) => {
+            1 + rest.iter().take_while(|b| is_name_byte(**b)).count()
+        }
+        _ => 0,
+    }
+}
+
+/// The value of the assignment word `word`, `NAME=value` or `NAME+=value`:
+/// the text after its `=`. `None` when `word` does not start with a NAME and
+/// then `=` or `+=`, as in `1a=b`, `foo-bar=x` or `"foo"=x`, which bash runs
+/// as commands rather than assigning them.
+pub(crate) fn assignment_value(word: &str) -> Option<&str> {
+    let name = name_len(word);
+    if name == 0 {
+        return None;
+    }
+    let rest = &word[name..];
+    rest.strip_prefix('=').or_else(|| rest.strip_prefix("+="))
 }
 
 /// Byte walker yielding each byte with the quoting it was reached in.
@@ -191,8 +230,10 @@ impl Iterator for QuoteScan<'_> {
 /// One shell word: a run of adjacent tokens that are not blanks, with its span.
 ///
 /// A quoted span is one word however many blanks it holds, and so is `a\ b`,
-/// because the tokenizer keeps both inside a single token. Operators are not
-/// word boundaries here: `a;b` is one run of tokens with no blank in it.
+/// because the tokenizer keeps both inside a single token. So is an extglob
+/// group, an array literal or a `${ }`, whose blanks are text of the word as
+/// [`read_grammar`] reads them: `a=(x y)` is one word. Operators are not word
+/// boundaries here: `a;b` is one run of tokens with no blank in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Word<'a> {
     pub(crate) text: &'a str,
@@ -203,6 +244,7 @@ pub(crate) struct Word<'a> {
 /// The words of `input`, from its `tokens` (as [`tokenize`] returned them for
 /// that same `input`).
 pub(crate) fn words<'a>(input: &'a str, tokens: &[Token<'a>]) -> Vec<Word<'a>> {
+    let readings = read_grammar(input, tokens);
     let mut found = Vec::new();
     let mut start: Option<usize> = None;
     let mut push = |start: usize, end: usize| {
@@ -212,8 +254,8 @@ pub(crate) fn words<'a>(input: &'a str, tokens: &[Token<'a>]) -> Vec<Word<'a>> {
             end,
         });
     };
-    for tok in tokens {
-        if tok.is_blank() {
+    for (tok, reading) in tokens.iter().zip(readings) {
+        if tok.is_blank() && reading != Reading::WordText {
             if let Some(from) = start.take() {
                 push(from, tok.offset);
             }
@@ -354,9 +396,8 @@ impl<'a> Lexer<'a> {
             match c.byte {
                 b'$' => {
                     self.flush(i);
-                    if self.next_is(|b| b.is_ascii_alphabetic() || b == b'_') {
-                        let end =
-                            self.take_while(i + 1, |b| b.is_ascii_alphanumeric() || b == b'_');
+                    if self.next_is(is_name_start) {
+                        let end = self.take_while(i + 1, is_name_byte);
                         self.push(TokenKind::Arg, i, end);
                     } else {
                         self.push(TokenKind::Shellism, i, i + 1);
@@ -543,12 +584,6 @@ fn contains_substitution(cmd: &str) -> bool {
     })
 }
 
-/// Grammar that can open a command without being part of it, so it does not
-/// count as command text: a redirect behind one is still a leading redirect.
-fn is_grammar_word(value: &str) -> bool {
-    matches!(value, "{" | "}" | "!")
-}
-
 // `>&N`/`>&-` (and `N>&M`) is fd-dup/close; bare `>&` before a word is
 // `>word 2>&1` — a file target. The operand is the next token that is not a
 // blank.
@@ -571,8 +606,6 @@ pub(crate) fn redirect_has_file_target(tokens: &[Token<'_>], i: usize) -> bool {
 /// How a policy treats redirect tokens.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RedirectPolicy {
-    /// Ordinary text: the segment keeps the redirect and its operand.
-    Keep,
     /// The command is what matters, not its plumbing: a redirect before any
     /// command text is stepped over, and one after it ends the segment.
     Excise,
@@ -581,8 +614,6 @@ pub(crate) enum RedirectPolicy {
 /// How a policy reads the end of a line.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NewlinePolicy {
-    /// A `Newline` separates words like a `Sep`.
-    Blank,
     /// A `Newline` ends a segment, and so does an unquoted `\r`, although bash
     /// reads that as a word byte: the line is cut there and each piece
     /// segmented on its own, so that no command can hide behind one.
@@ -591,10 +622,9 @@ pub(crate) enum NewlinePolicy {
 
 /// What counts as the end of a segment, and what the segment keeps.
 ///
-/// The permission gate, analytics classification and the rewrite each need a
-/// different answer, and the gate's must be the most conservative — a segment
-/// it never sees is a command its rules never check. Naming the differences
-/// here keeps them chosen rather than emergent.
+/// The permission gate's answer must be the most conservative one — a segment
+/// it never sees is a command its rules never check — and naming each choice
+/// here keeps it chosen rather than emergent.
 #[derive(Clone, Copy)]
 pub(crate) struct Policy {
     newline: NewlinePolicy,
@@ -604,12 +634,7 @@ pub(crate) struct Policy {
     /// Whether the body of a `$( )` is read as commands in its own right.
     ///
     /// The gate descends, because a command hidden in a substitution still runs
-    /// and still has to meet the deny rules. Every other caller stays out: the
-    /// text around a substitution is not a command of its own — descending
-    /// turns `git log $(git rev-parse HEAD)` into a `git log $` nobody ran —
-    /// and what a substitution captures is a string the outer command is built
-    /// from, so filtering it would change that string rather than change what
-    /// reaches anyone.
+    /// and still has to meet the deny rules.
     descend_into_substitution: bool,
 }
 
@@ -620,14 +645,6 @@ impl Policy {
         group_boundaries: true,
         redirects: RedirectPolicy::Excise,
         descend_into_substitution: true,
-    };
-
-    /// Classification only, never a security decision.
-    pub(crate) const CLASSIFY: Self = Self {
-        newline: NewlinePolicy::Blank,
-        group_boundaries: true,
-        redirects: RedirectPolicy::Keep,
-        descend_into_substitution: false,
     };
 }
 
@@ -690,32 +707,38 @@ enum CaseState {
     InBody,
 }
 
-/// Follows `case … in pattern) … ;; … esac` so a pattern is not read as code.
+/// Follows `case … in pattern) … ;; … esac` so a pattern's optional opening
+/// bracket is not read as a subshell.
 ///
-/// Both segmenters consult this, because a pattern's optional opening bracket
-/// is the one place a `(` does not start a command.
+/// [`segment`] consults this, because that bracket is the one place a `(` does
+/// not start a command there. It reads no more of a `case`: any `esac` closes
+/// it, and the words of a pattern are segment text like a command's. The
+/// rewrite reads the whole grammar with [`read_grammar`].
 #[derive(Default)]
-pub(crate) struct CaseTracker(Vec<CaseState>);
+struct CaseTracker(Vec<CaseState>);
 
 impl CaseTracker {
     /// Whether a pattern starts here, so a `(` belongs to it.
-    pub(crate) fn in_pattern(&self) -> bool {
+    fn in_pattern(&self) -> bool {
         self.0.last() == Some(&CaseState::AwaitingPattern)
     }
 
     /// Reads one token. `case` is the keyword only in command position, so
     /// that the `case` in `echo case` stays an ordinary word.
-    pub(crate) fn observe(&mut self, tok: &Token<'_>, at_command_position: bool) {
+    fn observe(&mut self, tok: &Token<'_>, at_command_position: bool) {
         match (&tok.kind, tok.value) {
-            (TokenKind::Arg, "case") if at_command_position => {
-                self.0.push(CaseState::AwaitingIn);
-            }
-            (TokenKind::Arg, "esac") => {
-                self.0.pop();
-            }
-            (TokenKind::Arg, "in") => {
-                self.advance(CaseState::AwaitingIn, CaseState::AwaitingPattern);
-            }
+            (TokenKind::Arg, _) => match reserved_word(tok.value).map(|w| w.word) {
+                Some(Reserved::Case) if at_command_position => {
+                    self.0.push(CaseState::AwaitingIn);
+                }
+                Some(Reserved::Esac) => {
+                    self.0.pop();
+                }
+                Some(Reserved::In) => {
+                    self.advance(CaseState::AwaitingIn, CaseState::AwaitingPattern);
+                }
+                _ => {}
+            },
             (TokenKind::Shellism, ")") => {
                 self.advance(CaseState::AwaitingPattern, CaseState::InBody);
             }
@@ -735,6 +758,749 @@ impl CaseTracker {
             && *top == from
         {
             *top = to;
+        }
+    }
+}
+
+/// How bash reads a token: as part of a command list, of a `case` pattern, of
+/// a `[[ ]]` expression, or as text of one word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reading {
+    /// Command text, and the operators and brackets around commands.
+    Commands,
+    /// A `case` pattern list, from its optional `(` to the `)` that ends it.
+    /// Nothing there runs: `|` separates alternatives, and `(` opens nothing.
+    Pattern,
+    /// A `[[ ]]` expression, from the word after `[[` to its `]]`, or an
+    /// arithmetic command, from its `((` to its `))`. `&&`, `||`, `(`, `)`,
+    /// `;`, `<` and a regex's `|` there belong to the expression.
+    Expression,
+    /// Text of one word in a command list, from the bracket that opens it to
+    /// the one that closes it: an extglob group (`!(…)`, `?(…)`, `*(…)`,
+    /// `@(…)`, `+(…)`), an array literal (`a=(…)`) or a parameter expansion
+    /// (`${…}`). Its blanks separate no words, and its operators and brackets
+    /// end nothing: `a=(x y)` and `@(a|b c)` are one word each. In a `case`
+    /// pattern or a `[[ ]]` expression, word text reads as `Pattern` or
+    /// `Expression`, and ends nothing there either.
+    WordText,
+}
+
+/// Where a `case` is, for [`read_grammar`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CaseAt {
+    /// After `case`: the next word is the subject.
+    Subject,
+    /// After the subject, until `in`.
+    In,
+    /// A pattern list, after `in` or an arm terminator. `started` once a word
+    /// of it is read; `depth` counts the brackets opened inside it.
+    Pattern { started: bool, depth: usize },
+    /// An arm's command list, after the `)` that ended its pattern.
+    Body,
+}
+
+/// How bash reads a `((` where a command starts, as its `parse_dparen` does.
+enum DoubleParen {
+    /// An arithmetic command: the `)` that closes the second `(` is followed
+    /// at once by another, and the command ends at that one, `tokens[last]`.
+    Arithmetic { last: usize },
+    /// Two subshells, one inside the other: the `)` that closes the second
+    /// `(` is not followed at once by another, as in `((ls) )`.
+    Subshells,
+    /// No `)` closes the second `(`: a syntax error.
+    Unterminated,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many tokens [`is_paren`] has looked at on this thread: the work
+    /// spent matching brackets, which a test bounds by the length of the line.
+    static PAREN_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether `tokens[j]` is the bracket `paren`.
+fn is_paren(tokens: &[Token<'_>], j: usize, paren: &str) -> bool {
+    #[cfg(test)]
+    PAREN_CHECKS.with(|checks| checks.set(checks.get() + 1));
+    tokens
+        .get(j)
+        .is_some_and(|t| t.kind == TokenKind::Shellism && t.value == paren)
+}
+
+/// Where each `(` of a line is closed: at the first `)` after it that no `(`
+/// between them takes. Matched in one pass over the line, the first time a
+/// `((` asks, so that a line of many `((` is read in linear time.
+#[derive(Default)]
+struct ParenCloses(OnceCell<Vec<Option<usize>>>);
+
+impl ParenCloses {
+    /// The position of the `)` that closes the `(` at `tokens[open]`, if one
+    /// does.
+    fn close_of(&self, tokens: &[Token<'_>], open: usize) -> Option<usize> {
+        let closes = self.0.get_or_init(|| {
+            let mut closes = vec![None; tokens.len()];
+            let mut opens = Vec::new();
+            for j in 0..tokens.len() {
+                if is_paren(tokens, j, "(") {
+                    opens.push(j);
+                } else if is_paren(tokens, j, ")")
+                    && let Some(at) = opens.pop()
+                {
+                    closes[at] = Some(j);
+                }
+            }
+            closes
+        });
+        closes.get(open).copied().flatten()
+    }
+
+    /// How bash reads `tokens[i]` and `tokens[i + 1]` when both are a `(`,
+    /// which bash reads as `((` only with nothing between them; `None`
+    /// otherwise.
+    fn double_paren(&self, tokens: &[Token<'_>], i: usize) -> Option<DoubleParen> {
+        if !is_paren(tokens, i, "(") || !is_paren(tokens, i + 1, "(") {
+            return None;
+        }
+        Some(match self.close_of(tokens, i + 1) {
+            Some(j) if is_paren(tokens, j + 1, ")") => DoubleParen::Arithmetic { last: j + 1 },
+            Some(_) => DoubleParen::Subshells,
+            None => DoubleParen::Unterminated,
+        })
+    }
+}
+
+/// Whether `tok` ends a word on the side it sits: it is missing (an end of
+/// the line), a blank, an operator, a pipe, a redirect, `&`, `(` or `)`.
+fn delimits_word(tok: Option<&Token<'_>>) -> bool {
+    tok.is_none_or(|t| match t.kind {
+        TokenKind::Arg => false,
+        TokenKind::Shellism => matches!(t.value, "&" | "(" | ")"),
+        _ => true,
+    })
+}
+
+/// Whether `tokens[i]` is a whole word: a blank, an operator, a pipe, a
+/// redirect, `&`, `(`, `)` or an end of the line on either side. Bash reads a
+/// reserved word only then, so `esac*` is an ordinary word.
+fn is_whole_word(tokens: &[Token<'_>], i: usize) -> bool {
+    delimits_word(i.checked_sub(1).and_then(|p| tokens.get(p))) && delimits_word(tokens.get(i + 1))
+}
+
+/// A bracket that opened word text ([`Reading::WordText`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TextBracket {
+    /// The `(` of an extglob group or of an array literal. Brackets nest in
+    /// it, and the `)` that no bracket inside it takes closes it.
+    Paren,
+    /// The `{` of a `${ }`. The first `}` that no `${` inside it takes closes
+    /// it, as bash's `parse_matched_pair` reads it: `${x-{a}b}` ends after
+    /// `{a}`, and a `(` or `)` in it is text.
+    Brace,
+}
+
+/// The word text `tokens[i]` opens, if it opens one:
+/// - a `(` right after a bare `!`, `@`, `*`, `?` or `+` in a word opens an
+///   extglob group, glued to the word or starting it (`git !(ls)`,
+///   `x@(a|b)`). Bash reads it as one word with `extglob` on; with it off,
+///   the line is a syntax error, and the rewrite leaves its text as written;
+/// - a `(` right after a word `NAME=` or `NAME+=` opens an array literal;
+/// - a `{` right after a bare `$` opens a parameter expansion.
+///
+/// A `(` after `$`, `<` or `>` opens a substitution, which is no word text.
+/// Nor does a `(` where a command starts, which opens a subshell.
+fn opens_word_text(tokens: &[Token<'_>], i: usize) -> Option<TextBracket> {
+    let tok = &tokens[i];
+    let prev = tokens.get(i.checked_sub(1)?)?;
+    if tok.kind != TokenKind::Shellism || prev.is_blank() {
+        return None;
+    }
+    match tok.value {
+        "{" => {
+            (prev.kind == TokenKind::Shellism && prev.value == "$").then_some(TextBracket::Brace)
+        }
+        "(" => (ends_with_extglob_operator(prev) || names_array(tokens, i - 1))
+            .then_some(TextBracket::Paren),
+        _ => None,
+    }
+}
+
+/// Whether `tok`'s last byte is a bare `!`, `@`, `*`, `?` or `+`, the byte
+/// before an extglob group's `(`.
+fn ends_with_extglob_operator(tok: &Token<'_>) -> bool {
+    matches!(tok.kind, TokenKind::Arg | TokenKind::Shellism)
+        && QuoteScan::new(tok.value)
+            .last()
+            .is_some_and(|c| c.is_bare() && b"!@*?+".contains(&c.byte))
+}
+
+/// Whether `tokens[i]` is a whole word `NAME=` or `NAME+=`, the word before
+/// an array literal's `(`.
+fn names_array(tokens: &[Token<'_>], i: usize) -> bool {
+    let tok = &tokens[i];
+    tok.kind == TokenKind::Arg
+        && delimits_word(i.checked_sub(1).and_then(|p| tokens.get(p)))
+        && assignment_value(tok.value) == Some("")
+}
+
+/// How bash reads each of `tokens`, lexed from `input`.
+///
+/// It follows bash's grammar:
+/// - a word is reserved only whole, and where a command or a reserved word
+///   starts. A command starts at the start, after an operator, a pipe, `&`
+///   or a subshell's `(`, after a reserved word a command follows, and where
+///   an arm's commands start. A reserved word, and no command, starts after a
+///   compound command's last word (`fi`, `done`, `esac`, `}`, `]]`, a
+///   subshell's `)`, an arithmetic command's `))`), after the name that
+///   follows `for`, `select`, `function` or `coproc`, and after a function's
+///   `name ( )`: `if (true) then`, `for x do`, `coproc NAME {`;
+/// - `time` is reserved only where a pipeline starts: after `|`, `|&` or
+///   `coproc` it is a program, so `ls | time [[ -f a || ls ]]` runs `time`
+///   and then `ls ]]`;
+/// - word text is one word's, never a command: an extglob group, an array
+///   literal and a `${ }`, each from its opening bracket to the one that
+///   closes it ([`Reading::WordText`]), in a command, a `case` pattern or a
+///   `[[ ]]` expression alike, where its tokens take the pattern's or the
+///   expression's reading. A `(` after any other word is a function's
+///   (`name ( )`), and one where a command starts opens a subshell;
+/// - inside `[[ … ]]` nothing is a command: the expression runs to the first
+///   `]]` outside the brackets and the word text opened in it, or to the end
+///   of the line;
+/// - a `((` where a reserved word starts, or right after `for`, opens an
+///   arithmetic command when the `)` that closes its second `(` is followed
+///   at once by another: all of it up to that `))` is an expression.
+///   Otherwise `((` there is two subshells, one inside the other, and a `((`
+///   with no such `)`, or one after `for` that is not arithmetic, is a
+///   syntax error, read as an expression to the end of the line;
+/// - after `time`, its options `-p` and `--` leave the next word where a
+///   command starts;
+/// - a `case` pattern is never a command: after `in`, and after each `;;`,
+///   `;&` and `;;&`, the words up to the first `)` outside a bracket and
+///   outside word text are a pattern list, and the arm's commands start
+///   after that `)`;
+/// - `esac` closes the `case` only where a pattern or a reserved word
+///   would start, so the `esac` of `echo esac` is an argument;
+/// - `$( )`, `<( )` and `>( )` hold a command list of their own, read by
+///   these rules up to the `)` that ends it, which is not a `)` that a `case`
+///   pattern or a subshell inside it takes; `$(( … ))` is an arithmetic
+///   expansion, read up to its `))`. A substitution is text of the word it
+///   sits in, so each of its tokens takes the reading around it.
+///
+/// A `Newline` separates words like a `Sep`: the rewrite hands this one line,
+/// in which a newline only follows an operator that joins two lines.
+pub(crate) fn read_grammar(input: &str, tokens: &[Token<'_>]) -> Vec<Reading> {
+    let mut reader = GrammarReader::new();
+    (0..tokens.len())
+        .map(|i| reader.read(input, tokens, i))
+        .collect()
+}
+
+/// Where the command [`starts_with_grammar`] reads starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandStart {
+    /// Where a pipeline starts: at the start of a list, after `;`, `&`, `&&`
+    /// or `||`, and after a reserved word a pipeline follows.
+    Pipeline,
+    /// At a pipeline's stage after `|` or `|&`, where `time` is the program
+    /// `time`, as [`ReservedWord::pipeline_follows`] says.
+    PipeStage,
+}
+
+/// Whether bash reads the first of `tokens`, where a command starts at
+/// `start`, as grammar rather than a command's name: a reserved word, or the
+/// `((` of an arithmetic command, as [`read_grammar`] reads them. Either way
+/// no command of that name runs.
+pub(crate) fn starts_with_grammar(tokens: &[Token<'_>], start: CommandStart) -> bool {
+    let Some(i) = tokens.iter().position(|tok| !tok.is_blank()) else {
+        return false;
+    };
+    let frame = Frame::new(None, None);
+    let pipeline = start == CommandStart::Pipeline;
+    reserved_at(frame.position, pipeline, tokens, i).is_some()
+        || frame
+            .arithmetic_at(tokens, i, After::Nothing, &ParenCloses::default())
+            .is_some()
+}
+
+/// The reserved word `tokens[i]` is, where bash reads one: whole, and where
+/// `position` lets a reserved word start. `pipeline` says whether a pipeline
+/// may start there, and not only a command: `time` is reserved only then.
+fn reserved_at(
+    position: Position,
+    pipeline: bool,
+    tokens: &[Token<'_>],
+    i: usize,
+) -> Option<&'static ReservedWord> {
+    if position == Position::Word || !is_whole_word(tokens, i) {
+        return None;
+    }
+    reserved_word(tokens[i].value).filter(|word| pipeline || word.word != Reserved::Time)
+}
+
+/// The command lists [`read_grammar`] is inside: the line's, then one for
+/// each substitution around the token, innermost last.
+struct GrammarReader {
+    frames: Vec<Frame>,
+    closes: ParenCloses,
+}
+
+/// The state [`read_grammar`] carries from token to token through one
+/// command list.
+struct Frame {
+    /// For a substitution's command list, the reading of the substitution in
+    /// the line: every token of it takes that one. `None` for the line's.
+    around: Option<Reading>,
+    /// For an arithmetic expansion `$(( … ))`, its last token: nothing in it
+    /// is read, and it ends there.
+    expansion_last: Option<usize>,
+    cases: Vec<CaseAt>,
+    /// The brackets open inside the `[[ ]]` being read, if one is.
+    test: Option<usize>,
+    /// The last token of the arithmetic command being read, if one is: the
+    /// second `)` of its `))`, or `usize::MAX` when it runs to the end of the
+    /// line.
+    arithmetic: Option<usize>,
+    /// The brackets of the word text being read, innermost last.
+    word_text: Vec<TextBracket>,
+    /// The brackets open in the command list, innermost last.
+    parens: Vec<Paren>,
+    /// Where the next word stands.
+    position: Position,
+    /// Whether a pipeline may start at the next word, and not only a command:
+    /// false after a pipe and after `coproc`.
+    pipeline: bool,
+    /// What the last token that is not a blank makes of the next one.
+    after: After,
+}
+
+/// A `(` that [`read_grammar`] read in a command list.
+enum Paren {
+    /// One where a command or a reserved word starts: a subshell.
+    Subshell,
+    /// One after a word: a function's `name ( )`.
+    AfterWord,
+}
+
+/// What the last token that is not a blank makes of the next one.
+#[derive(Clone, Copy)]
+enum After {
+    Nothing,
+    /// A `(`: a `)` right after it ends a function's name, `name ( )`.
+    OpenParen,
+    /// A reserved word that names what follows it (`for`, `select`,
+    /// `function`, `coproc`): after the name stands a reserved word. `header`
+    /// after `for`, where a `((` instead opens its arithmetic header.
+    Name {
+        header: bool,
+    },
+    /// A reserved word whose options may follow, or an option of it: these
+    /// are the options left, in order.
+    Options(&'static [&'static str]),
+}
+
+impl GrammarReader {
+    fn new() -> Self {
+        GrammarReader {
+            frames: vec![Frame::new(None, None)],
+            closes: ParenCloses::default(),
+        }
+    }
+
+    /// Reads `tokens[i]`.
+    fn read(&mut self, input: &str, tokens: &[Token<'_>], i: usize) -> Reading {
+        let Some(frame) = self.frames.last_mut() else {
+            return Reading::Commands;
+        };
+        let tok = &tokens[i];
+        let region = frame.region();
+        let reading = frame.around.unwrap_or(frame.reading());
+        if tok.is_blank() {
+            return reading;
+        }
+        let after = std::mem::replace(&mut frame.after, After::Nothing);
+        let pipeline = std::mem::replace(&mut frame.pipeline, true);
+        if tok.kind == TokenKind::Shellism
+            && tok.value == "("
+            && opens_substitution(input, tok.offset)
+        {
+            // The substitution is text of a word: what follows it is no
+            // command, and a pattern it starts has started.
+            frame.position = Position::Word;
+            if let Some(CaseAt::Pattern { started, .. }) = frame.cases.last_mut() {
+                *started = true;
+            }
+            // `$((` opens an arithmetic expansion when bash's `parse_dparen`
+            // would read an arithmetic command there, and a command
+            // substitution holding a subshell otherwise.
+            let expansion_last = if input[..tok.offset].ends_with('$') {
+                match self.closes.double_paren(tokens, i) {
+                    Some(DoubleParen::Arithmetic { last }) => Some(last),
+                    Some(DoubleParen::Unterminated) => Some(usize::MAX),
+                    Some(DoubleParen::Subshells) | None => None,
+                }
+            } else {
+                None
+            };
+            self.frames.push(Frame::new(Some(reading), expansion_last));
+            return reading;
+        }
+        if let Some(last) = frame.expansion_last {
+            if i >= last {
+                self.frames.pop();
+            }
+            return reading;
+        }
+        if let Some(last) = frame.arithmetic {
+            if i >= last {
+                frame.arithmetic = None;
+                frame.position = Position::ReservedWord;
+            }
+            return reading;
+        }
+        let ends_list = match region {
+            Reading::WordText => {
+                frame.read_word_text(tokens, i);
+                false
+            }
+            Reading::Expression => {
+                frame.read_expression(tokens, i);
+                false
+            }
+            Reading::Pattern => {
+                let read = frame.read_pattern(tokens, i);
+                return frame.around.unwrap_or(read);
+            }
+            Reading::Commands => {
+                if frame.read_arithmetic(tokens, i, after, &self.closes) {
+                    return frame.around.unwrap_or(Reading::Expression);
+                }
+                let ends_list = frame.read_commands(tokens, i, after, pipeline);
+                // The bracket that opens word text is part of it.
+                if !frame.word_text.is_empty() {
+                    return frame.around.unwrap_or(Reading::WordText);
+                }
+                ends_list
+            }
+        };
+        if ends_list && self.frames.len() > 1 {
+            self.frames.pop();
+        }
+        reading
+    }
+}
+
+impl Frame {
+    fn new(around: Option<Reading>, expansion_last: Option<usize>) -> Self {
+        Frame {
+            around,
+            expansion_last,
+            cases: Vec::new(),
+            test: None,
+            arithmetic: None,
+            word_text: Vec::new(),
+            parens: Vec::new(),
+            position: Position::Command,
+            pipeline: true,
+            after: After::Nothing,
+        }
+    }
+
+    /// Which of the frame's readers takes its next token.
+    fn region(&self) -> Reading {
+        if self.word_text.is_empty() {
+            self.list_region()
+        } else {
+            Reading::WordText
+        }
+    }
+
+    /// How the frame's own grammar reads its next token. Word text inside a
+    /// `case` pattern or a `[[ ]]` expression takes that reading, as a
+    /// substitution's tokens take the reading around it.
+    fn reading(&self) -> Reading {
+        match self.list_region() {
+            Reading::Commands if !self.word_text.is_empty() => Reading::WordText,
+            around => around,
+        }
+    }
+
+    /// What the frame reads outside word text: an expression, a pattern or
+    /// commands.
+    fn list_region(&self) -> Reading {
+        if self.test.is_some() || self.arithmetic.is_some() {
+            Reading::Expression
+        } else if matches!(self.cases.last(), Some(CaseAt::Pattern { .. })) {
+            Reading::Pattern
+        } else {
+            Reading::Commands
+        }
+    }
+
+    /// The last token of the arithmetic command a `((` at `tokens[i]` opens,
+    /// if it opens one here.
+    fn arithmetic_at(
+        &self,
+        tokens: &[Token<'_>],
+        i: usize,
+        after: After,
+        closes: &ParenCloses,
+    ) -> Option<usize> {
+        let header = matches!(after, After::Name { header: true });
+        if self.position == Position::Word && !header {
+            return None;
+        }
+        match closes.double_paren(tokens, i)? {
+            DoubleParen::Subshells if !header => None,
+            DoubleParen::Arithmetic { last } => Some(last),
+            DoubleParen::Subshells | DoubleParen::Unterminated => Some(usize::MAX),
+        }
+    }
+
+    /// Opens the arithmetic command that a `((` at `tokens[i]` starts, if it
+    /// starts one here, and says whether it did.
+    fn read_arithmetic(
+        &mut self,
+        tokens: &[Token<'_>],
+        i: usize,
+        after: After,
+        closes: &ParenCloses,
+    ) -> bool {
+        let Some(last) = self.arithmetic_at(tokens, i, after, closes) else {
+            return false;
+        };
+        self.arithmetic = Some(last);
+        self.position = Position::Word;
+        true
+    }
+
+    fn read_word_text(&mut self, tokens: &[Token<'_>], i: usize) {
+        let tok = &tokens[i];
+        if tok.kind != TokenKind::Shellism {
+            return;
+        }
+        match (self.word_text.last(), tok.value) {
+            (_, "{") if opens_word_text(tokens, i) == Some(TextBracket::Brace) => {
+                self.word_text.push(TextBracket::Brace);
+            }
+            (Some(TextBracket::Paren), "(") => self.word_text.push(TextBracket::Paren),
+            (Some(TextBracket::Paren), ")") | (Some(TextBracket::Brace), "}") => {
+                self.word_text.pop();
+            }
+            _ => {}
+        }
+    }
+
+    /// Reads a token of a `[[ ]]` expression. Word text in it is text of one
+    /// of its words, so its brackets are counted apart: a `)` or a `]]` in a
+    /// `${ }` ends nothing.
+    fn read_expression(&mut self, tokens: &[Token<'_>], i: usize) {
+        let tok = &tokens[i];
+        if let Some(bracket) = opens_word_text(tokens, i) {
+            self.word_text.push(bracket);
+            return;
+        }
+        let Some(depth) = self.test.as_mut() else {
+            return;
+        };
+        match tok.kind {
+            TokenKind::Shellism if tok.value == "(" => *depth += 1,
+            TokenKind::Shellism if tok.value == ")" => *depth = depth.saturating_sub(1),
+            TokenKind::Arg if *depth == 0 && is_whole_word(tokens, i) => {
+                if let Some(word) = reserved_word(tok.value).filter(|w| w.closes(Compound::Test)) {
+                    self.test = None;
+                    self.position = word.next;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Reads a token of a `case` pattern list, and says how it reads: as
+    /// the pattern, or as commands for an `esac` that closes the `case`.
+    fn read_pattern(&mut self, tokens: &[Token<'_>], i: usize) -> Reading {
+        let tok = &tokens[i];
+        let Some(&CaseAt::Pattern { started, depth }) = self.cases.last() else {
+            return Reading::Commands;
+        };
+        if !started
+            && tok.kind == TokenKind::Arg
+            && is_whole_word(tokens, i)
+            && let Some(word) = reserved_word(tok.value).filter(|w| w.closes(Compound::Case))
+        {
+            self.cases.pop();
+            self.position = word.next;
+            return Reading::Commands;
+        }
+        // Word text in a pattern is text of one of its words: a `)` or a `|`
+        // in a `${ }` ends nothing.
+        if let Some(bracket) = opens_word_text(tokens, i) {
+            self.word_text.push(bracket);
+            return Reading::Pattern;
+        }
+        let bracket = match tok.kind {
+            TokenKind::Shellism => tok.value,
+            _ => "",
+        };
+        let next = match bracket {
+            // The optional bracket before the first pattern.
+            "(" if !started => CaseAt::Pattern {
+                started: true,
+                depth,
+            },
+            "(" => CaseAt::Pattern {
+                started,
+                depth: depth + 1,
+            },
+            ")" if depth > 0 => CaseAt::Pattern {
+                started,
+                depth: depth - 1,
+            },
+            ")" => {
+                self.position = Position::Command;
+                CaseAt::Body
+            }
+            _ => CaseAt::Pattern {
+                started: true,
+                depth,
+            },
+        };
+        if let Some(top) = self.cases.last_mut() {
+            *top = next;
+        }
+        Reading::Pattern
+    }
+
+    /// Reads a token of a command list, and says whether it ends the list: a
+    /// `)` that no bracket opened in it takes, which ends a substitution.
+    /// `pipeline` says whether a pipeline may start at it.
+    fn read_commands(
+        &mut self,
+        tokens: &[Token<'_>],
+        i: usize,
+        after: After,
+        pipeline: bool,
+    ) -> bool {
+        let tok = &tokens[i];
+        // Where a command starts, a `(` opens a subshell.
+        if self.position != Position::Command
+            && let Some(bracket) = opens_word_text(tokens, i)
+        {
+            self.word_text.push(bracket);
+            self.position = Position::Word;
+            return false;
+        }
+        match tok.kind {
+            TokenKind::Operator => {
+                if matches!(tok.value, ";;" | ";&" | ";;&")
+                    && let Some(at @ CaseAt::Body) = self.cases.last_mut()
+                {
+                    *at = CaseAt::Pattern {
+                        started: false,
+                        depth: 0,
+                    };
+                }
+                self.position = Position::Command;
+            }
+            TokenKind::Pipe(_) => {
+                self.position = Position::Command;
+                self.pipeline = false;
+            }
+            TokenKind::Redirect => {
+                self.position = Position::Word;
+            }
+            TokenKind::Shellism if tok.value == "&" => {
+                self.position = Position::Command;
+            }
+            TokenKind::Shellism if tok.value == "(" => {
+                // A word right before a `(` is a function's name.
+                let paren = if self.position == Position::Word {
+                    Paren::AfterWord
+                } else {
+                    self.position = Position::Command;
+                    Paren::Subshell
+                };
+                self.parens.push(paren);
+                self.after = After::OpenParen;
+            }
+            TokenKind::Shellism if tok.value == ")" => {
+                self.position = match self.parens.pop() {
+                    Some(Paren::Subshell) => Position::ReservedWord,
+                    // `name ( )` defines a function, and its body follows.
+                    Some(Paren::AfterWord) if matches!(after, After::OpenParen) => {
+                        Position::ReservedWord
+                    }
+                    Some(Paren::AfterWord) => Position::Word,
+                    None => {
+                        self.position = Position::ReservedWord;
+                        return true;
+                    }
+                };
+            }
+            TokenKind::Arg | TokenKind::Shellism => self.read_word(tokens, i, after, pipeline),
+            TokenKind::Sep | TokenKind::Newline => {}
+        }
+        false
+    }
+
+    /// A word, or a token of one, in a command list.
+    fn read_word(&mut self, tokens: &[Token<'_>], i: usize, after: After, pipeline: bool) {
+        let tok = &tokens[i];
+        let position = std::mem::replace(&mut self.position, Position::Word);
+        // `time -p --`: an option of the reserved word before leaves the next
+        // word where it would stand without the option. Bash compares the
+        // word's text as written (`special_case_tokens` in its `parse.y`), so
+        // `time "-p"` and `time -P` run a command of that name. Reserved-word
+        // grammar is matched literally, the exception to rule 6 of
+        // `.claude/rules/rust-patterns.md`.
+        if let After::Options(options) = after
+            && is_whole_word(tokens, i)
+            && let Some(at) = options.iter().position(|option| *option == tok.value)
+        {
+            self.position = position;
+            self.after = After::Options(&options[at + 1..]);
+            return;
+        }
+        match self.cases.last_mut() {
+            Some(at @ CaseAt::Subject) => {
+                *at = CaseAt::In;
+                return;
+            }
+            Some(at @ CaseAt::In) => {
+                if is_whole_word(tokens, i)
+                    && reserved_word(tok.value).is_some_and(|w| w.word == Reserved::In)
+                {
+                    *at = CaseAt::Pattern {
+                        started: false,
+                        depth: 0,
+                    };
+                }
+                return;
+            }
+            _ => {}
+        }
+        let Some(word) = reserved_at(position, pipeline, tokens, i) else {
+            if matches!(after, After::Name { .. }) {
+                self.position = Position::ReservedWord;
+            }
+            return;
+        };
+        self.position = word.next;
+        if word.next == Position::Command && !word.pipeline_follows() {
+            self.pipeline = false;
+        }
+        if !word.options.is_empty() {
+            self.after = After::Options(word.options);
+        }
+        if word.names {
+            self.after = After::Name {
+                header: word.opens(Compound::For),
+            };
+        }
+        if word.opens(Compound::Test) {
+            self.test = Some(0);
+        } else if word.opens(Compound::Case) {
+            self.cases.push(CaseAt::Subject);
+        } else if word.closes(Compound::Case) && self.cases.last() == Some(&CaseAt::Body) {
+            self.cases.pop();
         }
     }
 }
@@ -800,7 +1566,6 @@ pub(crate) fn segment(cmd: &str, policy: Policy) -> Vec<Segment<'_>> {
         cases: CaseTracker::default(),
     };
     let cuts: Vec<usize> = match policy.newline {
-        NewlinePolicy::Blank => Vec::new(),
         NewlinePolicy::EndsSegmentAndCrCuts => QuoteScan::new(trimmed)
             .filter(|c| c.byte == b'\r' && c.is_bare())
             .map(|c| c.index)
@@ -900,8 +1665,10 @@ impl SegmentWalk<'_> {
                     self.seg_end = Some(tok.offset);
                 }
             } else if tok.kind == TokenKind::Arg
-                || (tok.kind == TokenKind::Shellism && !is_grammar_word(tok.value))
+                || (tok.kind == TokenKind::Shellism && reserved_word(tok.value).is_none())
             {
+                // A reserved word is grammar around a command, not command
+                // text, so a redirect behind one is still a leading redirect.
                 self.seg_has_text = true;
             }
 
@@ -914,9 +1681,9 @@ impl SegmentWalk<'_> {
 /// Segments `cmd` for the **permission gate** (`hooks/permissions.rs::check_command_with_rules`):
 /// every segment this returns is independently checked against deny/ask/allow
 /// rules, so this is the most paranoid of the three compound-command segmenters
-/// in this codebase — see [`split_for_classify`] (analytics/discovery
-/// classification) and `discover/registry.rs::rewrite_compound`'s inline token walk
-/// (actual rewrite) for the other two.
+/// in this codebase. The other two, [`split_for_classify`] (analytics/discovery
+/// classification) and `discover/registry.rs::rewrite_compound`'s token walk
+/// (actual rewrite), both read the line through [`read_grammar`].
 ///
 /// All three agree on where a command begins and ends. Where a row below still
 /// differs, the difference is the consumer's purpose, not an accident, and
@@ -927,14 +1694,18 @@ impl SegmentWalk<'_> {
 /// | `&&` / `\|\|` / `;` | splits | splits | splits |
 /// | `\|` | splits | splits | splits, then `PipelineSafety` decides per rule |
 /// | background `&` | splits | splits | splits |
-/// | `( ... )` grouping | splits | splits | splits |
+/// | `( ... )` subshell | splits | splits | splits |
 /// | `$( ... )` substitution | descends: a command that runs must meet the rules | stays out: the text around it is not a command | stays out: it captures a string, not output |
 /// | `{ ... }` grouping | strips the bracket before matching | not a boundary: `{` is brace expansion off a command position | not a boundary, same reason |
+/// | `&&` / `\|\|` / `( )` inside `[[ ... ]]` or `(( ... ))` | splits | not a boundary: the expression is one command | same as classification |
+/// | `case` pattern | the `(` before it is not a boundary; its words are segment text | not a command: in no segment | not a command: never rewritten |
+/// | brackets of word text (`a=(…)`, `!(…)`, `${…}`) | `(` and `)` split | not a boundary: the text is one word | same as classification |
 /// | trailing redirect | truncates the segment, so nothing rides in behind one | kept | kept, so the rewrite reproduces the real shape |
 /// | leading redirect | stepped over, command kept | kept | kept |
+/// | newline | splits | does not split | does not split |
 /// | lone `\r` (no following `\n`) | splits | does not split | does not split |
 ///
-/// Like [`split_for_classify`] but also breaks on newline and on a lone `\r`
+/// It breaks on a newline and on a lone `\r`
 /// (`NewlinePolicy::EndsSegmentAndCrCuts`), descends into `$( )`, and truncates each
 /// segment at the first redirect that follows command text — deliberately
 /// conservative so a hidden command can't evade the gate by hiding behind a
@@ -947,15 +1718,52 @@ pub fn split_for_permissions(cmd: &str) -> Vec<&str> {
         .collect()
 }
 
-/// Split a shell command on operators (`&&`, `||`, `;`) and pipes (`|`),
-/// quote-aware.
+/// The commands of `cmd`, for classification: split where [`read_grammar`]
+/// reads an operator, a pipe, `&` or a subshell's bracket as command text,
+/// the same reading the rewrite splits on, so the two agree on what a command
+/// is. A `[[ ]]` expression, an arithmetic command and word text are part of
+/// the command they sit in, and a `case` pattern belongs to no segment.
 ///
-/// For classification only — unlike [`split_for_permissions`] this never
-/// splits on a newline or a lone `\r`, stays out of `$( )`, and keeps rather
-/// than truncates at a redirect (see that function's comparison table), so it
-/// must not be repurposed for permission/security decisions.
+/// It never splits on a newline, stays out of `$( )`, `<( )` and `>( )`, and
+/// keeps a redirect (see [`split_for_permissions`]'s comparison table): the
+/// text around a substitution is not a command of its own, and descending
+/// would turn `git log $(git rev-parse HEAD)` into a `git log $` nobody ran.
+/// It must not be repurposed for permission/security decisions.
 pub(crate) fn split_for_classify(cmd: &str) -> Vec<Segment<'_>> {
-    segment(cmd, Policy::CLASSIFY)
+    let input = trim_ifs(cmd);
+    let tokens = tokenize(input);
+    let readings = read_grammar(input, &tokens);
+    let mut out = Vec::new();
+    let mut seg_start = 0;
+    let mut substitution = SubstitutionDepth::default();
+    for (tok, reading) in tokens.iter().zip(readings) {
+        match reading {
+            // A `case` pattern runs nothing: what precedes it ends, and the
+            // arm's commands start after its `)`.
+            Reading::Pattern => {
+                push_segment(&mut out, input, seg_start, tok.offset, false);
+                seg_start = tok.end();
+                continue;
+            }
+            Reading::Expression | Reading::WordText => continue,
+            Reading::Commands => {}
+        }
+        if substitution.absorbs(input, tok) || substitution.is_inside() {
+            continue;
+        }
+        let boundary = match tok.kind {
+            TokenKind::Operator | TokenKind::Pipe(_) => true,
+            TokenKind::Shellism => matches!(tok.value, "&" | "(" | ")"),
+            _ => false,
+        };
+        if boundary {
+            let feeds_pipe = matches!(tok.kind, TokenKind::Pipe(_));
+            push_segment(&mut out, input, seg_start, tok.offset, feeds_pipe);
+            seg_start = tok.end();
+        }
+    }
+    push_segment(&mut out, input, seg_start, input.len(), false);
+    out
 }
 
 #[cfg(test)]
@@ -1160,6 +1968,28 @@ mod tests {
                 "trailing {byte:?} stays in the word"
             );
         }
+    }
+
+    /// A blank inside an extglob group, an array literal or a `${ }` is text
+    /// of its word, as bash reads it.
+    #[test]
+    fn test_words_keep_word_text_whole() {
+        assert_eq!(word_texts("arr=(a b c) git"), vec!["arr=(a b c)", "git"]);
+        assert_eq!(
+            word_texts("ls ${x:- a b} @(c d)e f"),
+            vec!["ls", "${x:- a b}", "@(c d)e", "f"]
+        );
+        assert_eq!(
+            word_texts("declare -a a+=(1 2) ls"),
+            vec!["declare", "-a", "a+=(1 2)", "ls"]
+        );
+        assert_eq!(
+            shell_split("git log !(a b) x"),
+            vec!["git", "log", "!(a b)", "x"]
+        );
+        // A subshell's blanks, and a function's, still separate words.
+        assert_eq!(word_texts("(ls a)"), vec!["(ls", "a)"]);
+        assert_eq!(word_texts("f () { ls; }"), vec!["f", "()", "{", "ls;", "}"]);
     }
 
     /// Each word carries its span and the text that span names.
@@ -2280,23 +3110,25 @@ mod tests {
                 legacy_segmenters::split_for_permissions_legacy(cmd),
                 "permission segmentation changed for {cmd:?}"
             );
-            // Classify and the gate hold the same policy once the three things
+            // Classification and the gate agree on every line whose tokens
+            // `read_grammar` all reads as command text, once the three things
             // they deliberately differ on are out of the picture: newlines,
-            // redirects, and substitutions. On everything else they must agree
-            // exactly. That is what anchors classify to the frozen walker —
-            // the gate is still compared against it line by line above, so an
-            // unintended drift in `segment()` has to show up as classify and
-            // the gate disagreeing here.
-            // About a third of the corpus reaches this: the redirect variants
-            // are eight of nine and every one of them carries a `<` or `>`.
-            // What is left still crosses every joiner with every wrapper, which
-            // is where this commit's boundaries live. `<(`/`>(` fall out with
-            // the redirects, and `$(` is named because it has no angle bracket.
-            if !cmd.contains(['\n', '\r', '>', '<']) && !cmd.contains("$(") {
+            // redirects, and substitutions. Only a `[[ ]]` expression, an
+            // arithmetic command, a `case` pattern or word text sets them
+            // apart. About a third of the corpus reaches this: the redirect
+            // variants are eight of nine and every one of them carries a `<`
+            // or `>`. What is left still crosses every joiner with every
+            // wrapper. `<(`/`>(` fall out with the redirects, and `$(` is named
+            // because it has no angle bracket.
+            let tokens = tokenize(trim_ifs(cmd));
+            let all_commands = read_grammar(trim_ifs(cmd), &tokens)
+                .iter()
+                .all(|reading| *reading == Reading::Commands);
+            if all_commands && !cmd.contains(['\n', '\r', '>', '<']) && !cmd.contains("$(") {
                 assert_eq!(
                     classify_texts(cmd),
                     split_for_permissions(cmd),
-                    "classify and the gate disagree on {cmd:?}, which shares their policy"
+                    "classify and the gate disagree on {cmd:?}, which both read as commands"
                 );
             }
 
@@ -2341,20 +3173,661 @@ mod tests {
             "ls\r\nls -la",
         ] {
             let trimmed = trim_ifs(cmd);
-            for policy in [Policy::PERMISSIONS, Policy::CLASSIFY] {
-                for seg in segment(cmd, policy) {
-                    assert_eq!(
-                        &trimmed[seg.start..seg.end],
-                        seg.text,
-                        "span {}..{} does not address {:?} in {cmd:?}",
-                        seg.start,
-                        seg.end,
-                        seg.text
-                    );
-                    assert_eq!(trim_ifs(seg.text), seg.text, "segment text was not trimmed");
-                }
+            for seg in segment(cmd, Policy::PERMISSIONS)
+                .into_iter()
+                .chain(split_for_classify(cmd))
+            {
+                assert_eq!(
+                    &trimmed[seg.start..seg.end],
+                    seg.text,
+                    "span {}..{} does not address {:?} in {cmd:?}",
+                    seg.start,
+                    seg.end,
+                    seg.text
+                );
+                assert_eq!(trim_ifs(seg.text), seg.text, "segment text was not trimmed");
             }
         }
+    }
+
+    /// Each token of `cmd` that is not a blank, with the letter of its
+    /// reading: `C` commands, `P` pattern, `E` expression, `W` word text.
+    fn read(cmd: &str) -> Vec<(&str, char)> {
+        let tokens = tokenize(cmd);
+        tokens
+            .iter()
+            .zip(read_grammar(cmd, &tokens))
+            .filter(|(tok, _)| !tok.is_blank())
+            .map(|(tok, reading)| {
+                let letter = match reading {
+                    Reading::Commands => 'C',
+                    Reading::Pattern => 'P',
+                    Reading::Expression => 'E',
+                    Reading::WordText => 'W',
+                };
+                (tok.value, letter)
+            })
+            .collect()
+    }
+
+    /// The reading of the token spelled `value`, the `nth` one so spelled.
+    fn reading_of(cmd: &str, value: &str, nth: usize) -> char {
+        read(cmd)
+            .into_iter()
+            .filter(|(v, _)| *v == value)
+            .nth(nth)
+            .map(|(_, r)| r)
+            .unwrap_or_else(|| panic!("no {value:?} #{nth} in {cmd:?}"))
+    }
+
+    #[test]
+    fn test_read_grammar_expression_runs_from_open_test_to_its_close() {
+        assert_eq!(
+            read("[[ -f a || ls ]] && ls"),
+            vec![
+                ("[[", 'C'),
+                ("-f", 'E'),
+                ("a", 'E'),
+                ("||", 'E'),
+                ("ls", 'E'),
+                ("]]", 'E'),
+                ("&&", 'C'),
+                ("ls", 'C'),
+            ]
+        );
+        // Brackets nest, a regex's `|`, `(`, `)` and `&&` belong to it, and a
+        // `]]` glued to more text is not the close.
+        for cmd in [
+            "[[ ( -f a || ( -d b && -e c ) ) ]] || ls",
+            "[[(-f a||-d b)]] || ls",
+            "[[ $x =~ ^(a|b)$ ]] || ls",
+            "[[ $x =~ (a|b)&&c ]] || ls",
+            "[[ $x == *]] && y ]] || ls",
+        ] {
+            let got = read(cmd);
+            let close = got.iter().rposition(|(v, _)| *v == "]]").expect("close");
+            assert!(
+                got[1..=close].iter().all(|(_, r)| *r == 'E'),
+                "{cmd:?}: {got:?}"
+            );
+            assert!(
+                got[close + 1..].iter().all(|(_, r)| *r == 'C'),
+                "{cmd:?}: {got:?}"
+            );
+        }
+        // With no `]]`, the rest of the line is the expression.
+        assert!(
+            read("[[ -f a || ls; git status")[1..]
+                .iter()
+                .all(|(_, r)| *r == 'E')
+        );
+    }
+
+    /// `[[` opens an expression wherever a command could start, and nowhere
+    /// else: after an assignment, a redirect or another word it is an
+    /// ordinary word, and so is a quoted `[[`.
+    #[test]
+    fn test_read_grammar_open_test_only_in_command_position() {
+        for cmd in [
+            "if [[ a || b ]]; then :; fi",
+            "while [[ a || b ]]; do :; done",
+            "until [[ a || b ]]; do :; done",
+            "if :; then [[ a || b ]]; elif [[ a || b ]]; then :; else [[ a || b ]]; fi",
+            "time [[ a || b ]]",
+            "ls && [[ a || b ]]",
+            "ls | [[ a || b ]]",
+            "ls & [[ a || b ]]",
+            "( [[ a || b ]] )",
+            "f() { [[ a || b ]]; }",
+            "function f { [[ a || b ]]; }",
+            "case x in x) [[ a || b ]];; esac",
+        ] {
+            for nth in 0..cmd.matches("||").count() {
+                assert_eq!(reading_of(cmd, "||", nth), 'E', "{cmd:?} #{nth}");
+            }
+        }
+        for cmd in [
+            "echo [[ a || b ]]",
+            "a=1 [[ a || b ]]",
+            ">f [[ a || b ]]",
+            "\"[[\" a || b ]]",
+            "\\[[ a || b ]]",
+            "x[[ a || b ]]",
+        ] {
+            assert_eq!(reading_of(cmd, "||", 0), 'C', "{cmd:?}");
+        }
+    }
+
+    /// `time`'s options `-p` and `--`, in that order, leave the next word in
+    /// command position; any other word after `time` is a command's name.
+    #[test]
+    fn test_read_grammar_time_options() {
+        for cmd in [
+            "time -p [[ a || b ]]",
+            "time -- [[ a || b ]]",
+            "time -p -- [[ a || b ]]",
+            "ls && time -p [[ a || b ]]",
+        ] {
+            assert_eq!(reading_of(cmd, "||", 0), 'E', "{cmd:?}");
+        }
+        for cmd in [
+            "time -- -p [[ a || b ]]",
+            "time -p -p [[ a || b ]]",
+            "time \"-p\" [[ a || b ]]",
+            "time -P [[ a || b ]]",
+            "time -p x [[ a || b ]]",
+            "echo -p [[ a || b ]]",
+        ] {
+            assert_eq!(reading_of(cmd, "||", 0), 'C', "{cmd:?}");
+        }
+    }
+
+    /// Bash reads `time` as reserved only where a pipeline starts. After `|`
+    /// or `|&`, and after `coproc`, `time -p` runs the program `time`, and a
+    /// `[[` after it is its argument.
+    #[test]
+    fn test_read_grammar_time_after_a_pipe_is_a_program() {
+        for cmd in [
+            "ls | time [[ a || b ]]",
+            "ls |& time [[ a || b ]]",
+            "ls | time -p [[ a || b ]]",
+            "ls |\ntime [[ a || b ]]",
+            "coproc time -p [[ a || b ]]",
+        ] {
+            assert_eq!(reading_of(cmd, "||", 0), 'C', "{cmd:?}");
+        }
+        for cmd in [
+            "ls; time [[ a || b ]]",
+            "ls && time [[ a || b ]]",
+            "ls | (time [[ a || b ]])",
+            "ls | if :; then time [[ a || b ]]; fi",
+            "time time -p [[ a || b ]]",
+        ] {
+            assert_eq!(reading_of(cmd, "||", 0), 'E', "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn test_read_grammar_arithmetic_command() {
+        assert_eq!(
+            read("(( a || b )) && ls"),
+            vec![
+                ("(", 'E'),
+                ("(", 'E'),
+                ("a", 'E'),
+                ("||", 'E'),
+                ("b", 'E'),
+                (")", 'E'),
+                (")", 'E'),
+                ("&&", 'C'),
+                ("ls", 'C'),
+            ]
+        );
+        // Wherever a command could start, `((` opens one, whose brackets nest
+        // and whose `;`, `<` and quoted `)` belong to it.
+        for cmd in [
+            "((a||b))",
+            "(( ( a || b ) && c ))",
+            "(( a = \"x)\" || b ))",
+            "(( a < 3 || b ))",
+            "time (( a || b ))",
+            "time -p (( a || b ))",
+            "if (( a || b )); then :; fi",
+            "while (( a || b )); do :; done",
+            "ls && (( a || b ))",
+            "ls | (( a || b ))",
+            "( (( a || b )) )",
+            "f() (( a || b ))",
+            "function f (( a || b ))",
+            "coproc (( a || b ))",
+            "case x in x) (( a || b ));; esac",
+        ] {
+            assert_eq!(reading_of(cmd, "||", 0), 'E', "{cmd:?}");
+            assert_eq!(reading_of(cmd, "a", 0), 'E', "{cmd:?}");
+        }
+        // The `))` ends it: what follows is commands again.
+        assert_eq!(reading_of("((a)) || [[ b || c ]]", "||", 0), 'C');
+        assert_eq!(reading_of("((a)) || [[ b || c ]]", "||", 1), 'E');
+        // A `)` that closes the second `(` with no `)` right after it makes
+        // the two brackets subshells, one inside the other.
+        for cmd in ["((a) || (b))", "((a); (b)) || c", "(( a ) || b )"] {
+            assert!(read(cmd).iter().all(|(_, r)| *r == 'C'), "{cmd:?}");
+        }
+        // Inside a word, `$((` is an arithmetic expansion, and elsewhere `((`
+        // is no command.
+        for cmd in [
+            "echo $(( a || b ))",
+            "x=$((a||b)) || c",
+            "echo a (( b || c ))",
+        ] {
+            assert!(read(cmd).iter().all(|(_, r)| *r == 'C'), "{cmd:?}");
+        }
+        // With no `)` to close the second `(`, the rest of the line is the
+        // expression.
+        assert!(read("(( a || b; ls").iter().all(|(_, r)| *r == 'E'));
+    }
+
+    /// `for ((init; test; step))` is an arithmetic header, and `do` after it
+    /// is in command position. A `((` there that is not arithmetic is a
+    /// syntax error, read to the end of the line.
+    #[test]
+    fn test_read_grammar_arithmetic_for() {
+        for cmd in [
+            "for ((i=0; i<3 || j; i++)); do [[ a || b ]]; done",
+            "for ((i=0;i<3||j;i++)) do [[ a || b ]]; done",
+        ] {
+            assert_eq!(reading_of(cmd, "||", 0), 'E', "{cmd:?}");
+            assert_eq!(reading_of(cmd, ";", 0), 'E', "{cmd:?}");
+            assert_eq!(reading_of(cmd, "[[", 0), 'C', "{cmd:?}");
+            assert_eq!(reading_of(cmd, "||", 1), 'E', "{cmd:?}");
+        }
+        assert!(
+            read("for ((i=0;i<3;i++) ); do ls; done")[1..]
+                .iter()
+                .all(|(_, r)| *r == 'E')
+        );
+        assert_eq!(reading_of("for x in a; do ((x)); done", "x", 1), 'E');
+    }
+
+    #[test]
+    fn test_read_grammar_case_patterns() {
+        assert_eq!(
+            read("case $x in a) echo esac ;; (ls|b) ls ;; esac; ls"),
+            vec![
+                ("case", 'C'),
+                ("$x", 'C'),
+                ("in", 'C'),
+                ("a", 'P'),
+                (")", 'P'),
+                ("echo", 'C'),
+                ("esac", 'C'),
+                (";;", 'C'),
+                ("(", 'P'),
+                ("ls", 'P'),
+                ("|", 'P'),
+                ("b", 'P'),
+                (")", 'P'),
+                ("ls", 'C'),
+                (";;", 'C'),
+                ("esac", 'C'),
+                (";", 'C'),
+                ("ls", 'C'),
+            ]
+        );
+        // Every terminator starts a pattern, and an extglob's brackets or a
+        // substitution sit inside one.
+        for (cmd, pattern) in [
+            ("case $x in a) :;;& ls) :;; esac", "ls"),
+            ("case $x in a) :;& ls) :;; esac", "ls"),
+            ("case $x in @(ls|b)) :;; esac", "ls"),
+            ("case $x in $(ls)) :;; esac", "ls"),
+            ("case in in in) :;; esac", "in"),
+            ("case $x in a) :;; esac*) :;; esac", "esac"),
+        ] {
+            let nth = usize::from(pattern == "in") * 2;
+            assert_eq!(reading_of(cmd, pattern, nth), 'P', "{cmd:?}");
+            assert_eq!(reading_of(cmd, ":", 0), 'C', "{cmd:?}");
+        }
+    }
+
+    /// `esac` closes the `case` where a pattern would start and in command
+    /// position, and nowhere else: what follows a real close is commands
+    /// again, so a `[[` there opens an expression.
+    #[test]
+    fn test_read_grammar_esac_closes_only_where_bash_reads_it() {
+        for cmd in [
+            "case $x in esac; [[ a || b ]]",
+            "case $x in a) :;; esac; [[ a || b ]]",
+            "case $x in a) :; esac; [[ a || b ]]",
+            "case $x in a) :;;esac;[[ a || b ]]",
+            "(case $x in a) :;; esac) && [[ a || b ]]",
+            "case $x in a) case $y in b) :;; esac;; esac; [[ a || b ]]",
+        ] {
+            assert_eq!(reading_of(cmd, "||", 0), 'E', "{cmd:?}");
+        }
+        // As an argument, `esac` leaves the `case` open: the next `;;` starts
+        // a pattern.
+        for cmd in [
+            "case $x in a) echo esac;; ls) :;; esac",
+            "case $x in a) echo \"esac\" esac;; ls) :;; esac",
+        ] {
+            assert_eq!(reading_of(cmd, "ls", 0), 'P', "{cmd:?}");
+        }
+    }
+
+    /// After a compound command's last word (`)`, `}`, `]]`, `))`, `fi`,
+    /// `done`, `esac`), after the name of a `for`, `select`, `function` or
+    /// `coproc`, and after `name ( )`, bash reads a reserved word and no
+    /// command, so a `[[` or `((` behind that word opens an expression.
+    #[test]
+    fn test_read_grammar_reserved_word_after_a_closer() {
+        for cmd in [
+            "for x do [[ a || b ]]; done",
+            "select x do [[ a || b ]]; done",
+            "for x\ndo [[ a || b ]]; done",
+            "if (true) then [[ a || b ]]; fi",
+            "if [[ c ]] then [[ a || b ]]; fi",
+            "while (( 0 )) do [[ a || b ]]; done",
+            "until (false) do [[ a || b ]]; done",
+            "if :; then :; elif (true) then [[ a || b ]]; fi",
+            "coproc NAME [[ a || b ]]",
+            "function f [[ a || b ]]",
+            "function f ( ) [[ a || b ]]",
+            "f() [[ a || b ]]",
+            "case x in x) (:) esac; [[ a || b ]]",
+            "case x in x) [[ c ]] esac; [[ a || b ]]",
+            "case x in x) ((1)) esac; [[ a || b ]]",
+            "case x in x) if :; then :; fi esac; [[ a || b ]]",
+            "case x in x) while :; do :; done esac; [[ a || b ]]",
+            "case x in x) case y in y) :;; esac esac; [[ a || b ]]",
+        ] {
+            assert_eq!(reading_of(cmd, "||", 0), 'E', "{cmd:?}");
+        }
+        for cmd in [
+            "for x do (( a || b )); done",
+            "if (true) then (( a || b )); fi",
+            "coproc NAME (( a || b ))",
+        ] {
+            assert_eq!(reading_of(cmd, "||", 0), 'E', "{cmd:?}");
+            assert_eq!(reading_of(cmd, "a", 0), 'E', "{cmd:?}");
+        }
+        // After an array's or a coproc command's words, and after a word
+        // that follows a name, no word is reserved.
+        for cmd in [
+            "arr=(a) [[ a || b ]]",
+            "arr=(if a) [[ a || b ]]",
+            "coproc ls -l [[ a || b ]]",
+            "echo (x) [[ a || b ]]",
+        ] {
+            assert_eq!(reading_of(cmd, "||", 0), 'C', "{cmd:?}");
+        }
+    }
+
+    /// A substitution holds a command list of its own, so a `case` inside it
+    /// keeps its pattern's `)` and the substitution ends at its own `)`. Its
+    /// tokens take the reading around it.
+    #[test]
+    fn test_read_grammar_substitution_holds_its_own_command_list() {
+        assert_eq!(
+            read("echo $(case y in b) :;; esac) || [[ a || b ]]"),
+            vec![
+                ("echo", 'C'),
+                ("$", 'C'),
+                ("(", 'C'),
+                ("case", 'C'),
+                ("y", 'C'),
+                ("in", 'C'),
+                ("b", 'C'),
+                (")", 'C'),
+                (":", 'C'),
+                (";;", 'C'),
+                ("esac", 'C'),
+                (")", 'C'),
+                ("||", 'C'),
+                ("[[", 'C'),
+                ("a", 'E'),
+                ("||", 'E'),
+                ("b", 'E'),
+                ("]]", 'E'),
+            ]
+        );
+        for (cmd, value, nth, reading) in [
+            // The arm after the substitution's arm starts with a pattern.
+            (
+                "case x in a) echo $(case y in b) :;; esac);; ls) ls;; esac",
+                "ls",
+                0,
+                'P',
+            ),
+            (
+                "case x in a) echo $(case y in b) :;; esac);; ls) ls;; esac",
+                "ls",
+                1,
+                'C',
+            ),
+            // Inside a pattern or an expression, it takes that reading.
+            (
+                "case x in $(case y in b) :;; esac)) :;; esac",
+                "esac",
+                0,
+                'P',
+            ),
+            ("[[ $(case y in b) :;; esac) || a ]] || c", "||", 0, 'E'),
+            ("[[ $(case y in b) :;; esac) || a ]] || c", "||", 1, 'C'),
+            // Its own subshells, `[[ ]]` and nested substitutions stay in it.
+            ("echo $( (a) ; $(b) ) || [[ a || b ]]", "||", 1, 'E'),
+            ("echo $([[ a ]]) || [[ a || b ]]", "||", 1, 'E'),
+            ("cat <(case y in b) :;; esac) || [[ a || b ]]", "||", 1, 'E'),
+            // `$((` is an arithmetic expansion, read to its `))`.
+            ("echo $(( (1) + 2 )) || [[ a || b ]]", "||", 1, 'E'),
+            ("echo $((a) ) || [[ a || b ]]", "||", 1, 'E'),
+        ] {
+            assert_eq!(
+                reading_of(cmd, value, nth),
+                reading,
+                "{cmd:?} {value} #{nth}"
+            );
+        }
+    }
+
+    /// The text of each run of tokens read as word text.
+    fn word_text_in(cmd: &str) -> Vec<&str> {
+        let tokens = tokenize(cmd);
+        let readings = read_grammar(cmd, &tokens);
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        for (tok, reading) in tokens.iter().zip(readings) {
+            if reading != Reading::WordText {
+                continue;
+            }
+            match runs.last_mut() {
+                Some((_, end)) if *end == tok.offset => *end = tok.end(),
+                _ => runs.push((tok.offset, tok.end())),
+            }
+        }
+        runs.into_iter().map(|(from, to)| &cmd[from..to]).collect()
+    }
+
+    /// An extglob group glued to a word or starting one, an array literal and
+    /// a `${ }` are word text, from their opening bracket to the one that
+    /// closes them. Nothing in them is a command, and nothing in them ends
+    /// one.
+    #[test]
+    fn test_read_grammar_word_text() {
+        for (cmd, expected) in [
+            ("git !(ls)", vec!["(ls)"]),
+            ("ls x@(a;b)&&y", vec!["(a;b)"]),
+            ("ls ?((ls))", vec!["((ls))"]),
+            ("ls *(a|b) +(c d)", vec!["(a|b)", "(c d)"]),
+            ("ls a!(b) c", vec!["(b)"]),
+            ("x=(ls; y) z", vec!["(ls; y)"]),
+            ("a+=(git status) && ls", vec!["(git status)"]),
+            ("declare -a a=(git status)", vec!["(git status)"]),
+            ("ls ${x-;ls }; y", vec!["{x-;ls }"]),
+            (
+                "echo ${x:-a b} ${y+git status}",
+                vec!["{x:-a b}", "{y+git status}"],
+            ),
+            ("echo ${x=ls} ${x?ls}", vec!["{x=ls}", "{x?ls}"]),
+            ("ls ${x:-$(a; b) @(c|d)}", vec!["{x:-$(a; b) @(c|d)}"]),
+            ("ls @(a|${x-b c})", vec!["(a|${x-b c})"]),
+            ("x=(${y-a b} c)", vec!["(${y-a b} c)"]),
+            // A `${ }` ends at its first `}`, and a bracket in it is text.
+            ("echo ${x-{a}b} && ls", vec!["{x-{a}"]),
+            ("echo ${x-a)b} && ls", vec!["{x-a)b}"]),
+            // With no closing bracket, the rest of the line is word text.
+            ("ls ${x-a", vec!["{x-a"]),
+            ("ls @(a b", vec!["(a b"]),
+            // A subshell, a function's brackets and a substitution are not
+            // word text, nor is quoted or escaped text, which is its word's
+            // already.
+            ("f() { ls; }", vec![]),
+            ("echo $(ls) <(ls)", vec![]),
+            ("echo \"${x-;a}\" '@(a b)'", vec![]),
+            ("echo \\@(a) \\${x}", vec![]),
+            ("echo a==(b)", vec![]),
+        ] {
+            assert_eq!(word_text_in(cmd), expected, "{cmd:?}");
+        }
+        // In a pattern or an expression, word text takes that reading, and
+        // a `)`, a `|` or a `]]` in a `${ }` ends nothing.
+        assert_eq!(
+            read("case $x in ${y:-a)b}) ls;; esac"),
+            vec![
+                ("case", 'C'),
+                ("$x", 'C'),
+                ("in", 'C'),
+                ("$", 'P'),
+                ("{", 'P'),
+                ("y:-a", 'P'),
+                (")", 'P'),
+                ("b", 'P'),
+                ("}", 'P'),
+                (")", 'P'),
+                ("ls", 'C'),
+                (";;", 'C'),
+                ("esac", 'C'),
+            ]
+        );
+        for (cmd, value, nth, reading) in [
+            ("case $x in ${y:-a|b}) ls;; esac", "ls", 0, 'C'),
+            ("case $x in ${y-a)b} | c) ls;; esac", "ls", 0, 'C'),
+            ("case $x in !(a)) ls;; esac", "ls", 0, 'C'),
+            ("[[ ${x- ]] } == a || ls ]] && ls", "||", 0, 'E'),
+            ("[[ ${x- ]] } == a || ls ]] && ls", "ls", 0, 'E'),
+            ("[[ ${x- ]] } == a || ls ]] && ls", "&&", 0, 'C'),
+            ("[[ ${x-)} == a || ls ]] && ls", "ls", 0, 'E'),
+            ("[[ ${x-)} == a || ls ]] && ls", "ls", 1, 'C'),
+            ("[[ $x == @(a|${y- ]] }) || ls ]] && ls", "ls", 0, 'E'),
+            ("[[ $x == !(a) || ls ]] && ls", "&&", 0, 'C'),
+        ] {
+            assert_eq!(
+                reading_of(cmd, value, nth),
+                reading,
+                "{cmd:?} {value} #{nth}"
+            );
+        }
+        // The reading around word text is unchanged: after it, the command
+        // goes on or ends as it would after any word.
+        assert_eq!(reading_of("x=(a) [[ b || c ]]", "||", 0), 'C');
+        assert_eq!(reading_of("ls @(a) && [[ b || c ]]", "||", 0), 'E');
+        assert_eq!(reading_of("case ${x-a b} in a) :;; esac", ":", 0), 'C');
+        assert_eq!(reading_of("case ${x-a b} in a) :;; esac", "a", 0), 'P');
+        // A substitution inside keeps its own command list, whose tokens take
+        // the reading around it.
+        assert_eq!(
+            reading_of("x=($(case y in b) :;; esac)) && ls", "&&", 0),
+            'C'
+        );
+        assert_eq!(
+            reading_of("x=($(case y in b) :;; esac)) && ls", ";;", 0),
+            'W'
+        );
+    }
+
+    /// Each word read where a command starts, as `classify_command` asks.
+    #[test]
+    fn test_starts_with_grammar() {
+        for cmd in [
+            "if x",
+            "[[(-f x)]]",
+            "]]",
+            "((x))",
+            "((x",
+            "esac",
+            "time -p x",
+        ] {
+            assert!(
+                starts_with_grammar(&tokenize(cmd), CommandStart::Pipeline),
+                "{cmd:?}"
+            );
+        }
+        for cmd in [
+            "\"if\" x",
+            "\\if x",
+            "donex",
+            "((x) )",
+            "((x); (y))",
+            "( (x))",
+            "x",
+            "",
+        ] {
+            assert!(
+                !starts_with_grammar(&tokenize(cmd), CommandStart::Pipeline),
+                "{cmd:?}"
+            );
+        }
+        // After `|`, `time` is the program `time`, as `read_grammar` reads
+        // it there (`test_read_grammar_time_after_a_pipe_is_a_program`);
+        // every other word reads as it does where a pipeline starts.
+        for (cmd, grammar) in [
+            ("time cargo test", false),
+            ("time -p x", false),
+            ("if x", true),
+            ("[[ x ]]", true),
+            ("((x))", true),
+        ] {
+            assert_eq!(
+                starts_with_grammar(&tokenize(cmd), CommandStart::PipeStage),
+                grammar,
+                "{cmd:?}"
+            );
+        }
+    }
+
+    /// A line of many `((`, each where a command starts, is read in linear
+    /// time: each `((` asks where its second `(` is closed, and that is
+    /// matched once for the whole line, so the brackets looked at stay within
+    /// a few per token.
+    #[test]
+    fn test_read_grammar_deep_nesting_is_linear() {
+        let depth = 32_000;
+        let cmd = format!("{}ls{}", "(".repeat(depth), ") ".repeat(depth));
+        let tokens = tokenize(&cmd);
+        let before = PAREN_CHECKS.with(|checks| checks.get());
+        let readings = read_grammar(&cmd, &tokens);
+        let checks = PAREN_CHECKS.with(|checks| checks.get()) - before;
+        assert!(readings.iter().all(|r| *r == Reading::Commands));
+        assert!(
+            checks <= 4 * tokens.len(),
+            "{depth} nested brackets: {checks} bracket checks for {} tokens",
+            tokens.len()
+        );
+    }
+
+    /// Bash's NAME rule, as assignments and array literals read it.
+    #[test]
+    fn test_assignment_value() {
+        for (word, value) in [
+            ("a=b", Some("b")),
+            ("_x1=", Some("")),
+            ("A+=(1)", Some("(1)")),
+            ("a==b", Some("=b")),
+            ("1a=b", None),
+            ("foo-bar=x", None),
+            ("\"foo\"=x", None),
+            ("a++=b", None),
+            ("+=b", None),
+            ("=b", None),
+            ("a", None),
+        ] {
+            assert_eq!(assignment_value(word), value, "{word:?}");
+        }
+        assert_eq!(name_len("ab_1-c"), 4);
+        assert_eq!(name_len("1ab"), 0);
+    }
+
+    /// The gate's segmenter keeps its own reading: it splits inside an
+    /// expression and after a pattern's `)`, where the rewrite does not.
+    #[test]
+    fn test_read_grammar_leaves_the_gate_segmenter_alone() {
+        assert_eq!(
+            split_for_permissions("[[ -f a || ls ]]"),
+            vec!["[[ -f a", "ls ]]"]
+        );
+        assert_eq!(
+            split_for_permissions("case $x in a) echo esac;; (ls) ls;; esac"),
+            vec!["case $x in a", "echo esac", "ls", "ls", "esac"]
+        );
     }
 
     #[test]
@@ -2551,7 +4024,7 @@ mod legacy_segmenters {
                     seg_end = Some(tok.offset);
                 }
             } else if tok.kind == TokenKind::Arg
-                || (tok.kind == TokenKind::Shellism && !is_grammar_word(&tok.value))
+                || (tok.kind == TokenKind::Shellism && reserved_word(&tok.value).is_none())
             {
                 seg_has_text = true;
             }

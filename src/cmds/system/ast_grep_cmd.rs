@@ -3,7 +3,7 @@
 //! structured-output request — see Correctness vs Token Savings), and so is
 //! every subcommand other than `run`.
 
-use crate::core::arg_tokenizer::{TokenKind, ValueSpec};
+use crate::core::arg_tokenizer::{Flag, Grammar, Token, ValueSpec};
 use crate::core::guard::never_worse;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
@@ -35,46 +35,66 @@ const HINT_RESERVE: usize = 256;
 /// `--report-style short` form happens to parse, and was being capped as if it were a match
 /// list), `test` reports rule results, and `lsp` speaks a protocol over stdin, which capturing
 /// closes.
-const OTHER_SUBCOMMANDS: &[&str] = &["scan", "test", "new", "lsp", "completions", "docs"];
+const OTHER_SUBCOMMANDS: &[&str] = &[
+    "scan",
+    "test",
+    "new",
+    "lsp",
+    "outline",
+    "completions",
+    "help",
+    "docs",
+];
+
+/// `--flag=v` or `--flag v`, the spec of every row below.
+const VALUE: ValueSpec = ValueSpec::value();
 
 /// The value-taking options ast-grep accepts *ahead of* a subcommand. Deliberately only those:
 /// a per-subcommand arity table would go stale against a tool that adds options, and an entry
-/// missing from it puts an option's value where a subcommand is looked for -- `--color always
-/// lsp` reading as `run` hands an editor a closed stdin.
-fn global_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    match kind {
-        TokenKind::Long => matches!(name, "config" | "color").then(ValueSpec::value),
-        TokenKind::Short => matches!(name, "c").then(ValueSpec::value),
-        _ => None,
-    }
-}
+/// missing from it puts an option's value where a subcommand is looked for -- `-c sg.yml lsp`
+/// reading as `run` hands an editor a closed stdin. ast-grep 0.45.3's `--help` lists
+/// `-c/--config` as the only one; `--color` belongs to `run` and `scan`, and ahead of `scan`
+/// it is rejected.
+const GLOBAL_FLAGS: &[Flag] = &[Flag::pair("c", "config").takes(VALUE)];
 
-/// `run`'s own value-taking options, consulted only once the invocation is known to be a `run`.
-/// Being wrong here costs compression, never correctness: the worst an entry missing from this
-/// table does is leave a pattern looking like a free positional.
-fn run_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    match kind {
-        TokenKind::Long => matches!(
-            name,
-            "pattern"
-                | "rewrite"
-                | "lang"
-                | "globs"
-                | "context"
-                | "after"
-                | "before"
-                | "selector"
-                | "strictness"
-                | "threads"
-        )
-        .then(ValueSpec::value)
-        .or_else(|| global_takes_value(kind, name)),
-        TokenKind::Short => matches!(name, "p" | "r" | "l" | "C" | "A" | "B")
-            .then(ValueSpec::value)
-            .or_else(|| global_takes_value(kind, name)),
-        _ => None,
-    }
-}
+/// ast-grep's grammar before a subcommand.
+const GLOBAL_GRAMMAR: Grammar = Grammar::posix(&[GLOBAL_FLAGS]);
+
+/// `run`'s own options, consulted only once the invocation is known to be a `run`: every
+/// value-taking one ast-grep 0.45.3's `run --help` lists, and the ones RTK checks for. Being
+/// wrong here costs compression, never correctness: the worst a value-taking entry missing from
+/// this table does is leave a pattern looking like a free positional.
+const RUN_FLAGS: &[Flag] = &[
+    Flag::pair("p", "pattern").takes(VALUE),
+    Flag::long("selector").takes(VALUE),
+    Flag::long("strictness").takes(VALUE),
+    Flag::pair("k", "kind").takes(VALUE),
+    Flag::pair("r", "rewrite").takes(VALUE),
+    Flag::pair("l", "lang").takes(VALUE),
+    // `--debug-query[=<format>]`: the next argument stays a path.
+    Flag::long("debug-query").takes(ValueSpec::attached_only()),
+    Flag::long("no-ignore").takes(VALUE),
+    Flag::long("globs").takes(VALUE),
+    Flag::pair("j", "threads").takes(VALUE),
+    Flag::long("color").takes(VALUE),
+    Flag::long("inspect").takes(VALUE),
+    Flag::pair("A", "after").takes(VALUE),
+    Flag::pair("B", "before").takes(VALUE),
+    Flag::pair("C", "context").takes(VALUE),
+    Flag::long("heading").takes(VALUE),
+    STDIN,
+    JSON,
+];
+
+/// `--stdin`: the source comes from the pipe.
+const STDIN: Flag = Flag::long("stdin");
+
+/// `--json[=<STYLE>]`. ast-grep 0.45.3's `run --help`: "the json flag must use `=` to specify its
+/// value".
+const JSON: Flag = Flag::long("json").takes(ValueSpec::attached_only());
+
+/// `run`'s grammar: its own options, and the global ones, which stay valid after `run`.
+const RUN_GRAMMAR: Grammar = Grammar::posix(&[RUN_FLAGS, GLOBAL_FLAGS]);
 
 /// Whether this invocation is one whose output the filter understands.
 ///
@@ -91,9 +111,10 @@ fn run_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
 /// pattern or a path spelled like a subcommand, which is compression; reading `lsp` as a `run`
 /// hands an editor a closed stdin, which is correctness, and RTK's priority order picks
 /// correctness.
-fn filters_this_invocation(args: &[String]) -> bool {
-    let global_tokens =
-        arg_tokenizer::tokenize_grammar(args, &global_takes_value, arg_tokenizer::Dialect::Posix);
+///
+/// `run_tokens` are `args` read with [`RUN_GRAMMAR`] ([`tokenize_run_args`]).
+fn filters_this_invocation(args: &[String], run_tokens: &[Token<'_>]) -> bool {
+    let global_tokens = arg_tokenizer::tokenize_grammar(args, &GLOBAL_GRAMMAR);
     let positionals: Vec<&str> = arg_tokenizer::before_dashdash(&global_tokens)
         .iter()
         .filter(|t| t.is_free_positional())
@@ -106,22 +127,24 @@ fn filters_this_invocation(args: &[String]) -> bool {
     }
 
     // A `--stdin` run reads the source from the pipe that capturing would close.
-    let run_tokens =
-        arg_tokenizer::tokenize_grammar(args, &run_takes_value, arg_tokenizer::Dialect::Posix);
-    !arg_tokenizer::before_dashdash(&run_tokens)
+    !arg_tokenizer::before_dashdash(run_tokens)
         .iter()
-        .any(|t| t.kind == TokenKind::Long && t.text == "stdin")
+        .any(|t| t.is(&STDIN))
+}
+
+/// `args` read as `run`'s, with [`RUN_GRAMMAR`].
+fn tokenize_run_args(args: &[String]) -> Vec<Token<'_>> {
+    arg_tokenizer::tokenize_grammar(args, &RUN_GRAMMAR)
 }
 
 /// Whether the user asked for JSON, which passes through as an explicit structured-output
 /// request. Read from tokens, not raw argv: past `--` a `--json` is a path, and every other
-/// argument check in this module already respects that boundary.
-fn requests_json(args: &[String]) -> bool {
-    let tokens =
-        arg_tokenizer::tokenize_grammar(args, &run_takes_value, arg_tokenizer::Dialect::Posix);
-    arg_tokenizer::before_dashdash(&tokens)
+/// argument check in this module already respects that boundary. `run_tokens` are `args` read
+/// with [`RUN_GRAMMAR`] ([`tokenize_run_args`]).
+fn requests_json(run_tokens: &[Token<'_>]) -> bool {
+    arg_tokenizer::before_dashdash(run_tokens)
         .iter()
-        .any(|t| t.kind == TokenKind::Long && t.text == "json")
+        .any(|t| t.is(&JSON))
 }
 
 /// Counts non-blank lines that are not `path:line:content`.
@@ -244,7 +267,8 @@ fn filter_ast_grep(raw: &str, max_per_file: usize, max_total: usize) -> Filtered
 pub fn run(args: &[String]) -> Result<i32> {
     // Capturing hands the child a closed stdin, so an invocation that reads one has to be
     // streamed instead -- `ast-grep lsp` otherwise served an editor an empty document.
-    if !filters_this_invocation(args) {
+    let run_tokens = tokenize_run_args(args);
+    if !filters_this_invocation(args, &run_tokens) {
         let forwarded: Vec<OsString> = args.iter().map(OsString::from).collect();
         return crate::core::runner::run_passthrough("ast-grep", &forwarded, 0);
     }
@@ -252,7 +276,7 @@ pub fn run(args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
     let real_cmd = format!("ast-grep {}", args.join(" "));
 
-    let is_json = requests_json(args);
+    let is_json = requests_json(&run_tokens);
 
     let mut cmd = resolved_command("ast-grep");
     cmd.args(args);
@@ -313,6 +337,17 @@ pub fn run(args: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::arg_tokenizer::{TokenKind, assert_takes_value_table};
+
+    /// [`super::filters_this_invocation`] on `args`, tokenized as [`run`] tokenizes them.
+    fn filters_this_invocation(args: &[String]) -> bool {
+        super::filters_this_invocation(args, &tokenize_run_args(args))
+    }
+
+    /// [`super::requests_json`] on `args`, tokenized as [`run`] tokenizes them.
+    fn requests_json(args: &[String]) -> bool {
+        super::requests_json(&tokenize_run_args(args))
+    }
 
     fn count_tokens(s: &str) -> usize {
         s.split_whitespace().count()
@@ -582,6 +617,93 @@ b.rs:3:eight
             total,
             "{} of {total} fixture lines went uncounted",
             total - shown - output.hidden_lines
+        );
+    }
+
+    /// Each of `run`'s value-taking options owns the argument after it, in both spellings, so
+    /// no value reads as a path and `--debug-query` leaves the next argument alone.
+    #[test]
+    fn test_run_option_values_are_not_paths() {
+        let line = args(&[
+            "run",
+            "-j",
+            "4",
+            "--threads",
+            "2",
+            "-k",
+            "call",
+            "--kind",
+            "id",
+            "--no-ignore",
+            "hidden",
+            "--inspect",
+            "summary",
+            "--heading",
+            "never",
+            "--color",
+            "never",
+            "--debug-query",
+            "src/",
+        ]);
+        let tokens = arg_tokenizer::tokenize_grammar(&line, &RUN_GRAMMAR);
+        let free: Vec<&str> = tokens
+            .iter()
+            .filter(|t| t.is_free_positional())
+            .map(|t| t.text)
+            .collect();
+        assert_eq!(free, ["run", "src/"]);
+    }
+
+    #[test]
+    fn test_global_grammar_matches_its_table() {
+        assert_takes_value_table(
+            &GLOBAL_GRAMMAR,
+            &[
+                (TokenKind::Long, &["config"], Some(ValueSpec::value())),
+                (TokenKind::Short, &["c"], Some(ValueSpec::value())),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_run_grammar_matches_its_table() {
+        assert_takes_value_table(
+            &RUN_GRAMMAR,
+            &[
+                (
+                    TokenKind::Long,
+                    &[
+                        "pattern",
+                        "selector",
+                        "strictness",
+                        "kind",
+                        "rewrite",
+                        "lang",
+                        "no-ignore",
+                        "globs",
+                        "threads",
+                        "color",
+                        "inspect",
+                        "after",
+                        "before",
+                        "context",
+                        "heading",
+                        "config",
+                    ],
+                    Some(ValueSpec::value()),
+                ),
+                (
+                    TokenKind::Short,
+                    &["p", "k", "r", "l", "j", "A", "B", "C", "c"],
+                    Some(ValueSpec::value()),
+                ),
+                (TokenKind::Long, &["stdin"], None),
+                (
+                    TokenKind::Long,
+                    &["json", "debug-query"],
+                    Some(ValueSpec::attached_only()),
+                ),
+            ],
         );
     }
 }

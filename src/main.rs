@@ -343,6 +343,8 @@ enum Commands {
     },
 
     /// Compact grep - strips whitespace, truncates, groups by file
+    // The help flag is long-only too: grep's `-h` is `--no-filename`.
+    #[command(disable_help_flag = true)]
     Grep {
         // rtk's own options here are long-only: a short form shadows the native
         // grep/rg flag of the same letter and captures it before it can reach
@@ -367,6 +369,9 @@ enum Commands {
         /// Show only match context (not full line)
         #[arg(long)]
         context_only: bool,
+        /// Print help
+        #[arg(long, action = clap::ArgAction::Help, display_order = 9999)]
+        help: Option<bool>,
         // No --file-type: `-t TYPE` is rg's type filter and the option never
         // reached the engine, so `rtk rg -t rust` filters by type while
         // `rtk grep -t rust` surfaces grep's own error.
@@ -2507,6 +2512,7 @@ fn run_cli() -> Result<i32> {
             max,
             context_only,
             extra_args,
+            ..
         } => search::run(
             search::Engine::Grep,
             max_len,
@@ -4623,6 +4629,27 @@ mod tests {
         );
     }
 
+    /// grep's `-h` is `--no-filename` (GNU grep 3.12), so it reaches search.rs; `--help` stays
+    /// rtk's. rg's `-h` is help, as rg's own is.
+    #[test]
+    fn test_grep_dash_h_is_greps_no_filename() {
+        assert_eq!(
+            grep_extra_args(&["rtk", "grep", "-h", "-r", "needle", "dir"]).unwrap(),
+            vec!["-h", "-r", "needle", "dir"]
+        );
+        assert_eq!(
+            grep_extra_args(&["rtk", "grep", "-hr", "needle", "dir"]).unwrap(),
+            vec!["-hr", "needle", "dir"]
+        );
+        let help = |args: &[&str]| {
+            Cli::try_parse_from(args).err().map(|e| e.kind())
+                == Some(clap::error::ErrorKind::DisplayHelp)
+        };
+        assert!(help(&["rtk", "grep", "--help"]));
+        assert!(help(&["rtk", "rg", "-h"]));
+        assert!(help(&["rtk", "rg", "--help"]));
+    }
+
     #[test]
     fn test_grep_parse_combined_short_cluster() {
         // `-rn` is a native grep cluster (recursive + line-numbers); it must
@@ -4699,6 +4726,7 @@ mod tests {
                 max,
                 context_only,
                 extra_args,
+                ..
             } => Ok((max_len, max, context_only, extra_args)),
             _ => unreachable!("parsed a grep command"),
         }
