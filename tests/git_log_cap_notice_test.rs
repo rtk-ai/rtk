@@ -11,21 +11,19 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-const RTK_BIN: &str = env!("CARGO_BIN_EXE_rtk");
+mod common;
+
 const NOTICE: &str = "[rtk] capped at 10 commits";
 
 /// Env that isolates git and rtk from the developer's real config, identity and home.
 fn isolate(cmd: &mut Command, home: &Path) {
+    common::isolate_git(cmd);
     cmd.env("HOME", home)
-        .env("GIT_CONFIG_GLOBAL", home.join("nonexistent-global"))
-        .env("GIT_CONFIG_SYSTEM", home.join("nonexistent-system"))
         .env("GIT_AUTHOR_NAME", "t")
         .env("GIT_AUTHOR_EMAIL", "t@example.com")
         .env("GIT_COMMITTER_NAME", "t")
         .env("GIT_COMMITTER_EMAIL", "t@example.com")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE");
+        .env("GIT_TERMINAL_PROMPT", "0");
 }
 
 fn git_ok(repo: &Path, home: &Path, args: &[&str]) {
@@ -43,7 +41,7 @@ fn git_ok(repo: &Path, home: &Path, args: &[&str]) {
 }
 
 fn rtk_log(repo: &Path, home: &Path, args: &[&str]) -> Output {
-    let mut cmd = Command::new(RTK_BIN);
+    let mut cmd = common::rtk_command();
     cmd.arg("git").arg("log").args(args).current_dir(repo);
     isolate(&mut cmd, home);
     cmd.output().expect("run rtk git log")
@@ -119,7 +117,7 @@ fn a_coloured_decorated_walk_announces_the_cap() {
         vec!["-c", "log.decorate=short"],
         vec!["-c", "color.ui=always"],
     ] {
-        let mut cmd = Command::new(RTK_BIN);
+        let mut cmd = common::rtk_command();
         cmd.arg("git")
             .args(&globals)
             .args(["log", "--graph", "-p"])
@@ -259,7 +257,7 @@ fn the_probe_does_not_rerun_the_users_diff_program() {
         vec!["--patch-with-raw", "--ext-diff"],
     ] {
         let _ = std::fs::remove_file(&counter);
-        let mut cmd = Command::new(RTK_BIN);
+        let mut cmd = common::rtk_command();
         cmd.args(["git", "log"])
             .args(&shape)
             .current_dir(&repo.path);

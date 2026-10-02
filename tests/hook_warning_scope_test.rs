@@ -8,7 +8,8 @@
 #![cfg(unix)]
 
 use std::path::Path;
-use std::process::Command;
+
+mod common;
 
 const REMINDER: &str = "No hook installed";
 
@@ -32,7 +33,7 @@ fn isolating_env(home: &Path) -> Vec<(String, std::ffi::OsString)> {
 /// Runs `rtk <args>` against a home directory whose Claude config directory
 /// exists but registers no hook, and returns stderr.
 fn run(home: &Path, args: &[&str]) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let out = common::rtk_command()
         .args(args)
         .envs(isolating_env(home))
         .output()
@@ -112,7 +113,7 @@ fn with_suppress_config(home: &Path, value: bool) {
 /// Like [`run`], but pins `RTK_SUPPRESS_HOOK_WARNING` — `None` unsets it, so an
 /// exported value in the developer's own shell cannot decide the outcome.
 fn run_with_env(home: &Path, args: &[&str], value: Option<&str>) -> String {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rtk"));
+    let mut cmd = common::rtk_command();
     cmd.args(args).envs(isolating_env(home));
     match value {
         Some(v) => cmd.env("RTK_SUPPRESS_HOOK_WARNING", v),

@@ -1,9 +1,10 @@
 //! Reads user settings from config.toml.
 
 use super::constants::{CONFIG_TOML, DEFAULT_HISTORY_DAYS, RTK_DATA_DIR};
+use crate::core::user_dirs;
+use crate::core::user_env;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::ffi::OsString;
 use std::path::PathBuf;
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -276,9 +277,22 @@ pub fn hook_rewrite_params() -> (Vec<String>, Vec<String>) {
 /// same process run (e.g. `hooks::init::save_telemetry_consent`'s load-mutate-save),
 /// since those must always observe a fresh read. Only reach for this from a
 /// caller that never itself writes config.toml.
-pub(crate) fn cached_config() -> &'static Config {
-    static CACHE: std::sync::OnceLock<Config> = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| Config::load().unwrap_or_default())
+///
+/// In a test build every call loads afresh from the calling test's own
+/// `user_dirs::config`: a process-wide cache would hold whichever test's
+/// configuration was read first, and hand it to all the others.
+pub(crate) fn cached_config() -> std::sync::Arc<Config> {
+    #[cfg(not(test))]
+    {
+        static CACHE: std::sync::OnceLock<std::sync::Arc<Config>> = std::sync::OnceLock::new();
+        CACHE
+            .get_or_init(|| std::sync::Arc::new(Config::load().unwrap_or_default()))
+            .clone()
+    }
+    #[cfg(test)]
+    {
+        std::sync::Arc::new(Config::load().unwrap_or_default())
+    }
 }
 
 /// Check if the missing-hook warning is suppressed via env var or config.
@@ -288,7 +302,7 @@ pub(crate) fn cached_config() -> &'static Config {
 /// force off, case-insensitive. Unset, empty, or unrecognised values fall
 /// through to `hooks.suppress_hook_warning` instead of vetoing it.
 pub fn hook_warning_suppressed() -> bool {
-    parse_suppress_hook_warning_env(std::env::var("RTK_SUPPRESS_HOOK_WARNING").ok().as_deref())
+    parse_suppress_hook_warning_env(user_env::var("RTK_SUPPRESS_HOOK_WARNING").as_deref())
         .unwrap_or_else(|| cached_config().hooks.suppress_hook_warning)
 }
 
@@ -484,8 +498,8 @@ pub fn show_recall_mode() -> Result<()> {
     if config.migrated_from_legacy_tee {
         println!("source: legacy [tee] section (auto-migrated at load)");
     }
-    if std::env::var("RTK_RECALL").ok().as_deref() == Some("0")
-        || std::env::var("RTK_TEE").ok().as_deref() == Some("0")
+    if user_env::var("RTK_RECALL").as_deref() == Some("0")
+        || user_env::var("RTK_TEE").as_deref() == Some("0")
     {
         println!("note: RTK_RECALL=0/RTK_TEE=0 is set — recovery disabled for this environment");
     }
@@ -493,53 +507,9 @@ pub fn show_recall_mode() -> Result<()> {
     Ok(())
 }
 
-/// Points at RTK's config directory itself (the one holding `config.toml`).
-pub const RTK_CONFIG_DIR_ENV: &str = "RTK_CONFIG_DIR";
-
-/// Path of `file` in RTK's config directory: `$RTK_CONFIG_DIR/file`, else
-/// `$XDG_CONFIG_HOME/rtk/file`, else the platform config dir. `None` only when no
-/// directory can be determined at all.
-pub fn rtk_config_path(file: &str) -> Option<PathBuf> {
-    resolve_config_path(
-        std::env::var_os(RTK_CONFIG_DIR_ENV),
-        std::env::var_os("XDG_CONFIG_HOME"),
-        dirs::config_dir(),
-        file,
-    )
-}
-
-/// `XDG_CONFIG_HOME` counts only when absolute (per the XDG spec) and off Windows,
-/// where `dirs` uses the Known Folder API and the variable is usually a leftover
-/// from a Unix-like shell. When the XDG path has no `file` but the platform dir
-/// does, the platform file wins, so existing installs (macOS
-/// `~/Library/Application Support/rtk`) keep their settings until moved.
-fn resolve_config_path(
-    override_dir: Option<OsString>,
-    xdg_config_home: Option<OsString>,
-    platform_dir: Option<PathBuf>,
-    file: &str,
-) -> Option<PathBuf> {
-    if let Some(dir) = override_dir.filter(|value| !value.is_empty()) {
-        return Some(PathBuf::from(dir).join(file));
-    }
-    let xdg = xdg_config_home
-        .filter(|_| cfg!(not(windows)))
-        .map(PathBuf::from)
-        .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join(RTK_DATA_DIR).join(file));
-    let platform = platform_dir.map(|dir| dir.join(RTK_DATA_DIR).join(file));
-    match (xdg, platform) {
-        (Some(xdg), Some(platform)) if xdg != platform && !xdg.exists() && platform.exists() => {
-            Some(platform)
-        }
-        (Some(xdg), _) => Some(xdg),
-        (None, platform) => platform,
-    }
-}
-
 fn get_config_path() -> Result<PathBuf> {
-    Ok(rtk_config_path(CONFIG_TOML)
-        .unwrap_or_else(|| PathBuf::from(".").join(RTK_DATA_DIR).join(CONFIG_TOML)))
+    let rtk_dir = user_dirs::config().unwrap_or_else(|| PathBuf::from(".").join(RTK_DATA_DIR));
+    Ok(rtk_dir.join(CONFIG_TOML))
 }
 
 pub fn show_config() -> Result<()> {
@@ -563,115 +533,6 @@ pub fn show_config() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_config_path_override_wins_over_everything() {
-        let temp = tempfile::TempDir::new().expect("temp dir");
-        let platform = temp.path().join("platform");
-        std::fs::create_dir_all(platform.join(RTK_DATA_DIR)).expect("platform dir");
-        std::fs::write(platform.join(RTK_DATA_DIR).join(CONFIG_TOML), "").expect("config");
-        let custom = temp.path().join("custom");
-
-        let path = resolve_config_path(
-            Some(custom.clone().into_os_string()),
-            Some(temp.path().join("xdg").into_os_string()),
-            Some(platform),
-            CONFIG_TOML,
-        );
-
-        // The override is used verbatim, no `rtk` subdir and no fallback to an existing file.
-        assert_eq!(path, Some(custom.join(CONFIG_TOML)));
-    }
-
-    #[test]
-    fn test_config_path_empty_override_is_ignored() {
-        let platform = PathBuf::from("/platform");
-        let path = resolve_config_path(Some("".into()), None, Some(platform.clone()), CONFIG_TOML);
-        assert_eq!(path, Some(platform.join(RTK_DATA_DIR).join(CONFIG_TOML)));
-    }
-
-    #[test]
-    fn test_config_path_defaults_to_platform_dir() {
-        let platform = PathBuf::from("/platform");
-        let path = resolve_config_path(None, None, Some(platform.clone()), CONFIG_TOML);
-        assert_eq!(path, Some(platform.join(RTK_DATA_DIR).join(CONFIG_TOML)));
-        assert_eq!(resolve_config_path(None, None, None, CONFIG_TOML), None);
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn test_config_path_uses_xdg_config_home() {
-        let temp = tempfile::TempDir::new().expect("temp dir");
-        let xdg = temp.path().join("xdg");
-        let platform = temp.path().join("platform");
-
-        let path = resolve_config_path(
-            None,
-            Some(xdg.clone().into_os_string()),
-            Some(platform),
-            CONFIG_TOML,
-        );
-
-        assert_eq!(path, Some(xdg.join(RTK_DATA_DIR).join(CONFIG_TOML)));
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn test_config_path_ignores_empty_or_relative_xdg_config_home() {
-        let platform = PathBuf::from("/platform");
-        for xdg in ["", "relative/config"] {
-            let path =
-                resolve_config_path(None, Some(xdg.into()), Some(platform.clone()), CONFIG_TOML);
-            assert_eq!(
-                path,
-                Some(platform.join(RTK_DATA_DIR).join(CONFIG_TOML)),
-                "XDG_CONFIG_HOME={xdg:?} must be ignored"
-            );
-        }
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn test_config_path_keeps_existing_platform_file_until_moved() {
-        let temp = tempfile::TempDir::new().expect("temp dir");
-        let xdg = temp.path().join("xdg");
-        let platform = temp.path().join("platform");
-        let legacy = platform.join(RTK_DATA_DIR).join(CONFIG_TOML);
-        std::fs::create_dir_all(platform.join(RTK_DATA_DIR)).expect("platform dir");
-        std::fs::write(&legacy, "").expect("legacy config");
-
-        let resolve = || {
-            resolve_config_path(
-                None,
-                Some(xdg.clone().into_os_string()),
-                Some(platform.clone()),
-                CONFIG_TOML,
-            )
-        };
-        assert_eq!(
-            resolve(),
-            Some(legacy),
-            "existing install must keep its config"
-        );
-
-        let moved = xdg.join(RTK_DATA_DIR).join(CONFIG_TOML);
-        std::fs::create_dir_all(xdg.join(RTK_DATA_DIR)).expect("xdg dir");
-        std::fs::write(&moved, "").expect("moved config");
-        assert_eq!(resolve(), Some(moved), "once present, the XDG file wins");
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn test_config_path_ignores_xdg_config_home_on_windows() {
-        let platform = PathBuf::from(r"C:\platform");
-        let path = resolve_config_path(
-            None,
-            Some(r"C:\xdg".into()),
-            Some(platform.clone()),
-            CONFIG_TOML,
-        );
-        assert_eq!(path, Some(platform.join(RTK_DATA_DIR).join(CONFIG_TOML)));
-    }
 
     #[test]
     fn test_hooks_config_deserialize() {

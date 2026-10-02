@@ -3,6 +3,8 @@
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
+mod common;
+
 fn run_with_stdin(command: &mut Command, input: &[u8]) -> Output {
     let mut child = command
         .stdin(Stdio::piped())
@@ -21,10 +23,7 @@ fn run_with_stdin(command: &mut Command, input: &[u8]) -> Output {
 
 #[test]
 fn wc_reads_piped_stdin() {
-    let output = run_with_stdin(
-        Command::new(env!("CARGO_BIN_EXE_rtk")).args(["wc", "-l"]),
-        b"alpha\nbeta\n",
-    );
+    let output = run_with_stdin(common::rtk_command().args(["wc", "-l"]), b"alpha\nbeta\n");
 
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "2");
@@ -34,7 +33,7 @@ fn wc_reads_piped_stdin() {
 fn wc_preserves_native_failure_exit_code() {
     let invalid_option = "--definitely-invalid-rtk-test-option";
     let rtk = run_with_stdin(
-        Command::new(env!("CARGO_BIN_EXE_rtk")).args(["wc", invalid_option]),
+        common::rtk_command().args(["wc", invalid_option]),
         b"input\n",
     );
     let native = run_with_stdin(Command::new("wc").arg(invalid_option), b"input\n");

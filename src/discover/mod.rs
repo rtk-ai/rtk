@@ -18,6 +18,7 @@ use registry::{
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
 use crate::core::tracking::{HookDecisionRecord, Tracker};
+use crate::core::user_dirs;
 use crate::discover::registry::prefix_contains_rtk_disabled;
 use crate::hooks::hook_check::{HookStatus, status as hook_status};
 use crate::hooks::permissions::{self, PermissionVerdict};
@@ -272,7 +273,7 @@ pub fn run(
         report::ScanScope::ProjectFilter(p.to_string())
     } else {
         // Default: current working directory
-        let cwd = std::env::current_dir()?;
+        let cwd = user_dirs::current_dir()?;
         let cwd_str = cwd.to_string_lossy().to_string();
         report::ScanScope::CurrentProject(ClaudeProvider::encode_project_path(&cwd_str))
     };

@@ -18,6 +18,7 @@
 //! [`ApprovalOwner`], which only ever relaxes the *default* ask.
 
 use super::permissions::{Host, PermissionVerdict, check_command_for};
+use crate::core::user_env;
 use crate::discover::registry::rewrite_command;
 
 /// What a hook should do with a command.
@@ -90,12 +91,12 @@ impl ApprovalOwner {
     /// typo must never borrow another host's rules or drop a gate, which is
     /// what an unknown-value fallback to a *named* host would do.
     pub(crate) fn from_env() -> Self {
-        match std::env::var(REWRITE_HOST_ENV) {
-            Ok(name) => match AgentPath::lookup(&name) {
+        match user_env::var(REWRITE_HOST_ENV) {
+            Some(name) => match AgentPath::lookup(&name) {
                 Some(AgentPath::ViaRewrite(owner)) => owner,
                 _ => Self::Rtk,
             },
-            Err(_) => Self::Rtk,
+            None => Self::Rtk,
         }
     }
 
@@ -147,13 +148,11 @@ pub(crate) fn decide(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
 /// [`decide`] with the rewrite parameters supplied by the caller, mirroring
 /// [`check_command_with_rules`](super::permissions::check_command_with_rules).
 ///
-/// `hook_rewrite_params` reads the user's `config.toml`, so a test calling
-/// [`decide`] changes answer with the developer's own `exclude_commands` and
-/// `transparent_prefixes` — an `exclude_commands = ["git"]` on the machine
-/// turns an expected rewrite into a defer, and the test fails there and only
-/// there. Taking the parameters keeps the decision under test independent of
-/// the host configuration, the same way the verdict is passed in rather than
-/// looked up (#3146).
+/// `hook_rewrite_params` reads `config.toml`, which in a test build is the
+/// calling test's own. Taking the parameters lets a test state the
+/// `exclude_commands` and `transparent_prefixes` it means instead of writing a
+/// file for them, the same way the verdict is passed in rather than looked up
+/// (#3146).
 pub(crate) fn decide_with_params(
     cmd: &str,
     verdict: PermissionVerdict,
@@ -653,7 +652,7 @@ mod tests {
     /// is one vocabulary; everything else is the stricter default.
     #[test]
     fn the_host_environment_variable_fails_closed() {
-        temp_env::with_var(REWRITE_HOST_ENV, Some("openclaw"), || {
+        user_env::with_vars(&[(REWRITE_HOST_ENV, Some("openclaw"))], || {
             assert_eq!(ApprovalOwner::from_env(), ApprovalOwner::Delegate);
         });
         for name in [
@@ -673,7 +672,7 @@ mod tests {
             "",
             "nope",
         ] {
-            temp_env::with_var(REWRITE_HOST_ENV, Some(name), || {
+            user_env::with_vars(&[(REWRITE_HOST_ENV, Some(name))], || {
                 assert_eq!(
                     ApprovalOwner::from_env(),
                     ApprovalOwner::Rtk,
@@ -681,7 +680,7 @@ mod tests {
                 );
             });
         }
-        temp_env::with_var_unset(REWRITE_HOST_ENV, || {
+        user_env::with_vars(&[(REWRITE_HOST_ENV, None)], || {
             assert_eq!(ApprovalOwner::from_env(), ApprovalOwner::Rtk);
         });
     }

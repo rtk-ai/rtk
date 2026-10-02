@@ -5,8 +5,10 @@
 use std::path::Path;
 use std::process::Command;
 
+mod common;
+
 fn rtk() -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rtk"));
+    let mut cmd = common::rtk_command();
     cmd.env("RTK_NO_TRACK", "1");
     cmd
 }

@@ -1,7 +1,9 @@
 use serde_json::{Value, json};
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
+
+mod common;
 
 fn run_antigravity_hook(command: &str, home: &Path, audit: bool) -> Output {
     let payload = json!({
@@ -20,7 +22,7 @@ fn run_antigravity_hook(command: &str, home: &Path, audit: bool) -> Output {
 }
 
 fn run_antigravity_payload(payload: &str, home: &Path, audit: bool) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let mut child = common::rtk_command()
         .args(["hook", "antigravity"])
         .env("HOME", home)
         .env("RTK_TELEMETRY_DISABLED", "1")
@@ -165,7 +167,7 @@ fn antigravity_hook_ignores_non_command_tools() {
 
 /// Runs `rtk init` in `project` with an isolated HOME and closed stdin.
 fn run_init(project: &Path, home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_rtk"))
+    common::rtk_command()
         .arg("init")
         .args(args)
         .current_dir(project)

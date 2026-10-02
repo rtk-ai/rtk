@@ -7,6 +7,7 @@ use crate::core::guard::never_worse;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::{CAP_ERRORS, CAP_LIST, CAP_WARNINGS};
+use crate::core::user_dirs;
 use crate::core::utils::{resolved_command, truncate};
 use crate::dotnet_format_report;
 use crate::dotnet_trx;
@@ -677,20 +678,14 @@ fn parse_global_json_mtp_mode(path: &Path) -> bool {
 /// Checks whether the `global.json` closest to the current directory enables the .NET 10
 /// native MTP mode (`"test": { "runner": "Microsoft.Testing.Platform" }`).
 fn is_global_json_mtp_mode(start_dir: &Path) -> bool {
-    let Ok(mut dir) = start_dir.canonicalize() else {
+    let Ok(start) = start_dir.canonicalize() else {
         return false;
     };
-    loop {
-        let path = dir.join("global.json");
-        if path.exists() {
-            let is_mtp = parse_global_json_mtp_mode(&path);
-            return is_mtp; // stop at first global.json found, regardless of result
-        }
-        if !dir.pop() {
-            break;
-        }
-    }
-    false
+    // Stop at the first global.json found, regardless of its result.
+    user_dirs::ancestors(&start)
+        .map(|dir| dir.join("global.json"))
+        .find(|path| path.exists())
+        .is_some_and(|path| parse_global_json_mtp_mode(&path))
 }
 
 /// Detects which test runner mode the targeted project(s) use. Priority: global.json (MtpNative,
@@ -701,7 +696,7 @@ fn is_global_json_mtp_mode(start_dir: &Path) -> bool {
 /// missing value-taking flag whose value ends in `.csproj`/`.fsproj`/`.vbproj` would be misread
 /// as an explicit project path.
 fn detect_test_runner_mode(tokens: &[Token<'_>]) -> TestRunnerMode {
-    detect_test_runner_mode_in_dir(tokens, Path::new("."))
+    detect_test_runner_mode_in_dir(tokens, &user_dirs::in_working_dir("."))
 }
 
 /// `scan_dir` is where every filesystem probe starts: the project-file scan when no project is
@@ -748,7 +743,7 @@ fn detect_test_runner_mode_in_dir(tokens: &[Token<'_>], scan_dir: &Path) -> Test
 
     if !explicit_projects.is_empty() {
         for p in &explicit_projects {
-            if scan_mtp_kind_in_file(Path::new(p)) == MtpProjectKind::VsTestBridge {
+            if scan_mtp_kind_in_file(&scan_dir.join(p)) == MtpProjectKind::VsTestBridge {
                 found = MtpProjectKind::VsTestBridge;
             }
         }
@@ -774,19 +769,14 @@ fn detect_test_runner_mode_in_dir(tokens: &[Token<'_>], scan_dir: &Path) -> Test
     }
 
     // Walk up from the scanned directory looking for Directory.Build.props.
-    if let Ok(mut dir) = scan_dir.canonicalize() {
-        loop {
-            let props = dir.join("Directory.Build.props");
-            if props.exists() {
-                if scan_mtp_kind_in_file(&props) == MtpProjectKind::VsTestBridge {
-                    return TestRunnerMode::MtpVsTestBridge;
-                }
-                break; // only read the first (closest) Directory.Build.props
-            }
-            if !dir.pop() {
-                break;
-            }
-        }
+    // Only the first (closest) Directory.Build.props is read.
+    if let Ok(start) = scan_dir.canonicalize()
+        && let Some(props) = user_dirs::ancestors(&start)
+            .map(|dir| dir.join("Directory.Build.props"))
+            .find(|props| props.exists())
+        && scan_mtp_kind_in_file(&props) == MtpProjectKind::VsTestBridge
+    {
+        return TestRunnerMode::MtpVsTestBridge;
     }
 
     TestRunnerMode::Classic
@@ -1480,6 +1470,7 @@ fn format_restore_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::test_isolation;
     use crate::dotnet_format_report;
     use std::fs;
     use std::time::Duration;
@@ -2276,7 +2267,7 @@ mod tests {
         // All three probes have to start from scan_dir: while only the project scan did, a
         // developer working beneath a global.json decided the result and every tempdir
         // assertion in these tests was decorative.
-        let mtp_root = tempfile::tempdir().expect("create temp dir");
+        let mtp_root = test_isolation::tempdir();
         fs::write(
             mtp_root.path().join("global.json"),
             r#"{"test":{"runner":"Microsoft.Testing.Platform"}}"#,
@@ -2293,7 +2284,7 @@ mod tests {
         );
 
         // A directory with no global.json above it is unaffected by wherever the process is.
-        let plain = tempfile::tempdir().expect("create temp dir");
+        let plain = test_isolation::tempdir();
         fs::write(
             plain.path().join("Classic.Tests.csproj"),
             r#"<Project Sdk="Microsoft.NET.Sdk"></Project>"#,
@@ -2310,7 +2301,7 @@ mod tests {
         // `/Other.csproj` tokenizes as a slash flag (structure alone can't tell it from an
         // MSBuild switch), and being missed from the explicit projects made RTK scan the cwd
         // and adopt an unrelated project's runner mode.
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         fs::write(
             temp_dir.path().join("Root.csproj"),
             r#"<Project Sdk="Microsoft.NET.Sdk">
@@ -2424,7 +2415,7 @@ mod tests {
 
     #[test]
     fn test_scan_mtp_kind_detects_use_microsoft_testing_platform_runner() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let csproj = temp_dir.path().join("MyProject.csproj");
         fs::write(
             &csproj,
@@ -2441,7 +2432,7 @@ mod tests {
 
     #[test]
     fn test_scan_mtp_kind_detects_use_testing_platform_runner() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let csproj = temp_dir.path().join("MyProject.csproj");
         fs::write(
             &csproj,
@@ -2458,7 +2449,7 @@ mod tests {
 
     #[test]
     fn test_is_mtp_project_file_returns_false_for_classic_vstest() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let csproj = temp_dir.path().join("MyProject.csproj");
         fs::write(
             &csproj,
@@ -2478,7 +2469,7 @@ mod tests {
 
     #[test]
     fn test_scan_mtp_kind_returns_none_when_value_is_false() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let csproj = temp_dir.path().join("MyProject.csproj");
         fs::write(
             &csproj,
@@ -2495,7 +2486,7 @@ mod tests {
 
     #[test]
     fn test_scan_mtp_kind_detects_vstest_bridge() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let csproj = temp_dir.path().join("MSTest.Tests.csproj");
         fs::write(
             &csproj,
@@ -2512,7 +2503,7 @@ mod tests {
 
     #[test]
     fn test_both_mtp_properties_in_same_file_still_vstest_bridge() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let csproj = temp_dir.path().join("Hybrid.Tests.csproj");
         fs::write(
             &csproj,
@@ -2531,7 +2522,7 @@ mod tests {
 
     #[test]
     fn test_detect_mode_mtp_csproj_is_vstest_bridge_injects_report_trx() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let csproj = temp_dir.path().join("MTP.Tests.csproj");
         fs::write(
             &csproj,
@@ -2568,7 +2559,7 @@ mod tests {
 
     #[test]
     fn test_detect_mode_vstest_bridge_injects_report_trx() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let csproj = temp_dir.path().join("MSTest.Tests.csproj");
         fs::write(
             &csproj,
@@ -2606,7 +2597,7 @@ mod tests {
 
     #[test]
     fn test_parse_global_json_mtp_mode_detects_mtp_native() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let global_json = temp_dir.path().join("global.json");
         fs::write(
             &global_json,
@@ -2619,7 +2610,7 @@ mod tests {
 
     #[test]
     fn test_vstest_bridge_injects_report_trx_after_separator() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let csproj = temp_dir.path().join("MTP.Tests.csproj");
         fs::write(
             &csproj,
@@ -2660,7 +2651,7 @@ mod tests {
 
     #[test]
     fn test_vstest_bridge_existing_separator_inserts_report_trx_after_it() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let csproj = temp_dir.path().join("MTP.Tests.csproj");
         fs::write(
             &csproj,
@@ -2696,7 +2687,7 @@ mod tests {
 
     #[test]
     fn test_vstest_bridge_respects_existing_report_trx() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let csproj = temp_dir.path().join("MTP.Tests.csproj");
         fs::write(
             &csproj,
@@ -2730,7 +2721,7 @@ mod tests {
 
     #[test]
     fn test_detect_mode_classic_csproj_injects_trx() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let csproj = temp_dir.path().join("Classic.Tests.csproj");
         fs::write(
             &csproj,
@@ -2764,7 +2755,7 @@ mod tests {
     fn test_detect_mode_ignores_flag_value_ending_in_project_extension() {
         // A value-taking flag's own value (e.g. --results-directory's path) must not be misread
         // as an explicit project reference just because it ends in .csproj.
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let csproj = temp_dir.path().join("Real.Tests.csproj");
         fs::write(
             &csproj,
@@ -2792,7 +2783,7 @@ mod tests {
     fn test_detect_mode_ignores_filter_and_configuration_flag_values() {
         // --filter and -c/--configuration's own values must not be misread as an explicit
         // project reference either.
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let csproj = temp_dir.path().join("Real.Tests.csproj");
         fs::write(
             &csproj,
@@ -2828,7 +2819,7 @@ mod tests {
     fn test_detect_mode_ignores_positional_after_double_dash() {
         // A VSTest/MTP filter expression after -- (a forwarding boundary, not end-of-options)
         // must not be treated as an explicit project reference just because it looks like one.
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let csproj = temp_dir.path().join("Real.Tests.csproj");
         fs::write(
             &csproj,
@@ -2854,7 +2845,7 @@ mod tests {
 
     #[test]
     fn test_detect_mode_directory_build_props_vstest_bridge() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let props = temp_dir.path().join("Directory.Build.props");
         fs::write(
             &props,
@@ -2871,7 +2862,7 @@ mod tests {
 
     #[test]
     fn test_is_global_json_mtp_mode_detects_mtp_runner() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let global_json = temp_dir.path().join("global.json");
         fs::write(
             &global_json,
@@ -2884,7 +2875,7 @@ mod tests {
 
     #[test]
     fn test_is_global_json_mtp_mode_returns_false_for_vstest_runner() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let global_json = temp_dir.path().join("global.json");
         fs::write(&global_json, r#"{ "sdk": { "version": "9.0.100" } }"#)
             .expect("write global.json");
@@ -2894,7 +2885,7 @@ mod tests {
 
     #[test]
     fn test_merge_test_summary_from_trx_uses_primary_and_cleans_file() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let primary = temp_dir.path().join("primary.trx");
         fs::write(&primary, trx_with_counts(3, 3, 0)).expect("write primary trx");
 
@@ -2912,7 +2903,7 @@ mod tests {
 
     #[test]
     fn test_merge_test_summary_from_trx_falls_back_to_testresults() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let fallback = temp_dir.path().join("fallback.trx");
         fs::write(&fallback, trx_with_counts(2, 1, 1)).expect("write fallback trx");
         let missing_primary = temp_dir.path().join("missing.trx");
@@ -2931,7 +2922,7 @@ mod tests {
 
     #[test]
     fn test_merge_test_summary_from_trx_returns_default_when_no_trx() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let missing = temp_dir.path().join("missing.trx");
 
         let filled = merge_test_summary_from_trx(
@@ -2945,7 +2936,7 @@ mod tests {
 
     #[test]
     fn test_merge_test_summary_from_trx_ignores_stale_fallback_file() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let fallback = temp_dir.path().join("fallback.trx");
         fs::write(&fallback, trx_with_counts(2, 1, 1)).expect("write fallback trx");
         // Force the fixture's mtime well before the cutoff rather than leaning on a
@@ -2973,7 +2964,7 @@ mod tests {
 
     #[test]
     fn test_merge_test_summary_from_trx_keeps_larger_existing_counts() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let primary = temp_dir.path().join("primary.trx");
         fs::write(&primary, trx_with_counts(5, 4, 1)).expect("write primary trx");
 
@@ -2996,7 +2987,7 @@ mod tests {
 
     #[test]
     fn test_merge_test_summary_from_trx_overrides_smaller_existing_counts() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let primary = temp_dir.path().join("primary.trx");
         fs::write(&primary, trx_with_counts(12, 10, 2)).expect("write primary trx");
 
@@ -3019,7 +3010,7 @@ mod tests {
 
     #[test]
     fn test_merge_test_summary_from_trx_uses_larger_project_count() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let trx_a = temp_dir.path().join("a.trx");
         let trx_b = temp_dir.path().join("b.trx");
         fs::write(&trx_a, trx_with_counts(2, 2, 0)).expect("write first trx");
@@ -3296,7 +3287,7 @@ mod tests {
 
     #[test]
     fn test_format_report_summary_ignores_stale_report_file() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let report = temp_dir.path().join("report.json");
         fs::write(&report, "[]").expect("write report");
 
@@ -3320,7 +3311,7 @@ mod tests {
 
     #[test]
     fn test_cleanup_temp_file_removes_existing_file() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let temp_file = temp_dir.path().join("temp.binlog");
         fs::write(&temp_file, "content").expect("write temp file");
 
@@ -3331,7 +3322,7 @@ mod tests {
 
     #[test]
     fn test_cleanup_temp_file_ignores_missing_file() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let temp_dir = test_isolation::tempdir();
         let missing_file = temp_dir.path().join("missing.binlog");
 
         cleanup_temp_file(&missing_file);

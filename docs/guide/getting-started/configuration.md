@@ -15,10 +15,10 @@ sidebar:
 | macOS | `~/Library/Application Support/rtk/config.toml` |
 | Windows | `%APPDATA%\rtk\config.toml` |
 
-The global `filters.toml` is looked up with the same rules, file by file. To move them:
+The global `filters.toml` lives in the same directory. To move the directory:
 
 - `RTK_CONFIG_DIR=/path/to/dir`: RTK reads `/path/to/dir/config.toml` directly (no `rtk` subdirectory is added). Works on every platform.
-- `XDG_CONFIG_HOME` (Linux and macOS): RTK uses `$XDG_CONFIG_HOME/rtk/`. It must be an absolute path. On macOS, an existing `~/Library/Application Support/rtk/config.toml` keeps being used until a `config.toml` exists under `$XDG_CONFIG_HOME/rtk/`, so move the file there to switch. The same goes for `filters.toml`, which needs `rtk trust` again after a move (trust is recorded per path).
+- `XDG_CONFIG_HOME` (Linux and macOS): RTK uses `$XDG_CONFIG_HOME/rtk/`. It must be an absolute path. On macOS, an existing `~/Library/Application Support/rtk/` keeps being used until `$XDG_CONFIG_HOME/rtk/` exists, so move the directory there to switch. A moved `filters.toml` needs `rtk trust` again (trust is recorded per path).
 
 `rtk config` prints the path in use. Data files (`history.db`, recall store) are not affected. Relocate them with `tracking.database_path` / `RTK_DB_PATH` and `retriever.database_path` / `RTK_RECALL_DB`.
 

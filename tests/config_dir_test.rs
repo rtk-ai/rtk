@@ -1,11 +1,12 @@
 //! Where `rtk config` reads and writes `config.toml` (#3193): `RTK_CONFIG_DIR`
 //! first, then `$XDG_CONFIG_HOME/rtk` (Unix), then the platform config dir.
 
+mod common;
+
 use std::path::Path;
-use std::process::Command;
 
 fn rtk_config(envs: &[(&str, &Path)], args: &[&str]) -> String {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rtk"));
+    let mut cmd = common::rtk_command();
     cmd.arg("config").args(args);
     for (key, value) in envs {
         cmd.env(key, value);
@@ -50,19 +51,12 @@ fn xdg_config_home_is_used_for_new_installs() {
     let home = tempfile::tempdir().expect("tempdir");
     let xdg = home.path().join("xdg");
 
-    let shown = Command::new(env!("CARGO_BIN_EXE_rtk"))
-        .arg("config")
-        .env("HOME", home.path())
-        .env("XDG_CONFIG_HOME", &xdg)
-        .env_remove("RTK_CONFIG_DIR")
-        .output()
-        .expect("run rtk config");
-    let stdout = String::from_utf8_lossy(&shown.stdout);
+    let shown = rtk_config(&[("HOME", home.path()), ("XDG_CONFIG_HOME", &xdg)], &[]);
 
     let expected = xdg.join("rtk").join("config.toml");
     assert!(
-        stdout.contains(&format!("Config: {}", expected.display())),
-        "with no existing config, XDG_CONFIG_HOME must decide the path: {stdout}"
+        shown.contains(&format!("Config: {}", expected.display())),
+        "with no existing config, XDG_CONFIG_HOME must decide the path: {shown}"
     );
 }
 
@@ -75,21 +69,15 @@ fn existing_application_support_config_survives_setting_xdg_config_home() {
     let legacy_dir = home.path().join("Library/Application Support/rtk");
     std::fs::create_dir_all(&legacy_dir).expect("legacy dir");
     std::fs::write(legacy_dir.join("config.toml"), "").expect("legacy config");
+    let xdg = home.path().join(".config");
 
-    let shown = Command::new(env!("CARGO_BIN_EXE_rtk"))
-        .arg("config")
-        .env("HOME", home.path())
-        .env("XDG_CONFIG_HOME", home.path().join(".config"))
-        .env_remove("RTK_CONFIG_DIR")
-        .output()
-        .expect("run rtk config");
-    let stdout = String::from_utf8_lossy(&shown.stdout);
+    let shown = rtk_config(&[("HOME", home.path()), ("XDG_CONFIG_HOME", &xdg)], &[]);
 
     assert!(
-        stdout.contains(&format!(
+        shown.contains(&format!(
             "Config: {}",
             legacy_dir.join("config.toml").display()
         )),
-        "an existing macOS config must keep being used: {stdout}"
+        "an existing macOS config must keep being used: {shown}"
     );
 }

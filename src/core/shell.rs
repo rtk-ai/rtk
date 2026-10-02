@@ -135,7 +135,18 @@ pub fn direct_command(args: &[String]) -> Result<Launch> {
     };
 
     if resolve_binary(program).is_err() {
-        return Ok(Launch::Unrunnable(classify_unrunnable(program)));
+        let outcome = classify_unrunnable(program);
+        if program_args.is_empty()
+            && outcome.code == EXIT_COMMAND_NOT_FOUND
+            && (program.is_empty() || program.contains(SHELL_METACHARACTERS))
+        {
+            eprintln!(
+                "rtk: single-string command; running through {} -c — pass arguments separately, or use --shell for scripts",
+                default_shell()
+            );
+            return shell_command(program, None);
+        }
+        return Ok(Launch::Unrunnable(outcome));
     }
 
     let mut command = resolved_command(program);
@@ -320,6 +331,55 @@ mod tests {
             "{}",
             outcome.message
         );
+    }
+
+    #[test]
+    fn a_single_shell_phrase_falls_back_to_the_platform_shell() {
+        for phrase in ["echo one two", "true && false", "echo x | grep x", ""] {
+            let command = ready(
+                direct_command(&[phrase.to_string()]).expect("fallback builds a shell command"),
+            );
+
+            let program = command.get_program().to_string_lossy().to_string();
+            assert!(
+                Path::new(&program)
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(default_shell())),
+                "expected the platform shell, got {program}"
+            );
+            let actual: Vec<_> = command.get_args().collect();
+            assert_eq!(
+                actual,
+                [
+                    OsStr::new(command_flag(default_shell())),
+                    OsStr::new(phrase)
+                ],
+                "{phrase:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_fallback_requires_a_single_unresolvable_phrase() {
+        let args = vec!["echo one two".to_string(), "x".to_string()];
+        let outcome = unrunnable(direct_command(&args).expect("extra args stay direct"));
+        assert_eq!(outcome.code, EXIT_COMMAND_NOT_FOUND);
+
+        let args = vec!["rtk-no-such-binary-4c1f".to_string()];
+        let outcome = unrunnable(direct_command(&args).expect("bare word stays direct"));
+        assert_eq!(outcome.code, EXIT_COMMAND_NOT_FOUND);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_unexecutable_path_keeps_126_over_the_shell() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let spaced = dir.path().join("a b");
+        std::fs::create_dir(&spaced).expect("create spaced dir");
+
+        let args = vec![spaced.to_string_lossy().into_owned()];
+        let outcome = unrunnable(direct_command(&args).expect("existing path stays direct"));
+        assert_eq!(outcome.code, EXIT_COMMAND_NOT_EXECUTABLE);
     }
 
     #[test]

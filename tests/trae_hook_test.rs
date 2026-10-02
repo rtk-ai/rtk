@@ -1,7 +1,9 @@
 use serde_json::json;
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
+
+mod common;
 
 fn run_trae_hook(command: &str, home: &Path, audit: bool) -> Output {
     let payload = json!({
@@ -17,7 +19,7 @@ fn run_trae_hook(command: &str, home: &Path, audit: bool) -> Output {
 }
 
 fn run_trae_payload(payload: &str, home: &Path, audit: bool) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let mut child = common::rtk_command()
         .args(["hook", "trae"])
         .env("HOME", home)
         .env("RTK_TELEMETRY_DISABLED", "1")

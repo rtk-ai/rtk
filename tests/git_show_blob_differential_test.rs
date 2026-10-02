@@ -24,7 +24,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const RTK_BIN: &str = env!("CARGO_BIN_EXE_rtk");
+mod common;
 
 /// Number of fuzz iterations. Seeded, so this is deterministic across runs/CI.
 const ITERATIONS: usize = 600;
@@ -58,16 +58,13 @@ impl Rng {
 
 /// Env that isolates git and rtk from the developer's real config/identity/home.
 fn isolate(cmd: &mut Command, home: &Path) {
+    common::isolate_git(cmd);
     cmd.env("HOME", home)
-        .env("GIT_CONFIG_GLOBAL", home.join("nonexistent-global"))
-        .env("GIT_CONFIG_SYSTEM", home.join("nonexistent-system"))
         .env("GIT_AUTHOR_NAME", "t")
         .env("GIT_AUTHOR_EMAIL", "t@example.com")
         .env("GIT_COMMITTER_NAME", "t")
         .env("GIT_COMMITTER_EMAIL", "t@example.com")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE");
+        .env("GIT_TERMINAL_PROMPT", "0");
 }
 
 fn git(repo: &Path, home: &Path, args: &[&str]) -> Output {
@@ -101,7 +98,7 @@ fn cat_file_type(repo: &Path, home: &Path, arg: &str) -> Option<String> {
 }
 
 fn rtk_show(repo: &Path, home: &Path, args: &[&str]) -> Output {
-    let mut cmd = Command::new(RTK_BIN);
+    let mut cmd = common::rtk_command();
     cmd.arg("git").arg("show").args(args).current_dir(repo);
     isolate(&mut cmd, home);
     cmd.output().expect("run rtk git show")
@@ -559,7 +556,7 @@ fn windowed_blob_hint_command_returns_the_rest() {
 
     let words = split_hint_words(recall);
     assert_eq!(words.first().map(String::as_str), Some("rtk"), "{hint}");
-    let mut cmd = Command::new(RTK_BIN);
+    let mut cmd = common::rtk_command();
     cmd.args(&words[1..]).current_dir(path);
     isolate(&mut cmd, home);
     let recalled = cmd.output().expect("run the hint's own command");
