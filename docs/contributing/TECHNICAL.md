@@ -278,7 +278,7 @@ Every command execution records metrics to SQLite (`~/.local/share/rtk/tracking.
 - Input tokens (raw output size) and output tokens (filtered size)
 - Savings percentage, execution time, project path
 - 90-day automatic retention cleanup
-- Token estimation: `ceil(chars / 4.0)` approximation
+- Token estimation: `ceil(UTF-8 bytes / 4.0)` approximation
 
 Analytics commands (`rtk gain`, `rtk cc-economics`, `rtk session`) query this database to produce dashboards and ROI reports.
 
@@ -406,10 +406,12 @@ fn test_my_filter() {
 }
 ```
 
-**3. Verify the output reduction** (>=20% of the bash output required; `count_tokens` in tests and the `bytes / 4` estimator behind `rtk gain` are both approximations, reliable as ratios):
+**3. Verify the output reduction** (>=20% of the bash output required). Use the same `ceil(UTF-8 bytes / 4)` token estimate as `rtk gain` and the never-worse guard; word-count ratios are not interchangeable with it:
 ```rust
 #[test]
 fn test_my_filter_savings() {
+    use crate::core::tracking::estimate_tokens as count_tokens;
+
     let input = include_str!("../tests/fixtures/my_cmd_raw.txt");
     let output = filter_my_cmd(input);
     let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);

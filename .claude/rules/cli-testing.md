@@ -74,16 +74,17 @@ cargo test test_mvn_test_example
 
 **Priority**: 🔴 **Triggers**: All filter implementations, token savings claims
 
-All filters **MUST** verify 60-90% token savings claims with real fixtures.
+All filters **MUST** verify 60-90% token savings claims with real fixtures. Use
+`core::tracking::estimate_tokens`, the same `ceil(UTF-8 bytes / 4)` approximation
+used by tracking and the never-worse guard. Whitespace-delimited word counts
+are a different metric and must not be used for token savings assertions.
 
 ### Token Count Test
 
 ```rust
 #[cfg(test)]
 mod tests {
-    fn count_tokens(text: &str) -> usize {
-        text.split_whitespace().count()
-    }
+    use crate::core::tracking::estimate_tokens as count_tokens;
 
     #[test]
     fn test_git_log_savings() {
@@ -371,8 +372,8 @@ rtk/
 - **Fixtures**: Prefer inline strings for small/quick cases; use `include_str!` from
   `tests/fixtures/` (real command output) once a case gets large or format-sensitive — see
   `src/cmds/jvm/mvn_cmd.rs` for the pattern.
-- **`count_tokens` helper**: currently duplicated per test module — don't assume a shared
-  `tests/common/mod.rs` exists.
+- **Token estimates**: import `core::tracking::estimate_tokens` in unit tests, or use
+  `common::estimate_tokens` in integration tests. Both share the production implementation.
 - **Integration**: top-level `tests/*.rs` files, some with `#[ignore]`-tagged real-process tests.
 
 ## Testing Checklist
@@ -382,7 +383,7 @@ When adding/modifying a filter:
 ### Implementation Phase
 - [ ] Write a unit test in the filter's own `#[cfg(test)] mod tests` block (inline string, or
       `include_str!` fixture for larger/real output)
-- [ ] Add a token accuracy test (verify ≥60% savings) using a locally-defined `count_tokens`
+- [ ] Add a token accuracy test (verify ≥60% savings) using the production `estimate_tokens`
 - [ ] Test cross-platform shell escaping (if applicable)
 
 ### Quality Checks
@@ -413,9 +414,7 @@ When adding/modifying a filter:
 mod tests {
     use super::*;
 
-    fn count_tokens(text: &str) -> usize {
-        text.split_whitespace().count()
-    }
+    use crate::core::tracking::estimate_tokens as count_tokens;
 
     #[test]
     fn test_output_format() {

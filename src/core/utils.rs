@@ -365,11 +365,10 @@ pub fn ruby_exec(tool: &str) -> Command {
     Command::new(tool)
 }
 
-/// Count whitespace-delimited tokens in text. Used by filter tests to verify
-/// token savings claims.
+/// Use the production token estimate when verifying filter savings in tests.
 #[cfg(test)]
 pub fn count_tokens(text: &str) -> usize {
-    text.split_whitespace().count()
+    crate::core::tracking::estimate_tokens(text)
 }
 
 /// Detect the package manager used in the current directory.
@@ -1504,21 +1503,63 @@ mod tests {
     }
 
     #[test]
+    fn test_count_tokens_matches_tracking_for_whitespace_and_empty_output() {
+        for (text, expected) in [("", 0), ("   ", 1), ("\t\n", 1)] {
+            assert_eq!(count_tokens(text), expected, "text: {text:?}");
+            assert_eq!(
+                count_tokens(text),
+                crate::core::tracking::estimate_tokens(text)
+            );
+        }
+    }
+
+    #[test]
+    fn test_count_tokens_matches_tracking_at_rounding_boundaries() {
+        for (text, expected) in [("a", 1), ("abcd", 1), ("abcde", 2), ("abcdefgh", 2)] {
+            assert_eq!(count_tokens(text), expected, "text: {text:?}");
+            assert_eq!(
+                count_tokens(text),
+                crate::core::tracking::estimate_tokens(text)
+            );
+        }
+    }
+
+    #[test]
+    fn test_count_tokens_matches_tracking_for_utf8() {
+        for (text, expected) in [("ééé", 2), ("日本語", 3), ("🦀", 1), ("🦀a", 2)] {
+            assert_eq!(count_tokens(text), expected, "text: {text:?}");
+            assert_eq!(
+                count_tokens(text),
+                crate::core::tracking::estimate_tokens(text)
+            );
+        }
+    }
+
+    #[test]
+    fn test_count_tokens_rejects_word_count_false_savings() {
+        let raw = "a b c d";
+        let filtered = "abcdefghijkl";
+        // Fewer words can still cost more under the shipped byte estimator.
+        assert!(count_tokens(filtered) > count_tokens(raw));
+        assert_eq!(crate::core::guard::never_worse(raw, filtered), raw);
+    }
+
+    #[test]
     fn test_count_tokens_basic() {
-        assert_eq!(count_tokens("hello world"), 2);
-        assert_eq!(count_tokens("one two three four"), 4);
+        assert_eq!(count_tokens("hello world"), 3);
+        assert_eq!(count_tokens("one two three four"), 5);
     }
 
     #[test]
     fn test_count_tokens_empty() {
         assert_eq!(count_tokens(""), 0);
-        assert_eq!(count_tokens("   "), 0);
+        assert_eq!(count_tokens("   "), 1);
     }
 
     #[test]
     fn test_count_tokens_multiple_spaces() {
-        assert_eq!(count_tokens("hello    world"), 2);
-        assert_eq!(count_tokens("  hello   world  "), 2);
+        assert_eq!(count_tokens("hello    world"), 4);
+        assert_eq!(count_tokens("  hello   world  "), 5);
     }
 
     #[cfg(unix)]

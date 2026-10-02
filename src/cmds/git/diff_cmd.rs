@@ -7104,9 +7104,7 @@ diff --git a/b.rs b/b.rs
 
     // --- token accounting (fidelity filter: content kept, metadata dropped) ---
 
-    fn count_tokens(s: &str) -> usize {
-        s.split_whitespace().count()
-    }
+    use crate::core::tracking::estimate_tokens as count_tokens;
 
     #[test]
     fn condensed_output_is_never_larger_than_input() {
@@ -7120,9 +7118,8 @@ diff --git a/b.rs b/b.rs
         // streams in the test below; it is not guaranteed by construction
         // on content-heavy input. What must always hold: the output is never
         // larger than the input (the `never_worse` guard's contract,
-        // verified here at the filter level). Percentages above are by this
-        // test's whitespace-token metric; the runtime guard uses
-        // `estimate_tokens` (bytes/4), which shifts individual numbers.
+        // verified here at the filter level). Savings use the same byte-based
+        // token estimate as the runtime guard.
         for (name, fixture) in CORPUS.iter().chain(HUNKLESS_CORPUS) {
             let out = condense_unified_diff(fixture);
             assert!(

@@ -2761,8 +2761,8 @@ error: aborting due to 1 previous error
             result
         );
 
-        let raw = input.split_whitespace().count();
-        let out = result.split_whitespace().count();
+        let raw = crate::core::tracking::estimate_tokens(&input);
+        let out = crate::core::tracking::estimate_tokens(&result);
         let savings = 100.0 - (out as f64 / raw as f64) * 100.0;
         assert!(
             savings >= 60.0,

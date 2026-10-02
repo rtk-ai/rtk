@@ -1462,15 +1462,15 @@ max_lines = 999
             "Plan: 1 to add, 0 to change, 0 to destroy.\n",
         );
         let out = apply_filter(filter, input);
-        let input_words = input.split_whitespace().count();
-        let out_words = out.split_whitespace().count();
-        let savings = 100.0 - (out_words as f64 / input_words as f64 * 100.0);
+        let input_tokens = crate::core::tracking::estimate_tokens(input);
+        let out_tokens = crate::core::tracking::estimate_tokens(&out);
+        let savings = 100.0 - (out_tokens as f64 / input_tokens as f64 * 100.0);
         assert!(
             savings >= 60.0,
             "terraform-plan filter: expected >=60% savings, got {:.1}% (in={} out={})",
             savings,
-            input_words,
-            out_words
+            input_tokens,
+            out_tokens
         );
     }
 
@@ -1508,15 +1508,15 @@ doxygen Doxyfile
 make[1]: Leaving directory '/home/user/project/docs'
 "#;
         let out = apply_filter(filter, input);
-        let input_words = input.split_whitespace().count();
-        let out_words = out.split_whitespace().count();
-        let savings = 100.0 - (out_words as f64 / input_words as f64 * 100.0);
+        let input_tokens = crate::core::tracking::estimate_tokens(input);
+        let out_tokens = crate::core::tracking::estimate_tokens(&out);
+        let savings = 100.0 - (out_tokens as f64 / input_tokens as f64 * 100.0);
         assert!(
             savings >= 60.0,
             "make filter: expected >=60% savings, got {:.1}% (in={} out={})",
             savings,
-            input_words,
-            out_words
+            input_tokens,
+            out_tokens
         );
     }
 

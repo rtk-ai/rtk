@@ -1975,9 +1975,7 @@ mod tests {
     use flate2::read::GzDecoder;
     use std::io::Read;
 
-    fn count_tokens(s: &str) -> usize {
-        s.split_whitespace().count()
-    }
+    use crate::core::tracking::estimate_tokens as count_tokens;
 
     /// Cold-preclear finding (upstream PR #3199, fourth review round): the
     /// `[INFO] Building ` keeper was a bare `starts_with`, so on a *tagged*
