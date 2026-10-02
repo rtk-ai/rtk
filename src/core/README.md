@@ -6,12 +6,29 @@
 
 Domain-agnostic building blocks with **no knowledge of any specific command, hook, or agent**. If a module references "git", "cargo", "claude", or any external tool by name, it does not belong here. Core is a leaf in the dependency graph — it is consumed by all other components but imports from none of them.
 
-Owns: configuration loading, token tracking persistence, TOML filter engine, tee output recovery, display formatting, explicit shell/direct command construction, telemetry, and shared utilities.
+Owns: shell command-line lexing, configuration loading, token tracking persistence, TOML filter engine, tee output recovery, display formatting, explicit shell/direct command construction, telemetry, and shared utilities.
 
 Does **not** own: command-specific filtering logic (that's `cmds/`), hook lifecycle management (that's `src/hooks/`), or analytics dashboards (that's `analytics/`).
 
 ## Purpose
 Core infrastructure shared by all RTK command modules. Every filter, tracker, and command handler depends on these modules. No inward dependencies — leaf in the dependency graph (no circular imports possible).
+
+## Shell Lexer (`cmdline/lexer.rs`)
+
+`cmdline/lexer.rs` is the first step of RTK's command parsing: raw string → quote/operator-aware tokens, words and segments. The second step, already-split argv → flags and values, is `arg_tokenizer.rs`. The lexer holds no rewrite rule and no classification logic, so every component that has to read a shell command builds on it instead of re-scanning.
+
+| Function | Purpose | Used by |
+|---|---|---|
+| `tokenize(cmd)` | Full shell-syntax tokens: quotes, escapes, operators, pipes, redirects, shellisms | `discover/registry.rs` |
+| `tokenize_with_newlines(cmd)` | Like `tokenize`, plus a `\n` `Operator` token per unquoted newline (a lone `\r` stays glued to its word, matching real bash) | `discover/registry.rs` |
+| `shell_split(cmd)` | Quote-aware split into argv-ready words (quotes stripped, escapes resolved) | `hooks/mod.rs::is_claude_hook_command`, `main.rs`'s `rtk proxy '...'`, `discover/registry.rs` |
+| `split_for_permissions(cmd)` | Segments a compound command for the **permission gate** — deliberately the most conservative segmenter (see its doc comment for the full comparison table) | `hooks/permissions.rs::check_command_with_rules`, `discover/registry.rs` |
+| `split_for_classify(cmd)` | Segments for classification only — not safe for permission/security decisions | `discover/registry.rs::split_command_chain` |
+| `contains_unattestable_construct(cmd)` | True for command/process substitution, quoting the lexer reads differently from bash (`$'\''`), or a file-target redirect — constructs the permission gate can't decompose and must never auto-allow | `hooks/permissions.rs::check_command_with_rules`, `hooks/decision.rs`, `hooks/hook_cmd.rs` (Codex payloads), `discover/mod.rs` |
+
+`pub(crate)` scanning helpers are shared with the rewriter's own token walks, which must read quoting and substitutions exactly as the segmenter does: `QuoteScan`, `CaseTracker`, `SubstitutionDepth`, `word_spans`, `coalesce_words`, `is_crlf_at`, `ansi_c_quote_defeats_lexer` and `redirect_has_file_target` (all used by `discover/registry.rs`), and `is_word_boundary_whitespace` (also used by `hooks/permissions.rs::command_matches_pattern`). A change to any of them changes where the rewriter and the permission gate see a word or a segment end.
+
+The permission gate, discover/analytics classification, and rewrite all agree on where a command begins and ends — one `segment(cmd, Policy)` decides, and the three `Policy` constants name the only differences that remain: whether a newline or a lone `\r` ends a segment, whether `$( )` is descended into, and whether a redirect is kept or excised. `split_for_permissions`'s doc comment carries the full comparison, and `discover/registry.rs`'s `segmenter_agreement` tests hold each remaining difference to a stated reason. Those differences still matter at the call site: the gate must never under-segment, because a segment it never sees is a command its rules never check, so don't reuse `split_for_classify` or `rewrite_compound`'s segmenting for a permission/security decision — use `split_for_permissions`.
 
 ## TOML Filter Pipeline
 

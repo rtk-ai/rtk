@@ -1765,7 +1765,7 @@ enum GtCommands {
 /// Split a string into shell-like tokens, respecting single and double quotes.
 /// e.g. `git log --format="%H %s"` → ["git", "log", "--format=%H %s"]
 fn shell_split(input: &str) -> Vec<String> {
-    discover::lexer::shell_split(input)
+    core::cmdline::lexer::shell_split(input)
 }
 
 fn build_k8s_namespace_args(namespace: Option<String>, all: bool) -> Vec<String> {

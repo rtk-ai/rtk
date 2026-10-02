@@ -139,7 +139,7 @@ rewrite_command(cmd, excluded)                     [src/discover/registry.rs]
   v
 rewrite_compound(cmd, excluded)                    [src/discover/registry.rs]
   |
-  |  Step 1 — Tokenize (lexer.rs)
+  |  Step 1 — Tokenize                              [src/core/cmdline/lexer.rs]
   |  tokenize() produces typed tokens with byte offsets:
   |    Arg("cargo") Arg("fmt") Arg("--all")
   |    Operator("&&")
@@ -214,7 +214,7 @@ LLM Agent executes rewritten command
 ```
 
 Key design decisions:
-- **Lexer-based tokenization**: A single-pass state machine (`lexer.rs`) handles all shell constructs (quotes, escapes, redirects, operators). Used for both compound splitting and redirect stripping.
+- **Lexer-based tokenization**: A single-pass state machine (`src/core/cmdline/lexer.rs`) handles all shell constructs (quotes, escapes, redirects, operators). Used for both compound splitting and redirect stripping.
 - **Segment-level rewriting**: Compound commands are split by operators, each segment rewritten independently. Bash recombines them at execution time.
 - **Pipe semantics**: Producers and intermediate stages of `|` remain raw. Only an argument-safe final stage whose rule has `pipeline_final_safe` may be rewritten; initially this is limited to ordinary `grep` and `rg` invocations. Search pattern-file forms (`-f`/`--file`) defer because they can consume pipeline stdin as configuration. `|&` is recognized separately and its complete pipeline stays raw.
 - **Double env prefix handling**: `classify_command()` strips env prefixes to match the underlying command against rules. `rewrite_segment()` extracts the same prefix separately to re-prepend it to the rewritten command.
@@ -307,11 +307,11 @@ Start here, then drill down into each README for file-level details.
 | Directory | What it does | What you'll find in its README |
 |-----------|-------------|-------------------------------|
 | `main.rs` | CLI entry point, `Commands` enum, routing match | _(no README — read the file directly)_ |
-| [`core/`](../src/core/README.md) | Shared infrastructure | Tracking DB schema, config system, tee recovery, TOML filter engine, utility functions |
+| [`core/`](../src/core/README.md) | Shared infrastructure | Shell lexer (command segmentation, word splitting), tracking DB schema, config system, tee recovery, TOML filter engine, utility functions |
 | [`hooks/`](../src/hooks/README.md) | Hook system | Installation flow (`rtk init`), integrity verification, rewrite command, trust model |
 | [`analytics/`](../src/analytics/README.md) | Token savings analytics | `rtk gain` dashboard, Claude Code economics, ccusage parsing |
 | [`cmds/`](../src/cmds/README.md) | **Command filters (9 ecosystems)** | Common filter pattern, cross-command routing, token savings table, **links to each ecosystem** |
-| [`discover/`](../src/discover/README.md) | History analysis + rewrite registry | Rewrite patterns, session providers, compound command splitting |
+| [`discover/`](../src/discover/README.md) | History analysis + rewrite registry | Rewrite patterns, session providers, per-segment rewriting |
 | [`learn/`](../src/learn/README.md) | CLI correction detection | Error classification, correction pair detection, rule generation |
 | [`parser/`](../src/parser/README.md) | Parser infrastructure | Canonical types (TestResult, LintResult, etc.), 3-tier format modes, migration guide |
 | [`filters/`](../src/filters/README.md) | TOML filter configs | TOML DSL syntax, 8-stage pipeline, inline testing, naming conventions |

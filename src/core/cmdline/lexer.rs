@@ -1,3 +1,7 @@
+//! Quote-, escape- and operator-aware shell lexer: tokens, words, and the
+//! segmenter that decides where one command ends and the next begins. Who uses
+//! each entry point is listed in `src/core/README.md`.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipeKind {
     /// Standard stdout pipeline (`|`).
@@ -226,13 +230,13 @@ pub(crate) fn ansi_c_quote_defeats_lexer(cmd: &str) -> bool {
 
 /// Bash's default `$IFS` is exactly space/tab/newline — not Rust's
 /// `char::is_whitespace()`, which wrongly includes non-IFS Unicode
-/// whitespace like NBSP. Shared with `permissions.rs::command_matches_pattern`.
+/// whitespace like NBSP. Shared with `hooks/permissions.rs::command_matches_pattern`.
 pub(crate) fn is_word_boundary_whitespace(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n')
 }
 
 /// True if `bytes[i..]` starts a CRLF pair. Shared by `tokenize_inner` and
-/// `registry.rs::rewrite_multiline_block`'s raw-newline parity check.
+/// `discover/registry.rs::rewrite_multiline_block`'s raw-newline parity check.
 pub(crate) fn is_crlf_at(bytes: &[u8], i: usize) -> bool {
     bytes.get(i) == Some(&b'\r') && bytes.get(i + 1) == Some(&b'\n')
 }
@@ -925,16 +929,16 @@ pub(crate) fn segment(cmd: &str, policy: Policy) -> Vec<Segment<'_>> {
     out
 }
 
-/// Segments `cmd` for the **permission gate** (`permissions.rs::check_command_with_rules`):
+/// Segments `cmd` for the **permission gate** (`hooks/permissions.rs::check_command_with_rules`):
 /// every segment this returns is independently checked against deny/ask/allow
 /// rules, so this is the most paranoid of the three compound-command segmenters
 /// in this codebase — see [`split_for_classify`] (analytics/discovery
-/// classification) and `registry.rs::rewrite_compound`'s inline token walk
+/// classification) and `discover/registry.rs::rewrite_compound`'s inline token walk
 /// (actual rewrite) for the other two.
 ///
 /// All three agree on where a command begins and ends. Where a row below still
 /// differs, the difference is the consumer's purpose, not an accident, and
-/// `registry.rs`'s `segmenter_agreement` tests hold each one to a stated reason:
+/// `discover/registry.rs`'s `segmenter_agreement` tests hold each one to a stated reason:
 ///
 /// | | here (permission gate) | [`split_for_classify`] (analytics) | `rewrite_compound` (rewrite) |
 /// |---|---|---|---|
@@ -2178,7 +2182,7 @@ mod tests {
             // over a neighbour or quote something nobody typed. This says
             // nothing about *which* text became a segment — gaps are legal,
             // that is where separators live — so the placement cases live in
-            // registry.rs's `segmenter_agreement`.
+            // discover/registry.rs's `segmenter_agreement`.
             let trimmed = cmd.trim();
             let mut furthest = 0;
             for seg in split_for_classify(cmd) {
