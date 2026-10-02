@@ -131,6 +131,7 @@ rtk init --global --opencode
 ```
 
 Creates `~/.config/opencode/plugins/rtk.ts`. Uses the `tool.execute.before` hook.
+The plugin also carries configured bash permissions over to rewritten commands, helping keep OpenCode's permission decisions consistent.
 
 ### Pi
 

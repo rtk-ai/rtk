@@ -8,4 +8,5 @@
 - Intercepts `tool.execute.before` events, calls `rtk rewrite` as a subprocess
 - Uses `.quiet().nothrow()` to silently ignore failures
 - Mutates `args.command` in-place if rewrite differs from original
+- Preserves configured bash permissions when commands are rewritten with the `rtk` prefix
 - Installed to `~/.config/opencode/plugins/rtk.ts` by `rtk init -g --opencode`
