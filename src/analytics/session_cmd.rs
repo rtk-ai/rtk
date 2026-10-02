@@ -329,6 +329,13 @@ mod tests {
     }
 
     #[test]
+    fn test_count_pipeline_as_one_unit_then_continue_chain() {
+        let cmds = vec![make_cmd("cargo test | tail -50 && git status", Some(500))];
+        let (total, _, _) = count_rtk_commands(&cmds);
+        assert_eq!(total, 2, "pipeline should count as one command unit");
+    }
+
+    #[test]
     fn test_count_chained_no_false_inflation() {
         // Single command should still count as 1
         let cmds = vec![make_cmd("git status", Some(100))];
