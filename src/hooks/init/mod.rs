@@ -18,8 +18,12 @@ use crate::core::utils::{from_json_str, strip_leading_bom};
 use super::integrity;
 use super::is_claude_hook_command;
 use crate::core::config::AwarenessLevel;
+#[cfg(test)]
+use crate::core::test_isolation;
+use crate::core::user_dirs;
 
 mod agents_md;
+mod antigravity;
 mod claude;
 mod codex;
 mod copilot;
@@ -52,12 +56,13 @@ use opencode::{
 };
 use pi::*;
 
+pub use antigravity::{run_antigravity_mode, uninstall_antigravity_mode};
 pub(crate) use copilot::{COPILOT_HOOK_JSON, copilot_user_dir};
 pub use copilot::{run_copilot, run_copilot_global, uninstall_copilot, uninstall_copilot_global};
 pub use droid::{run_droid_mode, uninstall_droid};
 pub use gemini::run_gemini;
 pub use hermes::{run_hermes_mode, uninstall_hermes};
-pub use instructions_agents::{run_antigravity_mode, run_kilocode_mode, run_kimi_mode};
+pub use instructions_agents::{run_kilocode_mode, run_kimi_mode};
 pub use pi::{run_omp_mode_with_patch_mode, run_pi_mode_with_patch_mode};
 pub use trae::{run_trae_mode, uninstall_trae_mode};
 pub use vibe::{run_vibe_mode, uninstall_vibe};
@@ -209,7 +214,7 @@ rtk playwright test     # Playwright failures only (94%)
 rtk pytest              # Python test failures only (90%)
 rtk rake test           # Ruby test failures only (90%)
 rtk rspec               # RSpec test failures only (60%)
-rtk test <cmd>          # Generic test wrapper - failures only
+rtk test <cmd> [args...] # Generic test wrapper - failures only
 ```
 
 ### Git (59-80% savings)
@@ -260,14 +265,18 @@ rtk find <pattern>      # Find grouped by directory (70%)
 
 ### Analysis & Debug (70-90% savings)
 ```bash
-rtk err <cmd>           # Filter errors only from any command
+rtk err <cmd> [args...] # Filter errors only; argv runs directly, no shell
 rtk log <file>          # Deduplicated logs with counts
 rtk json <file>         # JSON structure without values
 rtk deps                # Dependency overview
 rtk env                 # Environment variables compact
-rtk summary <cmd>       # Smart summary of command output
+rtk summary <cmd> [args...]  # Smart summary of command output
 rtk diff                # Ultra-compact diffs
 ```
+
+`rtk err`, `rtk test` and `rtk summary` execute the program directly, so shell
+syntax (`&&`, `|`, `*`, `$VAR`) is not interpreted. Pass a script explicitly:
+`rtk err --shell sh 'npm run build && npm test'`.
 
 ### Infrastructure (85% savings)
 ```bash
@@ -1243,7 +1252,7 @@ pub(super) fn generate_project_filters_template(ctx: InitContext) -> Result<()> 
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
-    let rtk_dir = std::path::Path::new(".rtk");
+    let rtk_dir = user_dirs::in_working_dir(".rtk");
     let path = rtk_dir.join("filters.toml");
 
     if path.exists() {
@@ -1261,7 +1270,7 @@ pub(super) fn generate_project_filters_template(ctx: InitContext) -> Result<()> 
         return Ok(());
     }
 
-    fs::create_dir_all(rtk_dir)
+    fs::create_dir_all(&rtk_dir)
         .with_context(|| format!("Failed to create directory: {}", rtk_dir.display()))?;
     fs::write(&path, FILTERS_TEMPLATE)
         .with_context(|| format!("Failed to write {}", path.display()))?;
@@ -1278,9 +1287,10 @@ pub(super) fn generate_global_filters_template(ctx: InitContext) -> Result<()> {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
-    let config_dir = dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from(".config"));
-    let rtk_dir = config_dir.join(crate::core::constants::RTK_DATA_DIR);
-    let path = rtk_dir.join("filters.toml");
+    let rtk_dir = user_dirs::config().unwrap_or_else(|| {
+        std::path::PathBuf::from(".config").join(crate::core::constants::RTK_DATA_DIR)
+    });
+    let path = rtk_dir.join(crate::core::constants::FILTERS_TOML);
 
     if path.exists() {
         if verbose > 0 {
@@ -1381,7 +1391,7 @@ pub(super) fn resolve_config_dir(
 }
 
 pub(super) fn resolve_home_subdir(subdir: &str) -> Result<PathBuf> {
-    dirs::home_dir()
+    user_dirs::home()
         .map(|h| h.join(subdir))
         .context(if cfg!(windows) {
             "Cannot determine home directory. Is %USERPROFILE% set?"
@@ -1392,18 +1402,22 @@ pub(super) fn resolve_home_subdir(subdir: &str) -> Result<PathBuf> {
 
 pub fn resolve_claude_dir() -> Result<PathBuf> {
     let windows_home = if cfg!(windows) {
-        std::env::var_os("USERPROFILE")
-            .filter(|path| !path.is_empty())
-            .or_else(|| std::env::var_os("HOME").filter(|path| !path.is_empty()))
-            .map(PathBuf::from)
+        windows_home_fallback()
     } else {
         None
     };
     resolve_claude_dir_from(
-        std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
-        dirs::home_dir(),
+        user_dirs::env_path("CLAUDE_CONFIG_DIR").map(PathBuf::from),
+        user_dirs::home(),
         windows_home,
     )
+}
+
+fn windows_home_fallback() -> Option<PathBuf> {
+    user_dirs::env_path("USERPROFILE")
+        .filter(|path| !path.is_empty())
+        .or_else(|| user_dirs::env_path("HOME").filter(|path| !path.is_empty()))
+        .map(PathBuf::from)
 }
 
 pub(super) fn resolve_claude_dir_from(
@@ -1415,7 +1429,7 @@ pub(super) fn resolve_claude_dir_from(
         claude_dir.map(PathBuf::into_os_string),
         home_dir.or_else(|| windows_home.filter(|path| !path.as_os_str().is_empty())),
         CLAUDE_DIR,
-        "Cannot determine Claude config directory. Set $CLAUDE_CONFIG_DIR or $HOME.",
+        "Cannot determine Claude config directory. Set $CLAUDE_CONFIG_DIR, $HOME, or on Windows $USERPROFILE.",
     )
 }
 
@@ -1436,7 +1450,7 @@ fn show_claude_config() -> Result<()> {
     let hook_path = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
     let rtk_md_path = claude_dir.join(RTK_MD);
     let global_claude_md = claude_dir.join(CLAUDE_MD);
-    let local_claude_md = PathBuf::from(CLAUDE_MD);
+    let local_claude_md = user_dirs::in_working_dir(CLAUDE_MD);
 
     println!("rtk Configuration:\n");
 
@@ -1667,65 +1681,28 @@ fn show_claude_config() -> Result<()> {
 }
 
 #[cfg(test)]
-use std::sync::Mutex;
-#[cfg(test)]
 use tempfile::TempDir;
-/// Serialises all tests that mutate the process-wide working directory.
-#[cfg(test)]
-pub(super) static CWD_LOCK: Mutex<()> = Mutex::new(());
-
-/// Holds the cwd lock and puts the working directory back when it goes out of scope.
-///
-/// Restoring by hand needs the call under test to return rather than panic, so one failing
-/// assertion used to leave every later test inside a deleted `TempDir`, burying the real
-/// failure under unrelated ones.
-#[cfg(test)]
-pub(super) struct CwdGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
-    original: PathBuf,
-}
-
-#[cfg(test)]
-impl CwdGuard {
-    pub(super) fn enter(dir: &Path) -> Self {
-        let _lock = CWD_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-        let original = std::env::current_dir().expect("read the current directory");
-        std::env::set_current_dir(dir).expect("enter the test directory");
-        Self { _lock, original }
-    }
-}
-
-#[cfg(test)]
-impl Drop for CwdGuard {
-    fn drop(&mut self) {
-        let _ = std::env::set_current_dir(&self.original);
-    }
-}
-
 #[cfg(test)]
 pub(super) fn with_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
     let claude_dir = tmp.path().join(CLAUDE_DIR);
     fs::create_dir_all(&claude_dir).unwrap();
 
-    temp_env::with_var("CLAUDE_CONFIG_DIR", Some(&claude_dir), || f(&claude_dir));
+    test_isolation::with_agent_dir(tmp.path(), "CLAUDE_CONFIG_DIR", &claude_dir, || {
+        f(&claude_dir)
+    });
 }
 
 #[cfg(test)]
 pub(super) fn with_missing_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
     let claude_dir = tmp.path().join(CLAUDE_DIR);
-    let home_dir = tmp.path().join("home");
     assert!(
         !claude_dir.exists(),
         "test precondition: Claude config dir must be missing"
     );
 
-    temp_env::with_vars(
-        [
-            ("CLAUDE_CONFIG_DIR", Some(claude_dir.as_os_str())),
-            ("HOME", Some(home_dir.as_os_str())),
-        ],
-        || f(&claude_dir),
-    );
+    test_isolation::with_agent_dir(tmp.path(), "CLAUDE_CONFIG_DIR", &claude_dir, || {
+        f(&claude_dir)
+    });
 }
 
 #[cfg(test)]
@@ -2414,32 +2391,5 @@ mod tests {
 
         assert!(format!("{err:#}").contains("backup"));
         assert_eq!(fs::read_to_string(path).unwrap(), "old");
-    }
-
-    #[test]
-    fn test_cwd_guard_restores_after_a_panic() {
-        let tmp = TempDir::new().expect("tmp");
-        // Read under the lock: another cwd-mutating test holding it has the process sitting in
-        // its own TempDir, and capturing that would assert against a directory this test never
-        // entered.
-        let before = {
-            let _held = CwdGuard::enter(Path::new("."));
-            std::env::current_dir().expect("cwd")
-        };
-        let panicked = std::panic::catch_unwind(|| {
-            let _cwd = CwdGuard::enter(tmp.path());
-            panic!("the call under test fails");
-        });
-        assert!(panicked.is_err(), "the panic must propagate");
-        // Observed under the lock as well: the unwind dropped the closure's guard, so without
-        // retaking it a concurrent cwd test sitting in its own TempDir is what gets read.
-        let after = {
-            let _held = CwdGuard::enter(Path::new("."));
-            std::env::current_dir().expect("cwd")
-        };
-        assert_eq!(
-            after, before,
-            "a panic must not strand the process in the test directory"
-        );
     }
 }

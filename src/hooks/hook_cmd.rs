@@ -11,6 +11,8 @@ use serde_json::{Value, json};
 use std::io::{self, Read, Write};
 
 use crate::core::tracking::HookOutcome;
+use crate::core::user_dirs;
+use crate::core::user_env;
 use crate::core::utils::strip_leading_bom;
 
 const STDIN_CAP: usize = 1_048_576; // 1 MiB
@@ -440,6 +442,75 @@ fn run_gemini_inner_impl(
     })
 }
 
+// ── Google Antigravity hook ───────────────────────────────────
+
+/// Run the Google Antigravity PreToolUse hook.
+///
+/// Antigravity PreToolUse hook contract:
+/// - stdin: JSON with `toolCall: { name: "run_command", args: { CommandLine: "..." } }`
+/// - Passthrough: emit `{"decision": "allow"}`
+/// - Rewrite: emit `{"decision": "allow", "reason": "...", "overwrite": { "CommandLine": "..." }}`
+/// - Deny: emit `{"decision": "deny", "reason": "..."}`
+///
+/// Fail-open design: invalid JSON, non-command tools, or unparseable payloads
+/// emit `{"decision": "allow"}` so RTK never blocks agent operations.
+pub fn run_antigravity() -> Result<()> {
+    let input = read_stdin_limited()?;
+    let output = run_antigravity_inner(&input);
+    let _ = writeln!(io::stdout(), "{output}");
+    Ok(())
+}
+
+fn run_antigravity_inner(input: &str) -> Value {
+    let input = strip_leading_bom(input).trim();
+    if input.is_empty() {
+        return json!({ "decision": "allow" });
+    }
+
+    let parsed: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(_) => return json!({ "decision": "allow" }),
+    };
+
+    let tool_name = parsed
+        .pointer("/toolCall/name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if tool_name != "run_command" {
+        return json!({ "decision": "allow" });
+    }
+
+    let cmd = parsed
+        .pointer("/toolCall/args/CommandLine")
+        .or_else(|| parsed.pointer("/toolCall/args/command"))
+        .or_else(|| parsed.pointer("/toolCall/args/cmd"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if cmd.is_empty() {
+        return json!({ "decision": "allow" });
+    }
+
+    match decide_hook_action(cmd, permissions::Host::Antigravity) {
+        HookDecision::Deny => json!({
+            "decision": "deny",
+            "reason": "Blocked by RTK permission rule"
+        }),
+        HookDecision::AllowRewrite(ref rewritten) | HookDecision::AskRewrite(ref rewritten) => {
+            audit_log("rewrite", cmd, rewritten);
+            json!({
+                "decision": "allow",
+                "reason": "Rewritten by rtk for token optimization.",
+                "overwrite": {
+                    "CommandLine": rewritten
+                }
+            })
+        }
+        HookDecision::Defer => json!({ "decision": "allow" }),
+    }
+}
+
 // ── Vibe hook ─────────────────────────────────────────────────
 
 /// Run the Mistral Vibe CLI pre_tool hook.
@@ -515,7 +586,7 @@ fn gemini_json(decision: &str, rewrite: Option<&str>) -> String {
 
 /// Best-effort audit log when RTK_HOOK_AUDIT=1.
 fn audit_log(action: &str, original: &str, rewritten: &str) {
-    if std::env::var("RTK_HOOK_AUDIT").as_deref() != Ok("1") {
+    if user_env::var("RTK_HOOK_AUDIT").as_deref() != Some("1") {
         return;
     }
     let _ = audit_log_inner(action, original, rewritten);
@@ -530,7 +601,7 @@ fn sanitize_log_field(s: &str) -> String {
 }
 
 fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> {
-    let home = dirs::home_dir()?;
+    let home = user_dirs::home()?;
     let dir = home.join(".local").join("share").join("rtk");
     crate::core::utils::create_private_dir(&dir).ok()?;
     let path = dir.join("hook-audit.log");
@@ -1177,6 +1248,7 @@ fn run_droid_inner_with_rules(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::test_isolation;
     use crate::hooks::permissions::PermissionVerdict;
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
@@ -2416,31 +2488,36 @@ mod tests {
 
     // --- Audit logging ---
 
+    /// Where `audit_log` writes under a test's own root.
+    fn audit_log_under(root: &std::path::Path) -> std::path::PathBuf {
+        root.join(".local")
+            .join("share")
+            .join("rtk")
+            .join("hook-audit.log")
+    }
+
     #[test]
     fn test_audit_log_silent_when_disabled() {
-        temp_env::with_var_unset("RTK_HOOK_AUDIT", || {
-            audit_log("test", "git status", "rtk git status");
+        let root = test_isolation::tempdir();
+        test_isolation::with_root(root.path(), || {
+            user_env::with_vars(&[("RTK_HOOK_AUDIT", None)], || {
+                audit_log("test", "git status", "rtk git status");
+            });
         });
+        assert!(!audit_log_under(root.path()).exists());
     }
 
     #[test]
     fn test_audit_log_format_four_fields() {
-        let tmp = std::env::temp_dir().join("rtk-test-audit");
-        let _ = std::fs::create_dir_all(&tmp);
-        let log_path = tmp.join("hook-audit.log");
-        let _ = std::fs::remove_file(&log_path);
+        let root = test_isolation::tempdir();
+        test_isolation::with_root(root.path(), || {
+            user_env::with_vars(&[("RTK_HOOK_AUDIT", Some("1"))], || {
+                audit_log("rewrite", "git status", "rtk git status");
+            });
+        });
 
-        {
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path)
-                .unwrap();
-            let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S");
-            writeln!(file, "{} | rewrite | git status | rtk git status", ts).unwrap();
-        }
-
-        let content = std::fs::read_to_string(&log_path).unwrap();
+        let content =
+            std::fs::read_to_string(audit_log_under(root.path())).expect("audit log written");
         let parts: Vec<&str> = content.trim().split(" | ").collect();
         assert_eq!(
             parts.len(),
@@ -2451,8 +2528,6 @@ mod tests {
         assert_eq!(parts[1], "rewrite");
         assert_eq!(parts[2], "git status");
         assert_eq!(parts[3], "rtk git status");
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // --- Adversarial tests ---
@@ -2607,12 +2682,11 @@ mod tests {
         // and the tool call is blocked.
         //
         // Uses run_gemini_inner_with_rules (explicit allow-all rules) rather
-        // than run_gemini_inner: the latter's decide_hook_action reads the
-        // REAL ~/.gemini/settings.json (and project .gemini/settings.json),
-        // making the decision assertion depend on whatever is on the
-        // machine running the test. Both share the same parse/strip/render
-        // core (run_gemini_inner_impl) that production run_gemini uses, so
-        // this still exercises the real BOM-stripping path.
+        // than run_gemini_inner, so the decision assertion rests on the rules
+        // it states rather than on whichever settings files resolve. Both
+        // share the same parse/strip/render core (run_gemini_inner_impl) that
+        // production run_gemini uses, so this still exercises the real
+        // BOM-stripping path.
         let payload = json!({
             "tool_name": "run_shell_command",
             "tool_input": { "command": "git status" }
@@ -2989,5 +3063,119 @@ mod tests {
     fn test_vibe_substitution_defers() {
         let input = vibe_input("bash", "echo $(rm -rf /)");
         assert!(run_vibe_inner(&input).is_none());
+    }
+
+    fn antigravity_input(cmd: &str) -> String {
+        json!({
+            "toolCall": {
+                "name": "run_command",
+                "args": {
+                    "CommandLine": cmd
+                }
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_antigravity_rewrite_git_status() {
+        let v = run_antigravity_inner(&antigravity_input("git status"));
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(v["overwrite"]["CommandLine"], "rtk git status");
+    }
+
+    #[test]
+    fn test_antigravity_passthrough_non_rewritable() {
+        let v = run_antigravity_inner(&antigravity_input("htop"));
+        assert_eq!(v["decision"], "allow");
+        assert!(v.get("overwrite").is_none());
+    }
+
+    #[test]
+    fn test_antigravity_non_command_tool_passthrough() {
+        let input = json!({
+            "toolCall": {
+                "name": "view_file",
+                "args": { "AbsolutePath": "/tmp/test.rs" }
+            }
+        })
+        .to_string();
+        let v = run_antigravity_inner(&input);
+        assert_eq!(v["decision"], "allow");
+        assert!(v.get("overwrite").is_none());
+    }
+
+    #[test]
+    fn test_antigravity_empty_and_corrupt_input_passthrough() {
+        assert_eq!(run_antigravity_inner("")["decision"], "allow");
+        assert_eq!(run_antigravity_inner("   ")["decision"], "allow");
+        assert_eq!(run_antigravity_inner("{not-json}")["decision"], "allow");
+    }
+
+    #[test]
+    fn test_antigravity_leading_bom_and_whitespace_trimmed() {
+        let raw = format!("\u{FEFF}   {}   ", antigravity_input("git status"));
+        let v = run_antigravity_inner(&raw);
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(v["overwrite"]["CommandLine"], "rtk git status");
+    }
+
+    #[test]
+    fn test_antigravity_complex_quoted_command_preserved() {
+        let cmd = "git log --format='%h %s' --all --decorate";
+        let v = run_antigravity_inner(&antigravity_input(cmd));
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(
+            v["overwrite"]["CommandLine"],
+            "rtk git log --format='%h %s' --all --decorate"
+        );
+    }
+
+    #[test]
+    fn test_antigravity_fallback_command_args_keys() {
+        let input = json!({
+            "toolCall": {
+                "name": "run_command",
+                "args": { "command": "git status" }
+            }
+        })
+        .to_string();
+        let v = run_antigravity_inner(&input);
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(v["overwrite"]["CommandLine"], "rtk git status");
+    }
+
+    #[test]
+    fn test_antigravity_pre_prefixed_command_defers() {
+        let v = run_antigravity_inner(&antigravity_input("rtk git status"));
+        assert_eq!(v["decision"], "allow");
+        assert!(
+            v.get("overwrite").is_none(),
+            "already prefixed command must not be rewritten again"
+        );
+    }
+
+    #[test]
+    fn test_antigravity_shell_redirection_and_subshells_defer() {
+        for cmd in [
+            "git status $(whoami)",
+            "git status `whoami`",
+            "git status > /tmp/out.txt",
+            "git status < /tmp/in.txt",
+        ] {
+            let v = run_antigravity_inner(&antigravity_input(cmd));
+            assert_eq!(v["decision"], "allow");
+            assert!(
+                v.get("overwrite").is_none(),
+                "unattestable shell construct must defer without overwrite for {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_antigravity_unknown_binary_passthrough() {
+        let v = run_antigravity_inner(&antigravity_input("definitely-not-a-real-binary --foo"));
+        assert_eq!(v["decision"], "allow");
+        assert!(v.get("overwrite").is_none());
     }
 }

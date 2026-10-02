@@ -5,11 +5,13 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+mod common;
+
 /// Runs rtk against `home` with every directory it resolves from the
 /// environment pinned inside it, so an exported `CLAUDE_CONFIG_DIR` or `XDG_*`
 /// can neither change the outcome nor receive writes.
 fn rtk(home: &Path) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rtk"));
+    let mut cmd = common::rtk_command();
     cmd.env("HOME", home)
         .env("RTK_DB_PATH", home.join("rtk.db"))
         .env("XDG_CONFIG_HOME", home.join(".config"))

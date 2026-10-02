@@ -3,13 +3,14 @@ use super::constants::{
     SETTINGS_JSON, SETTINGS_LOCAL_JSON,
 };
 use super::init::resolve_claude_dir;
-use crate::core::stream::exec_capture;
+use crate::core::user_dirs;
+use crate::core::user_env;
 use crate::discover::lexer::{is_word_boundary_whitespace, split_for_permissions};
 use serde_json::Value;
 use std::path::PathBuf;
 
 /// Verdict from checking a command against Claude Code's permission rules.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum PermissionVerdict {
     /// An explicit allow rule matched — safe to auto-allow.
     Allow,
@@ -40,6 +41,7 @@ pub enum Host {
     Gemini,
     Droid,
     Vibe,
+    Antigravity,
 }
 
 pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
@@ -63,7 +65,9 @@ pub(crate) fn load_rules_for(host: Host) -> (Vec<String>, Vec<String>, Vec<Strin
         // execution rules after updatedInput. Do not interpret these hosts'
         // rules as Claude Bash patterns or borrow another host's settings.
         // No RTK-side match means Default, not an explicit Allow.
-        Host::Codex | Host::Trae | Host::Vibe => (Vec::new(), Vec::new(), Vec::new()),
+        Host::Codex | Host::Trae | Host::Vibe | Host::Antigravity => {
+            (Vec::new(), Vec::new(), Vec::new())
+        }
     }
 }
 
@@ -254,7 +258,7 @@ fn append_wrapped_rules(rules_value: Option<&Value>, prefixes: &[&str], target: 
 // else defers to the host, which applies its own project config and folder-trust.
 // This keeps RTK's allow set a subset of the host's — never more permissive.
 fn global_config(dir: &str, file: &str) -> Option<Value> {
-    read_json(&dirs::home_dir()?.join(dir).join(file))
+    read_json(&user_dirs::home()?.join(dir).join(file))
 }
 
 fn load_cursor_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
@@ -276,7 +280,7 @@ fn load_cursor_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
 // untrusted → global, which is safe: never more permissive than the host).
 fn gemini_settings() -> Option<Value> {
     let global = global_config(GEMINI_DIR, SETTINGS_JSON);
-    let trusted = std::env::var("GEMINI_CLI_TRUST_WORKSPACE").as_deref() == Ok("true")
+    let trusted = user_env::var("GEMINI_CLI_TRUST_WORKSPACE").as_deref() == Some("true")
         || !global
             .as_ref()
             .and_then(|j| {
@@ -309,10 +313,10 @@ fn load_gemini_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
 // (docs.factory.ai/cli/configuration/settings). Missing files are skipped.
 fn droid_settings_scopes() -> Vec<Value> {
     let mut dirs_to_read = Vec::new();
-    if let Some(home) = std::env::var_os(DROID_HOME_ENV)
+    if let Some(home) = user_dirs::env_path(DROID_HOME_ENV)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .or_else(dirs::home_dir)
+        .or_else(user_dirs::home)
     {
         dirs_to_read.push(home.join(DROID_DIR));
     }
@@ -366,27 +370,7 @@ pub(crate) fn droid_rules_from_settings(
 ///
 /// Falls back to `git rev-parse --show-toplevel` if not found via directory walk.
 fn find_project_root() -> Option<PathBuf> {
-    // Fast path: walk up CWD looking for .claude/ — no subprocess needed.
-    let mut dir = std::env::current_dir().ok()?;
-    loop {
-        if dir.join(CLAUDE_DIR).exists() {
-            return Some(dir);
-        }
-        if !dir.pop() {
-            break;
-        }
-    }
-
-    // Fallback: git (spawns a subprocess, slower but handles monorepo layouts).
-    let mut cmd = std::process::Command::new("git");
-    cmd.args(["rev-parse", "--show-toplevel"]);
-    let result = exec_capture(&mut cmd).ok()?;
-
-    if result.success() {
-        return Some(PathBuf::from(result.stdout.trim()));
-    }
-
-    None
+    user_dirs::project_root(CLAUDE_DIR)
 }
 
 /// Extract the pattern string from inside `Bash(pattern)`.

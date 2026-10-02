@@ -7,8 +7,10 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use tempfile::TempDir;
+
+mod common;
 
 const LEGACY_STOCK: &str = r#"{
   "version": 1,
@@ -87,7 +89,7 @@ impl Sandbox {
     }
 
     fn run_hook(&self, payload: &str) -> (String, String, Option<i32>) {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        let mut child = common::rtk_command()
             .args(["hook", "copilot"])
             .current_dir(&self.project)
             .env("HOME", &self.home)

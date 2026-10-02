@@ -5,6 +5,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
+
+mod common;
 fn shim_dir() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     let cargo = dir.path().join("cargo");
@@ -48,7 +50,7 @@ fn signalled_run_still_prints_captured_output() {
         std::env::var("PATH").unwrap_or_default()
     );
 
-    let child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let child = common::rtk_command()
         .args(["cargo", "clippy"])
         .env("PATH", path)
         .env("HOME", &home)
