@@ -6,24 +6,27 @@ use crate::core::utils::composer_bin_dirs;
 use regex::{Regex, RegexSet};
 use std::borrow::Cow;
 use std::cell::OnceCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::iter::once;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::LazyLock;
 
+use super::families::{self, AFTER_USER_PREFIX, LayerKind};
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 use crate::core::arg_tokenizer::{self, TokenKind as ArgKind};
 use crate::core::cmdline::bash_grammar::{ReservedWord, reserved_word};
 use crate::core::cmdline::edit::{Edit, apply_edits};
 use crate::core::cmdline::lexer::{
-    CommandStart, PipeKind, QuoteScan, Reading, SubstitutionDepth, Token, TokenKind, Word,
-    ansi_c_quote_defeats_lexer, assignment_value, content_bounds, is_ifs, read_grammar,
-    redirect_has_file_target, resolve_words, split_for_classify, split_for_permissions, split_ifs,
-    squeeze_blanks, starts_with_grammar, tokenize, tokenize_at, tokenize_trimmed, trim_ifs,
-    trim_ifs_end, trim_ifs_start, words,
+    CommandStart, CompoundSpan, Nesting, PipeKind, QuoteScan, Reading, SubstitutionDepth, Token,
+    TokenKind, Word, ansi_c_quote_defeats_lexer, assignment_value, content_bounds, is_ifs,
+    quotes_balanced, read_nesting, redirect_has_file_target, resolve_word_text, resolve_words,
+    split_for_classify, split_ifs, squeeze_blanks, starts_with_grammar, tokenize, tokenize_trimmed,
+    trim_ifs, trim_ifs_end, trim_ifs_start, words,
 };
 use crate::core::cmdline::rtk::rtk_invocation;
+use crate::core::cmdline::walker::{self, Line, Peel, Position};
+use crate::core::deferred;
 
 const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
 
@@ -189,6 +192,48 @@ pub(crate) fn classify_command_at(cmd: &str, start: CommandStart) -> Classificat
     classify_words(cmd, &tokens, &words(cmd, &tokens), start)
 }
 
+/// Classify a single (already-split) command that a walk reached at `pos`:
+/// behind an assignment, `time` is the program `time`.
+///
+/// The command is read past the reserved words bash runs a pipeline after
+/// (`time` and its options, `then`, `do`, ...) and past its assignments and
+/// `env` words, as the rewrite's walk reads them, so `time cargo test` is
+/// `cargo test`.
+fn classify_command_from(cmd: &str, mut pos: Position) -> Classification {
+    let tokens = tokenize(cmd);
+    let words = words(cmd, &tokens);
+    let line = Line {
+        text: cmd,
+        words: &words,
+        tokens: &tokens,
+    };
+    let mut at = 0;
+    while let Some(peel) = walker::peel_reserved(&line, at, pos, LayerKind::ReservedWord)
+        .or_else(|| walker::peel_assignments(&line, at, families::ALL, pos, LayerKind::Assignments))
+    {
+        at = peel.end;
+        pos = peel.next;
+    }
+    classify_command_words(cmd, &tokens, &words[at..], pos)
+}
+
+/// Where a command that the walk reads at `pos` starts.
+fn command_start(pos: Position) -> CommandStart {
+    if pos.pipeline {
+        CommandStart::Pipeline
+    } else {
+        CommandStart::PipeStage
+    }
+}
+
+/// Whether `cmd` is one of the commands the report leaves out.
+fn is_ignored(cmd: &str) -> bool {
+    IGNORED_EXACT.contains(&cmd)
+        || IGNORED_PREFIXES
+            .iter()
+            .any(|prefix| cmd.starts_with(prefix))
+}
+
 /// [`classify_command_at`] for the command made of `words`, spans of `text`,
 /// lexed as `tokens`. It runs from the first word to the end of the last, so
 /// an escaped blank that ends the last word stays in it.
@@ -219,16 +264,8 @@ fn classify_words(
         return Classification::Ignored;
     }
 
-    // Check ignored
-    for exact in IGNORED_EXACT {
-        if trimmed == *exact {
-            return Classification::Ignored;
-        }
-    }
-    for prefix in IGNORED_PREFIXES {
-        if trimmed.starts_with(prefix) {
-            return Classification::Ignored;
-        }
+    if is_ignored(trimmed) {
+        return Classification::Ignored;
     }
 
     // Strip env prefixes (env VAR=val, VAR=val); sudo is left untouched (#146)
@@ -237,6 +274,53 @@ fn classify_words(
         return Classification::Ignored;
     }
 
+    classify_clean(cmd_clean)
+}
+
+/// [`classify_command_from`] for the command made of `words`, read past its
+/// reserved words and assignments already, which stands at `pos`: the
+/// rewrite's walk has done that reading when it decides about a command.
+fn classify_command_words(
+    text: &str,
+    tokens: &[Token<'_>],
+    words: &[Word<'_>],
+    pos: Position,
+) -> Classification {
+    let (Some(first), Some(last)) = (words.first(), words.last()) else {
+        return Classification::Ignored;
+    };
+    let cmd_clean = &text[first.start..last.end];
+
+    // A command that runs rtk is not an opportunity.
+    if rtk_invocation(words).is_some() {
+        return Classification::Ignored;
+    }
+
+    // A command that starts with a reserved word the walk does not step over
+    // is grammar around commands, not a command: `rtk until …` or `rtk esac`
+    // would break the construct. Nor is one that starts with the `((` of an
+    // arithmetic command, which runs no command. `read_grammar`'s rules
+    // decide both, so `[[(-f a)]]` starts with `[[`, a quoted `"if"` is an
+    // ordinary word, `((ls) )` is two subshells, and after `|` `time` is a
+    // program. Behind an assignment no word is reserved. A command word that
+    // is an option (`time -f %e cmd` runs a command named `-f`) is none.
+    let from = tokens.partition_point(|tok| tok.offset < first.start);
+    if (pos.simple_command && starts_with_grammar(&tokens[from..], command_start(pos)))
+        || head_is_an_option(first.text)
+    {
+        return Classification::Ignored;
+    }
+
+    if is_ignored(cmd_clean) {
+        return Classification::Ignored;
+    }
+
+    classify_clean(cmd_clean)
+}
+
+/// Classifies `cmd_clean`, a command read past what precedes its program,
+/// against the rules.
+fn classify_clean(cmd_clean: &str) -> Classification {
     // Normalize absolute binary paths: /usr/bin/grep → grep (#485)
     let cmd_normalized = strip_absolute_path(cmd_clean);
     // Strip git global options: git -C /tmp status → git status (#163)
@@ -682,6 +766,33 @@ fn strip_absolute_path(cmd: &str) -> String {
 
 /// What an assignment spells to bypass the rewrite (#345).
 const RTK_DISABLED_MARKER: &str = "RTK_DISABLED=";
+/// The same assignment spelled as an append.
+const RTK_DISABLED_APPEND_MARKER: &str = "RTK_DISABLED+=";
+
+/// Whether one of `words`, a run of assignments and `env` words, assigns
+/// `RTK_DISABLED`, by that exact name: `XRTK_DISABLED=1` and
+/// `MSG='RTK_DISABLED=1'` are not the bypass.
+fn words_set_rtk_disabled(words: &[Word<'_>]) -> bool {
+    // Behind a run word (`env`) the words are that program's operands: it sets
+    // a variable named `RTK_DISABLED+`, and does not append.
+    //
+    // The words are read as written, where a wrapper's head is read with its
+    // quotes removed: `env 'RTK_DISABLED=1' git status` really sets the
+    // variable, but the walk ends at `env` (a quoted operand is no assignment
+    // word to it), the line is left as written and no warning is printed.
+    // Reading the operands unquoted would peel `env` and rewrite the command
+    // behind it, which is left as written today, so the asymmetry stays.
+    let mut shell_assignments = true;
+    for word in words {
+        if word.text.starts_with(RTK_DISABLED_MARKER)
+            || (shell_assignments && word.text.starts_with(RTK_DISABLED_APPEND_MARKER))
+        {
+            return true;
+        }
+        shell_assignments &= walker::is_assignment_word(word.text);
+    }
+    false
+}
 
 pub fn prefix_contains_rtk_disabled(prefix_part: &str) -> bool {
     prefix_part.contains(RTK_DISABLED_MARKER)
@@ -773,47 +884,51 @@ fn collapse_line_continuations(s: &str) -> Cow<'_, str> {
 /// being run, only *how* it's run — e.g. `docker exec mycontainer`,
 /// `direnv exec .`, `poetry run`, or `bundle exec`. Peeling it lets the inner
 /// command match a filter, and only that inner command is edited, so the
-/// prefix stays as written. The built-in [`ROUTABLE_WRAPPER_PREFIXES`] and
-/// [`SHELL_KEYWORD_PREFIXES`] are always applied in addition to
-/// user-configured prefixes.
+/// prefix stays as written. The built-in wrapper [`families`] are always
+/// applied in addition to user-configured prefixes.
 ///
-/// Matching is strict: a configured prefix `"foo bar"` matches a command that
-/// starts with `"foo bar "` (or strictly equals `"foo bar"`), not anything
-/// else. Matching is literal, not pattern-based: configure the exact concrete
-/// prefix you use.
+/// Matching is strict: a configured prefix `"foo bar"` matches a command whose
+/// words start with `foo bar` (or that strictly equals it), not anything else.
+/// Matching is literal, not pattern-based: configure the exact concrete prefix
+/// you use.
+///
+/// What it says on stderr comes in this order: #508's `RTK_DISABLED` warning,
+/// printed exactly when a walk of the rewrite stopped at the prefix and the
+/// command was refused, then the configuration's own warnings, then whatever
+/// the filter registry says about trust. Those are held back while the rewrite
+/// runs ([`deferred::capture`]), since the first needs the rewrite's answer.
+/// `rewrite_command_precompiled` also serves `rtk discover`, which asks about
+/// commands from months of history and prints none of it.
 pub fn rewrite_command(
     cmd: &str,
     excluded: &[String],
     transparent_prefixes: &[String],
 ) -> Option<String> {
-    // #508: tell the agent it is paying for the bypass. Raised here rather than
-    // at the segment that carries the prefix, because this is the entry point a
-    // real invocation comes through — `rewrite_command_precompiled` also serves
-    // `rtk discover`, which asks about commands from months of history and must
-    // not answer with advice about any of them.
-    if uses_rtk_disabled(cmd) {
+    let (answer, held) = deferred::capture(|| {
+        let compiled = compile_exclude_patterns(excluded);
+        let normalized_prefixes = normalize_transparent_prefixes(transparent_prefixes);
+        rewrite_line(cmd, &compiled, &normalized_prefixes)
+    });
+    if answer.disabled {
         eprintln!(
-            "[rtk] RTK_DISABLED=1 detected — skipping filter for this command. \
+            "[rtk] warning: RTK_DISABLED=1 detected — skipping filter for this command. \
              Remove RTK_DISABLED=1 to restore token savings."
         );
     }
-    let compiled = compile_exclude_patterns(excluded);
-    let normalized_prefixes = normalize_transparent_prefixes(transparent_prefixes);
-    rewrite_command_precompiled(cmd, &compiled, &normalized_prefixes)
+    for warning in held {
+        eprintln!("{warning}");
+    }
+    answer.text
 }
 
-/// Whether some command in `cmd` opens with an `RTK_DISABLED=` assignment,
-/// which the rewrite refuses on. A chain disables per command, so the prefix
-/// can sit on any of them, on any line, but only where a command starts:
-/// `split_for_permissions` finds those, so `echo "a<newline>RTK_DISABLED=1 b"`
-/// stays one command and draws no warning. The rewrite refuses a line that
-/// holds a heredoc, so a heredoc's body never counts either.
-fn uses_rtk_disabled(cmd: &str) -> bool {
-    cmd.contains(RTK_DISABLED_MARKER)
-        && !has_heredoc(cmd)
-        && split_for_permissions(cmd)
-            .iter()
-            .any(|seg| prefix_contains_rtk_disabled(split_env_prefix(seg).0))
+/// What the rewrite of a line answers: the rewritten text, if any, and
+/// whether a walk that decided about one of its commands stopped at
+/// `RTK_DISABLED=` and the command was refused (#345), which #508 warns
+/// about.
+#[derive(Default)]
+struct Answer {
+    text: Option<String>,
+    disabled: bool,
 }
 
 /// Core of `rewrite_command`, taking already-compiled exclude patterns and
@@ -830,12 +945,17 @@ pub(crate) fn rewrite_command_precompiled(
     compiled: &[ExcludePattern],
     normalized_prefixes: &[String],
 ) -> Option<String> {
+    rewrite_line(cmd, compiled, normalized_prefixes).text
+}
+
+/// The refusals every rewrite starts with, then the rewrite of the line.
+fn rewrite_line(cmd: &str, compiled: &[ExcludePattern], normalized_prefixes: &[String]) -> Answer {
     // Bash joins `\<NL>` with nothing, so `<<` or `$((` can arrive split across
     // a continuation; the space-join below would erase them (#3188 review).
     if let Cow::Owned(joined) = BASH_JOIN_RE.replace_all(cmd, "")
         && (has_heredoc(&joined) || joined.contains("$(("))
     {
-        return None;
+        return Answer::default();
     }
 
     // The pre-pass runs before the blanks at either end are left out, so
@@ -844,14 +964,83 @@ pub(crate) fn rewrite_command_precompiled(
     let normalized = collapse_line_continuations(cmd);
     let line = CompoundLex::new(&normalized);
     if line.text.is_empty() || line.has_heredoc() || line.text.contains("$((") {
-        return None;
+        return Answer::default();
     }
 
-    if line.text.contains('\n') {
-        return rewrite_multiline_block(&line, compiled, normalized_prefixes);
+    let mut rewriter = Rewriter::new(compiled, normalized_prefixes);
+    let text = if line.text.contains('\n') {
+        rewrite_multiline_block(&line, &mut rewriter)
+    } else {
+        rewrite_single(&line, &mut rewriter)
+    };
+    Answer {
+        text,
+        disabled: rewriter.disabled,
+    }
+}
+
+/// What the rewrite of one line carries from command to command: the
+/// configuration it runs under, the edits made so far, and whether a command
+/// was refused on `RTK_DISABLED=` ([`Answer::disabled`]).
+struct Rewriter<'c> {
+    excluded: &'c [ExcludePattern],
+    prefixes: &'c [String],
+    edits: Vec<Edit>,
+    disabled: bool,
+}
+
+impl<'c> Rewriter<'c> {
+    fn new(excluded: &'c [ExcludePattern], prefixes: &'c [String]) -> Self {
+        Self {
+            excluded,
+            prefixes,
+            edits: Vec::new(),
+            disabled: false,
+        }
     }
 
-    rewrite_single(&line, compiled, normalized_prefixes)
+    /// The command in `line.tokens[range]`, rewritten in `context`: its edit,
+    /// if any, is recorded, and so is a refusal on `RTK_DISABLED=`. Says
+    /// whether it was rewritten.
+    ///
+    /// A command inside a compound command whose parts are command lists, in
+    /// any of them, writes the compound's output, or reads its input: when a
+    /// pipe joins the compound to another command, the command is left as
+    /// written. `kept` says that for each token of the line
+    /// ([`kept_across_lines`]).
+    fn segment(
+        &mut self,
+        line: &Slice<'_, '_>,
+        range: Range<usize>,
+        context: RewriteContext,
+        kept: &[bool],
+    ) -> bool {
+        if kept
+            .get(range.clone())
+            .is_some_and(|kept| kept.contains(&true))
+        {
+            return false;
+        }
+        let Some(slice) = Slice::new(line.text, &line.tokens[range]) else {
+            return false;
+        };
+        let outcome = rewrite_segment(slice, self.excluded, self.prefixes, context);
+        self.disabled |= outcome.disabled;
+        match outcome.edit {
+            Some(edit) => {
+                self.edits.push(edit);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The text the recorded edits make of `text`, if they make any change.
+    fn apply(&self, text: &str) -> Option<String> {
+        (!self.edits.is_empty())
+            .then(|| apply_edits(text, &self.edits))
+            .flatten()
+    }
 }
 
 /// Whether `line` is one simple command that runs rtk: [`rtk_invocation`]
@@ -869,20 +1058,13 @@ fn already_rtk(line: &Slice<'_, '_>) -> bool {
 
 /// Rewrite one logical command line (no unquoted newlines). A line that
 /// already runs through rtk comes back as it is.
-fn rewrite_single(
-    line: &CompoundLex<'_>,
-    excluded: &[ExcludePattern],
-    transparent_prefixes: &[String],
-) -> Option<String> {
+fn rewrite_single(line: &CompoundLex<'_>, rewriter: &mut Rewriter<'_>) -> Option<String> {
     let whole = line.whole()?;
     if already_rtk(&whole) {
         return Some(line.text.to_string());
     }
-    let mut edits = Vec::new();
-    rewrite_compound(whole, excluded, transparent_prefixes, &mut edits);
-    (!edits.is_empty())
-        .then(|| apply_edits(line.text, &edits))
-        .flatten()
+    rewrite_compound(whole, rewriter);
+    rewriter.apply(line.text)
 }
 
 /// Byte offset where an unquoted `#` at the start of a word begins a trailing
@@ -951,12 +1133,6 @@ fn line_has_unbalanced_test_brackets(code: &str) -> bool {
     depth != 0
 }
 
-fn quotes_balanced(cmd: &str) -> bool {
-    let mut scan = QuoteScan::new(cmd);
-    scan.by_ref().for_each(drop);
-    scan.balanced()
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LineRole {
     Passive,
@@ -1012,6 +1188,12 @@ fn classify_line(line: &str) -> LineRole {
 /// indentation. A line ends at its `\n` only: the `\r` of a CRLF is the last
 /// byte of the line's last word, as bash reads it.
 ///
+/// A compound command that one line opens and a later one closes holds the
+/// lines between as part of its lists: when a pipe joins it to another
+/// command, before its opening word or after its closing one, the commands
+/// on all of those lines are left as written, as on one line
+/// ([`Rewriter::segment`]).
+///
 /// If any newline byte was swallowed by quote state, the block passes through
 /// untouched. The lexer has no comment awareness, so an apostrophe in a `#`
 /// comment opens quote state and hides the rest of the block — rewriting (or
@@ -1019,11 +1201,7 @@ fn classify_line(line: &str) -> LineRole {
 /// computed for. Passthrough hands the original command to the agent's native
 /// permission handling instead. Genuine quoted newlines (multi-line commit
 /// messages) also land here; forgoing that rewrite is the safe trade.
-fn rewrite_multiline_block(
-    block: &CompoundLex<'_>,
-    excluded: &[ExcludePattern],
-    transparent_prefixes: &[String],
-) -> Option<String> {
+fn rewrite_multiline_block(block: &CompoundLex<'_>, rewriter: &mut Rewriter<'_>) -> Option<String> {
     let cmd = block.text;
     let tokens = &block.tokens;
     if ansi_c_quote_defeats_lexer(cmd) {
@@ -1045,7 +1223,7 @@ fn rewrite_multiline_block(
         // is one logical command (a multi-line commit message), not a hidden
         // extra line; rewrite it whole, as develop always did (#3319 fuzz).
         if newlines.is_empty() && quotes_balanced(cmd) {
-            return rewrite_single(block, excluded, transparent_prefixes);
+            return rewrite_single(block, rewriter);
         }
         return None;
     }
@@ -1072,7 +1250,9 @@ fn rewrite_multiline_block(
         return None;
     }
 
-    let mut edits = Vec::new();
+    // Each unit, a line with the lines its operators join to it, is read
+    // first: a compound command it opens or closes may span others.
+    let mut units: Vec<(Range<usize>, LineRead)> = Vec::new();
     let mut i = 0;
     while i < lines.len() {
         if roles[i] == LineRole::Passive {
@@ -1097,17 +1277,66 @@ fn rewrite_multiline_block(
             end = next;
         }
 
-        if let Some(unit) = Slice::new(cmd, &tokens[lines[i].start..lines[end].end])
-            && !already_rtk(&unit)
-        {
-            rewrite_compound(unit, excluded, transparent_prefixes, &mut edits);
+        let range = lines[i].start..lines[end].end;
+        if let Some((first, last)) = content_bounds(&tokens[range.clone()]) {
+            let unit = range.start + first..range.start + last + 1;
+            if let Some(slice) = Slice::new(cmd, &tokens[unit.clone()])
+                && !already_rtk(&slice)
+            {
+                units.push((unit, LineRead::new(&slice)));
+            }
         }
         i = end + 1;
     }
 
-    (!edits.is_empty())
-        .then(|| apply_edits(cmd, &edits))
-        .flatten()
+    let kept = kept_across_lines(tokens.len(), &units);
+    for (unit, read) in &units {
+        if let Some(slice) = Slice::new(cmd, &tokens[unit.clone()]) {
+            rewrite_read(slice, read, &kept[unit.clone()], rewriter);
+        }
+    }
+    rewriter.apply(cmd)
+}
+
+/// For each of the `len` tokens of a line or a block, whether it sits in a
+/// compound command that is a pipeline's stage, from the opening word to the
+/// closing one, given each of its `units` (their token ranges; a line is one)
+/// and how it reads: such a compound writes its output into a pipe, or reads
+/// its input from one, and a command in any of its lists (a `case` arm's
+/// included) is left as written. A pipeline inside one of its lists is no
+/// reason: it is read like any other. A compound command a unit leaves open
+/// is closed by the first unit after it that closes one it did not open, as
+/// bash pairs them; one left open at the end, or closed with none open,
+/// counts as joined by a pipe when any unit holds one.
+fn kept_across_lines(len: usize, units: &[(Range<usize>, LineRead)]) -> Vec<bool> {
+    let piped = units.iter().any(|(_, read)| read.piped);
+    let mut kept = vec![false; len];
+    let mut mark = |from: usize, to: usize, joined: bool| {
+        if joined {
+            kept[from..to].iter_mut().for_each(|k| *k = true);
+        }
+    };
+    // The compound commands left open so far: where each opens, in the
+    // block, and whether a pipe comes before it.
+    let mut open: Vec<(usize, bool)> = Vec::new();
+    for (unit, read) in units {
+        let at = |i: usize| unit.start + i;
+        for span in &read.compounds {
+            match (span.open, span.close) {
+                (Some(o), Some(c)) => mark(at(o), at(c), span.piped),
+                (None, Some(c)) => match open.pop() {
+                    Some((o, before)) => mark(o, at(c), before || span.piped),
+                    None => mark(0, at(c), span.piped || piped),
+                },
+                (Some(o), None) => open.push((at(o), span.piped)),
+                (None, None) => {}
+            }
+        }
+    }
+    for (o, before) in open {
+        mark(o, len, before || piped);
+    }
+    kept
 }
 
 /// Where a pipeline's stages are, as indices into its line's tokens.
@@ -1205,26 +1434,29 @@ fn rewrite_pipeline(
     segment_start: usize,
     first_pipe: usize,
     analysis: PipelineAnalysis,
-    excluded: &[ExcludePattern],
-    transparent_prefixes: &[String],
-) -> Option<Edit> {
-    let stage = |range: Range<usize>, context: RewriteContext| {
-        Slice::new(line.text, &line.tokens[range])
-            .and_then(|stage| rewrite_segment(stage, excluded, transparent_prefixes, context))
-    };
-    analysis
-        .final_stage_start
-        .and_then(|start| stage(start..analysis.end, RewriteContext::PipelineFinal))
-        .or_else(|| {
-            analysis
-                .all_consumers_safe
-                .then(|| stage(segment_start..first_pipe, RewriteContext::PipelineProducer))
-                .flatten()
-        })
+    kept: &[bool],
+    rewriter: &mut Rewriter<'_>,
+) {
+    let rewritten = analysis.final_stage_start.is_some_and(|start| {
+        rewriter.segment(
+            line,
+            start..analysis.end,
+            RewriteContext::PipelineFinal,
+            kept,
+        )
+    });
+    if !rewritten && analysis.all_consumers_safe {
+        rewriter.segment(
+            line,
+            segment_start..first_pipe,
+            RewriteContext::PipelineProducer,
+            kept,
+        );
+    }
 }
 
-/// Rewrites each command of `line`, pushing one edit per rewritten command
-/// onto `edits`. Third of three compound-command segmenters — see the
+/// Rewrites each command of `line`, recording one edit per rewritten command
+/// in `rewriter`. Third of three compound-command segmenters — see the
 /// comparison table on [`split_for_permissions`]. Less conservative than that
 /// gate: a redirect stays part of its command rather than truncating it. It
 /// also reads bash's grammar through [`read_grammar`]: a `[[ … ]]` expression
@@ -1235,41 +1467,85 @@ fn rewrite_pipeline(
 /// The blanks and operators between two commands belong to no edit, so they
 /// are emitted as written: an operator's own spacing is nobody's to normalise,
 /// which is what keeps `echo 1;;esac` and `a  &&  b` intact.
-fn rewrite_compound(
-    line: Slice<'_, '_>,
-    excluded: &[ExcludePattern],
-    transparent_prefixes: &[String],
-    edits: &mut Vec<Edit>,
-) {
+///
+/// A word behind a subshell's closing `)` in the same simple command, glued
+/// to it or not, is not a command bash reads there (a subshell is followed by
+/// a separator or a redirect), and putting `rtk` in front of it would only
+/// move the error: that command is left as written. A `case` pattern's `)`
+/// is not one, since an arm's command may follow it directly.
+///
+/// A command inside a compound command that a pipe joins to another
+/// command is left as written ([`Rewriter::segment`]).
+///
+/// [`read_grammar`]: crate::core::cmdline::lexer::read_grammar
+fn rewrite_compound(line: Slice<'_, '_>, rewriter: &mut Rewriter<'_>) {
+    let len = line.tokens.len();
+    let units = [(0..len, LineRead::new(&line))];
+    let kept = kept_across_lines(len, &units);
+    rewrite_read(line, &units[0].1, &kept, rewriter);
+}
+
+/// A line of commands as the rewrite reads it once: how bash reads each
+/// token, its compound commands whose parts are command lists
+/// ([`read_nesting`]), and whether it holds a pipe.
+struct LineRead {
+    readings: Vec<Reading>,
+    compounds: Vec<CompoundSpan>,
+    piped: bool,
+}
+
+impl LineRead {
+    fn new(line: &Slice<'_, '_>) -> Self {
+        let Nesting {
+            readings,
+            compounds,
+        } = read_nesting(line.text, line.tokens);
+        // A `case` pattern's `|` and a `[[ ]]` regex's belong to no pipeline.
+        let piped = line.tokens.iter().zip(&readings).any(|(tok, reading)| {
+            matches!(reading, Reading::Commands | Reading::WordText)
+                && matches!(tok.kind, TokenKind::Pipe(_))
+        });
+        Self {
+            readings,
+            compounds,
+            piped,
+        }
+    }
+
+    /// Whether the rewrite leaves the whole line as written: one that pipes
+    /// and holds a bracket. A `case` pattern's `|` and brackets, and a
+    /// `[[ ]]` regex's, belong to no pipeline. Word text's count here, as
+    /// they do for the permission gate's segmenter, so a line holding them
+    /// next to a pipe is left as written.
+    fn left_whole(&self, tokens: &[Token<'_>]) -> bool {
+        self.piped
+            && tokens
+                .iter()
+                .zip(&self.readings)
+                .filter(|(_, reading)| matches!(reading, Reading::Commands | Reading::WordText))
+                .any(|(tok, _)| {
+                    tok.kind == TokenKind::Shellism && matches!(tok.value, "(" | ")" | "{" | "}")
+                })
+    }
+}
+
+/// [`rewrite_compound`] for a line already read, with the tokens where a
+/// command is left as written.
+fn rewrite_read(line: Slice<'_, '_>, read: &LineRead, kept: &[bool], rewriter: &mut Rewriter<'_>) {
     let tokens = line.tokens;
-    let readings = read_grammar(line.text, tokens);
-    // A `case` pattern's `|` and brackets, and a `[[ ]]` regex's, belong to no
-    // pipeline. Word text's count here, as they do for the permission gate's
-    // segmenter, so a line holding them next to a pipe is left as written.
-    let commands = || {
-        tokens
-            .iter()
-            .zip(&readings)
-            .filter(|(_, reading)| matches!(reading, Reading::Commands | Reading::WordText))
-            .map(|(tok, _)| tok)
-    };
-    let has_pipe = commands().any(|tok| matches!(tok.kind, TokenKind::Pipe(_)));
-    let has_opaque_grouping = commands()
-        .any(|tok| tok.kind == TokenKind::Shellism && matches!(tok.value, "(" | ")" | "{" | "}"));
-    if has_pipe && has_opaque_grouping {
+    let readings = &read.readings;
+    if read.left_whole(tokens) {
         return;
     }
 
-    let segment = |range: Range<usize>, edits: &mut Vec<Edit>| {
-        edits.extend(Slice::new(line.text, &tokens[range]).and_then(|segment| {
-            rewrite_segment(
-                segment,
-                excluded,
-                transparent_prefixes,
-                RewriteContext::Normal,
-            )
-        }));
-    };
+    // Where the last subshell's closing `)` ended, as a token index.
+    let mut subshell_end = None;
+    let segment =
+        |range: Range<usize>, subshell_end: Option<usize>, rewriter: &mut Rewriter<'_>| {
+            if subshell_end != Some(range.start) {
+                rewriter.segment(&line, range, RewriteContext::Normal, kept);
+            }
+        };
     let mut seg_start = 0;
     let mut substitution = SubstitutionDepth::default();
 
@@ -1283,7 +1559,7 @@ fn rewrite_compound(
             // A `case` pattern runs nothing, so it belongs to no command: what
             // precedes it ends, and the arm's commands start after its `)`.
             Reading::Pattern => {
-                segment(seg_start..i, edits);
+                segment(seg_start..i, subshell_end, rewriter);
                 seg_start = i + 1;
                 continue;
             }
@@ -1304,15 +1580,8 @@ fn rewrite_compound(
         let boundary = match tok.kind {
             TokenKind::Operator => true,
             TokenKind::Pipe(_) => {
-                let analysis = analyze_pipeline(&line, &readings, seg_start, i);
-                edits.extend(rewrite_pipeline(
-                    &line,
-                    seg_start,
-                    i,
-                    analysis,
-                    excluded,
-                    transparent_prefixes,
-                ));
+                let analysis = analyze_pipeline(&line, readings, seg_start, i);
+                rewrite_pipeline(&line, seg_start, i, analysis, kept, rewriter);
                 match analysis.next_clause {
                     Some(next_clause) => {
                         seg_start = next_clause;
@@ -1325,12 +1594,15 @@ fn rewrite_compound(
             _ => false,
         };
         if boundary {
-            segment(seg_start..i, edits);
+            segment(seg_start..i, subshell_end, rewriter);
             seg_start = i + 1;
+            if tok.value == ")" {
+                subshell_end = Some(seg_start);
+            }
         }
     }
 
-    segment(seg_start..tokens.len(), edits);
+    segment(seg_start..tokens.len(), subshell_end, rewriter);
 }
 
 fn rewrite_line_range(cmd: &str) -> Option<String> {
@@ -1370,66 +1642,6 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
     }
     None
 }
-
-/// Transparent wrappers that RULES can also match as a whole string, so an
-/// unfiltered inner command falls through instead of dropping the rewrite.
-const ROUTABLE_WRAPPER_PREFIXES: &[&str] = &["uv run"];
-
-/// Shell keywords that wrap a command without changing which one runs. They are
-/// not spawnable, so they must never fall through: `rtk exec foo` cannot run.
-const SHELL_KEYWORD_PREFIXES: &[&str] = &["noglob", "command", "builtin", "exec", "nocorrect"];
-
-struct ProcessWrapper {
-    name: &'static str,
-    value_opts: &'static [&'static str],
-    flag_opts: &'static [&'static str],
-    attached_opts: &'static [&'static str],
-    positionals: usize,
-    numeric_opts: bool,
-}
-
-const PROCESS_WRAPPERS: &[ProcessWrapper] = &[
-    ProcessWrapper {
-        name: "timeout",
-        value_opts: &["-s", "-k", "--signal", "--kill-after"],
-        flag_opts: &["--preserve-status", "--foreground", "-v", "--verbose"],
-        attached_opts: &["-s", "-k"],
-        positionals: 1,
-        numeric_opts: false,
-    },
-    ProcessWrapper {
-        name: "time",
-        value_opts: &["-f", "-o", "--format", "--output"],
-        flag_opts: &[
-            "-p",
-            "-a",
-            "-v",
-            "--append",
-            "--verbose",
-            "--portability",
-            "--quiet",
-        ],
-        attached_opts: &["-f", "-o"],
-        positionals: 0,
-        numeric_opts: false,
-    },
-    ProcessWrapper {
-        name: "nice",
-        value_opts: &["-n", "--adjustment"],
-        flag_opts: &[],
-        attached_opts: &["-n"],
-        positionals: 0,
-        numeric_opts: true,
-    },
-    ProcessWrapper {
-        name: "nohup",
-        value_opts: &[],
-        flag_opts: &[],
-        attached_opts: &[],
-        positionals: 0,
-        numeric_opts: false,
-    },
-];
 
 struct SafePipeConsumer {
     name: &'static str,
@@ -1483,15 +1695,9 @@ fn is_safe_pipe_consumer(stage: &Slice<'_, '_>) -> bool {
     !words.any(|arg| arg_matches_unsafe_flag(consumer, arg))
 }
 
-/// Every built-in transparent wrapper, paired with whether it may fall through.
-/// Derived from the two lists above so they cannot drift apart.
-fn builtin_transparent_prefixes() -> impl Iterator<Item = (&'static str, bool)> {
-    ROUTABLE_WRAPPER_PREFIXES
-        .iter()
-        .map(|prefix| (*prefix, true))
-        .chain(SHELL_KEYWORD_PREFIXES.iter().map(|prefix| (*prefix, false)))
-}
-
+/// How many layers a walk unwraps before giving up. A command nesting this
+/// many transparent prefixes is either pathological or an attempt to make the
+/// rewriter spend unbounded time on it.
 const MAX_PREFIX_DEPTH: usize = 10;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1499,6 +1705,19 @@ enum RewriteContext {
     Normal,
     PipelineFinal,
     PipelineProducer,
+}
+
+impl RewriteContext {
+    /// Where a command rewritten in this context starts. Every stage of a
+    /// pipeline starts its own simple command, but only its first is where a
+    /// pipeline starts, which is where bash reads `time` as its reserved
+    /// word.
+    fn position(self) -> Position {
+        match self {
+            RewriteContext::PipelineFinal => Position::STAGE,
+            RewriteContext::Normal | RewriteContext::PipelineProducer => Position::START,
+        }
+    }
 }
 
 /// Checks whether grep or rg reads patterns from a file, given its argv.
@@ -1547,10 +1766,10 @@ pub(crate) fn compile_exclude_patterns(patterns: &[String]) -> Vec<ExcludePatter
         .filter_map(|pattern| {
             let trimmed = pattern.trim();
             if trimmed.is_empty() || trimmed == "^" {
-                eprintln!(
-                    "rtk: warning: ignoring trivial exclude_commands pattern '{}'",
+                deferred::warn(format_args!(
+                    "[rtk] warning: ignoring trivial exclude_commands pattern '{}'",
                     pattern
-                );
+                ));
                 return None;
             }
             let anchored = if trimmed.starts_with('^') {
@@ -1561,10 +1780,10 @@ pub(crate) fn compile_exclude_patterns(patterns: &[String]) -> Vec<ExcludePatter
             Some(match Regex::new(&anchored) {
                 Ok(re) => ExcludePattern::Regex(re),
                 Err(e) => {
-                    eprintln!(
-                        "rtk: warning: invalid exclude_commands pattern '{}': {}",
+                    deferred::warn(format_args!(
+                        "[rtk] warning: invalid exclude_commands pattern '{}': {}",
                         pattern, e
-                    );
+                    ));
                     ExcludePattern::Prefix(trimmed.to_string())
                 }
             })
@@ -1572,19 +1791,7 @@ pub(crate) fn compile_exclude_patterns(patterns: &[String]) -> Vec<ExcludePatter
         .collect()
 }
 
-pub(crate) fn normalize_transparent_prefixes(prefixes: &[String]) -> Vec<String> {
-    let mut normalized: Vec<String> = prefixes
-        .iter()
-        .map(|prefix| prefix.trim())
-        .filter(|prefix| !prefix.is_empty())
-        .map(str::to_string)
-        .collect();
-
-    // Match longer wrappers first so `docker exec mycontainer` wins over `docker`.
-    normalized.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
-    normalized.dedup();
-    normalized
-}
+pub(crate) use super::families::user::normalize_transparent_prefixes;
 
 fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
     excluded.iter().any(|pat| match pat {
@@ -1693,14 +1900,6 @@ impl<'a, 't> Slice<'a, 't> {
     }
 }
 
-/// A command and its words, found once for every step that reads them.
-#[derive(Clone, Copy)]
-struct Command<'a, 't> {
-    slice: Slice<'a, 't>,
-    /// The words `slice`'s tokens form.
-    words: &'t [Word<'a>],
-}
-
 /// The words of the tokens before `end`, which falls on a token boundary,
 /// given the words of a command that runs on past it: a word the boundary
 /// cuts, as in `status>out`, ends there.
@@ -1716,384 +1915,690 @@ fn words_before<'a>(text: &'a str, words: &[Word<'a>], end: usize) -> Vec<Word<'
         .collect()
 }
 
-/// The tokens and words of `cmd` from `at` on. A token starts where the lexer
-/// holds no quote, escape or word open, so from one that starts at `at`,
-/// `cmd`'s own tokens are what a fresh lex of the rest would give, and so are
-/// its words from a word that starts there. Anywhere else the rest is lexed
-/// afresh ([`relex`]).
-fn lex_from<'a, 't>(
-    cmd: &Command<'a, 't>,
-    at: usize,
-) -> (Cow<'t, [Token<'a>]>, Cow<'t, [Word<'a>]>) {
-    let (text, tokens) = (cmd.slice.text, cmd.slice.tokens);
-    let lex = match tokens.binary_search_by_key(&at, |tok| tok.offset) {
-        Ok(i) => Cow::Borrowed(&tokens[i..]),
-        Err(_) => Cow::Owned(relex(text, at, cmd.slice.end())),
-    };
-    let found = match (&lex, cmd.words.binary_search_by_key(&at, |word| word.start)) {
-        (Cow::Borrowed(_), Ok(i)) => Cow::Borrowed(&cmd.words[i..]),
-        _ => Cow::Owned(words(text, &lex)),
-    };
-    (lex, found)
-}
-
-/// A fresh lex of `text[from..to]`, its offsets into `text`.
-fn relex(text: &str, from: usize, to: usize) -> Vec<Token<'_>> {
-    tokenize_at(&text[from..to], from)
-}
-
-/// One transparent layer a walk peeled off the front of a command.
+/// One transparent layer a walk peeled off the front of a command: the words
+/// it covers in the command's own lex, its kind, and where the walk stood
+/// behind it. Everything a rewrite does with a layer is a span of the
+/// command's text.
 #[derive(Debug, Clone, Copy)]
 struct Layer {
-    /// Where the layer's first word starts.
-    start: usize,
+    /// Index of the layer's first word.
+    word: usize,
+    /// Index of the first word after it, where what it wraps starts.
+    end: usize,
     kind: LayerKind,
+    /// Where the walk stands behind this layer.
+    next: Position,
 }
 
+/// Why a walk ended where it did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LayerKind {
-    /// A run of `NAME=value` assignments and `env` words.
-    Env,
-    /// A shell keyword that runs its argument as the command it names
-    /// ([`SHELL_KEYWORD_PREFIXES`]).
-    ShellKeyword,
-    /// A wrapper `RULES` also match whole ([`ROUTABLE_WRAPPER_PREFIXES`]).
-    /// `inner` is where the command it wraps starts, past any assignments in
-    /// front of it; the command runs to the end of the segment, and that span
-    /// is what its fall-through checks against `exclude_commands`.
-    RoutableWrapper { inner: usize },
-    /// A process wrapper ([`PROCESS_WRAPPERS`]).
-    ProcessWrapper,
-    /// One of the user's `transparent_prefixes`.
-    UserPrefix,
+enum Stop {
+    /// At the command word, or past every word.
+    Command,
+    /// At an assignment run that sets `RTK_DISABLED` and has a command behind
+    /// it: the rewrite is refused (#345).
+    Disabled,
+    /// At a layer with nothing after it.
+    Nothing,
+    /// [`MAX_PREFIX_DEPTH`] layers deep, with the command unseen.
+    Depth,
 }
 
-/// What peeling at one position found.
-enum Peel {
-    /// A layer, and where the command it wraps starts.
-    Layer { kind: LayerKind, next: usize },
-    /// A layer after which there is nothing to decide about.
-    Stop,
-}
-
-/// A command's transparent layers, peeled left to right, and the command
-/// under them.
-struct Walk<'a, 't> {
-    text: &'a str,
+/// A command's transparent layers, peeled left to right in one pass over the
+/// words and tokens of its one lex, and the word the command under them
+/// starts at (it runs to the end of the line). `command` is `None` when the
+/// walk stopped with nothing to decide about; a `Some` past the last word
+/// means the layers took every word.
+struct Walk {
     layers: Vec<Layer>,
-    /// The tokens the walk read the command from, and the words they form.
-    lex: Cow<'t, [Token<'a>]>,
-    words: Cow<'t, [Word<'a>]>,
-    /// Where in `lex` and in `words` the command under the layers starts.
-    /// `None` when the walk stopped with nothing to decide about: at an
-    /// `RTK_DISABLED=` assignment, a layer with nothing after it, or
-    /// [`MAX_PREFIX_DEPTH`] layers.
-    command: Option<(usize, usize)>,
+    command: Option<usize>,
+    stop: Stop,
 }
 
-impl<'a, 't> Walk<'a, 't> {
-    /// Peels the layers off the command `lex` opens with, whose words are
-    /// `words`, `depth` layers deep already. At each position an assignment
-    /// run comes first, then a built-in wrapper, a process wrapper and a user
-    /// prefix. When `builtins_first` is false, the first position skips the
-    /// built-in wrappers: that is how a routable wrapper's own text is read
-    /// again.
+impl Walk {
+    /// Peels `line`'s layers from word `from`, each read at the position the
+    /// one before it left ([`Position`]), starting at `pos`. Stops at a
+    /// command word, at a layer that [`ends_the_walk`], or at
+    /// [`MAX_PREFIX_DEPTH`] layers counted from `depth`.
     fn run(
-        text: &'a str,
-        (mut lex, mut words): (Cow<'t, [Token<'a>]>, Cow<'t, [Word<'a>]>),
+        line: &Line<'_>,
+        prefixes: &[String],
+        from: usize,
+        mut pos: Position,
         mut depth: usize,
-        builtins_first: bool,
-        transparent_prefixes: &[String],
     ) -> Self {
         let mut layers = Vec::new();
-        // Where the command being peeled starts, in `lex` and in `words`.
-        let (mut at, mut word_at) = (0, 0);
-        let command = loop {
-            if depth >= MAX_PREFIX_DEPTH {
-                break None;
-            }
-            let Some(slice) = Slice::new(text, &lex[at..]) else {
-                break None;
-            };
-            let cur = Command {
-                slice,
-                words: &words[word_at..],
-            };
-            let builtins = builtins_first || !layers.is_empty();
-            let peeled = env_peel(&cur)
-                .or_else(|| builtins.then(|| builtin_peel(&cur)).flatten())
-                .or_else(|| process_wrapper_peel(&cur))
-                .or_else(|| user_prefix_peel(&cur, transparent_prefixes));
-            let (mut kind, next) = match peeled {
-                None => break Some((at, word_at)),
-                Some(Peel::Stop) => break None,
-                Some(Peel::Layer { kind, next }) => (kind, next),
-            };
-            let (start, end) = (slice.start(), slice.end());
-            match lex[at..].binary_search_by_key(&next, |tok| tok.offset) {
-                Ok(i) => {
-                    at += i;
-                    match words[word_at..].binary_search_by_key(&next, |word| word.start) {
-                        Ok(j) => word_at += j,
-                        Err(_) => {
-                            words = Cow::Owned(self::words(text, &lex[at..]));
-                            word_at = 0;
-                        }
-                    }
-                }
-                // Only a prefix matched as text can end inside a token, as
-                // `x 'a` ends inside the quote it opens. What follows is read
-                // from a fresh lex of its own text.
-                Err(_) => {
-                    lex = Cow::Owned(relex(text, next, end));
-                    words = Cow::Owned(self::words(text, &lex));
-                    (at, word_at) = (0, 0);
-                }
-            }
-            if let LayerKind::RoutableWrapper { inner } = &mut kind
-                && let Some(past_assignments) = env_run_end(&words[word_at..])
-            {
-                *inner = past_assignments;
-            }
-            layers.push(Layer { start, kind });
-            depth += 1;
-        };
-        Self {
-            text,
+        let mut at = from;
+        let stopped = |layers, stop| Walk {
             layers,
-            lex,
-            words,
-            command,
-        }
-    }
-
-    fn command(&self) -> Option<Command<'a, '_>> {
-        let (at, word_at) = self.command?;
-        Some(Command {
-            slice: Slice::new(self.text, &self.lex[at..])?,
-            words: &self.words[word_at..],
-        })
-    }
-}
-
-/// A run of `env` and `NAME=value` words.
-fn env_peel(cur: &Command<'_, '_>) -> Option<Peel> {
-    let end = env_run_end(cur.words)?;
-    // #345: RTK_DISABLED=1 in env prefix → skip rewrite entirely. The warning
-    // that goes with it (#508) is raised by `rewrite_command`, where someone is
-    // actually running the command.
-    let disabled = prefix_contains_rtk_disabled(&cur.slice.text[cur.slice.start()..end]);
-    Some(if disabled || end == cur.slice.end() {
-        Peel::Stop
-    } else {
-        Peel::Layer {
-            kind: LayerKind::Env,
-            next: end,
-        }
-    })
-}
-
-/// `prefix`, matched as text at the start of `cur` ([`strip_word_prefix`]).
-fn text_peel(
-    cur: &Command<'_, '_>,
-    prefix: &str,
-    kind: impl FnOnce(usize) -> LayerKind,
-) -> Option<Peel> {
-    let rest = strip_word_prefix(cur.slice.as_str(), prefix)?;
-    if rest.is_empty() {
-        return Some(Peel::Stop);
-    }
-    let next = cur.slice.end() - rest.len();
-    Some(Peel::Layer {
-        kind: kind(next),
-        next,
-    })
-}
-
-fn builtin_peel(cur: &Command<'_, '_>) -> Option<Peel> {
-    builtin_transparent_prefixes().find_map(|(prefix, routable)| {
-        text_peel(cur, prefix, |next| {
-            if routable {
-                LayerKind::RoutableWrapper { inner: next }
-            } else {
-                LayerKind::ShellKeyword
+            command: None,
+            stop,
+        };
+        loop {
+            if depth >= MAX_PREFIX_DEPTH {
+                return stopped(layers, Stop::Depth);
             }
-        })
-    })
+            let Some(peel) = peel_at(line, at, pos, prefixes) else {
+                break;
+            };
+            let layer = Layer {
+                word: at,
+                end: peel.end,
+                kind: peel.kind,
+                next: peel.next,
+            };
+            if let Some(stop) = ends_the_walk(line, &layer) {
+                return stopped(layers, stop);
+            }
+            layers.push(layer);
+            at = peel.end;
+            pos = peel.next;
+            depth += 1;
+        }
+        Walk {
+            layers,
+            command: Some(at),
+            stop: Stop::Command,
+        }
+    }
 }
 
-/// #2375
-fn process_wrapper_peel(cur: &Command<'_, '_>) -> Option<Peel> {
-    process_wrapper_inner(&cur.slice).map(|next| Peel::Layer {
-        kind: LayerKind::ProcessWrapper,
-        next,
-    })
+/// The layer `at` opens, if any: an assignment run, a reserved word bash runs
+/// a pipeline after, a keyword, a wrapper or a user-configured prefix, tried
+/// in that order. The built-in peel wins whenever it succeeds, and an entry
+/// of `transparent_prefixes` that starts with a reserved word is refused where
+/// the configuration is read ([`families::user`]), so a reserved word is never
+/// a user prefix's to claim.
+///
+/// A wrapper with a literal `rtk` word among its own flags and operands
+/// (#2375) is no layer: `/usr/bin/time -o rtk cmd` names its output file `rtk`. Words
+/// are read, not the raw text, so a quoted value that holds ` rtk `
+/// (`/usr/bin/time -f "%e rtk %U" cmd`) is one word and does not count. A
+/// wrapped command that runs rtk is left alone by [`decide`], which keeps it.
+fn peel_at(
+    line: &Line<'_>,
+    at: usize,
+    pos: Position,
+    prefixes: &[String],
+) -> Option<Peel<LayerKind>> {
+    walker::peel_tiers(
+        line,
+        at,
+        families::ALL,
+        prefixes,
+        pos,
+        (
+            LayerKind::Assignments,
+            LayerKind::ReservedWord,
+            LayerKind::UserPrefix,
+        ),
+        AFTER_USER_PREFIX,
+    )
 }
 
-/// User-configured wrapper prefixes (e.g. `docker exec mycontainer`). These
-/// never fall through: an unmatched inner command drops the rewrite.
-fn user_prefix_peel(cur: &Command<'_, '_>, transparent_prefixes: &[String]) -> Option<Peel> {
-    transparent_prefixes
-        .iter()
-        .find_map(|prefix| text_peel(cur, prefix, |_| LayerKind::UserPrefix))
+/// Whether `layer` ends the walk instead of becoming one of its layers: a
+/// layer with nothing after it, which is no more the command than a wrapper
+/// of one, or an assignment run that sets `RTK_DISABLED` (#345). An
+/// assignment run with no command behind it (`RTK_DISABLED=1; git status`)
+/// is a statement of its own, and disables nothing.
+fn ends_the_walk(line: &Line<'_>, layer: &Layer) -> Option<Stop> {
+    if layer.end >= line.words.len() {
+        return Some(Stop::Nothing);
+    }
+    (layer.kind == LayerKind::Assignments
+        && words_set_rtk_disabled(&line.words[layer.word..layer.end]))
+    .then_some(Stop::Disabled)
 }
 
 /// What deciding about one command found.
+#[derive(Debug, PartialEq, Eq)]
 enum Decision {
     /// The command already runs through rtk.
     Keep,
     Rewrite(Edit),
+    /// The command is one `exclude_commands` names, as written or as the tool
+    /// a rule routes it to.
+    Excluded,
 }
 
-/// The edit that rewrites the command `cmd` in `context`; `None` when it
-/// stays as written.
+/// The rewrite of one command: its edit, if any, and whether a walk stopped
+/// at `RTK_DISABLED=` without anything else deciding about the command.
+#[derive(Debug, Default)]
+struct Outcome {
+    edit: Option<Edit>,
+    disabled: bool,
+    /// The walks the rewrite ran (test builds only).
+    #[cfg(test)]
+    walks: usize,
+}
+
+/// The rewrite of the command `cmd` in `context`: its edit, if any.
+///
+/// The command's layers are walked once ([`Walk::run`]) over one [`Line`],
+/// the command under them is decided about, and when that decides nothing the
+/// layers are read again ([`Search::fall_back`]). Every rewrite is an edit
+/// against the text the command's tokens index.
 fn rewrite_segment(
     cmd: Slice<'_, '_>,
     excluded: &[ExcludePattern],
     transparent_prefixes: &[String],
     context: RewriteContext,
-) -> Option<Edit> {
-    rewrite_segment_counted(cmd, excluded, transparent_prefixes, context).0
-}
-
-/// [`rewrite_segment`]'s edit, and the number of walks it ran: one, plus one
-/// per retry.
-fn rewrite_segment_counted(
-    cmd: Slice<'_, '_>,
-    excluded: &[ExcludePattern],
-    transparent_prefixes: &[String],
-    context: RewriteContext,
-) -> (Option<Edit>, usize) {
+) -> Outcome {
     let words = cmd.words();
-    let cmd = Command {
-        slice: cmd,
+    let line = Line {
+        text: cmd.text,
         words: &words,
+        tokens: cmd.tokens,
     };
-    let walk = Walk::run(
-        cmd.slice.text,
-        (Cow::Borrowed(cmd.slice.tokens), Cow::Borrowed(cmd.words)),
-        0,
-        true,
-        transparent_prefixes,
-    );
+    let walk = Walk::run(&line, transparent_prefixes, 0, context.position(), 0);
     let decided = walk
-        .command()
-        .and_then(|inner| decide(inner, excluded, context));
-    let (decision, retries) = match decided {
-        Some(decision) => (Some(decision), 0),
-        None => fall_back(&cmd, walk.layers, excluded, transparent_prefixes, context),
-    };
-    let edit = match decision {
+        .command
+        .and_then(|at| decide(&line, at, excluded, context));
+    let edit = |decision| match decision {
         Some(Decision::Rewrite(edit)) => Some(edit),
-        Some(Decision::Keep) | None => None,
+        _ => None,
     };
-    (edit, 1 + retries)
+    if let Some(decision @ (Decision::Rewrite(_) | Decision::Keep)) = decided {
+        return Outcome {
+            edit: edit(Some(decision)),
+            disabled: false,
+            #[cfg(test)]
+            walks: 1,
+        };
+    }
+    let mut search = Search {
+        line: &line,
+        excluded,
+        prefixes: transparent_prefixes,
+        context,
+        visited: HashSet::new(),
+        refusals: HashMap::new(),
+        disabled: false,
+        #[cfg(test)]
+        walks: 1,
+    };
+    let stopped = walk.stop == Stop::Disabled;
+    let decision = search.fall_back(walk.layers);
+    // A fall-through that wins draws no warning.
+    let disabled = decision.is_none() && (stopped || search.disabled);
+    Outcome {
+        edit: edit(decision),
+        disabled,
+        #[cfg(test)]
+        walks: search.walks,
+    }
 }
 
-/// A walk whose layers are left to retry, innermost first:
-/// `layers[..upto]` are left, and `layers[i]` sits `depth + i` layers deep.
-struct Retry {
+/// What a search for a fall-through concluded about what a routable wrapper
+/// wraps, from the weakest answer to the strongest: when several walks
+/// answer, the strongest holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Refusal {
+    Allowed,
+    /// The walk stopped at an option under `exclude_commands`, which leaves
+    /// the command behind it unread: the wrapper is not matched whole, and a
+    /// user prefix that starts where it does is tried.
+    Unread,
+    /// Refused: something wrapped is excluded, or out of sight.
+    Refused,
+    /// Refused because a walk stopped at `RTK_DISABLED=`.
+    Disabled,
+}
+
+/// One walk still to search for a fall-through: its layers, `layers[..upto]`
+/// left to try, innermost first, and the depth `layers[0]` was peeled at, so
+/// that `layers[i]` sits `depth + i` layers deep.
+struct Frame {
     layers: Vec<Layer>,
     depth: usize,
     upto: usize,
 }
 
-/// #2768: when nothing is decided about the command under a routable wrapper
-/// (`uv run`), the wrapper's own text is read again, with the built-in wrappers
-/// skipped at its start: a user prefix that begins with the wrapper's words
-/// can match there, and otherwise the wrapper is itself the command. That
-/// reading is a walk of its own whose routable layers get the same retry, so
-/// every routable layer of every walk is a candidate, innermost first, and the
-/// first decision found wins.
-///
-/// A walk from a position depends on nothing but that position and its
-/// depth, so a pair already tried is skipped, which keeps the search over a
-/// `uv run uv run … uv run` chain linear in its depth.
-///
-/// Returns the decision, if any, and the number of walks run.
-fn fall_back(
-    cmd: &Command<'_, '_>,
-    layers: Vec<Layer>,
-    excluded: &[ExcludePattern],
-    transparent_prefixes: &[String],
+/// The state of one search for a fall-through over the layers of one command.
+struct Search<'l, 'a> {
+    line: &'l Line<'a>,
+    excluded: &'l [ExcludePattern],
+    prefixes: &'l [String],
     context: RewriteContext,
-) -> (Option<Decision>, usize) {
-    if !layers
-        .iter()
-        .any(|layer| matches!(layer.kind, LayerKind::RoutableWrapper { .. }))
-    {
-        return (None, 0);
-    }
-    let mut tried = HashSet::new();
-    let upto = layers.len();
-    let mut stack = vec![Retry {
-        layers,
-        depth: 0,
-        upto,
-    }];
-    while let Some(mut retry) = stack.pop() {
-        while retry.upto > 0 {
-            retry.upto -= 1;
-            let layer = retry.layers[retry.upto];
-            let LayerKind::RoutableWrapper { inner } = layer.kind else {
-                continue;
-            };
-            // The inner command may have been dropped because it is excluded.
-            // Re-testing the wrapped form would route it through the wrapper's
-            // own filter, defeating the exclusion.
-            if is_excluded(&cmd.slice.text[inner..cmd.slice.end()], excluded) {
-                continue;
-            }
-            let depth = retry.depth + retry.upto;
-            if !tried.insert((layer.start, depth)) {
-                continue;
-            }
-            let walk = Walk::run(
-                cmd.slice.text,
-                lex_from(cmd, layer.start),
-                depth,
-                false,
-                transparent_prefixes,
-            );
-            if let Some(decision) = walk
-                .command()
-                .and_then(|inner| decide(inner, excluded, context))
-            {
-                return (Some(decision), tried.len());
-            }
-            let upto = walk.layers.len();
-            stack.push(retry);
-            stack.push(Retry {
-                layers: walk.layers,
-                depth,
-                upto,
-            });
-            break;
-        }
-    }
-    (None, tried.len())
+    /// `(word, depth)` pairs already tried: a retry depends on nothing else.
+    visited: HashSet<(usize, usize)>,
+    /// [`Search::walk_refuses`]' answers, by where a walk started, how deep,
+    /// and the position it read from.
+    refusals: HashMap<(usize, usize, Position), Refusal>,
+    /// Whether a walk of the search stopped at `RTK_DISABLED=`.
+    disabled: bool,
+    #[cfg(test)]
+    walks: usize,
 }
 
-/// Decides about `cmd`, the command a walk found under its layers.
+impl Search<'_, '_> {
+    fn walk(&mut self, from: usize, pos: Position, depth: usize) -> Walk {
+        #[cfg(test)]
+        {
+            self.walks += 1;
+        }
+        let walk = Walk::run(self.line, self.prefixes, from, pos, depth);
+        self.disabled |= walk.stop == Stop::Disabled;
+        walk
+    }
+
+    fn decide(&self, word: usize) -> Option<Decision> {
+        decide(self.line, word, self.excluded, self.context)
+    }
+
+    /// #2768: when nothing is decided about the command, each layer's own
+    /// text is read again at that layer's position and depth, innermost
+    /// first.
+    ///
+    /// A user prefix that starts at the layer is read first, whatever the
+    /// layer's kind: `transparent_prefixes = ["nice -n 19 ionice"]` rewrites
+    /// `nice -n 19 ionice git status` although the command under `nice`'s own
+    /// peel (`ionice git status`) has no rewrite. That prefix is the answer:
+    /// its own walk is searched the same way, and the layer is not also tried
+    /// whole. When no prefix matches, only a routable layer (`uv run`) may be
+    /// matched whole by a rule, and only when [`Search::fallthrough_refused`]
+    /// allows it; any other layer runs its command without changing which
+    /// program runs, so a command with no rewrite of its own leaves it as
+    /// written. A reserved word is bash's, and no prefix takes it.
+    ///
+    /// Every layer any walk produces is a candidate. The layers of a walk made
+    /// here are tried before the shallower layers of the walk that led to it,
+    /// and each walk's layers are kept apart, so a branch that leads nowhere
+    /// adds nothing to one that decides. `(word, depth)` is recorded once its
+    /// prefix has been tried (a frame that skips it because the prefix ends
+    /// inside one of its own layers leaves it for another frame), and reached
+    /// a second time it is skipped, which keeps a `uv run uv run … uv run` chain linear in its depth.
+    fn fall_back(&mut self, layers: Vec<Layer>) -> Option<Decision> {
+        let words = self.line.words;
+        let upto = layers.len();
+        let mut stack = vec![Frame {
+            layers,
+            depth: 0,
+            upto,
+        }];
+        while let Some(mut frame) = stack.pop() {
+            while frame.upto > 0 {
+                frame.upto -= 1;
+                let idx = frame.upto;
+                let layer = frame.layers[idx];
+                if matches!(layer.kind, LayerKind::UserPrefix | LayerKind::ReservedWord) {
+                    continue;
+                }
+                let depth = frame.depth + idx;
+                let mut routable = layer.kind == LayerKind::RoutableWrapper;
+                if routable {
+                    match self.fallthrough_refused(&layer, depth) {
+                        Refusal::Allowed => {}
+                        Refusal::Unread => routable = false,
+                        Refusal::Refused | Refusal::Disabled => continue,
+                    }
+                }
+                if self.visited.contains(&(layer.word, depth)) {
+                    continue;
+                }
+                let Some(user) = walker::peel_literal_prefix(
+                    self.line,
+                    layer.word,
+                    self.prefixes,
+                    LayerKind::UserPrefix,
+                    AFTER_USER_PREFIX,
+                ) else {
+                    self.visited.insert((layer.word, depth));
+                    if routable && let Some(decision) = decided(self.decide(layer.word)) {
+                        return Some(decision);
+                    }
+                    continue;
+                };
+                // A prefix that ends inside the words of a layer it covers
+                // (`nice` inside `nice -5`, `nice timeout` inside `nice
+                // timeout 5`) would leave that layer's own flags as the
+                // command. One with nothing behind it leaves nothing to
+                // decide about.
+                if prefix_ends_inside_a_layer(user.end, &frame.layers[idx..])
+                    || user.end >= words.len()
+                {
+                    continue;
+                }
+                self.visited.insert((layer.word, depth));
+                let alt = self.walk(user.end, user.next, depth + 1);
+                if let Some(decision) = decided(alt.command.and_then(|at| self.decide(at))) {
+                    return Some(decision);
+                }
+                let mut layers = vec![Layer {
+                    word: layer.word,
+                    end: user.end,
+                    kind: user.kind,
+                    next: user.next,
+                }];
+                layers.extend(alt.layers);
+                let upto = layers.len();
+                // This frame's shallower layers resume after the new walk's.
+                stack.push(frame);
+                stack.push(Frame {
+                    layers,
+                    depth,
+                    upto,
+                });
+                break;
+            }
+        }
+        None
+    }
+
+    /// Whether a routable layer's own text must not be matched whole: the
+    /// command it wraps was left for a reason a whole-string match would undo.
+    ///
+    /// - A `NAME=value` word right behind `uv run` is a program's name, since
+    ///   `uv run` is a program and nothing behind it starts a simple command.
+    ///   Matching the whole string would hand that word to `uv run` as its
+    ///   command (`uv run RTK_DISABLED=1 git status`). `env` is a program too,
+    ///   and falls through (`uv run env python x.py`).
+    /// - Everything else is read by walking what the wrapper wraps as the
+    ///   rewrite walks it ([`Search::walk_refuses`]), from `depth`: the same
+    ///   peels, the same user-prefix retries, the same depth budget. A walk
+    ///   that stops at `RTK_DISABLED=` refuses, and so does one whose command
+    ///   `exclude_commands` covers, as [`decide`] reads it, on its words as
+    ///   bash runs them ([`command_is_excluded`]): under `exclude_commands =
+    ///   ["pytest"]`, `uv run python -m pytest`, `uv run timeout 5 pytest`,
+    ///   `uv run nice python -m pytest` and `uv run 'pytest'` are refused as
+    ///   `uv run pytest` is. What the wrapper wraps,
+    ///   as written and past an assignment run, is checked too (`uv run env`
+    ///   under an excluded `env`). A walk that runs out of depth hides its
+    ///   command, and counts as excluded.
+    /// - Under exclusions, a walk that stops at an option (`uv run --with x
+    ///   pytest`), which is the wrapper's own and leaves the command behind it
+    ///   unread, keeps the wrapper from being matched whole; a user prefix
+    ///   that starts where the wrapper does is tried
+    ///   ([`Refusal::Unread`]). A `--` right behind the wrapper is read
+    ///   through: what follows it is the command (`uv run -- pytest`).
+    fn fallthrough_refused(&mut self, layer: &Layer, depth: usize) -> Refusal {
+        let words = self.line.words;
+        let mut from = layer.end;
+        if !self.excluded.is_empty() && words.get(from).is_some_and(|w| is_dash_dash(w.text)) {
+            from += 1;
+        }
+        let Some(inner) = words.get(from) else {
+            return Refusal::Refused;
+        };
+        if walker::is_assignment_word(inner.text) {
+            return Refusal::Refused;
+        }
+        if !self.excluded.is_empty() {
+            let behind_env = walker::peel_assignments(
+                self.line,
+                from,
+                families::ALL,
+                layer.next,
+                LayerKind::Assignments,
+            )
+            .map_or(from, |run| run.end);
+            let excluded = |at| self.decide(at) == Some(Decision::Excluded);
+            if excluded(from) || (behind_env != from && excluded(behind_env)) {
+                return Refusal::Refused;
+            }
+        }
+        self.walk_refuses(from, layer.next, depth + 1, Some(from))
+    }
+
+    /// What a walk from `(from, pos, depth)`, the start of what a routable
+    /// wrapper wraps, means for its fall-through ([`Search::fallthrough_refused`]):
+    /// its own stop, and those of the walks a user prefix starting at one of
+    /// its layers reads out of the same words. Remembered per start, so the
+    /// candidates of one search share the work.
+    ///
+    /// `not_excluded` is a word the caller has already found `exclude_commands`
+    /// does not cover, which the walk does not decide about again.
+    fn walk_refuses(
+        &mut self,
+        from: usize,
+        pos: Position,
+        depth: usize,
+        not_excluded: Option<usize>,
+    ) -> Refusal {
+        let key = (from, depth, pos);
+        if let Some(&known) = self.refusals.get(&key) {
+            return known;
+        }
+        let walk = self.walk(from, pos, depth);
+        let excluding = !self.excluded.is_empty();
+        let mut refused = match walk.stop {
+            Stop::Disabled => Refusal::Disabled,
+            Stop::Depth if excluding => Refusal::Refused,
+            Stop::Command => match walk.command {
+                Some(at)
+                    if excluding
+                        && not_excluded != Some(at)
+                        && self.decide(at) == Some(Decision::Excluded) =>
+                {
+                    Refusal::Refused
+                }
+                // A command word that is an option is a wrapper's own, which
+                // hides the command behind it.
+                Some(at)
+                    if excluding
+                        && self
+                            .line
+                            .words
+                            .get(at)
+                            .is_some_and(|w| head_is_an_option(w.text)) =>
+                {
+                    Refusal::Unread
+                }
+                // A program spelled by a path that a layer's word names hides
+                // the command behind it.
+                Some(at)
+                    if excluding && walker::is_path_spelled_head(self.line, at, families::ALL) =>
+                {
+                    Refusal::Refused
+                }
+                _ => Refusal::Allowed,
+            },
+            Stop::Depth | Stop::Nothing => Refusal::Allowed,
+        };
+        for (idx, walked) in walk.layers.iter().enumerate() {
+            if refused == Refusal::Disabled {
+                break;
+            }
+            if matches!(walked.kind, LayerKind::UserPrefix | LayerKind::ReservedWord) {
+                continue;
+            }
+            let Some(user) = walker::peel_literal_prefix(
+                self.line,
+                walked.word,
+                self.prefixes,
+                LayerKind::UserPrefix,
+                AFTER_USER_PREFIX,
+            ) else {
+                continue;
+            };
+            if user.end >= self.line.words.len()
+                || prefix_ends_inside_a_layer(user.end, &walk.layers[idx..])
+            {
+                continue;
+            }
+            let other = self.walk_refuses(user.end, user.next, depth + idx + 1, None);
+            refused = refused.max(other);
+        }
+        self.refusals.insert(key, refused);
+        refused
+    }
+}
+
+/// A decision that settles the command: a rewrite, or a command left as it is
+/// because it already runs rtk.
+fn decided(decision: Option<Decision>) -> Option<Decision> {
+    decision.filter(|d| matches!(d, Decision::Rewrite(_) | Decision::Keep))
+}
+
+/// How [`arg_tokenizer::tokenize`] reads `word`, as the shell resolves it
+/// (`"-s"` is `-s`), as one argument: an option, `--` or a positional.
+fn resolved_arg_kind(word: &str) -> Option<ArgKind> {
+    let resolved = [resolve_word_text(word)];
+    arg_tokenizer::tokenize(&resolved)
+        .first()
+        .map(|token| token.kind)
+}
+
+/// Whether `word`, as the shell resolves it, is `--`.
+fn is_dash_dash(word: &str) -> bool {
+    resolved_arg_kind(word) == Some(ArgKind::DashDash)
+}
+
+/// Whether a prefix ending at word `end` ends inside the words of one of
+/// `layers` (a built-in layer's own flags and operands), which would leave the
+/// rest of those words as the command.
+fn prefix_ends_inside_a_layer(end: usize, layers: &[Layer]) -> bool {
+    layers
+        .iter()
+        .any(|l| l.kind != LayerKind::UserPrefix && l.word < end && end < l.end)
+}
+
+/// Whether the word a command starts with, as the shell resolves it (`"-s"` is
+/// `-s`), is an option or `--` rather than a program's name: a wrapper's own
+/// flag it does not declare, or `--`. No command is named that.
+fn head_is_an_option(word: &str) -> bool {
+    resolved_arg_kind(word).is_some_and(|kind| kind != ArgKind::Positional)
+}
+
+/// Whether `exclude_commands` covers the command, up to where it ends (the
+/// redirections behind it are no part of it). A pattern covers it when it
+/// matches the command either as typed, `raw`, or as bash runs it: the words
+/// `argv`, their quotes and escapes removed, with the first word's absolute
+/// path left out, or in the spelling of the tool a rule routes it to
+/// ([`tool_form`]: `python -m pytest` is `pytest`). The words are read in one
+/// spelling ([`spell_words`]), so `'pytest' -x`, `\pytest -x` and
+/// `'/opt/my tools/pytest' -x` are excluded with `pytest` and so with
+/// `^'pytest'`, and `'pytest x'`, which runs a program named `pytest x`, is
+/// not excluded with `pytest`.
+fn command_is_excluded(
+    raw: &str,
+    spelled: &str,
+    argv: &[String],
+    classification: &Classification,
+    excluded: &[ExcludePattern],
+    position: Position,
+) -> bool {
+    if excluded.is_empty() {
+        return false;
+    }
+    let Some((program, args)) = argv.split_first() else {
+        return false;
+    };
+    let args = args.iter().map(String::as_str);
+    let as_run = spell_words(std::iter::once(program.as_str()).chain(args.clone()));
+    // The program's basename, read off its one word as it is resolved.
+    let named = match program.rsplit_once('/') {
+        Some((_, base)) if !base.is_empty() => spell_words(std::iter::once(base).chain(args)),
+        _ => as_run.clone(),
+    };
+    // The command as typed, with the directory of its program left out. The
+    // first word is cut at its last `/` only where it is written plain; a
+    // quoted or escaped one may hold a blank and a `/` in one name, and the
+    // words bash runs ([`named`]) read it right.
+    let typed: Cow<'_, str> = match raw.strip_prefix(spelled) {
+        Some(rest)
+            if !spelled.contains(['\'', '"', '\\'])
+                && !walker::basename(spelled).is_empty()
+                && walker::basename(spelled) != spelled =>
+        {
+            Cow::Owned(format!("{}{rest}", walker::basename(spelled)))
+        }
+        _ => Cow::Borrowed(raw),
+    };
+    if [raw, typed.as_ref(), as_run.as_str(), named.as_str()]
+        .into_iter()
+        .any(|text| is_excluded(text, excluded))
+    {
+        return true;
+    }
+    // The tool a rule routes the command to, read off the command as typed
+    // and off the words bash runs: `npx "playwright" test` is `npx playwright
+    // test`. The words are classified again only when they spell something
+    // other than what was classified.
+    let as_words = (named != typed || !matches!(classification, Classification::Supported { .. }))
+        .then(|| classify_command_from(&named, position));
+    [Some(classification), as_words.as_ref()]
+        .into_iter()
+        .flatten()
+        .any(|class| {
+            matches!(class, Classification::Supported { rtk_equivalent, .. }
+                if [typed.as_ref(), named.as_str()]
+                    .into_iter()
+                    .enumerate()
+                    .any(|(i, text)| (i == 0 || text != typed)
+                        && is_excluded(&tool_form(text, rtk_equivalent), excluded)))
+        })
+}
+
+/// `words` as the one text a pattern of `exclude_commands` reads: one space
+/// between two words, and a blank inside a word behind a backslash, as bash
+/// reads it, so that a blank of the text separates two words exactly where
+/// bash separates them. Every other character is the word's own.
+fn spell_words<'w>(words: impl IntoIterator<Item = &'w str>) -> String {
+    let mut text = String::new();
+    for (index, word) in words.into_iter().enumerate() {
+        if index > 0 {
+            text.push(' ');
+        }
+        for c in word.chars() {
+            if is_ifs(c) {
+                text.push('\\');
+            }
+            text.push(c);
+        }
+    }
+    text
+}
+
+/// Decides about the command that starts at word `word` of `line`, which a
+/// walk found under its layers or which is a routable layer's own text.
+///
+/// The command is classified where its segment starts (`context`), not where
+/// the walk stands behind its layers. The two differ only in whether the
+/// first word is grammar, and the segment's start is the stricter reading: a
+/// `[[` or `((` behind a wrapper or an assignment (`a=1 [[ -f a ]]`) is left
+/// as written, as the rewrite has always left it, rather than read as a
+/// program that takes arguments.
+///
+/// A command whose first word is an assignment is a program named like one:
+/// the walk peels an assignment run wherever bash reads one, so one left here
+/// is a `NAME=value` behind `timeout` or `exec`, which bash runs as a command.
+/// A first word that is an option is a wrapper's own, a flag it does not
+/// declare or `--`, and no command is named that. Neither is rewritten.
+///
+/// Exclusion is decided before anything that depends on the context, so a
+/// command `exclude_commands` names is [`Decision::Excluded`] wherever it
+/// sits.
 fn decide(
-    cmd: Command<'_, '_>,
+    line: &Line<'_>,
+    word: usize,
     excluded: &[ExcludePattern],
     context: RewriteContext,
 ) -> Option<Decision> {
-    let text = cmd.slice.text;
+    let first = line.words.get(word)?;
+    if walker::is_assignment_word(first.text)
+        || head_is_an_option(first.text)
+        || walker::is_path_spelled_head(line, word, families::ALL)
+    {
+        return None;
+    }
+    let text = line.text;
+    let from = line.tokens.partition_point(|tok| tok.offset < first.start);
+    let slice = Slice::new(text, &line.tokens[from..])?;
+    let all_words = &line.words[word..];
     // Trailing stderr/stdout redirects are left out of the match and kept as
     // written (#530): `git status 2>&1` matches `git status`.
-    let redirect_start = cmd.slice.trailing_redirect_start();
+    let redirect_start = slice.trailing_redirect_start();
     let part = match redirect_start {
-        Some(start) => cmd.slice.before(start)?,
-        None => cmd.slice,
+        Some(start) => slice.before(start)?,
+        None => slice,
     };
     let words: Cow<'_, [Word<'_>]> = match redirect_start {
-        Some(start) => Cow::Owned(words_before(text, cmd.words, start)),
-        None => Cow::Borrowed(cmd.words),
+        Some(start) => Cow::Owned(words_before(text, all_words, start)),
+        None => Cow::Borrowed(all_words),
     };
     let cmd_part = part.as_str();
-    let redirect_suffix = &text[part.end()..cmd.slice.end()];
+    let redirect_suffix = &text[part.end()..slice.end()];
     let replace = |text: String| {
         Some(Decision::Rewrite(Edit::Replace {
             span: part.start()..part.end(),
@@ -2110,14 +2615,23 @@ fn decide(
         return Some(Decision::Keep);
     }
 
+    let classification = classify_command_words(text, part.tokens, &words, context.position());
+    if !excluded.is_empty()
+        && command_is_excluded(
+            cmd_part,
+            first.text,
+            argv(),
+            &classification,
+            excluded,
+            context.position(),
+        )
+    {
+        return Some(Decision::Excluded);
+    }
+
     // A bare `head` or `tail` reads its input and has no line range to map, so
     // only one with arguments takes this branch.
     if context == RewriteContext::Normal && words.len() > 1 && matches!(program, "head" | "tail") {
-        // head/tail rewrite to `rtk read`, so honour exclude_commands here too:
-        // this branch returns before the checks below.
-        if is_excluded(cmd_part, excluded) {
-            return None;
-        }
         return replace(space_before_redirect(
             rewrite_line_range(cmd_part)?,
             redirect_suffix,
@@ -2129,33 +2643,14 @@ fn decide(
         return None;
     }
 
-    // Use classify_command for correct ignore/prefix handling
-    let start = if context == RewriteContext::PipelineFinal {
-        CommandStart::PipeStage
-    } else {
-        CommandStart::Pipeline
-    };
-    let rtk_equivalent = match classify_words(text, part.tokens, &words, start) {
-        Classification::Supported { rtk_equivalent, .. } => {
-            if !excluded.is_empty() {
-                let cmd_clean = env_run_end(&words).map_or(cmd_part, |end| &text[end..part.end()]);
-                if is_excluded(cmd_clean, excluded)
-                    || is_excluded(&tool_form(cmd_clean, rtk_equivalent), excluded)
-                {
-                    return None;
-                }
-            }
-            rtk_equivalent
-        }
+    let rtk_equivalent = match classification {
+        Classification::Supported { rtk_equivalent, .. } => rtk_equivalent,
         // TOML-only commands: consult the registry so the hook filters them too (#2179).
         Classification::Unsupported { .. } => {
             if context != RewriteContext::Normal || toml_disabled() {
                 return None;
             }
             let normalized = strip_absolute_path(cmd_part);
-            if is_excluded(&normalized, excluded) {
-                return None;
-            }
             let base = split_ifs(&normalized).next().unwrap_or("");
             if is_rtk_reserved_command(base) || !command_matches_filter(&normalized) {
                 return None;
@@ -2199,7 +2694,7 @@ fn decide(
         // from the output (`golangci-lint run ./... 2>&1` becomes
         // `rtk golangci-lint run ./...`).
         return Some(Decision::Rewrite(Edit::Replace {
-            span: part.start()..cmd.slice.end(),
+            span: part.start()..slice.end(),
             text,
         }));
     }
@@ -2298,109 +2793,34 @@ fn php_tool_form(cmd: &str, rtk_cmd: &str) -> Option<String> {
 fn tool_form(cmd_clean: &str, rtk_equivalent: &str) -> String {
     // Same normalization the rewrite path applies, so the exclusion sees the tool
     // whichever way it was spelled — including `php vendor/bin/phpunit`.
-    let normalized = strip_absolute_path(
-        &php_tool_form(cmd_clean, rtk_equivalent).unwrap_or_else(|| cmd_clean.to_string()),
-    );
+    let unwrapped =
+        php_tool_form(cmd_clean, rtk_equivalent).unwrap_or_else(|| cmd_clean.to_string());
+    // A quoted first word may hold a blank and a `/` in one name, which a cut
+    // at the first blank would split; the caller reads it from its words.
+    let first_word = unwrapped.split(is_ifs).next().unwrap_or_default();
+    let normalized = if first_word.contains(['\'', '"', '\\']) {
+        unwrapped
+    } else {
+        strip_absolute_path(&unwrapped)
+    };
     RULES
         .iter()
         .find(|r| r.rtk_cmd == rtk_equivalent)
         .and_then(|rule| {
             rule.rewrite_prefixes.iter().find_map(|&prefix| {
-                let rest = strip_word_prefix(&normalized, prefix)?;
+                // What follows the prefix is kept as spelled, an empty
+                // argument included, so `pytest ''` is not `pytest`.
+                let tail = normalized.strip_prefix(prefix)?;
+                if !tail.is_empty() && !tail.starts_with(is_ifs) {
+                    return None;
+                }
                 // No rewrite prefix carries a path outside its first token, and that
                 // token is already a basename here, so `tool_portion` needs no strip.
                 let tool = tool_portion(prefix, rule);
-                Some(if rest.is_empty() {
-                    tool.to_string()
-                } else {
-                    format!("{} {}", tool, rest)
-                })
+                Some(format!("{tool}{tail}"))
             })
         })
         .unwrap_or(normalized)
-}
-
-/// Where the command run by the process wrapper that opens `cmd` starts
-/// (#2375): `git` in `timeout 5 git status`. `None` when `cmd` opens with no
-/// wrapper, when the wrapper's own arguments do not parse, or when `rtk` is
-/// among them.
-fn process_wrapper_inner(cmd: &Slice<'_, '_>) -> Option<usize> {
-    let first = cmd.toks().next()?;
-    if first.kind != TokenKind::Arg {
-        return None;
-    }
-    let wrapper = PROCESS_WRAPPERS
-        .iter()
-        .find(|candidate| candidate.name == command_basename(first.value))?;
-    let inner = wrapper_inner_command(wrapper, cmd.toks().skip(1))?;
-    if cmd
-        .toks()
-        .take_while(|tok| tok.offset < inner.offset)
-        .any(|tok| tok.value == "rtk")
-    {
-        return None;
-    }
-    Some(inner.offset)
-}
-
-fn command_basename(command: &str) -> &str {
-    command.rsplit('/').next().unwrap_or(command)
-}
-
-/// The token that starts the command `wrapper` runs, given the tokens that
-/// follow the wrapper's name, blanks left out.
-fn wrapper_inner_command<'t, 'a: 't>(
-    wrapper: &ProcessWrapper,
-    mut args: impl Iterator<Item = &'t Token<'a>>,
-) -> Option<&'t Token<'a>> {
-    let mut next_arg = || args.next().filter(|token| token.kind == TokenKind::Arg);
-    let mut options_done = false;
-    let mut positionals = wrapper.positionals;
-
-    loop {
-        let token = next_arg()?;
-        let arg = token.value;
-
-        if !options_done && arg == "--" {
-            options_done = true;
-            continue;
-        }
-        if !options_done && wrapper.numeric_opts && is_numeric_option(arg) {
-            continue;
-        }
-        if !options_done && arg.starts_with('-') && arg != "-" {
-            if wrapper.flag_opts.contains(&arg) || takes_attached_value(wrapper, arg) {
-                continue;
-            }
-            if wrapper.value_opts.contains(&arg) {
-                next_arg()?;
-                continue;
-            }
-            return None;
-        }
-        if positionals > 0 {
-            positionals -= 1;
-            continue;
-        }
-        return Some(token);
-    }
-}
-
-fn is_numeric_option(arg: &str) -> bool {
-    let Some(digits) = arg.strip_prefix('-').or_else(|| arg.strip_prefix('+')) else {
-        return false;
-    };
-    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
-}
-
-fn takes_attached_value(wrapper: &ProcessWrapper, arg: &str) -> bool {
-    if let Some((name, _)) = arg.split_once('=') {
-        return wrapper.value_opts.contains(&name);
-    }
-    wrapper
-        .attached_opts
-        .iter()
-        .any(|opt| arg.len() > opt.len() && arg.starts_with(opt))
 }
 
 /// Strip a command prefix with word-boundary check.
@@ -2438,7 +2858,8 @@ fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
 mod tests {
     use super::super::report::RtkStatus;
     use super::*;
-    use crate::core::cmdline::lexer::shell_split;
+    use crate::core::cmdline::family::Form;
+    use crate::core::cmdline::lexer::{read_grammar, shell_split};
     use crate::core::test_isolation;
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
@@ -3774,31 +4195,51 @@ mod tests {
         }
     }
 
+    /// Whether the rewrite of `cmd` refused a command on `RTK_DISABLED=`,
+    /// which is when #508's warning is printed.
+    fn refused_on_disabled(cmd: &str) -> bool {
+        rewrite_line(cmd, &[], &[]).disabled
+    }
+
     /// The bypass is per command, so the prefix can sit on any of them — the
     /// warning must not depend on it being the first thing on the line.
     #[test]
-    fn test_uses_rtk_disabled_finds_the_prefix_on_any_command() {
-        assert!(uses_rtk_disabled("RTK_DISABLED=1 git status"));
-        assert!(uses_rtk_disabled("cargo test | RTK_DISABLED=1 grep FAILED"));
-        assert!(uses_rtk_disabled(
-            "git status && RTK_DISABLED=1 cargo build"
-        ));
-        assert!(uses_rtk_disabled("git status\nRTK_DISABLED=1 cargo build"));
-
-        assert!(!uses_rtk_disabled("git status"));
-        assert!(!uses_rtk_disabled("SOME_VAR=1 git status"));
-        assert!(
-            !uses_rtk_disabled("echo RTK_DISABLED=1"),
-            "an argument is not a prefix"
-        );
-        assert!(
-            !uses_rtk_disabled("echo \"a\nRTK_DISABLED=1 b\""),
-            "a newline inside quotes does not start a command"
-        );
-        assert!(
-            !uses_rtk_disabled("cat <<EOF\nRTK_DISABLED=1 b\nEOF"),
-            "a heredoc body is data, and the line is refused before this anyway"
-        );
+    fn test_the_refusal_on_rtk_disabled_is_found_on_any_command() {
+        for cmd in [
+            "RTK_DISABLED=1 git status",
+            "cargo test | RTK_DISABLED=1 grep FAILED",
+            "git status && RTK_DISABLED=1 cargo build",
+            "git status\nRTK_DISABLED=1 cargo build",
+            "timeout 5 env RTK_DISABLED=1 git status",
+            "nice -n 5 env RTK_DISABLED=1 git status",
+            "RTK_DISABLED+=1 git status",
+            "RTK_DISABLED=1 frobnicate --all",
+        ] {
+            assert!(refused_on_disabled(cmd), "{cmd:?}");
+        }
+        for (cmd, why) in [
+            ("git status", "no marker"),
+            ("SOME_VAR=1 git status", "another name"),
+            ("XRTK_DISABLED=1 git status", "another name"),
+            ("NOTE='set RTK_DISABLED=1 x' git status", "a value"),
+            ("env MSG=RTK_DISABLED=1 git status", "a value"),
+            ("echo RTK_DISABLED=1", "an argument is not a prefix"),
+            (
+                "echo \"a\nRTK_DISABLED=1 b\"",
+                "a newline inside quotes does not start a command",
+            ),
+            (
+                "cat <<EOF\nRTK_DISABLED=1 b\nEOF",
+                "a heredoc body is data, and the line is refused before any walk",
+            ),
+            ("RTK_DISABLED=1; git status", "a statement of its own"),
+            ("timeout 5 RTK_DISABLED=1 git status", "a program's name"),
+            ("noglob RTK_DISABLED=1 git status", "a program's name"),
+            ("uv run RTK_DISABLED=1 git status", "a program's name"),
+            ("RTK_DISABLED=1 git status | wc -l", "no walk reads it"),
+        ] {
+            assert!(!refused_on_disabled(cmd), "{cmd:?}: {why}");
+        }
     }
 
     /// The bypass stops the command that carries it, not the clause beside it.
@@ -5805,17 +6246,15 @@ mod tests {
         let mut groups: Vec<(&str, Vec<String>)> = Vec::new();
 
         let mut wrapped = Vec::new();
-        let wrappers = ROUTABLE_WRAPPER_PREFIXES
+        for family in families::ALL
             .iter()
-            .copied()
-            .chain(SHELL_KEYWORD_PREFIXES.iter().copied())
-            .chain(PROCESS_WRAPPERS.iter().map(|w| w.name));
-        for wrapper in wrappers {
-            // `timeout`/`time` take a duration before the command they wrap.
-            let operand = if PROCESS_WRAPPERS.iter().any(|w| w.name == wrapper) {
-                "5 "
-            } else {
-                ""
+            .filter(|f| !matches!(f.form, Form::RunWord))
+        {
+            let wrapper = family.head;
+            // `timeout` takes a duration before the command it wraps.
+            let operand = match family.form {
+                Form::Wrapper(spec) => "5 ".repeat(spec.operands),
+                _ => String::new(),
             };
             for gap in GAPS {
                 wrapped.push(format!("{wrapper} {operand}{gap}ls -la"));
@@ -8801,42 +9240,32 @@ mod tests {
         );
     }
 
-    /// A prefix that ends inside a quote left open leaves the blanks at the end
-    /// of the line inside the command, and they are kept as written.
+    /// A prefix that does not lex into whole words (a quote left open, a
+    /// trailing backslash) is refused where the configuration is read, so it
+    /// matches nothing and the line is left as written.
     #[test]
-    fn test_transparent_prefix_ending_in_an_open_quote_keeps_trailing_blanks() {
-        for (prefix, cmd, expected) in [
-            ("x 'a", "x 'a ls -la & ", "x 'a rtk ls -la & "),
-            (
-                "sh -c \"",
-                "sh -c \" git status\t",
-                "sh -c \" rtk git status\t",
-            ),
-            (
-                "sh -c \"",
-                "sh -c \"\tgit status \t ",
-                "sh -c \"\trtk git status \t ",
-            ),
+    fn test_a_prefix_that_does_not_lex_into_whole_words_is_refused() {
+        for (prefix, cmd) in [
+            ("x 'a", "x 'a ls -la & "),
+            ("sh -c \"", "sh -c \" git status\t"),
+            ("sh -c \"", "sh -c \" timeout 5 git status"),
+            ("x\\", "x\\ git status"),
         ] {
             assert_eq!(
                 super::rewrite_command(cmd, &[], &[prefix.to_string()]),
-                Some(expected.to_string()),
+                None,
                 "{cmd:?}"
             );
         }
-    }
-
-    /// When the command behind such a prefix is left as it is, the line is not
-    /// rewritten: no byte of it changes.
-    #[test]
-    fn test_transparent_prefix_ending_in_an_open_quote_unchanged_is_no_rewrite() {
-        let prefixes = vec!["sh -c \"".to_string()];
-        for cmd in [
-            "sh -c \" timeout -s KILL 5 rtk nohup git\tstatus\r\t",
-            "sh -c \" rtk git status ",
-        ] {
-            assert_eq!(super::rewrite_command(cmd, &[], &prefixes), None, "{cmd:?}");
-        }
+        // The other entries are kept.
+        assert_eq!(
+            super::rewrite_command(
+                "docker exec c git status",
+                &[],
+                &["x 'a".to_string(), "docker exec c".to_string()]
+            ),
+            Some("docker exec c rtk git status".to_string())
+        );
     }
 
     #[test]
@@ -8947,108 +9376,14 @@ mod tests {
         let chain = "uv run ".repeat(20) + "xyz";
         let line = CompoundLex::new(&chain);
         let segment = line.whole().expect("a command");
-        let (edit, walks) =
-            rewrite_segment_counted(segment, &[], &prefixes, RewriteContext::Normal);
+        let outcome = rewrite_segment(segment, &[], &prefixes, RewriteContext::Normal);
+        let walks = outcome.walks;
         // The chain is deeper than `MAX_PREFIX_DEPTH`, so no walk reaches `xyz`
         // and nothing is decided. An exponential search over it would run into
         // the thousands of walks.
         assert!(walks < 50, "expected O(depth) walks, got {walks}");
-        assert_eq!(edit, None);
+        assert_eq!(outcome.edit, None);
         assert_eq!(super::rewrite_command(&chain, &[], &prefixes), None);
-    }
-
-    /// A user prefix is matched as text, so it can end inside a token: `x 'a`
-    /// ends inside the quote it opens. The command after it is read from a
-    /// fresh lex of its own text, where the `'` in `FOO=1'` opens a quote that
-    /// never closes, so there is nothing to decide about.
-    #[test]
-    fn test_prefix_ending_mid_quote_finds_nothing_decidable_when_the_reopened_quote_never_closes() {
-        let x_a = vec!["x 'a".to_string()];
-        for cmd in [
-            "x 'a FOO=1' git status",
-            "git log | x 'a FOO=1' grep foo",
-            "x 'a FOO=1' uv run pytest",
-            "x 'a git status'",
-        ] {
-            assert_eq!(super::rewrite_command(cmd, &[], &x_a), None, "{cmd}");
-        }
-    }
-
-    /// `sh -c "` leaves a `"` open, and the text after it holds no quote, so
-    /// the fresh lex of it reads an assignment, a wrapper and a command.
-    #[test]
-    fn test_prefix_ending_mid_quote_rewrites_correctly_when_the_rest_has_no_quote() {
-        let sh_c = vec!["sh -c \"".to_string()];
-        for (cmd, expected) in [
-            ("sh -c \" FOO=1 git status", "sh -c \" FOO=1 rtk git status"),
-            (
-                "sh -c \" timeout 5 git status",
-                "sh -c \" timeout 5 rtk git status",
-            ),
-            ("sh -c \" env git status", "sh -c \" env rtk git status"),
-        ] {
-            assert_eq!(
-                super::rewrite_command(cmd, &[], &sh_c),
-                Some(expected.to_string()),
-                "{cmd}"
-            );
-        }
-    }
-
-    /// Layers read from the segment's lex and layers read from a fresh one,
-    /// here an assignment before `x 'a` and a routable wrapper after it, sit
-    /// in one walk; the wrapper's fall-through starts where it was peeled.
-    #[test]
-    fn test_layers_before_a_divergent_one_keep_what_they_were_peeled_with() {
-        let prefixes = vec!["x 'a".to_string()];
-        assert_eq!(
-            super::rewrite_command("FOO=1 x 'a uv run xyz", &[], &prefixes),
-            Some("FOO=1 x 'a rtk uv run xyz".to_string())
-        );
-    }
-
-    /// A second prefix ending inside a token of the first fresh lex takes a
-    /// fresh lex of its own.
-    #[test]
-    fn test_a_second_prefix_ending_inside_a_token_relexes_again() {
-        let prefixes = vec!["x 'a".to_string()];
-        for (cmd, expected) in [
-            (
-                "x 'a FOO=1 x 'a git status",
-                "x 'a FOO=1 x 'a rtk git status",
-            ),
-            (
-                "x 'a FOO=1 x 'a uv run xyz",
-                "x 'a FOO=1 x 'a rtk uv run xyz",
-            ),
-            (
-                "x 'a FOO=1 x 'a uv run pytest",
-                "x 'a FOO=1 x 'a uv run rtk pytest",
-            ),
-            (
-                "git log | x 'a FOO=1 x 'a grep foo",
-                "git log | x 'a FOO=1 x 'a rtk grep foo",
-            ),
-        ] {
-            assert_eq!(
-                super::rewrite_command(cmd, &[], &prefixes),
-                Some(expected.to_string()),
-                "{cmd:?}"
-            );
-        }
-    }
-
-    /// The exclusion check on what a routable wrapper wraps reads the position
-    /// recorded on the layer when it was peeled, through the lex the walk was
-    /// reading then.
-    #[test]
-    fn test_exclusion_after_a_second_unbalanced_span_reads_the_walks_own_position() {
-        let prefixes = vec!["x 'a".to_string()];
-        let excluded = vec!["pytest".to_string()];
-        assert_eq!(
-            super::rewrite_command("x 'a uv run FOO=1 x 'a pytest", &excluded, &prefixes),
-            Some("x 'a rtk uv run FOO=1 x 'a pytest".to_string())
-        );
     }
 
     /// A trailing redirect can cut a command down to one env word (`env>f`
@@ -9082,61 +9417,73 @@ mod tests {
     #[test]
     fn test_emitter_keeps_quotes_and_redirect_untouched_around_a_peeled_wrapper() {
         assert_eq!(
-            rewrite_command_no_prefixes(r#"timeout 5 GIT_SSH_COMMAND="ssh -v" git push 2>&1"#, &[]),
-            Some(r#"timeout 5 GIT_SSH_COMMAND="ssh -v" rtk git push 2>&1"#.into())
+            rewrite_command_no_prefixes(r#"GIT_SSH_COMMAND="ssh -v" timeout 5 git push 2>&1"#, &[]),
+            Some(r#"GIT_SSH_COMMAND="ssh -v" timeout 5 rtk git push 2>&1"#.into())
         );
     }
 
-    /// A walk over the whole of `line`, as [`rewrite_segment`] starts one.
-    fn walk_line<'a, 't>(line: &'t CompoundLex<'a>, prefixes: &[String]) -> Walk<'a, 't> {
-        let words = Cow::Owned(words(line.text, &line.tokens));
-        Walk::run(
-            line.text,
-            (Cow::Borrowed(&line.tokens), words),
-            0,
-            true,
-            prefixes,
-        )
+    /// The layers of a walk over the whole of `text`, as [`rewrite_segment`]
+    /// starts one, and the command under them.
+    fn walk_text(text: &str, prefixes: &[String]) -> (Vec<(LayerKind, String)>, Option<String>) {
+        let tokens = tokenize(text);
+        let words = words(text, &tokens);
+        let line = Line {
+            text,
+            words: &words,
+            tokens: &tokens,
+        };
+        let walk = Walk::run(&line, prefixes, 0, Position::START, 0);
+        let span = |from: usize, to: usize| text[words[from].start..words[to - 1].end].to_string();
+        let layers = walk
+            .layers
+            .iter()
+            .map(|layer| (layer.kind, span(layer.word, layer.end)))
+            .collect();
+        let command = walk
+            .command
+            .filter(|&at| at < words.len())
+            .map(|at| span(at, words.len()));
+        (layers, command)
     }
 
-    /// Env runs, built-in wrappers and process wrappers end where a token
-    /// starts, so the walk reads through them on the segment's own tokens.
+    /// Every layer is a range of the words of the segment's one lex, each
+    /// read at the position the one before it left.
     #[test]
-    fn test_the_walk_reads_the_segments_own_tokens_through_lexed_layers() {
-        let line = CompoundLex::new("FOO=1 noglob timeout 5 uv run git status");
-        let walk = walk_line(&line, &[]);
-        assert!(matches!(walk.lex, Cow::Borrowed(_)));
+    fn test_the_walk_peels_layers_as_ranges_of_the_segments_words() {
+        let (layers, command) = walk_text("FOO=1 noglob timeout 5 uv run git status", &[]);
         assert_eq!(
-            walk.layers.iter().map(|l| l.kind).collect::<Vec<_>>(),
+            layers,
             vec![
-                LayerKind::Env,
-                LayerKind::ShellKeyword,
-                LayerKind::ProcessWrapper,
-                LayerKind::RoutableWrapper { inner: 30 },
+                (LayerKind::Assignments, "FOO=1".to_string()),
+                (LayerKind::Precommand, "noglob".to_string()),
+                (LayerKind::ProcessWrapper, "timeout 5".to_string()),
+                (LayerKind::RoutableWrapper, "uv run".to_string()),
             ]
         );
-        assert_eq!(walk.command().map(|c| c.slice.as_str()), Some("git status"));
-    }
+        assert_eq!(command.as_deref(), Some("git status"));
 
-    /// Where a prefix matched as text ends inside a token, the walk reads on
-    /// from a fresh lex of the text after it, as a lex of that text alone
-    /// would read it.
-    #[test]
-    fn test_the_walk_relexes_where_a_text_prefix_ends_inside_a_token() {
-        let text = "x 'a FOO=1 git status'";
-        let line = CompoundLex::new(text);
-        assert_eq!(line.tokens.iter().filter(|t| !t.is_blank()).count(), 2);
-        let prefixes = ["x 'a".to_string()];
-        let walk = walk_line(&line, &prefixes);
-        assert!(matches!(walk.lex, Cow::Owned(_)));
-        let fresh = relex(text, 5, text.len());
-        assert_eq!(&*walk.lex, fresh.as_slice());
+        let (layers, command) = walk_text("time -p then A=1 env B=2 nice -5 git status", &[]);
         assert_eq!(
-            fresh.iter().map(|t| t.value).collect::<Vec<_>>(),
-            vec!["FOO=1", " ", "git", " ", "status'"]
+            layers,
+            vec![
+                (LayerKind::ReservedWord, "time -p".to_string()),
+                (LayerKind::ReservedWord, "then".to_string()),
+                (LayerKind::Assignments, "A=1 env B=2".to_string()),
+                (LayerKind::ProcessWrapper, "nice -5".to_string()),
+            ]
         );
-        let command = walk.command().expect("a command");
-        assert_eq!(command.slice.as_str(), "git status'");
+        assert_eq!(command.as_deref(), Some("git status"));
+
+        let prefixes = vec!["docker exec c".to_string()];
+        let (layers, command) = walk_text("docker exec c A=1 git status", &prefixes);
+        assert_eq!(
+            layers,
+            vec![
+                (LayerKind::UserPrefix, "docker exec c".to_string()),
+                (LayerKind::Assignments, "A=1".to_string()),
+            ]
+        );
+        assert_eq!(command.as_deref(), Some("git status"));
     }
 
     /// A command ends where its last word does: a space or tab the last token
@@ -9239,12 +9586,13 @@ mod tests {
                 "timeout --preserve-status 300 rtk cargo test",
             ),
             ("timeout -- 300 cargo test", "timeout -- 300 rtk cargo test"),
-            ("timeout 300 -- cargo test", "timeout 300 -- rtk cargo test"),
             ("time -p cargo build", "time -p rtk cargo build"),
-            ("time -f %e cargo build", "time -f %e rtk cargo build"),
+            (
+                "/usr/bin/time -f %e cargo build",
+                "/usr/bin/time -f %e rtk cargo build",
+            ),
             ("nice -n10 cargo test", "nice -n10 rtk cargo test"),
             ("nice -10 cargo test", "nice -10 rtk cargo test"),
-            ("nice +5 cargo test", "nice +5 rtk cargo test"),
         ] {
             assert_eq!(
                 rewrite_command_no_prefixes(input, &[]),
@@ -10068,5 +10416,1200 @@ mod tests {
             rewrite_command_no_prefixes("/usr/bin/liquibase update", &[]),
             None,
         );
+    }
+
+    // --- The walk over transparent layers ---
+
+    #[test]
+    fn test_bare_time_is_the_reserved_word_and_gnu_time_goes_through_a_path() {
+        // Where a pipeline starts, bare `time` takes only `-p` and `--`, so
+        // `-q` is the command it runs. Through a path it is GNU time.
+        assert_eq!(rewrite_command_no_prefixes("time -q git status", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("/usr/bin/time -q git status", &[]),
+            Some("/usr/bin/time -q rtk git status".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("/usr/bin/time -pv cargo build", &[]),
+            Some("/usr/bin/time -pv rtk cargo build".into())
+        );
+        for cmd in [
+            "time -pp git status",
+            "time -p -p git status",
+            "time time -v git status",
+            "time -p time -v git status",
+            "time -f %e git status",
+            // A redirect glued to an option leaves its word no option, read
+            // the same way by the walk and by the line's grammar.
+            "time -p>out git status",
+            "time -->x git status",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd:?}");
+        }
+        for (cmd, expected) in [
+            ("time -- git status", "time -- rtk git status"),
+            ("time -p -- git status", "time -p -- rtk git status"),
+            ("time time git status", "time time rtk git status"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                Some(expected),
+                "{cmd:?}"
+            );
+        }
+    }
+
+    /// Behind a layer that runs a program, and in a later stage of a pipeline,
+    /// bare `time` is GNU time, found by `$PATH`, with its own grammar.
+    #[test]
+    fn test_time_is_gnu_time_where_no_pipeline_starts() {
+        for (input, expected) in [
+            ("FOO=1 time -v cargo build", "FOO=1 time -v rtk cargo build"),
+            (
+                "LC_ALL=C time -o log git status",
+                "LC_ALL=C time -o log rtk git status",
+            ),
+            ("env time -f %e git status", "env time -f %e rtk git status"),
+            (
+                "exec time -f %e git status",
+                "exec time -f %e rtk git status",
+            ),
+            ("nice time -v cargo build", "nice time -v rtk cargo build"),
+            (
+                "timeout 5 time -v git status",
+                "timeout 5 time -v rtk git status",
+            ),
+            (
+                "git log | time -v grep foo",
+                "git log | time -v rtk grep foo",
+            ),
+            (
+                "git log | time -f %e grep x",
+                "git log | time -f %e rtk grep x",
+            ),
+            (
+                "git log |\n  time -v grep foo",
+                "git log |\n  time -v rtk grep foo",
+            ),
+            ("time -p git status", "time -p rtk git status"),
+            ("FOO=1 time -p git status", "FOO=1 time -p rtk git status"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                Some(expected.into()),
+                "{input}"
+            );
+        }
+        // The first stage of a pipeline is where one starts: `-v` is the
+        // command there.
+        assert_eq!(
+            rewrite_command_no_prefixes("time -v grep x | cat", &[]),
+            None
+        );
+    }
+
+    /// The command behind a reserved word bash runs a pipeline after is
+    /// rewritten, and the reserved word stays as written.
+    #[test]
+    fn test_the_command_behind_a_reserved_word_is_rewritten() {
+        for (cmd, expected) in [
+            (
+                "if git diff --quiet; then git status; fi",
+                "if rtk git diff --quiet; then rtk git status; fi",
+            ),
+            (
+                "if true; then git status; else cargo build; fi",
+                "if true; then rtk git status; else rtk cargo build; fi",
+            ),
+            (
+                "until false; do git status; done",
+                "until false; do rtk git status; done",
+            ),
+            (
+                "for x in a b; do git status; done",
+                "for x in a b; do rtk git status; done",
+            ),
+            (
+                "while true; do time git status; done",
+                "while true; do time rtk git status; done",
+            ),
+            ("then A=1 git status", "then A=1 rtk git status"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                Some(expected),
+                "{cmd:?}"
+            );
+        }
+        for cmd in [
+            "coproc git status",
+            "for x in git status",
+            "case git in",
+            "A=1 then git status",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd:?}");
+        }
+    }
+
+    /// A command inside a compound command that a pipe joins to another
+    /// command writes the compound's output, or reads its input: every
+    /// command in any of its lists is left as written, the first and the
+    /// later ones, a `case` arm's too. A compound no pipe joins is rewritten
+    /// like any other list, and a pipeline inside one of its lists is read
+    /// like any other pipeline.
+    #[test]
+    fn test_a_compound_a_pipe_joins_is_left_as_written() {
+        for cmd in [
+            "for x in a; do git status; done | head",
+            "while true; do time git status; done | cat",
+            "git log | if true; then git status; fi",
+            "for x in a; do git status; git log; done | wc -l",
+            "if true; then git status; git log; fi | wc -l",
+            "for x in a; do git status && git log; done | head",
+            "case x in a) git log;; esac | wc -l",
+            "case x in a) ls;; b) git status; git log;; esac | head",
+            "if true; then :; else ls; git log; fi | wc -l",
+            "while git status; do git log; ls; done | head",
+            "for x in a; do if true; then ls; fi; git log; done | wc -l",
+            "for x in a; do git status | head; git log; done | wc -l",
+            "for x in a; do git log; done > out.txt | head",
+            "ls | while read x; do git status; git log; done",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd:?}");
+        }
+        for (cmd, expected) in [
+            (
+                "if true; then git status; fi; ls | head",
+                "if true; then rtk git status; fi; rtk ls | head",
+            ),
+            (
+                "if true; then git status; git log; fi; ls | head",
+                "if true; then rtk git status; rtk git log; fi; rtk ls | head",
+            ),
+            (
+                "case x in a) git log;; esac; ls | head",
+                "case x in a) rtk git log;; esac; rtk ls | head",
+            ),
+            (
+                "for x in a; do git status; done 2>/dev/null&ls|head",
+                "for x in a; do rtk git status; done 2>/dev/null&rtk ls|head",
+            ),
+            (
+                "case $y in a) git status | head;; b) git log;; esac",
+                "case $y in a) rtk git status | head;; b) rtk git log;; esac",
+            ),
+            (
+                "for x in a; do if true; then git log; fi | head; git status; done",
+                "for x in a; do if true; then git log; fi | head; rtk git status; done",
+            ),
+            (
+                "if true; then git status; fi | grep x",
+                "if true; then git status; fi | rtk grep x",
+            ),
+            ("time git status | head", "time rtk git status | head"),
+            (
+                "for x in a; do git status; git log; done",
+                "for x in a; do rtk git status; rtk git log; done",
+            ),
+            (
+                "case x in a) git log;; esac",
+                "case x in a) rtk git log;; esac",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                Some(expected),
+                "{cmd:?}"
+            );
+        }
+    }
+
+    /// A compound command or a subshell right after `coproc` or `coproc
+    /// NAME` is the coprocess's body, whose input and output are pipes: its
+    /// commands are left as written, and the line's other commands are not.
+    #[test]
+    fn test_a_coprocess_body_is_left_as_written() {
+        for cmd in [
+            "coproc while true; do git status; done",
+            "coproc for x in a; do git status; done",
+            "coproc NAME while true; do git status; done",
+            "coproc NAME for x in a; do git status; done",
+            "coproc if true; then git status; fi",
+            "coproc case x in a) git status;; esac",
+            "coproc ( git status )",
+            "coproc (git status)",
+            "coproc ( git status; git log )",
+            "coproc ( git status && git log )",
+            "coproc NAME ( git log )",
+            "coproc NAME (git log; git status)",
+            "coproc ( (git status) )",
+            "coproc ( while true; do git status; done )",
+            "coproc ( git status",
+            // A name of several tokens is still one word.
+            "coproc NAME$x while true; do git status; done",
+            "coproc NAME$x until false; do git status; done",
+            "coproc NAME$x for x in a; do git status; done",
+            "coproc NAME$x select x in a; do git status; done",
+            "coproc NAME$x if true; then git status; fi",
+            "coproc NAME${x} while true; do git status; done",
+            "coproc NAME${x} until false; do git status; done",
+            "coproc NAME${x} for x in a; do git status; done",
+            "coproc NAME${x} select x in a; do git status; done",
+            "coproc NAME${x} if true; then git status; fi",
+            "coproc NAME$x ( git status )",
+            "coproc NAME${x} ( git status )",
+            "coproc NAME$(echo x) while true; do git status; done",
+            "coproc ${x} ( git status )",
+            "coproc NAME$x$y ( git status )",
+            "coproc N{a} ( git status )",
+            "coproc N* if true; then git status; fi",
+            "coproc NAME@(x)y while true; do git status; done",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd:?}");
+        }
+        for (cmd, expected) in [
+            (
+                "git status | head; coproc while true; do git log; done",
+                "rtk git status | head; coproc while true; do git log; done",
+            ),
+            (
+                "coproc while true; do git log; done; git status",
+                "coproc while true; do git log; done; rtk git status",
+            ),
+            (
+                "coproc NAME while true; do git log; done; git status",
+                "coproc NAME while true; do git log; done; rtk git status",
+            ),
+            (
+                "coproc ( git log ); git status",
+                "coproc ( git log ); rtk git status",
+            ),
+            (
+                "coproc NAME ( git log ) && git status",
+                "coproc NAME ( git log ) && rtk git status",
+            ),
+            (
+                "coproc N{a} ( git log ); git status",
+                "coproc N{a} ( git log ); rtk git status",
+            ),
+            ("ls; ( git status )", "rtk ls; ( rtk git status )"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                Some(expected),
+                "{cmd:?}"
+            );
+        }
+    }
+
+    /// A compound command one line of a block opens and a later line closes
+    /// holds the lines between: when a pipe joins it to another command, the
+    /// commands on all of them are left as written, and the block's other
+    /// commands are not.
+    #[test]
+    fn test_a_compound_across_lines_that_a_pipe_joins_is_left_as_written() {
+        for (cmd, expected) in [
+            (
+                "ls; while true; do\ngit status\nls; done | wc -l",
+                "rtk ls; while true; do\ngit status\nls; done | wc -l",
+            ),
+            (
+                "ls; for x in a; do\ngit status\ngit log; done | head",
+                "rtk ls; for x in a; do\ngit status\ngit log; done | head",
+            ),
+            (
+                "ls | while read x; do\ngit status\ngit log; done; ls",
+                "ls | while read x; do\ngit status\ngit log; done; rtk ls",
+            ),
+            (
+                "ls; while true; do\ngit status\nls; done",
+                "rtk ls; while true; do\nrtk git status\nrtk ls; done",
+            ),
+            (
+                "ls; while true; do\ngit status\nls; done; ls | head",
+                "rtk ls; while true; do\nrtk git status\nrtk ls; done; rtk ls | head",
+            ),
+            (
+                "ls; for x in a; do git status; done\nls | head",
+                "rtk ls; for x in a; do rtk git status; done\nrtk ls | head",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                Some(expected),
+                "{cmd:?}"
+            );
+        }
+    }
+
+    /// `--` is read as `arg_tokenizer` reads the one argument, once the shell
+    /// has resolved its quotes.
+    #[test]
+    fn test_dash_dash_is_the_tokenizers_separator() {
+        for word in ["--", "'--'", "\"--\""] {
+            assert!(is_dash_dash(word), "{word:?}");
+        }
+        for word in ["-", "---", "--x", "--=", "x"] {
+            assert!(!is_dash_dash(word), "{word:?}");
+        }
+    }
+
+    /// A user prefix never takes a reserved word the walk steps over: the
+    /// word after `time`'s options is the command, whatever a prefix says.
+    #[test]
+    fn test_a_reserved_word_is_no_prefixs_to_claim() {
+        let prefixes = vec!["time -v".to_string(), "then x".to_string()];
+        for cmd in ["time -v git status", "then x git status"] {
+            assert_eq!(super::rewrite_command(cmd, &[], &prefixes), None, "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn test_bare_uv_run_with_no_inner_command_is_not_rewritten() {
+        assert_eq!(rewrite_command_no_prefixes("uv run", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("uv run  ", &[]), None);
+    }
+
+    /// A quoted value that holds ` rtk ` is one word, not the word `rtk`.
+    #[test]
+    fn test_double_wrap_guard_checks_shell_words_not_blank_split_text() {
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"/usr/bin/time -f "%e rtk %U" git status"#, &[]),
+            Some(r#"/usr/bin/time -f "%e rtk %U" rtk git status"#.into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout 5 rtk git status", &[]),
+            None
+        );
+    }
+
+    /// GNU nice has no `+N` spelling, so `+5` is the program it runs.
+    #[test]
+    fn test_nice_plus_prefixed_number_is_not_rewritten() {
+        assert_eq!(rewrite_command_no_prefixes("nice +5 cargo test", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("nice +5 git status", &[]), None);
+    }
+
+    /// A run of `NAME=value` and `env` words is one layer however long, so it
+    /// does not use up the depth budget.
+    #[test]
+    fn test_one_layer_per_assignment_run() {
+        assert_eq!(
+            rewrite_command_no_prefixes("env env env env env env env env env env git status", &[]),
+            Some("env env env env env env env env env env rtk git status".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "A=1 env B=2 env C=3 timeout 5 nice -n 5 command git status",
+                &[]
+            ),
+            Some("A=1 env B=2 env C=3 timeout 5 nice -n 5 command rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_process_wrapper_2375_and_3574_regression_rows() {
+        for (input, expected) in [
+            ("nice -n 10 ls -la", "nice -n 10 rtk ls -la"),
+            ("time git log --oneline -5", "time rtk git log --oneline -5"),
+            (
+                "timeout 30 gh run view 123 --log-failed",
+                "timeout 30 rtk gh run view 123 --log-failed",
+            ),
+            (
+                "timeout 60 php artisan tinker",
+                "timeout 60 rtk php artisan tinker",
+            ),
+            ("nohup git status", "nohup rtk git status"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                Some(expected.into()),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_wrapper_head_with_an_expansion_or_a_glob_is_no_wrapper() {
+        for input in [
+            "*/timeout 300 git status",
+            "${D}/timeout 300 git status",
+            "$D/timeout 300 git status",
+            "/usr/*/time git status",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(input, &[]), None, "{input}");
+        }
+        // An unbraced `$NAME` glued to the operand is one word, which fills it.
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout 5$UNIT git status", &[]),
+            Some("timeout 5$UNIT rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_prefixed_commands() {
+        for (input, expected) in [
+            ("NODE_ENV=test git status", "NODE_ENV=test rtk git status"),
+            (
+                "PRISMA_USER_CONSENT=\"yes\" pnpm install",
+                "PRISMA_USER_CONSENT=\"yes\" rtk pnpm install",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                Some(expected.into()),
+                "{input}"
+            );
+        }
+    }
+
+    /// `NAME=value` is an assignment only where a simple command starts:
+    /// behind `timeout`, `nice`, `exec` or `uv run` it is a program's name.
+    /// `env` is a program found wherever it sits, so its own operands are its
+    /// own anywhere.
+    #[test]
+    fn test_shell_assignment_position_gating() {
+        for input in [
+            "timeout 300 A=1 git status",
+            "nice FOO=1 git status",
+            "exec A=1 git status",
+            "uv run A=1 pytest",
+            "noglob A=1 git status",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(input, &[]), None, "{input}");
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout 5 env A=1 git status", &[]),
+            Some("timeout 5 env A=1 rtk git status".into())
+        );
+        // A later pipeline stage starts its own simple command.
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test | FOO=1 command grep FAILED", &[]),
+            Some("cargo test | FOO=1 command rtk grep FAILED".into())
+        );
+    }
+
+    /// Once `timeout`'s one operand is read, its own options are over: `-s`
+    /// and `--` there are the program it runs.
+    #[test]
+    fn test_wrapper_options_end_at_the_first_operand() {
+        for cmd in [
+            "timeout 300 -s KILL git status",
+            "timeout 300 -- cargo test",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd:?}");
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout -s KILL 5 cargo test", &[]),
+            Some("timeout -s KILL 5 rtk cargo test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout -vk 5 300 cargo test", &[]),
+            Some("timeout -vk 5 300 rtk cargo test".into())
+        );
+    }
+
+    /// A user prefix is tried at the start of every layer whose own command
+    /// has no rewrite, not only behind `uv run`.
+    #[test]
+    fn test_a_user_prefix_is_tried_at_every_layer() {
+        assert_eq!(
+            super::rewrite_command("env -i git status", &[], &["env -i".to_string()]),
+            Some("env -i rtk git status".into())
+        );
+        assert_eq!(
+            super::rewrite_command(
+                "nice -n 19 ionice git status",
+                &[],
+                &["nice -n 19 ionice".to_string()]
+            ),
+            Some("nice -n 19 ionice rtk git status".into())
+        );
+        let frozen = vec!["uv run --frozen".to_string()];
+        assert_eq!(
+            super::rewrite_command("uv run --frozen pytest", &["pytest".to_string()], &frozen),
+            None
+        );
+        assert_eq!(
+            super::rewrite_command(
+                "uv run --frozen git status",
+                &["pytest".to_string()],
+                &frozen
+            ),
+            Some("uv run --frozen rtk git status".into())
+        );
+    }
+
+    /// A prefix that would end inside the words of a built-in layer it covers
+    /// is skipped, so `rtk` never lands inside a wrapper's own grammar.
+    #[test]
+    fn test_a_prefix_ending_inside_a_layer_is_skipped() {
+        for (cmd, prefix) in [
+            ("nice -5 xyz git status", "nice"),
+            ("nice timeout 5 xyz git status", "nice timeout"),
+        ] {
+            assert_eq!(
+                super::rewrite_command(cmd, &[], &[prefix.to_string()]),
+                None,
+                "{cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_prefix_matches_whole_words_written_as_configured() {
+        let prefixes = vec!["myjail run".to_string()];
+        for (cmd, expected) in [
+            ("myjail run git status", Some("myjail run rtk git status")),
+            ("myjail runs git status", None),
+            ("myjail run\u{a0}git status", None),
+            ("myjail  run git status", None),
+        ] {
+            assert_eq!(
+                super::rewrite_command(cmd, &[], &prefixes),
+                expected.map(String::from),
+                "{cmd:?}"
+            );
+        }
+    }
+
+    /// What follows a user prefix may be an assignment, and is no place where
+    /// a pipeline starts.
+    #[test]
+    fn test_a_user_prefix_keeps_the_simple_command_start() {
+        let prefixes = vec!["sudo".to_string()];
+        for (cmd, expected) in [
+            ("sudo A=1 git status", "sudo A=1 rtk git status"),
+            ("sudo A=1 B=2 git status", "sudo A=1 B=2 rtk git status"),
+            ("sudo git status", "sudo rtk git status"),
+            ("A=1 sudo B=2 git status", "A=1 sudo B=2 rtk git status"),
+            ("git log | sudo A=1 grep x", "git log | sudo A=1 rtk grep x"),
+            (
+                "timeout 5 sudo A=1 git status",
+                "timeout 5 sudo A=1 rtk git status",
+            ),
+            ("sudo time -v git status", "sudo time -v rtk git status"),
+        ] {
+            assert_eq!(
+                super::rewrite_command(cmd, &[], &prefixes).as_deref(),
+                Some(expected),
+                "{cmd:?}"
+            );
+        }
+    }
+
+    // --- `exclude_commands` behind the layers under `uv run` ---
+
+    /// Exclusion is decided before the context gates, so an excluded command
+    /// is excluded wherever it sits.
+    #[test]
+    fn test_decide_answers_excluded_in_every_context() {
+        let excluded = compile_exclude_patterns(&["pytest".to_string()]);
+        let text = "pytest -q";
+        let tokens = tokenize(text);
+        let words = words(text, &tokens);
+        let line = Line {
+            text,
+            words: &words,
+            tokens: &tokens,
+        };
+        for context in [
+            RewriteContext::Normal,
+            RewriteContext::PipelineFinal,
+            RewriteContext::PipelineProducer,
+        ] {
+            assert_eq!(
+                decide(&line, 0, &excluded, context),
+                Some(Decision::Excluded)
+            );
+        }
+        assert!(matches!(
+            decide(&line, 0, &[], RewriteContext::Normal),
+            Some(Decision::Rewrite(_))
+        ));
+    }
+
+    /// `uv run`'s fall-through to its own rule reads what it wraps with the
+    /// rewrite's own walk, so no layer hides an excluded command from it.
+    #[test]
+    fn test_uv_run_fallthrough_reads_through_every_layer_for_exclusion() {
+        let excluded = vec!["pytest".to_string()];
+        let nested = format!("{}pytest", "uv run ".repeat(11));
+        for input in [
+            "uv run pytest",
+            "uv run timeout 5 pytest",
+            "uv run noglob pytest",
+            "uv run command pytest",
+            "uv run /usr/bin/pytest",
+            "uv run uv run pytest",
+            "uv run time pytest",
+            "uv run nice pytest",
+            "python -m pytest",
+            "uv run python -m pytest",
+            "uv run nice python -m pytest",
+            "uv run timeout 5 python -m pytest",
+            "uv run env python -m pytest",
+            "uv run --with x pytest",
+            "uv run --with x python -m pytest",
+            "uv run --frozen pytest",
+            "uv run -- pytest",
+            "uv run -- python -m pytest",
+            nested.as_str(),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &excluded),
+                None,
+                "{input}"
+            );
+        }
+        for (input, prefix) in [
+            ("uv run x pytest", "x"),
+            ("uv run nice -n 19 ionice pytest", "nice -n 19 ionice"),
+        ] {
+            assert_eq!(
+                super::rewrite_command(input, &excluded, &[prefix.to_string()]),
+                None,
+                "{input}"
+            );
+        }
+        for (input, expected) in [
+            ("uv run -- cargo test", "rtk uv run -- cargo test"),
+            (
+                "uv run timeout 5 cargo test",
+                "uv run timeout 5 rtk cargo test",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &excluded).as_deref(),
+                Some(expected),
+                "{input}"
+            );
+        }
+        // Under any exclusion, an option the walk cannot read past leaves the
+        // command behind it unread, and the wrapper is not matched whole.
+        for input in ["uv run --with x pytest", "uv run --frozen ruff check"] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &["git".to_string()]),
+                None,
+                "{input}"
+            );
+        }
+        // Without exclusions the wrapper is matched whole, or its command is.
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run python -m pytest", &[]),
+            Some("uv run rtk pytest".into())
+        );
+        for cmd in [
+            "uv run -- pytest",
+            "uv run --with x pytest",
+            "uv run --with x python -m pytest",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(format!("rtk {cmd}")),
+                "{cmd:?}"
+            );
+        }
+        assert!(
+            super::rewrite_command(
+                "uv run nice -n 19 ionice pytest",
+                &[],
+                &["nice -n 19 ionice".to_string()]
+            )
+            .is_some()
+        );
+    }
+
+    /// The command `uv run` wraps is excluded as bash runs its words, their
+    /// quotes and escapes removed, as much as when it is written plain.
+    #[test]
+    fn test_uv_run_fallthrough_reads_an_excluded_command_as_bash_runs_it() {
+        let excluded = vec!["pytest".to_string()];
+        for input in [
+            "uv run 'pytest'",
+            "uv run \"pytest\" -x",
+            "uv run p\"ytest\" -x",
+            "uv run \\pytest",
+            "uv run '/usr/bin/pytest'",
+            "uv run timeout 5 'pytest'",
+            "uv run env A=1 \\pytest",
+            "uv run -- p'ytest'",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &excluded),
+                None,
+                "{input}"
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                Some(format!("rtk {input}")),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run 'pytestx'", &excluded).as_deref(),
+            Some("rtk uv run 'pytestx'")
+        );
+        // A program named like an assignment is read as `decide` reads it,
+        // which matches no exclusion against it.
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run uv run FOO=1 make", &["^[^a-z]".to_string()])
+                .as_deref(),
+            Some("rtk uv run uv run FOO=1 make")
+        );
+    }
+
+    /// An exclusion reads the command on the words bash runs, up to where it
+    /// ends: a redirection behind it is no part of it, and a quoted path is
+    /// one word, whose basename is the program's name.
+    #[test]
+    fn test_exclusion_reads_the_words_up_to_the_redirections() {
+        for (pattern, input, unexcluded) in [
+            (
+                "^pytest$",
+                "uv run 'pytest' 2>&1",
+                "rtk uv run 'pytest' 2>&1",
+            ),
+            ("^pytest$", "uv run pytest 2>&1", "uv run rtk pytest 2>&1"),
+            (
+                "^pytest$",
+                "uv run timeout 5 'pytest' 2>&1",
+                "rtk uv run timeout 5 'pytest' 2>&1",
+            ),
+            (
+                "pytest",
+                "uv run timeout 5 'pytest' 2>&1",
+                "rtk uv run timeout 5 'pytest' 2>&1",
+            ),
+            (
+                "pytest",
+                "uv run '/opt/my tools/pytest' -x",
+                "rtk uv run '/opt/my tools/pytest' -x",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[pattern.to_string()]),
+                None,
+                "{input} under {pattern}"
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]).as_deref(),
+                Some(unexcluded),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run '/opt/my tools/pytest' -x", &["^pytest$".into()])
+                .as_deref(),
+            Some("rtk uv run '/opt/my tools/pytest' -x")
+        );
+    }
+
+    #[test]
+    fn test_exclusion_reads_a_wrapper_head_by_the_name_it_runs() {
+        for cmd in [
+            "uv run env pytest",
+            "uv run 'env' pytest",
+            "uv run \\env pytest",
+            "uv run 'command' pytest",
+            "uv run \"noglob\" pytest",
+            "uv run 'exec' pytest",
+            "uv run 'uv' run pytest",
+            "uv run \\uv\trun pytest",
+            "timeout 5 'env' pytest -x",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &["pytest".into()]),
+                None,
+                "{cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_path_spelled_wrapper_head_leaves_the_line_as_written() {
+        for head in [
+            "/usr/bin/env",
+            "/usr/bin/command",
+            "/usr/bin/exec",
+            "/usr/bin/noglob",
+            "'/usr/bin/env'",
+            "/usr/bin/uv run",
+        ] {
+            for cmd in [
+                format!("{head} git status"),
+                format!("{head} pytest"),
+                format!("timeout 5 {head} pytest -x"),
+            ] {
+                assert_eq!(rewrite_command_no_prefixes(&cmd, &[]), None, "{cmd}");
+            }
+            // `uv run` has its own rule, so it is refused only for what it
+            // hides from an exclusion.
+            for cmd in [
+                format!("{head} pytest"),
+                format!("timeout 5 {head} pytest -x"),
+                format!("uv run {head} pytest"),
+            ] {
+                assert_eq!(
+                    rewrite_command_no_prefixes(&cmd, &["pytest".into()]),
+                    None,
+                    "{cmd}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_only_a_path_spelled_uv_run_is_refused_behind_uv_run() {
+        let excluded = ["pytest".to_string()];
+        // A `uv` spelled by a path, followed by anything but `run`, is another
+        // program: the `uv run` that heads the command is matched whole.
+        for (cmd, want) in [
+            (
+                "uv run /usr/bin/uv pip list",
+                "rtk uv run /usr/bin/uv pip list",
+            ),
+            ("uv run ./uv pip list", "rtk uv run ./uv pip list"),
+            ("uv run git status", "uv run rtk git status"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &excluded).as_deref(),
+                Some(want),
+                "{cmd}"
+            );
+        }
+        for cmd in [
+            "uv run /usr/bin/uv run pytest",
+            "uv run /usr/bin/env xyz",
+            "uv run /usr/bin/uv  run git status",
+            "uv run /usr/bin/uv\trun git status",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &excluded), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_exclusion_reads_a_tab_after_the_tool() {
+        assert_eq!(
+            rewrite_command_no_prefixes("npx playwright\ttest", &["^playwright test".into()]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_exclusion_reads_the_basename_of_a_plain_first_word_only() {
+        assert_eq!(
+            rewrite_command_no_prefixes("/usr/bin/pytest -x", &["^pytest -x".into()]),
+            None
+        );
+        // The cut inside the quotes would read `tools/pytest' -x`, which this
+        // pattern matches; the command is excluded or not by its words alone.
+        let cmd = "'/opt/my tools/pytest' -x";
+        assert_eq!(
+            rewrite_command_no_prefixes(cmd, &["^tools/pytest".into()]),
+            rewrite_command_no_prefixes(cmd, &[]),
+        );
+    }
+
+    /// A word that holds a blank is one word: `'pytest x'` runs a program
+    /// named `pytest x`, which no pattern naming `pytest` covers.
+    #[test]
+    fn test_exclusion_never_splits_a_word() {
+        for pattern in ["pytest", "^pytest$", "^pytest( |$)", "^pytest x"] {
+            assert_eq!(
+                rewrite_command_no_prefixes("uv run 'pytest x'", &[pattern.to_string()]).as_deref(),
+                Some("rtk uv run 'pytest x'"),
+                "{pattern}"
+            );
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run 'pytest x'", &[r"^pytest\\ x$".into()]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_spell_words_escapes_only_a_blank_inside_a_word() {
+        for (words, expected) in [
+            (&["pytest", "-x"][..], "pytest -x"),
+            (&["pytest x"][..], r"pytest\ x"),
+            (&["a\tb"][..], "a\\\tb"),
+            (&["\u{b}a b", "it's"][..], "\u{b}a\\ b it's"),
+            (&[][..], ""),
+        ] {
+            assert_eq!(spell_words(words.iter().copied()), expected, "{words:?}");
+        }
+    }
+
+    #[test]
+    fn test_exclusion_reads_the_tool_off_the_words_bash_runs() {
+        for cmd in [
+            "npx playwright test",
+            "npx \"playwright\" test",
+            "npx 'playwright' test",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &["playwright".into()]),
+                None,
+                "{cmd}"
+            );
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes("pytest ''", &["^pytest$".into()]),
+            Some("rtk pytest ''".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pytest", &["^pytest$".into()]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_exclusion_matches_the_command_as_typed_and_as_run() {
+        for (cmd, pattern) in [
+            ("git log --format=\"%H\"", "^git log --format=\"%H\""),
+            ("git commit -m 'wip'", "^git commit -m 'wip'"),
+            ("grep -r \"a b\" .", "^grep -r \"a b\""),
+            ("git log --format=\"%H\"", "^git log --format=%H"),
+            ("git commit -m 'wip'", "^git commit -m wip"),
+            ("grep -r \"a b\" .", "^grep -r a\\\\ b"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[pattern.into()]),
+                None,
+                "{cmd} {pattern}"
+            );
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "git log --format=\"%H\"",
+                &["^git log --format=%h".into()]
+            ),
+            Some("rtk git log --format=\"%H\"".into())
+        );
+    }
+
+    #[test]
+    fn test_exclusion_holds_behind_a_wrapper_written_quoted() {
+        for cmd in [
+            "'timeout' 5 pytest",
+            "\\timeout 5 pytest",
+            "\"nice\" pytest",
+            "uv  run pytest",
+            "uv\trun timeout 5 pytest",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &["pytest".into()]),
+                None,
+                "{cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_uv_run_fallthrough_refuses_what_it_wraps_as_written() {
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run env", &["env".to_string()]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run env", &[]),
+            Some("rtk uv run env".into())
+        );
+        let excluded = vec!["uv run xyz".to_string()];
+        for input in ["uv run uv run xyz", "uv run env uv run xyz"] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &excluded),
+                None,
+                "{input}"
+            );
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run uv run xyz", &[]),
+            Some("uv run rtk uv run xyz".into())
+        );
+    }
+
+    /// Layers deeper than the walk follows hide the command, which counts as
+    /// excluded.
+    #[test]
+    fn test_uv_run_fallthrough_refuses_what_it_cannot_see_the_end_of() {
+        let deep = format!("uv run {}pytest", "nice ".repeat(11));
+        assert_eq!(
+            rewrite_command_no_prefixes(&deep, &["pytest".to_string()]),
+            None
+        );
+        let chain = format!("{}git status", "uv run ".repeat(12));
+        assert_eq!(
+            rewrite_command_no_prefixes(&chain, &["^git status".to_string()]),
+            None
+        );
+        assert!(rewrite_command_no_prefixes(&deep, &[]).is_some());
+    }
+
+    /// A `NAME=value` word right behind `uv run` is a program's name, and the
+    /// fall-through refuses it; `env` is a program, and falls through.
+    #[test]
+    fn test_uv_run_fallthrough_refuses_a_bare_assignment_or_rtk_disabled() {
+        for cmd in [
+            "uv run A=1 pytest",
+            "uv run RTK_DISABLED=1 git status",
+            "uv run RTK_DISABLED=1 python x.py",
+            "uv run env RTK_DISABLED=1 git status",
+            "uv run timeout 5 env RTK_DISABLED=1 pytest",
+            "uv run nice env RTK_DISABLED=1 pytest",
+            "uv run env A=1 RTK_DISABLED=1 x",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd:?}");
+        }
+        for (cmd, expected) in [
+            ("uv run env python x.py", "rtk uv run env python x.py"),
+            ("uv run env -i python x.py", "rtk uv run env -i python x.py"),
+            ("uv run env", "rtk uv run env"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                Some(expected),
+                "{cmd:?}"
+            );
+        }
+        assert!(refused_on_disabled(
+            "uv run timeout 5 env RTK_DISABLED=1 pytest"
+        ));
+        assert!(refused_on_disabled("uv run env RTK_DISABLED=1 git status"));
+        assert!(!refused_on_disabled("uv run nice RTK_DISABLED=1 pytest"));
+        assert!(!refused_on_disabled("uv run RTK_DISABLED=1 git status"));
+        let excluded = compile_exclude_patterns(&["pytest".to_string()]);
+        assert!(
+            rewrite_line("uv run timeout 5 env RTK_DISABLED=1 pytest", &excluded, &[]).disabled
+        );
+    }
+
+    // --- `RTK_DISABLED=` by assignment name ---
+
+    #[test]
+    fn test_rtk_disabled_is_matched_by_assignment_name() {
+        for (cmd, expected) in [
+            (
+                "XRTK_DISABLED=1 git status",
+                "XRTK_DISABLED=1 rtk git status",
+            ),
+            (
+                "NOTE='set RTK_DISABLED=1 x' git status",
+                "NOTE='set RTK_DISABLED=1 x' rtk git status",
+            ),
+            (
+                "MSG='RTK_DISABLED=1' git status",
+                "MSG='RTK_DISABLED=1' rtk git status",
+            ),
+            (
+                "env MSG=RTK_DISABLED=1 git status",
+                "env MSG=RTK_DISABLED=1 rtk git status",
+            ),
+            (
+                "RTK_DISABLED=1; git status",
+                "RTK_DISABLED=1; rtk git status",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                Some(expected),
+                "{cmd:?}"
+            );
+            assert!(!refused_on_disabled(cmd), "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn test_the_append_form_is_a_bypass_only_as_a_shell_assignment() {
+        for cmd in [
+            "RTK_DISABLED+=1 git status",
+            "A=1 RTK_DISABLED+=1 git status",
+            "RTK_DISABLED+=1 env A=1 git status",
+            "env RTK_DISABLED=1 git status",
+        ] {
+            assert!(refused_on_disabled(cmd), "{cmd:?}");
+        }
+        for cmd in [
+            "env RTK_DISABLED+=1 git status",
+            "A=1 env RTK_DISABLED+=1 git status",
+            "timeout 5 env RTK_DISABLED+=1 git status",
+        ] {
+            assert!(!refused_on_disabled(cmd), "{cmd:?}");
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes("env RTK_DISABLED+=1 git status", &[]),
+            Some("env RTK_DISABLED+=1 rtk git status".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("RTK_DISABLED+=1 git status", &[]),
+            None
+        );
+    }
+
+    /// The warning follows the walk's stop: a retry behind a user prefix that
+    /// stops at the marker refuses on it, and one that stops there and loses
+    /// to a retry that decides draws none.
+    #[test]
+    fn test_a_retry_that_stops_at_the_marker_refuses_on_it() {
+        let prefixes =
+            normalize_transparent_prefixes(&["nohup".to_string(), "docker exec c".to_string()]);
+        for cmd in [
+            "nohup RTK_DISABLED=1 git status",
+            "docker exec c RTK_DISABLED=1 git status",
+        ] {
+            let answer = rewrite_line(cmd, &[], &prefixes);
+            assert_eq!(answer.text, None, "{cmd}");
+            assert!(answer.disabled, "{cmd}");
+        }
+        let prefixes = normalize_transparent_prefixes(&[
+            "timeout 5 nice -n 19 RTK_DISABLED=1".to_string(),
+            "nice -n 19".to_string(),
+        ]);
+        let answer = rewrite_line(
+            "timeout 5 nice -n 19 RTK_DISABLED=1 git status",
+            &[],
+            &prefixes,
+        );
+        assert_eq!(
+            answer.text.as_deref(),
+            Some("timeout 5 nice -n 19 RTK_DISABLED=1 rtk git status")
+        );
+        assert!(!answer.disabled);
+    }
+
+    // --- A subshell's closing `)` ---
+
+    #[test]
+    fn test_a_word_after_a_subshell_is_left_as_written() {
+        for cmd in [
+            "(true)git status",
+            "(true) git status",
+            "( (true)git status )",
+            "( (true) git status )",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd:?}");
+        }
+        for (cmd, expected) in [
+            ("( git status )word", "( rtk git status )word"),
+            ("( (git status) )", "( (rtk git status) )"),
+            ("(true) >f; git status", "(true) >f; rtk git status"),
+            ("(true) && git status", "(true) && rtk git status"),
+            (
+                "case x in a) git status;; esac",
+                "case x in a) rtk git status;; esac",
+            ),
+            (
+                "case x in a)git status;; esac",
+                "case x in a)rtk git status;; esac",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                Some(expected),
+                "{cmd:?}"
+            );
+        }
     }
 }

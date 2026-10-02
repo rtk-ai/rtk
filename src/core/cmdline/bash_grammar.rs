@@ -3,6 +3,8 @@
 //! Every reader of a command line that has to know one of these facts reads
 //! it here.
 
+use crate::core::arg_tokenizer::{Flag, Grammar, TokenKind as ArgKind, tokenize_grammar};
+
 /// A bash reserved word, as `compgen -k` lists them in bash 5.3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reserved {
@@ -52,6 +54,12 @@ impl Compound {
     fn holds_commands(self) -> bool {
         self != Compound::Test
     }
+
+    /// Whether a reserved word ends it. The body of a `function` or `coproc`
+    /// definition is the command after it, which ends on its own.
+    fn has_closing_word(self) -> bool {
+        !matches!(self, Compound::Function | Compound::Coproc)
+    }
 }
 
 /// What a reserved word does in the compound command it belongs to.
@@ -96,10 +104,10 @@ pub struct ReservedWord {
     /// `function NAME {`, `coproc NAME {`.
     pub names: bool,
     pub role: Role,
-    /// The words bash reads as the word's options right after it, in the
-    /// order it takes them, each one optional: `time -p --`. The word after
-    /// them stands where the word after this one would.
-    pub options: &'static [&'static str],
+    /// The options bash reads right after the word, if it takes any
+    /// ([`ReservedWord::options_read`]). The word after them stands where the
+    /// word after this one would.
+    pub options: Option<Grammar>,
 }
 
 impl ReservedWord {
@@ -117,6 +125,20 @@ impl ReservedWord {
         }
     }
 
+    /// Whether the word opens a compound command whose parts are command
+    /// lists and that a reserved word ends: one of the rows of
+    /// [`RESERVED_WORDS`] whose [`Role::Opens`] names such a compound.
+    pub fn opens_command_lists(&self) -> bool {
+        matches!(self.role, Role::Opens(c) if c.holds_commands() && c.has_closing_word())
+    }
+
+    /// Whether the word ends a compound command that
+    /// [`ReservedWord::opens_command_lists`] opens: one of the rows of
+    /// [`RESERVED_WORDS`] whose [`Role::Closes`] names only such compounds.
+    pub fn closes_command_lists(&self) -> bool {
+        matches!(self.role, Role::Closes(compounds) if compounds.iter().all(|c| c.holds_commands()))
+    }
+
     /// Whether a pipeline may start after it, and not only a command. Bash
     /// reads `time` as reserved only where a pipeline starts
     /// (`time_command_acceptable` in its `parse.y`), and `coproc` takes one
@@ -124,6 +146,32 @@ impl ReservedWord {
     /// does.
     pub fn pipeline_follows(&self) -> bool {
         self.next == Position::Command && self.word != Reserved::Coproc
+    }
+
+    /// How many of `words`, the words right after this one as written, bash
+    /// reads as its options: each option its grammar declares once, then a
+    /// `--`, each one optional (`time -p --`). A word that repeats an option,
+    /// or follows the `--`, is none: in `time -p -p` and `time -- -p` the
+    /// second word is a command's name.
+    pub fn options_read<'w>(&self, words: impl IntoIterator<Item = &'w str>) -> usize {
+        let Some(grammar) = &self.options else {
+            return 0;
+        };
+        let mut read: Vec<&Flag> = Vec::new();
+        for word in words {
+            let args = [word];
+            let [token] = tokenize_grammar(&args, grammar)[..] else {
+                break;
+            };
+            if token.kind == ArgKind::DashDash {
+                return read.len() + 1;
+            }
+            match token.flag {
+                Some(flag) if !read.contains(&flag) => read.push(flag),
+                _ => break,
+            }
+        }
+        read.len()
     }
 
     /// Whether the word starts `compound`.
@@ -151,13 +199,16 @@ const fn row(word: Reserved, spelling: &'static str, next: Position, role: Role)
         next,
         names: false,
         role,
-        options: &[],
+        options: None,
     }
 }
 
 impl ReservedWord {
-    const fn with_options(self, options: &'static [&'static str]) -> Self {
-        ReservedWord { options, ..self }
+    const fn with_options(self, options: Grammar) -> Self {
+        ReservedWord {
+            options: Some(options),
+            ..self
+        }
     }
 
     const fn naming(self) -> Self {
@@ -167,6 +218,12 @@ impl ReservedWord {
         }
     }
 }
+
+/// `time`'s one option, `-p`. Bash compares the word as written
+/// (`special_case_tokens` in its `parse.y`): no clustering, no attached value
+/// and no abbreviation, so `time "-p"` and `time -P` run a command of that
+/// name.
+const TIME_OPTIONS: Grammar = Grammar::exact(&[&[Flag::short("p")]]);
 
 const COMMAND: Position = Position::Command;
 const RESERVED_WORD: Position = Position::ReservedWord;
@@ -251,7 +308,7 @@ pub const RESERVED_WORDS: &[ReservedWord] = &[
         Role::Opens(Compound::Coproc),
     )
     .naming(),
-    row(Reserved::Time, "time", COMMAND, Role::Prefix).with_options(&["-p", "--"]),
+    row(Reserved::Time, "time", COMMAND, Role::Prefix).with_options(TIME_OPTIONS),
     row(Reserved::Bang, "!", COMMAND, Role::Prefix),
     row(
         Reserved::OpenBrace,
@@ -442,12 +499,47 @@ mod tests {
     /// found`).
     #[test]
     fn options_as_bash_reads_them() {
-        let with_options: Vec<(&str, &[&str])> = RESERVED_WORDS
+        let with_options: Vec<&str> = RESERVED_WORDS
             .iter()
-            .filter(|w| !w.options.is_empty())
-            .map(|w| (w.spelling, w.options))
+            .filter(|w| w.options.is_some())
+            .map(|w| w.spelling)
             .collect();
-        assert_eq!(with_options, [("time", &["-p", "--"][..])]);
+        assert_eq!(with_options, ["time"]);
+        let time = reserved_word("time").expect("a reserved word");
+        for (words, read) in [
+            (&["-p", "ls"][..], 1),
+            (&["--", "ls"], 1),
+            (&["-p", "--", "ls"], 2),
+            (&["--", "-p"], 1),
+            (&["-p", "-p"], 1),
+            (&["\"-p\"", "ls"], 0),
+            (&["-P", "ls"], 0),
+            (&["-pp", "ls"], 0),
+            (&["--p", "ls"], 0),
+            (&["-p=1", "ls"], 0),
+            (&["ls"], 0),
+        ] {
+            assert_eq!(time.options_read(words.iter().copied()), read, "{words:?}");
+        }
+        let if_word = reserved_word("if").expect("a reserved word");
+        assert_eq!(if_word.options_read(["-p"]), 0);
+    }
+
+    #[test]
+    fn loops_conditionals_and_case_hold_command_lists() {
+        let word = |spelling| reserved_word(spelling).expect("a reserved word");
+        for spelling in ["if", "case", "for", "select", "while", "until"] {
+            assert!(word(spelling).opens_command_lists(), "{spelling}");
+            assert!(!word(spelling).closes_command_lists(), "{spelling}");
+        }
+        for spelling in ["fi", "esac", "done"] {
+            assert!(word(spelling).closes_command_lists(), "{spelling}");
+            assert!(!word(spelling).opens_command_lists(), "{spelling}");
+        }
+        for spelling in ["then", "do", "in", "[[", "]]", "function", "coproc", "time"] {
+            assert!(!word(spelling).opens_command_lists(), "{spelling}");
+            assert!(!word(spelling).closes_command_lists(), "{spelling}");
+        }
     }
 
     #[test]

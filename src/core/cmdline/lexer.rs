@@ -5,7 +5,7 @@
 use std::cell::OnceCell;
 use std::iter::{Peekable, once};
 
-use super::bash_grammar::{Compound, Position, Reserved, ReservedWord, reserved_word};
+use super::bash_grammar::{Compound, Position, Reserved, ReservedWord, Role, reserved_word};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipeKind {
@@ -225,6 +225,33 @@ impl Iterator for QuoteScan<'_> {
             escaped: false,
         })
     }
+}
+
+/// Whether `word` holds a `$` or a backquote outside single quotes: a
+/// variable expansion, braced or not (`$D`, `${D}`), or a command
+/// substitution (`$(…)`, or `` `…` `` inside double quotes, where it is part
+/// of the word). What bash runs for such a word is the expansion's result, so
+/// `$D/timeout` is not read as `timeout`.
+pub(crate) fn word_has_expansion(word: &str) -> bool {
+    QuoteScan::new(word)
+        .significant()
+        .any(|c| matches!(c.byte, b'$' | b'`') && !c.in_single)
+}
+
+/// Whether `text` lexes into whole words: every quote closed, and no trailing
+/// backslash waiting for a byte to escape. Configuration text matched against
+/// the words of a command has to, or the quote it opens would run into
+/// whatever the command has after it.
+pub(crate) fn lexes_into_whole_words(text: &str) -> bool {
+    let trailing_backslashes = text.bytes().rev().take_while(|&b| b == b'\\').count();
+    quotes_balanced(text) && trailing_backslashes % 2 == 0
+}
+
+/// Whether every quote `text` opens is closed by its end.
+pub(crate) fn quotes_balanced(text: &str) -> bool {
+    let mut scan = QuoteScan::new(text);
+    scan.by_ref().for_each(drop);
+    scan.balanced()
 }
 
 /// One shell word: a run of adjacent tokens that are not blanks, with its span.
@@ -886,6 +913,16 @@ fn is_whole_word(tokens: &[Token<'_>], i: usize) -> bool {
     delimits_word(i.checked_sub(1).and_then(|p| tokens.get(p))) && delimits_word(tokens.get(i + 1))
 }
 
+/// Whether `tokens[i]` is part of the word the token before it is part of:
+/// glued to it, and neither a blank, an operator, a pipe, a redirect, `&`
+/// nor a bracket, unless the bracket opens word text (`a@(b)`).
+fn continues_word(tokens: &[Token<'_>], i: usize) -> bool {
+    i.checked_sub(1)
+        .and_then(|p| tokens.get(p))
+        .is_some_and(|prev| !prev.is_blank())
+        && (!delimits_word(tokens.get(i)) || opens_word_text(tokens, i).is_some())
+}
+
 /// A bracket that opened word text ([`Reading::WordText`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TextBracket {
@@ -994,6 +1031,134 @@ pub(crate) fn read_grammar(input: &str, tokens: &[Token<'_>]) -> Vec<Reading> {
         .collect()
 }
 
+/// [`read_grammar`]'s reading of a line, with its compound commands whose
+/// parts are command lists.
+pub(crate) struct Nesting {
+    /// How bash reads each token, as [`read_grammar`] says.
+    pub(crate) readings: Vec<Reading>,
+    /// The compound commands whose parts are command lists and that a
+    /// reserved word closes ([`ReservedWord::opens_command_lists`]), and the
+    /// subshells that are a coprocess's body, in the line's own list: first
+    /// those whose closing word the line holds but not their opening one, in
+    /// order, then those it opens and closes, then those it opens and leaves
+    /// open, innermost last.
+    pub(crate) compounds: Vec<CompoundSpan>,
+}
+
+/// One compound command of a [`Nesting`], as token positions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CompoundSpan {
+    /// Its opening reserved word or `(`; `None` when the line starts inside
+    /// it.
+    pub(crate) open: Option<usize>,
+    /// Its closing reserved word or `)`; `None` when the line ends inside it.
+    pub(crate) close: Option<usize>,
+    /// Whether the compound is a pipeline's stage on this line: a pipe comes
+    /// right before its opening word, or right after its closing word and
+    /// the redirections that follow it, or it is a coprocess's body, right
+    /// after `coproc` or `coproc NAME`, whose input and output are pipes.
+    pub(crate) piped: bool,
+}
+
+/// Reads `tokens`, lexed from `input`, as [`read_grammar`] does, and finds
+/// the compound commands whose parts are command lists ([`Nesting`]).
+pub(crate) fn read_nesting(input: &str, tokens: &[Token<'_>]) -> Nesting {
+    let mut reader = GrammarReader::new();
+    let readings: Vec<Reading> = (0..tokens.len())
+        .map(|i| reader.read(input, tokens, i))
+        .collect();
+    let Some(line) = reader.frames.first() else {
+        return Nesting {
+            readings,
+            compounds: Vec::new(),
+        };
+    };
+    // Looking back from a compound's opening word, the reserved words that
+    // prefix its pipeline and their options (`time -p --`) stand between it
+    // and the operator before that pipeline.
+    let piped_before = |open: usize| {
+        tokens[..open]
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|&(j, tok)| !tok.is_blank() && line.prefix_words.binary_search(&j).is_err())
+            .is_some_and(|(j, tok)| {
+                matches!(tok.kind, TokenKind::Pipe(_)) && readings[j] == Reading::Commands
+            })
+    };
+    let piped_after = |close: usize| {
+        let mut j = close + 1;
+        let skip_blanks = |j: &mut usize| {
+            while tokens.get(*j).is_some_and(Token::is_blank) {
+                *j += 1;
+            }
+        };
+        skip_blanks(&mut j);
+        while tokens
+            .get(j)
+            .is_some_and(|tok| tok.kind == TokenKind::Redirect)
+        {
+            let takes_a_word = redirect_takes_a_word(tokens[j].value);
+            j += 1;
+            skip_blanks(&mut j);
+            if takes_a_word {
+                // The target is one word: a `&`, `(` or `)` glued to it
+                // where commands are read ends it.
+                while tokens.get(j).is_some_and(|tok| match tok.kind {
+                    TokenKind::Arg => true,
+                    TokenKind::Shellism => {
+                        readings[j] != Reading::Commands || !matches!(tok.value, "&" | "(" | ")")
+                    }
+                    _ => false,
+                }) {
+                    j += 1;
+                }
+                skip_blanks(&mut j);
+            }
+        }
+        tokens.get(j).is_some_and(|tok| {
+            matches!(tok.kind, TokenKind::Pipe(_)) && readings[j] == Reading::Commands
+        })
+    };
+    // A subshell that is a coprocess's body and that the line leaves open
+    // stands among the compounds left open, innermost last.
+    let mut left_open = line.opens.clone();
+    left_open.extend(line.parens.iter().filter_map(|paren| match *paren {
+        Paren::Subshell { coproc } => coproc,
+        Paren::AfterWord => None,
+    }));
+    left_open.sort_unstable();
+    let compounds = line
+        .strays
+        .iter()
+        .map(|&close| (None, Some(close)))
+        .chain(
+            line.closed
+                .iter()
+                .map(|&(open, close)| (Some(open), Some(close))),
+        )
+        .chain(left_open.iter().map(|&open| (Some(open), None)))
+        .map(|(open, close)| CompoundSpan {
+            open,
+            close,
+            piped: open.is_some_and(|open| {
+                piped_before(open) || line.coproc_bodies.binary_search(&open).is_ok()
+            }) || close.is_some_and(piped_after),
+        })
+        .collect();
+    Nesting {
+        readings,
+        compounds,
+    }
+}
+
+/// Whether the redirection `op` takes the word after it as its target: every
+/// one does but a descriptor duplicated or closed in the operator itself
+/// (`>&2`, `2>&1`, `<&-`). `&>` and a bare `>&` take a word.
+fn redirect_takes_a_word(op: &str) -> bool {
+    !op.contains('&') || op.starts_with('&') || op.ends_with('&')
+}
+
 /// Where the command [`starts_with_grammar`] reads starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommandStart {
@@ -1070,12 +1235,46 @@ struct Frame {
     pipeline: bool,
     /// What the last token that is not a blank makes of the next one.
     after: After,
+    /// The opening words of the compound commands whose parts are command
+    /// lists ([`ReservedWord::opens_command_lists`]) open in the list, as
+    /// token positions, innermost last.
+    opens: Vec<usize>,
+    /// Those the list closed, and the subshells that are a coprocess's body,
+    /// as the positions of their opening and closing words or brackets, in
+    /// the order they closed.
+    closed: Vec<(usize, usize)>,
+    /// The closing words of such compound commands the list did not open.
+    strays: Vec<usize>,
+    /// The tokens read as a reserved word that prefixes a pipeline or as one
+    /// of its options (`time -p --`), in order.
+    prefix_words: Vec<usize>,
+    /// Where the words after a `coproc` stand, while one may still open its
+    /// body.
+    coproc: CoprocAt,
+    /// The opening words or brackets of the compound commands and subshells
+    /// that are a coprocess's body, right after `coproc` or `coproc NAME`,
+    /// in order.
+    coproc_bodies: Vec<usize>,
+}
+
+/// Where a word stands after `coproc`: its body is the command that
+/// follows, or, behind a name, the compound command that follows.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum CoprocAt {
+    #[default]
+    Outside,
+    /// Right after `coproc`.
+    Head,
+    /// Right after `coproc NAME`.
+    Name,
 }
 
 /// A `(` that [`read_grammar`] read in a command list.
 enum Paren {
-    /// One where a command or a reserved word starts: a subshell.
-    Subshell,
+    /// One where a command or a reserved word starts: a subshell. `coproc`
+    /// is its own position when it is a coprocess's body, right after
+    /// `coproc` or `coproc NAME`.
+    Subshell { coproc: Option<usize> },
     /// One after a word: a function's `name ( )`.
     AfterWord,
 }
@@ -1092,9 +1291,10 @@ enum After {
     Name {
         header: bool,
     },
-    /// A reserved word whose options may follow, or an option of it: these
-    /// are the options left, in order.
-    Options(&'static [&'static str]),
+    /// A reserved word whose options follow, or an option of it: how many
+    /// of the words after it bash reads as its options
+    /// ([`ReservedWord::options_read`]).
+    Options(usize),
 }
 
 impl GrammarReader {
@@ -1123,8 +1323,11 @@ impl GrammarReader {
             && opens_substitution(input, tok.offset)
         {
             // The substitution is text of a word: what follows it is no
-            // command, and a pattern it starts has started.
-            frame.position = Position::Word;
+            // command, and a pattern it starts has started. In a coprocess's
+            // name, the body still follows the name.
+            if frame.coproc != CoprocAt::Name {
+                frame.position = Position::Word;
+            }
             if let Some(CaseAt::Pattern { started, .. }) = frame.cases.last_mut() {
                 *started = true;
             }
@@ -1173,7 +1376,7 @@ impl GrammarReader {
                 if frame.read_arithmetic(tokens, i, after, &self.closes) {
                     return frame.around.unwrap_or(Reading::Expression);
                 }
-                let ends_list = frame.read_commands(tokens, i, after, pipeline);
+                let ends_list = frame.read_commands(input, tokens, i, after, pipeline);
                 // The bracket that opens word text is part of it.
                 if !frame.word_text.is_empty() {
                     return frame.around.unwrap_or(Reading::WordText);
@@ -1201,6 +1404,25 @@ impl Frame {
             position: Position::Command,
             pipeline: true,
             after: After::Nothing,
+            opens: Vec::new(),
+            closed: Vec::new(),
+            strays: Vec::new(),
+            prefix_words: Vec::new(),
+            coproc: CoprocAt::Outside,
+            coproc_bodies: Vec::new(),
+        }
+    }
+
+    /// Records a compound command whose parts are command lists that `word`,
+    /// at `tokens[i]`, opens or closes.
+    fn count_compound(&mut self, word: &ReservedWord, i: usize) {
+        if word.opens_command_lists() {
+            self.opens.push(i);
+        } else if word.closes_command_lists() {
+            match self.opens.pop() {
+                Some(open) => self.closed.push((open, i)),
+                None => self.strays.push(i),
+            }
         }
     }
 
@@ -1327,6 +1549,7 @@ impl Frame {
             && let Some(word) = reserved_word(tok.value).filter(|w| w.closes(Compound::Case))
         {
             self.cases.pop();
+            self.count_compound(word, i);
             self.position = word.next;
             return Reading::Commands;
         }
@@ -1374,12 +1597,24 @@ impl Frame {
     /// `pipeline` says whether a pipeline may start at it.
     fn read_commands(
         &mut self,
+        input: &str,
         tokens: &[Token<'_>],
         i: usize,
         after: After,
         pipeline: bool,
     ) -> bool {
         let tok = &tokens[i];
+        let coproc = std::mem::take(&mut self.coproc);
+        // A coprocess's name is one word, however many tokens it spans
+        // (`NAME$x`, `NAME${x}`): its body, or the reserved word that opens
+        // it, still follows it.
+        if coproc == CoprocAt::Name && continues_word(tokens, i) {
+            self.coproc = CoprocAt::Name;
+            if let Some(bracket) = opens_word_text(tokens, i) {
+                self.word_text.push(bracket);
+            }
+            return false;
+        }
         // Where a command starts, a `(` opens a subshell.
         if self.position != Position::Command
             && let Some(bracket) = opens_word_text(tokens, i)
@@ -1416,14 +1651,21 @@ impl Frame {
                     Paren::AfterWord
                 } else {
                     self.position = Position::Command;
-                    Paren::Subshell
+                    let coproc = (coproc != CoprocAt::Outside).then_some(i);
+                    self.coproc_bodies.extend(coproc);
+                    Paren::Subshell { coproc }
                 };
                 self.parens.push(paren);
                 self.after = After::OpenParen;
             }
             TokenKind::Shellism if tok.value == ")" => {
                 self.position = match self.parens.pop() {
-                    Some(Paren::Subshell) => Position::ReservedWord,
+                    Some(Paren::Subshell { coproc }) => {
+                        if let Some(open) = coproc {
+                            self.closed.push((open, i));
+                        }
+                        Position::ReservedWord
+                    }
                     // `name ( )` defines a function, and its body follows.
                     Some(Paren::AfterWord) if matches!(after, After::OpenParen) => {
                         Position::ReservedWord
@@ -1435,28 +1677,33 @@ impl Frame {
                     }
                 };
             }
-            TokenKind::Arg | TokenKind::Shellism => self.read_word(tokens, i, after, pipeline),
+            TokenKind::Arg | TokenKind::Shellism => {
+                self.read_word(input, tokens, i, after, pipeline, coproc)
+            }
             TokenKind::Sep | TokenKind::Newline => {}
         }
         false
     }
 
-    /// A word, or a token of one, in a command list.
-    fn read_word(&mut self, tokens: &[Token<'_>], i: usize, after: After, pipeline: bool) {
+    /// A word, or a token of one, in a command list. `coproc` says where it
+    /// stands after a `coproc`.
+    fn read_word(
+        &mut self,
+        input: &str,
+        tokens: &[Token<'_>],
+        i: usize,
+        after: After,
+        pipeline: bool,
+        coproc: CoprocAt,
+    ) {
         let tok = &tokens[i];
         let position = std::mem::replace(&mut self.position, Position::Word);
         // `time -p --`: an option of the reserved word before leaves the next
-        // word where it would stand without the option. Bash compares the
-        // word's text as written (`special_case_tokens` in its `parse.y`), so
-        // `time "-p"` and `time -P` run a command of that name. Reserved-word
-        // grammar is matched literally, the exception to rule 6 of
-        // `.claude/rules/rust-patterns.md`.
-        if let After::Options(options) = after
-            && is_whole_word(tokens, i)
-            && let Some(at) = options.iter().position(|option| *option == tok.value)
-        {
+        // word where it would stand without the option.
+        if let After::Options(left @ 1..) = after {
             self.position = position;
-            self.after = After::Options(&options[at + 1..]);
+            self.after = After::Options(left - 1);
+            self.prefix_words.push(i);
             return;
         }
         match self.cases.last_mut() {
@@ -1480,15 +1727,29 @@ impl Frame {
         let Some(word) = reserved_at(position, pipeline, tokens, i) else {
             if matches!(after, After::Name { .. }) {
                 self.position = Position::ReservedWord;
+                if coproc == CoprocAt::Head {
+                    self.coproc = CoprocAt::Name;
+                }
             }
             return;
         };
         self.position = word.next;
+        self.count_compound(word, i);
+        if coproc != CoprocAt::Outside && word.opens_command_lists() {
+            self.coproc_bodies.push(i);
+        }
+        if word.word == Reserved::Coproc {
+            self.coproc = CoprocAt::Head;
+        }
+        if word.role == Role::Prefix {
+            self.prefix_words.push(i);
+        }
         if word.next == Position::Command && !word.pipeline_follows() {
             self.pipeline = false;
         }
-        if !word.options.is_empty() {
-            self.after = After::Options(word.options);
+        let options = reserved_options_read(word, input, tokens, i);
+        if options > 0 {
+            self.after = After::Options(options);
         }
         if word.names {
             self.after = After::Name {
@@ -1503,6 +1764,39 @@ impl Frame {
             self.cases.pop();
         }
     }
+}
+
+/// How many of the words after `tokens[i]`, the reserved word `word`, bash
+/// reads as its options ([`ReservedWord::options_read`]). A word here runs
+/// from a token that is no blank to the next blank, operator, pipe, `&` or
+/// bracket, and is compared as written, so a redirect glued to an option is
+/// text of its word and leaves it none (`time -p>out cmd` reads no option).
+/// The walker reads a reserved word's options through this too
+/// ([`crate::core::cmdline::walker::peel_reserved`]), so the two agree on
+/// where the command behind them starts.
+pub(crate) fn reserved_options_read(
+    word: &ReservedWord,
+    input: &str,
+    tokens: &[Token<'_>],
+    i: usize,
+) -> usize {
+    let ends_word = |tok: &Token<'_>| {
+        tok.is_blank() || (tok.kind != TokenKind::Redirect && delimits_word(Some(tok)))
+    };
+    let mut j = i + 1;
+    let words = std::iter::from_fn(|| {
+        while tokens.get(j).is_some_and(Token::is_blank) {
+            j += 1;
+        }
+        let first = tokens.get(j).filter(|tok| !ends_word(tok))?;
+        let mut end = first.end();
+        while let Some(tok) = tokens.get(j).filter(|tok| !ends_word(tok)) {
+            end = tok.end();
+            j += 1;
+        }
+        input.get(first.offset..end)
+    });
+    word.options_read(words)
 }
 
 /// How deep a walk currently is inside `$( )`, `<( )` or `>( )`.
@@ -1781,7 +2075,7 @@ pub fn strip_quotes(s: &str) -> String {
 /// Turns a word's raw text (quotes/escapes still literal, as `tokenize()`
 /// preserves them) into argv-ready text: quote chars that open/close a span are
 /// stripped, backslash escapes resolved.
-pub(super) fn resolve_word_text(raw: &str) -> String {
+pub(crate) fn resolve_word_text(raw: &str) -> String {
     let bytes = raw.as_bytes();
     let mut result = String::with_capacity(raw.len());
     // Bytes are dropped one at a time and all of them are ASCII, so every run
@@ -1851,6 +2145,44 @@ pub(crate) fn resolve_words(words: &[Word<'_>]) -> Vec<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn an_expansion_outside_single_quotes_is_an_expansion() {
+        for word in [
+            "$D/timeout",
+            "${D}/timeout",
+            "\"$D\"/timeout",
+            "a$b",
+            "\"`d`\"/timeout",
+        ] {
+            assert!(word_has_expansion(word), "{word}");
+        }
+        for word in [
+            "timeout",
+            "'$D'/timeout",
+            "\\$D/timeout",
+            "'`d`'/timeout",
+            "/usr/bin/time",
+        ] {
+            assert!(!word_has_expansion(word), "{word}");
+        }
+    }
+
+    #[test]
+    fn a_text_lexes_into_whole_words_when_its_quotes_and_escapes_close() {
+        for text in [
+            "docker exec c",
+            "sh -c 'a b'",
+            "ssh \"my host\"",
+            "x a\\\\",
+            "",
+        ] {
+            assert!(lexes_into_whole_words(text), "{text:?}");
+        }
+        for text in ["x 'a", "x \"a", "x a\\", "sh -c \""] {
+            assert!(!lexes_into_whole_words(text), "{text:?}");
+        }
+    }
+
     /// The scan reports every byte and says which are escaped, so a caller
     /// asking about syntax and a caller asking about text get different
     /// answers from one place rather than one answer and a workaround.
@@ -1874,10 +2206,10 @@ mod tests {
         assert_eq!(quoted, vec![(b'a', false), (b'\'', false), (b'b', true)]);
 
         assert!(
-            quotes_balanced_for_test(r"echo \'"),
+            quotes_balanced(r"echo \'"),
             "an escaped quote leaves nothing open"
         );
-        assert!(!quotes_balanced_for_test("echo '"), "a real quote does");
+        assert!(!quotes_balanced("echo '"), "a real quote does");
     }
 
     /// A pending escape is consumed before a fresh backslash is looked for.
@@ -1895,12 +2227,6 @@ mod tests {
             vec![(b'\'', false), (b'x', true)],
             "two escaped backslashes, then a quote that really opens"
         );
-    }
-
-    fn quotes_balanced_for_test(cmd: &str) -> bool {
-        let mut scan = QuoteScan::new(cmd);
-        scan.by_ref().for_each(drop);
-        scan.balanced()
     }
 
     fn word_texts(cmd: &str) -> Vec<&str> {
@@ -2906,6 +3232,37 @@ mod tests {
         assert_eq!(strip_quotes("\"hello'"), "\"hello'");
     }
 
+    /// `time`'s options are words that run to a blank, an operator, a pipe,
+    /// `&` or a bracket, compared as written: a redirect glued to one is text
+    /// of its word, which is then none. The walker reads them through the
+    /// same function.
+    #[test]
+    fn test_reserved_options_read_whole_words_up_to_a_blank() {
+        let time = crate::core::cmdline::bash_grammar::reserved_word("time").expect("time");
+        for (cmd, read) in [
+            ("time -p x", 1),
+            ("time -p -- x", 2),
+            ("time -- x", 1),
+            ("time -p>out x", 0),
+            ("time -->x x", 0),
+            ("time -p -->x x", 1),
+            ("time -p >out x", 1),
+            ("time -p", 1),
+            ("time -p; x", 1),
+            ("time -p&& x", 1),
+            ("time -p| x", 1),
+            ("time \"-p\" x", 0),
+            ("time >out -p x", 0),
+        ] {
+            let tokens = tokenize(cmd);
+            assert_eq!(
+                reserved_options_read(time, cmd, &tokens, 0),
+                read,
+                "{cmd:?}"
+            );
+        }
+    }
+
     fn classify_texts(cmd: &str) -> Vec<&str> {
         split_for_classify(cmd)
             .into_iter()
@@ -3298,6 +3655,95 @@ mod tests {
         }
     }
 
+    /// The compound commands of `cmd` whose parts are command lists, as
+    /// [`read_nesting`] finds them: the text from the opening word to the
+    /// closing one (from the start of the line when it starts inside one, to
+    /// its end when it ends inside one), and whether the compound is a
+    /// pipeline's stage.
+    fn compounds(cmd: &str) -> Vec<(&str, bool)> {
+        let tokens = tokenize(cmd);
+        read_nesting(cmd, &tokens)
+            .compounds
+            .iter()
+            .map(|span| {
+                let from = span.open.map_or(0, |i| tokens[i].offset);
+                let to = span.close.map_or(cmd.len(), |i| tokens[i].end());
+                (&cmd[from..to], span.piped)
+            })
+            .collect()
+    }
+
+    /// A compound command is a pipeline's stage when a pipe comes right
+    /// before its opening word, or right after its closing word and the
+    /// redirections behind it. A pipeline inside one of its lists does not
+    /// make it one.
+    #[test]
+    fn test_read_nesting_finds_the_compounds_a_pipe_joins() {
+        for (cmd, found) in [
+            (
+                "for x in a; do git status; git log; done | wc -l",
+                vec![("for x in a; do git status; git log; done", true)],
+            ),
+            (
+                "case x in a) git log;; esac | wc -l",
+                vec![("case x in a) git log;; esac", true)],
+            ),
+            (
+                "ls | while read y; do git log; done",
+                vec![("while read y; do git log; done", true)],
+            ),
+            (
+                "for x in a; do ls; done 2>&1 > out | head",
+                vec![("for x in a; do ls; done", true)],
+            ),
+            (
+                "if true; then ls && git log; fi; ls | head",
+                vec![("if true; then ls && git log; fi", false)],
+            ),
+            (
+                "case $y in (a|b) git status | head;; esac",
+                vec![("case $y in (a|b) git status | head;; esac", false)],
+            ),
+            (
+                "while a; do if b; then c; fi | head; d; done",
+                vec![
+                    ("if b; then c; fi", true),
+                    ("while a; do if b; then c; fi | head; d; done", false),
+                ],
+            ),
+            ("echo done esac fi; ls | head", vec![]),
+            ("time git status | head", vec![]),
+            (
+                "for x in a; do git status; done >out&ls|head",
+                vec![("for x in a; do git status; done", false)],
+            ),
+            (
+                "ls && time -p -- while true; do ls; done",
+                vec![("while true; do ls; done", false)],
+            ),
+        ] {
+            assert_eq!(compounds(cmd), found, "{cmd:?}");
+        }
+    }
+
+    /// A line that closes a compound command it did not open, or leaves one
+    /// open, says so, with what a pipe joins on its side.
+    #[test]
+    fn test_read_nesting_keeps_a_compound_the_line_does_not_close() {
+        for (cmd, found) in [
+            ("ls; done | wc -l", vec![("ls; done", true)]),
+            ("ls; done; ls | head", vec![("ls; done", false)]),
+            ("ls | while true; do ls", vec![("while true; do ls", true)]),
+            ("ls; while true; do ls", vec![("while true; do ls", false)]),
+            (
+                "done; for x in a; do ls",
+                vec![("done", false), ("for x in a; do ls", false)],
+            ),
+        ] {
+            assert_eq!(compounds(cmd), found, "{cmd:?}");
+        }
+    }
+
     /// `time`'s options `-p` and `--`, in that order, leave the next word in
     /// command position; any other word after `time` is a command's name.
     #[test]
@@ -3511,6 +3957,10 @@ mod tests {
             "until (false) do [[ a || b ]]; done",
             "if :; then :; elif (true) then [[ a || b ]]; fi",
             "coproc NAME [[ a || b ]]",
+            "coproc NAME$x [[ a || b ]]",
+            "coproc NAME${x} [[ a || b ]]",
+            "coproc N{a} [[ a || b ]]",
+            "coproc NAME$(x) [[ a || b ]]",
             "function f [[ a || b ]]",
             "function f ( ) [[ a || b ]]",
             "f() [[ a || b ]]",

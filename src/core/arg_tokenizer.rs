@@ -174,12 +174,13 @@ pub fn is_digit_run(text: &str) -> bool {
 }
 
 /// True if `text` (a `Long` token's name) matches `name` under `dialect`'s naming rules: exact
-/// for [`Dialect::Posix`], ASCII case-insensitive for [`Dialect::Msbuild`] (MSBuild-ecosystem
-/// tools fold case broadly, e.g. `/nologo` and `/NoLogo` are equally valid).
+/// for [`Dialect::Posix`] and [`Dialect::Exact`], ASCII case-insensitive for
+/// [`Dialect::Msbuild`] (MSBuild-ecosystem tools fold case broadly, e.g. `/nologo` and
+/// `/NoLogo` are equally valid).
 fn flag_name_matches(text: &str, name: &str, dialect: Dialect) -> bool {
     match dialect {
         Dialect::Msbuild => text.eq_ignore_ascii_case(name),
-        Dialect::Posix => text == name,
+        Dialect::Posix | Dialect::Exact => text == name,
     }
 }
 
@@ -295,6 +296,11 @@ pub enum Dialect {
     /// GNU/POSIX-ish: git, cargo, rg, golangci-lint. `--name` is a `Long` flag and `-x` a
     /// `Short` one, only `=` attaches a value, and names match exactly.
     Posix,
+    /// Each argument is one option, compared whole as written: `-name` is the `Short` flag
+    /// `name` and `--name` the `Long` flag `name`, with no clustering, no attached value and no
+    /// abbreviation. `--` ends the options, as under [`Dialect::Posix`]. A shell's reserved
+    /// word reads its options so (`time -p`).
+    Exact,
 }
 
 /// How a flag's value may be written. The tokenizer branches on this; a tool states it once,
@@ -494,7 +500,19 @@ impl Flag {
 pub struct Grammar {
     dialect: Dialect,
     flags: &'static [&'static [Flag]],
+    /// Whether an all-digit `-N`, given as a whole argument, is one of this grammar's flags
+    /// ([`Grammar::numeric`]).
+    numeric: bool,
 }
+
+/// The flag an all-digit `-N` is under a [`Grammar::numeric`] grammar: it has no spelling of
+/// its own, so no declared flag and no name a caller asks about is ever it.
+static NUMERIC: Flag = Flag {
+    short: None,
+    long: None,
+    short_value: None,
+    long_value: None,
+};
 
 impl Grammar {
     /// A getopt grammar: `-xyz` is a cluster of short flags, a value-taking one taking the rest
@@ -503,6 +521,26 @@ impl Grammar {
         Self {
             dialect: Dialect::Posix,
             flags,
+            numeric: false,
+        }
+    }
+
+    /// This grammar, with an all-digit `-N` given as a whole argument read as one of its own
+    /// flags, as `nice -5` reads it: [`tokenize_grammar`] gives such a token a [`Token::flag`].
+    /// A digit inside a cluster (`-5n`) is no such flag.
+    pub const fn numeric(self) -> Self {
+        Self {
+            numeric: true,
+            ..self
+        }
+    }
+
+    /// A grammar whose every argument is one option compared as written ([`Dialect::Exact`]).
+    pub const fn exact(flags: &'static [&'static [Flag]]) -> Self {
+        Self {
+            dialect: Dialect::Exact,
+            flags,
+            numeric: false,
         }
     }
 
@@ -528,6 +566,7 @@ impl Grammar {
         Self {
             dialect: Dialect::Msbuild,
             flags,
+            numeric: false,
         }
     }
 
@@ -585,7 +624,7 @@ pub fn tokenize_grammar<'a, T: AsRef<str>>(args: &'a [T], grammar: &Grammar) -> 
 
         // Posix stops classifying at `--`; Msbuild's `--` is a forwarding boundary, so it keeps
         // classifying flags past it (see TokenKind::DashDash).
-        if scanner.emitted_dash_dash && scanner.grammar.dialect == Dialect::Posix {
+        if scanner.emitted_dash_dash && scanner.grammar.dialect != Dialect::Msbuild {
             let token = scanner.positional(arg, scanner.i);
             scanner.tokens.push(token);
             scanner.i += 1;
@@ -630,12 +669,22 @@ pub fn tokenize_grammar<'a, T: AsRef<str>>(args: &'a [T], grammar: &Grammar) -> 
                 scanner.push_atomic_flag(&arg[1..], FlagPrefix::Dash);
                 continue;
             }
+        } else if scanner.grammar.dialect == Dialect::Exact && arg.len() > 1 && arg.starts_with('-')
+        {
+            let name = &arg[1..];
+            scanner.tokens.push(Token {
+                flag: scanner.grammar.flag(TokenKind::Short, name),
+                ..scanner.token(TokenKind::Short, name, scanner.i, FlagPrefix::Dash)
+            });
+            scanner.i += 1;
+            continue;
         } else if arg.len() > 1 && arg.starts_with('-') {
             let cluster = &arg[1..];
 
             if is_digit_run(cluster) {
+                let numeric = scanner.grammar.numeric.then_some(&NUMERIC);
                 scanner.tokens.push(Token {
-                    flag: scanner.grammar.flag(TokenKind::Short, cluster),
+                    flag: scanner.grammar.flag(TokenKind::Short, cluster).or(numeric),
                     ..scanner.token(TokenKind::Short, cluster, scanner.i, FlagPrefix::Dash)
                 });
                 scanner.i += 1;
@@ -781,11 +830,13 @@ impl<'a, 'g, T: AsRef<str>> Scanner<'a, 'g, T> {
 
 /// Splits `s` into `(name, attached_value)` on the first dialect-appropriate separator:
 /// `=` only for [`Dialect::Posix`], `=` or `:` (whichever comes first) for
-/// [`Dialect::Msbuild`] (`--logger:trx` and `--logger=trx` are both valid dotnet CLI syntax).
+/// [`Dialect::Msbuild`] (`--logger:trx` and `--logger=trx` are both valid dotnet CLI syntax),
+/// and none for [`Dialect::Exact`], whose options take no value.
 fn split_attached(s: &str, dialect: Dialect) -> (&str, Option<&str>) {
     let sep_pos = match dialect {
         Dialect::Posix => s.find('='),
         Dialect::Msbuild => s.find(['=', ':']),
+        Dialect::Exact => None,
     };
     match sep_pos {
         Some(pos) => (&s[..pos], Some(&s[pos + 1..])),
@@ -1198,6 +1249,36 @@ mod tests {
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].kind, TokenKind::Short);
         assert_eq!(tokens[0].text, "20");
+    }
+
+    /// A numeric grammar gives a whole-argument `-N` a flag, and nothing else: a digit in a
+    /// cluster, a `+N` and a `-N` under a grammar that is not numeric stay undeclared.
+    #[test]
+    fn a_numeric_grammar_declares_a_whole_argument_digit_run() {
+        const N: &[Flag] = &[Flag::short("n").takes(ValueSpec::value())];
+        const NUMERIC: Grammar = Grammar::posix(&[N]).numeric();
+        const PLAIN: Grammar = Grammar::posix(&[N]);
+        let declared = |grammar: &Grammar, args: &[&str]| -> Vec<(String, bool)> {
+            let args = owned(args);
+            tokenize_grammar(&args, grammar)
+                .iter()
+                .map(|t| (t.text.to_string(), t.flag.is_some()))
+                .collect()
+        };
+        assert_eq!(declared(&NUMERIC, &["-5"]), [("5".into(), true)]);
+        assert_eq!(declared(&NUMERIC, &["-19"]), [("19".into(), true)]);
+        assert_eq!(
+            declared(&NUMERIC, &["-5n", "10"]),
+            [
+                ("5".into(), false),
+                ("n".into(), true),
+                ("10".into(), false)
+            ]
+        );
+        assert_eq!(declared(&NUMERIC, &["+5"]), [("+5".into(), false)]);
+        assert_eq!(declared(&PLAIN, &["-5"]), [("5".into(), false)]);
+        let args = owned(&["-5"]);
+        assert_eq!(tokenize_grammar(&args, &NUMERIC)[0].value_spec(), None);
     }
 
     #[test]
@@ -1770,5 +1851,31 @@ mod tests {
             &G,
             &[(TokenKind::Long, &["grep"], Some(ValueSpec::value()))],
         );
+    }
+
+    /// Under [`Grammar::exact`] each argument is one option, compared whole: no clustering, no
+    /// attached value, and `--` ends the options.
+    #[test]
+    fn exact_grammar_reads_each_argument_whole() {
+        static P: Flag = Flag::short("p");
+        const EXACT: Grammar = Grammar::exact(&[&[Flag::short("p")]]);
+        let args = ["-p", "-pp", "-p=1", "--p", "--", "-p"];
+        let tokens = tokenize_grammar(&args, &EXACT);
+        let read: Vec<(TokenKind, &str, bool)> = tokens
+            .iter()
+            .map(|t| (t.kind, t.text, t.flag == Some(&P)))
+            .collect();
+        assert_eq!(
+            read,
+            [
+                (TokenKind::Short, "p", true),
+                (TokenKind::Short, "pp", false),
+                (TokenKind::Short, "p=1", false),
+                (TokenKind::Long, "p", false),
+                (TokenKind::DashDash, "", false),
+                (TokenKind::Positional, "-p", false),
+            ]
+        );
+        assert!(tokens.iter().all(|t| t.attached.is_none()));
     }
 }
