@@ -269,6 +269,7 @@ rtk aws sts get-caller-identity # One-line identity
 rtk aws ec2 describe-instances  # Compact instance list
 rtk aws lambda list-functions   # Name/runtime/memory (strips secrets)
 rtk aws logs get-log-events     # Timestamped messages only
+rtk aws logs describe-log-groups  # Name/size/retention, totals
 rtk aws cloudformation describe-stack-events  # Failures first
 rtk aws dynamodb scan           # Unwraps type annotations
 rtk aws iam list-roles          # Strips policy documents

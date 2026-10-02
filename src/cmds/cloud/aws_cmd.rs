@@ -186,6 +186,18 @@ pub fn run(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
             verbose,
             filter_logs_query_results,
         ),
+        "logs"
+            if !args.is_empty()
+                && args[0] == "describe-log-groups"
+                && !has_explicit_output(&args[1..]) =>
+        {
+            run_aws_filtered(
+                &["logs", "describe-log-groups"],
+                &args[1..],
+                verbose,
+                filter_logs_log_groups,
+            )
+        }
         "s3" if !args.is_empty() && (args[0] == "sync" || args[0] == "cp") => {
             run_s3_transfer(&args[0], &args[1..], verbose)
         }
@@ -214,6 +226,13 @@ fn is_structured_operation(args: &[String]) -> bool {
         || op == "scan"
         || op == "query"
         || op == "receive-message"
+}
+
+/// True when the user picked an output format; the filter is then skipped so the
+/// requested format reaches them (`run_aws_json` would otherwise replace it with JSON).
+fn has_explicit_output(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| a == "--output" || a.starts_with("--output="))
 }
 
 /// Generic strategy: force --output json for structured ops, compress via json_cmd compact (values preserved)
@@ -1426,6 +1445,60 @@ fn filter_logs_query_results(json_str: &str) -> Option<FilterResult> {
     }
 
     None
+}
+
+const MAX_LOG_GROUPS: usize = CAP_INVENTORY;
+
+fn filter_logs_log_groups(json_str: &str) -> Option<FilterResult> {
+    let v: Value = serde_json::from_str(json_str).ok()?;
+    let groups = v["logGroups"].as_array()?;
+
+    let total = groups.len();
+    if total == 0 {
+        return Some(FilterResult::new("0 log groups".to_string()));
+    }
+    let total_bytes: u64 = groups
+        .iter()
+        .filter_map(|g| g["storedBytes"].as_u64())
+        .sum();
+
+    let lines: Vec<String> = groups
+        .iter()
+        .take(MAX_LOG_GROUPS)
+        .map(format_log_group)
+        .collect();
+    let mut text = join_with_overflow(&lines, total, MAX_LOG_GROUPS, "log groups");
+    text.push_str(&format!(
+        "\n{} log groups, {} total",
+        total,
+        human_bytes(total_bytes)
+    ));
+
+    Some(if total > MAX_LOG_GROUPS {
+        FilterResult::truncated(text)
+    } else {
+        FilterResult::new(text)
+    })
+}
+
+fn format_log_group(group: &Value) -> String {
+    let name = group["logGroupName"].as_str().unwrap_or("?");
+    let size = human_bytes(group["storedBytes"].as_u64().unwrap_or(0));
+    // CloudWatch omits retentionInDays when logs never expire.
+    let retention = group["retentionInDays"]
+        .as_i64()
+        .map(|days| format!("{}d", days))
+        .unwrap_or_else(|| "never".to_string());
+
+    let mut line = format!("{} {} {}", name, size, retention);
+    if let Some(class) = group["logGroupClass"].as_str().filter(|c| *c != "STANDARD") {
+        line.push(' ');
+        line.push_str(class);
+    }
+    if group["kmsKeyId"].is_string() {
+        line.push_str(" kms");
+    }
+    line
 }
 
 fn filter_s3_transfer(output: &str) -> FilterResult {
@@ -2788,5 +2861,73 @@ upload: file10.txt to s3://bucket/file10.txt
             output.contains("isMpaEnabled"),
             "object keys must be preserved, got:\n{output}"
         );
+    }
+
+    #[test]
+    fn test_filter_logs_log_groups_fixture() {
+        let input = include_str!("../../../tests/fixtures/aws_logs_describe_log_groups.json");
+        let result = filter_logs_log_groups(input).unwrap();
+        let lines: Vec<&str> = result.text.lines().collect();
+
+        assert!(result.truncated);
+        assert_eq!(lines.len(), MAX_LOG_GROUPS + 2);
+        assert_eq!(lines[MAX_LOG_GROUPS], "… +10 more log groups");
+        assert!(lines[MAX_LOG_GROUPS + 1].starts_with("60 log groups, "));
+        assert!(
+            result.text.contains(" never"),
+            "groups without retentionInDays"
+        );
+        assert!(!result.text.contains("arn:aws:logs"));
+    }
+
+    #[test]
+    fn test_snapshot_logs_log_groups_format() {
+        let json = r#"{"logGroups": [
+            {"logGroupName": "/aws/lambda/fn", "storedBytes": 1536, "retentionInDays": 30,
+             "logGroupClass": "STANDARD", "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/fn:*"},
+            {"logGroupName": "/app/audit", "storedBytes": 0, "logGroupClass": "INFREQUENT_ACCESS",
+             "kmsKeyId": "arn:aws:kms:us-east-1:123456789012:key/abc"}
+        ]}"#;
+        let result = filter_logs_log_groups(json).unwrap();
+        assert_eq!(
+            result.text,
+            "/aws/lambda/fn 1.5 KB 30d\n/app/audit 0 B never INFREQUENT_ACCESS kms\n2 log groups, 1.5 KB total"
+        );
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn test_filter_logs_log_groups_empty() {
+        let result = filter_logs_log_groups(r#"{"logGroups": []}"#).unwrap();
+        assert_eq!(result.text, "0 log groups");
+    }
+
+    #[test]
+    fn test_filter_logs_log_groups_query_shaped_output_passes_through() {
+        assert!(filter_logs_log_groups(r#"["/aws/lambda/fn"]"#).is_none());
+        assert!(filter_logs_log_groups("not json").is_none());
+    }
+
+    #[test]
+    fn test_filter_logs_log_groups_token_savings() {
+        let input = include_str!("../../../tests/fixtures/aws_logs_describe_log_groups.json");
+        let output = filter_logs_log_groups(input).unwrap().text;
+        let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "expected >=60% savings, got {:.1}%",
+            savings
+        );
+    }
+
+    #[test]
+    fn test_has_explicit_output() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(has_explicit_output(&args(&["--output", "text"])));
+        assert!(has_explicit_output(&args(&["--output=table"])));
+        assert!(!has_explicit_output(&args(&[
+            "--log-group-name-prefix",
+            "/aws"
+        ])));
     }
 }
