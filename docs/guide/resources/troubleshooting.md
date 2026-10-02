@@ -105,18 +105,16 @@ rtk --version
 
 ### Hook not working (no auto-rewrite)
 
-**Symptom:** `rtk init -g` shows "Falling back to --claude-md mode" on Windows.
+**Symptom:** Claude Code commands are not being rewritten on native Windows.
 
-**Cause:** The auto-rewrite hook (`rtk-rewrite.sh`) requires a Unix shell. Native Windows doesn't have one.
+**Cause:** RTK added native Windows support for the Claude Code hook in v0.37.2. Older versions fell back to `CLAUDE.md` injection because the shell hook (`rtk-rewrite.sh`) requires a Unix shell.
 
-**Fix:** Use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) for full hook support:
-```bash
-# Inside WSL
-curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
-rtk init -g    # full hook mode works in WSL
+**Fix:** Update to v0.37.2 or newer, then run `rtk init -g` in PowerShell to install the native `rtk hook claude` entry:
+```powershell
+rtk init -g
 ```
 
-On native Windows, RTK falls back to CLAUDE.md injection. Your AI assistant gets RTK instructions but won't auto-rewrite commands. It can still use RTK manually: `rtk cargo test`, `rtk git status`, etc.
+Use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) only for agent integrations that still require the Unix shell hook.
 
 ### Node.js tools not found
 
