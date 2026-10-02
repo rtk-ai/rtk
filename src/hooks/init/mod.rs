@@ -81,7 +81,7 @@ schema_version = 1
 # Example: suppress build noise from a custom tool
 # [filters.my-tool]
 # description = "Compact my-tool output"
-# match_command = "^my-tool\\s+build"
+# match_command = "^my-tool[ \\t\\n]+build(?:[ \\t\\n]|$)"
 # strip_ansi = true
 # strip_lines_matching = ["^\\s*$", "^Downloading", "^Installing"]
 # max_lines = 30
@@ -97,7 +97,7 @@ schema_version = 1
 # Example: suppress noise from a tool you use everywhere
 # [filters.my-global-tool]
 # description = "Compact my-global-tool output"
-# match_command = "^my-global-tool\\b"
+# match_command = "^my-global-tool(?:[ \\t\\n]|$)"
 # strip_ansi = true
 # strip_lines_matching = ["^\\s*$"]
 # max_lines = 40

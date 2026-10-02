@@ -2,6 +2,8 @@
 //! segmenter that decides where one command ends and the next begins. Who uses
 //! each entry point is listed in `src/core/README.md`.
 
+use std::iter::{Peekable, once};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipeKind {
     /// Standard stdout pipeline (`|`).
@@ -17,58 +19,77 @@ pub enum TokenKind {
     Pipe(PipeKind),
     Redirect,
     Shellism,
+    /// A run of unquoted spaces and tabs between two words.
+    Sep,
+    /// One unquoted `\n`. Bash ends a command line there and nowhere else: a
+    /// `\r` is an ordinary word byte, so `\r\n` is the end of a word followed
+    /// by a `Newline`.
+    Newline,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedToken {
+/// One token of a command line: what it is, the exact bytes it covers, and
+/// where they start.
+///
+/// Tokens tile their input: every byte belongs to exactly one token, in order,
+/// so `value` is always `input[offset..offset + value.len()]` and the values
+/// concatenated give the input back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Token<'a> {
     pub kind: TokenKind,
-    pub value: String,
+    pub value: &'a str,
     pub offset: usize,
 }
 
-/// How `tokenize_inner` treats `\n`/`\r`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum NewlineMode {
-    /// Ordinary characters, no Operator tokens.
-    None,
-    /// `\n`, and the `\r` of a CRLF pair, are Operator boundaries; a lone
-    /// `\r` stays glued to its word — real bash's behavior.
-    Bash,
-    /// Like `Bash`, but a lone `\r` is a boundary too. Only
-    /// `split_for_permissions` uses this, to stay maximally conservative.
-    Conservative,
-}
+impl Token<'_> {
+    /// The offset just past this token.
+    pub fn end(&self) -> usize {
+        self.offset + self.value.len()
+    }
 
-pub fn tokenize(input: &str) -> Vec<ParsedToken> {
-    tokenize_inner(input, NewlineMode::None)
-}
-
-/// Like [`tokenize`] but emits a `\n` operator token for each newline that
-/// sits outside quotes. Newlines inside quoted strings stay part of their
-/// argument, so callers can use the emitted offsets as safe line-split points.
-pub fn tokenize_with_newlines(input: &str) -> Vec<ParsedToken> {
-    tokenize_inner(input, NewlineMode::Bash)
-}
-
-/// Applies one character's effect on quote state, mirroring bash: only the
-/// quote char that opened a span closes it. Shared by `tokenize_inner`,
-/// `shell_split`, and [`QuoteScan`] so they can't drift.
-pub(crate) fn advance_quote_state(quote: Option<char>, c: char) -> Option<char> {
-    match (quote, c) {
-        (None, '\'' | '"') => Some(c),
-        (Some(q), c) if c == q => None,
-        (q, _) => q,
+    /// Whether this token only separates words: a `Sep` or a `Newline`.
+    pub fn is_blank(&self) -> bool {
+        matches!(self.kind, TokenKind::Sep | TokenKind::Newline)
     }
 }
 
-/// Byte walker yielding `(offset, byte, in_single_before, in_double_before)`.
+/// Bash's default `$IFS`: space, tab and newline. Vertical tab, form feed,
+/// carriage return and non-breaking space are word bytes, which is why neither
+/// `char::is_whitespace` nor `str::trim` may stand in for this.
+pub(crate) fn is_ifs(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n')
+}
+
+/// `s` without the `$IFS` bytes at either end.
+pub(crate) fn trim_ifs(s: &str) -> &str {
+    s.trim_matches(is_ifs)
+}
+
+/// `s` without the `$IFS` bytes at its start.
+pub(crate) fn trim_ifs_start(s: &str) -> &str {
+    s.trim_start_matches(is_ifs)
+}
+
+/// `s` without the `$IFS` bytes at its end.
+pub(crate) fn trim_ifs_end(s: &str) -> &str {
+    s.trim_end_matches(is_ifs)
+}
+
+/// The non-empty runs of `s` between `$IFS` bytes. Blind to quoting, so a
+/// quoted blank splits a word like any other.
+pub(crate) fn split_ifs(s: &str) -> impl Iterator<Item = &str> {
+    s.split(is_ifs).filter(|part| !part.is_empty())
+}
+
+/// Byte walker yielding each byte with the quoting it was reached in.
 ///
-/// Quote state comes from the shared [`advance_quote_state`] rather than an
-/// independently-maintained pair of bools, so it cannot drift from the lexer.
+/// The one flat quote-state machine of this module: the tokenizer,
+/// [`resolve_word_text`] and every other reader of quoting walk it, so none of
+/// them can drift from the others. Only the quote char that opened a span
+/// closes it, as in bash.
 pub(crate) struct QuoteScan<'a> {
     bytes: &'a [u8],
     i: usize,
-    quote: Option<char>,
+    quote: Option<u8>,
     /// The next byte is the one a `\` escapes.
     pending_escape: bool,
 }
@@ -109,14 +130,21 @@ pub(crate) struct Scanned {
     pub(crate) escaped: bool,
 }
 
+impl Scanned {
+    /// Neither quoted nor escaped: a byte the shell reads as syntax.
+    fn is_bare(&self) -> bool {
+        !self.escaped && !self.in_single && !self.in_double
+    }
+}
+
 impl Iterator for QuoteScan<'_> {
     type Item = Scanned;
 
     fn next(&mut self) -> Option<Self::Item> {
         let i = self.i;
         let b = *self.bytes.get(i)?;
-        let in_single = self.quote == Some('\'');
-        let in_double = self.quote == Some('"');
+        let in_single = self.quote == Some(b'\'');
+        let in_double = self.quote == Some(b'"');
 
         if self.pending_escape {
             self.pending_escape = false;
@@ -144,8 +172,10 @@ impl Iterator for QuoteScan<'_> {
             });
         }
 
-        if b == b'\'' || b == b'"' {
-            self.quote = advance_quote_state(self.quote, b as char);
+        match (self.quote, b) {
+            (None, b'\'' | b'"') => self.quote = Some(b),
+            (Some(q), b) if b == q => self.quote = None,
+            _ => {}
         }
         self.i += 1;
         Some(Scanned {
@@ -158,39 +188,95 @@ impl Iterator for QuoteScan<'_> {
     }
 }
 
-/// The shell words of `cmd`, as byte ranges, with a quoted span counted as one
-/// word however many blanks it holds.
+/// One shell word: a run of adjacent tokens that are not blanks, with its span.
 ///
-/// [`coalesce_words`] answers a different question: it merges *adjacent* tokens,
-/// so `D='a b'` comes back as two words. That is right for argv and wrong for
-/// anyone asking where a word ends, which is how a value like
-/// `D='# shellcheck disable=SC2034'` came to be read as an assignment plus a
-/// command (#3262).
-///
-/// Escapes need no special handling here because [`QuoteScan`] never yields an
-/// escaped byte, so the space in `a\ b` is not a blank.
-pub(crate) fn word_spans(cmd: &str) -> Vec<(usize, usize)> {
-    let mut spans = Vec::new();
-    let mut start: Option<usize> = None;
+/// A quoted span is one word however many blanks it holds, and so is `a\ b`,
+/// because the tokenizer keeps both inside a single token. Operators are not
+/// word boundaries here: `a;b` is one run of tokens with no blank in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Word<'a> {
+    pub(crate) text: &'a str,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+}
 
-    // Every byte, escaped ones included: a `\'` on its own is a word, and
-    // `a\ b` is one word rather than two.
-    for c in QuoteScan::new(cmd) {
-        let blank =
-            !c.escaped && !c.in_single && !c.in_double && (c.byte == b' ' || c.byte == b'\t');
-        if blank {
+/// The words of `input`, from its `tokens` (as [`tokenize`] returned them for
+/// that same `input`).
+pub(crate) fn words<'a>(input: &'a str, tokens: &[Token<'a>]) -> Vec<Word<'a>> {
+    let mut found = Vec::new();
+    let mut start: Option<usize> = None;
+    let mut push = |start: usize, end: usize| {
+        found.push(Word {
+            text: &input[start..end],
+            start,
+            end,
+        });
+    };
+    for tok in tokens {
+        if tok.is_blank() {
             if let Some(from) = start.take() {
-                spans.push((from, c.index));
+                push(from, tok.offset);
             }
         } else if start.is_none() {
-            start = Some(c.index);
+            start = Some(tok.offset);
         }
     }
-
     if let Some(from) = start {
-        spans.push((from, cmd.len()));
+        push(from, tokens.last().map_or(input.len(), Token::end));
     }
-    spans
+    found
+}
+
+/// Where the text between `start` and `end` begins and ends once the blanks
+/// around it are left out: from the first of `tokens` in that range that is
+/// not a `Sep` or a `Newline` to the end of the last one. `None` when every
+/// token there is a blank.
+///
+/// A command ends where its last word does, and an escaped or quoted blank is
+/// part of a word: `head\ ` names the program `head␠`, so its span ends after
+/// the space. Trimming `$IFS` bytes off the text would drop that space and
+/// name `head`. `start` and `end` must fall on token boundaries.
+pub(crate) fn content_span(
+    tokens: &[Token<'_>],
+    start: usize,
+    end: usize,
+) -> Option<(usize, usize)> {
+    let from = tokens.partition_point(|t| t.offset < start);
+    let to = tokens.partition_point(|t| t.offset < end);
+    let inside = &tokens[from..to];
+    let first = inside.iter().find(|t| !t.is_blank())?;
+    let last = inside.iter().rev().find(|t| !t.is_blank())?;
+    Some((first.offset, last.end()))
+}
+
+/// `input` without the blanks at either end, as [`content_span`] reads them,
+/// with its tokens, their offsets counted from the trimmed text. One lex for
+/// a caller that needs both.
+pub(crate) fn tokenize_trimmed(input: &str) -> (&str, Vec<Token<'_>>) {
+    let mut tokens = tokenize(input);
+    let Some((from, to)) = content_span(&tokens, 0, input.len()) else {
+        return ("", Vec::new());
+    };
+    tokens.retain(|t| t.offset >= from && t.end() <= to);
+    for tok in &mut tokens {
+        tok.offset -= from;
+    }
+    (&input[from..to], tokens)
+}
+
+/// The first `end` bytes' share of `tokens`: every token that ends by `end`.
+/// When `end` falls on a token boundary, these are the tokens a lex of those
+/// bytes alone returns.
+pub(crate) fn tokens_until<'t, 'a>(tokens: &'t [Token<'a>], end: usize) -> &'t [Token<'a>] {
+    &tokens[..tokens.partition_point(|t| t.end() <= end)]
+}
+
+/// `text`'s runs between `$IFS` bytes joined by one space each, with nothing at
+/// either end: the spelling a pattern written with single spaces matches.
+/// Blind to quoting, as [`split_ifs`] is, so these are `text`'s words only when
+/// it carries no quoting, as a regex capture of plain words does.
+pub(crate) fn squeeze_blanks(text: &str) -> String {
+    split_ifs(text).collect::<Vec<_>>().join(" ")
 }
 
 /// Only `\'` inside `$'…'` diverges: bash keeps the string open, the lexer
@@ -228,347 +314,205 @@ pub(crate) fn ansi_c_quote_defeats_lexer(cmd: &str) -> bool {
     false
 }
 
-/// Bash's default `$IFS` is exactly space/tab/newline — not Rust's
-/// `char::is_whitespace()`, which wrongly includes non-IFS Unicode
-/// whitespace like NBSP. Shared with `hooks/permissions.rs::command_matches_pattern`.
-pub(crate) fn is_word_boundary_whitespace(c: char) -> bool {
-    matches!(c, ' ' | '\t' | '\n')
+/// The tokens of `input`, every one a slice of it: words (`Arg`), operators,
+/// pipes, redirects, shellisms, the `Sep` runs between words and each unquoted
+/// `Newline`.
+pub fn tokenize(input: &str) -> Vec<Token<'_>> {
+    lex(input, 0)
 }
 
-/// True if `bytes[i..]` starts a CRLF pair. Shared by `tokenize_inner` and
-/// `discover/registry.rs::rewrite_multiline_block`'s raw-newline parity check.
-pub(crate) fn is_crlf_at(bytes: &[u8], i: usize) -> bool {
-    bytes.get(i) == Some(&b'\r') && bytes.get(i + 1) == Some(&b'\n')
+/// [`tokenize`] for a piece that starts at byte `base` of a larger input: every
+/// offset is into that larger input.
+pub(crate) fn tokenize_at(input: &str, base: usize) -> Vec<Token<'_>> {
+    lex(input, base)
 }
 
-/// Merges `tokenize()` tokens that are directly adjacent in `cmd` (no gap)
-/// into single words — e.g. `*.yml` tokenizes as `Shellism("*")` +
-/// `Arg(".yml")` but is one bash word. For callers that only need "was there
-/// a space here", not full shell-operator awareness.
-pub(crate) fn coalesce_words<'a>(cmd: &'a str, tokens: &[ParsedToken]) -> Vec<(&'a str, usize)> {
-    let mut words = Vec::new();
-    let mut run_start: Option<usize> = None;
-    let mut run_end: usize = 0;
-
-    for tok in tokens {
-        if let Some(start) = run_start
-            && tok.offset != run_end
-        {
-            words.push((&cmd[start..run_end], start));
-            run_start = None;
-        }
-        if run_start.is_none() {
-            run_start = Some(tok.offset);
-        }
-        run_end = tok.offset + tok.value.len();
-    }
-    if let Some(start) = run_start {
-        words.push((&cmd[start..run_end], start));
-    }
-    words
+fn lex(input: &str, base: usize) -> Vec<Token<'_>> {
+    let mut lexer = Lexer {
+        input,
+        base,
+        tokens: Vec::new(),
+        word_start: None,
+        scan: QuoteScan::new(input).peekable(),
+    };
+    lexer.run();
+    lexer.tokens
 }
 
-fn tokenize_inner(input: &str, newline_mode: NewlineMode) -> Vec<ParsedToken> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut current_start: usize = 0;
-    let mut byte_pos: usize = 0;
-    let mut chars = input.chars().peekable();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
+struct Lexer<'a> {
+    input: &'a str,
+    /// Added to every offset pushed.
+    base: usize,
+    tokens: Vec<Token<'a>>,
+    /// Where the word being read began, if one is.
+    word_start: Option<usize>,
+    scan: Peekable<QuoteScan<'a>>,
+}
 
-    while let Some(c) = chars.next() {
-        let char_len = c.len_utf8();
-
-        if escaped {
-            current.push('\\');
-            current.push(c);
-            byte_pos += char_len;
-            escaped = false;
-            continue;
-        }
-        if c == '\\' && quote != Some('\'') {
-            escaped = true;
-            if current.is_empty() {
-                current_start = byte_pos;
+impl<'a> Lexer<'a> {
+    fn run(&mut self) {
+        while let Some(c) = self.scan.next() {
+            let i = c.index;
+            // Quoted and escaped bytes are text, and so is the quote opening a
+            // span: none of them ends or starts anything.
+            if !c.is_bare() || c.byte == b'\'' || c.byte == b'"' {
+                self.word_start.get_or_insert(i);
+                continue;
             }
-            byte_pos += char_len;
-            continue;
-        }
-
-        if quote.is_some() || c == '\'' || c == '"' {
-            if quote.is_none() && current.is_empty() {
-                current_start = byte_pos;
-            }
-            quote = advance_quote_state(quote, c);
-            current.push(c);
-            byte_pos += char_len;
-            continue;
-        }
-
-        match c {
-            '$' => {
-                flush_arg(&mut tokens, &mut current, current_start);
-                let start = byte_pos;
-                byte_pos += char_len;
-                if chars
-                    .peek()
-                    .is_some_and(|&nc| nc.is_ascii_alphabetic() || nc == '_')
-                {
-                    let mut name = String::from("$");
-                    while let Some(&nc) = chars.peek() {
-                        if !nc.is_ascii_alphanumeric() && nc != '_' {
-                            break;
-                        }
-                        chars.next();
-                        byte_pos += nc.len_utf8();
-                        name.push(nc);
-                    }
-                    tokens.push(ParsedToken {
-                        kind: TokenKind::Arg,
-                        value: name,
-                        offset: start,
-                    });
-                } else {
-                    tokens.push(ParsedToken {
-                        kind: TokenKind::Shellism,
-                        value: "$".into(),
-                        offset: start,
-                    });
-                }
-                current_start = byte_pos;
-            }
-            '*' | '?' | '`' | '(' | ')' | '{' | '}' | '!' => {
-                flush_arg(&mut tokens, &mut current, current_start);
-                tokens.push(ParsedToken {
-                    kind: TokenKind::Shellism,
-                    value: c.to_string(),
-                    offset: byte_pos,
-                });
-                byte_pos += char_len;
-                current_start = byte_pos;
-            }
-            '|' => {
-                flush_arg(&mut tokens, &mut current, current_start);
-                let start = byte_pos;
-                byte_pos += char_len;
-                if chars.peek() == Some(&'|') {
-                    chars.next();
-                    byte_pos += 1;
-                    tokens.push(ParsedToken {
-                        kind: TokenKind::Operator,
-                        value: "||".into(),
-                        offset: start,
-                    });
-                } else if chars.peek() == Some(&'&') {
-                    chars.next();
-                    byte_pos += 1;
-                    tokens.push(ParsedToken {
-                        kind: TokenKind::Pipe(PipeKind::StdoutAndStderr),
-                        value: "|&".into(),
-                        offset: start,
-                    });
-                } else {
-                    tokens.push(ParsedToken {
-                        kind: TokenKind::Pipe(PipeKind::Stdout),
-                        value: "|".into(),
-                        offset: start,
-                    });
-                }
-                current_start = byte_pos;
-            }
-            ';' => {
-                flush_arg(&mut tokens, &mut current, current_start);
-                let start = byte_pos;
-                let mut val = String::from(";");
-                byte_pos += char_len;
-                // `;;`, `;&` and `;;&` are single `case` terminators. Split
-                // apart, the second half reads as an empty command, and the
-                // rewrite emits `; ;` or `; &` in its place — a syntax error,
-                // or a background job where a fall-through was written.
-                if chars.peek() == Some(&';') {
-                    chars.next();
-                    byte_pos += 1;
-                    val.push(';');
-                }
-                if chars.peek() == Some(&'&') {
-                    chars.next();
-                    byte_pos += 1;
-                    val.push('&');
-                }
-                tokens.push(ParsedToken {
-                    kind: TokenKind::Operator,
-                    value: val,
-                    offset: start,
-                });
-                current_start = byte_pos;
-            }
-            '&' => {
-                flush_arg(&mut tokens, &mut current, current_start);
-                let start = byte_pos;
-                byte_pos += char_len;
-                if chars.peek() == Some(&'&') {
-                    chars.next();
-                    byte_pos += 1;
-                    tokens.push(ParsedToken {
-                        kind: TokenKind::Operator,
-                        value: "&&".into(),
-                        offset: start,
-                    });
-                } else if chars.peek() == Some(&'>') {
-                    chars.next();
-                    byte_pos += 1;
-                    let mut val = String::from("&>");
-                    if chars.peek() == Some(&'>') {
-                        chars.next();
-                        byte_pos += 1;
-                        val.push('>');
-                    }
-                    tokens.push(ParsedToken {
-                        kind: TokenKind::Redirect,
-                        value: val,
-                        offset: start,
-                    });
-                } else {
-                    tokens.push(ParsedToken {
-                        kind: TokenKind::Shellism,
-                        value: "&".into(),
-                        offset: start,
-                    });
-                }
-                current_start = byte_pos;
-            }
-            '>' => {
-                let fd_prefix =
-                    if !current.is_empty() && current.chars().all(|ch| ch.is_ascii_digit()) {
-                        Some(std::mem::take(&mut current))
+            match c.byte {
+                b'$' => {
+                    self.flush(i);
+                    if self.next_is(|b| b.is_ascii_alphabetic() || b == b'_') {
+                        let end =
+                            self.take_while(i + 1, |b| b.is_ascii_alphanumeric() || b == b'_');
+                        self.push(TokenKind::Arg, i, end);
                     } else {
-                        flush_arg(&mut tokens, &mut current, current_start);
-                        None
-                    };
-                let redir_start = if fd_prefix.is_some() {
-                    current_start
-                } else {
-                    byte_pos
-                };
-                let mut val = fd_prefix.unwrap_or_default();
-                val.push('>');
-                byte_pos += char_len;
-                if chars.peek() == Some(&'>') {
-                    chars.next();
-                    byte_pos += 1;
-                    val.push('>');
-                }
-                if chars.peek() == Some(&'&') {
-                    chars.next();
-                    byte_pos += 1;
-                    val.push('&');
-                    while let Some(&nc) = chars.peek() {
-                        if !nc.is_ascii_digit() && nc != '-' {
-                            break;
-                        }
-                        chars.next();
-                        val.push(nc);
-                        byte_pos += nc.len_utf8();
+                        self.push(TokenKind::Shellism, i, i + 1);
                     }
                 }
-                tokens.push(ParsedToken {
-                    kind: TokenKind::Redirect,
-                    value: val,
-                    offset: redir_start,
-                });
-                current_start = byte_pos;
-            }
-            '<' => {
-                // A leading fd number belongs to the redirect, as in the `>`
-                // arm: left as its own word it reads as command text, and the
-                // redirect behind it then looks like a trailing one.
-                let fd_prefix =
-                    if !current.is_empty() && current.chars().all(|ch| ch.is_ascii_digit()) {
-                        Some(std::mem::take(&mut current))
+                b'*' | b'?' | b'`' | b'(' | b')' | b'{' | b'}' | b'!' => {
+                    self.flush(i);
+                    self.push(TokenKind::Shellism, i, i + 1);
+                }
+                b'|' => {
+                    self.flush(i);
+                    if self.eat(b'|') {
+                        self.push(TokenKind::Operator, i, i + 2);
+                    } else if self.eat(b'&') {
+                        self.push(TokenKind::Pipe(PipeKind::StdoutAndStderr), i, i + 2);
                     } else {
-                        flush_arg(&mut tokens, &mut current, current_start);
-                        None
-                    };
-                let start = if fd_prefix.is_some() {
-                    current_start
-                } else {
-                    byte_pos
-                };
-                let mut val = fd_prefix.unwrap_or_default();
-                val.push('<');
-                byte_pos += char_len;
-                if chars.peek() == Some(&'<') {
-                    chars.next();
-                    byte_pos += 1;
-                    val.push('<');
-                } else if chars.peek() == Some(&'&') {
-                    // `<&N` is one redirection operator, as `>&N` is in the
-                    // `>` arm: split apart, its `&` reads as a background
-                    // operator and its `N` as a command.
-                    chars.next();
-                    byte_pos += 1;
-                    val.push('&');
-                    while let Some(&nc) = chars.peek() {
-                        if !nc.is_ascii_digit() && nc != '-' {
-                            break;
-                        }
-                        chars.next();
-                        byte_pos += 1;
-                        val.push(nc);
+                        self.push(TokenKind::Pipe(PipeKind::Stdout), i, i + 1);
                     }
                 }
-                tokens.push(ParsedToken {
-                    kind: TokenKind::Redirect,
-                    value: val,
-                    offset: start,
-                });
-                current_start = byte_pos;
+                b';' => {
+                    self.flush(i);
+                    // `;;`, `;&` and `;;&` are single `case` terminators. Split
+                    // apart, the second half reads as an empty command, and the
+                    // rewrite emits `; ;` or `; &` in its place — a syntax error,
+                    // or a background job where a fall-through was written.
+                    let mut end = i + 1;
+                    if self.eat(b';') {
+                        end += 1;
+                    }
+                    if self.eat(b'&') {
+                        end += 1;
+                    }
+                    self.push(TokenKind::Operator, i, end);
+                }
+                b'&' => {
+                    self.flush(i);
+                    if self.eat(b'&') {
+                        self.push(TokenKind::Operator, i, i + 2);
+                    } else if self.eat(b'>') {
+                        let end = if self.eat(b'>') { i + 3 } else { i + 2 };
+                        self.push(TokenKind::Redirect, i, end);
+                    } else {
+                        self.push(TokenKind::Shellism, i, i + 1);
+                    }
+                }
+                b'>' => {
+                    let start = self.fd_prefix_start(i);
+                    let mut end = i + 1;
+                    if self.eat(b'>') {
+                        end += 1;
+                    }
+                    if self.eat(b'&') {
+                        end = self.take_while(end + 1, |b| b.is_ascii_digit() || b == b'-');
+                    }
+                    self.push(TokenKind::Redirect, start, end);
+                }
+                b'<' => {
+                    // A leading fd number belongs to the redirect, as in the `>`
+                    // arm: left as its own word it reads as command text, and the
+                    // redirect behind it then looks like a trailing one.
+                    let start = self.fd_prefix_start(i);
+                    let mut end = i + 1;
+                    if self.eat(b'<') {
+                        end += 1;
+                    } else if self.eat(b'&') {
+                        // `<&N` is one redirection operator, as `>&N` is in the
+                        // `>` arm: split apart, its `&` reads as a background
+                        // operator and its `N` as a command.
+                        end = self.take_while(end + 1, |b| b.is_ascii_digit() || b == b'-');
+                    }
+                    self.push(TokenKind::Redirect, start, end);
+                }
+                b'\n' => {
+                    self.flush(i);
+                    self.push(TokenKind::Newline, i, i + 1);
+                }
+                b' ' | b'\t' => {
+                    self.flush(i);
+                    let end = self.take_while(i + 1, |b| b == b' ' || b == b'\t');
+                    self.push(TokenKind::Sep, i, end);
+                }
+                _ => {
+                    self.word_start.get_or_insert(i);
+                }
             }
-            c @ ('\n' | '\r')
-                if newline_mode != NewlineMode::None
-                    && (c == '\n'
-                        || newline_mode == NewlineMode::Conservative
-                        || is_crlf_at(input.as_bytes(), byte_pos)) =>
+        }
+        self.flush(self.input.len());
+    }
+
+    fn push(&mut self, kind: TokenKind, start: usize, end: usize) {
+        self.tokens.push(Token {
+            kind,
+            value: &self.input[start..end],
+            offset: self.base + start,
+        });
+    }
+
+    /// Ends the word being read, if any, at `at`.
+    fn flush(&mut self, at: usize) {
+        if let Some(start) = self.word_start.take() {
+            self.push(TokenKind::Arg, start, at);
+        }
+    }
+
+    /// Where a redirect operator at `at` starts: at the word before it when
+    /// that word is all digits (`2>`), else at the operator itself.
+    fn fd_prefix_start(&mut self, at: usize) -> usize {
+        match self.word_start {
+            Some(start)
+                if self.input.as_bytes()[start..at]
+                    .iter()
+                    .all(u8::is_ascii_digit) =>
             {
-                flush_arg(&mut tokens, &mut current, current_start);
-                tokens.push(ParsedToken {
-                    kind: TokenKind::Operator,
-                    value: "\n".into(),
-                    offset: byte_pos,
-                });
-                byte_pos += char_len;
-                current_start = byte_pos;
-            }
-            c if is_word_boundary_whitespace(c) => {
-                flush_arg(&mut tokens, &mut current, current_start);
-                byte_pos += c.len_utf8();
-                current_start = byte_pos;
+                self.word_start = None;
+                start
             }
             _ => {
-                if current.is_empty() {
-                    current_start = byte_pos;
-                }
-                current.push(c);
-                byte_pos += char_len;
+                self.flush(at);
+                at
             }
         }
     }
 
-    if escaped {
-        current.push('\\');
+    fn next_is(&mut self, accept: impl Fn(u8) -> bool) -> bool {
+        self.scan
+            .peek()
+            .is_some_and(|c| c.is_bare() && accept(c.byte))
     }
-    flush_arg(&mut tokens, &mut current, current_start);
-    tokens
-}
 
-fn flush_arg(tokens: &mut Vec<ParsedToken>, current: &mut String, offset: usize) {
-    if !current.is_empty() {
-        tokens.push(ParsedToken {
-            kind: TokenKind::Arg,
-            value: std::mem::take(current),
-            offset,
-        });
+    /// Consumes the next byte if it is a bare `b`.
+    fn eat(&mut self, b: u8) -> bool {
+        let found = self.next_is(|n| n == b);
+        if found {
+            self.scan.next();
+        }
+        found
+    }
+
+    /// Consumes bare bytes `accept` takes, and returns the offset past them,
+    /// `from` when there are none.
+    fn take_while(&mut self, from: usize, accept: impl Fn(u8) -> bool) -> usize {
+        let mut end = from;
+        while self.next_is(&accept) {
+            if let Some(c) = self.scan.next() {
+                end = c.index + 1;
+            }
+        }
+        end
     }
 }
 
@@ -614,9 +558,10 @@ fn is_grammar_word(value: &str) -> bool {
 }
 
 // `>&N`/`>&-` (and `N>&M`) is fd-dup/close; bare `>&` before a word is
-// `>word 2>&1` — a file target.
-pub(crate) fn redirect_has_file_target(tokens: &[ParsedToken], i: usize) -> bool {
-    let value = &tokens[i].value;
+// `>word 2>&1` — a file target. The operand is the next token that is not a
+// blank.
+pub(crate) fn redirect_has_file_target(tokens: &[Token<'_>], i: usize) -> bool {
+    let value = tokens[i].value;
     // `<&` duplicates a descriptor exactly as `>&` does, and the tokenizer
     // only folds digits or `-` after either, so neither can name a file.
     if let Some(pos) = value.find(">&").or_else(|| value.find("<&")) {
@@ -625,7 +570,7 @@ pub(crate) fn redirect_has_file_target(tokens: &[ParsedToken], i: usize) -> bool
             return false;
         }
     }
-    match tokens.get(i + 1) {
+    match tokens[i + 1..].iter().find(|t| !t.is_blank()) {
         Some(next) if next.kind == TokenKind::Arg => next.value != "/dev/null",
         _ => true,
     }
@@ -641,6 +586,17 @@ pub(crate) enum RedirectPolicy {
     Excise,
 }
 
+/// How a policy reads the end of a line.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NewlinePolicy {
+    /// A `Newline` separates words like a `Sep`.
+    Blank,
+    /// A `Newline` ends a segment, and so does an unquoted `\r`, although bash
+    /// reads that as a word byte: the line is cut there and each piece
+    /// segmented on its own, so that no command can hide behind one.
+    EndsSegmentAndCrCuts,
+}
+
 /// What counts as the end of a segment, and what the segment keeps.
 ///
 /// The permission gate, analytics classification and the rewrite each need a
@@ -649,7 +605,7 @@ pub(crate) enum RedirectPolicy {
 /// here keeps them chosen rather than emergent.
 #[derive(Clone, Copy)]
 pub(crate) struct Policy {
-    newline: NewlineMode,
+    newline: NewlinePolicy,
     /// `&`, `(` and `)` end a segment.
     group_boundaries: bool,
     redirects: RedirectPolicy,
@@ -668,7 +624,7 @@ pub(crate) struct Policy {
 impl Policy {
     /// The permission gate: breaks on everything a command could hide behind.
     pub(crate) const PERMISSIONS: Self = Self {
-        newline: NewlineMode::Conservative,
+        newline: NewlinePolicy::EndsSegmentAndCrCuts,
         group_boundaries: true,
         redirects: RedirectPolicy::Excise,
         descend_into_substitution: true,
@@ -676,7 +632,7 @@ impl Policy {
 
     /// Classification only, never a security decision.
     pub(crate) const CLASSIFY: Self = Self {
-        newline: NewlineMode::None,
+        newline: NewlinePolicy::Blank,
         group_boundaries: true,
         redirects: RedirectPolicy::Keep,
         descend_into_substitution: false,
@@ -705,11 +661,11 @@ fn push_segment<'a>(
     feeds_pipe: bool,
 ) {
     let raw = &input[start..end];
-    let text = raw.trim();
+    let text = trim_ifs(raw);
     if text.is_empty() {
         return;
     }
-    let lead = raw.len() - raw.trim_start().len();
+    let lead = raw.len() - trim_ifs_start(raw).len();
     out.push(Segment {
         text,
         start: start + lead,
@@ -757,8 +713,8 @@ impl CaseTracker {
 
     /// Reads one token. `case` is the keyword only in command position, so
     /// that the `case` in `echo case` stays an ordinary word.
-    pub(crate) fn observe(&mut self, tok: &ParsedToken, at_command_position: bool) {
-        match (&tok.kind, tok.value.as_str()) {
+    pub(crate) fn observe(&mut self, tok: &Token<'_>, at_command_position: bool) {
+        match (&tok.kind, tok.value) {
             (TokenKind::Arg, "case") if at_command_position => {
                 self.0.push(CaseState::AwaitingIn);
             }
@@ -810,11 +766,11 @@ impl SubstitutionDepth {
     /// Take `tok` into account, and say whether it was the bracketing of a
     /// substitution — the `(` that opens one or the `)` that closes it — which
     /// is never a boundary in its own right.
-    pub(crate) fn absorbs(&mut self, cmd: &str, tok: &ParsedToken) -> bool {
+    pub(crate) fn absorbs(&mut self, cmd: &str, tok: &Token<'_>) -> bool {
         if tok.kind != TokenKind::Shellism {
             return false;
         }
-        match tok.value.as_str() {
+        match tok.value {
             // Brackets nest, so one inside a substitution counts too: without
             // that its `)` closes the substitution a bracket early and the real
             // closing `)` reads as a boundary.
@@ -837,96 +793,130 @@ impl SubstitutionDepth {
 
 /// Split a compound command into the commands it runs, under `policy`.
 ///
-/// Offsets are relative to `cmd.trim()`, which is what every caller matches
+/// Offsets are relative to `trim_ifs(cmd)`, which is what every caller matches
 /// against.
 pub(crate) fn segment(cmd: &str, policy: Policy) -> Vec<Segment<'_>> {
-    let trimmed = cmd.trim();
-    if trimmed.is_empty() {
-        return vec![];
+    let trimmed = trim_ifs(cmd);
+    let mut walk = SegmentWalk {
+        input: trimmed,
+        policy,
+        out: Vec::new(),
+        seg_start: 0,
+        seg_end: None,
+        seg_has_text: false,
+        substitution: SubstitutionDepth::default(),
+        cases: CaseTracker::default(),
+    };
+    let cuts: Vec<usize> = match policy.newline {
+        NewlinePolicy::Blank => Vec::new(),
+        NewlinePolicy::EndsSegmentAndCrCuts => QuoteScan::new(trimmed)
+            .filter(|c| c.byte == b'\r' && c.is_bare())
+            .map(|c| c.index)
+            .collect(),
+    };
+    let mut from = 0;
+    for cut in cuts.into_iter().chain(once(trimmed.len())) {
+        walk.read(from, cut);
+        walk.end_segment(cut, false);
+        walk.seg_start = cut + 1;
+        from = cut + 1;
+    }
+    walk.out
+}
+
+/// The state [`segment`] carries from token to token, and across the pieces a
+/// policy cuts the line into.
+struct SegmentWalk<'a> {
+    input: &'a str,
+    policy: Policy,
+    out: Vec<Segment<'a>>,
+    seg_start: usize,
+    seg_end: Option<usize>,
+    seg_has_text: bool,
+    substitution: SubstitutionDepth,
+    cases: CaseTracker,
+}
+
+impl SegmentWalk<'_> {
+    /// Ends the current segment at `at`, or where a trailing redirect cut it.
+    fn end_segment(&mut self, at: usize, feeds_pipe: bool) {
+        let end = self.seg_end.take().unwrap_or(at);
+        push_segment(&mut self.out, self.input, self.seg_start, end, feeds_pipe);
+        self.seg_has_text = false;
     }
 
-    let tokens = tokenize_inner(trimmed, policy.newline);
-    let mut out = Vec::new();
-    let mut seg_start: usize = 0;
-    let mut seg_end: Option<usize> = None;
-    let mut seg_has_text = false;
-    let mut substitution = SubstitutionDepth::default();
-    let mut cases = CaseTracker::default();
+    /// Reads `input[from..to]`, lexed on its own.
+    fn read(&mut self, from: usize, to: usize) {
+        let tokens = tokenize_at(&self.input[from..to], from);
+        let policy = self.policy;
 
-    let mut i = 0;
-    while let Some(tok) = tokens.get(i) {
-        let at_command_position = !seg_has_text;
-        // The gate descends into a substitution, so for it the tracker never
-        // engages and everything inside is read as ordinary commands.
-        let bracketing = !policy.descend_into_substitution && substitution.absorbs(trimmed, tok);
-        let is_boundary = !bracketing
-            && !substitution.is_inside()
-            && match tok.kind {
-                TokenKind::Operator | TokenKind::Pipe(_) => true,
-                // `case x in (ls) …` is the same statement as `case x in ls) …`,
-                // so that `(` opens nothing. Ending a command there would make
-                // the pattern a command position, and a rewrite turns its one
-                // word into two, which bash rejects. The `)` still ends it.
-                TokenKind::Shellism if tok.value == "(" && cases.in_pattern() => false,
-                TokenKind::Shellism => {
-                    policy.group_boundaries && matches!(tok.value.as_str(), "&" | "(" | ")")
-                }
-                _ => false,
-            };
-
-        if is_boundary {
-            let end = seg_end.take().unwrap_or(tok.offset);
-            push_segment(
-                &mut out,
-                trimmed,
-                seg_start,
-                end,
-                matches!(tok.kind, TokenKind::Pipe(_)),
-            );
-            seg_start = tok.offset + tok.value.len();
-            seg_has_text = false;
-        } else if tok.kind == TokenKind::Redirect && policy.redirects == RedirectPolicy::Excise {
-            if !seg_has_text {
-                // A redirect may precede the command it applies to, and that
-                // command still has to reach the caller, so step over the
-                // redirect instead of ending the segment at it.
-                //
-                // The operand runs to the first gap or boundary. `>$HOME/x` is
-                // several tokens but one word, and a boundary ends the operand
-                // even with no gap — in `>a|rm -rf /` the `|` starts the next
-                // command rather than continuing the filename.
-                let mut end = tok.offset + tok.value.len();
-                let mut next = i + 1;
-                while let Some(part) = tokens.get(next) {
-                    let ends_operand = matches!(
-                        part.kind,
-                        TokenKind::Operator | TokenKind::Pipe(_) | TokenKind::Shellism
-                    );
-                    if part.offset != end || ends_operand {
-                        break;
+        let mut i = 0;
+        while let Some(tok) = tokens.get(i) {
+            let at_command_position = !self.seg_has_text;
+            // The gate descends into a substitution, so for it the tracker never
+            // engages and everything inside is read as ordinary commands.
+            let bracketing =
+                !policy.descend_into_substitution && self.substitution.absorbs(self.input, tok);
+            let is_boundary = !bracketing
+                && !self.substitution.is_inside()
+                && match tok.kind {
+                    TokenKind::Operator | TokenKind::Pipe(_) => true,
+                    TokenKind::Newline => policy.newline == NewlinePolicy::EndsSegmentAndCrCuts,
+                    // `case x in (ls) …` is the same statement as `case x in ls) …`,
+                    // so that `(` opens nothing. Ending a command there would make
+                    // the pattern a command position, and a rewrite turns its one
+                    // word into two, which bash rejects. The `)` still ends it.
+                    TokenKind::Shellism if tok.value == "(" && self.cases.in_pattern() => false,
+                    TokenKind::Shellism => {
+                        policy.group_boundaries && matches!(tok.value, "&" | "(" | ")")
                     }
-                    end = part.offset + part.value.len();
-                    next += 1;
+                    TokenKind::Arg | TokenKind::Redirect | TokenKind::Sep => false,
+                };
+
+            if is_boundary {
+                self.end_segment(tok.offset, matches!(tok.kind, TokenKind::Pipe(_)));
+                self.seg_start = tok.end();
+            } else if tok.kind == TokenKind::Redirect && policy.redirects == RedirectPolicy::Excise
+            {
+                if !self.seg_has_text {
+                    // A redirect may precede the command it applies to, and that
+                    // command still has to reach the caller, so step over the
+                    // redirect instead of ending the segment at it.
+                    //
+                    // The operand runs to the first blank or boundary. `>$HOME/x`
+                    // is several tokens but one word, and a boundary ends the
+                    // operand even with no blank — in `>a|rm -rf /` the `|` starts
+                    // the next command rather than continuing the filename.
+                    let mut end = tok.end();
+                    let mut next = i + 1;
+                    while let Some(part) = tokens.get(next) {
+                        match part.kind {
+                            TokenKind::Operator
+                            | TokenKind::Pipe(_)
+                            | TokenKind::Shellism
+                            | TokenKind::Sep
+                            | TokenKind::Newline => break,
+                            TokenKind::Arg | TokenKind::Redirect => {}
+                        }
+                        end = part.end();
+                        next += 1;
+                    }
+                    self.seg_start = end;
+                    i = next;
+                    continue;
+                } else if self.seg_end.is_none() {
+                    self.seg_end = Some(tok.offset);
                 }
-                seg_start = end;
-                i = next;
-                continue;
-            } else if seg_end.is_none() {
-                seg_end = Some(tok.offset);
+            } else if tok.kind == TokenKind::Arg
+                || (tok.kind == TokenKind::Shellism && !is_grammar_word(tok.value))
+            {
+                self.seg_has_text = true;
             }
-        } else if tok.kind == TokenKind::Arg
-            || (tok.kind == TokenKind::Shellism && !is_grammar_word(&tok.value))
-        {
-            seg_has_text = true;
+
+            self.cases.observe(tok, at_command_position);
+            i += 1;
         }
-
-        cases.observe(tok, at_command_position);
-        i += 1;
     }
-
-    let end = seg_end.unwrap_or(trimmed.len());
-    push_segment(&mut out, trimmed, seg_start, end, false);
-    out
 }
 
 /// Segments `cmd` for the **permission gate** (`hooks/permissions.rs::check_command_with_rules`):
@@ -953,7 +943,7 @@ pub(crate) fn segment(cmd: &str, policy: Policy) -> Vec<Segment<'_>> {
 /// | lone `\r` (no following `\n`) | splits | does not split | does not split |
 ///
 /// Like [`split_for_classify`] but also breaks on newline and on a lone `\r`
-/// (`NewlineMode::Conservative`), descends into `$( )`, and truncates each
+/// (`NewlinePolicy::EndsSegmentAndCrCuts`), descends into `$( )`, and truncates each
 /// segment at the first redirect that follows command text — deliberately
 /// conservative so a hidden command can't evade the gate by hiding behind a
 /// construct another segmenter would leave intact.
@@ -988,48 +978,55 @@ pub fn strip_quotes(s: &str) -> String {
     s.to_string()
 }
 
-/// Turns a coalesced word's raw text (quotes/escapes still literal, as
-/// `tokenize()` preserves them) into argv-ready text: quote chars that
-/// open/close a span are stripped, backslash escapes resolved.
-fn resolve_word_text(raw: &str) -> String {
-    let mut result = String::new();
-    let mut chars = raw.chars().peekable();
-    let mut quote: Option<char> = None;
+/// Turns a word's raw text (quotes/escapes still literal, as `tokenize()`
+/// preserves them) into argv-ready text: quote chars that open/close a span are
+/// stripped, backslash escapes resolved.
+pub(crate) fn resolve_word_text(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut result = String::with_capacity(raw.len());
+    // Bytes are dropped one at a time and all of them are ASCII, so every run
+    // kept between two dropped bytes is whole UTF-8.
+    let mut kept_from = 0;
+    let mut skip = |result: &mut String, at: usize| {
+        result.push_str(&raw[kept_from..at]);
+        kept_from = at + 1;
+    };
+    let mut escaping = false;
 
-    while let Some(c) = chars.next() {
-        match c {
+    for c in QuoteScan::new(raw) {
+        if escaping {
+            // The escaped byte itself, which is always text.
+            escaping = false;
+            continue;
+        }
+        if c.escaped {
+            escaping = true;
             // Inside double quotes bash only lets `\` escape `$`, `` ` ``, `"`,
             // `\` or a newline; before anything else it is a literal character.
             // That is what keeps a quoted Windows path (`"C:\Program Files"`)
             // intact instead of eating its separators.
-            '\\' if quote == Some('"') => match chars.peek() {
-                Some('$' | '`' | '"' | '\\' | '\n') => {
-                    if let Some(next) = chars.next() {
-                        result.push(next);
-                    }
-                }
-                _ => result.push('\\'),
-            },
-            '\\' if quote.is_none() => {
-                if let Some(next) = chars.next() {
-                    result.push(next);
-                }
+            let escapes = !c.in_double
+                || matches!(
+                    bytes.get(c.index + 1),
+                    Some(b'$' | b'`' | b'"' | b'\\' | b'\n')
+                );
+            if escapes {
+                skip(&mut result, c.index);
             }
-            '\'' | '"' => {
-                // advance_quote_state leaves `quote` unchanged when `c` is the
-                // "wrong" quote char for the current span (e.g. a `'` while
-                // inside `"..."`) — that's literal text, not a toggle.
-                let new_quote = advance_quote_state(quote, c);
-                if new_quote == quote {
-                    result.push(c);
-                } else {
-                    quote = new_quote;
-                }
-            }
-            _ => result.push(c),
+            continue;
+        }
+        // Only a quote that opens or closes a span is syntax: a `'` inside
+        // `"..."`, or a `"` inside `'...'`, is literal text.
+        let toggles = match c.byte {
+            b'\'' => !c.in_double,
+            b'"' => !c.in_single,
+            _ => false,
+        };
+        if toggles {
+            skip(&mut result, c.index);
         }
     }
-
+    result.push_str(&raw[kept_from..]);
     result
 }
 
@@ -1038,9 +1035,9 @@ fn resolve_word_text(raw: &str) -> String {
 /// straight to `Command::new`/exec or compare it against literal words
 /// (`hooks/mod.rs::is_claude_hook_command`, `rtk proxy` arg-splitting).
 pub fn shell_split(input: &str) -> Vec<String> {
-    coalesce_words(input, &tokenize(input))
+    words(input, &tokenize(input))
         .into_iter()
-        .map(|(raw, _)| resolve_word_text(raw))
+        .map(|w| resolve_word_text(w.text))
         .collect()
 }
 
@@ -1100,51 +1097,97 @@ mod tests {
         scan.balanced()
     }
 
-    /// `word_spans` decides where a word ends for anyone who needs to know —
+    fn word_texts(cmd: &str) -> Vec<&str> {
+        words(cmd, &tokenize(cmd))
+            .into_iter()
+            .map(|w| w.text)
+            .collect()
+    }
+
+    /// `words` decides where a word ends for anyone who needs to know —
     /// `split_env_prefix` among them — so it is worth asserting on its own
     /// rather than only through a caller that happens to exercise it.
     #[test]
-    fn test_word_spans_reads_a_quoted_span_as_one_word() {
-        fn words(cmd: &str) -> Vec<&str> {
-            word_spans(cmd)
-                .into_iter()
-                .map(|(from, to)| &cmd[from..to])
-                .collect()
-        }
-
-        assert_eq!(words("git status"), vec!["git", "status"]);
+    fn test_words_reads_a_quoted_span_as_one_word() {
+        assert_eq!(word_texts("git status"), vec!["git", "status"]);
         assert_eq!(
-            words("D='# shellcheck disable=SC2034' git status"),
+            word_texts("D='# shellcheck disable=SC2034' git status"),
             vec!["D='# shellcheck disable=SC2034'", "git", "status"]
         );
-        assert_eq!(words("FOO=\"a b\" ls"), vec!["FOO=\"a b\"", "ls"]);
+        assert_eq!(word_texts("FOO=\"a b\" ls"), vec!["FOO=\"a b\"", "ls"]);
         assert_eq!(
-            words("a\\ b c"),
+            word_texts("a\\ b c"),
             vec!["a\\ b", "c"],
             "an escaped blank joins"
         );
-        assert_eq!(words("a\tb"), vec!["a", "b"], "a tab separates");
-        assert_eq!(words("echo \"a'b'c\" x"), vec!["echo", "\"a'b'c\"", "x"]);
-        assert_eq!(words("echo '' x"), vec!["echo", "''", "x"]);
-        assert_eq!(words("café日本語 x"), vec!["café日本語", "x"]);
-        // A word of nothing but escapes is still a word, which is why this
-        // reads the whole scan rather than only the bytes that are syntax.
-        assert_eq!(words(r"git status \'"), vec!["git", "status", r"\'"]);
-        assert_eq!(words(r"\' foo"), vec![r"\'", "foo"]);
-        assert_eq!(words(r"a \' b"), vec!["a", r"\'", "b"]);
+        assert_eq!(word_texts("a\tb"), vec!["a", "b"], "a tab separates");
+        assert_eq!(word_texts("a\nb"), vec!["a", "b"], "a newline separates");
+        assert_eq!(
+            word_texts("echo \"a'b'c\" x"),
+            vec!["echo", "\"a'b'c\"", "x"]
+        );
+        assert_eq!(word_texts("echo '' x"), vec!["echo", "''", "x"]);
+        assert_eq!(word_texts("café日本語 x"), vec!["café日本語", "x"]);
+        // A word of nothing but escapes is still a word.
+        assert_eq!(word_texts(r"git status \'"), vec!["git", "status", r"\'"]);
+        assert_eq!(word_texts(r"\' foo"), vec![r"\'", "foo"]);
+        assert_eq!(word_texts(r"a \' b"), vec!["a", r"\'", "b"]);
+        // Adjacent tokens are one word: a glob, and an operator with no blank.
+        assert_eq!(
+            word_texts("golangci-lint --config *.yml run"),
+            vec!["golangci-lint", "--config", "*.yml", "run"]
+        );
+        assert_eq!(word_texts("a;b c"), vec!["a;b", "c"]);
 
-        assert!(words("").is_empty());
-        assert!(words("   \t  ").is_empty());
-        assert_eq!(words("  ls  "), vec!["ls"], "outer blanks are not words");
+        assert!(word_texts("").is_empty());
+        assert!(word_texts("   \t  ").is_empty());
+        assert_eq!(
+            word_texts("  ls  "),
+            vec!["ls"],
+            "outer blanks are not words"
+        );
+    }
+
+    /// Only space, tab and newline separate words, as in bash: a vertical tab,
+    /// a form feed, a carriage return or a non-breaking space is a word byte.
+    #[test]
+    fn test_words_split_on_ifs_only() {
+        for byte in ["\x0b", "\x0c", "\r", "\u{a0}"] {
+            let cmd = format!("git{byte}status");
+            assert_eq!(word_texts(&cmd), vec![cmd.as_str()], "{cmd:?}");
+            let cmd = format!("git status{byte}");
+            assert_eq!(
+                word_texts(&cmd),
+                vec!["git", &cmd[4..]],
+                "trailing {byte:?} stays in the word"
+            );
+        }
+    }
+
+    /// Each word carries its span and the text that span names.
+    #[test]
+    fn test_words_carry_their_span_and_text() {
+        let cmd = "FOO='a b' git  *.rs";
+        let found = words(cmd, &tokenize(cmd));
+        assert_eq!(
+            found.iter().map(|w| (w.start, w.end)).collect::<Vec<_>>(),
+            vec![(0, 9), (10, 13), (15, 19)]
+        );
+        for word in &found {
+            assert_eq!(word.text, &cmd[word.start..word.end]);
+        }
     }
 
     /// Nothing here should panic or lose a byte, however the quoting ends.
     #[test]
-    fn test_word_spans_survives_unfinished_quoting() {
+    fn test_words_survive_unfinished_quoting() {
         for cmd in ["echo 'abc", "echo \"abc", "echo abc\\", "'", "\\"] {
-            for (from, to) in word_spans(cmd) {
-                assert!(from < to && to <= cmd.len(), "bad span in {cmd:?}");
-                assert!(cmd.is_char_boundary(from) && cmd.is_char_boundary(to));
+            for word in words(cmd, &tokenize(cmd)) {
+                assert!(
+                    word.start < word.end && word.end <= cmd.len(),
+                    "bad span in {cmd:?}"
+                );
+                assert!(cmd.is_char_boundary(word.start) && cmd.is_char_boundary(word.end));
             }
         }
     }
@@ -1156,9 +1199,8 @@ mod tests {
     #[test]
     fn test_word_spans_reads_ansi_c_quoting_as_ordinary_quoting() {
         let cmd = "D=$'ansi\\'c' git status";
-        let spans = word_spans(cmd);
         assert_ne!(
-            spans.len(),
+            word_texts(cmd).len(),
             3,
             "if this ever splits into three words the limitation is gone and \
              the comment above should go with it"
@@ -1169,40 +1211,126 @@ mod tests {
         );
     }
 
+    /// Every token is a slice of the input, and together they are all of it.
     #[test]
-    fn test_coalesce_words_merges_adjacent_tokens() {
-        let cmd = "golangci-lint --config *.yml run";
-        let words: Vec<&str> = coalesce_words(cmd, &tokenize(cmd))
-            .into_iter()
-            .map(|(w, _)| w)
-            .collect();
-        assert_eq!(words, vec!["golangci-lint", "--config", "*.yml", "run"]);
+    fn test_tokens_tile_their_input() {
+        for cmd in [
+            "git status",
+            "  a  &&\tb || c ;; d |& e\n",
+            "FOO=1 2>&1 >>out <&3 &>/dev/null $HOME ${X} *.rs",
+            "echo 'a b' \"c\\\"d\" e\\ f \\",
+            "git status\r\ngit log\rx\x0b\u{a0}y",
+            "echo 'unterminated",
+            "café;;&fin",
+        ] {
+            let tokens = tokenize(cmd);
+            let mut at = 0;
+            for tok in &tokens {
+                assert_eq!(tok.offset, at, "gap before {tok:?} in {cmd:?}");
+                assert_eq!(tok.value, &cmd[tok.offset..tok.end()]);
+                at = tok.end();
+            }
+            assert_eq!(at, cmd.len(), "tokens stop short in {cmd:?}");
+        }
     }
 
     #[test]
-    fn test_coalesce_words_preserves_offsets() {
-        let cmd = "a *.yml b";
-        let words = coalesce_words(cmd, &tokenize(cmd));
-        assert_eq!(words, vec![("a", 0), ("*.yml", 2), ("b", 8)]);
+    fn test_sep_carries_the_exact_blank_bytes() {
+        let seps: Vec<&str> = tokenize("a \t b\tc")
+            .into_iter()
+            .filter(|t| t.kind == TokenKind::Sep)
+            .map(|t| t.value)
+            .collect();
+        assert_eq!(seps, vec![" \t ", "\t"]);
+    }
+
+    /// `tokenize_at` is `tokenize` with its offsets moved, and nothing else.
+    #[test]
+    fn test_tokenize_variants_agree_with_tokenize() {
+        for input in [
+            "git status && ls -la\n  cargo test 2>&1 | grep x",
+            "a\r\n\tb\x0bc \u{a0}d",
+            "",
+            "echo 'a  b' \"c\td\" $(x)",
+        ] {
+            let full = tokenize(input);
+            let shifted: Vec<Token<'_>> = full
+                .iter()
+                .map(|t| Token {
+                    offset: t.offset + 7,
+                    ..*t
+                })
+                .collect();
+            assert_eq!(tokenize_at(input, 7), shifted, "{input:?}");
+        }
+        assert_eq!(
+            split_ifs(" a\t\tb\r \x0bc\n").collect::<Vec<_>>(),
+            vec!["a", "b\r", "\x0bc"]
+        );
+        assert_eq!(squeeze_blanks("pm \t\n ls "), "pm ls");
+    }
+
+    /// A command ends where its last word does. An escaped or quoted blank is
+    /// part of that word, so only a bare blank is trimmed.
+    #[test]
+    fn test_trimmed_text_ends_at_the_last_word() {
+        for (input, expected) in [
+            ("  git status \t\n", "git status"),
+            ("head\\ ", "head\\ "),
+            ("cat f\\ \t", "cat f\\ "),
+            ("cat f\\\t", "cat f\\\t"),
+            ("echo 'a ", "echo 'a "),
+            ("echo \"a\t\"  ", "echo \"a\t\""),
+            ("ls \x0b", "ls \x0b"),
+            (" \t\n", ""),
+            ("", ""),
+        ] {
+            let (trimmed, tokens) = tokenize_trimmed(input);
+            assert_eq!(trimmed, expected, "{input:?}");
+            assert_eq!(tokens, tokenize(trimmed), "{input:?}");
+        }
+
+        let cmd = "a | head\\  ; b";
+        let tokens = tokenize(cmd);
+        let pipe_end = cmd.find('|').expect("pipe") + 1;
+        let semi = cmd.find(';').expect("semicolon");
+        assert_eq!(
+            content_span(&tokens, pipe_end, semi).map(|(from, to)| &cmd[from..to]),
+            Some("head\\ ")
+        );
+        assert_eq!(content_span(&tokens, semi + 1, semi + 1), None);
+        assert_eq!(tokens_until(&tokens, semi), &tokens[..tokens.len() - 3]);
+    }
+
+    /// The tokens that are not blanks, as `(kind, value)`.
+    fn non_blank(cmd: &str) -> Vec<(TokenKind, &str)> {
+        tokenize(cmd)
+            .into_iter()
+            .filter(|t| !t.is_blank())
+            .map(|t| (t.kind, t.value))
+            .collect()
     }
 
     #[test]
     fn test_simple_command() {
         let tokens = tokenize("git status");
-        assert_eq!(tokens.len(), 2);
-        assert_eq!(tokens[0].kind, TokenKind::Arg);
-        assert_eq!(tokens[0].value, "git");
-        assert_eq!(tokens[1].value, "status");
+        assert_eq!(
+            tokens.iter().map(|t| (t.kind, t.value)).collect::<Vec<_>>(),
+            vec![
+                (TokenKind::Arg, "git"),
+                (TokenKind::Sep, " "),
+                (TokenKind::Arg, "status")
+            ]
+        );
     }
 
     #[test]
     fn test_command_with_args() {
-        let tokens = tokenize("git commit -m message");
-        assert_eq!(tokens.len(), 4);
-        assert_eq!(tokens[0].value, "git");
-        assert_eq!(tokens[1].value, "commit");
-        assert_eq!(tokens[2].value, "-m");
-        assert_eq!(tokens[3].value, "message");
+        let values: Vec<&str> = non_blank("git commit -m message")
+            .into_iter()
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(values, vec!["git", "commit", "-m", "message"]);
     }
 
     #[test]
@@ -1265,7 +1393,7 @@ mod tests {
 
     #[test]
     fn test_whitespace_only() {
-        assert!(tokenize("   ").is_empty());
+        assert!(non_blank("   ").is_empty());
     }
 
     #[test]
@@ -1289,13 +1417,13 @@ mod tests {
     #[test]
     fn test_multiple_spaces() {
         let tokens = tokenize("git   status");
-        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[1].value, "   ");
     }
 
     #[test]
     fn test_leading_trailing_spaces() {
-        let tokens = tokenize("  git status  ");
-        assert_eq!(tokens.len(), 2);
+        assert_eq!(non_blank("  git status  ").len(), 2);
     }
 
     #[test]
@@ -1572,9 +1700,9 @@ mod tests {
     #[test]
     fn test_redirect_2_to_1_single_token() {
         let tokens = tokenize("cmd 2>&1");
-        assert_eq!(tokens.len(), 2);
-        assert_eq!(tokens[1].kind, TokenKind::Redirect);
-        assert_eq!(tokens[1].value, "2>&1");
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[2].kind, TokenKind::Redirect);
+        assert_eq!(tokens[2].value, "2>&1");
         assert!(
             !tokens
                 .iter()
@@ -1739,10 +1867,8 @@ mod tests {
 
     #[test]
     fn test_offset_tracking() {
-        let tokens = tokenize("a && b");
-        assert_eq!(tokens[0].offset, 0);
-        assert_eq!(tokens[1].offset, 2);
-        assert_eq!(tokens[2].offset, 5);
+        let offsets: Vec<usize> = tokenize("a && b").iter().map(|t| t.offset).collect();
+        assert_eq!(offsets, vec![0, 1, 2, 4, 5]);
     }
 
     #[test]
@@ -1753,9 +1879,8 @@ mod tests {
             .iter()
             .find(|t| t.kind == TokenKind::Operator)
             .unwrap();
-        let left = cmd[..op.offset].trim();
-        let right_start = op.offset + op.value.len();
-        let right = cmd[right_start..].trim();
+        let left = trim_ifs(&cmd[..op.offset]);
+        let right = trim_ifs(&cmd[op.end()..]);
         assert_eq!(left, "git add .");
         assert_eq!(right, "cargo test");
     }
@@ -2183,7 +2308,7 @@ mod tests {
             // nothing about *which* text became a segment — gaps are legal,
             // that is where separators live — so the placement cases live in
             // discover/registry.rs's `segmenter_agreement`.
-            let trimmed = cmd.trim();
+            let trimmed = trim_ifs(cmd);
             let mut furthest = 0;
             for seg in split_for_classify(cmd) {
                 assert!(
@@ -2217,7 +2342,7 @@ mod tests {
             "2>&1 ls | grep x",
             "ls\r\nls -la",
         ] {
-            let trimmed = cmd.trim();
+            let trimmed = trim_ifs(cmd);
             for policy in [Policy::PERMISSIONS, Policy::CLASSIFY] {
                 for seg in segment(cmd, policy) {
                     assert_eq!(
@@ -2228,7 +2353,7 @@ mod tests {
                         seg.end,
                         seg.text
                     );
-                    assert_eq!(seg.text.trim(), seg.text, "segment text was not trimmed");
+                    assert_eq!(trim_ifs(seg.text), seg.text, "segment text was not trimmed");
                 }
             }
         }
@@ -2321,18 +2446,20 @@ mod tests {
     }
 
     #[test]
-    fn test_tokenize_with_newlines_emits_operator_outside_quotes_only() {
-        let newline_ops = |input: &str| {
-            tokenize_with_newlines(input)
-                .iter()
-                .filter(|t| t.kind == TokenKind::Operator && t.value == "\n")
-                .count()
-        };
-        assert_eq!(newline_ops("git status\ngit log"), 1);
-        assert_eq!(newline_ops("echo 'line1\nline2'"), 0);
-        assert_eq!(newline_ops("git status\r\ngit log"), 2);
-        // A lone `\r` (no following `\n`) is not a separator → no newline operator.
-        assert_eq!(newline_ops("git status\rgit log"), 0);
+    fn test_newline_token_outside_quotes_only() {
+        fn newlines(input: &str) -> Vec<(usize, &str)> {
+            tokenize(input)
+                .into_iter()
+                .filter(|t| t.kind == TokenKind::Newline)
+                .map(|t| (t.offset, t.value))
+                .collect()
+        }
+        assert_eq!(newlines("git status\ngit log"), vec![(10, "\n")]);
+        assert!(newlines("echo 'line1\nline2'").is_empty());
+        // The `\r` of a CRLF is the last byte of the word before the newline.
+        assert_eq!(newlines("git status\r\ngit log"), vec![(11, "\n")]);
+        // A lone `\r` is never a newline.
+        assert!(newlines("git status\rgit log").is_empty());
     }
 
     #[test]
@@ -2340,20 +2467,18 @@ mod tests {
         // Bash's default $IFS is space/tab/newline, never CR: a bare `\r` with no
         // following `\n` stays glued into its surrounding word instead of splitting
         // it, matching how real bash tokenizes `git status<CR>git log`.
-        let args: Vec<String> = tokenize("git status\rgit log")
-            .into_iter()
-            .map(|t| t.value)
-            .collect();
-        assert_eq!(args, vec!["git", "status\rgit", "log"]);
+        assert_eq!(
+            word_texts("git status\rgit log"),
+            vec!["git", "status\rgit", "log"]
+        );
     }
 
     #[test]
-    fn test_crlf_in_plain_tokenize_keeps_cr_glued_to_word() {
-        let args: Vec<String> = tokenize("git status\r\ngit log")
-            .into_iter()
-            .map(|t| t.value)
-            .collect();
-        assert_eq!(args, vec!["git", "status\r", "git", "log"]);
+    fn test_crlf_keeps_cr_glued_to_word() {
+        assert_eq!(
+            word_texts("git status\r\ngit log"),
+            vec!["git", "status\r", "git", "log"]
+        );
     }
 }
 
@@ -2485,5 +2610,347 @@ mod legacy_segmenters {
         }
 
         results
+    }
+
+    // The tokenizer the walkers above read, as it shipped with them: frozen for
+    // the same reason, so the oracle does not move with the lexer it checks.
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct LegacyToken {
+        pub kind: TokenKind,
+        pub value: String,
+        pub offset: usize,
+    }
+
+    #[allow(dead_code)]
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum NewlineMode {
+        None,
+        Bash,
+        Conservative,
+    }
+
+    fn tokenize(input: &str) -> Vec<LegacyToken> {
+        tokenize_inner(input, NewlineMode::None)
+    }
+
+    fn advance_quote_state(quote: Option<char>, c: char) -> Option<char> {
+        match (quote, c) {
+            (None, '\'' | '"') => Some(c),
+            (Some(q), c) if c == q => None,
+            (q, _) => q,
+        }
+    }
+
+    fn is_word_boundary_whitespace(c: char) -> bool {
+        matches!(c, ' ' | '\t' | '\n')
+    }
+
+    fn is_crlf_at(bytes: &[u8], i: usize) -> bool {
+        bytes.get(i) == Some(&b'\r') && bytes.get(i + 1) == Some(&b'\n')
+    }
+
+    fn tokenize_inner(input: &str, newline_mode: NewlineMode) -> Vec<LegacyToken> {
+        let mut tokens = Vec::new();
+        let mut current = String::new();
+        let mut current_start: usize = 0;
+        let mut byte_pos: usize = 0;
+        let mut chars = input.chars().peekable();
+        let mut quote: Option<char> = None;
+        let mut escaped = false;
+
+        while let Some(c) = chars.next() {
+            let char_len = c.len_utf8();
+
+            if escaped {
+                current.push('\\');
+                current.push(c);
+                byte_pos += char_len;
+                escaped = false;
+                continue;
+            }
+            if c == '\\' && quote != Some('\'') {
+                escaped = true;
+                if current.is_empty() {
+                    current_start = byte_pos;
+                }
+                byte_pos += char_len;
+                continue;
+            }
+
+            if quote.is_some() || c == '\'' || c == '"' {
+                if quote.is_none() && current.is_empty() {
+                    current_start = byte_pos;
+                }
+                quote = advance_quote_state(quote, c);
+                current.push(c);
+                byte_pos += char_len;
+                continue;
+            }
+
+            match c {
+                '$' => {
+                    flush_arg(&mut tokens, &mut current, current_start);
+                    let start = byte_pos;
+                    byte_pos += char_len;
+                    if chars
+                        .peek()
+                        .is_some_and(|&nc| nc.is_ascii_alphabetic() || nc == '_')
+                    {
+                        let mut name = String::from("$");
+                        while let Some(&nc) = chars.peek() {
+                            if !nc.is_ascii_alphanumeric() && nc != '_' {
+                                break;
+                            }
+                            chars.next();
+                            byte_pos += nc.len_utf8();
+                            name.push(nc);
+                        }
+                        tokens.push(LegacyToken {
+                            kind: TokenKind::Arg,
+                            value: name,
+                            offset: start,
+                        });
+                    } else {
+                        tokens.push(LegacyToken {
+                            kind: TokenKind::Shellism,
+                            value: "$".into(),
+                            offset: start,
+                        });
+                    }
+                    current_start = byte_pos;
+                }
+                '*' | '?' | '`' | '(' | ')' | '{' | '}' | '!' => {
+                    flush_arg(&mut tokens, &mut current, current_start);
+                    tokens.push(LegacyToken {
+                        kind: TokenKind::Shellism,
+                        value: c.to_string(),
+                        offset: byte_pos,
+                    });
+                    byte_pos += char_len;
+                    current_start = byte_pos;
+                }
+                '|' => {
+                    flush_arg(&mut tokens, &mut current, current_start);
+                    let start = byte_pos;
+                    byte_pos += char_len;
+                    if chars.peek() == Some(&'|') {
+                        chars.next();
+                        byte_pos += 1;
+                        tokens.push(LegacyToken {
+                            kind: TokenKind::Operator,
+                            value: "||".into(),
+                            offset: start,
+                        });
+                    } else if chars.peek() == Some(&'&') {
+                        chars.next();
+                        byte_pos += 1;
+                        tokens.push(LegacyToken {
+                            kind: TokenKind::Pipe(PipeKind::StdoutAndStderr),
+                            value: "|&".into(),
+                            offset: start,
+                        });
+                    } else {
+                        tokens.push(LegacyToken {
+                            kind: TokenKind::Pipe(PipeKind::Stdout),
+                            value: "|".into(),
+                            offset: start,
+                        });
+                    }
+                    current_start = byte_pos;
+                }
+                ';' => {
+                    flush_arg(&mut tokens, &mut current, current_start);
+                    let start = byte_pos;
+                    let mut val = String::from(";");
+                    byte_pos += char_len;
+                    // `;;`, `;&` and `;;&` are single `case` terminators. Split
+                    // apart, the second half reads as an empty command, and the
+                    // rewrite emits `; ;` or `; &` in its place — a syntax error,
+                    // or a background job where a fall-through was written.
+                    if chars.peek() == Some(&';') {
+                        chars.next();
+                        byte_pos += 1;
+                        val.push(';');
+                    }
+                    if chars.peek() == Some(&'&') {
+                        chars.next();
+                        byte_pos += 1;
+                        val.push('&');
+                    }
+                    tokens.push(LegacyToken {
+                        kind: TokenKind::Operator,
+                        value: val,
+                        offset: start,
+                    });
+                    current_start = byte_pos;
+                }
+                '&' => {
+                    flush_arg(&mut tokens, &mut current, current_start);
+                    let start = byte_pos;
+                    byte_pos += char_len;
+                    if chars.peek() == Some(&'&') {
+                        chars.next();
+                        byte_pos += 1;
+                        tokens.push(LegacyToken {
+                            kind: TokenKind::Operator,
+                            value: "&&".into(),
+                            offset: start,
+                        });
+                    } else if chars.peek() == Some(&'>') {
+                        chars.next();
+                        byte_pos += 1;
+                        let mut val = String::from("&>");
+                        if chars.peek() == Some(&'>') {
+                            chars.next();
+                            byte_pos += 1;
+                            val.push('>');
+                        }
+                        tokens.push(LegacyToken {
+                            kind: TokenKind::Redirect,
+                            value: val,
+                            offset: start,
+                        });
+                    } else {
+                        tokens.push(LegacyToken {
+                            kind: TokenKind::Shellism,
+                            value: "&".into(),
+                            offset: start,
+                        });
+                    }
+                    current_start = byte_pos;
+                }
+                '>' => {
+                    let fd_prefix =
+                        if !current.is_empty() && current.chars().all(|ch| ch.is_ascii_digit()) {
+                            Some(std::mem::take(&mut current))
+                        } else {
+                            flush_arg(&mut tokens, &mut current, current_start);
+                            None
+                        };
+                    let redir_start = if fd_prefix.is_some() {
+                        current_start
+                    } else {
+                        byte_pos
+                    };
+                    let mut val = fd_prefix.unwrap_or_default();
+                    val.push('>');
+                    byte_pos += char_len;
+                    if chars.peek() == Some(&'>') {
+                        chars.next();
+                        byte_pos += 1;
+                        val.push('>');
+                    }
+                    if chars.peek() == Some(&'&') {
+                        chars.next();
+                        byte_pos += 1;
+                        val.push('&');
+                        while let Some(&nc) = chars.peek() {
+                            if !nc.is_ascii_digit() && nc != '-' {
+                                break;
+                            }
+                            chars.next();
+                            val.push(nc);
+                            byte_pos += nc.len_utf8();
+                        }
+                    }
+                    tokens.push(LegacyToken {
+                        kind: TokenKind::Redirect,
+                        value: val,
+                        offset: redir_start,
+                    });
+                    current_start = byte_pos;
+                }
+                '<' => {
+                    // A leading fd number belongs to the redirect, as in the `>`
+                    // arm: left as its own word it reads as command text, and the
+                    // redirect behind it then looks like a trailing one.
+                    let fd_prefix =
+                        if !current.is_empty() && current.chars().all(|ch| ch.is_ascii_digit()) {
+                            Some(std::mem::take(&mut current))
+                        } else {
+                            flush_arg(&mut tokens, &mut current, current_start);
+                            None
+                        };
+                    let start = if fd_prefix.is_some() {
+                        current_start
+                    } else {
+                        byte_pos
+                    };
+                    let mut val = fd_prefix.unwrap_or_default();
+                    val.push('<');
+                    byte_pos += char_len;
+                    if chars.peek() == Some(&'<') {
+                        chars.next();
+                        byte_pos += 1;
+                        val.push('<');
+                    } else if chars.peek() == Some(&'&') {
+                        // `<&N` is one redirection operator, as `>&N` is in the
+                        // `>` arm: split apart, its `&` reads as a background
+                        // operator and its `N` as a command.
+                        chars.next();
+                        byte_pos += 1;
+                        val.push('&');
+                        while let Some(&nc) = chars.peek() {
+                            if !nc.is_ascii_digit() && nc != '-' {
+                                break;
+                            }
+                            chars.next();
+                            byte_pos += 1;
+                            val.push(nc);
+                        }
+                    }
+                    tokens.push(LegacyToken {
+                        kind: TokenKind::Redirect,
+                        value: val,
+                        offset: start,
+                    });
+                    current_start = byte_pos;
+                }
+                c @ ('\n' | '\r')
+                    if newline_mode != NewlineMode::None
+                        && (c == '\n'
+                            || newline_mode == NewlineMode::Conservative
+                            || is_crlf_at(input.as_bytes(), byte_pos)) =>
+                {
+                    flush_arg(&mut tokens, &mut current, current_start);
+                    tokens.push(LegacyToken {
+                        kind: TokenKind::Operator,
+                        value: "\n".into(),
+                        offset: byte_pos,
+                    });
+                    byte_pos += char_len;
+                    current_start = byte_pos;
+                }
+                c if is_word_boundary_whitespace(c) => {
+                    flush_arg(&mut tokens, &mut current, current_start);
+                    byte_pos += c.len_utf8();
+                    current_start = byte_pos;
+                }
+                _ => {
+                    if current.is_empty() {
+                        current_start = byte_pos;
+                    }
+                    current.push(c);
+                    byte_pos += char_len;
+                }
+            }
+        }
+
+        if escaped {
+            current.push('\\');
+        }
+        flush_arg(&mut tokens, &mut current, current_start);
+        tokens
+    }
+
+    fn flush_arg(tokens: &mut Vec<LegacyToken>, current: &mut String, offset: usize) {
+        if !current.is_empty() {
+            tokens.push(LegacyToken {
+                kind: TokenKind::Arg,
+                value: std::mem::take(current),
+                offset,
+            });
+        }
     }
 }

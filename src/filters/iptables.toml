@@ -1,6 +1,6 @@
 [filters.iptables]
 description = "Compact iptables output"
-match_command = "^iptables\\b"
+match_command = "^iptables(?:[ \\t\\n]|$)"
 strip_lines_matching = [
   "^\\s*$",
   "^Chain DOCKER",

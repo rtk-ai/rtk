@@ -1,6 +1,6 @@
 [filters.ping]
 description = "Compact ping output — strip per-packet lines, keep summary"
-match_command = "^ping\\b"
+match_command = "^ping(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^PING ",

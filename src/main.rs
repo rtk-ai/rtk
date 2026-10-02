@@ -1602,8 +1602,9 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     // Start timer before execution to capture actual command runtime
     let timer = core::tracking::TimedExecution::start();
 
-    // TOML filter lookup — bypass with RTK_NO_TOML=1
-    // Use basename of args[0] so absolute paths (/usr/bin/make) still match "^make\b".
+    // TOML filter lookup, bypassed with RTK_NO_TOML=1. The first word is looked up
+    // by its basename, so `/usr/bin/make all` reads as `make all` and meets a pattern
+    // that ends the command word at `$IFS`, such as `^make(?:[ \t\n]|$)`.
     let lookup_cmd = {
         let base = std::path::Path::new(&args[0])
             .file_name()

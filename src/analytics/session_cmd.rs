@@ -290,6 +290,19 @@ mod tests {
         assert_eq!(rtk, 1, "only the explicit non-proxy rtk invocation counts");
     }
 
+    /// bash runs `rtk` for a quoted or escaped `rtk`, so those count as well.
+    #[test]
+    fn test_count_quoted_rtk_as_adopted() {
+        let cmds = vec![
+            make_cmd("'rtk' git status", Some(200)),
+            make_cmd("\\rtk git log", Some(200)),
+            make_cmd("\\rtk 'proxy' git log", Some(200)),
+        ];
+        let (total, rtk, _) = count_rtk_commands(&cmds);
+        assert_eq!(total, 3);
+        assert_eq!(rtk, 2);
+    }
+
     #[test]
     fn test_count_empty_commands() {
         let cmds: Vec<ExtractedCommand> = vec![];
