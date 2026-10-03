@@ -34,6 +34,7 @@ mod hermes;
 mod instructions_agents;
 mod opencode;
 mod pi;
+mod swival;
 mod trae;
 mod vibe;
 
@@ -64,6 +65,7 @@ pub use gemini::run_gemini;
 pub use hermes::{run_hermes_mode, uninstall_hermes};
 pub use instructions_agents::{run_kilocode_mode, run_kimi_mode};
 pub use pi::{run_omp_mode_with_patch_mode, run_pi_mode_with_patch_mode};
+pub use swival::{run_swival, show_swival_config, uninstall_swival};
 pub use trae::{run_trae_mode, uninstall_trae_mode};
 pub use vibe::{run_vibe_mode, uninstall_vibe};
 

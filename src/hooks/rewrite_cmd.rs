@@ -88,7 +88,7 @@ pub(crate) fn track_tee_read(cmd: &str) {
 /// `Deny` and still renders as exit 2, for every delegate, named or not.
 pub fn run(cmd: &str) -> anyhow::Result<()> {
     // `rtk rewrite` has one rule source for every delegate that shells out to
-    // it -- hermes, omp, opencode, openclaw, pi -- and that is `~/.claude`'s
+    // it -- hermes, omp, opencode, openclaw, pi, swival -- and that is `~/.claude`'s
     // rules. The in-process `rtk hook <agent>` path is host-parameterized
     // instead (`permissions::Host`). What a delegate may say about itself is
     // only who owns approval, never whose rules apply.
