@@ -51,9 +51,9 @@ SELECT 1
 """Module doc."""    # opens and closes on one line
 ```
 
-Docstrings are kept at `minimal`. `aggressive` has no string awareness: it
-keeps a line inside a string when that line looks like an import or a
-signature.
+Docstrings are kept at `minimal`. For brace-scoped languages, `aggressive`
+counts braces outside comments and quoted literals. Its Python path still
+keeps a line inside a string when that line looks like an import or a signature.
 
 ## Tracking Database Schema
 

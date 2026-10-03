@@ -364,6 +364,273 @@ static FUNC_SIGNATURE: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
+enum BraceLexState {
+    Code,
+    BlockComment(usize),
+    Quote(u8),
+    JsRegex(bool),
+    RustRaw(usize),
+    CppRaw(Vec<u8>),
+}
+
+struct CodeBraces {
+    opens: i32,
+    closes: i32,
+    starts_in_code: bool,
+}
+
+struct BraceScanner {
+    lang: Language,
+    state: BraceLexState,
+}
+
+impl BraceScanner {
+    fn new(lang: Language) -> Self {
+        Self {
+            lang,
+            state: BraceLexState::Code,
+        }
+    }
+
+    fn scan(&mut self, line: &str) -> CodeBraces {
+        // Indentation- and keyword-scoped languages retain the old brace walk.
+        if matches!(
+            self.lang,
+            Language::Python | Language::Ruby | Language::Shell
+        ) {
+            return CodeBraces {
+                opens: line.matches('{').count() as i32,
+                closes: line.matches('}').count() as i32,
+                starts_in_code: true,
+            };
+        }
+
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        let mut braces = CodeBraces {
+            opens: 0,
+            closes: 0,
+            starts_in_code: matches!(self.state, BraceLexState::Code),
+        };
+
+        while i < bytes.len() {
+            let rest = &bytes[i..];
+            match &self.state {
+                BraceLexState::BlockComment(depth) => {
+                    if self.lang == Language::Rust && rest.starts_with(b"/*") {
+                        self.state = BraceLexState::BlockComment(depth + 1);
+                        i += 2;
+                    } else if rest.starts_with(b"*/") {
+                        self.state = if *depth == 1 {
+                            BraceLexState::Code
+                        } else {
+                            BraceLexState::BlockComment(depth - 1)
+                        };
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                BraceLexState::Quote(quote) => {
+                    if rest[0] == b'\\' {
+                        i += 2;
+                    } else if rest[0] == *quote {
+                        self.state = BraceLexState::Code;
+                        i += 1;
+                    } else {
+                        i += 1;
+                    }
+                }
+                BraceLexState::JsRegex(in_class) => match rest[0] {
+                    b'\\' => i += 2,
+                    b'[' => {
+                        self.state = BraceLexState::JsRegex(true);
+                        i += 1;
+                    }
+                    b']' => {
+                        self.state = BraceLexState::JsRegex(false);
+                        i += 1;
+                    }
+                    b'/' if !in_class => {
+                        self.state = BraceLexState::Code;
+                        i += 1;
+                    }
+                    _ => i += 1,
+                },
+                BraceLexState::RustRaw(hashes) => {
+                    let hashes = *hashes;
+                    let closes_raw_string = rest[0] == b'"'
+                        && rest
+                            .get(1..1 + hashes)
+                            .is_some_and(|suffix| suffix.iter().all(|&byte| byte == b'#'));
+                    if closes_raw_string {
+                        self.state = BraceLexState::Code;
+                        i += 1 + hashes;
+                    } else {
+                        i += 1;
+                    }
+                }
+                BraceLexState::CppRaw(end) => {
+                    if rest.starts_with(end) {
+                        let len = end.len();
+                        self.state = BraceLexState::Code;
+                        i += len;
+                    } else {
+                        i += 1;
+                    }
+                }
+                BraceLexState::Code => {
+                    if rest.starts_with(b"//") {
+                        break;
+                    }
+                    if rest.starts_with(b"/*") {
+                        self.state = BraceLexState::BlockComment(1);
+                        i += 2;
+                        continue;
+                    }
+                    if matches!(self.lang, Language::JavaScript | Language::TypeScript)
+                        && rest[0] == b'/'
+                        && js_regex_can_start(bytes, i)
+                    {
+                        self.state = BraceLexState::JsRegex(false);
+                        i += 1;
+                        continue;
+                    }
+                    if self.lang == Language::Rust
+                        && let Some((hashes, after_quote)) = rust_raw_opener(bytes, i)
+                    {
+                        self.state = BraceLexState::RustRaw(hashes);
+                        i = after_quote;
+                        continue;
+                    }
+                    if self.lang == Language::Cpp
+                        && let Some((end, after_paren)) = cpp_raw_opener(bytes, i)
+                    {
+                        self.state = BraceLexState::CppRaw(end);
+                        i = after_paren;
+                        continue;
+                    }
+
+                    match rest[0] {
+                        b'"' => self.state = BraceLexState::Quote(b'"'),
+                        b'\'' if self.lang == Language::Rust => {
+                            // A lifetime such as 'a is not a character literal.
+                            if let Some(end) = rust_char_literal_end(line, i) {
+                                i = end;
+                                continue;
+                            }
+                        }
+                        b'\'' => self.state = BraceLexState::Quote(b'\''),
+                        b'`' if matches!(
+                            self.lang,
+                            Language::JavaScript | Language::TypeScript | Language::Go
+                        ) =>
+                        {
+                            self.state = BraceLexState::Quote(b'`');
+                        }
+                        b'{' => braces.opens += 1,
+                        b'}' => braces.closes += 1,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
+        }
+        if matches!(self.state, BraceLexState::JsRegex(_))
+            || (self.lang != Language::Rust
+                && matches!(self.state, BraceLexState::Quote(b'"' | b'\''))
+                && !bytes.ends_with(b"\\"))
+        {
+            self.state = BraceLexState::Code;
+        }
+        braces
+    }
+}
+
+fn js_regex_can_start(bytes: &[u8], i: usize) -> bool {
+    let Some(end) = bytes[..i].iter().rposition(|b| !b.is_ascii_whitespace()) else {
+        return true;
+    };
+    if b"=([{:,;!?&|>".contains(&bytes[end]) {
+        return true;
+    }
+    let start = bytes[..=end]
+        .iter()
+        .rposition(|b| !(b.is_ascii_alphanumeric() || *b == b'_'))
+        .map_or(0, |p| p + 1);
+    matches!(
+        &bytes[start..=end],
+        b"return" | b"throw" | b"case" | b"yield" | b"await"
+    )
+}
+
+fn rust_raw_opener(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
+    if bytes.get(i) != Some(&b'r') {
+        return None;
+    }
+    let mut j = i + 1;
+    while bytes.get(j) == Some(&b'#') {
+        j += 1;
+    }
+    if bytes.get(j) == Some(&b'"') {
+        Some((j - i - 1, j + 1))
+    } else {
+        None
+    }
+}
+
+fn cpp_raw_opener(bytes: &[u8], i: usize) -> Option<(Vec<u8>, usize)> {
+    if !bytes.get(i..).is_some_and(|rest| rest.starts_with(b"R\"")) {
+        return None;
+    }
+    let start = i + 2;
+    let mut j = start;
+    while j - start <= 16 {
+        match bytes.get(j)? {
+            b'(' => {
+                let mut end = Vec::with_capacity(j - start + 2);
+                end.push(b')');
+                end.extend_from_slice(&bytes[start..j]);
+                end.push(b'"');
+                return Some((end, j + 1));
+            }
+            b' ' | b'\\' | b')' | b'\t' => return None,
+            _ => j += 1,
+        }
+    }
+    None
+}
+
+fn rust_char_literal_end(line: &str, i: usize) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut j = i + 1;
+    if bytes.get(j) == Some(&b'\\') {
+        j += 1;
+        match bytes.get(j)? {
+            b'u' if bytes.get(j + 1) == Some(&b'{') => {
+                j += 2;
+                while j < bytes.len() && bytes[j] != b'}' {
+                    j += 1;
+                }
+                if j >= bytes.len() {
+                    return None;
+                }
+                j += 1;
+            }
+            b'x' => j += 3,
+            _ => j += 1,
+        }
+    } else {
+        let ch = line.get(j..)?.chars().next()?;
+        j += ch.len_utf8();
+    }
+    if bytes.get(j) == Some(&b'\'') {
+        Some(j + 1)
+    } else {
+        None
+    }
+}
+
 impl FilterStrategy for AggressiveFilter {
     fn filter(&self, content: &str, lang: &Language) -> String {
         // Data formats (JSON, YAML, etc.) must never be code-filtered
@@ -375,43 +642,71 @@ impl FilterStrategy for AggressiveFilter {
         let mut result = String::with_capacity(minimal.len() / 2);
         let mut brace_depth = 0;
         let mut in_impl_body = false;
+        let mut body_started = false;
+        let mut scanner = BraceScanner::new(*lang);
+        let brace_scoped = !matches!(lang, Language::Python | Language::Ruby | Language::Shell);
 
         for line in minimal.lines() {
             let trimmed = line.trim();
+            let braces = scanner.scan(line);
 
             // Always keep imports
-            if IMPORT_PATTERN.is_match(trimmed) {
+            if braces.starts_in_code && IMPORT_PATTERN.is_match(trimmed) {
                 result.push_str(line);
                 result.push('\n');
+                if brace_scoped && in_impl_body {
+                    brace_depth += braces.opens - braces.closes;
+                    body_started |= braces.opens > 0;
+                    if body_started && brace_depth <= 0 {
+                        in_impl_body = false;
+                        body_started = false;
+                    }
+                }
                 continue;
             }
 
             // Always keep function/struct/class signatures
-            if FUNC_SIGNATURE.is_match(trimmed) {
+            if braces.starts_in_code && FUNC_SIGNATURE.is_match(trimmed) {
                 result.push_str(line);
                 result.push('\n');
-                in_impl_body = true;
-                brace_depth = 0;
+                if !in_impl_body || !brace_scoped {
+                    in_impl_body = true;
+                    brace_depth = 0;
+                    body_started = false;
+                }
+                if brace_scoped {
+                    brace_depth += braces.opens - braces.closes;
+                    body_started |= braces.opens > 0;
+                    if (body_started && brace_depth <= 0)
+                        || (!body_started && trimmed.ends_with(';'))
+                    {
+                        in_impl_body = false;
+                        body_started = false;
+                    }
+                }
                 continue;
             }
 
             // Track brace depth for implementation bodies
-            let open_braces = trimmed.matches('{').count();
-            let close_braces = trimmed.matches('}').count();
-
             if in_impl_body {
-                brace_depth += open_braces as i32;
-                brace_depth -= close_braces as i32;
+                brace_depth += braces.opens - braces.closes;
+                body_started |= braces.opens > 0;
 
                 // Only keep the opening and closing braces
-                if brace_depth <= 1 && (trimmed == "{" || trimmed == "}" || trimmed.ends_with('{'))
-                {
+                let brace_marker = if brace_scoped {
+                    (trimmed == "}" && braces.closes > 0)
+                        || (trimmed.ends_with('{') && braces.opens > 0)
+                } else {
+                    trimmed == "{" || trimmed == "}" || trimmed.ends_with('{')
+                };
+                if brace_depth <= 1 && brace_marker {
                     result.push_str(line);
                     result.push('\n');
                 }
 
-                if brace_depth <= 0 {
+                if (!brace_scoped || body_started) && brace_depth <= 0 {
                     in_impl_body = false;
+                    body_started = false;
                     if !trimmed.is_empty() && trimmed != "}" {
                         result.push_str("    // ... implementation\n");
                     }
@@ -420,11 +715,12 @@ impl FilterStrategy for AggressiveFilter {
             }
 
             // Keep type definitions, constants, etc.
-            if trimmed.starts_with("const ")
-                || trimmed.starts_with("static ")
-                || trimmed.starts_with("let ")
-                || trimmed.starts_with("pub const ")
-                || trimmed.starts_with("pub static ")
+            if braces.starts_in_code
+                && (trimmed.starts_with("const ")
+                    || trimmed.starts_with("static ")
+                    || trimmed.starts_with("let ")
+                    || trimmed.starts_with("pub const ")
+                    || trimmed.starts_with("pub static "))
             {
                 result.push_str(line);
                 result.push('\n');
@@ -845,6 +1141,171 @@ fn main() {
             "URL line must be kept, got:\n{}",
             result
         );
+    }
+
+    #[test]
+    fn test_aggressive_signature_brace_keeps_locals_hidden_and_top_level_declarations() {
+        let code = r#"fn compute(x: i32) -> i32 {
+    let first = x * 2;
+    let second = first + 1;
+    second
+}
+const TOP: i32 = 1;
+fn empty() {}
+static AFTER: i32 = 2;"#;
+        let output = AggressiveFilter.filter(code, &Language::Rust);
+        assert_eq!(
+            output,
+            "fn compute(x: i32) -> i32 {\n}\nconst TOP: i32 = 1;\nfn empty() {}\nstatic AFTER: i32 = 2;"
+        );
+    }
+
+    #[test]
+    fn test_aggressive_ignores_comment_and_quoted_braces() {
+        let code = r#"fn f() { // }
+    a(); /* e.g. { {
+    still */
+    /// example {
+    let text = "{";
+    let ch = '}';
+    b();
+}
+const TOP: u32 = 1;
+static S: u8 = 2;
+fn g() {}"#;
+        let output = AggressiveFilter.filter(code, &Language::Rust);
+        assert_eq!(
+            output,
+            "fn f() { // }\n}\nconst TOP: u32 = 1;\nstatic S: u8 = 2;\nfn g() {}"
+        );
+    }
+
+    #[test]
+    fn test_aggressive_ignores_nested_rust_block_comments() {
+        let code = r#"fn f() {
+    work(); /* outer {
+    still /* inner */ {
+    */
+}
+const AFTER: u8 = 1;"#;
+        let output = AggressiveFilter.filter(code, &Language::Rust);
+        assert_eq!(output, "fn f() {\n}\nconst AFTER: u8 = 1;");
+    }
+
+    #[test]
+    fn test_aggressive_ignores_multiline_rust_raw_string_and_lifetimes() {
+        let code = r###"fn borrow<'a>(x: &'a str) {
+    let raw = r##"{
+    }"##;
+    let escaped = "\"{\"";
+}
+const AFTER: u8 = 1;"###;
+        let output = AggressiveFilter.filter(code, &Language::Rust);
+        assert_eq!(
+            output,
+            "fn borrow<'a>(x: &'a str) {\n}\nconst AFTER: u8 = 1;"
+        );
+    }
+
+    #[test]
+    fn test_aggressive_ignores_multiline_js_and_go_backticks() {
+        let cases = [
+            (
+                Language::JavaScript,
+                r#"function render() {
+  const template = `{
+  }`;
+}
+const AFTER = 1;"#,
+                "function render() {\n}\nconst AFTER = 1;",
+            ),
+            (
+                Language::Go,
+                r#"func render() {
+    raw := `{
+    }`
+}
+const AFTER = 1"#,
+                "func render() {\n}\nconst AFTER = 1",
+            ),
+        ];
+        for (lang, code, expected) in cases {
+            assert_eq!(AggressiveFilter.filter(code, &lang), expected, "{lang:?}");
+        }
+    }
+
+    #[test]
+    fn test_aggressive_ignores_js_regex_literal_braces_and_comment_markers() {
+        let code = r#"function parse() {
+  const pattern = /[/*}]/;
+  const closing = /}/;
+}
+const AFTER = 1;"#;
+        let output = AggressiveFilter.filter(code, &Language::JavaScript);
+        assert_eq!(output, "function parse() {\n}\nconst AFTER = 1;");
+    }
+
+    #[test]
+    fn test_aggressive_ignores_fake_signatures_in_raw_strings() {
+        let code = r##"fn actual() {
+    let text = r#"
+fn fake() {
+const FALSE: u8 = 0;
+"#;
+}
+const REAL: u8 = 1;"##;
+        let output = AggressiveFilter.filter(code, &Language::Rust);
+        assert_eq!(output, "fn actual() {\n}\nconst REAL: u8 = 1;");
+    }
+
+    #[test]
+    fn test_aggressive_tracks_multiline_and_nested_signatures() {
+        let code = r#"fn outer()
+{
+    fn inner() {
+        let hidden = 1;
+    }
+    let also_hidden = 2;
+}
+const AFTER: u8 = 3;"#;
+        let output = AggressiveFilter.filter(code, &Language::Rust);
+        assert_eq!(
+            output,
+            "fn outer()\n{\n    fn inner() {\n    }\n}\nconst AFTER: u8 = 3;"
+        );
+    }
+
+    #[test]
+    fn test_aggressive_tracks_braces_on_kept_import_lines() {
+        let code = r#"fn f() {
+    use crate::things::{
+        A,
+    };
+    let hidden = 1;
+}
+const AFTER: u8 = 2;"#;
+        let output = AggressiveFilter.filter(code, &Language::Rust);
+        assert!(!output.contains("let hidden"), "{output}");
+        assert!(output.contains("const AFTER: u8 = 2;"), "{output}");
+    }
+
+    #[test]
+    fn test_aggressive_ignores_cpp_raw_string_braces() {
+        let code = r#"struct Sample {
+    const char* text = R"tag({
+    })tag";
+};
+static int AFTER = 1;"#;
+        let output = AggressiveFilter.filter(code, &Language::Cpp);
+        assert!(output.contains("static int AFTER = 1;"), "{output}");
+        assert!(!output.contains("const char* text"), "{output}");
+    }
+
+    #[test]
+    fn test_aggressive_preserves_python_body_handling() {
+        let code = "def f():\n    x = 1\n    y = 2\nconst TOP = 3";
+        let output = AggressiveFilter.filter(code, &Language::Python);
+        assert_eq!(output, "def f():\n    // ... implementation\nconst TOP = 3");
     }
 
     // --- truncation accuracy ---
