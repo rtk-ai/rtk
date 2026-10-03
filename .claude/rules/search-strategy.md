@@ -54,7 +54,7 @@ src/
 │   ├── python/                ← ruff, pytest, mypy, pip
 │   ├── go/                    ← go, golangci-lint
 │   ├── dotnet/                ← dotnet, binlog, trx, format_report
-│   ├── cloud/                 ← aws, container (docker/kubectl), curl, wget, psql
+│   ├── cloud/                 ← aws, az, container (docker/kubectl), curl, wget, psql
 │   ├── system/                ← ls, tree, read, grep, find, wc, env, json, log, deps, summary, format, local_llm
 │   ├── ruby/                  ← rake, rspec, rubocop
 │   ├── jvm/                   ← gradlew, mvn
