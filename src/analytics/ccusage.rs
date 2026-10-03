@@ -98,12 +98,13 @@ fn binary_exists() -> bool {
 /// Build the ccusage command, falling back to npx if binary not in PATH
 fn build_command() -> Option<Command> {
     if binary_exists() {
-        return Some(resolved_command("ccusage"));
+        return resolved_command("ccusage").ok();
     }
 
     // Fallback: try npx
     eprintln!("[info] ccusage not installed globally, fetching via npx...");
     let npx_check = resolved_command("npx")
+        .ok()?
         .arg("--yes")
         .arg("ccusage")
         .arg("--help")
@@ -112,7 +113,7 @@ fn build_command() -> Option<Command> {
         .status();
 
     if npx_check.map(|s| s.success()).unwrap_or(false) {
-        let mut cmd = resolved_command("npx");
+        let mut cmd = resolved_command("npx").ok()?;
         cmd.arg("--yes");
         cmd.arg("ccusage");
         return Some(cmd);

@@ -345,7 +345,7 @@ fn format_mr_list(json: &Value, ultra_compact: bool) -> String {
 }
 
 fn mr_list(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
-    let mut cmd = resolved_command("glab");
+    let mut cmd = resolved_command("glab")?;
     cmd.args(["mr", "list", "-F", "json"]);
     for arg in args {
         cmd.arg(arg);
@@ -434,7 +434,7 @@ fn mr_view(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
         return run_passthrough_with_extra("glab", &base, &extra_args);
     }
 
-    let mut cmd = resolved_command("glab");
+    let mut cmd = resolved_command("glab")?;
     cmd.args(["mr", "view"]);
     if let Some(id) = mr_number_opt.as_deref() {
         cmd.arg(id);
@@ -451,7 +451,7 @@ fn mr_view(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
 }
 
 fn mr_create(args: &[String], _verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("glab");
+    let mut cmd = resolved_command("glab")?;
     cmd.args(["mr", "create"]);
     for arg in args {
         cmd.arg(arg);
@@ -476,7 +476,7 @@ fn mr_create(args: &[String], _verbose: u8) -> Result<i32> {
 }
 
 fn mr_diff(args: &[String], _verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("glab");
+    let mut cmd = resolved_command("glab")?;
     cmd.args(["mr", "diff"]);
     for arg in args {
         cmd.arg(arg);
@@ -500,7 +500,7 @@ fn mr_diff(args: &[String], _verbose: u8) -> Result<i32> {
 /// Uses extract_identifier_and_extra_args to correctly find the MR number
 /// even when it appears after flags (e.g. `glab mr note -m "msg" 42`).
 fn mr_action(subcmd: &str, label: &str, args: &[String], _verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("glab");
+    let mut cmd = resolved_command("glab")?;
     cmd.args(["mr", subcmd]);
     for arg in args {
         cmd.arg(arg);
@@ -580,7 +580,7 @@ fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
 }
 
 fn issue_list(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
-    let mut cmd = resolved_command("glab");
+    let mut cmd = resolved_command("glab")?;
     cmd.args(["issue", "list", "-F", "json"]);
     for arg in args {
         cmd.arg(arg);
@@ -637,7 +637,7 @@ fn issue_view(args: &[String], _verbose: u8) -> Result<i32> {
         return run_passthrough_with_extra("glab", &base, &extra_args);
     }
 
-    let mut cmd = resolved_command("glab");
+    let mut cmd = resolved_command("glab")?;
     cmd.args(["issue", "view"]);
     if let Some(id) = issue_number_opt.as_deref() {
         cmd.arg(id);
@@ -708,7 +708,7 @@ fn format_ci_list(json: &Value, ultra_compact: bool) -> String {
 }
 
 fn ci_list(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
-    let mut cmd = resolved_command("glab");
+    let mut cmd = resolved_command("glab")?;
     cmd.args(["ci", "list", "-F", "json"]);
     for arg in args {
         cmd.arg(arg);
@@ -759,7 +759,7 @@ fn format_ci_status(raw: &str, ultra_compact: bool) -> String {
 
 fn ci_status(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
     // glab ci status does not support -F json — text parsing with raw fallback
-    let mut cmd = resolved_command("glab");
+    let mut cmd = resolved_command("glab")?;
     cmd.args(["ci", "status"]);
     for arg in args {
         cmd.arg(arg);
@@ -774,7 +774,7 @@ fn ci_status(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> 
 }
 
 fn ci_trace(args: &[String]) -> Result<i32> {
-    let mut cmd = resolved_command("glab");
+    let mut cmd = resolved_command("glab")?;
     cmd.args(["ci", "trace"]);
     for arg in args {
         cmd.arg(arg);
@@ -908,7 +908,7 @@ fn format_release_list(raw: &str) -> Option<String> {
 }
 
 fn release_list(args: &[String]) -> Result<i32> {
-    let mut cmd = resolved_command("glab");
+    let mut cmd = resolved_command("glab")?;
     cmd.args(["release", "list"]);
     for arg in args {
         cmd.arg(arg);
@@ -923,7 +923,7 @@ fn release_list(args: &[String]) -> Result<i32> {
 }
 
 fn release_view(args: &[String]) -> Result<i32> {
-    let mut cmd = resolved_command("glab");
+    let mut cmd = resolved_command("glab")?;
     cmd.args(["release", "view"]);
     for arg in args {
         cmd.arg(arg);

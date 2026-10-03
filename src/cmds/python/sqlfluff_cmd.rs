@@ -128,7 +128,7 @@ impl Invocation {
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let plan = plan(args);
 
-    let mut cmd = resolved_command("sqlfluff");
+    let mut cmd = resolved_command("sqlfluff")?;
     cmd.args(&plan.args);
 
     if verbose > 0 {

@@ -25,7 +25,7 @@ fn run_filtered_subcmd(subcmd: &str, args: &[String], verbose: u8) -> Result<i32
         return passthrough_subcmd(subcmd, args, verbose);
     }
 
-    let mut cmd = resolved_command("deno");
+    let mut cmd = resolved_command("deno")?;
     cmd.arg(subcmd);
     cmd.args(args);
 
@@ -82,7 +82,7 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
         return passthrough_subcmd("test", args, verbose);
     }
 
-    let mut cmd = resolved_command("deno");
+    let mut cmd = resolved_command("deno")?;
     cmd.arg("test").args(args);
     let display = format!("test {}", args.join(" "));
     crate::core::runner::run_test_cmd(

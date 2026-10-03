@@ -6,7 +6,7 @@ use crate::core::runner;
 use anyhow::Result;
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = php_tool_command("pest");
+    let mut cmd = php_tool_command("pest")?;
 
     let has_no_progress = args.iter().any(|a| a == "--no-progress");
     if !has_no_progress {

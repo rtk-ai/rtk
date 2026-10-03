@@ -254,7 +254,7 @@ pub fn run(args: &[String]) -> Result<i32> {
 
     let is_json = requests_json(args);
 
-    let mut cmd = resolved_command("ast-grep");
+    let mut cmd = resolved_command("ast-grep")?;
     cmd.args(args);
     let result = exec_capture(&mut cmd).context("Failed to execute ast-grep")?;
 

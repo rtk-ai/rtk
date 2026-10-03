@@ -243,17 +243,17 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let pm = detect_package_manager();
     let mut cmd = match pm {
         "pnpm" => {
-            let mut c = resolved_command("pnpm");
+            let mut c = resolved_command("pnpm")?;
             c.arg("exec").arg("--").arg("playwright");
             c
         }
         "yarn" => {
-            let mut c = resolved_command("yarn");
+            let mut c = resolved_command("yarn")?;
             c.arg("exec").arg("--").arg("playwright");
             c
         }
         _ => {
-            let mut c = resolved_command("npx");
+            let mut c = resolved_command("npx")?;
             c.arg("--no-install").arg("--").arg("playwright");
             c
         }

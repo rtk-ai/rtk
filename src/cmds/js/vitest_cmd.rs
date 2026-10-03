@@ -206,7 +206,7 @@ pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32>
     let (framework, mut cmd) = match command {
         Commands::Vitest { .. } => {
             let framework = "vitest";
-            let mut cmd = package_manager_exec(framework);
+            let mut cmd = package_manager_exec(framework)?;
             let effective_args = build_vitest_effective_args(args);
             passthrough_requested = effective_args.passthrough;
             cmd.args(effective_args.args);
@@ -214,7 +214,7 @@ pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32>
         }
         Commands::Jest { .. } => {
             let framework = "jest";
-            let mut cmd = package_manager_exec(framework);
+            let mut cmd = package_manager_exec(framework)?;
             cmd
                 // Force non-watch mode
                 .arg("--no-watch")

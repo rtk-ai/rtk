@@ -1,3 +1,4 @@
+use crate::core::utils::CommandNotFound;
 use anyhow::{Context, Result};
 use std::borrow::Cow;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
@@ -438,7 +439,8 @@ pub fn run_streaming(
         };
         cmd.stdout(Stdio::inherit());
         cmd.stderr(Stdio::inherit());
-        let status = cmd.status().context("Failed to spawn process")?;
+        let program = program_of(cmd);
+        let status = cmd.status().map_err(|e| exec_error(&program, e))?;
         return Ok(StreamResult {
             exit_code: status_to_exit_code(status),
             raw: String::new(),
@@ -468,7 +470,8 @@ pub fn run_streaming(
 
     let is_streaming = matches!(stdout_mode, FilterMode::Streaming(_));
 
-    let mut child = ChildGuard(cmd.spawn().context("Failed to spawn process")?);
+    let program = program_of(cmd);
+    let mut child = ChildGuard(cmd.spawn().map_err(|e| exec_error(&program, e))?);
     let _signal_relay = signal_relay::Relay::install(child.0.id());
 
     let stdin_thread: Option<std::thread::JoinHandle<()>> = match stdin_mode {
@@ -707,6 +710,21 @@ impl CaptureResult {
     }
 }
 
+// An unreadable PATH directory makes execvp report EACCES for a missing
+// program. `which` skips unreadable directories and can identify that case.
+fn exec_error(program: &str, err: std::io::Error) -> anyhow::Error {
+    if which::which(program).is_err() {
+        return anyhow::Error::new(CommandNotFound {
+            program: program.to_string(),
+        });
+    }
+    anyhow::Error::new(err).context(format!("Failed to execute {}", program))
+}
+
+fn program_of(cmd: &Command) -> String {
+    cmd.get_program().to_string_lossy().into_owned()
+}
+
 pub fn exec_capture(cmd: &mut Command) -> Result<CaptureResult> {
     cmd.stdin(Stdio::null());
     capture(cmd)
@@ -741,8 +759,8 @@ fn capture(cmd: &mut Command) -> Result<CaptureResult> {
 /// caller decodes the bytes ([`capture`]) or keeps them raw ([`exec_capture_bytes`]),
 /// instead of the raw path silently dropping it.
 fn capture_raw(cmd: &mut Command) -> Result<CaptureBytes> {
-    let program = cmd.get_program().to_string_lossy().into_owned();
-    let output = cmd.output().context("Failed to execute command")?;
+    let program = program_of(cmd);
+    let output = cmd.output().map_err(|e| exec_error(&program, e))?;
     let exit_code = super::utils::exit_code_from_output(&output, &program);
     Ok(CaptureBytes {
         stdout: output.stdout,

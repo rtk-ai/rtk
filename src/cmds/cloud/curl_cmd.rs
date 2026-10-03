@@ -22,7 +22,7 @@ const MAX_RESPONSE_SIZE: usize = 500;
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
-    let mut cmd = resolved_command("curl");
+    let mut cmd = resolved_command("curl")?;
     cmd.arg("-s"); // Silent mode (no progress bar)
 
     for arg in args {

@@ -128,10 +128,10 @@ Key functions available to all command modules:
 |----------|---------|
 | `truncate(s, max)` | Truncate string with `...` suffix |
 | `strip_ansi(text)` | Remove ANSI escape/color codes |
-| `resolved_command(name)` | Find command in PATH, returns `Command` |
+| `resolved_command(name)` | Find command in PATH, returns `Result<Command>`; missing Unix binaries return `CommandNotFound` |
 | `tool_exists(name)` | Check if a CLI tool is available |
 | `detect_package_manager()` | Detect pnpm/yarn/npm from lockfiles |
-| `package_manager_exec(tool)` | Build `Command` using detected package manager |
+| `package_manager_exec(tool)` | Build `Result<Command>` using detected package manager |
 | `ruby_exec(tool)` | Auto-detect `bundle exec` when `Gemfile` exists |
 | `count_tokens(text)` | Estimate tokens: `ceil(chars / 4.0)` |
 

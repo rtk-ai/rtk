@@ -31,7 +31,7 @@ fn run_gt_filtered(
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = resolved_command("gt");
+    let mut cmd = resolved_command("gt")?;
     for part in subcmd {
         cmd.arg(part);
     }

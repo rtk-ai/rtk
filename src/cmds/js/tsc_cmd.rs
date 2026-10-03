@@ -83,7 +83,7 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
 
     // Fetch, not Fail: `npx tsc` fetched before this routing existed, and
     // rtk filters output rather than changing what a command does.
-    let mut cmd = tool_exec(runner, "tsc", MissingTool::Fetch);
+    let mut cmd = tool_exec(runner, "tsc", MissingTool::Fetch)?;
 
     for arg in args {
         cmd.arg(arg);

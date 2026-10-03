@@ -41,7 +41,7 @@ pub fn run_format(args: &[String], verbose: u8) -> Result<i32> {
     let tokens = tokenize_dotnet_args(args);
     let timer = tracking::TimedExecution::start();
     let (report_path, cleanup_report_path) = resolve_format_report_path(&tokens);
-    let mut cmd = resolved_command("dotnet");
+    let mut cmd = resolved_command("dotnet")?;
     cmd.env(DOTNET_CLI_UI_LANGUAGE, DOTNET_CLI_UI_LANGUAGE_VALUE);
     cmd.arg("format");
 
@@ -85,7 +85,7 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
     let subcommand = args[0].to_string_lossy().to_string();
 
-    let mut cmd = resolved_command("dotnet");
+    let mut cmd = resolved_command("dotnet")?;
     cmd.env(DOTNET_CLI_UI_LANGUAGE, DOTNET_CLI_UI_LANGUAGE_VALUE);
     cmd.arg(&subcommand);
     for arg in &args[1..] {
@@ -133,7 +133,7 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
     let (trx_results_dir, cleanup_trx_results_dir) =
         resolve_trx_results_dir(subcommand, &tokens, runner_mode);
 
-    let mut cmd = resolved_command("dotnet");
+    let mut cmd = resolved_command("dotnet")?;
     cmd.env(DOTNET_CLI_UI_LANGUAGE, DOTNET_CLI_UI_LANGUAGE_VALUE);
     cmd.arg(subcommand);
 

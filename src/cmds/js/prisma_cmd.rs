@@ -30,20 +30,20 @@ pub fn run(cmd: PrismaCommand, args: &[String], verbose: u8) -> Result<i32> {
 }
 
 /// Create a Command that will run prisma (tries global first, then npx)
-fn create_prisma_command() -> Command {
+fn create_prisma_command() -> Result<Command> {
     if tool_exists("prisma") {
         resolved_command("prisma")
     } else {
-        let mut c = resolved_command("npx");
+        let mut c = resolved_command("npx")?;
         c.arg("prisma");
-        c
+        Ok(c)
     }
 }
 
 fn run_generate(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = create_prisma_command();
+    let mut cmd = create_prisma_command()?;
     cmd.arg("generate");
 
     for arg in args {
@@ -81,7 +81,7 @@ fn run_generate(args: &[String], verbose: u8) -> Result<i32> {
 fn run_migrate(subcommand: MigrateSubcommand, args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = create_prisma_command();
+    let mut cmd = create_prisma_command()?;
     cmd.arg("migrate");
 
     let cmd_name = match &subcommand {
@@ -141,7 +141,7 @@ fn run_migrate(subcommand: MigrateSubcommand, args: &[String], verbose: u8) -> R
 fn run_db_push(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = create_prisma_command();
+    let mut cmd = create_prisma_command()?;
     cmd.arg("db").arg("push");
 
     for arg in args {

@@ -25,7 +25,7 @@ static RECORD_HEADER: LazyLock<Regex> =
 // - On success: tracking raw includes stderr (previously stdout-only, but stderr is empty on success)
 // - Tee hint uses merged stdout+stderr as raw (was stdout-only)
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("psql");
+    let mut cmd = resolved_command("psql")?;
     for arg in args {
         cmd.arg(arg);
     }

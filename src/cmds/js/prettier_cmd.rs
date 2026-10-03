@@ -6,7 +6,7 @@ use crate::core::utils::package_manager_exec;
 use anyhow::Result;
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = package_manager_exec("prettier");
+    let mut cmd = package_manager_exec("prettier")?;
 
     for arg in args {
         cmd.arg(arg);

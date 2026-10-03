@@ -402,7 +402,7 @@ pub fn detect_package_manager_in(dir: &std::path::Path) -> &'static str {
 
 /// Build a Command using the detected package manager's exec mechanism.
 /// Returns a Command ready to have tool-specific args appended.
-pub fn package_manager_exec(tool: &str) -> Command {
+pub fn package_manager_exec(tool: &str) -> Result<Command> {
     tool_exec(None, tool, MissingTool::Fail)
 }
 
@@ -443,36 +443,45 @@ pub fn exec_runner(runner: Option<&str>, missing: MissingTool) -> &str {
 /// Detection applies only when nothing was named, as with a bare `rtk tsc`.
 ///
 /// A tool already on PATH is run directly only when no runner was named.
-pub fn tool_exec(runner: Option<&str>, tool: &str, missing: MissingTool) -> Command {
+pub fn tool_exec(runner: Option<&str>, tool: &str, missing: MissingTool) -> Result<Command> {
+    tool_exec_with_resolver(runner, tool, missing, resolved_command)
+}
+
+fn tool_exec_with_resolver(
+    runner: Option<&str>,
+    tool: &str,
+    missing: MissingTool,
+    resolve: fn(&str) -> Result<Command>,
+) -> Result<Command> {
     // Only when nothing was named: `bunx tsc` must resolve the project's tsc,
     // not a global one that happens to be on PATH. Both bunx and npx prefer
     // node_modules/.bin before fetching, so naming one is a real choice.
     if runner.is_none() && tool_exists(tool) {
-        resolved_command(tool)
+        resolve(tool)
     } else {
         match exec_runner(runner, missing) {
             "pnpm" => {
-                let mut c = resolved_command("pnpm");
+                let mut c = resolve("pnpm")?;
                 c.arg("exec").arg("--").arg(tool);
-                c
+                Ok(c)
             }
             "yarn" => {
-                let mut c = resolved_command("yarn");
+                let mut c = resolve("yarn")?;
                 c.arg("exec").arg("--").arg(tool);
-                c
+                Ok(c)
             }
             "bun" | "bunx" => {
-                let mut c = resolved_command("bunx");
+                let mut c = resolve("bunx")?;
                 c.arg(tool);
-                c
+                Ok(c)
             }
             _ => {
-                let mut c = resolved_command("npx");
+                let mut c = resolve("npx")?;
                 if missing == MissingTool::Fail {
                     c.arg("--no-install");
                 }
                 c.arg("--").arg(tool);
-                c
+                Ok(c)
             }
         }
     }
@@ -596,40 +605,63 @@ pub fn resolve_binary(name: &str) -> Result<PathBuf> {
     which::which(name).context(format!("Binary '{}' not found on PATH", name))
 }
 
+/// A wrapped binary that isn't on PATH.
+///
+/// Typed so `main` can exit 127 (the POSIX command-not-found status) instead of
+/// a generic 1, which any `cmd || fallback` or CI gate testing for 127 would
+/// otherwise misread as an ordinary failure.
+#[derive(Debug)]
+pub struct CommandNotFound {
+    pub program: String,
+}
+
+impl std::fmt::Display for CommandNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: command not found", self.program)
+    }
+}
+
+impl std::error::Error for CommandNotFound {}
+
 /// Create a `Command` with PATHEXT-aware binary resolution.
 ///
 /// Drop-in replacement for `Command::new(name)` that works on Windows
 /// with `.CMD`/`.BAT`/`.PS1` wrappers.
 ///
-/// Falls back to `Command::new(name)` if resolution fails, so native
-/// commands (git, cargo) still work even if `which` can't find them.
+/// Returns `CommandNotFound` on Unix when `which` cannot resolve the binary.
+/// POSIX `execvp` reports EACCES over ENOENT if any PATH directory is
+/// unreadable, so its errno cannot distinguish a missing binary from a
+/// permissions failure. `which` skips unreadable directories.
+///
+/// Windows keeps the direct-execution fallback for `.CMD`/`.BAT` wrappers
+/// that can evade `which` while remaining executable.
 ///
 /// # Arguments
 /// * `name` - Binary name (e.g., "vitest", "eslint")
 ///
 /// # Returns
-/// A `Command` configured with the resolved binary path.
+/// A `Command` configured with the resolved binary path, or `CommandNotFound`.
 ///
 /// In a test build a `git` command comes isolated as
 /// `test_isolation::isolate_git_config` does it, so a test that runs rtk's own
 /// git in-process neither obeys the developer's configuration nor an exported
 /// `GIT_DIR` or `GIT_INDEX_FILE` — which git sets inside a pre-commit hook.
-pub fn resolved_command(name: &str) -> Command {
+pub fn resolved_command(name: &str) -> Result<Command> {
     #[allow(unused_mut)]
     let mut cmd = match resolve_binary(name) {
         Ok(path) => Command::new(path),
         Err(e) => {
-            // On Windows, resolution failure likely means a .CMD/.BAT wrapper
-            // wasn't found — always warn so users have a signal.
-            // On Unix, this is less common; only log in debug builds.
-            if cfg!(any(target_os = "windows", debug_assertions)) {
+            if cfg!(target_os = "windows") {
                 eprintln!(
                     "rtk: Failed to resolve '{}' via PATH, falling back to direct exec: {}",
                     name, e
                 );
+                Command::new(name)
+            } else {
+                return Err(anyhow::Error::new(CommandNotFound {
+                    program: name.to_string(),
+                }));
             }
-
-            Command::new(name)
         }
     };
     #[cfg(test)]
@@ -638,7 +670,7 @@ pub fn resolved_command(name: &str) -> Command {
             test_isolation::isolate_git_config(&mut cmd);
         }
     }
-    cmd
+    Ok(cmd)
 }
 
 /// Return Composer bin directories in precedence order.
@@ -905,6 +937,26 @@ fn output_codepage() -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_resolved_command_resolves_a_real_binary() {
+        assert!(resolved_command("cargo").is_ok());
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn test_resolved_command_reports_missing_binary_as_not_found() {
+        let err = resolved_command("rtk_definitely_no_such_binary_zzz")
+            .expect_err("missing binary must not resolve");
+        let not_found = err
+            .downcast_ref::<CommandNotFound>()
+            .expect("must be typed CommandNotFound so main can exit 127");
+        assert_eq!(not_found.program, "rtk_definitely_no_such_binary_zzz");
+        assert_eq!(
+            err.to_string(),
+            "rtk_definitely_no_such_binary_zzz: command not found"
+        );
+    }
 
     #[test]
     fn test_strip_leading_bom_helper() {
@@ -1212,6 +1264,7 @@ mod tests {
     #[test]
     fn test_resolved_command_executes_known_command() {
         let output = resolved_command("cargo")
+            .expect("cargo must resolve on PATH in tests")
             .arg("--version")
             .output()
             .expect("resolved_command('cargo') should execute");
@@ -1413,7 +1466,8 @@ mod tests {
             // When resolve_binary fails, resolved_command should fall back to
             // Command::new(name) instead of panicking.  On Windows this also
             // prints a warning to stderr.
-            let mut cmd = resolved_command("nonexistent_binary_xyz_99999");
+            let mut cmd = resolved_command("nonexistent_binary_xyz_99999")
+                .expect("Windows preserves direct execution after failed resolution");
             // The Command should be created (not panic).  Attempting to run it
             // will fail, but that's expected — we just verify the fallback path
             // produces a usable Command.
@@ -1826,18 +1880,32 @@ mod tests {
         // Semantics are per caller: a tool the user named may be fetched, one
         // rtk chose may not. Changing either would change what runs, not what
         // is printed, which is not rtk's job.
-        let args: Vec<String> =
-            tool_exec(Some("npm"), "definitely-not-installed", MissingTool::Fetch)
-                .get_args()
-                .map(|a| a.to_string_lossy().into_owned())
-                .collect();
+        let resolve = |program: &str| {
+            // nosemgrep: dynamic-command-execution -- captures runner argv for assertions; this command is never spawned
+            Ok(Command::new(program))
+        };
+        let args: Vec<String> = tool_exec_with_resolver(
+            Some("npm"),
+            "definitely-not-installed",
+            MissingTool::Fetch,
+            resolve,
+        )
+        .expect("build fetch command")
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
         assert!(!args.contains(&"--no-install".to_string()), "{args:?}");
 
-        let args: Vec<String> =
-            tool_exec(Some("npm"), "definitely-not-installed", MissingTool::Fail)
-                .get_args()
-                .map(|a| a.to_string_lossy().into_owned())
-                .collect();
+        let args: Vec<String> = tool_exec_with_resolver(
+            Some("npm"),
+            "definitely-not-installed",
+            MissingTool::Fail,
+            resolve,
+        )
+        .expect("build no-install command")
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
         assert!(args.contains(&"--no-install".to_string()), "{args:?}");
     }
 

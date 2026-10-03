@@ -150,7 +150,7 @@ pub fn filter_bun_pm_ls_text(raw: &str) -> String {
 /// records the output that was actually shown rather than the pre-guard filter
 /// result.
 pub fn run_pkg(subcmd: &str, args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("bun");
+    let mut cmd = resolved_command("bun")?;
     cmd.args(pkg_argv(subcmd, args));
 
     if verbose > 0 {
@@ -172,7 +172,7 @@ pub fn run_pm_ls(args: &[String], verbose: u8) -> Result<i32> {
     // No --json injection: bun 1.x ignores the flag, `filter_bun_pm_ls` selects
     // its parser from the output's shape, and a bun that rejected an unknown
     // flag would make rtk fail a command that succeeds on its own.
-    let mut cmd = resolved_command("bun");
+    let mut cmd = resolved_command("bun")?;
     cmd.arg("pm").arg("ls");
     for arg in args {
         cmd.arg(arg);
@@ -216,7 +216,7 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
         return crate::core::runner::run_passthrough("bun", &passthrough, verbose);
     }
 
-    let mut cmd = resolved_command("bun");
+    let mut cmd = resolved_command("bun")?;
     cmd.arg("test").args(args);
     let display = format!("test {}", args.join(" "));
     crate::core::runner::run_test_cmd(

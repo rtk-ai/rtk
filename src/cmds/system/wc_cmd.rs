@@ -11,7 +11,7 @@ use crate::core::utils::{ChildArgExt, resolved_command};
 use anyhow::Result;
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("wc");
+    let mut cmd = resolved_command("wc")?;
     cmd.child_args(args);
 
     if verbose > 0 {

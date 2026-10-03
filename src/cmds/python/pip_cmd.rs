@@ -64,7 +64,7 @@ fn prog_label(base_cmd: &str) -> &'static str {
 }
 
 fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String, i32)> {
-    let mut cmd = resolved_command(base_cmd);
+    let mut cmd = resolved_command(base_cmd)?;
 
     if base_cmd == "uv" {
         cmd.arg("pip");
@@ -92,7 +92,7 @@ fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, Str
 }
 
 fn run_outdated(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String, i32)> {
-    let mut cmd = resolved_command(base_cmd);
+    let mut cmd = resolved_command(base_cmd)?;
 
     if base_cmd == "uv" {
         cmd.arg("pip");
@@ -123,7 +123,7 @@ fn run_outdated(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String,
 }
 
 fn run_passthrough(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String, i32)> {
-    let mut cmd = resolved_command(base_cmd);
+    let mut cmd = resolved_command(base_cmd)?;
 
     if base_cmd == "uv" {
         cmd.arg("pip");

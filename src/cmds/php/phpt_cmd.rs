@@ -99,7 +99,7 @@ fn args_already_show_diff(args: &[String]) -> bool {
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("php");
+    let mut cmd = resolved_command("php")?;
     cmd.arg("run-tests.php");
     // The diff is what makes a failure actionable, and the filter caps it at
     // MAX_DIFF_LINES_PER_FAILURE regardless, so request it unless the caller

@@ -151,7 +151,7 @@ fn run_filtered(
     skip_env: bool,
     forward_piped_stdin: bool,
 ) -> Result<i32> {
-    let mut cmd = resolved_command(name);
+    let mut cmd = resolved_command(name)?;
     for arg in args {
         cmd.arg(arg);
     }

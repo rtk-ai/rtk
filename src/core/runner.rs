@@ -382,7 +382,7 @@ pub fn run_passthrough(tool: &str, args: &[std::ffi::OsString], verbose: u8) -> 
     if verbose > 0 {
         eprintln!("{} passthrough: {:?}", tool, args);
     }
-    let mut cmd = crate::core::utils::resolved_command(tool);
+    let mut cmd = crate::core::utils::resolved_command(tool)?;
     crate::core::utils::ChildArgExt::child_args(&mut cmd, args);
     let args_str = tracking::args_display(args);
     run(

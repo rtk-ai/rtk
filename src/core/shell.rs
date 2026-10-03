@@ -149,7 +149,7 @@ pub fn direct_command(args: &[String]) -> Result<Launch> {
         return Ok(Launch::Unrunnable(outcome));
     }
 
-    let mut command = resolved_command(program);
+    let mut command = resolved_command(program)?;
     // These arguments came off rtk's own command line, so they take the
     // encoding MSYS/Cygwin children expect on Windows (#3728).
     command.child_args(program_args);
@@ -164,13 +164,12 @@ pub fn shell_command(script: &str, shell: Option<&str>) -> Result<Launch> {
     }
 
     // A named shell is resolved up front so an unusable one reports the shell's
-    // own answer, the same way an unusable program does. The platform default
-    // keeps `resolved_command`'s fallback: it is RTK's choice, not the caller's.
+    // own answer, the same way an unusable program does.
     if shell.is_some() && resolve_binary(program).is_err() {
         return Ok(Launch::Unrunnable(classify_unrunnable(program)));
     }
 
-    let mut command = resolved_command(program);
+    let mut command = resolved_command(program)?;
     command.arg(command_flag(program)).child_arg(script);
     Ok(Launch::Ready(command))
 }

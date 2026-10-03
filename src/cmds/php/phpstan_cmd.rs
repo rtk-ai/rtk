@@ -50,7 +50,7 @@ struct PhpstanMessage {
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     // Composer-aware resolution (COMPOSER_BIN_DIR / config.bin-dir), matching
     // the other php tools, with PATH fallback for a global install.
-    let mut cmd = php_tool_command("phpstan");
+    let mut cmd = php_tool_command("phpstan")?;
 
     // Utility commands (--version, list, clear-result-cache, worker, …): real passthrough.
     // Only analyse/analyze subcommands get filtered and token-tracked.
