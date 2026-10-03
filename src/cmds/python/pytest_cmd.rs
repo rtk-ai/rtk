@@ -5,9 +5,18 @@ use crate::core::runner;
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
+use regex::Regex;
+use std::sync::LazyLock;
 
 const MAX_XFAIL: usize = CAP_WARNINGS;
 const MAX_PYTEST_FAILURES: usize = CAP_WARNINGS;
+// Optional " (H:MM:SS)" is pytest's format_session_duration once a run exceeds 60s.
+static PYTEST_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^(?:=+\s*)?\d+ (?:passed|failed|skipped|xfailed|xpassed|deselected|errors?|warnings?)(?:, \d+ (?:passed|failed|skipped|xfailed|xpassed|deselected|errors?|warnings?))* in \d+(?:\.\d+)?s(?: \(\d+:\d{2}:\d{2}\))?(?:\s*=+)?$",
+    )
+    .expect("valid pytest summary regex")
+});
 
 #[derive(Debug, PartialEq)]
 enum ParseState {
@@ -100,23 +109,9 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
                 current_failure.clear();
             }
             continue;
-        } else if trimmed.starts_with("===")
-            && (trimmed.contains("passed")
-                || trimmed.contains("failed")
-                || trimmed.contains("skipped"))
-        {
-            summary_line = trimmed.to_string();
-            continue;
-        // quiet mode (-q): bare summary without === wrapper, e.g. "5 failed, 1698 passed, 2 skipped in 108.89s"
-        } else if summary_line.is_empty()
-            && !trimmed.starts_with("===")
-            && !trimmed.starts_with("FAILED")
-            && !trimmed.starts_with("ERROR")
-            && (trimmed.contains(" passed")
-                || trimmed.contains(" failed")
-                || trimmed.contains(" skipped"))
-            && trimmed.contains(" in ")
-        {
+        // Accept wrapped and quiet-mode summaries, and keep the last match so
+        // traceback source cannot override pytest's trailing result line.
+        } else if PYTEST_SUMMARY_RE.is_match(trimmed) {
             summary_line = trimmed.to_string();
             continue;
         }
@@ -584,6 +579,42 @@ FAILED tests/test_foo.py::test_something - AssertionError
             "Should show actual test counts. Got: {}",
             result
         );
+    }
+
+    #[test]
+    fn test_filter_pytest_summary_over_60s_with_clock() {
+        // Once elapsed time passes 60s, pytest appends a parenthetical clock.
+        let long_runs = [
+            "===== 40 passed in 65.12s (0:01:05) =====",
+            "40 passed in 65.12s (0:01:05)",
+        ];
+        let short = filter_pytest_output("===== 40 passed in 0.12s =====");
+        assert_eq!(short, "Pytest: 40 passed");
+        assert_eq!(filter_pytest_output("40 passed in 12s"), short);
+
+        for line in long_runs {
+            let result = filter_pytest_output(line);
+            assert!(
+                !result.contains("No tests collected"),
+                "summary over 60s was not recognized: {line:?} -> {result}"
+            );
+            assert_eq!(result, short, "counts diverged for {line:?}: {result}");
+        }
+
+        let not_a_summary = "see 40 passed in 65.12s (0:01:05) in the log";
+        assert!(
+            !PYTEST_SUMMARY_RE.is_match(not_a_summary),
+            "non-summary lines must still be rejected"
+        );
+    }
+
+    #[test]
+    fn test_filter_pytest_uses_trailing_summary_not_traceback_source() {
+        let output = r#"assert x in out  # counted failed
+1 failed, 40 passed in 12.15s"#;
+
+        let result = filter_pytest_output(output);
+        assert_eq!(result, "Pytest: 40 passed, 1 failed");
     }
 
     #[test]
