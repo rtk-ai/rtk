@@ -805,6 +805,16 @@ mod tests {
             judge("RTK_DISABLED=1 sudo docker ps", &ctx_sudo),
             DisabledSegment::Bypass
         );
+        // rtk-ai/rtk#4412: an expanded env value ($CI) is detected as a bypass
+        // too, instead of falling back to strip_disabled_prefix (no sudo peel).
+        assert_eq!(
+            judge("sudo RTK_DISABLED=$CI docker ps", &ctx_sudo),
+            DisabledSegment::Bypass
+        );
+        assert_eq!(
+            judge("RTK_DISABLED=$CI sudo docker ps", &ctx_sudo),
+            DisabledSegment::Bypass
+        );
         // Only the RTK_DISABLED= word is removed, whole: a bare bypass, one next
         // to another assignment, and a quoted or expanded value are all bypasses.
         for raw in [
