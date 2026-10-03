@@ -152,12 +152,7 @@ fn analyze_logs(content: &str) -> String {
                 .map(|s| s.as_str())
                 .unwrap_or(normalized);
 
-            let truncated = if original.len() > 100 {
-                let t: String = original.chars().take(97).collect();
-                format!("{}...", t)
-            } else {
-                original.to_string()
-            };
+            let truncated = clip_line(original);
 
             if **count > 1 {
                 result.push(format!("   [×{}] {}", count, truncated));
@@ -194,12 +189,7 @@ fn analyze_logs(content: &str) -> String {
                 .map(|s| s.as_str())
                 .unwrap_or(normalized);
 
-            let truncated = if original.len() > 100 {
-                let t: String = original.chars().take(97).collect();
-                format!("{}...", t)
-            } else {
-                original.to_string()
-            };
+            let truncated = clip_line(original);
 
             if **count > 1 {
                 result.push(format!("   [×{}] {}", count, truncated));
@@ -216,7 +206,45 @@ fn analyze_logs(content: &str) -> String {
         }
     }
 
+    // The end of a log is where a run reports its outcome — the path it
+    // wrote, the final metric, a DONE marker. None of that carries a
+    // severity keyword, so the summary above drops it, and the reader is
+    // left with counts but not the result. Keep the last few lines verbatim.
+    let tail: Vec<&str> = content
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(TAIL_LINES)
+        .collect();
+    if content.lines().filter(|l| !l.trim().is_empty()).count() > TAIL_LINES {
+        result.push(format!("[TAIL] last {} lines", tail.len()));
+        for line in tail.iter().rev() {
+            result.push(format!("   {}", clip_line(line.trim_end())));
+        }
+    }
     result.join("\n")
+}
+
+/// Longest line kept in the summary. 100 chars cut `provider=nvidia_nim` to
+/// `provider=nvidia_n...` in a real daemon log — the one token the reader
+/// needed. 200 keeps a typical structured line whole.
+const LOG_LINE_MAX: usize = 200;
+/// Raw lines kept verbatim from the end of the log.
+const TAIL_LINES: usize = 5;
+
+/// Cut a line to [`LOG_LINE_MAX`] chars, at a space when one is near the
+/// cut so a `key=value` token is dropped whole rather than split.
+fn clip_line(line: &str) -> String {
+    let n = line.chars().count();
+    if n <= LOG_LINE_MAX {
+        return line.to_string();
+    }
+    let head: String = line.chars().take(LOG_LINE_MAX - 3).collect();
+    let cut = match head.rfind(' ') {
+        Some(i) if i > LOG_LINE_MAX / 2 => &head[..i],
+        _ => head.as_str(),
+    };
+    format!("{}...", cut)
 }
 
 fn normalize_log_line(
@@ -269,6 +297,38 @@ mod tests {
             result.contains("WARNINGS"),
             "notice should count as warning"
         );
+    }
+
+    #[test]
+    fn test_analyze_logs_keeps_the_outcome_in_the_tail() {
+        // A training log: progress noise, then the result. Nothing in the
+        // result carries a severity keyword, so before the tail section the
+        // summary reported "0 errors, 1 info" and lost the path and the size.
+        let logs = "steps: 10%\nsteps: 50%\nsteps: 90%\nsteps: 100% avr_loss=0.109\n2026-09-13 21:21:32 INFO model saved.\nsaving checkpoint: /home/louis/lora_out/louis_sdxl.safetensors\n/home/louis/lora_out/louis_sdxl.safetensors 85423396\nKOHYA-DONE";
+        let result = analyze_logs(logs);
+        assert!(result.contains("[TAIL]"));
+        assert!(result.contains("/home/louis/lora_out/louis_sdxl.safetensors 85423396"));
+        assert!(result.contains("avr_loss=0.109"));
+        assert!(result.contains("KOHYA-DONE"));
+        // A short log has no tail section — everything is already shown.
+        assert!(!analyze_logs("ERROR one\nERROR two").contains("[TAIL]"));
+    }
+
+    #[test]
+    fn test_clip_line_keeps_a_structured_token_whole() {
+        let line = format!(
+            "{} WARN anvil_router: provider failed role=\"verifier\" provider=nvidia_nim error=timeout {}",
+            "2026-09-02T21:08:50.356893Z",
+            "x".repeat(120)
+        );
+        let clipped = clip_line(&line);
+        assert!(
+            clipped.contains("provider=nvidia_nim"),
+            "the token was split at 100 chars before: {clipped}"
+        );
+        assert!(clipped.ends_with("..."));
+        assert!(clipped.chars().count() <= LOG_LINE_MAX);
+        assert_eq!(clip_line("short"), "short");
     }
 
     #[test]
