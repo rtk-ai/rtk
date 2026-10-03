@@ -35,6 +35,9 @@ strip_lines_matching = [               # optional: drop lines matching any of th
   "^\\s*$",
   "^noise pattern",
 ]
+squeeze_whitespace = false              # optional: collapse space/tab runs to one space (lossless, default off)
+collapse_table_padding = false          # optional: collapse padded-column gaps to one separator (lossless, default off)
+fold_repeats = false                    # optional: collapse consecutive identical lines to "line ×N" (lossless, default off)
 max_lines = 40                          # optional: keep only the first N lines after filtering
 on_empty = "my-tool: ok"               # optional: message to emit when output is empty after filtering
 
@@ -56,10 +59,54 @@ expected = "expected filtered output"
 | `keep_lines_matching` | regex[] | Keep only lines matching at least one regex |
 | `replace` | array | Regex substitutions (`{ pattern, replacement }`) |
 | `match_output` | array | Short-circuit rules (`{ pattern, message }`) |
+| `squeeze_whitespace` | bool | Collapse runs of spaces/tabs inside a line to a single space and strip trailing whitespace; leading indentation is preserved. **Lossless** — off by default. |
+| `collapse_table_padding` | bool | For padded-column lines (2+ spaces between cells, or `\|`-separated with padding), reduce each inter-cell gap to a single separator (` \| ` or two spaces), keeping every cell verbatim. **Lossless** — off by default. |
+| `fold_repeats` | bool | Collapse runs of consecutive identical lines into one line suffixed with ` ×N` (N >= 2). **Lossless** — the repeat count is recoverable from the suffix. Off by default. |
 | `truncate_lines_at` | int | Truncate lines longer than N characters |
 | `max_lines` | int | Keep only the first N lines |
 | `tail_lines` | int | Keep only the last N lines (applied after other filters) |
 | `on_empty` | string | Fallback message when filtered output is empty |
+
+## Lossless whitespace/repeat transforms
+
+`squeeze_whitespace`, `collapse_table_padding`, and `fold_repeats` all default
+to `false` and never drop a line's *content* — only its whitespace geometry
+(squeeze/collapse) or its repeat count representation (fold), both of which are
+recoverable from the output. They run in that order, after `strip/keep_lines`
+and before `truncate_lines_at`, so folding sees already-squeezed lines.
+
+Reach for these on output that has no dedicated filter but is heavy on padded
+columns or duplicate lines — `psql` tables, `ps`/`ps aux`, Python heredoc
+tracebacks, `column -t`-formatted output:
+
+```toml
+[filters.psql-table]
+description = "compact psql table output"
+match_command = "^psql\\b"
+squeeze_whitespace = true
+collapse_table_padding = true
+fold_repeats = true
+```
+
+Before:
+```
+ id | name    | status
+----+---------+--------
+  1 | alice   | active
+  2 | bob     | active
+  2 | bob     | active
+```
+
+After:
+```
+ id | name | status
+----+---------+--------
+  1 | alice | active
+  2 | bob | active ×2
+```
+
+(`----+---------+--------` is untouched — a run of `-`/`+` has no 2+ space gap
+and no whitespace-padded `|`, so it doesn't look like a padded-column line.)
 
 ## Naming convention
 
@@ -92,7 +139,7 @@ flowchart TD
         R["TomlFilterRegistry::load()\n1. .rtk/filters.toml\n2. ~/.config/rtk/filters.toml\n3. BUILTIN_TOML\n4. passthrough"] --> S
         S{"match_command\nmatches?"} -->|"no match"| T[["exec raw (passthrough)"]]
         S -->|"match"| U["exec command\ncapture stdout"]
-        U --> V["8-stage pipeline\nstrip_ansi → replace → match_output\n→ strip/keep_lines → truncate\n→ tail_lines → max_lines → on_empty"]
+        U --> V["11-stage pipeline\nstrip_ansi → replace → match_output\n→ strip/keep_lines → squeeze_whitespace\n→ collapse_table_padding → fold_repeats\n→ truncate → tail_lines → max_lines → on_empty"]
         V --> W[["print filtered output + exit code"]]
     end
 
