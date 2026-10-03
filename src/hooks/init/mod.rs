@@ -988,10 +988,10 @@ pub fn uninstall_with_patch_mode(
         let mut claude_md_changed = false;
         let mut working_content = content.clone();
 
-        if working_content.contains(RTK_MD_REF) {
+        if has_rtk_reference(&working_content, &[RTK_MD_REF]) {
             let new_content = working_content
                 .lines()
-                .filter(|line| !line.trim().starts_with(RTK_MD_REF))
+                .filter(|line| line.trim() != RTK_MD_REF)
                 .collect::<Vec<_>>()
                 .join("\n");
 
@@ -2286,22 +2286,89 @@ mod tests {
 
     #[test]
     fn test_uninstall_handles_both_artifacts() {
-        let content = format!("# Config\n\n@RTK.md\n\n{}\n\nMore stuff", RTK_INSTRUCTIONS);
+        let temp = TempDir::new().expect("create isolated home");
+        with_claude_dir_override(&temp, |claude_dir| {
+            let claude_md = claude_dir.join(CLAUDE_MD);
+            let prose = "@RTK.md is where I keep my own token rules; do not delete.\n\
+                         @RTK.md.backup is a different file.\n\
+                         Read @RTK.md for details.";
+            let content = format!(
+                "# Config\n\n{prose}\n\n@RTK.md\n  @RTK.md \t\n\n{RTK_INSTRUCTIONS}\n\nMore stuff"
+            );
+            fs::write(&claude_md, content).expect("write instructions");
 
-        let after_at_removal: String = content
-            .lines()
-            .filter(|line| !line.trim().starts_with("@RTK.md"))
-            .collect::<Vec<_>>()
-            .join("\n");
+            for _ in 0..2 {
+                uninstall(
+                    true,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    InitContext::default(),
+                )
+                .expect("uninstall RTK");
+                let cleaned = fs::read_to_string(&claude_md).expect("read retained instructions");
+                assert_eq!(cleaned, format!("# Config\n\n{prose}\n\nMore stuff"));
+            }
+        });
+    }
 
-        assert!(!after_at_removal.contains("@RTK.md"));
-        assert!(after_at_removal.contains(RTK_BLOCK_START));
+    #[test]
+    fn test_uninstall_preserves_prose_without_exact_rtk_reference() {
+        let temp = TempDir::new().expect("create isolated home");
+        with_claude_dir_override(&temp, |claude_dir| {
+            let claude_md = claude_dir.join(CLAUDE_MD);
+            let content = "# My rules\r\n\r\n\r\n\
+                           @RTK.md is where I keep my own rules.\r\n\
+                           Read @RTK.md for details.\r\n";
+            fs::write(&claude_md, content).expect("write instructions");
 
-        let (final_content, did_remove) = remove_rtk_block(&after_at_removal);
-        assert!(did_remove);
-        assert!(!final_content.contains(RTK_BLOCK_START));
-        assert!(final_content.contains("# Config"));
-        assert!(final_content.contains("More stuff"));
+            uninstall(
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                InitContext::default(),
+            )
+            .expect("uninstall RTK");
+
+            assert_eq!(
+                fs::read_to_string(&claude_md).expect("read retained instructions"),
+                content
+            );
+        });
+    }
+
+    #[test]
+    fn test_uninstall_dry_run_preserves_instruction_artifacts() {
+        let temp = TempDir::new().expect("create isolated home");
+        with_claude_dir_override(&temp, |claude_dir| {
+            let claude_md = claude_dir.join(CLAUDE_MD);
+            let content = format!("# My rules\n\n@RTK.md\n\n{RTK_INSTRUCTIONS}\n");
+            fs::write(&claude_md, &content).expect("write instructions");
+
+            uninstall(
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                InitContext {
+                    dry_run: true,
+                    ..InitContext::default()
+                },
+            )
+            .expect("preview uninstall");
+
+            assert_eq!(
+                fs::read_to_string(&claude_md).expect("read retained instructions"),
+                content
+            );
+        });
     }
 
     #[test]
