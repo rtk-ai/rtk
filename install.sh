@@ -27,6 +27,13 @@ error() {
     exit 1
 }
 
+# Every executable `rtk` on PATH (POSIX; no reliance on `which -a`), deduped.
+list_rtk_on_path() {
+    printf '%s\n' "$PATH" | tr ':' '\n' | while IFS= read -r d; do
+        [ -n "$d" ] && [ -x "$d/rtk" ] && printf '%s\n' "$d/rtk"
+    done | sort -u
+}
+
 # Detect OS
 detect_os() {
     case "$(uname -s)" in
@@ -161,6 +168,22 @@ verify() {
         warn "Binary installed but not in PATH. Add to your shell profile:"
         warn "  export PATH=\"\$HOME/.local/bin:\$PATH\""
     fi
+
+    # Single-owner check: only one rtk should own the name on PATH.
+    ACTIVE=$(command -v "$BINARY_NAME" 2>/dev/null || true)
+    if [ -n "$ACTIVE" ] && [ "$ACTIVE" != "$INSTALLED_BIN" ]; then
+        warn "'$BINARY_NAME' resolves to $ACTIVE — NOT the binary just installed."
+        warn "Remove it, or put $INSTALL_DIR first on PATH."
+    fi
+    OTHERS=$(list_rtk_on_path | grep -vxF "$INSTALLED_BIN" 2>/dev/null || true)
+    if [ -n "$OTHERS" ]; then
+        warn "Other rtk binaries are on your PATH — only one should own the name:"
+        printf '%s\n' "$OTHERS" | while IFS= read -r p; do warn "    $p"; done
+        warn "Remove the extras so 'rtk' is unambiguous, e.g.:"
+        printf '%s\n' "$OTHERS" | while IFS= read -r p; do warn "    rm -f $p"; done
+    fi
+    DUP=$(printf '%s\n' "$PATH" | tr ':' '\n' | grep -cxF "$INSTALL_DIR" 2>/dev/null || true)
+    [ "${DUP:-0}" -gt 1 ] 2>/dev/null && warn "$INSTALL_DIR appears ${DUP}x in PATH — de-dupe it in your shell profile."
 }
 
 main() {
