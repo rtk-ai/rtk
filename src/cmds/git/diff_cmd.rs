@@ -2,10 +2,12 @@
 
 use crate::core::guard::never_worse;
 use crate::core::tracking;
+use crate::core::utils::is_stdin_operand;
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashSet;
 use std::fs;
+use std::io::{self, Read};
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -37,9 +39,9 @@ const IDENTICAL_FILES_MESSAGE: &str = "[ok] Files are identical\n";
 /// the two files differ — the distinction a caller's `if diff a b` relies on.
 const DIFF_EXIT_TROUBLE: i32 = 2;
 
-/// Ultra-condensed diff - only changed lines, no context.
-/// Returns the diff-convention exit code: 0 if identical, 1 if files differ,
-/// 2 if an operand cannot be read.
+/// Ultra-condensed diff - only changed lines, no context. Either operand may
+/// be `-` for stdin. Returns the diff-convention exit code: 0 if identical,
+/// 1 if files differ, 2 if an operand cannot be read.
 pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
     let command = format!("diff {} {}", file1.display(), file2.display());
@@ -48,14 +50,25 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
         eprintln!("Comparing: {} vs {}", file1.display(), file2.display());
     }
 
+    // Two operands that are one file, whether `- -`, two names for stdin or
+    // one path reached twice, are identical by construction. `diff` answers
+    // them without reading, and so does rtk: reading would drain a producer
+    // or an endless device to learn nothing.
+    if same_operand(file1, file2) {
+        print!("{}", IDENTICAL_FILES_MESSAGE);
+        // Nothing was read in either case, so no saving is claimed: the
+        // verdict is both the output and its baseline.
+        timer.track(
+            &command,
+            "rtk diff",
+            IDENTICAL_FILES_MESSAGE,
+            IDENTICAL_FILES_MESSAGE,
+        );
+        return Ok(0);
+    }
+
     // Read bytes first so non-UTF-8 data is not mistaken for an I/O failure.
-    let (bytes1, bytes2) = match fs::read(file1)
-        .map_err(|error| (file1, error))
-        .and_then(|first| {
-            fs::read(file2)
-                .map(|second| (first, second))
-                .map_err(|error| (file2, error))
-        }) {
+    let (bytes1, bytes2) = match read_operands(file1, file2) {
         Ok(contents) => contents,
         Err((path, error)) => {
             let message = format!("rtk diff: {}: {}", path.display(), error);
@@ -97,6 +110,169 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
         shown,
     );
     Ok(exit_code)
+}
+
+/// An operand read: the bytes, or the operand that failed and why.
+type OperandRead<'a, T> = std::result::Result<T, (&'a Path, io::Error)>;
+
+/// Whether both operands are one file, which `diff` reports as identical
+/// without reading: one name given twice (`- -`, `f f`), or two names that
+/// reach the same file, stdin among them (`- /dev/stdin`, a link to the
+/// other operand).
+fn same_operand(file1: &Path, file2: &Path) -> bool {
+    if file1.as_os_str() == file2.as_os_str() {
+        // `diff` looks a name given twice up once and reuses the answer, so a
+        // file that changes between two lookups is still one file. A missing
+        // operand or a directory is left to the read, which reports it.
+        return is_stdin_operand(file1) || fs::metadata(file1).is_ok_and(|meta| !meta.is_dir());
+    }
+    same_file(file1, file2)
+}
+
+/// The fields `diff`'s `same_file` compares, taken from one operand.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FileIdentity {
+    node: (u64, u64),
+    /// Whether a device is a character device, and its `st_rdev`.
+    device: Option<(bool, u64)>,
+    attributes: FileAttributes,
+}
+
+/// The attributes `diff` checks on top of the inode.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FileAttributes {
+    mode: u32,
+    nlink: u64,
+    uid: u32,
+    gid: u32,
+    /// `diff`'s `stat_size`: a regular file's size, less what stdin has
+    /// already read of it, and `None` for anything else.
+    size: Option<u64>,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+}
+
+#[cfg(unix)]
+impl FileIdentity {
+    fn of(meta: &fs::Metadata, read_so_far: u64) -> Self {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+        let kind = meta.file_type();
+        let is_device = kind.is_char_device() || kind.is_block_device();
+        let size = meta
+            .is_file()
+            .then(|| meta.size().saturating_sub(read_so_far));
+        FileIdentity {
+            node: (meta.dev(), meta.ino()),
+            device: is_device.then(|| (kind.is_char_device(), meta.rdev())),
+            attributes: FileAttributes {
+                mode: meta.mode(),
+                nlink: meta.nlink(),
+                uid: meta.uid(),
+                gid: meta.gid(),
+                size,
+                mtime: (meta.mtime(), meta.mtime_nsec()),
+                ctime: (meta.ctime(), meta.ctime_nsec()),
+            },
+        }
+    }
+
+    /// `diff`'s rule: one device and inode needs matching attributes too,
+    /// since some file systems (NFS exports, snapshot directories) hand
+    /// distinct files one inode; two inodes are one file only as two device
+    /// nodes for the same device.
+    fn same_as(&self, other: &Self) -> bool {
+        if self.node == other.node {
+            self.attributes == other.attributes
+        } else {
+            self.device.is_some() && self.device == other.device
+        }
+    }
+}
+
+/// Whether two operands are one file by `diff`'s rule, from metadata alone,
+/// so nothing is opened or read. Directories are left to the read, which
+/// reports them. Any metadata error answers "not the same", leaving the read
+/// to report it too.
+#[cfg(unix)]
+fn same_file(file1: &Path, file2: &Path) -> bool {
+    use std::io::Seek;
+
+    let identity = |path: &Path| {
+        let (meta, read_so_far) = if is_stdin_operand(path) {
+            let mut stdin = crate::core::utils::stdin_file()?;
+            let meta = stdin.metadata().ok()?;
+            // `diff` compares stdin from its current offset.
+            let read_so_far = if meta.is_file() {
+                stdin.stream_position().unwrap_or(0)
+            } else {
+                0
+            };
+            (meta, read_so_far)
+        } else {
+            (fs::metadata(path).ok()?, 0)
+        };
+        (!meta.is_dir()).then(|| FileIdentity::of(&meta, read_so_far))
+    };
+    matches!((identity(file1), identity(file2)), (Some(a), Some(b)) if a.same_as(&b))
+}
+
+#[cfg(not(unix))]
+fn same_file(_file1: &Path, _file2: &Path) -> bool {
+    false
+}
+
+/// Reads both operands as bytes, resolving a `-` operand to stdin. `run`
+/// answers two operands that are one file before calling this, since that
+/// pair needs no read at all.
+fn read_operands<'a>(file1: &'a Path, file2: &'a Path) -> OperandRead<'a, (Vec<u8>, Vec<u8>)> {
+    debug_assert!(!(is_stdin_operand(file1) && is_stdin_operand(file2)));
+    // The file operand is read first when the other is stdin, so an unreadable
+    // path fails immediately, instead of after draining a producer that may be
+    // slow or unbounded. `diff` fails fast the same way and lets the writer see
+    // EPIPE.
+    if is_stdin_operand(file1) {
+        let from_file = read_file_operand(file2)?;
+        Ok((read_stdin_operand(file1)?, from_file))
+    } else if is_stdin_operand(file2) {
+        Ok((read_file_operand(file1)?, read_stdin_operand(file2)?))
+    } else {
+        Ok((read_file_operand(file1)?, read_file_operand(file2)?))
+    }
+}
+
+fn read_file_operand(path: &Path) -> OperandRead<'_, Vec<u8>> {
+    fs::read(path).map_err(|error| (path, error))
+}
+
+fn read_stdin_operand(path: &Path) -> OperandRead<'_, Vec<u8>> {
+    read_stdin_bytes().map_err(|error| (path, error))
+}
+
+/// Drains stdin as bytes: piped input is not guaranteed UTF-8, and a lossy
+/// re-encode would change what is compared or condensed.
+fn read_stdin_bytes() -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    io::stdin().read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+const FILE_FULL_TEXT_HINT: &str = "use `rtk proxy diff` for the full text";
+
+const STDIN_FULL_TEXT_HINT: &str =
+    "stdin was consumed, so feed it again to `rtk proxy diff` for the full text";
+
+/// How a refusal to list tells the caller to get the full text. A stdin
+/// operand was consumed by this run, so it has to be supplied again, whether
+/// it came from a pipe or from a redirect the command inherited.
+fn full_text_hint(file1: &Path, file2: &Path) -> &'static str {
+    if is_stdin_operand(file1) || is_stdin_operand(file2) {
+        STDIN_FULL_TEXT_HINT
+    } else {
+        FILE_FULL_TEXT_HINT
+    }
 }
 
 /// What comparing the two files established, before anything is rendered.
@@ -226,10 +402,11 @@ fn render_diff(file1: &Path, file2: &Path, comparison: &FileComparison) -> (Stri
             };
             return (
                 format!(
-                    "{} {}, {}; use `rtk proxy diff` for the full text\n",
+                    "{} {}, {}; {}\n",
                     count_lines(*count),
                     verb,
-                    reason
+                    reason,
+                    full_text_hint(file1, file2)
                 ),
                 1,
             );
@@ -248,14 +425,15 @@ fn render_diff(file1: &Path, file2: &Path, comparison: &FileComparison) -> (Stri
             // like one invites reading it as the amount of change.
             return (
                 format!(
-                    "at least {} lines differ, too different to align line by line\ndifferences fall between lines {}-{} of {} and {}-{} of {}; use `rtk proxy diff` for the full text\n",
+                    "at least {} lines differ, too different to align line by line\ndifferences fall between lines {}-{} of {} and {}-{} of {}; {}\n",
                     differing_floor,
                     first,
                     last1,
                     file1.display(),
                     first,
                     last2,
-                    file2.display()
+                    file2.display(),
+                    full_text_hint(file1, file2)
                 ),
                 1,
             );
@@ -283,12 +461,13 @@ fn render_diff(file1: &Path, file2: &Path, comparison: &FileComparison) -> (Stri
             };
             return (
                 format!(
-                    "{} changed in {}, {} changed in {}; {}, use `rtk proxy diff` for the full text\n",
+                    "{} changed in {}, {} changed in {}; {}; {}\n",
                     count_lines(*removed),
                     file1.display(),
                     count_lines(*added),
                     file2.display(),
-                    reason
+                    reason,
+                    full_text_hint(file1, file2)
                 ),
                 1,
             );
@@ -488,16 +667,12 @@ fn describe_invisible_difference(content1: &str, content2: &str) -> String {
 
 /// Run diff from stdin (piped command output)
 pub fn run_stdin(_verbose: u8) -> Result<()> {
-    use std::io::{self, Read};
     let timer = tracking::TimedExecution::start();
 
     // Bytes, not String: piped diffs are not guaranteed UTF-8 (patches quote
     // the target file's bytes). Non-UTF-8 input takes the raw-bytes branch
     // below — never a hard error, and never a lossy re-encode of content.
-    let mut bytes = Vec::new();
-    io::stdin()
-        .read_to_end(&mut bytes)
-        .context("Failed to read diff from stdin")?;
+    let bytes = read_stdin_bytes().context("Failed to read diff from stdin")?;
 
     match condense_stdin(&bytes) {
         Some(condensed) => {
@@ -2865,6 +3040,176 @@ fn condense_unified_diff_strict(diff: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn identity(node: (u64, u64), size: u64, mtime: i64) -> FileIdentity {
+        FileIdentity {
+            node,
+            device: None,
+            attributes: FileAttributes {
+                mode: 0o100644,
+                nlink: 1,
+                uid: 1000,
+                gid: 1000,
+                size: Some(size),
+                mtime: (mtime, 0),
+                ctime: (mtime, 0),
+            },
+        }
+    }
+
+    /// One inode is not enough: some file systems give distinct files one
+    /// (device, inode), and only the attributes tell them apart.
+    #[cfg(unix)]
+    #[test]
+    fn same_as_needs_the_inode_and_the_attributes() {
+        let file = identity((1, 42), 12, 100);
+
+        assert!(file.same_as(&file));
+        assert!(!file.same_as(&identity((1, 42), 12, 101)), "mtime differs");
+        assert!(!file.same_as(&identity((1, 42), 6, 100)), "size differs");
+        assert!(!file.same_as(&identity((1, 43), 12, 100)), "inode differs");
+        assert!(!file.same_as(&identity((2, 42), 12, 100)), "device differs");
+    }
+
+    /// Two device nodes for one device are the same file, as in `diff`; a
+    /// character and a block device with one number are not.
+    #[cfg(unix)]
+    #[test]
+    fn same_as_matches_device_nodes_by_device_number() {
+        let node = |ino, char_device| FileIdentity {
+            device: Some((char_device, 0x0105)),
+            ..identity((1, ino), 0, 0)
+        };
+
+        assert!(node(10, true).same_as(&node(11, true)));
+        assert!(!node(10, true).same_as(&node(11, false)));
+
+        // One inode leaves the answer to the attributes, device or not.
+        let touched = FileIdentity {
+            attributes: FileAttributes {
+                mtime: (1, 0),
+                ..node(10, true).attributes
+            },
+            ..node(10, true)
+        };
+        assert!(!node(10, true).same_as(&touched));
+    }
+
+    /// Stdin redirected from a file but partly read holds less than the file.
+    #[cfg(unix)]
+    #[test]
+    fn identity_counts_what_stdin_has_read_off_the_size() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("f.txt");
+        fs::write(&path, "alpha\nbeta\n").expect("write");
+        let meta = fs::metadata(&path).expect("metadata");
+
+        assert!(FileIdentity::of(&meta, 0).same_as(&FileIdentity::of(&meta, 0)));
+        assert!(!FileIdentity::of(&meta, 6).same_as(&FileIdentity::of(&meta, 0)));
+    }
+
+    /// Directories keep the read's answer, so `d d` reports what `d e` does,
+    /// whether the name is given twice or reached twice.
+    #[test]
+    fn same_operand_leaves_directories_to_the_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let again = dir.path().join(".");
+
+        assert!(!same_operand(dir.path(), dir.path()));
+        assert!(!same_operand(dir.path(), &again));
+    }
+
+    /// A name given twice is one file even while it changes: `diff` looks it
+    /// up once, so a log being appended to never differs from itself.
+    #[test]
+    fn same_operand_takes_a_name_given_twice_as_one_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("grow.log");
+        fs::write(&file, "one\n").expect("write");
+        let missing = dir.path().join("missing");
+
+        assert!(same_operand(&file, &file));
+        assert!(same_operand(Path::new("-"), Path::new("-")));
+        assert!(!same_operand(&missing, &missing));
+    }
+
+    #[test]
+    fn read_operands_reads_two_files_as_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.bin");
+        fs::write(&a, "alpha\n").expect("write");
+        fs::write(&b, b"\xff\n").expect("write");
+
+        let (first, second) = read_operands(&a, &b).expect("read");
+
+        assert_eq!(first, b"alpha\n");
+        assert_eq!(second, b"\xff\n");
+    }
+
+    #[test]
+    fn read_operands_names_the_operand_that_failed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = dir.path().join("a.txt");
+        fs::write(&a, "alpha\n").expect("write");
+        let missing = dir.path().join("nope.txt");
+
+        for (left, right) in [(&a, &missing), (&missing, &a)] {
+            let (failed, error) = read_operands(left, right).expect_err("missing file must error");
+            assert_eq!(failed, missing.as_path());
+            assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        }
+    }
+
+    /// Each refusal arm names the stdin hint whichever side `-` is on, so a
+    /// dropped call or a hint computed from one operand twice fails here.
+    #[test]
+    fn every_refusal_arm_carries_the_stdin_hint() {
+        let differing_lines = (
+            (0..30000).map(|i| format!("x{i}\n")).collect::<String>(),
+            (0..30000).map(|i| format!("y{i}\n")).collect::<String>(),
+            "lines differ, too many to list",
+        );
+        let region_bounds = (
+            (0..2001).map(|i| format!("a{i}\n")).collect::<String>(),
+            (0..2002).map(|i| format!("b{i}\n")).collect::<String>(),
+            "too different to align",
+        );
+        let edit_script = (
+            "SHARED\n".to_string(),
+            (0..60000)
+                .map(|i| {
+                    if i == 30000 {
+                        "SHARED\n".to_string()
+                    } else {
+                        format!("x{i}\n")
+                    }
+                })
+                .collect::<String>(),
+            "59999 lines changed in",
+        );
+        let (dash, file) = (Path::new("-"), Path::new("f.txt"));
+
+        for (content1, content2, arm) in [differing_lines, region_bounds, edit_script] {
+            for (left, right) in [(dash, file), (file, dash)] {
+                let (out, code) = render_file_diff(left, right, &content1, &content2);
+                assert_eq!(code, 1);
+                assert!(out.contains(arm), "wrong arm for {arm:?}, got:\n{out}");
+                assert!(
+                    out.contains(STDIN_FULL_TEXT_HINT),
+                    "{arm:?} {left:?} {right:?}:\n{out}"
+                );
+                assert!(
+                    !out.contains(FILE_FULL_TEXT_HINT),
+                    "{arm:?} {left:?} {right:?}:\n{out}"
+                );
+            }
+            let (out, _) = render_file_diff(file, Path::new("g.txt"), &content1, &content2);
+            assert!(out.contains(FILE_FULL_TEXT_HINT), "{arm:?}:\n{out}");
+            assert!(!out.contains(STDIN_FULL_TEXT_HINT), "{arm:?}:\n{out}");
+        }
+    }
 
     /// Compare two file contents and render the result, which is the path
     /// `run` takes minus the guard and the tracking.
@@ -7422,7 +7767,7 @@ diff --git a/b.rs b/b.rs
         // are pre-pairing, and these two lines are 99.99991% identical.
         assert_eq!(
             out,
-            "1 line changed in a.txt, 1 line changed in b.txt; 2.2MB of text, too large to list, use `rtk proxy diff` for the full text\n"
+            "1 line changed in a.txt, 1 line changed in b.txt; 2.2MB of text, too large to list; use `rtk proxy diff` for the full text\n"
         );
 
         // The one-sided path reaches the same budget through `DifferingLines`.

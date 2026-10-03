@@ -264,12 +264,15 @@ Seul `run` est filtre : soit nomme explicitement, soit implicite quand aucun pos
 **Syntaxe :**
 ```bash
 rtk diff <fichier1> <fichier2>
+rtk diff - <fichier>             # Compare stdin avec le fichier
+rtk diff <fichier> -             # Idem, stdin comme second operande
 rtk diff -                       # Condense un diff unifie lu sur stdin
 ```
 
 Pour comparer deux fichiers : code de sortie **0** si identiques, **1** si differents,
-**2** si un fichier ne peut pas etre lu. Les fichiers non UTF-8 sont compares octet
-par octet ; seuls leurs noms sont affiches lorsqu'ils different.
+**2** si un operande (fichier ou stdin) ne peut pas etre lu. `-` a la place de l'un
+des deux fichiers designe stdin, comme pour `diff`. Les fichiers non UTF-8 sont
+compares octet par octet ; seuls leurs noms sont affiches lorsqu'ils different.
 
 ---
 
@@ -1009,6 +1012,7 @@ Les variables sensibles (tokens, secrets, mots de passe) sont masquees par defau
 
 ```bash
 rtk log <fichier>     # Depuis un fichier
+rtk log -             # Depuis stdin
 rtk log               # Depuis stdin (pipe)
 ```
 

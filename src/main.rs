@@ -32,7 +32,7 @@ use anyhow::{Context, Result};
 use clap::error::ErrorKind;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Target agent for hook installation.
 #[derive(Debug, Clone, Copy, PartialEq, ValueEnum)]
@@ -293,20 +293,23 @@ enum Commands {
 
     /// Ultra-condensed diff (only changed lines)
     ///
-    /// Comparing two files exits 0 if identical, 1 if different, and 2 on a
-    /// file-read error. A single file operand is a usage error (exit 2), not a
-    /// diff to condense; `-` reads a piped diff from stdin. Non-UTF-8 files are
-    /// compared byte for byte.
+    /// Comparing two operands exits 0 if identical, 1 if different, and 2 if
+    /// an operand (file or stdin) cannot be read. Non-UTF-8 files are compared
+    /// byte for byte. With a single `-`, condenses a unified diff read from
+    /// stdin; a single file operand is a usage error (exit 2), not a diff to
+    /// condense.
     Diff {
-        /// First file or - for stdin (unified diff)
+        /// First file; `-` compares stdin with the second file. Alone, `-`
+        /// condenses a unified diff from stdin
         file1: PathBuf,
-        /// Second file (omit only when the first is - for stdin)
+        /// Second file; `-` compares stdin with the first file. Omit only when
+        /// the first is `-`
         file2: Option<PathBuf>,
     },
 
     /// Filter and deduplicate log output
     Log {
-        /// Log file (omit for stdin)
+        /// Log file; `-` or no file reads stdin
         file: Option<PathBuf>,
     },
 
@@ -2105,7 +2108,7 @@ fn run_cli() -> Result<i32> {
             let mut had_error = false;
             let mut stdin_seen = false;
             for file in &files {
-                let result = if file == Path::new("-") {
+                let result = if core::utils::is_stdin_operand(file) {
                     if stdin_seen {
                         eprintln!("rtk: warning: stdin specified more than once");
                         continue;
@@ -2387,7 +2390,7 @@ fn run_cli() -> Result<i32> {
             depth,
             keys_only,
         } => {
-            if file == Path::new("-") {
+            if core::utils::is_stdin_operand(&file) {
                 json_cmd::run_stdin(depth, keys_only, cli.verbose)?;
             } else {
                 json_cmd::run(&file, depth, keys_only, cli.verbose)?;
@@ -2410,7 +2413,7 @@ fn run_cli() -> Result<i32> {
         Commands::Diff { file1, file2 } => {
             if let Some(f2) = file2 {
                 diff_cmd::run(&file1, &f2, cli.verbose)?
-            } else if file1.as_os_str() == "-" {
+            } else if core::utils::is_stdin_operand(&file1) {
                 diff_cmd::run_stdin(cli.verbose)?;
                 0
             } else {
@@ -2422,10 +2425,11 @@ fn run_cli() -> Result<i32> {
         }
 
         Commands::Log { file } => {
-            if let Some(f) = file {
-                log_cmd::run_file(&f, cli.verbose)?;
-            } else {
-                log_cmd::run_stdin(cli.verbose)?;
+            match file {
+                Some(f) if !core::utils::is_stdin_operand(&f) => {
+                    log_cmd::run_file(&f, cli.verbose)?
+                }
+                _ => log_cmd::run_stdin(cli.verbose)?,
             }
             0
         }

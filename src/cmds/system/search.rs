@@ -24,13 +24,8 @@ use std::sync::LazyLock;
 /// `!is_terminal()` is wider and wrongly matches that `/dev/null` case.
 #[cfg(unix)]
 fn stdin_is_readable() -> bool {
-    use std::os::fd::AsFd;
     use std::os::unix::fs::FileTypeExt;
-    std::io::stdin()
-        .as_fd()
-        .try_clone_to_owned()
-        .map(std::fs::File::from)
-        .and_then(|f| f.metadata())
+    crate::core::utils::stdin_metadata()
         .map(|m| {
             let kind = m.file_type();
             kind.is_file() || kind.is_fifo() || kind.is_socket()
