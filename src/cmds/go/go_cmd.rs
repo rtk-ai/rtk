@@ -49,7 +49,7 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("go");
     cmd.arg("test");
 
-    let skip_json = args.iter().any(|a| a == "-json" || a.starts_with("-bench"));
+    let skip_json = should_skip_test_json(args);
 
     if !skip_json {
         cmd.arg("-json");
@@ -80,6 +80,16 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
         filter,
         crate::core::runner::RunOptions::stdout_only().tee("go_test"),
     )
+}
+
+fn should_skip_test_json(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg == "-json"
+            || arg.starts_with("-bench")
+            || matches!(arg.as_str(), "-list" | "--list")
+            || arg.starts_with("-list=")
+            || arg.starts_with("--list=")
+    })
 }
 
 pub fn run_build(args: &[String], verbose: u8) -> Result<i32> {
@@ -747,6 +757,21 @@ fn compact_package_name(package: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_go_test_list_uses_plain_output() {
+        for args in [
+            vec!["-list", ".", "./foo"],
+            vec!["-list=TestRev", "./foo"],
+            vec!["--list", ".", "./foo"],
+            vec!["--list=TestRev", "./foo"],
+        ] {
+            let args = args.into_iter().map(String::from).collect::<Vec<_>>();
+            assert!(should_skip_test_json(&args), "args: {args:?}");
+        }
+
+        assert!(!should_skip_test_json(&["./list".to_string()]));
+    }
 
     #[test]
     fn test_filter_go_test_all_pass() {
