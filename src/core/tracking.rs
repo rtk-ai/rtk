@@ -205,8 +205,8 @@ pub struct GainSummary {
     pub total_time_ms: u64,
     /// Average execution time per command (milliseconds)
     pub avg_time_ms: u64,
-    /// Top 10 commands by tokens saved: (cmd, count, saved, weighted_rate, avg_time_ms)
-    pub by_command: Vec<(String, usize, usize, f64, u64)>,
+    /// Selected commands: (cmd, count, saved, weighted_rate, avg_time_ms)
+    pub by_command: Vec<CommandStats>,
     /// Last 30 days of activity: (date, saved_tokens)
     pub by_day: Vec<(String, usize)>,
 }
@@ -308,7 +308,41 @@ pub struct MonthStats {
 /// `CASE WHEN SUM(input_tokens) > 0 THEN SUM(saved_tokens) / SUM(input_tokens) * 100.0 ELSE 0.0 END`
 /// instead. `saved_tokens` is signed, so the rate can be negative where the 3rd field, being
 /// unsigned, is clamped to 0.
-type CommandStats = (String, usize, usize, f64, u64);
+pub type CommandStats = (String, usize, usize, f64, u64);
+
+/// Metric used to rank command groups. SQL ordering precedes display clamping.
+#[derive(Debug, Default, Clone, Copy, clap::ValueEnum)]
+pub enum CommandSort {
+    #[default]
+    Saved,
+    Count,
+    Ratio,
+}
+
+/// Selection for the By Command table only; summary totals retain their scope.
+#[derive(Debug)]
+pub struct CommandQuery {
+    pub sort: CommandSort,
+    pub reverse: bool,
+    /// Maximum groups to return; zero removes the limit.
+    pub limit: usize,
+    /// Case-sensitive literal substring to include in the full recorded name.
+    pub filter: Option<String>,
+    /// Case-sensitive literal substring to exclude from the full recorded name.
+    pub exclude: Option<String>,
+}
+
+impl Default for CommandQuery {
+    fn default() -> Self {
+        Self {
+            sort: CommandSort::Saved,
+            reverse: false,
+            limit: 10,
+            filter: None,
+            exclude: None,
+        }
+    }
+}
 
 /// Current tracking-DB schema version, stored in the SQLite `user_version` pragma.
 ///
@@ -919,6 +953,15 @@ impl Tracker {
     /// When `project_path` is `Some`, matches the exact working directory
     /// or any subdirectory (prefix match with path separator).
     pub fn get_summary_filtered(&self, project_path: Option<&str>) -> Result<GainSummary> {
+        self.get_summary_with_commands(project_path, &CommandQuery::default())
+    }
+
+    /// Get scoped summary totals with an independently selected command table.
+    pub fn get_summary_with_commands(
+        &self,
+        project_path: Option<&str>,
+        commands: &CommandQuery,
+    ) -> Result<GainSummary> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
         let mut total_commands = 0usize;
         let mut total_input = 0usize;
@@ -965,7 +1008,7 @@ impl Tracker {
             0
         };
 
-        let by_command = self.get_by_command(project_path)?; // added: pass project filter
+        let by_command = self.get_by_command(project_path, commands)?;
         let by_day = self.get_by_day(project_path)?; // added: pass project filter
 
         Ok(GainSummary {
@@ -981,33 +1024,57 @@ impl Tracker {
         })
     }
 
-    fn get_by_command(
+    /// Filter, rank, and limit command groups without changing their recorded metrics.
+    pub fn get_by_command(
         &self,
-        project_path: Option<&str>, // added
+        project_path: Option<&str>,
+        query: &CommandQuery,
     ) -> Result<Vec<CommandStats>> {
-        let (project_exact, project_glob) = project_filter_params(project_path); // added
-        let mut stmt = self.conn.prepare(
+        let (project_exact, project_glob) = project_filter_params(project_path);
+        let order_by = match query.sort {
+            CommandSort::Saved => "SUM(saved_tokens)",
+            CommandSort::Count => "COUNT(*)",
+            CommandSort::Ratio => "weighted_rate",
+        };
+        let direction = if query.reverse { "ASC" } else { "DESC" };
+        let limit = if query.limit == 0 {
+            -1
+        } else {
+            i64::try_from(query.limit).unwrap_or(i64::MAX)
+        };
+        // Only closed enum values select SQL syntax; all user text remains bound data.
+        let sql = format!(
             "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens),
-                    CASE WHEN SUM(input_tokens) > 0 THEN SUM(saved_tokens) * 100.0 / SUM(input_tokens) ELSE 0.0 END,
+                    CASE WHEN SUM(input_tokens) > 0 THEN SUM(saved_tokens) * 100.0 / SUM(input_tokens) ELSE 0.0 END AS weighted_rate,
                     AVG(exec_time_ms)
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND (?3 IS NULL OR instr(rtk_cmd, ?3) > 0)
+               AND (?4 IS NULL OR instr(rtk_cmd, ?4) = 0)
              GROUP BY rtk_cmd
-             ORDER BY SUM(saved_tokens) DESC
-             LIMIT 10", // added: project filter in WHERE
+             ORDER BY {order_by} {direction}, rtk_cmd ASC
+             LIMIT ?5"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params![
+                project_exact,
+                project_glob,
+                query.filter,
+                query.exclude,
+                limit
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)? as usize,
+                    // Preserve the unsigned display contract after sorting the signed sum.
+                    row.get::<_, i64>(2)?.max(0) as usize,
+                    row.get::<_, f64>(3)?,
+                    row.get::<_, f64>(4)? as u64,
+                ))
+            },
         )?;
-
-        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
-            // added: params
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)? as usize,
-                // SUM(saved_tokens): clamp a net-negative group to 0 (unsigned field).
-                row.get::<_, i64>(2)?.max(0) as usize,
-                row.get::<_, f64>(3)?,
-                row.get::<_, f64>(4)? as u64,
-            ))
-        })?;
 
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
@@ -2826,7 +2893,7 @@ mod tests {
             .expect("Failed to insert large invocation");
 
         let by_cmd = tracker
-            .get_by_command(Some(project))
+            .get_by_command(Some(project), &CommandQuery::default())
             .expect("Failed to get by_command stats");
 
         let entry = by_cmd
@@ -2862,7 +2929,9 @@ mod tests {
             .record("grep tiny", "rtk grep", 100, 90, 5)
             .expect("record tiny");
 
-        let by_command = tracker.get_by_command(None).expect("get_by_command");
+        let by_command = tracker
+            .get_by_command(None, &CommandQuery::default())
+            .expect("get_by_command");
 
         let (_cmd, count, saved, pct, _avg_time) = by_command
             .iter()

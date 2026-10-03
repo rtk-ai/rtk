@@ -1,7 +1,7 @@
 //! Shows users how many tokens RTK has saved them over time.
 
 use crate::core::display_helpers::{format_duration, print_period_table};
-use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
+use crate::core::tracking::{CommandQuery, CommandStats, DayStats, MonthStats, Tracker, WeekStats};
 use crate::core::user_dirs;
 use crate::core::utils::{format_tokens, truncate};
 use crate::hooks::hook_check;
@@ -15,6 +15,7 @@ use std::path::PathBuf;
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     project: bool, // added: per-project scope flag
+    commands: &CommandQuery,
     graph: bool,
     history: bool,
     quota: bool,
@@ -66,6 +67,7 @@ pub fn run(
                 monthly,
                 all,
                 project_scope.as_deref(), // added: pass project scope
+                commands,
             );
         }
         "csv" => {
@@ -76,13 +78,14 @@ pub fn run(
                 monthly,
                 all,
                 project_scope.as_deref(), // added: pass project scope
+                commands,
             );
         }
         _ => {} // Continue with text format
     }
 
     let summary = tracker
-        .get_summary_filtered(project_scope.as_deref()) // changed: use filtered variant
+        .get_summary_with_commands(project_scope.as_deref(), commands)
         .context("Failed to load token savings summary from database")?;
 
     if crate::core::tee_file::legacy_tee_migration_pending() {
@@ -184,6 +187,7 @@ pub fn run(
             println!("{}", styled("By Command", true));
 
             // added: dynamic column widths for clean alignment
+            let rank_width = (summary.by_command.len().to_string().len() + 1).max(3);
             let cmd_width = 24usize;
             let impact_width = 10usize;
             let count_width = summary
@@ -208,7 +212,7 @@ pub fn run(
                 .unwrap_or(6)
                 .max(6);
 
-            let table_width = 3
+            let table_width = rank_width
                 + 2
                 + cmd_width
                 + 2
@@ -223,7 +227,7 @@ pub fn run(
                 + impact_width;
             println!("{}", "─".repeat(table_width));
             println!(
-                "{:>3}  {:<cmd_width$}  {:>count_width$}  {:>saved_width$}  {:>6}  {:>time_width$}  {:<impact_width$}",
+                "{:>rank_width$}  {:<cmd_width$}  {:>count_width$}  {:>saved_width$}  {:>6}  {:>time_width$}  {:<impact_width$}",
                 "#",
                 "Command",
                 "Count",
@@ -247,7 +251,7 @@ pub fn run(
                 .unwrap_or(1);
 
             for (idx, (cmd, count, saved, pct, avg_time)) in summary.by_command.iter().enumerate() {
-                let row_idx = format!("{:>2}.", idx + 1);
+                let row_idx = format!("{:>width$}.", idx + 1, width = rank_width - 1);
                 let cmd_cell = style_command_cell(&truncate_for_column(cmd, cmd_width)); // added: colored command
                 let count_cell = format!("{:>count_width$}", count, count_width = count_width);
                 let saved_cell = format!(
@@ -269,6 +273,9 @@ pub fn run(
                 );
             }
             println!("{}", "─".repeat(table_width));
+            println!();
+        } else if commands.filter.is_some() || commands.exclude.is_some() {
+            println!("No commands match the By Command filters.");
             println!();
         }
 
@@ -642,6 +649,8 @@ fn print_monthly(tracker: &Tracker, project_scope: Option<&str>) -> Result<()> {
 struct ExportData {
     summary: ExportSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
+    by_command: Option<Vec<ExportCommand>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     daily: Option<Vec<DayStats>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     weekly: Option<Vec<WeekStats>>,
@@ -660,6 +669,27 @@ struct ExportSummary {
     avg_time_ms: u64,
 }
 
+#[derive(Serialize)]
+struct ExportCommand {
+    command: String,
+    count: usize,
+    saved_tokens: usize,
+    savings_pct: f64,
+    avg_time_ms: u64,
+}
+
+impl From<CommandStats> for ExportCommand {
+    fn from((command, count, saved_tokens, savings_pct, avg_time_ms): CommandStats) -> Self {
+        Self {
+            command,
+            count,
+            saved_tokens,
+            savings_pct,
+            avg_time_ms,
+        }
+    }
+}
+
 fn export_json(
     tracker: &Tracker,
     daily: bool,
@@ -667,9 +697,10 @@ fn export_json(
     monthly: bool,
     all: bool,
     project_scope: Option<&str>, // added: project scope
+    commands: &CommandQuery,
 ) -> Result<()> {
     let summary = tracker
-        .get_summary_filtered(project_scope) // changed: use filtered variant
+        .get_summary_with_commands(project_scope, commands)
         .context("Failed to load token savings summary from database")?;
 
     let export = ExportData {
@@ -681,6 +712,17 @@ fn export_json(
             avg_savings_pct: summary.avg_savings_pct,
             total_time_ms: summary.total_time_ms,
             avg_time_ms: summary.avg_time_ms,
+        },
+        by_command: if !all && !daily && !weekly && !monthly {
+            Some(
+                summary
+                    .by_command
+                    .into_iter()
+                    .map(ExportCommand::from)
+                    .collect(),
+            )
+        } else {
+            None
         },
         daily: if all || daily {
             Some(tracker.get_all_days_filtered(project_scope)?) // changed: use filtered
@@ -712,7 +754,21 @@ fn export_csv(
     monthly: bool,
     all: bool,
     project_scope: Option<&str>, // added: project scope
+    commands: &CommandQuery,
 ) -> Result<()> {
+    if !all && !daily && !weekly && !monthly {
+        println!("command,count,saved_tokens,savings_pct,avg_time_ms");
+        for (command, count, saved, ratio, avg_time) in
+            tracker.get_by_command(project_scope, commands)?
+        {
+            println!(
+                "{},{count},{saved},{ratio:.2},{avg_time}",
+                escape_csv_field(&command)
+            );
+        }
+        return Ok(());
+    }
+
     if all || daily {
         let days = tracker.get_all_days_filtered(project_scope)?; // changed: use filtered
         println!("# Daily Data");
@@ -780,6 +836,14 @@ fn export_csv(
     }
 
     Ok(())
+}
+
+fn escape_csv_field(value: &str) -> String {
+    if value.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_owned()
+    }
 }
 
 /// Lightweight scan of recent Claude Code sessions for RTK_DISABLED= overuse.

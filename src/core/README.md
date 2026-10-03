@@ -196,3 +196,12 @@ The agent runs `rtk recall <hash>` to get back exactly what was elided. For `for
 
 ## Adding New Functionality
 Place new infrastructure code here if it meets **all** of these criteria: (1) it has no dependencies on command modules or hooks, (2) it is used by two or more other modules, and (3) it provides a general-purpose utility rather than command-specific logic. Follow the existing pattern of lazy-initialized resources (`LazyLock` for regex, on-demand config loading) to preserve the <10ms startup target. Add `#[cfg(test)] mod tests` with unit tests in the same file.
+
+## By-command analytics queries
+
+`Tracker::get_summary_with_commands` accepts `CommandQuery` to select the By Command
+rows independently of the summary totals. It applies project scope and literal
+include/exclude filters before grouping, then orders by saved tokens, invocation
+count, or weighted savings ratio before applying the row limit (`0` means all).
+`get_summary_filtered` retains the default top ten by saved tokens. These read-only
+options do not change recording, retention, or the database schema.
