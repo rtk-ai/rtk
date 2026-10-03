@@ -522,6 +522,11 @@ pub fn quote_arg_for_child(arg: &str) -> String {
 ///
 /// Use instead of `Command::arg`/`args` for anything that arrived on rtk's own
 /// command line — a pattern, a path, a flag value.
+///
+/// For cmd.exe, pass the complete invocation to `child_args`: `/C` and `/K`
+/// consume one command string, not independent MSVCRT arguments. A single
+/// payload is shell source; split arguments retain their plain quote grouping.
+/// Shell operators and expansion are intentional here, not sanitized data.
 pub trait ChildArgExt {
     fn child_arg<S: AsRef<OsStr>>(&mut self, arg: S) -> &mut Command;
 
@@ -542,6 +547,10 @@ impl ChildArgExt for Command {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        #[cfg(windows)]
+        if crate::core::windows_cmd::is_cmd_program(self.get_program()) {
+            return crate::core::windows_cmd::append_args(self, args);
+        }
         for arg in args {
             push_child_arg(self, arg.as_ref());
         }

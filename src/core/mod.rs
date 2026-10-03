@@ -23,3 +23,5 @@ pub mod truncate;
 pub mod user_dirs;
 pub mod user_env;
 pub mod utils;
+#[cfg(any(windows, test))]
+mod windows_cmd;
