@@ -1,0 +1,29 @@
+------------------------------------------------------------------------
+r4 | root | 2026-09-01 03:57:18 +0000 (Tue, 01 Sep 2026) | 6 lines
+
+Clarify configuration documentation
+
+Link the README to the checked-in defaults.
+
+Refs: OPS-142
+
+------------------------------------------------------------------------
+r3 | root | 2026-09-01 03:57:18 +0000 (Tue, 01 Sep 2026) | 5 lines
+
+Add application defaults
+
+Introduce the shared configuration used by deployment jobs.
+Keep environment overrides outside version control.
+
+------------------------------------------------------------------------
+r2 | root | 2026-09-01 03:57:18 +0000 (Tue, 01 Sep 2026) | 4 lines
+
+Add project README
+
+Document the initial checkout and build workflow.
+
+------------------------------------------------------------------------
+r1 | root | 2026-09-01 03:57:18 +0000 (Tue, 01 Sep 2026) | 1 line
+
+Initialize project structure
+------------------------------------------------------------------------

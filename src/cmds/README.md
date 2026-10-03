@@ -25,7 +25,7 @@ All command-specific filter modules that execute CLI commands and transform thei
 
 Each subdirectory has its own README with file descriptions, parsing strategies, and cross-command dependencies.
 
-- **[`git/`](git/README.md)** — git, gh, gt, diff — `trailing_var_arg` parsing, gh markdown filtering, gt passthrough
+- **[`git/`](git/README.md)** — git, svn, gh, gt, diff — VCS argument preservation, gh markdown filtering, safe passthrough
 - **[`rust/`](rust/README.md)** — cargo, runner (err/test) — Cargo sub-enum routing, runner dual-mode
 - **[`js/`](js/README.md)** — npm, pnpm, vitest, lint, tsc, next, prettier, playwright, prisma — Package manager auto-detection, lint routing, cross-deps with python
 - **[`python/`](python/README.md)** — ruff, pytest, mypy, pip — JSON check vs text format, state machine parsing, uv auto-detection

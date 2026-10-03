@@ -3,3 +3,4 @@ pub mod gh_cmd;
 pub mod git_cmd;
 pub mod glab_cmd;
 pub mod gt_cmd;
+pub mod svn_cmd;
