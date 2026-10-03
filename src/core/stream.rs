@@ -742,7 +742,11 @@ fn capture(cmd: &mut Command) -> Result<CaptureResult> {
 /// instead of the raw path silently dropping it.
 fn capture_raw(cmd: &mut Command) -> Result<CaptureBytes> {
     let program = cmd.get_program().to_string_lossy().into_owned();
-    let output = cmd.output().context("Failed to execute command")?;
+    let output = cmd.output().with_context(|| {
+        format!(
+            "failed to spawn `{program}` (is it installed, or does its shebang point at a missing interpreter?)"
+        )
+    })?;
     let exit_code = super::utils::exit_code_from_output(&output, &program);
     Ok(CaptureBytes {
         stdout: output.stdout,
@@ -1112,6 +1116,24 @@ pub(crate) mod tests {
         cmd.arg("check_equality");
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly).unwrap();
         assert_eq!(result.filtered.trim(), result.raw_stdout.trim());
+    }
+
+    #[test]
+    fn test_capture_raw_spawn_error_names_the_program() {
+        let result = exec_capture(&mut Command::new("rtk-definitely-not-a-real-binary-4056"));
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("missing binary must fail to spawn"),
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("rtk-definitely-not-a-real-binary-4056"),
+            "spawn error should name the program: {msg}"
+        );
+        assert!(
+            msg.contains("failed to spawn"),
+            "spawn error should use the shared wording: {msg}"
+        );
     }
 
     #[test]
