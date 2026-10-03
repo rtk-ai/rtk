@@ -160,9 +160,52 @@ jobs:
           name: rtk-rpm
           path: target/generate-rpm/*.rpm
 
+  build-apk:
+    name: Build APK package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+
+      - name: Install nfpm
+        run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
+
+      - name: Build release
+        run: cargo build --release --target x86_64-unknown-linux-musl
+        env:
+          RTK_TELEMETRY_URL: ${{ vars.RTK_TELEMETRY_URL }}
+          RTK_TELEMETRY_TOKEN: ${{ secrets.RTK_TELEMETRY_TOKEN }}
+
+      - name: Build APK
+        run: |
+          mkdir -p target/apk
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2) \
+            "$(go env GOPATH)/bin/nfpm" package -p apk -f .github/nfpm-apk.yaml -t target/apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtk-apk
+          path: target/apk/*.apk
+
   release:
     name: Create Release
-    needs: [build, build-deb, build-rpm]
+    needs: [build, build-deb, build-rpm, build-apk]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/create-github-app-token@v3
@@ -195,7 +238,7 @@ jobs:
       - name: Flatten artifacts
         run: |
           mkdir -p release
-          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.deb" -o -name "*.rpm" \) -exec cp {} release/ \;
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.deb" -o -name "*.rpm" -o -name "*.apk" \) -exec cp {} release/ \;
 
       - name: Create version-agnostic package names
         run: |
@@ -205,6 +248,9 @@ jobs:
           done
           for f in *.rpm; do
             [ -f "$f" ] && cp "$f" "rtk.x86_64.rpm"
+          done
+          for f in *.apk; do
+            [ -f "$f" ] && cp "$f" "rtk.x86_64.apk"
           done
 
       - name: Create checksums
