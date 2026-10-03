@@ -21,6 +21,8 @@ pub const CURSOR_HOOK_COMMAND: &str = "rtk hook cursor";
 pub const DROID_HOOK_COMMAND: &str = "rtk hook droid";
 /// Native Rust hook command for Mistral Vibe.
 pub const VIBE_HOOK_COMMAND: &str = "rtk hook vibe";
+/// Native Rust hook command for Grok Build CLI.
+pub const GROK_HOOK_COMMAND: &str = "rtk hook grok";
 
 pub const CONFIG_DIR: &str = ".config";
 pub const OPENCODE_SUBDIR: &str = "opencode";
@@ -78,6 +80,18 @@ pub const HERMES_PLUGINS_SUBDIR: &str = "plugins";
 pub const HERMES_PLUGIN_NAME: &str = "rtk-rewrite";
 pub const HERMES_PLUGIN_INIT_FILE: &str = "__init__.py";
 pub const HERMES_PLUGIN_MANIFEST_FILE: &str = "plugin.yaml";
+
+/// Grok Build home directory when `$GROK_HOME` is unset (`~/.grok`).
+pub const GROK_DIR: &str = ".grok";
+/// Environment variable Grok uses as the home directory itself (not a parent
+/// to join `.grok` onto). Default: `~/.grok`.
+pub const GROK_HOME_ENV: &str = "GROK_HOME";
+/// Dedicated hook file written under `$GROK_HOME/hooks/` or `.grok/hooks/`.
+pub const GROK_HOOK_FILE: &str = "rtk-rewrite.json";
+/// Grok scans `*.md` in this subdirectory as always-on rules.
+pub const GROK_RULES_SUBDIR: &str = "rules";
+/// Awareness file dropped into `GROK_RULES_SUBDIR`.
+pub const GROK_RULES_FILE: &str = "rtk.md";
 
 pub const VIBE_DIR: &str = ".vibe";
 pub const VIBE_HOOKS_FILE: &str = "hooks.toml";

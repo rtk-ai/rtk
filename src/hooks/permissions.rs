@@ -41,6 +41,7 @@ pub enum Host {
     Gemini,
     Droid,
     Vibe,
+    Grok,
     Antigravity,
 }
 
@@ -61,11 +62,12 @@ pub(crate) fn load_rules_for(host: Host) -> (Vec<String>, Vec<String>, Vec<Strin
         Host::Cursor => load_cursor_rules(),
         Host::Gemini => load_gemini_rules(),
         Host::Droid => load_droid_rules(),
-        // Hosts with no RTK-side rule source. Codex enforces its native
-        // execution rules after updatedInput. Do not interpret these hosts'
-        // rules as Claude Bash patterns or borrow another host's settings.
-        // No RTK-side match means Default, not an explicit Allow.
-        Host::Codex | Host::Trae | Host::Vibe | Host::Antigravity => {
+        // Hosts with no RTK-side rule source. Codex, Trae, Grok, and
+        // Antigravity enforce their native execution rules after the rewrite
+        // (Grok and Trae omit `permissionDecision`). Do not interpret these
+        // hosts' rules as Claude Bash patterns or borrow another host's
+        // settings. No RTK-side match means Default, not an explicit Allow.
+        Host::Codex | Host::Trae | Host::Vibe | Host::Grok | Host::Antigravity => {
             (Vec::new(), Vec::new(), Vec::new())
         }
     }
