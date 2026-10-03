@@ -3,6 +3,7 @@
 //! Detects table and expanded display formats, strips borders/padding,
 //! and produces compact tab-separated or key=value output.
 
+use crate::core::ascii_table::{strip_ascii_table, TableShape};
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::CAP_LIST;
 use crate::core::utils::resolved_command;
@@ -10,12 +11,10 @@ use anyhow::Result;
 use regex::Regex;
 use std::sync::LazyLock;
 
-const MAX_TABLE_ROWS: usize = CAP_LIST;
 const MAX_EXPANDED_RECORDS: usize = CAP_LIST;
 
 static EXPANDED_RECORD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"-\[ RECORD \d+ \]-").unwrap());
-static SEPARATOR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[-+]+$").unwrap());
 static ROW_COUNT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\(\d+ rows?\)$").unwrap());
 static RECORD_HEADER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^-\[ RECORD (\d+) \]-").unwrap());
@@ -71,57 +70,22 @@ fn is_expanded_format(output: &str) -> bool {
     EXPANDED_RECORD.is_match(output)
 }
 
-/// Filter psql table format:
-/// - Strip separator lines (----+----)
-/// - Strip (N rows) footer
-/// - Trim column padding
-/// - Output tab-separated
+/// Filter psql table format: drop the `(N rows)` footer, then delegate the row
+/// de-formatting to the shared ASCII-table stripper. psql rows have no outer
+/// bars, so `has_outer_pipes` is false.
 fn filter_table(output: &str) -> String {
-    let mut result = Vec::new();
-    let mut data_rows = 0;
-    let mut total_rows = 0;
+    let body = output
+        .lines()
+        .filter(|line| !ROW_COUNT.is_match(line.trim()))
+        .collect::<Vec<_>>()
+        .join("\n");
 
-    for line in output.lines() {
-        let trimmed = line.trim();
-
-        // Skip separator lines
-        if SEPARATOR.is_match(trimmed) {
-            continue;
-        }
-
-        // Skip row count footer
-        if ROW_COUNT.is_match(trimmed) {
-            continue;
-        }
-
-        // Skip empty lines
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        // This is a data or header row with | delimiters
-        if trimmed.contains('|') {
-            total_rows += 1;
-            // First row is header, don't count it as data
-            if total_rows > 1 {
-                data_rows += 1;
-            }
-
-            if data_rows <= MAX_TABLE_ROWS || total_rows == 1 {
-                let cols: Vec<&str> = trimmed.split('|').map(|c| c.trim()).collect();
-                result.push(cols.join("\t"));
-            }
-        } else {
-            // Non-table line (e.g., command output like SET, NOTICE)
-            result.push(trimmed.to_string());
-        }
-    }
-
-    if data_rows > MAX_TABLE_ROWS {
-        result.push(format!("... +{} more rows", data_rows - MAX_TABLE_ROWS));
-    }
-
-    result.join("\n")
+    strip_ascii_table(
+        &body,
+        TableShape {
+            has_outer_pipes: false,
+        },
+    )
 }
 
 /// Filter psql expanded format:
@@ -252,9 +216,9 @@ mod tests {
 
         let result = filter_table(&input);
         assert!(result.contains("... +20 more rows"));
-        // Header + MAX_TABLE_ROWS data rows + overflow line
+        // Header + CAP_LIST data rows + overflow line
         let result_lines: Vec<&str> = result.lines().collect();
-        assert_eq!(result_lines.len(), MAX_TABLE_ROWS + 2); // 1 header + data + 1 overflow
+        assert_eq!(result_lines.len(), CAP_LIST + 2); // 1 header + data + 1 overflow
     }
 
     #[test]

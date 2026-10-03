@@ -41,9 +41,100 @@ pub fn restore_double_dash_with_raw(parsed_args: &[String], raw_args: &[String])
     raw_args[user_region_start..].to_vec()
 }
 
+// --- credential redaction ---
+
+/// Redact a password that a getopt-style parser would read out of a *clustered*
+/// short-option token.
+///
+/// Tools built on getopt (mysql's `my_getopt` among them) accept bundled short
+/// options: `-tpSecret` is `-t`, then `-p` taking `Secret` as its value. A
+/// `starts_with("-p")` check only sees the *first* option in the bundle and so
+/// misses every password that is not written at the head of the token.
+///
+/// `value_taking` lists the short options that consume a value, so scanning can
+/// stop at them — in `-uroot` the `p`-less remainder is a username, not more
+/// flags. Do not list `p` itself there.
+///
+/// Returns `None` when the token carries no attached password (a long option, a
+/// bare `-p` that prompts interactively, or a bundle whose value swallowed the
+/// rest). The bias is deliberate: an unrecognized value-taking option leads to
+/// *over*-redaction of a label, never to a leaked secret.
+pub fn redact_clustered_password(arg: &str, value_taking: &str) -> Option<String> {
+    let body = arg.strip_prefix('-')?;
+    if body.starts_with('-') {
+        return None; // long option — the caller handles `--password=`
+    }
+
+    for (i, ch) in body.char_indices() {
+        if ch == 'p' {
+            // `p` is ASCII, so `i + 1` is always a char boundary.
+            if i + 1 >= body.len() {
+                return None; // trailing `-p` prompts instead of taking a value
+            }
+            return Some(format!("-{}p***", &body[..i]));
+        }
+        if value_taking.contains(ch) {
+            return None; // everything after this option is its value
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- credential redaction ---
+
+    #[test]
+    fn test_bundled_password_redacted() {
+        // `my_getopt` reads this as `-t` + `-p Secret123`.
+        assert_eq!(
+            redact_clustered_password("-tpSecret123", "uhPDSe"),
+            Some("-tp***".to_string())
+        );
+    }
+
+    #[test]
+    fn test_leading_password_redacted() {
+        assert_eq!(
+            redact_clustered_password("-pSecret123", "uhPDSe"),
+            Some("-p***".to_string())
+        );
+    }
+
+    #[test]
+    fn test_bare_p_prompts_and_is_kept() {
+        // A trailing `-p` takes no value — it prompts, so there is nothing to hide.
+        assert_eq!(redact_clustered_password("-p", "uhPDSe"), None);
+        assert_eq!(redact_clustered_password("-tp", "uhPDSe"), None);
+    }
+
+    #[test]
+    fn test_value_taking_option_stops_the_scan() {
+        // The `p` here belongs to a username/host/database, not to `-p`.
+        assert_eq!(redact_clustered_password("-uproot", "uhPDSe"), None);
+        assert_eq!(redact_clustered_password("-hprimary", "uhPDSe"), None);
+        assert_eq!(redact_clustered_password("-Dpayments", "uhPDSe"), None);
+    }
+
+    #[test]
+    fn test_non_password_tokens_untouched() {
+        assert_eq!(redact_clustered_password("-P3306", "uhPDSe"), None); // port
+        assert_eq!(redact_clustered_password("-t", "uhPDSe"), None);
+        assert_eq!(redact_clustered_password("--password=x", "uhPDSe"), None);
+        assert_eq!(redact_clustered_password("db_name", "uhPDSe"), None);
+    }
+
+    #[test]
+    fn test_multibyte_token_does_not_panic() {
+        // char_indices keeps the slice on a boundary even with multi-byte flags.
+        assert_eq!(redact_clustered_password("-é", "uhPDSe"), None);
+        assert_eq!(
+            redact_clustered_password("-épSecret", "uhPDSe"),
+            Some("-ép***".to_string())
+        );
+    }
 
     fn restore_with_raw(parsed: &[&str], raw: &[&str]) -> Vec<String> {
         let parsed: Vec<String> = parsed.iter().map(|s| s.to_string()).collect();
