@@ -394,6 +394,72 @@ The most effective way to use rtk. The hook transparently intercepts Bash comman
 
 **Scope note:** this only applies to Bash tool calls. Claude Code built-in tools such as `Read`, `Grep`, and `Glob` bypass the hook, so use shell commands or explicit `rtk` commands when you want RTK filtering there.
 
+Simple quoted shell wrappers are also rewritten without changing the selected
+shell:
+
+```bash
+bash -c "head foo && grep -R bar ."
+# → bash -c "rtk read foo --head-lines 10 && rtk grep -R bar ."
+```
+
+This support is intentionally conservative: it covers exact `sh -c`,
+`bash -c`, `zsh -c` and `fish -c` wrappers with a quoted portable script.
+Because the wrapper names the shell, a `fish -c` script is read as fish: its
+own syntax — `(cmd)` substitution, `and`/`or`/`end` control flow — defers
+instead of being rewritten under POSIX assumptions:
+
+```bash
+fish -c 'git status; cargo test'      # → fish -c 'rtk git status; rtk cargo test'
+fish -c 'git status; and cargo test'  # unchanged
+```
+
+Shell expansion in an outer double quote, additional shell options, redirects
+to files, and nested wrappers pass through unchanged.
+
+A command string that is *itself* fish — a multiline `if`/`for`/`switch` … `end`
+block, or a `; and` / `; or` chain — is handled before the rewrite rules are
+consulted: a host that evaluates it with a POSIX-compatible layer would fail to
+parse it before RTK ever runs, so the hook hands the script back for explicit
+fish execution:
+
+```fish
+if test -d src
+  git status
+end
+# → rtk run --shell fish -c 'if test -d src\n  git status\nend'
+
+git diff HEAD~3 HEAD; and true
+# → rtk run --shell fish -c 'rtk git diff HEAD~3 HEAD; and true'
+```
+
+The script travels inside one quoted argument, so both POSIX and fish host
+layers parse the wrapped command; its own commands go through the ordinary
+rewrite rules first, so wrapping costs no savings (a *multi-line* block opened
+by `if`/`for`/`while`/`switch` is carried through unrewritten, as the rewrite
+rules leave such blocks alone; a single-line `if …; …; end` is rewritten like
+any other chain). The wrap always surfaces as an "ask" rewrite — never
+auto-allowed by RTK, for any host, including the delegates that own their own
+approval — because the script's content cannot be attested. A deny rule keeps
+it off entirely: every word of the script is checked against your deny rules,
+so a denied command reaches none of the places fish starts one. Where the
+words cannot be read as fish would read them — a word carrying `$`, `{`, `*`,
+`[`, `~`, a backslash escape or a carriage return outside single quotes, all
+of which fish resolves at run time — the wrap is withheld rather than cleared,
+so with deny rules configured such a script keeps the behaviour it had before
+this feature. It requires a resolvable
+`fish` binary, is disabled on Windows, and can be turned off with
+`wrap_fish_scripts = false` under `[hooks]` in the RTK config.
+
+Not wrapped — these take the decision path they always did, ordinary rewrite
+rules included: ambiguous scripts (shared `if`/`for` keywords without a
+fish-only marker, POSIX `then`/`do`/`fi` forms, heredocs, backticks), any
+script RTK could not decompose for the permission gate (command or process
+substitution, including fish's own `(cmd)`, and a redirect to a file — so
+`for f in (ls) … end` is left to the host), a script containing `\\` or `\'`
+(fish and POSIX single quotes disagree about both), and fish's `&|` pipe,
+which the rewrite cannot re-emit in a form fish accepts. Keep writing
+intentionally shell-specific scripts as `rtk run --shell <shell> -c '<script>'`.
+
 ### Setup
 
 ```bash

@@ -116,17 +116,22 @@ LLM Agent: "cargo fmt --all && cargo test 2>&1 | tail -20"
   v
 rewrite_cmd::run(cmd)                              [src/hooks/rewrite_cmd.rs]
   |  1. Load config → hooks.exclude_commands
-  |  2. check_command(cmd) → Deny → exit(2)
-  |  3. registry::rewrite_command(cmd, excluded)
+  |  2. permissions::load_rules_for(Host::Claude) → deny/ask/allow, read once
+  |     check_command_with_rules(cmd, …) → Deny → exit(2)
+  |  3. decision::decide — a provably-fish script is wrapped as
+  |     `rtk run --shell fish -c '<script>'`, unless a deny rule matches a
+  |     run of words anywhere in it; otherwise
+  |     registry::rewrite_command(cmd, excluded)
   |     → None → exit(1)          (no RTK equivalent, passthrough)
   |     → Some + Allow → print, exit(0)
   |     → Some + Ask   → print, exit(3)
   |  4. ApprovalOwner::from_env() — RTK_REWRITE_HOST names the calling
   |     delegate. For one that gates the rewritten command itself
   |     (OpenClaw), a Default ask renders as exit(0) instead of exit(3); an
-  |     explicit Ask rule still exits 3 so the host can prompt. Deny and
-  |     passthrough are untouched, so this never relaxes a deny or drops an
-  |     explicit ask.
+  |     explicit Ask rule still exits 3 so the host can prompt, and a fish
+  |     wrap always exits 3, since the verdict behind it was read as bash.
+  |     Deny and passthrough are untouched, so this never relaxes a deny or
+  |     drops an explicit ask.
   |
   v
 rewrite_command(cmd, excluded)                     [src/discover/registry.rs]
@@ -216,6 +221,7 @@ LLM Agent executes rewritten command
 Key design decisions:
 - **Lexer-based tokenization**: A single-pass state machine (`lexer.rs`) handles all shell constructs (quotes, escapes, redirects, operators). Used for both compound splitting and redirect stripping.
 - **Segment-level rewriting**: Compound commands are split by operators, each segment rewritten independently. Bash recombines them at execution time.
+- **Conservative shell-wrapper recursion**: Only exact quoted `sh|bash|zsh|fish -c` wrappers enter one level of inner rewriting. The parser hands back byte ranges instead of a decoded script, so the wrapper's own bytes are never re-quoted, and it reports the shell it matched so the script is attested under that shell's grammar rather than under bash's.
 - **Pipe semantics**: Producers and intermediate stages of `|` remain raw. Only an argument-safe final stage whose rule has `pipeline_final_safe` may be rewritten; initially this is limited to ordinary `grep` and `rg` invocations. Search pattern-file forms (`-f`/`--file`) defer because they can consume pipeline stdin as configuration. `|&` is recognized separately and its complete pipeline stays raw.
 - **Double env prefix handling**: `classify_command()` strips env prefixes to match the underlying command against rules. `rewrite_segment()` extracts the same prefix separately to re-prepend it to the rewritten command.
 - **Fallback contract**: If any segment fails to match, it stays raw. `rewrite_command()` returns `None` only when zero segments were rewritten.

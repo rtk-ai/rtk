@@ -1348,6 +1348,51 @@ Avant la comparaison, RTK retire le wrapper, l'interpreteur ou le chemin, donc `
 aussi `python3 -m pytest tests/`. Les arguments sont conserves : `"^ls$"` exclut `ls` seul sans
 englober `ls -la`.
 
+### Scripts fish non ambigus
+
+Certains hotes evaluent la chaine de commande avec une couche compatible POSIX
+meme quand le shell de l'utilisateur est fish : un script fish multi-lignes
+(`if ... end`, `; and`, `; or`) echoue alors en erreur de parsing avant meme
+que RTK demarre. Le hook detecte les scripts **non ambigus** (mot-cle
+exclusivement fish comme `end`, `begin`, `switch`, `and`, `or`, `not` en
+position de commande, sans marqueur POSIX `then`/`fi`/`do`/`done`) et les
+reecrit en execution fish explicite :
+
+```
+if test -d src\n  git status\nend
+-> rtk run --shell fish -c 'if test -d src\n  git status\nend'
+
+git diff HEAD~3 HEAD; and true
+-> rtk run --shell fish -c 'rtk git diff HEAD~3 HEAD; and true'
+```
+
+Points cles :
+- Les commandes du script passent d'abord par les regles de reecriture
+  habituelles : l'encapsulation ne coute aucune economie. Un bloc *multi-ligne*
+  ouvert par `if`/`for`/`while`/`switch` est repris tel quel, les regles de
+  reecriture laissant ces blocs intacts ; une forme sur une seule ligne
+  (`if …; …; end`) est reecrite comme n'importe quelle chaine.
+- La reecriture est toujours en mode « ask » (jamais auto-approuvee par RTK,
+  quel que soit l'hote, y compris les delegues qui gerent eux-memes
+  l'approbation) : le contenu du script n'est pas attestable.
+- Une regle `deny` empeche l'encapsulation : chaque mot du script est confronte
+  aux regles de refus, donc une commande refusee n'atteint aucune des positions
+  ou fish demarre une commande — y compris la condition d'un `if`/`while` et le
+  cote droit de `and`/`or`/`not`, la ou les decoupeurs bash ne regardent pas.
+  Quand les mots ne peuvent pas etre lus comme fish les lit — un mot portant
+  `$`, `{`, `*`, `[`, `~`, un echappement ou un retour chariot hors guillemets
+  simples, que fish resout a l'execution — l'encapsulation est refusee plutot
+  qu'accordee.
+- Necessite un binaire `fish` resolvable ; desactive sous Windows.
+- Ne sont pas encapsules — et suivent donc le chemin habituel, regles de
+  reecriture comprises : les scripts ambigus ou POSIX ; ceux que RTK ne peut pas
+  decomposer pour la verification des permissions (substitution de commande, y
+  compris la forme fish `(cmd)`, et redirection vers un fichier — donc
+  `for f in (ls) ... end`) ; ceux contenant `\\` ou `\'` (les guillemets simples
+  de fish et POSIX ne s'accordent pas) ; et le tube `&|` de fish, que la
+  reecriture ne sait pas re-emettre dans une forme que fish accepte.
+- Desactivable via `wrap_fish_scripts = false` dans la section `[hooks]`.
+
 ---
 
 ## Configuration
@@ -1394,6 +1439,7 @@ enabled = false             # Telemetrie anonyme (1 ping/jour, requiert consente
 
 [hooks]
 exclude_commands = []       # Commandes a exclure de la recriture automatique
+wrap_fish_scripts = true    # Reecrire les scripts fish non ambigus en `rtk run --shell fish -c`
 ```
 
 ### Variables d'environnement

@@ -56,6 +56,7 @@ enabled = true              # anonymous daily ping — see Telemetry & Privacy f
 [hooks]
 exclude_commands = []       # commands to never auto-rewrite
 suppress_hook_warning = false # suppress the missing-hook warning only
+wrap_fish_scripts = true    # hand a provably-fish command string back as `rtk run --shell fish -c '…'`
 
 [awareness]
 level = "default"           # "default", "high", "full" — see Awareness level

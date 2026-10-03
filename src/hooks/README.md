@@ -77,6 +77,65 @@ Deny > Ask > Allow (explicit) > Default (ask)
 
 Rules are loaded from all Claude Code `settings.json` files (project + global, including `.local` variants). Only `Bash(...)` rules are extracted; other scopes (Read, Write) are ignored.
 
+Quoted `sh -c`, `bash -c`, `zsh -c` and `fish -c` scripts add a
+second command-parsing boundary. RTK checks deny rules against both the outer
+wrapper and the parsed inner segments. A wrapper rewrite is never auto-allowed:
+its strongest RTK verdict is `Ask`. Ask-capable hosts prompt, while other
+hosts retain their existing native permission flow. Unsupported or ambiguous
+wrapper syntax is left unchanged for the host to evaluate.
+
+Unambiguously-fish scripts (a fish-only keyword such as `end`, `begin`,
+`switch`, `and`, `or`, or `not` at command position, with no POSIX
+disambiguator anywhere, comments excluded before anything is classified) are
+rewritten to `rtk run --shell fish -c '<script>'` (`discover/fish_script.rs`),
+with the script's own commands rewritten inside the wrap so it costs no
+savings. Like wrapper rewrites, the wrapped form is never auto-allowed — its
+strongest verdict is `Ask`, for every host, including a delegate that owns
+approval (`ApprovalOwner`): the verdict behind a wrap was read as bash, so
+`Default` there means no rule was *read*, not that none matched. A deny rule
+keeps the wrap off entirely: because the wrap hands the script to a
+*different* shell, and fish starts commands where the bash-shaped segmenter
+does not look (the condition of an `if` or a `while`, the right side of
+`and`/`or`/`not`), every word of the script is treated as a possible command
+start and checked against the host's own deny rules before wrapping — both as
+the host submitted it and as RTK would emit it, since the inner rewrite
+inserts commands of its own. The wrap is skipped without a resolvable `fish`
+binary, on Windows, or when `hooks.wrap_fish_scripts = false`; those cases
+take the decision path they always did.
+
+**Why it runs before the unattestable gate.** Every other rewrite refuses a
+command the gate could not decompose. The wrap cannot wait for that gate and
+still do its job: a host that evaluates the command string with a POSIX layer
+fails to parse a fish script *before* RTK is consulted at all, so deferring
+means the command is lost rather than merely unrewritten. What it does instead
+is refuse everything that gate refuses — command and process substitution,
+file-target redirects, and fish's own `(cmd)` substitution, which the shared
+bash lexer reads as a subshell — reading the same comment-stripped text the
+classification uses, so a quote in a comment cannot blind it. It also refuses
+fish's `&|` pipe, which that lexer reads as a background `&` plus a pipe and
+the rewrite re-emits spaced, a form fish rejects outright. The only scripts
+that reach the wrap are ones whose sole unattestable property is fish control
+flow (`; and`, `if … end`), which the shared segmenter cannot split into
+commands. For those:
+
+- the script travels inside one quoted argument and RTK decides nothing about
+  its contents beyond the rewrite rules it applies to them — those rules are
+  the one edit it makes, so the argument carries the same commands rather than
+  the same bytes;
+- the verdict is `Ask`, never `Allow` and never relaxed, and a deny rule keeps
+  the wrap off wherever it matches a run of words in the script, in any
+  placement. The words are read as one command's argv — grouped by command
+  separator, with a redirect removed rather than truncated at, dequoted, and
+  compared against each rule both as written and dequoted. Where they cannot be
+  read as fish would read them — a word carrying `$`, `{`, `*`, `[`, `~`, a
+  backslash escape or a `\r` outside single quotes, all of which fish resolves
+  at run time — the wrap is withheld rather than cleared;
+- the residual exposure is a host that treats an `rtk`-prefixed command as
+  pre-approved. Codex does: it renders `Ask` as a protocol-level `allow` and
+  its own safe/dangerous classifiers do not unwrap `rtk` (see `hook_cmd.rs`).
+  `hooks.wrap_fish_scripts = false` is the switch for a host where that
+  trade is not wanted.
+
 | Verdict | Trigger | rewrite_cmd exit | Hook behavior |
 |---------|---------|-----------------|---------------|
 | Deny | `permissions.deny` rule matched | 2 | Passthrough — host tool handles denial |
@@ -118,6 +177,7 @@ rewrite`, since it is inherited by every child process. See `decision.rs`'s
 - `permissions.rs` — loads deny/ask/allow rules, evaluates precedence, returns `PermissionVerdict`
 - `rewrite_cmd.rs` — maps verdict to exit code (consumed by shell hook)
 - `hook_cmd.rs` — maps decisions to each agent's JSON protocol, including Codex `updatedInput`
+- `discover/shell_wrapper.rs` — shares conservative script-span parsing between rewrite and permission checks
 
 ## Exit Code Contract
 

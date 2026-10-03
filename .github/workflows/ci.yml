@@ -64,6 +64,16 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # The fish-script wrap is skipped without a resolvable `fish`, so without
+      # this step `tests/fish_wrap_test.rs` asserts only the disabled path and
+      # the feature's own code never runs on any runner. Windows has no wrap to
+      # exercise: it is disabled there by design.
+      - name: Install fish (wrap coverage)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y fish
+      - name: Install fish (wrap coverage)
+        if: runner.os == 'macOS'
+        run: brew install fish
       - run: cargo test --all
 
   security:
