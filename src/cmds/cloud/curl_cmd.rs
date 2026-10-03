@@ -23,14 +23,16 @@ const MAX_RESPONSE_SIZE: usize = 500;
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
     let mut cmd = resolved_command("curl");
-    cmd.arg("-s"); // Silent mode (no progress bar)
+    // -s silences the progress bar but ALSO suppresses error messages; -S
+    // re-enables them so a failure still says why (DNS, refused, TLS, ...).
+    cmd.arg("-sS");
 
     for arg in args {
         cmd.arg(arg);
     }
 
     if verbose > 0 {
-        eprintln!("Running: curl -s {}", args.join(" "));
+        eprintln!("Running: curl -sS {}", args.join(" "));
     }
 
     // Capture stdout as raw bytes (not UTF-8 String) so binary downloads
@@ -47,11 +49,14 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         // page. The body on stdout does not — see the note below.
         let stderr_str = crate::core::utils::decode_process_output(&output.stderr);
         let stdout_str = String::from_utf8_lossy(&output.stdout);
-        let msg = if stderr_str.trim().is_empty() {
-            stdout_str.trim().to_string()
-        } else {
-            stderr_str.trim().to_string()
-        };
+        // With `-S` curl says why it failed on stderr, but a body that arrived
+        // anyway (`--fail-with-body`, a transfer cut short) often explains the
+        // failure better, so keep both instead of letting the reason hide it.
+        let msg = [stderr_str.trim(), stdout_str.trim()]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
         eprintln!("FAILED: curl {}", msg);
         return Ok(exit_code);
     }
