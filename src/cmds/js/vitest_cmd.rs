@@ -3,9 +3,11 @@
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::Deserialize;
+use std::path::Path;
 use std::sync::LazyLock;
 
 use crate::Commands;
+use crate::core::arg_tokenizer;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{package_manager_exec, strip_ansi};
@@ -202,12 +204,23 @@ fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
 pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
     let mut passthrough_requested = false;
+    // Vitest 5's JSON reporter writes to a file and prints only its path unless told
+    // otherwise, so the report is sent to a temp file and read back from there.
+    let report_file = match command {
+        Commands::Vitest { .. } => tempfile::Builder::new()
+            .prefix("rtk_vitest_")
+            .suffix(".json")
+            .tempfile()
+            .map(tempfile::NamedTempFile::into_temp_path)
+            .ok(),
+        _ => None,
+    };
 
     let (framework, mut cmd) = match command {
         Commands::Vitest { .. } => {
             let framework = "vitest";
             let mut cmd = package_manager_exec(framework);
-            let effective_args = build_vitest_effective_args(args);
+            let effective_args = build_vitest_effective_args(args, report_file.as_deref());
             passthrough_requested = effective_args.passthrough;
             cmd.args(effective_args.args);
             (framework, cmd)
@@ -240,23 +253,34 @@ pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32>
 
     let result = exec_capture(&mut cmd).context(format!("Failed to run {}", framework))?;
     let combined = result.combined();
+    let report = report_file
+        .as_deref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .filter(|report| !report.trim().is_empty());
 
     let filtered = format_test_output(
         framework,
+        report.as_deref(),
         &result.stdout,
         &combined,
         passthrough_requested,
         verbose,
     );
     let tee_label = format!("{}_run", framework);
+    // The report is part of what the command produced: it is what the guard compares the
+    // summary against, what recovery tees and what the savings are counted from.
+    let raw = match &report {
+        Some(report) => format!("{}\n{}", combined.trim_end(), report),
+        None => combined,
+    };
 
-    let rendered = render_test_output(&filtered, &combined, &tee_label, result.exit_code);
-    let shown = crate::core::runner::emit_guarded(&rendered, None, &combined);
+    let rendered = render_test_output(&filtered, &raw, &tee_label, result.exit_code);
+    let shown = crate::core::runner::emit_guarded(&rendered, None, &raw);
 
     timer.track(
         format!("{} run", framework).as_str(),
         format!("rtk {} run", framework).as_str(),
-        &combined,
+        &raw,
         &shown,
     );
 
@@ -292,12 +316,15 @@ impl FormattedTestOutput {
     }
 }
 
-fn build_vitest_effective_args(args: &[String]) -> EffectiveVitestArgs {
+fn build_vitest_effective_args(args: &[String], report_path: Option<&Path>) -> EffectiveVitestArgs {
     let passthrough = has_explicit_vitest_reporter(args);
     let mut effective = vec!["run".to_string()];
 
     if !passthrough {
         effective.push("--reporter=json".to_string());
+        if let Some(path) = report_path.filter(|_| !has_explicit_vitest_output_file(args)) {
+            effective.push(format!("--outputFile.json={}", path.display()));
+        }
     }
 
     for arg in args {
@@ -318,12 +345,25 @@ fn has_explicit_vitest_reporter(args: &[String]) -> bool {
         .any(|arg| arg == "--reporter" || arg.starts_with("--reporter="))
 }
 
+/// `--outputFile` and `--outputFile.json` (with or without `=value`) choose where the JSON
+/// report goes, so rtk leaves the destination to the user when either is given.
+fn has_explicit_vitest_output_file(args: &[String]) -> bool {
+    let tokens = arg_tokenizer::tokenize(args);
+    arg_tokenizer::before_dashdash(&tokens).iter().any(|token| {
+        token.kind == arg_tokenizer::TokenKind::Long
+            && (token.text == "outputFile" || token.text.starts_with("outputFile."))
+    })
+}
+
 fn should_skip_vitest_arg(arg: &str) -> bool {
     arg == "run" || arg.starts_with("--json") || arg.starts_with("--watch")
 }
 
+/// `report` is the JSON report file's contents when the run wrote one; otherwise the report is
+/// looked for in `stdout`, where vitest before 5 and jest print it.
 fn format_test_output(
     framework: &str,
+    report: Option<&str>,
     stdout: &str,
     combined: &str,
     passthrough_requested: bool,
@@ -333,7 +373,7 @@ fn format_test_output(
         return format_passthrough_output(combined);
     }
 
-    let parse_result = VitestParser::parse(stdout);
+    let parse_result = VitestParser::parse(report.unwrap_or(stdout));
     let mode = FormatMode::from_verbosity(verbose);
     match parse_result {
         ParseResult::Full(data) => {
@@ -526,7 +566,7 @@ Scope: all 6 workspace projects
     #[test]
     fn test_vitest_effective_args_inject_json_reporter_by_default() {
         let effective =
-            build_vitest_effective_args(&args(&["run", "constants.test.ts", "--watch"]));
+            build_vitest_effective_args(&args(&["run", "constants.test.ts", "--watch"]), None);
 
         assert!(!effective.passthrough);
         assert_eq!(
@@ -536,9 +576,63 @@ Scope: all 6 workspace projects
     }
 
     #[test]
+    fn test_vitest_effective_args_send_json_report_to_file() {
+        let report = Path::new("/tmp/rtk_vitest_report.json");
+        let effective = build_vitest_effective_args(&args(&["run", "a.test.ts"]), Some(report));
+
+        assert!(!effective.passthrough);
+        assert_eq!(
+            effective.args,
+            args(&[
+                "run",
+                "--reporter=json",
+                &format!("--outputFile.json={}", report.display()),
+                "a.test.ts",
+            ])
+        );
+    }
+
+    #[test]
+    fn test_vitest_effective_args_keep_explicit_output_file() {
+        let report = Path::new("/tmp/rtk_vitest_report.json");
+        for user_args in [
+            args(&["a.test.ts", "--outputFile.json=out.json"]),
+            args(&["a.test.ts", "--outputFile", "out.json"]),
+            args(&["a.test.ts", "--outputFile=out.json"]),
+        ] {
+            let effective = build_vitest_effective_args(&user_args, Some(report));
+            assert!(
+                !effective
+                    .args
+                    .iter()
+                    .any(|arg| arg.contains("rtk_vitest_report")),
+                "{:?}",
+                effective.args
+            );
+        }
+    }
+
+    #[test]
+    fn test_vitest_reads_report_file_instead_of_stdout() {
+        // vitest 5 prints only where the report went.
+        let stdout = "JSON report written to /project/.vitest/json/output.json\n";
+        let report = r#"{"numTotalTests": 3, "numPassedTests": 2, "numFailedTests": 1, "numPendingTests": 0, "testResults": [{"name": "math.test.ts", "assertionResults": [{"fullName": "math adds", "status": "failed", "failureMessages": ["expected 3 to be 4"]}]}]}"#;
+
+        let filtered = format_test_output("vitest", Some(report), stdout, stdout, false, 0);
+
+        assert!(!filtered.text.contains("JSON report written"));
+        assert!(filtered.text.contains("math adds"), "{}", filtered.text);
+        assert!(
+            filtered.text.contains("expected 3 to be 4"),
+            "{}",
+            filtered.text
+        );
+    }
+
+    #[test]
     fn test_vitest_effective_args_preserve_explicit_reporter_equals() {
         let effective =
-            build_vitest_effective_args(&args(&["constants.test.ts", "--reporter=verbose"]));
+            build_vitest_effective_args(&args(&["constants.test.ts", "--reporter=verbose"]), None);
 
         assert!(effective.passthrough);
         assert_eq!(
@@ -549,12 +643,10 @@ Scope: all 6 workspace projects
 
     #[test]
     fn test_vitest_effective_args_preserve_explicit_reporter_value() {
-        let effective = build_vitest_effective_args(&args(&[
-            "run",
-            "constants.test.ts",
-            "--reporter",
-            "verbose",
-        ]));
+        let effective = build_vitest_effective_args(
+            &args(&["run", "constants.test.ts", "--reporter", "verbose"]),
+            None,
+        );
 
         assert!(effective.passthrough);
         assert_eq!(
@@ -574,7 +666,7 @@ Scope: all 6 workspace projects
    Duration  450ms
 "#;
 
-        let filtered = format_test_output("vitest", output, output, true, 0);
+        let filtered = format_test_output("vitest", None, output, output, true, 0);
 
         assert!(filtered.text.contains("keeps docs path"));
         assert!(filtered.text.contains("keeps app path"));
