@@ -270,6 +270,7 @@ rtk aws ec2 describe-instances  # Compact instance list
 rtk aws lambda list-functions   # Name/runtime/memory (strips secrets)
 rtk aws logs get-log-events     # Timestamped messages only
 rtk aws cloudformation describe-stack-events  # Failures first
+rtk aws cloudwatch describe-alarm-history  # One line per change, with state reason
 rtk aws dynamodb scan           # Unwraps type annotations
 rtk aws iam list-roles          # Strips policy documents
 rtk aws s3 ls                   # Truncated with recall recovery
