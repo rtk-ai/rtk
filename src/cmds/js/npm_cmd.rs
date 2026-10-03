@@ -189,8 +189,11 @@ fn filter_npm_output(output: &str) -> String {
         if line.trim_start().starts_with("npm notice") {
             continue;
         }
-        // Skip progress indicators
-        if line.contains("⸩") || line.contains("⸨") || line.contains("...") && line.len() < 10 {
+        // Skip progress indicators. `&&` binds tighter than `||`, so the length
+        // guard used to apply only to the `...` arm and every ⸨⸩ line was dropped
+        // whatever its length — grouping the arms makes the guard cover all three.
+        let is_progress_glyph = line.contains("⸩") || line.contains("⸨") || line.contains("...");
+        if is_progress_glyph && line.len() < 10 {
             continue;
         }
         // Skip empty lines
@@ -295,6 +298,24 @@ npm notice
                 "npm {subcommand} must be routed as a native subcommand"
             );
         }
+    }
+
+    #[test]
+    fn test_progress_indicator_preserves_long_lines() {
+        let output = "⸨loader⸩ Building module completed successfully\n⸨⸩\n...ok\n";
+        let result = filter_npm_output(output);
+        assert!(
+            result.contains("Building module completed successfully"),
+            "Long line with progress chars should be preserved, got: {result}"
+        );
+        assert!(
+            !result.contains("⸨⸩"),
+            "Short progress indicator should be filtered"
+        );
+        assert!(
+            !result.contains("...ok"),
+            "Short ellipsis line should be filtered"
+        );
     }
 
     #[test]
