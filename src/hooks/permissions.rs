@@ -42,9 +42,18 @@ pub enum Host {
     Droid,
     Vibe,
     Antigravity,
+    OpenCode,
 }
 
 pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
+    check_command_for_agent(cmd, host, None)
+}
+
+pub fn check_command_for_agent(cmd: &str, host: Host, agent: Option<&str>) -> PermissionVerdict {
+    if host == Host::OpenCode {
+        let rules = super::permissions_opencode::load_opencode_rules(agent);
+        return super::permissions_opencode::check_command_with_opencode_rules(cmd, &rules);
+    }
     let (deny_rules, ask_rules, allow_rules) = load_rules_for(host);
     check_command_with_rules(cmd, &deny_rules, &ask_rules, &allow_rules)
 }
@@ -68,6 +77,7 @@ pub(crate) fn load_rules_for(host: Host) -> (Vec<String>, Vec<String>, Vec<Strin
         Host::Codex | Host::Trae | Host::Vibe | Host::Antigravity => {
             (Vec::new(), Vec::new(), Vec::new())
         }
+        Host::OpenCode => (Vec::new(), Vec::new(), Vec::new()),
     }
 }
 

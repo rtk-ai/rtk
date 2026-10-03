@@ -1011,6 +1011,15 @@ enum HookCommands {
     Antigravity,
     /// Process Mistral Vibe CLI pre_tool hook (reads JSON from stdin)
     Vibe,
+    /// Answer for OpenCode's plugin: the rewrite and the verdict, as JSON
+    Opencode {
+        /// Active OpenCode agent, when its rules scope permissions by one
+        #[arg(long)]
+        agent: Option<String>,
+        /// Raw command to judge and rewrite
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -3066,6 +3075,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Vibe => {
                 hooks::hook_cmd::run_vibe()?;
+                0
+            }
+            HookCommands::Opencode { agent, args } => {
+                hooks::hook_cmd::run_opencode(&args.join(" "), agent.as_deref())?;
                 0
             }
             HookCommands::Check { agent, command } => {

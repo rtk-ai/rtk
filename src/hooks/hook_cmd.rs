@@ -1194,6 +1194,45 @@ fn droid_response_from_decision(v: &Value, cmd: &str, decision: HookDecision) ->
 }
 
 /// Run the Factory Droid PreToolUse hook natively.
+pub fn run_opencode(cmd: &str, agent: Option<&str>) -> Result<()> {
+    let _ = writeln!(io::stdout(), "{}", opencode_answer(cmd, agent));
+    Ok(())
+}
+
+fn opencode_answer(cmd: &str, agent: Option<&str>) -> Value {
+    if cmd.trim().is_empty() {
+        return json!({});
+    }
+    let verdict = permissions::check_command_for_agent(cmd, permissions::Host::OpenCode, agent);
+    let rewritten = match decide_from_verdict(cmd, verdict) {
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            return json!({ "status": "deny" });
+        }
+        HookDecision::Defer => return json!({}),
+        HookDecision::AllowRewrite(r) | HookDecision::AskRewrite(r) => r,
+    };
+    audit_log("rewrite", cmd, &rewritten);
+
+    let after =
+        permissions::check_command_for_agent(&rewritten, permissions::Host::OpenCode, agent);
+    match opencode_status(verdict, after) {
+        Some(status) => json!({ "command": rewritten, "status": status }),
+        None => json!({ "command": rewritten }),
+    }
+}
+
+fn opencode_status(before: PermissionVerdict, after: PermissionVerdict) -> Option<&'static str> {
+    if before == after {
+        return None;
+    }
+    Some(match before {
+        PermissionVerdict::Allow => "allow",
+        PermissionVerdict::Deny => "deny",
+        PermissionVerdict::Ask | PermissionVerdict::Default => "ask",
+    })
+}
+
 pub fn run_droid() -> Result<()> {
     let input = read_stdin_limited()?;
 
@@ -2561,6 +2600,34 @@ mod tests {
         let long_cmd = format!("git status {}", "A".repeat(100_000));
         let input = claude_input(&long_cmd);
         let _ = run_claude_inner(&input);
+    }
+
+    #[test]
+    fn opencode_reports_no_status_when_the_rewrite_keeps_the_verdict() {
+        for v in [
+            PermissionVerdict::Allow,
+            PermissionVerdict::Ask,
+            PermissionVerdict::Default,
+            PermissionVerdict::Deny,
+        ] {
+            assert_eq!(super::opencode_status(v, v), None);
+        }
+    }
+
+    #[test]
+    fn opencode_reports_the_original_verdict_when_the_rewrite_changes_it() {
+        assert_eq!(
+            super::opencode_status(PermissionVerdict::Allow, PermissionVerdict::Deny),
+            Some("allow")
+        );
+        assert_eq!(
+            super::opencode_status(PermissionVerdict::Default, PermissionVerdict::Deny),
+            Some("ask")
+        );
+        assert_eq!(
+            super::opencode_status(PermissionVerdict::Ask, PermissionVerdict::Allow),
+            Some("ask")
+        );
     }
 
     #[test]
