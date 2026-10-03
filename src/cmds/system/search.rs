@@ -46,6 +46,221 @@ fn stdin_is_readable() -> bool {
     !std::io::stdin().is_terminal()
 }
 
+/// Whether a name -- an operand, or a file-taking flag's value -- is standard input.
+///
+/// `-` is the portable spelling. Beyond it the same stream has many names, so the
+/// name alone is not enough: `/dev/stdin`, `/dev/fd/0` and `/proc/self/fd/0` are
+/// symlinks to one another, a symlink of one's own or a relative `stdin` from
+/// inside `/dev` reach it too. Those resolve to the same file, so the test is
+/// identity -- same device and inode as this process's own fd 0 -- with the two
+/// device trees kept as a name-only fast path for when that cannot be answered.
+///
+/// Over-matching costs only the #4102 guard for that invocation and leaves the
+/// output identical; under-matching withholds input the engine needed, which is
+/// silent. So both halves err the same way.
+fn spells_stdin(name: &str) -> bool {
+    if name == "-" {
+        return true;
+    }
+    if in_a_device_tree(name) {
+        return true;
+    }
+    // A symlink into one of those trees is the same stream under another name.
+    // Identity cannot always answer for it: on macOS `/dev/stdin` is an `fdesc`
+    // device node rather than a link to the open file, so its `stat` reports the
+    // node, not fd 0.
+    if std::fs::read_link(name).is_ok_and(|target| in_a_device_tree(&target.to_string_lossy())) {
+        return true;
+    }
+    is_our_stdin(name)
+}
+
+/// A name inside the trees where the standard streams live.
+///
+/// `/dev/null` is excluded: `-f /dev/null` and `--exclude-from=/dev/null` are the
+/// idiomatic "no patterns" / "no exclusions", and an operand `/dev/null` forces
+/// filenames. None of them is a stream, so the name-only path steps over it; if it
+/// really is this process's stdin (`< /dev/null`), identity still says so.
+fn in_a_device_tree(name: &str) -> bool {
+    name != "/dev/null" && (name.starts_with("/dev/") || name.starts_with("/proc/"))
+}
+
+/// Whether `name` resolves to this process's own standard input.
+///
+/// Our own fd 0 is stat'd once per process, not once per operand: a long operand
+/// list would otherwise pay three syscalls each against a <10ms startup budget.
+#[cfg(unix)]
+fn is_our_stdin(name: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Some((dev, ino)) = our_stdin_identity() else {
+        return false;
+    };
+    std::fs::metadata(name).is_ok_and(|named| named.dev() == dev && named.ino() == ino)
+}
+
+/// The device and inode of this process's standard input, or `None` when it has
+/// none to report -- a closed or invalid fd 0 answers `EBADF` rather than panics.
+#[cfg(unix)]
+fn our_stdin_identity() -> Option<(u64, u64)> {
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::MetadataExt;
+    static IDENTITY: std::sync::OnceLock<Option<(u64, u64)>> = std::sync::OnceLock::new();
+    *IDENTITY.get_or_init(|| {
+        std::io::stdin()
+            .as_fd()
+            .try_clone_to_owned()
+            .map(std::fs::File::from)
+            .and_then(|f| f.metadata())
+            .map(|m| (m.dev(), m.ino()))
+            .ok()
+    })
+}
+
+/// Windows has no `/dev/stdin` to name, so there is nothing to resolve.
+#[cfg(not(unix))]
+fn is_our_stdin(_name: &str) -> bool {
+    false
+}
+
+/// How the engine's stdin is wired for one invocation.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum EngineStdin {
+    /// Stream rtk's stdin through: it is the input, and the output is streamed.
+    Stream,
+    /// Pass rtk's stdin, but capture the output: the invocation names stdin
+    /// somewhere -- `grep -f -` takes its *patterns* there while still searching
+    /// a file -- so withholding it would lose data.
+    Inherit,
+    /// Capture with no stdin: the invocation names every input it has, so the
+    /// engine has no reason to read stdin. A misread argv then fails instead of
+    /// leaving the engine blocked on a pipe the parent never closes (#4102).
+    Null,
+}
+
+impl EngineStdin {
+    /// The single place a plan becomes a stdio setting.
+    fn capture(self, cmd: &mut Command) -> Result<CaptureResult> {
+        match self {
+            EngineStdin::Null => exec_capture(cmd),
+            EngineStdin::Stream | EngineStdin::Inherit => exec_capture_stdin(cmd),
+        }
+        .context("search failed")
+    }
+}
+
+/// Which flags take a *file* whose value may be `-`, meaning standard input.
+/// Transcribed per engine, like the `takes_value` tables above: grep 3.12 lists
+/// exactly `-f, --file=FILE` and `--exclude-from=FILE`; rg 15.2.0 documents `-`
+/// only for `-f, --file=PATTERNFILE` ("When PATTERNFILE is -, then stdin will be
+/// read for the patterns") and opens `--ignore-file`'s value literally, failing
+/// with `-: No such file or directory`. `--include`/`--exclude` take a glob, and
+/// `-e`/`--regexp` a pattern, so a `-` there is data rather than a stream.
+fn takes_stdin_capable_file(engine: Engine, kind: TokenKind, name: &str) -> bool {
+    match (engine, kind) {
+        (Engine::Grep, TokenKind::Short) => name == "f",
+        (Engine::Grep, TokenKind::Long) => matches!(name, "file" | "exclude-from"),
+        (Engine::Rg, TokenKind::Short) => name == "f",
+        (Engine::Rg, TokenKind::Long) => name == "file",
+        _ => false,
+    }
+}
+
+/// Whether this invocation names standard input as an input to the engine.
+///
+/// Three ways it can, and only the first is visible in the operands:
+/// no operand at all; an operand naming stdin (`-`, `/dev/stdin`); or a
+/// file-taking flag whose value is `-`, which is how `grep -f -` reads its
+/// pattern list and `--exclude-from=-` its exclusions while the operands still
+/// name real files. `paths` is used for the operand half rather than re-deriving
+/// it, because which positional is the pattern is decided in one place only.
+///
+/// Which flags those are comes from [`takes_stdin_capable_file`] rather than from
+/// any `-` value: `grep -e -` searches for the string `-` and reads no stream, so
+/// counting it would quietly drop the guard for that invocation.
+///
+/// Having no operand does not always mean stdin either. `grep -r pattern` walks
+/// the working tree and never reads it, while plain `grep pattern` does, and rg
+/// decides for itself from whether stdin is a pipe. Only the first is knowable
+/// here, so only it is claimed.
+///
+/// The flag half is asked *first*, and of every invocation: the two halves are
+/// independent, and `grep -r -f -` does both at once -- it walks the tree for
+/// files while taking its patterns from stdin. Letting the operand-less case
+/// answer for the whole invocation withheld the pattern list from that form.
+fn names_stdin_as_input<T: AsRef<str>>(args: &[T], engine: Engine, paths: &[String]) -> bool {
+    let tokens = tokenize_search_args(args, engine);
+    if a_file_flag_names_stdin(&tokens, engine) {
+        return true;
+    }
+    if paths.is_empty() {
+        return !walks_the_tree(&tokens, engine);
+    }
+    paths.iter().any(|p| spells_stdin(p))
+}
+
+/// Whether the engine will walk the working tree rather than read stdin when the
+/// invocation names no operand.
+///
+/// `-r`/`-R`/`--recursive` are `-d recurse` under another name and grep takes the
+/// *last* directory action of the two, so "a recursion flag appeared" is the wrong
+/// question: `grep -r -d read` reads stdin, and `grep -d recurse` walks without
+/// any `-r`. Kept separate from `DetectedFlags::recursive`, which answers a
+/// different question (whether to print filenames) and must not move.
+///
+/// rg is never included: with no path it decides for itself from whether stdin is
+/// a pipe, which is not knowable from the argv.
+///
+/// These are GNU grep's semantics, applied to whatever binary is named `grep`.
+/// BSD grep has no `-d` at all, so its `-r` is read by the recursion arm and the
+/// `-d` arm never fires there.
+fn walks_the_tree(tokens: &[Token<'_>], engine: Engine) -> bool {
+    if engine != Engine::Grep {
+        return false;
+    }
+    let mut walks = false;
+    for token in tokens {
+        if is_recursive_token(engine, token.kind, token.text)
+            || (token.kind == TokenKind::Long && token.text == "dereference-recursive")
+        {
+            walks = true;
+        } else if matches!(token.kind, TokenKind::Long | TokenKind::Short)
+            && matches!(token.text, "directories" | "d")
+        {
+            walks = flag_value_of(tokens, token, engine).is_some_and(action_recurses);
+        }
+    }
+    walks
+}
+
+/// Whether a `--directories` value means "walk the tree".
+///
+/// grep takes exactly `read`, `recurse` and `skip` -- it rejects anything else,
+/// `dereference-recurse` included -- and its `argmatch` accepts any unambiguous
+/// abbreviation, so `-d rec` recurses while `-d re` is ambiguous and refused.
+/// `read` and `skip` share no prefix with `recurse` past that ambiguity.
+fn action_recurses(value: &str) -> bool {
+    value.len() >= 3 && "recurse".starts_with(value)
+}
+
+/// Whether a file-taking flag's value names standard input, whatever the operands.
+fn a_file_flag_names_stdin(tokens: &[Token<'_>], engine: Engine) -> bool {
+    tokens
+        .iter()
+        .filter(|t| takes_stdin_capable_file(engine, t.kind, t.text))
+        .any(|t| flag_value_of(tokens, t, engine).is_some_and(spells_stdin))
+}
+
+/// A flag's value, attached or as a separate token.
+///
+/// rg accepts `-f=-` and keeps the `=` on the short form only, which is where the
+/// rest of the module strips it too.
+fn flag_value_of<'a>(tokens: &[Token<'a>], token: &Token<'a>, engine: Engine) -> Option<&'a str> {
+    match (token.attached, token.kind) {
+        (Some(attached), TokenKind::Short) => Some(unwrap_attached_value(engine, attached)),
+        _ => token.value(tokens),
+    }
+}
+
 /// Which flags consume a value, transcribed per engine from that engine's own `--help`.
 /// grep and rg only intersect -- 13 of ~50 entries -- and disagree outright on `-T`, `-r`,
 /// `-E` and `--color`, so one merged table with per-flag exceptions misreads whichever engine
@@ -419,9 +634,10 @@ fn engine_capture<T: AsRef<str>>(
     extra_args: &[T],
     patterns: &[String],
     paths: &[String],
+    stdin: EngineStdin,
 ) -> Result<CaptureResult> {
     let mut cmd = engine_command(engine, extra_args, patterns, paths, false);
-    exec_capture_stdin(&mut cmd).context("search failed")
+    stdin.capture(&mut cmd)
 }
 
 fn engine_command<T: AsRef<str>>(
@@ -559,9 +775,10 @@ fn passthrough<T: AsRef<str>>(
     engine: Engine,
     args: &[T],
     real_cmd: &str,
-    stream_stdin: bool,
+    stdin: EngineStdin,
     fold_file_list: bool,
 ) -> Result<i32> {
+    let stream_stdin = stdin == EngineStdin::Stream;
     let mut cmd = resolved_command(engine.bin());
     if stream_stdin && !std::io::stdout().is_terminal() {
         // Keep passthrough output live when stdout is piped.
@@ -580,7 +797,7 @@ fn passthrough<T: AsRef<str>>(
         return Ok(exit_code);
     }
 
-    let result = exec_capture_stdin(&mut cmd).context("search failed")?;
+    let result = stdin.capture(&mut cmd)?;
     let cleaned = strip_ansi(&result.stdout);
     let folded = if fold_file_list {
         fold_path_prefix(&cleaned).filter(|f| never_worse(&cleaned, f) == f)
@@ -704,13 +921,16 @@ pub fn run(
     });
     if dangling_value_flag {
         let real_cmd = format!("{} {}", engine.bin(), args.join(" "));
-        return passthrough(&timer, engine, args, &real_cmd, false, false);
+        // Unparsed: the operands are unknown here, so nothing licenses
+        // withholding stdin from the engine.
+        return passthrough(&timer, engine, args, &real_cmd, EngineStdin::Inherit, false);
     }
 
     if asks_for_help {
         let mut cmd = resolved_command(engine.bin());
         cmd.child_args(args);
-        let result = exec_capture(&mut cmd).context("search failed")?;
+        // `--help`/`--version` read nothing, and go through the same one place.
+        let result = EngineStdin::Null.capture(&mut cmd)?;
         print!("{}", result.stdout);
         if !result.stderr.is_empty() {
             eprint!("{}", result.stderr);
@@ -724,10 +944,21 @@ pub fn run(
     let (patterns, paths, extra_args, extra_args_has_format_flag, detected_flags) =
         extract_pattern_path(args, engine);
 
+    // Two different questions, deliberately not one boolean.
+    //
+    // Whether the engine needs stdin *at all* decides the stdio it is given, and
+    // depends only on the invocation -- a terminal stdin is still its input when
+    // no operand names another.
+    let stdin_plan = if names_stdin_as_input(args, engine, &paths) {
+        EngineStdin::Inherit
+    } else {
+        EngineStdin::Null
+    };
+
     if patterns.is_empty() {
         // `rg --files` lists paths without a pattern; fold it like `-l`.
         let fold = is_bare_file_list(engine, args);
-        return passthrough(&timer, engine, args, &real_cmd, false, fold);
+        return passthrough(&timer, engine, args, &real_cmd, stdin_plan, fold);
     }
 
     let pattern_display = if patterns.len() == 1 {
@@ -742,13 +973,22 @@ pub fn run(
         eprintln!("grep: '{}' in {}", pattern_display, path_display);
     }
 
+    // Whether the searched *data* arrives on a pipe decides the output shape, and
+    // that is narrower: a command searching named files while reading a pattern
+    // list from stdin still wants the grouped, capped, tee'd form. Keying this on
+    // the plan sent those down the streaming path and doubled their output.
     let reads_piped_stdin =
         stdin_is_readable() && (paths.is_empty() || paths.iter().any(|path| path == "-"));
 
     // format/shape flags (-c/-l/-o/...): already-minimal native output, passthrough.
     if extra_args_has_format_flag {
         let fold = is_bare_file_list(engine, args);
-        return passthrough(&timer, engine, args, &real_cmd, reads_piped_stdin, fold);
+        let plan = if reads_piped_stdin {
+            EngineStdin::Stream
+        } else {
+            stdin_plan
+        };
+        return passthrough(&timer, engine, args, &real_cmd, plan, fold);
     }
 
     if reads_piped_stdin {
@@ -764,7 +1004,7 @@ pub fn run(
         );
     }
 
-    let result = engine_capture(engine, &extra_args, &patterns, &paths)?;
+    let result = engine_capture(engine, &extra_args, &patterns, &paths, stdin_plan)?;
 
     let exit_code = result.exit_code;
     let raw_output = result.stdout.clone();
@@ -772,7 +1012,7 @@ pub fn run(
     // Unparseable shape re-runs verbatim below (with its own stderr), so handle it
     // before surfacing this run's stderr (#2333).
     if unparsed_signal(&raw_output) > 0 {
-        return passthrough(&timer, engine, args, &real_cmd, false, false);
+        return passthrough(&timer, engine, args, &real_cmd, stdin_plan, false);
     }
 
     if !result.stderr.is_empty() {
@@ -1194,6 +1434,262 @@ fn compact_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole decision for one invocation, parsed exactly as `run` parses it.
+    fn names_stdin(args: &[&str], engine: Engine) -> bool {
+        let (_patterns, paths, _flags, _fmt, _detected) = extract_pattern_path(args, engine);
+        names_stdin_as_input(args, engine, &paths)
+    }
+
+    #[test]
+    fn stdin_is_the_input_when_no_operand_names_one() {
+        for args in [vec!["hello"], vec!["-i", "hello"], vec!["-c", "hello"]] {
+            assert!(names_stdin(&args, Engine::Grep), "{args:?}");
+        }
+        // rg with no path decides for itself from whether stdin is a pipe, so it
+        // keeps it either way.
+        assert!(names_stdin(&["hello"], Engine::Rg));
+    }
+
+    /// Both halves at once: the tree supplies the files, stdin the patterns. The
+    /// operand-less case must not answer for the whole invocation.
+    #[test]
+    fn a_recursive_walk_can_still_take_its_patterns_from_stdin() {
+        for args in [
+            vec!["-r", "-f", "-"],
+            vec!["-R", "-f", "-"],
+            vec!["--recursive", "-f", "-"],
+            vec!["-rf", "-"],
+            vec!["-r", "--file=-"],
+            vec!["-c", "-r", "-f", "-"],
+            vec!["-l", "-r", "-f", "-"],
+            vec!["-r", "-e", "hello", "-f", "-"],
+        ] {
+            assert!(
+                names_stdin(&args, Engine::Grep),
+                "{args:?} takes its patterns from stdin"
+            );
+        }
+    }
+
+    /// The name-only fast path, which is the entire mechanism on Windows: there
+    /// `is_our_stdin` cannot resolve anything. Device names that do not exist
+    /// isolate it, since identity cannot answer for them.
+    #[test]
+    fn a_device_name_counts_without_resolving_it() {
+        for name in [
+            "-",
+            "/dev/stdin",
+            "/dev/fd/0",
+            "/proc/self/fd/0",
+            "/dev/no-such-device-4102",
+            "/proc/no-such-entry-4102",
+        ] {
+            assert!(spells_stdin(name), "{name} names stdin");
+        }
+        for name in ["q.txt", "/devious", "/procession", "dev/stdin", "./-"] {
+            assert!(!spells_stdin(name), "{name} is an ordinary name");
+        }
+    }
+
+    /// `grep -r pattern` with no operand walks the working tree and never reads
+    /// stdin, so the guard applies to it -- one of the most common forms, and the
+    /// one a mangled argv would otherwise leave wedged.
+    #[test]
+    fn recursive_grep_without_an_operand_does_not_read_stdin() {
+        for args in [
+            vec!["-r", "hello"],
+            vec!["-R", "hello"],
+            vec!["-ri", "hello"],
+            vec!["--recursive", "hello"],
+            // `-r` by another name, and by its own spelling.
+            vec!["--dereference-recursive", "hello"],
+            vec!["-d", "recurse", "hello"],
+            vec!["--directories=recurse", "hello"],
+        ] {
+            assert!(
+                !names_stdin(&args, Engine::Grep),
+                "{args:?} walks the tree instead"
+            );
+        }
+        // Without one it does read stdin.
+        assert!(names_stdin(&["hello"], Engine::Grep));
+        // rg with no path decides for itself, so it keeps stdin either way.
+        assert!(names_stdin(&["hello"], Engine::Rg));
+    }
+
+    /// grep takes the *last* directory action, so a later `-d read`/`-d skip`
+    /// undoes an earlier `-r` and the engine is back to reading stdin. Asking
+    /// only "did a recursion flag appear" withheld stdin from these.
+    #[test]
+    fn a_later_directories_action_undoes_recursion() {
+        for args in [
+            vec!["-r", "-d", "read", "hello"],
+            vec!["-r", "-d", "skip", "hello"],
+            vec!["-r", "--directories=read", "hello"],
+            vec!["-R", "--directories=skip", "hello"],
+        ] {
+            assert!(
+                names_stdin(&args, Engine::Grep),
+                "{args:?} reads stdin, so its stdin must not be withheld"
+            );
+        }
+        // grep's own abbreviations of `recurse`, and the ambiguous ones it refuses.
+        for args in [vec!["-d", "rec", "hello"], vec!["-d", "recu", "hello"]] {
+            assert!(!names_stdin(&args, Engine::Grep), "{args:?} walks the tree");
+        }
+        for args in [
+            // Ambiguous between `read` and `recurse`: grep refuses it, so it reads
+            // nothing either way and keeping stdin is the harmless answer.
+            vec!["-d", "re", "hello"],
+            vec!["-d", "read", "hello"],
+            vec!["-d", "skip", "hello"],
+            // Not a grep value at all -- grep rejects it outright.
+            vec!["-d", "dereference-recurse", "hello"],
+        ] {
+            assert!(names_stdin(&args, Engine::Grep), "{args:?} does not walk");
+        }
+
+        // The other order: recursion typed last wins, so the guard applies.
+        for args in [
+            vec!["-d", "read", "-r", "hello"],
+            vec!["--directories=skip", "--recursive", "hello"],
+        ] {
+            assert!(!names_stdin(&args, Engine::Grep), "{args:?} walks the tree");
+        }
+    }
+
+    #[test]
+    fn stdin_is_the_input_when_an_operand_names_it() {
+        for args in [
+            vec!["hello", "-"],
+            vec!["hello", "q.txt", "-"],
+            vec!["hello", "/dev/stdin"],
+            vec!["hello", "/dev/fd/0"],
+        ] {
+            assert!(names_stdin(&args, Engine::Grep), "{args:?}");
+        }
+    }
+
+    /// The spelling no operand shows: `-f -` reads the *pattern list* from stdin
+    /// while the operand still names a real file, and `--exclude-from=-` its
+    /// exclusions. Withholding stdin there loses data silently.
+    #[test]
+    fn stdin_is_the_input_when_a_flag_value_names_it() {
+        for args in [
+            vec!["-f", "-", "q.txt"],
+            vec!["--file=-", "q.txt"],
+            vec!["-e", "world", "-f", "-", "q.txt"],
+            vec!["-r", "--exclude-from=-", "hello", "tree"],
+            // The same stream named as a device rather than `-`.
+            vec!["-f", "/dev/stdin", "q.txt"],
+            vec!["--file=/dev/fd/0", "q.txt"],
+            vec!["-f", "/proc/self/fd/0", "q.txt"],
+            vec!["--exclude-from=/dev/stdin", "hello", "q.txt"],
+        ] {
+            assert!(names_stdin(&args, Engine::Grep), "{args:?}");
+        }
+        for args in [
+            vec!["-f", "-", "q.txt"],
+            vec!["--file=-", "q.txt"],
+            // rg keeps the `=` on a short flag, so the value arrives as `=-`.
+            vec!["-f=-", "q.txt"],
+            vec!["-f", "/dev/stdin", "q.txt"],
+        ] {
+            assert!(names_stdin(&args, Engine::Rg), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn stdin_is_not_the_input_when_every_input_is_named() {
+        for args in [
+            vec!["hello", "q.txt"],
+            vec!["hello", "a.txt", "b.txt"],
+            vec!["-i", "hello", "src"],
+            vec!["-f", "pats.txt", "q.txt"],
+            vec!["--file=pats.txt", "q.txt"],
+        ] {
+            assert!(
+                !names_stdin(&args, Engine::Grep),
+                "{args:?} names every input it has"
+            );
+        }
+    }
+
+    /// A file literally named `--` reaches `paths` after the boundary, and is an
+    /// ordinary operand rather than anything to do with stdin.
+    #[test]
+    fn a_file_named_dash_dash_is_an_ordinary_operand() {
+        assert!(!names_stdin(&["hello", "--", "--"], Engine::Grep));
+    }
+
+    /// Every spelling of a pattern file, since the tokenizer is what distinguishes
+    /// them: attached to a short flag, inside a cluster, or a separate token.
+    #[test]
+    fn a_pattern_file_of_dash_counts_however_it_is_spelled() {
+        for args in [
+            vec!["-f-", "q.txt"],
+            vec!["-if", "-", "q.txt"],
+            vec!["-nf", "-", "q.txt"],
+            vec!["--exclude-from", "-", "hello", "tree"],
+        ] {
+            assert!(names_stdin(&args, Engine::Grep), "{args:?}");
+        }
+    }
+
+    /// A name that is neither `-` nor under a device tree but still resolves to
+    /// this process's stdin. A prefix test cannot see these; identity can.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_resolving_to_our_stdin_counts() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        // TMPDIR itself can be under a device tree (`/dev/shm` is a common
+        // setting), where the name-only fast path answers first and the negative
+        // control below would be testing the wrong thing.
+        if dir.path().starts_with("/dev") || dir.path().starts_with("/proc") {
+            eprintln!(
+                "skipped: TMPDIR is {}, under a device tree the fast path answers first",
+                dir.path().display()
+            );
+            return;
+        }
+        let link = dir.path().join("looks_ordinary");
+        std::os::unix::fs::symlink("/dev/stdin", &link).expect("symlink");
+        let link = link.to_string_lossy().to_string();
+        assert!(
+            names_stdin(&["hello", &link], Engine::Grep),
+            "a symlink to stdin is still stdin"
+        );
+
+        // An ordinary file in the same directory is not.
+        let plain = dir.path().join("plain.txt");
+        std::fs::write(&plain, "hello\n").expect("write");
+        let plain = plain.to_string_lossy().to_string();
+        assert!(!names_stdin(&["hello", &plain], Engine::Grep));
+    }
+
+    /// A `-` that is data, not a stream. Counting these would drop the #4102 guard
+    /// for invocations that never read stdin: `grep -e -` searches for the string
+    /// `-`, and rg opens `--ignore-file`'s value literally (it fails with
+    /// `-: No such file or directory`).
+    #[test]
+    fn a_dash_that_is_not_a_stream_does_not_count() {
+        for args in [
+            vec!["-e", "-", "dash.txt"],
+            vec!["--regexp=-", "dash.txt"],
+            vec!["--include=-", "hello", "src"],
+            vec!["--label=-", "hello", "q.txt"],
+        ] {
+            assert!(
+                !names_stdin(&args, Engine::Grep),
+                "{args:?} reads no stream, so the guard must still apply"
+            );
+        }
+        assert!(!names_stdin(
+            &["--ignore-file", "-", "hello", "src"],
+            Engine::Rg
+        ));
+    }
 
     #[test]
     fn test_clean_line() {
