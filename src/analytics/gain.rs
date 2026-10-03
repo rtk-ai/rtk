@@ -142,23 +142,23 @@ pub fn run(
         // `suppress_hook_warning` hides the missing-hook arm here too: a user who
         // runs rtk without hooks on purpose reads this report most often, and the
         // outdated-hook arm stays visible either way.
-        match hook_check::status() {
-            hook_check::HookStatus::Missing if !crate::core::config::hook_warning_suppressed() => {
-                eprintln!(
-                    "{}",
-                    "[warn] No hook installed — run `rtk init -g` for automatic token savings"
-                        .yellow()
-                );
-                eprintln!();
-            }
-            hook_check::HookStatus::Outdated => {
-                eprintln!(
-                    "{}",
-                    "[warn] Hook outdated — run `rtk init -g` to update".yellow()
-                );
-                eprintln!();
-            }
-            hook_check::HookStatus::Missing | hook_check::HookStatus::Ok => {}
+        if hook_check::is_any_hook_outdated()
+            || hook_check::status() == hook_check::HookStatus::Outdated
+        {
+            eprintln!(
+                "{}",
+                "[warn] Hook outdated — run `rtk init -g` to update".yellow()
+            );
+            eprintln!();
+        } else if hook_check::status() == hook_check::HookStatus::Missing
+            && !hook_check::is_any_agent_configured()
+            && !crate::core::config::hook_warning_suppressed()
+        {
+            eprintln!(
+                "{}",
+                "[warn] No hook installed — run `rtk init -g` for automatic token savings".yellow()
+            );
+            eprintln!();
         }
 
         // Lightweight RTK_DISABLED bypass check (best-effort, silent on failure)

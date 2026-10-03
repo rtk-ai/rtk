@@ -89,6 +89,14 @@ pub(super) fn run_opencode_only_mode(ctx: InitContext) -> Result<()> {
     Ok(())
 }
 
+/// Returns true if OpenCode RTK plugin is installed.
+pub fn is_configured() -> bool {
+    let Ok(opencode_dir) = resolve_opencode_dir() else {
+        return false;
+    };
+    opencode_plugin_path(&opencode_dir).is_file()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

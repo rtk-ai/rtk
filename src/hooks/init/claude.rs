@@ -607,6 +607,55 @@ pub(super) fn run_hook_only_mode(
     Ok(())
 }
 
+/// Detailed hook status for Claude Code (used by `rtk discover` and warning coordinator).
+pub fn hook_status() -> crate::hooks::hook_check::HookStatus {
+    let Ok(claude_dir) = resolve_claude_dir() else {
+        return crate::hooks::hook_check::HookStatus::Ok;
+    };
+    if !claude_dir.exists() {
+        return crate::hooks::hook_check::HookStatus::Ok;
+    }
+
+    // Check for binary command in settings.json first
+    let settings_path = claude_dir.join(SETTINGS_JSON);
+    if let Ok(content) = fs::read_to_string(&settings_path) {
+        let content = strip_leading_bom(&content);
+        if let Ok(root) = from_json_str::<serde_json::Value>(content.trim())
+            && hook_already_present(&root, CLAUDE_HOOK_COMMAND)
+        {
+            let old_hook = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+            if old_hook.exists() {
+                return crate::hooks::hook_check::HookStatus::Outdated;
+            }
+            return crate::hooks::hook_check::HookStatus::Ok;
+        }
+    }
+
+    // Fall back to legacy script file check
+    let hook_path = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+    if let Ok(content) = fs::read_to_string(&hook_path) {
+        if crate::hooks::hook_check::parse_hook_version(&content)
+            >= crate::hooks::hook_check::CURRENT_HOOK_VERSION
+        {
+            crate::hooks::hook_check::HookStatus::Ok
+        } else {
+            crate::hooks::hook_check::HookStatus::Outdated
+        }
+    } else {
+        crate::hooks::hook_check::HookStatus::Missing
+    }
+}
+
+/// Returns true if Claude Code has an active, up-to-date hook configured.
+pub fn is_configured() -> bool {
+    hook_status() == crate::hooks::hook_check::HookStatus::Ok
+}
+
+/// Returns true if Claude Code's hook is installed but outdated.
+pub fn is_outdated() -> bool {
+    hook_status() == crate::hooks::hook_check::HookStatus::Outdated
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
