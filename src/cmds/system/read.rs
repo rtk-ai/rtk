@@ -1,4 +1,12 @@
 //! Reads source files with optional language-aware filtering to strip boilerplate.
+//!
+//! Data formats are exempt from the code filter, which used to make large
+//! `.json` reads byte-identical passthroughs at every level. Above
+//! `DATA_COMPACT_MIN` a `.json` file shows `rtk json`'s compact view instead,
+//! behind a banner, with the raw content persisted through the recovery store
+//! first; without a store hint nothing is elided. Line windows (`--head-lines`,
+//! `--tail-lines`, `--max-lines`), `-n` and `RTK_READ_RAW=1` keep the
+//! byte-exact read.
 
 use crate::core::filter::{self, FilterLevel, Language};
 use crate::core::guard::never_worse;
@@ -7,6 +15,11 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::io::{self, Read as IoRead, Write};
 use std::path::Path;
+
+/// Reads at or under this many bytes keep today's byte-identical output.
+const DATA_COMPACT_MIN: usize = 4096;
+/// Nesting depth kept in the compact JSON view.
+const JSON_DEPTH: usize = 3;
 
 pub fn run(
     file: &Path,
@@ -69,6 +82,31 @@ pub fn run(
     }
     let content = String::from_utf8(bytes)
         .with_context(|| format!("Failed to decode file: {}", file.display()))?;
+
+    // Large .json: the code filter exempts data formats, so every level used to
+    // hand the body through whole. Show the compact view instead, raw content
+    // recoverable through the store hint. A line window or -n asked for exact
+    // lines and skips this; no hint, no elision; a body that does not parse
+    // falls through to the ordinary path.
+    if head_lines.is_none()
+        && tail_lines.is_none()
+        && max_lines.is_none()
+        && !line_numbers
+        && !raw_mode_env()
+        && file.extension().and_then(|e| e.to_str()) == Some("json")
+        && content.len() > DATA_COMPACT_MIN
+        && let Some(view) = json_compact_view(&content)
+        && let Some(hint) = crate::core::tee::force_tee_hint(&content, "read")
+    {
+        let shown = crate::core::runner::emit_guarded(&view, Some(&hint), &content);
+        timer.track(
+            &format!("cat {}", file.display()),
+            "rtk read",
+            &content,
+            &shown,
+        );
+        return Ok(());
+    }
 
     // Detect language from extension
     let lang = file
@@ -203,6 +241,31 @@ pub fn run_stdin(
 
     timer.track("cat - (stdin)", "rtk read -", &raw, shown);
     Ok(())
+}
+
+/// The compact rendering of a JSON body behind a banner naming its size, or
+/// `None` when the content does not parse as JSON.
+fn json_compact_view(content: &str) -> Option<String> {
+    let compact = super::json_cmd::filter_json_compact(content, JSON_DEPTH).ok()?;
+    Some(format!(
+        "[rtk read: {} JSON -> compact view (strings truncated, long arrays sampled)]\n{}",
+        format_size(content.len()),
+        compact
+    ))
+}
+
+fn raw_mode_env() -> bool {
+    crate::core::user_env::var("RTK_READ_RAW").is_some_and(|v| v != "0")
+}
+
+fn format_size(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{}B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1}KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
+    }
 }
 
 fn format_with_line_numbers(content: &str) -> String {
@@ -662,6 +725,53 @@ fn main() {{
         let output = apply_line_window(input, Some(2), None, None, &Language::Unknown);
         assert!(output.starts_with("a\n"));
         assert!(output.contains("more lines"));
+    }
+
+    fn count_tokens(s: &str) -> usize {
+        s.split_whitespace().count()
+    }
+
+    #[test]
+    fn test_json_compact_view_real_fixture() {
+        let input = include_str!("../../../tests/fixtures/glab_mr_list_raw.json");
+        assert!(
+            input.len() > DATA_COMPACT_MIN,
+            "fixture must exceed threshold"
+        );
+        let view = json_compact_view(input).expect("fixture is valid JSON");
+        assert!(view.starts_with("[rtk read:"));
+        assert!(view.contains("compact view"));
+        let savings = 100.0 - (count_tokens(&view) as f64 / count_tokens(input) as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "expected >=60% savings, got {:.1}%",
+            savings
+        );
+    }
+
+    #[test]
+    fn test_json_compact_view_marks_elisions() {
+        let body = (0..200)
+            .map(|i| format!(r#""key{:03}":{{"id":{},"name":"item-{:04}"}}"#, i, i, i))
+            .collect::<Vec<_>>()
+            .join(",");
+        let json = format!("{{{}}}", body);
+        let view = json_compact_view(&json).expect("valid JSON");
+        assert!(view.contains("more keys"), "elision must be marked: {view}");
+    }
+
+    #[test]
+    fn test_json_compact_view_rejects_non_json() {
+        assert!(json_compact_view("not json at all").is_none());
+        assert!(json_compact_view(&format!("{{{}}}", "oops, ".repeat(900))).is_none());
+    }
+
+    #[test]
+    fn test_read_raw_env_opt_out() {
+        use crate::core::user_env;
+        user_env::with_vars(&[("RTK_READ_RAW", Some("1"))], || assert!(raw_mode_env()));
+        user_env::with_vars(&[("RTK_READ_RAW", Some("0"))], || assert!(!raw_mode_env()));
+        user_env::with_vars(&[("RTK_READ_RAW", None)], || assert!(!raw_mode_env()));
     }
 
     #[test]
