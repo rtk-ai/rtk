@@ -13,9 +13,16 @@ use std::sync::LazyLock;
 /// E.g.: " Mar 31 16:18 " or " Dec 25  2024 "
 static LS_DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(?:\d{4}|\d{2}:\d{2})\s+"
+        r"\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(?:\d{4}|\d{2}:\d{2}) ",
     )
     .unwrap()
+});
+
+// Preserve empty-directory detection for unsupported month names, but only
+// when the complete standard listing row identifies a literal . or .. entry.
+static LS_LOCALIZED_DOTDIR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^d\S+\s+\d+\s+\S+\s+\S+\s+\d+\s+\S+\s+\d{1,2}\s+(?:\d{4}|\d{2}:\d{2}) \.{1,2}$")
+        .unwrap()
 });
 
 fn is_short_flag(arg: &str) -> bool {
@@ -224,7 +231,14 @@ fn parse_ls_line(line: &str) -> Option<(char, String, u64, String)> {
 /// always appear in `ls -la` output and are skipped during parsing since they
 /// carry no meaningful content for token reduction.
 fn is_dotdir(line: &str) -> bool {
-    line.trim().ends_with('.') || line.trim().ends_with("..")
+    let line = line.trim_start();
+    if !line.starts_with('d') {
+        return false;
+    }
+    if let Some(date) = LS_DATE_RE.find(line) {
+        return matches!(&line[date.end()..], "." | "..");
+    }
+    LS_LOCALIZED_DOTDIR_RE.is_match(line)
 }
 
 /// Convert an `ls`-style permission string (e.g. `-rw-r--r--`, `drwxr-xr-x`,
@@ -610,6 +624,43 @@ mod tests {
         let (entries, parsed_count, _truncated, _hidden) = compact_ls(input, false, false);
         assert_eq!(parsed_count, 0);
         assert_eq!(entries, "(empty)\n");
+    }
+
+    #[test]
+    fn test_compact_preserves_entries_ending_in_dots() {
+        for name in ["report.", "report..", "report .", " .", ".. "] {
+            for kind in ['-', 'd', 'l'] {
+                let input = format!("{kind}rwxr-xr-x 1 user staff 4 Jan 1 12:00 {name}\n");
+                let (entries, parsed, truncated, hidden) = compact_ls(&input, true, false);
+                assert_eq!(parsed, 1, "lost {kind} entry {name:?}");
+                let expected = if kind == 'd' {
+                    format!("{name}/\n")
+                } else {
+                    format!("{name}  4B\n")
+                };
+                assert_eq!(entries, expected);
+                assert!(truncated.is_empty());
+                assert!(hidden.is_empty());
+            }
+        }
+        let input = "lrwxr-xr-x 1 user staff 1 Jan 1 12:00 link -> .\n";
+        let (entries, parsed, _, _) = compact_ls(input, true, false);
+        assert_eq!(parsed, 1);
+        assert_eq!(entries, "link -> .  1B\n");
+    }
+
+    #[test]
+    fn test_unknown_locale_trailing_dot_is_not_an_empty_directory() {
+        for name in ["report.", "report .", " .", ".. "] {
+            let input = format!("drwxr-xr-x 1 user staff 4 1月 1 12:00 {name}\n");
+            assert!(!is_dotdir(&input), "misclassified {name:?}");
+            let (entries, parsed, _, _) = compact_ls(&input, true, false);
+            assert_eq!(parsed, 0);
+            assert!(
+                entries.is_empty(),
+                "must request raw fallback, not report empty"
+            );
+        }
     }
 
     #[test]
