@@ -57,11 +57,16 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         .iter()
         .any(|a| a == "-a" || a == "-A" || a == "--auto-correct" || a == "--auto-correct-all");
 
+    // A version query (`--version`/`-v`, or `--verbose-version`/`-V`) prints a
+    // plain version string, not the JSON report — even with `--format json`
+    // injected. Pass it through untouched instead of parsing it as offenses (#1946).
+    let is_version = is_version_query(args);
+
     let has_format = args
         .iter()
         .any(|a| a.starts_with("--format") || a.starts_with("-f"));
 
-    if !has_format && !is_autocorrect {
+    if !has_format && !is_autocorrect && !is_version {
         cmd.arg("--format").arg("json");
     }
 
@@ -76,7 +81,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         "rubocop",
         &args.join(" "),
         move |stdout| {
-            if has_format || is_autocorrect {
+            if is_version {
+                stdout.trim_end().to_string()
+            } else if has_format || is_autocorrect {
                 filter_rubocop_text(stdout)
             } else {
                 filter_rubocop_json(stdout)
@@ -84,6 +91,14 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         },
         runner::RunOptions::stdout_only().tee("rubocop"),
     )
+}
+
+/// True when args are a rubocop version query: `--version`/`-v` or the verbose
+/// form `--verbose-version`/`-V`. These print plain text and must bypass
+/// JSON-report parsing (#1946).
+fn is_version_query(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| a == "--version" || a == "-v" || a == "--verbose-version" || a == "-V")
 }
 
 // ── JSON filtering ───────────────────────────────────────────────────────────
@@ -634,5 +649,15 @@ mod tests {
             "should show +2 more files overflow: {}",
             result
         );
+    }
+
+    #[test]
+    fn test_is_version_query_rubocop() {
+        assert!(is_version_query(&["--version".to_string()]));
+        assert!(is_version_query(&["-v".to_string()]));
+        assert!(is_version_query(&["--verbose-version".to_string()]));
+        assert!(is_version_query(&["-V".to_string()]));
+        assert!(!is_version_query(&["lib/foo.rb".to_string()]));
+        assert!(!is_version_query(&["-a".to_string()]));
     }
 }
