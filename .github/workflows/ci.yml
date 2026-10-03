@@ -80,7 +80,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit
+        run: cargo install cargo-audit --locked
 
       - name: Cargo Audit (CVE check)
         run: |
