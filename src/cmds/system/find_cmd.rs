@@ -142,14 +142,19 @@ fn parse_subset(paths: &[String], expr: &[String]) -> Option<FindArgs> {
 
 /// find syntax: `find [options] [paths...] [expression]` — paths end at the first
 /// token starting with `-`, `!` or a parenthesis, exactly like find.
-/// RTK syntax: `find <pattern> [path] [-m max] [-t type]` — used when the first
-/// token contains `*` or `?`, or is not an existing directory.
+/// RTK syntax: `find <pattern> [path] [-m max] [-t type]` — only when the first
+/// token contains `*` or `?` and is neither an expression token nor a path
+/// (`/` or `\`). A bare positional is always a find path, whether or not it exists.
 fn dispatch(original: &[String]) -> Result<Dispatch> {
     let (args, max, file_type) = peel_trailing_rtk_flags(original);
+    // ISSUE #3410: existence used to decide syntax, so `stale.log -delete` became
+    // `-name stale.log -delete` and a missing bare root became a successful search.
+    // Glob metacharacters are the only implicit RTK-pattern signal; `./` keeps a
+    // literal name that itself contains `*` or `?` on the find-path side.
     let legacy = !args.is_empty()
         && !is_expression_token(&args[0])
         && !looks_like_path(&args[0])
-        && (has_glob_meta(&args[0]) || !Path::new(&args[0]).is_dir());
+        && has_glob_meta(&args[0]);
     let args = if legacy {
         legacy_to_find_syntax(&args)
     } else {
@@ -775,6 +780,14 @@ mod tests {
         }
     }
 
+    fn assert_verbatim(input: &[&str], expected: &[&str]) {
+        match dispatch(&args(input)).unwrap() {
+            Dispatch::Verbatim(got) => assert_eq!(got, args(expected), "{input:?}"),
+            Dispatch::Native(_) => panic!("native for {input:?}"),
+            Dispatch::Compress { .. } => panic!("compress for {input:?}"),
+        }
+    }
+
     #[test]
     fn rtk_flags_before_actions_reach_find_so_it_refuses_them() {
         match dispatch(&args(&["*.rs", "src", "-delete", "-m", "1"])).unwrap() {
@@ -804,15 +817,103 @@ mod tests {
     }
 
     #[test]
-    fn literal_name_that_is_not_a_directory_stays_a_pattern() {
+    fn bare_non_glob_positionals_are_find_paths() {
+        // An existing file, a missing name, and several roots are find paths.
+        // Literal name search is `-name`, not the first positional.
         let p = parse_find_args(&args(&["Cargo.toml"])).unwrap();
-        assert_eq!(p.pattern, "Cargo.toml");
-        assert_eq!(p.path, ".");
+        assert_eq!(p.path, "Cargo.toml");
+        assert_eq!(p.pattern, "*");
         let p = parse_find_args(&args(&["no_such_dir_xyz"])).unwrap();
-        assert_eq!(p.pattern, "no_such_dir_xyz");
-        let p = parse_find_args(&args(&["README.md", "src"])).unwrap();
+        assert_eq!(p.path, "no_such_dir_xyz");
+        assert_eq!(p.pattern, "*");
+        match dispatch(&args(&["README.md", "src"])).unwrap() {
+            Dispatch::Compress { paths, expr, .. } => {
+                assert_eq!(paths, args(&["README.md", "src"]));
+                assert!(expr.is_empty(), "{expr:?}");
+            }
+            Dispatch::Native(_) => panic!("native"),
+            Dispatch::Verbatim(_) => panic!("verbatim"),
+        }
+        let p = parse_find_args(&args(&[".", "-name", "README.md"])).unwrap();
+        assert_eq!(p.path, ".");
         assert_eq!(p.pattern, "README.md");
+        let p = parse_find_args(&args(&["src", "-name", "README.md"])).unwrap();
         assert_eq!(p.path, "src");
+        assert_eq!(p.pattern, "README.md");
+        let p = parse_find_args(&args(&["./file*.log"])).unwrap();
+        assert_eq!(p.path, "./file*.log");
+        assert_eq!(p.pattern, "*");
+        let p = parse_find_args(&args(&["my file.log"])).unwrap();
+        assert_eq!(p.path, "my file.log");
+        assert_eq!(p.pattern, "*");
+        let p = parse_find_args(&args(&["file?.txt", "src"])).unwrap();
+        assert_eq!(p.pattern, "file?.txt");
+        assert_eq!(p.path, "src");
+    }
+
+    #[test]
+    fn bare_paths_with_actions_keep_exact_argv() {
+        // Dispatch only: `-ok` / `-okdir` read a confirmation and must not run.
+        for input in [
+            &["stale.log", "-delete"][..],
+            &["x.tmp", "y.tmp", "-delete"],
+            &["nodir", "-name", "*.o", "-delete"],
+            &["stale.log", "-exec", "echo", "{}", ";"],
+            &["stale.log", "-execdir", "echo", "{}", ";"],
+            &["stale.log", "-ok", "echo", "{}", ";"],
+            &["stale.log", "-okdir", "echo", "{}", ";"],
+            &["stale.log", "-print0"],
+            &["my file.log", "-exec", "echo", "{}", ";"],
+            &["./file*.log", "-delete"],
+            &["./file?.log", "-print0"],
+            &[".", "-delete"],
+            &["src", "-name", "*.rs", "-exec", "echo", "{}", ";"],
+            &["-L", "stale.log", "-delete"],
+            &["/definitely/missing/xyz", "-delete"],
+            &["stale.log", "-delete", "-m", "1"],
+            &["stale.log", "-exec", "echo", "{}", ";", "-t", "d"],
+        ] {
+            assert_verbatim(input, input);
+        }
+        assert_verbatim(&["*.log", "-delete"], &["-name", "*.log", "-delete"]);
+        assert_verbatim(
+            &["file?.log", "-exec", "echo", "{}", ";"],
+            &["-name", "file?.log", "-exec", "echo", "{}", ";"],
+        );
+    }
+
+    #[test]
+    fn bare_missing_roots_stay_out_of_synthesized_name() {
+        let p = parse_find_args(&args(&["nodir", "-type", "d"])).unwrap();
+        assert_eq!(p.path, "nodir");
+        assert_eq!(p.pattern, "*");
+        assert_eq!(p.file_type, "d");
+        match dispatch(&args(&["nodir", "-mtime", "+0"])).unwrap() {
+            Dispatch::Compress { paths, expr, .. } => {
+                assert_eq!(paths, args(&["nodir"]));
+                assert_eq!(expr, args(&["-mtime", "+0"]));
+                assert!(!expr.iter().any(|t| t == "-name"));
+            }
+            Dispatch::Native(_) => panic!("native"),
+            Dispatch::Verbatim(_) => panic!("verbatim"),
+        }
+        match dispatch(&args(&["x.tmp", "y.tmp"])).unwrap() {
+            Dispatch::Compress { paths, expr, .. } => {
+                assert_eq!(paths, args(&["x.tmp", "y.tmp"]));
+                assert!(expr.is_empty(), "{expr:?}");
+            }
+            Dispatch::Native(_) => panic!("native"),
+            Dispatch::Verbatim(_) => panic!("verbatim"),
+        }
+        match dispatch(&args(&["x.tmp", "y.tmp", "-mtime", "+0"])).unwrap() {
+            Dispatch::Compress { paths, expr, .. } => {
+                assert_eq!(paths, args(&["x.tmp", "y.tmp"]));
+                assert_eq!(expr, args(&["-mtime", "+0"]));
+                assert!(!expr.iter().any(|t| t == "-name"));
+            }
+            Dispatch::Native(_) => panic!("native"),
+            Dispatch::Verbatim(_) => panic!("verbatim"),
+        }
     }
 
     #[test]
