@@ -3033,7 +3033,7 @@ fn run_cli() -> Result<i32> {
 
         Commands::Hook { command } => match command {
             HookCommands::Claude => {
-                hooks::hook_cmd::run_claude()?;
+                hooks::hook_cmd::run_claude(cli.ultra_compact, cli.skip_env)?;
                 0
             }
             HookCommands::Trae => {
@@ -4126,6 +4126,20 @@ mod tests {
     }
 
     #[test]
+    fn test_hook_claude_parses_rewrite_flags() {
+        let cli = Cli::try_parse_from(["rtk", "hook", "claude", "--ultra-compact", "--skip-env"])
+            .unwrap();
+        assert!(cli.ultra_compact);
+        assert!(cli.skip_env);
+        assert!(matches!(
+            cli.command,
+            Commands::Hook {
+                command: HookCommands::Claude
+            }
+        ));
+    }
+
+    #[test]
     fn test_hook_trae_parses() {
         let cli = Cli::try_parse_from(["rtk", "hook", "trae"]);
         assert!(cli.is_ok());
@@ -4140,6 +4154,14 @@ mod tests {
                 command: HookCommands::Codex
             }
         ));
+    }
+
+    #[test]
+    fn test_rewritten_global_flags_parse_before_command() {
+        let cli =
+            Cli::try_parse_from(["rtk", "--ultra-compact", "--skip-env", "next", "build"]).unwrap();
+        assert!(cli.ultra_compact);
+        assert!(cli.skip_env);
     }
 
     #[test]
