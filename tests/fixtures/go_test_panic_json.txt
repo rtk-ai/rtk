@@ -1,0 +1,46 @@
+{"Time":"2025-01-15T10:00:00.000Z","Action":"start","Package":"github.com/tphakala/birdnet-go/internal/classifier"}
+{"Time":"2025-01-15T10:00:00.100Z","Action":"run","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestLoadModel"}
+{"Time":"2025-01-15T10:00:00.110Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestLoadModel","Output":"=== RUN   TestLoadModel\n"}
+{"Time":"2025-01-15T10:00:00.120Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestLoadModel","Output":"--- PASS: TestLoadModel (0.01s)\n"}
+{"Time":"2025-01-15T10:00:00.130Z","Action":"pass","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestLoadModel","Elapsed":0.01}
+{"Time":"2025-01-15T10:00:00.140Z","Action":"run","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestClassify"}
+{"Time":"2025-01-15T10:00:00.150Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestClassify","Output":"=== RUN   TestClassify\n"}
+{"Time":"2025-01-15T10:00:00.160Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestClassify","Output":"--- FAIL: TestClassify (0.02s)\n"}
+{"Time":"2025-01-15T10:00:00.165Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestClassify","Output":"panic: runtime error: index out of range [3] with length 2 [recovered]\n"}
+{"Time":"2025-01-15T10:00:00.166Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestClassify","Output":"\tpanic: runtime error: index out of range [3] with length 2\n"}
+{"Time":"2025-01-15T10:00:00.167Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestClassify","Output":"\n"}
+{"Time":"2025-01-15T10:00:00.168Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestClassify","Output":"goroutine 17 [running]:\n"}
+{"Time":"2025-01-15T10:00:00.169Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestClassify","Output":"testing.tRunner.func1.2({0x10a3ce0, 0xc000018090})\n"}
+{"Time":"2025-01-15T10:00:00.170Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestClassify","Output":"\t/usr/local/go/src/testing/testing.go:1545 +0x238\n"}
+{"Time":"2025-01-15T10:00:00.171Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestClassify","Output":"testing.tRunner.func1()\n"}
+{"Time":"2025-01-15T10:00:00.172Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestClassify","Output":"\t/usr/local/go/src/testing/testing.go:1548 +0x397\n"}
+{"Time":"2025-01-15T10:00:00.173Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestClassify","Output":"panic({0x10a3ce0?, 0xc000018090?})\n"}
+{"Time":"2025-01-15T10:00:00.174Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestClassify","Output":"\t/usr/local/go/src/runtime/panic.go:914 +0x21f\n"}
+{"Time":"2025-01-15T10:00:00.175Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestClassify","Output":"github.com/tphakala/birdnet-go/internal/classifier.(*Model).Predict(0xc00009e000, {0xc0001ba000, 0x2, 0x2})\n"}
+{"Time":"2025-01-15T10:00:00.176Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestClassify","Output":"\t/home/runner/work/birdnet-go/internal/classifier/model.go:142 +0x1a4\n"}
+{"Time":"2025-01-15T10:00:00.177Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestClassify","Output":"github.com/tphakala/birdnet-go/internal/classifier.TestClassify(0xc0001b6680)\n"}
+{"Time":"2025-01-15T10:00:00.178Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestClassify","Output":"\t/home/runner/work/birdnet-go/internal/classifier/classifier_test.go:58 +0xf8\n"}
+{"Time":"2025-01-15T10:00:00.179Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestClassify","Output":"testing.tRunner(0xc0001b6680, 0x10c5c50)\n"}
+{"Time":"2025-01-15T10:00:00.180Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestClassify","Output":"\t/usr/local/go/src/testing/testing.go:1595 +0xe8\n"}
+{"Time":"2025-01-15T10:00:00.181Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestClassify","Output":"created by testing.(*T).Run in goroutine 1\n"}
+{"Time":"2025-01-15T10:00:00.182Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestClassify","Output":"\t/usr/local/go/src/testing/testing.go:1648 +0x35f\n"}
+{"Time":"2025-01-15T10:00:00.183Z","Action":"fail","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestClassify","Elapsed":0.02}
+{"Time":"2025-01-15T10:00:00.190Z","Action":"run","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestSkippedFeature"}
+{"Time":"2025-01-15T10:00:00.191Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestSkippedFeature","Output":"=== RUN   TestSkippedFeature\n"}
+{"Time":"2025-01-15T10:00:00.192Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestSkippedFeature","Output":"    classifier_test.go:90: requires GPU\n"}
+{"Time":"2025-01-15T10:00:00.193Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestSkippedFeature","Output":"--- SKIP: TestSkippedFeature (0.00s)\n"}
+{"Time":"2025-01-15T10:00:00.194Z","Action":"skip","Package":"github.com/tphakala/birdnet-go/internal/classifier","Test":"TestSkippedFeature","Elapsed":0.0}
+{"Time":"2025-01-15T10:00:00.200Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Output":"FAIL\n"}
+{"Time":"2025-01-15T10:00:00.201Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/classifier","Output":"FAIL\tgithub.com/tphakala/birdnet-go/internal/classifier\t0.924s\n"}
+{"Time":"2025-01-15T10:00:00.202Z","Action":"fail","Package":"github.com/tphakala/birdnet-go/internal/classifier","Elapsed":0.924}
+{"Time":"2025-01-15T10:00:00.210Z","Action":"run","Package":"github.com/tphakala/birdnet-go/internal/audio","Test":"TestDecode"}
+{"Time":"2025-01-15T10:00:00.211Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/audio","Test":"TestDecode","Output":"=== RUN   TestDecode\n"}
+{"Time":"2025-01-15T10:00:00.212Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/audio","Test":"TestDecode","Output":"--- PASS: TestDecode (0.01s)\n"}
+{"Time":"2025-01-15T10:00:00.213Z","Action":"pass","Package":"github.com/tphakala/birdnet-go/internal/audio","Test":"TestDecode","Elapsed":0.01}
+{"Time":"2025-01-15T10:00:00.214Z","Action":"run","Package":"github.com/tphakala/birdnet-go/internal/audio","Test":"TestEncode"}
+{"Time":"2025-01-15T10:00:00.215Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/audio","Test":"TestEncode","Output":"=== RUN   TestEncode\n"}
+{"Time":"2025-01-15T10:00:00.216Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/audio","Test":"TestEncode","Output":"--- PASS: TestEncode (0.01s)\n"}
+{"Time":"2025-01-15T10:00:00.217Z","Action":"pass","Package":"github.com/tphakala/birdnet-go/internal/audio","Test":"TestEncode","Elapsed":0.01}
+{"Time":"2025-01-15T10:00:00.218Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/audio","Output":"PASS\n"}
+{"Time":"2025-01-15T10:00:00.219Z","Action":"output","Package":"github.com/tphakala/birdnet-go/internal/audio","Output":"ok\tgithub.com/tphakala/birdnet-go/internal/audio\t0.123s\n"}
+{"Time":"2025-01-15T10:00:00.220Z","Action":"pass","Package":"github.com/tphakala/birdnet-go/internal/audio","Elapsed":0.123}
