@@ -417,6 +417,7 @@ pub fn run(
     };
 
     let mut total_commands: usize = 0;
+    let mut sessions_with_bash: usize = 0;
     let mut already_rtk: usize = 0;
     let mut already_rtk_estimated: usize = 0;
     let mut parse_errors: usize = 0;
@@ -437,6 +438,9 @@ pub fn run(
                 continue;
             }
         };
+        if !extracted.is_empty() {
+            sessions_with_bash += 1;
+        }
 
         for ext_cmd in &extracted {
             let parts = split_command_chain(&ext_cmd.command);
@@ -639,6 +643,7 @@ pub fn run(
 
     let report = DiscoverReport {
         sessions_scanned: sessions.len(),
+        sessions_with_bash,
         scope,
         total_commands,
         already_rtk,
