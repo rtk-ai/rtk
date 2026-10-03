@@ -224,7 +224,8 @@ fn is_boilerplate(line: &str) -> bool {
 /// truly empty line between a Surefire failure trail and the next section;
 /// `mvnd` routes everything through the daemon logger, which prefixes even
 /// blank lines with `[INFO] ` (see `mvnd_test_fail_raw.txt`). Both terminate
-/// (or bridge, in the re-arm state) a failure trail.
+/// (or bridge, in the re-arm state) a failure trail — plain `mvn`'s only once
+/// the lines after it confirm it (see `SurefireBlock::held`).
 fn is_blank_separator(line: &str) -> bool {
     line.is_empty() || line.trim_end() == "[INFO]"
 }
@@ -526,7 +527,8 @@ fn keep_outside_block(line: &str, gate_building: bool) -> bool {
 ///     [`SurefireStep::FailingClose`] so the outer loop can decide whether to
 ///     emit (this seam enforces [`MAX_MVN_FAILING_CLASSES`])
 ///   - failure-trail handling for the exception/user-frame trail Surefire 3.x
-///     emits **after** the close line, terminated by a blank line. Framework
+///     emits **after** the close line, terminated by a blank line (on plain
+///     `mvn`, one the following lines confirm — see `held`). Framework
 ///     frames (junit, jdk.proxy, java.base, etc.) are stripped from both the
 ///     buffered block and the trail; user-code frames are preserved.
 ///   - multi-failure classes: Surefire 3.x emits one blank-separated detail
@@ -553,6 +555,11 @@ struct SurefireBlock<'a> {
     /// `commit_failing`/`drop_failing` — never by raw lines, which reach the
     /// lane only via routing fallback and can't speak for the trail.
     trail_rearm: Option<bool>,
+    /// Plain-`mvn` lines held back after an empty line inside a trail. That
+    /// empty line is either the per-test terminator or part of a multi-line
+    /// assertion message (AssertJ starts every message on a new line); see
+    /// [`Self::settle_held`] for how the lines after it decide.
+    held: Vec<&'a str>,
 }
 
 enum SurefireStep<'a> {
@@ -579,7 +586,46 @@ impl<'a> SurefireBlock<'a> {
             failure_trail: false,
             drop_trail: false,
             trail_rearm: None,
+            held: Vec::new(),
         }
+    }
+
+    /// Resolve [`Self::held`]. A stack frame proves the held lines were the
+    /// assertion message, since a message always runs into its frames: they
+    /// are emitted and the trail goes on. A Maven log line proves the empty
+    /// line was the terminator: the held lines are dropped, as they were
+    /// before a trail knew how to hold. Anything else is held as well.
+    /// Returns whether `line` itself was held.
+    fn settle_held(&mut self, line: &'a str, core: &str, out: &mut String) -> bool {
+        let t = core.trim_start();
+        if t.len() < core.len() && t.starts_with("at ") {
+            let held = std::mem::take(&mut self.held);
+            if !self.drop_trail {
+                for l in held {
+                    out.push_str(l);
+                    out.push('\n');
+                }
+            }
+            return false;
+        }
+        if lane_rest_level(core).is_some() {
+            self.held.clear();
+            self.end_trail(out);
+            return false;
+        }
+        self.held.push(line);
+        true
+    }
+
+    fn end_trail(&mut self, out: &mut String) {
+        if !self.drop_trail {
+            out.push('\n');
+        }
+        // Arm re-entry: a following per-test subline belongs to the
+        // same class and must inherit this trail's keep/drop decision.
+        self.trail_rearm = Some(self.drop_trail);
+        self.failure_trail = false;
+        self.drop_trail = false;
     }
 
     /// Matching is done on `core` (the module-prefix-stripped view of the
@@ -589,14 +635,21 @@ impl<'a> SurefireBlock<'a> {
     /// routed by its own module tag (see [`Lanes::route`]) rather than
     /// falling back to ownership rules; `is_root` is whether this lane is
     /// the root (untagged) lane, the only one plain `mvn` ever uses.
+    /// `hold_blanks` is set for plain `mvn` only (see [`Self::held`]); mvnd
+    /// lanes keep ending a trail on their own blank line at once.
     fn step(
         &mut self,
         line: &'a str,
         core: &str,
         keyed: bool,
         is_root: bool,
+        hold_blanks: bool,
         out: &mut String,
     ) -> SurefireStep<'a> {
+        if !self.held.is_empty() && self.settle_held(line, core, out) {
+            return SurefireStep::Consumed;
+        }
+
         // PLUGIN_BANNER/RUNNING/CLOSE only mean anything as *this lane's own*
         // state transitions. A fallback-routed line (keyed == false) landed
         // here via raw-line ownership rules, not because it's genuinely
@@ -680,15 +733,15 @@ impl<'a> SurefireBlock<'a> {
             // (another module's stray blank println, or a blank line inside
             // a multi-line assertion message) and must not end the trail —
             // it's just more trail content.
+            // Plain `mvn` does terminate with an empty line, but an
+            // AssertJ-style message opens with one too, so it is held until
+            // the lines after it show which it was (see `held`).
+            if hold_blanks && core.is_empty() {
+                self.held.push(line);
+                return SurefireStep::Consumed;
+            }
             if is_blank_separator(core) && (keyed || is_root) {
-                if !self.drop_trail {
-                    out.push('\n');
-                }
-                // Arm re-entry: a following per-test subline belongs to the
-                // same class and must inherit this trail's keep/drop decision.
-                self.trail_rearm = Some(self.drop_trail);
-                self.failure_trail = false;
-                self.drop_trail = false;
+                self.end_trail(out);
                 return SurefireStep::Consumed;
             }
             let t = core.trim_start();
@@ -779,6 +832,10 @@ impl<'a> SurefireBlock<'a> {
     /// End-of-stream flush: if a block opened and never closed (truncated
     /// output), surface what we have rather than dropping it silently.
     fn finish(&mut self, out: &mut String) {
+        if !self.held.is_empty() {
+            self.held.clear();
+            self.end_trail(out);
+        }
         if self.in_block {
             self.flush_open_block_as_keep(out);
         }
@@ -1258,7 +1315,7 @@ fn drive_surefire_line<'a>(
     let step = lanes
         .get(idx)
         .block
-        .step(line, core, keyed, idx == ROOT_LANE, out);
+        .step(line, core, keyed, idx == ROOT_LANE, !daemon, out);
     // A lane inside a Surefire block has no pending javac continuations:
     // entering a block retires any stale armed claim, so a single lane can't
     // hold a permanent armed-vs-block tie against raw-line routing.
@@ -3878,6 +3935,71 @@ mod tests {
             "pass-fixture savings >=50%, got {:.1}%",
             savings
         );
+    }
+
+    /// AssertJ (and JUnit's `assertEquals` via opentest4j for multi-line
+    /// values) starts the message on a new line, so Surefire prints
+    /// `java.lang.AssertionError: `, a blank line, then the message. The blank
+    /// used to end the failure trail, dropping the message and the user frame.
+    #[test]
+    fn multiline_assertion_message_survives_the_blank_line() {
+        let i = include_str!("../../../tests/fixtures/mvn_test_assertj_multiline_raw.txt");
+        for (name, o) in [
+            ("surefire", filter_surefire(i, false)),
+            ("package", filter_package(i, false)),
+        ] {
+            for want in [
+                r#"Expecting empty but was: ["AiAssessmentService", "CandidateAssessmentService", "AutoEvaluationService"]"#,
+                "at com.example.WiringTest.shouldWireWithoutCycles(WiringTest.java:7)",
+                r#"expected: "ReportService""#,
+                r#" but was: "AutoEvaluationService""#,
+                "at com.example.WiringTest.shouldNameTheService(WiringTest.java:8)",
+            ] {
+                assert!(o.contains(want), "{name}: missing {want:?}; got:\n{o}");
+            }
+            assert!(
+                !o.contains("java.lang.reflect.Method.invoke"),
+                "{name}: framework frames still stripped; got:\n{o}"
+            );
+            assert!(o.contains("[INFO] Results:"), "{name}: got:\n{o}");
+        }
+        let o = filter_surefire(i, false);
+        let savings = 100.0 - (count_tokens(&o) as f64 / count_tokens(i) as f64 * 100.0);
+        assert!(savings >= 60.0, "expected >=60% savings, got {savings:.1}%");
+    }
+
+    /// Defensive: stray unprefixed lines after a trail's real terminator
+    /// (Surefire 3.5 closes the fork's channel before shutdown hooks run, but
+    /// other plugins or runners may not) never reach a stack frame, so they
+    /// are dropped as before rather than kept as message text.
+    #[test]
+    fn unprefixed_lines_after_the_terminator_stay_dropped() {
+        let i = include_str!("../../../tests/fixtures/mvn_test_assertj_multiline_raw.txt")
+            .replacen(
+                "\n\n[INFO] \n[INFO] Results:",
+                "\n\nHikariPool-1 - Shutdown initiated...\n\nHikariPool-1 - Shutdown completed.\n[INFO] \n[INFO] Results:",
+                1,
+            );
+        let o = filter_surefire(&i, false);
+        assert!(!o.contains("HikariPool-1"), "got:\n{o}");
+        assert!(
+            o.contains(r#" but was: "AutoEvaluationService""#),
+            "got:\n{o}"
+        );
+    }
+
+    /// A class past the failing-class cap drops its whole trail, held lines
+    /// included — the message must not leak out through the hold.
+    #[test]
+    fn capped_class_drops_its_multiline_message() {
+        let i = include_str!("../../../tests/fixtures/mvn_test_assertj_multiline_raw.txt");
+        let o = filter_surefire_with_cap(i, 0, false);
+        assert!(!o.contains("Expecting empty but was"), "got:\n{o}");
+        assert!(
+            !o.contains(" but was: \"AutoEvaluationService\""),
+            "got:\n{o}"
+        );
+        assert!(!o.contains("at com.example.WiringTest"), "got:\n{o}");
     }
 
     #[test]
