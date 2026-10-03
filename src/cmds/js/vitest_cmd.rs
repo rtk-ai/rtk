@@ -26,6 +26,8 @@ struct VitestJsonOutput {
     num_passed_tests: usize,
     #[serde(rename = "numFailedTests")]
     num_failed_tests: usize,
+    #[serde(rename = "numFailedTestSuites", default)]
+    num_failed_test_suites: usize,
     #[serde(rename = "numPendingTests", default)]
     num_pending_tests: usize,
 }
@@ -35,6 +37,10 @@ struct VitestTestFile {
     name: String,
     #[serde(rename = "assertionResults")]
     assertion_results: Vec<VitestTest>,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    message: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,11 +72,19 @@ impl OutputParser for VitestParser {
         match json_result {
             Ok(json) => {
                 let failures = extract_failures_from_json(&json);
+                let failed = json.num_failed_tests.max(
+                    json.num_failed_test_suites.max(
+                        json.test_results
+                            .iter()
+                            .filter(|file| file.status == "failed")
+                            .count(),
+                    ),
+                );
 
                 let result = TestResult {
                     total: json.num_total_tests,
                     passed: json.num_passed_tests,
-                    failed: json.num_failed_tests,
+                    failed,
                     skipped: json.num_pending_tests,
                     duration_ms: None,
                     failures,
@@ -109,6 +123,19 @@ fn extract_failures_from_json(json: &VitestJsonOutput) -> Vec<TestFailure> {
                     stack_trace: None,
                 });
             }
+        }
+
+        if file.status == "failed" && file.assertion_results.is_empty() {
+            failures.push(TestFailure {
+                test_name: file.name.clone(),
+                file_path: file.name.clone(),
+                error_message: if file.message.is_empty() {
+                    "Test suite failed to load".to_string()
+                } else {
+                    file.message.clone()
+                },
+                stack_trace: None,
+            });
         }
     }
 
@@ -438,6 +465,42 @@ mod tests {
         assert_eq!(data.passed, 13);
         assert_eq!(data.failed, 0);
         assert_eq!(data.duration_ms, None);
+    }
+
+    #[test]
+    fn test_vitest_parser_reports_suite_load_failure() {
+        let json = r#"{
+            "numTotalTestSuites": 1,
+            "numFailedTestSuites": 1,
+            "numTotalTests": 0,
+            "numPassedTests": 0,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "testResults": [{
+                "name": "broken.test.ts",
+                "assertionResults": [],
+                "status": "failed",
+                "message": "Cannot find module './does-not-exist'"
+            }]
+        }"#;
+
+        let result = VitestParser::parse(json);
+        assert!(result.is_ok());
+
+        let data = result.unwrap();
+        assert_eq!(data.total, 0);
+        assert_eq!(data.passed, 0);
+        assert_eq!(data.failed, 1);
+        assert_eq!(data.failures.len(), 1);
+        assert_eq!(data.failures[0].test_name, "broken.test.ts");
+        assert_eq!(
+            data.failures[0].error_message,
+            "Cannot find module './does-not-exist'"
+        );
+
+        let summary = data.format(FormatMode::Compact);
+        assert!(summary.contains("PASS (0) FAIL (1)"));
+        assert!(summary.contains("Cannot find module './does-not-exist'"));
     }
 
     #[test]
