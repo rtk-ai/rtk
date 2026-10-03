@@ -809,10 +809,11 @@ fn prompt_telemetry_consent() -> Result<()> {
     Ok(())
 }
 
-pub(super) fn print_manual_instructions(hook_command: &str, include_opencode: bool) {
-    let settings_path = resolve_claude_dir()
-        .unwrap_or_else(|_| PathBuf::from(format!("~/{}", CLAUDE_DIR)))
-        .join(SETTINGS_JSON);
+pub(super) fn print_manual_instructions(
+    settings_path: &Path,
+    hook_command: &str,
+    include_opencode: bool,
+) {
     println!("\n  MANUAL STEP: Add this to {}:", settings_path.display());
     println!("  {{");
     println!("    \"hooks\": {{ \"PreToolUse\": [{{");
@@ -1581,6 +1582,17 @@ fn show_claude_config() -> Result<()> {
         }
     } else {
         println!("[--] settings.json: not found");
+    }
+
+    // A project hook can be active even when the user-global hook is absent.
+    let project_settings_path = PathBuf::from(CLAUDE_DIR).join(SETTINGS_JSON);
+    match read_json_file(&project_settings_path) {
+        Ok(Some(root)) if hook_already_present(&root, CLAUDE_HOOK_COMMAND) => {
+            println!("[ok] Project settings.json: RTK hook configured");
+        }
+        Ok(Some(_)) => println!("[--] Project settings.json: RTK hook not configured"),
+        Ok(None) => println!("[--] Project settings.json: not found"),
+        Err(error) => println!("[warn] Project settings.json: {error}"),
     }
 
     // Check OpenCode plugin
