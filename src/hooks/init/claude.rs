@@ -93,14 +93,12 @@ fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
     let mut migrated = false;
 
     // Check for old block and migrate
-    if content.contains(RTK_BLOCK_START) {
-        let (new_content, did_migrate) = remove_rtk_block(&content);
-        if did_migrate {
-            content = new_content;
-            migrated = true;
-            if verbose > 0 {
-                eprintln!("Migrated: removed old RTK block from CLAUDE.md");
-            }
+    let (new_content, did_migrate) = remove_rtk_block(&content);
+    if did_migrate {
+        content = new_content;
+        migrated = true;
+        if verbose > 0 {
+            eprintln!("Migrated: removed old RTK block from CLAUDE.md");
         }
     }
 
@@ -365,7 +363,7 @@ pub(super) fn run_default_mode(
         println!("  CLAUDE.md: @RTK.md reference added");
 
         if migrated {
-            println!("\n  [ok] Migrated: removed 137-line RTK block from CLAUDE.md");
+            println!("\n  [ok] Migrated: removed legacy RTK block from CLAUDE.md");
             println!(
                 "              replaced with @RTK.md (awareness: {})",
                 ctx.awareness
@@ -1457,6 +1455,31 @@ mod tests {
                 "hook must be in settings.json after upgrade"
             );
         });
+    }
+
+    #[test]
+    fn test_upgrade_from_pre_v010_claude_md_blocks() {
+        for legacy in [
+            include_str!("../../../tests/fixtures/init/rtk-v0.9.0-0.9.3-claude.md"),
+            include_str!("../../../tests/fixtures/init/rtk-v0.9.4-claude.md"),
+        ] {
+            let tmp = test_isolation::tempdir();
+            with_claude_dir_override(&tmp, |claude_dir| {
+                let claude_md = claude_dir.join(CLAUDE_MD);
+                fs::write(&claude_md, legacy).unwrap();
+
+                run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+
+                assert_eq!(
+                    fs::read_to_string(&claude_md).unwrap(),
+                    "@RTK.md\n",
+                    "the complete legacy block should be replaced by the reference"
+                );
+                assert!(claude_dir.join(RTK_MD).exists());
+                let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
+                assert!(settings.contains(CLAUDE_HOOK_COMMAND));
+            });
+        }
     }
 
     #[test]
