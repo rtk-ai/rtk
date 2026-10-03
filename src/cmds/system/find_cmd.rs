@@ -386,7 +386,10 @@ fn build_capped_listing(files: &[String], max_results: usize) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     if files.len() > max_results {
-        listing.push_str(&format!("\n+{} more", files.len() - max_results));
+        if !listing.is_empty() {
+            listing.push('\n');
+        }
+        listing.push_str(&format!("+{} more", files.len() - max_results));
     }
     listing.push('\n');
     listing
@@ -1292,6 +1295,12 @@ mod tests {
     fn capped_listing_truncates_with_marker() {
         let files = args(&["a.rs", "b.rs", "c.rs", "d.rs"]);
         assert_eq!(build_capped_listing(&files, 2), "a.rs\nb.rs\n+2 more\n");
+    }
+
+    #[test]
+    fn capped_listing_zero_max_has_no_leading_newline() {
+        let files = args(&["a.rs", "b.rs"]);
+        assert_eq!(build_capped_listing(&files, 0), "+2 more\n");
     }
 
     #[test]
