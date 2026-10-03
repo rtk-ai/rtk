@@ -230,6 +230,7 @@ rtk sqlfluff lint               # SQL linting (JSON, -75%)
 rtk sqlfluff lint models/       # Lint a specific directory (pass path after `lint`)
 rtk tsc                         # TypeScript errors grouped by file
 rtk next build                  # Next.js build compact
+rtk ng build                    # Angular build tables; keeps bundles and diagnostics
 rtk prettier --check .          # Files needing formatting
 rtk cargo build                 # Cargo build (-80%)
 rtk cargo clippy                # Cargo clippy (-80%)

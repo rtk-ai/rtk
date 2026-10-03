@@ -2018,6 +2018,37 @@ mod tests {
         super::rewrite_command(cmd, excluded, &[])
     }
 
+    #[test]
+    fn ng_build_rewrite_keeps_native_arguments_and_a_narrow_command_scope() {
+        assert_eq!(
+            rewrite_command_no_prefixes("ng build app --output-path 'dist folder'", &[]),
+            Some("rtk ng build app --output-path 'dist folder'".into())
+        );
+        for command in [
+            "ng test",
+            "ng serve",
+            "ng b",
+            "ng builder",
+            "ng-build",
+            "nginx build",
+            "yarn ng build",
+            "npm run ng -- build",
+            "npx ng build",
+            "node_modules/.bin/ng build",
+            "./node_modules/.bin/ng build",
+            "/opt/bin/ng build",
+        ] {
+            let rewritten = rewrite_command_no_prefixes(command, &[]);
+            assert!(
+                !rewritten
+                    .as_deref()
+                    .is_some_and(|text| text.starts_with("rtk ng ")),
+                "{command}: {rewritten:?}"
+            );
+        }
+        assert_eq!(rewrite_command_no_prefixes("ng build | cat", &[]), None);
+    }
+
     // Three compound-command segmenters look at the same kind of input for
     // different, deliberate purposes — split_for_permissions (the permission
     // gate, most conservative), split_on_operators/split_command_chain

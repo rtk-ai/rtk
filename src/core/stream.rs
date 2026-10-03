@@ -718,6 +718,27 @@ pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
     capture(cmd)
 }
 
+/// Buffered capture with verbatim decoded streams, stdin and cancellation relay.
+///
+/// Unlike the line-oriented streaming runner, this preserves CRLF and a missing
+/// final newline and does not cap either stream. The caller must emit the result,
+/// flush its output, then call [`die_by_relayed_signal`], as the shared runner does.
+pub fn exec_capture_stdin_with_relay(cmd: &mut Command) -> Result<CaptureResult> {
+    cmd.stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = cmd.spawn().context("Failed to spawn process")?;
+    let _relay = signal_relay::Relay::install(child.id());
+    let output = child
+        .wait_with_output()
+        .context("Failed to capture process output")?;
+    Ok(CaptureResult {
+        stdout: super::utils::decode_process_output(&output.stdout),
+        stderr: super::utils::decode_process_output(&output.stderr),
+        exit_code: status_to_exit_code(output.status),
+    })
+}
+
 /// Run `cmd` to completion, decode what it wrote, and report the exit code.
 ///
 /// A process killed by a signal has no exit code of its own, and returning

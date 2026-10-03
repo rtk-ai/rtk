@@ -1,0 +1,20 @@
+❯ Building...
+✔ Building...
+Initial chunk files | Names         |  Raw size | Estimated transfer size
+main-HQODSNQU.js    | main          | 193.46 kB |                52.36 kB
+styles-3IO2SMMH.css | styles        |  61 bytes |                61 bytes
+
+                    | Initial total | 193.52 kB |                52.42 kB
+
+Lazy chunk files    | Names         |  Raw size | Estimated transfer size
+chunk-BmiBcDhi.js   | dashboard     | 419 bytes |               419 bytes
+chunk-D4-ECPz-.js   | settings      | 415 bytes |               415 bytes
+chunk-Dy4ZsgMF.js   | projects      | 415 bytes |               415 bytes
+chunk-CcxzvmAm.js   | reports       | 411 bytes |               411 bytes
+chunk-DSFAMcLH.js   | profile       | 411 bytes |               411 bytes
+chunk-g6pIdGbu.js   | help          | 399 bytes |               399 bytes
+
+Application bundle generation complete. [1.753 seconds] - 2026-10-02T20:01:55.941Z
+
+Output location: /workspace/scratch/72640dd8823a/rtk-angular-fixture-work/fixture-app/dist/fixture-app
+
