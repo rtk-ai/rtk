@@ -13,6 +13,14 @@ sidebar:
 |----------|------|
 | Linux | `~/.config/rtk/config.toml` |
 | macOS | `~/Library/Application Support/rtk/config.toml` |
+| Windows | `%APPDATA%\rtk\config.toml` |
+
+The global `filters.toml` lives in the same directory. To move the directory:
+
+- `RTK_CONFIG_DIR=/path/to/dir`: RTK reads `/path/to/dir/config.toml` directly (no `rtk` subdirectory is added). Works on every platform.
+- `XDG_CONFIG_HOME` (Linux and macOS): RTK uses `$XDG_CONFIG_HOME/rtk/`. It must be an absolute path. On macOS, an existing `~/Library/Application Support/rtk/` keeps being used until `$XDG_CONFIG_HOME/rtk/` exists, so move the directory there to switch. A moved `filters.toml` needs `rtk trust` again (trust is recorded per path).
+
+`rtk config` prints the path in use. Data files (`history.db`, recall store) are not affected. Relocate them with `tracking.database_path` / `RTK_DB_PATH` and `retriever.database_path` / `RTK_RECALL_DB`.
 
 ```bash
 rtk config            # show current configuration
@@ -89,6 +97,8 @@ since the agent must type `rtk` itself. `rtk init` prints a note when it does th
 | Variable | Description |
 |----------|-------------|
 | `RTK_DISABLED=1` | Disable RTK for a single command (`RTK_DISABLED=1 git status`) |
+| `RTK_CONFIG_DIR` | Directory holding `config.toml` and the global `filters.toml` (see [Config file location](#config-file-location)) |
+| `RTK_DB_PATH` | Override the tracking database path |
 | `RTK_RECALL=0` | Disable the recall store for a single command |
 | `RTK_RECALL_DB` | Override the recall database path |
 | `RTK_TEE=0` | Legacy alias of `RTK_RECALL=0` (still honored) |
