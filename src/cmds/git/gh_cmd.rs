@@ -3,6 +3,7 @@
 //! Provides token-optimized alternatives to verbose `gh` commands.
 //! Focuses on extracting essential information from JSON outputs.
 
+use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
 use crate::core::runner::{self, RunOptions};
 use crate::core::truncate::CAP_LIST;
 use crate::core::utils::{ok_confirmation, resolved_command, truncate};
@@ -843,7 +844,39 @@ fn should_passthrough_run_view(extra_args: &[String]) -> bool {
         .any(|a| a == "--log-failed" || a == "--log" || a == "--json")
 }
 
+/// A job view has its own output format, so the workflow-run summary filter
+/// must not see it. Tokenizing also recognizes `-j` and attached values while
+/// excluding occurrences inside another flag's value or after `--`.
+fn has_run_view_job(args: &[String]) -> bool {
+    let tokens = arg_tokenizer::tokenize_grammar(
+        args,
+        &|kind, name| {
+            let takes_value = match kind {
+                TokenKind::Long => matches!(
+                    name,
+                    "job" | "attempt" | "repo" | "jq" | "json" | "template"
+                ),
+                TokenKind::Short => matches!(name, "j" | "a" | "R" | "q" | "t"),
+                _ => false,
+            };
+            takes_value.then(ValueSpec::value)
+        },
+        Dialect::Posix,
+    );
+    arg_tokenizer::before_dashdash(&tokens).iter().any(|token| {
+        matches!(
+            (token.kind, token.text),
+            (TokenKind::Long, "job") | (TokenKind::Short, "j")
+        )
+    })
+}
+
 fn view_run(args: &[String], _verbose: u8) -> Result<i32> {
+    if has_run_view_job(args) {
+        // Preserve argument order and raw job output, including when there is
+        // no positional run ID (`gh run view --job <id>`).
+        return run_passthrough_with_extra("gh", &["run", "view"], args);
+    }
     // `gh run view` without an identifier opens an interactive picker — defer to gh.
     let (run_id_opt, extra_args) = parse_optional_identifier(args);
     if should_passthrough_run_view(&extra_args) {
@@ -1308,6 +1341,33 @@ mod tests {
             "--json".into(),
             "jobs".into()
         ]));
+    }
+
+    #[test]
+    fn test_run_view_job_flag_forms() {
+        for args in [
+            vec!["--job", "67890"],
+            vec!["--job=67890"],
+            vec!["-j", "67890"],
+            vec!["-j67890"],
+            vec!["12345", "--job", "67890"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            assert!(has_run_view_job(&args), "did not detect {args:?}");
+        }
+    }
+
+    #[test]
+    fn test_run_view_job_flag_not_detected_in_flag_values_or_after_separator() {
+        for args in [
+            vec!["--jq", "--job"],
+            vec!["--template", "-j"],
+            vec!["--", "--job", "67890"],
+            vec!["--web"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            assert!(!has_run_view_job(&args), "misdetected {args:?}");
+        }
     }
 
     #[test]
