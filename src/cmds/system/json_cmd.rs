@@ -111,10 +111,38 @@ fn render_json<'a>(content: &'a str, max_depth: usize, schema_only: bool) -> Res
 }
 
 /// Parse a JSON string and return compact representation with values preserved.
-/// Long strings are truncated, arrays are summarized.
+/// Long strings are truncated and large arrays are summarized. Bounded arrays of
+/// short scalars keep every element (see `SCALAR_ARRAY_PRESERVE_LIMIT`).
 pub fn filter_json_compact(json_str: &str, max_depth: usize) -> Result<String> {
     let value: Value = from_json_str(json_str).context("Failed to parse JSON")?;
     Ok(compact_json(&value, 0, max_depth))
+}
+
+/// Preserve arrays of at most this many short scalars instead of collapsing
+/// them to `[first, ... +N more]`. 32 is the #4073 policy: large enough for
+/// typical enums, small enough that the extra bytes stay cheap. Arrays with
+/// nested containers, long strings, or more elements keep the legacy paths.
+const SCALAR_ARRAY_PRESERVE_LIMIT: usize = 32;
+
+/// Matches the existing short-string boundary in `compact_json` (`s.len() > 80`).
+const SHORT_STRING_MAX_BYTES: usize = 80;
+
+fn is_short_scalar(value: &Value) -> bool {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => true,
+        Value::String(s) => s.len() <= SHORT_STRING_MAX_BYTES,
+        _ => false,
+    }
+}
+
+/// ISSUE #4073: small enums (role lists, status codes) were summarized after
+/// five items, hiding legitimate values. Render every qualifying scalar with
+/// serde_json so spelling and escaping round-trip; do not drop duplicates or
+/// key off property names. `depth < max_depth` keeps the child-element depth
+/// gate: at the depth boundary children still become `...` via the legacy path.
+fn format_bounded_scalar_array(arr: &[Value], indent: &str) -> String {
+    let items: Vec<String> = arr.iter().map(Value::to_string).collect();
+    format!("{}[{}]", indent, items.join(", "))
 }
 
 fn compact_json(value: &Value, depth: usize, max_depth: usize) -> String {
@@ -129,7 +157,7 @@ fn compact_json(value: &Value, depth: usize, max_depth: usize) -> String {
         Value::Bool(b) => format!("{}{}", indent, b),
         Value::Number(n) => format!("{}{}", indent, n),
         Value::String(s) => {
-            if s.len() > 80 {
+            if s.len() > SHORT_STRING_MAX_BYTES {
                 let end = s.floor_char_boundary(77);
                 format!("{}\"{}...\"", indent, &s[..end])
             } else {
@@ -139,6 +167,11 @@ fn compact_json(value: &Value, depth: usize, max_depth: usize) -> String {
         Value::Array(arr) => {
             if arr.is_empty() {
                 format!("{}[]", indent)
+            } else if arr.len() <= SCALAR_ARRAY_PRESERVE_LIMIT
+                && depth < max_depth
+                && arr.iter().all(is_short_scalar)
+            {
+                format_bounded_scalar_array(arr, &indent)
             } else if arr.len() > 5 {
                 let first = compact_json(&arr[0], depth + 1, max_depth);
                 format!("{}[{}, ... +{} more]", indent, first.trim(), arr.len() - 1)
@@ -432,5 +465,349 @@ mod tests {
     #[test]
     fn test_compact_truncates_mixed_ascii_multibyte_string() {
         assert_value_truncated(&("a".repeat(76) + &"日本語".repeat(5)));
+    }
+
+    // --- #4073: bounded scalar arrays keep every value ---
+
+    /// Issue body example (`roles.json` as a single object line).
+    const ISSUE_ROLES_MINIFIED: &str = r#"{ "status": "ok", "allowed_roles": ["admin", "editor", "reviewer", "publisher", "auditor", "moderator", "archivist", "guest"], "count": 8 }"#;
+    const ISSUE_ROLES: [&str; 8] = [
+        "admin",
+        "editor",
+        "reviewer",
+        "publisher",
+        "auditor",
+        "moderator",
+        "archivist",
+        "guest",
+    ];
+
+    /// Follow-up pretty-printed reproduction from the issue thread.
+    const ISSUE_ROLES_PRETTY: &str = r#"{
+  "status": "ok",
+  "count": 8,
+  "allowed_roles": ["admin", "editor", "viewer", "owner", "member", "guest", "auditor", "support"]
+}"#;
+    const ISSUE_ROLES_PRETTY_VALUES: [&str; 8] = [
+        "admin", "editor", "viewer", "owner", "member", "guest", "auditor", "support",
+    ];
+
+    fn assert_no_array_omission(output: &str) {
+        assert!(
+            !output.contains("... +"),
+            "scalar array must not use an omission marker, got: {output}"
+        );
+    }
+
+    fn assert_values_in_order(output: &str, serialized: &[String]) {
+        let mut rest = output;
+        for needle in serialized {
+            match rest.find(needle.as_str()) {
+                Some(i) => rest = &rest[i + needle.len()..],
+                None => panic!("missing {needle} in order in: {output}"),
+            }
+        }
+    }
+
+    fn serialized_strings(values: &[&str]) -> Vec<String> {
+        values
+            .iter()
+            .map(|v| Value::String((*v).to_string()).to_string())
+            .collect()
+    }
+
+    fn numbered_array_json(n: usize) -> String {
+        let items: Vec<String> = (0..n).map(|i| format!("\"val_{i}\"")).collect();
+        format!("[{}]", items.join(","))
+    }
+
+    fn numbered_object_json(key: &str, n: usize) -> String {
+        format!(r#"{{"{key}":{}}}"#, numbered_array_json(n))
+    }
+
+    fn numbered_values(n: usize) -> Vec<String> {
+        (0..n)
+            .map(|i| Value::String(format!("val_{i}")).to_string())
+            .collect()
+    }
+
+    fn assert_preserves_scalar_array(json: &str, serialized: &[String]) {
+        let compact = filter_json_compact(json, 5).expect("filter_json_compact must parse");
+        let rendered = render_json(json, 5, false).expect("render_json must parse");
+        for output in [compact.as_str(), rendered.as_ref()] {
+            assert_no_array_omission(output);
+            assert_values_in_order(output, serialized);
+        }
+    }
+
+    #[test]
+    fn test_issue_eight_roles_minified_preserves_every_value() {
+        let expected = serialized_strings(&ISSUE_ROLES);
+        assert_preserves_scalar_array(ISSUE_ROLES_MINIFIED, &expected);
+    }
+
+    #[test]
+    fn test_issue_eight_roles_pretty_preserves_every_value() {
+        let expected = serialized_strings(&ISSUE_ROLES_PRETTY_VALUES);
+        assert_preserves_scalar_array(ISSUE_ROLES_PRETTY, &expected);
+        let rendered = render_json(ISSUE_ROLES_PRETTY, 5, false).expect("render");
+        assert!(
+            matches!(rendered, Cow::Owned(_)),
+            "pretty-printed input should take the compact path, got: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn test_scalar_array_size_table_root_and_nested() {
+        for n in [0usize, 1, 5, 6, 8, 32, 33] {
+            let root = numbered_array_json(n);
+            let nested = numbered_object_json("widget_ids", n);
+            let compact_root = filter_json_compact(&root, 5).expect("root");
+            let compact_nested = filter_json_compact(&nested, 5).expect("nested");
+            let rendered_root = render_json(&root, 5, false).expect("render root");
+            let rendered_nested = render_json(&nested, 5, false).expect("render nested");
+
+            if n == 0 {
+                assert!(compact_root.contains("[]"), "{compact_root}");
+                assert!(compact_nested.contains("[]"), "{compact_nested}");
+                continue;
+            }
+
+            if n <= SCALAR_ARRAY_PRESERVE_LIMIT {
+                let expected = numbered_values(n);
+                for output in [
+                    compact_root.as_str(),
+                    compact_nested.as_str(),
+                    rendered_root.as_ref(),
+                    rendered_nested.as_ref(),
+                ] {
+                    assert_no_array_omission(output);
+                    assert_values_in_order(output, &expected);
+                }
+            } else {
+                let omitted = n - 1;
+                let marker = format!("... +{omitted} more");
+                for output in [compact_root.as_str(), compact_nested.as_str()] {
+                    assert!(
+                        output.contains(&marker),
+                        "33-element array must keep the legacy summary ({marker}): {output}"
+                    );
+                    assert!(
+                        output.contains("\"val_0\""),
+                        "summary should keep the first value: {output}"
+                    );
+                    assert!(
+                        !output.contains(&format!("\"val_{}\"", n - 1)),
+                        "summarized array must omit the last value: {output}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_mixed_short_scalars_preserve_order_types_and_duplicates() {
+        let json = r#"[1, true, null, "dup", "dup", false, 0, "dup"]"#;
+        let compact = filter_json_compact(json, 5).expect("compact");
+        assert_no_array_omission(&compact);
+        let parsed: Value =
+            serde_json::from_str(compact.trim()).expect("root scalar array must be valid JSON");
+        let expected: Value = serde_json::from_str(json).expect("fixture");
+        assert_eq!(parsed, expected);
+        assert_eq!(
+            render_json(json, 5, false).expect("render").as_ref(),
+            compact.as_str()
+        );
+    }
+
+    #[test]
+    fn test_numeric_enum_and_unrelated_property_name() {
+        let json = r#"{"http_status":[200,201,400,401,403,404,500,503]}"#;
+        let expected: Vec<String> = [200, 201, 400, 401, 403, 404, 500, 503]
+            .into_iter()
+            .map(|n| n.to_string())
+            .collect();
+        assert_preserves_scalar_array(json, &expected);
+    }
+
+    #[test]
+    fn test_escaped_strings_round_trip() {
+        let json = r#"["quote\"here","back\\slash","new\nline","uni\u00e9","日本語"]"#;
+        let compact = filter_json_compact(json, 5).expect("compact");
+        assert_no_array_omission(&compact);
+        let parsed: Value =
+            serde_json::from_str(compact.trim()).expect("escaped scalars must round-trip");
+        let expected: Value = serde_json::from_str(json).expect("fixture");
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_string_length_boundary_80_vs_81_bytes() {
+        let s80 = "a".repeat(SHORT_STRING_MAX_BYTES);
+        let s81 = "a".repeat(SHORT_STRING_MAX_BYTES + 1);
+        let keep = Value::Array(vec![
+            Value::String(s80.clone()),
+            Value::String("x".into()),
+            Value::String("y".into()),
+            Value::String("z".into()),
+            Value::String("p".into()),
+            Value::String("q".into()),
+        ]);
+        let drop_long = Value::Array(vec![
+            Value::String(s81.clone()),
+            Value::String("x".into()),
+            Value::String("y".into()),
+            Value::String("z".into()),
+            Value::String("p".into()),
+            Value::String("q".into()),
+        ]);
+        let keep_json = keep.to_string();
+        let drop_json = drop_long.to_string();
+
+        let kept = filter_json_compact(&keep_json, 5).expect("80-byte strings qualify");
+        assert_no_array_omission(&kept);
+        let parsed: Value = serde_json::from_str(kept.trim()).expect("80-byte array round-trip");
+        assert_eq!(parsed, keep);
+
+        let summarized = filter_json_compact(&drop_json, 5).expect("81-byte string is not short");
+        assert!(
+            summarized.contains("... +5 more"),
+            "array containing an 81-byte string must not take the preservation exception: {summarized}"
+        );
+    }
+
+    #[test]
+    fn test_unicode_80_byte_string_qualifies() {
+        // "é" is 2 UTF-8 bytes; 40 of them is exactly 80 bytes.
+        let s80 = "é".repeat(40);
+        assert_eq!(s80.len(), SHORT_STRING_MAX_BYTES);
+        let json = Value::Array(vec![
+            Value::String(s80.clone()),
+            Value::String("a".into()),
+            Value::String("b".into()),
+            Value::String("c".into()),
+            Value::String("d".into()),
+            Value::String("e".into()),
+        ])
+        .to_string();
+        let compact = filter_json_compact(&json, 5).expect("unicode 80-byte");
+        assert_no_array_omission(&compact);
+        let parsed: Value = serde_json::from_str(compact.trim()).expect("round-trip");
+        assert_eq!(parsed[0], Value::String(s80));
+    }
+
+    #[test]
+    fn test_arrays_of_objects_and_nested_arrays_keep_summary() {
+        let objects = r#"[{"a":1},{"a":2},{"a":3},{"a":4},{"a":5},{"a":6}]"#;
+        let nested = r#"[[1,2],[3,4],[5,6],[7,8],[9,10],[11,12]]"#;
+        for json in [objects, nested] {
+            let output = filter_json_compact(json, 5).expect("compact");
+            assert!(
+                output.contains("... +5 more"),
+                "container arrays must keep the legacy summary: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_larger_array_keeps_exact_omitted_count() {
+        let json = numbered_object_json("batch", 40);
+        let output = filter_json_compact(&json, 5).expect("compact");
+        assert!(
+            output.contains("... +39 more"),
+            "omitted count must stay exact: {output}"
+        );
+    }
+
+    #[test]
+    fn test_depth_gate_root_array_children_exceed_max_depth() {
+        let json = numbered_array_json(8);
+        let output = filter_json_compact(&json, 0).expect("depth 0");
+        assert_eq!(
+            output, "[..., ... +7 more]",
+            "root array at max_depth 0 must still depth-gate children"
+        );
+    }
+
+    #[test]
+    fn test_depth_gate_nested_array_children_exceed_max_depth() {
+        let json = numbered_object_json("payload", 8);
+        let output = filter_json_compact(&json, 1).expect("depth 1");
+        assert!(
+            output.contains("[..., ... +7 more]"),
+            "nested array children past max depth must stay summarized: {output}"
+        );
+        assert!(
+            !output.contains("\"val_1\""),
+            "depth-gated children must not leak later values: {output}"
+        );
+    }
+
+    #[test]
+    fn test_depth_gate_nested_array_within_budget_preserves() {
+        let json = numbered_object_json("payload", 8);
+        let output = filter_json_compact(&json, 2).expect("depth 2");
+        assert_no_array_omission(&output);
+        assert_values_in_order(&output, &numbered_values(8));
+    }
+
+    #[test]
+    fn test_keys_only_schema_unchanged_for_eight_roles() {
+        let output = filter_json_string(ISSUE_ROLES_PRETTY, 5).expect("schema");
+        assert!(
+            output.contains("[string] (8)"),
+            "keys-only should still summarize the array type: {output}"
+        );
+        for role in ISSUE_ROLES_PRETTY_VALUES {
+            assert!(
+                !output.contains(role),
+                "keys-only must not leak role values ({role}): {output}"
+            );
+        }
+        let rendered = render_json(ISSUE_ROLES_PRETTY, 5, true).expect("render schema");
+        assert_eq!(rendered.as_ref(), output.as_str());
+    }
+
+    #[test]
+    fn test_pretty_roles_bom_stripped_and_never_worse() {
+        let raw = format!("\u{feff}{ISSUE_ROLES_PRETTY}");
+        let shown = render_json(&raw, 5, false).expect("render BOM pretty");
+        assert!(
+            !shown.starts_with('\u{feff}'),
+            "BOM must not leak into output: {shown:?}"
+        );
+        assert_no_array_omission(shown.as_ref());
+        assert_values_in_order(
+            shown.as_ref(),
+            &serialized_strings(&ISSUE_ROLES_PRETTY_VALUES),
+        );
+        assert!(
+            crate::core::tracking::estimate_tokens(shown.as_ref())
+                <= crate::core::tracking::estimate_tokens(strip_leading_bom(&raw)),
+            "never_worse must still hold"
+        );
+    }
+
+    #[test]
+    fn test_minified_roles_bom_never_worse() {
+        let minified = r#"{"status":"ok","allowed_roles":["admin","editor","reviewer","publisher","auditor","moderator","archivist","guest"],"count":8}"#;
+        let raw = format!("\u{feff}{minified}");
+        let shown = render_json(&raw, 5, false).expect("render BOM minified");
+        assert!(!shown.starts_with('\u{feff}'));
+        assert_values_in_order(shown.as_ref(), &serialized_strings(&ISSUE_ROLES));
+        assert!(
+            crate::core::tracking::estimate_tokens(shown.as_ref())
+                <= crate::core::tracking::estimate_tokens(strip_leading_bom(&raw)),
+            "never_worse must still hold for minified input"
+        );
+    }
+
+    #[test]
+    fn test_malformed_json_still_errors() {
+        let err = filter_json_compact("{not json", 5).unwrap_err();
+        assert!(
+            err.to_string().contains("Failed to parse JSON"),
+            "parse error must stay wrapped: {err}"
+        );
     }
 }
