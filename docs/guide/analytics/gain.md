@@ -61,6 +61,16 @@ TOTAL            196       1.3M      59.2K       1.2M   95.6%
 - **Saved**: Input - Output, in estimated tokens
 - **Save%**: Saved / Input × 100 — a **bash output byte ratio**, not a share of your bill
 
+## Negative savings and regressions
+
+Savings are signed: if RTK emits more output than the raw command, **Saved** and **Save%** are negative. Totals add savings and losses before computing the weighted rate. For example, `100 → 50` followed by `100 → 200` is **−50 tokens (−25%)**, not +50 or zero.
+
+The default summary also lists up to ten **Regressions**, ordered by the largest net token loss per command. This section is independent of the top-ten savers and respects `--project`. In `--graph`, losses extend left of the zero axis and savings extend right. History, temporal tables, JSON/CSV exports, and the quota estimate retain the same sign. Export consumers must accept negative `total_saved` and `saved_tokens` values.
+
+When input is zero, the percentage is undefined and shown as **0%**; the token delta still records any expansion (for example, `0 → 20` means **−20 saved tokens**).
+
+Existing SQLite databases remain readable without a new migration or historical rewrite. Older rows whose losses were already stored as zero remain zero; this change exposes signed losses already stored by newer versions and preserves them in all reports. It does not change command output or tracking baselines.
+
 ## Weekly and monthly breakdowns
 
 ```bash

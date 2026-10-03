@@ -106,7 +106,7 @@ pub struct CommandRecord {
     /// RTK command that was executed (e.g., "rtk ls")
     pub rtk_cmd: String,
     /// Number of tokens saved (input - output)
-    pub saved_tokens: usize,
+    pub saved_tokens: i64,
     /// Savings percentage ((saved / input) * 100)
     pub savings_pct: f64,
 }
@@ -198,7 +198,7 @@ pub struct GainSummary {
     /// Total output tokens across all commands
     pub total_output: usize,
     /// Total tokens saved (input - output)
-    pub total_saved: usize,
+    pub total_saved: i64,
     /// Average savings percentage across all commands
     pub avg_savings_pct: f64,
     /// Total execution time across all commands (milliseconds)
@@ -206,9 +206,9 @@ pub struct GainSummary {
     /// Average execution time per command (milliseconds)
     pub avg_time_ms: u64,
     /// Top 10 commands by tokens saved: (cmd, count, saved, weighted_rate, avg_time_ms)
-    pub by_command: Vec<(String, usize, usize, f64, u64)>,
+    pub by_command: Vec<CommandStats>,
     /// Last 30 days of activity: (date, saved_tokens)
-    pub by_day: Vec<(String, usize)>,
+    pub by_day: Vec<(String, i64)>,
 }
 
 /// Daily statistics for token savings and execution metrics.
@@ -240,7 +240,7 @@ pub struct DayStats {
     /// Total output tokens for this day
     pub output_tokens: usize,
     /// Total tokens saved this day
-    pub saved_tokens: usize,
+    pub saved_tokens: i64,
     /// Savings percentage for this day
     pub savings_pct: f64,
     /// Total execution time for this day (milliseconds)
@@ -266,7 +266,7 @@ pub struct WeekStats {
     /// Total output tokens for this week
     pub output_tokens: usize,
     /// Total tokens saved this week
-    pub saved_tokens: usize,
+    pub saved_tokens: i64,
     /// Savings percentage for this week
     pub savings_pct: f64,
     /// Total execution time for this week (milliseconds)
@@ -289,7 +289,7 @@ pub struct MonthStats {
     /// Total output tokens for this month
     pub output_tokens: usize,
     /// Total tokens saved this month
-    pub saved_tokens: usize,
+    pub saved_tokens: i64,
     /// Savings percentage for this month
     pub savings_pct: f64,
     /// Total execution time for this month (milliseconds)
@@ -306,9 +306,8 @@ pub struct MonthStats {
 /// Do NOT aggregate this column with `AVG()` — that would produce an unweighted mean that
 /// under-weights high-volume commands. Always recompute it as
 /// `CASE WHEN SUM(input_tokens) > 0 THEN SUM(saved_tokens) / SUM(input_tokens) * 100.0 ELSE 0.0 END`
-/// instead. `saved_tokens` is signed, so the rate can be negative where the 3rd field, being
-/// unsigned, is clamped to 0.
-type CommandStats = (String, usize, usize, f64, u64);
+/// instead. Both saved tokens and the weighted rate retain negative net savings.
+type CommandStats = (String, usize, i64, f64, u64);
 
 /// Current tracking-DB schema version, stored in the SQLite `user_version` pragma.
 ///
@@ -612,8 +611,8 @@ impl Tracker {
         // Signed, so a command that emitted MORE than the wrapped command records the
         // truth (a negative saving / negative pct) instead of `saturating_sub` clamping
         // to 0 and reporting a fake "0% — did nothing". SQLite INTEGER/REAL both hold
-        // negatives. Aggregate readers clamp these to 0 for their unsigned token-count
-        // API, but per-command `savings_pct` keeps the honest negative.
+        // negatives, as do the aggregate readers. Zero input has an undefined savings
+        // rate, represented consistently as 0.0 while retaining the signed delta.
         let saved = input_tokens as i64 - output_tokens as i64;
         let pct = if input_tokens > 0 {
             (saved as f64 / input_tokens as f64) * 100.0
@@ -923,7 +922,7 @@ impl Tracker {
         let mut total_commands = 0usize;
         let mut total_input = 0usize;
         let mut total_output = 0usize;
-        let mut total_saved = 0usize;
+        let mut total_saved = 0i64;
         let mut total_time_ms = 0u64;
 
         let mut stmt = self.conn.prepare(
@@ -937,9 +936,7 @@ impl Tracker {
             Ok((
                 row.get::<_, i64>(0)? as usize,
                 row.get::<_, i64>(1)? as usize,
-                // saved_tokens may be negative (a command that worsened output); clamp
-                // to 0 for the unsigned aggregate so it never wraps to a huge usize.
-                row.get::<_, i64>(2)?.max(0) as usize,
+                row.get::<_, i64>(2)?,
                 row.get::<_, i64>(3)? as u64,
             ))
         })?;
@@ -993,7 +990,7 @@ impl Tracker {
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY rtk_cmd
-             ORDER BY SUM(saved_tokens) DESC
+             ORDER BY SUM(saved_tokens) DESC, rtk_cmd ASC
              LIMIT 10", // added: project filter in WHERE
         )?;
 
@@ -1002,8 +999,7 @@ impl Tracker {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)? as usize,
-                // SUM(saved_tokens): clamp a net-negative group to 0 (unsigned field).
-                row.get::<_, i64>(2)?.max(0) as usize,
+                row.get::<_, i64>(2)?,
                 row.get::<_, f64>(3)?,
                 row.get::<_, f64>(4)? as u64,
             ))
@@ -1012,10 +1008,39 @@ impl Tracker {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// The ten largest net-regressing command groups, independent of the top savers.
+    pub fn get_regressions_filtered(
+        &self,
+        project_path: Option<&str>,
+    ) -> Result<Vec<CommandStats>> {
+        let (project_exact, project_glob) = project_filter_params(project_path);
+        let mut stmt = self.conn.prepare(
+            "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens),
+                    CASE WHEN SUM(input_tokens) > 0 THEN SUM(saved_tokens) * 100.0 / SUM(input_tokens) ELSE 0.0 END,
+                    AVG(exec_time_ms)
+             FROM commands
+             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+             GROUP BY rtk_cmd
+             HAVING SUM(saved_tokens) < 0
+             ORDER BY SUM(saved_tokens) ASC, rtk_cmd ASC
+             LIMIT 10",
+        )?;
+        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
+            Ok((
+                row.get(0)?,
+                row.get::<_, i64>(1)? as usize,
+                row.get(2)?,
+                row.get(3)?,
+                row.get::<_, f64>(4)? as u64,
+            ))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     fn get_by_day(
         &self,
         project_path: Option<&str>, // added
-    ) -> Result<Vec<(String, usize)>> {
+    ) -> Result<Vec<(String, i64)>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
         let mut stmt = self.conn.prepare(
             "SELECT DATE(timestamp), SUM(saved_tokens)
@@ -1028,11 +1053,7 @@ impl Tracker {
 
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
             // added: params
-            // SUM(saved_tokens) per day: clamp a net-negative day to 0 (unsigned field).
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?.max(0) as usize,
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;
 
         let mut result: Vec<_> = rows.collect::<Result<Vec<_>, _>>()?;
@@ -1082,7 +1103,7 @@ impl Tracker {
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
             // added: params
             let input = row.get::<_, i64>(2)? as usize;
-            let saved = row.get::<_, i64>(4)?.max(0) as usize; // clamp net-negative group
+            let saved = row.get::<_, i64>(4)?;
             let commands = row.get::<_, i64>(1)? as usize;
             let total_time = row.get::<_, i64>(5)? as u64;
             let savings_pct = if input > 0 {
@@ -1156,7 +1177,7 @@ impl Tracker {
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
             // added: params
             let input = row.get::<_, i64>(3)? as usize;
-            let saved = row.get::<_, i64>(5)?.max(0) as usize; // clamp net-negative group
+            let saved = row.get::<_, i64>(5)?;
             let commands = row.get::<_, i64>(2)? as usize;
             let total_time = row.get::<_, i64>(6)? as u64;
             let savings_pct = if input > 0 {
@@ -1230,7 +1251,7 @@ impl Tracker {
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
             // added: params
             let input = row.get::<_, i64>(2)? as usize;
-            let saved = row.get::<_, i64>(4)?.max(0) as usize; // clamp net-negative group
+            let saved = row.get::<_, i64>(4)?;
             let commands = row.get::<_, i64>(1)? as usize;
             let total_time = row.get::<_, i64>(5)? as u64;
             let savings_pct = if input > 0 {
@@ -1310,7 +1331,7 @@ impl Tracker {
                         .map(|dt| dt.with_timezone(&Utc))
                         .unwrap_or_else(|_| Utc::now()),
                     rtk_cmd: row.get(1)?,
-                    saved_tokens: row.get::<_, i64>(2)?.max(0) as usize, // clamp negative
+                    saved_tokens: row.get::<_, i64>(2)?,
                     savings_pct: row.get(3)?,
                 })
             },
@@ -2221,17 +2242,100 @@ mod tests {
             rec.savings_pct
         );
 
-        // Aggregate telemetry also reflects the regression as negative, and the unsigned
-        // summary counter clamps rather than wrapping to a huge usize.
+        // Aggregate telemetry and gain both retain the same negative net saving.
         assert!(
             tracker.overall_savings_pct().expect("overall pct") < 0.0,
             "overall savings must be negative for a net regression"
         );
         let summary = tracker.get_summary().expect("summary");
         assert_eq!(
-            summary.total_saved, 0,
-            "unsigned aggregate clamps a negative saving to 0 (never wraps)"
+            summary.total_saved, -50,
+            "gain and telemetry must agree on the signed total"
         );
+    }
+
+    #[test]
+    fn test_signed_net_savings_across_readers() {
+        let tracker = Tracker::new_in_memory().expect("create tracker");
+        tracker
+            .record("cmd", "rtk mixed", 100, 50, 5)
+            .expect("saving");
+        tracker
+            .record("cmd", "rtk mixed", 100, 200, 7)
+            .expect("regression");
+        let summary = tracker.get_summary().expect("summary");
+        assert_eq!(summary.total_saved, -50);
+        assert_eq!(summary.avg_savings_pct, -25.0);
+        assert_eq!(summary.by_command[0].2, -50);
+        assert_eq!(summary.by_command[0].3, -25.0);
+        assert_eq!(summary.by_day[0].1, -50);
+        assert_eq!(tracker.get_all_days().expect("daily")[0].saved_tokens, -50);
+        assert_eq!(tracker.get_by_week().expect("weekly")[0].saved_tokens, -50);
+        assert_eq!(
+            tracker.get_by_month().expect("monthly")[0].saved_tokens,
+            -50
+        );
+        assert!(
+            tracker
+                .get_recent(10)
+                .expect("history")
+                .iter()
+                .any(|r| r.saved_tokens == -100)
+        );
+    }
+
+    #[test]
+    fn test_signed_savings_positive_zero_and_empty_cases() {
+        for (rows, expected, pct) in [
+            (vec![], 0, 0.0),
+            (vec![(100, 50), (100, 120)], 30, 15.0),
+            (vec![(100, 50), (100, 150)], 0, 0.0),
+            (vec![(0, 20), (0, 0)], -20, 0.0),
+        ] {
+            let tracker = Tracker::new_in_memory().expect("create tracker");
+            for (input, output) in &rows {
+                tracker
+                    .record("cmd", "rtk mixed", *input, *output, 0)
+                    .expect("record");
+            }
+            let summary = tracker.get_summary().expect("summary");
+            assert_eq!(summary.total_saved, expected);
+            assert_eq!(summary.avg_savings_pct, pct);
+            assert_eq!(
+                tracker.total_tokens_saved().expect("telemetry total"),
+                expected
+            );
+            assert_eq!(
+                tracker.overall_savings_pct().expect("telemetry percentage"),
+                pct
+            );
+            if !rows.is_empty() {
+                assert_eq!(summary.by_command[0].2, expected);
+                assert_eq!(summary.by_command[0].3, pct);
+                for (saved, rate) in tracker
+                    .get_all_days()
+                    .expect("daily")
+                    .iter()
+                    .map(|d| (d.saved_tokens, d.savings_pct))
+                    .chain(
+                        tracker
+                            .get_by_week()
+                            .expect("weekly")
+                            .iter()
+                            .map(|w| (w.saved_tokens, w.savings_pct)),
+                    )
+                    .chain(
+                        tracker
+                            .get_by_month()
+                            .expect("monthly")
+                            .iter()
+                            .map(|m| (m.saved_tokens, m.savings_pct)),
+                    )
+                {
+                    assert_eq!((saved, rate), (expected, pct));
+                }
+            }
+        }
     }
 
     // avg_savings_per_command keeps the honest signed value: a command whose filter
