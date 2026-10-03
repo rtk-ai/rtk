@@ -2609,8 +2609,21 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
 
     match classify_commit_outcome(exit_code == 0, &stdout, exit_code) {
         CommitOutcome::Ok(compact) => {
+            // git routes post-commit hook output to its own stderr, so printing the
+            // compact token alone made hook messages invisible (#1355). A clean commit
+            // leaves stderr empty, so this adds nothing on the common path.
+            if !stderr.trim().is_empty() {
+                eprint!("{}", stderr);
+            }
             println!("{}", compact);
-            timer.track(&original_cmd, "rtk git commit", &raw_output, &compact);
+            // Count what was actually shown: tracking only the token would report
+            // savings the user did not get.
+            let shown = if stderr.trim().is_empty() {
+                compact
+            } else {
+                format!("{}{}", stderr, compact)
+            };
+            timer.track(&original_cmd, "rtk git commit", &raw_output, &shown);
             Ok(0)
         }
         CommitOutcome::Failed(code) => {
