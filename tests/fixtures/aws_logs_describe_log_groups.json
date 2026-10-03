@@ -1,0 +1,591 @@
+{
+    "logGroups": [
+        {
+            "logGroupName": "/aws/lambda/fn-00",
+            "creationTime": 1654135507702,
+            "retentionInDays": 90,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/fn-00:*",
+            "storedBytes": 0,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/fn-00"
+        },
+        {
+            "logGroupName": "/aws/ecs/service-01",
+            "creationTime": 1654138752057,
+            "retentionInDays": 180,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/ecs/service-01:*",
+            "storedBytes": 83430837,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/ecs/service-01"
+        },
+        {
+            "logGroupName": "/ecs/app-02",
+            "creationTime": 1654070280477,
+            "retentionInDays": 90,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/ecs/app-02:*",
+            "storedBytes": 685298,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/ecs/app-02"
+        },
+        {
+            "logGroupName": "/aws/rds/cluster/db-03",
+            "creationTime": 1654138760997,
+            "retentionInDays": 90,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/rds/cluster/db-03:*",
+            "storedBytes": 12518926,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/rds/cluster/db-03"
+        },
+        {
+            "logGroupName": "/aws/apigateway/api-04",
+            "creationTime": 1654072306875,
+            "retentionInDays": 180,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/apigateway/api-04:*",
+            "storedBytes": 1320835,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/apigateway/api-04"
+        },
+        {
+            "logGroupName": "/app/worker-05",
+            "creationTime": 1654071792820,
+            "retentionInDays": 90,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/app/worker-05:*",
+            "storedBytes": 25385984,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/app/worker-05"
+        },
+        {
+            "logGroupName": "/aws/lambda/fn-06",
+            "creationTime": 1654070559440,
+            "retentionInDays": 180,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/fn-06:*",
+            "storedBytes": 0,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/fn-06"
+        },
+        {
+            "logGroupName": "/aws/ecs/service-07",
+            "creationTime": 1654070566358,
+            "retentionInDays": 90,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/ecs/service-07:*",
+            "storedBytes": 0,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/ecs/service-07"
+        },
+        {
+            "logGroupName": "/ecs/app-08",
+            "creationTime": 1749711260712,
+            "retentionInDays": 90,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/ecs/app-08:*",
+            "storedBytes": 0,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/ecs/app-08"
+        },
+        {
+            "logGroupName": "/aws/rds/cluster/db-09",
+            "creationTime": 1749711862515,
+            "retentionInDays": 90,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/rds/cluster/db-09:*",
+            "storedBytes": 0,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/rds/cluster/db-09"
+        },
+        {
+            "logGroupName": "/aws/apigateway/api-10",
+            "creationTime": 1749711347993,
+            "retentionInDays": 90,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/apigateway/api-10:*",
+            "storedBytes": 0,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/apigateway/api-10"
+        },
+        {
+            "logGroupName": "/app/worker-11",
+            "creationTime": 1749712024392,
+            "retentionInDays": 90,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/app/worker-11:*",
+            "storedBytes": 0,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/app/worker-11"
+        },
+        {
+            "logGroupName": "/aws/lambda/fn-12",
+            "creationTime": 1758751957915,
+            "retentionInDays": 90,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/fn-12:*",
+            "storedBytes": 256465,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/fn-12"
+        },
+        {
+            "logGroupName": "/aws/ecs/service-13",
+            "creationTime": 1696924118959,
+            "retentionInDays": 90,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/ecs/service-13:*",
+            "storedBytes": 6432173,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/ecs/service-13"
+        },
+        {
+            "logGroupName": "/ecs/app-14",
+            "creationTime": 1774939704242,
+            "retentionInDays": 90,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/ecs/app-14:*",
+            "storedBytes": 8758972,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/ecs/app-14"
+        },
+        {
+            "logGroupName": "/aws/rds/cluster/db-15",
+            "creationTime": 1654591179026,
+            "retentionInDays": 90,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/rds/cluster/db-15:*",
+            "storedBytes": 0,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/rds/cluster/db-15"
+        },
+        {
+            "logGroupName": "/aws/apigateway/api-16",
+            "creationTime": 1709181540863,
+            "retentionInDays": 90,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/apigateway/api-16:*",
+            "storedBytes": 177268,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/apigateway/api-16"
+        },
+        {
+            "logGroupName": "/app/worker-17",
+            "creationTime": 1747974534756,
+            "retentionInDays": 90,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/app/worker-17:*",
+            "storedBytes": 35712,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/app/worker-17"
+        },
+        {
+            "logGroupName": "/aws/lambda/fn-18",
+            "creationTime": 1732505461697,
+            "retentionInDays": 90,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/fn-18:*",
+            "storedBytes": 0,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/fn-18"
+        },
+        {
+            "logGroupName": "/aws/ecs/service-19",
+            "creationTime": 1732078716048,
+            "retentionInDays": 90,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/ecs/service-19:*",
+            "storedBytes": 0,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/ecs/service-19"
+        },
+        {
+            "logGroupName": "/ecs/app-20",
+            "creationTime": 1740707896011,
+            "retentionInDays": 90,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/ecs/app-20:*",
+            "storedBytes": 0,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/ecs/app-20"
+        },
+        {
+            "logGroupName": "/aws/rds/cluster/db-21",
+            "creationTime": 1787643955270,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/rds/cluster/db-21:*",
+            "storedBytes": 5903696480,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/rds/cluster/db-21"
+        },
+        {
+            "logGroupName": "/aws/apigateway/api-22",
+            "creationTime": 1712736523286,
+            "retentionInDays": 90,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/apigateway/api-22:*",
+            "storedBytes": 0,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/apigateway/api-22"
+        },
+        {
+            "logGroupName": "/app/worker-23",
+            "creationTime": 1662698002607,
+            "retentionInDays": 90,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/app/worker-23:*",
+            "storedBytes": 0,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/app/worker-23"
+        },
+        {
+            "logGroupName": "/aws/lambda/fn-24",
+            "creationTime": 1778141282675,
+            "retentionInDays": 90,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/fn-24:*",
+            "storedBytes": 833075159,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/fn-24"
+        },
+        {
+            "logGroupName": "/aws/ecs/service-25",
+            "creationTime": 1775638967220,
+            "retentionInDays": 1,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/ecs/service-25:*",
+            "storedBytes": 0,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/ecs/service-25"
+        },
+        {
+            "logGroupName": "/ecs/app-26",
+            "creationTime": 1775639855960,
+            "retentionInDays": 1,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/ecs/app-26:*",
+            "storedBytes": 4224208,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/ecs/app-26"
+        },
+        {
+            "logGroupName": "/aws/rds/cluster/db-27",
+            "creationTime": 1775638795269,
+            "retentionInDays": 1,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/rds/cluster/db-27:*",
+            "storedBytes": 484171,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/rds/cluster/db-27"
+        },
+        {
+            "logGroupName": "/aws/apigateway/api-28",
+            "creationTime": 1775708426503,
+            "retentionInDays": 1,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/apigateway/api-28:*",
+            "storedBytes": 0,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/apigateway/api-28"
+        },
+        {
+            "logGroupName": "/app/worker-29",
+            "creationTime": 1776326579290,
+            "retentionInDays": 1,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/app/worker-29:*",
+            "storedBytes": 0,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/app/worker-29"
+        },
+        {
+            "logGroupName": "/aws/lambda/fn-30",
+            "creationTime": 1776326691024,
+            "retentionInDays": 1,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/fn-30:*",
+            "storedBytes": 0,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/fn-30"
+        },
+        {
+            "logGroupName": "/aws/ecs/service-31",
+            "creationTime": 1768376962793,
+            "retentionInDays": 1,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/ecs/service-31:*",
+            "storedBytes": 2127090,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/ecs/service-31"
+        },
+        {
+            "logGroupName": "/ecs/app-32",
+            "creationTime": 1768370911664,
+            "retentionInDays": 1,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/ecs/app-32:*",
+            "storedBytes": 8132030,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/ecs/app-32"
+        },
+        {
+            "logGroupName": "/aws/rds/cluster/db-33",
+            "creationTime": 1778141329689,
+            "retentionInDays": 1,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/rds/cluster/db-33:*",
+            "storedBytes": 3059974,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/rds/cluster/db-33"
+        },
+        {
+            "logGroupName": "/aws/apigateway/api-34",
+            "creationTime": 1761184978767,
+            "retentionInDays": 1,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/apigateway/api-34:*",
+            "storedBytes": 5809622,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/apigateway/api-34"
+        },
+        {
+            "logGroupName": "/app/worker-35",
+            "creationTime": 1702867583316,
+            "retentionInDays": 1,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/app/worker-35:*",
+            "storedBytes": 3111073,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/app/worker-35"
+        },
+        {
+            "logGroupName": "/aws/lambda/fn-36",
+            "creationTime": 1705479142406,
+            "retentionInDays": 1,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/fn-36:*",
+            "storedBytes": 1590872,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/fn-36"
+        },
+        {
+            "logGroupName": "/aws/ecs/service-37",
+            "creationTime": 1768456480335,
+            "retentionInDays": 1,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/ecs/service-37:*",
+            "storedBytes": 2134936,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/ecs/service-37"
+        },
+        {
+            "logGroupName": "/ecs/app-38",
+            "creationTime": 1707899255011,
+            "retentionInDays": 1,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/ecs/app-38:*",
+            "storedBytes": 0,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/ecs/app-38"
+        },
+        {
+            "logGroupName": "/aws/rds/cluster/db-39",
+            "creationTime": 1702891125217,
+            "retentionInDays": 1,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/rds/cluster/db-39:*",
+            "storedBytes": 2162,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/rds/cluster/db-39"
+        },
+        {
+            "logGroupName": "/aws/apigateway/api-40",
+            "creationTime": 1772678640760,
+            "retentionInDays": 1,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/apigateway/api-40:*",
+            "storedBytes": 2311200,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/apigateway/api-40"
+        },
+        {
+            "logGroupName": "/app/worker-41",
+            "creationTime": 1753756120469,
+            "retentionInDays": 1,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/app/worker-41:*",
+            "storedBytes": 0,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/app/worker-41"
+        },
+        {
+            "logGroupName": "/aws/lambda/fn-42",
+            "creationTime": 1754296856360,
+            "retentionInDays": 1,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/fn-42:*",
+            "storedBytes": 2320077,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/fn-42"
+        },
+        {
+            "logGroupName": "/aws/ecs/service-43",
+            "creationTime": 1766380222965,
+            "retentionInDays": 1,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/ecs/service-43:*",
+            "storedBytes": 3804635,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/ecs/service-43"
+        },
+        {
+            "logGroupName": "/ecs/app-44",
+            "creationTime": 1707186025730,
+            "retentionInDays": 1,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/ecs/app-44:*",
+            "storedBytes": 2554518,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/ecs/app-44"
+        },
+        {
+            "logGroupName": "/aws/rds/cluster/db-45",
+            "creationTime": 1707186047666,
+            "retentionInDays": 1,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/rds/cluster/db-45:*",
+            "storedBytes": 11675437,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/rds/cluster/db-45"
+        },
+        {
+            "logGroupName": "/aws/apigateway/api-46",
+            "creationTime": 1728375104576,
+            "retentionInDays": 1,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/apigateway/api-46:*",
+            "storedBytes": 1738173,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/apigateway/api-46"
+        },
+        {
+            "logGroupName": "/app/worker-47",
+            "creationTime": 1702935844235,
+            "retentionInDays": 1,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/app/worker-47:*",
+            "storedBytes": 0,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/app/worker-47"
+        },
+        {
+            "logGroupName": "/aws/lambda/fn-48",
+            "creationTime": 1789444568353,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/fn-48:*",
+            "storedBytes": 629,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/fn-48"
+        },
+        {
+            "logGroupName": "/aws/ecs/service-49",
+            "creationTime": 1789444567901,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/ecs/service-49:*",
+            "storedBytes": 391,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/ecs/service-49"
+        },
+        {
+            "logGroupName": "/ecs/app-50",
+            "creationTime": 1790662889093,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/ecs/app-50:*",
+            "storedBytes": 1584,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/ecs/app-50"
+        },
+        {
+            "logGroupName": "/aws/rds/cluster/db-51",
+            "creationTime": 1753406254990,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/rds/cluster/db-51:*",
+            "storedBytes": 814978864,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/rds/cluster/db-51"
+        },
+        {
+            "logGroupName": "/aws/apigateway/api-52",
+            "creationTime": 1753406255225,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/apigateway/api-52:*",
+            "storedBytes": 2076751667,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/apigateway/api-52"
+        },
+        {
+            "logGroupName": "/app/worker-53",
+            "creationTime": 1753406854945,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/app/worker-53:*",
+            "storedBytes": 1649,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/app/worker-53"
+        },
+        {
+            "logGroupName": "/aws/lambda/fn-54",
+            "creationTime": 1753163777157,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/fn-54:*",
+            "storedBytes": 1014574168,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/fn-54"
+        },
+        {
+            "logGroupName": "/aws/ecs/service-55",
+            "creationTime": 1753163777382,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/ecs/service-55:*",
+            "storedBytes": 1130600022,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/ecs/service-55"
+        },
+        {
+            "logGroupName": "/ecs/app-56",
+            "creationTime": 1753168337430,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/ecs/app-56:*",
+            "storedBytes": 472,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/ecs/app-56"
+        },
+        {
+            "logGroupName": "/aws/rds/cluster/db-57",
+            "creationTime": 1751511275338,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/rds/cluster/db-57:*",
+            "storedBytes": 765890470,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/rds/cluster/db-57"
+        },
+        {
+            "logGroupName": "/aws/apigateway/api-58",
+            "creationTime": 1751511275574,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/apigateway/api-58:*",
+            "storedBytes": 4524529227,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/apigateway/api-58"
+        },
+        {
+            "logGroupName": "/app/worker-59",
+            "creationTime": 1751518356116,
+            "metricFilterCount": 0,
+            "arn": "arn:aws:logs:us-east-1:123456789012:log-group:/app/worker-59:*",
+            "storedBytes": 760,
+            "logGroupClass": "STANDARD",
+            "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:/app/worker-59"
+        }
+    ]
+}
