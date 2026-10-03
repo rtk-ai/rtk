@@ -56,5 +56,5 @@ When Copilot CLI adds `updatedInput` support, only `rtk hook` needs updating —
 | Claude Code           | `PreToolUse` hook with `updatedInput`   | Transparent rewrite      | `hooks/rtk-rewrite.sh`             |
 | VS Code Copilot Chat  | `PreToolUse` hook with `updatedInput`   | Transparent rewrite      | `.github/hooks/rtk-rewrite.json`   |
 | GitHub Copilot CLI    | `PreToolUse` deny-with-suggestion       | Denial + retry           | `.github/hooks/rtk-rewrite.json`   |
-| OpenCode              | Plugin `tool.execute.before`            | Transparent rewrite      | `hooks/opencode-rtk.ts`            |
+| OpenCode              | Plugin `tool.execute.before`            | Transparent rewrite      | `hooks/opencode/rtk.ts`            |
 | (any)                 | Custom instructions                     | Prompt-level guidance    | `.github/copilot-instructions.md`  |
