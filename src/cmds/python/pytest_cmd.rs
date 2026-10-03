@@ -2,6 +2,7 @@
 
 use crate::core::config;
 use crate::core::runner;
+use crate::core::shell::display_args;
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
@@ -57,7 +58,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered_with_exit(
         cmd,
         "pytest",
-        &args.join(" "),
+        &display_args(args),
         |raw, exit_code| {
             let clean = strip_ansi(raw);
             let filtered = filter_pytest_output(&clean);

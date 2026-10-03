@@ -2,6 +2,7 @@
 
 use super::constants::NOISE_DIRS;
 use crate::core::runner::{self, RunOptions};
+use crate::core::shell::display_args;
 use crate::core::truncate::CAP_INVENTORY;
 use crate::core::utils::{ChildArgExt, resolved_command};
 use anyhow::Result;
@@ -91,7 +92,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let label = if args.is_empty() {
         ".".to_string()
     } else {
-        args.join(" ")
+        display_args(args)
     };
 
     runner::run_filtered(

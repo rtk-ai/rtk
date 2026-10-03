@@ -9,6 +9,7 @@
 //! number of failure diffs; it drops the per-test PASS/SKIP lines entirely.
 
 use crate::core::runner;
+use crate::core::shell::display_args;
 use crate::core::utils::{resolved_command, strip_ansi};
 use anyhow::Result;
 use regex::Regex;
@@ -120,7 +121,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "phpt",
-        &args.join(" "),
+        &display_args(args),
         filter_phpt_output,
         runner::RunOptions::with_tee("phpt"),
     )

@@ -1,6 +1,7 @@
 //! Runs code formatters (Prettier, Ruff) and shows only files that changed.
 
 use crate::core::guard::never_worse;
+use crate::core::shell::{display_args, with_args};
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::CAP_WARNINGS;
@@ -129,12 +130,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let shown = never_worse(&raw, &filtered);
     println!("{}", shown);
 
-    timer.track(
-        &format!("{} {}", formatter, user_args.join(" ")),
-        &format!("rtk format {} {}", formatter, user_args.join(" ")),
-        &raw,
-        shown,
-    );
+    let tracked = with_args(&formatter, &display_args(&user_args));
+    timer.track(&tracked, &format!("rtk format {tracked}"), &raw, shown);
 
     Ok(result.exit_code)
 }

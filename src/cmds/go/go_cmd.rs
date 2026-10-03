@@ -2,6 +2,7 @@
 
 use crate::core::guard::never_worse;
 use crate::core::runner;
+use crate::core::shell::{display_args, quote_word};
 use crate::core::stream::{CaptureResult, exec_capture};
 use crate::core::tracking;
 use crate::core::truncate::CAP_ERRORS;
@@ -76,7 +77,7 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "go test",
-        &args.join(" "),
+        &display_args(args),
         filter,
         crate::core::runner::RunOptions::stdout_only().tee("go_test"),
     )
@@ -97,7 +98,7 @@ pub fn run_build(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered_with_exit(
         cmd,
         "go build",
-        &args.join(" "),
+        &display_args(args),
         filter_go_build_with_exit,
         crate::core::runner::RunOptions::with_tee("go_build"),
     )
@@ -118,7 +119,7 @@ pub fn run_vet(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "go vet",
-        &args.join(" "),
+        &display_args(args),
         filter_go_vet,
         crate::core::runner::RunOptions::with_tee("go_vet"),
     )
@@ -157,9 +158,10 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
     print!("{}", captured.stdout);
     eprint!("{}", captured.stderr);
 
+    let label = format!("go {}", quote_word(&subcommand));
     timer.track(
-        &format!("go {}", subcommand),
-        &format!("rtk go {}", subcommand),
+        &label,
+        &format!("rtk {label}"),
         &raw,
         &raw, // No filtering for unsupported commands
     );

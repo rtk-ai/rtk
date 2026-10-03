@@ -3,7 +3,7 @@
 use crate::core::runner::{
     TestEcosystem, run_err_cmd, run_err_unrunnable, run_test_cmd, run_test_unrunnable,
 };
-use crate::core::shell::{Launch, command_from_args, display_args, program_name, spawn_failure};
+use crate::core::shell::{Launch, command_from_args, display_command, program_name, spawn_failure};
 use anyhow::{Context, Result};
 
 /// Run a command and filter output to show only errors/warnings.
@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 /// Arguments execute directly, preserving every boundary Clap parsed. With
 /// `shell`, the single supplied script runs through that shell instead.
 pub fn run_err(command: &[String], shell: Option<&str>, verbose: u8) -> Result<i32> {
-    let display = display_args(command);
+    let display = display_command(command);
     let program = program_name(command, shell);
     match command_from_args(command, shell).context("Failed to prepare err command")? {
         Launch::Ready(cmd) => match run_err_cmd(cmd, "err", &display, "err", verbose) {
@@ -32,7 +32,7 @@ pub fn run_err(command: &[String], shell: Option<&str>, verbose: u8) -> Result<i
 /// Arguments execute directly, preserving every boundary Clap parsed. With
 /// `shell`, the single supplied script runs through that shell instead.
 pub fn run_test(command: &[String], shell: Option<&str>, verbose: u8) -> Result<i32> {
-    let display = display_args(command);
+    let display = display_command(command);
     let program = program_name(command, shell);
     let eco = TestEcosystem::detect(&display);
     match command_from_args(command, shell).context("Failed to prepare test command")? {

@@ -1,6 +1,7 @@
 //! Filters TypeScript compiler errors, grouping them by file and error code.
 
 use crate::core::runner;
+use crate::core::shell::display_args;
 use crate::core::stream::{BlockHandler, BlockStreamFilter};
 use crate::core::truncate::{CAP_WARNINGS, reduced};
 use crate::core::utils::{MissingTool, exec_runner, strip_ansi, tool_exec, tool_exists, truncate};
@@ -101,7 +102,7 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
     runner::run_streamed(
         cmd,
         "tsc",
-        &args.join(" "),
+        &display_args(args),
         Box::new(BlockStreamFilter::new(TscHandler::new())),
         runner::RunOptions::with_tee("tsc"),
     )

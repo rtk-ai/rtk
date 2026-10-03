@@ -1,6 +1,7 @@
 //! Filters pip and uv package manager output.
 
 use crate::core::guard::never_worse;
+use crate::core::shell::{display_args, with_args};
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::{CAP_INVENTORY, CAP_LIST};
@@ -47,9 +48,10 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         }
     };
 
+    let words = display_args(args);
     timer.track(
-        &format!("{} {}", prog_label(base_cmd), args.join(" ")),
-        &format!("rtk pip {}", args.join(" ")),
+        &with_args(prog_label(base_cmd), &words),
+        &with_args("rtk pip", &words),
         &cmd_str,
         &filtered,
     );

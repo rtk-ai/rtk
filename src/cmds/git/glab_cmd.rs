@@ -12,6 +12,7 @@
 
 use super::git_cmd;
 use crate::core::runner::{self, RunOptions};
+use crate::core::shell::quote_word;
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{ok_confirmation, resolved_command, strip_ansi, truncate};
 use anyhow::Result;
@@ -444,7 +445,7 @@ fn mr_view(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
         cmd.arg(arg);
     }
     let label = match mr_number_opt.as_deref() {
-        Some(id) => format!("mr view {}", id),
+        Some(id) => format!("mr view {}", quote_word(id)),
         None => "mr view".to_string(),
     };
     run_glab_json(cmd, &label, |json| format_mr_view(json, ultra_compact))
@@ -647,7 +648,7 @@ fn issue_view(args: &[String], _verbose: u8) -> Result<i32> {
         cmd.arg(arg);
     }
     let label = match issue_number_opt.as_deref() {
-        Some(id) => format!("issue view {}", id),
+        Some(id) => format!("issue view {}", quote_word(id)),
         None => "issue view".to_string(),
     };
     run_glab_json(cmd, &label, format_issue_view)

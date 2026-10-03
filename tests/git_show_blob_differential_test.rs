@@ -652,7 +652,7 @@ fn cluster_flag_before_blob_windows_and_recovers_byte_exact() {
     // The hint points at the blob arg alone — verify it names `HEAD:large.txt`, not the
     // `x:y` pickaxe value that the old walker mistook for the object.
     assert!(
-        shown.contains("'HEAD:large.txt'"),
+        shown.contains("show HEAD:large.txt | tail"),
         "hint must target the real blob arg, not the flag value"
     );
 

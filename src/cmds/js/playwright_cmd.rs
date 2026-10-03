@@ -1,5 +1,6 @@
 //! Filters Playwright E2E test output to show only failures.
 
+use crate::core::shell::{display_args, with_args};
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{detect_package_manager, resolved_command, strip_ansi};
@@ -311,12 +312,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let hint = crate::core::tee::tee_and_hint(&raw, "playwright", result.exit_code);
     let shown = crate::core::runner::emit_guarded(&filtered, hint.as_deref(), &raw);
 
-    timer.track(
-        &format!("playwright {}", args.join(" ")),
-        &format!("rtk playwright {}", args.join(" ")),
-        &raw,
-        &shown,
-    );
+    let tracked = with_args("playwright", &display_args(args));
+    timer.track(&tracked, &format!("rtk {tracked}"), &raw, &shown);
 
     // Preserve exit code for CI/CD
     if !result.success() {

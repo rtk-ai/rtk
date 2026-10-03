@@ -6,6 +6,7 @@ use crate::core::arg_tokenizer::{
 use crate::core::args_utils;
 use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
+use crate::core::shell::{display_args, quote_word, with_args};
 use crate::core::stream::{
     self, CaptureResult, FilterMode, LineHandler, LineStreamFilter, StdinMode, exec_capture,
     exec_capture_stdin,
@@ -266,6 +267,7 @@ fn run_diff(
     global_args: &[String],
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+    let tracked = with_args("git diff", &display_args(args));
 
     let tokens = tokenize_git_diff_args(args);
     let wants_stat = tokens
@@ -307,8 +309,8 @@ fn run_diff(
                 eprintln!("{}", result.stderr.trim());
             }
             timer.track(
-                &format!("git diff {}", args.join(" ")),
-                &format!("rtk git diff {} (passthrough)", args.join(" ")),
+                &tracked,
+                &tracking::passthrough_label(&tracked),
                 &result.stdout,
                 &result.stdout,
             );
@@ -316,8 +318,8 @@ fn run_diff(
         }
 
         timer.track(
-            &format!("git diff {}", args.join(" ")),
-            &format!("rtk git diff {} (passthrough)", args.join(" ")),
+            &tracked,
+            &tracking::passthrough_label(&tracked),
             &result.stdout,
             &result.stdout,
         );
@@ -347,8 +349,8 @@ fn run_diff(
             eprint!("{}", diff_result.stderr);
         }
         timer.track(
-            &format!("git diff {}", args.join(" ")),
-            &format!("rtk git diff {}", args.join(" ")),
+            &tracked,
+            &format!("rtk {tracked}"),
             &diff_result.stdout,
             &diff_result.stdout,
         );
@@ -382,12 +384,7 @@ fn run_diff(
     let shown = never_worse(&raw, &printed);
     println!("{}", shown);
 
-    timer.track(
-        &format!("git diff {}", args.join(" ")),
-        &format!("rtk git diff {}", args.join(" ")),
-        &raw,
-        shown,
-    );
+    timer.track(&tracked, &format!("rtk {tracked}"), &raw, shown);
 
     Ok(0)
 }
@@ -448,6 +445,7 @@ fn run_show(
     // `show_positionals`, so `git show <rev> -- <path:with:colon>` would misread the
     // colon'd pathspec as a `<rev>:<path>` blob and dump it instead of a commit-diff.
     let args = &args_utils::restore_double_dash(args);
+    let tracked = with_args("git show", &display_args(args));
 
     // Pick one of three handlers for `git show`. `show_route` decides the blob case
     // FIRST (see its docs): the two branches below are mutually exclusive on `route`,
@@ -501,8 +499,8 @@ fn run_show(
         }
 
         timer.track(
-            &format!("git show {}", args.join(" ")),
-            &format!("rtk git show {} (passthrough)", args.join(" ")),
+            &tracked,
+            &tracking::passthrough_label(&tracked),
             &result.stdout,
             &result.stdout,
         );
@@ -521,8 +519,7 @@ fn run_show(
         // passthrough path below — decoding into a `String` first would lose them.
         let result =
             crate::core::stream::exec_capture_bytes(&mut cmd).context("Failed to run git show")?;
-        let label = format!("git show {}", args.join(" "));
-        let rtk_label = format!("rtk git show {}", args.join(" "));
+        let rtk_label = format!("rtk {tracked}");
         if !result.success() {
             eprint!(
                 "{}",
@@ -577,7 +574,7 @@ fn run_show(
             Err(_) => {
                 return emit_raw_bytes_passthrough(
                     &result.stdout,
-                    &label,
+                    &tracked,
                     &rtk_label,
                     &timer,
                     result.exit_code,
@@ -610,14 +607,14 @@ fn run_show(
             let shown = compact_blob_show(text, blob_objects[0], global_args);
             print!("{}", shown);
             // Track savings against the bytes git actually wrote (`result.stdout`).
-            timer.track_bytes(&label, &rtk_label, result.stdout.len(), &shown);
+            timer.track_bytes(&tracked, &rtk_label, result.stdout.len(), &shown);
             return Ok(0);
         }
         // Not windowable (multiple concatenated objects, a content-transforming flag, or
         // a trailing pathspec): pass through byte-identical.
         return emit_raw_bytes_passthrough(
             &result.stdout,
-            &label,
+            &tracked,
             &rtk_label,
             &timer,
             result.exit_code,
@@ -643,8 +640,8 @@ fn run_show(
             eprint!("{}", raw_result.stderr);
         }
         timer.track(
-            &format!("git show {}", args.join(" ")),
-            &format!("rtk git show {}", args.join(" ")),
+            &tracked,
+            &format!("rtk {tracked}"),
             &raw_result.stdout,
             &raw_result.stdout,
         );
@@ -672,12 +669,7 @@ fn run_show(
         // below would print what the user explicitly suppressed.
         let shown = never_worse(&raw_output, &printed);
         println!("{}", shown);
-        timer.track(
-            &format!("git show {}", args.join(" ")),
-            &format!("rtk git show {}", args.join(" ")),
-            &raw_output,
-            shown,
-        );
+        timer.track(&tracked, &format!("rtk {tracked}"), &raw_output, shown);
         return Ok(0);
     }
 
@@ -726,12 +718,7 @@ fn run_show(
     let shown = never_worse(&raw_output, &printed);
     println!("{}", shown);
 
-    timer.track(
-        &format!("git show {}", args.join(" ")),
-        &format!("rtk git show {}", args.join(" ")),
-        &raw_output,
-        shown,
-    );
+    timer.track(&tracked, &format!("rtk {tracked}"), &raw_output, shown);
 
     Ok(0)
 }
@@ -1031,12 +1018,6 @@ fn blob_truncation(raw: &str, budget: Budget) -> Option<(&str, usize, usize)> {
     Some((head, remaining, head_lines + 1))
 }
 
-/// POSIX single-quote a blob arg so a hint with a space or shell metachar in the path
-/// stays copy-paste safe.
-fn shell_single_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
-
 /// Window a single blob dump: cap a large text blob and point at the rest with a hint
 /// re-derived from the blob arg itself — `git show <rev>:<path> | tail -n +N`.
 ///
@@ -1050,11 +1031,12 @@ fn compact_blob_show(raw: &str, blob_arg: &str, global_args: &[String]) -> Strin
     };
     // Carry the command's global args (`-C <dir>`, `-c k=v`, `--git-dir`, `--work-tree`)
     // into the hint so it is runnable from anywhere, not just the repo root: without
-    // them `rtk git -C /repo show HEAD:big` would emit `git show 'HEAD:big' | tail …`,
-    // which fails outside /repo. Each is shell-quoted for copy-paste safety.
+    // them `rtk git -C /repo show HEAD:big` would emit `git show HEAD:big | tail …`,
+    // which fails outside /repo. Each is quoted when needed (`quote_word`), so the hint
+    // stays copy-paste safe.
     let mut prefix = String::new();
     for arg in global_args {
-        prefix.push_str(&shell_single_quote(arg));
+        prefix.push_str(&quote_word(arg));
         prefix.push(' ');
     }
     // Through `rtk proxy`, like the `diff` hints: a bare `git show` is what RTK's own hook
@@ -1064,7 +1046,7 @@ fn compact_blob_show(raw: &str, blob_arg: &str, global_args: &[String]) -> Strin
     let hint = format!(
         "[see remaining: rtk proxy git {}show {} | tail -n +{}]",
         prefix,
-        shell_single_quote(blob_arg),
+        quote_word(blob_arg),
         offset
     );
     let out = format!("{}... (+{} lines) {}\n", head, remaining, hint);
@@ -1746,6 +1728,7 @@ fn run_log(
     verbose: u8,
     global_args: &[String],
 ) -> Result<i32> {
+    let tracked = with_args("git log", &display_args(args));
     let tokens = tokenize_git_log_args(args);
 
     if tokens.iter().any(|t| log_wants_raw_shape(t, &tokens)) {
@@ -1767,8 +1750,8 @@ fn run_log(
             eprint!("{}", result.stderr);
         }
         timer.track(
-            &format!("git log {}", args.join(" ")),
-            &format!("rtk git log {} (passthrough)", args.join(" ")),
+            &tracked,
+            &tracking::passthrough_label(&tracked),
             &result.stdout,
             &result.stdout,
         );
@@ -1866,8 +1849,8 @@ fn run_log(
     println!("{}", filtered);
 
     timer.track(
-        &format!("git log {}", args.join(" ")),
-        &format!("rtk git log {}", args.join(" ")),
+        &tracked,
+        &format!("rtk {tracked}"),
         &result.stdout,
         &filtered,
     );
@@ -2378,6 +2361,7 @@ fn filter_status_with_args(output: &str) -> String {
 
 fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+    let tracked = with_args("git status", &display_args(args));
 
     // Keep a narrow compact path for no-arg status and branch/short-only flags.
     // More complex explicit args still use the existing minimal-filter path.
@@ -2390,8 +2374,8 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
                 eprint!("{}", result.stderr);
             }
             timer.track(
-                &format!("git status {}", args.join(" ")),
-                &format!("rtk git status {}", args.join(" ")),
+                &tracked,
+                &format!("rtk {tracked}"),
                 &result.stdout,
                 &result.stdout,
             );
@@ -2408,8 +2392,8 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         print!("{}", filtered);
 
         timer.track(
-            &format!("git status {}", args.join(" ")),
-            &format!("rtk git status {}", args.join(" ")),
+            &tracked,
+            &format!("rtk {tracked}"),
             &result.stdout,
             &filtered,
         );
@@ -2436,18 +2420,8 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         if !message.is_empty() {
             eprintln!("{}", message);
         }
-        let original_cmd = if args.is_empty() {
-            "git status".to_string()
-        } else {
-            format!("git status {}", args.join(" "))
-        };
-        let rtk_cmd = if args.is_empty() {
-            "rtk git status".to_string()
-        } else {
-            format!("rtk git status {}", args.join(" "))
-        };
         let shown = never_worse(&raw_output, &message);
-        timer.track(&original_cmd, &rtk_cmd, &raw_output, shown);
+        timer.track(&tracked, &format!("rtk {tracked}"), &raw_output, shown);
         return Ok(result.exit_code);
     }
 
@@ -2467,18 +2441,7 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     let shown = never_worse(&raw_output, &final_output);
     println!("{}", shown);
 
-    let original_cmd = if args.is_empty() {
-        "git status".to_string()
-    } else {
-        format!("git status {}", args.join(" "))
-    };
-    let rtk_cmd = if args.is_empty() {
-        "rtk git status".to_string()
-    } else {
-        format!("rtk git status {}", args.join(" "))
-    };
-
-    timer.track(&original_cmd, &rtk_cmd, &raw_output, shown);
+    timer.track(&tracked, &format!("rtk {tracked}"), &raw_output, shown);
 
     Ok(0)
 }
@@ -2536,12 +2499,8 @@ fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> 
             eprintln!("{}", result.stderr.trim());
         }
 
-        timer.track(
-            &format!("git add {}", args.join(" ")),
-            &format!("rtk git add {}", args.join(" ")),
-            &raw_output,
-            &compact,
-        );
+        let tracked = with_args("git add", &display_args(args));
+        timer.track(&tracked, &format!("rtk {tracked}"), &raw_output, &compact);
     } else {
         eprintln!("FAILED: git add");
         if !result.stderr.trim().is_empty() {
@@ -2591,7 +2550,7 @@ fn parse_commit_output(line: &str) -> String {
 fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let original_cmd = format!("git commit {}", args.join(" "));
+    let original_cmd = with_args("git commit", &display_args(args));
 
     if verbose > 0 {
         eprintln!("{}", original_cmd);
@@ -2662,7 +2621,7 @@ fn run_checkout(args: &[String], verbose: u8, global_args: &[String]) -> Result<
         cmd.arg(arg);
     }
 
-    let args_display = args.join(" ");
+    let args_display = display_args(args);
     let args_for_filter = args.to_vec();
     runner::run_filtered_with_exit(
         cmd,
@@ -2903,7 +2862,7 @@ fn run_push(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
         cmd.arg(arg);
     }
 
-    let cmd_label = format!("git push {}", args.join(" "));
+    let cmd_label = with_args("git push", &display_args(args));
     let filter = LineStreamFilter::new(GitPushLineHandler::default());
     let result = stream::run_streaming(
         &mut cmd,
@@ -2987,12 +2946,8 @@ fn run_pull(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
 
         println!("{}", compact);
 
-        timer.track(
-            &format!("git pull {}", args.join(" ")),
-            &format!("rtk git pull {}", args.join(" ")),
-            &raw_output,
-            &compact,
-        );
+        let tracked = with_args("git pull", &display_args(args));
+        timer.track(&tracked, &format!("rtk {tracked}"), &raw_output, &compact);
     } else {
         eprintln!("FAILED: git pull");
         if !result.stderr.trim().is_empty() {
@@ -3033,6 +2988,7 @@ fn branch_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
 
 fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+    let tracked = with_args("git branch", &display_args(args));
 
     if verbose > 0 {
         eprintln!("git branch");
@@ -3090,12 +3046,7 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         let combined = result.combined();
 
         let trimmed = result.stdout.trim();
-        timer.track(
-            &format!("git branch {}", args.join(" ")),
-            &format!("rtk git branch {}", args.join(" ")),
-            &combined,
-            trimmed,
-        );
+        timer.track(&tracked, &format!("rtk {tracked}"), &combined, trimmed);
 
         if result.success() {
             println!("{}", trimmed);
@@ -3121,12 +3072,7 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
 
         let msg = if result.success() { "ok" } else { &combined };
 
-        timer.track(
-            &format!("git branch {}", args.join(" ")),
-            &format!("rtk git branch {}", args.join(" ")),
-            &combined,
-            msg,
-        );
+        timer.track(&tracked, &format!("rtk {tracked}"), &combined, msg);
 
         if result.success() {
             println!("ok");
@@ -3161,8 +3107,8 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
             eprint!("{}", result.stderr);
         }
         timer.track(
-            &format!("git branch {}", args.join(" ")),
-            &format!("rtk git branch {}", args.join(" ")),
+            &tracked,
+            &format!("rtk {tracked}"),
             &result.stdout,
             &result.stdout,
         );
@@ -3174,8 +3120,8 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     println!("{}", filtered);
 
     timer.track(
-        &format!("git branch {}", args.join(" ")),
-        &format!("rtk git branch {}", args.join(" ")),
+        &tracked,
+        &format!("rtk {tracked}"),
         &result.stdout,
         &filtered,
     );
@@ -3592,6 +3538,7 @@ fn worktree_asked_for_report(tokens: &[Token<'_>]) -> bool {
 
 fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+    let tracked = with_args("git worktree", &display_args(args));
 
     if verbose > 0 {
         eprintln!("git worktree list");
@@ -3628,8 +3575,8 @@ fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<
             eprintln!("{}", result.stderr.trim());
         }
         timer.track(
-            &format!("git worktree {}", args.join(" ")),
-            &format!("rtk git worktree {} (passthrough)", args.join(" ")),
+            &tracked,
+            &tracking::passthrough_label(&tracked),
             &result.stdout,
             &result.stdout,
         );
@@ -3659,12 +3606,7 @@ fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<
             said
         };
 
-        timer.track(
-            &format!("git worktree {}", args.join(" ")),
-            &format!("rtk git worktree {}", args.join(" ")),
-            &combined,
-            msg,
-        );
+        timer.track(&tracked, &format!("rtk {tracked}"), &combined, msg);
 
         if result.success() {
             if said.is_empty() {
@@ -3752,11 +3694,8 @@ pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -
         .status()
         .context("Failed to run git")?;
 
-    let args_str = tracking::args_display(args);
-    timer.track_passthrough(
-        &format!("git {}", args_str),
-        &format!("rtk git {} (passthrough)", args_str),
-    );
+    let tracked = with_args("git", &tracking::args_display(args));
+    timer.track_passthrough(&tracked, &tracking::passthrough_label(&tracked));
 
     if !status.success() {
         return Ok(exit_code_from_status(&status, "git"));
@@ -4843,7 +4782,7 @@ mod tests {
         assert!(!out.contains("tail -n +0"));
 
         // A path containing a single quote must be escaped `'\''` so the hint stays
-        // copy-paste safe (the dangerous branch of `shell_single_quote`).
+        // copy-paste safe (the dangerous branch of `quote_word`).
         let out_q = compact_blob_show(&s, "HEAD:it's/a.lock", &[]);
         let expected_q = format!(
             "[see remaining: rtk proxy git show 'HEAD:it'\\''s/a.lock' | tail -n +{offset}]"
@@ -4911,10 +4850,10 @@ mod tests {
             "core.autocrlf=false".to_string(),
         ];
         let out = compact_blob_show(&s, "HEAD:big.lock", &globals);
-        // Every token is shell-quoted (same policy as the blob arg) — quoting a flag
-        // like `-C` is a harmless no-op and keeps the hint copy-paste safe.
+        // Every token is quoted when needed (`quote_word`, same as the blob arg): the
+        // path with a blank is quoted, the plain flags and values are left bare.
         let expected = format!(
-            "[see remaining: rtk proxy git '-C' '/tmp/my repo' '-c' 'core.autocrlf=false' show 'HEAD:big.lock' | tail -n +{offset}]"
+            "[see remaining: rtk proxy git -C '/tmp/my repo' -c core.autocrlf=false show HEAD:big.lock | tail -n +{offset}]"
         );
         assert!(out.contains(&expected), "global-args hint wrong: {out:?}");
     }

@@ -11,6 +11,7 @@
 //! otherwise replace non-UTF-8 bytes with U+FFFD and corrupt the stream
 //! (`#1087`).
 
+use crate::core::shell::display_args;
 use crate::core::tee::force_tee_hint;
 use crate::core::tracking;
 use crate::core::utils::resolved_command;
@@ -67,10 +68,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         handle
             .write_all(&output.stdout)
             .context("Failed to write binary response to stdout")?;
-        timer.track_passthrough(
-            &format!("curl {}", args.join(" ")),
-            &format!("rtk curl {}", args.join(" ")),
-        );
+        let tracked = format!("curl {}", display_args(args));
+        timer.track_passthrough(&tracked, &format!("rtk {tracked}"));
         return Ok(exit_code);
     }
 
@@ -86,12 +85,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let shown =
         crate::core::runner::emit_guarded(&filtered.content, filtered.tee_hint.as_deref(), &raw);
 
-    timer.track(
-        &format!("curl {}", args.join(" ")),
-        &format!("rtk curl {}", args.join(" ")),
-        &raw,
-        &shown,
-    );
+    let tracked = format!("curl {}", display_args(args));
+    timer.track(&tracked, &format!("rtk {tracked}"), &raw, &shown);
 
     Ok(exit_code)
 }

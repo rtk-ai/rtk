@@ -34,12 +34,7 @@ pub fn run_file(file: &Path, verbose: u8) -> Result<()> {
     let result = analyze_logs(&content);
     let shown = never_worse(&content, &result);
     println!("{}", shown);
-    timer.track(
-        &format!("cat {}", file.display()),
-        "rtk log",
-        &content,
-        shown,
-    );
+    timer.track(&super::read::cat_label(file), "rtk log", &content, shown);
     Ok(())
 }
 
