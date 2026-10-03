@@ -1095,15 +1095,26 @@ struct PipelineAnalysis {
     all_consumers_safe: bool,
 }
 
+// How many tokens `analyze_pipeline` looked at, to bound the work.
+#[cfg(test)]
+thread_local! {
+    static PIPELINE_TOKENS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn analyze_pipeline(
     cmd: &str,
     tokens: &[ParsedToken],
     segment_start: usize,
     first_pipe_offset: usize,
 ) -> PipelineAnalysis {
-    let next_clause_offset = tokens
+    // The tokens are in the order of their offsets, so those before the first
+    // pipe are skipped by bisection, not read.
+    let first = tokens.partition_point(|token| token.offset < first_pipe_offset);
+    let next_clause_offset = tokens[first..]
         .iter()
         .find(|token| {
+            #[cfg(test)]
+            PIPELINE_TOKENS_READ.with(|read| read.set(read.get() + 1));
             token.offset > first_pipe_offset
                 && (token.kind == TokenKind::Operator
                     || (token.kind == TokenKind::Shellism && token.value == "&"))
@@ -1116,12 +1127,11 @@ fn analyze_pipeline(
     let mut has_supported_structure = true;
     let mut consumers_all_safe = true;
 
-    for (i, token) in tokens.iter().enumerate() {
+    for (i, token) in tokens.iter().enumerate().skip(first) {
+        #[cfg(test)]
+        PIPELINE_TOKENS_READ.with(|read| read.set(read.get() + 1));
         if token.offset >= end_offset {
             break;
-        }
-        if token.offset < first_pipe_offset {
-            continue;
         }
         if token.kind == TokenKind::Redirect {
             if redirect_has_file_target(tokens, i) {
@@ -2984,6 +2994,26 @@ mod tests {
             .offset;
 
         analyze_pipeline(cmd, &tokens, 0, first_pipe_offset)
+    }
+
+    /// Each pipeline is read from its first pipe, not from the start of the
+    /// command: the tokens read grow with the number of pipelines, not with
+    /// their square.
+    #[test]
+    fn test_pipelines_are_read_from_their_first_pipe() {
+        for (unit, expected) in [
+            (";|", [398, 3998, 39998]),
+            ("; ls | cat", [598, 5998, 59998]),
+            ("; ls | cat | wc", [998, 9998, 99998]),
+        ] {
+            let counts = [100, 1000, 10000].map(|n| {
+                let cmd = format!("ls{}", unit.repeat(n));
+                PIPELINE_TOKENS_READ.with(|read| read.set(0));
+                let _ = rewrite_command_no_prefixes(&cmd, &[]);
+                PIPELINE_TOKENS_READ.with(std::cell::Cell::get)
+            });
+            assert_eq!(counts, expected, "{unit:?}");
+        }
     }
 
     #[test]
