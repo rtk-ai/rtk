@@ -144,6 +144,10 @@ feat!(hook): change rewrite config format
 
 These commit messages directly become CHANGELOG entries when release-please creates a release PR. Write them as if they will be read by users.
 
+### Pull request titles
+
+Pull request titles targeting `develop` or `master` must also use Conventional Commit format. Release PRs from `develop` to `master` should be squash-merged so the squash title becomes the release-please commit message.
+
 ---
 
 ## Branch Naming Convention
