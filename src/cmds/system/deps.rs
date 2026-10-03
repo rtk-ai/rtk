@@ -7,6 +7,14 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use std::fs;
 use std::path::Path;
+use std::sync::LazyLock;
+
+static CARGO_DEP_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"^([a-zA-Z0-9_-]+)\s*=\s*(?:"([^"]+)"|.*version\s*=\s*"([^"]+)")"#).unwrap()
+});
+static CARGO_SECTION_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[([^\]]+)\]").unwrap());
+static REQUIREMENTS_DEP_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^([a-zA-Z0-9_-]+)([=<>!~]+.*)?$").unwrap());
 
 const MAX_DEPS: usize = CAP_WARNINGS;
 // dev deps are secondary to prod — show fewer.
@@ -83,21 +91,18 @@ pub fn run(path: &Path, verbose: u8) -> Result<()> {
 fn summarize_cargo_str(path: &Path) -> Result<String> {
     let content =
         fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    let dep_re =
-        Regex::new(r#"^([a-zA-Z0-9_-]+)\s*=\s*(?:"([^"]+)"|.*version\s*=\s*"([^"]+)")"#).unwrap();
-    let section_re = Regex::new(r"^\[([^\]]+)\]").unwrap();
     let mut current_section = String::new();
     let mut deps = Vec::new();
     let mut dev_deps = Vec::new();
     let mut out = String::new();
 
     for line in content.lines() {
-        if let Some(caps) = section_re.captures(line) {
+        if let Some(caps) = CARGO_SECTION_RE.captures(line) {
             current_section = caps
                 .get(1)
                 .map(|m| m.as_str().to_string())
                 .unwrap_or_default();
-        } else if let Some(caps) = dep_re.captures(line) {
+        } else if let Some(caps) = CARGO_DEP_RE.captures(line) {
             let name = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             let version = caps
                 .get(2)
@@ -181,7 +186,6 @@ fn summarize_package_json_str(path: &Path) -> Result<String> {
 fn summarize_requirements_str(path: &Path) -> Result<String> {
     let content =
         fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    let dep_re = Regex::new(r"^([a-zA-Z0-9_-]+)([=<>!~]+.*)?$").unwrap();
     let mut deps = Vec::new();
     let mut out = String::new();
 
@@ -190,7 +194,7 @@ fn summarize_requirements_str(path: &Path) -> Result<String> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some(caps) = dep_re.captures(line) {
+        if let Some(caps) = REQUIREMENTS_DEP_RE.captures(line) {
             let name = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             let version = caps.get(2).map(|m| m.as_str()).unwrap_or("");
             deps.push(format!("{}{}", name, version));
@@ -320,5 +324,39 @@ mod tests {
     fn test_package_json_invalid_has_path_context() {
         let err = summarize("not json").unwrap_err();
         assert!(err.to_string().contains("package.json"));
+    }
+
+    fn summarize_named(name: &str, content: &str, f: fn(&Path) -> Result<String>) -> String {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(name);
+        fs::write(&path, content).expect("write manifest");
+        f(&path).expect("manifest must summarize")
+    }
+
+    #[test]
+    fn test_cargo_sections_and_versions_match() {
+        let out = summarize_named(
+            "Cargo.toml",
+            "[dependencies]\nserde = \"1.0\"\nregex = { version = \"1.11\", features = [\"std\"] }\n\
+             [dev-dependencies]\ntempfile = \"3\"\n",
+            summarize_cargo_str,
+        );
+        assert!(out.contains("serde (1.0)"), "{out}");
+        assert!(out.contains("regex (1.11)"), "{out}");
+        assert!(out.contains("tempfile (3)"), "{out}");
+        assert!(out.contains("Dev (1)"), "{out}");
+    }
+
+    #[test]
+    fn test_requirements_keeps_version_specifiers() {
+        let out = summarize_named(
+            "requirements.txt",
+            "# comment\n\nrequests==2.31.0\nflask>=2.0\nrich\n",
+            summarize_requirements_str,
+        );
+        assert!(out.contains("requests==2.31.0"), "{out}");
+        assert!(out.contains("flask>=2.0"), "{out}");
+        assert!(out.contains("rich"), "{out}");
+        assert!(out.contains("Packages (3)"), "{out}");
     }
 }
