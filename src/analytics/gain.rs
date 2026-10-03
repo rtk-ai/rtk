@@ -3,7 +3,7 @@
 use crate::core::display_helpers::{format_duration, print_period_table};
 use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
 use crate::core::user_dirs;
-use crate::core::utils::{format_tokens, truncate};
+use crate::core::utils::{format_signed_tokens, format_tokens, truncate};
 use crate::hooks::hook_check;
 use anyhow::{Context, Result};
 use chrono::Local;
@@ -123,7 +123,7 @@ pub fn run(
             "Tokens saved",
             format!(
                 "{} ({:.1}%)",
-                format_tokens(summary.total_saved),
+                format_signed_tokens(summary.total_saved),
                 summary.avg_savings_pct
             ),
         );
@@ -196,7 +196,7 @@ pub fn run(
             let saved_width = summary
                 .by_command
                 .iter()
-                .map(|(_, _, saved, _, _)| format_tokens(*saved).len())
+                .map(|(_, _, saved, _, _)| format_signed_tokens(*saved).len())
                 .max()
                 .unwrap_or(5)
                 .max(5);
@@ -242,7 +242,7 @@ pub fn run(
             let max_saved = summary
                 .by_command
                 .iter()
-                .map(|(_, _, saved, _, _)| *saved)
+                .map(|(_, _, saved, _, _)| saved.unsigned_abs())
                 .max()
                 .unwrap_or(1);
 
@@ -252,7 +252,7 @@ pub fn run(
                 let count_cell = format!("{:>count_width$}", count, count_width = count_width);
                 let saved_cell = format!(
                     "{:>saved_width$}",
-                    format_tokens(*saved),
+                    format_signed_tokens(*saved),
                     saved_width = saved_width
                 );
                 let pct_plain = format!("{:>6}", format!("{pct:.1}%"));
@@ -269,6 +269,28 @@ pub fn run(
                 );
             }
             println!("{}", "─".repeat(table_width));
+            println!();
+        }
+
+        let regressions = tracker.get_regressions_filtered(project_scope.as_deref())?;
+        if !regressions.is_empty() {
+            println!(
+                "{}",
+                styled("Regressions (largest net losses, up to 10)", true)
+            );
+            println!(
+                "{:<24}  {:>5}  {:>10}  {:>8}",
+                "Command", "Count", "Saved", "Total%"
+            );
+            for (cmd, count, saved, pct, _) in &regressions {
+                println!(
+                    "{}  {:>5}  {:>10}  {:>7.1}%",
+                    truncate_for_column(cmd, 24),
+                    count,
+                    format_signed_tokens(*saved),
+                    pct
+                );
+            }
             println!();
         }
 
@@ -296,12 +318,12 @@ pub fn run(
                         "•"
                     };
                     println!(
-                        "{} {} {:<25} -{:.0}% ({})",
+                        "{} {} {:<25} {:.0}% ({})",
                         time,
                         sign,
                         cmd_short,
                         rec.savings_pct,
-                        format_tokens(rec.saved_tokens)
+                        format_signed_tokens(rec.saved_tokens)
                     );
                 }
                 println!();
@@ -326,7 +348,7 @@ pub fn run(
             print_kpi("Estimated monthly quota", format_tokens(quota_tokens));
             print_kpi(
                 "Tokens saved (lifetime)",
-                format_tokens(summary.total_saved),
+                format_signed_tokens(summary.total_saved),
             );
             print_kpi("Quota preserved", format!("{:.1}%", quota_pct));
             println!();
@@ -412,16 +434,26 @@ fn style_command_cell(cmd: &str) -> String {
 }
 
 /// Render a proportional bar chart segment (TTY-aware). // added
-fn mini_bar(value: usize, max: usize, width: usize) -> String {
+fn mini_bar(value: i64, max: u64, width: usize) -> String {
     if max == 0 || width == 0 {
         return String::new();
     }
-    let filled = ((value as f64 / max as f64) * width as f64).round() as usize;
-    let filled = filled.min(width);
-    let mut bar = "█".repeat(filled);
-    bar.push_str(&"░".repeat(width - filled));
+    let bar_width = width - usize::from(value < 0);
+    let filled = ((value.unsigned_abs() as f64 / max as f64) * bar_width as f64).round() as usize;
+    let filled = filled.min(bar_width);
+    let mut bar = if value < 0 {
+        "-".to_string()
+    } else {
+        String::new()
+    };
+    bar.push_str(&"█".repeat(filled));
+    bar.push_str(&"░".repeat(bar_width - filled));
     if std::io::stdout().is_terminal() {
-        bar.cyan().to_string()
+        if value < 0 {
+            bar.red().to_string()
+        } else {
+            bar.cyan().to_string()
+        }
     } else {
         bar
     }
@@ -587,33 +619,36 @@ fn shorten_path(path: &str) -> String {
     }
 }
 
-fn print_ascii_graph(data: &[(String, usize)]) {
-    if data.is_empty() {
-        return;
-    }
-
-    let max_val = data.iter().map(|(_, v)| *v).max().unwrap_or(1);
-    let width = 40;
+fn print_ascii_graph(data: &[(String, i64)]) {
+    let max_val = data
+        .iter()
+        .map(|(_, v)| v.unsigned_abs())
+        .max()
+        .unwrap_or(0);
+    // A shared zero axis makes a loss visible without relying on terminal colors.
+    let has_losses = data.iter().any(|(_, value)| *value < 0);
+    let width = if has_losses { 20 } else { 40 };
 
     for (date, value) in data {
         let date_short = if date.len() >= 10 { &date[5..10] } else { date };
-
         let bar_len = if max_val > 0 {
-            ((*value as f64 / max_val as f64) * width as f64) as usize
+            ((value.unsigned_abs() as f64 / max_val as f64) * width as f64).round() as usize
         } else {
             0
+        }
+        .min(width);
+        let bar = "█".repeat(bar_len);
+        let spaces = " ".repeat(width - bar_len);
+        let graph = if has_losses {
+            if *value < 0 {
+                format!("{}{}│{}", spaces, bar, " ".repeat(width))
+            } else {
+                format!("{}│{}{}", " ".repeat(width), bar, spaces)
+            }
+        } else {
+            format!("│{}{}", bar, spaces)
         };
-
-        let bar: String = "█".repeat(bar_len);
-        let spaces: String = " ".repeat(width - bar_len);
-
-        println!(
-            "{} │{}{} {}",
-            date_short,
-            bar,
-            spaces,
-            format_tokens(*value)
-        );
+        println!("{} {} {}", date_short, graph, format_signed_tokens(*value));
     }
 }
 
@@ -654,7 +689,7 @@ struct ExportSummary {
     total_commands: usize,
     total_input: usize,
     total_output: usize,
-    total_saved: usize,
+    total_saved: i64,
     avg_savings_pct: f64,
     total_time_ms: u64,
     avg_time_ms: u64,
@@ -905,6 +940,18 @@ fn confirm_reset() -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_signed_impact_bars_are_bounded_and_identify_losses() {
+        let bar = |value, max, width| crate::core::utils::strip_ansi(&mini_bar(value, max, width));
+        assert_eq!(bar(-100, 100, 5), "-████");
+        assert_eq!(bar(100, 100, 5), "█████");
+        assert_eq!(bar(0, 100, 5), "░░░░░");
+        assert_eq!(bar(-100, 100, 1), "-");
+        assert_eq!(bar(-100, 100, 0), "");
+        assert_eq!(bar(0, 0, 5), "");
+        assert_eq!(bar(i64::MIN, i64::MIN.unsigned_abs(), 5), "-████");
+    }
 
     #[test]
     fn test_recall_verdict_needs_a_sample_before_judging() {
