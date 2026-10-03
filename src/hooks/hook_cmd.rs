@@ -539,7 +539,8 @@ fn run_vibe_inner(input: &str) -> Option<String> {
     };
 
     let tool_name = json.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
-    if tool_name != "bash" {
+    // Vibe's Unified Harness namespaces tools (`file_system.bash`); match the last segment.
+    if tool_name.rsplit('.').next() != Some("bash") {
         return None;
     }
 
@@ -3016,6 +3017,24 @@ mod tests {
             v.get("system_message").is_some(),
             "expected system_message for UI visibility"
         );
+    }
+
+    #[test]
+    fn test_vibe_rewrites_namespaced_bash_command() {
+        // Vibe's Unified Harness sends the bash tool as `file_system.bash`.
+        let input = vibe_input("file_system.bash", "git status");
+        let out = run_vibe_inner(&input).expect("rewrite expected for namespaced bash");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v["hook_specific_output"]["tool_input"]["command"],
+            "rtk git status"
+        );
+    }
+
+    #[test]
+    fn test_vibe_ignores_namespaced_non_bash_tool() {
+        let input = vibe_input("file_system.read_file", "git status");
+        assert!(run_vibe_inner(&input).is_none());
     }
 
     #[test]
