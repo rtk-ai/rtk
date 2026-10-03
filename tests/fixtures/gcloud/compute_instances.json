@@ -1,0 +1,4 @@
+[
+  {"name":"redacted-web-01","zone":"https://example.invalid/zones/region-a","machineType":"https://example.invalid/machineTypes/e2-medium","status":"RUNNING","scheduling":{"preemptible":true}},
+  {"name":"redacted-batch-02","zone":"https://example.invalid/zones/region-b","machineType":"https://example.invalid/machineTypes/n2-standard-4","status":"TERMINATED","scheduling":{"preemptible":false}}
+]
