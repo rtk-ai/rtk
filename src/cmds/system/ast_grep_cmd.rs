@@ -25,51 +25,73 @@ const DEFAULT_MAX_PER_FILE: usize = 5;
 /// Recovery slug for the match lines the caps hold back.
 const TEE_SLUG: &str = "ast-grep";
 
-/// Bytes the compaction must save before it is worth storing the output to point at. Covers
-/// `[full output: <path>]` for any path the recovery store can hand back, since that length is
-/// only known once the file has been written.
+/// Bytes the compaction must save before it is worth storing the output to point at. Writing
+/// the store is what produces the path the hint names, so the hint -- a few dozen bytes for a
+/// store under the default directory -- cannot be measured before the decision that would
+/// create it; the margin is required to clear this reserve instead. A `tee_directory` long
+/// enough to outgrow it is the one case left that can strand an archive nothing points at.
 const HINT_RESERVE: usize = 256;
 
-/// ast-grep's subcommands other than `run`. Only `run`'s plain output has the
-/// `path:line:content` shape this module parses: `scan` reports diagnostics (whose
-/// `--report-style short` form happens to parse, and was being capped as if it were a match
-/// list), `test` reports rule results, and `lsp` speaks a protocol over stdin, which capturing
-/// closes.
-const OTHER_SUBCOMMANDS: &[&str] = &["scan", "test", "new", "lsp", "completions", "docs"];
+/// Every subcommand `ast-grep --help` lists except `run` (read from ast-grep 0.45.3). Only
+/// `run`'s plain output has the `path:line:content` shape this module parses: `scan` reports
+/// diagnostics, whose `--report-style short` form parses well enough to be capped as if it
+/// were a match list; `test` reports rule results; `outline` reports symbols; `help` and
+/// `completions` print text meant to be read verbatim; and `lsp` speaks a protocol over stdin,
+/// which capturing closes.
+const OTHER_SUBCOMMANDS: &[&str] = &[
+    "scan",
+    "test",
+    "new",
+    "lsp",
+    "outline",
+    "completions",
+    "help",
+];
 
-/// The value-taking options ast-grep accepts *ahead of* a subcommand. Deliberately only those:
-/// a per-subcommand arity table would go stale against a tool that adds options, and an entry
-/// missing from it puts an option's value where a subcommand is looked for -- `--color always
-/// lsp` reading as `run` hands an editor a closed stdin.
+/// The value-taking options ast-grep accepts *ahead of* a subcommand. `ast-grep --help`
+/// (0.45.3) lists three global options -- `-c/--config`, `-h/--help`, `-V/--version` -- and
+/// only the first takes a value; every other option, `--color` among them, belongs to a
+/// subcommand and is rejected before one. An entry missing here puts an option's value where
+/// the subcommand is looked for, and a value reading as `run` (`-c run lsp`) hands an editor a
+/// closed stdin.
 fn global_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
     match kind {
-        TokenKind::Long => matches!(name, "config" | "color").then(ValueSpec::value),
+        TokenKind::Long => matches!(name, "config").then(ValueSpec::value),
         TokenKind::Short => matches!(name, "c").then(ValueSpec::value),
         _ => None,
     }
 }
 
-/// `run`'s own value-taking options, consulted only once the invocation is known to be a `run`.
-/// Being wrong here costs compression, never correctness: the worst an entry missing from this
-/// table does is leave a pattern looking like a free positional.
+/// `run`'s own value-taking options, as `ast-grep run --help` lists them (0.45.3), consulted
+/// only once the invocation is known to be a `run`. The two directions of being wrong here are
+/// not symmetric: a missing entry costs compression, leaving a pattern to look like a free
+/// positional, while an extra one costs correctness, swallowing the `--stdin` behind it so a
+/// run reading from the pipe gets captured -- and capturing closes it. That is why `--json` and
+/// `--debug-query` are absent: ast-grep takes their value attached with `=` only, which the
+/// tokenizer splits off without an entry, and an entry would eat the next argument.
 fn run_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
     match kind {
         TokenKind::Long => matches!(
             name,
             "pattern"
-                | "rewrite"
-                | "lang"
-                | "globs"
-                | "context"
-                | "after"
-                | "before"
                 | "selector"
                 | "strictness"
+                | "kind"
+                | "rewrite"
+                | "lang"
+                | "no-ignore"
+                | "globs"
                 | "threads"
+                | "color"
+                | "inspect"
+                | "after"
+                | "before"
+                | "context"
+                | "heading"
         )
         .then(ValueSpec::value)
         .or_else(|| global_takes_value(kind, name)),
-        TokenKind::Short => matches!(name, "p" | "r" | "l" | "C" | "A" | "B")
+        TokenKind::Short => matches!(name, "p" | "k" | "r" | "l" | "j" | "A" | "B" | "C")
             .then(ValueSpec::value)
             .or_else(|| global_takes_value(kind, name)),
         _ => None,
@@ -85,12 +107,12 @@ fn run_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
 /// pass reads it: without that, `run -p scan src/` took its pattern for the `scan` subcommand
 /// and gave up the filter entirely.
 ///
-/// When the first positional is neither `run` nor a known subcommand, the line is not
-/// identified: an option this module does not know may have claimed the real subcommand's
-/// place. Any of the other names anywhere on the line then disqualifies it. That costs a
-/// pattern or a path spelled like a subcommand, which is compression; reading `lsp` as a `run`
-/// hands an editor a closed stdin, which is correctness, and RTK's priority order picks
-/// correctness.
+/// Short of that first positional being `run`, the line is not identified -- an option this
+/// module does not know may have claimed the real subcommand's place -- and any of the other
+/// names then disqualifies it, wherever it sits among the free positionals before `--`. That
+/// costs a pattern or a path spelled like a subcommand, which is compression; reading `lsp` as
+/// a `run` hands an editor a closed stdin, which is correctness, and RTK's priority order
+/// picks correctness.
 fn filters_this_invocation(args: &[String]) -> bool {
     let global_tokens =
         arg_tokenizer::tokenize_grammar(args, &global_takes_value, arg_tokenizer::Dialect::Posix);
@@ -105,12 +127,17 @@ fn filters_this_invocation(args: &[String]) -> bool {
         return false;
     }
 
-    // A `--stdin` run reads the source from the pipe that capturing would close.
+    // Two runs have to reach the terminal as they happen. `--stdin` reads the source from the
+    // pipe that capturing closes. `-i` drives a full-screen session -- one prompt per match
+    // with a rewrite, a match browser without one -- that it writes to stdout while reading
+    // the answers from /dev/tty: capture swallows the whole session, prompt included, and
+    // ast-grep goes on waiting for an answer to a question nothing has displayed.
     let run_tokens =
         arg_tokenizer::tokenize_grammar(args, &run_takes_value, arg_tokenizer::Dialect::Posix);
-    !arg_tokenizer::before_dashdash(&run_tokens)
-        .iter()
-        .any(|t| t.kind == TokenKind::Long && t.text == "stdin")
+    !arg_tokenizer::before_dashdash(&run_tokens).iter().any(|t| {
+        matches!(t.kind, TokenKind::Long if matches!(t.text, "stdin" | "interactive"))
+            || matches!(t.kind, TokenKind::Short if t.text == "i")
+    })
 }
 
 /// Whether the user asked for JSON, which passes through as an explicit structured-output
@@ -264,22 +291,12 @@ pub fn run(args: &[String]) -> Result<i32> {
     } else {
         let mut out = filter_ast_grep(&result.stdout, DEFAULT_MAX_PER_FILE, DEFAULT_MAX_TOTAL);
         // A count of what was cut is not a way to read it, so the whole output is stored and
-        // pointed at, as every other capping filter does. Storing it is a write plus a
-        // rotation slot, though, and the guard below prints the raw output whenever the
-        // compacted form is not smaller -- so the decision is taken on the text the hint is
-        // already part of. Deciding before appending it let a search land in the band where
-        // the hint tipped the balance: the archive was written, the guard then printed raw,
-        // and the file sat there with nothing pointing at it, having evicted one a caller
-        // still needed.
+        // pointed at, as every other capping filter does.
         if out.hidden_lines > 0 {
             let fallback = "  (use --json, narrow the pattern, or rtk proxy ast-grep)\n";
-            // Storing the output is a write plus a rotation slot, and the guard below prints
-            // the raw output whenever the compacted form is not smaller. A hint appended after
-            // that decision was taken could tip the balance back: the archive got written, the
-            // guard printed raw, and the file sat there with nothing pointing at it, having
-            // evicted one a caller still needed. The hint's length is not known until the
-            // store has been written, so the decision is taken against a reserve wide enough
-            // for any path the store can produce.
+            // The guard below prints the raw output whenever the compacted form comes out
+            // larger, and a search landing in that band would leave the archive written,
+            // unreferenced, and one rotation slot poorer. Hence the margin check.
             let margin = result.stdout.len().saturating_sub(out.text.len());
             match (margin > HINT_RESERVE)
                 .then(|| crate::core::tee::force_tee_hint(&result.stdout, TEE_SLUG))
@@ -450,13 +467,12 @@ b.rs:3:eight
         assert_eq!(filter_ast_grep("not parseable\n", 5, 50).hidden_lines, 0);
     }
 
-    /// Only `run` produces the `path:line:content` shape this module parses. `scan
-    /// --report-style short` happens to parse as well and was being capped as if it were a
-    /// match list, and `lsp` speaks a protocol over the stdin that capturing closes.
+    /// Once the line names `run`, a positional spelled like another subcommand is that run's
+    /// pattern or its path. That is what the `run` short-circuit ahead of the
+    /// `OTHER_SUBCOMMANDS` scan buys, and dropping the short-circuit fails here and nowhere
+    /// else -- the arity of the options themselves is pinned by the two tests below.
     #[test]
     fn test_a_run_flag_value_is_not_read_as_a_subcommand() {
-        // `-p scan` is the pattern "scan". Classifying it as the `scan` subcommand sent a
-        // perfectly ordinary search to the passthrough and gave up the whole filter.
         for pattern in OTHER_SUBCOMMANDS {
             assert!(
                 filters_this_invocation(&args(&["run", "-p", pattern, "src/"])),
@@ -468,23 +484,140 @@ b.rs:3:eight
             );
         }
         assert!(filters_this_invocation(&args(&[
-            "run", "--globs", "docs", "-p", "$A"
+            "run", "--globs", "outline", "-p", "$A"
         ])));
+    }
+
+    /// Arity, probed with the token whose presence flips the routing: an option missing from
+    /// `run`'s table stops consuming the argument after it, which leaves a `--stdin` there
+    /// standing as a flag and turns a search into a passthrough. Every entry is pinned that
+    /// way, so dropping one fails here rather than quietly costing compression.
+    #[test]
+    fn test_a_run_option_value_is_not_read_as_a_flag() {
+        for opt in [
+            "-p",
+            "-k",
+            "-r",
+            "-l",
+            "-j",
+            "-A",
+            "-B",
+            "-C",
+            "--pattern",
+            "--selector",
+            "--strictness",
+            "--kind",
+            "--rewrite",
+            "--lang",
+            "--no-ignore",
+            "--globs",
+            "--threads",
+            "--color",
+            "--inspect",
+            "--after",
+            "--before",
+            "--context",
+            "--heading",
+        ] {
+            assert!(
+                filters_this_invocation(&args(&["run", opt, "--stdin", "-p", "$A"])),
+                "{opt}"
+            );
+        }
+    }
+
+    /// The other direction of the same table: an option that takes no separate value must not
+    /// acquire one here, or it swallows the `--stdin` behind it and a run reading from the
+    /// pipe gets captured. Two kinds qualify -- the flags ast-grep gives no value at all, and
+    /// `--json`/`--debug-query`, which take one only when it is attached with `=`.
+    #[test]
+    fn test_a_valueless_run_flag_does_not_swallow_the_next_argument() {
+        for flag in [
+            "--follow",
+            "-U",
+            "--update-all",
+            "--files-with-matches",
+            "--json",
+            "--debug-query",
+        ] {
+            assert!(
+                !filters_this_invocation(&args(&["run", flag, "--stdin", "-p", "$A"])),
+                "{flag}"
+            );
+        }
+    }
+
+    /// An interactive run writes its prompts to stdout but reads the answers from /dev/tty,
+    /// so capture leaves it waiting on a terminal that has been shown nothing.
+    #[test]
+    fn test_an_interactive_run_is_not_captured() {
+        assert!(!filters_this_invocation(&args(&[
+            "run", "-i", "-p", "$A", "-r", "$A"
+        ])));
+        assert!(!filters_this_invocation(&args(&[
+            "run",
+            "--interactive",
+            "-p",
+            "$A"
+        ])));
+        assert!(!filters_this_invocation(&args(&["-i", "-p", "$A", "src/"])));
+        // Clustered too: `-ip X` is how the session is usually opened.
+        assert!(!filters_this_invocation(&args(&["run", "-ip", "$A"])));
+        // ... while in `-pi` the `i` is `-p`'s attached value, which is an ordinary search.
+        assert!(filters_this_invocation(&args(&["run", "-pi", "src/"])));
+        // Past `--` it is a path again, and `-U` applies every rewrite without asking.
+        assert!(filters_this_invocation(&args(&[
+            "run", "-p", "$A", "--", "-i"
+        ])));
+        assert!(filters_this_invocation(&args(&[
+            "run", "-U", "-p", "$A", "-r", "$A"
+        ])));
+    }
+
+    /// `docs` is not one of ast-grep's subcommands, so a directory of that name is a path like
+    /// any other and the search over it still gets compacted.
+    #[test]
+    fn test_a_directory_named_like_no_subcommand_is_a_path() {
+        assert!(filters_this_invocation(&args(&["-p", "$A", "docs"])));
+        assert!(filters_this_invocation(&args(&["run", "-p", "$A", "docs"])));
     }
 
     #[test]
     fn test_a_global_option_value_does_not_hide_the_subcommand() {
         // The other direction, and the one that costs correctness: an option ahead of the
-        // subcommand must not let `lsp` slide into first position unnoticed.
-        assert!(!filters_this_invocation(&args(&[
-            "--color", "always", "lsp"
-        ])));
+        // subcommand must not let `lsp` slide into first position unnoticed. `-c/--config` is
+        // the only global option that takes a value.
         assert!(!filters_this_invocation(&args(&[
             "--config", "sg.yml", "scan"
         ])));
         assert!(!filters_this_invocation(&args(&["-c", "sg.yml", "test"])));
+        assert!(!filters_this_invocation(&args(&["-c", "sg.yml", "lsp"])));
+        // The case the table is there for: a config file named `run` would otherwise stand in
+        // first position and make `lsp` read as a search.
+        assert!(!filters_this_invocation(&args(&["-c", "run", "lsp"])));
+        assert!(!filters_this_invocation(&args(&["--config", "run", "lsp"])));
         // And an option this table does not know keeps the conservative answer.
         assert!(!filters_this_invocation(&args(&["--future-flag", "lsp"])));
+    }
+
+    /// The list itself, spelled out. The tests around it iterate it, so a name dropped from
+    /// the list takes its assertions with it: only the few names hardcoded elsewhere would
+    /// still fail something, and `outline` or `help` could go back to being captured with the
+    /// suite green.
+    #[test]
+    fn test_the_passthrough_set_is_ast_greps_subcommand_list() {
+        assert_eq!(
+            OTHER_SUBCOMMANDS,
+            [
+                "scan",
+                "test",
+                "new",
+                "lsp",
+                "outline",
+                "completions",
+                "help"
+            ]
+        );
     }
 
     #[test]
