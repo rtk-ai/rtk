@@ -94,6 +94,9 @@ use super::constants::{DEFAULT_HISTORY_DAYS, HISTORY_DB};
 /// ```
 pub struct Tracker {
     conn: Connection,
+    /// Retention window in days, resolved once at construction. `cleanup_old` runs on
+    /// every record, so this must not re-read the config file per call.
+    history_days: i64,
 }
 
 /// Individual command record from tracking history.
@@ -564,6 +567,7 @@ impl Tracker {
     pub fn new() -> Result<Self> {
         Ok(Self {
             conn: open_and_prepare(MigrationMode::GatedByVersion)?,
+            history_days: configured_history_days(),
         })
     }
 
@@ -576,13 +580,16 @@ impl Tracker {
     pub fn new_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("Failed to open in-memory DB")?;
         run_schema_migrations(&conn)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            history_days: DEFAULT_HISTORY_DAYS,
+        })
     }
 
     /// Record a command execution with token counts and timing.
     ///
     /// Calculates savings metrics and stores the record in the database.
-    /// Automatically cleans up records older than 90 days after insertion.
+    /// Automatically cleans up records beyond the configured retention after insertion.
     ///
     /// # Arguments
     ///
@@ -645,20 +652,53 @@ impl Tracker {
     }
 
     fn cleanup_old(&self) -> Result<()> {
-        let cutoff = Utc::now() - chrono::Duration::days(DEFAULT_HISTORY_DAYS);
-        self.conn.execute(
-            "DELETE FROM commands WHERE timestamp < ?1",
-            params![cutoff.to_rfc3339()],
-        )?;
-        self.conn.execute(
+        let cutoff = Utc::now() - chrono::Duration::days(self.history_days);
+        let cutoff = cutoff.to_rfc3339();
+        let mut deleted = self
+            .conn
+            .execute("DELETE FROM commands WHERE timestamp < ?1", params![cutoff])?;
+        deleted += self.conn.execute(
             "DELETE FROM parse_failures WHERE timestamp < ?1",
-            params![cutoff.to_rfc3339()],
+            params![cutoff],
         )?;
-        self.conn.execute(
+        deleted += self.conn.execute(
             "DELETE FROM hook_decisions WHERE timestamp < ?1",
-            params![cutoff.to_rfc3339()],
+            params![cutoff],
         )?;
+        if deleted > 0 {
+            self.reclaim_if_fragmented();
+        }
         Ok(())
+    }
+
+    /// Return freed pages to the filesystem when enough of the file is empty.
+    ///
+    /// These databases have no `auto_vacuum`, so a delete only marks pages reusable:
+    /// the file never shrinks on its own. Shortening `history_days` therefore prunes
+    /// millions of rows and leaves the file at its old size until something vacuums.
+    ///
+    /// `VACUUM` rewrites the whole database and takes an exclusive lock, so it must not
+    /// run on every `cleanup_old` (that is once per tracked command). Gating on the free
+    /// ratio keeps it near-free in steady state, where inserts reuse freed pages and the
+    /// freelist stays flat, and lets it fire on the bulk deletes that actually strand
+    /// space. Failure is ignored: reclaiming disk must never fail a user's command.
+    fn reclaim_if_fragmented(&self) {
+        let free: i64 = match self
+            .conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+        {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let total: i64 = match self.conn.query_row("PRAGMA page_count", [], |r| r.get(0)) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        if should_reclaim(free, total) {
+            // Cannot run inside a transaction, and needs scratch space roughly the size
+            // of the live data. Both are why this stays best-effort.
+            let _ = self.conn.execute_batch("VACUUM;");
+        }
     }
 
     /// Delete all tracked data (commands + parse_failures + hook_decisions), resetting all stats to zero.
@@ -765,7 +805,7 @@ impl Tracker {
     /// `maybe_cleanup_hook_decisions` so it's directly callable (bypassing the
     /// sampling gate) from tests without needing to hit the 1-in-N chance for real.
     fn cleanup_hook_decisions(&self) -> Result<()> {
-        let cutoff = Utc::now() - chrono::Duration::days(DEFAULT_HISTORY_DAYS);
+        let cutoff = Utc::now() - chrono::Duration::days(self.history_days);
         self.conn.execute(
             "DELETE FROM hook_decisions WHERE timestamp < ?1",
             params![cutoff.to_rfc3339()],
@@ -1620,6 +1660,44 @@ fn db_sidecars(db_path: &std::path::Path) -> Vec<PathBuf> {
             PathBuf::from(name)
         })
         .collect()
+}
+
+/// Retention window for `cleanup_old`, from `tracking.history_days`.
+///
+/// Falls back to the default on any config problem, including a `[tracking]` section
+/// that omits `history_days` (the field has no serde default, so a partial section
+/// fails the whole parse). A non-positive value also falls back rather than being
+/// honored: a typo'd `0` would otherwise delete the entire history on the next write.
+fn configured_history_days() -> i64 {
+    resolve_history_days(
+        crate::core::config::Config::load()
+            .ok()
+            .map(|c| c.tracking.history_days),
+    )
+}
+
+/// Free pages below this never justify a rewrite, whatever the ratio. At SQLite's 4 KiB
+/// default this is ~16 MB, so small databases are left alone.
+const VACUUM_MIN_FREE_PAGES: i64 = 4096;
+/// Percentage of the file that must be free pages before a rewrite pays for itself.
+const VACUUM_MIN_FREE_PCT: i64 = 25;
+
+/// Decision half of [`Tracker::reclaim_if_fragmented`], split out so the thresholds are
+/// testable without building a database large enough to cross them.
+fn should_reclaim(free_pages: i64, total_pages: i64) -> bool {
+    if total_pages <= 0 || free_pages < VACUUM_MIN_FREE_PAGES {
+        return false;
+    }
+    free_pages.saturating_mul(100) / total_pages >= VACUUM_MIN_FREE_PCT
+}
+
+/// Clamping half of [`configured_history_days`], split out so it is testable without
+/// touching the real config file.
+fn resolve_history_days(configured: Option<u32>) -> i64 {
+    configured
+        .map(i64::from)
+        .filter(|d| *d > 0)
+        .unwrap_or(DEFAULT_HISTORY_DAYS)
 }
 
 /// The database to open: `RTK_DB_PATH` where set, otherwise the configured or
@@ -2490,6 +2568,228 @@ mod tests {
         let summary = tracker.get_parse_failure_summary().unwrap();
         // Isolated DB, so the rate is now exact: 2/3 successes ≈ 66.7%.
         assert!((summary.recovery_rate - 66.7).abs() < 0.1);
+    }
+
+    /// Backdated tracker: one row per tracking table 10 days old,
+    /// with an explicit retention window.
+    #[cfg(test)]
+    fn tracker_with_10_day_old_rows(history_days: i64) -> Tracker {
+        let mut t = Tracker::new_in_memory().expect("in-memory tracker");
+        t.history_days = history_days;
+        let old = (Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+        t.conn
+            .execute(
+                "INSERT INTO commands
+                 (timestamp, original_cmd, rtk_cmd, input_tokens, output_tokens,
+                  saved_tokens, savings_pct, exec_time_ms, project_path)
+                 VALUES (?1, 'old cmd', 'rtk old cmd', 100, 20, 80, 80.0, 0, '')",
+                params![old],
+            )
+            .expect("insert backdated command");
+        t.conn
+            .execute(
+                "INSERT INTO parse_failures
+                 (timestamp, raw_command, error_message, fallback_succeeded)
+                 VALUES (?1, 'old raw', 'old err', 1)",
+                params![old],
+            )
+            .expect("insert backdated parse failure");
+        t.conn
+            .execute(
+                "INSERT INTO hook_decisions
+                 (timestamp, session_id, tool_use_id, raw_cmd, decision, rtk_version)
+                 VALUES (?1, 'old session', 'old tool', 'old raw', 'allow', '0.51.0')",
+                params![old],
+            )
+            .expect("insert backdated hook decision");
+        t
+    }
+
+    // Regression: cleanup_old hardcoded DEFAULT_HISTORY_DAYS, so tracking.history_days
+    // was declared, defaulted, written into config.toml, documented — and never read.
+    // Both directions are asserted deliberately: a hardcoded 90 still passes the
+    // "retained" half, so only the "pruned" half catches the regression, and only the
+    // pair proves the field is what drives the cutoff.
+    #[test]
+    fn test_cleanup_old_prunes_beyond_configured_history_days() {
+        let t = tracker_with_10_day_old_rows(3);
+
+        t.record("git status", "rtk git status fresh", 100, 20, 5)
+            .expect("record triggers cleanup_old");
+
+        let stale: i64 = t
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM commands WHERE rtk_cmd = 'rtk old cmd'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count commands");
+        assert_eq!(
+            stale, 0,
+            "10-day-old command should be pruned at 3-day retention"
+        );
+
+        let stale_pf: i64 = t
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM parse_failures WHERE raw_command = 'old raw'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count parse_failures");
+        assert_eq!(
+            stale_pf, 0,
+            "10-day-old parse failure should be pruned at 3-day retention"
+        );
+        assert!(
+            t.hook_decisions_since(DateTime::<Utc>::MIN_UTC)
+                .expect("query hook decisions")
+                .is_empty(),
+            "10-day-old hook decision should be pruned at 3-day retention"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_old_retains_within_configured_history_days() {
+        let t = tracker_with_10_day_old_rows(30);
+
+        t.record("git status", "rtk git status fresh", 100, 20, 5)
+            .expect("record triggers cleanup_old");
+
+        let stale: i64 = t
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM commands WHERE rtk_cmd = 'rtk old cmd'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count commands");
+        assert_eq!(
+            stale, 1,
+            "10-day-old command should survive 30-day retention"
+        );
+        assert_eq!(
+            t.hook_decisions_since(DateTime::<Utc>::MIN_UTC)
+                .expect("query hook decisions")
+                .len(),
+            1,
+            "10-day-old hook decision should survive 30-day retention"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_hook_decisions_uses_configured_history_days() {
+        for (history_days, expected) in [(3, 0), (30, 1)] {
+            let t = tracker_with_10_day_old_rows(history_days);
+            t.cleanup_hook_decisions().expect("cleanup hook decisions");
+            assert_eq!(
+                t.hook_decisions_since(DateTime::<Utc>::MIN_UTC)
+                    .expect("query hook decisions")
+                    .len(),
+                expected,
+                "10-day-old hook decision at {history_days}-day retention"
+            );
+        }
+    }
+
+    #[test]
+    fn test_should_reclaim_thresholds() {
+        // Steady state: inserts reuse freed pages, so the freelist stays flat and a
+        // per-command VACUUM would be pure waste.
+        assert!(!should_reclaim(0, 100_000), "no free pages");
+        assert!(
+            !should_reclaim(VACUUM_MIN_FREE_PAGES - 1, VACUUM_MIN_FREE_PAGES),
+            "tiny database, high ratio: not worth a rewrite"
+        );
+        assert!(
+            !should_reclaim(VACUUM_MIN_FREE_PAGES * 2, 1_000_000),
+            "plenty of free pages but a small share of the file"
+        );
+        // The bulk-delete case this exists for: shortening history_days strands most
+        // of the file.
+        assert!(
+            should_reclaim(450_000, 500_000),
+            "90% free after a retention drop should reclaim"
+        );
+        assert!(should_reclaim(
+            VACUUM_MIN_FREE_PAGES,
+            VACUUM_MIN_FREE_PAGES * 4
+        ));
+        // Guards against a divide-by-zero on an empty or unreadable database.
+        assert!(!should_reclaim(10, 0), "zero pages must not divide");
+    }
+
+    #[test]
+    fn test_vacuum_returns_space_after_bulk_delete() {
+        let t = Tracker::new_in_memory().expect("in-memory tracker");
+        let old = (Utc::now() - chrono::Duration::days(400)).to_rfc3339();
+        for i in 0..4000 {
+            t.conn
+                .execute(
+                    "INSERT INTO commands
+                     (timestamp, original_cmd, rtk_cmd, input_tokens, output_tokens,
+                      saved_tokens, savings_pct, exec_time_ms, project_path)
+                     VALUES (?1, ?2, ?2, 100, 20, 80, 80.0, 0, '')",
+                    params![old, format!("padding row {} {}", i, "x".repeat(400))],
+                )
+                .expect("insert bulk row");
+        }
+        let before: i64 = t
+            .conn
+            .query_row("PRAGMA page_count", [], |r| r.get(0))
+            .expect("page_count");
+
+        t.conn
+            .execute("DELETE FROM commands", [])
+            .expect("bulk delete");
+        let freed: i64 = t
+            .conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+            .expect("freelist_count");
+        assert!(
+            freed > 0,
+            "delete alone should strand pages, not return them"
+        );
+
+        t.conn.execute_batch("VACUUM;").expect("vacuum");
+        let after: i64 = t
+            .conn
+            .query_row("PRAGMA page_count", [], |r| r.get(0))
+            .expect("page_count");
+        assert!(
+            after < before,
+            "VACUUM should shrink the database ({} -> {} pages)",
+            before,
+            after
+        );
+        let leftover: i64 = t
+            .conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+            .expect("freelist_count");
+        assert_eq!(leftover, 0, "VACUUM should leave no free pages");
+    }
+
+    #[test]
+    fn test_resolve_history_days() {
+        assert_eq!(
+            resolve_history_days(Some(30)),
+            30,
+            "honors a configured value"
+        );
+        // A missing/unparseable config (including a [tracking] section that omits
+        // history_days, which fails the whole parse) must not change retention.
+        assert_eq!(
+            resolve_history_days(None),
+            DEFAULT_HISTORY_DAYS,
+            "absent config falls back to the default"
+        );
+        // A typo'd 0 would otherwise delete the entire history on the next write.
+        assert_eq!(
+            resolve_history_days(Some(0)),
+            DEFAULT_HISTORY_DAYS,
+            "zero falls back rather than wiping history"
+        );
     }
 
     #[test]
