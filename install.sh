@@ -74,7 +74,7 @@ get_target() {
         linux)
             case "$ARCH" in
                 x86_64)  TARGET="x86_64-unknown-linux-musl";;
-                aarch64) TARGET="aarch64-unknown-linux-gnu";;
+                aarch64) TARGET="aarch64-unknown-linux-musl";;
             esac
             ;;
         darwin)
