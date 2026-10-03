@@ -110,9 +110,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         &args.join(" "),
         move |stdout| {
             if is_check && use_json_filter && !stdout.trim().is_empty() {
-                filter_ruff_check_json(stdout)
+                filter_check_json(stdout)
             } else if is_format {
-                filter_ruff_format(stdout)
+                filter_format(stdout)
             } else {
                 truncate(stdout.trim(), config::limits().passthrough_max_chars)
             }
@@ -128,7 +128,7 @@ fn is_check_invocation(args: &[String]) -> bool {
 }
 
 /// Filter ruff check JSON output - group by rule and file
-pub fn filter_ruff_check_json(output: &str) -> String {
+pub fn filter_check_json(output: &str) -> String {
     let diagnostics: Result<Vec<RuffDiagnostic>, _> = serde_json::from_str(output);
 
     let diagnostics = match diagnostics {
@@ -266,7 +266,7 @@ pub fn filter_ruff_check_json(output: &str) -> String {
 }
 
 /// Filter ruff format output - show files that need formatting
-pub fn filter_ruff_format(output: &str) -> String {
+pub fn filter_format(output: &str) -> String {
     let mut files_to_format: Vec<String> = Vec::new();
     let mut files_checked = 0;
 
@@ -428,7 +428,7 @@ mod tests {
     #[test]
     fn test_filter_ruff_check_no_issues() {
         let output = "[]";
-        let result = filter_ruff_check_json(output);
+        let result = filter_check_json(output);
         assert!(result.contains("Ruff"));
         assert!(result.contains("No issues found"));
     }
@@ -461,7 +461,7 @@ mod tests {
     "fix": null
   }
 ]"#;
-        let result = filter_ruff_check_json(output);
+        let result = filter_check_json(output);
         assert!(result.contains("3 issues"));
         assert!(result.contains("2 files"));
         assert!(result.contains("1 fixable"));
@@ -476,7 +476,7 @@ mod tests {
     #[test]
     fn test_filter_ruff_format_all_formatted() {
         let output = "5 files left unchanged";
-        let result = filter_ruff_format(output);
+        let result = filter_format(output);
         assert!(result.contains("Ruff format"));
         assert!(result.contains("All files formatted correctly"));
     }
@@ -486,7 +486,7 @@ mod tests {
         let output = r#"Would reformat: src/main.py
 Would reformat: tests/test_utils.py
 2 files would be reformatted, 3 files left unchanged"#;
-        let result = filter_ruff_format(output);
+        let result = filter_format(output);
         assert!(result.contains("2 files need formatting"));
         assert!(result.contains("main.py"));
         assert!(result.contains("test_utils.py"));
@@ -504,7 +504,7 @@ Would reformat: tests/test_utils.py
             ));
         }
         let json = format!("[\n{}\n]", diags.join(",\n"));
-        let result = filter_ruff_check_json(&json);
+        let result = filter_check_json(&json);
 
         let in_section = result.split("Violations:").nth(1).unwrap_or("");
         let listed = in_section

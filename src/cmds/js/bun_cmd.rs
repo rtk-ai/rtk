@@ -28,7 +28,7 @@ fn pkg_argv(subcmd: &str, args: &[String]) -> Vec<String> {
 }
 
 /// Filter bun install/add/remove output — strip progress lines, version headers, empty lines.
-pub fn filter_bun_pkg(output: &str) -> String {
+pub fn filter_pkg(output: &str) -> String {
     let cleaned = strip_ansi(output);
     let mut result = Vec::new();
 
@@ -65,7 +65,7 @@ pub fn filter_bun_pkg(output: &str) -> String {
 }
 
 /// Parse JSON output from `bun pm ls --json`.
-pub fn filter_bun_pm_ls_json(raw: &str) -> Option<String> {
+pub fn filter_pm_ls_json(raw: &str) -> Option<String> {
     let packages: HashMap<String, BunPmPackage> = serde_json::from_str(raw).ok()?;
 
     if packages.is_empty() {
@@ -89,7 +89,7 @@ pub fn filter_bun_pm_ls_json(raw: &str) -> Option<String> {
 /// Parse the tree form of `bun pm ls` output (`\u{251c}\u{2500}\u{2500} name@version` rows).
 /// This is what real bun 1.x prints even when --json is passed (the flag is
 /// silently ignored), so this is the path real runs take.
-fn filter_bun_pm_ls_tree(raw: &str) -> Option<String> {
+fn filter_pm_ls_tree(raw: &str) -> Option<String> {
     let cleaned = strip_ansi(raw);
     let mut entries: Vec<&str> = cleaned
         .lines()
@@ -122,18 +122,18 @@ fn filter_bun_pm_ls_tree(raw: &str) -> Option<String> {
 
 /// Pick the pm ls parser by what bun actually printed, not by the flags we
 /// passed: JSON if the output is JSON, tree if it is a tree, raw text otherwise.
-fn filter_bun_pm_ls(raw: &str) -> String {
-    if let Some(json_result) = filter_bun_pm_ls_json(raw) {
+fn filter_pm_ls(raw: &str) -> String {
+    if let Some(json_result) = filter_pm_ls_json(raw) {
         return json_result;
     }
-    if let Some(tree_result) = filter_bun_pm_ls_tree(raw) {
+    if let Some(tree_result) = filter_pm_ls_tree(raw) {
         return tree_result;
     }
-    filter_bun_pm_ls_text(raw)
+    filter_pm_ls_text(raw)
 }
 
 /// Text fallback for `bun pm ls`.
-pub fn filter_bun_pm_ls_text(raw: &str) -> String {
+pub fn filter_pm_ls_text(raw: &str) -> String {
     // Strip first, like the JSON and tree paths: this is the path error output
     // takes, bun colorizes it, and the 500-char budget would otherwise be spent
     // on escape sequences and could cut one in half.
@@ -163,13 +163,13 @@ pub fn run_pkg(subcmd: &str, args: &[String], verbose: u8) -> Result<i32> {
         cmd,
         "bun",
         display.trim_end(),
-        filter_bun_pkg,
+        filter_pkg,
         crate::core::runner::RunOptions::with_tee(&tee_label),
     )
 }
 
 pub fn run_pm_ls(args: &[String], verbose: u8) -> Result<i32> {
-    // No --json injection: bun 1.x ignores the flag, `filter_bun_pm_ls` selects
+    // No --json injection: bun 1.x ignores the flag, `filter_pm_ls` selects
     // its parser from the output's shape, and a bun that rejected an unknown
     // flag would make rtk fail a command that succeeds on its own.
     let mut cmd = resolved_command("bun");
@@ -187,7 +187,7 @@ pub fn run_pm_ls(args: &[String], verbose: u8) -> Result<i32> {
         cmd,
         "bun",
         display.trim_end(),
-        filter_bun_pm_ls,
+        filter_pm_ls,
         crate::core::runner::RunOptions::with_tee("bun_pm_ls"),
     )
 }
@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn test_filter_bun_install_strips_progress() {
         let raw = include_str!("../../../tests/fixtures/bun_install_raw.txt");
-        let out = filter_bun_pkg(raw);
+        let out = filter_pkg(raw);
         assert!(!out.contains("Resolving dependencies"), "{out}");
         assert!(!out.contains("Resolved, downloaded"), "{out}");
         assert!(!out.contains("bun install v1.2.20"), "{out}");
@@ -271,7 +271,7 @@ mod tests {
         // to the filter: what bun prints when piped is a version header, two
         // resolution lines, and one line per package.
         let raw = include_str!("../../../tests/fixtures/bun_install_raw.txt");
-        let out = filter_bun_pkg(raw);
+        let out = filter_pkg(raw);
         // Bytes, not tokens: bun colorizes even when piped, so what rtk records
         // is measured against the escape sequences the command really emits.
         let savings = 100.0 - (out.len() as f64 / raw.len() as f64 * 100.0);
@@ -285,14 +285,14 @@ mod tests {
     #[test]
     fn test_filter_bun_install_empty_output() {
         let output = "\n\n\n";
-        let result = filter_bun_pkg(output);
+        let result = filter_pkg(output);
         assert_eq!(result, "ok");
     }
 
     #[test]
     fn test_filter_bun_install_strips_ansi() {
         let output = "\x1b[2mResolving dependencies\x1b[0m\n\x1b[32m+\x1b[0m \x1b[1mexpress\x1b[0m\x1b[2m@4.18.2\x1b[0m\n";
-        let result = filter_bun_pkg(output);
+        let result = filter_pkg(output);
         assert!(!result.contains("Resolving dependencies"));
         assert!(!result.contains("\x1b["));
         assert!(result.contains("express@4.18.2"));
@@ -304,7 +304,7 @@ mod tests {
 Resolving dependencies
 error: PackageNotFound - "nonexistent-pkg" not found in registry
 "#;
-        let result = filter_bun_pkg(output);
+        let result = filter_pkg(output);
         assert!(result.contains("error:"));
         assert!(result.contains("nonexistent-pkg"));
     }
@@ -313,20 +313,20 @@ error: PackageNotFound - "nonexistent-pkg" not found in registry
     fn test_filter_bun_install_handles_remove() {
         let output =
             "bun remove v1.2.20 (6ad208bc)\n- express@4.18.2\n1 package removed [7.00ms]\n";
-        let result = filter_bun_pkg(output);
+        let result = filter_pkg(output);
         assert!(!result.contains("bun remove v1.2.20"));
         assert!(result.contains("- express@4.18.2"));
         assert!(result.contains("1 package removed"));
     }
 
     #[test]
-    fn test_filter_bun_pm_ls_json() {
+    fn test_filter_pm_ls_json() {
         let json = r#"{
             "express": {"version": "4.18.2"},
             "lodash": {"version": "4.17.21"},
             "axios": {"version": "1.6.0"}
         }"#;
-        let result = filter_bun_pm_ls_json(json).expect("should parse");
+        let result = filter_pm_ls_json(json).expect("should parse");
         assert!(result.starts_with("3 deps"));
         let lines: Vec<&str> = result.lines().collect();
         assert_eq!(lines[1], "axios@1.6.0");
@@ -335,14 +335,14 @@ error: PackageNotFound - "nonexistent-pkg" not found in registry
     }
 
     #[test]
-    fn test_filter_bun_pm_ls_json_token_savings() {
+    fn test_filter_pm_ls_json_token_savings() {
         // Real `bun pm ls --json` carries resolved URLs and integrity hashes per dep.
         let input = r#"{
             "express": {"version": "4.18.2", "resolved": "https://registry.npmjs.org/express/-/express-4.18.2.tgz", "integrity": "sha512-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
             "lodash": {"version": "4.17.21", "resolved": "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz", "integrity": "sha512-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
             "axios": {"version": "1.6.0", "resolved": "https://registry.npmjs.org/axios/-/axios-1.6.0.tgz", "integrity": "sha512-cccccccccccccccccccccccccccccccccccccccccccc"}
         }"#;
-        let output = filter_bun_pm_ls_json(input).expect("should parse");
+        let output = filter_pm_ls_json(input).expect("should parse");
         let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
         assert!(
             savings >= 60.0,
@@ -352,24 +352,24 @@ error: PackageNotFound - "nonexistent-pkg" not found in registry
     }
 
     #[test]
-    fn test_filter_bun_pm_ls_json_empty() {
-        let result = filter_bun_pm_ls_json("{}");
+    fn test_filter_pm_ls_json_empty() {
+        let result = filter_pm_ls_json("{}");
         assert!(result.is_none());
     }
 
     #[test]
-    fn test_filter_bun_pm_ls_json_invalid() {
-        let result = filter_bun_pm_ls_json("not json");
+    fn test_filter_pm_ls_json_invalid() {
+        let result = filter_pm_ls_json("not json");
         assert!(result.is_none());
     }
 
     #[test]
-    fn test_filter_bun_pm_ls_selects_by_content_not_flag() {
+    fn test_filter_pm_ls_selects_by_content_not_flag() {
         // Selection keys on what bun PRINTED, not on the --json flag we
         // passed: tree text must never hit the JSON parser's 500-char
         // truncation fallback.
         let raw = include_str!("../../../tests/fixtures/bun_pm_ls_all_raw.txt");
-        let out = filter_bun_pm_ls(raw);
+        let out = filter_pm_ls(raw);
         assert!(out.starts_with("68 deps"), "{out}");
         assert!(
             !out.contains('\u{251c}'),
@@ -377,77 +377,77 @@ error: PackageNotFound - "nonexistent-pkg" not found in registry
         );
 
         let json = r#"{"express": {"version": "4.18.2"}}"#;
-        let out = filter_bun_pm_ls(json);
+        let out = filter_pm_ls(json);
         assert!(out.starts_with("1 deps"), "{out}");
 
         let err = "error: No package.json was found for directory \"/home/user\"\nnote: Run \"bun init\" to initialize a project";
-        let out = filter_bun_pm_ls(err);
+        let out = filter_pm_ls(err);
         assert!(out.contains("No package.json"), "{out}");
     }
 
     #[test]
-    fn test_filter_bun_pm_ls_text_strips_ansi() {
+    fn test_filter_pm_ls_text_strips_ansi() {
         let raw =
             "\x1b[31merror: No package.json was found\x1b[0m\n\x1b[2mnote: Run bun init\x1b[0m";
-        let out = filter_bun_pm_ls_text(raw);
+        let out = filter_pm_ls_text(raw);
         assert!(!out.contains('\x1b'), "{out:?}");
         assert!(out.contains("No package.json"), "{out}");
     }
 
     #[test]
-    fn test_filter_bun_pm_ls_json_rejects_grouped_shape() {
+    fn test_filter_pm_ls_json_rejects_grouped_shape() {
         // Group names are not packages. Without a required `version`, serde
         // accepts this and reports "dependencies"/"devDependencies" as deps.
         let grouped = r#"{"dependencies": {"express": {"version": "4.18.2"}}, "devDependencies": {"vitest": {"version": "1.0.0"}}}"#;
-        assert!(filter_bun_pm_ls_json(grouped).is_none());
+        assert!(filter_pm_ls_json(grouped).is_none());
         // It falls through to the raw text fallback rather than reporting the
         // two group names as a confident dependency list.
-        let out = filter_bun_pm_ls(grouped);
+        let out = filter_pm_ls(grouped);
         assert!(!out.starts_with("2 deps"), "{out}");
     }
 
     #[test]
-    fn test_filter_bun_pkg_keeps_indentation() {
+    fn test_filter_pkg_keeps_indentation() {
         let raw = "bun install v1.3.6
 error: failed to resolve left-pad
     hint: check the registry
 ";
-        let out = filter_bun_pkg(raw);
+        let out = filter_pkg(raw);
         assert!(out.contains("    hint: check the registry"), "{out}");
     }
 
     #[test]
-    fn test_filter_bun_pm_ls_tree_counts_nested_entries() {
+    fn test_filter_pm_ls_tree_counts_nested_entries() {
         // bun draws levels below the first with a leading pipe; skipping those
         // silently undercounts the tree.
         let raw = include_str!("../../../tests/fixtures/bun_pm_ls_all_raw.txt");
-        let out = filter_bun_pm_ls_tree(raw).expect("tree should parse");
+        let out = filter_pm_ls_tree(raw).expect("tree should parse");
         assert!(out.starts_with("68 deps"), "{out}");
         assert!(out.contains("ms@2.1.3"), "{out}");
     }
 
     #[test]
-    fn test_filter_bun_pm_ls_tree_dedups_nested_all() {
+    fn test_filter_pm_ls_tree_dedups_nested_all() {
         // `bun pm ls --all` can list the same package under several parents.
         let raw = "/home/user/project node_modules\n\u{251c}\u{2500}\u{2500} a@1.0.0\n\u{2502} \u{2514}\u{2500}\u{2500} shared@2.0.0\n\u{2514}\u{2500}\u{2500} b@1.0.0\n  \u{2514}\u{2500}\u{2500} shared@2.0.0";
-        let out = filter_bun_pm_ls_tree(raw).expect("should parse");
+        let out = filter_pm_ls_tree(raw).expect("should parse");
         assert!(out.starts_with("3 deps"), "{out}");
         assert_eq!(out.matches("shared@2.0.0").count(), 1, "{out}");
     }
 
     #[test]
-    fn test_filter_bun_pm_ls_tree_rejects_non_tree() {
-        assert!(filter_bun_pm_ls_tree("error: something broke").is_none());
-        assert!(filter_bun_pm_ls_tree("").is_none());
+    fn test_filter_pm_ls_tree_rejects_non_tree() {
+        assert!(filter_pm_ls_tree("error: something broke").is_none());
+        assert!(filter_pm_ls_tree("").is_none());
     }
 
     #[test]
-    fn test_filter_bun_pm_ls_text_truncates() {
+    fn test_filter_pm_ls_text_truncates() {
         let long_output = (0..100)
             .map(|i| format!("pkg-{i}@1.0.0"))
             .collect::<Vec<_>>()
             .join("\n");
-        let result = filter_bun_pm_ls_text(&long_output);
+        let result = filter_pm_ls_text(&long_output);
         assert!(result.len() <= 520);
     }
 
