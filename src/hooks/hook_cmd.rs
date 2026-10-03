@@ -640,6 +640,33 @@ enum PayloadAction {
     Ignore,
 }
 
+/// Detect Claude Code's `bypassPermissions` mode from the PreToolUse hook input.
+///
+/// The hook input JSON includes `permission_mode` carrying the active mode
+/// (`default`, `acceptEdits`, `plan`, `bypassPermissions`). Returns `false`
+/// when the field is absent or unrecognized — matches Claude Code's
+/// least-privilege default for unknown payloads.
+fn is_bypass_mode(v: &Value) -> bool {
+    v.get("permission_mode")
+        .and_then(|m| m.as_str())
+        .map(|m| m == "bypassPermissions")
+        .unwrap_or(false)
+}
+
+/// Decide whether to emit `permissionDecision: "allow"` in the Claude hook output.
+///
+/// Auto-allow is an optimization for `default` mode: it pre-approves the
+/// rewritten command so allow-listed users don't re-prompt for the new form.
+///
+/// Under `bypassPermissions`, Claude Code drops `updatedInput` whenever
+/// `permissionDecision` is present in the same `hookSpecificOutput` envelope —
+/// the original command then runs raw and the rewrite silently fails. Since
+/// bypass mode skips prompts already, the auto-allow has nothing to optimize,
+/// so omitting it costs nothing and restores the rewrite path.
+fn should_emit_allow_decision(allow: bool, bypass_mode: bool) -> bool {
+    allow && !bypass_mode
+}
+
 fn pre_tool_use_rewrite_output(
     v: &Value,
     rewritten: &str,
@@ -705,7 +732,11 @@ fn process_claude_payload_from_decision(
 
     PayloadAction::Rewrite {
         cmd: cmd.to_string(),
-        output: pre_tool_use_rewrite_output(v, &rewritten, allow.then_some("allow")),
+        output: pre_tool_use_rewrite_output(
+            v,
+            &rewritten,
+            should_emit_allow_decision(allow, is_bypass_mode(v)).then_some("allow"),
+        ),
         rewritten,
         decision: if allow {
             HookOutcome::Allow
@@ -1898,6 +1929,59 @@ mod tests {
     }
 
     #[test]
+    fn test_process_claude_payload_allow_respects_permission_mode() {
+        for (mode, expected_decision) in [
+            (None, Some("allow")),
+            (Some("default"), Some("allow")),
+            (Some("acceptEdits"), Some("allow")),
+            (Some("plan"), Some("allow")),
+            (Some("dontAsk"), Some("allow")),
+            (Some("unknown_future_mode"), Some("allow")),
+            (Some("bypassPermissions"), None),
+        ] {
+            let mut v = json!({
+                "tool_name": "Bash",
+                "tool_input": {
+                    "command": "git status",
+                    "timeout": 30000,
+                    "description": "Check repo status"
+                }
+            });
+            if let Some(mode) = mode {
+                v["permission_mode"] = json!(mode);
+            }
+            match process_claude_payload_from_decision(
+                &v,
+                "git status",
+                HookDecision::AllowRewrite("rtk git status".to_string()),
+            ) {
+                PayloadAction::Rewrite {
+                    decision,
+                    rewritten,
+                    output,
+                    ..
+                } => {
+                    assert_eq!(decision, HookOutcome::Allow);
+                    assert_eq!(rewritten, "rtk git status");
+                    let hook_output = &output["hookSpecificOutput"];
+                    assert_eq!(
+                        hook_output.get("permissionDecision").cloned(),
+                        expected_decision.map(Value::from),
+                        "permission mode: {mode:?}"
+                    );
+                    assert_eq!(hook_output["updatedInput"]["command"], "rtk git status");
+                    assert_eq!(hook_output["updatedInput"]["timeout"], 30000);
+                    assert_eq!(
+                        hook_output["updatedInput"]["description"],
+                        "Check repo status"
+                    );
+                }
+                other => panic!("expected Rewrite, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn test_process_claude_payload_decision_ask() {
         let v = claude_input_value("git status");
         match process_claude_payload_from_decision(
@@ -1987,6 +2071,43 @@ mod tests {
     fn test_claude_fd_dup_redirect_still_rewritten() {
         // `2>&1` is attestable — the rewrite proceeds as normal.
         assert!(run_claude_inner(&claude_input("git status 2>&1")).is_some());
+    }
+
+    #[test]
+    fn test_is_bypass_mode_recognizes_bypass_permissions() {
+        let v: Value = serde_json::from_str(
+            r#"{"permission_mode":"bypassPermissions","tool_input":{"command":"git status"}}"#,
+        )
+        .unwrap();
+        assert!(is_bypass_mode(&v));
+    }
+
+    #[test]
+    fn test_is_bypass_mode_treats_other_modes_as_non_bypass() {
+        for mode in ["default", "acceptEdits", "plan", "unknown_future_mode"] {
+            let v: Value = serde_json::from_str(&format!(
+                r#"{{"permission_mode":"{mode}","tool_input":{{"command":"git status"}}}}"#
+            ))
+            .unwrap();
+            assert!(!is_bypass_mode(&v), "{mode} should not count as bypass");
+        }
+    }
+
+    #[test]
+    fn test_is_bypass_mode_absent_field_defaults_to_false() {
+        let v: Value = serde_json::from_str(r#"{"tool_input":{"command":"git status"}}"#).unwrap();
+        assert!(!is_bypass_mode(&v));
+    }
+
+    #[test]
+    fn test_should_emit_allow_decision_truth_table() {
+        // allow + default → emit (the auto-allow optimization)
+        assert!(should_emit_allow_decision(true, false));
+        // allow + bypass → omit (would silently kill updatedInput)
+        assert!(!should_emit_allow_decision(true, true));
+        // non-allow → omit regardless of mode
+        assert!(!should_emit_allow_decision(false, false));
+        assert!(!should_emit_allow_decision(false, true));
     }
 
     #[test]
