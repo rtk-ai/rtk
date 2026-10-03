@@ -15,6 +15,69 @@ pub(super) enum RtkBlockUpsert {
     Malformed,
 }
 
+/// The unmarked instructions written by v0.9.0-v0.9.3.
+const LEGACY_RTK_V09_PREFIX: &str = "# Instructions: Utiliser rtk pour économiser des tokens";
+const LEGACY_RTK_V09_LEN: usize = 3009;
+const LEGACY_RTK_V09_SHA256: &str =
+    "930958d83808b8b439b79526cc8ea48c81a204f6084bddddc46ef5f5d3ac65be";
+
+/// The v0.9.4 instructions, which gained an opening marker but no closing marker.
+const LEGACY_RTK_V094_LEN: usize = 4731;
+const LEGACY_RTK_V094_SHA256: &str =
+    "9aa7f89885633b9e9a05e2b4b30e6d2685d015da701d57b6af557af73e75abcc";
+
+fn legacy_rtk_block_digest(content: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn find_legacy_rtk_block(content: &str) -> Option<(usize, usize)> {
+    for (prefix, length, digest) in [
+        (
+            LEGACY_RTK_V09_PREFIX,
+            LEGACY_RTK_V09_LEN,
+            LEGACY_RTK_V09_SHA256,
+        ),
+        (RTK_BLOCK_START, LEGACY_RTK_V094_LEN, LEGACY_RTK_V094_SHA256),
+    ] {
+        let mut search_from = 0;
+        while let Some(relative_start) = content[search_from..].find(prefix) {
+            let start = search_from + relative_start;
+            let is_line_start = start == 0 || content.as_bytes()[start - 1] == b'\n';
+            let end = start + length;
+
+            if is_line_start
+                && content
+                    .get(start..end)
+                    .is_some_and(|block| legacy_rtk_block_digest(block) == digest)
+            {
+                return Some((start, end));
+            }
+
+            search_from = start + prefix.len();
+        }
+    }
+
+    None
+}
+
+fn remove_rtk_block_range(content: &str, start: usize, end: usize) -> (String, bool) {
+    let before = content[..start].trim_end();
+    let after = content[end..].trim_start();
+
+    let result = match (before.is_empty(), after.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => after.to_string(),
+        (false, true) => format!("{before}\n"),
+        (false, false) => format!("{before}\n\n{after}"),
+    };
+
+    (result, true)
+}
+
 /// Insert or replace the RTK instructions block in `content`.
 ///
 /// Returns `(new_content, action)` describing what happened.
@@ -294,19 +357,18 @@ pub(super) fn remove_rtk_reference_from_agents(
 /// Strip the inline RTK block from an instructions file's content, returning the cleaned
 /// text and whether a block was removed.
 pub(super) fn remove_rtk_block(content: &str) -> (String, bool) {
-    if let (Some(start), Some(end)) = (content.find(RTK_BLOCK_START), content.find(RTK_BLOCK_END)) {
-        let end_pos = end + RTK_BLOCK_END.len();
-        let before = content[..start].trim_end();
-        let after = content[end_pos..].trim_start();
+    if let Some(start) = content.find(RTK_BLOCK_START)
+        && let Some(relative_end) = content[start..].find(RTK_BLOCK_END)
+    {
+        let end = start + relative_end + RTK_BLOCK_END.len();
+        return remove_rtk_block_range(content, start, end);
+    }
 
-        let result = if after.is_empty() {
-            format!("{}\n", before)
-        } else {
-            format!("{}\n\n{}", before, after)
-        };
+    if let Some((start, end)) = find_legacy_rtk_block(content) {
+        return remove_rtk_block_range(content, start, end);
+    }
 
-        (result, true) // migrated
-    } else if content.contains(RTK_BLOCK_START) {
+    if content.contains(RTK_BLOCK_START) {
         eprintln!(
             "[warn] Warning: Found '{}' without closing marker.",
             RTK_BLOCK_START
@@ -323,10 +385,9 @@ pub(super) fn remove_rtk_block(content: &str) -> (String, bool) {
 
         eprintln!("    Action: Manually remove the incomplete block, then re-run:");
         eprintln!("            rtk init -g");
-        (content.to_string(), false)
-    } else {
-        (content.to_string(), false)
     }
+
+    (content.to_string(), false)
 }
 
 #[cfg(test)]
@@ -374,6 +435,41 @@ mod tests {
         let input = format!("{} v2 -->\npartial", RTK_BLOCK_START);
         let (content, action) = upsert_rtk_block(&input, RTK_INSTRUCTIONS);
         assert_eq!(action, RtkBlockUpsert::Malformed);
+        assert_eq!(content, input);
+    }
+
+    #[test]
+    fn test_remove_rtk_block_removes_unmarked_v09_template() {
+        let legacy = include_str!("../../../tests/fixtures/init/rtk-v0.9.0-0.9.3-claude.md");
+        assert_eq!(legacy_rtk_block_digest(legacy), LEGACY_RTK_V09_SHA256);
+
+        let input = format!("# User notes\n\n{legacy}\n\nKeep this.");
+        let (content, migrated) = remove_rtk_block(&input);
+
+        assert!(migrated);
+        assert_eq!(content, "# User notes\n\nKeep this.");
+        assert!(!content.contains(LEGACY_RTK_V09_PREFIX));
+    }
+
+    #[test]
+    fn test_remove_rtk_block_removes_unterminated_v094_template() {
+        let legacy = include_str!("../../../tests/fixtures/init/rtk-v0.9.4-claude.md");
+        assert_eq!(legacy_rtk_block_digest(legacy), LEGACY_RTK_V094_SHA256);
+
+        let input = format!("{legacy}\n@RTK.md\n");
+        let (content, migrated) = remove_rtk_block(&input);
+
+        assert!(migrated);
+        assert_eq!(content, "@RTK.md\n");
+        assert!(!content.contains(RTK_BLOCK_START));
+    }
+
+    #[test]
+    fn test_remove_rtk_block_preserves_foreign_unterminated_marker() {
+        let input = format!("# User notes\n\n{RTK_BLOCK_START} v2 -->\nKeep this text.");
+        let (content, migrated) = remove_rtk_block(&input);
+
+        assert!(!migrated);
         assert_eq!(content, input);
     }
 

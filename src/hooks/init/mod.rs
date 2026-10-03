@@ -1000,13 +1000,11 @@ pub fn uninstall_with_patch_mode(
             removed.push("CLAUDE.md: removed @RTK.md reference".to_string());
         }
 
-        if working_content.contains(RTK_BLOCK_START) {
-            let (cleaned, did_remove) = remove_rtk_block(&working_content);
-            if did_remove {
-                working_content = cleaned;
-                claude_md_changed = true;
-                removed.push("CLAUDE.md: removed rtk-instructions block".to_string());
-            }
+        let (cleaned, did_remove) = remove_rtk_block(&working_content);
+        if did_remove {
+            working_content = cleaned;
+            claude_md_changed = true;
+            removed.push("CLAUDE.md: removed rtk-instructions block".to_string());
         }
 
         if claude_md_changed {
