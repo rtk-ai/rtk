@@ -1,0 +1,173 @@
+{
+  "status": 0,
+  "result": {
+    "summary": {
+      "failRate": "0%",
+      "failing": 0,
+      "hostname": "https://scratch.example.my.salesforce.com",
+      "orgId": "00DXXXXXXXXXXXXXXX",
+      "outcome": "Passed",
+      "passRate": "100%",
+      "passing": 2,
+      "skipped": 0,
+      "testRunId": "707XXXXXXXXXXXX",
+      "testStartTime": "2026-07-30T20:13:02.000Z",
+      "testsRan": 2,
+      "userId": "005XXXXXXXXXXXXXXX",
+      "username": "test-user@example.com",
+      "commandTime": "406 ms",
+      "testExecutionTime": "45 ms",
+      "testTotalTime": "45 ms",
+      "orgWideCoverage": "14%",
+      "testRunCoverage": "78%"
+    },
+    "tests": [
+      {
+        "Id": "07MXXXXXXXXXXXXXXX",
+        "QueueItemId": "709XXXXXXXXXXXXXXX",
+        "StackTrace": null,
+        "Message": null,
+        "AsyncApexJobId": "707XXXXXXXXXXXXXXX",
+        "MethodName": "testExampleOne",
+        "Outcome": "Pass",
+        "ApexClass": {
+          "Id": "01pXXXXXXXXXXXXXXX",
+          "Name": "AccountServiceTest",
+          "NamespacePrefix": "acme"
+        },
+        "RunTime": 39,
+        "FullName": "acme.AccountServiceTest.testExampleOne"
+      },
+      {
+        "Id": "07MXXXXXXXXXXXXXXX",
+        "QueueItemId": "709XXXXXXXXXXXXXXX",
+        "StackTrace": null,
+        "Message": null,
+        "AsyncApexJobId": "707XXXXXXXXXXXXXXX",
+        "MethodName": "testExampleTwo",
+        "Outcome": "Pass",
+        "ApexClass": {
+          "Id": "01pXXXXXXXXXXXXXXX",
+          "Name": "AccountServiceTest",
+          "NamespacePrefix": "acme"
+        },
+        "RunTime": 6,
+        "FullName": "acme.AccountServiceTest.testExampleTwo"
+      }
+    ],
+    "coverage": {
+      "coverage": [
+        {
+          "id": "01pXXXXXXXXXXXXXXX",
+          "name": "AccountService",
+          "totalLines": 18,
+          "lines": {
+            "3": 1,
+            "4": 1,
+            "6": 1,
+            "7": 1,
+            "9": 1,
+            "10": 1,
+            "11": 1,
+            "16": 1,
+            "17": 1,
+            "27": 1,
+            "31": 1,
+            "32": 1,
+            "33": 1,
+            "34": 1,
+            "35": 0,
+            "36": 0,
+            "37": 0,
+            "38": 0
+          },
+          "totalCovered": 14,
+          "coveredPercent": 78
+        }
+      ],
+      "records": [
+        {
+          "ApexTestClass": {
+            "Id": "07MXXXXXXXXXXXXXXX",
+            "Name": "AccountServiceTest"
+          },
+          "Coverage": {
+            "coveredLines": [
+              16,
+              17,
+              27
+            ],
+            "uncoveredLines": [
+              3,
+              4,
+              6,
+              7,
+              9,
+              10,
+              11,
+              31,
+              32,
+              33,
+              34,
+              35,
+              36,
+              37,
+              38
+            ]
+          },
+          "TestMethodName": "testExampleOne",
+          "NumLinesCovered": 3,
+          "ApexClassOrTrigger": {
+            "Id": "01pXXXXXXXXXXXXXXX",
+            "Name": "AccountService"
+          },
+          "NumLinesUncovered": 15
+        },
+        {
+          "ApexTestClass": {
+            "Id": "07MXXXXXXXXXXXXXXX",
+            "Name": "AccountServiceTest"
+          },
+          "Coverage": {
+            "coveredLines": [
+              3,
+              4,
+              6,
+              7,
+              9,
+              10,
+              11,
+              16,
+              31,
+              32,
+              33,
+              34
+            ],
+            "uncoveredLines": [
+              17,
+              27,
+              35,
+              36,
+              37,
+              38
+            ]
+          },
+          "TestMethodName": "testExampleTwo",
+          "NumLinesCovered": 12,
+          "ApexClassOrTrigger": {
+            "Id": "01pXXXXXXXXXXXXXXX",
+            "Name": "AccountService"
+          },
+          "NumLinesUncovered": 6
+        }
+      ],
+      "summary": {
+        "totalLines": 18,
+        "coveredLines": 14,
+        "orgWideCoverage": "14%",
+        "testRunCoverage": "78%"
+      }
+    }
+  },
+  "warnings": []
+}
