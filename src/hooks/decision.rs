@@ -283,6 +283,7 @@ impl AgentPath {
             "claude" | "copilot" => Some(Self::InProcess(Host::Claude)),
             "codex" => Some(Self::InProcess(Host::Codex)),
             "trae" => Some(Self::InProcess(Host::Trae)),
+            "workbuddy" => Some(Self::InProcess(Host::WorkBuddy)),
             "cursor" => Some(Self::InProcess(Host::Cursor)),
             "droid" => Some(Self::InProcess(Host::Droid)),
             "gemini" => Some(Self::InProcess(Host::Gemini)),
@@ -318,6 +319,7 @@ impl AgentPath {
         "trae",
         "vibe",
         "windsurf",
+        "workbuddy",
     ];
 
     /// The verdict this agent's hook would judge `cmd` against.
