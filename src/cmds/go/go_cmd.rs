@@ -546,7 +546,9 @@ fn select_go_test_failure_lines(outputs: &[String]) -> Vec<String> {
 
         if is_location || is_failure || keep_next_context_line {
             relevant.push(trimmed.to_string());
-            keep_next_context_line = is_location;
+            // A location line is followed by its message, and "To re-run:"
+            // is followed by the re-run command; keep that next line too.
+            keep_next_context_line = is_location || trimmed.starts_with("To re-run:");
         } else {
             keep_next_context_line = false;
         }
@@ -596,6 +598,10 @@ fn is_go_test_failure_line(line: &str) -> bool {
         || lower.contains("unexpected")
         || lower.contains("fatal")
         || line.starts_with("at ")
+        // Fuzz failures: the corpus path and the re-run header are the
+        // actionable part of the output, but match no keyword above.
+        || line.starts_with("Failing input written to")
+        || line.starts_with("To re-run:")
 }
 
 /// Filter go build output - show only errors
@@ -1235,6 +1241,53 @@ utils.go:15:5: unreachable code"#;
             result
         );
         assert!(!result.contains("fuzz in"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_filter_go_test_failing_fuzz_keeps_failing_input_and_rerun_lines() {
+        // Real stream shape from a fuzz crash (Go 1.26): the assertion is
+        // followed by a blank separator line, then the corpus path and the
+        // re-run command. All of them must survive the filter — they are
+        // what the user needs to reproduce the failure.
+        let output = r#"{"Action":"start","Package":"example.com/foo"}
+{"Action":"run","Package":"example.com/foo","Test":"FuzzRev"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"=== RUN   FuzzRev\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"fuzz: elapsed: 0s, gathering baseline coverage: 0/1 completed\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"fuzz: minimizing 34-byte failing input file\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"--- FAIL: FuzzRev (0.02s)\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"    --- FAIL: FuzzRev (0.00s)\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"        rev_test.go:12: Reverse produced invalid UTF-8 string \"\\xe8\"\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"    \n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"    Failing input written to testdata/fuzz/FuzzRev/5845f96f56664c01\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"    To re-run:\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"    go test -run=FuzzRev/5845f96f56664c01\n"}
+{"Action":"fail","Package":"example.com/foo","Test":"FuzzRev","Elapsed":0.02}
+{"Action":"output","Package":"example.com/foo","Output":"FAIL\n"}
+{"Action":"fail","Package":"example.com/foo","Elapsed":0.03}"#;
+
+        let result = filter_go_test_json(output);
+
+        assert!(
+            result.starts_with("Go test: 0 passed, 1 failed"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("Reverse produced invalid UTF-8"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("Failing input written to testdata/fuzz/FuzzRev/5845f96f56664c01"),
+            "got: {}",
+            result
+        );
+        assert!(result.contains("To re-run:"), "got: {}", result);
+        assert!(
+            result.contains("go test -run=FuzzRev/5845f96f56664c01"),
+            "got: {}",
+            result
+        );
     }
 
     #[test]
