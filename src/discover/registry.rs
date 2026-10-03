@@ -1779,7 +1779,18 @@ fn rewrite_segment_inner(
         return None;
     }
 
-    if let Some(parts) = parse_golangci_run_parts(cmd_part) {
+    // The trailing redirect is the shell's, not the tool's: every rewrite of a
+    // supported command re-attaches it here, once, exactly as typed.
+    rewrite_command_part(rule, cmd_part)
+        .map(|rewritten| format!("{}{}", rewritten, redirect_suffix))
+}
+
+/// Rewrite the command part of a segment (trailing redirects already split
+/// off) with `rule`, or `None` when this rule does not rewrite it.
+fn rewrite_command_part(rule: &RtkRule, cmd_part: &str) -> Option<String> {
+    if rule.rtk_cmd == "rtk golangci-lint run"
+        && let Some(parts) = parse_golangci_run_parts(cmd_part)
+    {
         let rewritten = if parts.global_segment.is_empty() {
             format!("rtk golangci-lint {}", parts.run_segment)
         } else {
@@ -1820,9 +1831,9 @@ fn rewrite_segment_inner(
     for &prefix in rule.rewrite_prefixes {
         if let Some(rest) = strip_word_prefix(strip_target, prefix) {
             let rewritten = if rest.is_empty() {
-                format!("{}{}", rule.rtk_cmd, redirect_suffix)
+                rule.rtk_cmd.to_string()
             } else {
-                format!("{} {}{}", rule.rtk_cmd, rest, redirect_suffix)
+                format!("{} {}", rule.rtk_cmd, rest)
             };
             return Some(rewritten);
         }
@@ -5394,6 +5405,79 @@ mod tests {
             rewrite_command_no_prefixes("golangci-lint run ./...", &[]),
             Some("rtk golangci-lint run ./...".into())
         );
+    }
+
+    #[test]
+    fn test_rewrite_golangci_lint_keeps_trailing_redirects() {
+        // The redirect belongs to the shell, not to golangci-lint: dropping it
+        // sends output meant for a file or /dev/null to the terminal.
+        for (input, expected) in [
+            ("golangci-lint run 2>&1", "rtk golangci-lint run 2>&1"),
+            (
+                "golangci-lint run ./... >/dev/null",
+                "rtk golangci-lint run ./... >/dev/null",
+            ),
+            (
+                "golangci-lint run 2>/dev/null",
+                "rtk golangci-lint run 2>/dev/null",
+            ),
+            (
+                "golangci-lint run &>/dev/null",
+                "rtk golangci-lint run &>/dev/null",
+            ),
+            (
+                "FOO=1 golangci-lint run 2>&1",
+                "FOO=1 rtk golangci-lint run 2>&1",
+            ),
+            (
+                "golangci-lint --color never run ./... 2>&1",
+                "rtk golangci-lint --color never run ./... 2>&1",
+            ),
+            (
+                "golangci-lint run ./... 2>&1 | tail -5",
+                "rtk golangci-lint run ./... 2>&1 | tail -5",
+            ),
+            // No space before the redirect: the boundary is kept exactly as
+            // typed, so a word ending in digits is not turned into a
+            // descriptor number and vice versa.
+            (
+                "golangci-lint run -c x.yml>/dev/null",
+                "rtk golangci-lint run -c x.yml>/dev/null",
+            ),
+            (
+                "golangci-lint run ${PKG}2>/dev/null",
+                "rtk golangci-lint run ${PKG}2>/dev/null",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]).as_deref(),
+                Some(expected),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_supported_commands_reattach_redirects_as_typed() {
+        for (input, expected) in [
+            (
+                "git status ${PKG}2>/dev/null",
+                Some("rtk git status ${PKG}2>/dev/null"),
+            ),
+            ("git status 2>&1", Some("rtk git status 2>&1")),
+            // gh's structured-output flags still skip the rewrite with a redirect.
+            ("gh pr list --json number 2>&1", None),
+            (
+                "vendor/bin/phpunit tests 2>&1",
+                Some("rtk phpunit tests 2>&1"),
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]).as_deref(),
+                expected,
+                "{input}"
+            );
+        }
     }
 
     #[test]
