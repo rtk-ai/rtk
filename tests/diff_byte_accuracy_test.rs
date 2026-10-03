@@ -100,3 +100,86 @@ fn non_utf8_files_are_compared_instead_of_reported_as_io_errors() {
         }
     }
 }
+
+#[test]
+fn one_file_operand_is_a_usage_error_not_a_stdin_condense() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("o.txt");
+    fs::write(&file, "a\n").unwrap();
+
+    let output = common::rtk_command()
+        .args([DIFF_SUBCOMMAND, &file.display().to_string()])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run rtk diff with one operand");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a single file operand is a usage error, not a diff to condense: {stderr}"
+    );
+    assert!(
+        stderr.contains("missing operand after"),
+        "the usage error must name the form, like diff does: {stderr}"
+    );
+}
+
+#[test]
+fn one_missing_operand_is_a_usage_error_before_any_read() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let piped = dir.path().join("piped.diff");
+    fs::write(&piped, "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-x\n+y\n").expect("write piped diff");
+    let missing = dir.path().join("missing.txt");
+
+    let output = common::rtk_command()
+        .args([DIFF_SUBCOMMAND, &missing.display().to_string()])
+        .stdin(fs::File::open(&piped).expect("open piped diff"))
+        .output()
+        .expect("run rtk diff with one missing operand");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("missing operand after"),
+        "the usage error comes before the operand is opened: {stderr}"
+    );
+    assert!(
+        !stderr.contains("rtk diff:"),
+        "the missing operand is not read: {stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "stdin is not condensed on a usage error: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn explicit_stdin_dash_still_condenses() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let mut child = common::rtk_command()
+        .args([DIFF_SUBCOMMAND, "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rtk diff -");
+    child
+        .stdin
+        .take()
+        .expect("stdin pipe")
+        .write_all(b"--- a/f\n+++ b/f\n@@ -1 +1 @@\n-x\n+y\n")
+        .expect("write diff to stdin");
+    let output = child.wait_with_output().expect("wait for rtk diff -");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the `-` form is the stdin mode"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("-x") || stdout.contains("+y"), "{stdout}");
+}
