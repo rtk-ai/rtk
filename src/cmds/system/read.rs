@@ -163,11 +163,11 @@ pub fn run_stdin(
     }
     let content = String::from_utf8(bytes).context("Failed to decode stdin")?;
 
-    // No file extension, so use Unknown language
-    let lang = Language::Unknown;
+    // Stdin has no extension, so detect Python from its shebang or syntax.
+    let lang = Language::from_content(&content);
 
     if verbose > 1 {
-        eprintln!("Language: {:?} (stdin has no extension)", lang);
+        eprintln!("Language: {:?} (detected from stdin content)", lang);
     }
 
     // Apply filter

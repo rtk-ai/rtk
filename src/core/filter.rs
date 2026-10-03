@@ -59,7 +59,7 @@ impl Language {
     pub fn from_extension(ext: &str) -> Self {
         match ext.to_lowercase().as_str() {
             "rs" => Language::Rust,
-            "py" | "pyw" => Language::Python,
+            "py" | "pyw" | "pyi" => Language::Python,
             "js" | "mjs" | "cjs" => Language::JavaScript,
             "ts" | "tsx" => Language::TypeScript,
             "go" => Language::Go,
@@ -73,6 +73,40 @@ impl Language {
                 Language::Data
             }
             _ => Language::Unknown,
+        }
+    }
+
+    /// Detect Python source when no file extension is available, such as stdin.
+    pub fn from_content(content: &str) -> Self {
+        let python_shebang = content
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix("#!"))
+            .is_some_and(|shebang| {
+                shebang.split_whitespace().any(|part| {
+                    part.rsplit('/').next().is_some_and(|interpreter| {
+                        interpreter == "python"
+                            || interpreter.starts_with("python2")
+                            || interpreter.starts_with("python3")
+                    })
+                })
+            });
+
+        let python_syntax = content.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("import ")
+                || line.starts_with("import\t")
+                || (line.starts_with("from ")
+                    && (line.contains(" import ") || line.contains(" import\t")))
+                || (line.starts_with("def ") && line.contains("):"))
+                || (line.starts_with("class ") && line.contains(':'))
+                || line.starts_with("if __name__")
+        });
+
+        if python_shebang || python_syntax {
+            Language::Python
+        } else {
+            Language::Unknown
         }
     }
 
@@ -511,7 +545,39 @@ mod tests {
     fn test_language_detection() {
         assert_eq!(Language::from_extension("rs"), Language::Rust);
         assert_eq!(Language::from_extension("py"), Language::Python);
+        assert_eq!(Language::from_extension("pyi"), Language::Python);
         assert_eq!(Language::from_extension("js"), Language::JavaScript);
+    }
+
+    #[test]
+    fn test_minimal_python_stub_strips_comments() {
+        let code = "import glob\nfiles = glob.glob(\"src/**/*.py\")\n# c\nx = 1\n";
+        let lang = Language::from_extension("pyi");
+        let result = MinimalFilter.filter(code, &lang);
+
+        assert_eq!(
+            result,
+            "import glob\nfiles = glob.glob(\"src/**/*.py\")\nx = 1"
+        );
+    }
+
+    #[test]
+    fn test_language_detection_python_shebang() {
+        let code = "#!/usr/bin/env python3\n# c\nx = 1\n";
+        assert_eq!(Language::from_content(code), Language::Python);
+    }
+
+    #[test]
+    fn test_language_detection_python_stdin_source() {
+        let code = "import glob\nfiles = glob.glob(\"src/**/*.py\")\n# c\nx = 1\n";
+        let lang = Language::from_content(code);
+        let result = MinimalFilter.filter(code, &lang);
+
+        assert_eq!(lang, Language::Python);
+        assert_eq!(
+            result,
+            "import glob\nfiles = glob.glob(\"src/**/*.py\")\nx = 1"
+        );
     }
 
     #[test]
