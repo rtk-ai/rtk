@@ -108,8 +108,8 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
             summary_line = trimmed.to_string();
             continue;
         // quiet mode (-q): bare summary without === wrapper, e.g. "5 failed, 1698 passed, 2 skipped in 108.89s"
-        } else if summary_line.is_empty()
-            && !trimmed.starts_with("===")
+        // The last match wins: earlier lookalikes can come from captured test stdout.
+        } else if !trimmed.starts_with("===")
             && !trimmed.starts_with("FAILED")
             && !trimmed.starts_with("ERROR")
             && (trimmed.contains(" passed")
@@ -582,6 +582,31 @@ FAILED tests/test_foo.py::test_something - AssertionError
         assert!(
             result.contains("1698") || result.contains("5 failed"),
             "Should show actual test counts. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_pytest_quiet_mode_ignores_summary_lookalike_in_captured_stdout() {
+        let output = r#"F                                                                        [100%]
+=================================== FAILURES ===================================
+__________________________________ test_outer __________________________________
+nested/test_nested.py:3: in test_outer
+    assert False
+E   assert False
+----------------------------- Captured stdout call -----------------------------
+1 passed in 0.01s
+1 failed in 0.01s"#;
+
+        let result = filter_pytest_output(output);
+        assert!(
+            result.starts_with("Pytest: 0 passed, 1 failed in 0.01s"),
+            "Should report the real session summary. Got: {}",
+            result
+        );
+        assert!(
+            result.contains("test_outer") && result.contains("E   assert False"),
+            "Should show the failure block. Got: {}",
             result
         );
     }
