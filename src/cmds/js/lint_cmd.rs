@@ -18,7 +18,9 @@ struct EslintMessage {
     rule_id: Option<String>,
     severity: u8,
     message: String,
+    #[serde(default)]
     line: usize,
+    #[serde(default)]
     column: usize,
 }
 
@@ -286,13 +288,19 @@ fn filter_eslint_json(output: &str) -> String {
         }
     }
 
-    // Group by file
+    // Group by file. Error-bearing files sort ahead of warning-only files so
+    // actionable failures remain visible even when the warning list is capped.
     let mut by_file: Vec<(&EslintResult, usize)> = results
         .iter()
         .filter(|r| !r.messages.is_empty())
         .map(|r| (r, r.messages.len()))
         .collect();
-    by_file.sort_by_key(|b| std::cmp::Reverse(b.1));
+    by_file.sort_by(|(a, a_count), (b, b_count)| {
+        eslint_error_count(b)
+            .cmp(&eslint_error_count(a))
+            .then(b_count.cmp(a_count))
+            .then(a.file_path.cmp(&b.file_path))
+    });
 
     // Build output
     let mut result = String::new();
@@ -313,10 +321,60 @@ fn filter_eslint_json(output: &str) -> String {
         result.push('\n');
     }
 
-    // Show top files with most issues, plus the top rules in each
+    // Rule-less errors (for example parse errors and unused eslint-disable
+    // directives) do not appear in `Top rules`, so render their actionable
+    // location and message explicitly. Keep this section before the compact
+    // file/rule aggregates so errors cannot be mistaken for warnings.
+    let errors: Vec<(&EslintResult, &EslintMessage)> = results
+        .iter()
+        .flat_map(|file| {
+            file.messages
+                .iter()
+                .filter(|message| message.severity >= 2)
+                .map(move |message| (file, message))
+        })
+        .collect();
+    const MAX_ERRORS: usize = CAP_ERRORS;
+    if !errors.is_empty() {
+        result.push_str("Errors:\n");
+        for (file, message) in errors.iter().take(MAX_ERRORS) {
+            let rule = message
+                .rule_id
+                .as_deref()
+                .map(|rule| format!(" [{}]", rule))
+                .unwrap_or_default();
+            result.push_str(&format!(
+                "  {}:{}:{} error{}: {}\n",
+                compact_path(&file.file_path),
+                message.line,
+                message.column,
+                rule,
+                message.message
+            ));
+        }
+        if errors.len() > MAX_ERRORS {
+            result.push_str(&format!("  … +{} more errors\n", errors.len() - MAX_ERRORS));
+        }
+        result.push('\n');
+    }
+
+    // Show error-bearing files first, followed by the warning-only files with
+    // the most issues. Error files are never hidden by the warning cap.
     const MAX_FILES: usize = CAP_WARNINGS;
     result.push_str("Top files:\n");
-    for (file_result, count) in by_file.iter().take(MAX_FILES) {
+    let error_files: Vec<_> = by_file
+        .iter()
+        .filter(|(file, _)| eslint_has_errors(file))
+        .collect();
+    let warning_files: Vec<_> = by_file
+        .iter()
+        .filter(|(file, _)| !eslint_has_errors(file))
+        .collect();
+
+    for (file_result, count) in error_files
+        .iter()
+        .chain(warning_files.iter().take(MAX_FILES))
+    {
         let short_path = compact_path(&file_result.file_path);
         result.push_str(&format!("  {} ({} issues)\n", short_path, count));
 
@@ -333,21 +391,39 @@ fn filter_eslint_json(output: &str) -> String {
         }
     }
 
-    if by_file.len() > MAX_FILES {
-        result.push_str(&format!("\n… +{} more files\n", by_file.len() - MAX_FILES));
-        let all_file_lines = by_file
+    if warning_files.len() > MAX_FILES {
+        result.push_str(&format!(
+            "\n… +{} more warning-only files\n",
+            warning_files.len() - MAX_FILES
+        ));
+        let all_file_lines = warning_files
             .iter()
             .map(|(r, count)| format!("{} ({} issues)", compact_path(&r.file_path), count))
             .collect::<Vec<_>>()
             .join("\n");
-        if let Some(hint) =
-            crate::core::tee::force_tee_tail_hint(&all_file_lines, "eslint-files", MAX_FILES + 1)
-        {
+        if let Some(hint) = crate::core::tee::force_tee_tail_hint(
+            &all_file_lines,
+            "eslint-warning-files",
+            MAX_FILES + 1,
+        ) {
             result.push_str(&format!("  {}\n", hint));
         }
     }
 
     result.trim().to_string()
+}
+
+fn eslint_error_count(file: &EslintResult) -> usize {
+    file.error_count.max(
+        file.messages
+            .iter()
+            .filter(|message| message.severity >= 2)
+            .count(),
+    )
+}
+
+fn eslint_has_errors(file: &EslintResult) -> bool {
+    eslint_error_count(file) > 0
 }
 
 /// Filter pylint JSON2 output - group by symbol and file
@@ -587,6 +663,52 @@ mod tests {
         assert!(result.contains("prefer-const"));
         assert!(result.contains("no-unused-vars"));
         assert!(result.contains("src/utils.ts"));
+    }
+
+    #[test]
+    fn test_filter_eslint_json_surfaces_errors_before_warning_files() {
+        let mut results = Vec::new();
+        for index in 0..(CAP_WARNINGS + 2) {
+            results.push(EslintResult {
+                file_path: format!("/Users/test/project/src/warn{index}.js"),
+                messages: vec![EslintMessage {
+                    rule_id: Some("no-unused-vars".to_string()),
+                    severity: 1,
+                    message: "'unused' is assigned a value but never used".to_string(),
+                    line: 1,
+                    column: 1,
+                }],
+                error_count: 0,
+                warning_count: 1,
+            });
+        }
+        results.push(EslintResult {
+            file_path: "/Users/test/project/src/syntax.js".to_string(),
+            messages: vec![EslintMessage {
+                rule_id: None,
+                severity: 2,
+                message: "Parsing error: Unexpected token }".to_string(),
+                line: 4,
+                column: 1,
+            }],
+            error_count: 1,
+            warning_count: 0,
+        });
+
+        let result = filter_eslint_json(&serde_json::to_string(&results).unwrap());
+
+        assert!(result.contains("Errors:"));
+        assert!(result.contains("src/syntax.js:4:1 error: Parsing error: Unexpected token }"));
+        assert!(result.contains("src/syntax.js (1 issues)"));
+        assert!(result.contains("… +2 more warning-only files"));
+
+        let top_files = result.split("Top files:\n").nth(1).unwrap();
+        let error_position = top_files.find("src/syntax.js").unwrap();
+        let warning_position = top_files.find("src/warn").unwrap();
+        assert!(
+            error_position < warning_position,
+            "error-bearing files should precede warning-only files"
+        );
     }
 
     #[test]
