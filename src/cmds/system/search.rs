@@ -220,8 +220,8 @@ fn extract_pattern_path<T: AsRef<str>>(
                 if is_show_file_token(t.kind, t.text) {
                     show_file_flag = Some(true);
                 }
-                if is_recursive_token(engine, t.kind, t.text) {
-                    recursive = true;
+                if let Some(action) = recursion_action(engine, t, &tokens) {
+                    recursive = action;
                 }
                 if is_show_line_on_token(t.kind, t.text) {
                     show_line_flag = Some(true);
@@ -288,8 +288,8 @@ fn extract_pattern_path<T: AsRef<str>>(
                     } else if is_show_line_off_token(engine, c.kind, c.text) {
                         show_line_flag = Some(false);
                     }
-                    if is_recursive_token(engine, c.kind, c.text) {
-                        recursive = true;
+                    if let Some(action) = recursion_action(engine, c, &tokens) {
+                        recursive = action;
                     }
                 }
                 if cluster
@@ -1027,17 +1027,33 @@ fn is_show_file_token(kind: TokenKind, text: &str) -> bool {
     }
 }
 
-/// True for grep's `-r`/`-R`/`--recursive`. Recursion is not a filename request: it only makes
+/// Whether a grep token turns recursion on (`Some(true)`) or off (`Some(false)`), or does not
+/// touch it (`None`). grep recurses for `-r`/`-R`/`--recursive`/`--dereference-recursive` and
+/// for `-d recurse`/`--directories=recurse` (or an unambiguous abbreviation such as `rec`), and
+/// `-d read`/`-d skip` turn it off again: the last directory action wins, as in grep, where
+/// `-r` is `-d recurse` under another name. Recursion is not a filename request: it only makes
 /// the search span several files, so grep shows the prefix by default -- an explicit `-h` still
 /// wins whichever side of it the recursion flag is typed on. ripgrep has none of these
 /// spellings (`-r` is `--replace`, a value-taking flag, see [`rg_takes_value`]).
-fn is_recursive_token(engine: Engine, kind: TokenKind, text: &str) -> bool {
-    engine == Engine::Grep
-        && match kind {
-            TokenKind::Long => text == "recursive",
-            TokenKind::Short => matches!(text, "R" | "r"),
-            _ => false,
+fn recursion_action(engine: Engine, token: &Token<'_>, tokens: &[Token<'_>]) -> Option<bool> {
+    if engine != Engine::Grep {
+        return None;
+    }
+    let is_directories = match token.kind {
+        TokenKind::Long if matches!(token.text, "recursive" | "dereference-recursive") => {
+            return Some(true);
         }
+        TokenKind::Short if matches!(token.text, "R" | "r") => return Some(true),
+        TokenKind::Long => token.text == "directories",
+        TokenKind::Short => token.text == "d",
+        _ => false,
+    };
+    if !is_directories {
+        return None;
+    }
+    let action = token.value(tokens)?;
+    // `r` and `re` also start `read`, so grep needs at least `rec`.
+    Some(action.len() >= 3 && "recurse".starts_with(action))
 }
 
 /// True for `-n`/`--line-number` (identical meaning for both engines).
@@ -2147,6 +2163,32 @@ mod tests {
         }
         // ripgrep's `-r` is `--replace`, so its value must not be read as recursion.
         assert!(!detected_for(Engine::Rg, &["-r", "X"]).recursive);
+    }
+
+    #[test]
+    fn every_recursion_spelling_is_recursive() {
+        for args in [
+            &["--dereference-recursive"][..],
+            &["-d", "recurse"][..],
+            &["-drecurse"][..],
+            &["-d", "rec"][..],
+            &["--directories=recurse"][..],
+            &["--directories", "recurs"][..],
+        ] {
+            assert!(detected(args).recursive, "{args:?} makes grep recurse");
+        }
+        for args in [&["-d", "read"][..], &["-d", "skip"][..], &["-d", "re"][..]] {
+            assert!(!detected(args).recursive, "{args:?} does not recurse");
+        }
+    }
+
+    #[test]
+    fn the_last_directory_action_wins() {
+        // grep's `-r` is `-d recurse`, so a later `-d read` turns it off and vice versa.
+        assert!(!detected(&["-r", "-d", "read"]).recursive);
+        assert!(!detected(&["--directories=recurse", "--directories=skip"]).recursive);
+        assert!(detected(&["-d", "read", "-r"]).recursive);
+        assert!(detected(&["-d", "skip", "--directories=recurse"]).recursive);
     }
 
     #[test]
