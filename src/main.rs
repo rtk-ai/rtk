@@ -1104,6 +1104,15 @@ enum GitCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Search tracked files: matches grouped by file (-c, -l, -L, -z, -o, --name-only run raw)
+    #[command(disable_help_flag = true)]
+    Grep {
+        /// Git grep arguments (pattern, paths, and any git grep flags).
+        /// `-h` and `--help` reach git grep so its native flags work; use
+        /// `rtk git --help` to read this description.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Passthrough: runs any unsupported git subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -2282,6 +2291,13 @@ fn run_cli() -> Result<i32> {
                 GitCommands::Other(args) => {
                     git_cmd::run_passthrough(&args, &global_args, cli.verbose)?
                 }
+                GitCommands::Grep { args } => git_cmd::run(
+                    git_cmd::GitCommand::Grep,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
             }
         }
 
