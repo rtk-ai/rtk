@@ -1294,9 +1294,7 @@ mod err_test_runner_tests {
         assert!(out.contains("test result:"));
     }
 
-    fn count_tokens(s: &str) -> usize {
-        s.split_whitespace().count()
-    }
+    use crate::core::tracking::estimate_tokens as count_tokens;
 
     #[test]
     fn test_bun_module_load_error_survives_with_no_fail_marker() {

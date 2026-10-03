@@ -29,6 +29,10 @@
 //!
 //! See [docs/tracking.md](../docs/tracking.md) for full documentation.
 
+mod tokens;
+
+pub use tokens::{estimate_tokens, estimate_tokens_from_len};
+
 use crate::core::user_dirs;
 use crate::core::user_env;
 use anyhow::{Context, Result};
@@ -1776,36 +1780,6 @@ pub fn record_parse_failure_silent(raw_command: &str, error_message: &str, succe
     }
 }
 
-/// Estimate token count from text using ~4 chars = 1 token heuristic.
-///
-/// This is a fast approximation suitable for tracking purposes.
-/// For precise counts, integrate with your LLM's tokenizer API.
-///
-/// # Formula
-///
-/// `tokens = ceil(chars / 4)`
-///
-/// # Examples
-///
-/// ```
-/// use rtk::tracking::estimate_tokens;
-///
-/// assert_eq!(estimate_tokens(""), 0);
-/// assert_eq!(estimate_tokens("abcd"), 1);  // 4 chars = 1 token
-/// assert_eq!(estimate_tokens("abcde"), 2); // 5 chars = ceil(1.25) = 2
-/// assert_eq!(estimate_tokens("hello world"), 3); // 11 chars = ceil(2.75) = 3
-/// ```
-pub fn estimate_tokens(text: &str) -> usize {
-    estimate_tokens_from_len(text.len())
-}
-
-/// Token estimate from a raw byte length, for callers that hold a byte count rather
-/// than a `&str` (e.g. non-UTF-8 captured output). Same ~4-chars-per-token model as
-/// [`estimate_tokens`].
-pub fn estimate_tokens_from_len(len: usize) -> usize {
-    (len as f64 / 4.0).ceil() as usize
-}
-
 /// Helper struct for timing command execution
 /// Helper for timing command execution and tracking results.
 ///
@@ -2102,14 +2076,14 @@ mod tests {
     use super::*;
     use crate::core::test_isolation;
 
-    // 1. estimate_tokens — verify ~4 chars/token ratio
+    // 1. estimate_tokens — verify ~4 bytes/token ratio
     #[test]
     fn test_estimate_tokens() {
         assert_eq!(estimate_tokens(""), 0);
-        assert_eq!(estimate_tokens("abcd"), 1); // 4 chars = 1 token
-        assert_eq!(estimate_tokens("abcde"), 2); // 5 chars = ceil(1.25) = 2
-        assert_eq!(estimate_tokens("a"), 1); // 1 char = ceil(0.25) = 1
-        assert_eq!(estimate_tokens("12345678"), 2); // 8 chars = 2 tokens
+        assert_eq!(estimate_tokens("abcd"), 1); // 4 bytes = 1 token
+        assert_eq!(estimate_tokens("abcde"), 2); // 5 bytes = ceil(1.25) = 2
+        assert_eq!(estimate_tokens("a"), 1); // 1 byte = ceil(0.25) = 1
+        assert_eq!(estimate_tokens("12345678"), 2); // 8 bytes = 2 tokens
     }
 
     // 2. args_display — format OsString vec

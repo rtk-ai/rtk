@@ -517,8 +517,8 @@ Would reformat: tests/test_utils.py
             "missing '+N more' indicator"
         );
 
-        let raw_tokens = json.split_whitespace().count();
-        let out_tokens = result.split_whitespace().count();
+        let raw_tokens = crate::core::tracking::estimate_tokens(&json);
+        let out_tokens = crate::core::tracking::estimate_tokens(&result);
         let savings = 100.0 - (out_tokens as f64 / raw_tokens as f64) * 100.0;
         assert!(
             savings >= 60.0,

@@ -96,11 +96,8 @@ All filters **MUST** verify token savings claims (60-90%) in tests:
 mod tests {
     use super::*;
 
-    // Helper function (exists in tests/common/mod.rs)
-    fn count_tokens(text: &str) -> usize {
-        // Simple whitespace tokenization (good enough for tests)
-        text.split_whitespace().count()
-    }
+    // Match the estimator used by tracking and the never-worse guard.
+    use crate::core::tracking::estimate_tokens as count_tokens;
 
     #[test]
     fn test_git_log_savings() {

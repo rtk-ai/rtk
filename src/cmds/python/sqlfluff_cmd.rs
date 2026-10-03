@@ -418,9 +418,7 @@ fn compact_path(path: &str) -> String {
 mod tests {
     use super::*;
 
-    fn count_tokens(text: &str) -> usize {
-        text.split_whitespace().count()
-    }
+    use crate::core::tracking::estimate_tokens as count_tokens;
 
     /// Real `sqlfluff 4.3.0 lint --format json` output: `start_line_no`
     /// coordinates, `fixes` arrays, nested paths.

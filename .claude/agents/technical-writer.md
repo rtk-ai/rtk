@@ -72,7 +72,7 @@ commit def5678 Fix bug Y
 
 **Methodology**:
 - Fixtures: Real command output from production environments
-- Measurement: Whitespace-based tokenization (`count_tokens()`)
+- Measurement: Production UTF-8 byte estimate (`core::tracking::estimate_tokens`, ceil(bytes / 4))
 - Verification: Tests enforce ≥60% savings threshold
 
 **Results by Filter**:

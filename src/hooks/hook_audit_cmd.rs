@@ -283,7 +283,7 @@ mod tests {
 
         // Compact output would be ~10 lines vs 8 raw lines — savings test:
         // The purpose of hook-audit is metrics, not filtering, so savings are moderate
-        let input_tokens: usize = raw_log.split_whitespace().count();
+        let input_tokens: usize = crate::core::tracking::estimate_tokens(raw_log);
         // Simulated compact output
         let compact = format!(
             "Hook Audit (all time)\nTotal: {}\nRewrites: {} ({:.1}%)\nSkips: {} ({:.1}%)\nTop: git status (1), cargo test (1)",
@@ -293,7 +293,7 @@ mod tests {
             skips,
             skips as f64 / entries.len() as f64 * 100.0,
         );
-        let output_tokens: usize = compact.split_whitespace().count();
+        let output_tokens: usize = crate::core::tracking::estimate_tokens(&compact);
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
         assert!(
             savings >= 30.0,
