@@ -286,7 +286,6 @@ impl FilterStrategy for MinimalFilter {
         let patterns = lang.comment_patterns();
         let mut result = String::with_capacity(content.len());
         let mut in_block_comment = false;
-        let mut in_docstring = false;
 
         for line in content.lines() {
             let trimmed = line.trim();
@@ -295,8 +294,7 @@ impl FilterStrategy for MinimalFilter {
             if let (Some(start), Some(end)) = (patterns.block_start, patterns.block_end) {
                 // starts_with, not contains: `/*` inside a string literal or
                 // glob (e.g. "src/*.rs") must not open a comment block (#2385)
-                if !in_docstring
-                    && trimmed.starts_with(start)
+                if trimmed.starts_with(start)
                     && !trimmed.starts_with(patterns.doc_block_start.unwrap_or("###"))
                 {
                     in_block_comment = true;
@@ -307,20 +305,6 @@ impl FilterStrategy for MinimalFilter {
                     }
                     continue;
                 }
-            }
-
-            // Handle Python docstrings (keep them in minimal mode)
-            if *lang == Language::Python && trimmed.starts_with("\"\"\"") {
-                in_docstring = !in_docstring;
-                result.push_str(line);
-                result.push('\n');
-                continue;
-            }
-
-            if in_docstring {
-                result.push_str(line);
-                result.push('\n');
-                continue;
             }
 
             // Skip single-line comments (but keep doc comments)
@@ -664,6 +648,60 @@ x = 1
             "a ''' inside a \"\"\" string confused the tracker:\n{}",
             result
         );
+        assert!(result.contains("x = 1"));
+    }
+
+    #[test]
+    fn test_minimal_python_docstring_closed_on_content_line() {
+        let code = r#""""start of docstring
+end of docstring"""
+# strip me
+x = 1
+"#;
+        let result = MinimalFilter.filter(code, &Language::Python);
+        assert!(!result.contains("# strip me"));
+        assert!(result.contains(r#""""start of docstring"#));
+        assert!(result.contains(r#"end of docstring""""#));
+        assert!(result.contains("x = 1"));
+    }
+
+    #[test]
+    fn test_minimal_python_text_after_closing_quotes_on_same_line() {
+        let code = r#"def foo():
+    """docstring""" ; x = 42
+    # strip me
+    return x
+"#;
+        let result = MinimalFilter.filter(code, &Language::Python);
+        assert!(!result.contains("# strip me"));
+        assert!(result.contains(r#""""docstring""" ; x = 42"#));
+        assert!(result.contains("return x"));
+    }
+
+    #[test]
+    fn test_minimal_python_two_oneline_docstrings_in_a_row() {
+        let code = r#""""First docstring.""""#;
+        let code_two = r#""""First docstring."""
+"""Second docstring."""
+# strip me
+x = 1
+"#;
+        let result = MinimalFilter.filter(code_two, &Language::Python);
+        assert!(!result.contains("# strip me"));
+        assert!(result.contains(r#""""First docstring.""""#));
+        assert!(result.contains(r#""""Second docstring.""""#));
+        assert!(result.contains("x = 1"));
+    }
+
+    #[test]
+    fn test_minimal_python_empty_docstring() {
+        let code = r#"""""""
+# strip me
+x = 1
+"#;
+        let result = MinimalFilter.filter(code, &Language::Python);
+        assert!(!result.contains("# strip me"));
+        assert!(result.contains(r#""""""""#));
         assert!(result.contains("x = 1"));
     }
 
