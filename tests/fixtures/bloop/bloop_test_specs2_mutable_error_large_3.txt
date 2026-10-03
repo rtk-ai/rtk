@@ -1,0 +1,142 @@
+Compiling root (1 Scala source)
+Compiled root (1476ms)
+Compiling root-test (6 Scala sources)
+Compiled root-test (1746ms)
+CalculatorSpec1
+ 
+Calculator should
+  + add returns the sum
+  + sub returns the difference
+  + mul returns the product
+  ! div returns the quotient
+[E]    java.lang.ArithmeticException: / by zero (Calculator.scala:8)example.Calculator$.div(Calculator.scala:8)
+[E] example.CalculatorSpec1.$init$$$anonfun$1$$anonfun$4$$anonfun$1(CalculatorSpec1.scala:17)
+[E] example.CalculatorSpec1.$init$$$anonfun$1$$anonfun$4(CalculatorSpec1.scala:17)
+[E]  
+ 
+ 
+Total for specification CalculatorSpec1
+Finished in 75 ms
+4 examples, 0 failure, 1 error
+ 
+Execution took 29ms
+4 tests, 3 passed, 1 errors
+
+CalculatorSpec2
+ 
+Calculator should
+  + add returns the sum
+  + sub returns the difference
+  + mul returns the product
+  ! div returns the quotient
+[E]    java.lang.ArithmeticException: / by zero (Calculator.scala:8)example.Calculator$.div(Calculator.scala:8)
+[E] example.CalculatorSpec2.$init$$$anonfun$1$$anonfun$4$$anonfun$1(CalculatorSpec2.scala:17)
+[E] example.CalculatorSpec2.$init$$$anonfun$1$$anonfun$4(CalculatorSpec2.scala:17)
+[E]  
+ 
+ 
+Total for specification CalculatorSpec2
+Finished in 27 ms
+4 examples, 0 failure, 1 error
+ 
+Execution took 5ms
+4 tests, 3 passed, 1 errors
+
+CalculatorSpec3
+ 
+Calculator should
+  + add returns the sum
+  + sub returns the difference
+  + mul returns the product
+  ! div returns the quotient
+[E]    java.lang.ArithmeticException: / by zero (Calculator.scala:8)example.Calculator$.div(Calculator.scala:8)
+[E] example.CalculatorSpec3.$init$$$anonfun$1$$anonfun$4$$anonfun$1(CalculatorSpec3.scala:17)
+[E] example.CalculatorSpec3.$init$$$anonfun$1$$anonfun$4(CalculatorSpec3.scala:17)
+[E]  
+ 
+ 
+Total for specification CalculatorSpec3
+Finished in 14 ms
+4 examples, 0 failure, 1 error
+ 
+Execution took 0ms
+4 tests, 3 passed, 1 errors
+
+CalculatorSpec4
+ 
+Calculator should
+  + add returns the sum
+  + sub returns the difference
+  + mul returns the product
+  ! div returns the quotient
+[E]    java.lang.ArithmeticException: / by zero (Calculator.scala:8)example.Calculator$.div(Calculator.scala:8)
+[E] example.CalculatorSpec4.$init$$$anonfun$1$$anonfun$4$$anonfun$1(CalculatorSpec4.scala:17)
+[E] example.CalculatorSpec4.$init$$$anonfun$1$$anonfun$4(CalculatorSpec4.scala:17)
+[E]  
+ 
+ 
+Total for specification CalculatorSpec4
+Finished in 12 ms
+4 examples, 0 failure, 1 error
+ 
+Execution took 4ms
+4 tests, 3 passed, 1 errors
+
+CalculatorSpec5
+ 
+Calculator should
+  + add returns the sum
+  + sub returns the difference
+  + mul returns the product
+  ! div returns the quotient
+[E]    java.lang.ArithmeticException: / by zero (Calculator.scala:8)example.Calculator$.div(Calculator.scala:8)
+[E] example.CalculatorSpec5.$init$$$anonfun$1$$anonfun$4$$anonfun$1(CalculatorSpec5.scala:17)
+[E] example.CalculatorSpec5.$init$$$anonfun$1$$anonfun$4(CalculatorSpec5.scala:17)
+[E]  
+ 
+ 
+Total for specification CalculatorSpec5
+Finished in 15 ms
+4 examples, 0 failure, 1 error
+ 
+Execution took 4ms
+4 tests, 3 passed, 1 errors
+
+CalculatorSpec6
+ 
+Calculator should
+  + add returns the sum
+  + sub returns the difference
+  + mul returns the product
+  ! div returns the quotient
+[E]    java.lang.ArithmeticException: / by zero (Calculator.scala:8)example.Calculator$.div(Calculator.scala:8)
+[E] example.CalculatorSpec6.$init$$$anonfun$1$$anonfun$4$$anonfun$1(CalculatorSpec6.scala:17)
+[E] example.CalculatorSpec6.$init$$$anonfun$1$$anonfun$4(CalculatorSpec6.scala:17)
+[E]  
+ 
+ 
+Total for specification CalculatorSpec6
+Finished in 16 ms
+4 examples, 0 failure, 1 error
+ 
+Execution took 4ms
+4 tests, 3 passed, 1 errors
+
+====================================================================================================
+Total duration: 46ms
+6 failed
+
+Failed:
+- example.CalculatorSpec1:
+  * Calculator should::div returns the quotient - java.lang.ArithmeticException: / by zero
+- example.CalculatorSpec2:
+  * Calculator should::div returns the quotient - java.lang.ArithmeticException: / by zero
+- example.CalculatorSpec3:
+  * Calculator should::div returns the quotient - java.lang.ArithmeticException: / by zero
+- example.CalculatorSpec4:
+  * Calculator should::div returns the quotient - java.lang.ArithmeticException: / by zero
+- example.CalculatorSpec5:
+  * Calculator should::div returns the quotient - java.lang.ArithmeticException: / by zero
+- example.CalculatorSpec6:
+  * Calculator should::div returns the quotient - java.lang.ArithmeticException: / by zero
+====================================================================================================

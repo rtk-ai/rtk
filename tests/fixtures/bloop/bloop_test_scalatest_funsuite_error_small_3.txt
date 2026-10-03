@@ -1,0 +1,33 @@
+Compiling root (1 Scala source)
+Compiled root (1470ms)
+Compiling root-test (1 Scala source)
+Compiled root-test (957ms)
+CalculatorSuite:
+- add returns the sum
+- sub returns the difference
+- mul returns the product
+- div returns the quotient *** FAILED ***
+  java.lang.ArithmeticException: / by zero
+  at example.Calculator$.div(Calculator.scala:8)
+  at example.CalculatorSuite.testFun$proxy4$1(CalculatorSuite.scala:20)
+  at example.CalculatorSuite.$init$$$anonfun$4(CalculatorSuite.scala:19)
+  at org.scalatest.Transformer.apply$$anonfun$1(Transformer.scala:22)
+  at org.scalatest.OutcomeOf.outcomeOf(OutcomeOf.scala:85)
+  at org.scalatest.OutcomeOf.outcomeOf$(OutcomeOf.scala:31)
+  at org.scalatest.OutcomeOf$.outcomeOf(OutcomeOf.scala:104)
+  at org.scalatest.Transformer.apply(Transformer.scala:22)
+  at org.scalatest.Transformer.apply(Transformer.scala:21)
+  at org.scalatest.funsuite.AnyFunSuiteLike$$anon$1.apply(AnyFunSuiteLike.scala:206)
+  ...
+Execution took 11ms
+4 tests, 3 passed, 1 failed
+
+====================================================================================================
+Total duration: 11ms
+1 failed
+
+Failed:
+- example.CalculatorSuite:
+  * div returns the quotient - java.lang.ArithmeticException: / by zero
+====================================================================================================
+The test execution was successfully closed.

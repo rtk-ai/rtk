@@ -1,0 +1,35 @@
+Compiling coreJVM (8 Scala sources)
+Compiled coreJVM (1857ms)
+Test run io.circe.JsonSuite started
+  + deepDropNullValues should remove null value for JsonObject 0.001s
+==> X io.circe.JsonSuite.deepDropNullValues should remove null value for JsonArray  0.025s munit.ComparisonFailException: /tmp/rsx-preflight/circe/modules/tests/shared/src/test/scala/io/circe/JsonSuite.scala:187
+186:
+187:    assertEquals(actual, Json.fromValues(List(Json.fromString("REGRESSION"))))
+188:  }
+values are not the same
+=> Obtained
+JArray(
+  value = Vector(
+    JString(
+      value = "a"
+    )
+  )
+)
+=> Diff (- obtained, + expected)
+     JString(
+-      value = "a"
++      value = "REGRESSION"
+     )
+    at munit.Assertions.failComparison(Assertions.scala:278)
+  + deepDropNullValues should remove null value for nested object 0.001s
+Execution took 0.33s
+3 tests, 2 passed, 1 failed
+
+====================================================================================================
+Total duration: 38s
+2 passed, 1 failed
+
+Failed:
+- io.circe.JsonSuite:
+  * deepDropNullValues should remove null value for JsonArray - values are not the same
+====================================================================================================

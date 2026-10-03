@@ -1,0 +1,60 @@
+Compiling root (1 Scala source)
+Compiled root (1452ms)
+Compiling root-test (1 Scala source)
+Compiled root-test (990ms)
+Test run example.CalculatorSuite started
+==> X example.CalculatorSuite.add zero is identity 0.024s munit.FailException: /tmp/workspace/munit-scalacheck-fail-small/src/test/scala/example/CalculatorSuite.scala:20
+19:    }
+20:  }
+21:}
+
+Failing seed: TO7zgUWdv-WPJuetViT8r85tY3TprSjGhdyoESCTTkI=
+You can reproduce this failure by adding the following override to your suite:
+
+  override def scalaCheckInitialSeed = "TO7zgUWdv-WPJuetViT8r85tY3TprSjGhdyoESCTTkI="
+
+Falsified after 0 passed tests.
+> ARG_0: 0
+> ARG_0_ORIGINAL: 2147483647
+    at munit.Assertions.fail(Assertions.scala:297)
+    at munit.Assertions.fail$(Assertions.scala:20)
+    at munit.FunSuite.fail(FunSuite.scala:12)
+    at munit.ScalaCheckSuite.propToTry$$anonfun$1(ScalaCheckSuite.scala:118)
+    at scala.util.Try$.apply(Try.scala:217)
+    at munit.ScalaCheckSuite.propToTry(ScalaCheckSuite.scala:118)
+    at munit.ScalaCheckSuite.$init$$$anonfun$1$$anonfun$1$$anonfun$1(ScalaCheckSuite.scala:58)
+    at scala.concurrent.impl.Promise$Transformation.run(Promise.scala:475)
+    at munit.Suite$$anon$1.execute(Suite.scala:28)
+    at scala.concurrent.impl.Promise$Transformation.submitWithValue(Promise.scala:429)
+    at scala.concurrent.impl.Promise$DefaultPromise.submitWithValue(Promise.scala:338)
+    at scala.concurrent.impl.Promise$DefaultPromise.dispatchOrAddCallbacks(Promise.scala:312)
+    at scala.concurrent.impl.Promise$DefaultPromise.transform(Promise.scala:128)
+    at munit.ScalaCheckSuite.$init$$$anonfun$1$$anonfun$1(ScalaCheckSuite.scala:60)
+    at munit.Test.withBodyMap$$anonfun$1(Test.scala:30)
+    at munit.MUnitRunner.runTestBody$$anonfun$1$$anonfun$1(MUnitRunner.scala:306)
+example.CalculatorSuite: finished 0.155s
+Test run example.CalculatorSuite finished: 1 failed, 0 ignored, 2 total 0.163s
+Execution took 0.12s
+2 tests, 1 passed, 1 failed
+
+The test execution was successfully closed.
+====================================================================================================
+Total duration: 0.12s
+1 failed
+
+Failed:
+- example.CalculatorSuite:
+  * example.CalculatorSuite.add zero is identity - munit.FailException: /tmp/workspace/munit-scalacheck-fail-small/src/test/scala/example/CalculatorSuite.scala:20
+19:    }
+20:  }
+21:}
+
+Failing seed: TO7zgUWdv-WPJuetViT8r85tY3TprSjGhdyoESCTTkI=
+You can reproduce this failure by adding the following override to your suite:
+
+  override def scalaCheckInitialSeed = "TO7zgUWdv-WPJuetViT8r85tY3TprSjGhdyoESCTTkI="
+
+Falsified after 0 passed tests.
+> ARG_0: 0
+> ARG_0_ORIGINAL: 2147483647
+====================================================================================================

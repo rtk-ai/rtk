@@ -1,0 +1,289 @@
+Compiling coreJVM (8 Scala sources)
+Compiled coreJVM (1857ms)
+Compiling coreJVM-test (16 Scala sources)
+Compiled coreJVM-test (2467ms)
+EnumSpec:
+no values
+- should result in findValues finding nothing *** FAILED ***
+  0 was not equal to 1 (EnumSpec.scala:11)
+when not wrapped in another object
+  #values
+  - should contain objects
+  - should contain objects found in nested objects
+  - should contain instance of subclass
+  #withName
+  - should return the proper object when passed the proper string
+  - should throw an error otherwise
+  #withNameOption
+  - should return the proper object when passed the proper string
+  - should return None otherwise
+  #withNameEither
+  - should return the proper object when passed the proper string
+  - should return Left otherwise
+  #withNameInsensitive
+  - should return the proper object when passed the proper string, disregarding cases
+  - should throw an error otherwise
+  #withNameInsensitiveOption
+  - should return the proper object when passed the proper string, disregarding cases
+  - should return None otherwise
+  #withNameInsensitiveEither
+  - should return the proper object when passed the proper string, disregarding cases
+  - should return Left otherwise
+  #withNameUppercaseOnly
+  - should return the proper object when passed the proper string, transforming to upper case first
+  - should throw an error for not uppercase but case insensitive values
+  - should throw an error otherwise
+  #withNameUppercaseOnlyOption
+  - should return the proper object when passed the proper string, transforming to upper case first
+  - should return None for not uppercase but case insensitive values
+  - should return None otherwise
+  #withNameUppercaseOnlyEither
+  - should return the proper object when passed the proper string, transforming to upper case first
+  - should return Left for not uppercase but case insensitive values
+  - should return Left otherwise
+  #withNameLowercaseOnly
+  - should return the proper object when passed the proper string, transforming to lower case first
+  - should throw an error for not lowercase but case insensitive values
+  - should throw an error otherwise
+  #withNameLowercaseOnlyOption
+  - should return the proper object when passed the proper string, transforming to lower case first
+  - should return None for not lowercase but case insensitive values
+  - should return None otherwise
+  #withNameLowercaseOnlyEither
+  - should return the proper object when passed the proper string, transforming to lower case first
+  - should return Left for not lowercase but case insensitive values
+  - should return Left otherwise
+when a sealed trait is wrapped in another object
+  #values
+  - should contain objects
+  #withName
+  - should return the proper object when passed the proper string
+  - should throw an error otherwise
+when a sealed abstract class is wrapped in another object
+  #values
+  - should contain objects
+  #withName
+  - should return the proper object when passed the proper string
+  - should throw an error otherwise
+when the entry has stackable traits mixed in
+  #withName
+  - should return the proper object when passed the proper string
+indexOf
+- should return the proper index for elements that exist in values
+- should return -1 for elements that do not exist
+trying to use with improper types
+- should fail to compile for unsealed traits
+- should fail to compile for unsealed abstract classes
+- should fail to compile for classes
+- should fail to compile if the enum is not an object
+in
+- should return true if enum value is contained by the parameter list
+- should return false if enum value is not contained by the parameter list
+materializeEnum
+- should return the proper Enum object
+- should fail to compile when passed a singleton object
+extraNamesToValuesMap
+- should return a value for a legacy name
+Scala2 in
+- should fail to compile if either enum in the parameter list is not instance of the same enum type as the checked one
+Execution took 71ms
+53 tests, 52 passed, 1 failed
+
+ValueEnumSpec:
+basic sanity check
+- should have the proper values
+IntEnum
+- should have more than one value (sanity test)
+  withValue
+  - should return entries that match the value
+  - should throw on values that don't map to any entries
+  withValueOpt
+  - should return Some(entry) that match the value
+  - should return None when given values that do not map to any entries
+  withValueEither
+  - should return Right(entry) that match the value
+  - should return Left when given values that do not map to any entries
+  in
+  - should return false if given an empty list
+  - should return false if given a list that does not hold the entry
+  - should return true if the list only holds itself
+  - should return true if given a list that has the current entry
+ShortEnum
+- should have more than one value (sanity test)
+  withValue
+  - should return entries that match the value
+  - should throw on values that don't map to any entries
+  withValueOpt
+  - should return Some(entry) that match the value
+  - should return None when given values that do not map to any entries
+  withValueEither
+  - should return Right(entry) that match the value
+  - should return Left when given values that do not map to any entries
+  in
+  - should return false if given an empty list
+  - should return false if given a list that does not hold the entry
+  - should return true if the list only holds itself
+  - should return true if given a list that has the current entry
+LongEnum
+- should have more than one value (sanity test)
+  withValue
+  - should return entries that match the value
+  - should throw on values that don't map to any entries
+  withValueOpt
+  - should return Some(entry) that match the value
+  - should return None when given values that do not map to any entries
+  withValueEither
+  - should return Right(entry) that match the value
+  - should return Left when given values that do not map to any entries
+  in
+  - should return false if given an empty list
+  - should return false if given a list that does not hold the entry
+  - should return true if the list only holds itself
+  - should return true if given a list that has the current entry
+StringEnum
+- should have more than one value (sanity test)
+  withValue
+  - should return entries that match the value
+  - should throw on values that don't map to any entries
+  withValueOpt
+  - should return Some(entry) that match the value
+  - should return None when given values that do not map to any entries
+  withValueEither
+  - should return Right(entry) that match the value
+  - should return Left when given values that do not map to any entries
+  in
+  - should return false if given an empty list
+  - should return false if given a list that does not hold the entry
+  - should return true if the list only holds itself
+  - should return true if given a list that has the current entry
+CharEnum
+- should have more than one value (sanity test)
+  withValue
+  - should return entries that match the value
+  - should throw on values that don't map to any entries
+  withValueOpt
+  - should return Some(entry) that match the value
+  - should return None when given values that do not map to any entries
+  withValueEither
+  - should return Right(entry) that match the value
+  - should return Left when given values that do not map to any entries
+  in
+  - should return false if given an empty list
+  - should return false if given a list that does not hold the entry
+  - should return true if the list only holds itself
+  - should return true if given a list that has the current entry
+ByteEnum
+- should have more than one value (sanity test)
+  withValue
+  - should return entries that match the value
+  - should throw on values that don't map to any entries
+  withValueOpt
+  - should return Some(entry) that match the value
+  - should return None when given values that do not map to any entries
+  withValueEither
+  - should return Right(entry) that match the value
+  - should return Left when given values that do not map to any entries
+  in
+  - should return false if given an empty list
+  - should return false if given a list that does not hold the entry
+  - should return true if the list only holds itself
+  - should return true if given a list that has the current entry
+When using val members in the body
+- should have more than one value (sanity test)
+  withValue
+  - should return entries that match the value
+  - should throw on values that don't map to any entries
+  withValueOpt
+  - should return Some(entry) that match the value
+  - should return None when given values that do not map to any entries
+  withValueEither
+  - should return Right(entry) that match the value
+  - should return Left when given values that do not map to any entries
+  in
+  - should return false if given an empty list
+  - should return false if given a list that does not hold the entry
+  - should return true if the list only holds itself
+  - should return true if given a list that has the current entry
+LongEnum that is nesting an IntEnum
+- should have more than one value (sanity test)
+  withValue
+  - should return entries that match the value
+  - should throw on values that don't map to any entries
+  withValueOpt
+  - should return Some(entry) that match the value
+  - should return None when given values that do not map to any entries
+  withValueEither
+  - should return Right(entry) that match the value
+  - should return Left when given values that do not map to any entries
+  in
+  - should return false if given an empty list
+  - should return false if given a list that does not hold the entry
+  - should return true if the list only holds itself
+  - should return true if given a list that has the current entry
+IntEnum that is nested inside a LongEnum
+- should have more than one value (sanity test)
+  withValue
+  - should return entries that match the value
+  - should throw on values that don't map to any entries
+  withValueOpt
+  - should return Some(entry) that match the value
+  - should return None when given values that do not map to any entries
+  withValueEither
+  - should return Right(entry) that match the value
+  - should return Left when given values that do not map to any entries
+  in
+  - should return false if given an empty list
+  - should return false if given a list that does not hold the entry
+  - should return true if the list only holds itself
+  - should return true if given a list that has the current entry
+Custom IntEnum with private constructors
+- should have more than one value (sanity test)
+  withValue
+  - should return entries that match the value
+  - should throw on values that don't map to any entries
+  withValueOpt
+  - should return Some(entry) that match the value
+  - should return None when given values that do not map to any entries
+  withValueEither
+  - should return Right(entry) that match the value
+  - should return Left when given values that do not map to any entries
+  in
+  - should return false if given an empty list
+  - should return false if given a list that does not hold the entry
+  - should return true if the list only holds itself
+  - should return true if given a list that has the current entry
+AllowAlias
+- should be supported
+finding companion object
+- should work for IntEnums
+- should work for ShortEnum
+- should work for LongEnum
+- should work for StringEnum
+- should work for CharEnum
+- should work for ByteEnum
+compilation failures
+  problematic values
+  - should fail to compile when values are repeated
+  - should compile when the value constructor parameter is not first
+  - should compile even when values are repeated if AllowAlias is extended
+  - should compile when there is a hierarchy of sealed traits
+  - should fail to compile when there are non literal values
+  - should compile when entries accept type parameters
+  trying to use with improper types
+  - should fail to compile when value types do not match with the kind of value enum
+  - should fail to compile for unsealed traits
+  - should fail to compile for unsealed abstract classes
+  - should fail to compile for classes
+  - should fail to compile if the enum is not an object
+Execution took 28ms
+129 tests, 129 passed
+All tests in enumeratum.values.ValueEnumSpec passed
+
+====================================================================================================
+Total duration: 99ms
+1 passed, 1 failed
+
+Failed:
+- enumeratum.EnumSpec:
+  * no values should result in findValues finding nothing - 0 was not equal to 1
+====================================================================================================
