@@ -17,6 +17,9 @@ static BUILD_STATUS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^BUILD (SUCCESSFUL|FAILED)").unwrap());
 static ACTIONABLE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\d+ actionable tasks?").unwrap());
+static CACHE_PROBLEMS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^\d+ problems? (was|were) found .*configuration cache").unwrap()
+});
 
 #[derive(Debug, PartialEq)]
 enum GradlewTask {
@@ -100,12 +103,18 @@ fn new_gradle_command(args: &[String]) -> Command {
     cmd
 }
 
-/// `StreamFilter` for build mode: keeps lines for which `filter_build_line` returns true.
-struct BuildLineFilter;
+/// Keep build diagnostics, including the indented details of a cache problem report.
+#[derive(Default)]
+struct BuildLineFilter {
+    cache_report: bool,
+}
 
 impl StreamFilter for BuildLineFilter {
     fn feed_line(&mut self, line: &str) -> Option<String> {
-        if filter_build_line(line) {
+        self.cache_report = CACHE_PROBLEMS.is_match(line)
+            || (self.cache_report
+                && (line.starts_with("- ") || line.starts_with("  ") || line.trim().is_empty()));
+        if self.cache_report || filter_build_line(line) {
             Some(format!("{}\n", line))
         } else {
             None
@@ -136,7 +145,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             cmd,
             tool,
             &args_display,
-            Box::new(BuildLineFilter),
+            Box::new(BuildLineFilter::default()),
             RunOptions::with_tee("gradlew_build"),
         ),
         GradlewTask::Test => runner::run_filtered(
@@ -177,6 +186,13 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 // ── Build filter predicate ────────────────────────────────────────────────────
 
 fn filter_build_line(line: &str) -> bool {
+    static CACHE_DIAGNOSTIC: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)^(Configuration cache entry (discarded\b|(?:stored|reused) with \d+ problems?\b)|See the complete report at .*configuration-cache)").unwrap()
+    });
+    // Diagnostic forms share the same prefix as successful cache chatter.
+    if CACHE_DIAGNOSTIC.is_match(line) || CACHE_PROBLEMS.is_match(line) {
+        return true;
+    }
     static DAEMON_LINE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(
             r"^(Starting a Gradle Daemon|Daemon will be stopped|Reusing configuration cache|Calculating task graph|> Configure project|Deprecated Gradle features|You can use|For more on this|Configuration cache entry)"
@@ -663,6 +679,47 @@ mod tests {
     }
 
     // ── BUILD FILTER ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_build_configuration_cache_diagnostics() {
+        for summary in [
+            "Configuration cache entry discarded with 1 problem.",
+            "Configuration cache entry discarded with 3 problems.",
+            "Configuration cache entry stored with 1 problem.",
+            "Configuration cache entry reused with 1 problem.",
+            "Configuration Cache entry discarded with 1 problem.",
+        ] {
+            let diagnostics = format!(
+                "1 problem was found storing the configuration cache.\n\
+- Task `:app:build`: cannot serialize object of type 'java.io.InputStream'.\n  See https://docs.gradle.org/current/userguide/configuration_cache_requirements.html\n\
+See the complete report at file:///tmp/build/reports/configuration-cache/report/configuration-cache-report.html\n\
+{summary}\n"
+            );
+            let input = format!(
+                "Reusing configuration cache.\n{diagnostics}> Task :app:build\nBUILD SUCCESSFUL in 1s\n"
+            );
+            let mut filter = BuildLineFilter::default();
+            let output: String = input
+                .lines()
+                .filter_map(|line| filter.feed_line(line))
+                .collect();
+            assert!(output.contains(&diagnostics), "Lost diagnostic: {output}");
+            assert!(output.contains("BUILD SUCCESSFUL"));
+            assert!(!output.contains("Reusing configuration cache"));
+            assert!(!output.contains("> Task :"));
+        }
+    }
+
+    #[test]
+    fn test_build_configuration_cache_success_is_noise() {
+        for line in [
+            "Configuration cache entry stored.",
+            "Configuration cache entry reused.",
+            "Reusing configuration cache.",
+        ] {
+            assert!(!filter_build_line(line), "Unexpected noise: {line}");
+        }
+    }
 
     #[test]
     fn test_build_success_strips_task_lines() {
