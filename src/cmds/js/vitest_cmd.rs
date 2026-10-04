@@ -237,6 +237,11 @@ fn vitest_invocation(args: &[String]) -> TestInvocation {
 }
 
 fn jest_invocation(args: &[String]) -> TestInvocation {
+    // Only a leading `run` is a subcommand; later it can be a flag value (`-t run`).
+    let args = match args.split_first() {
+        Some((first, rest)) if first == "run" => rest,
+        _ => args,
+    };
     let mut effective = vec![
         // Force non-watch mode
         "--no-watch".to_string(),
@@ -256,10 +261,7 @@ fn jest_invocation(args: &[String]) -> TestInvocation {
 }
 
 fn should_skip_jest_arg(arg: &str) -> bool {
-    arg == "run"
-        || arg.starts_with("--json")
-        || arg.starts_with("--reporter")
-        || arg.starts_with("--watch")
+    arg.starts_with("--json") || arg.starts_with("--reporter") || arg.starts_with("--watch")
 }
 
 fn run_framework_test(invocation: TestInvocation, verbose: u8) -> Result<i32> {
@@ -456,6 +458,23 @@ mod tests {
         assert_eq!(
             invocation.args,
             args(&["--no-watch", "--json", "-t", "adds", "src/a.test.js"])
+        );
+    }
+
+    #[test]
+    fn test_jest_invocation_keeps_run_after_first_arg() {
+        let invocation = jest_invocation(&args(&["-t", "run", "src/ok.test.js"]));
+
+        assert_eq!(
+            invocation.args,
+            args(&["--no-watch", "--json", "-t", "run", "src/ok.test.js"])
+        );
+
+        let invocation = jest_invocation(&args(&["run", "-t", "run"]));
+
+        assert_eq!(
+            invocation.args,
+            args(&["--no-watch", "--json", "-t", "run"])
         );
     }
 
