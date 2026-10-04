@@ -17,6 +17,7 @@ use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
 use std::borrow::Cow;
 use std::io::{IsTerminal, Write};
+use std::process::Stdio;
 
 const MAX_RESPONSE_SIZE: usize = 500;
 
@@ -32,6 +33,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     if verbose > 0 {
         eprintln!("Running: curl -s {}", args.join(" "));
     }
+
+    // Forward our stdin: `Command::output()` gives the child an immediate-EOF
+    // stdin, which empties stdin-based bodies (`-d @-`, `--data-binary @-`,
+    // `-T -`, `-K -`). Mirrors `RunOptions::inherit_stdin` (#4084).
+    cmd.stdin(Stdio::inherit());
 
     // Capture stdout as raw bytes (not UTF-8 String) so binary downloads
     // survive intact. `String::from_utf8_lossy` would otherwise replace
