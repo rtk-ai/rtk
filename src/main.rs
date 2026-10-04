@@ -294,11 +294,13 @@ enum Commands {
     /// Ultra-condensed diff (only changed lines)
     ///
     /// Comparing two files exits 0 if identical, 1 if different, and 2 on a
-    /// file-read error. Non-UTF-8 files are compared byte for byte.
+    /// file-read error. A single file operand is a usage error (exit 2), not a
+    /// diff to condense; `-` reads a piped diff from stdin. Non-UTF-8 files are
+    /// compared byte for byte.
     Diff {
         /// First file or - for stdin (unified diff)
         file1: PathBuf,
-        /// Second file (optional if stdin)
+        /// Second file (omit only when the first is - for stdin)
         file2: Option<PathBuf>,
     },
 
@@ -2408,9 +2410,14 @@ fn run_cli() -> Result<i32> {
         Commands::Diff { file1, file2 } => {
             if let Some(f2) = file2 {
                 diff_cmd::run(&file1, &f2, cli.verbose)?
-            } else {
+            } else if file1.as_os_str() == "-" {
                 diff_cmd::run_stdin(cli.verbose)?;
                 0
+            } else {
+                // `diff` rejects a lone file operand as a usage error, exit 2,
+                // before opening it, so `diff <file> && next` stops here too.
+                eprintln!("diff: missing operand after '{}'", file1.display());
+                2
             }
         }
 
@@ -2612,8 +2619,7 @@ fn run_cli() -> Result<i32> {
                 // shared init path; only the default (no --agent) or an explicit
                 // Claude target should install Claude Code files. Without this
                 // guard, `rtk init -g --agent cursor` writes into ~/.claude (#2097).
-                let install_claude =
-                    !opencode && !install_cursor && !install_windsurf && !install_cline;
+                let install_claude = !install_cursor && !install_windsurf && !install_cline;
 
                 hooks::init::run(
                     global,
@@ -2734,9 +2740,8 @@ fn run_cli() -> Result<i32> {
             0
         }
 
-        Commands::Jest { ref args } | Commands::Vitest { ref args } => {
-            vitest_cmd::run_test(&cli.command, args, cli.verbose)?
-        }
+        Commands::Vitest { ref args } => vitest_cmd::run_vitest(args, cli.verbose)?,
+        Commands::Jest { ref args } => vitest_cmd::run_jest(args, cli.verbose)?,
 
         Commands::Ctest { args } => ctest_cmd::run(&args, cli.verbose)?,
 
@@ -3438,6 +3443,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Rg { .. }
             | Commands::AstGrep { .. }
             | Commands::Wget { .. }
+            | Commands::Jest { .. }
             | Commands::Vitest { .. }
             | Commands::Ctest { .. }
             | Commands::Prisma { .. }
@@ -3482,6 +3488,15 @@ mod tests {
     use crate::core::test_isolation;
     use clap::Parser;
     use std::cell::Cell;
+
+    #[test]
+    fn test_jest_and_vitest_get_the_hook_integrity_check() {
+        for framework in ["jest", "vitest"] {
+            let cli = Cli::try_parse_from(["rtk", framework, "src/a.test.js"])
+                .expect("rtk <framework> <path> parses");
+            assert!(is_operational_command(&cli.command), "{framework}");
+        }
+    }
 
     #[test]
     fn test_git_commit_single_message() {
