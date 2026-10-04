@@ -1401,21 +1401,35 @@ pub(super) fn resolve_home_subdir(subdir: &str) -> Result<PathBuf> {
 }
 
 pub fn resolve_claude_dir() -> Result<PathBuf> {
+    let windows_home = if cfg!(windows) {
+        windows_home_fallback()
+    } else {
+        None
+    };
     resolve_claude_dir_from(
         user_dirs::env_path("CLAUDE_CONFIG_DIR").map(PathBuf::from),
         user_dirs::home(),
+        windows_home,
     )
+}
+
+fn windows_home_fallback() -> Option<PathBuf> {
+    user_dirs::env_path("USERPROFILE")
+        .filter(|path| !path.is_empty())
+        .or_else(|| user_dirs::env_path("HOME").filter(|path| !path.is_empty()))
+        .map(PathBuf::from)
 }
 
 pub(super) fn resolve_claude_dir_from(
     claude_dir: Option<PathBuf>,
     home_dir: Option<PathBuf>,
+    windows_home: Option<PathBuf>,
 ) -> Result<PathBuf> {
     resolve_config_dir(
         claude_dir.map(PathBuf::into_os_string),
-        home_dir,
+        home_dir.or_else(|| windows_home.filter(|path| !path.as_os_str().is_empty())),
         CLAUDE_DIR,
-        "Cannot determine Claude config directory. Set $CLAUDE_CONFIG_DIR or $HOME.",
+        "Cannot determine Claude config directory. Set $CLAUDE_CONFIG_DIR, $HOME, or on Windows $USERPROFILE.",
     )
 }
 
