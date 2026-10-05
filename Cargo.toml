@@ -51,6 +51,15 @@ windows-sys = { version = "0.59", features = [
     "Win32_Globalization",
 ] }
 
+# musl's built-in malloc makes ~1,700 mmap/munmap calls and ~8,000 extra page
+# faults per `rtk hook claude`, more than twice the CPU of a glibc build. Use
+# mimalloc on musl targets only; glibc, macOS and Windows builds are unchanged.
+# `no_thp` skips mimalloc's madvise(MADV_HUGEPAGE) on its arena: with transparent
+# huge pages set to `madvise` (the Ubuntu default) it makes the first page faults
+# stall in memory compaction, up to 100+ ms per call on a fragmented host.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1", features = ["no_thp"] }
+
 [build-dependencies]
 toml = "0.8"
 
