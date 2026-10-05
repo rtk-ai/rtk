@@ -824,6 +824,28 @@ mod tests {
             judge("RTK_DISABLED=1 frobnicate x", &ctx),
             DisabledSegment::Unhandled
         );
+        for raw in [
+            "nice RTK_DISABLED=1 docker ps",
+            "nice -n5 RTK_DISABLED=1 docker ps",
+            "timeout 30 RTK_DISABLED=1 docker ps",
+            "command RTK_DISABLED=1 docker ps",
+        ] {
+            assert_eq!(judge(raw, &ctx), DisabledSegment::Bypass, "{raw}");
+        }
+        let mut ctx_mywrap = test_ctx(true);
+        ctx_mywrap.normalized_transparent_prefixes = vec!["mywrap".to_string()];
+        assert_eq!(
+            judge("mywrap RTK_DISABLED=1 docker ps", &ctx_mywrap),
+            DisabledSegment::Bypass
+        );
+        assert_eq!(
+            judge("mywrap RTK_DISABLED=1 docker ps", &ctx),
+            unbypassed("mywrap docker ps")
+        );
+        assert_eq!(
+            judge("xargs -n1 RTK_DISABLED=1 git show", &ctx),
+            unbypassed("xargs -n1 git show")
+        );
     }
 
     #[test]

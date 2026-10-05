@@ -591,7 +591,7 @@ pub fn prefix_contains_rtk_disabled(prefix_part: &str) -> bool {
     prefix_part.contains("RTK_DISABLED=")
 }
 
-/// Whether a token is allowed in an analytics env/sudo prefix before/after
+/// Whether a token is allowed in an analytics env/sudo prefix after
 /// `RTK_DISABLED=`. Deliberately shallow: no sudo flag-arity table — only
 /// `sudo`, `env`, `KEY=VALUE`, and `-flags`. Value-taking sudo options like
 /// `-u root` are therefore not treated as a bypass prefix (see #3808 review).
@@ -599,61 +599,79 @@ fn is_analytics_env_wrapper_token(value: &str) -> bool {
     value == "sudo" || value == "env" || value.contains('=') || value.starts_with('-')
 }
 
-/// Strip an `RTK_DISABLED=` prefix for analytics, including a shallow `sudo` /
-/// `env` / assign / `-flag` wrapper around it.
+/// Strip an `RTK_DISABLED=` prefix for analytics, including any wrapper
+/// around it (`sudo`, `env`, `nice -n 5`, `timeout 30`, `command`, …).
 ///
 /// Unlike [`strip_disabled_prefix`] (rewrite path), this recognizes
-/// `sudo RTK_DISABLED=1 …` and `RTK_DISABLED=1 sudo …` so discover can find
-/// them; whether one counts as a bypass is `judge_disabled_segment`'s call. It is intentionally stricter than a full shell parse:
+/// `nice RTK_DISABLED=1 …` and `RTK_DISABLED=1 sudo …` so discover can find
+/// them; whether one counts as a bypass is `judge_disabled_segment`'s call,
+/// which knows the wrappers the hook rewrites through, so no wrapper list is
+/// kept here. It is intentionally stricter than a full shell parse:
 /// - never looks past `|` / `&&` / other non-`Arg` tokens for `RTK_DISABLED=`
-/// - prefix before `RTK_DISABLED=` may only be wrapper tokens (above)
+/// - the hook, rewriting the line without the assignment, must keep every word
+///   before it in place (`nice rtk docker ps`); if `rtk` lands in front of them
+///   (`rtk docker run -e myimage …`, `rtk ssh host docker ps`) the assignment
+///   is an argument of the filtered command and the hook rewrites it as typed
 /// - after `RTK_DISABLED=`, takes the first non-wrapper command word and
 ///   stops — no scanning into wrapper arguments (`ssh host docker …`)
 pub fn strip_disabled_prefix_for_analytics(cmd: &str) -> (&str, &str) {
     let trimmed = cmd.trim();
     let tokens = tokenize(trimmed);
+    let words = coalesce_words(trimmed, &tokens);
+    let has_non_arg = |i: usize| {
+        let (word, start) = words[i];
+        let end = start + word.len();
+        tokens
+            .iter()
+            .any(|t| t.offset >= start && t.offset < end && t.kind != TokenKind::Arg)
+    };
 
     let mut disabled_index = None;
-    for (i, token) in tokens.iter().enumerate() {
+    for (i, &(word, _)) in words.iter().enumerate() {
         // A non-`Arg` token (operator, redirect) ends the prefix: an
         // `RTK_DISABLED=` after it belongs to another command.
-        if token.kind != TokenKind::Arg {
+        if has_non_arg(i) {
             break;
         }
-        if token.value.starts_with("RTK_DISABLED=") {
+        if word.starts_with("RTK_DISABLED=") {
             disabled_index = Some(i);
             break;
-        }
-        if !is_analytics_env_wrapper_token(&token.value) {
-            // A real command word before RTK_DISABLED= (e.g. `docker run -e
-            // RTK_DISABLED=1 …`) — not an RTK bypass prefix.
-            return strip_disabled_prefix(trimmed);
         }
     }
 
     let Some(disabled_index) = disabled_index else {
         return strip_disabled_prefix(trimmed);
     };
+    let before = &trimmed[..words[disabled_index].1];
+    let after = words
+        .get(disabled_index + 1)
+        .map_or("", |&(_, start)| &trimmed[start..]);
+    let rewrites_as_typed = !before.is_empty()
+        && rewrite_command_precompiled(&format!("{before}{after}"), &[], &[])
+            .is_some_and(|rewritten| !rewritten.starts_with(before));
+    if rewrites_as_typed {
+        return strip_disabled_prefix(trimmed);
+    }
 
-    // Walk past RTK_DISABLED= and any remaining wrapper tokens; the next Arg
+    // Walk past RTK_DISABLED= and any remaining wrapper tokens; the next word
     // is the command word. If it isn't Supported, give up — do not keep
     // searching for an inner Supported command (ssh/xargs/watch/script args).
     let mut i = disabled_index + 1;
-    while i < tokens.len() {
-        let token = &tokens[i];
-        if token.kind != TokenKind::Arg {
+    while i < words.len() {
+        if has_non_arg(i) {
             break;
         }
-        if is_analytics_env_wrapper_token(&token.value) {
+        let (word, start) = words[i];
+        if is_analytics_env_wrapper_token(word) {
             i += 1;
             continue;
         }
-        let candidate = trimmed[token.offset..].trim();
+        let candidate = trimmed[start..].trim();
         if matches!(
             classify_command(candidate),
             Classification::Supported { .. }
         ) {
-            return (&trimmed[..token.offset], candidate);
+            return (&trimmed[..start], candidate);
         }
         break;
     }
@@ -6769,6 +6787,63 @@ mod tests {
             ),
             strip_disabled_prefix("sudo -E ls && docker run -e RTK_DISABLED=1 img git status")
         );
+    }
+
+    #[test]
+    fn test_strip_disabled_prefix_for_analytics_sees_through_any_wrapper() {
+        for (cmd, expected) in [
+            (
+                "nice RTK_DISABLED=1 docker ps",
+                ("nice RTK_DISABLED=1 ", "docker ps"),
+            ),
+            (
+                "nice -n5 RTK_DISABLED=1 docker ps",
+                ("nice -n5 RTK_DISABLED=1 ", "docker ps"),
+            ),
+            (
+                "nice -n 5 RTK_DISABLED=1 docker ps",
+                ("nice -n 5 RTK_DISABLED=1 ", "docker ps"),
+            ),
+            (
+                "timeout 30 RTK_DISABLED=1 docker ps",
+                ("timeout 30 RTK_DISABLED=1 ", "docker ps"),
+            ),
+            (
+                "command RTK_DISABLED=1 docker ps",
+                ("command RTK_DISABLED=1 ", "docker ps"),
+            ),
+            (
+                "nice -n 10 timeout 300 RTK_DISABLED=1 cargo test",
+                ("nice -n 10 timeout 300 RTK_DISABLED=1 ", "cargo test"),
+            ),
+            (
+                "nice RTK_DISABLED=$CI docker ps",
+                ("nice RTK_DISABLED=$CI ", "docker ps"),
+            ),
+            (
+                "xargs -n1 RTK_DISABLED=1 git show",
+                ("xargs -n1 RTK_DISABLED=1 ", "git show"),
+            ),
+        ] {
+            assert_eq!(strip_disabled_prefix_for_analytics(cmd), expected, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_strip_disabled_prefix_for_analytics_keeps_a_supported_commands_argument() {
+        for cmd in [
+            "docker run -e RTK_DISABLED=1 myimage npm run build",
+            "docker run -e RTK_DISABLED=1 git status",
+            "npx cross-env RTK_DISABLED=1 vitest run",
+            "ssh host RTK_DISABLED=1 docker ps",
+            "nice docker ps && RTK_DISABLED=1 docker ps",
+        ] {
+            assert_eq!(
+                strip_disabled_prefix_for_analytics(cmd),
+                strip_disabled_prefix(cmd),
+                "{cmd}"
+            );
+        }
     }
 
     // --- #485: absolute path normalization ---
