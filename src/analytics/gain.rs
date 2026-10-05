@@ -2,6 +2,7 @@
 
 use crate::core::display_helpers::{format_duration, print_period_table};
 use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
+use crate::core::user_dirs;
 use crate::core::utils::{format_tokens, truncate};
 use crate::hooks::hook_check;
 use anyhow::{Context, Result};
@@ -558,7 +559,7 @@ fn resolve_project_scope(project: bool) -> Result<Option<String>> {
     if !project {
         return Ok(None);
     }
-    let cwd = std::env::current_dir().context("Failed to resolve current working directory")?;
+    let cwd = user_dirs::current_dir().context("Failed to resolve current working directory")?;
     let canonical = cwd.canonicalize().unwrap_or(cwd);
     Ok(Some(canonical.to_string_lossy().to_string()))
 }

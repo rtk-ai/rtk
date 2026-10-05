@@ -1,8 +1,10 @@
 //! Regression coverage for the shared hook configuration I/O.
 use std::fs;
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use tempfile::TempDir;
+
+mod common;
 
 #[test]
 fn copilot_cli_rewrite_preserves_vscode_tool_input() {
@@ -14,7 +16,7 @@ fn copilot_cli_rewrite_preserves_vscode_tool_input() {
         "tool_name": "run_in_terminal",
         "tool_input": {"command": "git status", "timeout": 5000, "description": "Inspect changes"}
     });
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let mut child = common::rtk_command()
         .args(["hook", "copilot"])
         .current_dir(temp.path())
         .env("HOME", temp.path())
@@ -59,7 +61,7 @@ fn codex_status_handles_global_and_local_empty_bom_and_invalid_files() {
     let global_path = global.join("hooks.json");
     let local_path = project.join(".codex/hooks.json");
     let show = || {
-        let output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        let output = common::rtk_command()
             .args(["init", "--codex", "--show"])
             .current_dir(&project)
             .env("HOME", temp.path())

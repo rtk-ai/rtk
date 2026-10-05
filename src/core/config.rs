@@ -1,6 +1,8 @@
 //! Reads user settings from config.toml.
 
 use super::constants::{CONFIG_TOML, DEFAULT_HISTORY_DAYS, RTK_DATA_DIR};
+use crate::core::user_dirs;
+use crate::core::user_env;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -275,9 +277,22 @@ pub fn hook_rewrite_params() -> (Vec<String>, Vec<String>) {
 /// same process run (e.g. `hooks::init::save_telemetry_consent`'s load-mutate-save),
 /// since those must always observe a fresh read. Only reach for this from a
 /// caller that never itself writes config.toml.
-pub(crate) fn cached_config() -> &'static Config {
-    static CACHE: std::sync::OnceLock<Config> = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| Config::load().unwrap_or_default())
+///
+/// In a test build every call loads afresh from the calling test's own
+/// `user_dirs::config`: a process-wide cache would hold whichever test's
+/// configuration was read first, and hand it to all the others.
+pub(crate) fn cached_config() -> std::sync::Arc<Config> {
+    #[cfg(not(test))]
+    {
+        static CACHE: std::sync::OnceLock<std::sync::Arc<Config>> = std::sync::OnceLock::new();
+        CACHE
+            .get_or_init(|| std::sync::Arc::new(Config::load().unwrap_or_default()))
+            .clone()
+    }
+    #[cfg(test)]
+    {
+        std::sync::Arc::new(Config::load().unwrap_or_default())
+    }
 }
 
 /// Check if the missing-hook warning is suppressed via env var or config.
@@ -287,7 +302,7 @@ pub(crate) fn cached_config() -> &'static Config {
 /// force off, case-insensitive. Unset, empty, or unrecognised values fall
 /// through to `hooks.suppress_hook_warning` instead of vetoing it.
 pub fn hook_warning_suppressed() -> bool {
-    parse_suppress_hook_warning_env(std::env::var("RTK_SUPPRESS_HOOK_WARNING").ok().as_deref())
+    parse_suppress_hook_warning_env(user_env::var("RTK_SUPPRESS_HOOK_WARNING").as_deref())
         .unwrap_or_else(|| cached_config().hooks.suppress_hook_warning)
 }
 
@@ -483,8 +498,8 @@ pub fn show_recall_mode() -> Result<()> {
     if config.migrated_from_legacy_tee {
         println!("source: legacy [tee] section (auto-migrated at load)");
     }
-    if std::env::var("RTK_RECALL").ok().as_deref() == Some("0")
-        || std::env::var("RTK_TEE").ok().as_deref() == Some("0")
+    if user_env::var("RTK_RECALL").as_deref() == Some("0")
+        || user_env::var("RTK_TEE").as_deref() == Some("0")
     {
         println!("note: RTK_RECALL=0/RTK_TEE=0 is set — recovery disabled for this environment");
     }
@@ -493,8 +508,8 @@ pub fn show_recall_mode() -> Result<()> {
 }
 
 fn get_config_path() -> Result<PathBuf> {
-    let config_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-    Ok(config_dir.join(RTK_DATA_DIR).join(CONFIG_TOML))
+    let rtk_dir = user_dirs::config().unwrap_or_else(|| PathBuf::from(".").join(RTK_DATA_DIR));
+    Ok(rtk_dir.join(CONFIG_TOML))
 }
 
 pub fn show_config() -> Result<()> {

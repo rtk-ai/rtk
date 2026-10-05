@@ -1,9 +1,11 @@
+mod common;
+
 #[cfg(unix)]
 mod unix {
     use std::process::Command;
 
     fn rtk() -> Command {
-        Command::new(env!("CARGO_BIN_EXE_rtk"))
+        crate::common::rtk_command()
     }
 
     #[test]
@@ -436,6 +438,76 @@ mod unix {
             );
         }
     }
+
+    #[test]
+    fn a_single_shell_phrase_falls_back_to_the_platform_shell() {
+        let output = rtk()
+            .args(["run", "echo one two"])
+            .output()
+            .expect("run rtk run");
+
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "one two\n");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("pass arguments separately"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn the_fallback_propagates_the_script_exit_code() {
+        let output = rtk()
+            .args(["err", "true && false"])
+            .output()
+            .expect("run rtk err");
+
+        assert_eq!(output.status.code(), Some(1));
+    }
+
+    #[test]
+    fn single_string_shell_syntax_reaches_the_shell() {
+        for (args, expected_code) in [
+            (["run", "echo x | grep x"], 0),
+            (["summary", "echo a && echo b"], 0),
+            (["test", "cd /tmp && pwd"], 0),
+            (["err", "cargo --version 2>&1"], 0),
+        ] {
+            let output = rtk()
+                .args(args)
+                .output()
+                .unwrap_or_else(|e| panic!("run rtk {args:?}: {e}"));
+            assert_eq!(output.status.code(), Some(expected_code), "{args:?}");
+            assert!(
+                !String::from_utf8_lossy(&output.stdout).contains("command not found"),
+                "{args:?} must run through the shell, not report it missing"
+            );
+        }
+    }
+
+    #[test]
+    fn a_single_bare_word_still_answers_127_without_the_shell() {
+        let output = rtk()
+            .args(["run", "rtk-no-such-binary-4c1f"])
+            .output()
+            .expect("run rtk run");
+
+        assert_eq!(output.status.code(), Some(127));
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("pass arguments separately"),
+            "a bare word must not trigger the compatibility fallback"
+        );
+    }
+
+    #[test]
+    fn the_fallback_requires_a_single_argument() {
+        let output = rtk()
+            .args(["run", "echo one two", "x"])
+            .output()
+            .expect("run rtk run");
+
+        assert_eq!(output.status.code(), Some(127));
+    }
 }
 
 #[cfg(windows)]
@@ -443,7 +515,7 @@ mod windows {
     use std::process::Command;
 
     fn rtk() -> Command {
-        Command::new(env!("CARGO_BIN_EXE_rtk"))
+        crate::common::rtk_command()
     }
 
     /// Direct execution resolves through `%PATH%` (and `PATHEXT`), where the
@@ -470,13 +542,11 @@ mod windows {
     #[test]
     fn quoted_arguments_reach_the_child_intact() {
         let home = tempfile::tempdir().expect("create isolated home");
+        let child = rtk();
         let output = rtk()
-            .args([
-                "run",
-                env!("CARGO_BIN_EXE_rtk"),
-                "rewrite",
-                "git status \"a b\"",
-            ])
+            .arg("run")
+            .arg(child.get_program())
+            .args(["rewrite", "git status \"a b\""])
             .env("HOME", home.path())
             .env("USERPROFILE", home.path())
             .env("XDG_CONFIG_HOME", home.path())

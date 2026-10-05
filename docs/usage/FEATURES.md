@@ -264,7 +264,7 @@ Seul `run` est filtre : soit nomme explicitement, soit implicite quand aucun pos
 **Syntaxe :**
 ```bash
 rtk diff <fichier1> <fichier2>
-rtk diff <fichier1>              # Stdin comme second fichier
+rtk diff -                       # Condense un diff unifie lu sur stdin
 ```
 
 Pour comparer deux fichiers : code de sortie **0** si identiques, **1** si differents,

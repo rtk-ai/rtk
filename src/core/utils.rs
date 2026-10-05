@@ -5,6 +5,10 @@
 //! - Text truncation
 //! - Command execution with error context
 
+#[cfg(test)]
+use crate::core::test_isolation;
+use crate::core::user_dirs;
+use crate::core::user_env;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use regex::Regex;
@@ -14,7 +18,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::LazyLock;
-use std::sync::OnceLock;
 
 /// Compute `days` ago from now, clamped instead of panicking on overflow.
 ///
@@ -185,7 +188,7 @@ pub fn format_cpt(cpt: f64) -> String {
 /// ```
 /// use rtk::utils::join_with_overflow;
 /// let items = vec!["a".to_string(), "b".to_string()];
-/// assert_eq!(join_with_overflow(&items, 5, 3, "items"), "a\nb\n... +2 more items");
+/// assert_eq!(join_with_overflow(&items, 5, 3, "items"), "a\nb\n… +2 more items");
 /// assert_eq!(join_with_overflow(&items, 2, 3, "items"), "a\nb");
 /// ```
 pub fn join_with_overflow(items: &[String], total: usize, max: usize, label: &str) -> String {
@@ -281,12 +284,6 @@ pub fn fallback_tail(output: &str, label: &str, n: usize) -> String {
 }
 
 /// Create a directory owner-only (0700 on Unix), tightening one that already exists.
-/// Serializes tests across modules that mutate process-global recall env vars
-/// (`RTK_RECALL`, `RTK_TEE`): a static declared inside one test module is not
-/// shared with other modules, so those tests would not actually serialize.
-#[cfg(test)]
-pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 pub fn create_private_dir(path: &std::path::Path) -> std::io::Result<()> {
     fs::create_dir_all(path)?;
     set_owner_only(path, 0o700);
@@ -386,7 +383,7 @@ pub fn count_tokens(text: &str) -> usize {
 /// ```
 #[allow(dead_code)]
 pub fn detect_package_manager() -> &'static str {
-    detect_package_manager_in(std::path::Path::new("."))
+    detect_package_manager_in(&user_dirs::in_working_dir("."))
 }
 
 /// Lockfile detection against an explicit directory, so callers (and tests) do
@@ -612,8 +609,14 @@ pub fn resolve_binary(name: &str) -> Result<PathBuf> {
 ///
 /// # Returns
 /// A `Command` configured with the resolved binary path.
+///
+/// In a test build a `git` command comes isolated as
+/// `test_isolation::isolate_git_config` does it, so a test that runs rtk's own
+/// git in-process neither obeys the developer's configuration nor an exported
+/// `GIT_DIR` or `GIT_INDEX_FILE` — which git sets inside a pre-commit hook.
 pub fn resolved_command(name: &str) -> Command {
-    match resolve_binary(name) {
+    #[allow(unused_mut)]
+    let mut cmd = match resolve_binary(name) {
         Ok(path) => Command::new(path),
         Err(e) => {
             // On Windows, resolution failure likely means a .CMD/.BAT wrapper
@@ -628,7 +631,14 @@ pub fn resolved_command(name: &str) -> Command {
 
             Command::new(name)
         }
+    };
+    #[cfg(test)]
+    {
+        if name == "git" {
+            test_isolation::isolate_git_config(&mut cmd);
+        }
     }
+    cmd
 }
 
 /// Return Composer bin directories in precedence order.
@@ -640,14 +650,22 @@ pub fn composer_bin_dirs() -> Vec<PathBuf> {
     // Resolution depends only on the process's env + cwd composer.json, both
     // constant for a single rtk invocation. The rewrite hot path queries this
     // several times per command segment, so read the file once and cache.
-    static CACHE: OnceLock<Vec<PathBuf>> = OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let env_bin_dir = std::env::var("COMPOSER_BIN_DIR").ok();
-            let composer_json = fs::read_to_string("composer.json").ok();
-            composer_bin_dirs_from(env_bin_dir.as_deref(), composer_json.as_deref())
-        })
-        .clone()
+    //
+    // In a test build both belong to the calling test, so nothing is cached.
+    let resolve = || {
+        let env_bin_dir = user_env::var("COMPOSER_BIN_DIR");
+        let composer_json = fs::read_to_string(user_dirs::in_working_dir("composer.json")).ok();
+        composer_bin_dirs_from(env_bin_dir.as_deref(), composer_json.as_deref())
+    };
+    #[cfg(not(test))]
+    {
+        static CACHE: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+        CACHE.get_or_init(resolve).clone()
+    }
+    #[cfg(test)]
+    {
+        resolve()
+    }
 }
 
 pub fn composer_tool_paths(tool: &str) -> Vec<PathBuf> {
@@ -868,7 +886,7 @@ fn output_codepage() -> Option<u16> {
 /// characters that the previous lossy conversion produced.
 #[cfg(windows)]
 fn output_codepage() -> Option<u16> {
-    static CODEPAGE: OnceLock<Option<u16>> = OnceLock::new();
+    static CODEPAGE: std::sync::OnceLock<Option<u16>> = std::sync::OnceLock::new();
     *CODEPAGE.get_or_init(|| {
         #[allow(unsafe_code)]
         // nosemgrep: unsafe-block — read-only Win32 APIs, no memory or thread safety risk

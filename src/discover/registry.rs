@@ -7,8 +7,9 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use super::lexer::{
-    ParsedToken, PipeKind, TokenKind, advance_quote_state, coalesce_words, is_crlf_at,
-    redirect_has_file_target, shell_split, split_on_operators, tokenize, tokenize_with_newlines,
+    ParsedToken, PipeKind, QuoteScan, TokenKind, ansi_c_quote_defeats_lexer, coalesce_words,
+    is_crlf_at, redirect_has_file_target, shell_split, split_on_operators, tokenize,
+    tokenize_with_newlines,
 };
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 
@@ -590,8 +591,80 @@ pub fn prefix_contains_rtk_disabled(prefix_part: &str) -> bool {
     prefix_part.contains("RTK_DISABLED=")
 }
 
+/// Whether a token is allowed in an analytics env/sudo prefix before/after
+/// `RTK_DISABLED=`. Deliberately shallow: no sudo flag-arity table — only
+/// `sudo`, `env`, `KEY=VALUE`, and `-flags`. Value-taking sudo options like
+/// `-u root` are therefore not treated as a bypass prefix (see #3808 review).
+fn is_analytics_env_wrapper_token(value: &str) -> bool {
+    value == "sudo" || value == "env" || value.contains('=') || value.starts_with('-')
+}
+
+/// Strip an `RTK_DISABLED=` prefix for analytics, including a shallow `sudo` /
+/// `env` / assign / `-flag` wrapper around it.
+///
+/// Unlike [`strip_disabled_prefix`] (rewrite path), this recognizes
+/// `sudo RTK_DISABLED=1 …` and `RTK_DISABLED=1 sudo …` so discover can find
+/// them; whether one counts as a bypass is `judge_disabled_segment`'s call. It is intentionally stricter than a full shell parse:
+/// - never looks past `|` / `&&` / other non-`Arg` tokens for `RTK_DISABLED=`
+/// - prefix before `RTK_DISABLED=` may only be wrapper tokens (above)
+/// - after `RTK_DISABLED=`, takes the first non-wrapper command word and
+///   stops — no scanning into wrapper arguments (`ssh host docker …`)
+pub fn strip_disabled_prefix_for_analytics(cmd: &str) -> (&str, &str) {
+    let trimmed = cmd.trim();
+    let tokens = tokenize(trimmed);
+
+    let mut disabled_index = None;
+    for (i, token) in tokens.iter().enumerate() {
+        // A non-`Arg` token (operator, redirect) ends the prefix: an
+        // `RTK_DISABLED=` after it belongs to another command.
+        if token.kind != TokenKind::Arg {
+            break;
+        }
+        if token.value.starts_with("RTK_DISABLED=") {
+            disabled_index = Some(i);
+            break;
+        }
+        if !is_analytics_env_wrapper_token(&token.value) {
+            // A real command word before RTK_DISABLED= (e.g. `docker run -e
+            // RTK_DISABLED=1 …`) — not an RTK bypass prefix.
+            return strip_disabled_prefix(trimmed);
+        }
+    }
+
+    let Some(disabled_index) = disabled_index else {
+        return strip_disabled_prefix(trimmed);
+    };
+
+    // Walk past RTK_DISABLED= and any remaining wrapper tokens; the next Arg
+    // is the command word. If it isn't Supported, give up — do not keep
+    // searching for an inner Supported command (ssh/xargs/watch/script args).
+    let mut i = disabled_index + 1;
+    while i < tokens.len() {
+        let token = &tokens[i];
+        if token.kind != TokenKind::Arg {
+            break;
+        }
+        if is_analytics_env_wrapper_token(&token.value) {
+            i += 1;
+            continue;
+        }
+        let candidate = trimmed[token.offset..].trim();
+        if matches!(
+            classify_command(candidate),
+            Classification::Supported { .. }
+        ) {
+            return (&trimmed[..token.offset], candidate);
+        }
+        break;
+    }
+
+    strip_disabled_prefix(trimmed)
+}
+
 /// Check if a command has RTK_DISABLED= prefix in its env prefix portion.
 pub fn cmd_has_rtk_disabled_prefix(cmd: &str) -> bool {
+    // `gain` has no coverage gate, so this stays on the syntactic rewrite-path
+    // stripper; the wrapper-aware peel is for discover, where the gate judges it.
     let (prefix_part, _) = strip_disabled_prefix(cmd);
     prefix_contains_rtk_disabled(prefix_part)
 }
@@ -765,55 +838,6 @@ const BLOCK_KEYWORDS: &[&str] = &[
     "select", "function", "coproc", "{", "}", "(", ")",
 ];
 
-/// Shared quote-state byte walker used by all line scanners. Yields
-/// `(offset, byte, in_single_before, in_double_before)`, skipping backslash
-/// escape pairs outside single quotes and toggling quote state — the same
-/// model the lexer applies.
-struct QuoteScan<'a> {
-    bytes: &'a [u8],
-    i: usize,
-    // Same `Option<char>` model `tokenize_inner`/`shell_split` use, driven by
-    // the shared `advance_quote_state` — not an independently-maintained pair
-    // of bools, so this can't drift from the lexer's own quote handling.
-    quote: Option<char>,
-}
-
-impl<'a> QuoteScan<'a> {
-    fn new(s: &'a str) -> Self {
-        Self {
-            bytes: s.as_bytes(),
-            i: 0,
-            quote: None,
-        }
-    }
-
-    fn balanced(&self) -> bool {
-        self.quote.is_none()
-    }
-}
-
-impl Iterator for QuoteScan<'_> {
-    type Item = (usize, u8, bool, bool);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.i < self.bytes.len() {
-            let i = self.i;
-            let b = self.bytes[i];
-            if b == b'\\' && self.quote != Some('\'') {
-                self.i += 2;
-                continue;
-            }
-            let item = (i, b, self.quote == Some('\''), self.quote == Some('"'));
-            if b == b'\'' || b == b'"' {
-                self.quote = advance_quote_state(self.quote, b as char);
-            }
-            self.i += 1;
-            return Some(item);
-        }
-        None
-    }
-}
-
 /// Byte offset where an unquoted `#` at the start of a word begins a trailing
 /// comment, if any. The lexer has no comment state, so the independence checks
 /// must ignore comment text themselves: `git log | # keep pipeline` continues
@@ -877,31 +901,6 @@ fn line_has_unbalanced_test_brackets(code: &str) -> bool {
         }
     }
     depth != 0
-}
-
-// Only `\'` inside `$'…'` diverges: bash keeps the string open, the lexer
-// closes it — an extra split point the newline-count check can't see (#3188).
-fn ansi_c_quote_defeats_lexer(cmd: &str) -> bool {
-    let bytes = cmd.as_bytes();
-    let mut ansi_span = false;
-    let mut backslash_run = 0u32;
-    for (i, b, in_single, in_double) in QuoteScan::new(cmd) {
-        if b == b'\'' && !in_double {
-            if !in_single {
-                ansi_span = i > 0 && bytes[i - 1] == b'$';
-                backslash_run = 0;
-            } else if ansi_span && backslash_run % 2 == 1 {
-                return true;
-            }
-        } else if in_single {
-            if b == b'\\' {
-                backslash_run += 1;
-            } else {
-                backslash_run = 0;
-            }
-        }
-    }
-    false
 }
 
 fn quotes_balanced(cmd: &str) -> bool {
@@ -2013,6 +2012,7 @@ fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
 mod tests {
     use super::super::report::RtkStatus;
     use super::*;
+    use crate::core::test_isolation;
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         super::rewrite_command(cmd, excluded, &[])
@@ -4025,27 +4025,11 @@ mod tests {
 
     #[test]
     fn test_rewrite_rtk_disabled_subprocess_warns() {
-        let rtk_bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("debug")
-            .join("rtk");
-        if !rtk_bin.exists() {
-            return;
-        }
-        let rtk_mtime = std::fs::metadata(&rtk_bin)
-            .ok()
-            .and_then(|m| m.modified().ok());
-        let test_mtime = std::env::current_exe()
-            .ok()
-            .and_then(|p| std::fs::metadata(p).ok())
-            .and_then(|m| m.modified().ok());
-        if let (Some(rtk_t), Some(test_t)) = (rtk_mtime, test_mtime)
-            && rtk_t < test_t
-        {
+        if !test_isolation::rtk_binary_is_built() {
             return;
         }
 
-        let output = std::process::Command::new(&rtk_bin)
+        let output = test_isolation::rtk_command()
             .args(["rewrite", "RTK_DISABLED=1 git status"])
             .output()
             .expect("Failed to run rtk");
@@ -6653,9 +6637,56 @@ mod tests {
         assert!(cmd_has_rtk_disabled_prefix(
             "RTK_DISABLED=true git log --oneline"
         ));
+        // `gain`'s warning has no coverage gate, so this predicate stays purely
+        // syntactic (`ENV_PREFIX`): a `sudo`-first bypass is not counted there.
+        // The wrapper-aware peel is discover-only, where the gate can judge it.
+        assert!(!cmd_has_rtk_disabled_prefix(
+            "sudo RTK_DISABLED=1 docker ps"
+        ));
+        assert!(!cmd_has_rtk_disabled_prefix(
+            "sudo -E RTK_DISABLED=1 docker ps"
+        ));
+        assert!(cmd_has_rtk_disabled_prefix("RTK_DISABLED=1 sudo docker ps"));
+        assert!(cmd_has_rtk_disabled_prefix(
+            "RTK_DISABLED=1 sudo -E docker ps"
+        ));
         assert!(!cmd_has_rtk_disabled_prefix("git status"));
         assert!(!cmd_has_rtk_disabled_prefix("rtk git status"));
         assert!(!cmd_has_rtk_disabled_prefix("SOME_VAR=1 git status"));
+        assert!(!cmd_has_rtk_disabled_prefix("sudo docker ps"));
+
+        // Leading RTK_DISABLED= still reports true via strip_disabled_prefix
+        // fallthrough when the command word is unsupported (pre-existing gain
+        // behavior). Discover only counts Supported actual commands, so this
+        // does not create a false bypass example — see analytics strip tests
+        // for the "do not peel into docker/git" guarantee.
+        assert!(cmd_has_rtk_disabled_prefix(
+            "RTK_DISABLED=1 ssh host docker ps"
+        ));
+
+        // sudo-wrapped disabled + unsupported command word: rewrite helper does
+        // not strip sudo, so this is not a detected bypass prefix.
+        assert!(!cmd_has_rtk_disabled_prefix(
+            "sudo -E RTK_DISABLED=1 ./deploy.sh docker ps"
+        ));
+
+        // KuSh #3808: sudo -flag must not make later -e RTK_DISABLED= a prefix.
+        assert!(!cmd_has_rtk_disabled_prefix(
+            "sudo -E docker run -e RTK_DISABLED=1 myimage npm run build"
+        ));
+        assert!(!cmd_has_rtk_disabled_prefix(
+            "sudo docker run -e RTK_DISABLED=1 myimage npm run build"
+        ));
+
+        // KuSh #3808: do not look past && (gain passes unsplit lines).
+        assert!(!cmd_has_rtk_disabled_prefix(
+            "sudo -E ls && docker run -e RTK_DISABLED=1 img git status"
+        ));
+
+        // Shallow parse: value-taking sudo flags (`-u root`) are not a prefix.
+        assert!(!cmd_has_rtk_disabled_prefix(
+            "sudo -E -u root RTK_DISABLED=1 docker ps"
+        ));
     }
 
     #[test]
@@ -6669,6 +6700,75 @@ mod tests {
             ("FOO=1 RTK_DISABLED=1 ", "cargo test")
         );
         assert_eq!(strip_disabled_prefix("git status"), ("", "git status"));
+        // Rewrite helper still does not strip sudo (see ENV_PREFIX / #146).
+        assert_eq!(
+            strip_disabled_prefix("sudo RTK_DISABLED=1 docker ps"),
+            ("", "sudo RTK_DISABLED=1 docker ps")
+        );
+    }
+
+    #[test]
+    fn test_strip_disabled_prefix_for_analytics() {
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("sudo RTK_DISABLED=1 docker ps"),
+            ("sudo RTK_DISABLED=1 ", "docker ps")
+        );
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("sudo -E RTK_DISABLED=1 docker ps"),
+            ("sudo -E RTK_DISABLED=1 ", "docker ps")
+        );
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("RTK_DISABLED=1 sudo docker ps"),
+            ("RTK_DISABLED=1 sudo ", "docker ps")
+        );
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("RTK_DISABLED=1 sudo -E docker ps"),
+            ("RTK_DISABLED=1 sudo -E ", "docker ps")
+        );
+
+        // Wrapper commands: do not peel into arguments / inner Supported cmds.
+        for cmd in [
+            "RTK_DISABLED=1 ssh host docker ps",
+            "RTK_DISABLED=1 xargs -n1 git show",
+            "RTK_DISABLED=1 watch -n1 git status",
+            "sudo -E RTK_DISABLED=1 ./deploy.sh docker ps",
+        ] {
+            let (prefix, actual) = strip_disabled_prefix_for_analytics(cmd);
+            assert_eq!((prefix, actual), strip_disabled_prefix(cmd), "{cmd}");
+            assert!(
+                !actual.starts_with("docker") && !actual.starts_with("git "),
+                "must not attribute inner command for {cmd}: {actual}"
+            );
+        }
+
+        // Every wrapper class is peeled: an assignment after `sudo`, and `env`.
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("sudo FOO=1 RTK_DISABLED=1 docker ps"),
+            ("sudo FOO=1 RTK_DISABLED=1 ", "docker ps")
+        );
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("sudo env RTK_DISABLED=1 docker ps"),
+            ("sudo env RTK_DISABLED=1 ", "docker ps")
+        );
+        // An operator ends the prefix even when only wrapper words precede it.
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("sudo -v && RTK_DISABLED=1 docker ps"),
+            ("", "sudo -v && RTK_DISABLED=1 docker ps")
+        );
+
+        // Buried -e / && cases fall back to the rewrite stripper (no sudo peel).
+        assert_eq!(
+            strip_disabled_prefix_for_analytics(
+                "sudo -E docker run -e RTK_DISABLED=1 myimage npm run build"
+            ),
+            strip_disabled_prefix("sudo -E docker run -e RTK_DISABLED=1 myimage npm run build")
+        );
+        assert_eq!(
+            strip_disabled_prefix_for_analytics(
+                "sudo -E ls && docker run -e RTK_DISABLED=1 img git status"
+            ),
+            strip_disabled_prefix("sudo -E ls && docker run -e RTK_DISABLED=1 img git status")
+        );
     }
 
     // --- #485: absolute path normalization ---

@@ -11,6 +11,8 @@ use serde_json::{Value, json};
 use std::io::{self, Read, Write};
 
 use crate::core::tracking::HookOutcome;
+use crate::core::user_dirs;
+use crate::core::user_env;
 use crate::core::utils::strip_leading_bom;
 
 const STDIN_CAP: usize = 1_048_576; // 1 MiB
@@ -584,7 +586,7 @@ fn gemini_json(decision: &str, rewrite: Option<&str>) -> String {
 
 /// Best-effort audit log when RTK_HOOK_AUDIT=1.
 fn audit_log(action: &str, original: &str, rewritten: &str) {
-    if std::env::var("RTK_HOOK_AUDIT").as_deref() != Ok("1") {
+    if user_env::var("RTK_HOOK_AUDIT").as_deref() != Some("1") {
         return;
     }
     let _ = audit_log_inner(action, original, rewritten);
@@ -599,7 +601,7 @@ fn sanitize_log_field(s: &str) -> String {
 }
 
 fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> {
-    let home = dirs::home_dir()?;
+    let home = user_dirs::home()?;
     let dir = home.join(".local").join("share").join("rtk");
     crate::core::utils::create_private_dir(&dir).ok()?;
     let path = dir.join("hook-audit.log");
@@ -1246,6 +1248,7 @@ fn run_droid_inner_with_rules(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::test_isolation;
     use crate::hooks::permissions::PermissionVerdict;
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
@@ -2485,31 +2488,36 @@ mod tests {
 
     // --- Audit logging ---
 
+    /// Where `audit_log` writes under a test's own root.
+    fn audit_log_under(root: &std::path::Path) -> std::path::PathBuf {
+        root.join(".local")
+            .join("share")
+            .join("rtk")
+            .join("hook-audit.log")
+    }
+
     #[test]
     fn test_audit_log_silent_when_disabled() {
-        temp_env::with_var_unset("RTK_HOOK_AUDIT", || {
-            audit_log("test", "git status", "rtk git status");
+        let root = test_isolation::tempdir();
+        test_isolation::with_root(root.path(), || {
+            user_env::with_vars(&[("RTK_HOOK_AUDIT", None)], || {
+                audit_log("test", "git status", "rtk git status");
+            });
         });
+        assert!(!audit_log_under(root.path()).exists());
     }
 
     #[test]
     fn test_audit_log_format_four_fields() {
-        let tmp = std::env::temp_dir().join("rtk-test-audit");
-        let _ = std::fs::create_dir_all(&tmp);
-        let log_path = tmp.join("hook-audit.log");
-        let _ = std::fs::remove_file(&log_path);
+        let root = test_isolation::tempdir();
+        test_isolation::with_root(root.path(), || {
+            user_env::with_vars(&[("RTK_HOOK_AUDIT", Some("1"))], || {
+                audit_log("rewrite", "git status", "rtk git status");
+            });
+        });
 
-        {
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path)
-                .unwrap();
-            let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S");
-            writeln!(file, "{} | rewrite | git status | rtk git status", ts).unwrap();
-        }
-
-        let content = std::fs::read_to_string(&log_path).unwrap();
+        let content =
+            std::fs::read_to_string(audit_log_under(root.path())).expect("audit log written");
         let parts: Vec<&str> = content.trim().split(" | ").collect();
         assert_eq!(
             parts.len(),
@@ -2520,8 +2528,6 @@ mod tests {
         assert_eq!(parts[1], "rewrite");
         assert_eq!(parts[2], "git status");
         assert_eq!(parts[3], "rtk git status");
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // --- Adversarial tests ---
@@ -2676,12 +2682,11 @@ mod tests {
         // and the tool call is blocked.
         //
         // Uses run_gemini_inner_with_rules (explicit allow-all rules) rather
-        // than run_gemini_inner: the latter's decide_hook_action reads the
-        // REAL ~/.gemini/settings.json (and project .gemini/settings.json),
-        // making the decision assertion depend on whatever is on the
-        // machine running the test. Both share the same parse/strip/render
-        // core (run_gemini_inner_impl) that production run_gemini uses, so
-        // this still exercises the real BOM-stripping path.
+        // than run_gemini_inner, so the decision assertion rests on the rules
+        // it states rather than on whichever settings files resolve. Both
+        // share the same parse/strip/render core (run_gemini_inner_impl) that
+        // production run_gemini uses, so this still exercises the real
+        // BOM-stripping path.
         let payload = json!({
             "tool_name": "run_shell_command",
             "tool_input": { "command": "git status" }

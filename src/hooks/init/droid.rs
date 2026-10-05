@@ -1,6 +1,7 @@
 //! Droid agent: hook install/uninstall helpers.
 
 use super::*;
+use crate::core::user_dirs;
 use crate::hooks::constants::{
     DROID_DIR, DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOK_COMMAND, DROID_HOOKS_FILE,
     DROID_HOOKS_SUBDIR, DROID_SETTINGS_FILE, PRE_TOOL_USE_KEY,
@@ -16,7 +17,7 @@ use std::ffi::OsString;
 /// - Global: `$FACTORY_HOME_OVERRIDE/.factory` or `~/.factory`.
 /// - Project: caller passes `.factory` relative to project root.
 fn resolve_droid_dir() -> Result<PathBuf> {
-    resolve_droid_dir_from_env(dirs::home_dir(), std::env::var_os(DROID_HOME_ENV))
+    resolve_droid_dir_from_env(user_dirs::home(), user_dirs::env_path(DROID_HOME_ENV))
 }
 
 /// Unlike the other agents, `FACTORY_HOME_OVERRIDE` replaces the home directory and
@@ -142,7 +143,7 @@ pub fn run_droid_mode(global: bool, ctx: InitContext) -> Result<()> {
     let droid_dir = if global {
         resolve_droid_dir()?
     } else {
-        std::env::current_dir()
+        user_dirs::current_dir()
             .context("Failed to read current directory")?
             .join(DROID_DIR)
     };
@@ -308,7 +309,7 @@ pub fn uninstall_droid(global: bool, ctx: InitContext) -> Result<()> {
     let droid_dir = if global {
         resolve_droid_dir()?
     } else {
-        std::env::current_dir()
+        user_dirs::current_dir()
             .context("Failed to read current directory")?
             .join(DROID_DIR)
     };

@@ -1,4 +1,5 @@
 //! Applies TOML-defined filter rules to command output.
+
 ///
 /// Provides a declarative pipeline of 8 stages that can be configured
 /// via TOML files. Lookup priority (first match wins):
@@ -23,6 +24,8 @@
 ///   7. max_lines            — absolute line cap
 ///   8. on_empty             — message if result is empty
 use super::constants::RTK_META_COMMANDS;
+use crate::core::user_dirs;
+use crate::core::user_env;
 use regex::{Regex, RegexSet};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -188,6 +191,10 @@ impl TomlFilterRegistry {
     fn load() -> Self {
         let mut filters = Vec::new();
 
+        // The registry is built once per process. In a test build the user and
+        // project filters it would read belong to whichever test's directories
+        // were current first, so it holds the built-in filters alone.
+        #[cfg(not(test))]
         for path in crate::hooks::trust::gated_filter_paths() {
             Self::extend_with_trusted(&mut filters, &path);
         }
@@ -409,7 +416,7 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
 static REGISTRY: LazyLock<TomlFilterRegistry> = LazyLock::new(TomlFilterRegistry::load);
 
 pub fn toml_disabled() -> bool {
-    std::env::var("RTK_NO_TOML").ok().as_deref() == Some("1")
+    user_env::var("RTK_NO_TOML").as_deref() == Some("1")
 }
 
 pub fn active_filter_summaries(content: &str) -> Vec<(String, String)> {
@@ -738,10 +745,10 @@ pub fn run_filter_tests(filter_name_opt: Option<&str>) -> VerifyResults {
     );
 
     // Trust-gated: only verify project-local filters if trusted (SA-2025-RTK-002)
-    let project_path = std::path::Path::new(".rtk/filters.toml");
+    let project_path = user_dirs::in_working_dir(".rtk/filters.toml");
     if project_path.exists() {
         let (trust_status, verified_content) =
-            crate::hooks::trust::check_trust_with_content(project_path)
+            crate::hooks::trust::check_trust_with_content(&project_path)
                 .unwrap_or((crate::hooks::trust::TrustStatus::Untrusted, None));
         match trust_status {
             crate::hooks::trust::TrustStatus::Trusted
@@ -848,7 +855,7 @@ fn collect_test_outcomes(
 /// Find a matching filter from the global registry. Initialises the registry
 /// lazily on first call. Returns `None` if no filter matches.
 pub fn find_matching_filter(command: &str) -> Option<&'static CompiledFilter> {
-    if std::env::var("RTK_TOML_DEBUG").is_ok() {
+    if user_env::var("RTK_TOML_DEBUG").is_some() {
         eprintln!(
             "[rtk:toml] looking up filter for: {:?} ({} filters loaded)",
             command,
@@ -856,7 +863,7 @@ pub fn find_matching_filter(command: &str) -> Option<&'static CompiledFilter> {
         );
     }
     let result = find_filter_in(command, &REGISTRY.filters);
-    if std::env::var("RTK_TOML_DEBUG").is_ok() {
+    if user_env::var("RTK_TOML_DEBUG").is_some() {
         match result {
             Some(f) => eprintln!("[rtk:toml] matched filter: '{}'", f.name),
             None => eprintln!("[rtk:toml] no filter matched — passthrough"),
@@ -872,6 +879,35 @@ pub fn find_matching_filter(command: &str) -> Option<&'static CompiledFilter> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::test_isolation;
+
+    /// The trust gate the registry puts on user and project filters, which a
+    /// test build's registry does not load: an untrusted file adds nothing, a
+    /// trusted one adds its filters, and one changed since adds nothing again.
+    #[test]
+    fn user_filters_load_only_while_trusted() {
+        let root = test_isolation::tempdir();
+        test_isolation::with_root(root.path(), || {
+            let path = root.path().join("filters.toml");
+            let trusted = "schema_version = 1\n[filters.planted]\nmatch_command = \"^planted\"\n";
+            std::fs::write(&path, trusted).expect("write filters");
+            let loaded = || {
+                let mut filters = Vec::new();
+                TomlFilterRegistry::extend_with_trusted(&mut filters, &path);
+                filters.len()
+            };
+
+            assert_eq!(loaded(), 0, "untrusted");
+            crate::hooks::trust::trust_filter_with_hash(
+                &path,
+                &crate::hooks::integrity::compute_hash_bytes(trusted.as_bytes()),
+            )
+            .expect("trust the filters");
+            assert_eq!(loaded(), 1, "trusted");
+            std::fs::write(&path, format!("{trusted}# edited\n")).expect("edit filters");
+            assert_eq!(loaded(), 0, "changed since it was trusted");
+        });
+    }
 
     // Helper: build a CompiledFilter from inline TOML for tests.
     // Never touches the lazy registry.

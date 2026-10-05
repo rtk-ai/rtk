@@ -398,7 +398,7 @@ The most effective way to use rtk. The hook transparently intercepts Bash comman
 
 ```bash
 rtk init -g                 # Install hook + RTK.md (recommended)
-rtk init -g --opencode      # OpenCode plugin (instead of Claude Code)
+rtk init -g --opencode      # Claude setup + OpenCode plugin
 rtk init -g --auto-patch    # Non-interactive (CI/CD)
 rtk init -g --hook-only     # Hook only, no RTK.md
 rtk init --show             # Verify installation
@@ -423,7 +423,7 @@ Prefer [`winget`](#winget-windows) if you can — it handles PATH for you.
 rtk init -g
 ```
 
-**Upgrading from an older install?** If you set RTK up before v0.37.2 you may still have the legacy `rtk-rewrite.sh` shell hook (which does need a Unix shell). Re-run `rtk init -g` to migrate to the native binary hook.
+**Upgrading from an older install?** Before v0.37.2, `rtk init -g` on native Windows fell back to CLAUDE.md injection and registered no hook. Re-run `rtk init -g` and answer `y` when it asks to patch `settings.json` (or pass `--auto-patch`) to install the native binary hook.
 
 **Prerequisites**: some filters shell out to [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`). Install it and keep it on your PATH (e.g. `winget install BurntSushi.ripgrep.MSVC`) to avoid `Binary 'rg' not found on PATH` warnings.
 

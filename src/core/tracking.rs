@@ -29,6 +29,8 @@
 //!
 //! See [docs/tracking.md](../docs/tracking.md) for full documentation.
 
+use crate::core::user_dirs;
+use crate::core::user_env;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
@@ -43,7 +45,7 @@ use std::time::Instant;
 
 /// Get the canonical project path string for the current working directory.
 fn current_project_path_string() -> String {
-    std::env::current_dir()
+    user_dirs::current_dir()
         .ok()
         .and_then(|p| p.canonicalize().ok())
         .map(|p| p.to_string_lossy().to_string())
@@ -63,7 +65,7 @@ fn project_filter_params(project_path: Option<&str>) -> (Option<String>, Option<
     }
 }
 
-use super::constants::{DEFAULT_HISTORY_DAYS, HISTORY_DB, RTK_DATA_DIR};
+use super::constants::{DEFAULT_HISTORY_DAYS, HISTORY_DB};
 
 /// Main tracking interface for recording and querying command history.
 ///
@@ -1586,7 +1588,7 @@ fn categorize_command(rtk_cmd: &str) -> String {
         "cargo" => "cargo",
         "npm" | "npx" | "pnpm" | "bun" | "bunx" | "deno" | "vitest" | "tsc" | "lint"
         | "prettier" | "next" | "playwright" | "prisma" => "js",
-        "pytest" | "ruff" | "mypy" | "pip" | "sqlfluff" => "python",
+        "pytest" | "ruff" | "mypy" | "pip" | "sqlfluff" | "uv" => "python",
         "go" | "golangci-lint" => "go",
         "docker" | "kubectl" => "cloud",
         "rspec" | "rubocop" | "rake" => "ruby",
@@ -1620,19 +1622,28 @@ fn db_sidecars(db_path: &std::path::Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// The database to open: `RTK_DB_PATH` where set, otherwise the configured or
+/// default path. In a test build it is the file the test named in
+/// `RTK_DB_PATH` or its own configuration, or else its scratch database: an
+/// exported `RTK_DB_PATH` names the developer's real one and is never read,
+/// and neither is their `config.toml`.
+///
+/// A test exercising a command path reaches `TimedExecution::track`, which
+/// builds its own `Tracker` and takes no path, leaving it no way to redirect
+/// itself. The rows it writes are indistinguishable from real usage in the
+/// developer's history.
 pub(crate) fn get_db_path() -> Result<PathBuf> {
     // Priority 1: Environment variable RTK_DB_PATH
-    if let Ok(custom_path) = std::env::var("RTK_DB_PATH") {
+    if let Some(custom_path) = user_env::var("RTK_DB_PATH") {
         return Ok(PathBuf::from(custom_path));
     }
 
-    // Priority 2: Configuration file. Reads the process-wide cached config (see
-    // `config::cached_config`), not a fresh `Config::load()`: this runs inside
-    // `Tracker::new()`, which `log_hook_decision` now calls on every single
-    // PreToolUse hook invocation — `hook_rewrite_params()` (called earlier in the
-    // same hook invocation, via `hooks::decision::decide`) already reads config too, so
-    // without caching that's two full disk-read-plus-TOML-parse round trips per
-    // Bash tool call instead of one.
+    // Priority 2: Configuration file, through `config::cached_config` rather
+    // than a fresh `Config::load()`. This runs inside `Tracker::new()`, which
+    // `log_hook_decision` calls on every PreToolUse hook invocation after
+    // `hook_rewrite_params()` has already read the config, so without the
+    // cache each Bash tool call would read and parse it twice. (A test build
+    // loads afresh every time; see `cached_config`.)
     if let Some(db_path) = crate::core::config::cached_config()
         .tracking
         .database_path
@@ -1642,8 +1653,7 @@ pub(crate) fn get_db_path() -> Result<PathBuf> {
     }
 
     // Priority 3: Default platform-specific location
-    let data_dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
-    Ok(data_dir.join(RTK_DATA_DIR).join(HISTORY_DB))
+    Ok(user_dirs::data_under(".").join(HISTORY_DB))
 }
 
 /// Whether to gate schema migrations behind `user_version` (the hot-path
@@ -1804,7 +1814,7 @@ pub fn estimate_tokens_from_len(len: usize) -> usize {
 ///
 /// # Examples
 ///
-/// ```no_run
+/// ```ignore
 /// use rtk::tracking::TimedExecution;
 ///
 /// let timer = TimedExecution::start();
@@ -2090,14 +2100,7 @@ mod command_label_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// Serializes tests that mutate the process-global `RTK_DB_PATH` env var.
-    /// Must be a single shared static: a `static` declared inside each test
-    /// function body is a distinct static per function, not a shared lock, so
-    /// tests using separate locals don't actually serialize against each other
-    /// and can race on the same global env var under parallel `cargo test`.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::core::test_isolation;
 
     // 1. estimate_tokens — verify ~4 chars/token ratio
     #[test]
@@ -2266,15 +2269,13 @@ mod tests {
     // record once 5+ other rows land first.
     #[test]
     fn test_timed_execution_records_time() {
-        use std::env;
-        let _guard = ENV_LOCK.lock().unwrap();
-        let db_path = env::temp_dir().join(format!(
+        let db_path = test_isolation::scratch_dir().join(format!(
             "rtk_test_timed_exec_records_{}.db",
             std::process::id()
         ));
         // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
         let _ = std::fs::remove_file(&db_path);
-        temp_env::with_var("RTK_DB_PATH", Some(&db_path), || {
+        user_env::with_path("RTK_DB_PATH", Some(&db_path), || {
             let timer = TimedExecution::start();
             std::thread::sleep(std::time::Duration::from_millis(10));
             timer.track("test cmd", "rtk test", "raw input data", "filtered");
@@ -2292,15 +2293,13 @@ mod tests {
     // Same isolation rationale as test_timed_execution_records_time above.
     #[test]
     fn test_timed_execution_passthrough() {
-        use std::env;
-        let _guard = ENV_LOCK.lock().unwrap();
-        let db_path = env::temp_dir().join(format!(
+        let db_path = test_isolation::scratch_dir().join(format!(
             "rtk_test_timed_exec_passthrough_{}.db",
             std::process::id()
         ));
         // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
         let _ = std::fs::remove_file(&db_path);
-        temp_env::with_var("RTK_DB_PATH", Some(&db_path), || {
+        user_env::with_path("RTK_DB_PATH", Some(&db_path), || {
             let timer = TimedExecution::start();
             timer.track_passthrough("git tag", "rtk git tag (passthrough)");
 
@@ -2325,22 +2324,16 @@ mod tests {
     // Combined into one test so the set and unset cases cannot interleave.
     #[test]
     fn test_db_path_env_and_default() {
-        use std::env;
-        let _guard = ENV_LOCK.lock().unwrap();
-
-        let custom_path = env::temp_dir().join("rtk_test_custom.db");
-        temp_env::with_var("RTK_DB_PATH", Some(&custom_path), || {
+        let custom_path = test_isolation::scratch_dir().join("rtk_test_custom.db");
+        user_env::with_path("RTK_DB_PATH", Some(&custom_path), || {
             let db_path = get_db_path().expect("Failed to get db path");
             assert_eq!(db_path, custom_path);
         });
 
-        temp_env::with_var_unset("RTK_DB_PATH", || {
+        user_env::with_vars(&[("RTK_DB_PATH", None)], || {
+            // This test's scratch database, never the developer's own.
             let db_path = get_db_path().expect("Failed to get db path");
-            assert!(
-                db_path.ends_with("rtk/history.db"),
-                "expected default path ending with rtk/history.db, got: {}",
-                db_path.display()
-            );
+            assert_eq!(db_path, test_isolation::db_path());
         });
     }
 
@@ -2349,14 +2342,11 @@ mod tests {
     // still works (and doesn't re-run/fail the migration).
     #[test]
     fn test_schema_migration_gated_by_user_version() {
-        use std::env;
-        let _guard = ENV_LOCK.lock().unwrap();
-
-        let db_path =
-            env::temp_dir().join(format!("rtk_test_schema_version_{}.db", std::process::id()));
+        let db_path = test_isolation::scratch_dir()
+            .join(format!("rtk_test_schema_version_{}.db", std::process::id()));
         // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
         let _ = std::fs::remove_file(&db_path);
-        temp_env::with_var("RTK_DB_PATH", Some(&db_path), || {
+        user_env::with_path("RTK_DB_PATH", Some(&db_path), || {
             let tracker = Tracker::new().expect("first open should run migrations");
             let version: i64 = tracker
                 .conn
@@ -2383,15 +2373,13 @@ mod tests {
     // init` relies on instead of a dedicated repair flag.
     //
     // Exercises the migration function directly on its own throwaway on-disk
-    // connection rather than going through ensure_schema_fresh()/Tracker::new()
-    // (which read the process-global RTK_DB_PATH env var): this test doesn't
-    // need the ENV_LOCK serialization those need, and — critically — never
-    // leaves the *shared default* tracking DB in a dropped-table state where
-    // an unrelated, concurrently-running test that opens Tracker::new()
-    // without its own RTK_DB_PATH override could observe it.
+    // connection rather than going through ensure_schema_fresh()/Tracker::new(),
+    // so it never leaves the *shared default* tracking DB in a dropped-table
+    // state where an unrelated, concurrently-running test that opens
+    // Tracker::new() without its own RTK_DB_PATH could observe it.
     #[test]
     fn test_run_schema_migrations_heals_dropped_table_when_forced() {
-        let db_path = std::env::temp_dir().join(format!(
+        let db_path = test_isolation::scratch_dir().join(format!(
             "rtk_test_heal_migrations_{}.db",
             std::process::id()
         ));
@@ -2783,6 +2771,13 @@ mod tests {
     fn test_categorize_bun_and_deno_as_js() {
         for cmd in ["rtk bun install", "rtk bunx cowsay", "rtk deno test"] {
             assert_eq!(categorize_command(cmd), "js", "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_categorize_uv_as_python() {
+        for cmd in ["rtk uv sync", "rtk uv run pytest", "rtk uv pip install foo"] {
+            assert_eq!(categorize_command(cmd), "python", "{cmd}");
         }
     }
 
