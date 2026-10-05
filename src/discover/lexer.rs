@@ -181,8 +181,8 @@ fn coalesce_words<'a>(cmd: &'a str, tokens: &[ParsedToken]) -> Vec<(&'a str, usi
 /// passthrough, not when it means a wrong rewrite.
 ///
 /// Callers that hand the words to `core::arg_tokenizer` keep the offsets alongside:
-/// `Token::source_index` indexes the words, so `spans[token.source_index]` is the way back to a
-/// slice of the original command string.
+/// `Token::source_index` indexes the slice that was tokenized, so add that slice's own start
+/// offset before indexing `spans` -- tokenizing `&words[1..]` means `spans[source_index + 1]`.
 pub(crate) fn words_and_spans(cmd: &str) -> (Vec<&str>, Vec<usize>) {
     coalesce_words(cmd, &tokenize(cmd)).into_iter().unzip()
 }
