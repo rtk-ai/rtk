@@ -41,7 +41,11 @@ pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
 }
 
 fn go_test_wrapper(input: &str) -> String {
-    crate::cmds::go::go_cmd::filter_go_test_json(input)
+    if crate::cmds::go::go_cmd::is_go_test_json(input) {
+        crate::cmds::go::go_cmd::filter_go_test_json(input)
+    } else {
+        input.to_string()
+    }
 }
 
 fn git_status_wrapper(input: &str) -> String {
@@ -353,6 +357,32 @@ mod tests {
     #[test]
     fn test_resolve_filter_pytest() {
         assert!(resolve_filter("pytest").is_some());
+    }
+
+    #[test]
+    fn go_test_wrapper_preserves_non_event_input() {
+        for input in [
+            "",
+            " \n\t\n",
+            "ok  \texample.com/proj\t0.001s\nFAIL\texample.com/other\t0.002s\n",
+            r#"{"Action":"pass"}"#,
+            r#"{"Action":"unknown","Package":"example.com/proj"}"#,
+            r#"{"Action":"output","Package":"example.com/proj","Output":42}"#,
+        ] {
+            assert_eq!(go_test_wrapper(input), input);
+        }
+    }
+
+    #[test]
+    fn go_test_wrapper_keeps_build_event_filtering() {
+        let input = concat!(
+            "{\"Action\":\"build-output\",\"ImportPath\":\"example.com/proj\",\"Output\":\"main.go:4: undefined: missing\\n\"}\n",
+            "{\"Action\":\"build-fail\",\"ImportPath\":\"example.com/proj\"}\n",
+            "{\"Action\":\"fail\",\"Package\":\"example.com/proj\",\"FailedBuild\":\"example.com/proj\"}\n",
+        );
+        let shown = go_test_wrapper(input);
+        assert!(shown.contains("main.go:4: undefined: missing"), "{shown}");
+        assert_ne!(shown, input);
     }
 
     #[test]

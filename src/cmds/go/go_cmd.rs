@@ -291,6 +291,30 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
     Ok(if exit_code == 1 { 0 } else { exit_code })
 }
 
+/// Recognize a complete event stream before filtering piped input. The runner
+/// controls Go's output format, but `pipe` may receive plain text, unrelated JSON,
+/// or merged stderr. Preserve all of those rather than silently discarding lines.
+pub(crate) fn is_go_test_json(input: &str) -> bool {
+    let mut saw_event = false;
+    for line in input.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let Ok(event) = serde_json::from_str::<GoTestEvent>(line) else {
+            return false;
+        };
+        let identity = match event.action.as_str() {
+            "start" | "run" | "pause" | "cont" | "pass" | "bench" | "fail" | "output" | "skip" => {
+                event.package
+            }
+            "build-output" | "build-fail" => event.import_path,
+            _ => return false,
+        };
+        if identity.is_none_or(|name| name.is_empty()) {
+            return false;
+        }
+        saw_event = true;
+    }
+    saw_event
+}
+
 /// Parse go test -json output (NDJSON format)
 pub(crate) fn filter_go_test_json(output: &str) -> String {
     let mut packages: HashMap<String, PackageResult> = HashMap::new();
