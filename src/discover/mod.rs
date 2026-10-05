@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use provider::{ClaudeProvider, SessionProvider};
 use registry::{
-    Classification, ExcludePattern, category_avg_tokens, classify_command, split_command_chain,
+    Classification, category_avg_tokens, classify_command, split_command_chain,
     strip_disabled_prefix_for_analytics,
 };
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
@@ -51,39 +51,26 @@ impl Coverage {
     }
 }
 
-/// Preloaded permission rules, read from disk once per `discover` run instead of
-/// once per command. `check_command_for` re-reads every settings file on disk on
-/// every call; over a large history (tens of thousands of commands) that dominated
-/// runtime (see rtk-ai/rtk#3206 review: 80s vs 2.5s on the measured path).
-struct PermissionRules {
-    deny: Vec<String>,
-    ask: Vec<String>,
-    allow: Vec<String>,
-}
-
 /// Everything `hook_coverage`/`estimate_hook_coverage` need to judge a command,
 /// besides the command (and `tool_use_id`) itself — built once per `discover` run
 /// and passed by reference to every per-command call.
 ///
-/// Grouped into one struct rather than several individual positional params: with
-/// `excluded`/`transparent_prefixes` both `Vec<String>`, a swapped argument order
-/// at a call site would compile silently and misclassify RTK_DISABLED bypass
-/// coverage (code-review finding on rtk-ai/rtk#3206's fixup round).
-///
-/// `exclude_patterns`/`normalized_transparent_prefixes` are `registry::
-/// rewrite_command`'s exclude-pattern regexes and normalized prefixes,
-/// precompiled once here instead of inside `rewrite_command` on every call — that
-/// recompilation is exactly the "recompute per command instead of once per run"
-/// class of cost this PR's `PermissionRules`/`hook_status` caching already fixed
-/// elsewhere, left as a hot-loop cost in `estimate_hook_coverage_with_verdict`'s
-/// `registry::rewrite_command` call until now (code-review finding on rtk-ai/rtk#3206's
-/// second fixup round).
+/// The rewrite estimate uses the `exclude_commands` and transparent prefixes
+/// `rules` were read beside, compiled once per run as the rules are loaded
+/// once, so a wrapper the verdict sees past is one the estimate sees past too.
 struct CoverageContext {
     hook_log: HashMap<String, HookDecisionRecord>,
     hook_installed: bool,
-    rules: PermissionRules,
-    exclude_patterns: Vec<ExcludePattern>,
-    normalized_transparent_prefixes: Vec<String>,
+    /// Claude Code's rules, read from disk once per run instead of once per
+    /// command: over tens of thousands of commands, re-reading every settings
+    /// file dominated the runtime (80s vs 2.5s on the measured path).
+    rules: permissions::HostRules,
+}
+
+/// The rules `discover` judges transcript commands against: Claude Code's,
+/// whose transcripts it reads.
+fn coverage_rules() -> permissions::HostRules {
+    permissions::HostRules::load(permissions::Host::Claude, None)
 }
 
 /// Determine whether `cmd` was (or, absent a log entry, likely would have been)
@@ -107,9 +94,9 @@ struct CoverageContext {
 /// being asked about one `part` of it — passing an isolated segment here would
 /// silently blind the `Deny`/`Ask` permission check to sibling segments (a
 /// chain-wide deny rule matching only `a` would go undetected when checking `b` in
-/// isolation, since `permissions::check_command_with_rules` only re-derives the
+/// isolation, since `HostRules::verdict` only re-derives the
 /// chain from whatever string it's given). The real rewrite (`registry::
-/// rewrite_command`) genuinely is best-effort *per segment* though — it can
+/// rewrite_command_precompiled`) genuinely is best-effort *per segment* though — it can
 /// rewrite just `a` and leave an unsupported `b` untouched — so `rewrite_cmd` is
 /// deliberately the isolated `part`, not `raw_cmd`. Neither `Measured` (one
 /// `hook_decisions` row per `tool_use_id`, no per-segment detail) nor `Estimated`
@@ -146,11 +133,11 @@ fn hook_coverage(
 /// engine actually evaluates (`hooks::hook_cmd::decide_hook_action` never splits
 /// or strips it; see `hook_coverage`'s doc comment for why an isolated chain
 /// segment would blind the deny/ask check to sibling segments). `rewrite_cmd` is
-/// passed to `registry::rewrite_command`, which is genuinely best-effort
+/// passed to `registry::rewrite_command_precompiled`, which is genuinely best-effort
 /// *per segment* — pass the isolated segment being evaluated. For the RTK_DISABLED=
 /// bypass call site specifically, `rewrite_cmd` must also have its `RTK_DISABLED=`
 /// words removed (`without_rtk_disabled` does it, keeping any wrapper),
-/// since `rewrite_command` itself detects and refuses a raw
+/// since `rewrite_command_precompiled` itself detects and refuses a raw
 /// `RTK_DISABLED=` prefix (registry.rs #345) — passing it unremoved there would
 /// make every bypassed command register as never-covered regardless of whether
 /// it's otherwise supported, defeating the point of the RTK_DISABLED bucket.
@@ -165,13 +152,7 @@ fn estimate_hook_coverage(permission_cmd: &str, rewrite_cmd: &str, ctx: &Coverag
     if !ctx.hook_installed {
         return false;
     }
-    let verdict = permissions::check_command_with_rules_and_prefixes(
-        permission_cmd,
-        &ctx.rules.deny,
-        &ctx.rules.ask,
-        &ctx.rules.allow,
-        &ctx.normalized_transparent_prefixes,
-    );
+    let verdict = ctx.rules.verdict(permission_cmd);
     estimate_hook_coverage_with_verdict(permission_cmd, rewrite_cmd, verdict, ctx)
 }
 
@@ -192,8 +173,8 @@ fn estimate_hook_coverage_with_verdict(
         && !lexer::contains_unattestable_construct(permission_cmd)
         && registry::rewrite_command_precompiled(
             rewrite_cmd,
-            &ctx.exclude_patterns,
-            &ctx.normalized_transparent_prefixes,
+            ctx.rules.exclude_patterns(),
+            ctx.rules.transparent_prefixes(),
         )
         .is_some()
 }
@@ -370,16 +351,8 @@ pub fn run(
     // today's hook-install state; fall back to a heuristic only for history that
     // predates logging (or isn't Claude Code).
     let hook_installed = hook_status() != HookStatus::Missing;
-    let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
-    // Compiled once here (see `CoverageContext`'s doc comment), not once per
-    // command inside `registry::rewrite_command`.
-    let exclude_patterns = registry::compile_exclude_patterns(&excluded);
-    let normalized_transparent_prefixes =
-        registry::normalize_transparent_prefixes(&transparent_prefixes);
-
-    // Loaded once up front (see `PermissionRules`), not once per command.
-    let (deny, ask, allow) = permissions::load_permission_rules();
-    let rules = PermissionRules { deny, ask, allow };
+    // Loaded once up front (see `CoverageContext::rules`), not once per command.
+    let rules = coverage_rules();
 
     let cutoff = crate::core::utils::days_ago_cutoff(since_days);
     // Every other hook_decisions-touching path (record()/record_parse_failure()/
@@ -423,8 +396,6 @@ pub fn run(
         hook_log,
         hook_installed,
         rules,
-        exclude_patterns,
-        normalized_transparent_prefixes,
     };
 
     let mut total_commands: usize = 0;
@@ -708,12 +679,8 @@ mod tests {
         HookDecisionRecord { decision }
     }
 
-    fn empty_rules() -> PermissionRules {
-        PermissionRules {
-            deny: vec![],
-            ask: vec![],
-            allow: vec![],
-        }
+    fn empty_rules() -> permissions::HostRules {
+        permissions::HostRules::lists(permissions::Host::Claude, &[], &[], &[])
     }
 
     /// Build a `CoverageContext` for tests, with an empty `hook_log` (so every
@@ -724,9 +691,31 @@ mod tests {
             hook_log: HashMap::new(),
             hook_installed,
             rules: empty_rules(),
-            exclude_patterns: vec![],
-            normalized_transparent_prefixes: vec![],
         }
+    }
+
+    #[test]
+    fn coverage_is_judged_against_claude_codes_rules() {
+        use crate::core::test_isolation;
+
+        let tmp = test_isolation::tempdir();
+        let home = tmp.path().join("home");
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).expect("create project dir");
+        std::fs::create_dir_all(home.join(".claude")).expect("create .claude dir");
+        std::fs::write(
+            home.join(".claude").join("settings.json"),
+            r#"{ "permissions": { "deny": ["Bash(rm:*)"] } }"#,
+        )
+        .expect("write Claude settings");
+
+        test_isolation::with_root(&home, || {
+            let _entered = test_isolation::enter(&project);
+            assert_eq!(
+                coverage_rules().verdict("rm -rf x"),
+                PermissionVerdict::Deny
+            );
+        });
     }
 
     #[test]
@@ -823,7 +812,7 @@ mod tests {
         ));
         // …and it becomes a real bypass once the user declares sudo transparent.
         let mut ctx_sudo = test_ctx(true);
-        ctx_sudo.normalized_transparent_prefixes = vec!["sudo".to_string()];
+        ctx_sudo.rules = ctx_sudo.rules.with_transparent_prefixes(&["sudo"]);
         assert_eq!(
             judge("sudo RTK_DISABLED=1 docker ps", &ctx_sudo),
             DisabledSegment::Bypass
@@ -870,7 +859,7 @@ mod tests {
         // Even with the hook installed, a command the user excluded via config
         // was never rewritten — the hook stepped aside, so it's a genuine miss.
         let mut ctx = test_ctx(true);
-        ctx.exclude_patterns = registry::compile_exclude_patterns(&["grep".to_string()]);
+        ctx.rules = ctx.rules.with_exclude_commands(&["grep"]);
         assert!(!estimate_hook_coverage_with_verdict(
             "grep -n foo bar.py",
             "grep -n foo bar.py",
@@ -900,7 +889,12 @@ mod tests {
         // check needs the stripped form. An exact-match deny rule on the literal
         // prefixed command only matches the raw form, not the stripped one.
         let mut ctx = test_ctx(true);
-        ctx.rules.deny = vec!["RTK_DISABLED=1 git status".to_string()];
+        ctx.rules = permissions::HostRules::lists(
+            permissions::Host::Claude,
+            &["RTK_DISABLED=1 git status".to_string()],
+            &[],
+            &[],
+        );
 
         assert!(
             !would_be_covered_without_bypass("RTK_DISABLED=1 git status", "git status", &ctx),
@@ -924,7 +918,12 @@ mod tests {
         // would NOT do (it always evaluates the whole raw line). Must pass the
         // full, unsplit command as `raw_cmd`, not the isolated `rewrite_cmd`.
         let mut ctx = test_ctx(true);
-        ctx.rules.deny = vec!["cd /sensitive".to_string()];
+        ctx.rules = permissions::HostRules::lists(
+            permissions::Host::Claude,
+            &["cd /sensitive".to_string()],
+            &[],
+            &[],
+        );
         let full_chain = "cd /sensitive && grep -rn foo .";
         let isolated_segment = "grep -rn foo .";
 
