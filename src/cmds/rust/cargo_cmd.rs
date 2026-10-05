@@ -383,7 +383,7 @@ fn run_build(args: &[String], verbose: u8) -> Result<i32> {
     )
 }
 
-/// Cargo's first `--` forwards to libtest; a second ends libtest's options.
+/// Cargo's first `--` forwards to libtest; an unclaimed `--` ends its options.
 fn lists_tests(args: &[String]) -> bool {
     // Cargo never consumes `--` as a flag value, so structural tokenization is
     // sufficient to locate its forwarding boundary.
@@ -399,7 +399,8 @@ fn lists_tests(args: &[String]) -> bool {
                 TokenKind::Long,
                 "logfile" | "test-threads" | "skip" | "color" | "format" | "shuffle-seed",
             )
-            | (TokenKind::Short, "Z") => Some(ValueSpec::value()),
+            // Unlike Cargo, libtest lets a required value consume `--`.
+            | (TokenKind::Short, "Z") => Some(ValueSpec::value().claiming_dash_dash()),
             _ => None,
         },
         Dialect::Posix,
@@ -1502,6 +1503,7 @@ mod tests {
             vec!["--", "--list"],
             vec!["--all-targets", "--", "--list", "--format=terse"],
             vec!["filter", "--", "--skip", "other", "--list"],
+            vec!["--", "--skip", "--", "--list"],
         ] {
             let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
             assert!(lists_tests(&args), "{args:?}");
@@ -1510,6 +1512,7 @@ mod tests {
             vec![],
             vec!["--list"],
             vec!["--", "--", "--list"],
+            vec!["--", "--skip", "--", "--", "--list"],
             vec!["--", "--skip", "--list"],
             vec!["--", "--skip=--list"],
             vec!["--", "--format", "--list"],

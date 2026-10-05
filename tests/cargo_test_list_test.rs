@@ -107,6 +107,7 @@ fn ordinary_runs_and_literal_list_arguments_still_use_test_filter() {
         vec!["--list"],                 // Cargo's own flag region is not libtest's.
         vec!["--", "--skip", "--list"], // A value, not a list flag.
         vec!["--", "--", "--list"],     // A libtest positional after its separator.
+        vec!["--", "--skip", "--", "--", "--list"], // Value, then actual separator.
     ] {
         let (out, argv) = run(&args, raw, "", 0);
         assert_eq!(out.status.code(), Some(0));
@@ -122,4 +123,30 @@ fn ordinary_runs_and_literal_list_arguments_still_use_test_filter() {
             .collect();
         assert_eq!(argv, expected);
     }
+}
+
+#[test]
+fn listing_preserves_whitespace_and_unterminated_streams() {
+    assert_listing(
+        &[
+            "--manifest-path",
+            "project with spaces/Cargo.toml",
+            "--",
+            "--list",
+        ],
+        "  nested::ok: test\r\n\r\n1 test, 0 benchmarks",
+        "  warning: fixture diagnostic without newline  ",
+        0,
+    );
+    assert_listing(&["--", "--list"], "", "", 0);
+}
+
+#[test]
+fn libtest_option_can_consume_a_separator_before_list() {
+    assert_listing(
+        &["--", "--skip", "--", "--list"],
+        "ok: test\n\n1 test, 0 benchmarks\n",
+        "",
+        0,
+    );
 }
