@@ -844,7 +844,7 @@ pub(crate) fn segment(cmd: &str, policy: Policy) -> Vec<Segment<'_>> {
     out
 }
 
-/// Segments `cmd` for the **permission gate** (`permissions.rs::check_command_with_rules`):
+/// Segments `cmd` for the **permission gate** (`permissions.rs::check_command_with_rules_and_prefixes`):
 /// every segment this returns is independently checked against deny/ask/allow
 /// rules, so this is deliberately the most paranoid of the three compound-command
 /// segmenters in this codebase — see [`split_on_operators`] (analytics/discovery

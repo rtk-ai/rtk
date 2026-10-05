@@ -1,5 +1,6 @@
-use super::{STDIN_CAP, audit_log, pre_tool_use_rewrite_output};
+use super::{ClaudeHookRules, STDIN_CAP, audit_log, pre_tool_use_rewrite_output};
 use crate::core::pipeline_config::{self, ShellHookDecision};
+use crate::discover::registry::ExcludePattern;
 use crate::hooks::constants::{POST_TOOL_USE_KEY, PRE_TOOL_USE_KEY, SESSION_START_KEY};
 use crate::hooks::decision::{self, HookDecision};
 use crate::hooks::permissions;
@@ -21,7 +22,7 @@ pub(super) fn read_payload() -> Result<String> {
     Ok(input)
 }
 
-pub(super) fn handle(v: &Value, raw_len: usize) -> Result<bool> {
+pub(super) fn handle(v: &Value, raw_len: usize, rules: &ClaudeHookRules) -> Result<bool> {
     crate::hooks::set_hook_agent("claude-code");
     if let Some(purpose) = v
         .pointer("/tool_input/description")
@@ -54,7 +55,7 @@ pub(super) fn handle(v: &Value, raw_len: usize) -> Result<bool> {
     if read_gate(v) || tool_gate(v) {
         return Ok(true);
     }
-    Ok(shell_gate(v))
+    Ok(shell_gate(v, rules))
 }
 
 fn deny(message: &str) {
@@ -130,7 +131,7 @@ fn tool_gate(v: &Value) -> bool {
     }
 }
 
-fn shell_gate(v: &Value) -> bool {
+fn shell_gate(v: &Value, rules: &ClaudeHookRules) -> bool {
     let Some(cmd) = v
         .pointer("/tool_input/command")
         .and_then(|c| c.as_str())
@@ -150,24 +151,42 @@ fn shell_gate(v: &Value) -> bool {
             true
         }
         ShellHookDecision::Swap { command, rule } => {
-            let verdict = permissions::check_command_for(cmd, permissions::Host::Claude);
-            let (excluded, transparent) = crate::core::config::hook_rewrite_params();
-            let rewrite =
-                decision::decide_for_agent(cmd, verdict, permissions::DenyRules::Unattested);
+            // Whether the pipeline's own replacement command may run, not a
+            // rewrite RTK emits, so it must answer about `cmd` as it stands,
+            // under the rules the hook itself reads. Unwrapped keeps the wrap
+            // out of this gate, so it answers as it does without the feature:
+            // a fish script stays out of the swap.
+            //
+            // In a managed worktree the hook leaves git as typed (#3864).
+            // Claude Code reads a plain command there segment by segment, but
+            // refuses a replacement like this one, an `rtk` command handing a
+            // script to `sh`, whenever its text contains `git`, in any case
+            // and even inside another word (`xargs git add`, `echo digit`, a
+            // task named `git-digest`): such a replacement is not swapped. It
+            // embeds the typed command, so this covers git in that too, and
+            // the worktree makes no difference to the decision past this point.
+            if v.get("cwd")
+                .and_then(Value::as_str)
+                .is_some_and(decision::in_claude_worktree)
+                && command.to_ascii_lowercase().contains("git")
+            {
+                return false;
+            }
+            let (verdict, rewrite) = decision::decide_for_host_unwrapped(cmd, rules);
             let unfiltered = matches!(rewrite, HookDecision::Defer);
             if !keeps_the_agents_check(verdict, unfiltered)
                 || !swappable(
                     cmd,
                     verdict,
                     rewrite,
-                    &excluded,
+                    rules.exclude_patterns(),
                     crate::core::utils::tool_exists,
                 )
             {
                 return false;
             }
             let ask_rule = matches!(verdict, permissions::PermissionVerdict::Ask)
-                && permissions::ask_rule_applies(cmd, permissions::Host::Claude, &transparent);
+                && rules.ask_rule_applies(cmd);
             let decision = swap_decision(verdict, ask_rule, unfiltered);
             let output = swap_output(v, &command, &rule, decision);
             let _ = writeln!(io::stdout(), "{output}");
@@ -210,7 +229,7 @@ fn swappable(
     cmd: &str,
     verdict: permissions::PermissionVerdict,
     rewrite: HookDecision,
-    excluded: &[String],
+    excluded: &[ExcludePattern],
     program_exists: impl Fn(&str) -> bool,
 ) -> bool {
     use crate::discover::registry;
@@ -308,6 +327,7 @@ mod tests {
     use permissions::PermissionVerdict;
 
     fn decide(cmd: &str, verdict: PermissionVerdict, excluded: &[String]) -> bool {
+        let excluded = &crate::discover::registry::compile_exclude_patterns(excluded);
         let rewrite = decision::decide_with_params(
             cmd,
             verdict,

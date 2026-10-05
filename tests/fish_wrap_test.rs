@@ -6,6 +6,9 @@ mod common;
 
 #[cfg(unix)]
 mod unix {
+    use crate::common::hook::{
+        BROKEN_SETTINGS, CONFIG_PATHS, claude_payload, hook_check, hook_stdin, parse_warnings,
+    };
     use std::process::{Command, Output};
 
     const FISH_BLOCK: &str = "if test -d src\n  git status\nelse\n  echo missing\nend";
@@ -27,66 +30,15 @@ mod unix {
     /// [`home_with`], with `hooks.wrap_fish_scripts` set to `enabled` — or the
     /// config left absent entirely when it is `None`.
     fn home_with_wrap(files: &[(&str, &str)], enabled: Option<bool>) -> tempfile::TempDir {
-        let home = tempfile::tempdir().expect("create isolated home");
-        if let Some(enabled) = enabled {
-            // dirs::config_dir() resolves differently per platform; cover both.
-            for dir in [
-                home.path().join("Library/Application Support/rtk"),
-                home.path().join("rtk"),
-            ] {
-                std::fs::create_dir_all(&dir).expect("create config dir");
-                std::fs::write(
-                    dir.join("config.toml"),
-                    format!("[hooks]\nwrap_fish_scripts = {enabled}\n"),
-                )
-                .expect("write config");
-            }
+        // The config goes first, so a file the caller names at the same path
+        // wins. dirs::config_dir() resolves differently per platform; cover both.
+        let config = enabled.map(|enabled| format!("[hooks]\nwrap_fish_scripts = {enabled}\n"));
+        let mut all = Vec::new();
+        if let Some(config) = &config {
+            all.extend(CONFIG_PATHS.map(|path| (path, config.as_str())));
         }
-        for (path, contents) in files {
-            let target = home.path().join(path);
-            std::fs::create_dir_all(target.parent().expect("rule file has a parent"))
-                .expect("create rule dir");
-            std::fs::write(&target, contents).expect("write rule file");
-        }
-        home
-    }
-
-    /// `rtk hook <agent>` fed a PreToolUse payload on stdin — the path a host
-    /// actually takes, as opposed to the `rtk rewrite` CLI.
-    fn hook_stdin(agent: &str, payload: &str, home: &tempfile::TempDir) -> Output {
-        use std::io::Write;
-
-        let mut child = rtk()
-            .args(["hook", agent])
-            .current_dir(home.path())
-            .env("HOME", home.path())
-            .env("XDG_CONFIG_HOME", home.path())
-            .env("RTK_TELEMETRY_DISABLED", "1")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("spawn rtk hook");
-        child
-            .stdin
-            .as_mut()
-            .expect("hook stdin")
-            .write_all(payload.as_bytes())
-            .expect("write payload");
-        child.wait_with_output().expect("run rtk hook")
-    }
-
-    /// `rtk hook check --agent <agent>` — the diagnostic that must answer for
-    /// the agent named, including whose rules that agent's hook reads.
-    fn hook_check(agent: &str, command: &str, home: &tempfile::TempDir) -> Output {
-        rtk()
-            .args(["hook", "check", "--agent", agent, "--", command])
-            .current_dir(home.path())
-            .env("HOME", home.path())
-            .env("XDG_CONFIG_HOME", home.path())
-            .env("RTK_TELEMETRY_DISABLED", "1")
-            .output()
-            .expect("run rtk hook check")
+        all.extend_from_slice(files);
+        crate::common::hook::isolated_home(&all)
     }
 
     /// Builds one host's payload around a command.
@@ -95,14 +47,6 @@ mod unix {
     /// `value` as a JSON string literal, for payloads built by hand.
     fn json_string(value: &str) -> String {
         serde_json::to_string(value).expect("encode string")
-    }
-
-    /// A Claude Code `PreToolUse` payload carrying `command`.
-    fn claude_payload(command: &str) -> String {
-        format!(
-            r#"{{"tool_name":"Bash","tool_input":{{"command":{}}}}}"#,
-            serde_json::to_string(command).expect("encode command")
-        )
     }
 
     fn wrapped(output: &Output) -> bool {
@@ -124,7 +68,7 @@ mod unix {
     /// `rtk hook claude` on `command`, with the rule files the test names.
     fn claude_hook(command: &str, files: &[(&str, &str)]) -> Output {
         let home = home_with(files);
-        hook_stdin("claude", &claude_payload(command), &home)
+        hook_stdin("claude", &claude_payload(command, None), &home)
     }
 
     fn claude_denies(rule: &str) -> String {
@@ -250,7 +194,11 @@ mod unix {
         )
         .expect("write settings");
         assert!(
-            !wrapped(&hook_stdin("claude", &claude_payload(FISH_CHAIN), &home)),
+            !wrapped(&hook_stdin(
+                "claude",
+                &claude_payload(FISH_CHAIN, None),
+                &home
+            )),
             "a file RTK could not decode must keep the wrap off"
         );
     }
@@ -436,35 +384,19 @@ mod unix {
     /// touch the command at all, and uses the answer as a yes/no on the
     /// pipeline's *own* replacement command. A wrap must never be that answer:
     /// the gate would then swap a script it otherwise defers into `sh -c`.
+    #[cfg(feature = "engine")]
     #[test]
     fn the_pipeline_swap_gate_never_sees_a_wrap() {
+        use crate::common::hook::{PIPELINE_PATHS, SWAP_GIT_STATUS};
+
         if which::which("fish").is_err() {
             return;
         }
-        const RULE: &str = r#"[upstream.haiku]
-provider = "anthropic"
-model = "claude-haiku-4-5"
-
-[task.check-build]
-kind = "digest"
-upstream = "haiku"
-
-[[hook.before_tool.shell]]
-name = "swap-git"
-when = { command_matches = "git status" }
-action = "route"
-task = "check-build"
-mode = "swap"
-"#;
-        // dirs::config_dir() resolves differently per platform; cover both.
-        let home = home_with(&[
-            ("rtk/pipeline.toml", RULE),
-            ("Library/Application Support/rtk/pipeline.toml", RULE),
-        ]);
+        let home = home_with(&PIPELINE_PATHS.map(|path| (path, SWAP_GIT_STATUS)));
 
         // The control: a plain command the rule matches is swapped, so the
         // rule is live and the gate is the thing being exercised.
-        let swapped = hook_stdin("claude", &claude_payload("git status"), &home);
+        let swapped = hook_stdin("claude", &claude_payload("git status", None), &home);
         assert!(
             String::from_utf8_lossy(&swapped.stdout).contains("rtk check-build"),
             "control: the swap rule must fire: {}",
@@ -472,7 +404,7 @@ mode = "swap"
         );
 
         // A fish chain the same rule matches is not swapped into `sh -c`.
-        let output = hook_stdin("claude", &claude_payload(FISH_CHAIN), &home);
+        let output = hook_stdin("claude", &claude_payload(FISH_CHAIN, None), &home);
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
             !stdout.contains("rtk check-build"),
@@ -659,17 +591,11 @@ mode = "swap"
             home_with_wrap(&[], None),
             home_with_wrap(&[], Some(false)),
             home_with_wrap(
-                &[
-                    ("rtk/config.toml", "[hooks]\nexclude_commands = []\n"),
-                    (
-                        "Library/Application Support/rtk/config.toml",
-                        "[hooks]\nexclude_commands = []\n",
-                    ),
-                ],
+                &CONFIG_PATHS.map(|path| (path, "[hooks]\nexclude_commands = []\n")),
                 None,
             ),
         ] {
-            let output = hook_stdin("claude", &claude_payload(FISH_BLOCK), &home);
+            let output = hook_stdin("claude", &claude_payload(FISH_BLOCK, None), &home);
 
             assert!(
                 output.stdout.trim_ascii().is_empty(),
@@ -766,7 +692,7 @@ mode = "swap"
             ] {
                 let settings = format!(r#"{{"permissions":{{"allow":{allow}}}}}"#);
                 let home = home_with_wrap(&[(".claude/settings.json", settings.as_str())], enabled);
-                let output = hook_stdin("claude", &claude_payload(command), &home);
+                let output = hook_stdin("claude", &claude_payload(command, None), &home);
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let v: serde_json::Value = serde_json::from_str(stdout.trim())
                     .unwrap_or_else(|e| panic!("{command:?}: {stdout}: {e}"));
@@ -787,29 +713,30 @@ mode = "swap"
         }
     }
 
-    /// The verdict and wrap attestation share one settings scan (#4762),
-    /// including commands the wrap's pure gates will refuse.
+    /// A fish script costs the hook and `rtk hook check` nothing they did not
+    /// cost before, whether the wrap is on or off: the walk that reads the
+    /// rules is the one that says whether a deny rule exists (#4762), so the
+    /// settings are walked as often as for any other command, including for
+    /// commands the wrap's own gates refuse, and a file RTK cannot parse warns
+    /// as often too.
     #[test]
     fn fish_wrap_checks_reuse_the_verdict_settings_scan() {
-        let count = |output: Output| {
-            String::from_utf8_lossy(&output.stderr)
-                .matches("failed to parse permissions")
-                .count()
-        };
+        const FISH: &str = "git diff HEAD~3 HEAD; and true";
         let hook = |home: &tempfile::TempDir, command: &str| {
-            count(hook_stdin("claude", &claude_payload(command), home))
+            parse_warnings(&hook_stdin("claude", &claude_payload(command, None), home))
         };
-        let check =
-            |home: &tempfile::TempDir, command: &str| count(hook_check("claude", command, home));
+        let check = |home: &tempfile::TempDir, command: &str| {
+            parse_warnings(&hook_check("claude", command, home))
+        };
 
         for enabled in [None, Some(true)] {
-            let home = home_with_wrap(&[(".claude/settings.json", "{ not json")], enabled);
+            let home = home_with_wrap(&[BROKEN_SETTINGS], enabled);
             let plain = hook(&home, "git status");
             assert!(plain > 0, "control: the broken file must warn at all");
             assert_eq!(check(&home, "git status"), plain, "rtk hook check");
 
             for command in [
-                "git diff HEAD~3 HEAD; and true",
+                FISH,
                 "rtk git status; and true",
                 "git status; and echo $(whoami)",
                 "git status > out; and true",
@@ -823,6 +750,16 @@ mode = "swap"
                     "check: {enabled:?} {command:?}"
                 );
             }
+        }
+
+        // The control: with the wrap on and nothing denied, the first script is
+        // wrapped, so it is a fish script the counts above are about.
+        if which::which("fish").is_ok() {
+            let empty = home_with(&[]);
+            assert!(
+                wrapped(&hook_stdin("claude", &claude_payload(FISH, None), &empty)),
+                "control: {FISH} classifies as fish"
+            );
         }
     }
 
