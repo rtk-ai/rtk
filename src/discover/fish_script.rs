@@ -2,7 +2,7 @@
 //!
 //! Hosts that evaluate Bash-tool command strings with a POSIX/zsh layer choke on
 //! fish-only syntax (`if … end`, `; and`) before RTK ever runs. [`try_wrap`] is
-//! asked first in [`crate::hooks::decision::decide`]: a script that is provably
+//! asked first in [`crate::hooks::decision::decide_with_params`]: a script that is provably
 //! fish — a fish-only marker at command position and no POSIX disambiguator — is
 //! rewritten to `rtk run --shell fish -c '<script>'`, a form every host layer
 //! parses as one command with one quoted argument. Anything ambiguous is left
@@ -151,7 +151,7 @@ fn contains_fish_substitution(cmd: &str) -> bool {
 
 /// True only when the command contains a fish-only marker at command position and
 /// nothing a POSIX shell would need to parse it (see module docs for the lists).
-pub(crate) fn is_unambiguous_fish(cmd: &str) -> bool {
+fn is_unambiguous_fish(cmd: &str) -> bool {
     if cmd.contains('\0') {
         return false;
     }

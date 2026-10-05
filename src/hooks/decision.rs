@@ -5,30 +5,37 @@
 //!
 //! | Entry point | Verdict source | Identity rewrite |
 //! |---|---|---|
-//! | `rtk hook <agent>` (`hook_cmd`) | `check_command_for(cmd, host)` | suppressed |
-//! | `rtk rewrite` (`rewrite_cmd`, run as a subprocess by the shell/TS/Python delegates) | Claude Code's rules | reported |
+//! | `rtk hook <agent>` (`hook_cmd`) | `HostRules::load(host, ..)`, or `HostRules::claude_hook()` for Claude Code's own hook | suppressed |
+//! | `rtk rewrite` (`rewrite_cmd`, run as a subprocess by the shell/TS/Python delegates) | Claude Code's rules, via [`AgentPath::answer`] | reported |
 //! | `rtk hook check` (`main.rs`) | whatever the named `--agent` consults, via [`AgentPath`] | suppressed |
 //!
-//! Each also hands [`decide`] a [`DenyRules`], which is not the verdict but a
+//! Each also hands [`decide_with_params`] a [`DenyRules`], which is not the verdict but a
 //! statement about the *caller*: whether it is the one path whose deny rules
 //! RTK reads and whose hook asks explicitly for every wrap it builds. That
 //! is what decides whether a fish script may be wrapped, because once a
 //! script reaches a fish the verdict no longer describes what runs. Only
-//! `rtk hook claude` qualifies — see
-//! [`claude_hook_deny_rules`](super::permissions::claude_hook_deny_rules).
+//! `rtk hook claude` qualifies; a hook takes the answer from its
+//! [`HostRules`], and only [`HostRules::claude_hook`] ever gives it.
 //!
-//! [`decide`] is the shared answer. What legitimately differs between callers
-//! stays outside it: the verdict is passed in rather than looked up, so each
-//! host consults its own permission rules and tests stay independent of the
-//! machine's settings (#3146); the no-op-rewrite policy lives in
-//! [`decide_for_agent`], which every hook shares and the CLI does not; and
+//! [`decide_with_params`] is the shared answer. What legitimately differs
+//! between callers stays outside it: the verdict is passed in rather than
+//! looked up, so each host consults its own permission rules and tests stay
+//! independent of the machine's settings (#3146); the no-op-rewrite policy
+//! ([`suppress_identity`]) is applied by every hook and not by the CLI; and
 //! whether the caller runs its own approval gate on the result lives in
 //! [`ApprovalOwner`], which only ever relaxes the *default* ask, and never on
-//! a fish wrap.
+//! a fish wrap. Every entry point decides through [`decide_for_host`] or
+//! [`AgentPath::answer`] (the engine pipeline's swap gate through
+//! `decide_for_host_unwrapped`, the same steps without the wrap), so a host
+//! that judges the command its hook hands back keeps a rewrite only when its
+//! rules give it the same verdict.
 
-use super::permissions::{DenyRules, Host, PermissionVerdict};
+use super::permissions::{DenyRules, Host, HostRules, PermissionVerdict};
 use crate::core::user_env;
-use crate::discover::registry::rewrite_command;
+use crate::discover::registry::{
+    ExcludePattern, compile_exclude_patterns, rewrite_command_precompiled,
+};
+use std::sync::LazyLock;
 
 /// What a hook should do with a command.
 ///
@@ -153,7 +160,7 @@ impl ApprovalOwner {
 ///    such a command to `Ask`; refusing to rewrite it at all is the stronger
 ///    guarantee. Heredocs reach the same outcome, though most of them stop at
 ///    this gate only because a `<<` operand reads as a file target; what
-///    actually refuses them is `rewrite_command`'s own `has_heredoc`, which
+///    actually refuses them is `rewrite_command_precompiled`'s own `has_heredoc`, which
 ///    catches the forms this gate lets past (see #3980).
 /// 4. **Otherwise rewrite if a rule matches**, and auto-allow only on an
 ///    explicit `Allow`. Every other verdict — including `Default`, where no
@@ -163,23 +170,16 @@ impl ApprovalOwner {
 ///
 /// An identity rewrite (`cmd` was already RTK-prefixed) is reported here as a
 /// normal rewrite. Callers that want it suppressed apply [`suppress_identity`].
-pub(crate) fn decide(cmd: &str, verdict: PermissionVerdict, deny_rules: DenyRules) -> HookDecision {
-    let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
-    decide_with_params(cmd, verdict, &excluded, &transparent_prefixes, deny_rules)
-}
-
-/// [`decide`] with the rewrite parameters supplied by the caller, mirroring
-/// [`check_command_with_rules_and_prefixes`](super::permissions::check_command_with_rules_and_prefixes).
 ///
-/// `hook_rewrite_params` reads `config.toml`, which in a test build is the
-/// calling test's own. Taking the parameters lets a test state the
-/// `exclude_commands` and `transparent_prefixes` it means instead of writing a
-/// file for them, the same way the verdict is passed in rather than looked up
-/// (#3146).
+/// The rewrite parameters are supplied by the caller, compiled and
+/// normalized: a hook takes them from its [`HostRules`], read from
+/// `config.toml` once, and a test states the `exclude_commands` and
+/// `transparent_prefixes` it means instead of writing a file for them, the
+/// same way the verdict is passed in rather than looked up (#3146).
 pub(crate) fn decide_with_params(
     cmd: &str,
     verdict: PermissionVerdict,
-    excluded: &[String],
+    excluded: &[ExcludePattern],
     transparent_prefixes: &[String],
     deny_rules: DenyRules,
 ) -> HookDecision {
@@ -200,7 +200,7 @@ pub(crate) fn decide_with_params(
 pub(crate) fn decide_with_wrap(
     cmd: &str,
     verdict: PermissionVerdict,
-    excluded: &[String],
+    excluded: &[ExcludePattern],
     transparent_prefixes: &[String],
     deny_rules: DenyRules,
     wrap_fish: fn(&str) -> Option<String>,
@@ -230,7 +230,7 @@ pub(crate) fn decide_with_wrap(
     // RTK reads, and there are none. Every other case defers, which is what
     // the command did before the wrap existed. See [`DenyRules`].
     if deny_rules.permit_wrap() && wrap_fish(cmd).is_some() {
-        let rewritten = rewrite_command(cmd, excluded, transparent_prefixes);
+        let rewritten = rewrite_command_precompiled(cmd, excluded, transparent_prefixes);
         let script = rewritten.as_deref().unwrap_or(cmd);
         return HookDecision::AskRewrite(crate::discover::fish_script::wrap(script));
     }
@@ -239,7 +239,7 @@ pub(crate) fn decide_with_wrap(
         return HookDecision::Defer;
     }
 
-    match rewrite_command(cmd, excluded, transparent_prefixes) {
+    match rewrite_command_precompiled(cmd, excluded, transparent_prefixes) {
         Some(rewritten) if verdict == PermissionVerdict::Allow => {
             HookDecision::AllowRewrite(rewritten)
         }
@@ -248,21 +248,10 @@ pub(crate) fn decide_with_wrap(
     }
 }
 
-/// [`decide`], plus the no-op suppression every agent applies.
-///
-/// This is the composition every *hook* wants, as opposed to [`decide`] alone,
-/// which is what the `rtk rewrite` CLI renders. Every hook entry point goes
-/// through here so they cannot drift apart.
-pub(crate) fn decide_for_agent(
-    cmd: &str,
-    verdict: PermissionVerdict,
-    deny_rules: DenyRules,
-) -> HookDecision {
-    decide_for_agent_at(cmd, verdict, deny_rules, None)
-}
-
-/// [`decide_for_agent`] for a hook whose payload reports the command's working
-/// directory: inside a Claude Code managed worktree, `git` is left unrewritten.
+/// [`decide_with_params`] under the rewrite settings `rules` were read
+/// beside, from `cwd`, the command's working directory when the hook's
+/// payload reports one: inside a Claude Code managed worktree, `git` is left
+/// unrewritten as well.
 ///
 /// Claude Code's worktree-isolation guard runs on the command *after* the hook
 /// has rewritten it, and it only accepts git spelled plainly (or under the few
@@ -274,21 +263,32 @@ pub(crate) fn decide_for_agent(
 /// `WorktreeCreate` hook places elsewhere is not detected, and git there is
 /// still rewritten. The rest of a chain is still rewritten:
 /// `git status && cargo build` → `git status && rtk cargo build`.
-pub(crate) fn decide_for_agent_at(
+fn decide_for_agent_at(
     cmd: &str,
     verdict: PermissionVerdict,
+    rules: &HostRules,
     deny_rules: DenyRules,
     cwd: Option<&str>,
 ) -> HookDecision {
-    let (mut excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
-    if cwd.is_some_and(in_claude_worktree) {
-        excluded.push("git".to_string());
-    }
-    suppress_identity(
+    let excluded = if cwd.is_some_and(in_claude_worktree) {
+        let mut excluded = rules.exclude_patterns().to_vec();
+        excluded.extend(GIT.iter().cloned());
+        std::borrow::Cow::Owned(excluded)
+    } else {
+        std::borrow::Cow::Borrowed(rules.exclude_patterns())
+    };
+    decide_with_params(
         cmd,
-        decide_with_params(cmd, verdict, &excluded, &transparent_prefixes, deny_rules),
+        verdict,
+        &excluded,
+        rules.transparent_prefixes(),
+        deny_rules,
     )
 }
+
+/// What a managed worktree adds to the commands left as typed.
+static GIT: LazyLock<Vec<ExcludePattern>> =
+    LazyLock::new(|| compile_exclude_patterns(&["git".to_string()]));
 
 /// Whether `cwd` is inside a worktree Claude Code manages
 /// (`<repo>/.claude/worktrees/<name>`, or deeper).
@@ -300,6 +300,83 @@ pub(crate) fn in_claude_worktree(cwd: &str) -> bool {
     parts
         .windows(3)
         .any(|w| w[0] == super::constants::CLAUDE_DIR && w[1] == "worktrees")
+}
+
+/// What a hook does with `cmd`, run from `cwd`, under a host's rules, loaded
+/// once: [`answer_for_host`], less a rewrite that changes nothing
+/// ([`suppress_identity`]).
+pub(crate) fn decide_for_host(
+    cmd: &str,
+    rules: &HostRules,
+    cwd: Option<&str>,
+) -> (PermissionVerdict, HookDecision) {
+    let (verdict, decision) = answer_for_host(cmd, rules, cwd);
+    (verdict, suppress_identity(cmd, decision))
+}
+
+/// The verdict of `cmd` under a host's rules, and [`decide_for_agent_at`]'s
+/// decision less any rewrite that [`keep_host_verdict`] drops — what
+/// `rtk rewrite` prints, which reports a rewrite that changes nothing. Rules
+/// rtk cannot read the way the host does keep no rewrite at all, so none is
+/// built.
+fn answer_for_host(
+    cmd: &str,
+    rules: &HostRules,
+    cwd: Option<&str>,
+) -> (PermissionVerdict, HookDecision) {
+    decide_under(cmd, rules, rules.deny_rules(), cwd)
+}
+
+/// [`decide_for_host`] without the fish wrap, whatever `rules` attest: for a
+/// gate that asks whether the ordinary rewrite applies to `cmd` as it stands,
+/// rather than a hook that answers with the result.
+#[cfg(feature = "engine")]
+pub(crate) fn decide_for_host_unwrapped(
+    cmd: &str,
+    rules: &HostRules,
+    cwd: Option<&str>,
+) -> HookDecision {
+    suppress_identity(cmd, decide_under(cmd, rules, DenyRules::Unattested, cwd).1)
+}
+
+fn decide_under(
+    cmd: &str,
+    rules: &HostRules,
+    deny_rules: DenyRules,
+    cwd: Option<&str>,
+) -> (PermissionVerdict, HookDecision) {
+    let verdict = rules.verdict(cmd);
+    if verdict == PermissionVerdict::Deny {
+        return (verdict, HookDecision::Deny);
+    }
+    if !rules.readable() {
+        return (verdict, HookDecision::Defer);
+    }
+    let decision = keep_host_verdict(
+        decide_for_agent_at(cmd, verdict, rules, deny_rules, cwd),
+        verdict,
+        rules,
+    );
+    (verdict, decision)
+}
+
+/// Drop a rewrite whose verdict under `rules` differs from `verdict`, the
+/// verdict of the command as typed, when the host judges the command its hook
+/// hands back against those same rules: the user's rule decides, not the
+/// rewrite.
+fn keep_host_verdict(
+    decision: HookDecision,
+    verdict: PermissionVerdict,
+    rules: &HostRules,
+) -> HookDecision {
+    match decision {
+        HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten)
+            if rules.judges_final_command() && rules.verdict(&rewritten) != verdict =>
+        {
+            HookDecision::Defer
+        }
+        decision => decision,
+    }
 }
 
 /// Turn a rewrite that changed nothing into a [`HookDecision::Defer`].
@@ -319,11 +396,11 @@ pub(crate) fn in_claude_worktree(cwd: &str) -> bool {
 /// so there suppression trades a no-op rewrite for a confirmation prompt even
 /// when that host's own allow rule covers the command.
 ///
-/// The comparison is byte-exact while `rewrite_command` returns a trimmed,
+/// The comparison is byte-exact while `rewrite_command_precompiled` returns a trimmed,
 /// continuation-collapsed string, so a command differing only in leading or
 /// trailing whitespace is not suppressed.
 ///
-/// `rtk rewrite` itself reports the no-op as a normal rewrite, exit 0 or 3 with
+/// `rtk rewrite` itself ([`AgentPath::answer`]) reports the no-op as a normal rewrite, exit 0 or 3 with
 /// the command unchanged on stdout. It answers "what is the RTK form of this
 /// command", and for an already-prefixed one that form is itself; whether that
 /// counts as a change is the caller's question, which is why those plugins
@@ -353,7 +430,7 @@ pub(crate) fn suppress_identity(cmd: &str, decision: HookDecision) -> HookDecisi
 pub(crate) enum AgentPath {
     /// `rtk hook claude` — the one host whose rules RTK reads and whose hook
     /// asks explicitly for every wrap it builds, which is what the fish wrap needs
-    /// (`permissions::claude_hook_deny_rules`). Copilot reads the same
+    /// ([`HostRules::claude_hook`]). Copilot reads the same
     /// settings but judges the returned command itself, so it is
     /// [`AgentPath::InProcess`] like every other host.
     ClaudeHook,
@@ -446,39 +523,19 @@ impl AgentPath {
         "windsurf",
     ];
 
-    /// The verdict this agent's hook judges `cmd` against.
-    ///
-    /// Through [`check_command_for`](super::permissions::check_command_for),
-    /// not the rule triple, because a host can have a rule source that is not
-    /// Claude-shaped — OpenCode's lives in `permissions_opencode` — and this
-    /// diagnostic must report the denial its hook reports.
-    fn verdict(&self, cmd: &str) -> PermissionVerdict {
+    /// The rules this agent's hook judges a command against.
+    fn rules(&self) -> HostRules {
         match self {
-            Self::ClaudeHook => super::permissions::check_command_for(cmd, Host::Claude),
-            Self::InProcess(host) => super::permissions::check_command_for(cmd, *host),
+            // The rules `rtk hook claude` reads, the same single walk of the
+            // settings that says whether a fish script may be wrapped.
+            Self::ClaudeHook => HostRules::claude_hook(),
+            Self::InProcess(host) => HostRules::load(*host, None),
             // `rtk rewrite` always reads Claude Code's rules, for every
             // delegate. Naming a host changes what is done with the verdict,
             // never where the verdict comes from.
-            Self::ViaRewrite(_) => super::permissions::check_command_for(cmd, Host::Claude),
+            Self::ViaRewrite(_) => HostRules::load(Host::Claude, None),
             // No hook, so no rules to consult.
-            Self::RulesOnly => PermissionVerdict::Default,
-        }
-    }
-
-    /// Whether a fish script may be wrapped for this agent.
-    ///
-    /// Only Claude Code's own hook can say so. Every other path either reads a
-    /// rule source that is not the one enforced, or hands the rewritten
-    /// command to a host that judges it again — see
-    /// [`claude_hook_deny_rules`](super::permissions::claude_hook_deny_rules).
-    /// A rules-file install has no hook at all, so `rtk hook check` must not
-    /// show it a wrap nothing would ever emit. The Claude hook's answer comes
-    /// from the same gate the hook itself uses, so the two walk the settings
-    /// alike.
-    fn deny_rules(&self, cmd: &str) -> DenyRules {
-        match self {
-            Self::ClaudeHook => super::permissions::claude_hook_deny_rules_for(cmd),
-            Self::InProcess(_) | Self::ViaRewrite(_) | Self::RulesOnly => DenyRules::Unattested,
+            Self::RulesOnly => HostRules::none(),
         }
     }
 
@@ -492,14 +549,34 @@ impl AgentPath {
     }
 
     /// What this agent's hook would do with `cmd` — the same answer it gives at
-    /// runtime, including discarding a rewrite that changed nothing and
-    /// relaxing the default ask the agent would only ask about twice.
+    /// runtime, through the same [`decide_for_host`], relaxing the default ask
+    /// the agent would only ask about twice. For OpenCode, that is the plugin
+    /// run without an agent: `rtk hook check` has no agent name to pass.
     pub(crate) fn decide(&self, cmd: &str) -> HookDecision {
-        let verdict = self.verdict(cmd);
-        self.approval_owner().apply(
-            decide_for_agent(cmd, verdict, self.deny_rules(cmd)),
-            verdict,
-        )
+        self.through(cmd, decide_for_host)
+    }
+
+    /// [`AgentPath::decide`] before discarding a rewrite that changed nothing
+    /// ([`answer_for_host`]): for a delegate, what `rtk rewrite` prints.
+    pub(crate) fn answer(&self, cmd: &str) -> HookDecision {
+        self.through(cmd, answer_for_host)
+    }
+
+    fn through(
+        &self,
+        cmd: &str,
+        decide: fn(&str, &HostRules, Option<&str>) -> (PermissionVerdict, HookDecision),
+    ) -> HookDecision {
+        // Claude Code's hook decides from the session's working directory,
+        // which is where `rtk hook check` runs.
+        let cwd = match self {
+            Self::ClaudeHook => crate::core::user_dirs::current_dir().ok(),
+            Self::InProcess(_) | Self::ViaRewrite(_) | Self::RulesOnly => None,
+        };
+        // Lossy, as the payload's JSON string is.
+        let cwd = cwd.as_deref().map(std::path::Path::to_string_lossy);
+        let (verdict, decision) = decide(cmd, &self.rules(), cwd.as_deref());
+        self.approval_owner().apply(decision, verdict)
     }
 }
 
@@ -507,8 +584,32 @@ impl AgentPath {
 mod tests {
     use super::*;
     use crate::hooks::permissions::DenyRules;
+    use crate::hooks::permissions_opencode::{Action, bash_rule};
 
     // --- #3864: Claude Code worktree isolation ---
+
+    /// `rtk hook check --agent claude` gives the hook's answer from where it
+    /// runs: git is left as typed inside a managed worktree, as the hook
+    /// leaves it there, and rewritten elsewhere.
+    #[test]
+    fn hook_check_for_claude_leaves_git_alone_in_a_managed_worktree() {
+        let tmp = crate::core::test_isolation::tempdir();
+        let repo = tmp.path().join("repo");
+        let worktree = repo.join(".claude").join("worktrees").join("feat-x");
+        std::fs::create_dir_all(&worktree).expect("create worktree dir");
+        let claude = AgentPath::lookup("claude").expect("claude is mapped");
+        crate::core::test_isolation::with_root(&tmp.path().join("home"), || {
+            {
+                let _entered = crate::core::test_isolation::enter(&repo);
+                assert_eq!(
+                    claude.decide("git status"),
+                    HookDecision::AskRewrite("rtk git status".into())
+                );
+            }
+            let _entered = crate::core::test_isolation::enter(&worktree);
+            assert_eq!(claude.decide("git status"), HookDecision::Defer);
+        });
+    }
 
     #[test]
     fn in_claude_worktree_matches_only_managed_worktree_paths() {
@@ -527,6 +628,7 @@ mod tests {
             decide_for_agent_at(
                 "git status",
                 PermissionVerdict::Default,
+                &HostRules::none(),
                 DenyRules::Unattested,
                 wt
             ),
@@ -536,6 +638,7 @@ mod tests {
             decide_for_agent_at(
                 "git status && cargo build",
                 PermissionVerdict::Allow,
+                &HostRules::none(),
                 DenyRules::Unattested,
                 wt
             ),
@@ -545,6 +648,7 @@ mod tests {
             decide_for_agent_at(
                 "git log -1 --oneline",
                 PermissionVerdict::Allow,
+                &HostRules::none(),
                 DenyRules::Unattested,
                 wt
             ),
@@ -554,10 +658,64 @@ mod tests {
             decide_for_agent_at(
                 "git status",
                 PermissionVerdict::Allow,
+                &HostRules::none(),
                 DenyRules::Unattested,
                 Some("/repo")
             ),
             HookDecision::AllowRewrite("rtk git status".into())
+        );
+    }
+
+    /// The rewrite looks past the transparent prefixes the verdict was judged
+    /// with, the rules' own, not a second read of the config: behind `mywrap`,
+    /// a denied command in a shell wrapper's script defers, and an unruled
+    /// command is rewritten.
+    #[test]
+    fn the_rewrite_looks_past_the_prefixes_the_verdict_was_judged_with() {
+        let deny = ["git push:*".to_string()];
+        let script = "mywrap bash -c 'git push origin'";
+        let unruled = "mywrap git status";
+        let rules = HostRules::lists(Host::Claude, &deny, &[], &[]);
+        let decide = |cmd: &str, rules: &HostRules| decide_for_host(cmd, rules, None);
+        // The control: with no prefix, `mywrap` is the command.
+        assert_eq!(decide(script, &rules).0, PermissionVerdict::Default);
+        assert_eq!(decide(unruled, &rules).1, HookDecision::Defer);
+
+        let rules = rules.with_transparent_prefixes(&["mywrap"]);
+        assert_eq!(
+            decide(script, &rules),
+            (PermissionVerdict::Defer, HookDecision::Defer)
+        );
+        assert_eq!(
+            decide(unruled, &rules),
+            (
+                PermissionVerdict::Default,
+                HookDecision::AskRewrite("mywrap rtk git status".into())
+            )
+        );
+    }
+
+    /// The rewrite leaves as typed the commands the rules were read beside,
+    /// not a second read of the config, and a managed worktree adds `git` to
+    /// them.
+    #[test]
+    fn the_rewrite_leaves_the_rules_own_excluded_commands_alone() {
+        let rules = HostRules::lists(Host::Claude, &[], &[], &[]);
+        let decide = |cmd: &str, rules: &HostRules, cwd| decide_for_host(cmd, rules, cwd).1;
+        assert_eq!(
+            decide("cargo test", &rules, None),
+            HookDecision::AskRewrite("rtk cargo test".into()),
+            "control: nothing excluded"
+        );
+
+        let rules = rules.with_exclude_commands(&["cargo"]);
+        assert_eq!(decide("cargo test", &rules, None), HookDecision::Defer);
+        let worktree = Some("/repo/.claude/worktrees/feat-x");
+        assert_eq!(decide("cargo test", &rules, worktree), HookDecision::Defer);
+        assert_eq!(decide("git status", &rules, worktree), HookDecision::Defer);
+        assert_eq!(
+            decide("ls -la", &rules, worktree),
+            HookDecision::AskRewrite("rtk ls -la".into())
         );
     }
 
@@ -580,6 +738,7 @@ mod tests {
                 decide_for_agent_at(
                     "cargo test",
                     PermissionVerdict::Allow,
+                    &HostRules::none(),
                     DenyRules::Unattested,
                     wt
                 ),
@@ -589,6 +748,7 @@ mod tests {
                 decide_for_agent_at(
                     "git status",
                     PermissionVerdict::Allow,
+                    &HostRules::none(),
                     DenyRules::Unattested,
                     wt
                 ),
@@ -598,6 +758,7 @@ mod tests {
                 decide_for_agent_at(
                     "ls -la",
                     PermissionVerdict::Allow,
+                    &HostRules::none(),
                     DenyRules::Unattested,
                     wt
                 ),
@@ -742,9 +903,9 @@ mod tests {
         );
     }
 
-    /// `decide` itself reports a no-op rewrite as a normal one; only
-    /// `suppress_identity` turns it into a defer. `rtk rewrite` depends on the
-    /// former, the in-process hosts on the latter.
+    /// [`decide_with_params`] itself reports a no-op rewrite as a normal one;
+    /// only `suppress_identity` turns it into a defer. `rtk rewrite`
+    /// ([`answer_for_host`]) depends on the former, the hooks on the latter.
     #[test]
     fn identity_rewrite_is_reported_and_only_suppressed_on_request() {
         let cmd = "rtk git status";
@@ -878,7 +1039,7 @@ mod tests {
                 decide_with_wrap(
                     "git diff HEAD~3 HEAD; and true",
                     PermissionVerdict::Default,
-                    &["git".to_string()],
+                    &crate::discover::registry::compile_exclude_patterns(&["git".to_string()]),
                     &[],
                     DenyRules::NoneConfigured,
                     wrap_stub
@@ -1028,6 +1189,130 @@ mod tests {
         ));
     }
 
+    /// A host that judges the command its hook hands back keeps a rewrite only
+    /// when its rules give the rewrite the typed command's verdict.
+    #[test]
+    fn a_host_judging_the_final_command_keeps_only_a_same_verdict_rewrite() {
+        let rewrite = || HookDecision::AllowRewrite("rtk git status".to_string());
+        let narrow = HostRules::opencode(vec![
+            bash_rule("*", Action::Deny),
+            bash_rule("git status", Action::Allow),
+        ]);
+        assert_eq!(
+            keep_host_verdict(rewrite(), PermissionVerdict::Allow, &narrow),
+            HookDecision::Defer
+        );
+        let broad = HostRules::opencode(vec![bash_rule("*", Action::Allow)]);
+        assert_eq!(
+            keep_host_verdict(rewrite(), PermissionVerdict::Allow, &broad),
+            rewrite()
+        );
+    }
+
+    /// A host that does not judge the final command keeps its rewrite whatever
+    /// verdict its rules give the rewritten form; OpenCode, which does, drops
+    /// it. The exact allow matches `git status` but not `rtk git status`.
+    #[test]
+    fn a_host_not_judging_the_final_command_keeps_its_rewrite() {
+        let rewrite = || HookDecision::AllowRewrite("rtk git status".to_string());
+        let allow = ["git status".to_string()];
+        for host in [
+            Host::Claude,
+            Host::Cursor,
+            Host::Gemini,
+            Host::Droid,
+            Host::Codex,
+            Host::Trae,
+            Host::Vibe,
+            Host::Antigravity,
+        ] {
+            let rules = HostRules::lists(host, &[], &[], &allow);
+            let typed = rules.verdict("git status");
+            assert_eq!(
+                typed,
+                PermissionVerdict::Allow,
+                "{host:?}: the allow matches"
+            );
+            assert_ne!(rules.verdict("rtk git status"), typed, "{host:?}");
+            assert_eq!(
+                keep_host_verdict(rewrite(), typed, &rules),
+                rewrite(),
+                "{host:?}"
+            );
+        }
+        let rules = HostRules::opencode(vec![bash_rule("git status", Action::Allow)]);
+        let typed = rules.verdict("git status");
+        assert_eq!(
+            typed,
+            PermissionVerdict::Allow,
+            "control: the allow matches"
+        );
+        assert_eq!(
+            keep_host_verdict(rewrite(), typed, &rules),
+            HookDecision::Defer,
+            "control: OpenCode judges the final command"
+        );
+    }
+
+    /// Claude Code keeps its rewrite under an exact `Bash(git status)` allow,
+    /// whatever an `opencode.json` in the project says.
+    #[test]
+    fn claude_keeps_its_rewrite_beside_an_opencode_config() {
+        use crate::core::test_isolation;
+
+        let tmp = test_isolation::tempdir();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).expect("create project dir");
+        std::fs::write(
+            project.join("opencode.json"),
+            r#"{ "permission": { "bash": { "*": "deny", "git status": "allow" } } }"#,
+        )
+        .expect("write project config");
+
+        let home = tmp.path().join("claude-home");
+        std::fs::create_dir_all(home.join(".claude")).expect("create .claude dir");
+        std::fs::write(
+            home.join(".claude").join("settings.json"),
+            r#"{ "permissions": { "allow": ["Bash(git status)"] } }"#,
+        )
+        .expect("write Claude settings");
+        test_isolation::with_root(&home, || {
+            let _entered = test_isolation::enter(&project);
+            let claude = AgentPath::lookup("claude").expect("claude is mapped");
+            assert!(matches!(
+                claude.decide("git status"),
+                HookDecision::AllowRewrite(r) if r == "rtk git status"
+            ));
+        });
+    }
+
+    /// A delegate is judged against Claude Code's rules and a rules-file agent
+    /// against none, whatever Claude Code's settings deny.
+    #[test]
+    fn delegates_read_claudes_rules_and_rules_file_agents_read_none() {
+        use crate::core::test_isolation;
+
+        let tmp = test_isolation::tempdir();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).expect("create project dir");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(home.join(".claude")).expect("create .claude dir");
+        std::fs::write(
+            home.join(".claude").join("settings.json"),
+            r#"{ "permissions": { "deny": ["Bash(rm:*)"] } }"#,
+        )
+        .expect("write Claude settings");
+        test_isolation::with_root(&home, || {
+            let _entered = test_isolation::enter(&project);
+            let delegate = AgentPath::lookup("openclaw").expect("openclaw is mapped");
+            assert_eq!(verdict_for(&delegate, "rm -rf x"), PermissionVerdict::Deny);
+            assert_eq!(
+                verdict_for(&AgentPath::RulesOnly, "rm -rf x"),
+                PermissionVerdict::Default
+            );
+        });
+    }
+
     /// Everything advertised in the error message must actually resolve.
     #[test]
     fn every_listed_agent_resolves() {
@@ -1042,7 +1327,7 @@ mod tests {
     /// The verdict an agent's path judges `cmd` against — the hook's own,
     /// including a host whose rule source is not Claude-shaped.
     fn verdict_for(path: &AgentPath, cmd: &str) -> PermissionVerdict {
-        path.verdict(cmd)
+        path.rules().verdict(cmd)
     }
 
     #[test]
@@ -1062,8 +1347,10 @@ mod tests {
             verdict_for(&AgentPath::InProcess(Host::Codex), "git status"),
             PermissionVerdict::Default
         );
-        let (deny, ask, allow) = super::super::permissions::load_rules_for(Host::Codex);
-        assert!(deny.is_empty() && ask.is_empty() && allow.is_empty());
+        assert_eq!(
+            HostRules::load(Host::Codex, None).verdict("rm -rf /"),
+            PermissionVerdict::Default
+        );
     }
 
     #[test]
@@ -1076,18 +1363,23 @@ mod tests {
             verdict_for(&AgentPath::InProcess(Host::Antigravity), "git status"),
             PermissionVerdict::Default
         );
-        let (deny, ask, allow) = super::super::permissions::load_rules_for(Host::Antigravity);
-        assert!(deny.is_empty() && ask.is_empty() && allow.is_empty());
+        assert_eq!(
+            HostRules::load(Host::Antigravity, None).verdict("rm -rf /"),
+            PermissionVerdict::Default
+        );
     }
 
     /// A rules-file agent has no hook and no permission rules, so its answer
     /// must not depend on any host's settings.
     #[test]
     fn rules_only_agent_uses_the_default_verdict() {
-        assert_eq!(
-            verdict_for(&AgentPath::RulesOnly, "git status"),
-            PermissionVerdict::Default
-        );
+        for cmd in ["git status", "echo $(date) > x"] {
+            assert_eq!(
+                verdict_for(&AgentPath::RulesOnly, cmd),
+                PermissionVerdict::Default,
+                "command {cmd}"
+            );
+        }
     }
 
     /// The load-bearing property of [`ApprovalOwner`]: it relaxes the
@@ -1177,11 +1469,11 @@ mod tests {
             Some(AgentPath::ViaRewrite(ApprovalOwner::Delegate))
         ));
         assert_eq!(
-            verdict_for(
-                &AgentPath::lookup("openclaw").expect("openclaw resolves"),
-                "git status"
-            ),
-            super::super::permissions::check_command_for("git status", Host::Claude),
+            AgentPath::lookup("openclaw")
+                .expect("openclaw resolves")
+                .rules()
+                .verdict("git status"),
+            HostRules::load(Host::Claude, None).verdict("git status"),
             "naming a host must not change whose rules are read"
         );
     }

@@ -1,7 +1,6 @@
 //! Translates a raw shell command into its RTK-optimized equivalent.
 
 use super::decision::{self, HookDecision};
-use super::permissions;
 use crate::core::user_dirs;
 use std::io::Write;
 
@@ -71,12 +70,13 @@ pub(crate) fn track_tee_read(cmd: &str) {
 /// | Exit | Stdout   | Meaning                                                                  |
 /// |------|----------|--------------------------------------------------------------------------|
 /// | 0    | rewritten| Allow rules cover every command — hook may auto-allow the rewrite.       |
-/// | 1    | (none)   | No rewrite, or a deny rule matched inside a shell wrapper's script ([`decision::decide`] deferred) — hook passes through. |
+/// | 1    | (none)   | No rewrite, or a deny rule matched inside a shell wrapper's script ([`decision::decide_with_params`] deferred) — hook passes through. |
 /// | 2    | (none)   | Deny rule matched — hook defers to the host's native deny.               |
 /// | 3    | rewritten| Ask rule, or allow rules short of every command (also with no rules) — hook rewrites, host prompts. |
 ///
-/// The decision itself is [`decision::decide`], shared with the in-process
-/// `rtk hook <agent>` path; this function is only its exit-code rendering.
+/// The decision itself is [`decision::AgentPath::answer`], what `rtk hook
+/// check` gives for the same delegates and the in-process `rtk hook <agent>`
+/// path builds on; this function is only its exit-code rendering.
 ///
 /// A delegate that gates the rewritten command itself can set
 /// [`decision::REWRITE_HOST_ENV`] to its agent name (`openclaw` is the only one
@@ -91,7 +91,8 @@ pub(crate) fn track_tee_read(cmd: &str) {
 pub fn run(cmd: &str) -> anyhow::Result<()> {
     // `rtk rewrite` has one rule source for every delegate that shells out to
     // it -- hermes, omp, opencode, openclaw, pi -- and that is `~/.claude`'s
-    // rules. The in-process `rtk hook <agent>` path is host-parameterized
+    // rules, as `rtk hook check` reads them for those agents
+    // (`AgentPath::ViaRewrite`). The in-process `rtk hook <agent>` path is host-parameterized
     // instead (`permissions::Host`). What a delegate may say about itself is
     // only who owns approval, never whose rules apply.
     //
@@ -100,11 +101,7 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
     // (`hooks/pi/rtk.ts`, `hooks/hermes/rtk-rewrite`), and OpenClaw matches
     // its own exec checks against the returned string — so a wrap would put
     // the script's commands past a gate RTK does not own.
-    let verdict = permissions::check_command(cmd);
-    let decided = decision::ApprovalOwner::from_env().apply(
-        decision::decide(cmd, verdict, permissions::DenyRules::Unattested),
-        verdict,
-    );
+    let decided = decision::AgentPath::ViaRewrite(decision::ApprovalOwner::from_env()).answer(cmd);
     if !matches!(decided, HookDecision::Deny) {
         track_tee_read(cmd);
     }

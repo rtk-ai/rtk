@@ -3,6 +3,9 @@ use super::constants::{
     SETTINGS_JSON, SETTINGS_LOCAL_JSON,
 };
 use super::init::resolve_claude_dir;
+use super::permissions_opencode::{
+    Rule, agent_rules_unreadable, check_command_with_opencode_rules, load_judgeable_opencode_rules,
+};
 use crate::core::user_dirs;
 use crate::core::user_env;
 use crate::core::utils::strip_leading_bom;
@@ -10,6 +13,7 @@ use crate::discover::lexer::{
     is_word_boundary_whitespace, split_for_permissions, split_for_wrappers,
 };
 use crate::discover::registry;
+use crate::discover::registry::ExcludePattern;
 #[cfg(test)]
 use crate::discover::registry::MAX_MATCHING_PEELS;
 use crate::discover::registry::{MatchingReadings, matching_readings};
@@ -32,15 +36,6 @@ pub enum PermissionVerdict {
     Defer,
 }
 
-/// Check `cmd` against Claude Code's deny/ask/allow permission rules.
-///
-/// Precedence: Deny > Defer > Ask > Allow > Default (ask).
-/// Returns `Default` when no rules match — callers should treat this as ask
-/// to match Claude Code's least-privilege default.
-pub fn check_command(cmd: &str) -> PermissionVerdict {
-    check_command_for(cmd, Host::Claude)
-}
-
 /// The agent host whose own permission settings should be consulted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Host {
@@ -55,24 +50,264 @@ pub enum Host {
     OpenCode,
 }
 
-pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
-    check_command_for_agent(cmd, host, None)
+/// A host's permission rules, read from disk once, and the rewrite settings
+/// they are judged beside. A hook judges the command as typed against them
+/// and, on a host that judges the command its hook hands back, the rewrite
+/// against the same rules.
+pub(crate) struct HostRules {
+    rules: Rules,
+    /// `hooks.exclude_commands`, compiled once: the commands the rewrite
+    /// leaves as typed.
+    exclude_patterns: Vec<ExcludePattern>,
+    /// `hooks.transparent_prefixes`, normalized once: the wrappers the rewrite
+    /// looks past, and deny, ask and allow lists judge past, so those two
+    /// cannot disagree about one. OpenCode's ordered rules match the command
+    /// as written.
+    transparent_prefixes: Vec<String>,
+    judges_final_command: bool,
+    /// Whether a fish script may be wrapped under these rules: only
+    /// [`HostRules::claude_hook`] ever attests it.
+    deny_rules: DenyRules,
 }
 
-pub fn check_command_for_agent(cmd: &str, host: Host, agent: Option<&str>) -> PermissionVerdict {
-    if host == Host::OpenCode {
-        let rules = super::permissions_opencode::load_opencode_rules(agent);
-        return super::permissions_opencode::check_command_with_opencode_rules(cmd, &rules);
+enum Rules {
+    /// Deny, ask and allow lists: deny wins, then ask, then allow. A wrapper
+    /// behind one of [`HostRules`]' transparent prefixes is gated where the
+    /// rewrite reaches it.
+    Buckets {
+        deny: Vec<String>,
+        ask: Vec<String>,
+        allow: Vec<String>,
+    },
+    /// One ordered list in which the last matching rule wins.
+    Ordered(Vec<Rule>),
+    /// Rules rtk cannot read the way the host does, so it cannot tell whether
+    /// a rewrite keeps their verdict: the host decides alone.
+    Unjudgeable,
+    /// No rules and no hook to apply them: nothing is judged. Not empty
+    /// [`Rules::Buckets`], which still ask about a command they cannot
+    /// attest, such as `echo $(date) > x`.
+    Nothing,
+}
+
+impl Rules {
+    fn buckets((deny, ask, allow): (Vec<String>, Vec<String>, Vec<String>)) -> Self {
+        Self::Buckets { deny, ask, allow }
     }
-    let (deny_rules, ask_rules, allow_rules) = load_rules_for(host);
-    let (_, transparent_prefixes) = crate::core::config::hook_rewrite_params();
-    check_command_with_rules_and_prefixes(
-        cmd,
-        &deny_rules,
-        &ask_rules,
-        &allow_rules,
-        &transparent_prefixes,
-    )
+
+    /// OpenCode's rules for `agent`, or [`Rules::Unjudgeable`] when an agent
+    /// markdown file declares rules or a legacy key applies on only one
+    /// OpenCode generation.
+    fn opencode(agent: Option<&str>) -> Self {
+        if agent_rules_unreadable(agent) {
+            return Self::Unjudgeable;
+        }
+        load_judgeable_opencode_rules(agent).map_or(Self::Unjudgeable, Self::Ordered)
+    }
+}
+
+impl HostRules {
+    /// Read `host`'s rules. `agent` selects agent-scoped rules on a host that
+    /// has them.
+    pub(crate) fn load(host: Host, agent: Option<&str>) -> Self {
+        let rules = match host {
+            Host::Claude => Rules::buckets(load_permission_rules()),
+            Host::Cursor => Rules::buckets(load_cursor_rules()),
+            Host::Gemini => Rules::buckets(load_gemini_rules()),
+            Host::Droid => Rules::buckets(load_droid_rules()),
+            // Hosts with no RTK-side rule source. Codex enforces its native
+            // execution rules after updatedInput. Do not interpret these hosts'
+            // rules as Claude Bash patterns or borrow another host's settings.
+            // No RTK-side match means Default, not an explicit Allow.
+            Host::Codex | Host::Trae | Host::Vibe | Host::Antigravity => {
+                Rules::buckets(Default::default())
+            }
+            Host::OpenCode => Rules::opencode(agent),
+        };
+        Self::of(host, rules)
+    }
+
+    /// `rules` as `host` applies them: whether it judges the command its hook
+    /// hands back is the host's, whatever the rules look like.
+    fn of(host: Host, rules: Rules) -> Self {
+        Self::new(rules, judges_final_command(host))
+    }
+
+    /// `rules`, beside the configured `exclude_commands` and transparent
+    /// prefixes: the one place every rewrite reads them from, through the
+    /// cached config, since this runs on the hook's hot path and
+    /// `tracking::get_db_path` reads the config again in the same call.
+    fn new(rules: Rules, judges_final_command: bool) -> Self {
+        let config = crate::core::config::cached_config();
+        Self {
+            rules,
+            exclude_patterns: registry::compile_exclude_patterns(&config.hooks.exclude_commands),
+            transparent_prefixes: registry::normalize_transparent_prefixes(
+                &config.hooks.transparent_prefixes,
+            ),
+            judges_final_command,
+            deny_rules: DenyRules::Unattested,
+        }
+    }
+
+    /// Claude Code's rules as `rtk hook claude` reads them, with what RTK can
+    /// say about the deny rules in force, from the same single walk of the
+    /// settings files. It attests only while `hooks.wrap_fish_scripts` is on,
+    /// so with the wrap off no command is even classified for it.
+    ///
+    /// The settings files [`load_permission_rules`] reads are the rules RTK can
+    /// see, not all of Claude Code's: `--settings`, `--disallowedTools`, managed
+    /// settings and the project the agent has `cd`'d away from never reach the
+    /// hook, which is why every wrap is also an explicit ask. Within what RTK can
+    /// see, an empty deny list is evidence only when RTK read and parsed every
+    /// one of those files. A file it had to skip may name the rule that matters.
+    ///
+    /// "No deny rule" means no entry under `permissions.deny` at all, not "no
+    /// entry this gate understands": `Bash` on its own denies every Bash call,
+    /// and `append_bash_rules` keeps only the `Bash(…)` forms, so counting the
+    /// extracted patterns would read a configured user as an unconfigured one.
+    ///
+    /// No other caller gets this answer, and the reasons differ per host rather
+    /// than being one oversight:
+    ///
+    /// - Gemini's loader reads `tools.allowed` and `tools.confirmationRequired`
+    ///   only, and never produces a deny rule, so its exclude lists are invisible
+    ///   here;
+    /// - Droid's built-in defaults are deliberately not mirrored, so an empty
+    ///   `commandDenylist` says nothing about what Droid refuses;
+    /// - Cursor's loader reads the global `cli-config.json`, while the host also
+    ///   applies its project config;
+    /// - Copilot resolves to [`Host::Claude`] for its verdict, but judges the
+    ///   returned command with its own allowlist flow;
+    /// - OpenCode re-evaluates its own patterns against the string RTK hands back;
+    /// - Codex, Trae, Vibe and Antigravity have no RTK-side rule source at all;
+    /// - `rtk rewrite` reads Claude's rules for delegates that do not prompt on
+    ///   exit 3 at all (`hooks/pi/rtk.ts`, `hooks/hermes/rtk-rewrite`), and
+    ///   OpenClaw matches its exec checks against the returned string.
+    pub(crate) fn claude_hook() -> Self {
+        let mut scan = SettingsScan::default();
+        let lists = load_permission_rules_tracking(&get_settings_paths(), &mut scan);
+        let wrap_enabled = crate::core::config::cached_config().hooks.wrap_fish_scripts;
+        let deny_rules = if wrap_enabled && scan.every_file_read && !scan.any_deny_entry {
+            DenyRules::NoneConfigured
+        } else {
+            DenyRules::Unattested
+        };
+        Self {
+            deny_rules,
+            ..Self::of(Host::Claude, Rules::buckets(lists))
+        }
+    }
+
+    /// No rules and no hook: every command gets [`PermissionVerdict::Default`].
+    pub(crate) fn none() -> Self {
+        Self::new(Rules::Nothing, false)
+    }
+
+    /// Deny, ask and allow lists a test supplies, applied as `host` applies
+    /// its own, with no transparent prefix and no excluded command.
+    #[cfg(test)]
+    pub(crate) fn lists(host: Host, deny: &[String], ask: &[String], allow: &[String]) -> Self {
+        Self::of(
+            host,
+            Rules::Buckets {
+                deny: deny.to_vec(),
+                ask: ask.to_vec(),
+                allow: allow.to_vec(),
+            },
+        )
+        .with_transparent_prefixes(&[])
+        .with_exclude_commands(&[])
+    }
+
+    /// These rules, leaving `commands` as typed instead of the configured ones.
+    #[cfg(test)]
+    pub(crate) fn with_exclude_commands(self, commands: &[&str]) -> Self {
+        let commands: Vec<String> = commands.iter().map(|command| command.to_string()).collect();
+        Self {
+            exclude_patterns: registry::compile_exclude_patterns(&commands),
+            ..self
+        }
+    }
+
+    /// These rules, looking past `prefixes` instead of the configured ones.
+    #[cfg(test)]
+    pub(crate) fn with_transparent_prefixes(self, prefixes: &[&str]) -> Self {
+        let prefixes: Vec<String> = prefixes.iter().map(|prefix| prefix.to_string()).collect();
+        Self {
+            transparent_prefixes: registry::normalize_transparent_prefixes(&prefixes),
+            ..self
+        }
+    }
+
+    /// OpenCode's rules as [`HostRules::load`] builds them, from `rules`, with
+    /// no transparent prefix and no excluded command.
+    #[cfg(test)]
+    pub(crate) fn opencode(rules: Vec<Rule>) -> Self {
+        Self::of(Host::OpenCode, Rules::Ordered(rules))
+            .with_transparent_prefixes(&[])
+            .with_exclude_commands(&[])
+    }
+
+    pub(crate) fn verdict(&self, cmd: &str) -> PermissionVerdict {
+        match &self.rules {
+            Rules::Buckets { deny, ask, allow } => check_command_with_rules_and_prefixes(
+                cmd,
+                deny,
+                ask,
+                allow,
+                &self.transparent_prefixes,
+            ),
+            Rules::Ordered(rules) => check_command_with_opencode_rules(cmd, rules),
+            Rules::Unjudgeable | Rules::Nothing => PermissionVerdict::Default,
+        }
+    }
+
+    /// The commands the rewrite leaves as typed.
+    pub(crate) fn exclude_patterns(&self) -> &[ExcludePattern] {
+        &self.exclude_patterns
+    }
+
+    /// The wrappers both the verdict and the rewrite look past.
+    pub(crate) fn transparent_prefixes(&self) -> &[String] {
+        &self.transparent_prefixes
+    }
+
+    /// Whether the host judges the command its hook hands back against these
+    /// same rules, so that a rewrite must leave the verdict unchanged.
+    pub(crate) fn judges_final_command(&self) -> bool {
+        self.judges_final_command
+    }
+
+    /// Whether rtk reads these rules the way the host does, and so can tell
+    /// whether a rewrite keeps their verdict.
+    pub(crate) fn readable(&self) -> bool {
+        !matches!(self.rules, Rules::Unjudgeable)
+    }
+
+    /// What RTK can say about the deny rules a fish wrap could escape.
+    pub(crate) fn deny_rules(&self) -> DenyRules {
+        self.deny_rules
+    }
+}
+
+/// Whether `host` judges the command its hook hands back against the same
+/// rules, so that a rewrite must leave their verdict unchanged. A fact about
+/// the host, not about the shape of its rules: each host says so here.
+fn judges_final_command(host: Host) -> bool {
+    match host {
+        // OpenCode judges the command its plugin hands back against these
+        // same rules, and a plugin cannot change that verdict.
+        Host::OpenCode => true,
+        Host::Claude
+        | Host::Cursor
+        | Host::Gemini
+        | Host::Droid
+        | Host::Codex
+        | Host::Trae
+        | Host::Vibe
+        | Host::Antigravity => false,
+    }
 }
 
 /// Whether RTK can show that nothing it is about to wrap could escape a deny
@@ -88,14 +323,14 @@ pub fn check_command_for_agent(cmd: &str, host: Host, agent: Option<&str>) -> Pe
 /// So the wrap is offered on one host only, Claude Code's own hook: RTK reads
 /// its settings files, and the hook asks explicitly for every wrap it builds, so no
 /// allow rule matching `rtk` can run the script unprompted. See
-/// [`claude_hook_deny_rules`].
+/// [`HostRules::claude_hook`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DenyRules {
     /// Every settings file RTK reads parsed, and none carries a deny rule.
     NoneConfigured,
     /// Anything else: a deny rule is present, a file could not be parsed, the
-    /// wrap is off, the command is not provably fish, or this caller is not
-    /// the Claude hook.
+    /// wrap is off, or these are not the rules of the Claude hook. Whether a
+    /// given command is fish is `try_wrap`'s to say, not this.
     Unattested,
 }
 
@@ -103,63 +338,6 @@ impl DenyRules {
     /// True only for [`DenyRules::NoneConfigured`].
     pub(crate) fn permit_wrap(self) -> bool {
         self == Self::NoneConfigured
-    }
-}
-
-/// What RTK can say about the deny rules in force for `rtk hook claude`.
-///
-/// The settings files [`load_permission_rules`] reads are the rules RTK can
-/// see, not all of Claude Code's: `--settings`, `--disallowedTools`, managed
-/// settings and the project the agent has `cd`'d away from never reach the
-/// hook, which is why every wrap is also an explicit ask. Within what RTK can
-/// see, an empty deny list is evidence only when RTK read and parsed every
-/// one of those files. A file it had to skip may name the rule that matters.
-///
-/// "No deny rule" means no entry under `permissions.deny` at all, not "no
-/// entry this gate understands": `Bash` on its own denies every Bash call,
-/// and `append_bash_rules` keeps only the `Bash(…)` forms, so counting the
-/// extracted patterns would read a configured user as an unconfigured one.
-///
-/// No other caller gets this answer, and the reasons differ per host rather
-/// than being one oversight:
-///
-/// - Gemini's loader reads `tools.allowed` and `tools.confirmationRequired`
-///   only, and never produces a deny rule, so its exclude lists are invisible
-///   here;
-/// - Droid's built-in defaults are deliberately not mirrored, so an empty
-///   `commandDenylist` says nothing about what Droid refuses;
-/// - Cursor's loader reads the global `cli-config.json`, while the host also
-///   applies its project config;
-/// - Copilot resolves to [`Host::Claude`] for its verdict, but judges the
-///   returned command with its own allowlist flow;
-/// - OpenCode re-evaluates its own patterns against the string RTK hands back;
-/// - Codex, Trae, Vibe and Antigravity have no RTK-side rule source at all;
-/// - `rtk rewrite` reads Claude's rules for delegates that do not prompt on
-///   exit 3 at all (`hooks/pi/rtk.ts`, `hooks/hermes/rtk-rewrite`), and
-///   OpenClaw matches its exec checks against the returned string.
-pub(crate) fn claude_hook_deny_rules() -> DenyRules {
-    let mut scan = SettingsScan::default();
-    let _ = load_permission_rules_tracking(&get_settings_paths(), &mut scan);
-    if scan.every_file_read && !scan.any_deny_entry {
-        DenyRules::NoneConfigured
-    } else {
-        DenyRules::Unattested
-    }
-}
-
-/// [`claude_hook_deny_rules`] where a wrap is possible at all: the wrap is
-/// enabled and `cmd` is provably fish. Anywhere else the answer cannot change
-/// a decision, so the settings are not walked a second time for it.
-///
-/// `rtk hook claude` and `rtk hook check --agent claude` both ask here, so the
-/// two read the settings the same number of times.
-pub(crate) fn claude_hook_deny_rules_for(cmd: &str) -> DenyRules {
-    if crate::core::config::cached_config().hooks.wrap_fish_scripts
-        && crate::discover::fish_script::is_unambiguous_fish(cmd)
-    {
-        claude_hook_deny_rules()
-    } else {
-        DenyRules::Unattested
     }
 }
 
@@ -180,33 +358,8 @@ impl Default for SettingsScan {
     }
 }
 
-/// Load `host`'s deny/ask/allow Bash rules from disk, doing the settings-file I/O
-/// exactly once.
-///
-/// Every caller reads its rules through here and keeps them: a verdict needs
-/// all three, and a caller that checks many commands against the same host in
-/// a loop (e.g.
-/// `rtk discover` scanning thousands of transcript commands) reuses them per
-/// command instead of re-reading every settings file from
-/// disk on every single call.
-pub(crate) fn load_rules_for(host: Host) -> (Vec<String>, Vec<String>, Vec<String>) {
-    match host {
-        Host::Claude => load_permission_rules(),
-        Host::Cursor => load_cursor_rules(),
-        Host::Gemini => load_gemini_rules(),
-        Host::Droid => load_droid_rules(),
-        // Hosts with no RTK-side rule source. Codex enforces its native
-        // execution rules after updatedInput. Do not interpret these hosts'
-        // rules as Claude Bash patterns or borrow another host's settings.
-        // No RTK-side match means Default, not an explicit Allow.
-        Host::Codex | Host::Trae | Host::Vibe | Host::Antigravity => {
-            (Vec::new(), Vec::new(), Vec::new())
-        }
-        Host::OpenCode => (Vec::new(), Vec::new(), Vec::new()),
-    }
-}
-
-/// Internal implementation allowing tests to inject rules without file I/O.
+/// Claude Code's verdict on `cmd` under rules a test supplies, without file
+/// I/O: the one [`HostRules::verdict`] gives the hooks.
 #[cfg(test)]
 pub(crate) fn check_command_with_rules(
     cmd: &str,
@@ -214,11 +367,12 @@ pub(crate) fn check_command_with_rules(
     ask_rules: &[String],
     allow_rules: &[String],
 ) -> PermissionVerdict {
-    check_command_with_rules_and_prefixes(cmd, deny_rules, ask_rules, allow_rules, &[])
+    HostRules::lists(Host::Claude, deny_rules, ask_rules, allow_rules).verdict(cmd)
 }
 
-/// `check_command_with_rules` with the `transparent_prefixes` the rewrite
-/// strips, so a wrapper behind one of them is gated where the rewrite reaches it.
+/// The verdict of deny, ask and allow lists ([`Rules::Buckets`]), with the
+/// `transparent_prefixes` the rewrite strips, already normalized, so a wrapper
+/// behind one of them is gated where the rewrite reaches it.
 pub(crate) fn check_command_with_rules_and_prefixes(
     cmd: &str,
     deny_rules: &[String],
@@ -263,11 +417,10 @@ pub(crate) fn check_command_with_rules_and_prefixes(
         }
     }
 
-    let transparent_prefixes = registry::normalize_transparent_prefixes(transparent_prefixes);
     let joined = registry::collapse_line_continuations(cmd);
     let wrapper_segments = split_for_wrappers(&joined);
     if let Some(verdict) =
-        check_shell_wrapper_permissions(&wrapper_segments, deny_rules, &transparent_prefixes)
+        check_shell_wrapper_permissions(&wrapper_segments, deny_rules, transparent_prefixes)
     {
         return verdict;
     }
@@ -385,7 +538,10 @@ fn check_shell_wrapper_permissions(
 /// Missing and empty files are skipped. A file that exists but cannot be read
 /// or parsed may hold deny rules that can no longer be applied, so it fails
 /// closed: a warning is printed and every command gets at least `Ask`.
-fn load_permission_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
+///
+/// `rtk discover` checks thousands of transcript commands against these, so it
+/// loads them once up front and calls `check_command_with_rules` per command.
+pub(crate) fn load_permission_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
     load_permission_rules_from(&get_settings_paths())
 }
 
@@ -398,7 +554,7 @@ fn load_permission_rules_from(paths: &[PathBuf]) -> (Vec<String>, Vec<String>, V
 /// whether any deny entry exists at all.
 ///
 /// Both are the difference between "this user configured no deny rule" and
-/// "RTK saw none" — see [`claude_hook_deny_rules`]. The rules themselves are
+/// "RTK saw none" — see [`HostRules::claude_hook`]. The rules themselves are
 /// unaffected: the fail-closed `ask *` a skipped file contributes is the same
 /// either way.
 fn load_permission_rules_tracking(
@@ -855,6 +1011,109 @@ fn split_compound_command(cmd: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A deny rule in a shell wrapper's script behind a configured transparent
+    /// prefix defers the command: the rewrite would reach that script.
+    #[test]
+    fn host_rules_gate_past_the_configured_transparent_prefixes() {
+        use crate::core::{test_isolation, user_dirs};
+
+        let tmp = test_isolation::tempdir();
+        let home = tmp.path().join("home");
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).expect("create project dir");
+        std::fs::create_dir_all(home.join(".claude")).expect("create .claude dir");
+        std::fs::write(
+            home.join(".claude").join("settings.json"),
+            r#"{ "permissions": { "deny": ["Bash(git push:*)"] } }"#,
+        )
+        .expect("write Claude settings");
+
+        test_isolation::with_root(&home, || {
+            let _entered = test_isolation::enter(&project);
+            let config = user_dirs::config().expect("config dir");
+            std::fs::create_dir_all(&config).expect("create config dir");
+            // The control: without the prefix, `mywrap` is an ordinary command
+            // and the deny rule is never reached.
+            assert_eq!(
+                HostRules::load(Host::Claude, None).verdict("mywrap bash -c 'git push origin'"),
+                PermissionVerdict::Default
+            );
+            std::fs::write(
+                config.join("config.toml"),
+                "[hooks]\ntransparent_prefixes = [\"mywrap\"]\n",
+            )
+            .expect("write config");
+            assert_eq!(
+                HostRules::load(Host::Claude, None).verdict("mywrap bash -c 'git push origin'"),
+                PermissionVerdict::Defer
+            );
+        });
+    }
+
+    /// Each host reads its own rule file and no other: a command is judged by
+    /// its rule only on the host whose file holds it, and hosts with no rule
+    /// source judge every command `Default`.
+    #[test]
+    fn each_host_reads_its_own_rules_and_no_other() {
+        use crate::core::test_isolation;
+
+        let tmp = test_isolation::tempdir();
+        let home = tmp.path().join("home");
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).expect("create project dir");
+        for (dir, file, body) in [
+            (
+                ".claude",
+                "settings.json",
+                r#"{ "permissions": { "deny": ["Bash(rm:*)"] } }"#,
+            ),
+            (
+                ".cursor",
+                "cli-config.json",
+                r#"{ "permissions": { "deny": ["Shell(curl)"] } }"#,
+            ),
+            (
+                ".gemini",
+                "settings.json",
+                r#"{ "tools": { "confirmationRequired": ["run_shell_command(wget)"] } }"#,
+            ),
+            (
+                ".factory",
+                "settings.json",
+                r#"{ "commandDenylist": ["chmod 777"] }"#,
+            ),
+        ] {
+            std::fs::create_dir_all(home.join(dir)).expect("create host dir");
+            std::fs::write(home.join(dir).join(file), body).expect("write host settings");
+        }
+        let commands = ["rm -rf x", "curl x", "wget x", "chmod 777 x"];
+        let own = [
+            (Host::Claude, Some(("rm -rf x", PermissionVerdict::Deny))),
+            (Host::Cursor, Some(("curl x", PermissionVerdict::Deny))),
+            (Host::Gemini, Some(("wget x", PermissionVerdict::Ask))),
+            (Host::Droid, Some(("chmod 777 x", PermissionVerdict::Deny))),
+            (Host::Codex, None),
+            (Host::Trae, None),
+            (Host::Vibe, None),
+            (Host::Antigravity, None),
+            (Host::OpenCode, None),
+        ];
+
+        test_isolation::with_root(&home, || {
+            let _entered = test_isolation::enter(&project);
+            for (host, rule) in own {
+                let rules = HostRules::load(host, None);
+                for cmd in commands {
+                    let expected = match rule {
+                        Some((ruled, verdict)) if ruled == cmd => verdict,
+                        _ => PermissionVerdict::Default,
+                    };
+                    assert_eq!(rules.verdict(cmd), expected, "host {host:?}, command {cmd}");
+                }
+            }
+        });
+    }
 
     #[test]
     fn test_get_settings_paths_uses_the_resolved_claude_dir() {

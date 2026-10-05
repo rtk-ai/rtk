@@ -1,8 +1,7 @@
-use super::{STDIN_CAP, audit_log, pre_tool_use_rewrite_output};
+use super::{ClaudeHookRules, STDIN_CAP, audit_log, pre_tool_use_rewrite_output};
 use crate::core::pipeline_config::{self, ShellHookDecision};
 use crate::hooks::constants::{POST_TOOL_USE_KEY, PRE_TOOL_USE_KEY, SESSION_START_KEY};
 use crate::hooks::decision::{self, HookDecision};
-use crate::hooks::permissions;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::io::{self, Read, Write};
@@ -21,7 +20,7 @@ pub(super) fn read_payload() -> Result<String> {
     Ok(input)
 }
 
-pub(super) fn handle(v: &Value, raw_len: usize) -> Result<bool> {
+pub(super) fn handle(v: &Value, raw_len: usize, rules: &ClaudeHookRules) -> Result<bool> {
     crate::hooks::set_hook_agent("claude-code");
     if let Some(purpose) = v
         .pointer("/tool_input/description")
@@ -54,7 +53,7 @@ pub(super) fn handle(v: &Value, raw_len: usize) -> Result<bool> {
     if read_gate(v) || tool_gate(v) {
         return Ok(true);
     }
-    Ok(shell_gate(v))
+    Ok(shell_gate(v, rules))
 }
 
 fn deny(message: &str) {
@@ -130,7 +129,7 @@ fn tool_gate(v: &Value) -> bool {
     }
 }
 
-fn shell_gate(v: &Value) -> bool {
+fn shell_gate(v: &Value, rules: &ClaudeHookRules) -> bool {
     let Some(cmd) = v
         .pointer("/tool_input/command")
         .and_then(|c| c.as_str())
@@ -150,13 +149,27 @@ fn shell_gate(v: &Value) -> bool {
             true
         }
         ShellHookDecision::Swap { command, rule } => {
-            let verdict = permissions::check_command_for(cmd, permissions::Host::Claude);
             // A yes/no gate on the pipeline's own replacement command, not a
-            // rewrite RTK emits — so it must answer about `cmd` as it stands.
-            // `Unattested` keeps the wrap out of this gate, so it answers as
-            // it does without the feature: a fish script the ordinary rewrite
-            // would defer stays deferred, and one it would rewrite swaps.
-            match decision::decide_for_agent(cmd, verdict, permissions::DenyRules::Unattested) {
+            // rewrite RTK emits — so it must answer about `cmd` as it stands,
+            // under the rules the hook itself reads. Unwrapped keeps the wrap
+            // out of this gate, so it answers as it does without the feature:
+            // a fish script the ordinary rewrite would defer stays deferred,
+            // and one it would rewrite swaps.
+            //
+            // In a managed worktree the hook leaves git as typed (#3864).
+            // Claude Code reads a plain command there segment by segment, but
+            // refuses a replacement like this one, an `rtk` command handing a
+            // script to `sh`, whenever its text contains `git`, in any case
+            // and even inside another word (`xargs git add`, `echo digit`, a
+            // task named `git-digest`): such a replacement is not swapped. It
+            // embeds the typed command, so this covers git in that too.
+            let cwd = v.get("cwd").and_then(Value::as_str);
+            if cwd.is_some_and(decision::in_claude_worktree)
+                && command.to_ascii_lowercase().contains("git")
+            {
+                return false;
+            }
+            match decision::decide_for_host_unwrapped(cmd, rules, cwd) {
                 HookDecision::AllowRewrite(_) | HookDecision::AskRewrite(_) => {
                     let output = pre_tool_use_rewrite_output(v, &command, None);
                     let _ = writeln!(io::stdout(), "{output}");

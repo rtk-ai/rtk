@@ -177,7 +177,7 @@ fn estimate_hook_coverage(permission_cmd: &str, rewrite_cmd: &str, ctx: &Coverag
 
 /// Pure core of `estimate_hook_coverage`, taking the permission verdict directly so
 /// it's testable without depending on real config files. Mirrors the real hook's own
-/// decision order (`hooks::decision::decide`): a `Deny`-rule match or an
+/// decision order (`hooks::decision::decide_with_params`): a `Deny`-rule match or an
 /// unattestable construct means the hook would never have rewritten this, regardless
 /// of registry support. See `estimate_hook_coverage` for why `permission_cmd` and
 /// `rewrite_cmd` can differ.
@@ -378,7 +378,7 @@ pub fn run(
         registry::normalize_transparent_prefixes(&transparent_prefixes);
 
     // Loaded once up front (see `PermissionRules`), not once per command.
-    let (deny, ask, allow) = permissions::load_rules_for(permissions::Host::Claude);
+    let (deny, ask, allow) = permissions::load_permission_rules();
     let rules = PermissionRules { deny, ask, allow };
 
     let cutoff = crate::core::utils::days_ago_cutoff(since_days);
