@@ -191,3 +191,39 @@ fn explicit_reporter_keeps_stderr_diagnostics_and_failure_status() {
     );
     assert!(out.stderr.is_empty());
 }
+
+#[test]
+fn native_spawn_preserves_argument_boundaries_and_metacharacters() {
+    for framework in ["vitest", "jest"] {
+        let fixture = Fixture::new(true, None);
+        let user_args = [
+            "src/a.test.ts",
+            "--",
+            "-literal",
+            "a;$(echo unsafe)&b",
+            "quote\"and\\slash",
+        ];
+        let args: Vec<_> = [framework].into_iter().chain(user_args).collect();
+        let out = fixture.run(&args, PASS_JSON, "", 0);
+        let mut expected = vec![framework];
+        expected.extend(framework_args(framework));
+        expected.extend(user_args);
+        fixture.assert_invocation(&expected);
+        assert_eq!(out.status.code(), Some(0));
+        assert_eq!(out.stdout, b"PASS (2) FAIL (0)\n");
+        assert!(out.stderr.is_empty());
+    }
+}
+
+#[test]
+fn reporter_passthrough_also_reaches_the_package_manager() {
+    let fixture = Fixture::new(false, Some("pnpm-lock.yaml"));
+    let out = fixture.run(&["vitest", "--reporter", "json"], PASS_JSON, "", 0);
+    fixture.assert_invocation(&["pnpm", "exec", "--", "vitest", "run", "--reporter", "json"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("{PASS_JSON}\n")
+    );
+    assert!(out.stderr.is_empty());
+}
