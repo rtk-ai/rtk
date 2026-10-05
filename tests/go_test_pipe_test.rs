@@ -71,3 +71,40 @@ fn valid_json_events_still_use_the_existing_filter() {
     assert!(shown.contains("x_test.go:12"), "{shown}");
     assert!(!shown.contains("No tests found"), "{shown}");
 }
+
+#[test]
+fn raw_fallback_preserves_line_endings_and_unterminated_text() {
+    for input in [
+        " \t\r\nFAIL\texample.com/proj\t0.01s\r\n  ",
+        "--- FAIL: TestUnicode\n    expected 日本語, got 中文",
+        "{\"message\":\"failure without newline\"}",
+    ] {
+        assert_eq!(pipe(input), input);
+    }
+}
+
+#[test]
+fn output_shaped_json_without_output_is_not_a_test_report() {
+    for input in [
+        r#"{"Action":"output","Package":"example.com/proj","message":"setup failed"}"#,
+        r#"{"Action":"build-output","ImportPath":"example.com/proj","message":"compile failed"}"#,
+    ] {
+        assert_eq!(pipe(input), input);
+    }
+}
+
+#[test]
+fn padded_json_and_build_failures_keep_existing_summaries() {
+    let input =
+        " \r\n \t{\"Action\":\"pass\",\"Package\":\"example.com/proj\",\"Test\":\"TestOK\"} \r\n\t";
+    assert_eq!(pipe(input), "Go test: 1 passed in 1 packages");
+    let build = concat!(
+        "{\"Action\":\"build-output\",\"ImportPath\":\"example.com/proj\",\"Output\":\"main.go:4: undefined: missing\\n\"}\n",
+        "{\"Action\":\"build-fail\",\"ImportPath\":\"example.com/proj\"}\n",
+        "{\"Action\":\"fail\",\"Package\":\"example.com/proj\",\"FailedBuild\":\"example.com/proj\"}\n",
+    );
+    let shown = pipe(build);
+    assert!(shown.contains("main.go:4: undefined: missing"), "{shown}");
+    assert!(shown.contains("[build failed]"), "{shown}");
+    assert_ne!(shown, build);
+}

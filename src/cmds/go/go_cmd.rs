@@ -300,6 +300,11 @@ pub(crate) fn is_go_test_json(input: &str) -> bool {
         let Ok(event) = serde_json::from_str::<GoTestEvent>(line) else {
             return false;
         };
+        // Output actions require their payload; an Action/Package-shaped log
+        // object alone is not evidence that this is Go's event format.
+        if matches!(event.action.as_str(), "output" | "build-output") && event.output.is_none() {
+            return false;
+        }
         let identity = match event.action.as_str() {
             "start" | "run" | "pause" | "cont" | "pass" | "bench" | "fail" | "output" | "skip" => {
                 event.package

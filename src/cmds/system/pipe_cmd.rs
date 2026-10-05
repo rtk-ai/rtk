@@ -368,6 +368,8 @@ mod tests {
             r#"{"Action":"pass"}"#,
             r#"{"Action":"unknown","Package":"example.com/proj"}"#,
             r#"{"Action":"output","Package":"example.com/proj","Output":42}"#,
+            r#"{"Action":"output","Package":"example.com/proj","message":"setup failed"}"#,
+            r#"{"Action":"build-output","ImportPath":"example.com/proj","message":"compile failed"}"#,
         ] {
             assert_eq!(go_test_wrapper(input), input);
         }
