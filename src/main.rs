@@ -241,7 +241,11 @@ enum Commands {
     /// Run command and show only errors/warnings
     Err {
         /// Execute one quoted command string with this shell instead of direct argv execution
-        #[arg(long, value_name = "SHELL")]
+        #[arg(
+            long,
+            value_name = "SHELL",
+            value_parser = clap::builder::NonEmptyStringValueParser::new()
+        )]
         shell: Option<String>,
         /// Command to run
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
@@ -251,7 +255,11 @@ enum Commands {
     /// Run tests and show only failures
     Test {
         /// Execute one quoted command string with this shell instead of direct argv execution
-        #[arg(long, value_name = "SHELL")]
+        #[arg(
+            long,
+            value_name = "SHELL",
+            value_parser = clap::builder::NonEmptyStringValueParser::new()
+        )]
         shell: Option<String>,
         /// Test command (e.g. cargo test)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -337,7 +345,11 @@ enum Commands {
     /// Run command and show heuristic summary
     Summary {
         /// Execute one quoted command string with this shell instead of direct argv execution
-        #[arg(long, value_name = "SHELL")]
+        #[arg(
+            long,
+            value_name = "SHELL",
+            value_parser = clap::builder::NonEmptyStringValueParser::new()
+        )]
         shell: Option<String>,
         /// Command to run and summarize
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
