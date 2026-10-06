@@ -1,0 +1,51 @@
+name: Transparency
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    branches: [master]
+
+permissions: {}
+
+concurrency:
+  group: transparency-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  trigger:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository
+      && github.head_ref == 'develop'
+      && contains(github.event.pull_request.labels.*.name, 'next-release')
+      && (github.event.action != 'labeled'
+          || github.event.label.name == 'next-release')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Start transparency pipeline
+        env:
+          TOKEN: ${{ secrets.TRANSPARENCY_TRIGGER_TOKEN }}
+          PROJECT_ID: ${{ secrets.TRANSPARENCY_PROJECT_ID }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${TOKEN:-}" ] || [ -z "${PROJECT_ID:-}" ]; then
+            echo "::notice::Transparency pipeline is not configured for this repository."
+            exit 0
+          fi
+
+          umask 077
+          printf '%s' "${TOKEN}" > token.txt
+          trap 'rm -f token.txt' EXIT
+
+          curl --silent --show-error --fail-with-body --max-time 60 \
+            --request POST \
+            --data-urlencode "token@token.txt" \
+            --data-urlencode "ref=main" \
+            --data-urlencode "variables[RTK_PR]=${PR_NUMBER}" \
+            --data-urlencode "variables[RTK_PR_URL]=${PR_URL}" \
+            "https://gitlab.com/api/v4/projects/${PROJECT_ID}/trigger/pipeline" > /dev/null
+
+          echo "::notice::Transparency pipeline started for PR #${PR_NUMBER}."

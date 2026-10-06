@@ -4,6 +4,7 @@
 //! Focuses on extracting essential information from JSON outputs.
 
 use crate::core::runner::{self, RunOptions};
+use crate::core::shell::quote_word;
 use crate::core::truncate::CAP_LIST;
 use crate::core::utils::{ok_confirmation, resolved_command, truncate};
 use crate::git_cmd;
@@ -357,7 +358,7 @@ fn view_pr(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
         cmd.arg(arg);
     }
     let label = match pr_number_opt.as_deref() {
-        Some(id) => format!("pr view {}", id),
+        Some(id) => format!("pr view {}", quote_word(id)),
         None => "pr view".to_string(),
     };
     run_gh_json(cmd, &label, |json| format_pr_view(json, ultra_compact))
@@ -461,7 +462,7 @@ fn pr_checks(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<i32>
         cmd.arg(arg);
     }
     let label = match pr_number_opt.as_deref() {
-        Some(id) => format!("pr checks {}", id),
+        Some(id) => format!("pr checks {}", quote_word(id)),
         None => "pr checks".to_string(),
     };
     runner::run_filtered(
@@ -729,7 +730,7 @@ fn view_issue(args: &[String], _verbose: u8) -> Result<i32> {
         cmd.arg(arg);
     }
     let label = match issue_number_opt.as_deref() {
-        Some(id) => format!("issue view {}", id),
+        Some(id) => format!("issue view {}", quote_word(id)),
         None => "issue view".to_string(),
     };
     run_gh_json(cmd, &label, format_issue_view)
@@ -862,7 +863,7 @@ fn view_run(args: &[String], _verbose: u8) -> Result<i32> {
         cmd.arg(arg);
     }
     let label = match run_id_opt.as_deref() {
-        Some(id) => format!("run view {}", id),
+        Some(id) => format!("run view {}", quote_word(id)),
         None => "run view".to_string(),
     };
     let run_id_owned = run_id_opt.unwrap_or_default();

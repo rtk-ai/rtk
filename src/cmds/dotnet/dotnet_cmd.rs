@@ -4,6 +4,7 @@ use crate::binlog;
 use crate::core::arg_tokenizer::{self, Dialect, Token, TokenKind, ValueSpec};
 use crate::core::args_utils;
 use crate::core::guard::never_worse;
+use crate::core::shell::{display_args, quote_word, with_args};
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::{CAP_ERRORS, CAP_LIST, CAP_WARNINGS};
@@ -63,12 +64,8 @@ pub fn run_format(args: &[String], verbose: u8) -> Result<i32> {
     let shown = never_worse(&raw, &filtered);
     println!("{}", shown);
 
-    timer.track(
-        &format!("dotnet format {}", args.join(" ")),
-        &format!("rtk dotnet format {}", args.join(" ")),
-        &raw,
-        shown,
-    );
+    let tracked = with_args("dotnet format", &display_args(args));
+    timer.track(&tracked, &format!("rtk {tracked}"), &raw, shown);
 
     if cleanup_report_path && let Some(path) = report_path.as_deref() {
         cleanup_temp_file(path);
@@ -104,12 +101,8 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
     print!("{}", result.stdout);
     eprint!("{}", result.stderr);
 
-    timer.track(
-        &format!("dotnet {}", subcommand),
-        &format!("rtk dotnet {}", subcommand),
-        &raw,
-        &raw,
-    );
+    let label = format!("dotnet {}", quote_word(&subcommand));
+    timer.track(&label, &format!("rtk {label}"), &raw, &raw);
 
     Ok(result.exit_code)
 }
@@ -250,12 +243,8 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
     let shown = never_worse(&raw, &output_to_print);
     println!("{}", shown);
 
-    timer.track(
-        &format!("dotnet {} {}", subcommand, args.join(" ")),
-        &format!("rtk dotnet {} {}", subcommand, args.join(" ")),
-        &raw,
-        shown,
-    );
+    let tracked = format!("dotnet {} {}", subcommand, display_args(args));
+    timer.track(&tracked, &format!("rtk {tracked}"), &raw, shown);
 
     cleanup_temp_file(&binlog_path);
     if cleanup_trx_results_dir && let Some(dir) = trx_results_dir.as_deref() {

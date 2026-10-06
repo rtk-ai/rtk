@@ -5,6 +5,7 @@
 
 use crate::core::arg_tokenizer::{TokenKind, ValueSpec};
 use crate::core::guard::never_worse;
+use crate::core::shell::{display_args, with_args};
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::resolved_command;
@@ -250,7 +251,7 @@ pub fn run(args: &[String]) -> Result<i32> {
     }
 
     let timer = tracking::TimedExecution::start();
-    let real_cmd = format!("ast-grep {}", args.join(" "));
+    let real_cmd = with_args("ast-grep", &display_args(args));
 
     let is_json = requests_json(args);
 

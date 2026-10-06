@@ -355,7 +355,7 @@ static CURRENT_DIR_READ: LazyLock<Regex> = LazyLock::new(|| {
 /// character literals are skipped. The attribute on anything smaller than an
 /// item — a statement, a field, a match arm — strips too much, which only ever
 /// hides code from the scan.
-fn without_test_items(code: &str) -> String {
+pub(crate) fn without_test_items(code: &str) -> String {
     let mut kept = String::with_capacity(code.len());
     let mut rest = code;
     while let Some(at) = rest.find("#[cfg(test)]") {
@@ -623,7 +623,7 @@ fn every_variable_rtk_reads_is_redirected_for_a_child() {
     );
 }
 
-fn rust_files(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn rust_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return out;

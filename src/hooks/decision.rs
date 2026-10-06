@@ -193,9 +193,10 @@ pub(crate) fn decide_for_agent(cmd: &str, verdict: PermissionVerdict) -> HookDec
 /// so it refuses the command and tells the user to re-run the very thing they
 /// ran; Cursor raises a permission prompt for it. The plugins that shell out to
 /// `rtk rewrite` reach the same outcome in their own code --
-/// `hooks/opencode/rtk.ts`, `hooks/pi/rtk.ts` (shared with omp),
-/// `hooks/hermes/rtk-rewrite/__init__.py` and `openclaw/index.ts` all gate on
-/// `rewritten != command`.
+/// `hooks/pi/rtk.ts` (shared with omp), `hooks/hermes/rtk-rewrite/__init__.py`
+/// and `openclaw/index.ts` all gate on `rewritten != command`.
+/// `hooks/opencode/rtk.ts` shells out to `rtk hook opencode` instead, which
+/// goes through here in-process and answers `{}` for the no-op.
 ///
 /// `Defer` is not uniformly neutral, though: Gemini renders it as `ask_user`,
 /// so there suppression trades a no-op rewrite for a confirmation prompt even
@@ -292,7 +293,8 @@ impl AgentPath {
             // settings (#3908). Its deny gate is unaffected -- see
             // `ApprovalOwner`.
             "openclaw" => Some(Self::ViaRewrite(ApprovalOwner::Delegate)),
-            "hermes" | "omp" | "opencode" | "pi" => Some(Self::ViaRewrite(ApprovalOwner::Rtk)),
+            "opencode" => Some(Self::InProcess(Host::OpenCode)),
+            "hermes" | "omp" | "pi" => Some(Self::ViaRewrite(ApprovalOwner::Rtk)),
             "vibe" => Some(Self::InProcess(Host::Vibe)),
             _ => None,
         }
@@ -495,6 +497,17 @@ mod tests {
             assert!(AgentPath::lookup(name).is_some(), "unmapped: {name}");
             assert!(AgentPath::AGENTS.contains(&name), "not listed: {name}");
         }
+    }
+
+    /// OpenCode decides in-process against its own rules. On `ViaRewrite` the
+    /// plugin and `rtk hook check --agent opencode` would silently drift back
+    /// to judging against Claude Code's settings (#4195).
+    #[test]
+    fn opencode_is_judged_in_process_against_its_own_host() {
+        assert!(matches!(
+            AgentPath::lookup("opencode"),
+            Some(AgentPath::InProcess(Host::OpenCode))
+        ));
     }
 
     /// Everything advertised in the error message must actually resolve.

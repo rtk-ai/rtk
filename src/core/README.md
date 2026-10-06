@@ -61,8 +61,8 @@ signature.
 CREATE TABLE commands (
   id INTEGER PRIMARY KEY,
   timestamp TEXT,              -- UTC ISO8601
-  original_cmd TEXT,           -- "ls -la"
-  rtk_cmd TEXT,                -- "rtk ls"
+  original_cmd TEXT,           -- "ls -la"; words quoted only when needed: "grep 'a b' f"
+  rtk_cmd TEXT,                -- "rtk ls", "rtk:toml make all", "rtk:passthrough git tag"
   project_path TEXT,           -- cwd (for project-scoped stats)
   input_tokens INTEGER,        -- estimated from raw output (bytes / 4, no tokenizer)
   output_tokens INTEGER,       -- estimated from filtered output (bytes / 4)

@@ -8,6 +8,7 @@
 //! tee file, breaking recovery.
 
 use crate::core::runner;
+use crate::core::shell::{display_args, with_args};
 use crate::core::stream::{self, FilterMode, StdinMode};
 use crate::core::tracking;
 use crate::core::truncate::{CAP_INVENTORY, CAP_WARNINGS};
@@ -49,9 +50,9 @@ const TEE_SLUG_STDERR: &str = "uv-run-stderr";
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
-    let args_display = args.join(" ");
-    let original_cmd = display_command("uv", &args_display);
-    let rtk_cmd = display_command("rtk uv", &args_display);
+    let args_display = display_args(args);
+    let original_cmd = with_args("uv", &args_display);
+    let rtk_cmd = with_args("rtk uv", &args_display);
 
     let mut cmd = resolved_command("uv");
     cmd.args(args);
@@ -62,7 +63,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     if args.first().map(String::as_str) != Some("run") {
         let status = cmd.status().context("Failed to run uv")?;
-        timer.track_passthrough(&original_cmd, &format!("{rtk_cmd} (passthrough)"));
+        timer.track_passthrough(&original_cmd, &tracking::passthrough_label(&original_cmd));
         return Ok(exit_code_from_status(&status, "uv"));
     }
 
@@ -79,14 +80,6 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     timer.track(&original_cmd, &rtk_cmd, &result.raw, &filtered);
 
     Ok(result.exit_code)
-}
-
-fn display_command(prefix: &str, args_display: &str) -> String {
-    if args_display.trim().is_empty() {
-        prefix.to_string()
-    } else {
-        format!("{prefix} {args_display}")
-    }
 }
 
 fn filter_uv_run_output(output: &str, stdout: &str, stderr: &str, exit_code: i32) -> String {

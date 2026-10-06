@@ -49,7 +49,7 @@ fn wait_before_eof<W>(mut child: Child, held_open: W, source: &str) -> Output {
 #[test]
 fn read_windows_preserve_non_utf8_files() {
     let dir = tempfile::tempdir().expect("create test directory");
-    let file = dir.path().join("binary.log");
+    let file = dir.path().join("binary window.log");
     fs::write(&file, b"\xff\xfe bad\nline2\nline3\n").expect("write binary file");
 
     for (flag, expected) in [

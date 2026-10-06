@@ -6,6 +6,7 @@
 use super::constants::PRE_TOOL_USE_KEY;
 use super::decision::{self, HookDecision};
 use super::permissions::{self, PermissionVerdict};
+use super::permissions_opencode;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::io::{self, Read, Write};
@@ -1191,6 +1192,55 @@ fn droid_response_from_decision(v: &Value, cmd: &str, decision: HookDecision) ->
     audit_log("rewrite", cmd, &rewritten);
 
     Some(pre_tool_use_rewrite_output(v, &rewritten, None))
+}
+
+/// Answer OpenCode's plugin: the rewrite as JSON, or `{}` to leave the
+/// command untouched.
+pub fn run_opencode(cmd: &str, agent: Option<&str>) -> Result<()> {
+    let _ = writeln!(io::stdout(), "{}", opencode_answer_for(cmd, agent));
+    Ok(())
+}
+
+/// [`opencode_answer`] against the rules OpenCode resolves for `agent`.
+fn opencode_answer_for(cmd: &str, agent: Option<&str>) -> Value {
+    let rules = permissions_opencode::load_opencode_rules(agent);
+    opencode_answer(cmd, &rules)
+}
+
+/// Decide what the plugin should do with `cmd` under OpenCode's own rules.
+///
+/// OpenCode evaluates whatever command the plugin hands back against the
+/// user's permission rules itself, and from 1.1.4 on plugins cannot
+/// influence that verdict: there is no `permission.ask` plugin hook (1.0.142
+/// had one). So the one thing RTK must guarantee is that the rewrite never
+/// changes what those rules decide: whenever the verdict for `rtk <cmd>`
+/// differs from the verdict for `cmd` as typed, RTK steps aside and returns
+/// `{}`, trading token savings on that command for the user's own policy
+/// (#4195). An allow stays an allow, an ask stays a prompt, and a deny stays
+/// denied — RTK never blocks, lifts or silences anything.
+fn opencode_answer(cmd: &str, rules: &[permissions_opencode::Rule]) -> Value {
+    if cmd.trim().is_empty() {
+        return json!({});
+    }
+    let before = permissions_opencode::check_command_with_opencode_rules(cmd, rules);
+    let rewritten = match decide_from_verdict(cmd, before) {
+        // OpenCode denies the typed command itself; a rewrite could only
+        // un-match the deny rule.
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            return json!({});
+        }
+        HookDecision::Defer => return json!({}),
+        HookDecision::AllowRewrite(r) | HookDecision::AskRewrite(r) => r,
+    };
+
+    let after = permissions_opencode::check_command_with_opencode_rules(&rewritten, rules);
+    if before != after {
+        return json!({});
+    }
+
+    audit_log("rewrite", cmd, &rewritten);
+    json!({ "command": rewritten })
 }
 
 /// Run the Factory Droid PreToolUse hook natively.
@@ -2561,6 +2611,123 @@ mod tests {
         let long_cmd = format!("git status {}", "A".repeat(100_000));
         let input = claude_input(&long_cmd);
         let _ = run_claude_inner(&input);
+    }
+
+    // --- OpenCode: the answer the plugin acts on ---
+    //
+    // OpenCode judges whatever command runs against the user's own rules;
+    // plugins cannot change that verdict. So the invariant pinned here is:
+    // a rewrite is returned only when it leaves the verdict untouched.
+
+    mod opencode_answer {
+        use super::super::opencode_answer;
+        use crate::hooks::permissions_opencode::{Action, Rule};
+        use serde_json::json;
+
+        fn rule(pattern: &str, action: Action) -> Rule {
+            Rule {
+                permission: "bash".to_string(),
+                pattern: pattern.to_string(),
+                action,
+            }
+        }
+
+        #[test]
+        fn an_empty_command_gets_no_answer() {
+            assert_eq!(opencode_answer("   ", &[]), json!({}));
+        }
+
+        #[test]
+        fn an_already_prefixed_command_gets_no_answer() {
+            assert_eq!(opencode_answer("rtk git status", &[]), json!({}));
+        }
+
+        #[test]
+        fn with_no_rules_the_rewrite_happens() {
+            assert_eq!(
+                opencode_answer("git status", &[]),
+                json!({ "command": "rtk git status" })
+            );
+        }
+
+        #[test]
+        fn a_uniform_policy_keeps_the_rewrite() {
+            // allow or ask on everything: the rtk form gets the same verdict,
+            // so the rewrite costs the user nothing.
+            for action in [Action::Allow, Action::Ask] {
+                let rules = [rule("*", action)];
+                assert_eq!(
+                    opencode_answer("ls -la", &rules),
+                    json!({ "command": "rtk ls -la" }),
+                    "action: {action:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn the_4195_allow_survives_because_the_rewrite_is_skipped() {
+            // {"*": "deny", "git status": "allow"} — the typed command is
+            // allowed, its rtk form would be denied. RTK steps aside so
+            // OpenCode runs the typed `git status` under the user's rule.
+            let rules = [rule("*", Action::Deny), rule("git status", Action::Allow)];
+            assert_eq!(opencode_answer("git status", &rules), json!({}));
+        }
+
+        #[test]
+        fn the_reporters_npx_allow_survives_too() {
+            let rules = [
+                rule("*", Action::Deny),
+                rule("npx ts-node*task-cli*", Action::Allow),
+            ];
+            assert_eq!(
+                opencode_answer("npx ts-node src/task-cli.ts list", &rules),
+                json!({})
+            );
+        }
+
+        #[test]
+        fn an_ask_rule_still_prompts_because_the_rewrite_is_skipped() {
+            // {"git push *": "ask"} — the rtk form matches no rule, so a
+            // rewrite would turn the user's prompt into a silent run.
+            let rules = [rule("git push *", Action::Ask)];
+            assert_eq!(opencode_answer("git push origin main", &rules), json!({}));
+        }
+
+        #[test]
+        fn a_denied_command_is_left_for_opencode_to_deny() {
+            // {"*": "allow", "git push *": "deny"} — rewriting would un-match
+            // the deny rule; saying nothing keeps OpenCode's own deny intact.
+            let rules = [rule("*", Action::Allow), rule("git push *", Action::Deny)];
+            assert_eq!(opencode_answer("git push --force", &rules), json!({}));
+        }
+
+        #[test]
+        fn the_agent_flag_reaches_the_rule_lookup() {
+            use crate::core::test_isolation;
+
+            let tmp = test_isolation::tempdir();
+            let project = tmp.path().join("project");
+            std::fs::create_dir_all(&project).expect("create project dir");
+            std::fs::write(
+                project.join("opencode.json"),
+                r#"{ "agent": { "staged-review": { "permission": { "bash": "deny" } } } }"#,
+            )
+            .expect("write project config");
+
+            test_isolation::with_root(&tmp.path().join("home"), || {
+                let _entered = test_isolation::enter(&project);
+                assert_eq!(
+                    super::super::opencode_answer_for("git status", Some("staged-review")),
+                    json!({}),
+                    "the agent's deny-all must reach the verdict"
+                );
+                assert_eq!(
+                    super::super::opencode_answer_for("git status", None),
+                    json!({ "command": "rtk git status" }),
+                    "without the agent, no rule applies and the rewrite stands"
+                );
+            });
+        }
     }
 
     #[test]

@@ -6,6 +6,7 @@
 //! mode toggle) that TOML DSL cannot express.
 
 use crate::core::runner::{self, RunOptions};
+use crate::core::shell::display_args;
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, strip_ansi};
 use anyhow::Result;
@@ -1848,7 +1849,7 @@ fn run_tool(args: &[String], daemon: bool, verbose: u8) -> Result<i32> {
     }
 
     let tool = mvn_binary(daemon);
-    let args_display = args.join(" ");
+    let args_display = display_args(args);
 
     // Quiet mode: standard footer guard can't fire (no `BUILD SUCCESS` line
     // under `-q`). Route to `filter_quiet` for any non-passthrough phase so
