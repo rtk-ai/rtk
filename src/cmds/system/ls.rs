@@ -32,8 +32,47 @@ fn shows_dotfiles(args: &[String]) -> bool {
     })
 }
 
+/// Whether the user asked `ls` to pick the listing order.
+///
+/// `compact_ls` renders directories ahead of files, which discards whatever order the child
+/// produced. That grouping is the compact shape for an unsorted listing, but a sort flag makes
+/// the child's order the answer the caller asked for (#4302).
+fn sorts_output(args: &[String]) -> bool {
+    // GNU ls's ordering short flags: -t time, -S size, -X extension, -r reverse, -U none,
+    // -u atime, -c ctime, -f none, -v version.
+    const SORTING: &[char] = &['t', 'S', 'X', 'r', 'U', 'u', 'c', 'f', 'v'];
+    args.iter().any(|arg| {
+        if arg == "--reverse" || arg == "--sort" || arg == "--time" {
+            return true;
+        }
+        // Only the `=` form: `--time-style=` must not read as a sort.
+        if arg.starts_with("--sort=") || arg.starts_with("--time=") {
+            return true;
+        }
+        is_short_flag(arg) && arg.chars().any(|c| SORTING.contains(&c))
+    })
+}
+
+/// One directory in the compact listing.
+fn dir_entry(name: &str, octal: &Option<String>) -> String {
+    match octal {
+        Some(octal) => format!("{}  {}/", octal, name),
+        None => format!("{}/", name),
+    }
+}
+
+/// One non-directory entry in the compact listing.
+fn file_entry(name: &str, size: &str, octal: &Option<String>) -> String {
+    match octal {
+        Some(octal) => format!("{}  {}  {}", octal, name, size),
+        None => format!("{}  {}", name, size),
+    }
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let show_all = shows_dotfiles(args);
+    // The child applies the sort; RTK must not regroup what it returns (#4302).
+    let sorted = sorts_output(args);
 
     // Per `man ls`, the long listing is triggered by `-l` and also implied by
     // `-g`, `-n`, `-o`, `--full-time` or GNU `--format=long` and `--format=verbose`.
@@ -99,7 +138,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         "ls",
         &label,
         |raw| {
-            let (entries, parsed_count, truncated, filtered) = compact_ls(raw, show_all, show_long);
+            let (entries, parsed_count, truncated, filtered) =
+                compact_ls_ordered(raw, show_all, show_long, sorted);
 
             // If no lines were parsed (e.g., unrecognized locale), fall back to raw output.
             // This is safer than returning "(empty)" for a non-empty directory.
@@ -281,13 +321,28 @@ fn perms_to_octal(perms: &str) -> Option<String> {
 /// (noise dirs without -a/-A as `name/`, plus raw unparsable non-dotdir
 /// lines).
 /// If parsed_count == 0 but raw had content, caller should fall back to raw output.
+/// The unsorted entry point, kept for the tests that pin the compact shape.
+#[cfg(test)]
 fn compact_ls(
     raw: &str,
     show_all: bool,
     show_long: bool,
 ) -> (String, usize, Vec<String>, Vec<String>) {
+    compact_ls_ordered(raw, show_all, show_long, false)
+}
+
+/// `compact_ls` with the caller's answer for whether the listing is sorted. `sorted` keeps the
+/// child's order instead of regrouping by type — see [`sorts_output`].
+fn compact_ls_ordered(
+    raw: &str,
+    show_all: bool,
+    show_long: bool,
+    sorted: bool,
+) -> (String, usize, Vec<String>, Vec<String>) {
     let mut dirs: Vec<(String, Option<String>)> = Vec::new(); // (name, octal_perms)
     let mut files: Vec<(String, String, Option<String>)> = Vec::new(); // (name, size, octal_perms)
+    // Populated only when `sorted`: the child chose the order, so it is emitted as read.
+    let mut ordered: Vec<String> = Vec::new();
     let mut lines_seen: usize = 0;
     let mut parsed_count: usize = 0;
     let mut dotdirs: usize = 0;
@@ -325,10 +380,17 @@ fn compact_ls(
         };
 
         if file_type == 'd' {
+            if sorted {
+                ordered.push(dir_entry(&name, &octal));
+            }
             dirs.push((name, octal));
         } else {
             // Regular files, symlinks, character/block devices, pipes, sockets
-            files.push((name, human_size(size), octal));
+            let size = human_size(size);
+            if sorted {
+                ordered.push(file_entry(&name, &size, &octal));
+            }
+            files.push((name, size, octal));
         }
     }
 
@@ -346,19 +408,18 @@ fn compact_ls(
         return ("(empty)\n".to_string(), parsed_count, Vec::new(), filtered);
     }
 
-    // Dirs first, then files — one compact line each
+    // A sorted listing keeps the order the child produced, which is the answer the caller
+    // asked for. Otherwise group by type: dirs first, then files — one compact line each.
     let mut all_lines: Vec<String> = Vec::with_capacity(dirs.len() + files.len());
-    for (name, octal) in &dirs {
-        all_lines.push(match octal {
-            Some(octal) => format!("{}  {}/", octal, name),
-            None => format!("{}/", name),
-        });
-    }
-    for (name, size, octal) in &files {
-        all_lines.push(match octal {
-            Some(octal) => format!("{}  {}  {}", octal, name, size),
-            None => format!("{}  {}", name, size),
-        });
+    if sorted {
+        all_lines = ordered;
+    } else {
+        for (name, octal) in &dirs {
+            all_lines.push(dir_entry(name, octal));
+        }
+        for (name, size, octal) in &files {
+            all_lines.push(file_entry(name, size, octal));
+        }
     }
 
     // Cap the displayed listing; the rest is recoverable via the tee hint.
@@ -400,6 +461,125 @@ mod tests {
         assert!(!entries.contains("total")); // no total
         assert!(!entries.contains("\n.\n")); // no . entry
         assert!(!entries.contains("\n..\n")); // no .. entry
+    }
+
+    fn s(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_sorts_output_recognizes_ordering_flags() {
+        // Every short flag GNU ls sorts or reverses by.
+        for flag in ["-t", "-S", "-X", "-r", "-U", "-u", "-c", "-f", "-v"] {
+            assert!(sorts_output(&s(&[flag])), "{flag} orders the listing");
+        }
+        // Clustered with other flags, as `ls -lat` is usually written.
+        for flag in ["-lat", "-tr", "-Sl", "-laU"] {
+            assert!(sorts_output(&s(&[flag])), "{flag} orders the listing");
+        }
+        for flag in ["--sort=size", "--sort=none", "--time=atime", "--reverse"] {
+            assert!(sorts_output(&s(&[flag])), "{flag} orders the listing");
+        }
+        // The bare long forms take their value as the next argument.
+        for flag in ["--sort", "--time"] {
+            assert!(sorts_output(&s(&[flag])), "{flag} orders the listing");
+        }
+    }
+
+    #[test]
+    fn test_sorts_output_leaves_non_ordering_args_alone() {
+        // `-l` implies no order, so the default grouping still applies.
+        for args in [
+            &["-l"][..],
+            &["-a"][..],
+            &["-la"][..],
+            &["-1"][..],
+            &["-h"][..],
+            &["--all"][..],
+            &["--almost-all"][..],
+            &[][..],
+            &["some", "path"][..],
+        ] {
+            assert!(
+                !sorts_output(&s(args)),
+                "{args:?} must not count as ordering"
+            );
+        }
+        // `--time-style` sets the date format, not the order: only the `=` spelling of
+        // `--time` is a sort, and this must not be confused with it.
+        assert!(!sorts_output(&s(&["--time-style=long-iso"])));
+        assert!(!sorts_output(&s(&["--time-style", "long-iso"])));
+    }
+
+    /// Regression test for #4302: with a sort flag the child's order is the answer the caller
+    /// asked for, so the compact listing must not regroup directories ahead of files. The
+    /// entry the child put first is a file, and it must stay first.
+    #[test]
+    fn test_sorted_listing_keeps_child_order() {
+        let input = "total 8\n\
+                     -rw-r--r--  1 user  staff  1000 Jan  1 12:00 newest.txt\n\
+                     drwxr-xr-x  2 user  staff    64 Jan  1 12:00 olddir\n\
+                     -rw-r--r--  1 user  staff   100 Jan  1 12:00 oldest.txt\n";
+        let (entries, _parsed, _truncated, _hidden) = compact_ls_ordered(input, false, false, true);
+        assert_eq!(
+            entries, "newest.txt  1000B\nolddir/\noldest.txt  100B\n",
+            "sorted listing must keep the order the child produced"
+        );
+    }
+
+    /// The counterpart guard: without a sort flag the compact grouping is unchanged, so this
+    /// fix does not alter the shape every unsorted `rtk ls` produces.
+    #[test]
+    fn test_unsorted_listing_still_groups_dirs_first() {
+        let input = "total 8\n\
+                     -rw-r--r--  1 user  staff  1000 Jan  1 12:00 newest.txt\n\
+                     drwxr-xr-x  2 user  staff    64 Jan  1 12:00 olddir\n\
+                     -rw-r--r--  1 user  staff   100 Jan  1 12:00 oldest.txt\n";
+        let (entries, _parsed, _truncated, _hidden) =
+            compact_ls_ordered(input, false, false, false);
+        assert_eq!(
+            entries, "olddir/\nnewest.txt  1000B\noldest.txt  100B\n",
+            "unsorted listing keeps the dirs-first compact shape"
+        );
+    }
+
+    /// A sorted listing keeps its order through truncation: the cap drops from the tail of the
+    /// child's order, and what was dropped is still recoverable from the hint.
+    ///
+    /// A directory sits at position 10 in the child's order. Under the dirs-first grouping it
+    /// would be hoisted to the front, so the assertions on positions 0 and 10 both fail if the
+    /// sorted path ever stops being taken — an all-files fixture would pass either way.
+    #[test]
+    fn test_sorted_listing_truncates_from_the_tail() {
+        const DIR_AT: usize = 10;
+        let mut input = String::from("total 0\n");
+        for i in 0..(CAP_INVENTORY + 5) {
+            if i == DIR_AT {
+                input.push_str("drwxr-xr-x  2 user  staff  64 Jan  1 12:00 adir\n");
+            } else {
+                input.push_str(&format!(
+                    "-rw-r--r--  1 user  staff  1000 Jan  1 12:00 file{i:04}.txt\n"
+                ));
+            }
+        }
+        let (entries, _parsed, truncated, _hidden) = compact_ls_ordered(&input, false, false, true);
+        let lines: Vec<&str> = entries.lines().collect();
+
+        assert_eq!(lines.len(), CAP_INVENTORY, "cap still bounds the listing");
+        assert_eq!(
+            lines[0], "file0000.txt  1000B",
+            "head of the child order stays"
+        );
+        assert_eq!(
+            lines[DIR_AT], "adir/",
+            "the directory keeps its place in a sorted listing"
+        );
+
+        assert_eq!(truncated.len(), 5, "the tail is what gets dropped");
+        // Indices 11..54 follow the directory, so the first dropped entry is the 50th entry
+        // overall — file0050, since one index went to the directory.
+        assert_eq!(truncated[0], "file0050.txt  1000B");
+        assert_eq!(truncated[4], "file0054.txt  1000B");
     }
 
     #[test]
