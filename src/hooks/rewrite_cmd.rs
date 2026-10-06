@@ -40,9 +40,11 @@ fn tee_read_slug(cmd: &str, tee_dir: &std::path::Path) -> Option<(String, String
             continue;
         }
         let stem = path.file_stem()?.to_str()?;
-        if let Some((epoch, slug)) = stem.split_once('_')
-            && !epoch.is_empty()
-            && epoch.chars().all(|c| c.is_ascii_digit())
+        // `{epoch}_{slug}` (older files) or `{epoch}-{pid}-{seq}_{slug}`.
+        if let Some((prefix, slug)) = stem.split_once('_')
+            && prefix
+                .split('-')
+                .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
             && !slug.is_empty()
         {
             return Some((slug.to_string(), expanded));
@@ -177,6 +179,20 @@ mod tests {
         assert_eq!(
             tee_read_slug(cmd, dir).map(|(s, _)| s),
             Some("gh-prs".to_string())
+        );
+    }
+
+    #[test]
+    fn test_tee_read_slug_accepts_unique_file_names() {
+        let dir = std::path::Path::new("/home/u/.local/share/rtk/tee");
+        let cmd = "tail -n +3 /home/u/.local/share/rtk/tee/1790211029-4242-7_git-status.log";
+        assert_eq!(
+            tee_read_slug(cmd, dir).map(|(s, _)| s),
+            Some("git-status".to_string())
+        );
+        assert_eq!(
+            tee_read_slug("cat /home/u/.local/share/rtk/tee/-4242_x.log", dir),
+            None
         );
     }
 

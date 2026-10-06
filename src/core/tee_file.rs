@@ -6,6 +6,7 @@ use crate::core::retriever::RetrieverConfig;
 use crate::core::user_dirs;
 use crate::core::user_env;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Sanitize a command slug for use in filenames.
@@ -102,7 +103,7 @@ pub(crate) fn resolved_tee_dir() -> Option<PathBuf> {
 /// whatever this returns, so a test that sets either points it at a directory
 /// of its own.
 fn get_tee_dir(cfg: &RetrieverConfig) -> Option<PathBuf> {
-    if let Some(dir) = user_env::var("RTK_TEE_DIR") {
+    if let Some(dir) = user_env::var("RTK_TEE_DIR").filter(|d| !d.is_empty()) {
         return Some(PathBuf::from(dir));
     }
     if let Some(ref dir) = cfg.tee_directory {
@@ -137,6 +138,42 @@ fn create_tee_dir(tee_dir: &Path) -> Option<()> {
     crate::core::utils::create_private_dir(tee_dir).ok()
 }
 
+/// Per-process write counter: with the pid it gives every tee write its own
+/// file, so neither a second rtk run nor a filter teeing once per item within
+/// the same second can overwrite a file whose hint was already printed.
+static TEE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Collisions left after pid + counter (e.g. pid namespaces sharing one tee
+/// directory) are resolved by retrying with the next counter value.
+const MAX_NAME_ATTEMPTS: usize = 64;
+
+/// `{epoch}-{pid}-{seq}_{slug}.log`: the leading epoch keeps the name-sorted
+/// rotation in `cleanup_old_files` oldest-first, and the slug stays after the
+/// first `_` for `rewrite_cmd::tee_read_slug`.
+fn tee_file_name(epoch: u64, pid: u32, seq: u64, slug: &str) -> String {
+    format!("{}-{}-{}_{}.log", epoch, pid, seq, slug)
+}
+
+/// Create a tee file that did not exist before (`O_EXCL`), never reopening and
+/// truncating one another writer owns.
+fn create_unique_tee_file(dir: &Path, slug: &str) -> Option<(PathBuf, std::fs::File)> {
+    let epoch = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    let pid = std::process::id();
+    for _ in 0..MAX_NAME_ATTEMPTS {
+        let seq = TEE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let filepath = dir.join(tee_file_name(epoch, pid, seq, slug));
+        match crate::core::utils::open_private(
+            std::fs::OpenOptions::new().write(true).create_new(true),
+            &filepath,
+        ) {
+            Ok(file) => return Some((filepath, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
 fn write_tee_file(
     raw: &str,
     slug: &str,
@@ -146,8 +183,6 @@ fn write_tee_file(
 ) -> Option<PathBuf> {
     create_tee_dir(dir)?;
     let slug = sanitize_slug(slug);
-    let epoch = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    let filepath = dir.join(format!("{}_{}.log", epoch, slug));
     let content = if raw.len() > max_file_size {
         let boundary = raw
             .char_indices()
@@ -163,14 +198,7 @@ fn write_tee_file(
     } else {
         raw.to_string()
     };
-    let mut file = crate::core::utils::open_private(
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true),
-        &filepath,
-    )
-    .ok()?;
+    let (filepath, mut file) = create_unique_tee_file(dir, &slug)?;
     use std::io::Write;
     file.write_all(content.as_bytes()).ok()?;
     cleanup_old_files(dir, max_files);
@@ -365,6 +393,75 @@ mod tests {
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("--- truncated at 998 bytes ---"));
         assert!(content.starts_with(&"\u{6F22}".repeat(332)));
+    }
+
+    #[test]
+    fn test_write_tee_file_same_slug_never_shares_a_file() {
+        // Two writes with one slug inside one second (a filter teeing per item,
+        // or two rtk runs back to back) must each keep their own content.
+        let tmpdir = tempfile::tempdir().unwrap();
+        let first = write_tee_file(
+            "project A\n",
+            "git-status",
+            tmpdir.path(),
+            MAX_FILE_SIZE,
+            20,
+        )
+        .expect("first tee file written");
+        let second = write_tee_file(
+            "project B\n",
+            "git-status",
+            tmpdir.path(),
+            MAX_FILE_SIZE,
+            20,
+        )
+        .expect("second tee file written");
+        assert_ne!(first, second, "each write needs its own file");
+        assert_eq!(fs::read_to_string(&first).unwrap(), "project A\n");
+        assert_eq!(fs::read_to_string(&second).unwrap(), "project B\n");
+    }
+
+    #[test]
+    fn test_write_tee_file_never_truncates_an_existing_file() {
+        // Another process (or a pid reused in another pid namespace sharing the
+        // directory) may already hold the next name: it must be left intact.
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = tmpdir.path();
+        let epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let next = TEE_SEQ.load(Ordering::Relaxed);
+        let taken: Vec<PathBuf> = (next..next + 8)
+            .map(|seq| dir.join(tee_file_name(epoch, std::process::id(), seq, "grep")))
+            .collect();
+        for path in &taken {
+            fs::write(path, "someone else's output").unwrap();
+        }
+        let ours =
+            write_tee_file("our output", "grep", dir, MAX_FILE_SIZE, 20).expect("tee file written");
+        assert!(!taken.contains(&ours), "must not reuse an existing name");
+        assert_eq!(fs::read_to_string(&ours).unwrap(), "our output");
+        for path in &taken {
+            assert_eq!(fs::read_to_string(path).unwrap(), "someone else's output");
+        }
+    }
+
+    #[test]
+    fn test_tee_file_name_keeps_epoch_prefix_and_slug() {
+        let name = tee_file_name(1790211029, 4242, 7, "git-status");
+        assert_eq!(name, "1790211029-4242-7_git-status.log");
+    }
+
+    #[test]
+    fn test_empty_rtk_tee_dir_is_ignored() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            tee_directory: Some(tmpdir.path().to_path_buf()),
+            ..RetrieverConfig::default()
+        };
+        let dir = user_env::with_vars(&[("RTK_TEE_DIR", Some(""))], || get_tee_dir(&cfg));
+        assert_eq!(dir.as_deref(), Some(tmpdir.path()));
     }
 
     #[test]
