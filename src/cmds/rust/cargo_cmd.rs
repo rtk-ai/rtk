@@ -631,8 +631,9 @@ fn flush_failure_block(header: &mut String, body: &mut Vec<String>, failures: &m
 
 /// Filter cargo nextest output - show failures + compact summary
 fn filter_cargo_nextest(output: &str) -> String {
+    // nextest annotates `passed` in place, e.g. `2 passed (1 slow), 1 failed`
     let summary_re = regex::Regex::new(
-        r"Summary \[\s*([\d.]+)s\]\s+(\d+) tests? run:\s+(\d+) passed(?:,\s+(\d+) failed)?(?:,\s+(\d+) skipped)?"
+        r"Summary \[\s*([\d.]+)s\]\s+(\d+) tests? run:\s+(\d+) passed(?:\s+\([^)]*\))?(?:,\s+(\d+) failed)?(?:,\s+(\d+) skipped)?"
     ).expect("invalid nextest summary regex");
 
     let starting_re = regex::Regex::new(r"Starting \d+ tests? across (\d+) binar(?:y|ies)")
@@ -2342,6 +2343,61 @@ error: test run failed
             result.matches("FAIL [").count(),
             1,
             "should have exactly 1 FAIL header (no post-summary duplicate): {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_nextest_slow_annotation_keeps_failed_and_skipped() {
+        // cargo-nextest 0.9.143 puts `(N slow)` directly after `passed` (#4420)
+        let output = r#"    Starting 3 tests across 1 binary (1 test skipped)
+        PASS [   0.004s] (1/3) scratch tests::passing
+        FAIL [   0.005s] (2/3) scratch tests::failing
+
+  stderr ───
+
+    thread 'tests::failing' panicked at src/lib.rs:14:9:
+    assertion `left == right` failed
+      left: 1
+     right: 2
+
+        SLOW [>  1.000s] (───────) scratch tests::slow
+        PASS [   2.502s] (3/3) scratch tests::slow
+────────────
+     Summary [   2.503s] 3 tests run: 2 passed (1 slow), 1 failed, 1 skipped
+        FAIL [   0.005s] (2/3) scratch tests::failing
+error: test run failed
+"#;
+        let result = filter_cargo_nextest(output);
+        assert!(
+            result.contains("cargo nextest: 2 passed, 1 failed, 1 skipped"),
+            "should keep failed and skipped counts: {}",
+            result
+        );
+        assert!(
+            result.contains("FAIL [   0.005s] (2/3) scratch tests::failing"),
+            "should keep the failure block: {}",
+            result
+        );
+        assert!(
+            result.contains("panicked"),
+            "should keep failure stderr: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_nextest_slow_annotation_all_pass() {
+        let output = r#"    Starting 2 tests across 1 binary
+        PASS [   0.004s] (1/2) scratch tests::passing
+        PASS [   2.502s] (2/2) scratch tests::slow
+────────────
+     Summary [   2.503s] 2 tests run: 2 passed (1 slow), 0 skipped
+"#;
+        let result = filter_cargo_nextest(output);
+        assert_eq!(
+            result, "cargo nextest: 2 passed (1 binary, 2.503s)",
+            "got: {}",
             result
         );
     }
