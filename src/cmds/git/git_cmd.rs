@@ -33,6 +33,46 @@ pub enum GitCommand {
     Worktree,
 }
 
+impl GitCommand {
+    /// The word git expects, for rebuilding the argv clap took apart.
+    fn git_name(&self) -> &'static str {
+        match self {
+            GitCommand::Diff => "diff",
+            GitCommand::Log => "log",
+            GitCommand::Status => "status",
+            GitCommand::Show => "show",
+            GitCommand::Add => "add",
+            GitCommand::Commit => "commit",
+            GitCommand::Checkout => "checkout",
+            GitCommand::Push => "push",
+            GitCommand::Pull => "pull",
+            GitCommand::Branch => "branch",
+            GitCommand::Fetch => "fetch",
+            GitCommand::Stash { .. } => "stash",
+            GitCommand::Worktree => "worktree",
+        }
+    }
+}
+
+/// What git would have seen: the caller's own globals, the subcommand clap matched, the
+/// stash subcommand clap carved out of the trailing args, then the rest.
+fn help_passthrough_argv(
+    cmd: &GitCommand,
+    args: &[String],
+    global_args: &[String],
+) -> Vec<OsString> {
+    let mut forwarded: Vec<OsString> = global_args.iter().map(OsString::from).collect();
+    forwarded.push(OsString::from(cmd.git_name()));
+    if let GitCommand::Stash {
+        subcommand: Some(sub),
+    } = cmd
+    {
+        forwarded.push(OsString::from(sub));
+    }
+    forwarded.extend(args.iter().map(OsString::from));
+    forwarded
+}
+
 /// Create a git Command with global options (e.g. -C, -c, --git-dir, --work-tree)
 /// prepended before any subcommand arguments.
 fn git_cmd(global_args: &[String]) -> Command {
@@ -113,6 +153,15 @@ pub fn run(
         other => (other, args_utils::restore_double_dash(args)),
     };
     let args = &args;
+
+    // Forwarded clean rather than left to the guard in stream::capture: by then RTK has
+    // injected its own globals, and `--no-pager` turns git's man page into a one-screen
+    // usage (#4198).
+    if runner::requests_help_args("git", args) {
+        let forwarded = help_passthrough_argv(&cmd, args, global_args);
+        return runner::run_passthrough("git", &forwarded, verbose);
+    }
+
     match cmd {
         GitCommand::Diff => run_diff(args, max_lines, verbose, global_args),
         GitCommand::Log => run_log(args, max_lines, verbose, global_args),
@@ -3694,6 +3743,66 @@ pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What reaches git decides which page comes back, and a wrong subcommand still returns
+    /// a plausible one. Pins every part the argv is assembled from.
+    #[test]
+    fn help_passthrough_argv_is_what_git_would_have_seen() {
+        let owned = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let argv = |cmd: &GitCommand, args: &[&str], globals: &[&str]| -> Vec<String> {
+            help_passthrough_argv(cmd, &owned(args), &owned(globals))
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+
+        assert_eq!(
+            argv(&GitCommand::Log, &["--help"], &[]),
+            vec!["log", "--help"]
+        );
+        // The caller's own globals come first, the way they were typed.
+        assert_eq!(
+            argv(&GitCommand::Status, &["--help"], &["-C", "/tmp"]),
+            vec!["-C", "/tmp", "status", "--help"]
+        );
+        // clap carves the stash subcommand out of the trailing args; it has to go back.
+        assert_eq!(
+            argv(
+                &GitCommand::Stash {
+                    subcommand: Some("list".into())
+                },
+                &["-h"],
+                &["-C", "/tmp"]
+            ),
+            vec!["-C", "/tmp", "stash", "list", "-h"]
+        );
+        assert_eq!(
+            argv(&GitCommand::Stash { subcommand: None }, &["--help"], &[]),
+            vec!["stash", "--help"]
+        );
+    }
+
+    /// Every arm, so `Status => "diff"` cannot pass by returning a page that is merely long.
+    #[test]
+    fn git_name_round_trips_every_subcommand() {
+        for (cmd, name) in [
+            (GitCommand::Diff, "diff"),
+            (GitCommand::Log, "log"),
+            (GitCommand::Status, "status"),
+            (GitCommand::Show, "show"),
+            (GitCommand::Add, "add"),
+            (GitCommand::Commit, "commit"),
+            (GitCommand::Checkout, "checkout"),
+            (GitCommand::Push, "push"),
+            (GitCommand::Pull, "pull"),
+            (GitCommand::Branch, "branch"),
+            (GitCommand::Fetch, "fetch"),
+            (GitCommand::Worktree, "worktree"),
+            (GitCommand::Stash { subcommand: None }, "stash"),
+        ] {
+            assert_eq!(cmd.git_name(), name, "{cmd:?}");
+        }
+    }
     use crate::core::test_isolation;
 
     #[test]

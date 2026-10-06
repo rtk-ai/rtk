@@ -2,7 +2,7 @@
 
 use crate::core::guard::never_worse;
 use crate::core::runner;
-use crate::core::stream::{CaptureResult, exec_capture};
+use crate::core::stream::{CaptureResult, exec_capture, exec_capture_probe};
 use crate::core::tracking;
 use crate::core::truncate::CAP_ERRORS;
 use crate::core::utils::{resolved_command, truncate};
@@ -174,7 +174,7 @@ fn detect_go_tool_golangci_version() -> u32 {
     let mut cmd = resolved_command("go");
     cmd.arg("tool").arg("golangci-lint").arg("--version");
 
-    match exec_capture(&mut cmd) {
+    match exec_capture_probe(&mut cmd) {
         Ok(captured) => {
             let version_text = if captured.stdout.trim().is_empty() {
                 &captured.stderr

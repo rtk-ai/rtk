@@ -709,13 +709,41 @@ impl CaptureResult {
 
 pub fn exec_capture(cmd: &mut Command) -> Result<CaptureResult> {
     cmd.stdin(Stdio::null());
+    show_usage_if_asked(cmd)?;
     capture(cmd)
 }
 
 /// Like [`exec_capture`] but inherits stdin so a wrapped engine can read a piped stdin.
 pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
     cmd.stdin(Stdio::inherit());
+    show_usage_if_asked(cmd)?;
     capture(cmd)
+}
+
+/// For a command RTK issues on its own behalf rather than one the caller typed: a version
+/// probe asks `--version` to read the answer, not to show it, so the usage guard below must
+/// not fire. Everything a caller's argv reaches goes through [`exec_capture`] instead.
+pub fn exec_capture_probe(cmd: &mut Command) -> Result<CaptureResult> {
+    cmd.stdin(Stdio::null());
+    capture(cmd)
+}
+
+/// A usage page is not the output a filter reads: handed one, a filter built for the tool's
+/// normal output reports an empty run, which is how `pnpm outdated --help` became
+/// "48 outdated packages" and `jest --help` lost 24 KB of its 26 (#4198). Show it as the
+/// tool printed it and end with the tool's own code: there is no captured output to hand
+/// back, and an empty capture would get a summary written under it.
+fn show_usage_if_asked(cmd: &mut Command) -> Result<()> {
+    if !crate::core::runner::requests_help(cmd) {
+        return Ok(());
+    }
+    let program = cmd.get_program().to_string_lossy().into_owned();
+    let status = cmd
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .with_context(|| format!("Failed to execute {program}"))?;
+    std::process::exit(crate::core::utils::exit_code_from_status(&status, &program));
 }
 
 /// Run `cmd` to completion, decode what it wrote, and report the exit code.

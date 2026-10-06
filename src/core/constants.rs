@@ -30,9 +30,10 @@ pub const RTK_META_COMMANDS: &[&str] = &[
     "smart",
     "deps",
     "json",
-    // `err` and `summary` name no real binary, and since they grew `--shell`
-    // they have a flag to get wrong. Falling through would try to exec a
-    // program called `err` instead of reporting the flag error (#4125 review).
+    // These name no real binary, so falling through would exec `err`, or find `/bin/test`
+    // (#4125 review). Membership also keeps their `-h` RTK's own (#4198).
     "err",
+    "test",
     "summary",
+    "format",
 ];

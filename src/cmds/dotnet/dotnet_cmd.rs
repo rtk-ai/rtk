@@ -38,6 +38,9 @@ pub fn run_restore(args: &[String], verbose: u8) -> Result<i32> {
 
 pub fn run_format(args: &[String], verbose: u8) -> Result<i32> {
     let args = &args_utils::restore_double_dash(args);
+    if crate::core::runner::requests_help_args("dotnet", args) {
+        return run_passthrough(&forwarded_dotnet_args("format", args), verbose);
+    }
     let tokens = tokenize_dotnet_args(args);
     let timer = tracking::TimedExecution::start();
     let (report_path, cleanup_report_path) = resolve_format_report_path(&tokens);
@@ -75,6 +78,14 @@ pub fn run_format(args: &[String], verbose: u8) -> Result<i32> {
     }
 
     Ok(result.exit_code)
+}
+
+/// The subcommand RTK routed on, then the caller's own arguments: what the child would
+/// have seen without the binlog injection.
+fn forwarded_dotnet_args(subcommand: &str, args: &[String]) -> Vec<OsString> {
+    let mut out = vec![OsString::from(subcommand)];
+    out.extend(args.iter().map(OsString::from));
+    out
 }
 
 pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
@@ -116,6 +127,12 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
 
 fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
     let args = &args_utils::restore_double_dash(args);
+    // Forwarded clean rather than left to the guard in stream::capture: by then RTK has
+    // injected `-bl:<tmp>.binlog`, and an injected flag can change what a tool prints for
+    // help -- git's `--no-pager` turns its man page into a one-screen usage (#4198).
+    if crate::core::runner::requests_help_args("dotnet", args) {
+        return run_passthrough(&forwarded_dotnet_args(subcommand, args), verbose);
+    }
     let tokens = tokenize_dotnet_args(args);
     let timer = tracking::TimedExecution::start();
     let binlog_path = build_binlog_path(subcommand);
@@ -1470,6 +1487,44 @@ fn format_restore_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// dotnet is not installed on every runner, so the argv the help guard forwards is
+    /// pinned here rather than only through the integration test, which skips absent tools.
+    #[test]
+    fn forwarded_dotnet_args_keeps_the_subcommand_rtk_routed_on() {
+        let owned = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let argv = |sub: &str, args: &[&str]| -> Vec<String> {
+            forwarded_dotnet_args(sub, &owned(args))
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(argv("format", &["--help"]), vec!["format", "--help"]);
+        assert_eq!(argv("build", &["-?"]), vec!["build", "-?"]);
+        assert_eq!(argv("test", &["/?"]), vec!["test", "/?"]);
+    }
+
+    /// The MSBuild spellings, which a POSIX scan reads as a cluster or a path.
+    #[test]
+    fn dotnet_help_is_recognised_in_every_spelling() {
+        let owned = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for form in [
+            vec!["build", "--help"],
+            vec!["build", "-h"],
+            vec!["build", "-?"],
+            vec!["build", "/?"],
+            vec!["test", "-?"],
+        ] {
+            assert!(
+                crate::core::runner::requests_help_args("dotnet", &owned(&form)),
+                "{form:?}"
+            );
+        }
+        assert!(!crate::core::runner::requests_help_args(
+            "dotnet",
+            &owned(&["build", "-c", "Release"])
+        ));
+    }
     use crate::core::test_isolation;
     use crate::dotnet_format_report;
     use std::fs;

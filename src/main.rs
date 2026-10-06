@@ -213,7 +213,6 @@ enum Commands {
     },
 
     /// PostgreSQL client with compact output (strip borders, compress tables)
-    #[command(disable_help_flag = true)]
     Psql {
         /// psql arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -561,7 +560,6 @@ enum Commands {
     },
 
     /// CTest with compact output
-    #[command(disable_help_flag = true, disable_version_flag = true)]
     Ctest {
         /// Additional ctest arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -1216,6 +1214,10 @@ enum KubectlCommands {
         /// All namespaces
         #[arg(short = 'A', long)]
         all: bool,
+        // An RTK-only alias, so the raw-exec fallback would run `kubectl pods` (#4198).
+        /// Further arguments forwarded to `get pods`
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
     },
     /// List services
     Services {
@@ -1224,6 +1226,9 @@ enum KubectlCommands {
         /// All namespaces
         #[arg(short = 'A', long)]
         all: bool,
+        /// Further arguments forwarded to `get services`
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
     },
     /// Show pod logs (deduplicated)
     Logs {
@@ -1251,6 +1256,10 @@ enum OcCommands {
         /// All namespaces
         #[arg(short = 'A', long)]
         all: bool,
+        // An RTK-only alias, so the raw-exec fallback would run `kubectl pods` (#4198).
+        /// Further arguments forwarded to `get pods`
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
     },
     /// List services
     Services {
@@ -1259,6 +1268,9 @@ enum OcCommands {
         /// All namespaces
         #[arg(short = 'A', long)]
         all: bool,
+        /// Further arguments forwarded to `get services`
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra: Vec<String>,
     },
     /// Show pod logs (deduplicated)
     Logs {
@@ -1576,6 +1588,48 @@ fn configured_awareness_level() -> core::config::AwarenessLevel {
     }
 }
 
+/// True when `cmd` hands its arguments to a native binary.
+///
+/// `has_subcommands` stands in for `external_subcommand`, which clap only infers inside
+/// `Command::build`; `cheap_wrapper_test_matches_clap_built_tree` pins that equivalence.
+fn forwards_to_native_tool(cmd: &clap::Command) -> bool {
+    cmd.get_positionals().any(|a| a.is_trailing_var_arg_set()) || cmd.has_subcommands()
+}
+
+/// Gives a wrapper subcommand's `-h`, `--help`, `-V`, `--version` and `help` back to the
+/// tool it wraps: `grep -h` is `--no-filename`, `git help log` is a real subcommand
+/// (#4198). All three settings are global in clap, so one call covers the subtree.
+fn release_meta_flags(cmd: clap::Command) -> clap::Command {
+    if !forwards_to_native_tool(&cmd) {
+        return cmd;
+    }
+    cmd.disable_help_flag(true)
+        .disable_version_flag(true)
+        .disable_help_subcommand(true)
+}
+
+/// The `Cli` clap command with every wrapper subcommand's meta flags released. RTK's own
+/// meta-commands and the root keep theirs.
+fn rtk_command() -> clap::Command {
+    <Cli as clap::CommandFactory>::command().mut_subcommands(|sub| {
+        if core::constants::RTK_META_COMMANDS.contains(&sub.get_name()) {
+            sub
+        } else {
+            release_meta_flags(sub)
+        }
+    })
+}
+
+/// Single parse entry point; tests go through it so they assert what ships.
+fn try_parse_cli_from<I, T>(args: I) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let matches = rtk_command().try_get_matches_from(args)?;
+    <Cli as clap::FromArgMatches>::from_arg_matches(&matches)
+}
+
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     use crate::core::utils::ChildArgExt;
 
@@ -1780,7 +1834,39 @@ fn shell_split(input: &str) -> Vec<String> {
     discover::lexer::shell_split(input)
 }
 
-fn build_k8s_namespace_args(namespace: Option<String>, all: bool) -> Vec<String> {
+/// `pods` and `services` are RTK's own aliases for `get pods`/`get services`.
+enum K8sAlias {
+    /// Forward to the aliased subcommand and filter as usual.
+    Filtered(Vec<String>),
+    /// Run what the caller typed, unfiltered. `extra` exists so a usage request reaches the
+    /// tool; anything else would land on a `get` RTK has pinned to `-o json`, where `-o wide`
+    /// fights the parser. Those stay what they were before the field existed: the literal
+    /// `kubectl pods …`, which the tool answers itself.
+    Raw(Vec<OsString>),
+}
+
+#[cfg(test)]
+impl K8sAlias {
+    fn filtered_args(self) -> Vec<String> {
+        match self {
+            K8sAlias::Filtered(args) => args,
+            K8sAlias::Raw(argv) => panic!("expected a filtered run, got {argv:?}"),
+        }
+    }
+}
+
+fn build_k8s_namespace_args(
+    alias: &str,
+    namespace: Option<String>,
+    all: bool,
+    extra: Vec<String>,
+) -> K8sAlias {
+    let extra = core::args_utils::restore_double_dash(&extra);
+    if !extra.is_empty() && !core::runner::requests_help_args("kubectl", &extra) {
+        let mut raw = vec![OsString::from(alias)];
+        raw.extend(extra.iter().map(OsString::from));
+        return K8sAlias::Raw(raw);
+    }
     let mut args = Vec::new();
     if all {
         args.push("-A".to_string());
@@ -1788,7 +1874,8 @@ fn build_k8s_namespace_args(namespace: Option<String>, all: bool) -> Vec<String>
         args.push("-n".to_string());
         args.push(n);
     }
-    args
+    args.extend(extra);
+    K8sAlias::Filtered(args)
 }
 
 fn build_k8s_logs_args(pod: String, container: Option<String>) -> Vec<String> {
@@ -2072,7 +2159,7 @@ fn run_cli() -> Result<i32> {
     // Fire-and-forget telemetry ping (1/day, non-blocking)
     core::telemetry::maybe_ping();
 
-    let cli = match Cli::try_parse_from(std::env::args_os()) {
+    let cli = match try_parse_cli_from(std::env::args_os()) {
         Ok(cli) => cli,
         Err(e) => {
             if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
@@ -2475,14 +2562,30 @@ fn run_cli() -> Result<i32> {
 
         Commands::Kubectl { command } => match command {
             KubectlCommands::Get { args } => container::run_kubectl_get(&args, cli.verbose)?,
-            KubectlCommands::Pods { namespace, all } => {
-                let args = build_k8s_namespace_args(namespace, all);
-                container::run(container::ContainerCmd::KubectlPods, &args, cli.verbose)?
-            }
-            KubectlCommands::Services { namespace, all } => {
-                let args = build_k8s_namespace_args(namespace, all);
-                container::run(container::ContainerCmd::KubectlServices, &args, cli.verbose)?
-            }
+            KubectlCommands::Pods {
+                namespace,
+                all,
+                extra,
+            } => match build_k8s_namespace_args("pods", namespace, all, extra) {
+                K8sAlias::Filtered(args) => {
+                    container::run(container::ContainerCmd::KubectlPods, &args, cli.verbose)?
+                }
+                K8sAlias::Raw(argv) => {
+                    core::runner::run_passthrough("kubectl", &argv, cli.verbose)?
+                }
+            },
+            KubectlCommands::Services {
+                namespace,
+                all,
+                extra,
+            } => match build_k8s_namespace_args("services", namespace, all, extra) {
+                K8sAlias::Filtered(args) => {
+                    container::run(container::ContainerCmd::KubectlServices, &args, cli.verbose)?
+                }
+                K8sAlias::Raw(argv) => {
+                    core::runner::run_passthrough("kubectl", &argv, cli.verbose)?
+                }
+            },
             KubectlCommands::Logs { pod, container: c } => {
                 let args = build_k8s_logs_args(pod, c);
                 container::run(container::ContainerCmd::KubectlLogs, &args, cli.verbose)?
@@ -2492,14 +2595,22 @@ fn run_cli() -> Result<i32> {
 
         Commands::Oc { command } => match command {
             OcCommands::Get { args } => container::run_oc_get(&args, cli.verbose)?,
-            OcCommands::Pods { namespace, all } => {
-                let args = build_k8s_namespace_args(namespace, all);
-                container::k8s_pods("oc", &args, cli.verbose)?
-            }
-            OcCommands::Services { namespace, all } => {
-                let args = build_k8s_namespace_args(namespace, all);
-                container::k8s_services("oc", &args, cli.verbose)?
-            }
+            OcCommands::Pods {
+                namespace,
+                all,
+                extra,
+            } => match build_k8s_namespace_args("pods", namespace, all, extra) {
+                K8sAlias::Filtered(args) => container::k8s_pods("oc", &args, cli.verbose)?,
+                K8sAlias::Raw(argv) => core::runner::run_passthrough("oc", &argv, cli.verbose)?,
+            },
+            OcCommands::Services {
+                namespace,
+                all,
+                extra,
+            } => match build_k8s_namespace_args("services", namespace, all, extra) {
+                K8sAlias::Filtered(args) => container::k8s_services("oc", &args, cli.verbose)?,
+                K8sAlias::Raw(argv) => core::runner::run_passthrough("oc", &argv, cli.verbose)?,
+            },
             OcCommands::Logs { pod, container: c } => {
                 let args = build_k8s_logs_args(pod, c);
                 container::k8s_logs("oc", &args, cli.verbose)?
@@ -3495,7 +3606,6 @@ fn is_operational_command(cmd: &Commands) -> bool {
 mod tests {
     use super::*;
     use crate::core::test_isolation;
-    use clap::Parser;
     use std::cell::Cell;
 
     #[test]
@@ -3509,7 +3619,7 @@ mod tests {
 
     #[test]
     fn test_git_commit_single_message() {
-        let cli = Cli::try_parse_from(["rtk", "git", "commit", "-m", "fix: typo"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "git", "commit", "-m", "fix: typo"]).unwrap();
         match cli.command {
             Commands::Git {
                 command: GitCommands::Commit { args },
@@ -3523,7 +3633,7 @@ mod tests {
 
     #[test]
     fn test_git_commit_multiple_messages() {
-        let cli = Cli::try_parse_from([
+        let cli = try_parse_cli_from([
             "rtk",
             "git",
             "commit",
@@ -3550,7 +3660,7 @@ mod tests {
     // #327: git commit -am "msg" was rejected by Clap
     #[test]
     fn test_git_commit_am_flag() {
-        let cli = Cli::try_parse_from(["rtk", "git", "commit", "-am", "quick fix"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "git", "commit", "-am", "quick fix"]).unwrap();
         match cli.command {
             Commands::Git {
                 command: GitCommands::Commit { args },
@@ -3564,8 +3674,7 @@ mod tests {
 
     #[test]
     fn test_git_commit_amend() {
-        let cli =
-            Cli::try_parse_from(["rtk", "git", "commit", "--amend", "-m", "new msg"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "git", "commit", "--amend", "-m", "new msg"]).unwrap();
         match cli.command {
             Commands::Git {
                 command: GitCommands::Commit { args },
@@ -3579,9 +3688,8 @@ mod tests {
 
     #[test]
     fn test_git_global_options_parsing() {
-        let cli =
-            Cli::try_parse_from(["rtk", "git", "--no-pager", "--no-optional-locks", "status"])
-                .unwrap();
+        let cli = try_parse_cli_from(["rtk", "git", "--no-pager", "--no-optional-locks", "status"])
+            .unwrap();
         match cli.command {
             Commands::Git {
                 no_pager,
@@ -3603,7 +3711,7 @@ mod tests {
     fn test_pnpm_recursive_install_parsing() {
         // The rewriter emits `rtk pnpm -r install` for `pnpm -r install`; it must parse
         // to Install with recursive=true (not error, not Other) so `-r` is forwarded.
-        let cli = Cli::try_parse_from(["rtk", "pnpm", "-r", "install"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "pnpm", "-r", "install"]).unwrap();
         match cli.command {
             Commands::Pnpm {
                 recursive,
@@ -3621,8 +3729,7 @@ mod tests {
 
     #[test]
     fn test_pnpm_workspace_root_filter_install_parsing() {
-        let cli =
-            Cli::try_parse_from(["rtk", "pnpm", "-w", "--filter", "@app", "install"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "pnpm", "-w", "--filter", "@app", "install"]).unwrap();
         match cli.command {
             Commands::Pnpm {
                 filter,
@@ -3641,7 +3748,7 @@ mod tests {
 
     #[test]
     fn test_git_commit_long_flag_multiple() {
-        let cli = Cli::try_parse_from([
+        let cli = try_parse_cli_from([
             "rtk",
             "git",
             "commit",
@@ -3676,13 +3783,13 @@ mod tests {
 
     #[test]
     fn test_try_parse_valid_git_status() {
-        let result = Cli::try_parse_from(["rtk", "git", "status"]);
+        let result = try_parse_cli_from(["rtk", "git", "status"]);
         assert!(result.is_ok(), "git status should parse successfully");
     }
 
     #[test]
     fn test_try_parse_init_agent_hermes() {
-        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "hermes"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "init", "--agent", "hermes"]).unwrap();
         match cli.command {
             Commands::Init { agent, .. } => {
                 assert_eq!(agent, Some(AgentTarget::Hermes));
@@ -3693,7 +3800,7 @@ mod tests {
 
     #[test]
     fn test_try_parse_init_agent_trae_and_uninstall() {
-        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "trae", "--uninstall"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "init", "--agent", "trae", "--uninstall"]).unwrap();
         match cli.command {
             Commands::Init {
                 agent, uninstall, ..
@@ -3707,7 +3814,7 @@ mod tests {
 
     #[test]
     fn test_try_parse_kubectl_get_alias() {
-        let cli = Cli::try_parse_from(["rtk", "kubectl", "get", "pods", "-n", "default"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "kubectl", "get", "pods", "-n", "default"]).unwrap();
 
         match cli.command {
             Commands::Kubectl {
@@ -3719,7 +3826,7 @@ mod tests {
 
     #[test]
     fn test_try_parse_oc_get() {
-        let cli = Cli::try_parse_from(["rtk", "oc", "get", "pods", "-n", "default"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "oc", "get", "pods", "-n", "default"]).unwrap();
 
         match cli.command {
             Commands::Oc {
@@ -3731,7 +3838,7 @@ mod tests {
 
     #[test]
     fn test_try_parse_oc_other() {
-        let cli = Cli::try_parse_from(["rtk", "oc", "new-project", "test"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "oc", "new-project", "test"]).unwrap();
 
         match cli.command {
             Commands::Oc {
@@ -3746,7 +3853,7 @@ mod tests {
         // Regression: `-m` is GNU grep's --max-count, not RTK's --max. It must
         // parse (not consume the pattern), keep `max` at its default, and reach
         // extra_args so it is forwarded to grep as a real --max-count.
-        let cli = Cli::try_parse_from(["rtk", "grep", "-m", "5", "pattern", "file"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "grep", "-m", "5", "pattern", "file"]).unwrap();
 
         match cli.command {
             Commands::Grep {
@@ -3761,7 +3868,7 @@ mod tests {
 
     #[test]
     fn test_try_parse_init_agent_hermes_uninstall() {
-        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "hermes", "--uninstall"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "init", "--agent", "hermes", "--uninstall"]).unwrap();
         match cli.command {
             Commands::Init {
                 agent, uninstall, ..
@@ -3809,7 +3916,7 @@ mod tests {
 
     #[test]
     fn test_try_parse_init_agent_omp() {
-        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "omp"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "init", "--agent", "omp"]).unwrap();
         match cli.command {
             Commands::Init { agent, .. } => {
                 assert_eq!(agent, Some(AgentTarget::Omp));
@@ -3820,7 +3927,7 @@ mod tests {
 
     #[test]
     fn test_try_parse_init_agent_omp_uninstall() {
-        let cli = Cli::try_parse_from(["rtk", "init", "--uninstall", "--agent", "omp", "--global"])
+        let cli = try_parse_cli_from(["rtk", "init", "--uninstall", "--agent", "omp", "--global"])
             .unwrap();
         match cli.command {
             Commands::Init {
@@ -3870,7 +3977,7 @@ mod tests {
 
     #[test]
     fn test_try_parse_help_is_display_help() {
-        match Cli::try_parse_from(["rtk", "--help"]) {
+        match try_parse_cli_from(["rtk", "--help"]) {
             Err(e) => assert_eq!(e.kind(), ErrorKind::DisplayHelp),
             Ok(_) => panic!("Expected DisplayHelp error"),
         }
@@ -3878,7 +3985,7 @@ mod tests {
 
     #[test]
     fn test_try_parse_version_is_display_version() {
-        match Cli::try_parse_from(["rtk", "--version"]) {
+        match try_parse_cli_from(["rtk", "--version"]) {
             Err(e) => assert_eq!(e.kind(), ErrorKind::DisplayVersion),
             Ok(_) => panic!("Expected DisplayVersion error"),
         }
@@ -3886,7 +3993,7 @@ mod tests {
 
     #[test]
     fn test_try_parse_unknown_subcommand_is_error() {
-        match Cli::try_parse_from(["rtk", "nonexistent-command"]) {
+        match try_parse_cli_from(["rtk", "nonexistent-command"]) {
             Err(e) => assert!(!matches!(
                 e.kind(),
                 ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
@@ -3921,7 +4028,7 @@ mod tests {
 
     #[test]
     fn test_try_parse_git_with_dash_c_succeeds() {
-        let result = Cli::try_parse_from(["rtk", "git", "-C", "/path", "status"]);
+        let result = try_parse_cli_from(["rtk", "git", "-C", "/path", "status"]);
         assert!(
             result.is_ok(),
             "git -C /path status should parse successfully"
@@ -3938,7 +4045,7 @@ mod tests {
 
     #[test]
     fn test_gain_failures_flag_parses() {
-        let result = Cli::try_parse_from(["rtk", "gain", "--failures"]);
+        let result = try_parse_cli_from(["rtk", "gain", "--failures"]);
         assert!(result.is_ok());
         if let Ok(cli) = result {
             match cli.command {
@@ -3950,7 +4057,7 @@ mod tests {
 
     #[test]
     fn test_gain_failures_short_flag_parses() {
-        let result = Cli::try_parse_from(["rtk", "gain", "-F"]);
+        let result = try_parse_cli_from(["rtk", "gain", "-F"]);
         assert!(result.is_ok());
         if let Ok(cli) = result {
             match cli.command {
@@ -3967,11 +4074,11 @@ mod tests {
         for cmd in core::constants::RTK_META_COMMANDS {
             if matches!(
                 *cmd,
-                "proxy" | "run" | "rewrite" | "session" | "err" | "summary"
+                "proxy" | "run" | "rewrite" | "session" | "err" | "test" | "summary" | "format"
             ) {
                 continue; // these use trailing_var_arg (accept any args by design)
             }
-            let result = Cli::try_parse_from(["rtk", cmd, "--nonexistent-flag-xyz"]);
+            let result = try_parse_cli_from(["rtk", cmd, "--nonexistent-flag-xyz"]);
             assert!(
                 result.is_err(),
                 "Meta-command '{}' with bad flag should fail to parse",
@@ -3999,7 +4106,6 @@ mod tests {
             "aws",
             "psql",
             "pnpm",
-            "test",
             "env",
             "find",
             "diff",
@@ -4019,7 +4125,6 @@ mod tests {
             "next",
             "lint",
             "prettier",
-            "format",
             "playwright",
             "cargo",
             "npm",
@@ -4073,7 +4178,7 @@ mod tests {
 
     #[test]
     fn test_run_command_with_dash_c() {
-        let cli = Cli::try_parse_from(["rtk", "run", "-c", "git status && echo done"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "run", "-c", "git status && echo done"]).unwrap();
         match cli.command {
             Commands::Run {
                 command,
@@ -4090,7 +4195,7 @@ mod tests {
 
     #[test]
     fn test_run_command_positional_args() {
-        let cli = Cli::try_parse_from(["rtk", "run", "echo", "hello"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "run", "echo", "hello"]).unwrap();
         match cli.command {
             Commands::Run {
                 command,
@@ -4108,12 +4213,426 @@ mod tests {
     #[test]
     fn test_ctest_help_and_version_passthrough_args() {
         for flag in ["--help", "--version"] {
-            let cli = Cli::try_parse_from(["rtk", "ctest", flag]).unwrap();
+            let cli = try_parse_cli_from(["rtk", "ctest", flag]).unwrap();
             match cli.command {
                 Commands::Ctest { args } => assert_eq!(args, vec![flag]),
                 _ => panic!("Expected Ctest command"),
             }
         }
+    }
+
+    #[test]
+    fn grep_dash_h_reaches_grep() {
+        let cli = try_parse_cli_from(["rtk", "grep", "-h", "TODO", "a.txt"]).unwrap();
+        match cli.command {
+            Commands::Grep { extra_args, .. } => {
+                assert_eq!(extra_args, vec!["-h", "TODO", "a.txt"]);
+            }
+            other => panic!("Expected Grep command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wrapper_meta_flags_are_forwarded_verbatim() {
+        let cases: &[(&[&str], &[&str])] = &[
+            (&["rtk", "ls", "-h"], &["-h"]),
+            (&["rtk", "tree", "-h"], &["-h"]),
+            (&["rtk", "ls", "--help"], &["--help"]),
+            (&["rtk", "wc", "--help"], &["--help"]),
+            (&["rtk", "psql", "-h", "localhost"], &["-h", "localhost"]),
+            (&["rtk", "ctest", "--version"], &["--version"]),
+        ];
+        for (argv, expected) in cases {
+            let cli = try_parse_cli_from(argv.iter().copied())
+                .unwrap_or_else(|e| panic!("{argv:?} should parse, got: {e}"));
+            let forwarded = match cli.command {
+                Commands::Ls { args } => args,
+                Commands::Tree { args } => args,
+                Commands::Wc { args } => args,
+                Commands::Psql { args } => args,
+                Commands::Ctest { args } => args,
+                other => panic!("unexpected command for {argv:?}: {other:?}"),
+            };
+            assert_eq!(forwarded, *expected, "for {argv:?}");
+        }
+    }
+
+    #[test]
+    fn every_wrapper_subcommand_releases_its_meta_flags() {
+        fn walk(cmd: &clap::Command, path: &str, misses: &mut Vec<String>) {
+            for sub in cmd.get_subcommands() {
+                let here = format!("{path} {}", sub.get_name());
+                if forwards_to_native_tool(sub) && !sub.is_disable_help_flag_set() {
+                    misses.push(here.clone());
+                }
+                walk(sub, &here, misses);
+            }
+        }
+        let built = {
+            let mut c = rtk_command();
+            c.build();
+            c
+        };
+        let mut misses = Vec::new();
+        for sub in built.get_subcommands() {
+            if core::constants::RTK_META_COMMANDS.contains(&sub.get_name()) {
+                continue;
+            }
+            let here = format!("rtk {}", sub.get_name());
+            if forwards_to_native_tool(sub) && !sub.is_disable_help_flag_set() {
+                misses.push(here.clone());
+            }
+            walk(sub, &here, &mut misses);
+        }
+        assert!(
+            misses.is_empty(),
+            "these wrappers still answer -h/--help themselves: {misses:#?}"
+        );
+    }
+
+    #[test]
+    fn cheap_wrapper_test_matches_clap_built_tree() {
+        fn authoritative(cmd: &clap::Command) -> bool {
+            cmd.get_positionals().any(|a| a.is_trailing_var_arg_set())
+                || cmd.is_allow_external_subcommands_set()
+                || cmd.get_subcommands().any(authoritative)
+        }
+        fn walk(built: &clap::Command, path: &str, disagree: &mut Vec<String>) {
+            for sub in built.get_subcommands() {
+                // added by clap during build, not part of RTK's surface
+                if sub.get_name() == "help" {
+                    continue;
+                }
+                let here = format!("{path} {}", sub.get_name());
+                if forwards_to_native_tool(sub) != authoritative(sub) {
+                    disagree.push(format!(
+                        "{here}: cheap={} authoritative={}",
+                        forwards_to_native_tool(sub),
+                        authoritative(sub)
+                    ));
+                }
+                walk(sub, &here, disagree);
+            }
+        }
+        let mut built = <Cli as clap::CommandFactory>::command();
+        built.build();
+        let mut disagree = Vec::new();
+        for sub in built.get_subcommands() {
+            if core::constants::RTK_META_COMMANDS.contains(&sub.get_name())
+                || sub.get_name() == "help"
+            {
+                continue;
+            }
+            let here = format!("rtk {}", sub.get_name());
+            if forwards_to_native_tool(sub) != authoritative(sub) {
+                disagree.push(format!(
+                    "{here}: cheap={} authoritative={}",
+                    forwards_to_native_tool(sub),
+                    authoritative(sub)
+                ));
+            }
+            walk(sub, &here, &mut disagree);
+        }
+        assert!(
+            disagree.is_empty(),
+            "wrapper detection disagrees with clap's built tree: {disagree:#?}"
+        );
+    }
+
+    #[test]
+    fn rtk_own_commands_keep_their_help() {
+        let root = rtk_command();
+        assert!(
+            !root.is_disable_help_flag_set(),
+            "`rtk --help` must stay RTK's"
+        );
+        for name in [
+            "gain", "init", "proxy", "recall", "verify", "rewrite", "hook",
+        ] {
+            let sub = root
+                .get_subcommands()
+                .find(|s| s.get_name() == name)
+                .unwrap_or_else(|| panic!("missing subcommand {name}"));
+            assert!(
+                !sub.is_disable_help_flag_set(),
+                "`rtk {name} --help` is RTK's own, not a wrapped tool's"
+            );
+        }
+    }
+
+    // ---- #4198 fuzz: a wrapper must never answer a meta flag itself ----
+
+    /// Every subcommand path under `rtk` that forwards to a native tool, and every path
+    /// that is RTK's own. Read off the built tree so a new subcommand joins the fuzz on
+    /// its own.
+    fn classified_paths() -> (Vec<Vec<String>>, Vec<Vec<String>>) {
+        fn walk(
+            cmd: &clap::Command,
+            path: &[String],
+            rtk_own: bool,
+            wrappers: &mut Vec<Vec<String>>,
+            own: &mut Vec<Vec<String>>,
+        ) {
+            for sub in cmd.get_subcommands() {
+                if sub.get_name() == "help" {
+                    continue;
+                }
+                let mut here = path.to_vec();
+                here.push(sub.get_name().to_string());
+                // Only at depth 1: `rtk test` is RTK's, `rtk dotnet test` is dotnet's.
+                let mine = rtk_own
+                    || (path.is_empty()
+                        && core::constants::RTK_META_COMMANDS.contains(&sub.get_name()));
+                if mine {
+                    own.push(here.clone());
+                } else if forwards_to_native_tool(sub) {
+                    wrappers.push(here.clone());
+                }
+                walk(sub, &here, mine, wrappers, own);
+            }
+        }
+        let mut built = rtk_command();
+        built.build();
+        let (mut wrappers, mut own) = (Vec::new(), Vec::new());
+        walk(&built, &[], false, &mut wrappers, &mut own);
+        (wrappers, own)
+    }
+
+    /// Argv shapes a caller reaches for, with `meta` dropped at every position of each.
+    fn argv_shapes(meta: &str) -> Vec<Vec<String>> {
+        // Decoys chosen to exercise the parser rather than the tool: a value-taking flag,
+        // a short cluster, an attached value, a bare operand, and the boundary itself.
+        const BASES: &[&[&str]] = &[
+            &[],
+            &["pattern"],
+            &["-n"],
+            &["-rn", "src/"],
+            &["--color=always"],
+            &["-e", "x"],
+            &["a", "b", "c"],
+            &["--", "after"],
+            &["before", "--", "after"],
+        ];
+        let mut out = Vec::new();
+        for base in BASES {
+            for at in 0..=base.len() {
+                let mut argv: Vec<String> = base.iter().map(|s| s.to_string()).collect();
+                argv.insert(at, meta.to_string());
+                out.push(argv);
+            }
+        }
+        out
+    }
+
+    /// The #4198 invariant, over the whole surface: whatever a caller types, RTK never
+    /// answers a wrapped tool's `-h`, `--help`, `-V`, `--version` or `help` with its own
+    /// usage. Any other parse outcome is fine, since the args reach the tool either
+    /// directly or through the raw-exec fallback.
+    #[test]
+    fn fuzz_no_wrapper_ever_answers_a_meta_flag_itself() {
+        let (wrappers, _) = classified_paths();
+        assert!(wrappers.len() > 100, "expected the full wrapper surface");
+        let mut cmd = rtk_command();
+        let mut checked = 0usize;
+        for meta in ["-h", "--help", "-V", "--version", "help"] {
+            for path in &wrappers {
+                for extra in argv_shapes(meta) {
+                    let argv: Vec<String> = std::iter::once("rtk".to_string())
+                        .chain(path.iter().cloned())
+                        .chain(extra.iter().cloned())
+                        .collect();
+                    checked += 1;
+                    if let Err(e) = cmd.try_get_matches_from_mut(&argv) {
+                        assert!(
+                            !matches!(
+                                e.kind(),
+                                ErrorKind::DisplayHelp
+                                    | ErrorKind::DisplayVersion
+                                    | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+                            ),
+                            "RTK answered `{}` itself",
+                            argv.join(" ")
+                        );
+                    }
+                }
+            }
+        }
+        assert!(checked > 10_000, "fuzz did not cover enough, got {checked}");
+    }
+
+    /// The inverse, so the rule above cannot be satisfied by releasing everything: RTK's
+    /// own commands still answer `-h` and `--help`.
+    #[test]
+    fn fuzz_rtk_own_commands_still_answer_their_own_help() {
+        let (_, own) = classified_paths();
+        let mut cmd = rtk_command();
+        for path in &own {
+            for meta in ["-h", "--help"] {
+                let argv: Vec<String> = std::iter::once("rtk".to_string())
+                    .chain(path.iter().cloned())
+                    .chain(std::iter::once(meta.to_string()))
+                    .collect();
+                match cmd.try_get_matches_from_mut(&argv) {
+                    Err(e) if e.kind() == ErrorKind::DisplayHelp => {}
+                    other => panic!(
+                        "`{}` should print RTK's own help, got {:?}",
+                        argv.join(" "),
+                        other.err().map(|e| e.kind())
+                    ),
+                }
+            }
+        }
+    }
+
+    /// Nothing the caller typed may be dropped on the way to the tool: when the parse
+    /// succeeds, every token still appears in the leaf subcommand's own values.
+    #[test]
+    fn fuzz_wrapper_args_reach_the_leaf_verbatim() {
+        /// Descends to the leaf, collecting the subcommand names passed on the way. Past
+        /// the wrapper's own path those names are the caller's tokens: an
+        /// `external_subcommand` arm stores the first one as the subcommand name.
+        fn leaf<'m>(
+            m: &'m clap::ArgMatches,
+            depth: usize,
+            names: &mut Vec<String>,
+        ) -> &'m clap::ArgMatches {
+            match m.subcommand() {
+                Some((name, sub)) => {
+                    if depth == 0 {
+                        names.push(name.to_string());
+                    }
+                    leaf(sub, depth.saturating_sub(1), names)
+                }
+                None => m,
+            }
+        }
+        let (wrappers, _) = classified_paths();
+        let mut cmd = rtk_command();
+        for meta in ["-h", "--help"] {
+            for path in &wrappers {
+                for extra in argv_shapes(meta) {
+                    let argv: Vec<String> = std::iter::once("rtk".to_string())
+                        .chain(path.iter().cloned())
+                        .chain(extra.iter().cloned())
+                        .collect();
+                    let Ok(m) = cmd.try_get_matches_from_mut(&argv) else {
+                        continue; // a parse error routes to the raw-exec fallback
+                    };
+                    let mut names = Vec::new();
+                    let leaf = leaf(&m, path.len(), &mut names);
+                    // An `external_subcommand` arm collects OsString, everything else String.
+                    let seen: Vec<String> = leaf
+                        .ids()
+                        .flat_map(|id| {
+                            let strs = leaf
+                                .try_get_many::<String>(id.as_str())
+                                .ok()
+                                .flatten()
+                                .map(|v| v.cloned().collect::<Vec<_>>())
+                                .unwrap_or_default();
+                            let os = leaf
+                                .try_get_many::<std::ffi::OsString>(id.as_str())
+                                .ok()
+                                .flatten()
+                                .map(|v| {
+                                    v.map(|o| o.to_string_lossy().into_owned())
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default();
+                            strs.into_iter().chain(os)
+                        })
+                        .collect();
+                    assert!(
+                        seen.iter().chain(names.iter()).any(|v| v == meta),
+                        "`{}` parsed but `{meta}` reached nothing: {seen:?} {names:?}",
+                        argv.join(" ")
+                    );
+                }
+            }
+        }
+    }
+
+    /// Commands that wrap nothing are not in `RTK_META_COMMANDS`, so the fuzz above never
+    /// reaches them. Removing the `forwards_to_native_tool` early return passes everything
+    /// else and breaks exactly these: `read` and `log` fall back to resolving a binary of
+    /// that name, `diff` and `env` print GNU's usage.
+    #[test]
+    fn rtk_commands_that_wrap_nothing_keep_their_help() {
+        let root = rtk_command();
+        for name in ["read", "diff", "log", "env", "json", "deps", "smart"] {
+            let sub = root
+                .get_subcommands()
+                .find(|s| s.get_name() == name)
+                .unwrap_or_else(|| panic!("missing subcommand {name}"));
+            assert!(
+                !forwards_to_native_tool(sub),
+                "`rtk {name}` wraps nothing, so it must not be treated as a wrapper"
+            );
+            assert!(
+                !sub.is_disable_help_flag_set(),
+                "`rtk {name} --help` is RTK's own"
+            );
+        }
+    }
+
+    /// `pods` is RTK's alias for `get pods`, so `extra` carries a usage request down and
+    /// nothing else: anything more would reach a `get` already pinned to `-o json`.
+    #[test]
+    fn k8s_alias_forwards_only_a_usage_request() {
+        let owned = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let filtered = |all, extra: &[&str]| {
+            build_k8s_namespace_args("pods", None, all, owned(extra)).filtered_args()
+        };
+
+        assert_eq!(filtered(true, &[]), vec!["-A"]);
+        assert_eq!(
+            build_k8s_namespace_args("pods", Some("kube-system".into()), false, Vec::new())
+                .filtered_args(),
+            vec!["-n", "kube-system"]
+        );
+        // The request is appended after the namespace flags RTK adds.
+        assert_eq!(filtered(true, &["--help"]), vec!["-A", "--help"]);
+        assert_eq!(filtered(false, &["-h"]), vec!["-h"]);
+
+        // Anything else runs as the caller typed it, which is what kubectl answers itself.
+        match build_k8s_namespace_args("pods", None, true, owned(&["-o", "wide"])) {
+            K8sAlias::Raw(argv) => assert_eq!(
+                argv.iter()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>(),
+                vec!["pods", "-o", "wide"]
+            ),
+            K8sAlias::Filtered(args) => panic!("expected a raw run, got {args:?}"),
+        }
+    }
+
+    #[test]
+    fn rtk_composite_commands_keep_their_help() {
+        let root = rtk_command();
+        for name in ["err", "test", "summary", "format"] {
+            let sub = root
+                .get_subcommands()
+                .find(|s| s.get_name() == name)
+                .unwrap_or_else(|| panic!("missing subcommand {name}"));
+            assert!(
+                !sub.is_disable_help_flag_set(),
+                "`rtk {name} --help` has no single wrapped tool to defer to"
+            );
+        }
+    }
+
+    #[test]
+    fn rtk_help_subcommand_still_reaches_wrapper_usage() {
+        let err = match try_parse_cli_from(["rtk", "help", "grep"]) {
+            Err(e) => e,
+            Ok(_) => panic!("`rtk help grep` renders usage via a clap error"),
+        };
+        assert_eq!(err.kind(), ErrorKind::DisplayHelp);
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--max-len"),
+            "should list RTK's own grep options, got: {rendered}"
+        );
     }
 
     #[test]
@@ -4141,7 +4660,7 @@ mod tests {
 
     #[test]
     fn test_hook_claude_parses() {
-        let cli = Cli::try_parse_from(["rtk", "hook", "claude"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "hook", "claude"]).unwrap();
         assert!(matches!(
             cli.command,
             Commands::Hook {
@@ -4152,13 +4671,13 @@ mod tests {
 
     #[test]
     fn test_hook_trae_parses() {
-        let cli = Cli::try_parse_from(["rtk", "hook", "trae"]);
+        let cli = try_parse_cli_from(["rtk", "hook", "trae"]);
         assert!(cli.is_ok());
     }
 
     #[test]
     fn test_hook_codex_parses() {
-        let cli = Cli::try_parse_from(["rtk", "hook", "codex"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "hook", "codex"]).unwrap();
         assert!(matches!(
             cli.command,
             Commands::Hook {
@@ -4169,7 +4688,7 @@ mod tests {
 
     #[test]
     fn test_hook_check_parses() {
-        let cli = Cli::try_parse_from(["rtk", "hook", "check", "git", "status"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "hook", "check", "git", "status"]).unwrap();
         match cli.command {
             Commands::Hook {
                 command: HookCommands::Check { agent, command },
@@ -4184,7 +4703,7 @@ mod tests {
     #[test]
     fn test_hook_check_with_agent() {
         let cli =
-            Cli::try_parse_from(["rtk", "hook", "check", "--agent", "gemini", "cargo", "test"])
+            try_parse_cli_from(["rtk", "hook", "check", "--agent", "gemini", "cargo", "test"])
                 .unwrap();
         match cli.command {
             Commands::Hook {
@@ -4199,7 +4718,7 @@ mod tests {
 
     #[test]
     fn test_hook_check_preserves_double_dash_in_command() {
-        let cli = Cli::try_parse_from([
+        let cli = try_parse_cli_from([
             "rtk",
             "hook",
             "check",
@@ -4236,7 +4755,7 @@ mod tests {
             vec!["rtk", "cc-economics"],
         ];
         for args in &meta_cmds_that_parse {
-            let result = Cli::try_parse_from(args.iter());
+            let result = try_parse_cli_from(args.iter());
             assert!(
                 result.is_ok(),
                 "Meta-command {:?} should parse successfully",
@@ -4294,7 +4813,7 @@ mod tests {
             vec!["rtk", "rewrite", "head", "-50", "file.txt"],
         ];
         for args in &cases {
-            let result = Cli::try_parse_from(args.iter());
+            let result = try_parse_cli_from(args.iter());
             assert!(
                 result.is_ok(),
                 "rtk rewrite {:?} should parse (was failing before trailing_var_arg fix)",
@@ -4314,7 +4833,7 @@ mod tests {
     #[test]
     fn test_rewrite_clap_quoted_single_arg() {
         // Quoted form: `rtk rewrite "git status"` — single arg containing spaces
-        let result = Cli::try_parse_from(["rtk", "rewrite", "git status"]);
+        let result = try_parse_cli_from(["rtk", "rewrite", "git status"]);
         assert!(result.is_ok());
         if let Ok(cli) = result {
             match cli.command {
@@ -4415,7 +4934,7 @@ mod tests {
 
     #[test]
     fn test_pnpm_subcommand_with_filter() {
-        let cli = Cli::try_parse_from([
+        let cli = try_parse_cli_from([
             "rtk", "pnpm", "--filter", "@app1", "--filter", "@app2", "list", "--filter", "@app3",
             "--filter", "@app4", "--prod",
         ])
@@ -4439,7 +4958,7 @@ mod tests {
 
     #[test]
     fn test_git_push_u_flag_passes_through() {
-        let cli = Cli::try_parse_from(["rtk", "git", "push", "-u", "origin", "my-branch"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "git", "push", "-u", "origin", "my-branch"]).unwrap();
         assert!(
             !cli.ultra_compact,
             "-u on git push must NOT be consumed as --ultra-compact"
@@ -4463,7 +4982,7 @@ mod tests {
     fn test_pnpm_subcommand_with_short_filter() {
         // -F is the short form of --filter in pnpm
         let cli =
-            Cli::try_parse_from(["rtk", "pnpm", "-F", "@app1", "-F", "@app2", "list"]).unwrap();
+            try_parse_cli_from(["rtk", "pnpm", "-F", "@app1", "-F", "@app2", "list"]).unwrap();
         match cli.command {
             Commands::Pnpm { filter, .. } => {
                 assert_eq!(filter, vec!["@app1", "@app2"]);
@@ -4474,7 +4993,7 @@ mod tests {
 
     #[test]
     fn test_pnpm_typecheck_without_filters() {
-        let cli = Cli::try_parse_from([
+        let cli = try_parse_cli_from([
             "rtk",
             "pnpm",
             "typecheck",
@@ -4499,7 +5018,7 @@ mod tests {
 
     #[test]
     fn test_pnpm_typecheck_with_filters() {
-        let cli = Cli::try_parse_from([
+        let cli = try_parse_cli_from([
             "rtk",
             "pnpm",
             "--filter",
@@ -4560,7 +5079,7 @@ mod tests {
 
     #[test]
     fn test_ultra_compact_long_form_still_works() {
-        let cli = Cli::try_parse_from(["rtk", "--ultra-compact", "git", "status"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "--ultra-compact", "git", "status"]).unwrap();
         assert!(
             cli.ultra_compact,
             "--ultra-compact long form must still enable ultra-compact mode"
@@ -4573,7 +5092,7 @@ mod tests {
         // were dispatched to `npm` instead of `npx`. At the parse level, the
         // Npx variant must carry all args through unchanged so the dispatch
         // arm can forward them to npx.
-        let cli = Cli::try_parse_from(["rtk", "npx", "cowsay", "hello"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "npx", "cowsay", "hello"]).unwrap();
         match cli.command {
             Commands::Npx { args } => {
                 assert_eq!(args, vec!["cowsay", "hello"]);
@@ -4585,13 +5104,13 @@ mod tests {
     #[test]
     fn test_init_pi_flag_rejected() {
         // --pi has been removed; --agent pi is the canonical form
-        let result = Cli::try_parse_from(["rtk", "init", "--pi"]);
+        let result = try_parse_cli_from(["rtk", "init", "--pi"]);
         assert!(result.is_err(), "--pi must be rejected as unknown argument");
     }
 
     #[test]
     fn test_init_agent_pi_parses() {
-        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "pi"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "init", "--agent", "pi"]).unwrap();
         match cli.command {
             Commands::Init { agent, .. } => {
                 assert_eq!(
@@ -4606,7 +5125,7 @@ mod tests {
 
     #[test]
     fn test_init_uninstall_agent_pi_parses() {
-        let cli = Cli::try_parse_from(["rtk", "init", "--uninstall", "--agent", "pi", "--global"])
+        let cli = try_parse_cli_from(["rtk", "init", "--uninstall", "--agent", "pi", "--global"])
             .unwrap();
         match cli.command {
             Commands::Init {
@@ -4632,7 +5151,7 @@ mod tests {
     /// Parse `rtk grep …` and return the captured `extra_args`, or `None` if
     /// clap rejects the invocation (e.g. a colliding short option mis-binds).
     fn grep_extra_args(args: &[&str]) -> Option<Vec<String>> {
-        match Cli::try_parse_from(args).ok()?.command {
+        match try_parse_cli_from(args).ok()?.command {
             Commands::Grep { extra_args, .. } => Some(extra_args),
             _ => None,
         }
@@ -4716,7 +5235,7 @@ mod tests {
 
     /// Parse `rtk grep …` into the full `Grep` field set for inspection.
     fn parse_grep(args: &[&str]) -> Result<(usize, usize, bool, Vec<String>), clap::Error> {
-        match Cli::try_parse_from(args)?.command {
+        match try_parse_cli_from(args)?.command {
             Commands::Grep {
                 max_len,
                 max,
@@ -4785,7 +5304,7 @@ mod tests {
 
     #[test]
     fn test_bun_build_parses_to_arg_vector() {
-        let cli = Cli::try_parse_from(["rtk", "bun", "build", "--outdir", "dist"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "bun", "build", "--outdir", "dist"]).unwrap();
         match cli.command {
             Commands::Bun {
                 command: BunCommands::Build { args },
@@ -4796,7 +5315,7 @@ mod tests {
 
     #[test]
     fn test_bun_x_parses_to_arg_vector() {
-        let cli = Cli::try_parse_from(["rtk", "bun", "x", "tsc", "--noEmit"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "bun", "x", "tsc", "--noEmit"]).unwrap();
         match cli.command {
             Commands::Bun {
                 command: BunCommands::X { args },
@@ -4807,7 +5326,7 @@ mod tests {
 
     #[test]
     fn test_bun_pm_ls_parses_to_typed_ls() {
-        let cli = Cli::try_parse_from(["rtk", "bun", "pm", "ls"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "bun", "pm", "ls"]).unwrap();
         match cli.command {
             Commands::Bun {
                 command:
@@ -4821,7 +5340,7 @@ mod tests {
 
     #[test]
     fn test_bun_pm_other_passes_through() {
-        let cli = Cli::try_parse_from(["rtk", "bun", "pm", "cache", "rm"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "bun", "pm", "cache", "rm"]).unwrap();
         match cli.command {
             Commands::Bun {
                 command:
@@ -4835,7 +5354,7 @@ mod tests {
 
     #[test]
     fn test_deno_compile_parses_to_arg_vector() {
-        let cli = Cli::try_parse_from(["rtk", "deno", "compile", "main.ts"]).unwrap();
+        let cli = try_parse_cli_from(["rtk", "deno", "compile", "main.ts"]).unwrap();
         match cli.command {
             Commands::Deno {
                 command: DenoCommands::Compile { args },

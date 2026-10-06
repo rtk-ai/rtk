@@ -60,7 +60,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: {}", original_cmd);
     }
 
-    if args.first().map(String::as_str) != Some("run") {
+    if args.first().map(String::as_str) != Some("run")
+        || crate::core::runner::requests_help_args("uv", args)
+    {
         let status = cmd.status().context("Failed to run uv")?;
         timer.track_passthrough(&original_cmd, &format!("{rtk_cmd} (passthrough)"));
         return Ok(exit_code_from_status(&status, "uv"));
