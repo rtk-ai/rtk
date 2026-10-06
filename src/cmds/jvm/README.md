@@ -4,7 +4,7 @@ Filters for JVM-based build tools.
 
 | Module           | Tool(s)                              | Modes                                                                                  |
 |------------------|--------------------------------------|----------------------------------------------------------------------------------------|
-| `gradlew_cmd.rs` | `./gradlew`, `gradlew.bat`, `gradle` | Build / Test / ConnectedTest / Lint / Dependencies — streaming line filter + passthrough |
+| `gradlew_cmd.rs` | `./gradlew`, `gradlew.bat`, `gradle` | Build / Test / ConnectedTest / Lint / Dependencies — preserves wrapper vs. system Gradle selection |
 | `mvn_cmd.rs`     | `mvn`, `./mvnw`, `mvnw.cmd`, `mvnd`  | Test / Compile / Package / Passthrough — buffered single-pass filter per phase           |
 
 ## Maven (`mvn_cmd.rs`)
@@ -40,8 +40,10 @@ Token-savings tests run inline as part of `cargo test --all`. The `mvn` fixtures
 
 ### Integrity-check whitelist
 
-`Commands::Mvn` and `Commands::Mvnd` are intentionally omitted from `is_operational_command` in `src/main.rs`, matching the gradle precedent (`Commands::Gradlew` also omitted). The whitelist guards SHA-256 hook-integrity verification; filter modules invoked through an already-verified hook do not need a second check on their own dispatch path. Per the comment above the function, the whitelist is opt-in by design and a forgotten command fails open rather than creating false confidence about what's protected.
+`Commands::Mvn` and `Commands::Mvnd` are intentionally omitted from `is_operational_command` in `src/main.rs`, matching the Gradle precedent (`Commands::Gradle` and `Commands::Gradlew` are also omitted). The whitelist guards SHA-256 hook-integrity verification; filter modules invoked through an already-verified hook do not need a second check on their own dispatch path. Per the comment above the function, the whitelist is opt-in by design and a forgotten command fails open rather than creating false confidence about what's protected.
 
 ## Gradle (`gradlew_cmd.rs`)
 
-See module docs and the gradle PR (`feat/gradlew-android-support`) for rationale. Streaming filter chosen because Gradle output is task-line-based, not block-based — unlike Maven Surefire.
+`rtk gradlew` executes the project wrapper and `rtk gradle` executes system Gradle. The rewrite hook keeps that distinction instead of silently substituting one executable for the other. Only supported build/test/lint/dependency tasks are rewritten; other Gradle commands pass through unchanged.
+
+Streaming filtering is used because Gradle output is task-line-based, not block-based — unlike Maven Surefire.
