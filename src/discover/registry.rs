@@ -1082,6 +1082,8 @@ struct PipelineAnalysis {
     next_clause_offset: Option<usize>,
     final_stage_start: Option<usize>,
     all_consumers_safe: bool,
+    /// A consumer selects lines by position (`head`, `tail`) rather than showing them all.
+    positional_consumer: bool,
 }
 
 fn analyze_pipeline(
@@ -1104,6 +1106,7 @@ fn analyze_pipeline(
     let mut final_stage_start = None;
     let mut has_supported_structure = true;
     let mut consumers_all_safe = true;
+    let mut positional_consumer = false;
 
     for (i, token) in tokens.iter().enumerate() {
         if token.offset >= end_offset {
@@ -1125,10 +1128,11 @@ fn analyze_pipeline(
         if cmd[stage_start..token.offset].trim().is_empty() || kind == PipeKind::StdoutAndStderr {
             has_supported_structure = false;
         }
-        if token.offset > first_pipe_offset
-            && !is_safe_pipe_consumer(cmd[stage_start..token.offset].trim())
-        {
-            consumers_all_safe = false;
+        if token.offset > first_pipe_offset {
+            match safe_pipe_consumer(cmd[stage_start..token.offset].trim()) {
+                Some(consumer) => positional_consumer |= consumer.positional,
+                None => consumers_all_safe = false,
+            }
         }
 
         stage_start = token.offset + token.value.len();
@@ -1137,8 +1141,11 @@ fn analyze_pipeline(
 
     if cmd[stage_start..end_offset].trim().is_empty() {
         has_supported_structure = false;
-    } else if !is_safe_pipe_consumer(cmd[stage_start..end_offset].trim()) {
-        consumers_all_safe = false;
+    } else {
+        match safe_pipe_consumer(cmd[stage_start..end_offset].trim()) {
+            Some(consumer) => positional_consumer |= consumer.positional,
+            None => consumers_all_safe = false,
+        }
     }
 
     PipelineAnalysis {
@@ -1150,6 +1157,7 @@ fn analyze_pipeline(
             None
         },
         all_consumers_safe: has_supported_structure && consumers_all_safe,
+        positional_consumer,
     }
 }
 
@@ -1210,7 +1218,9 @@ fn rewrite_pipeline_producer(
         cmd,
         segment_start,
         first_pipe_offset,
-        RewriteContext::PipelineProducer,
+        RewriteContext::PipelineProducer {
+            positional_consumer: analysis.positional_consumer,
+        },
         excluded,
         transparent_prefixes,
     )
@@ -1444,6 +1454,8 @@ const PROCESS_WRAPPERS: &[ProcessWrapper] = &[
 
 struct SafePipeConsumer {
     name: &'static str,
+    /// Selects lines by position, so it needs the producer's lines in their raw order.
+    positional: bool,
     unsafe_flags: &'static [&'static str],
     unsafe_flag_chars: &'static [char],
 }
@@ -1451,17 +1463,20 @@ struct SafePipeConsumer {
 const SAFE_PIPE_CONSUMERS: &[SafePipeConsumer] = &[
     SafePipeConsumer {
         name: "cat",
+        positional: false,
         unsafe_flags: &[],
         unsafe_flag_chars: &[],
     },
     SafePipeConsumer {
         name: "head",
+        positional: true,
         unsafe_flags: &[],
         unsafe_flag_chars: &[],
     },
     // #3171: only non-following tail is display-only
     SafePipeConsumer {
         name: "tail",
+        positional: true,
         unsafe_flags: &["--follow"],
         unsafe_flag_chars: &['f', 'F'],
     },
@@ -1482,17 +1497,20 @@ fn arg_matches_unsafe_flag(consumer: &SafePipeConsumer, arg: &str) -> bool {
     })
 }
 
-fn is_safe_pipe_consumer(stage: &str) -> bool {
+fn safe_pipe_consumer(stage: &str) -> Option<&'static SafePipeConsumer> {
     let words = shell_split(stage);
     let mut words = words.iter();
-    let Some(head) = words.next() else {
-        return false;
-    };
-    let Some(consumer) = SAFE_PIPE_CONSUMERS.iter().find(|c| c.name == head.as_str()) else {
-        return false;
-    };
-    !words.any(|arg| arg_matches_unsafe_flag(consumer, arg))
+    let head = words.next()?;
+    let consumer = SAFE_PIPE_CONSUMERS
+        .iter()
+        .find(|c| c.name == head.as_str())?;
+    (!words.any(|arg| arg_matches_unsafe_flag(consumer, arg))).then_some(consumer)
 }
+
+/// #4445: rtk filters that move lines relative to the raw output (`rtk pytest` prints its
+/// summary first and tee pointers last, where pytest ends on the summary), so a positional
+/// consumer would select different lines than the command the agent wrote.
+const POSITION_SHIFTING_PRODUCERS: &[&str] = &["rtk pytest"];
 
 /// Every built-in transparent wrapper, paired with whether it may fall through.
 /// Derived from the two lists above so they cannot drift apart.
@@ -1509,7 +1527,7 @@ const MAX_PREFIX_DEPTH: usize = 10;
 enum RewriteContext {
     Normal,
     PipelineFinal,
-    PipelineProducer,
+    PipelineProducer { positional_consumer: bool },
 }
 
 /// Checks whether grep or rg reads patterns from a file.
@@ -1771,10 +1789,13 @@ fn rewrite_segment_inner(
         return None;
     }
     // #3171
-    if context == RewriteContext::PipelineProducer
+    if let RewriteContext::PipelineProducer {
+        positional_consumer,
+    } = context
         && (!rule.pipeline_safety.producer_safe()
             || !pipeline_command_is_safe(rule.rtk_cmd, cmd_part)
-            || !producer_output_is_line_faithful(rule.rtk_cmd, cmd_part))
+            || !producer_output_is_line_faithful(rule.rtk_cmd, cmd_part)
+            || (positional_consumer && POSITION_SHIFTING_PRODUCERS.contains(&rule.rtk_cmd)))
     {
         return None;
     }
@@ -3951,12 +3972,40 @@ mod tests {
     #[test]
     fn test_rewrite_pipe_producer_batch_rules_rewritten() {
         assert_eq!(
-            rewrite_command_no_prefixes("pytest | tail -20", &[]),
-            Some("rtk pytest | tail -20".into())
+            rewrite_command_no_prefixes("pytest | cat", &[]),
+            Some("rtk pytest | cat".into())
         );
         assert_eq!(
             rewrite_command_no_prefixes("terraform plan | head -40", &[]),
             Some("rtk terraform plan | head -40".into())
+        );
+    }
+
+    /// #4445: `rtk pytest` prints its summary first and the tee pointers last, so a
+    /// positional consumer would select different lines than it does on raw pytest.
+    #[test]
+    fn test_rewrite_pipe_reordering_producer_before_positional_consumer_stays_raw() {
+        for cmd in [
+            "python3 -m pytest t.py -q 2>&1 | tail -3",
+            "pytest -q | tail -n 5",
+            "pytest | tail",
+            "pytest -x | head -5",
+            "uv run pytest -q | tail -3",
+            "pytest -q | cat | tail -3",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes("pytest -q", &[]),
+            Some("rtk pytest -q".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pytest -q 2>&1 | cat", &[]),
+            Some("rtk pytest -q 2>&1 | cat".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("pytest -q | tail -3 && pytest -q", &[]),
+            Some("pytest -q | tail -3 && rtk pytest -q".into())
         );
     }
 
