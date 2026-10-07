@@ -1,99 +1,162 @@
 [filters.xcodebuild]
-description = "Compact xcodebuild output — strip build phases, keep errors/warnings/summary"
-match_command = "^xcodebuild\\b"
+description = "Compact xcodebuild output — keep errors, failed tests and the result summary"
+match_command = "^xcodebuild\\b.*\\s(build|test|archive|analyze|clean|build-for-testing|test-without-building|docbuild)(\\s|$)"
 strip_ansi = true
-strip_lines_matching = [
-  "^\\s*$",
-  "^CompileC\\s",
-  "^CompileSwift\\s",
-  "^Ld\\s",
-  "^CreateBuildDirectory\\s",
-  "^MkDir\\s",
-  "^ProcessInfoPlistFile\\s",
-  "^CopySwiftLibs\\s",
-  "^CodeSign\\s",
-  "^Signing Identity:",
-  "^RegisterWithLaunchServices",
-  "^Validate\\s",
-  "^ProcessProductPackaging",
-  "^Touch\\s",
-  "^LinkStoryboards",
-  "^CompileStoryboard",
-  "^CompileAssetCatalog",
-  "^GenerateDSYMFile",
-  "^PhaseScriptExecution",
-  "^PBXCp\\s",
-  "^SetMode\\s",
-  "^SetOwnerAndGroup\\s",
-  "^Ditto\\s",
-  "^CpResource\\s",
-  "^CpHeader\\s",
-  "^\\s+cd\\s+/",
-  "^\\s+export\\s",
-  "^\\s+/Applications/Xcode",
-  "^\\s+/usr/bin/",
-  "^\\s+builtin-",
-  "^note: Using new build system",
+keep_lines_matching = [
+  "^\\*\\* .+ \\*\\*$",
+  ":\\d+(:\\d+)?: (fatal )?error: ",
+  "^(\\S+: )?(fatal )?error: ",
+  "^ld: .*not found",
+  "^Undefined symbols for architecture ",
+  "^\\s+\"[^\"]+\", referenced from:$",
+  "^Command \\S+ failed with a nonzero exit code",
+  "^The following build commands failed:",
+  "^(Failing tests|Testing failed):",
+  "^\\t+\\S",
+  "^\\(\\d+ failures?\\)$",
+  "^Test [Cc]ase '.+' failed",
+  "Executed \\d+ tests?, with [1-9]\\d* failures?",
 ]
 max_lines = 60
-on_empty = "xcodebuild: ok"
+on_empty = "xcodebuild: no errors and no result line in output"
 
 [[tests.xcodebuild]]
-name = "strips build phases, keeps errors and summary"
+name = "modern Xcode build keeps only the result line"
 input = """
-note: Using new build system
-CompileSwift normal arm64 /Users/dev/App/ViewController.swift
-    cd /Users/dev/App
-    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift-frontend -c
-CompileSwift normal arm64 /Users/dev/App/AppDelegate.swift
-    cd /Users/dev/App
-    export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-Ld /Users/dev/Build/Products/Debug/App normal arm64
-    cd /Users/dev/App
-    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang
-CodeSign /Users/dev/Build/Products/Debug/App.app
-    cd /Users/dev/App
-    builtin-codesign --force --sign
+Command line invocation:
+    /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -workspace App.xcworkspace -scheme App build
 
-/Users/dev/App/ViewController.swift:42:9: error: use of unresolved identifier 'foo'
-/Users/dev/App/Model.swift:18:5: warning: variable 'x' was never used
+Resolve Package Graph
+Fetching from https://github.com/Quick/Nimble (cached)
+Creating working copy of package ‘Nimble’
+Checking out 9.0.0 of package ‘Nimble’
 
-** BUILD FAILED **
-"""
-expected = "/Users/dev/App/ViewController.swift:42:9: error: use of unresolved identifier 'foo'\n/Users/dev/App/Model.swift:18:5: warning: variable 'x' was never used\n** BUILD FAILED **"
+ComputeTargetDependencyGraph
+note: Building targets in dependency order
+note: Target dependency graph (3 targets)
+    Target 'App' in project 'App'
+        ➜ Implicit dependency on target 'Pods-App' in project 'Pods' via file 'Pods_App.framework' in build phase 'Link Binary'
 
-[[tests.xcodebuild]]
-name = "clean build success"
-input = """
-note: Using new build system
-CompileSwift normal arm64 /Users/dev/App/Main.swift
-    cd /Users/dev/App
-Ld /Users/dev/Build/Products/Debug/App normal arm64
-    cd /Users/dev/App
-CodeSign /Users/dev/Build/Products/Debug/App.app
-    cd /Users/dev/App
-    builtin-codesign --force --sign
+ScanDependencies /Users/dev/DerivedData/Build/Intermediates.noindex/Pods.build/Alamofire-dummy.o /Users/dev/App/Pods/Alamofire-dummy.m normal arm64 objective-c com.apple.compilers.llvm.clang.1_0.compiler (in target 'Alamofire' from project 'Pods')
+    cd /Users/dev/App/Pods
+    builtin-ScanDependencies -o /Users/dev/DerivedData/Alamofire-dummy.o
 
+SwiftDriver Alamofire normal arm64 com.apple.xcode.tools.swift.compiler (in target 'Alamofire' from project 'Pods')
+    cd /Users/dev/App/Pods
+    builtin-SwiftDriver -- /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc -module-name Alamofire
+
+SwiftCompile normal arm64 /Users/dev/App/Pods/Alamofire/Source/Session.swift (in target 'Alamofire' from project 'Pods')
+    cd /Users/dev/App/Pods
+    Using response file: /Users/dev/DerivedData/Build/Intermediates.noindex/Pods.build/arguments-1.resp
+
+PrecompileModule /Users/dev/DerivedData/ModuleCache.noindex/Foundation-1.pcm (in target 'Alamofire' from project 'Pods')
+WriteAuxiliaryFile /Users/dev/DerivedData/Build/Intermediates.noindex/Alamofire.SwiftFileList (in target 'Alamofire' from project 'Pods')
+    write-file /Users/dev/DerivedData/Build/Intermediates.noindex/Alamofire.SwiftFileList
+Copy /Users/dev/DerivedData/Build/Products/Alamofire.swiftmodule/arm64.swiftmodule (in target 'Alamofire' from project 'Pods')
+/Users/dev/App/Pods/Alamofire/Source/Session.swift:120:13: warning: 'init(x:)' is deprecated
+            let value = Legacy(x: 1)
+            ^
+PhaseScriptExecution SwiftLint /Users/dev/DerivedData/Build/Intermediates.noindex/Script-ABC123.sh (in target 'App' from project 'App')
+Linting Swift files in current working directory
+/Users/dev/App/App/Feature/View.swift:10:1: warning: Line Length Violation: Line should be 120 characters or less (line_length)
+warning: Run script build phase 'Create Symlinks' will be run during every build because it does not specify any outputs. (in target 'abseil' from project 'Pods')
 ** BUILD SUCCEEDED **
 """
 expected = "** BUILD SUCCEEDED **"
 
 [[tests.xcodebuild]]
-name = "test output keeps test results"
+name = "compile failure keeps errors and the failure summary"
 input = """
-note: Using new build system
-CompileSwift normal arm64 /Users/dev/AppTests/Tests.swift
+SwiftCompile normal arm64 /Users/dev/App/App/Feature/View.swift (in target 'App' from project 'App')
     cd /Users/dev/App
-Test Suite 'All tests' started at 2026-03-10 12:00:00
-Test Suite 'AppTests' started at 2026-03-10 12:00:00
-Test Case '-[AppTests testExample]' passed (0.001 seconds).
-Test Case '-[AppTests testFailing]' failed (0.002 seconds).
-Test Suite 'AppTests' passed at 2026-03-10 12:00:01
-Executed 2 tests, with 1 failure in 0.003 seconds
+    Using response file: /Users/dev/DerivedData/Build/Intermediates.noindex/App.build/arguments-1.resp
+/Users/dev/App/App/Feature/View.swift:42:9: error: cannot find 'foo' in scope
+        foo()
+        ^~~
+/Users/dev/App/App/Feature/View.swift:50:5: warning: variable 'x' was never used; consider replacing with '_' or removing it
+/Users/dev/App/App/Feature/Model.swift:12:20: note: did you mean 'bar'?
+** BUILD FAILED **
+
+
+The following build commands failed:
+\tSwiftCompile normal arm64 /Users/dev/App/App/Feature/View.swift (in target 'App' from project 'App')
+\tSwiftEmitModule normal arm64 Emitting module for App (in target 'App' from project 'App')
+(2 failures)
 """
-expected = "Test Suite 'All tests' started at 2026-03-10 12:00:00\nTest Suite 'AppTests' started at 2026-03-10 12:00:00\nTest Case '-[AppTests testExample]' passed (0.001 seconds).\nTest Case '-[AppTests testFailing]' failed (0.002 seconds).\nTest Suite 'AppTests' passed at 2026-03-10 12:00:01\nExecuted 2 tests, with 1 failure in 0.003 seconds"
+expected = "/Users/dev/App/App/Feature/View.swift:42:9: error: cannot find 'foo' in scope\n** BUILD FAILED **\nThe following build commands failed:\n\tSwiftCompile normal arm64 /Users/dev/App/App/Feature/View.swift (in target 'App' from project 'App')\n\tSwiftEmitModule normal arm64 Emitting module for App (in target 'App' from project 'App')\n(2 failures)"
+
+[[tests.xcodebuild]]
+name = "linker failure keeps undefined symbols and linker errors"
+input = """
+Ld /Users/dev/DerivedData/Build/Products/App.app/App normal (in target 'App' from project 'App')
+    cd /Users/dev/App
+    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -Xlinker -reproducible
+Undefined symbols for architecture arm64:
+  "_OBJC_CLASS_$_FIRApp", referenced from:
+       in AppDelegate.o
+ld: symbol(s) not found for architecture arm64
+clang: error: linker command failed with exit code 1 (use -v to see invocation)
+** BUILD FAILED **
+"""
+expected = "Undefined symbols for architecture arm64:\n  \"_OBJC_CLASS_$_FIRApp\", referenced from:\nld: symbol(s) not found for architecture arm64\nclang: error: linker command failed with exit code 1 (use -v to see invocation)\n** BUILD FAILED **"
+
+[[tests.xcodebuild]]
+name = "failing script phase keeps its error"
+input = """
+PhaseScriptExecution SwiftGen /Users/dev/DerivedData/Build/Intermediates.noindex/Script-123.sh (in target 'App' from project 'App')
+    cd /Users/dev/App
+    /bin/sh -c /Users/dev/DerivedData/Build/Intermediates.noindex/Script-123.sh
+error: SwiftGen is not installed. Run 'brew install swiftgen'.
+Command PhaseScriptExecution failed with a nonzero exit code
+** BUILD FAILED **
+"""
+expected = "error: SwiftGen is not installed. Run 'brew install swiftgen'.\nCommand PhaseScriptExecution failed with a nonzero exit code\n** BUILD FAILED **"
+
+[[tests.xcodebuild]]
+name = "failing XCTest run keeps failures and drops passing tests"
+input = """
+Test Suite 'All tests' started at 2026-10-07 12:00:00.000.
+Test Suite 'AppTests' started at 2026-10-07 12:00:00.001.
+Test Case '-[AppTests testExample]' started.
+Test Case '-[AppTests testExample]' passed (0.001 seconds).
+Test Case '-[AppTests testFailing]' started.
+/Users/dev/App/AppTests/AppTests.swift:21: error: -[AppTests testFailing] : XCTAssertEqual failed: ("1") is not equal to ("2")
+Test Case '-[AppTests testFailing]' failed (0.002 seconds).
+Test Suite 'AppTests' failed at 2026-10-07 12:00:00.004.
+\t Executed 2 tests, with 1 failure (0 unexpected) in 0.003 (0.004) seconds
+Test Suite 'All tests' failed at 2026-10-07 12:00:00.004.
+\t Executed 2 tests, with 1 failure (0 unexpected) in 0.003 (0.005) seconds
+
+
+Failing tests:
+\tAppTests.testFailing()
+
+** TEST FAILED **
+"""
+expected = "/Users/dev/App/AppTests/AppTests.swift:21: error: -[AppTests testFailing] : XCTAssertEqual failed: (\"1\") is not equal to (\"2\")\nTest Case '-[AppTests testFailing]' failed (0.002 seconds).\n\t Executed 2 tests, with 1 failure (0 unexpected) in 0.003 (0.004) seconds\n\t Executed 2 tests, with 1 failure (0 unexpected) in 0.003 (0.005) seconds\nFailing tests:\n\tAppTests.testFailing()\n** TEST FAILED **"
+
+[[tests.xcodebuild]]
+name = "parallel test run keeps the failing test case"
+input = """
+Test case 'AppTests.testExample()' passed on 'Clone 1 of iPhone 16 - App (4242)' (0.001 seconds)
+Test case 'AppTests.testFailing()' failed on 'Clone 1 of iPhone 16 - App (4242)' (0.002 seconds)
+** TEST FAILED **
+"""
+expected = "Test case 'AppTests.testFailing()' failed on 'Clone 1 of iPhone 16 - App (4242)' (0.002 seconds)\n** TEST FAILED **"
+
+[[tests.xcodebuild]]
+name = "passing test run keeps only the result line"
+input = """
+Test Suite 'All tests' started at 2026-10-07 12:00:00.000.
+Test Case '-[AppTests testExample]' started.
+Test Case '-[AppTests testExample]' passed (0.001 seconds).
+Test Suite 'All tests' passed at 2026-10-07 12:00:00.002.
+\t Executed 1 test, with 0 failures (0 unexpected) in 0.001 (0.002) seconds
+** TEST SUCCEEDED **
+"""
+expected = "** TEST SUCCEEDED **"
 
 [[tests.xcodebuild]]
 name = "empty input returns on_empty message"
 input = ""
-expected = "xcodebuild: ok"
+expected = "xcodebuild: no errors and no result line in output"

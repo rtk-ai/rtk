@@ -1651,6 +1651,60 @@ make[1]: Leaving directory '/home/user/project/docs'
         assert_eq!(bare.name, "ssh");
     }
 
+    #[test]
+    fn test_xcodebuild_match_command_requires_an_action() {
+        let filters = make_filters(BUILTIN_TOML);
+        let xcodebuild = filters
+            .iter()
+            .find(|f| f.name == "xcodebuild")
+            .expect("xcodebuild filter must exist");
+
+        for cmd in [
+            "xcodebuild -workspace App.xcworkspace -scheme App build",
+            "xcodebuild test -scheme App -destination 'platform=iOS Simulator,name=iPhone 16'",
+            "xcodebuild -scheme App clean build",
+            "xcodebuild archive -scheme App -archivePath App.xcarchive",
+            "xcodebuild -quiet -scheme App build-for-testing",
+        ] {
+            let found = find_filter_in(cmd, &filters)
+                .unwrap_or_else(|| panic!("'{cmd}' must activate the xcodebuild filter"));
+            assert_eq!(found.name, "xcodebuild");
+        }
+
+        for cmd in [
+            "xcodebuild -list",
+            "xcodebuild -showBuildSettings -scheme App",
+            "xcodebuild -version",
+            "xcodebuild -showsdks",
+            "xcodebuild -scheme App -resultBundlePath test.xcresult",
+        ] {
+            assert!(
+                !xcodebuild.match_regex.is_match(cmd),
+                "'{cmd}' prints information, not a build log, and must pass through unfiltered"
+            );
+        }
+    }
+
+    #[test]
+    fn test_xcodebuild_real_build_keeps_result_and_saves_tokens() {
+        let filters = make_filters(BUILTIN_TOML);
+        let xcodebuild = filters
+            .iter()
+            .find(|f| f.name == "xcodebuild")
+            .expect("xcodebuild filter must exist");
+        let input = include_str!("../../tests/fixtures/xcodebuild_build_raw.txt");
+
+        let output = apply_filter(xcodebuild, input);
+
+        assert_eq!(output.trim(), "** BUILD SUCCEEDED **");
+        let count_tokens = |s: &str| s.split_whitespace().count();
+        let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "xcodebuild filter: expected >=60% savings, got {savings:.1}%"
+        );
+    }
+
     // --- Edge cases ---
 
     #[test]
