@@ -32,6 +32,7 @@ mod droid;
 mod gemini;
 mod hermes;
 mod instructions_agents;
+mod kilocode;
 mod opencode;
 mod pi;
 mod trae;
@@ -62,7 +63,8 @@ pub use copilot::{run_copilot, run_copilot_global, uninstall_copilot, uninstall_
 pub use droid::{run_droid_mode, uninstall_droid};
 pub use gemini::run_gemini;
 pub use hermes::{run_hermes_mode, uninstall_hermes};
-pub use instructions_agents::{run_kilocode_mode, run_kimi_mode};
+pub use instructions_agents::run_kimi_mode;
+pub use kilocode::{kilocode_plugin_installed, run_kilocode_mode, uninstall_kilocode};
 pub use pi::{run_omp_mode_with_patch_mode, run_pi_mode_with_patch_mode};
 pub use trae::{run_trae_mode, uninstall_trae_mode};
 pub use vibe::{run_vibe_mode, uninstall_vibe};
@@ -1668,8 +1670,46 @@ fn show_claude_config() -> Result<()> {
 
 #[cfg(test)]
 use tempfile::TempDir;
+/// Serialises tests that mutate the process-wide config-directory environment variables.
+#[cfg(test)]
+pub(crate) static CLAUDE_DIR_LOCK: Mutex<()> = Mutex::new(());
+/// Serialises all tests that mutate the process-wide working directory.
+#[cfg(test)]
+pub(super) static CWD_LOCK: Mutex<()> = Mutex::new(());
+
+/// Holds the cwd lock and puts the working directory back when it goes out of scope.
+///
+/// Restoring by hand needs the call under test to return rather than panic, so one failing
+/// assertion used to leave every later test inside a deleted `TempDir`, burying the real
+/// failure under unrelated ones.
+#[cfg(test)]
+pub(super) struct CwdGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    original: PathBuf,
+}
+
+#[cfg(test)]
+impl CwdGuard {
+    pub(super) fn enter(dir: &Path) -> Self {
+        let _lock = CWD_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let original = std::env::current_dir().expect("read the current directory");
+        std::env::set_current_dir(dir).expect("enter the test directory");
+        Self { _lock, original }
+    }
+}
+
+#[cfg(test)]
+impl Drop for CwdGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.original);
+    }
+}
+
 #[cfg(test)]
 pub(super) fn with_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
+    let _guard = CLAUDE_DIR_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let claude_dir = tmp.path().join(CLAUDE_DIR);
     fs::create_dir_all(&claude_dir).unwrap();
 
@@ -1680,6 +1720,9 @@ pub(super) fn with_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
 
 #[cfg(test)]
 pub(super) fn with_missing_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
+    let _guard = CLAUDE_DIR_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let claude_dir = tmp.path().join(CLAUDE_DIR);
     assert!(
         !claude_dir.exists(),
