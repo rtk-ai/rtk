@@ -3161,23 +3161,38 @@ fn run_fetch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32
 }
 
 /// Format status message for stash operations.
-/// - For create operations (push/save): checks for "No local changes"
+/// - For create operations (push/save): "ok stashed", or "No local changes to save"
+///   when `stash_created` says nothing was stashed
 /// - For other operations: uses "ok stash <subcommand>" format
-fn format_stash_message(subcommand: Option<&str>, result: &CaptureResult) -> String {
+fn format_stash_message(subcommand: Option<&str>, stash_created: bool) -> String {
     match subcommand {
         None | Some("push") | Some("save") => {
             // A successful stash collapses to "ok stashed" (the WIP ref/sha git
             // prints isn't needed to `git stash pop`). But a no-op must NOT look
-            // like success — pass git's "No local changes to save" through so the
-            // agent can tell nothing was stashed.
-            if result.combined().contains("No local changes") {
-                "No local changes to save".to_string()
-            } else {
+            // like success — say "No local changes to save" so the agent can
+            // tell nothing was stashed.
+            if stash_created {
                 "ok stashed".to_string()
+            } else {
+                "No local changes to save".to_string()
             }
         }
         Some(sub) => format!("ok stash {}", sub),
     }
+}
+
+/// The commit `refs/stash` points at, or `None` when there is no stash.
+///
+/// Comparing it before and after `git stash push` tells whether a stash was
+/// created without reading git's message, which git translates (#3839) — and
+/// pinning that spawn's locale would turn its failure text, shown to the user
+/// verbatim, English.
+fn stash_tip(global_args: &[String]) -> Option<String> {
+    let mut cmd = git_cmd(global_args);
+    cmd.args(["rev-parse", "-q", "--verify", "refs/stash"]);
+    let result = exec_capture(&mut cmd).ok()?;
+    let tip = result.stdout.trim();
+    (result.success() && !tip.is_empty()).then(|| tip.to_string())
 }
 
 /// True if `-p`/`--patch` was requested. Note: `-u` means `--include-untracked` here, not `-p`.
@@ -3288,7 +3303,7 @@ fn run_stash(
             let combined = result.combined();
 
             let msg = if result.success() {
-                let msg = format_stash_message(subcommand, &result);
+                let msg = format!("ok stash {}", sub);
                 println!("{}", msg);
                 msg
             } else {
@@ -3318,6 +3333,7 @@ fn run_stash(
                 Some(s) => ("push", Some(s)),
                 None => ("push", None),
             };
+            let tip_before = stash_tip(global_args);
             let mut cmd = git_cmd(global_args);
             cmd.args(["stash", sub]);
             if let Some(arg) = arg {
@@ -3330,7 +3346,8 @@ fn run_stash(
             let combined = result.combined();
 
             let msg = if result.success() {
-                let msg = format_stash_message(subcommand, &result);
+                let stash_created = stash_tip(global_args) != tip_before;
+                let msg = format_stash_message(subcommand, stash_created);
                 println!("{}", msg);
                 msg
             } else {
@@ -5973,6 +5990,103 @@ A  added.rs
 
         let args = vec!["-u".to_string(), "-p".to_string()];
         assert!(stash_show_wants_patch(&args));
+    }
+
+    #[test]
+    fn test_stash_tip_moves_only_when_a_stash_is_created() {
+        // #3839: the stash verdict comes from `refs/stash`, not git's (translated) message.
+        let repo = test_isolation::temp_git_repo();
+        let global = vec!["-C".to_string(), repo.path().to_string_lossy().into_owned()];
+        let git = |args: &[&str]| {
+            let mut cmd = Command::new("git");
+            test_isolation::isolate_git(&mut cmd);
+            let ok = cmd
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .expect("git should run")
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+
+        assert_eq!(stash_tip(&global), None);
+        git(&["stash", "push", "-q"]);
+        assert_eq!(stash_tip(&global), None, "a no-op stash creates no ref");
+
+        std::fs::write(repo.path().join("file.txt"), "change\n").expect("write file");
+        git(&["add", "file.txt"]);
+        git(&["stash", "push", "-q"]);
+        let first = stash_tip(&global);
+        assert!(first.is_some(), "a real stash sets refs/stash");
+
+        git(&["stash", "push", "-q"]);
+        assert_eq!(
+            stash_tip(&global),
+            first,
+            "a no-op leaves the tip where it was"
+        );
+    }
+
+    /// #3839: whether `rtk git stash` stashed anything must not depend on the language git
+    /// speaks. Apple's git ships no translations, so a `git` shim on `PATH` stands in for a
+    /// localized one: it answers a no-op stash in French unless `LC_ALL=C` asks for English,
+    /// as gettext would.
+    #[cfg(unix)]
+    #[test]
+    fn test_stash_verdict_does_not_depend_on_git_locale() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if !test_isolation::rtk_binary_is_built() {
+            return;
+        }
+        let real_git = which::which("git").expect("git on PATH");
+        let sed = which::which("sed").expect("sed on PATH");
+        let shim_dir = test_isolation::tempdir();
+        let shim = shim_dir.path().join("git");
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\n\
+                 [ \"$LC_ALL\" = C ] && exec '{git}' \"$@\"\n\
+                 out=$('{git}' \"$@\" 2>&1); rc=$?\n\
+                 printf '%s\\n' \"$out\" | '{sed}' 's/^No local changes to save$/Pas de modifications locales à sauver/'\n\
+                 exit $rc\n",
+                git = real_git.display(),
+                sed = sed.display()
+            ),
+        )
+        .expect("write git shim");
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))
+            .expect("make git shim executable");
+
+        let repo = test_isolation::temp_git_repo();
+        let rtk_stash = || {
+            let output = test_isolation::rtk_command()
+                .args(["git", "stash"])
+                .current_dir(repo.path())
+                // The shim is all rtk finds on `PATH`; it calls git and sed by full path.
+                .env("PATH", shim_dir.path())
+                .env("LC_ALL", "fr_FR.UTF-8")
+                .output()
+                .expect("rtk git stash should run");
+            assert!(output.status.success(), "rtk git stash failed: {output:?}");
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+
+        // Clean tree: nothing to stash, so no success verdict.
+        assert_eq!(rtk_stash(), "No local changes to save");
+
+        // Dirty tree: the stash is created and reported as such.
+        std::fs::write(repo.path().join("file.txt"), "change\n").expect("write file");
+        let mut add = Command::new("git");
+        test_isolation::isolate_git(&mut add);
+        let added = add
+            .args(["add", "file.txt"])
+            .current_dir(repo.path())
+            .status()
+            .expect("git add should run");
+        assert!(added.success(), "git add failed");
+        assert_eq!(rtk_stash(), "ok stashed");
     }
 
     #[test]
