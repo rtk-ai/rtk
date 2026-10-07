@@ -1,0 +1,81 @@
+From c23ad245289e11ee3f2946088f078b62ef625a7c Mon Sep 17 00:00:00 2001
+From: a <a@b>
+Date: Mon, 7 Sep 2026 09:58:13 -0400
+Subject: [PATCH 0/2] *** SUBJECT HERE ***
+
+*** BLURB HERE ***
+
+a (2):
+  change things
+  second
+
+ bin.dat            | Bin 2 -> 2 bytes
+ src.txt => dst.txt |   1 +
+ f.txt              |   4 ++--
+ 3 files changed, 3 insertions(+), 2 deletions(-)
+ rename src.txt => dst.txt (57%)
+
+-- 
+2.54.0.windows.1
+
+From 6bdc7c7e008d896784dd49690b26ae64cef5132e Mon Sep 17 00:00:00 2001
+From: a <a@b>
+Date: Mon, 7 Sep 2026 09:58:13 -0400
+Subject: [PATCH 1/2] change things
+
+- first, it flips b to B
+- second, it renames src
+--no-stat is what this exercises
+
+diff --git a/bin.dat b/bin.dat
+index bdc955b7b2e610ad5a72302b139a2e6cb325519a..8835708590a9afa236e1bbad18df9d23de82ccd3 100644
+GIT binary patch
+literal 2
+JcmZQz0ssI600RI3
+
+literal 2
+JcmZQz1ONa700IC2
+
+diff --git a/src.txt b/dst.txt
+similarity index 57%
+rename from src.txt
+rename to dst.txt
+index 814f4a4..4cb29ea 100644
+--- a/src.txt
++++ b/dst.txt
+@@ -1,2 +1,3 @@
+ one
+ two
++three
+diff --git a/f.txt b/f.txt
+index de98044..7be73ce 100644
+--- a/f.txt
++++ b/f.txt
+@@ -1,3 +1,3 @@
+ a
+-b
++B
+ c
+-- 
+2.54.0.windows.1
+
+
+From c23ad245289e11ee3f2946088f078b62ef625a7c Mon Sep 17 00:00:00 2001
+From: a <a@b>
+Date: Mon, 7 Sep 2026 09:58:13 -0400
+Subject: [PATCH 2/2] second
+
+- one bullet
+
+diff --git a/f.txt b/f.txt
+index 7be73ce..e642ff0 100644
+--- a/f.txt
++++ b/f.txt
+@@ -1,3 +1,3 @@
+ a
+ B
+-c
++C
+-- 
+2.54.0.windows.1
+

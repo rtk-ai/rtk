@@ -1,4 +1,6 @@
 use crate::core::runner::{self, RunOptions};
+use crate::core::shell::display_args;
+use crate::core::tracking;
 use crate::core::utils::{resolved_command, truncate};
 use anyhow::Result;
 use regex::Regex;
@@ -96,16 +98,14 @@ fn run_task(
         eprintln!("Running: sbt {} {}", sbt_task, rest.join(" "));
     }
 
-    let args_display = if rest.is_empty() {
-        sbt_task.to_string()
-    } else {
-        format!("{} {}", sbt_task, rest.join(" "))
-    };
+    let words: Vec<&str> = std::iter::once(sbt_task)
+        .chain(rest.iter().map(String::as_str))
+        .collect();
 
     runner::run_filtered(
         cmd,
         "sbt",
-        &args_display,
+        &display_args(&words),
         filter,
         RunOptions::with_tee(tee_label),
     )
@@ -151,20 +151,10 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
             "sbt_test"
         };
 
-        let rest: Vec<String> = args[1..]
-            .iter()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        let args_display = if rest.is_empty() {
-            subcommand
-        } else {
-            format!("{} {}", subcommand, rest.join(" "))
-        };
-
         return runner::run_filtered(
             cmd,
             "sbt",
-            &args_display,
+            &tracking::args_display(args),
             filter_sbt_test,
             RunOptions::with_tee(tee_label),
         );
@@ -249,7 +239,10 @@ fn filter_sbt_test(output: &str) -> String {
                 .trim_start_matches('-')
                 .trim()
                 .to_string();
-            failures.push(FailureBlock { name, details: Vec::new() });
+            failures.push(FailureBlock {
+                name,
+                details: Vec::new(),
+            });
             in_failure_detail = true;
             continue;
         }
@@ -273,14 +266,12 @@ fn filter_sbt_test(output: &str) -> String {
                         // Skip raw JVM stack frames — they add noise without signal.
                         // Keep Mockito "-> at" pointers and ScalaMock locations
                         // (they include the file:line reference).
-                        let is_stack_frame = detail.starts_with("at ")
-                            || detail.starts_with("...");
-                        if !is_stack_frame {
-                            if let Some(block) = failures.last_mut() {
-                                if block.details.len() < 4 {
-                                    block.details.push(detail.to_string());
-                                }
-                            }
+                        let is_stack_frame = detail.starts_with("at ") || detail.starts_with("...");
+                        if !is_stack_frame
+                            && let Some(block) = failures.last_mut()
+                            && block.details.len() < 4
+                        {
+                            block.details.push(detail.to_string());
                         }
                     }
                     continue;
@@ -541,15 +532,17 @@ mod tests {
         assert!(output.contains("2 ignored"));
         assert!(output.contains("5 suites"));
         assert!(output.contains("5s"));
-        assert!(!output.contains('\n'), "all-pass output should be a single line");
+        assert!(
+            !output.contains('\n'),
+            "all-pass output should be a single line"
+        );
     }
 
     #[test]
     fn test_filter_sbt_test_all_pass_token_savings() {
         let input = include_str!("../../../tests/fixtures/sbt/sbt_test_pass.txt");
         let output = filter_sbt_test(input);
-        let savings = 100.0
-            - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
+        let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
         assert!(
             savings >= 60.0,
             "sbt test (pass): expected >=60% savings, got {:.1}%",
@@ -594,8 +587,7 @@ mod tests {
     fn test_filter_sbt_test_fail_token_savings() {
         let input = include_str!("../../../tests/fixtures/sbt/sbt_test_fail.txt");
         let output = filter_sbt_test(input);
-        let savings = 100.0
-            - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
+        let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
         assert!(
             savings >= 40.0,
             "sbt test (fail): expected >=40% savings, got {:.1}%",
@@ -628,7 +620,9 @@ mod tests {
         // Mockito pointer lines ("-> at com.example...") may remain — they
         // carry the file:line reference that identifies the assertion site.
         assert!(
-            !output.lines().any(|l| l.trim_start().starts_with("at com.")),
+            !output
+                .lines()
+                .any(|l| l.trim_start().starts_with("at com.")),
             "bare stack frame leaked into output: {}",
             output
         );
@@ -638,8 +632,7 @@ mod tests {
     fn test_filter_sbt_test_mockito_token_savings() {
         let input = include_str!("../../../tests/fixtures/sbt/sbt_test_mockito_fail.txt");
         let output = filter_sbt_test(input);
-        let savings = 100.0
-            - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
+        let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
         assert!(
             savings >= 40.0,
             "sbt test (mockito): expected >=40% savings, got {:.1}%",
@@ -669,8 +662,7 @@ mod tests {
     fn test_filter_sbt_test_scalamock_token_savings() {
         let input = include_str!("../../../tests/fixtures/sbt/sbt_test_scalamock_fail.txt");
         let output = filter_sbt_test(input);
-        let savings = 100.0
-            - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
+        let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
         assert!(
             savings >= 40.0,
             "sbt test (scalamock): expected >=40% savings, got {:.1}%",
@@ -689,7 +681,10 @@ mod tests {
         assert!(output.contains("5 passed"));
         assert!(output.contains("2 suites"));
         assert!(output.contains("18s"));
-        assert!(!output.contains('\n'), "all-pass output should be a single line");
+        assert!(
+            !output.contains('\n'),
+            "all-pass output should be a single line"
+        );
     }
 
     #[test]
@@ -730,7 +725,10 @@ mod tests {
 
         assert!(output.starts_with("sbt test:"), "output: {}", output);
         assert!(output.contains("12 passed"), "output: {}", output);
-        assert!(!output.contains('\n'), "all-pass output should be a single line");
+        assert!(
+            !output.contains('\n'),
+            "all-pass output should be a single line"
+        );
         assert!(!output.contains("parse error"), "output: {}", output);
     }
 
@@ -749,8 +747,7 @@ mod tests {
     fn test_filter_sbt_test_munit_token_savings() {
         let input = include_str!("../../../tests/fixtures/sbt/sbt_test_munit_pass.txt");
         let output = filter_sbt_test(input);
-        let savings = 100.0
-            - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
+        let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
         assert!(
             savings >= 60.0,
             "sbt test (munit): expected >=60% savings, got {:.1}%",
@@ -787,8 +784,7 @@ mod tests {
     fn test_filter_sbt_compile_error_token_savings() {
         let input = include_str!("../../../tests/fixtures/sbt/sbt_compile_error.txt");
         let output = filter_sbt_compile(input);
-        let savings = 100.0
-            - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
+        let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
         assert!(
             savings >= 30.0,
             "sbt compile (error): expected >=30% savings, got {:.1}%",

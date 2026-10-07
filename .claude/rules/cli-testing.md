@@ -30,7 +30,7 @@ mod tests {
 Two patterns coexist, pick based on what the filter needs:
 
 1. **Inline literal strings** (most common for `src/cmds/**` unit tests) — build a small
-   representative string directly in the test body. Used throughout `src/cmds/git/git.rs`,
+   representative string directly in the test body. Used throughout `src/cmds/git/git_cmd.rs`,
    `src/cmds/git/gh_cmd.rs`, etc. Good for quick coverage of a specific format/edge case.
 2. **Real captured fixtures via `include_str!`** — used when the raw output is large or
    format-sensitive enough that inline strings would be unreadable or drift from reality.
@@ -190,18 +190,52 @@ behavior (search/grep compression, guard rails, faithful formatting) rather than
 filter module, and several of them draw on `tests/fixtures/` (real captured aws/glab/gradlew/
 mvn/phpstan/dotnet output) alongside their own inline cases.
 
+### Machine independence (🔴 Critical)
+
+A test that spawns a real process must not depend on the machine it runs on. Two rules,
+both with `src/core/test_isolation/` helpers behind them (`tests/common/mod.rs` for the
+integration tests):
+
+- **Never assert on a third-party tool's wording.** git, grep and coreutils translate their
+  messages, so `stderr.contains("not a git repository")` fails outright in a French shell —
+  and a *negative* assertion (`!out.contains("Is a directory")`) is worse, passing vacuously
+  while testing nothing. Assert RTK's own output, or the structure (exit code, which stream
+  the message went to). Spawn rtk through `test_isolation::rtk_command()`
+  (`common::rtk_command()` under `tests/`): it redirects rtk's data and neutralizes the
+  contributor's git config and exported `GIT_*` variables, but leaves the locale to the
+  test. When a test genuinely needs a tool's English text, set `LC_ALL=C` on that command,
+  and on any native tool its output is compared with. A git the test runs itself goes
+  through `isolate_git()`, which pins it.
+- **Never touch the ambient repository.** Use `test_isolation::temp_git_repo()` and
+  `.current_dir(repo.path())`. A test that runs `git branch` in whatever repo the
+  contributor is sitting in mutates their work, and one that assumes it is inside a repo at
+  all silently stops exercising anything when it isn't.
+
+Verify a change here against a hostile environment, not just yours:
+
+```bash
+LC_ALL=de_DE.UTF-8 LANGUAGE=de cargo test --all -- --include-ignored
+GIT_DIR=/path/to/another/repo/.git RTK_NO_TOML=1 RTK_TEE=0 cargo test --all -- --include-ignored
+TMPDIR=/path/inside/a/git/repo cargo test --all -- --include-ignored
+```
+
+and with a `~/.gitconfig` that signs commits, deny rules in `~/.claude/settings.json`, and a
+`global.json` or `.ignore` above `TMPDIR`: none of it may change a result, and none of it may
+be written to.
+
 ### Real Command Execution
 
 ```rust
 #[test]
 #[ignore] // Run with: cargo test --ignored
 fn test_real_git_log() {
-    // Requires:
-    // 1. RTK binary installed (cargo install --path .)
-    // 2. Git repository available
-
-    let output = std::process::Command::new("rtk")
+    // The binary cargo built for this run, with rtk's data redirected to a
+    // scratch directory (the installed `rtk` would write to the developer's own),
+    // in a throwaway repository rather than the one the tests run from.
+    let repo = common::temp_git_repo();
+    let output = common::rtk_command()
         .args(&["git", "log", "-10"])
+        .current_dir(repo.path())
         .output()
         .expect("Failed to run rtk");
 
@@ -217,16 +251,13 @@ fn test_real_git_log() {
 ### Running Integration Tests
 
 ```bash
-# 1. Install RTK locally
-cargo install --path .
-
-# 2. Run all tests, including top-level tests/*.rs integration tests
+# 1. Run all tests, including top-level tests/*.rs integration tests
 cargo test --all
 
-# 3. Run ignored (real-process) integration tests
+# 2. Run ignored (real-process) integration tests
 cargo test --ignored
 
-# 4. Run specific test
+# 3. Run specific test
 cargo test --ignored test_real_git_log
 ```
 
@@ -306,7 +337,7 @@ rtk/
 ├── src/
 │   ├── cmds/
 │   │   ├── git/
-│   │   │   ├── git.rs              # Filter implementation
+│   │   │   ├── git_cmd.rs              # Filter implementation
 │   │   │   │   └── #[cfg(test)] mod tests { ... }
 │   │   ├── jvm/                    # gradlew, mvn — reference example for include_str! fixtures
 │   │   ├── php/                    # php, artisan, phpunit, phpstan, pest, paratest, ecs, pint
@@ -457,7 +488,7 @@ fn test_ansi_codes() {
 #[test]
 #[ignore]
 fn test_real_command_execution() {
-    let output = std::process::Command::new("rtk")
+    let output = common::rtk_command()
         .args(&["cmd", "args"])
         .output()
         .expect("Failed to run rtk");

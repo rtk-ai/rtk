@@ -1,9 +1,10 @@
 //! Filters TypeScript compiler errors, grouping them by file and error code.
 
 use crate::core::runner;
+use crate::core::shell::display_args;
 use crate::core::stream::{BlockHandler, BlockStreamFilter};
-use crate::core::truncate::{reduced, CAP_WARNINGS};
-use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
+use crate::core::truncate::{CAP_WARNINGS, reduced};
+use crate::core::utils::{MissingTool, exec_runner, strip_ansi, tool_exec, tool_exists, truncate};
 use anyhow::Result;
 use regex::Regex;
 use std::borrow::Cow;
@@ -76,30 +77,32 @@ fn clean_line(line: &str) -> Cow<'_, str> {
     }
 }
 
-pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+/// `runner` is the package runner the user named (`bunx tsc`, `npx tsc`), or
+/// None for a bare `rtk tsc` where nothing was specified and detection applies.
+pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
     let tsc_exists = tool_exists("tsc");
 
-    let mut cmd = if tsc_exists {
-        resolved_command("tsc")
-    } else {
-        let mut c = resolved_command("npx");
-        c.arg("tsc");
-        c
-    };
+    // Fetch, not Fail: `npx tsc` fetched before this routing existed, and
+    // rtk filters output rather than changing what a command does.
+    let mut cmd = tool_exec(runner, "tsc", MissingTool::Fetch);
 
     for arg in args {
         cmd.arg(arg);
     }
 
     if verbose > 0 {
-        let tool = if tsc_exists { "tsc" } else { "npx tsc" };
-        eprintln!("Running: {} {}", tool, args.join(" "));
+        let via = if tsc_exists {
+            "tsc".to_string()
+        } else {
+            format!("{} tsc", exec_runner(runner, MissingTool::Fetch))
+        };
+        eprintln!("Running: {} {}", via, args.join(" "));
     }
 
     runner::run_streamed(
         cmd,
         "tsc",
-        &args.join(" "),
+        &display_args(args),
         Box::new(BlockStreamFilter::new(TscHandler::new())),
         runner::RunOptions::with_tee("tsc"),
     )
@@ -334,11 +337,7 @@ pub(crate) fn filter_tsc_output(output: &str) -> String {
     if !global_errors.is_empty() {
         result.push_str(&format!("global ({} errors)\n", global_errors.len()));
         for err in global_errors {
-            result.push_str(&format!(
-                "  {} {}\n",
-                err.code,
-                truncate(&err.message, 120)
-            ));
+            result.push_str(&format!("  {} {}\n", err.code, truncate(&err.message, 120)));
             for ctx in &err.context_lines {
                 result.push_str(&format!("    {}\n", truncate(ctx, 120)));
             }
@@ -407,9 +406,8 @@ Found 4 errors in 2 files.
 
     #[test]
     fn test_filter_tsc_output_global_error() {
-        let result = filter_tsc_output(
-            "error TS5058: The specified path does not exist: 'tsconfig.json'.",
-        );
+        let result =
+            filter_tsc_output("error TS5058: The specified path does not exist: 'tsconfig.json'.");
         assert!(result.contains("TS5058"));
         assert!(result.contains("global (1 errors)"));
         assert!(!result.contains("completed"));
@@ -532,7 +530,11 @@ Found 3 errors in 2 files.
         );
         assert!(result.contains("3 errors in 1 files"), "got: {}", result);
         assert!(!result.contains("Found 3 errors"), "got: {}", result);
-        assert!(!result.contains("\x1b["), "emitted block keeps escapes: {}", result);
+        assert!(
+            !result.contains("\x1b["),
+            "emitted block keeps escapes: {}",
+            result
+        );
         // Real pretty output separates code frames with a blank line; the compact filter drops them.
         assert!(!result.contains("const x: number"), "got: {}", result);
         assert!(
@@ -589,16 +591,36 @@ src/app.ts(1,7): error TS2322: Type 'string' is not assignable to type 'number'.
             .collect();
         let mut f = BlockStreamFilter::new(TscHandler::new());
         let result = run_block_filter(&mut f, &input, 2);
-        assert!(result.contains("compiler exited with code 2"), "got: {}", result);
+        assert!(
+            result.contains("compiler exited with code 2"),
+            "got: {}",
+            result
+        );
         for i in 1..=5 {
-            assert!(result.contains(&format!("junk line {i} {padding}\n")), "got: {}", result);
+            assert!(
+                result.contains(&format!("junk line {i} {padding}\n")),
+                "got: {}",
+                result
+            );
         }
         assert!(result.contains("... +20 more lines"), "got: {}", result);
         for i in 26..=30 {
-            assert!(result.contains(&format!("junk line {i} {padding}\n")), "got: {}", result);
+            assert!(
+                result.contains(&format!("junk line {i} {padding}\n")),
+                "got: {}",
+                result
+            );
         }
-        assert!(!result.contains(&format!("junk line 6 {padding}\n")), "got: {}", result);
-        assert!(!result.contains(&format!("junk line 25 {padding}\n")), "got: {}", result);
+        assert!(
+            !result.contains(&format!("junk line 6 {padding}\n")),
+            "got: {}",
+            result
+        );
+        assert!(
+            !result.contains(&format!("junk line 25 {padding}\n")),
+            "got: {}",
+            result
+        );
         assert_eq!(result.lines().count(), 1 + 5 + 1 + 5);
     }
 
@@ -613,11 +635,19 @@ src/app.ts(1,7): error TS2322: Type 'string' is not assignable to type 'number'.
         let mut f = BlockStreamFilter::new(TscHandler::new());
         let result = run_block_filter(&mut f, &input, 2);
         for i in 1..=5 {
-            assert!(result.contains(&format!("real line {i} {padding}\n")), "got: {}", result);
+            assert!(
+                result.contains(&format!("real line {i} {padding}\n")),
+                "got: {}",
+                result
+            );
         }
         assert!(result.contains("... +20 more lines"), "got: {}", result);
         for i in 26..=30 {
-            assert!(result.contains(&format!("real line {i} {padding}\n")), "got: {}", result);
+            assert!(
+                result.contains(&format!("real line {i} {padding}\n")),
+                "got: {}",
+                result
+            );
         }
         assert!(!result.contains("\n\n"), "got: {}", result);
         assert_eq!(result.lines().count(), 1 + 5 + 1 + 5);
@@ -656,9 +686,17 @@ src/app.ts(1,7): error TS2322: Type 'string' is not assignable to type 'number'.
         let input = include_str!("../../../tests/fixtures/tsc_no_project_raw.txt");
         let mut f = BlockStreamFilter::new(TscHandler::new());
         let result = run_block_filter(&mut f, input, 1);
-        assert!(result.contains("compiler exited with code 1"), "got: {}", result);
+        assert!(
+            result.contains("compiler exited with code 1"),
+            "got: {}",
+            result
+        );
         assert!(result.contains("Version 6.0.3"), "got: {}", result);
-        assert!(result.contains("tsc: The TypeScript Compiler"), "got: {}", result);
+        assert!(
+            result.contains("tsc: The TypeScript Compiler"),
+            "got: {}",
+            result
+        );
         assert!(result.contains("... +"), "got: {}", result);
     }
 
@@ -670,7 +708,11 @@ Use npm install typescript before using npx
 ";
         let mut f = BlockStreamFilter::new(TscHandler::new());
         let result = run_block_filter(&mut f, input, 1);
-        assert!(result.contains("compiler exited with code 1"), "got: {}", result);
+        assert!(
+            result.contains("compiler exited with code 1"),
+            "got: {}",
+            result
+        );
         assert!(
             result.contains("This is not the tsc command you are looking for"),
             "got: {}",

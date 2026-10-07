@@ -1,10 +1,12 @@
 //! Filters find results by grouping files by directory.
 
+use crate::core::shell::{display_args, with_args};
 use crate::core::tracking;
 use crate::core::truncate::CAP_INVENTORY;
+use crate::core::utils::ChildArgExt;
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::Path;
 
@@ -59,13 +61,17 @@ const VERBATIM_ACTIONS: &[&str] = &[
 ];
 
 enum Dispatch {
-    Native(FindArgs),
+    Native {
+        parsed: FindArgs,
+        label: String,
+    },
     Compress {
         options: Vec<String>,
         paths: Vec<String>,
         expr: Vec<String>,
         max: Option<usize>,
         file_type: Option<String>,
+        label: String,
     },
     Verbatim(Vec<String>),
 }
@@ -76,6 +82,10 @@ fn is_expression_token(token: &str) -> bool {
 
 fn has_glob_meta(token: &str) -> bool {
     token.contains('*') || token.contains('?')
+}
+
+fn looks_like_path(token: &str) -> bool {
+    token.contains('/') || (cfg!(windows) && token.contains('\\'))
 }
 
 /// Leading find options: `-H`, `-L`, `-P`, `-D debugopts`, `-Olevel`.
@@ -143,6 +153,7 @@ fn dispatch(original: &[String]) -> Result<Dispatch> {
     let (args, max, file_type) = peel_trailing_rtk_flags(original);
     let legacy = !args.is_empty()
         && !is_expression_token(&args[0])
+        && !looks_like_path(&args[0])
         && (has_glob_meta(&args[0]) || !Path::new(&args[0]).is_dir());
     let args = if legacy {
         legacy_to_find_syntax(&args)
@@ -167,21 +178,24 @@ fn dispatch(original: &[String]) -> Result<Dispatch> {
         };
         return Ok(Dispatch::Verbatim(verbatim));
     }
-    if options.is_empty() {
-        if let Some(mut parsed) = parse_subset(&paths, &expr) {
-            let repeated_max = max.is_some() && parsed.max_explicit;
-            let repeated_type =
-                file_type.is_some() && parsed.file_type != FindArgs::default().file_type;
-            if !repeated_max && !repeated_type {
-                if let Some(n) = max {
-                    parsed.max_results = n;
-                    parsed.max_explicit = true;
-                }
-                if let Some(t) = file_type {
-                    parsed.file_type = t;
-                }
-                return Ok(Dispatch::Native(parsed));
+    if options.is_empty()
+        && let Some(mut parsed) = parse_subset(&paths, &expr)
+    {
+        let repeated_max = max.is_some() && parsed.max_explicit;
+        let repeated_type =
+            file_type.is_some() && parsed.file_type != FindArgs::default().file_type;
+        if !repeated_max && !repeated_type {
+            if let Some(n) = max {
+                parsed.max_results = n;
+                parsed.max_explicit = true;
             }
+            if let Some(t) = file_type {
+                parsed.file_type = t;
+            }
+            return Ok(Dispatch::Native {
+                parsed,
+                label: find_label(original),
+            });
         }
     }
     Ok(Dispatch::Compress {
@@ -190,6 +204,7 @@ fn dispatch(original: &[String]) -> Result<Dispatch> {
         expr,
         max,
         file_type,
+        label: find_label(original),
     })
 }
 
@@ -233,13 +248,15 @@ fn peel_trailing_rtk_flags(args: &[String]) -> (Vec<String>, Option<usize>, Opti
     (args[..end].to_vec(), max, file_type)
 }
 
-fn run_verbatim(args: &[String], verbose: u8) -> Result<()> {
+fn run_verbatim(args: &[String], verbose: u8) -> Result<i32> {
     let os_args: Vec<std::ffi::OsString> = args.iter().map(std::ffi::OsString::from).collect();
-    let exit_code = crate::core::runner::run_passthrough("find", &os_args, verbose)?;
-    if exit_code != 0 {
-        std::process::exit(exit_code);
-    }
-    Ok(())
+    crate::core::runner::run_passthrough("find", &os_args, verbose)
+}
+
+/// The tracked command for a find run: the arguments exactly as they were passed to
+/// `rtk find`, quoted, with one blank between words.
+fn find_label(args: &[String]) -> String {
+    with_args("find", &display_args(args))
 }
 
 fn run_compress(
@@ -248,8 +265,9 @@ fn run_compress(
     expr: &[String],
     max: Option<usize>,
     file_type: Option<&str>,
+    track_cmd: &str,
     verbose: u8,
-) -> Result<()> {
+) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
     if verbose > 0 {
         eprintln!("find: results from find, compressed by rtk");
@@ -257,16 +275,17 @@ fn run_compress(
     let max_results = max.unwrap_or(CAP_INVENTORY);
     let max_explicit = max.is_some();
     let mut cmd = crate::core::utils::resolved_command("find");
-    cmd.args(options).args(paths);
+    cmd.child_args(options).child_args(paths);
     if !expr.is_empty() {
-        cmd.arg("(");
-        cmd.args(expr);
-        cmd.arg(")");
+        cmd.child_arg("(");
+        cmd.child_args(expr);
+        cmd.child_arg(")");
     }
     if let Some(t) = file_type {
-        cmd.arg("-type").arg(t);
+        cmd.child_arg("-type").child_arg(t);
     }
-    cmd.arg("-print0").stdin(std::process::Stdio::inherit());
+    cmd.child_arg("-print0")
+        .stdin(std::process::Stdio::inherit());
     let output = cmd.output().context("Failed to execute find")?;
     let exit_code = crate::core::utils::exit_code_from_output(&output, "find");
     {
@@ -279,18 +298,12 @@ fn run_compress(
         .split(|b| *b == 0)
         .filter(|s| !s.is_empty())
         .collect();
-    let track_cmd = format!(
-        "find {} {} {}",
-        options.join(" "),
-        paths.join(" "),
-        expr.join(" ")
-    );
     if entries.iter().any(|e| std::str::from_utf8(e).is_err()) {
         let raw: Vec<u8> = entries.iter().flat_map(|e| [*e, b"\n"].concat()).collect();
         let mut stdout = std::io::stdout().lock();
         stdout.write_all(&raw)?;
         stdout.flush()?;
-        timer.track_passthrough(&track_cmd, "rtk find (passthrough)");
+        timer.track_passthrough(track_cmd, &tracking::passthrough_label(track_cmd));
     } else {
         let files: Vec<String> = entries
             .iter()
@@ -307,21 +320,20 @@ fn run_compress(
             files,
             max_results,
             max_explicit,
-            &track_cmd,
+            &[],
+            track_cmd,
             &raw_output,
             &timer,
         );
     }
-    if exit_code != 0 {
-        std::process::exit(exit_code);
-    }
-    Ok(())
+    Ok(exit_code)
 }
 
 /// Entry point from main.rs — dispatches on find's grammar then delegates.
-pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
+pub fn run_from_args(args: &[String], verbose: u8) -> Result<i32> {
     match dispatch(args)? {
-        Dispatch::Native(parsed) => run(
+        Dispatch::Native { parsed, label } => run(
+            &label,
             &parsed.pattern,
             &parsed.path,
             parsed.max_results,
@@ -337,7 +349,16 @@ pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
             expr,
             max,
             file_type,
-        } => run_compress(&options, &paths, &expr, max, file_type.as_deref(), verbose),
+            label,
+        } => run_compress(
+            &options,
+            &paths,
+            &expr,
+            max,
+            file_type.as_deref(),
+            &label,
+            verbose,
+        ),
         Dispatch::Verbatim(args) => run_verbatim(&args, verbose),
     }
 }
@@ -393,6 +414,7 @@ fn build_capped_listing(files: &[String], max_results: usize) -> String {
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
+    label: &str,
     pattern: &str,
     path: &str,
     max_results: usize,
@@ -401,7 +423,7 @@ pub fn run(
     file_type: &str,
     case_insensitive: bool,
     verbose: u8,
-) -> Result<()> {
+) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     // Treat "." as match-all
@@ -415,72 +437,17 @@ pub fn run(
 
     if !Path::new(path).exists() {
         eprintln!("find: '{}': No such file or directory", path);
-        std::process::exit(1);
+        return Ok(1);
     }
 
-    // When the pattern targets dotfiles (e.g. -name ".claude.json"), we must walk hidden
-    // entries; otherwise skip them to keep results tidy (#1101).
-    let search_hidden = effective_pattern.starts_with('.');
-
-    let mut builder = WalkBuilder::new(path);
-    builder
-        .hidden(!search_hidden) // skip hidden files/dirs unless pattern targets dotfiles
-        .git_ignore(true) // respect .gitignore
-        .git_global(true)
-        .git_exclude(true);
-    if let Some(depth) = max_depth {
-        builder.max_depth(Some(depth));
-    }
-    let walker = builder.build();
-
-    let mut files: Vec<String> = Vec::new();
-
-    for entry in walker {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        let ft = entry.file_type();
-        let is_dir = ft.as_ref().is_some_and(|t| t.is_dir());
-
-        // Filter by type
-        if want_dirs && !is_dir {
-            continue;
-        }
-        if !want_dirs && is_dir {
-            continue;
-        }
-
-        let entry_path = entry.path();
-
-        // Get filename for glob matching
-        let name = match entry_path.file_name() {
-            Some(n) => n.to_string_lossy(),
-            None => continue,
-        };
-
-        let matches = if case_insensitive {
-            glob_match(&effective_pattern.to_lowercase(), &name.to_lowercase())
-        } else {
-            glob_match(effective_pattern, &name)
-        };
-        if !matches {
-            continue;
-        }
-
-        let display_path = entry_path
-            .strip_prefix(path)
-            .unwrap_or(entry_path)
-            .to_string_lossy()
-            .to_string();
-
-        if !display_path.is_empty() {
-            files.push(display_path);
-        } else if !is_dir {
-            files.push(path.to_string());
-        }
-    }
+    let (files, filtered) = native_walk(
+        path,
+        effective_pattern,
+        max_depth,
+        want_dirs,
+        case_insensitive,
+        true,
+    );
 
     let raw_output = {
         let mut sorted = files.clone();
@@ -491,27 +458,212 @@ pub fn run(
         files,
         max_results,
         max_explicit,
-        &format!("find {} -name '{}'", path, effective_pattern),
+        &filtered,
+        label,
         &raw_output,
         &timer,
     );
 
-    Ok(())
+    Ok(0)
+}
+
+const DISCLOSURE_ENTRY_CAP: usize = 20_000;
+
+fn native_walk(
+    path: &str,
+    pattern: &str,
+    max_depth: Option<usize>,
+    want_dirs: bool,
+    case_insensitive: bool,
+    ambient_ignores: bool,
+) -> (Vec<String>, Vec<String>) {
+    // When the pattern targets dotfiles (e.g. -name ".claude.json"), we must walk hidden
+    // entries; otherwise skip them to keep results tidy (#1101).
+    let search_hidden = pattern.starts_with('.');
+
+    let mut builder = WalkBuilder::new(path);
+    builder
+        .hidden(!search_hidden) // skip hidden files/dirs unless pattern targets dotfiles
+        .git_ignore(true) // respect .gitignore
+        // Rules from outside the tree walked: the global gitignore, and ignore
+        // files in the directories above it. A test turns them off, so the
+        // developer's own do not decide what it finds.
+        .git_global(ambient_ignores)
+        .parents(ambient_ignores)
+        .git_exclude(true);
+    if let Some(depth) = max_depth {
+        builder.max_depth(Some(depth));
+    }
+
+    let mut files = Vec::new();
+    let mut visited: HashSet<std::path::PathBuf> = HashSet::new();
+    let mut visited_dirs: Vec<(std::path::PathBuf, usize)> = Vec::new();
+    let mut disclose = true;
+    for entry in builder.build().flatten() {
+        if disclose {
+            if visited.len() >= DISCLOSURE_ENTRY_CAP {
+                disclose = false;
+                visited.clear();
+                visited_dirs.clear();
+            } else {
+                visited.insert(entry.path().to_path_buf());
+                let is_dir = if entry.depth() == 0 {
+                    std::fs::metadata(entry.path()).is_ok_and(|m| m.is_dir())
+                } else {
+                    entry.file_type().is_some_and(|t| t.is_dir())
+                };
+                if is_dir {
+                    visited_dirs.push((entry.path().to_path_buf(), entry.depth()));
+                }
+            }
+        }
+        if let Some(display) = entry_display(&entry, path, pattern, want_dirs, case_insensitive) {
+            files.push(display);
+        }
+    }
+
+    let filtered = if disclose {
+        disclose_filtered(
+            path,
+            pattern,
+            max_depth,
+            want_dirs,
+            case_insensitive,
+            &visited_dirs,
+            &visited,
+        )
+    } else {
+        Vec::new()
+    };
+    (files, filtered)
+}
+
+fn entry_display(
+    entry: &ignore::DirEntry,
+    root: &str,
+    pattern: &str,
+    want_dirs: bool,
+    case_insensitive: bool,
+) -> Option<String> {
+    let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
+    if want_dirs != is_dir {
+        return None;
+    }
+    let name = entry.path().file_name()?.to_string_lossy();
+    if !name_matches(pattern, &name, case_insensitive) {
+        return None;
+    }
+    let display = relative_display(entry.path(), root);
+    if !display.is_empty() {
+        Some(display)
+    } else if !is_dir {
+        Some(root.to_string())
+    } else {
+        None
+    }
+}
+
+fn name_matches(pattern: &str, name: &str, case_insensitive: bool) -> bool {
+    if case_insensitive {
+        glob_match(&pattern.to_lowercase(), &name.to_lowercase())
+    } else {
+        glob_match(pattern, name)
+    }
+}
+
+fn relative_display(entry_path: &Path, root: &str) -> String {
+    entry_path
+        .strip_prefix(root)
+        .unwrap_or(entry_path)
+        .to_string_lossy()
+        .to_string()
+}
+
+const FILTERED_CAP: usize = 1000;
+const UNREPORTED_DIR: &str = ".git";
+
+fn disclose_filtered(
+    root: &str,
+    pattern: &str,
+    max_depth: Option<usize>,
+    want_dirs: bool,
+    case_insensitive: bool,
+    visited_dirs: &[(std::path::PathBuf, usize)],
+    visited: &HashSet<std::path::PathBuf>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for (dir, depth) in visited_dirs {
+        if max_depth.is_some_and(|max| *depth >= max) {
+            continue;
+        }
+        let Ok(children) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for child in children.flatten() {
+            let child_path = child.path();
+            if visited.contains(&child_path) {
+                continue;
+            }
+            let name = child.file_name().to_string_lossy().into_owned();
+            let is_dir = child.file_type().is_ok_and(|t| t.is_dir());
+            let display = relative_display(&child_path, root);
+            if is_dir {
+                if name == UNREPORTED_DIR {
+                    continue;
+                }
+                out.push(format!("{}/", display));
+            } else if !want_dirs && name_matches(pattern, &name, case_insensitive) {
+                out.push(display);
+            }
+            if out.len() >= FILTERED_CAP {
+                out.sort();
+                return out;
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+fn filtered_hint(filtered: &[String]) -> Option<String> {
+    if filtered.is_empty() {
+        return None;
+    }
+    let count = if filtered.len() >= FILTERED_CAP {
+        format!("{}+", FILTERED_CAP)
+    } else {
+        filtered.len().to_string()
+    };
+    let note = format!("... ({} filtered)", count);
+    let mut sorted = filtered.to_vec();
+    sorted.sort();
+    let listing = format!("{}\n", sorted.join("\n"));
+    match crate::core::tee::force_tee_tail_hint(&listing, "find-hidden", 1) {
+        Some(tee_hint) => Some(format!("{}\n{}", note, tee_hint)),
+        None => Some(note),
+    }
 }
 
 fn render(
     mut files: Vec<String>,
     max_results: usize,
     max_explicit: bool,
+    filtered: &[String],
     track_cmd: &str,
     raw_output: &str,
     timer: &tracking::TimedExecution,
-) {
+) -> String {
     files.sort();
+    let note = filtered_hint(filtered);
+    let rtk_cmd = format!("rtk {track_cmd}");
 
     if files.is_empty() {
-        timer.track(track_cmd, "rtk find", raw_output, "");
-        return;
+        let shown = match &note {
+            Some(note) => crate::core::runner::emit_guarded(note, None, note),
+            None => String::new(),
+        };
+        timer.track(track_cmd, &rtk_cmd, raw_output, &shown);
+        return shown;
     }
 
     let ordered = display_ordered(&files);
@@ -592,6 +744,10 @@ fn render(
         body.push_str(&format!("{}\n", ext_line));
     }
 
+    if let Some(note) = &note {
+        body.push_str(&format!("{}\n", note));
+    }
+
     let capped_raw = build_capped_listing(&ordered, max_results);
     let hint = if displayed < total_files && !max_explicit {
         crate::core::tee::force_tee_tail_hint(&ordered.join("\n"), "find", displayed + 1)
@@ -599,18 +755,25 @@ fn render(
         None
     };
     let listing = capped_raw.trim_end_matches('\n');
-    let baseline = match &hint {
+    let mut baseline = match &hint {
         Some(h) => format!("{}\n{}", listing, h),
         None => listing.to_string(),
     };
+    if let Some(note) = &note {
+        baseline.push('\n');
+        baseline.push_str(note);
+    }
     let shown =
         crate::core::runner::emit_guarded(body.trim_end_matches('\n'), hint.as_deref(), &baseline);
-    timer.track(track_cmd, "rtk find", raw_output, &shown);
+    timer.track(track_cmd, &rtk_cmd, raw_output, &shown);
+    shown
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::test_isolation;
+    use crate::core::user_env;
 
     /// Convert string slices to Vec<String> for test convenience.
     fn args(values: &[&str]) -> Vec<String> {
@@ -619,7 +782,7 @@ mod tests {
 
     fn parse_find_args(a: &[String]) -> Result<FindArgs> {
         match dispatch(a)? {
-            Dispatch::Native(p) => Ok(p),
+            Dispatch::Native { parsed, .. } => Ok(parsed),
             Dispatch::Compress { .. } => anyhow::bail!("dispatched to compress"),
             Dispatch::Verbatim(_) => anyhow::bail!("dispatched to verbatim"),
         }
@@ -627,7 +790,7 @@ mod tests {
 
     fn class(a: &[&str]) -> &'static str {
         match dispatch(&args(a)) {
-            Ok(Dispatch::Native(_)) => "native",
+            Ok(Dispatch::Native { .. }) => "native",
             Ok(Dispatch::Compress { .. }) => "compress",
             Ok(Dispatch::Verbatim(_)) => "verbatim",
             Err(_) => "error",
@@ -774,7 +937,9 @@ mod tests {
     #[test]
     fn rtk_flags_mid_expression_reach_find_untouched() {
         assert_eq!(
-            class(&[".", "-name", "*.rs", "-m", "5", "-exec", "grep", "-m", "1", "x", "{}", ";"]),
+            class(&[
+                ".", "-name", "*.rs", "-m", "5", "-exec", "grep", "-m", "1", "x", "{}", ";"
+            ]),
             "verbatim"
         );
         match dispatch(&args(&[".", "-m", "5", "-mtime", "-7"])).unwrap() {
@@ -857,6 +1022,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("f.txt"), "").unwrap();
         let result = run(
+            "find",
             "*.txt",
             root.path().to_str().unwrap(),
             50,
@@ -1047,14 +1213,14 @@ mod tests {
     #[test]
     fn find_dotfile_pattern_includes_hidden() {
         // .gitignore exists at the repo root — must be found when using a dotfile pattern
-        let result = run(".gitignore", ".", 50, true, Some(1), "f", false, 0);
+        let result = run("find", ".gitignore", ".", 50, true, Some(1), "f", false, 0);
         assert!(result.is_ok(), "run with dotfile pattern should not error");
     }
 
     #[test]
     fn find_regular_pattern_skips_hidden() {
         // Non-dot pattern should not error (hidden dirs remain skipped)
-        let result = run("*.rs", "src", 5, true, None, "f", false, 0);
+        let result = run("find", "*.rs", "src", 5, true, None, "f", false, 0);
         assert!(result.is_ok());
     }
 
@@ -1063,27 +1229,37 @@ mod tests {
     #[test]
     fn find_rs_files_in_src() {
         // Should find .rs files without error
-        let result = run("*.rs", "src", 100, true, None, "f", false, 0);
+        let result = run("find", "*.rs", "src", 100, true, None, "f", false, 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_dot_pattern_works() {
         // "." pattern should not error (was broken before)
-        let result = run(".", "src", 10, true, None, "f", false, 0);
+        let result = run("find", ".", "src", 10, true, None, "f", false, 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_no_matches() {
-        let result = run("*.xyz_nonexistent", "src", 50, true, None, "f", false, 0);
+        let result = run(
+            "find",
+            "*.xyz_nonexistent",
+            "src",
+            50,
+            true,
+            None,
+            "f",
+            false,
+            0,
+        );
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_respects_max() {
         // With max=2, should not error
-        let result = run("*.rs", "src", 2, true, None, "f", false, 0);
+        let result = run("find", "*.rs", "src", 2, true, None, "f", false, 0);
         assert!(result.is_ok());
     }
 
@@ -1169,9 +1345,281 @@ mod tests {
     #[test]
     fn find_gitignored_excluded() {
         // target/ is in .gitignore — files inside should not appear
-        let result = run("*", ".", 1000, true, None, "f", false, 0);
+        let result = run("find", "*", ".", 1000, true, None, "f", false, 0);
         assert!(result.is_ok());
         // We can't easily capture stdout in unit tests, but at least
         // verify it runs without error. The smoke tests verify content.
+    }
+
+    #[test]
+    fn missing_path_with_separator_is_a_find_path_not_a_pattern() {
+        let p = parse_find_args(&args(&["/definitely/missing/xyz", "-maxdepth", "1"])).unwrap();
+        assert_eq!(p.path, "/definitely/missing/xyz");
+        assert_eq!(p.pattern, "*");
+        let p = parse_find_args(&args(&["./nope_xyz"])).unwrap();
+        assert_eq!(p.path, "./nope_xyz");
+        assert_eq!(p.pattern, "*");
+        match dispatch(&args(&["/definitely/missing/xyz", "-mtime", "+0"])).unwrap() {
+            Dispatch::Compress { paths, expr, .. } => {
+                assert_eq!(paths, args(&["/definitely/missing/xyz"]));
+                assert_eq!(expr, args(&["-mtime", "+0"]));
+            }
+            _ => panic!("expected compress"),
+        }
+    }
+
+    #[test]
+    fn native_run_reports_missing_path_as_exit_1() {
+        let code = run(
+            "find",
+            "*",
+            "/definitely/missing/xyz",
+            10,
+            false,
+            None,
+            "f",
+            false,
+            0,
+        )
+        .unwrap();
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn the_find_label_has_one_blank_between_words() {
+        let w = |v: &[&str]| args(v);
+        assert_eq!(
+            find_label(&w(&["-L", "a b", "-name", "*.rs"])),
+            "find -L 'a b' -name '*.rs'"
+        );
+        assert_eq!(
+            find_label(&w(&["d", "-name", "*.rs"])),
+            "find d -name '*.rs'"
+        );
+        assert_eq!(find_label(&w(&["-L", "d"])), "find -L d");
+        assert_eq!(find_label(&w(&["d"])), "find d");
+        assert_eq!(find_label(&[]), "find");
+    }
+
+    /// The rtk column of a filtered row holds the arguments as typed, for the native walk
+    /// and for the compressed `find` alike.
+    #[test]
+    fn a_filtered_row_keeps_the_find_arguments() {
+        let tmp = test_isolation::tempdir();
+        let home = test_isolation::tempdir();
+        std::fs::create_dir(tmp.path().join("sub.rs")).expect("create a directory to find");
+        std::fs::write(tmp.path().join("a.rs"), "").expect("create a file to find");
+        let root = tmp.path().to_string_lossy().into_owned();
+        let quoted = crate::core::shell::quote_word(&root);
+        let cases: [(Vec<&str>, bool, String); 5] = [
+            (
+                vec![&root, "-iname", "*.RS", "-maxdepth", "1", "-type", "d"],
+                true,
+                format!("rtk find {quoted} -iname '*.RS' -maxdepth 1 -type d"),
+            ),
+            (
+                vec![&root, "-iname", "*.RS", "-t", "d"],
+                true,
+                format!("rtk find {quoted} -iname '*.RS' -t d"),
+            ),
+            (
+                vec![&root, "-iname", "*.RS", "-maxdepth", "1", "-m", "5"],
+                true,
+                format!("rtk find {quoted} -iname '*.RS' -maxdepth 1 -m 5"),
+            ),
+            (
+                vec!["*.rs", &root],
+                true,
+                format!("rtk find '*.rs' {quoted}"),
+            ),
+            (
+                vec![&root, "-name", "*.rs", "-mmin", "-600", "-t", "d"],
+                false,
+                format!("rtk find {quoted} -name '*.rs' -mmin -600 -t d"),
+            ),
+        ];
+        test_isolation::with_root(home.path(), || {
+            for (words, native, _) in &cases {
+                let given = args(words);
+                match dispatch(&given).expect("dispatch") {
+                    Dispatch::Native { parsed, .. } => {
+                        assert!(*native, "{words:?} went native");
+                        let (files, _) = native_walk(
+                            &parsed.path,
+                            &parsed.pattern,
+                            parsed.max_depth,
+                            parsed.file_type == "d",
+                            parsed.case_insensitive,
+                            true,
+                        );
+                        assert!(!files.is_empty(), "{words:?} matches no entry");
+                    }
+                    Dispatch::Compress { .. } => assert!(!*native, "{words:?} went to compress"),
+                    Dispatch::Verbatim(_) => panic!("{words:?} went verbatim"),
+                }
+                run_from_args(&given, 0).expect("find");
+            }
+            let tracker = tracking::Tracker::new().expect("open the tracking database");
+            let recent = tracker.get_recent(20).expect("read recent rows");
+            let stored: Vec<&str> = recent.iter().map(|r| r.rtk_cmd.as_str()).collect();
+            for (_, _, expected) in &cases {
+                assert!(
+                    stored.contains(&expected.as_str()),
+                    "no row {expected:?} in {stored:?}"
+                );
+            }
+        });
+    }
+
+    /// Output that is not UTF-8 passes through unfiltered, and its row keeps the
+    /// arguments that ran, so it reads back as the command. Run as a child, so the
+    /// raw bytes go to its captured stdout rather than the harness's. Linux only:
+    /// other file systems refuse a name that is not UTF-8.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_passthrough_row_keeps_the_find_arguments() {
+        use std::os::unix::ffi::OsStrExt;
+
+        if !test_isolation::rtk_binary_is_built() {
+            return;
+        }
+        let tmp = test_isolation::tempdir();
+        let home = test_isolation::tempdir();
+        let bad = std::ffi::OsStr::from_bytes(b"bad\xff.rs");
+        std::fs::write(tmp.path().join(bad), "x").expect("create a non-UTF-8 file name");
+        let root = tmp.path().to_string_lossy().into_owned();
+        test_isolation::with_root(home.path(), || {
+            let output = test_isolation::rtk_command()
+                .args(["find", &root, "-name", "*.rs", "-mmin", "-600"])
+                .output()
+                .expect("run rtk find");
+            assert!(output.status.success(), "{output:?}");
+
+            let tracker = tracking::Tracker::new().expect("open the tracking database");
+            let recent = tracker.get_recent(5).expect("read recent rows");
+            let expected = format!(
+                "rtk:passthrough find {} -name '*.rs' -mmin -600",
+                crate::core::shell::quote_word(&root)
+            );
+            assert!(
+                recent.iter().any(|r| r.rtk_cmd == expected),
+                "no row {expected:?} in {recent:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn native_run_returns_zero_on_success() {
+        let tmp = test_isolation::tempdir();
+        user_env::with_path("RTK_TEE_DIR", Some(tmp.path()), || {
+            std::fs::write(tmp.path().join("a.txt"), "x").unwrap();
+            let root = tmp.path().to_string_lossy().into_owned();
+            assert_eq!(
+                run("find", "*.txt", &root, 10, false, None, "f", false, 0).unwrap(),
+                0
+            );
+        });
+    }
+
+    #[test]
+    fn run_from_args_propagates_find_exit_status() {
+        let argv = ["/definitely/missing/xyz", "-mtime", "+0"];
+        let expected = std::process::Command::new("find")
+            .args(argv)
+            .output()
+            .map(|o| o.status.code().unwrap_or(1))
+            .unwrap_or(127);
+        let code = run_from_args(&args(&argv), 0).unwrap();
+        assert_eq!(code, expected);
+    }
+
+    #[test]
+    fn hidden_and_ignored_matches_are_collected_for_disclosure() {
+        let tmp = test_isolation::tempdir();
+        let root = tmp.path();
+        // The developer's init template could seed `.git/info/exclude`, which
+        // the walk honours.
+        let mut init = std::process::Command::new("git");
+        init.args(["init", "-q"]).current_dir(root);
+        test_isolation::isolate_git(&mut init);
+        if !init.status().map(|s| s.success()).unwrap_or(false) {
+            return; // no git: .gitignore cannot apply, nothing to assert
+        }
+        std::fs::write(root.join(".gitignore"), "secret.txt\nbuild/\n").unwrap();
+        std::fs::write(root.join("secret.txt"), "x").unwrap();
+        std::fs::write(root.join("visible.txt"), "y").unwrap();
+        std::fs::create_dir(root.join(".hidden")).unwrap();
+        std::fs::write(root.join(".hidden").join("h.txt"), "z").unwrap();
+        std::fs::create_dir(root.join("build")).unwrap();
+        std::fs::write(root.join("build").join("out.txt"), "w").unwrap();
+        let root_s = root.to_string_lossy().into_owned();
+
+        let (files, filtered) = native_walk(&root_s, "*.txt", None, false, false, false);
+        assert_eq!(files, vec!["visible.txt".to_string()]);
+        assert_eq!(
+            filtered,
+            vec![
+                ".hidden/".to_string(),
+                "build/".to_string(),
+                "secret.txt".to_string()
+            ]
+        );
+
+        let (_, filtered) = native_walk(&root_s, "*.txt", Some(0), false, false, false);
+        assert!(filtered.is_empty(), "{filtered:?}");
+
+        let (files, filtered) = native_walk(&root_s, ".gitignore", None, false, false, false);
+        assert_eq!(files, vec![".gitignore".to_string()]);
+        assert_eq!(filtered, vec!["build/".to_string()]);
+    }
+
+    #[test]
+    fn disclosure_survives_the_output_guard() {
+        let tee = test_isolation::tempdir();
+        user_env::with_path("RTK_TEE_DIR", Some(tee.path()), || {
+            let timer = tracking::TimedExecution::start();
+            let shown = render(
+                vec!["visible.txt".to_string()],
+                50,
+                false,
+                &["secret.txt".to_string()],
+                "find . -name '*.txt'",
+                "visible.txt",
+                &timer,
+            );
+            assert!(shown.contains("(1 filtered"), "{shown}");
+            let shown = render(
+                vec![],
+                50,
+                false,
+                &["secret.txt".to_string()],
+                "find . -name secret.txt",
+                "",
+                &timer,
+            );
+            assert!(shown.contains("(1 filtered"), "{shown}");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_root_still_discloses() {
+        let tmp = test_isolation::tempdir();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("sub").join(".hidden")).unwrap();
+        std::fs::write(root.join("sub").join("a.txt"), "a").unwrap();
+        std::fs::write(root.join("sub").join(".hidden").join("h.txt"), "h").unwrap();
+        std::os::unix::fs::symlink(root.join("sub"), root.join("link")).unwrap();
+        let link = root.join("link").to_string_lossy().into_owned();
+        let (files, filtered) = native_walk(&link, "*.txt", None, false, false, false);
+        assert_eq!(files, vec!["a.txt".to_string()]);
+        assert_eq!(filtered, vec![".hidden/".to_string()]);
+    }
+
+    #[test]
+    fn filtered_hint_names_the_count() {
+        assert!(filtered_hint(&[]).is_none());
+        let h = filtered_hint(&["secret.txt".to_string(), ".hidden/h.txt".to_string()]).unwrap();
+        assert!(h.starts_with("... (2 filtered"), "{h}");
     }
 }

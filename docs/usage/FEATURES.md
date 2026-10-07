@@ -130,7 +130,9 @@ rtk read - [options]          # Lecture depuis stdin
 | Option | Court | Defaut | Description |
 |--------|-------|--------|-------------|
 | `--level` | `-l` | `minimal` | Niveau de filtrage : `none`, `minimal`, `aggressive` |
-| `--max-lines` | `-m` | illimite | Nombre maximum de lignes |
+| `--max-lines` | `-m` | illimite | Apercu structurel plafonne a N lignes (signatures et imports, pas les N premieres) |
+| `--head-lines` | | illimite | Garde seulement les N premieres lignes, a l'octet pres |
+| `--tail-lines` | | illimite | Garde seulement les N dernieres lignes, a l'octet pres |
 | `--line-numbers` | `-n` | non | Afficher les numeros de ligne |
 
 **Niveaux de filtrage :**
@@ -238,6 +240,23 @@ src/ls.rs:25:fn run_tree(...)                src/ls.rs
 
 ---
 
+### `rtk ast-grep` -- Recherche structurelle (AST)
+
+**Objectif :** Remplace `ast-grep` avec une sortie groupee par fichier, plafonnee.
+
+**Syntaxe :**
+```bash
+rtk ast-grep run -p '<pattern>' [chemin] [options]
+```
+
+Regroupe les correspondances par fichier, plafonnees a 5 par fichier et 50 au total ; le surplus est remplace par une note de comptage ("N more match line(s) in X" / "N more match line(s) in M more file(s) not shown"), suivie d'un indice `[full output: ...]` qui pointe vers la sortie complete -- aucune ligne n'est perdue tant que la recuperation est active (`[retriever] mode`), sinon la note de comptage reste seule. ast-grep imprime une ligne par ligne source d'une correspondance, et une correspondance structurelle s'etend sur plusieurs lignes : le decompte porte donc sur les lignes, pas sur les correspondances. Sur une recherche reelle dans ce depot, ~85% de reduction.
+
+Seul `run` est filtre : soit nomme explicitement, soit implicite quand aucun positionnel avant `--` ne porte le nom d'une autre sous-commande. `scan`, `test`, `new`, `lsp`, `completions`, `docs` et `run --stdin` passent tels quels : leur sortie n'a pas cette forme, et `lsp` dialogue sur stdin.
+
+`--json` n'est pas filtre -- une demande explicite de sortie structuree passe telle quelle, sans compression.
+
+---
+
 ### `rtk diff` -- Diff condense
 
 **Objectif :** Diff ultra-condense entre deux fichiers (uniquement les lignes modifiees).
@@ -245,8 +264,12 @@ src/ls.rs:25:fn run_tree(...)                src/ls.rs
 **Syntaxe :**
 ```bash
 rtk diff <fichier1> <fichier2>
-rtk diff <fichier1>              # Stdin comme second fichier
+rtk diff -                       # Condense un diff unifie lu sur stdin
 ```
+
+Pour comparer deux fichiers : code de sortie **0** si identiques, **1** si differents,
+**2** si un fichier ne peut pas etre lu. Les fichiers non UTF-8 sont compares octet
+par octet ; seuls leurs noms sont affiches lorsqu'ils different.
 
 ---
 
@@ -332,17 +355,83 @@ rtk git diff [args...]    # Supporte --stat, --cached, --staged, etc.
 ```
 
 **Avant / Apres :**
+
+`git diff` brut, 21 lignes :
 ```
-# git diff (~100 lignes)                    # rtk git diff (~25 lignes)
-diff --git a/src/main.rs b/src/main.rs      src/main.rs (+5/-2)
-index abc123..def456 100644                    +  let config = Config::load()?;
---- a/src/main.rs                              +  config.validate()?;
-+++ b/src/main.rs                              -  // old code
-@@ -10,6 +10,8 @@                              -  let x = 42;
-   fn main() {                               src/git.rs (+1/-1)
-+    let config = Config::load()?;              ~  format!("ok {}", branch)
-...30 lignes de headers et contexte...
+diff --git a/git.rs b/git.rs
+index 50f7a19..225f918 100644
+--- a/git.rs
++++ b/git.rs
+@@ -1,3 +1,3 @@
+ fn helper(branch: &str) -> String {
+-    format!("ko {}", branch)
++    format!("ok {}", branch)
+ }
+diff --git a/main.rs b/main.rs
+index 765936a..7abfb4f 100644
+--- a/main.rs
++++ b/main.rs
+@@ -1,5 +1,5 @@
+ fn main() {
+-    let x = 42;
+-    // old code
++    let config = Config::load()?;
++    config.validate()?;
+     println!("start");
+ }
 ```
+
+`rtk git diff`, 24 lignes :
+```
+git.rs  | 2 +-
+ main.rs | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+Changes:
+
+git.rs
+@@ -1,3 +1,3 @@
+ fn helper(branch: &str) -> String {
+-    format!("ko {}", branch)
++    format!("ok {}", branch)
+ }
+  +1 -1
+
+main.rs
+@@ -1,5 +1,5 @@
+ fn main() {
+-    let x = 42;
+-    // old code
++    let config = Config::load()?;
++    config.validate()?;
+     println!("start");
+ }
+  +2 -2
+```
+
+Sur un diff aussi petit, rtk economise peu : 440 octets bruts contre 392
+filtres, soit 11 %. La compression vient des diffs ou les en-tetes par fichier
+et les plafonds par hunk pesent. Sur un diff de 4 fichiers dont un hunk de 300
+lignes changees, la sortie passe de 335 a 140 lignes et de 13 262 a 4 880
+octets, soit 63 % de reduction, avec la note de troncature et le rappel
+`[full diff: rtk git diff --no-compact]`.
+
+Les lignes de hunk et les en-tetes `@@` sortent en colonne 0, dans la forme
+unifiee de git, donc `rtk git diff | grep "^-"` fonctionne. Les annotations
+propres a rtk restent indentees de deux espaces pour que ces memes greps ne
+les comptent pas : le total par fichier (`  +2 -2`) et la note de troncature
+(`  ... (30 deletions, 20 additions truncated)`).
+
+Trois limites de l'audit ancre. Au-dela de 100 lignes de changement par hunk,
+`grep -c "^-"` plafonne a ce qui est affiche ; la note de troncature indique
+le reste, par signe, mais elle est indentee et donc invisible au meme grep.
+Sur un diff combine (`diff --cc`, ce que git produit pour chaque chemin en
+conflit pendant un merge, rebase, cherry-pick ou stash pop), le marqueur peut
+occuper la deuxieme colonne : ` +ours` est compte dans le total `+N -M` mais
+reste invisible a `grep "^+"`. Et la sortie n'est pas un patch applicable :
+rtk supprime les en-tetes `diff --git` / `---` / `+++`. Utilisez
+`rtk proxy git diff` pour un patch fidele, ou `rtk gh pr diff --patch`, qui
+passe sans filtrage.
 
 ---
 
@@ -353,6 +442,16 @@ rtk git show [args...]
 ```
 
 Affiche le resume du commit + stat + diff compact.
+
+> **Attention (redirection vers un fichier).** Pour un blob volumineux
+> (`rtk git show HEAD:gros-fichier`), la sortie est fenetree : seul un apercu
+> est affiche, suivi d'un indice
+> `[see remaining: rtk proxy git show 'HEAD:...' | tail -n +N]`.
+> Un `rtk git show HEAD:x > fichier` ecrit a la main peut donc tronquer
+> silencieusement le contenu (le code de sortie reste 0). Pour capturer le
+> fichier complet, suivez l'indice de recuperation, ou passez par
+> `rtk proxy git show`. Un `git show` nu ne suffit pas quand le hook RTK est
+> actif : il est reecrit en `rtk git show`, qui fenetre a nouveau la sortie.
 
 ---
 
@@ -495,8 +594,12 @@ Showing 10 of 15 pull requests in org/repo   #42 feat: add vitest (open, 2d)
 **Syntaxe :**
 ```bash
 rtk test <commande...>
+rtk test --shell fish '<commande fish>'
 ```
 
+Par défaut, la commande et ses arguments sont exécutés directement, sans
+expansion par un shell. `--shell` accepte une commande complète comme argument
+unique lorsque la syntaxe d'un shell est nécessaire.
 **Exemple :**
 ```bash
 rtk test cargo test
@@ -524,8 +627,11 @@ test utils::test_edge_case ... FAILED
 **Syntaxe :**
 ```bash
 rtk err <commande...>
+rtk err --shell fish '<commande fish>'
 ```
 
+Sans `--shell`, les limites des arguments sont préservées et les jokers,
+variables et opérateurs ne sont pas interprétés par un shell.
 **Exemple :**
 ```bash
 rtk err npm run build
@@ -937,9 +1043,12 @@ Supprime les barres de progression et le bruit.
 
 ```bash
 rtk summary <commande...>
+rtk summary --shell fish '<commande fish>'
 ```
 
 Utile pour les commandes longues dont la sortie n'a pas de filtre dedie.
+La commande est exécutée directement par défaut ; `--shell` active
+explicitement l'interprétation d'une commande complète par le shell choisi.
 
 ---
 
@@ -1202,6 +1311,7 @@ rtk verify
 | `cargo test/build/clippy/check` | `rtk cargo ...` |
 | `cat/head/tail <fichier>` | `rtk read <fichier>` |
 | `rg/grep <pattern>` | `rtk grep <pattern>` |
+| `ast-grep run -p <pattern>` | `rtk ast-grep run -p <pattern>` |
 | `ls` | `rtk ls` |
 | `tree` | `rtk tree` |
 | `wc` | `rtk wc` |
@@ -1269,11 +1379,13 @@ max_width = 120             # Largeur maximale de sortie
 ignore_dirs = [".git", "node_modules", "target", "__pycache__", ".venv", "vendor"]
 ignore_files = ["*.lock", "*.min.js", "*.min.css"]
 
-[tee]
-enabled = true              # Activer la sauvegarde de sortie brute
-mode = "failures"           # "failures" (defaut), "always", ou "never"
-max_files = 20              # Rotation : garder les N derniers fichiers
-# directory = "/custom/tee/path"  # Chemin personnalise (optionnel)
+[retriever]
+mode = "sqlite"             # sqlite (defaut) | tee (fichiers legacy) | disabled
+max_entries = 200           # Nombre max d'entrees dans la base recall
+retention_days = 30         # Retention des entrees
+# database_path = "/custom/recall.db"  # Chemin personnalise (optionnel)
+# Une ancienne section [tee] reste reconnue : mappee vers mode = "tee",
+# ou "disabled" si enabled = false
 
 [telemetry]
 enabled = false             # Telemetrie anonyme (1 ping/jour, requiert consentement)
@@ -1288,40 +1400,56 @@ exclude_commands = []       # Commandes a exclure de la recriture automatique
 
 | Variable | Description |
 |----------|-------------|
-| `RTK_TEE_DIR` | Surcharge le repertoire tee |
+| `RTK_RECALL=0` | Desactiver la sauvegarde recall |
+| `RTK_TEE_DIR` | Surcharge le repertoire tee (mode "tee") |
 | `RTK_TELEMETRY_DISABLED=1` | Desactiver la telemetrie |
 | `RTK_HOOK_AUDIT=1` | Activer l'audit du hook |
 | `SKIP_ENV_VALIDATION=1` | Desactiver la validation d'env (Next.js, etc.) |
 
 ---
 
-## Systeme Tee
+## Systeme Recall
 
 ### Recuperation de sortie brute
 
-Quand une commande echoue, RTK sauvegarde automatiquement la sortie brute complete dans un fichier log. Cela permet au LLM de lire la sortie sans re-executer la commande.
+Quand une commande echoue (ou qu'un filtre tronque une liste), RTK sauvegarde la sortie brute complete dans une base SQLite locale, adressee par hash de contenu. Cela permet au LLM de recuperer la sortie sans re-executer la commande.
 
 **Fonctionnement :**
-1. La commande echoue (exit code != 0)
-2. RTK sauvegarde la sortie brute dans `~/.local/share/rtk/tee/`
-3. Le chemin du fichier est affiche dans la sortie filtree
-4. Le LLM peut lire le fichier si besoin de plus de details
+1. La commande echoue (exit code != 0) ou la sortie est tronquee
+2. RTK stocke la sortie brute (gzip) dans `~/.local/share/rtk/recall.db`
+3. Un hint avec le hash est affiche : `[full output: rtk recall <hash>]` ou `[+N hidden: rtk recall <hash>]`
+4. `rtk recall <hash>` restitue la partie manquante (delta), `--full` la sortie complete
 
-**Sortie :**
+**Commandes :**
+```bash
+rtk recall <hash>            # Partie non montree (delta)
+rtk recall <hash> --full     # Sortie complete
+rtk recall <hash> --grep RE  # Filtrer par regex
+rtk recall --list            # Lister les entrees
+rtk gain --recalls           # Taux de consultation par filtre (calibration des caps)
+rtk config recall <mode>     # Changer de mode sans editer la config (sqlite|tee|disabled)
 ```
-FAILED: 2/15 tests
-[full output: ~/.local/share/rtk/tee/1707753600_cargo_test.log]
-```
+
+`rtk gain --recalls` separe strictement les donnees par mode : taux exact en sqlite
+(la lecture passe par `rtk recall`), approximation (`≥`) en tee (seules les lectures
+bash sont detectables via le hook, pas l'outil Read). Un taux eleve signale un filtre
+qui cache des sorties que l'agent revient chercher.
 
 **Configuration :**
 
 | Parametre | Defaut | Description |
 |-----------|--------|-------------|
-| `tee.enabled` | `true` | Activer/desactiver |
-| `tee.mode` | `"failures"` | `"failures"`, `"always"`, `"never"` |
-| `tee.max_files` | `20` | Rotation : garder les N derniers |
-| Taille min | 500 octets | Les sorties trop courtes ne sont pas sauvegardees |
-| Taille max fichier | 1 Mo | Troncature au-dela |
+| `retriever.mode` | `"sqlite"` | `"sqlite"`, `"tee"` (fichiers legacy), `"disabled"` |
+| `retriever.max_entries` | `200` | Eviction FIFO au-dela |
+| `retriever.retention_days` | `30` | Purge des entrees anciennes |
+| `retriever.max_entry_bytes` | `10 Mo` | Troncature au-dela (a la derniere ligne complete) |
+| Taille min | 500 octets | Les echecs trop courts ne sont pas sauvegardes |
+
+Le mode `"tee"` conserve l'ancien comportement (fichiers `.log` dans `~/.local/share/rtk/tee/`, rotation `tee_max_files`). Une ancienne section `[tee]` en config est automatiquement mappee (voir plus haut).
+
+Le mode se change avec `rtk config recall <sqlite|tee|disabled>` (edition chirurgicale de
+config.toml, commentaires preserves, champs `[tee]` legacy migres) — le champ equivalent
+en edition manuelle est `[retriever] mode`.
 
 ---
 
@@ -1329,7 +1457,7 @@ FAILED: 2/15 tests
 
 RTK peut envoyer un ping anonyme une fois par jour (23h d'intervalle) pour des statistiques d'utilisation. La telemetrie est **desactivee par defaut** et requiert un consentement explicite (RGPD Art. 6, 7).
 
-**Donnees envoyees :** hash de device (SHA-256 d'un sel aleatoire), version, OS, architecture, nombre de commandes/24h, top commandes, pourcentage de reduction de sortie bash.
+**Donnees envoyees :** hash de device (SHA-256 d'un sel aleatoire), version, OS, architecture, nombre de commandes/24h, top commandes, pourcentage de reduction de sortie bash, compteurs recall par famille de filtre (elisions/consultations — noms issus d'une allowlist fermee, jamais de hash, chemin, argument ou contenu).
 
 **Responsable du traitement :** `RTK AI Labs`, contact@rtk-ai.app
 
@@ -1356,7 +1484,7 @@ Octets de sortie bash supprimes (voir [A propos de la reduction de sortie bash](
 
 | Categorie | Commandes | Reduction sortie bash |
 |-----------|-----------|-------------------|
-| **Fichiers** | ls, tree, read, find, grep, diff | 60-80% |
+| **Fichiers** | ls, tree, read, find, grep, ast-grep, diff | 60-85% |
 | **Git** | status, log, diff, show, add, commit, push, pull | 75-92% |
 | **GitHub** | pr, issue, run, api | 79-87% |
 | **Tests** | cargo test, vitest, playwright, pytest, go test | 90-99% |

@@ -1,0 +1,89 @@
+diff --cc b/blob.bin
+index d6db588,a903574..0000000
+Binary files differ
+diff --cc b/inb.txt
+index ba2906d,2299c37..0000000
+--- a/b/inb.txt
++++ b/b/inb.txt
+@@@ -1,1 -1,1 +1,5 @@@
+++<<<<<<< HEAD
+ +main
+++=======
++ side
+++>>>>>>> side
+diff --cc "caf\303\251.txt"
+index ba2906d,2299c37..0000000
+--- "a/caf\303\251.txt"
++++ "b/caf\303\251.txt"
+@@@ -1,1 -1,1 +1,5 @@@
+++<<<<<<< HEAD
+ +main
+++=======
++ side
+++>>>>>>> side
+diff --cc "caf\303\251.txt.bin"
+index d6db588,a903574..0000000
+Binary files differ
+diff --cc colon: x.txt
+index ba2906d,2299c37..0000000
+--- a/colon: x.txt
++++ b/colon: x.txt
+@@@ -1,1 -1,1 +1,5 @@@
+++<<<<<<< HEAD
+ +main
+++=======
++ side
+++>>>>>>> side
+diff --cc d: x/f.txt
+index ba2906d,2299c37..0000000
+--- a/d: x/f.txt
++++ b/d: x/f.txt
+@@@ -1,1 -1,1 +1,5 @@@
+++<<<<<<< HEAD
+ +main
+++=======
++ side
+++>>>>>>> side
+diff --cc "new\nline.txt"
+index ba2906d,2299c37..0000000
+--- "a/new\nline.txt"
++++ "b/new\nline.txt"
+@@@ -1,1 -1,1 +1,5 @@@
+++<<<<<<< HEAD
+ +main
+++=======
++ side
+++>>>>>>> side
+diff --cc "say \"hi\".txt"
+index ba2906d,2299c37..0000000
+--- "a/say \"hi\".txt"
++++ "b/say \"hi\".txt"
+@@@ -1,1 -1,1 +1,5 @@@
+++<<<<<<< HEAD
+ +main
+++=======
++ side
+++>>>>>>> side
+diff --cc "say \"hi\".txt.bin"
+index d6db588,a903574..0000000
+Binary files differ
+diff --cc "tab\there.txt"
+index ba2906d,2299c37..0000000
+--- "a/tab\there.txt"
++++ "b/tab\there.txt"
+@@@ -1,1 -1,1 +1,5 @@@
+++<<<<<<< HEAD
+ +main
+++=======
++ side
+++>>>>>>> side
+diff --cc trail .txt
+index ba2906d,2299c37..0000000
+--- a/trail .txt
++++ b/trail .txt
+@@@ -1,1 -1,1 +1,5 @@@
+++<<<<<<< HEAD
+ +main
+++=======
++ side
+++>>>>>>> side

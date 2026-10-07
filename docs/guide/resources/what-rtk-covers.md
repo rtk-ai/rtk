@@ -116,6 +116,7 @@ Every percentage below measures **bash output bytes removed** — the only thing
 | `ls` | 80% | Tree format with file counts |
 | `find` | 75% | Tree format |
 | `grep` | 70% | Truncated lines, grouped by file |
+| `ast-grep` | 85% | Grouped by file, capped overflow; `--json` passes through |
 | `diff` | 65% | Context reduced |
 | `wc` | 60% | Compact counts |
 | `cat` / `head` / `tail <file>` | 60-80% | Smart file reading via `rtk read` |

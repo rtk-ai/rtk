@@ -18,7 +18,7 @@ jobs:
     name: test presence
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 50
       - name: Check filter modules have tests
@@ -30,7 +30,7 @@ jobs:
     name: fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -41,7 +41,7 @@ jobs:
     needs: fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -59,7 +59,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all
@@ -69,7 +71,7 @@ jobs:
     needs: clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -192,7 +194,7 @@ jobs:
     container:
       image: semgrep/semgrep
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - run: semgrep scan --config .semgrep.yml --baseline-commit ${{ github.event.pull_request.base.sha }} --error
@@ -202,7 +204,7 @@ jobs:
     needs: clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -212,18 +214,18 @@ jobs:
         run: cargo build --release
 
       - name: Install system tools
-        run: sudo apt-get install -y tree
+        run: sudo apt-get install -y tree ripgrep
 
       - name: Install Python tools
         run: pip install ruff pytest mypy
 
       - name: Install Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: "stable"
 
       - name: Install Go tools
-        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
 
       - name: Run benchmark
         run: ./scripts/benchmark.sh
@@ -235,7 +237,7 @@ jobs:
     if: github.base_ref == 'develop'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 

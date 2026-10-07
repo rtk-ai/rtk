@@ -1,0 +1,13 @@
+diff --git a/main.rs b/main.rs
+index 5d804c0..0658d30 100644
+--- a/main.rs
++++ b/main.rs
+@@ -1,6 +1,7 @@
+ fn main() {
+     println!("one");
+-    println!("two");
++    println!("2");
+     println!("three");
+     println!("four");
++    println!("five");
+ }

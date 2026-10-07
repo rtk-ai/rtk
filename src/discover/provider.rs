@@ -16,6 +16,10 @@ pub struct ExtractedCommand {
     pub output_len: Option<usize>,
     #[allow(dead_code)]
     pub session_id: String,
+    /// The Claude Code `tool_use_id` for this Bash call — the same id the
+    /// PreToolUse hook receives, letting hook-decision logs join back to this
+    /// exact transcript entry.
+    pub tool_use_id: String,
     /// Actual output content (first ~1000 chars for error detection)
     pub output_content: Option<String>,
     /// Whether the tool_result indicated an error
@@ -41,6 +45,29 @@ pub trait SessionProvider {
 
 pub struct ClaudeProvider;
 
+/// Substring match of a project filter against a project directory name.
+///
+/// On Windows the match is case-insensitive: NTFS paths are case-insensitive
+/// and Claude Code encodes the project folder from whatever cwd casing it was
+/// launched with, so the same project can produce sibling folders like
+/// `E--proj` and `e--proj`, while `std::env::current_dir()` reports whatever
+/// casing the launching shell set (an uppercase drive letter under PowerShell).
+/// Either side can differ from the other, so both are lowered; a case-sensitive
+/// match finds zero sessions.
+fn dir_matches_filter(dir_name: &str, filter: &str) -> bool {
+    dir_matches_filter_impl(dir_name, filter, cfg!(windows))
+}
+
+fn dir_matches_filter_impl(dir_name: &str, filter: &str, case_insensitive: bool) -> bool {
+    if case_insensitive {
+        dir_name
+            .to_ascii_lowercase()
+            .contains(&filter.to_ascii_lowercase())
+    } else {
+        dir_name.contains(filter)
+    }
+}
+
 impl ClaudeProvider {
     /// Get the base directory for Claude Code projects.
     fn projects_dir() -> Result<PathBuf> {
@@ -60,9 +87,18 @@ impl ClaudeProvider {
             return Ok(Vec::new());
         }
 
+        // `days * 86400` can overflow u64 for a large user-supplied `--since` (same
+        // overflow class `core::utils::days_ago_cutoff` fixes for the hook_decisions
+        // query) — use checked_mul and fall back to the epoch, which for "days ago"
+        // naturally means "no lower bound", instead of panicking. Kept as its own
+        // SystemTime-based implementation rather than reusing days_ago_cutoff
+        // directly: this filters on file mtimes (SystemTime), not chrono
+        // DateTime<Utc>, and days_ago_cutoff's MIN_UTC fallback wouldn't convert to
+        // a valid SystemTime anyway. If this overflow-clamping logic needs a fix,
+        // check whether the same fix applies to days_ago_cutoff too.
         let cutoff = since_days.map(|days| {
-            SystemTime::now()
-                .checked_sub(Duration::from_secs(days * 86400))
+            days.checked_mul(86400)
+                .and_then(|secs| SystemTime::now().checked_sub(Duration::from_secs(secs)))
                 .unwrap_or(SystemTime::UNIX_EPOCH)
         });
 
@@ -81,7 +117,7 @@ impl ClaudeProvider {
             // Apply project filter: substring match on directory name
             if let Some(filter) = project_filter {
                 let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !dir_name.contains(filter) {
+                if !dir_matches_filter(dir_name, filter) {
                     continue;
                 }
             }
@@ -98,14 +134,12 @@ impl ClaudeProvider {
                 }
 
                 // Apply mtime filter
-                if let Some(cutoff_time) = cutoff {
-                    if let Ok(meta) = fs::metadata(file_path) {
-                        if let Ok(mtime) = meta.modified() {
-                            if mtime < cutoff_time {
-                                continue;
-                            }
-                        }
-                    }
+                if let Some(cutoff_time) = cutoff
+                    && let Ok(meta) = fs::metadata(file_path)
+                    && let Ok(mtime) = meta.modified()
+                    && mtime < cutoff_time
+                {
+                    continue;
                 }
 
                 sessions.push(file_path.to_path_buf());
@@ -198,18 +232,17 @@ impl SessionProvider for ClaudeProvider {
                         for block in content {
                             if block.get("type").and_then(|t| t.as_str()) == Some("tool_use")
                                 && block.get("name").and_then(|n| n.as_str()) == Some("Bash")
-                            {
-                                if let (Some(id), Some(cmd)) = (
+                                && let (Some(id), Some(cmd)) = (
                                     block.get("id").and_then(|i| i.as_str()),
                                     block.pointer("/input/command").and_then(|c| c.as_str()),
-                                ) {
-                                    pending_tool_uses.push((
-                                        id.to_string(),
-                                        cmd.to_string(),
-                                        sequence_counter,
-                                    ));
-                                    sequence_counter += 1;
-                                }
+                                )
+                            {
+                                pending_tool_uses.push((
+                                    id.to_string(),
+                                    cmd.to_string(),
+                                    sequence_counter,
+                                ));
+                                sequence_counter += 1;
                             }
                         }
                     }
@@ -220,28 +253,26 @@ impl SessionProvider for ClaudeProvider {
                         entry.pointer("/message/content").and_then(|c| c.as_array())
                     {
                         for block in content {
-                            if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
-                                if let Some(id) = block.get("tool_use_id").and_then(|i| i.as_str())
-                                {
-                                    // Get content, length, and error status
-                                    let content =
-                                        block.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                            if block.get("type").and_then(|t| t.as_str()) == Some("tool_result")
+                                && let Some(id) = block.get("tool_use_id").and_then(|i| i.as_str())
+                            {
+                                // Get content, length, and error status
+                                let content =
+                                    block.get("content").and_then(|c| c.as_str()).unwrap_or("");
 
-                                    let output_len = content.len();
-                                    let is_error = block
-                                        .get("is_error")
-                                        .and_then(|e| e.as_bool())
-                                        .unwrap_or(false);
+                                let output_len = content.len();
+                                let is_error = block
+                                    .get("is_error")
+                                    .and_then(|e| e.as_bool())
+                                    .unwrap_or(false);
 
-                                    // Store first ~1000 chars of content for error detection
-                                    let content_preview: String =
-                                        content.chars().take(1000).collect();
+                                // Store first ~1000 chars of content for error detection
+                                let content_preview: String = content.chars().take(1000).collect();
 
-                                    tool_results.insert(
-                                        id.to_string(),
-                                        (output_len, content_preview, is_error),
-                                    );
-                                }
+                                tool_results.insert(
+                                    id.to_string(),
+                                    (output_len, content_preview, is_error),
+                                );
                             }
                         }
                     }
@@ -261,6 +292,7 @@ impl SessionProvider for ClaudeProvider {
                 command,
                 output_len,
                 session_id: session_id.clone(),
+                tool_use_id: tool_id,
                 output_content,
                 is_error,
                 sequence_index,
@@ -418,6 +450,29 @@ mod tests {
     }
 
     #[test]
+    fn test_dir_matches_filter_case_sensitive() {
+        assert!(dir_matches_filter_impl("-Users-foo-rtk", "rtk", false));
+        assert!(!dir_matches_filter_impl("-Users-foo-RTK", "rtk", false));
+    }
+
+    #[test]
+    fn test_dir_matches_filter_case_insensitive_windows() {
+        // Uppercase cwd drive letter vs lowercase history folder
+        assert!(dir_matches_filter_impl(
+            "e--PROJECT-XXX-XXX-xxxx",
+            "E--PROJECT-XXX-XXX-xxxx",
+            true
+        ));
+        // And the reverse: lowercase cwd vs uppercase folder
+        assert!(dir_matches_filter_impl(
+            "E--PROJECT-app",
+            "e--PROJECT-app",
+            true
+        ));
+        assert!(!dir_matches_filter_impl("e--PROJECT-app", "e--OTHER", true));
+    }
+
+    #[test]
     fn test_match_project_filter() {
         let encoded = ClaudeProvider::encode_project_path("/Users/foo/Sites/rtk");
         assert!(encoded.contains("rtk"));
@@ -475,6 +530,30 @@ mod tests {
             sessions[0].file_name().and_then(|name| name.to_str()),
             Some("matching.jsonl")
         );
+    }
+
+    #[test]
+    fn test_discover_sessions_project_filter_case_follows_platform() {
+        // The default filter comes from `current_dir()`, whose drive-letter casing
+        // can differ from the folder Claude Code created (#2919): the walk matches
+        // case-insensitively on Windows and exactly elsewhere. Drives the
+        // `cfg!(windows)` wrapper, which the `_impl` tests cannot reach.
+        let projects_dir = tempfile::tempdir().unwrap();
+        for name in ["E--PROJECT-app", "-Users-test-other"] {
+            let dir = projects_dir.path().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("session.jsonl"), "").unwrap();
+        }
+
+        let sessions = ClaudeProvider::discover_sessions_in_projects_dir(
+            projects_dir.path(),
+            Some("e--project-app"),
+            None,
+        )
+        .unwrap();
+
+        let expected = if cfg!(windows) { 1 } else { 0 };
+        assert_eq!(sessions.len(), expected);
     }
 
     #[test]

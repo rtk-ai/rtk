@@ -5,7 +5,11 @@
 //! capable of state-machine parsing (block collapse, continuation tracking,
 //! mode toggle) that TOML DSL cannot express.
 
+use crate::core::arg_tokenizer::{
+    Dialect, Token, TokenKind, ValueSpec, before_dashdash, has_flag, tokenize_grammar,
+};
 use crate::core::runner::{self, RunOptions};
+use crate::core::shell::display_args;
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, strip_ansi};
 use anyhow::Result;
@@ -145,7 +149,71 @@ static FILE_COORD: LazyLock<Regex> =
 /// stack trace. The standard filters key off `[INFO]` markers and the footer
 /// guard, so they can't fire here — `filter_quiet` handles this case instead.
 fn is_quiet(args: &[String]) -> bool {
-    args.iter().any(|a| a == "-q" || a == "--quiet")
+    has_option(args, &["q", "quiet"])
+}
+
+// ── Argument grammar ────────────────────────────────────────────────────────
+
+/// Maven's CLI is Apache commons-cli, whose short options are whole multi-character
+/// words (`-pl`, `-gs`, `-amd`) that never cluster.
+const MVN_DIALECT: Dialect = Dialect::CommonsCli;
+
+/// Options declared `<arg>` by `mvn --help` (3.9.16). `SingleDash::Atomic` tags even
+/// `-pl` as `TokenKind::Long`, so the name alone decides and the kind is never read.
+fn mvn_takes_value(_kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    matches!(
+        name,
+        "b" | "builder"
+            | "color"
+            | "D"
+            | "define"
+            | "emp"
+            | "encrypt-master-password"
+            | "ep"
+            | "encrypt-password"
+            | "f"
+            | "file"
+            | "gs"
+            | "global-settings"
+            | "gt"
+            | "global-toolchains"
+            | "l"
+            | "log-file"
+            | "P"
+            | "activate-profiles"
+            | "pl"
+            | "projects"
+            | "rf"
+            | "resume-from"
+            | "s"
+            | "settings"
+            | "t"
+            | "toolchains"
+            | "T"
+            | "threads"
+    )
+    .then(ValueSpec::value)
+}
+
+fn mvn_tokens(args: &[String]) -> Vec<Token<'_>> {
+    tokenize_grammar(args, &mvn_takes_value, MVN_DIALECT)
+}
+
+/// True if any of `names` (Maven's long and short spelling of one option) is set.
+fn has_option(args: &[String], names: &[&str]) -> bool {
+    let tokens = mvn_tokens(args);
+    let scoped = before_dashdash(&tokens);
+    names.iter().any(|name| has_flag(scoped, MVN_DIALECT, name))
+}
+
+/// The goals in `args`, in order — including everything past `--`, which
+/// `DashDashRole::EndsOptions` has already made positionals.
+fn goals(args: &[String]) -> Vec<&str> {
+    mvn_tokens(args)
+        .iter()
+        .filter(|t| t.is_free_positional())
+        .map(|t| t.text)
+        .collect()
 }
 
 // ── Phase detection ─────────────────────────────────────────────────────────
@@ -158,15 +226,11 @@ pub enum MvnPhase {
     Passthrough, // clean, site, plugin goals, version/help, empty
 }
 
-/// Scan args left-to-right, skip flags + `-D…` system props, pick the LAST
-/// remaining token. If empty, plugin-form (`:`), or `clean`/`site` → Passthrough.
+/// The last goal decides the filter (`clean install` is a package build). Empty,
+/// plugin-form (`:`), or `clean`/`site` → Passthrough.
 pub fn detect_phase(args: &[String]) -> MvnPhase {
-    let last = args
-        .iter()
-        .filter(|a| !a.starts_with('-'))
-        .map(|s| s.as_str())
-        .next_back()
-        .unwrap_or("");
+    let goals = goals(args);
+    let last = goals.last().copied().unwrap_or("");
 
     if last.is_empty() || last.contains(':') {
         return MvnPhase::Passthrough;
@@ -178,6 +242,32 @@ pub fn detect_phase(args: &[String]) -> MvnPhase {
         "package" | "install" | "verify" | "deploy" => MvnPhase::Package,
         _ => MvnPhase::Passthrough,
     }
+}
+
+// ── Routing ─────────────────────────────────────────────────────────────────
+
+/// Which filter, if any, wraps a run. `Raw` is unfiltered passthrough.
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum MvnRoute {
+    Raw,
+    Quiet,
+    Filtered(MvnPhase),
+}
+
+/// `-X`/`-e` mean the user asked for the full output, so nothing is filtered.
+fn is_verbose(args: &[String]) -> bool {
+    has_option(args, &["X", "debug", "e", "errors"])
+}
+
+fn route(args: &[String]) -> MvnRoute {
+    if is_verbose(args) {
+        return MvnRoute::Raw;
+    }
+    let phase = detect_phase(args);
+    if !matches!(phase, MvnPhase::Passthrough) && is_quiet(args) {
+        return MvnRoute::Quiet;
+    }
+    MvnRoute::Filtered(phase)
 }
 
 // ── Stack-frame deny-list ────────────────────────────────────────────────────
@@ -437,8 +527,7 @@ fn is_lane_opener(core: &str) -> bool {
 /// Note: the `[ERROR]   Class.test:25 …` failures-summary entries (3-space
 /// indent, no `<<<` marker) do NOT match.
 fn is_per_test_subline(line: &str) -> bool {
-    line.starts_with("[ERROR] ")
-        && (line.contains("<<< FAILURE!") || line.contains("<<< ERROR!"))
+    line.starts_with("[ERROR] ") && (line.contains("<<< FAILURE!") || line.contains("<<< ERROR!"))
 }
 
 // ── English-footer guard ────────────────────────────────────────────────────
@@ -648,25 +737,23 @@ impl<'a> SurefireBlock<'a> {
         }
 
         if self.in_block {
-            if keyed {
-                if let Some(caps) = CLOSE.captures(core) {
-                    let fail = caps.get(1).map(|m| m.as_str() != "0").unwrap_or(false);
-                    let err = caps.get(2).map(|m| m.as_str() != "0").unwrap_or(false);
-                    if fail || err {
-                        let lines = std::mem::take(&mut self.block_lines);
-                        let running = self.block_running.take();
-                        self.in_block = false;
-                        return SurefireStep::FailingClose {
-                            running,
-                            lines,
-                            close: line,
-                        };
-                    }
-                    self.block_lines.clear();
-                    self.block_running = None;
+            if keyed && let Some(caps) = CLOSE.captures(core) {
+                let fail = caps.get(1).map(|m| m.as_str() != "0").unwrap_or(false);
+                let err = caps.get(2).map(|m| m.as_str() != "0").unwrap_or(false);
+                if fail || err {
+                    let lines = std::mem::take(&mut self.block_lines);
+                    let running = self.block_running.take();
                     self.in_block = false;
-                    return SurefireStep::Consumed;
+                    return SurefireStep::FailingClose {
+                        running,
+                        lines,
+                        close: line,
+                    };
                 }
+                self.block_lines.clear();
+                self.block_running = None;
+                self.in_block = false;
+                return SurefireStep::Consumed;
             }
             self.block_lines.push(line);
             return SurefireStep::Consumed;
@@ -1254,13 +1341,14 @@ fn drive_surefire_line<'a>(
     // repetition (cold-preclear finding, upstream PR #3199, third review
     // round: that inference silently shared Surefire's leftover budget with
     // a module whose only failures were integration-test ones).
-    if keyed {
-        if let Some(caps) = TEST_PLUGIN_BANNER.captures(core) {
-            summary.observe_plugin_banner(caps.get(1).map_or("", |m| m.as_str()));
-        }
+    if keyed && let Some(caps) = TEST_PLUGIN_BANNER.captures(core) {
+        summary.observe_plugin_banner(caps.get(1).map_or("", |m| m.as_str()));
     }
 
-    let step = lanes.get(idx).block.step(line, core, keyed, idx == ROOT_LANE, out);
+    let step = lanes
+        .get(idx)
+        .block
+        .step(line, core, keyed, idx == ROOT_LANE, out);
     // A lane inside a Surefire block has no pending javac continuations:
     // entering a block retires any stale armed claim, so a single lane can't
     // hold a permanent armed-vs-block tie against raw-line routing.
@@ -1275,7 +1363,10 @@ fn drive_surefire_line<'a>(
             close,
         } => {
             if classes.admit() {
-                lanes.get(idx).block.commit_failing(out, running, &lines, close);
+                lanes
+                    .get(idx)
+                    .block
+                    .commit_failing(out, running, &lines, close);
             } else {
                 lanes.get(idx).block.drop_failing();
             }
@@ -1317,7 +1408,12 @@ fn filter_surefire_with_cap(raw: &str, cap: usize, daemon: bool) -> String {
 
     for line in stripped.lines() {
         let (idx, core, keyed) = match drive_surefire_line(
-            &mut lanes, line, &mut classes, &mut summary, daemon, &mut out,
+            &mut lanes,
+            line,
+            &mut classes,
+            &mut summary,
+            daemon,
+            &mut out,
         ) {
             Some(v) => v,
             None => continue,
@@ -1565,7 +1661,12 @@ fn filter_package_with_cap(raw: &str, cap: usize, daemon: bool) -> String {
 
     for line in stripped.lines() {
         let (idx, core, keyed) = match drive_surefire_line(
-            &mut lanes, line, &mut classes, &mut summary, daemon, &mut out,
+            &mut lanes,
+            line,
+            &mut classes,
+            &mut summary,
+            daemon,
+            &mut out,
         ) {
             Some(v) => v,
             None => continue,
@@ -1711,8 +1812,7 @@ pub fn filter_quiet(raw: &str, daemon: bool) -> String {
         if CLOSE.is_match(core) {
             out.push_str(line);
             out.push('\n');
-            failure_trail =
-                core.contains("<<< FAILURE!") || core.contains("<<< ERROR!");
+            failure_trail = core.contains("<<< FAILURE!") || core.contains("<<< ERROR!");
             continue;
         }
 
@@ -1828,64 +1928,42 @@ pub fn run_daemon(args: &[String], verbose: u8) -> Result<i32> {
 }
 
 fn run_tool(args: &[String], daemon: bool, verbose: u8) -> Result<i32> {
-    // Verbose flags bypass filtering — user wants full output.
-    if args
-        .iter()
-        .any(|a| matches!(a.as_str(), "-X" | "--debug" | "-e" | "--errors"))
-    {
-        let osargs: Vec<OsString> = args.iter().map(OsString::from).collect();
-        return runner::run_passthrough(mvn_binary(daemon), &osargs, verbose);
-    }
-
     let tool = mvn_binary(daemon);
-    let args_display = args.join(" ");
+    let args_display = display_args(args);
 
-    // Quiet mode: standard footer guard can't fire (no `BUILD SUCCESS` line
-    // under `-q`). Route to `filter_quiet` for any non-passthrough phase so
-    // failure output gets framework frames + help boilerplate stripped.
-    if is_quiet(args) {
-        let phase = detect_phase(args);
-        if matches!(phase, MvnPhase::Passthrough) {
+    match route(args) {
+        MvnRoute::Raw | MvnRoute::Filtered(MvnPhase::Passthrough) => {
             let osargs: Vec<OsString> = args.iter().map(OsString::from).collect();
-            return runner::run_passthrough(tool, &osargs, verbose);
+            runner::run_passthrough(tool, &osargs, verbose)
         }
-        return runner::run_filtered(
+        MvnRoute::Quiet => runner::run_filtered(
             new_mvn_command(args, daemon),
             tool,
             &args_display,
             |raw: &str| filter_quiet(raw, daemon),
             RunOptions::with_tee("mvn_quiet"),
-        );
-    }
-
-    let phase = detect_phase(args);
-
-    match phase {
-        MvnPhase::Test => runner::run_filtered(
+        ),
+        MvnRoute::Filtered(MvnPhase::Test) => runner::run_filtered(
             new_mvn_command(args, daemon),
             tool,
             &args_display,
             move |raw: &str| filter_surefire(raw, daemon),
             RunOptions::with_tee("mvn_test"),
         ),
-        MvnPhase::Compile => runner::run_filtered(
+        MvnRoute::Filtered(MvnPhase::Compile) => runner::run_filtered(
             new_mvn_command(args, daemon),
             tool,
             &args_display,
             move |raw: &str| filter_compile(raw, daemon),
             RunOptions::with_tee("mvn_compile"),
         ),
-        MvnPhase::Package => runner::run_filtered(
+        MvnRoute::Filtered(MvnPhase::Package) => runner::run_filtered(
             new_mvn_command(args, daemon),
             tool,
             &args_display,
             move |raw: &str| filter_package(raw, daemon),
             RunOptions::with_tee("mvn_package"),
         ),
-        MvnPhase::Passthrough => {
-            let osargs: Vec<OsString> = args.iter().map(OsString::from).collect();
-            runner::run_passthrough(tool, &osargs, verbose)
-        }
     }
 }
 
@@ -1959,7 +2037,8 @@ mod tests {
         let i = include_str!("../../../tests/fixtures/mvnd_reactor_pass_raw.txt");
         let o = filter_package(i, true);
         assert!(
-            o.contains("Building child-a 1.0.0-SNAPSHOT") && o.contains("Building child-b 1.0.0-SNAPSHOT"),
+            o.contains("Building child-a 1.0.0-SNAPSHOT")
+                && o.contains("Building child-b 1.0.0-SNAPSHOT"),
             "genuine `[n/m]`-numbered module headers survive on tagged lanes; got:\n{o}"
         );
     }
@@ -2020,7 +2099,9 @@ mod tests {
                   \tat com.example.rtk.AFailTest.foo(AFailTest.java:10)\n\
                   [INFO] BUILD FAILURE\n";
         let o = filter_surefire(i, true);
-        let running = o.find("Running com.example.rtk.AFailTest").expect("Running kept");
+        let running = o
+            .find("Running com.example.rtk.AFailTest")
+            .expect("Running kept");
         let pipeline = o
             .find("Running the widget pipeline for tenant acme")
             .expect("app-log line kept, buffered inside the block");
@@ -2058,7 +2139,8 @@ mod tests {
     /// exactly there.
     #[test]
     fn daemon_building_applog_dropped_with_no_block_open() {
-        let mut i = String::from("[INFO] Scanning for projects...\n[INFO] Building web 2.1.0 [1/1]\n");
+        let mut i =
+            String::from("[INFO] Scanning for projects...\n[INFO] Building web 2.1.0 [1/1]\n");
         for n in 0..10 {
             i.push_str(&format!(
                 "[pool-1] [INFO] Building segment {n} of the data pipeline\n"
@@ -2098,7 +2180,10 @@ mod tests {
             ("same coordinates", "surefire:3.5.5:test (default-test)"),
             ("different version", "surefire:3.2.2:test (default-test)"),
             ("different execution id", "surefire:3.5.5:test (unit-tests)"),
-            ("legacy spelling", "maven-surefire-plugin:2.22.2:test (default-test)"),
+            (
+                "legacy spelling",
+                "maven-surefire-plugin:2.22.2:test (default-test)",
+            ),
         ] {
             let i = format!(
                 "[INFO] Scanning for projects...\n{}{}[INFO] BUILD FAILURE\n",
@@ -2338,11 +2423,13 @@ mod tests {
         // kept — pre-fix (stale open block swallowing the header/entries)
         // all 4 would survive.
         assert!(
-            o.contains("AMultiFailTest.first:10 a1 boom") && o.contains("BMultiFailTest.first:10 b1 boom"),
+            o.contains("AMultiFailTest.first:10 a1 boom")
+                && o.contains("BMultiFailTest.first:10 b1 boom"),
             "the first entry of each module's summary is kept; got:\n{o}"
         );
         assert!(
-            !o.contains("AMultiFailTest.second:20 a2 boom") && !o.contains("BMultiFailTest.second:20 b2 boom"),
+            !o.contains("AMultiFailTest.second:20 a2 boom")
+                && !o.contains("BMultiFailTest.second:20 b2 boom"),
             "the second entry of each module's summary is capped, not kept; got:\n{o}"
         );
 
@@ -2357,11 +2444,15 @@ mod tests {
             !o.contains("… +2 more failures"),
             "no module's tail should absorb the other's drop; got:\n{o}"
         );
-        let a_header = o.find("[child-a] [ERROR] Failures:").expect("child-a header kept");
+        let a_header = o
+            .find("[child-a] [ERROR] Failures:")
+            .expect("child-a header kept");
         let a_agg = o
             .find("[child-a] [ERROR] Tests run: 2, Failures: 2, Errors: 0, Skipped: 0\n")
             .expect("child-a AGG kept");
-        let b_header = o.find("[child-b] [ERROR] Failures:").expect("child-b header kept");
+        let b_header = o
+            .find("[child-b] [ERROR] Failures:")
+            .expect("child-b header kept");
         let b_agg = o
             .rfind("[child-b] [ERROR] Tests run: 2, Failures: 2, Errors: 0, Skipped: 0\n")
             .expect("child-b AGG kept");
@@ -2376,13 +2467,18 @@ mod tests {
 
         // Ordering: banners, Running, and the capped summary all survive in
         // a sane relative order, ending at the reactor footer.
-        let banner_a = o.find("< com.example.rtk:child-a >").expect("child-a banner kept");
+        let banner_a = o
+            .find("< com.example.rtk:child-a >")
+            .expect("child-a banner kept");
         let running_a = o
             .find("Running com.example.rtk.AMultiFailTest")
             .expect("child-a Running kept");
         let build_failure = o.rfind("BUILD FAILURE").expect("footer kept");
         assert!(
-            banner_a < running_a && running_a < a_header && a_header < a_agg && a_agg < build_failure,
+            banner_a < running_a
+                && running_a < a_header
+                && a_header < a_agg
+                && a_agg < build_failure,
             "banner < Running < header < AGG < footer; got:\n{o}"
         );
     }
@@ -2515,10 +2611,7 @@ mod tests {
     }
     #[test]
     fn phase_plugin_goal_passthrough() {
-        assert_eq!(
-            detect_phase(&s(["dependency:tree"])),
-            MvnPhase::Passthrough
-        );
+        assert_eq!(detect_phase(&s(["dependency:tree"])), MvnPhase::Passthrough);
     }
     #[test]
     fn phase_empty_passthrough() {
@@ -2540,6 +2633,126 @@ mod tests {
     #[test]
     fn phase_help() {
         assert_eq!(detect_phase(&s(["--help"])), MvnPhase::Passthrough);
+    }
+
+    // ── Separate-token option values are not goals ───────────────────────────
+
+    /// `-f pom.xml`, `-pl core`, `-P prod`, `-T 1C`, `-l build.log`: the value is
+    /// a separate argument, and reading it as the last goal dropped the filter.
+    #[test]
+    fn option_value_after_the_goal_is_not_the_goal() {
+        for (args, phase) in [
+            (s(["test", "-f", "pom.xml"]), MvnPhase::Test),
+            (s(["test", "-pl", "core"]), MvnPhase::Test),
+            (s(["verify", "-P", "prod"]), MvnPhase::Package),
+            (s(["clean", "test", "-T", "1C"]), MvnPhase::Test),
+            (s(["install", "-l", "build.log"]), MvnPhase::Package),
+            (s(["test", "-s", "settings.xml"]), MvnPhase::Test),
+            (s(["test", "-rf", "core"]), MvnPhase::Test),
+        ] {
+            assert_eq!(route(&args), MvnRoute::Filtered(phase), "for {args:?}");
+        }
+    }
+
+    /// `-D test` defines a property named `test`; Maven is then left with no goal.
+    #[test]
+    fn separate_define_value_is_not_a_goal() {
+        assert_eq!(
+            route(&s(["-D", "test"])),
+            MvnRoute::Filtered(MvnPhase::Passthrough)
+        );
+    }
+
+    /// Attached values stay attached: `-DskipTests`, `-Pprod`, `-T1C`, `-f=pom.xml`.
+    #[test]
+    fn attached_option_values_do_not_swallow_the_goal() {
+        for args in [
+            s(["-DskipTests", "test"]),
+            s(["-Pprod", "test"]),
+            s(["-T1C", "test"]),
+            s(["-f=pom.xml", "test"]),
+            s(["--define", "skipTests=true", "test"]),
+        ] {
+            assert_eq!(
+                route(&args),
+                MvnRoute::Filtered(MvnPhase::Test),
+                "for {args:?}"
+            );
+        }
+    }
+
+    /// Maven's multi-character short options are atomic: `-pl` is `--projects`,
+    /// not a POSIX cluster whose `l` would be `--log-file` and eat `core`.
+    #[test]
+    fn multi_char_short_options_do_not_cluster() {
+        assert_eq!(goals(&s(["-pl", "core", "test"])), vec!["test"]);
+        assert_eq!(
+            goals(&s(["-am", "-amd", "-ntp", "install"])),
+            vec!["install"]
+        );
+    }
+
+    // ── `--` ends option parsing ─────────────────────────────────────────────
+
+    /// Verified against Maven 3.9.16: `mvn -- -X validate` reports `-X` as an
+    /// unknown lifecycle phase, so `--` ends option parsing rather than forwarding.
+    #[test]
+    fn everything_after_double_dash_is_a_goal() {
+        assert_eq!(
+            goals(&s(["test", "--", "-f", "pom.xml"])),
+            vec!["test", "-f", "pom.xml"]
+        );
+        assert_eq!(
+            route(&s(["test", "--", "-q"])),
+            MvnRoute::Filtered(MvnPhase::Passthrough)
+        );
+        assert_eq!(
+            route(&s(["--", "test"])),
+            MvnRoute::Filtered(MvnPhase::Test)
+        );
+    }
+
+    // ── Routing ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn verbose_and_quiet_options_pick_their_route() {
+        assert_eq!(route(&s(["test", "-X"])), MvnRoute::Raw);
+        assert_eq!(route(&s(["test", "--errors"])), MvnRoute::Raw);
+        assert_eq!(route(&s(["test", "-q"])), MvnRoute::Quiet);
+        assert_eq!(
+            route(&s(["clean", "-q"])),
+            MvnRoute::Filtered(MvnPhase::Passthrough)
+        );
+    }
+
+    /// `-ep`/`-emp` are their own options, not `-e` with something appended.
+    #[test]
+    fn encrypt_options_are_not_the_errors_flag() {
+        assert_eq!(
+            route(&s(["-ep", "secret", "test"])),
+            MvnRoute::Filtered(MvnPhase::Test)
+        );
+        assert_eq!(
+            route(&s(["-emp", "secret", "test"])),
+            MvnRoute::Filtered(MvnPhase::Test)
+        );
+    }
+
+    /// `rtk mvnd` routes through this module, so it shares the argument handling
+    /// and forwards argv untouched.
+    #[test]
+    fn mvnd_shares_argument_handling_and_argv() {
+        let args = s(["test", "-f", "pom.xml"]);
+        assert_eq!(route(&args), MvnRoute::Filtered(MvnPhase::Test));
+        for daemon in [false, true] {
+            let cmd = new_mvn_command(&args, daemon);
+            let argv: Vec<String> = cmd
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(argv, args, "daemon={daemon}");
+        }
+        assert_eq!(mvn_binary(true), "mvnd");
     }
 
     // ── Binary selection ─────────────────────────────────────────────────────
@@ -2642,7 +2855,9 @@ mod tests {
             "[child-a] [ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0, Time elapsed:"
         ));
         assert!(o.contains("parallel reactor diagnostic ==> expected: <1> but was: <2>"));
-        assert!(o.contains("at com.example.rtk.ParallelFailTest.reactorDiagnostic(ParallelFailTest.java:10)"));
+        assert!(o.contains(
+            "at com.example.rtk.ParallelFailTest.reactorDiagnostic(ParallelFailTest.java:10)"
+        ));
         assert!(o.contains("[child-a] [ERROR]   ParallelFailTest.reactorDiagnostic:10"));
         assert!(o.contains("[child-a] [ERROR] Tests run: 3, Failures: 1, Errors: 0, Skipped: 0"));
         // Reactor summary keeps the per-module verdicts.
@@ -2888,7 +3103,9 @@ mod tests {
         // child-b's header is legitimately empty (its only entry lost the
         // race) — but must never look *complete*: its own tail must follow
         // directly, not vanish silently.
-        let b_header = o.find("[child-b] [ERROR] Failures:").expect("child-b header kept");
+        let b_header = o
+            .find("[child-b] [ERROR] Failures:")
+            .expect("child-b header kept");
         let b_agg = o
             .find("[child-b] [ERROR] Tests run:")
             .expect("child-b AGG kept");
@@ -2964,7 +3181,9 @@ mod tests {
         for n in 1..=12 {
             i.push_str(&format!("[ERROR]   ITTest.case{n}:{n} boom it{n}\n"));
         }
-        i.push_str("[ERROR] Tests run: 12, Failures: 12, Errors: 0, Skipped: 0\n[INFO] BUILD FAILURE\n");
+        i.push_str(
+            "[ERROR] Tests run: 12, Failures: 12, Errors: 0, Skipped: 0\n[INFO] BUILD FAILURE\n",
+        );
 
         let o = filter_package(&i, false);
         assert_eq!(
@@ -3087,7 +3306,9 @@ mod tests {
         for n in 1..=12 {
             i.push_str(&format!("[ERROR]   ITTest.case{n}:{n} boom it{n}\n"));
         }
-        i.push_str("[ERROR] Tests run: 0, Failures: 0, Errors: 12, Skipped: 0\n[INFO] BUILD FAILURE\n");
+        i.push_str(
+            "[ERROR] Tests run: 0, Failures: 0, Errors: 12, Skipped: 0\n[INFO] BUILD FAILURE\n",
+        );
 
         let o = filter_package(&i, false);
         assert_eq!(
@@ -3519,7 +3740,10 @@ mod tests {
     /// has no `[WARNING]` branch but shares the same fall-through reset).
     fn assert_warning_interloper_does_not_disarm_continuation(filter: fn(&str) -> String) {
         const WARNING_INTERLOPER: [&str; 1] = ["[main] [WARNING] connection pool exhausted"];
-        for (n, m) in merges(&SWEEP_COMPILE_A, &WARNING_INTERLOPER).iter().enumerate() {
+        for (n, m) in merges(&SWEEP_COMPILE_A, &WARNING_INTERLOPER)
+            .iter()
+            .enumerate()
+        {
             let i = sweep_input(m);
             let o = filter(&i);
             assert!(
@@ -3562,7 +3786,10 @@ mod tests {
     /// position of the compile-error sequence, on all three filter paths.
     fn assert_error_interloper_does_not_disarm_continuation(filter: fn(&str) -> String) {
         const ERROR_INTERLOPER: [&str; 1] = ["[main] [ERROR] connection pool exhausted"];
-        for (n, m) in merges(&SWEEP_COMPILE_A, &ERROR_INTERLOPER).iter().enumerate() {
+        for (n, m) in merges(&SWEEP_COMPILE_A, &ERROR_INTERLOPER)
+            .iter()
+            .enumerate()
+        {
             let i = sweep_input(m);
             let o = filter(&i);
             assert!(
@@ -3745,8 +3972,7 @@ mod tests {
              [INFO] BUILD FAILURE\n";
         let o = filter(i);
         assert!(
-            o.contains("symbol:   variable bar")
-                && o.contains("location: class com.example.rtk.A"),
+            o.contains("symbol:   variable bar") && o.contains("location: class com.example.rtk.A"),
             "ambiguous continuations preserved verbatim; got:\n{o}"
         );
     }
@@ -3864,11 +4090,7 @@ mod tests {
             "passing-test Running line dropped; got:\n{}",
             o
         );
-        assert!(
-            o.contains("BUILD SUCCESS"),
-            "footer preserved; got:\n{}",
-            o
-        );
+        assert!(o.contains("BUILD SUCCESS"), "footer preserved; got:\n{}", o);
         assert!(
             o.contains("Tests run: 977, Failures: 0"),
             "aggregate preserved; got:\n{}",
@@ -3914,11 +4136,7 @@ mod tests {
             "2.x ` - in ` close-line matched; passing block dropped; got:\n{}",
             o
         );
-        assert!(
-            o.contains("BUILD SUCCESS"),
-            "footer preserved; got:\n{}",
-            o
-        );
+        assert!(o.contains("BUILD SUCCESS"), "footer preserved; got:\n{}", o);
     }
 
     /// 3.x WARNING-prefixed close line (class with only skipped tests) must
@@ -3949,8 +4167,16 @@ mod tests {
                  \n\
                  [INFO] BUILD FAILURE\n";
         let o = filter_surefire(i, false);
-        assert!(o.contains("AssertionFailedError"), "exception preserved; got:\n{}", o);
-        assert!(o.contains("at x.Foo.bar"), "user frame preserved; got:\n{}", o);
+        assert!(
+            o.contains("AssertionFailedError"),
+            "exception preserved; got:\n{}",
+            o
+        );
+        assert!(
+            o.contains("at x.Foo.bar"),
+            "user frame preserved; got:\n{}",
+            o
+        );
         assert!(
             !o.contains("at org.junit."),
             "framework frame stripped in trail; got:\n{}",
@@ -4234,7 +4460,11 @@ mod tests {
     fn surefire_keeps_compile_continuation_on_test_phase() {
         let i = include_str!("../../../tests/fixtures/mvn_test_compile_fail_slice_raw.txt");
         let o = filter_surefire(i, false);
-        assert!(o.contains("cannot find symbol"), "ERROR line preserved; got:\n{}", o);
+        assert!(
+            o.contains("cannot find symbol"),
+            "ERROR line preserved; got:\n{}",
+            o
+        );
         assert!(
             o.contains("symbol:   variable bar"),
             "indented `symbol:` continuation preserved; got:\n{}",
@@ -4256,7 +4486,11 @@ mod tests {
     fn package_still_keeps_compile_error_continuation_after_refactor() {
         let i = include_str!("../../../tests/fixtures/mvn_compile_error_slice_raw.txt");
         let o = filter_package(i, false);
-        assert!(o.contains("cannot find symbol"), "ERROR line preserved; got:\n{}", o);
+        assert!(
+            o.contains("cannot find symbol"),
+            "ERROR line preserved; got:\n{}",
+            o
+        );
         assert!(
             o.contains("symbol:   variable bar"),
             "indented `symbol:` continuation preserved; got:\n{}",
@@ -4393,8 +4627,8 @@ mod tests {
 
     #[test]
     fn package_handles_crlf_line_endings() {
-        let i_lf = include_str!("../../../tests/fixtures/mvn_install_slice_raw.txt")
-            .replace("\r\n", "\n");
+        let i_lf =
+            include_str!("../../../tests/fixtures/mvn_install_slice_raw.txt").replace("\r\n", "\n");
         let o_lf = filter_package(&i_lf, false);
         let i_crlf = i_lf.replace('\n', "\r\n");
         let o_crlf = filter_package(&i_crlf, false);
@@ -4597,11 +4831,7 @@ mod tests {
             "second per-module SUCCESS row preserved; got:\n{}",
             o
         );
-        assert!(
-            o.contains("BUILD SUCCESS"),
-            "footer preserved; got:\n{}",
-            o
-        );
+        assert!(o.contains("BUILD SUCCESS"), "footer preserved; got:\n{}", o);
     }
 
     /// `mvn install` on a multi-module reactor build where one module fails
@@ -4638,7 +4868,11 @@ mod tests {
             "resume hint preserved (actionable signal); got:\n{}",
             o
         );
-        assert!(!o.contains("[Help 1]"), "help boilerplate stripped; got:\n{}", o);
+        assert!(
+            !o.contains("[Help 1]"),
+            "help boilerplate stripped; got:\n{}",
+            o
+        );
         assert!(
             !o.contains("Re-run Maven"),
             "re-run hint stripped; got:\n{}",
@@ -4735,7 +4969,9 @@ mod tests {
     #[test]
     #[ignore]
     fn print_savings_summary() {
-        let pf = gunzip(include_bytes!("../../../tests/fixtures/mvn_test_pass_full_raw.txt.gz"));
+        let pf = gunzip(include_bytes!(
+            "../../../tests/fixtures/mvn_test_pass_full_raw.txt.gz"
+        ));
         let pf_out = filter_surefire(&pf, false);
         let pf_in_tok = count_tokens(&pf);
         let pf_out_tok = count_tokens(&pf_out);
@@ -4745,7 +4981,9 @@ mod tests {
             pf_in_tok, pf_out_tok, pf_s
         );
 
-        let inst = gunzip(include_bytes!("../../../tests/fixtures/mvn_install_full_raw.txt.gz"));
+        let inst = gunzip(include_bytes!(
+            "../../../tests/fixtures/mvn_install_full_raw.txt.gz"
+        ));
         let inst_out = filter_package(&inst, false);
         let inst_in_tok = count_tokens(&inst);
         let inst_out_tok = count_tokens(&inst_out);
@@ -4800,10 +5038,17 @@ mod tests {
         assert!(is_quiet(&s(["--quiet", "test"])));
     }
 
+    /// Verified against Maven 3.9.16: `mvn -quiet validate` runs quiet, so the
+    /// single-dash spelling of a long option is the option. Case is not folded.
+    #[test]
+    fn quiet_detects_single_dash_long_flag() {
+        assert!(is_quiet(&s(["-quiet", "test"])));
+    }
+
     #[test]
     fn quiet_does_not_match_unrelated_flags() {
         assert!(!is_quiet(&s(["-Q", "test"])));
-        assert!(!is_quiet(&s(["-quiet", "test"])));
+        assert!(!is_quiet(&s(["--QUIET", "test"])));
         assert!(!is_quiet(&s(["-B", "test"])));
     }
 
@@ -4961,7 +5206,10 @@ mod tests {
         // after — `lane_rest_level`'s documented other spelling of the
         // daemon-prefixed trail terminator, alongside `[tag] [LEVEL] `).
         // Pinned so the "both spellings" contract can't rot.
-        assert_eq!(split_lane("[child-a] [INFO]", true), (Some("child-a"), "[INFO]"));
+        assert_eq!(
+            split_lane("[child-a] [INFO]", true),
+            (Some("child-a"), "[INFO]")
+        );
     }
 
     // ── daemon gate: plain `mvn` never routes through the lane layer ────────
@@ -4991,7 +5239,9 @@ mod tests {
             .find("Running the widget pipeline")
             .expect("app-log Running-shaped line kept");
         let db = o.find("connecting to db").expect("first context line kept");
-        let refused = o.find("connection refused").expect("second context line kept");
+        let refused = o
+            .find("connection refused")
+            .expect("second context line kept");
         let footer = o.rfind("BUILD FAILURE").expect("footer kept");
         assert!(
             pipeline < db && db < refused && refused < footer,
@@ -5013,7 +5263,9 @@ mod tests {
     fn timestamp_tag_does_not_mint_phantom_lanes_in_plain_mvn() {
         let mut i = String::from("[INFO] Scanning for projects...\n");
         for n in 0..300 {
-            i.push_str(&format!("[2026-08-29 10:00:00] [INFO] Building segment {n}\n"));
+            i.push_str(&format!(
+                "[2026-08-29 10:00:00] [INFO] Building segment {n}\n"
+            ));
         }
         i.push_str("[INFO] BUILD SUCCESS\n");
         let o = filter_surefire(&i, false);
@@ -5071,7 +5323,8 @@ mod tests {
                   [INFO] BUILD FAILURE\n";
         let o = filter_package_with_cap(i, 2, true);
         assert!(
-            o.contains("AMultiFailTest.one:10 a1 boom") && o.contains("AMultiFailTest.two:20 a2 boom"),
+            o.contains("AMultiFailTest.one:10 a1 boom")
+                && o.contains("AMultiFailTest.two:20 a2 boom"),
             "child-a's first two entries fill its Surefire-phase budget; got:\n{o}"
         );
         assert!(
@@ -5138,7 +5391,8 @@ mod tests {
                   [INFO] BUILD FAILURE\n";
         let o = filter_package_with_cap(i, 2, true);
         assert!(
-            o.contains("AMultiFailTest.one:10 a1 boom") && o.contains("AMultiFailTest.two:20 a2 boom"),
+            o.contains("AMultiFailTest.one:10 a1 boom")
+                && o.contains("AMultiFailTest.two:20 a2 boom"),
             "child-a's first two entries fill its Surefire-phase budget; got:\n{o}"
         );
         assert!(
@@ -5335,7 +5589,9 @@ mod tests {
                   [child-a] [INFO] \n\
                   [INFO] BUILD FAILURE\n";
         let o = filter_surefire(i, true);
-        let running = o.find("Running com.example.rtk.SlowTest").expect("Running kept");
+        let running = o
+            .find("Running com.example.rtk.SlowTest")
+            .expect("Running kept");
         let server = o
             .find("[Server] [ERROR] connection refused")
             .expect("app log line kept, buffered inside the block");
@@ -5428,7 +5684,9 @@ mod tests {
         // unrelated 255-way armed tie in `raw_owner` instead of exercising
         // the fix it targets.
         for n in 0..(MAX_LANES + 50) {
-            i.push_str(&format!("[tag{n}] [INFO] Running com.example.rtk.Tag{n}Test\n"));
+            i.push_str(&format!(
+                "[tag{n}] [INFO] Running com.example.rtk.Tag{n}Test\n"
+            ));
         }
         // One more never-seen tag, past the cap: a genuine failing test
         // class (`Running` + failing close), not just a bare `[ERROR]`
@@ -5465,8 +5723,3 @@ mod tests {
         );
     }
 }
-
-
-
-
-

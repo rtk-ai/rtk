@@ -47,8 +47,10 @@ bench() {
   local unix_cmd="$2"
   local rtk_cmd="$3"
 
-  unix_out=$(eval "$unix_cmd" 2>/dev/null || true)
-  rtk_out=$(eval "$rtk_cmd" 2>/dev/null || true)
+  # rtk forwards the stderr it does not filter, so measuring only stdout would book
+  # a passed-through stream as if the filter had removed it.
+  unix_out=$(eval "$unix_cmd" 2>&1 || true)
+  rtk_out=$(eval "$rtk_cmd" 2>&1 || true)
 
   unix_tokens=$(count_tokens "$unix_out")
   rtk_tokens=$(count_tokens "$rtk_out")
@@ -213,6 +215,10 @@ count_find_names() {
     /^[0-9]+F [0-9]+D:$/ { next }   # "356F 63D:" summary header
     /^\+[0-9]+ more$/    { next }   # "+256 more" truncation marker
     /^ext: /             { next }   # extension histogram footer
+    /^\.\.\. \(/          { next }   # "... (8 filtered)" disclosure note
+    /^\[see remaining: / { next }   # tee pointer for the disclosed entries
+    /^\[\+[0-9]+ hidden: / { next }   # sqlite recall pointer, same role
+    /^\[full output: /   { next }   # sqlite recall pointer for a whole capture
     NF == 0              { next }
     { n += NF - ($1 ~ /\/$/ ? 1 : 0) }   # grouped lines lead with "dir/"
     END { print n + 0 }
@@ -226,6 +232,10 @@ count_find_total() {
     /^[0-9]+F [0-9]+D:$/ { total = $1 + 0; next }
     /^\+[0-9]+ more$/    { more = substr($1, 2) + 0; next }
     /^ext: /             { next }
+    /^\.\.\. \(/          { next }
+    /^\[see remaining: / { next }
+    /^\[\+[0-9]+ hidden: / { next }
+    /^\[full output: /   { next }
     NF == 0              { next }
     { shown += NF - ($1 ~ /\/$/ ? 1 : 0) }
     END { print (total ? total : shown + more) + 0 }
@@ -279,11 +289,16 @@ bench "grep -c" "grep -ron 'fn ' src/ || true" "$RTK grep -rc 'fn ' src/"
 # ===================
 # rg (native ripgrep, recursive by default, same output filter)
 # ===================
-section "rg"
-bench "rg fn" "rg -n 'fn ' src/ || true" "$RTK rg 'fn ' src/"
-bench "rg struct" "rg -n 'struct ' src/ || true" "$RTK rg 'struct ' src/"
-bench "rg -l files" "rg -l 'fn ' src/ || true" "$RTK rg -l 'fn ' src/"
-bench "rg -c count" "rg -c 'fn ' src/ || true" "$RTK rg -c 'fn ' src/"
+if command -v rg &>/dev/null; then
+  section "rg"
+  bench "rg fn" "rg -n 'fn ' src/ || true" "$RTK rg 'fn ' src/"
+  bench "rg struct" "rg -n 'struct ' src/ || true" "$RTK rg 'struct ' src/"
+  bench "rg -l files" "rg -l 'fn ' src/ || true" "$RTK rg -l 'fn ' src/"
+  bench "rg -c count" "rg -c 'fn ' src/ || true" "$RTK rg -c 'fn ' src/"
+else
+  echo ""
+  echo "⏭️  rg (not installed, skipped)"
+fi
 
 # ===================
 # json
@@ -675,10 +690,15 @@ module bench
 go 1.21
 GOEOF
 
+  # The ignored error returns are deliberate: this row only measures the filter
+  # if errcheck has findings to compress.
   cat > main.go << 'GOEOF'
 package main
 
-import "fmt"
+import (
+    "fmt"
+    "os"
+)
 
 func Add(a, b int) int {
     return a + b
@@ -688,9 +708,40 @@ func Multiply(a, b int) int {
     return a * b
 }
 
+func readConfig() {
+    f, _ := os.Open("config.yml")
+    defer f.Close()
+    fmt.Println(f != nil)
+}
+
+func writeCache() {
+    os.Remove("cache.tmp")
+    os.Chmod("cache.tmp", 0o600)
+}
+
+func exportEnv() {
+    os.Setenv("BENCH_MODE", "on")
+    os.Unsetenv("BENCH_DEBUG")
+}
+
+func reportStatus() {
+    fmt.Fprintf(os.Stderr, "status: %s\n", "ok")
+    fmt.Fprintln(os.Stderr, "done")
+}
+
+func rotateLogs() {
+    os.Truncate("bench.log", 0)
+    os.Rename("bench.log", "bench.log.1")
+}
+
 func main() {
     fmt.Println(Add(2, 3))
     fmt.Println(Multiply(4, 5))
+    readConfig()
+    writeCache()
+    exportEnv()
+    reportStatus()
+    rotateLogs()
 }
 GOEOF
 

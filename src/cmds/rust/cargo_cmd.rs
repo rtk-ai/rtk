@@ -2,6 +2,7 @@
 
 use crate::core::args_utils;
 use crate::core::runner;
+use crate::core::shell::display_args;
 use crate::core::stream::{BlockHandler, BlockStreamFilter, StreamFilter};
 use crate::core::truncate::{CAP_ERRORS, CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{join_with_overflow, resolved_command, truncate};
@@ -98,11 +99,8 @@ impl BlockHandler for CargoBuildHandler {
 
     fn format_summary(&self, exit_code: i32, raw: &str) -> Option<String> {
         if self.error_count == 0 && self.warnings == 0 && exit_code == 0 {
-            let summary = cargo_build_success_line(
-                self.compiled,
-                self.finished_line.as_deref(),
-                self.label,
-            );
+            let summary =
+                cargo_build_success_line(self.compiled, self.finished_line.as_deref(), self.label);
             return Some(crate::core::guard::never_worse(raw, &summary).to_string());
         }
         // The streamed path only runs for non-json build/check; error blocks are
@@ -177,12 +175,11 @@ impl CargoTestHandler {
             }
         }
 
-        if all_parsed {
-            if let Some(agg) = aggregated {
-                if agg.suites > 0 {
-                    return Some(format!("{}\n", agg.format_compact()));
-                }
-            }
+        if all_parsed
+            && let Some(agg) = aggregated
+            && agg.suites > 0
+        {
+            return Some(format!("{}\n", agg.format_compact()));
         }
 
         // Fallback: show raw summary lines
@@ -290,7 +287,7 @@ where
     runner::run_filtered(
         cmd,
         &format!("cargo {}", subcommand),
-        &restored_args.join(" "),
+        &display_args(&restored_args),
         filter_fn,
         runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
     )
@@ -322,7 +319,7 @@ where
     runner::run_filtered_with_exit(
         cmd,
         &format!("cargo {}", subcommand),
-        &restored_args.join(" "),
+        &display_args(&restored_args),
         filter_fn,
         runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
     )
@@ -349,7 +346,7 @@ fn run_cargo_streamed(
     runner::run_streamed(
         cmd,
         &format!("cargo {}", subcommand),
-        &restored_args.join(" "),
+        &display_args(&restored_args),
         filter,
         runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
     )
@@ -361,10 +358,10 @@ fn has_json_message_format(args: &[String]) -> bool {
     while let Some(arg) = iter.next() {
         if let Some(val) = arg.strip_prefix("--message-format=") {
             json = val.contains("json");
-        } else if arg == "--message-format" {
-            if let Some(val) = iter.next() {
-                json = val.contains("json");
-            }
+        } else if arg == "--message-format"
+            && let Some(val) = iter.next()
+        {
+            json = val.contains("json");
         }
     }
     json
@@ -380,7 +377,9 @@ fn run_build(args: &[String], verbose: u8) -> Result<i32> {
         "build",
         args,
         verbose,
-        Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label("build"))),
+        Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label(
+            "build",
+        ))),
     )
 }
 
@@ -414,7 +413,9 @@ fn run_check(args: &[String], verbose: u8) -> Result<i32> {
         "check",
         args,
         verbose,
-        Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label("check"))),
+        Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label(
+            "check",
+        ))),
     )
 }
 
@@ -673,10 +674,10 @@ fn filter_cargo_nextest(output: &str) -> String {
 
         // Parse binary count from Starting line
         if trimmed.starts_with("Starting") {
-            if let Some(caps) = starting_re.captures(trimmed) {
-                if let Some(m) = caps.get(1) {
-                    binaries = m.as_str().parse().unwrap_or(0);
-                }
+            if let Some(caps) = starting_re.captures(trimmed)
+                && let Some(m) = caps.get(1)
+            {
+                binaries = m.as_str().parse().unwrap_or(0);
             }
             continue;
         }
@@ -888,7 +889,11 @@ fn extract_json_diagnostics(raw: &str) -> JsonDiagnostics {
             continue;
         }
         if let Some(rendered) = msg.rendered {
-            bucket.push(crate::core::utils::strip_ansi(&rendered).trim_end().to_string());
+            bucket.push(
+                crate::core::utils::strip_ansi(&rendered)
+                    .trim_end()
+                    .to_string(),
+            );
         } else if !msg.message.is_empty() {
             bucket.push(msg.message);
         }
@@ -896,7 +901,11 @@ fn extract_json_diagnostics(raw: &str) -> JsonDiagnostics {
     JsonDiagnostics { errors, warnings }
 }
 
-fn merge_diag_counts(error_count: usize, warnings: usize, json: &JsonDiagnostics) -> (usize, usize) {
+fn merge_diag_counts(
+    error_count: usize,
+    warnings: usize,
+    json: &JsonDiagnostics,
+) -> (usize, usize) {
     (
         error_count.max(json.errors.len()),
         warnings.max(json.warnings.len()),
@@ -999,7 +1008,8 @@ fn filter_cargo_build_labeled(output: &str, label: &'static str, exit_code: i32)
     let (errors, warnings) = merge_diag_counts(handler.error_count, handler.warnings, &json);
 
     if errors == 0 && warnings == 0 && exit_code == 0 {
-        let summary = cargo_build_success_line(handler.compiled, handler.finished_line.as_deref(), label);
+        let summary =
+            cargo_build_success_line(handler.compiled, handler.finished_line.as_deref(), label);
         return crate::core::guard::never_worse(output, &summary).to_string();
     }
 
@@ -1199,12 +1209,11 @@ pub(crate) fn filter_cargo_test(output: &str) -> String {
         }
 
         // If all lines parsed successfully and we have at least one suite, return compact format
-        if all_parsed {
-            if let Some(agg) = aggregated {
-                if agg.suites > 0 {
-                    return agg.format_compact();
-                }
-            }
+        if all_parsed
+            && let Some(agg) = aggregated
+            && agg.suites > 0
+        {
+            return agg.format_compact();
         }
 
         // Fallback: use original behavior if regex failed
@@ -1221,7 +1230,10 @@ pub(crate) fn filter_cargo_test(output: &str) -> String {
             result.push_str(&format!("{}. {}\n", i + 1, truncate(failure, 200)));
         }
         if failures.len() > MAX_FAILURES {
-            result.push_str(&format!("\n… +{} more failures\n", failures.len() - MAX_FAILURES));
+            result.push_str(&format!(
+                "\n… +{} more failures\n",
+                failures.len() - MAX_FAILURES
+            ));
             let all_failures = failures.join("\n\n");
             if let Some(hint) =
                 crate::core::tee::force_tee_hint(&all_failures, "cargo-test-failures")
@@ -1395,8 +1407,7 @@ fn filter_cargo_clippy(output: &str) -> String {
                 .map(|b| b.join("\n"))
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            if let Some(hint) =
-                crate::core::tee::force_tee_hint(&all_blocks, "cargo-clippy-errors")
+            if let Some(hint) = crate::core::tee::force_tee_hint(&all_blocks, "cargo-clippy-errors")
             {
                 result.push_str(&format!("  {}\n", hint));
             }
@@ -2479,7 +2490,11 @@ error: aborting due to 1 previous error
         );
         let result = filter_cargo_clippy_json(input, 0);
         assert!(result.contains("unused variable"), "got: {}", result);
-        assert!(result.contains("cargo clippy: 0 errors, 1 warnings"), "got: {}", result);
+        assert!(
+            result.contains("cargo clippy: 0 errors, 1 warnings"),
+            "got: {}",
+            result
+        );
     }
 
     #[test]
@@ -2496,7 +2511,11 @@ error: aborting due to 1 previous error
             "a failed build must not be reported as compiled: {}",
             result
         );
-        assert!(result.contains("cargo build: failed (exit 101)"), "got: {}", result);
+        assert!(
+            result.contains("cargo build: failed (exit 101)"),
+            "got: {}",
+            result
+        );
     }
 
     #[test]
@@ -2548,7 +2567,6 @@ error: aborting due to 1 previous error
         );
     }
 
-
     #[test]
     fn test_extract_json_diagnostics_skips_generated_summary() {
         let output = concat!(
@@ -2560,7 +2578,11 @@ error: aborting due to 1 previous error
             "\n",
         );
         let json = extract_json_diagnostics(output);
-        assert_eq!(json.warnings.len(), 1, "generated summary must not inflate the count");
+        assert_eq!(
+            json.warnings.len(),
+            1,
+            "generated summary must not inflate the count"
+        );
         assert!(
             !json.warnings.iter().any(|w| w.contains("generated")),
             "the generated summary line must not appear in the output"
@@ -2577,7 +2599,11 @@ error: aborting due to 1 previous error
         );
         let json = extract_json_diagnostics(output);
         assert_eq!(json.errors.len(), 1, "an ICE must count as an error");
-        assert!(json.errors[0].contains("internal compiler error"), "got: {:?}", json.errors[0]);
+        assert!(
+            json.errors[0].contains("internal compiler error"),
+            "got: {:?}",
+            json.errors[0]
+        );
     }
 
     #[test]
@@ -2686,7 +2712,11 @@ error: aborting due to 1 previous error
 
         let result = filter_cargo_build(&output);
         let rendered = result.matches("error[E0308]").count();
-        assert_eq!(rendered, CAP_ERRORS, "json errors must be capped: {}", result);
+        assert_eq!(
+            rendered, CAP_ERRORS,
+            "json errors must be capped: {}",
+            result
+        );
         assert!(
             result.contains(&format!("… +{} more errors", total - CAP_ERRORS)),
             "expected overflow hint: {}",
@@ -2720,7 +2750,11 @@ error: aborting due to 1 previous error
 
         // The cap is what bounds the output, so assert it holds here too.
         let rendered = result.matches("error[E0308]").count();
-        assert_eq!(rendered, CAP_ERRORS, "json errors must be capped: {}", result);
+        assert_eq!(
+            rendered, CAP_ERRORS,
+            "json errors must be capped: {}",
+            result
+        );
         assert!(
             result.contains(&format!("… +{} more errors", total - CAP_ERRORS)),
             "expected overflow hint: {}",
@@ -2832,10 +2866,17 @@ error: could not compile `rtk` (test "repro_compile_fail") due to 1 previous err
         );
         let mut f = BlockStreamFilter::new(CargoTestHandler::new());
         let result = run_block_filter(&mut f, input, 101);
-        assert!(!result.trim().is_empty(), "json compile error must not be silent");
+        assert!(
+            !result.trim().is_empty(),
+            "json compile error must not be silent"
+        );
         assert!(result.contains("cargo test:"), "got: {}", result);
         assert!(result.contains("1 errors"), "got: {}", result);
-        assert!(result.contains("E0425"), "diagnostic must be surfaced: {}", result);
+        assert!(
+            result.contains("E0425"),
+            "diagnostic must be surfaced: {}",
+            result
+        );
     }
 
     #[test]

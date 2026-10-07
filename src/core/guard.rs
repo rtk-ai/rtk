@@ -1,4 +1,19 @@
 //! Never-worse output guard: RTK never emits more tokens than the raw command.
+//!
+//! Two callers are allowed past it. `rtk diff` prints a one-line message for a
+//! difference `str::lines()` cannot render — CRLF against LF, or a missing
+//! final newline — where the raw fallback is two blobs that look identical and
+//! answer the question worse at any size. The exception is bounded by the case
+//! rather than by a token count: it fires only when the bytes differ and the
+//! line vectors do not, so the message never competes with a change list. A
+//! fixed allowance above raw was tried and could not be met by construction:
+//! the shortest form of the message is ~20 tokens and a one-line pair is ~2, so
+//! the ceiling sat under the message's own floor and dropped it on 90% of
+//! one-line pairs.
+//!
+//! The other is a clean run of a command whose output format rtk injected
+//! (`runner::RunOptions::clean_outputs`): ruff's `[]` answers a question the
+//! user never asked, so the filter's summary is shown although it is longer.
 
 use crate::core::tracking::estimate_tokens;
 

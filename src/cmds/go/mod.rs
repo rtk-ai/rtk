@@ -1,1 +1,2 @@
-automod::dir!(pub "src/cmds/go");
+pub mod go_cmd;
+pub mod golangci_cmd;

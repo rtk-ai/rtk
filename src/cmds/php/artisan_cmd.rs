@@ -1,7 +1,7 @@
 //! Laravel Artisan output cleanup helpers.
 
 use super::test_output::filter_test_runner_output;
-use super::utils::{strip_ansi_and_controls, PhpTestRunner};
+use super::utils::{PhpTestRunner, strip_ansi_and_controls};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -34,8 +34,7 @@ mod tests {
 
     #[test]
     fn test_artisan_cleanup() {
-        let out =
-            "\u{1b}[32mEnvironment .....\u{1b}[0m\n\u{2502} Laravel Version \u{2502} 13.0.0 \u{2502}\n\n\n";
+        let out = "\u{1b}[32mEnvironment .....\u{1b}[0m\n\u{2502} Laravel Version \u{2502} 13.0.0 \u{2502}\n\n\n";
         let filtered = filter_artisan_output(out);
         assert!(!filtered.contains('\u{1b}'));
         assert!(!filtered.contains('\u{2502}'));

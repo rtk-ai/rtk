@@ -3,8 +3,10 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+mod common;
+
 fn rtk_stdin(args: &[&str], input: &str) -> String {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let mut child = common::rtk_command()
         .env("LC_ALL", "C")
         .args(args)
         .stdin(Stdio::piped())
@@ -58,7 +60,7 @@ fn guard_does_not_block_real_compression() {
 }
 
 fn rtk_output_in_dir(dir: &std::path::Path, args: &[&str]) -> (String, String, Option<i32>) {
-    let out = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let out = common::rtk_command()
         .env("LC_ALL", "C")
         .args(args)
         .current_dir(dir)
@@ -84,6 +86,14 @@ fn rg_available() -> bool {
         .unwrap_or(false)
 }
 
+/// git in `dir`, isolated as the rtk children these tests compare it with are.
+fn git(dir: &std::path::Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(dir);
+    common::isolate_git(&mut cmd);
+    cmd
+}
+
 fn init_git_repo() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     for args in [
@@ -92,9 +102,8 @@ fn init_git_repo() -> tempfile::TempDir {
         &["config", "user.name", "t"][..],
         &["commit", "-q", "--allow-empty", "-m", "init"][..],
     ] {
-        let ok = Command::new("git")
+        let ok = git(dir.path())
             .args(args)
-            .current_dir(dir.path())
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
@@ -104,11 +113,7 @@ fn init_git_repo() -> tempfile::TempDir {
 }
 
 fn git_in_dir(dir: &std::path::Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("spawn git");
+    let out = git(dir).args(args).output().expect("spawn git");
     assert!(
         out.status.success(),
         "git command failed: {args:?}\nstdout: {}\nstderr: {}",
@@ -171,9 +176,8 @@ fn git_log_patch_output_matches_raw_git() {
     git_in_dir(dir.path(), &["add", "history.txt"]);
     git_in_dir(dir.path(), &["commit", "-q", "-m", "add history fixture"]);
 
-    let raw = Command::new("git")
+    let raw = git(dir.path())
         .args(["log", "-p", "--all"])
-        .current_dir(dir.path())
         .output()
         .expect("spawn raw git log");
     assert!(raw.status.success());
@@ -209,6 +213,140 @@ fn git_log_dash_p_pathspec_after_double_dash_is_not_patch_flag() {
     assert!(
         stdout.contains("add dash-p file"),
         "expected the commit touching the -p pathspec: {stdout:?}"
+    );
+}
+
+#[test]
+fn git_show_dash_dash_stat_pathspec_after_double_dash_is_not_stat_flag() {
+    // Regression: `rtk git show -- --stat` must not be misread as a request for the real
+    // `--stat` summary flag. Before restore_double_dash + arg_tokenizer, run_show's
+    // wants_stat_only check was a raw `arg == "--stat"` scan with no `--`-boundary awareness, so
+    // a file literally named "--stat" after the boundary was wrongly treated as the flag and
+    // sent down the raw-passthrough path instead of RTK's own compacted-diff path.
+    let dir = init_git_repo();
+    std::fs::write(dir.path().join("--stat"), "not a summary flag\n").expect("write --stat file");
+    git_in_dir(dir.path(), &["add", "--", "--stat"]);
+    git_in_dir(
+        dir.path(),
+        &["commit", "-q", "-m", "add dash-dash-stat file"],
+    );
+
+    let (stdout, stderr, code) = rtk_output_in_dir(dir.path(), &["git", "show", "--", "--stat"]);
+
+    assert_eq!(code, Some(0), "rtk stderr: {stderr}");
+    assert!(
+        !stdout.contains("diff --git"),
+        "-- --stat should stay on RTK's compacted-diff path, not raw passthrough: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("--stat") && stdout.contains("+1"),
+        "expected RTK's compacted diff summary for the --stat file: {stdout:?}"
+    );
+}
+
+#[test]
+fn git_diff_dash_dash_stat_pathspec_after_double_dash_is_not_stat_flag() {
+    // Regression: `rtk git diff -- --stat` must not be misread as a request for the real
+    // `--stat` diffstat-only flag. Before this fix, run_diff's wants_stat check was a raw
+    // `arg == "--stat"` scan with no `--`-boundary awareness, so a file literally named "--stat"
+    // after the boundary was wrongly treated as the flag and sent down the raw-passthrough path
+    // (plain diffstat output) instead of RTK's own stat+compacted-diff path.
+    let dir = init_git_repo();
+    std::fs::write(dir.path().join("--stat"), "line one\n").expect("write --stat file");
+    git_in_dir(dir.path(), &["add", "--", "--stat"]);
+    git_in_dir(
+        dir.path(),
+        &["commit", "-q", "-m", "add dash-dash-stat file"],
+    );
+    std::fs::write(dir.path().join("--stat"), "line one\nline two\n").expect("modify --stat file");
+
+    let (stdout, stderr, code) = rtk_output_in_dir(dir.path(), &["git", "diff", "--", "--stat"]);
+
+    assert_eq!(code, Some(0), "rtk stderr: {stderr}");
+    assert!(
+        !stdout.contains("diff --git"),
+        "-- --stat should stay on RTK's stat+compacted-diff path, not raw passthrough: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("--stat | 1 +") && stdout.contains("Changes:"),
+        "expected RTK's stat-summary-plus-compacted-diff output for the modified --stat file: {stdout:?}"
+    );
+}
+
+#[test]
+fn git_diff_name_only_passes_through_raw() {
+    // Regression: run_diff's wants_stat check only recognized --stat/--numstat/--shortstat, a
+    // narrower list than requests_raw_diff_shape (which run_log already used, covering
+    // --name-only/--name-status/--raw/--dirstat/--summary/-p/-u too). `--name-only` fell through
+    // to RTK's default stat+compacted-diff path instead of a raw passthrough of git's own
+    // name-only output.
+    let dir = init_git_repo();
+    std::fs::write(dir.path().join("file.txt"), "one\n").expect("write file");
+    git_in_dir(dir.path(), &["add", "file.txt"]);
+    git_in_dir(dir.path(), &["commit", "-q", "-m", "add file"]);
+    std::fs::write(dir.path().join("file.txt"), "one\ntwo\n").expect("modify file");
+
+    let (stdout, stderr, code) = rtk_output_in_dir(dir.path(), &["git", "diff", "--name-only"]);
+
+    assert_eq!(code, Some(0), "rtk stderr: {stderr}");
+    assert_eq!(
+        stdout.trim(),
+        "file.txt",
+        "--name-only should pass through as git's own bare filename list: {stdout:?}"
+    );
+}
+
+#[test]
+fn git_branch_dash_prefixed_name_after_double_dash_attempts_creation_not_a_silent_list() {
+    // Regression: `rtk git branch -- -weird` must be classified as a branch-creation attempt
+    // (and let real git's own ref-name validation reject it), not silently fall through to list
+    // mode as if no branch name were given. Before restore_double_dash + arg_tokenizer,
+    // run_branch's has_positional_arg check was a raw `!a.starts_with('-')` scan with no
+    // `--`-boundary awareness, so a branch name starting with '-' after the separator was
+    // misclassified as a flag: has_positional_arg came back false, and (with no list flag
+    // either) rtk silently ran `git branch -a --no-color -- -weird-branch` -- a harmless, empty,
+    // exit-0 *list* filtered on a pattern that matches nothing, giving no indication the
+    // requested branch was never created. A real branch named "-weird-branch" is impossible
+    // (git's own check-ref-format forbids a leading '-'), so the observable signal here is that
+    // rtk actually attempts the creation and surfaces git's real rejection, instead of quietly
+    // doing nothing and exiting 0.
+    let dir = init_git_repo();
+
+    let (stdout, stderr, code) =
+        rtk_output_in_dir(dir.path(), &["git", "branch", "--", "-weird-branch"]);
+
+    assert_ne!(
+        code,
+        Some(0),
+        "a creation attempt for an invalid ref name must fail, not silently succeed as an empty list: stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stderr.contains("-weird-branch"),
+        "expected git's own rejection to mention the attempted branch name: {stderr:?}"
+    );
+}
+
+#[test]
+fn git_log_malformed_digit_run_propagates_real_git_error() {
+    // "-5x" isn't a valid git log limit; real git rejects it outright ("fatal: '5x': not an
+    // integer", verified against git 2.51). run_log's internal limit-parsing for this
+    // malformed input differs before/after arg_tokenizer (5 vs the old fallback of 10), but
+    // that's never observable here: run_log bails out on the real git failure before ever
+    // reaching the formatting code that would use it.
+    let dir = init_git_repo();
+
+    let raw = git(dir.path())
+        .args(["log", "-5x"])
+        .output()
+        .expect("spawn raw git log");
+    assert!(!raw.status.success(), "expected real git to reject -5x");
+
+    let (_, rtk_stderr, rtk_code) = rtk_output_in_dir(dir.path(), &["git", "log", "-5x"]);
+
+    assert_eq!(rtk_code, raw.status.code());
+    assert!(
+        rtk_stderr.contains("not an integer"),
+        "rtk should surface git's own error verbatim: {rtk_stderr:?}"
     );
 }
 
@@ -251,13 +389,39 @@ fn git_checkout_new_branch_emits_compact_ok() {
 }
 
 #[test]
-fn git_checkout_reset_branch_does_not_claim_new_branch() {
+fn git_checkout_dash_b_capital_reports_what_git_actually_did() {
     let dir = init_git_repo();
 
+    // `-B` creates *or* resets, and only git knows which. Reading the branch name out of the
+    // args and returning early claimed neither, so a created branch lost its `(new)` marker.
+    //
+    // rtk_output_in_dir pins LC_ALL=C, which is what makes the English scan land. Under
+    // another locale this degrades to the args fallback ("ok feature/test") rather than
+    // claiming a marker it cannot verify -- weaker, never wrong -- so `(new)` is asserted
+    // here only because the locale is pinned.
     let (out, code) = rtk_in_dir(dir.path(), &["git", "checkout", "-B", "feature/test"]);
-
     assert_eq!(code, Some(0));
-    assert_eq!(out.trim(), "ok feature/test");
+    assert_eq!(
+        out.trim(),
+        "ok feature/test (new)",
+        "git: Switched to a new branch"
+    );
+
+    // Reset of a branch that already exists: not new, and the args fallback names it.
+    git_in_dir(dir.path(), &["checkout", "-q", "main"]);
+    let (out, code) = rtk_in_dir(dir.path(), &["git", "checkout", "-B", "feature/test"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        out.trim(),
+        "ok feature/test",
+        "git: Switched to and reset branch -- matches no scan prefix, so the args name it"
+    );
+
+    // Glued spelling routes identically; the string scans it replaced could not read it.
+    git_in_dir(dir.path(), &["checkout", "-q", "main"]);
+    let (out, code) = rtk_in_dir(dir.path(), &["git", "checkout", "-Bfeature/glued"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(out.trim(), "ok feature/glued (new)");
 }
 
 #[test]
@@ -319,5 +483,184 @@ fn git_checkout_dirty_tree_error_keeps_file_list() {
     assert!(
         combined.contains("Aborting"),
         "dirty checkout failure should keep abort line: {combined:?}"
+    );
+}
+
+/// A repo with one commit and one working-tree change, for the diff/show routing tests below.
+fn repo_with_a_change() -> tempfile::TempDir {
+    let dir = init_git_repo();
+    std::fs::write(dir.path().join("a.txt"), "l1\nl2\nl3\n").expect("write");
+    git_in_dir(dir.path(), &["add", "-A"]);
+    git_in_dir(dir.path(), &["commit", "-qm", "c1"]);
+    std::fs::write(dir.path().join("a.txt"), "l1\nl2 CHANGED\nl3\n").expect("write");
+    dir
+}
+
+#[test]
+fn git_diff_reports_the_error_git_gives_for_what_was_typed() {
+    // RTK also runs a stat probe with the patch-shape flags stripped, so that probe answers a
+    // different command: git rejects `-Uabc` (129) while the stripped probe got as far as the
+    // unknown ref and said `ambiguous argument` (128). A probe must never be what reports.
+    let dir = repo_with_a_change();
+
+    let (_, stderr, code) =
+        rtk_output_in_dir(dir.path(), &["git", "diff", "-Uabc", "nonexistent-ref"]);
+    assert_eq!(code, Some(129), "git's own code for the first bad flag");
+    assert!(
+        stderr.contains("--unified"),
+        "expected git's --unified complaint, got: {stderr:?}"
+    );
+
+    // Each alone still reports its own error.
+    let (_, _, code) = rtk_output_in_dir(dir.path(), &["git", "diff", "-Uabc"]);
+    assert_eq!(code, Some(129));
+    let (_, _, code) = rtk_output_in_dir(dir.path(), &["git", "diff", "nonexistent-ref"]);
+    assert_eq!(code, Some(128));
+}
+
+#[test]
+fn git_diff_keeps_the_body_when_git_colours_it() {
+    // Colour puts an escape at column 0, where the compaction looks for `diff --git` and `@@`,
+    // so the body silently came back empty. RTK renders its own output, so the colour was
+    // never going to survive compaction and is stripped before parsing.
+    let dir = repo_with_a_change();
+
+    for args in [
+        &["git", "diff", "--color"][..],
+        &["git", "diff", "--color", "--unified=0"][..],
+        &["git", "diff", "--color=always"][..],
+    ] {
+        let (stdout, _, code) = rtk_output_in_dir(dir.path(), args);
+        assert_eq!(code, Some(0), "{args:?}");
+        assert!(
+            stdout.contains("CHANGED"),
+            "{args:?} lost the body: {stdout:?}"
+        );
+    }
+
+    // The same escape arrives from config, where no argument inspection could have seen it.
+    git_in_dir(dir.path(), &["config", "color.ui", "always"]);
+    let (stdout, _, _) = rtk_output_in_dir(dir.path(), &["git", "diff"]);
+    assert!(
+        stdout.contains("CHANGED"),
+        "color.ui=always lost the body: {stdout:?}"
+    );
+}
+
+#[test]
+fn git_log_announces_its_limit_only_when_the_limit_took_something() {
+    // The notice exists because that path streams and has no footer to notice missing commits
+    // from. It must not claim a truncation that did not happen, nor precede a command git
+    // rejects outright.
+    let dir = repo_with_a_change();
+    git_in_dir(dir.path(), &["add", "-A"]);
+    git_in_dir(dir.path(), &["commit", "-qm", "c2"]);
+
+    let (_, stderr, code) = rtk_output_in_dir(dir.path(), &["git", "log", "--stat"]);
+    assert_eq!(code, Some(0));
+    assert!(
+        !stderr.contains("[rtk]"),
+        "two commits, limit of ten: nothing was truncated, but got: {stderr:?}"
+    );
+
+    let (_, stderr, code) = rtk_output_in_dir(dir.path(), &["git", "log", "-pq"]);
+    assert_ne!(code, Some(0), "git rejects -q for log");
+    assert!(
+        !stderr.contains("[rtk]"),
+        "no notice ahead of a command git refuses: {stderr:?}"
+    );
+}
+
+#[test]
+fn git_show_quiet_loses_to_a_patch_request_from_either_side() {
+    // git 2.53: `-s`/`--no-patch` fold in order against a patch request, `--quiet` never wins
+    // over one. Modelling all three the same way dropped a patch that was asked for.
+    let dir = repo_with_a_change();
+    git_in_dir(dir.path(), &["add", "-A"]);
+    git_in_dir(dir.path(), &["commit", "-qm", "c2"]);
+
+    for args in [
+        &["git", "show", "--quiet", "-p"][..],
+        &["git", "show", "-p", "--quiet"][..],
+        &["git", "show", "-s", "-p"][..],
+    ] {
+        let (stdout, _, _) = rtk_output_in_dir(dir.path(), args);
+        assert!(
+            stdout.contains("CHANGED"),
+            "{args:?} should print the body: {stdout:?}"
+        );
+    }
+    for args in [
+        &["git", "show", "--quiet"][..],
+        &["git", "show", "-s"][..],
+        &["git", "show", "-p", "-s"][..],
+    ] {
+        let (stdout, _, _) = rtk_output_in_dir(dir.path(), args);
+        assert!(
+            !stdout.contains("CHANGED"),
+            "{args:?} should suppress the body: {stdout:?}"
+        );
+    }
+}
+
+/// A repo whose `big.txt` is comfortably over the 8 KiB blob-window budget, so
+/// `rtk git show HEAD:big.txt` windows it and any misrouting is visible in the output.
+fn repo_with_a_large_blob() -> tempfile::TempDir {
+    let dir = init_git_repo();
+    let body: String = (0..600).map(|i| format!("line {i} a:b url:1\n")).collect();
+    std::fs::write(dir.path().join("big.txt"), &body).expect("write big.txt");
+    git_in_dir(dir.path(), &["add", "-A"]);
+    git_in_dir(dir.path(), &["commit", "-qm", "big blob"]);
+    dir
+}
+
+const BLOB_HINT: &str = "[see remaining: rtk proxy git show HEAD:big.txt | tail -n +";
+
+#[test]
+fn git_show_cluster_flag_value_is_not_mistaken_for_the_blob_object() {
+    // `-wG a:b HEAD:big.txt`: `a:b` is `-G`'s value, not a second object. Counting it as a
+    // positional makes `can_window` false and dumps the whole file instead of windowing it.
+    let dir = repo_with_a_large_blob();
+
+    let (stdout, stderr, code) =
+        rtk_output_in_dir(dir.path(), &["git", "show", "-wG", "a:b", "HEAD:big.txt"]);
+
+    assert_eq!(code, Some(0), "rtk stderr: {stderr}");
+    assert!(
+        stdout.contains(BLOB_HINT),
+        "-wG a:b should still window the blob: {stdout:?}"
+    );
+}
+
+#[test]
+fn git_show_rename_limit_clusters_under_diffs_grammar_not_logs() {
+    // `git show -wl 100` is diff-family: `-l` is the rename limit and consumes the `100` even
+    // when clustered. Under `git log`'s grammar `-l` is solo-only, which would leave `100` as a
+    // second positional and drop the blob window.
+    let dir = repo_with_a_large_blob();
+
+    let (stdout, stderr, code) =
+        rtk_output_in_dir(dir.path(), &["git", "show", "-wl", "100", "HEAD:big.txt"]);
+
+    assert_eq!(code, Some(0), "rtk stderr: {stderr}");
+    assert!(
+        stdout.contains(BLOB_HINT),
+        "-wl 100 should still window the blob: {stdout:?}"
+    );
+}
+
+#[test]
+fn git_show_blob_spec_after_double_dash_is_a_pathspec_not_an_object() {
+    // Past `--` even a string `cat-file` resolves to a blob is a pathspec: git matches it
+    // against no file and prints the bare commit, so RTK must not dump the blob instead.
+    let dir = repo_with_a_large_blob();
+
+    let (stdout, stderr, code) =
+        rtk_output_in_dir(dir.path(), &["git", "show", "HEAD", "--", "HEAD:big.txt"]);
+
+    assert_eq!(code, Some(0), "rtk stderr: {stderr}");
+    assert!(
+        !stdout.contains(BLOB_HINT) && !stdout.contains("line 0 a:b"),
+        "pathspec past -- must not be windowed as a blob: {stdout:?}"
     );
 }
