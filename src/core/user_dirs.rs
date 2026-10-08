@@ -45,22 +45,26 @@ pub fn data() -> Option<PathBuf> {
 }
 
 /// rtk's own directory inside the user's configuration directory, holding
-/// `filters.toml` and `config.toml`.
+/// `filters.toml` and `config.toml`: `$RTK_CONFIG_DIR` itself when set, else
+/// `$XDG_CONFIG_HOME/rtk`, else the platform's (see [`resolve_config`]).
 ///
 /// In a test build it is under `test_isolation::root`, so a `cargo test` run
 /// leaves the developer's own untouched. It sits under the directory
 /// `test_isolation::scratch::redirect_rtk_data` pins `XDG_CONFIG_HOME` to, so on
-/// Linux an in-process writer and a spawned `rtk` resolve the same file. A child
-/// resolves elsewhere on the other two platforms, where `dirs::config_dir()`
-/// reads no `XDG_CONFIG_HOME`: `$HOME/Library/Application Support/rtk` on macOS,
-/// and on Windows the real RoamingAppData, which the environment cannot redirect.
+/// Linux and macOS an in-process writer and a spawned `rtk` resolve the same
+/// file. On Windows a child ignores `XDG_CONFIG_HOME` and resolves the real
+/// RoamingAppData, which the environment cannot redirect.
 ///
 /// Redirecting in Rust rather than through the environment is what makes the
 /// in-process half hold on all three.
 pub fn config() -> Option<PathBuf> {
     #[cfg(not(test))]
     {
-        dirs::config_dir().map(|d| d.join(constants::RTK_DATA_DIR))
+        resolve_config(
+            env_path("RTK_CONFIG_DIR"),
+            env_path("XDG_CONFIG_HOME"),
+            dirs::config_dir(),
+        )
     }
     #[cfg(test)]
     {
@@ -69,6 +73,35 @@ pub fn config() -> Option<PathBuf> {
                 .join(".config")
                 .join(constants::RTK_DATA_DIR),
         )
+    }
+}
+
+/// [`config`] from its inputs. `XDG_CONFIG_HOME` counts only when absolute (per
+/// the XDG spec) and off Windows, where `dirs` uses the Known Folder API and the
+/// variable is usually a leftover from a Unix-like shell. When `$XDG_CONFIG_HOME/rtk`
+/// does not exist but the platform's directory does, the platform's wins, so an
+/// existing install (macOS `~/Library/Application Support/rtk`) keeps its
+/// settings until the directory is moved.
+fn resolve_config(
+    override_dir: Option<OsString>,
+    xdg_config_home: Option<OsString>,
+    platform_dir: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(dir) = override_dir.filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    let platform = platform_dir.map(|dir| dir.join(constants::RTK_DATA_DIR));
+    let Some(xdg) = xdg_config_home
+        .filter(|_| cfg!(not(windows)))
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(constants::RTK_DATA_DIR))
+    else {
+        return platform;
+    };
+    match platform {
+        Some(platform) if platform != xdg && !xdg.exists() && platform.exists() => Some(platform),
+        _ => Some(xdg),
     }
 }
 
@@ -217,4 +250,111 @@ fn within_reach(dir: &Path) -> bool {
 /// them, as a `CLAUDE_CONFIG_DIR` carrying Bash deny rules does.
 pub fn env_path(name: &str) -> Option<OsString> {
     super::user_env::var_os(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `root/rtk` as an existing directory, standing in for an install.
+    fn existing_rtk_dir(root: &Path) -> PathBuf {
+        let dir = root.join(constants::RTK_DATA_DIR);
+        std::fs::create_dir_all(&dir).expect("create rtk dir");
+        dir
+    }
+
+    #[test]
+    fn config_override_is_the_directory_itself_and_wins_over_an_install() {
+        let tmp = test_isolation::tempdir();
+        let platform = tmp.path().join("platform");
+        existing_rtk_dir(&platform);
+        let custom = tmp.path().join("custom");
+
+        let dir = resolve_config(
+            Some(custom.clone().into_os_string()),
+            Some(tmp.path().join("xdg").into_os_string()),
+            Some(platform),
+        );
+
+        assert_eq!(dir, Some(custom));
+    }
+
+    #[test]
+    fn config_empty_override_is_ignored() {
+        let platform = PathBuf::from("/platform");
+        let dir = resolve_config(Some("".into()), None, Some(platform.clone()));
+        assert_eq!(dir, Some(platform.join(constants::RTK_DATA_DIR)));
+    }
+
+    #[test]
+    fn config_defaults_to_the_platform_dir() {
+        let platform = PathBuf::from("/platform");
+        let dir = resolve_config(None, None, Some(platform.clone()));
+        assert_eq!(dir, Some(platform.join(constants::RTK_DATA_DIR)));
+        assert_eq!(resolve_config(None, None, None), None);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn config_uses_xdg_config_home_for_a_new_install() {
+        let tmp = test_isolation::tempdir();
+        let xdg = tmp.path().join("xdg");
+
+        let dir = resolve_config(
+            None,
+            Some(xdg.clone().into_os_string()),
+            Some(tmp.path().join("platform")),
+        );
+
+        assert_eq!(dir, Some(xdg.join(constants::RTK_DATA_DIR)));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn config_ignores_an_empty_or_relative_xdg_config_home() {
+        let platform = PathBuf::from("/platform");
+        for xdg in ["", "relative/config"] {
+            assert_eq!(
+                resolve_config(None, Some(xdg.into()), Some(platform.clone())),
+                Some(platform.join(constants::RTK_DATA_DIR)),
+                "XDG_CONFIG_HOME={xdg:?} must be ignored"
+            );
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn config_keeps_an_existing_install_until_it_is_moved() {
+        let tmp = test_isolation::tempdir();
+        let xdg = tmp.path().join("xdg");
+        let platform = tmp.path().join("platform");
+        let installed = existing_rtk_dir(&platform);
+        let resolve = || {
+            resolve_config(
+                None,
+                Some(xdg.clone().into_os_string()),
+                Some(platform.clone()),
+            )
+        };
+
+        assert_eq!(
+            resolve(),
+            Some(installed),
+            "an existing install keeps its config"
+        );
+        let moved = existing_rtk_dir(&xdg);
+        assert_eq!(
+            resolve(),
+            Some(moved),
+            "once it exists, the XDG directory wins"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn config_ignores_xdg_config_home_on_windows() {
+        let platform = PathBuf::from(r"C:\platform");
+        let dir = resolve_config(None, Some(r"C:\xdg".into()), Some(platform.clone()));
+        assert_eq!(dir, Some(platform.join(constants::RTK_DATA_DIR)));
+    }
 }

@@ -1356,6 +1356,8 @@ englober `ls -la`.
 
 **Emplacement :** `~/.config/rtk/config.toml` (Linux) ou `~/Library/Application Support/rtk/config.toml` (macOS)
 
+Pour le deplacer : `RTK_CONFIG_DIR=/chemin` (lit `/chemin/config.toml`, toutes plateformes) ou `XDG_CONFIG_HOME` (Linux/macOS, lit `$XDG_CONFIG_HOME/rtk/config.toml`). Sur macOS, un dossier existant `~/Library/Application Support/rtk/` reste utilise tant que `$XDG_CONFIG_HOME/rtk/` n'existe pas.
+
 **Commandes :**
 ```bash
 rtk config                # Afficher la configuration actuelle
