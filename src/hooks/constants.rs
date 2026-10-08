@@ -13,6 +13,9 @@ pub const CLAUDE_HOOK_COMMAND: &str = "rtk hook claude";
 /// Shell-free Claude Code registration written to `command` and `args`.
 pub const CLAUDE_HOOK_BINARY: &str = "rtk";
 pub const CLAUDE_HOOK_ARGS: [&str; 2] = ["hook", "claude"];
+/// Native Rust hook command for Trae.
+pub const TRAE_HOOK_COMMAND: &str = "rtk hook trae";
+
 /// Native Rust hook command for Codex CLI.
 pub const CODEX_HOOK_COMMAND: &str = "rtk hook codex";
 /// Native Rust hook command for Cursor (replaces rtk-rewrite.sh).
@@ -28,6 +31,10 @@ pub const PLUGIN_SUBDIR: &str = "plugins";
 pub const OPENCODE_PLUGIN_FILE: &str = "rtk.ts";
 
 pub const CURSOR_DIR: &str = ".cursor";
+/// The Trae tool name RTK's hook registers against.
+pub const TRAE_RUN_COMMAND_MATCHER: &str = "RunCommand";
+pub const TRAE_DIR: &str = ".trae";
+pub const TRAE_CN_DIR: &str = ".trae-cn";
 pub const CODEX_DIR: &str = ".codex";
 pub const GEMINI_DIR: &str = ".gemini";
 

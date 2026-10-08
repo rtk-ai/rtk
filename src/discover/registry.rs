@@ -1,13 +1,15 @@
 //! Matches shell commands against known RTK rewrite rules to decide how to handle them.
 
+use crate::cmds::system::search::{Engine, is_bare_file_list};
 use crate::core::utils::composer_bin_dirs;
 use regex::{Regex, RegexSet};
 use std::path::Path;
 use std::sync::LazyLock;
 
 use super::lexer::{
-    ParsedToken, PipeKind, TokenKind, advance_quote_state, coalesce_words, is_crlf_at,
-    redirect_has_file_target, shell_split, split_on_operators, tokenize, tokenize_with_newlines,
+    ParsedToken, PipeKind, QuoteScan, TokenKind, ansi_c_quote_defeats_lexer, coalesce_words,
+    is_crlf_at, redirect_has_file_target, shell_split, split_on_operators, tokenize,
+    tokenize_with_newlines,
 };
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 
@@ -76,6 +78,13 @@ static ENV_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
 // --git-dir <dir>, --work-tree <dir>, and flag-only options (#163)
 static GIT_GLOBAL_OPT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(?:(?:-C\s+\S+|-c\s+\S+|--git-dir(?:=\S+|\s+\S+)|--work-tree(?:=\S+|\s+\S+)|--no-pager|--no-optional-locks|--bare|--literal-pathspecs)\s+)+").unwrap()
+});
+// Strip pnpm global options that precede the subcommand so `pnpm -r install`,
+// `pnpm --filter @app install`, `pnpm -w list` route to the same rules as their
+// bare forms. Only a fixed, known set is stripped — never an unknown `-x`, so a
+// non-install flag-first command can't be mis-rewritten into a filter with savings.
+static PNPM_GLOBAL_OPT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:(?:-r|--recursive|-w|--workspace-root|--filter(?:=\S+|\s+\S+)|-F(?:=\S+|\s+\S+))\s+)+").unwrap()
 });
 // Issue #1362: each capture expects a SINGLE file argument (`\S+$`). Multi-file
 // invocations like `head -3 a b c` fail to match so the segment is passed through
@@ -200,6 +209,21 @@ pub fn classify_command(cmd: &str) -> Classification {
     // Strip golangci-lint global options before `run` so classify/rewrite stays
     // aligned with the runtime wrapper behavior.
     let cmd_normalized = strip_golangci_global_opts(&cmd_normalized);
+    // Strip pnpm global options (-r, --filter, -w) before the subcommand so
+    // `pnpm -r install` classifies like `pnpm install` — but only adopt the
+    // stripped form when it routes to the `rtk pnpm` rule itself. For the tool
+    // rules reachable via `pnpm exec`/`pnpm run` (`pnpm -r exec vitest`,
+    // `pnpm -r lint`, …) the rewrite matches the original flag-first text and
+    // never fires, so classifying the stripped form there would report a
+    // Supported saving the hook can't deliver — misleading `rtk discover` and
+    // `rtk session`, which count `Supported` as covered. See #3275.
+    let cmd_pnpm_stripped = strip_pnpm_global_opts(&cmd_normalized);
+    let cmd_normalized =
+        if cmd_pnpm_stripped != cmd_normalized && matches_pnpm_rule(&cmd_pnpm_stripped) {
+            cmd_pnpm_stripped
+        } else {
+            cmd_normalized
+        };
     let cmd_clean = cmd_normalized.as_str();
 
     // Exclude cat/head/tail with redirect operators — these are writes, not reads (#315)
@@ -422,6 +446,39 @@ fn strip_git_global_opts(cmd: &str) -> String {
     format!("git {}", stripped.trim())
 }
 
+/// Strip pnpm global options before the subcommand (mirror of `strip_git_global_opts`).
+/// `pnpm -r install` → `pnpm install`; `pnpm --filter @app list` → `pnpm list`.
+/// Classification only — the rewrite re-emits the ORIGINAL command, so the stripped
+/// flags are preserved (e.g. `pnpm -r install` → `rtk pnpm -r install`).
+/// Returns the original string unchanged if not a pnpm command.
+fn strip_pnpm_global_opts(cmd: &str) -> String {
+    // Require a single ASCII space after `pnpm` — the exact boundary the rewrite's
+    // `strip_word_prefix` enforces — so classify and rewrite can never diverge on a
+    // tab or other whitespace separator (that would resurrect the class of bug
+    // #3275 closes: Supported on one side, un-rewritable on the other). Extra
+    // spaces are still tolerated via `trim_start` (`pnpm  -r  install`), since
+    // `PNPM_GLOBAL_OPT` is `^`-anchored and a leading space would skip the strip.
+    if !cmd.starts_with("pnpm ") {
+        return cmd.to_string();
+    }
+    let after_pnpm = cmd[5..].trim_start(); // skip "pnpm ", then any extra spaces
+    let stripped = PNPM_GLOBAL_OPT.replace(after_pnpm, "");
+    format!("pnpm {}", stripped.trim())
+}
+
+/// True when `cmd` (already normalized) routes to the `rtk pnpm` rule rather than
+/// a tool rule reachable through `pnpm exec`/`pnpm run`. Gates the pnpm
+/// global-option strip in `classify_command`: adopting the stripped form for a
+/// tool rule would diverge from the rewrite, which matches the original
+/// flag-first text and never fires there. See #3275.
+fn matches_pnpm_rule(cmd: &str) -> bool {
+    REGEX_SET
+        .matches(cmd)
+        .into_iter()
+        .next_back()
+        .is_some_and(|idx| RULES[idx].rtk_cmd == "rtk pnpm")
+}
+
 /// Strip golangci-lint global options before the `run` subcommand.
 /// `golangci-lint --color never run ./...` → `golangci-lint run ./...`
 /// Returns the original string unchanged if this is not a supported compact `run` invocation.
@@ -534,8 +591,80 @@ pub fn prefix_contains_rtk_disabled(prefix_part: &str) -> bool {
     prefix_part.contains("RTK_DISABLED=")
 }
 
+/// Whether a token is allowed in an analytics env/sudo prefix before/after
+/// `RTK_DISABLED=`. Deliberately shallow: no sudo flag-arity table — only
+/// `sudo`, `env`, `KEY=VALUE`, and `-flags`. Value-taking sudo options like
+/// `-u root` are therefore not treated as a bypass prefix (see #3808 review).
+fn is_analytics_env_wrapper_token(value: &str) -> bool {
+    value == "sudo" || value == "env" || value.contains('=') || value.starts_with('-')
+}
+
+/// Strip an `RTK_DISABLED=` prefix for analytics, including a shallow `sudo` /
+/// `env` / assign / `-flag` wrapper around it.
+///
+/// Unlike [`strip_disabled_prefix`] (rewrite path), this recognizes
+/// `sudo RTK_DISABLED=1 …` and `RTK_DISABLED=1 sudo …` so discover can find
+/// them; whether one counts as a bypass is `judge_disabled_segment`'s call. It is intentionally stricter than a full shell parse:
+/// - never looks past `|` / `&&` / other non-`Arg` tokens for `RTK_DISABLED=`
+/// - prefix before `RTK_DISABLED=` may only be wrapper tokens (above)
+/// - after `RTK_DISABLED=`, takes the first non-wrapper command word and
+///   stops — no scanning into wrapper arguments (`ssh host docker …`)
+pub fn strip_disabled_prefix_for_analytics(cmd: &str) -> (&str, &str) {
+    let trimmed = cmd.trim();
+    let tokens = tokenize(trimmed);
+
+    let mut disabled_index = None;
+    for (i, token) in tokens.iter().enumerate() {
+        // A non-`Arg` token (operator, redirect) ends the prefix: an
+        // `RTK_DISABLED=` after it belongs to another command.
+        if token.kind != TokenKind::Arg {
+            break;
+        }
+        if token.value.starts_with("RTK_DISABLED=") {
+            disabled_index = Some(i);
+            break;
+        }
+        if !is_analytics_env_wrapper_token(&token.value) {
+            // A real command word before RTK_DISABLED= (e.g. `docker run -e
+            // RTK_DISABLED=1 …`) — not an RTK bypass prefix.
+            return strip_disabled_prefix(trimmed);
+        }
+    }
+
+    let Some(disabled_index) = disabled_index else {
+        return strip_disabled_prefix(trimmed);
+    };
+
+    // Walk past RTK_DISABLED= and any remaining wrapper tokens; the next Arg
+    // is the command word. If it isn't Supported, give up — do not keep
+    // searching for an inner Supported command (ssh/xargs/watch/script args).
+    let mut i = disabled_index + 1;
+    while i < tokens.len() {
+        let token = &tokens[i];
+        if token.kind != TokenKind::Arg {
+            break;
+        }
+        if is_analytics_env_wrapper_token(&token.value) {
+            i += 1;
+            continue;
+        }
+        let candidate = trimmed[token.offset..].trim();
+        if matches!(
+            classify_command(candidate),
+            Classification::Supported { .. }
+        ) {
+            return (&trimmed[..token.offset], candidate);
+        }
+        break;
+    }
+
+    strip_disabled_prefix(trimmed)
+}
+
 /// Check if a command has RTK_DISABLED= prefix in its env prefix portion.
 pub fn cmd_has_rtk_disabled_prefix(cmd: &str) -> bool {
+    // `gain` has no coverage gate, so this stays on the syntactic rewrite-path
+    // stripper; the wrapper-aware peel is for discover, where the gate judges it.
     let (prefix_part, _) = strip_disabled_prefix(cmd);
     prefix_contains_rtk_disabled(prefix_part)
 }
@@ -709,55 +838,6 @@ const BLOCK_KEYWORDS: &[&str] = &[
     "select", "function", "coproc", "{", "}", "(", ")",
 ];
 
-/// Shared quote-state byte walker used by all line scanners. Yields
-/// `(offset, byte, in_single_before, in_double_before)`, skipping backslash
-/// escape pairs outside single quotes and toggling quote state — the same
-/// model the lexer applies.
-struct QuoteScan<'a> {
-    bytes: &'a [u8],
-    i: usize,
-    // Same `Option<char>` model `tokenize_inner`/`shell_split` use, driven by
-    // the shared `advance_quote_state` — not an independently-maintained pair
-    // of bools, so this can't drift from the lexer's own quote handling.
-    quote: Option<char>,
-}
-
-impl<'a> QuoteScan<'a> {
-    fn new(s: &'a str) -> Self {
-        Self {
-            bytes: s.as_bytes(),
-            i: 0,
-            quote: None,
-        }
-    }
-
-    fn balanced(&self) -> bool {
-        self.quote.is_none()
-    }
-}
-
-impl Iterator for QuoteScan<'_> {
-    type Item = (usize, u8, bool, bool);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.i < self.bytes.len() {
-            let i = self.i;
-            let b = self.bytes[i];
-            if b == b'\\' && self.quote != Some('\'') {
-                self.i += 2;
-                continue;
-            }
-            let item = (i, b, self.quote == Some('\''), self.quote == Some('"'));
-            if b == b'\'' || b == b'"' {
-                self.quote = advance_quote_state(self.quote, b as char);
-            }
-            self.i += 1;
-            return Some(item);
-        }
-        None
-    }
-}
-
 /// Byte offset where an unquoted `#` at the start of a word begins a trailing
 /// comment, if any. The lexer has no comment state, so the independence checks
 /// must ignore comment text themselves: `git log | # keep pipeline` continues
@@ -821,31 +901,6 @@ fn line_has_unbalanced_test_brackets(code: &str) -> bool {
         }
     }
     depth != 0
-}
-
-// Only `\'` inside `$'…'` diverges: bash keeps the string open, the lexer
-// closes it — an extra split point the newline-count check can't see (#3188).
-fn ansi_c_quote_defeats_lexer(cmd: &str) -> bool {
-    let bytes = cmd.as_bytes();
-    let mut ansi_span = false;
-    let mut backslash_run = 0u32;
-    for (i, b, in_single, in_double) in QuoteScan::new(cmd) {
-        if b == b'\'' && !in_double {
-            if !in_single {
-                ansi_span = i > 0 && bytes[i - 1] == b'$';
-                backslash_run = 0;
-            } else if ansi_span && backslash_run % 2 == 1 {
-                return true;
-            }
-        } else if in_single {
-            if b == b'\\' {
-                backslash_run += 1;
-            } else {
-                backslash_run = 0;
-            }
-        }
-    }
-    false
 }
 
 fn quotes_balanced(cmd: &str) -> bool {
@@ -1477,6 +1532,18 @@ fn pipeline_command_is_safe(rtk_cmd: &str, cmd: &str) -> bool {
     !matches!(rtk_cmd, "rtk grep" | "rtk rg") || !search_uses_pattern_file(cmd)
 }
 
+/// A folded file list (`-l`/`-L`/`--files`) carries its shared prefix in a header line, so a
+/// display consumer that keeps only some lines (`tail`) would return tails with no prefix.
+fn producer_output_is_line_faithful(rtk_cmd: &str, cmd: &str) -> bool {
+    let engine = match rtk_cmd {
+        "rtk grep" => Engine::Grep,
+        "rtk rg" => Engine::Rg,
+        _ => return true,
+    };
+    let args: Vec<String> = shell_split(cmd).into_iter().skip(1).collect();
+    !is_bare_file_list(engine, &args)
+}
+
 pub(crate) enum ExcludePattern {
     Regex(Regex),
     Prefix(String),
@@ -1706,12 +1773,24 @@ fn rewrite_segment_inner(
     // #3171
     if context == RewriteContext::PipelineProducer
         && (!rule.pipeline_safety.producer_safe()
-            || !pipeline_command_is_safe(rule.rtk_cmd, cmd_part))
+            || !pipeline_command_is_safe(rule.rtk_cmd, cmd_part)
+            || !producer_output_is_line_faithful(rule.rtk_cmd, cmd_part))
     {
         return None;
     }
 
-    if let Some(parts) = parse_golangci_run_parts(cmd_part) {
+    // The trailing redirect is the shell's, not the tool's: every rewrite of a
+    // supported command re-attaches it here, once, exactly as typed.
+    rewrite_command_part(rule, cmd_part)
+        .map(|rewritten| format!("{}{}", rewritten, redirect_suffix))
+}
+
+/// Rewrite the command part of a segment (trailing redirects already split
+/// off) with `rule`, or `None` when this rule does not rewrite it.
+fn rewrite_command_part(rule: &RtkRule, cmd_part: &str) -> Option<String> {
+    if rule.rtk_cmd == "rtk golangci-lint run"
+        && let Some(parts) = parse_golangci_run_parts(cmd_part)
+    {
         let rewritten = if parts.global_segment.is_empty() {
             format!("rtk golangci-lint {}", parts.run_segment)
         } else {
@@ -1752,9 +1831,9 @@ fn rewrite_segment_inner(
     for &prefix in rule.rewrite_prefixes {
         if let Some(rest) = strip_word_prefix(strip_target, prefix) {
             let rewritten = if rest.is_empty() {
-                format!("{}{}", rule.rtk_cmd, redirect_suffix)
+                rule.rtk_cmd.to_string()
             } else {
-                format!("{} {}{}", rule.rtk_cmd, rest, redirect_suffix)
+                format!("{} {}", rule.rtk_cmd, rest)
             };
             return Some(rewritten);
         }
@@ -1944,6 +2023,7 @@ fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
 mod tests {
     use super::super::report::RtkStatus;
     use super::*;
+    use crate::core::test_isolation;
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         super::rewrite_command(cmd, excluded, &[])
@@ -2972,6 +3052,179 @@ mod tests {
         );
     }
 
+    // --- pnpm global option stripping (-r / --filter / -w) ---
+
+    #[test]
+    fn test_rewrite_pnpm_recursive_install() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm -r install", &[]),
+            Some("rtk pnpm -r install".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_filter_install() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --filter @app install", &[]),
+            Some("rtk pnpm --filter @app install".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_filter_short_install() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm -F @app install", &[]),
+            Some("rtk pnpm -F @app install".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_filter_eq_install() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --filter=@app install", &[]),
+            Some("rtk pnpm --filter=@app install".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_workspace_root_install() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm -w install", &[]),
+            Some("rtk pnpm -w install".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_recursive_filter_combo() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm -r --filter @app list", &[]),
+            Some("rtk pnpm -r --filter @app list".into())
+        );
+    }
+
+    // No-regression: bare forms behave exactly as before.
+    #[test]
+    fn test_rewrite_pnpm_bare_install_unchanged() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm install", &[]),
+            Some("rtk pnpm install".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_run_build_unchanged() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm run build", &[]),
+            Some("rtk pnpm run build".into())
+        );
+    }
+
+    // Bare `pnpm build` is still NOT rewritten: it would only hit the passthrough
+    // (no output parser), so rewriting it would add false-positive surface for zero
+    // savings. Stripping global opts must not change this.
+    #[test]
+    fn test_rewrite_pnpm_bare_build_none() {
+        assert_eq!(rewrite_command_no_prefixes("pnpm build", &[]), None);
+    }
+
+    // False-positive guards.
+    #[test]
+    fn test_rewrite_pnpm_filter_no_subcommand_none() {
+        // A filter with no subcommand must not be rewritten.
+        assert_eq!(rewrite_command_no_prefixes("pnpm --filter @app", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_unknown_flag_not_stripped() {
+        // `-x` is not a known global opt → not stripped → no subcommand → None.
+        assert_eq!(rewrite_command_no_prefixes("pnpm -x build", &[]), None);
+        // Load-bearing case for the fixed-set design: `install` IS a routed
+        // subcommand, so if `-x` were stripped this would rewrite to
+        // `rtk pnpm -x install`, which reaches clap and dies. Only the fixed
+        // allowlist keeps it a safe passthrough (None).
+        assert_eq!(rewrite_command_no_prefixes("pnpm -x install", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_recursive_lint_safe_noop() {
+        // `pnpm lint` classifies as Supported, but the ORIGINAL `pnpm -r lint`
+        // matches no lint rewrite-prefix → safe no-op (never a malformed rewrite).
+        assert_eq!(rewrite_command_no_prefixes("pnpm -r lint", &[]), None);
+    }
+
+    #[test]
+    fn test_classify_pnpm_flag_first_tool_stays_unsupported() {
+        // #3275 blocker: the strip must not make a tool rule reachable via
+        // `pnpm exec`/`pnpm run` classify as Supported — its rewrite matches the
+        // original flag-first text and never fires, so a Supported verdict would
+        // advertise savings `rtk discover`/`rtk session` can never deliver. These
+        // must classify exactly as on develop: Unsupported(pnpm).
+        for cmd in [
+            "pnpm -r lint",
+            "pnpm -r exec eslint .",
+            "pnpm --filter @app exec vitest run",
+            "pnpm -F web exec playwright test",
+            "pnpm -r exec tsc --noEmit",
+            "pnpm -w exec next build",
+        ] {
+            assert!(
+                matches!(classify_command(cmd), Classification::Unsupported { .. }),
+                "{cmd} must stay Unsupported (rewrite can't fire), got: {:?}",
+                classify_command(cmd)
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_pnpm_flag_first_install_still_supported() {
+        // The gate keeps everything the PR claims: flag-first forms that route to
+        // the `rtk pnpm` rule stay Supported.
+        for cmd in [
+            "pnpm -r install",
+            "pnpm --filter @app list",
+            "pnpm -w install",
+            "pnpm -r outdated",
+        ] {
+            assert!(
+                matches!(
+                    classify_command(cmd),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk pnpm",
+                        ..
+                    }
+                ),
+                "{cmd} must classify as rtk pnpm, got: {:?}",
+                classify_command(cmd)
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_extra_whitespace() {
+        // Extra spaces before the global flag must not skip the strip
+        // (`PNPM_GLOBAL_OPT` is `^`-anchored, so the slice is trimmed first).
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm  -r  install", &[]),
+            Some("rtk pnpm -r  install".into())
+        );
+    }
+
+    #[test]
+    fn test_pnpm_tab_separator_no_classify_rewrite_divergence() {
+        // A non-space separator must NOT be stripped: the rewrite's
+        // `strip_word_prefix` only accepts an ASCII space, so classify has to
+        // agree and stay Unsupported. If the strip tolerated `\t` (or any other
+        // whitespace), classify would say Supported(rtk pnpm) while rewrite
+        // returned None — the exact classify/rewrite divergence #3275 closes.
+        let cmd = "pnpm\t-r install";
+        assert!(
+            matches!(classify_command(cmd), Classification::Unsupported { .. }),
+            "tab-separated pnpm must stay Unsupported, got: {:?}",
+            classify_command(cmd)
+        );
+        assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None);
+    }
+
     #[test]
     fn test_rewrite_cargo_test() {
         assert_eq!(
@@ -3221,6 +3474,93 @@ mod tests {
             rewrite_command_no_prefixes("rg \"fn main\"", &[]),
             Some("rtk rg \"fn main\"".into())
         );
+    }
+
+    #[test]
+    fn test_subcommand_rules_require_token_boundaries() {
+        // The pnpm case is covered separately. The sbt rule is included here
+        // because it is already boundary-safe and guards the full issue family
+        // against future regressions.
+        let false_positives = [
+            "git branchless status",
+            "gh prs",
+            "glab mrs",
+            "cargo builder",
+            "prettierish",
+            "next builder",
+            "playwrighting",
+            "prismax",
+            "docker psql",
+            "kubectl getall",
+            "oc status-check",
+            "ruff checker",
+            "sqlfluff linting",
+            "pip installer",
+            "uv pip installer",
+            "go vetting",
+            "sbt tester",
+            "rake tester",
+            "rails tester",
+            "pio runner",
+            "quarto renderer",
+            "shopify themepark",
+            "terraform planner",
+            "trunk builder",
+        ];
+
+        for command in false_positives {
+            assert!(
+                matches!(
+                    classify_command(command),
+                    Classification::Unsupported { .. }
+                ),
+                "{command} must not classify as a supported command"
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                None,
+                "{command} must not be rewritten"
+            );
+        }
+
+        let valid_commands = [
+            ("git branch status", "rtk git"),
+            ("gh pr list", "rtk gh"),
+            ("glab mr list", "rtk glab"),
+            ("cargo build --release", "rtk cargo"),
+            ("prettier --check .", "rtk prettier"),
+            ("next build --turbo", "rtk next"),
+            ("playwright test", "rtk playwright"),
+            ("prisma migrate status", "rtk prisma"),
+            ("docker ps", "rtk docker"),
+            ("kubectl get pods", "rtk kubectl"),
+            ("oc status", "rtk oc"),
+            ("ruff check .", "rtk ruff"),
+            ("sqlfluff lint .", "rtk sqlfluff"),
+            ("pip install flask", "rtk pip"),
+            ("uv pip install flask", "rtk uv"),
+            ("go test ./...", "rtk go"),
+            ("sbt test", "rtk sbt"),
+            ("rake test", "rtk rake"),
+            ("rake test:unit", "rtk rake"),
+            ("rails test:system", "rtk rake"),
+            ("bundle exec rake test:models", "rtk rake"),
+            ("bin/rails test:integration", "rtk rake"),
+            ("pio run", "rtk pio"),
+            ("quarto render docs", "rtk quarto"),
+            ("shopify theme push", "rtk shopify"),
+            ("terraform plan", "rtk terraform"),
+            ("trunk build", "rtk trunk"),
+        ];
+
+        for (command, expected_rtk_command) in valid_commands {
+            match classify_command(command) {
+                Classification::Supported { rtk_equivalent, .. } => {
+                    assert_eq!(rtk_equivalent, expected_rtk_command, "{command}");
+                }
+                classification => panic!("{command} classified as {classification:?}"),
+            }
+        }
     }
 
     #[test]
@@ -3587,6 +3927,28 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_pipe_producer_file_list_stays_raw() {
+        // A folded list keeps its prefix in the first line, which `tail` drops.
+        for cmd in [
+            "grep -rl foo src | tail -3",
+            "grep -rL foo . | head -5",
+            "rg -l foo | tail",
+            "rg --files src | cat",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+        // `-c` with `-l` is not folded, and `-e -l` makes `-l` the pattern.
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -rlc foo src | tail -3", &[]),
+            Some("rtk grep -rlc foo src | tail -3".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -e -l src | tail -3", &[]),
+            Some("rtk grep -e -l src | tail -3".into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_pipe_producer_batch_rules_rewritten() {
         assert_eq!(
             rewrite_command_no_prefixes("pytest | tail -20", &[]),
@@ -3674,27 +4036,11 @@ mod tests {
 
     #[test]
     fn test_rewrite_rtk_disabled_subprocess_warns() {
-        let rtk_bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("debug")
-            .join("rtk");
-        if !rtk_bin.exists() {
-            return;
-        }
-        let rtk_mtime = std::fs::metadata(&rtk_bin)
-            .ok()
-            .and_then(|m| m.modified().ok());
-        let test_mtime = std::env::current_exe()
-            .ok()
-            .and_then(|p| std::fs::metadata(p).ok())
-            .and_then(|m| m.modified().ok());
-        if let (Some(rtk_t), Some(test_t)) = (rtk_mtime, test_mtime)
-            && rtk_t < test_t
-        {
+        if !test_isolation::rtk_binary_is_built() {
             return;
         }
 
-        let output = std::process::Command::new(&rtk_bin)
+        let output = test_isolation::rtk_command()
             .args(["rewrite", "RTK_DISABLED=1 git status"])
             .output()
             .expect("Failed to run rtk");
@@ -5062,6 +5408,79 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_golangci_lint_keeps_trailing_redirects() {
+        // The redirect belongs to the shell, not to golangci-lint: dropping it
+        // sends output meant for a file or /dev/null to the terminal.
+        for (input, expected) in [
+            ("golangci-lint run 2>&1", "rtk golangci-lint run 2>&1"),
+            (
+                "golangci-lint run ./... >/dev/null",
+                "rtk golangci-lint run ./... >/dev/null",
+            ),
+            (
+                "golangci-lint run 2>/dev/null",
+                "rtk golangci-lint run 2>/dev/null",
+            ),
+            (
+                "golangci-lint run &>/dev/null",
+                "rtk golangci-lint run &>/dev/null",
+            ),
+            (
+                "FOO=1 golangci-lint run 2>&1",
+                "FOO=1 rtk golangci-lint run 2>&1",
+            ),
+            (
+                "golangci-lint --color never run ./... 2>&1",
+                "rtk golangci-lint --color never run ./... 2>&1",
+            ),
+            (
+                "golangci-lint run ./... 2>&1 | tail -5",
+                "rtk golangci-lint run ./... 2>&1 | tail -5",
+            ),
+            // No space before the redirect: the boundary is kept exactly as
+            // typed, so a word ending in digits is not turned into a
+            // descriptor number and vice versa.
+            (
+                "golangci-lint run -c x.yml>/dev/null",
+                "rtk golangci-lint run -c x.yml>/dev/null",
+            ),
+            (
+                "golangci-lint run ${PKG}2>/dev/null",
+                "rtk golangci-lint run ${PKG}2>/dev/null",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]).as_deref(),
+                Some(expected),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_supported_commands_reattach_redirects_as_typed() {
+        for (input, expected) in [
+            (
+                "git status ${PKG}2>/dev/null",
+                Some("rtk git status ${PKG}2>/dev/null"),
+            ),
+            ("git status 2>&1", Some("rtk git status 2>&1")),
+            // gh's structured-output flags still skip the rewrite with a redirect.
+            ("gh pr list --json number 2>&1", None),
+            (
+                "vendor/bin/phpunit tests 2>&1",
+                Some("rtk phpunit tests 2>&1"),
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]).as_deref(),
+                expected,
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
     fn test_rewrite_golangci_lint_with_flag_before_run() {
         assert_eq!(
             rewrite_command_no_prefixes("golangci-lint -v run ./...", &[]),
@@ -6302,9 +6721,56 @@ mod tests {
         assert!(cmd_has_rtk_disabled_prefix(
             "RTK_DISABLED=true git log --oneline"
         ));
+        // `gain`'s warning has no coverage gate, so this predicate stays purely
+        // syntactic (`ENV_PREFIX`): a `sudo`-first bypass is not counted there.
+        // The wrapper-aware peel is discover-only, where the gate can judge it.
+        assert!(!cmd_has_rtk_disabled_prefix(
+            "sudo RTK_DISABLED=1 docker ps"
+        ));
+        assert!(!cmd_has_rtk_disabled_prefix(
+            "sudo -E RTK_DISABLED=1 docker ps"
+        ));
+        assert!(cmd_has_rtk_disabled_prefix("RTK_DISABLED=1 sudo docker ps"));
+        assert!(cmd_has_rtk_disabled_prefix(
+            "RTK_DISABLED=1 sudo -E docker ps"
+        ));
         assert!(!cmd_has_rtk_disabled_prefix("git status"));
         assert!(!cmd_has_rtk_disabled_prefix("rtk git status"));
         assert!(!cmd_has_rtk_disabled_prefix("SOME_VAR=1 git status"));
+        assert!(!cmd_has_rtk_disabled_prefix("sudo docker ps"));
+
+        // Leading RTK_DISABLED= still reports true via strip_disabled_prefix
+        // fallthrough when the command word is unsupported (pre-existing gain
+        // behavior). Discover only counts Supported actual commands, so this
+        // does not create a false bypass example — see analytics strip tests
+        // for the "do not peel into docker/git" guarantee.
+        assert!(cmd_has_rtk_disabled_prefix(
+            "RTK_DISABLED=1 ssh host docker ps"
+        ));
+
+        // sudo-wrapped disabled + unsupported command word: rewrite helper does
+        // not strip sudo, so this is not a detected bypass prefix.
+        assert!(!cmd_has_rtk_disabled_prefix(
+            "sudo -E RTK_DISABLED=1 ./deploy.sh docker ps"
+        ));
+
+        // KuSh #3808: sudo -flag must not make later -e RTK_DISABLED= a prefix.
+        assert!(!cmd_has_rtk_disabled_prefix(
+            "sudo -E docker run -e RTK_DISABLED=1 myimage npm run build"
+        ));
+        assert!(!cmd_has_rtk_disabled_prefix(
+            "sudo docker run -e RTK_DISABLED=1 myimage npm run build"
+        ));
+
+        // KuSh #3808: do not look past && (gain passes unsplit lines).
+        assert!(!cmd_has_rtk_disabled_prefix(
+            "sudo -E ls && docker run -e RTK_DISABLED=1 img git status"
+        ));
+
+        // Shallow parse: value-taking sudo flags (`-u root`) are not a prefix.
+        assert!(!cmd_has_rtk_disabled_prefix(
+            "sudo -E -u root RTK_DISABLED=1 docker ps"
+        ));
     }
 
     #[test]
@@ -6318,6 +6784,75 @@ mod tests {
             ("FOO=1 RTK_DISABLED=1 ", "cargo test")
         );
         assert_eq!(strip_disabled_prefix("git status"), ("", "git status"));
+        // Rewrite helper still does not strip sudo (see ENV_PREFIX / #146).
+        assert_eq!(
+            strip_disabled_prefix("sudo RTK_DISABLED=1 docker ps"),
+            ("", "sudo RTK_DISABLED=1 docker ps")
+        );
+    }
+
+    #[test]
+    fn test_strip_disabled_prefix_for_analytics() {
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("sudo RTK_DISABLED=1 docker ps"),
+            ("sudo RTK_DISABLED=1 ", "docker ps")
+        );
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("sudo -E RTK_DISABLED=1 docker ps"),
+            ("sudo -E RTK_DISABLED=1 ", "docker ps")
+        );
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("RTK_DISABLED=1 sudo docker ps"),
+            ("RTK_DISABLED=1 sudo ", "docker ps")
+        );
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("RTK_DISABLED=1 sudo -E docker ps"),
+            ("RTK_DISABLED=1 sudo -E ", "docker ps")
+        );
+
+        // Wrapper commands: do not peel into arguments / inner Supported cmds.
+        for cmd in [
+            "RTK_DISABLED=1 ssh host docker ps",
+            "RTK_DISABLED=1 xargs -n1 git show",
+            "RTK_DISABLED=1 watch -n1 git status",
+            "sudo -E RTK_DISABLED=1 ./deploy.sh docker ps",
+        ] {
+            let (prefix, actual) = strip_disabled_prefix_for_analytics(cmd);
+            assert_eq!((prefix, actual), strip_disabled_prefix(cmd), "{cmd}");
+            assert!(
+                !actual.starts_with("docker") && !actual.starts_with("git "),
+                "must not attribute inner command for {cmd}: {actual}"
+            );
+        }
+
+        // Every wrapper class is peeled: an assignment after `sudo`, and `env`.
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("sudo FOO=1 RTK_DISABLED=1 docker ps"),
+            ("sudo FOO=1 RTK_DISABLED=1 ", "docker ps")
+        );
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("sudo env RTK_DISABLED=1 docker ps"),
+            ("sudo env RTK_DISABLED=1 ", "docker ps")
+        );
+        // An operator ends the prefix even when only wrapper words precede it.
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("sudo -v && RTK_DISABLED=1 docker ps"),
+            ("", "sudo -v && RTK_DISABLED=1 docker ps")
+        );
+
+        // Buried -e / && cases fall back to the rewrite stripper (no sudo peel).
+        assert_eq!(
+            strip_disabled_prefix_for_analytics(
+                "sudo -E docker run -e RTK_DISABLED=1 myimage npm run build"
+            ),
+            strip_disabled_prefix("sudo -E docker run -e RTK_DISABLED=1 myimage npm run build")
+        );
+        assert_eq!(
+            strip_disabled_prefix_for_analytics(
+                "sudo -E ls && docker run -e RTK_DISABLED=1 img git status"
+            ),
+            strip_disabled_prefix("sudo -E ls && docker run -e RTK_DISABLED=1 img git status")
+        );
     }
 
     // --- #485: absolute path normalization ---

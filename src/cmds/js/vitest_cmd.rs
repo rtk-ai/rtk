@@ -5,7 +5,6 @@ use regex::Regex;
 use serde::Deserialize;
 use std::sync::LazyLock;
 
-use crate::Commands;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{package_manager_exec, strip_ansi};
@@ -199,44 +198,75 @@ fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
     failures
 }
 
-pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32> {
-    let timer = tracking::TimedExecution::start();
-    let mut passthrough_requested = false;
+pub fn run_vitest(args: &[String], verbose: u8) -> Result<i32> {
+    run_framework_test(vitest_invocation(args), verbose)
+}
 
-    let (framework, mut cmd) = match command {
-        Commands::Vitest { .. } => {
-            let framework = "vitest";
-            let mut cmd = package_manager_exec(framework);
-            let effective_args = build_vitest_effective_args(args);
-            passthrough_requested = effective_args.passthrough;
-            cmd.args(effective_args.args);
-            (framework, cmd)
-        }
-        Commands::Jest { .. } => {
-            let framework = "jest";
-            let mut cmd = package_manager_exec(framework);
-            cmd
-                // Force non-watch mode
-                .arg("--no-watch")
-                // Enable JSON structured output
-                .arg("--json");
-            (framework, cmd)
-        }
-        _ => unreachable!(),
-    };
+pub fn run_jest(args: &[String], verbose: u8) -> Result<i32> {
+    run_framework_test(jest_invocation(args), verbose)
+}
 
-    if !matches!(command, Commands::Vitest { .. }) {
-        for arg in args {
-            if arg == "run"
-                || arg.starts_with("--json")
-                || arg.starts_with("--reporter")
-                || arg.starts_with("--watch")
-            {
-                continue;
-            }
-            cmd.arg(arg);
-        }
+/// What `rtk vitest` or `rtk jest` spawns: the tool, the arguments it gets,
+/// and whether the user's own reporter output is shown instead of parsed.
+struct TestInvocation {
+    framework: &'static str,
+    args: Vec<String>,
+    passthrough: bool,
+}
+
+fn vitest_invocation(args: &[String]) -> TestInvocation {
+    let passthrough = has_explicit_vitest_reporter(args);
+    let mut effective = vec!["run".to_string()];
+
+    if !passthrough {
+        effective.push("--reporter=json".to_string());
     }
+
+    for arg in args {
+        if should_skip_vitest_arg(arg) {
+            continue;
+        }
+        effective.push(arg.clone());
+    }
+
+    TestInvocation {
+        framework: "vitest",
+        args: effective,
+        passthrough,
+    }
+}
+
+fn jest_invocation(args: &[String]) -> TestInvocation {
+    let mut effective = vec![
+        // Force non-watch mode
+        "--no-watch".to_string(),
+        // Enable JSON structured output
+        "--json".to_string(),
+    ];
+    effective.extend(
+        args.iter()
+            .filter(|arg| !should_skip_jest_arg(arg))
+            .cloned(),
+    );
+    TestInvocation {
+        framework: "jest",
+        args: effective,
+        passthrough: false,
+    }
+}
+
+fn should_skip_jest_arg(arg: &str) -> bool {
+    arg == "run"
+        || arg.starts_with("--json")
+        || arg.starts_with("--reporter")
+        || arg.starts_with("--watch")
+}
+
+fn run_framework_test(invocation: TestInvocation, verbose: u8) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+    let framework = invocation.framework;
+    let mut cmd = package_manager_exec(framework);
+    cmd.args(&invocation.args);
 
     let result = exec_capture(&mut cmd).context(format!("Failed to run {}", framework))?;
     let combined = result.combined();
@@ -245,7 +275,7 @@ pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32>
         framework,
         &result.stdout,
         &combined,
-        passthrough_requested,
+        invocation.passthrough,
         verbose,
     );
     let tee_label = format!("{}_run", framework);
@@ -266,11 +296,6 @@ pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32>
     Ok(0)
 }
 
-struct EffectiveVitestArgs {
-    args: Vec<String>,
-    passthrough: bool,
-}
-
 struct FormattedTestOutput {
     text: String,
     truncated: bool,
@@ -289,27 +314,6 @@ impl FormattedTestOutput {
             text,
             truncated: true,
         }
-    }
-}
-
-fn build_vitest_effective_args(args: &[String]) -> EffectiveVitestArgs {
-    let passthrough = has_explicit_vitest_reporter(args);
-    let mut effective = vec!["run".to_string()];
-
-    if !passthrough {
-        effective.push("--reporter=json".to_string());
-    }
-
-    for arg in args {
-        if should_skip_vitest_arg(arg) {
-            continue;
-        }
-        effective.push(arg.clone());
-    }
-
-    EffectiveVitestArgs {
-        args: effective,
-        passthrough,
     }
 }
 
@@ -419,6 +423,43 @@ mod tests {
     }
 
     #[test]
+    fn test_vitest_invocation_runs_vitest() {
+        let invocation = vitest_invocation(&args(&["src/a.test.ts"]));
+
+        assert_eq!(invocation.framework, "vitest");
+    }
+
+    #[test]
+    fn test_jest_invocation_runs_jest_once_with_json_output() {
+        let invocation = jest_invocation(&args(&["src/a.test.js"]));
+
+        assert_eq!(invocation.framework, "jest");
+        assert_eq!(
+            invocation.args,
+            args(&["--no-watch", "--json", "src/a.test.js"])
+        );
+        assert!(!invocation.passthrough);
+    }
+
+    #[test]
+    fn test_jest_invocation_drops_run_json_reporter_and_watch_args() {
+        let invocation = jest_invocation(&args(&[
+            "run",
+            "--json",
+            "--reporters=default",
+            "--watch",
+            "-t",
+            "adds",
+            "src/a.test.js",
+        ]));
+
+        assert_eq!(
+            invocation.args,
+            args(&["--no-watch", "--json", "-t", "adds", "src/a.test.js"])
+        );
+    }
+
+    #[test]
     fn test_vitest_parser_json() {
         let json = r#"{
             "numTotalTests": 13,
@@ -525,8 +566,7 @@ Scope: all 6 workspace projects
 
     #[test]
     fn test_vitest_effective_args_inject_json_reporter_by_default() {
-        let effective =
-            build_vitest_effective_args(&args(&["run", "constants.test.ts", "--watch"]));
+        let effective = vitest_invocation(&args(&["run", "constants.test.ts", "--watch"]));
 
         assert!(!effective.passthrough);
         assert_eq!(
@@ -537,8 +577,7 @@ Scope: all 6 workspace projects
 
     #[test]
     fn test_vitest_effective_args_preserve_explicit_reporter_equals() {
-        let effective =
-            build_vitest_effective_args(&args(&["constants.test.ts", "--reporter=verbose"]));
+        let effective = vitest_invocation(&args(&["constants.test.ts", "--reporter=verbose"]));
 
         assert!(effective.passthrough);
         assert_eq!(
@@ -549,7 +588,7 @@ Scope: all 6 workspace projects
 
     #[test]
     fn test_vitest_effective_args_preserve_explicit_reporter_value() {
-        let effective = build_vitest_effective_args(&args(&[
+        let effective = vitest_invocation(&args(&[
             "run",
             "constants.test.ts",
             "--reporter",

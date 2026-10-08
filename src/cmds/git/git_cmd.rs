@@ -1,17 +1,17 @@
 //! Filters git output — log, status, diff, and more — keeping just the essential info.
 
-use crate::core::arg_tokenizer::{
-    self, Attachment, Dialect, Token, TokenKind, ValueSpec, is_digit_run,
-};
+use crate::core::arg_tokenizer::{self, Dialect, Token, TokenKind, ValueSpec, is_digit_run};
 use crate::core::args_utils;
 use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
+use crate::core::shell::{display_args, quote_word, with_args};
 use crate::core::stream::{
     self, CaptureResult, FilterMode, LineHandler, LineStreamFilter, StdinMode, exec_capture,
     exec_capture_stdin,
 };
 use crate::core::tracking;
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
+use crate::core::user_dirs;
 use crate::core::utils::{exit_code_from_status, join_with_overflow, resolved_command, strip_ansi};
 use anyhow::{Context, Result};
 use std::ffi::OsString;
@@ -196,7 +196,10 @@ fn hard_suppresses_diff_body(token: &Token<'_>) -> bool {
 
 fn requests_patch_output(token: &Token<'_>) -> bool {
     match token.kind {
-        TokenKind::Long => matches!(token.text, "patch" | "unified" | "function-context"),
+        TokenKind::Long => matches!(
+            token.text,
+            "patch" | "patch-with-stat" | "patch-with-raw" | "unified" | "function-context"
+        ),
         TokenKind::Short => matches!(token.text, "p" | "u" | "U" | "W"),
         _ => false,
     }
@@ -262,6 +265,7 @@ fn run_diff(
     global_args: &[String],
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+    let tracked = with_args("git diff", &display_args(args));
 
     let tokens = tokenize_git_diff_args(args);
     let wants_stat = tokens
@@ -303,8 +307,8 @@ fn run_diff(
                 eprintln!("{}", result.stderr.trim());
             }
             timer.track(
-                &format!("git diff {}", args.join(" ")),
-                &format!("rtk git diff {} (passthrough)", args.join(" ")),
+                &tracked,
+                &tracking::passthrough_label(&tracked),
                 &result.stdout,
                 &result.stdout,
             );
@@ -312,8 +316,8 @@ fn run_diff(
         }
 
         timer.track(
-            &format!("git diff {}", args.join(" ")),
-            &format!("rtk git diff {} (passthrough)", args.join(" ")),
+            &tracked,
+            &tracking::passthrough_label(&tracked),
             &result.stdout,
             &result.stdout,
         );
@@ -343,8 +347,8 @@ fn run_diff(
             eprint!("{}", diff_result.stderr);
         }
         timer.track(
-            &format!("git diff {}", args.join(" ")),
-            &format!("rtk git diff {}", args.join(" ")),
+            &tracked,
+            &format!("rtk {tracked}"),
             &diff_result.stdout,
             &diff_result.stdout,
         );
@@ -378,12 +382,7 @@ fn run_diff(
     let shown = never_worse(&raw, &printed);
     println!("{}", shown);
 
-    timer.track(
-        &format!("git diff {}", args.join(" ")),
-        &format!("rtk git diff {}", args.join(" ")),
-        &raw,
-        shown,
-    );
+    timer.track(&tracked, &format!("rtk {tracked}"), &raw, shown);
 
     Ok(0)
 }
@@ -444,6 +443,7 @@ fn run_show(
     // `show_positionals`, so `git show <rev> -- <path:with:colon>` would misread the
     // colon'd pathspec as a `<rev>:<path>` blob and dump it instead of a commit-diff.
     let args = &args_utils::restore_double_dash(args);
+    let tracked = with_args("git show", &display_args(args));
 
     // Pick one of three handlers for `git show`. `show_route` decides the blob case
     // FIRST (see its docs): the two branches below are mutually exclusive on `route`,
@@ -466,7 +466,7 @@ fn run_show(
     // `0xF1` becomes the `U+FFFD` replacement char — verified).
     let (route, blob_objects) = match show_route(args) {
         ShowRoute::Blob => {
-            let blobs: Vec<&String> = blob_candidates(args)
+            let blobs: Vec<&str> = blob_candidates(args)
                 .into_iter()
                 .filter(|c| probe_is_blob(global_args, c))
                 .collect();
@@ -497,8 +497,8 @@ fn run_show(
         }
 
         timer.track(
-            &format!("git show {}", args.join(" ")),
-            &format!("rtk git show {} (passthrough)", args.join(" ")),
+            &tracked,
+            &tracking::passthrough_label(&tracked),
             &result.stdout,
             &result.stdout,
         );
@@ -517,8 +517,7 @@ fn run_show(
         // passthrough path below — decoding into a `String` first would lose them.
         let result =
             crate::core::stream::exec_capture_bytes(&mut cmd).context("Failed to run git show")?;
-        let label = format!("git show {}", args.join(" "));
-        let rtk_label = format!("rtk git show {}", args.join(" "));
+        let rtk_label = format!("rtk {tracked}");
         if !result.success() {
             eprint!(
                 "{}",
@@ -573,7 +572,7 @@ fn run_show(
             Err(_) => {
                 return emit_raw_bytes_passthrough(
                     &result.stdout,
-                    &label,
+                    &tracked,
                     &rtk_label,
                     &timer,
                     result.exit_code,
@@ -606,14 +605,14 @@ fn run_show(
             let shown = compact_blob_show(text, blob_objects[0], global_args);
             print!("{}", shown);
             // Track savings against the bytes git actually wrote (`result.stdout`).
-            timer.track_bytes(&label, &rtk_label, result.stdout.len(), &shown);
+            timer.track_bytes(&tracked, &rtk_label, result.stdout.len(), &shown);
             return Ok(0);
         }
         // Not windowable (multiple concatenated objects, a content-transforming flag, or
         // a trailing pathspec): pass through byte-identical.
         return emit_raw_bytes_passthrough(
             &result.stdout,
-            &label,
+            &tracked,
             &rtk_label,
             &timer,
             result.exit_code,
@@ -639,8 +638,8 @@ fn run_show(
             eprint!("{}", raw_result.stderr);
         }
         timer.track(
-            &format!("git show {}", args.join(" ")),
-            &format!("rtk git show {}", args.join(" ")),
+            &tracked,
+            &format!("rtk {tracked}"),
             &raw_result.stdout,
             &raw_result.stdout,
         );
@@ -668,12 +667,7 @@ fn run_show(
         // below would print what the user explicitly suppressed.
         let shown = never_worse(&raw_output, &printed);
         println!("{}", shown);
-        timer.track(
-            &format!("git show {}", args.join(" ")),
-            &format!("rtk git show {}", args.join(" ")),
-            &raw_output,
-            shown,
-        );
+        timer.track(&tracked, &format!("rtk {tracked}"), &raw_output, shown);
         return Ok(0);
     }
 
@@ -682,11 +676,17 @@ fn run_show(
     // header this step must not repeat, and git resolves the two by last flag wins, so a user
     // `--oneline` re-enabled it and the summary printed twice. Appending RTK's flag after the
     // user's instead would put it past their `--`, where git reads it as a pathspec.
+    // Re-tokenized, because dropping `--oneline` shifts every later argument down one and
+    // `tokens` still addresses the unshifted `args`. Stale indices make the patch-shape strip
+    // below drop the wrong argument: `--oneline -p <sha>` loses the `<sha>` and keeps a bare
+    // `-p`, which outranks RTK's `--no-patch` -- HEAD's stat and patch under another
+    // commit's header.
     let stat_args = args_without_oneline(args, &tokens);
+    let stat_tokens = tokenize_git_diff_args(&stat_args);
     let mut stat_cmd = show_cmd(
         global_args,
         &stat_args,
-        &tokens,
+        &stat_tokens,
         &["--no-patch", "--stat", "--pretty=format:"],
         true,
     );
@@ -716,12 +716,7 @@ fn run_show(
     let shown = never_worse(&raw_output, &printed);
     println!("{}", shown);
 
-    timer.track(
-        &format!("git show {}", args.join(" ")),
-        &format!("rtk git show {}", args.join(" ")),
-        &raw_output,
-        shown,
-    );
+    timer.track(&tracked, &format!("rtk {tracked}"), &raw_output, shown);
 
     Ok(0)
 }
@@ -785,95 +780,27 @@ fn is_blob_show_arg(arg: &str) -> bool {
         && arg.chars().any(|c| c != ':')
 }
 
-/// The positional (non-option) arguments of a `git show` — its objects. Options and
-/// the value tokens they consume (`-S 'url:1'`, `-L 1,2:file`) are dropped via git's
-/// own flag/value grammar ([`flag_token_consumes_next`]), so an option operand that
-/// happens to contain a colon is never mistaken for a blob and truncated. This handles
-/// short-flag CLUSTERS too (`-wG a:b`, `-pS a:b`), whose value-flag tail git re-parses.
-/// Args after a `--` are pathspecs, never objects, so a colon in a filename there
-/// (`-- weird:name`) is excluded by scanning only the args before the first `--`; a
-/// trailing `-- <path>` beside a real object arg is thus ignored (git still dumps the
-/// blob) rather than emptying the list.
-fn show_positionals(args: &[String]) -> Vec<&String> {
-    let rev_args = match args.iter().position(|a| a == "--") {
-        Some(sep) => &args[..sep],
-        None => args,
-    };
-    let mut positionals = Vec::new();
-    let mut iter = rev_args.iter();
-    while let Some(arg) = iter.next() {
-        if arg.starts_with('-') {
-            if flag_token_consumes_next(arg) {
-                iter.next(); // skip this flag's value token
-            }
-            continue;
-        }
-        positionals.push(arg);
-    }
-    positionals
-}
-
-/// Whether `arg` is a flag that consumes the following argument as its value.
+/// The positional (non-option) arguments of a `git show` — its objects. A flag's own value
+/// operand (`-S 'url:1'`, the `-G` value in a `-wG a:b` cluster) and everything past `--`
+/// are excluded, so a colon in either is never mistaken for a `<rev>:<path>` blob. A
+/// trailing `-- <path>` beside a real object is thus ignored rather than emptying the list.
 ///
-/// Delegates to [`log_takes_value`] so git's flag/value grammar lives in one table rather than
-/// two that can drift: the same predicate the tokenizer folds with. `AttachedOnly` flags are
-/// excluded because they never take a separate token (`-M50` attaches, `-M 50` does not), and
-/// the cluster-position rule for solo-only flags is applied by the caller below.
-fn consumes_next_token_as_value(arg: &str) -> bool {
-    let (kind, name) = match arg.strip_prefix("--") {
-        Some(rest) => (TokenKind::Long, rest),
-        None => match arg.strip_prefix('-') {
-            Some(rest) => (TokenKind::Short, rest),
-            None => return false,
-        },
-    };
-    log_takes_value(kind, name).is_some_and(|spec| spec.attachment != Attachment::AttachedOnly)
-}
-
-/// Whether a flag token consumes the NEXT arg as its value (so `show_positionals` must
-/// skip it). Handles long flags (`--grep foo`) via [`consumes_next_token_as_value`] and
-/// short-flag CLUSTERS (`-wG foo`, `-pS bar`), which git re-parses char by char.
-///
-/// Inside a cluster, the first value-taking short flag (`-S -G -I -L -O -l -n`) takes
-/// the REST of the cluster as an INLINE value when more chars follow it (`-Sfoo` == `-S
-/// foo`, so it does NOT consume the next arg), or the NEXT arg when it is the cluster's
-/// last char (`-wG` == `-w -G`, consuming the next arg). Any earlier char is a boolean
-/// flag we skip over. This reuses the single flag/value table rather than re-tokenizing
-/// git's whole grammar, so `git show -wG x:y HEAD:big` correctly treats `x:y` as `-G`'s
-/// value and `HEAD:big` as the object.
-//
-// TODO(after #3681): replace this short-cluster walk with the ValueSpec factorization;
-// the per-char logic here is exactly what a ValueSpec table subsumes.
-fn flag_token_consumes_next(arg: &str) -> bool {
-    // A short cluster is a single leading `-` followed by non-empty flag chars (not the
-    // `--long` form and not the bare `-` stdin sentinel). Everything else (`--foo`, `-`)
-    // uses the exact-match table directly.
-    match arg.strip_prefix('-') {
-        Some(cluster) if !cluster.is_empty() && !cluster.starts_with('-') => {
-            for (i, c) in cluster.char_indices() {
-                if is_short_value_flag(c) {
-                    // Consumes the next arg only if no inline value follows in-cluster.
-                    return i + c.len_utf8() == cluster.len();
-                }
-            }
-            false
-        }
-        _ => consumes_next_token_as_value(arg),
-    }
-}
-
-/// Whether a single-letter short flag takes a value (`-S`, `-G`, `-L`, …). Derived from
-/// [`consumes_next_token_as_value`] so the flag/value table stays the single source of
-/// truth and no parallel list can drift out of sync.
-fn is_short_value_flag(c: char) -> bool {
-    c.is_ascii() && consumes_next_token_as_value(format!("-{c}").as_str())
+/// Uses `diff`'s grammar, not `log`'s: `git show -wl 100` consumes the `100` as the rename
+/// limit, where log's `-l` is solo-only and would leave it looking like a second object.
+fn show_positionals(args: &[String]) -> Vec<&str> {
+    let tokens = tokenize_git_diff_args(args);
+    arg_tokenizer::before_dashdash(&tokens)
+        .iter()
+        .filter(|t| t.is_free_positional())
+        .map(|t| t.text)
+        .collect()
 }
 
 /// The `git show` positionals that look like `<rev>:<path>` blob objects — the
 /// windowing candidates. ALL of them are returned (not just the first) so `run_show`
 /// can `cat-file`-probe every one: a value operand a missed exotic cluster might leave
 /// behind is rejected by the probe, while the real blob elsewhere on the line is found.
-fn blob_candidates(args: &[String]) -> Vec<&String> {
+fn blob_candidates(args: &[String]) -> Vec<&str> {
     show_positionals(args)
         .into_iter()
         .filter(|a| is_blob_show_arg(a))
@@ -963,9 +890,6 @@ fn commit_or_stat_route(args: &[String]) -> ShowRoute {
 /// requirement the recovery hint has. Only called on the path where the arg already
 /// looks like `rev:path` (the `show_route` pre-filter), so the ~1 ms subprocess never
 /// runs on an ordinary commit show.
-///
-// TODO(after #3681): once ValueSpec factorization lands, a flag pre-filter can avoid
-// the cat-file probe on the common path.
 fn probe_is_blob(global_args: &[String], arg: &str) -> bool {
     let mut cmd = git_cmd(global_args);
     cmd.args(["cat-file", "-t", arg]);
@@ -1021,12 +945,6 @@ fn blob_truncation(raw: &str, budget: Budget) -> Option<(&str, usize, usize)> {
     Some((head, remaining, head_lines + 1))
 }
 
-/// POSIX single-quote a blob arg so a hint with a space or shell metachar in the path
-/// stays copy-paste safe.
-fn shell_single_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
-
 /// Window a single blob dump: cap a large text blob and point at the rest with a hint
 /// re-derived from the blob arg itself — `git show <rev>:<path> | tail -n +N`.
 ///
@@ -1040,17 +958,22 @@ fn compact_blob_show(raw: &str, blob_arg: &str, global_args: &[String]) -> Strin
     };
     // Carry the command's global args (`-C <dir>`, `-c k=v`, `--git-dir`, `--work-tree`)
     // into the hint so it is runnable from anywhere, not just the repo root: without
-    // them `rtk git -C /repo show HEAD:big` would emit `git show 'HEAD:big' | tail …`,
-    // which fails outside /repo. Each is shell-quoted for copy-paste safety.
+    // them `rtk git -C /repo show HEAD:big` would emit `git show HEAD:big | tail …`,
+    // which fails outside /repo. Each is quoted when needed (`quote_word`), so the hint
+    // stays copy-paste safe.
     let mut prefix = String::new();
     for arg in global_args {
-        prefix.push_str(&shell_single_quote(arg));
+        prefix.push_str(&quote_word(arg));
         prefix.push(' ');
     }
+    // Through `rtk proxy`, like the `diff` hints: a bare `git show` is what RTK's own hook
+    // rewrites back into `rtk git show`, which windows the dump a second time and leaves
+    // `tail` nothing but this hint to print -- one line where the reader asked for the rest
+    // of the file. `proxy` is the documented way to reach the unfiltered command.
     let hint = format!(
-        "[see remaining: git {}show {} | tail -n +{}]",
+        "[see remaining: rtk proxy git {}show {} | tail -n +{}]",
         prefix,
-        shell_single_quote(blob_arg),
+        quote_word(blob_arg),
         offset
     );
     let out = format!("{}... (+{} lines) {}\n", head, remaining, hint);
@@ -1561,17 +1484,154 @@ fn raw_log_is_capped(tokens: &[Token<'_>]) -> bool {
     !has_limit_flag(tokens) && !bounds_the_walk(tokens)
 }
 
-/// How many commits a default-format `git log` printed. `None` when the format is not the
-/// default one, which is when RTK cannot tell and says nothing rather than guessing.
-fn count_default_format_commits(stdout: &str) -> Option<usize> {
-    let n = stdout
+/// Whether the walk holds more commits than RTK's default limit shows -- the question the
+/// truncation notice answers.
+///
+/// Asks git for the one commit just past the limit and reads only whether anything came back.
+/// Nothing about the printed shape can disfigure that answer, which is what counting commits
+/// out of the emitted output could never manage: `--oneline` leaves no commit header,
+/// `log.decorate` and `--graph` disfigure the one there is, `-z` runs the walk onto a single
+/// line, `--line-prefix` puts something in front of it, colour puts an escape there, and a
+/// SHA-256 object name is not 40 characters. Each of those silenced the notice on a cap that
+/// had taken most of the history away.
+///
+/// RTK's flags go in front of every user argument: git refuses an option that follows a
+/// positional, so a bare pathspec would otherwise make the probe fail outright. That leaves
+/// the user's flags last, where git's last-flag-wins hands the format back to them -- harmless
+/// except for `--pretty`/`--format`/`--oneline`, since an empty `--pretty=format:` prints a
+/// commit as no bytes at all and would read as "nothing left". Those three are dropped from
+/// what is forwarded, along with `--skip`, which RTK's own has to absorb, `--exit-code`, which
+/// would make the probe report failure on a walk git was perfectly happy with, `--output`,
+/// which is a redirect that would truncate the file the command just wrote, and the
+/// patch-shape flags, which are work with no answer in them.
+///
+/// `None` when git refuses the command: RTK then says nothing rather than guessing.
+fn walk_exceeds_limit(
+    global_args: &[String],
+    args: &[String],
+    tokens: &[Token<'_>],
+    limit: usize,
+) -> Option<bool> {
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("log");
+    // No `--no-patch`: git refuses it beside `--name-only`/`--name-status`, and the strip in
+    // `log_probe_args` has already taken the patch-shape flags out of what is forwarded.
+    cmd.args(["--pretty=format:%H"]);
+    // `--skip` is counted where the walk starts; a diff-based filter is applied after it. So
+    // for those the skip lands on commits the filter would have dropped and the probe reports
+    // on a commit the user was never going to see -- `git log -p -S needle` matching twice
+    // claimed a cap of ten. `--max-count` is applied last, after every filter, so there the
+    // question becomes how many came back rather than whether one did.
+    let counting = selects_by_diff(tokens);
+    if counting {
+        cmd.arg(format!("--max-count={}", limit.saturating_add(1)));
+    } else {
+        cmd.args(["--max-count=1".to_string()]);
+        cmd.arg(format!(
+            "--skip={}",
+            limit.saturating_add(user_skip(tokens))
+        ));
+    }
+    cmd.args(log_probe_args(args, tokens));
+
+    let result = exec_capture(&mut cmd).ok()?;
+    if !result.success() {
+        return None;
+    }
+    if !counting {
+        return Some(!result.stdout.trim().is_empty());
+    }
+    // One line per commit is RTK's own `--pretty` talking, but the user's `--stat`,
+    // `--name-only` or `--graph` still add lines of their own, so commits are counted by
+    // shape. ANSI first: `color.ui=always` puts an escape in front of the rail.
+    let shown = strip_ansi(&result.stdout)
         .lines()
-        .filter(|line| {
-            line.strip_prefix("commit ")
-                .is_some_and(|rest| rest.len() >= 7 && rest.chars().all(|c| c.is_ascii_hexdigit()))
-        })
+        .filter(|line| is_commit_name(line))
         .count();
-    (n > 0).then_some(n)
+    Some(shown > limit)
+}
+
+/// True for a `--pretty=format:%H` line, ignoring any `--graph` rail in front of it. No upper
+/// bound on the length: a SHA-256 object name is 64 characters, and rejecting it counted every
+/// commit in such a repository as none.
+fn is_commit_name(line: &str) -> bool {
+    let name =
+        line.trim_matches(|c: char| c.is_whitespace() || matches!(c, '*' | '|' | '/' | '\\'));
+    name.len() >= 7 && name.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// True when the walk is narrowed by what the commits changed rather than by where they are.
+/// git applies these after `--skip` and before `--max-count`, which is what makes the two
+/// probes above answer different questions.
+fn selects_by_diff(tokens: &[Token<'_>]) -> bool {
+    arg_tokenizer::before_dashdash(tokens).iter().any(|t| {
+        match t.kind {
+            TokenKind::Long => matches!(
+                t.text,
+                "find-object" | "diff-filter" | "pickaxe-regex" | "pickaxe-all"
+            ),
+            // `-S<string>` and `-G<regex>`.
+            TokenKind::Short => matches!(t.text, "S" | "G"),
+            _ => false,
+        }
+    })
+}
+
+/// The user arguments [`walk_exceeds_limit`] forwards: everything that bounds the walk, and
+/// nothing that decides what git does with it.
+///
+/// Three classes come out. `--pretty`/`--format`/`--oneline`, because RTK's own `--pretty` is
+/// written first and would otherwise lose the last-flag-wins arbitration -- an empty
+/// `--pretty=format:` then prints a commit as no bytes at all, which reads as "nothing left"
+/// (`--summary` and `--dirstat` print nothing of their own for a plain modification, so the
+/// probe would have only that format to go on). `--skip`, because RTK's has to absorb it for
+/// the same reason. And `--output=<file>`, which is not a format at all but a redirect: left
+/// in, the probe reruns it and truncates the file the command it follows has just written.
+///
+/// The patch-shape flags go too, through the same strip the `show` header uses. The probe
+/// reads only whether git printed anything, so a patch is work with no answer in it -- and
+/// with `diff.external` or a `textconv` driver configured, work that runs the user's own
+/// program one more time than they asked for.
+fn log_probe_args(args: &[String], tokens: &[Token<'_>]) -> Vec<String> {
+    let mut dropped: Vec<usize> = Vec::new();
+    for token in tokens {
+        if token.kind != TokenKind::Long
+            || !matches!(
+                token.text,
+                "pretty" | "format" | "oneline" | "skip" | "output" | "exit-code"
+            )
+        {
+            continue;
+        }
+        dropped.push(token.source_index);
+        // `--skip 5` spends a second argument on its value; `--skip=5` does not.
+        if let Some(index) = token.linked
+            && let Some(value) = tokens.get(index)
+        {
+            dropped.push(value.source_index);
+        }
+    }
+    let kept: Vec<String> = args
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !dropped.contains(index))
+        .map(|(_, arg)| arg.clone())
+        .collect();
+    // Re-tokenized, because the drop above shifted every index `tokens` holds.
+    let kept_tokens = tokenize_git_log_args(&kept);
+    args_without_patch_shape(&kept, &kept_tokens)
+}
+
+/// The user's own `--skip`, which RTK's has to absorb: git takes the last one, and RTK's is
+/// written first. Last one wins here too, matching git. Unparseable means git will reject the
+/// command anyway, so 0 is as good an answer as any.
+fn user_skip(tokens: &[Token<'_>]) -> usize {
+    tokens
+        .iter()
+        .rfind(|t| t.kind == TokenKind::Long && t.text == "skip")
+        .and_then(|t| t.value(tokens))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
 }
 
 /// True when the arguments already bound the walk, so RTK's default limit would only take away
@@ -1595,6 +1655,7 @@ fn run_log(
     verbose: u8,
     global_args: &[String],
 ) -> Result<i32> {
+    let tracked = with_args("git log", &display_args(args));
     let tokens = tokenize_git_log_args(args);
 
     if tokens.iter().any(|t| log_wants_raw_shape(t, &tokens)) {
@@ -1616,19 +1677,28 @@ fn run_log(
             eprint!("{}", result.stderr);
         }
         timer.track(
-            &format!("git log {}", args.join(" ")),
-            &format!("rtk git log {} (passthrough)", args.join(" ")),
+            &tracked,
+            &tracking::passthrough_label(&tracked),
             &result.stdout,
             &result.stdout,
         );
-        if !result.success() {
-            return Ok(result.exit_code);
-        }
-        if count_default_format_commits(&result.stdout) == Some(DEFAULT_LOG_LIMIT) {
+        // Before the exit check, not after: `--exit-code` makes a perfectly successful
+        // `git log` exit 1, and returning first left that cap unannounced. A command git
+        // really did refuse silences the notice anyway -- the probe fails on it too.
+        //
+        // Asked unconditionally, never skipped on empty output: `--output=<file>` sends the
+        // whole run to a file and `--summary --pretty=format:` prints nothing for a plain
+        // modification, and both of those are capped walks with a notice owed. The probe
+        // walks the history a second time when a filter like `-S` matches little, which is
+        // the price of an answer that does not depend on what the run happened to print.
+        if walk_exceeds_limit(global_args, args, &tokens, DEFAULT_LOG_LIMIT) == Some(true) {
             eprintln!(
-                "[rtk] showing {} commits; pass -n <count> for more",
+                "[rtk] capped at {} commits; pass -n <count> for more",
                 DEFAULT_LOG_LIMIT
             );
+        }
+        if !result.success() {
+            return Ok(result.exit_code);
         }
         return Ok(0);
     }
@@ -1706,8 +1776,8 @@ fn run_log(
     println!("{}", filtered);
 
     timer.track(
-        &format!("git log {}", args.join(" ")),
-        &format!("rtk git log {}", args.join(" ")),
+        &tracked,
+        &format!("rtk {tracked}"),
         &result.stdout,
         &filtered,
     );
@@ -1822,8 +1892,8 @@ fn real_flag_args(args: &[String]) -> Vec<&str> {
 
 /// True for git log flags that change the *shape* of git's raw output (patch text, diffstat,
 /// name lists) in a way incompatible with RTK's injected `--pretty=format` markers, requiring
-/// the raw passthrough path instead (see [`requests_raw_log_output`]). `diff`/`show` use the
-/// narrower [`diff_wants_raw_shape`]/[`show_wants_raw_shape`] instead.
+/// the raw passthrough path instead. `diff`/`show` use the narrower
+/// [`diff_wants_raw_shape`]/[`show_wants_raw_shape`] instead.
 fn log_wants_raw_shape(token: &Token<'_>, tokens: &[Token<'_>]) -> bool {
     // Every `--diff-merges` format but `off`/`none` emits a patch (git 2.53), and log's
     // one-line-per-commit compaction cannot represent one -- the same reason `-p` is listed
@@ -2218,6 +2288,7 @@ fn filter_status_with_args(output: &str) -> String {
 
 fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+    let tracked = with_args("git status", &display_args(args));
 
     // Keep a narrow compact path for no-arg status and branch/short-only flags.
     // More complex explicit args still use the existing minimal-filter path.
@@ -2230,8 +2301,8 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
                 eprint!("{}", result.stderr);
             }
             timer.track(
-                &format!("git status {}", args.join(" ")),
-                &format!("rtk git status {}", args.join(" ")),
+                &tracked,
+                &format!("rtk {tracked}"),
                 &result.stdout,
                 &result.stdout,
             );
@@ -2248,8 +2319,8 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         print!("{}", filtered);
 
         timer.track(
-            &format!("git status {}", args.join(" ")),
-            &format!("rtk git status {}", args.join(" ")),
+            &tracked,
+            &format!("rtk {tracked}"),
             &result.stdout,
             &filtered,
         );
@@ -2276,18 +2347,8 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         if !message.is_empty() {
             eprintln!("{}", message);
         }
-        let original_cmd = if args.is_empty() {
-            "git status".to_string()
-        } else {
-            format!("git status {}", args.join(" "))
-        };
-        let rtk_cmd = if args.is_empty() {
-            "rtk git status".to_string()
-        } else {
-            format!("rtk git status {}", args.join(" "))
-        };
         let shown = never_worse(&raw_output, &message);
-        timer.track(&original_cmd, &rtk_cmd, &raw_output, shown);
+        timer.track(&tracked, &format!("rtk {tracked}"), &raw_output, shown);
         return Ok(result.exit_code);
     }
 
@@ -2307,18 +2368,7 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     let shown = never_worse(&raw_output, &final_output);
     println!("{}", shown);
 
-    let original_cmd = if args.is_empty() {
-        "git status".to_string()
-    } else {
-        format!("git status {}", args.join(" "))
-    };
-    let rtk_cmd = if args.is_empty() {
-        "rtk git status".to_string()
-    } else {
-        format!("rtk git status {}", args.join(" "))
-    };
-
-    timer.track(&original_cmd, &rtk_cmd, &raw_output, shown);
+    timer.track(&tracked, &format!("rtk {tracked}"), &raw_output, shown);
 
     Ok(0)
 }
@@ -2376,12 +2426,8 @@ fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> 
             eprintln!("{}", result.stderr.trim());
         }
 
-        timer.track(
-            &format!("git add {}", args.join(" ")),
-            &format!("rtk git add {}", args.join(" ")),
-            &raw_output,
-            &compact,
-        );
+        let tracked = with_args("git add", &display_args(args));
+        timer.track(&tracked, &format!("rtk {tracked}"), &raw_output, &compact);
     } else {
         eprintln!("FAILED: git add");
         if !result.stderr.trim().is_empty() {
@@ -2431,7 +2477,7 @@ fn parse_commit_output(line: &str) -> String {
 fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let original_cmd = format!("git commit {}", args.join(" "));
+    let original_cmd = with_args("git commit", &display_args(args));
 
     if verbose > 0 {
         eprintln!("{}", original_cmd);
@@ -2502,7 +2548,7 @@ fn run_checkout(args: &[String], verbose: u8, global_args: &[String]) -> Result<
         cmd.arg(arg);
     }
 
-    let args_display = args.join(" ");
+    let args_display = display_args(args);
     let args_for_filter = args.to_vec();
     runner::run_filtered_with_exit(
         cmd,
@@ -2743,7 +2789,7 @@ fn run_push(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
         cmd.arg(arg);
     }
 
-    let cmd_label = format!("git push {}", args.join(" "));
+    let cmd_label = with_args("git push", &display_args(args));
     let filter = LineStreamFilter::new(GitPushLineHandler::default());
     let result = stream::run_streaming(
         &mut cmd,
@@ -2827,12 +2873,8 @@ fn run_pull(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
 
         println!("{}", compact);
 
-        timer.track(
-            &format!("git pull {}", args.join(" ")),
-            &format!("rtk git pull {}", args.join(" ")),
-            &raw_output,
-            &compact,
-        );
+        let tracked = with_args("git pull", &display_args(args));
+        timer.track(&tracked, &format!("rtk {tracked}"), &raw_output, &compact);
     } else {
         eprintln!("FAILED: git pull");
         if !result.stderr.trim().is_empty() {
@@ -2873,6 +2915,7 @@ fn branch_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
 
 fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+    let tracked = with_args("git branch", &display_args(args));
 
     if verbose > 0 {
         eprintln!("git branch");
@@ -2930,12 +2973,7 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         let combined = result.combined();
 
         let trimmed = result.stdout.trim();
-        timer.track(
-            &format!("git branch {}", args.join(" ")),
-            &format!("rtk git branch {}", args.join(" ")),
-            &combined,
-            trimmed,
-        );
+        timer.track(&tracked, &format!("rtk {tracked}"), &combined, trimmed);
 
         if result.success() {
             println!("{}", trimmed);
@@ -2961,12 +2999,7 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
 
         let msg = if result.success() { "ok" } else { &combined };
 
-        timer.track(
-            &format!("git branch {}", args.join(" ")),
-            &format!("rtk git branch {}", args.join(" ")),
-            &combined,
-            msg,
-        );
+        timer.track(&tracked, &format!("rtk {tracked}"), &combined, msg);
 
         if result.success() {
             println!("ok");
@@ -3001,8 +3034,8 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
             eprint!("{}", result.stderr);
         }
         timer.track(
-            &format!("git branch {}", args.join(" ")),
-            &format!("rtk git branch {}", args.join(" ")),
+            &tracked,
+            &format!("rtk {tracked}"),
             &result.stdout,
             &result.stdout,
         );
@@ -3014,8 +3047,8 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     println!("{}", filtered);
 
     timer.track(
-        &format!("git branch {}", args.join(" ")),
-        &format!("rtk git branch {}", args.join(" ")),
+        &tracked,
+        &format!("rtk {tracked}"),
         &result.stdout,
         &filtered,
     );
@@ -3432,6 +3465,7 @@ fn worktree_asked_for_report(tokens: &[Token<'_>]) -> bool {
 
 fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+    let tracked = with_args("git worktree", &display_args(args));
 
     if verbose > 0 {
         eprintln!("git worktree list");
@@ -3468,8 +3502,8 @@ fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<
             eprintln!("{}", result.stderr.trim());
         }
         timer.track(
-            &format!("git worktree {}", args.join(" ")),
-            &format!("rtk git worktree {} (passthrough)", args.join(" ")),
+            &tracked,
+            &tracking::passthrough_label(&tracked),
             &result.stdout,
             &result.stdout,
         );
@@ -3499,12 +3533,7 @@ fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<
             said
         };
 
-        timer.track(
-            &format!("git worktree {}", args.join(" ")),
-            &format!("rtk git worktree {}", args.join(" ")),
-            &combined,
-            msg,
-        );
+        timer.track(&tracked, &format!("rtk {tracked}"), &combined, msg);
 
         if result.success() {
             if said.is_empty() {
@@ -3554,7 +3583,7 @@ fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<
 }
 
 fn filter_worktree_list(output: &str) -> String {
-    let home = dirs::home_dir()
+    let home = user_dirs::home()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
 
@@ -3592,11 +3621,8 @@ pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -
         .status()
         .context("Failed to run git")?;
 
-    let args_str = tracking::args_display(args);
-    timer.track_passthrough(
-        &format!("git {}", args_str),
-        &format!("rtk git {} (passthrough)", args_str),
-    );
+    let tracked = with_args("git", &tracking::args_display(args));
+    timer.track_passthrough(&tracked, &tracking::passthrough_label(&tracked));
 
     if !status.success() {
         return Ok(exit_code_from_status(&status, "git"));
@@ -3607,6 +3633,7 @@ pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::test_isolation;
 
     #[test]
     fn test_branch_dash_u_links_its_upstream_value_not_a_free_positional() {
@@ -3702,13 +3729,15 @@ mod tests {
     #[test]
     fn test_git_cmd_c_locale_sets_stable_env() {
         let cmd = git_cmd_c_locale(&[]);
+        // Set entries only: a test build also removes the inherited `GIT_`
+        // variables from every git command.
         let envs: Vec<_> = cmd
             .get_envs()
-            .map(|(key, value)| {
-                (
+            .filter_map(|(key, value)| {
+                Some((
                     key.to_string_lossy().to_string(),
-                    value.expect("env value").to_string_lossy().to_string(),
-                )
+                    value?.to_string_lossy().to_string(),
+                ))
             })
             .collect();
         assert!(envs.contains(&("LC_ALL".to_string(), "C".to_string())));
@@ -3763,12 +3792,11 @@ mod tests {
         // flattened into "Clean working tree" + exit 0.
         let dir = tempfile::tempdir().expect("tempdir");
         let p = dir.path().to_string_lossy().into_owned();
+        let mut init = Command::new("git");
+        init.args(["-C", &p, "init", "-q"]);
+        test_isolation::isolate_git(&mut init);
         assert!(
-            Command::new("git")
-                .args(["-C", &p, "init", "-q"])
-                .status()
-                .expect("git init")
-                .success(),
+            init.status().expect("git init").success(),
             "git init should succeed"
         );
         std::fs::write(dir.path().join(".git/index"), "corrupt-index").expect("corrupt index");
@@ -4674,19 +4702,50 @@ mod tests {
             .2;
         let out = compact_blob_show(&s, "HEAD:my dir/big.lock", &[]);
         assert!(out.len() < s.len(), "windowing must shrink the output");
-        let expected =
-            format!("[see remaining: git show 'HEAD:my dir/big.lock' | tail -n +{offset}]");
+        let expected = format!(
+            "[see remaining: rtk proxy git show 'HEAD:my dir/big.lock' | tail -n +{offset}]"
+        );
         assert!(out.contains(&expected), "hint missing/unquoted: {out:?}");
         assert!(!out.contains("tail -n +0"));
 
         // A path containing a single quote must be escaped `'\''` so the hint stays
-        // copy-paste safe (the dangerous branch of `shell_single_quote`).
+        // copy-paste safe (the dangerous branch of `quote_word`).
         let out_q = compact_blob_show(&s, "HEAD:it's/a.lock", &[]);
-        let expected_q =
-            format!("[see remaining: git show 'HEAD:it'\\''s/a.lock' | tail -n +{offset}]");
+        let expected_q = format!(
+            "[see remaining: rtk proxy git show 'HEAD:it'\\''s/a.lock' | tail -n +{offset}]"
+        );
         assert!(
             out_q.contains(&expected_q),
             "single-quote path unescaped: {out_q:?}"
+        );
+    }
+
+    #[test]
+    fn test_compact_blob_show_hint_survives_rtks_own_hook() {
+        // The hook rewrites a bare `git ...` into `rtk git ...`, which windows the dump a
+        // second time -- `tail` then has only the hint left to print. The hint must name a
+        // command the hook leaves alone.
+        let mut s = String::new();
+        for i in 0..2000 {
+            s.push_str(&format!(
+                "line {i} with enough content to exceed the byte budget\n"
+            ));
+        }
+        let out = compact_blob_show(&s, "HEAD:big.lock", &[]);
+        let hint = out
+            .lines()
+            .next_back()
+            .and_then(|l| l.split_once("[see remaining: "))
+            .map(|(_, rest)| rest.trim_end_matches(']'))
+            .expect("hint");
+        assert!(
+            hint.starts_with("rtk proxy git "),
+            "hint must go through proxy: {hint:?}"
+        );
+        assert_eq!(
+            crate::discover::registry::rewrite_command(hint, &[], &[]),
+            None,
+            "the hook must leave the hint alone: {hint:?}"
         );
     }
 
@@ -4718,10 +4777,10 @@ mod tests {
             "core.autocrlf=false".to_string(),
         ];
         let out = compact_blob_show(&s, "HEAD:big.lock", &globals);
-        // Every token is shell-quoted (same policy as the blob arg) — quoting a flag
-        // like `-C` is a harmless no-op and keeps the hint copy-paste safe.
+        // Every token is quoted when needed (`quote_word`, same as the blob arg): the
+        // path with a blank is quoted, the plain flags and values are left bare.
         let expected = format!(
-            "[see remaining: git '-C' '/tmp/my repo' '-c' 'core.autocrlf=false' show 'HEAD:big.lock' | tail -n +{offset}]"
+            "[see remaining: rtk proxy git -C '/tmp/my repo' -c core.autocrlf=false show HEAD:big.lock | tail -n +{offset}]"
         );
         assert!(out.contains(&expected), "global-args hint wrong: {out:?}");
     }
@@ -5477,6 +5536,32 @@ A  added.rs
             vec!["-w", "HEAD~1", "f.txt"]
         );
         assert_eq!(rebuild(&["--author", "-p"]), vec!["--author", "-p"]);
+    }
+
+    #[test]
+    fn test_stat_step_retokenizes_after_dropping_oneline() {
+        // The stat step drops `--oneline` and then strips patch-shape flags. Both steps read
+        // token indices, and the first shifts them, so the second must re-tokenize or it
+        // deletes the argument that inherited the patch flag's index -- here the revision.
+        let args: Vec<String> = ["--oneline", "-p", "deadbee"]
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        let tokens = tokenize_git_diff_args(&args);
+        let stat_args = args_without_oneline(&args, &tokens);
+        assert_eq!(stat_args, vec!["-p", "deadbee"]);
+
+        let stat_tokens = tokenize_git_diff_args(&stat_args);
+        assert_eq!(
+            args_without_patch_shape(&stat_args, &stat_tokens),
+            vec!["deadbee"],
+            "the revision must survive; only the patch flag is dropped"
+        );
+        assert_eq!(
+            args_without_patch_shape(&stat_args, &tokens),
+            vec!["-p"],
+            "stale indices invert the result: revision dropped, patch flag kept"
+        );
     }
 
     #[test]
@@ -6238,14 +6323,26 @@ no changes added to commit (use "git add" and/or "git commit -a")
     /// Before fix, positional args fell into list mode which added `-a`,
     /// turning creation into a pattern-filtered listing (silent no-op).
     #[test]
-    #[ignore] // Integration test: requires git repo
+    #[ignore] // Integration test: requires git
     fn test_branch_creation_not_swallowed() {
+        let repo = test_isolation::temp_git_repo();
         let branch = "test-rtk-create-branch-regression";
-        // Create branch via run_branch
-        run_branch(&[branch.to_string()], 0, &[]).expect("run_branch should succeed");
-        // Verify it exists
-        let output = Command::new("git")
+
+        let created = test_isolation::rtk_command()
+            .args(["git", "branch", branch])
+            .current_dir(repo.path())
+            .output()
+            .expect("rtk git branch should run");
+        assert!(
+            created.status.success(),
+            "rtk git branch failed: {created:?}"
+        );
+
+        let mut list = std::process::Command::new("git");
+        test_isolation::isolate_git(&mut list);
+        let output = list
             .args(["branch", "--list", branch])
+            .current_dir(repo.path())
             .output()
             .expect("git branch --list should work");
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -6254,19 +6351,30 @@ no changes added to commit (use "git add" and/or "git commit -a")
             "Branch '{}' was not created. run_branch silently swallowed the creation.",
             branch
         );
-        // Cleanup
-        let _ = Command::new("git").args(["branch", "-d", branch]).output();
     }
 
     /// Regression test: `git branch <name> <commit>` must create from commit.
     #[test]
-    #[ignore] // Integration test: requires git repo
+    #[ignore] // Integration test: requires git
     fn test_branch_creation_from_commit() {
+        let repo = test_isolation::temp_git_repo();
         let branch = "test-rtk-create-from-commit";
-        run_branch(&[branch.to_string(), "HEAD".to_string()], 0, &[])
-            .expect("run_branch with start-point should succeed");
-        let output = Command::new("git")
+
+        let created = test_isolation::rtk_command()
+            .args(["git", "branch", branch, "HEAD"])
+            .current_dir(repo.path())
+            .output()
+            .expect("rtk git branch with start-point should run");
+        assert!(
+            created.status.success(),
+            "rtk git branch failed: {created:?}"
+        );
+
+        let mut list = std::process::Command::new("git");
+        test_isolation::isolate_git(&mut list);
+        let output = list
             .args(["branch", "--list", branch])
+            .current_dir(repo.path())
             .output()
             .expect("git branch --list should work");
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -6275,7 +6383,6 @@ no changes added to commit (use "git add" and/or "git commit -a")
             "Branch '{}' was not created from commit.",
             branch
         );
-        let _ = Command::new("git").args(["branch", "-d", branch]).output();
     }
 
     #[test]
@@ -6344,23 +6451,13 @@ no changes added to commit (use "git add" and/or "git commit -a")
     #[test]
     #[ignore] // Requires `cargo build` first — run with `cargo test --ignored`
     fn test_git_status_not_a_repo_exits_nonzero() {
-        // Run rtk git status in a directory that is not a git repo
-        let tmp = std::env::temp_dir().join("rtk_test_not_a_repo");
-        let _ = std::fs::create_dir_all(&tmp);
+        // Run rtk git status in a directory that is not a git repo. A fresh temp dir, not a
+        // fixed /tmp path: two contributors (or two parallel runs) would share the latter.
+        let tmp = tempfile::tempdir().expect("tempdir");
 
-        // Build the path to the test binary
-        let bin_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("debug")
-            .join("rtk");
-        assert!(
-            bin_path.exists(),
-            "Debug binary not found at {:?} — run `cargo build` first",
-            bin_path
-        );
-        let output = std::process::Command::new(&bin_path)
+        let output = test_isolation::rtk_command()
             .args(["git", "status"])
-            .current_dir(&tmp)
+            .current_dir(tmp.path())
             .output()
             .expect("Failed to run rtk");
 
@@ -6371,17 +6468,19 @@ no changes added to commit (use "git add" and/or "git commit -a")
             output.status.code()
         );
 
-        // Message should be on stderr, not stdout
+        // Message should be on stderr, not stdout. Asserting on git's own wording would only
+        // hold in an English locale -- `git status` is a passthrough, so its message stays in
+        // the user's language by design (see git_cmd_c_locale).
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            stderr.to_lowercase().contains("not a git repository"),
-            "Expected 'not a git repository' on stderr, got stderr={:?}, stdout={:?}",
-            stderr,
-            stdout
+            !stderr.trim().is_empty(),
+            "Expected git's error on stderr, got stderr={stderr:?}, stdout={stdout:?}"
         );
-
-        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(
+            stdout.trim().is_empty(),
+            "Expected nothing on stdout, got stdout={stdout:?}"
+        );
     }
 
     // --- truncation accuracy ---

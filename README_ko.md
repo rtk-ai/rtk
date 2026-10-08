@@ -102,10 +102,12 @@ rtk gain        # 토큰 절약 통계 표시되어야 함
 ## 빠른 시작
 
 ```bash
-# 1. Claude Code용 hook 설치 (권장)
-rtk init --global
+# 1. 해당 AI 도구용 hook 설치
+rtk init --global               # Claude Code (기본값)
+rtk init --agent trae           # Trae (프로젝트)
+rtk init --global --agent trae  # Trae (전역)
 
-# 2. Claude Code 재시작 후 테스트
+# 2. 해당 AI 도구를 재시작한 후 테스트
 git status  # 자동으로 rtk git status로 재작성
 ```
 
@@ -153,7 +155,7 @@ rtk jest                        # Jest 컴팩트
 rtk vitest                      # Vitest 컴팩트
 rtk pytest                      # Python 테스트 (-90%)
 rtk go test                     # Go 테스트 (-90%)
-rtk test <cmd>                  # 실패만 표시 (-90%)
+rtk test <cmd> [args...]        # 실패만 표시 (-90%), argv 직접 실행
 ```
 
 ### 빌드 & 린트

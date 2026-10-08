@@ -1,6 +1,8 @@
 //! Reads user settings from config.toml.
 
 use super::constants::{CONFIG_TOML, DEFAULT_HISTORY_DAYS, RTK_DATA_DIR};
+use crate::core::user_dirs;
+use crate::core::user_env;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -141,6 +143,12 @@ pub struct HooksConfig {
     /// not anything else.
     #[serde(default)]
     pub transparent_prefixes: Vec<String>,
+    /// Suppress the "No hook installed" warning only.
+    /// Useful when running rtk via CLAUDE.md instructions instead of hooks,
+    /// or with tools like OpenCode that don't use Claude Code hooks.
+    /// Does not mute the "Hook outdated" upgrade prompt.
+    #[serde(default)]
+    pub suppress_hook_warning: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -269,9 +277,53 @@ pub fn hook_rewrite_params() -> (Vec<String>, Vec<String>) {
 /// same process run (e.g. `hooks::init::save_telemetry_consent`'s load-mutate-save),
 /// since those must always observe a fresh read. Only reach for this from a
 /// caller that never itself writes config.toml.
-pub(crate) fn cached_config() -> &'static Config {
-    static CACHE: std::sync::OnceLock<Config> = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| Config::load().unwrap_or_default())
+///
+/// In a test build every call loads afresh from the calling test's own
+/// `user_dirs::config`: a process-wide cache would hold whichever test's
+/// configuration was read first, and hand it to all the others.
+pub(crate) fn cached_config() -> std::sync::Arc<Config> {
+    #[cfg(not(test))]
+    {
+        static CACHE: std::sync::OnceLock<std::sync::Arc<Config>> = std::sync::OnceLock::new();
+        CACHE
+            .get_or_init(|| std::sync::Arc::new(Config::load().unwrap_or_default()))
+            .clone()
+    }
+    #[cfg(test)]
+    {
+        std::sync::Arc::new(Config::load().unwrap_or_default())
+    }
+}
+
+/// Check if the missing-hook warning is suppressed via env var or config.
+///
+/// `RTK_SUPPRESS_HOOK_WARNING` is a three-way override: truthy values
+/// (`1`/`true`/`yes`/`on`) force on, falsy values (`0`/`false`/`no`/`off`)
+/// force off, case-insensitive. Unset, empty, or unrecognised values fall
+/// through to `hooks.suppress_hook_warning` instead of vetoing it.
+pub fn hook_warning_suppressed() -> bool {
+    parse_suppress_hook_warning_env(user_env::var("RTK_SUPPRESS_HOOK_WARNING").as_deref())
+        .unwrap_or_else(|| cached_config().hooks.suppress_hook_warning)
+}
+
+/// Parse `RTK_SUPPRESS_HOOK_WARNING`. `None` means fall through to config.
+fn parse_suppress_hook_warning_env(raw: Option<&str>) -> Option<bool> {
+    let value = raw?.trim();
+    if value.eq_ignore_ascii_case("1")
+        || value.eq_ignore_ascii_case("true")
+        || value.eq_ignore_ascii_case("yes")
+        || value.eq_ignore_ascii_case("on")
+    {
+        Some(true)
+    } else if value.eq_ignore_ascii_case("0")
+        || value.eq_ignore_ascii_case("false")
+        || value.eq_ignore_ascii_case("no")
+        || value.eq_ignore_ascii_case("off")
+    {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 impl Config {
@@ -446,8 +498,8 @@ pub fn show_recall_mode() -> Result<()> {
     if config.migrated_from_legacy_tee {
         println!("source: legacy [tee] section (auto-migrated at load)");
     }
-    if std::env::var("RTK_RECALL").ok().as_deref() == Some("0")
-        || std::env::var("RTK_TEE").ok().as_deref() == Some("0")
+    if user_env::var("RTK_RECALL").as_deref() == Some("0")
+        || user_env::var("RTK_TEE").as_deref() == Some("0")
     {
         println!("note: RTK_RECALL=0/RTK_TEE=0 is set — recovery disabled for this environment");
     }
@@ -456,8 +508,8 @@ pub fn show_recall_mode() -> Result<()> {
 }
 
 fn get_config_path() -> Result<PathBuf> {
-    let config_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-    Ok(config_dir.join(RTK_DATA_DIR).join(CONFIG_TOML))
+    let rtk_dir = user_dirs::config().unwrap_or_else(|| PathBuf::from(".").join(RTK_DATA_DIR));
+    Ok(rtk_dir.join(CONFIG_TOML))
 }
 
 pub fn show_config() -> Result<()> {
@@ -545,6 +597,7 @@ exclude_commands = ["curl", "gh"]
     fn test_hooks_config_default_empty() {
         let config = Config::default();
         assert!(config.hooks.exclude_commands.is_empty());
+        assert!(!config.hooks.suppress_hook_warning);
         assert!(config.hooks.transparent_prefixes.is_empty());
     }
 
@@ -582,6 +635,80 @@ history_days = 90
 "#;
         let config: Config = toml::from_str(toml).expect("valid toml");
         assert!(config.hooks.exclude_commands.is_empty());
+        assert!(!config.hooks.suppress_hook_warning);
+    }
+
+    #[test]
+    fn test_suppress_hook_warning_deserialize() {
+        let toml = r#"
+[hooks]
+suppress_hook_warning = true
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(config.hooks.suppress_hook_warning);
+    }
+
+    #[test]
+    fn test_suppress_hook_warning_default_false() {
+        let toml = r#"
+[hooks]
+exclude_commands = ["curl"]
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(!config.hooks.suppress_hook_warning);
+    }
+
+    #[test]
+    fn test_suppress_hook_warning_env_truthy_overrides_config() {
+        for raw in [
+            "1", "true", "TRUE", "True", "yes", "YES", "on", "On", " true ",
+        ] {
+            assert_eq!(
+                parse_suppress_hook_warning_env(Some(raw)),
+                Some(true),
+                "{raw:?} must force suppression on"
+            );
+            assert!(
+                parse_suppress_hook_warning_env(Some(raw)).unwrap_or(false),
+                "{raw:?} must win over config=false"
+            );
+        }
+    }
+
+    #[test]
+    fn test_suppress_hook_warning_env_falsy_overrides_config() {
+        for raw in [
+            "0", "false", "FALSE", "False", "no", "NO", "off", "Off", " 0 ",
+        ] {
+            assert_eq!(
+                parse_suppress_hook_warning_env(Some(raw)),
+                Some(false),
+                "{raw:?} must force suppression off"
+            );
+            assert!(
+                !parse_suppress_hook_warning_env(Some(raw)).unwrap_or(true),
+                "{raw:?} must win over config=true"
+            );
+        }
+    }
+
+    #[test]
+    fn test_suppress_hook_warning_env_falls_back_to_config() {
+        for raw in [None, Some(""), Some("   "), Some("maybe"), Some("2")] {
+            assert_eq!(
+                parse_suppress_hook_warning_env(raw),
+                None,
+                "{raw:?} must not override config"
+            );
+            assert!(
+                parse_suppress_hook_warning_env(raw).unwrap_or(true),
+                "{raw:?} must keep config=true"
+            );
+            assert!(
+                !parse_suppress_hook_warning_env(raw).unwrap_or(false),
+                "{raw:?} must keep config=false"
+            );
+        }
     }
 
     #[test]

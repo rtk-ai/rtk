@@ -1,4 +1,6 @@
 use crate::core::runner::{self, RunOptions};
+use crate::core::shell::display_args;
+use crate::core::tracking;
 use crate::core::utils::{resolved_command, truncate};
 use anyhow::Result;
 use regex::Regex;
@@ -96,16 +98,14 @@ fn run_task(
         eprintln!("Running: sbt {} {}", sbt_task, rest.join(" "));
     }
 
-    let args_display = if rest.is_empty() {
-        sbt_task.to_string()
-    } else {
-        format!("{} {}", sbt_task, rest.join(" "))
-    };
+    let words: Vec<&str> = std::iter::once(sbt_task)
+        .chain(rest.iter().map(String::as_str))
+        .collect();
 
     runner::run_filtered(
         cmd,
         "sbt",
-        &args_display,
+        &display_args(&words),
         filter,
         RunOptions::with_tee(tee_label),
     )
@@ -151,20 +151,10 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
             "sbt_test"
         };
 
-        let rest: Vec<String> = args[1..]
-            .iter()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        let args_display = if rest.is_empty() {
-            subcommand
-        } else {
-            format!("{} {}", subcommand, rest.join(" "))
-        };
-
         return runner::run_filtered(
             cmd,
             "sbt",
-            &args_display,
+            &tracking::args_display(args),
             filter_sbt_test,
             RunOptions::with_tee(tee_label),
         );

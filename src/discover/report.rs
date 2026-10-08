@@ -1,5 +1,6 @@
 //! Data types for reporting which commands RTK can and cannot optimize.
 
+use crate::core::user_dirs;
 use crate::hooks::constants::{
     COPILOT_HOOK_FILE, CURSOR_DIR, GITHUB_DIR, HERMES_DIR, HERMES_PLUGIN_MANIFEST_FILE,
     HERMES_PLUGIN_NAME, HERMES_PLUGINS_SUBDIR, HOOKS_SUBDIR, REWRITE_HOOK_FILE,
@@ -57,11 +58,11 @@ pub struct AgentIntegrationStatus {
 
 impl AgentIntegrationStatus {
     pub fn detect() -> Self {
-        let mut status = dirs::home_dir()
+        let mut status = user_dirs::home()
             .map(|home| Self::detect_from_home(&home))
             .unwrap_or_default();
         // Copilot is project-scoped (.github/hooks/), unlike the home-based agents.
-        status.copilot_hook_installed = std::env::current_dir()
+        status.copilot_hook_installed = user_dirs::working_dir()
             .map(|cwd| Self::copilot_hook_installed_in(&cwd))
             .unwrap_or(false);
         status
@@ -92,10 +93,25 @@ impl AgentIntegrationStatus {
     }
 }
 
+/// What `rtk discover` matched session directories against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScanScope {
+    /// `--all`: every project under `~/.claude/projects`.
+    AllProjects,
+    /// `-p <filter>`: substring match on the encoded project directory name.
+    ProjectFilter(String),
+    /// Default: the encoded name of the current working directory.
+    CurrentProject(String),
+}
+
 /// Full discover report.
 #[derive(Debug, Serialize)]
 pub struct DiscoverReport {
     pub sessions_scanned: usize,
+    /// Which sessions the scan covered. Drives the zero-session message only; not
+    /// serialized, because a JSON consumer already knows which flags it passed.
+    #[serde(skip)]
+    pub scope: ScanScope,
     pub total_commands: usize,
     pub already_rtk: usize,
     /// Subset of `already_rtk` that came from the current-state heuristic fallback
@@ -176,6 +192,27 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
                 report.already_rtk_estimated
             )),
         }
+    }
+
+    // Zero sessions is "nothing was looked at", not "nothing was missed": say what
+    // the scan was scoped to, so the reader knows which knob to turn.
+    if report.sessions_scanned == 0 {
+        match &report.scope {
+            ScanScope::AllProjects => out.push_str(&format!(
+                "\nNo Claude Code sessions found in any project in the last {} days.\n",
+                report.since_days
+            )),
+            ScanScope::ProjectFilter(filter) => out.push_str(&format!(
+                "\nNo sessions found for project filter `{}` in the last {} days (substring match on the transcript directory name). Try `rtk discover --all` to scan every project.\n",
+                filter, report.since_days
+            )),
+            ScanScope::CurrentProject(encoded) => out.push_str(&format!(
+                "\nNo sessions found for the current project (`{}`) in the last {} days. Try `rtk discover --all` to scan every project.\n",
+                encoded, report.since_days
+            )),
+        }
+        append_agent_notes(&mut out, report.agent_status);
+        return out;
     }
 
     // The RTK_DISABLED bypass section below is unconditional on `rtk_disabled_count`
@@ -329,6 +366,7 @@ mod tests {
     fn make_report(total_commands: usize, already_rtk: usize) -> DiscoverReport {
         DiscoverReport {
             sessions_scanned: 1,
+            scope: ScanScope::CurrentProject("-home-user-proj".to_string()),
             total_commands,
             already_rtk,
             already_rtk_estimated: 0,
@@ -461,6 +499,72 @@ mod tests {
         let report = make_report(0, 0);
         let output = format_text(&report, 10, false);
         assert!(output.contains("0 commands (0.0%)"));
+    }
+
+    #[test]
+    fn test_zero_sessions_does_not_report_success() {
+        let mut report = make_report(0, 0);
+        report.sessions_scanned = 0;
+        report.agent_status = AgentIntegrationStatus {
+            copilot_hook_installed: true,
+            ..Default::default()
+        };
+
+        let output = format_text(&report, 10, false);
+
+        assert!(output.contains(
+            "No sessions found for the current project (`-home-user-proj`) in the last 30 days"
+        ));
+        assert!(output.contains("rtk discover --all"));
+        assert!(!output.contains("RTK usage looks good"));
+        // The agent notes still print on the zero-session path.
+        assert!(output.contains("GitHub Copilot sessions are tracked via `rtk gain`"));
+    }
+
+    #[test]
+    fn test_zero_sessions_all_projects_does_not_suggest_all() {
+        let mut report = make_report(0, 0);
+        report.sessions_scanned = 0;
+        report.scope = ScanScope::AllProjects;
+        report.since_days = 7;
+
+        let output = format_text(&report, 10, false);
+
+        assert!(output.contains("No Claude Code sessions found in any project in the last 7 days"));
+        assert!(!output.contains("rtk discover --all"));
+        assert!(!output.contains("RTK usage looks good"));
+    }
+
+    #[test]
+    fn test_zero_sessions_project_filter_names_the_filter() {
+        let mut report = make_report(0, 0);
+        report.sessions_scanned = 0;
+        report.scope = ScanScope::ProjectFilter("my-app".to_string());
+
+        let output = format_text(&report, 10, false);
+
+        assert!(
+            output.contains("No sessions found for project filter `my-app` in the last 30 days")
+        );
+        assert!(output.contains("rtk discover --all"));
+        assert!(!output.contains("current project"));
+        assert!(!output.contains("RTK usage looks good"));
+    }
+
+    #[test]
+    fn test_zero_sessions_json_is_scope_independent() {
+        let mut report = make_report(0, 0);
+        report.sessions_scanned = 0;
+        let current = format_json(&report);
+        report.scope = ScanScope::AllProjects;
+        let all = format_json(&report);
+        report.scope = ScanScope::ProjectFilter("x".to_string());
+        let filtered = format_json(&report);
+
+        assert_eq!(current, all);
+        assert_eq!(current, filtered);
+        assert!(!current.contains("scope"));
+        assert!(current.contains("\"sessions_scanned\": 0"));
     }
 
     // Full percent: 1000/1000 = 100.0%

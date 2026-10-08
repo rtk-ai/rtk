@@ -6,7 +6,7 @@
 
 Domain-agnostic building blocks with **no knowledge of any specific command, hook, or agent**. If a module references "git", "cargo", "claude", or any external tool by name, it does not belong here. Core is a leaf in the dependency graph — it is consumed by all other components but imports from none of them.
 
-Owns: configuration loading, token tracking persistence, TOML filter engine, tee output recovery, display formatting, telemetry, and shared utilities.
+Owns: configuration loading, token tracking persistence, TOML filter engine, tee output recovery, display formatting, explicit shell/direct command construction, telemetry, and shared utilities.
 
 Does **not** own: command-specific filtering logic (that's `cmds/`), hook lifecycle management (that's `src/hooks/`), or analytics dashboards (that's `analytics/`).
 
@@ -31,14 +31,38 @@ Three-tier filter lookup (first match wins):
 2. `~/.config/rtk/filters.toml` (user-global)
 3. Built-in filters concatenated by `build.rs` at compile time
 
+## Source File Comment Stripping
+
+`src/core/filter.rs` is a separate engine from the TOML DSL: it filters *source
+files* (used by `rtk read`) rather than command output. At `-l minimal` it
+strips comments using the per-language delimiters in
+`Language::comment_patterns()`.
+
+Python does not use that walk. It has no block comments — `"""` opens a
+*string*, which may be a docstring or an ordinary value — so it gets a
+string-aware path that removes `#` comments and leaves string contents alone.
+Matching `"""` as a block delimiter misread both of these:
+
+```python
+QUERY = """          # contains """ without starting with it
+SELECT 1
+"""
+
+"""Module doc."""    # opens and closes on one line
+```
+
+Docstrings are kept at `minimal`. `aggressive` has no string awareness: it
+keeps a line inside a string when that line looks like an import or a
+signature.
+
 ## Tracking Database Schema
 
 ```sql
 CREATE TABLE commands (
   id INTEGER PRIMARY KEY,
   timestamp TEXT,              -- UTC ISO8601
-  original_cmd TEXT,           -- "ls -la"
-  rtk_cmd TEXT,                -- "rtk ls"
+  original_cmd TEXT,           -- "ls -la"; words quoted only when needed: "grep 'a b' f"
+  rtk_cmd TEXT,                -- "rtk ls", "rtk:toml make all", "rtk:passthrough git tag"
   project_path TEXT,           -- cwd (for project-scoped stats)
   input_tokens INTEGER,        -- estimated from raw output (bytes / 4, no tokenizer)
   output_tokens INTEGER,       -- estimated from filtered output (bytes / 4)
@@ -131,11 +155,45 @@ Four rules, each of which cost a real bug before it was written down:
 - `ValueSpec::solo_only()` — a `Short` flag takes a separate value only when it is the whole argument: `git log -n 2` does, `git log -pn 2` does not. No meaning for a `Long` flag.
 - `.claiming_dash_dash()` — lets a literal `--` be this flag's value. A per-tool split, not per-flag: grep and rg let any value-taking flag swallow it, git and cargo reject it whichever flag is asking.
 
-The dialect is the one axis that is not per-flag, so it stays a parameter: `tokenize_grammar(args, takes_value, Dialect::Msbuild)`.
+### Dialects
+
+Everything that is not per-flag is per-tool, and stays a parameter: `tokenize_grammar(args, takes_value, Dialect::Msbuild)`. `Dialect` is a `Copy` struct of five independent axes, because the tools measured want five different combinations of them:
+
+| axis | values | what differs |
+|---|---|---|
+| `single_dash` | `Cluster` / `Atomic` / `AtomicAliasingLong` | what `-abc` is: three short flags, one flag name, or one flag name that is also `--abc` |
+| `attach` | `Equals` / `EqualsOrColon` | which separator attaches a value (`--logger:trx`) |
+| `dash_dash` | `EndsOptions` / `Forwards` / `EndsGlobalOptions` | whether classification stops at `--`, continues because the tail is forwarded to another program, or continues because only the *global* option region ended |
+| `name_case` | `Sensitive` / `Folded` | whether flag lookups fold ASCII case |
+| `slash_flags` | `bool` | whether `/flag` is a switch rather than a path |
+
+**Naming rule.** A preset names a grammar *family* that several tools can share — a parser library, or a real convention — so its name answers "can my tool reuse this?". `Dialect::CommonsCli` is checkable (`ls /usr/share/maven/lib/` ships `commons-cli-1.11.0.jar`); "is my tool Maven?" is not. A single tool's bespoke parser gets **no preset**: its caller composes the axes at its own call site. That rule is what stops this list growing one variant per tool.
+
+- `Dialect::Posix` — git, cargo, rg, golangci-lint. Cluster, `=`, `--` ends options, case-sensitive, no `/flag`.
+- `Dialect::Msbuild` — dotnet. Atomic, `=` or `:`, `--` forwards, case-folded, `/flag`.
+- `Dialect::CommonsCli` — Apache commons-cli. POSIX with `Atomic`: the library's short options are whole multi-character words (`-pl`, `-am`, `-gs`, `-emp`), so `mvn -Bo` is an error, not a cluster. Maven is the first consumer.
+- `Dialect::GoFlag` — Go's `flag` package: atomic single-dash options, and `-run` is the same flag as `--run`.
+
+Gradle gets no preset: its parser is `org.gradle.cli` (`gradle:jdk21` ships `gradle-cli-*.jar` and no commons-cli), used by nothing else. It is `Posix` with `dash_dash: EndsGlobalOptions`, composed as a `const` in `gradlew_cmd.rs`. The axis value is shared infrastructure; the one-tool combination is not.
+
+`src/core/arg_tokenizer/frozen.rs` is the pre-axes implementation, kept as the oracle for the differential test in `differential.rs`: every arg vector up to four tokens over an alphabet covering each construct the scanner branches on, asserted token-for-token identical under `Posix` and `Msbuild`. Never edit `frozen.rs` to match new behaviour — a diff against it is the only proof the presets have not moved.
 
 ## Consumer Contracts
 
 Core provides infrastructure that `cmds/` and other components consume. These contracts define expected usage.
+
+### Command Construction (`shell`)
+
+Use `shell::direct_command()` when the caller already has an argv vector. It
+preserves argument boundaries and never expands globs, variables, redirects,
+or operators. Use `shell::shell_command()` only for an intentional command
+string, with an explicit shell when syntax is shell-specific. The platform
+default remains `sh -c` on Unix and `cmd /C` on Windows for compatibility.
+
+Never infer the command parser from `$SHELL`: agent hosts and terminal wrappers
+can execute a different shell while preserving the user's login-shell value.
+Callers that accept `--shell` must require the complete script as one quoted
+argument instead of reconstructing it by joining parsed argv.
 
 ### Tracking (`TimedExecution`)
 

@@ -34,6 +34,12 @@
 
 ---
 
+<p align="center">
+ <a href="https://www.star-history.com/rtk-ai/rtk">
+  <picture><source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/badge?repo=rtk-ai/rtk&type=rank&theme=dark" /><source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/badge?repo=rtk-ai/rtk&type=rank" /><img alt="Star History Rank" src="https://api.star-history.com/badge?repo=rtk-ai/rtk&type=rank" /></picture> <picture><source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/badge?repo=rtk-ai/rtk&type=trending&theme=dark" /><source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/badge?repo=rtk-ai/rtk&type=trending" /><img alt="GitHub Trending Repository of the Day" src="https://api.star-history.com/badge?repo=rtk-ai/rtk&type=trending" /></picture>
+ </a>
+</p>
+
 rtk filters and compresses command outputs before they reach your LLM context. Single Rust binary, 100+ supported commands, <10ms overhead.
 
 ## What RTK Does
@@ -135,6 +141,8 @@ rtk init -g --agent pi          # Pi
 rtk init --agent omp            # Oh My Pi (OMP)
 rtk init --agent hermes         # Hermes
 rtk init -g --agent droid       # Factory Droid
+rtk init --agent trae           # Trae (project: .trae/hooks.json)
+rtk init -g --agent trae        # Trae global: ~/.trae and existing ~/.trae-cn
 
 # 2. Restart your AI tool, then test
 git status  # Automatically rewritten to rtk git status
@@ -176,7 +184,7 @@ rtk read file.rs -l aggressive  # Signatures only (strips bodies)
 rtk smart file.rs               # 2-line heuristic code summary
 rtk find "*.rs" .               # Compact find results
 rtk grep "pattern" .            # Grouped search results
-rtk diff file1 file2            # Condensed diff (exit 1 if files differ)
+rtk diff file1 file2            # Condensed diff (exit 0: identical, 1: different, 2: read error)
 ```
 
 ### Git
@@ -209,8 +217,9 @@ rtk go test                     # Go tests (NDJSON, -90%)
 rtk cargo test                  # Cargo tests (-90%)
 rtk rake test                   # Ruby minitest (-90%)
 rtk rspec                       # RSpec tests (JSON, -60%+)
-rtk err <cmd>                   # Filter errors only from any command
-rtk test <cmd>                  # Generic test wrapper - failures only (-90%)
+rtk err <cmd> [args...]         # Direct argv execution, errors/warnings only
+rtk test <cmd> [args...]        # Direct argv execution, failures only (-90%)
+rtk err --shell fish '<script>' # Explicit shell for shell-specific syntax
 ```
 
 ### Build & Lint
@@ -297,9 +306,35 @@ rtk env -f AWS                  # Filtered env vars
 rtk log app.log                 # Deduplicated logs
 rtk curl <url>                  # Truncate + save full output
 rtk wget <url>                  # Download, strip progress bars
-rtk summary <long command>      # Heuristic summary
+rtk summary <cmd> [args...]     # Direct argv execution + heuristic summary
+rtk run <cmd> [args...]         # Raw direct execution (no filtering/tracking)
+rtk run -c '<script>'           # Shell string via sh (cmd on Windows)
+rtk run --shell fish -c '<script>' # Explicit shell for shell-specific syntax
 rtk proxy <command>             # Raw passthrough + tracking
 ```
+
+`rtk run`, `rtk err`, `rtk test`, and `rtk summary` preserve positional
+argument boundaries and do not expand globs, variables, or operators by
+default. Use `-c` with `rtk run`, or `--shell <name>` with the filtered
+wrappers, only when a command intentionally requires shell syntax. Pass an
+explicit shell script as one quoted argument; RTK does not infer the parser
+from `$SHELL` because the environment value may differ from the actual command
+executor.
+
+A program that cannot be run answers the way the shell used to: `127` with a
+`command not found` line, `126` for a path that exists but is a directory or is
+not executable.
+
+**Windows note.** The `cmd /C` string these commands used to build also
+searched the working directory and carried `cmd`'s builtins (`echo`, `dir`,
+`type`, `set`, `copy`, `del`, …). Direct execution resolves through `%PATH%`
+and `PATHEXT` only, so `rtk err dir`, `rtk summary echo hi`, and a tool sitting
+in the current directory now need the explicit form: `rtk run -c 'dir'`, or
+`rtk err --shell cmd 'echo hi'`. On Unix nothing equivalent is lost — `sh` does
+not search `.`, and `echo`, `test` and `pwd` all exist as real binaries. One
+more difference on both platforms: the child sees the resolved absolute path in
+`argv[0]` where the shell used to pass the spelling as typed, which matters
+only to multi-call binaries and to tools that print usage from `argv[0]`.
 
 ### Token Savings Analytics
 ```bash
@@ -363,7 +398,7 @@ The most effective way to use rtk. The hook transparently intercepts Bash comman
 
 ```bash
 rtk init -g                 # Install hook + RTK.md (recommended)
-rtk init -g --opencode      # OpenCode plugin (instead of Claude Code)
+rtk init -g --opencode      # Claude setup + OpenCode plugin
 rtk init -g --auto-patch    # Non-interactive (CI/CD)
 rtk init -g --hook-only     # Hook only, no RTK.md
 rtk init --show             # Verify installation
@@ -388,7 +423,7 @@ Prefer [`winget`](#winget-windows) if you can — it handles PATH for you.
 rtk init -g
 ```
 
-**Upgrading from an older install?** If you set RTK up before v0.37.2 you may still have the legacy `rtk-rewrite.sh` shell hook (which does need a Unix shell). Re-run `rtk init -g` to migrate to the native binary hook.
+**Upgrading from an older install?** Before v0.37.2, `rtk init -g` on native Windows fell back to CLAUDE.md injection and registered no hook. Re-run `rtk init -g` and answer `y` when it asks to patch `settings.json` (or pass `--auto-patch`) to install the native binary hook.
 
 **Prerequisites**: some filters shell out to [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`). Install it and keep it on your PATH (e.g. `winget install BurntSushi.ripgrep.MSVC`) to avoid `Binary 'rg' not found on PATH` warnings.
 
@@ -413,7 +448,7 @@ rtk init -g
 
 ## Supported AI Tools
 
-RTK supports 17 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents, reducing the bash output the agent reads where the agent supports command interception.
+RTK supports 18 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents, reducing the bash output the agent reads where the agent supports command interception.
 
 | Tool | Install | Method |
 |------|---------|--------|
@@ -432,9 +467,11 @@ RTK supports 17 AI coding tools. Each integration rewrites shell commands to `rt
 | **Hermes** | `rtk init --agent hermes` | Python plugin adapter (terminal command mutation via `rtk rewrite`) |
 | **Mistral Vibe** | `rtk init -g --agent vibe` | `pre_tool` hook (hooks.toml) |
 | **Kilo Code** | `rtk init --agent kilocode` | .kilocode/rules/rtk-rules.md (project-scoped) |
-| **Google Antigravity** | `rtk init --agent antigravity` | .agents/rules/antigravity-rtk-rules.md (project-scoped) |
+| **Google Antigravity** | `rtk init --agent antigravity` / `rtk init -g --agent antigravity` | .agents/plugins/rtk/ (project) or ~/.gemini/config/plugins/rtk/ (global): plugin.json, hooks.json, rules/AGENTS.md |
 | **Kimi AI** | `rtk init --agent kimi` | AGENTS.md (project-scoped) |
 | **Factory Droid** | `rtk init -g --agent droid` (or per-project) | PreToolUse hook in `~/.factory/hooks.json` (matcher `Execute`) |
+| **Trae** | `rtk init --agent trae` | Native `PreToolUse` hook in `.trae/hooks.json` (`RunCommand`) |
+| **Trae (global)** | `rtk init -g --agent trae` | `~/.trae/hooks.json`, plus `~/.trae-cn/hooks.json` when that directory exists |
 
 For per-agent setup details, override controls, and graceful degradation, see the [Supported Agents guide](https://www.rtk-ai.app/guide/getting-started/supported-agents). The Hermes plugin source and tests live in `hooks/hermes/`; installed Hermes runtime files still live under `~/.hermes/plugins/rtk-rewrite/`.
 
@@ -445,6 +482,7 @@ For per-agent setup details, override controls, and graceful degradation, see th
 ```toml
 [hooks]
 exclude_commands = ["curl", "playwright"]  # skip rewrite for these (matches `npx playwright` too)
+suppress_hook_warning = false                # suppress the missing-hook warning only
 
 [retriever]
 mode = "sqlite"         # sqlite (default) | tee (legacy files) | disabled
