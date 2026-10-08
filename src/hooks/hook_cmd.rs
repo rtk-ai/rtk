@@ -537,8 +537,8 @@ fn run_vibe_inner(input: &str) -> Option<String> {
     };
 
     let tool_name = json.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
-    // Vibe's Unified Harness namespaces tools (`file_system.bash`); match the last segment.
-    if tool_name.rsplit('.').next() != Some("bash") {
+    // Vibe's Unified Harness namespaces the shell tool as `file_system.bash`.
+    if !matches!(tool_name, "bash" | "file_system.bash") {
         return None;
     }
 
@@ -3029,6 +3029,14 @@ mod tests {
     #[test]
     fn test_vibe_ignores_namespaced_non_bash_tool() {
         let input = vibe_input("file_system.read_file", "git status");
+        assert!(run_vibe_inner(&input).is_none());
+    }
+
+    #[test]
+    fn test_vibe_ignores_other_namespace_bash_tool() {
+        // Only Vibe's own `file_system.bash` is the shell tool; a plugin's
+        // `myplugin.bash` must not be rewritten.
+        let input = vibe_input("myplugin.bash", "git status");
         assert!(run_vibe_inner(&input).is_none());
     }
 
