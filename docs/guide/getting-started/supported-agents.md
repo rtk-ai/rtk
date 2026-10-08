@@ -28,7 +28,7 @@ Agent runs "cargo test"
 
 | Agent | Integration tier | Can rewrite transparently? |
 |-------|-----------------|---------------------------|
-| Claude Code | Shell hook (`PreToolUse`) | Yes |
+| Claude Code | Rust binary (`rtk hook claude`, `PreToolUse`) | Yes |
 | Trae | Rust binary (`PreToolUse`, matcher `RunCommand`) | Yes |
 | VS Code Copilot Chat | Shell hook (`PreToolUse`) | Yes |
 | GitHub Copilot CLI | Shell hook (`PreToolUse`) | Yes |
@@ -325,9 +325,17 @@ Rules file integrations (Cline, Windsurf, Kilo Code) rely on the model following
 
 ## Windows support
 
-Since v0.37.2, `rtk init -g` registers the native `rtk hook claude` command on Windows, so Claude Code gets full auto-rewrite without a Unix shell. Setups created before v0.37.2 used CLAUDE.md injection and have no hook; re-running `rtk init -g` migrates them, and adds the hook once you answer `y` to the `settings.json` prompt (or pass `--auto-patch`).
+Claude Code uses the native RTK binary on every platform. `rtk init -g`
+registers `rtk` as the executable and passes `hook claude` as an argument array,
+so native Windows does not need a Unix shell for this hook. Existing absolute
+paths ending in `rtk.exe` are recognized as installed when they use the same
+arguments.
 
-Integrations that install a shell wrapper script (such as Gemini) still need a Unix shell. For those, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install), where they work identically to Linux. Native Rust hook integrations such as Trae do not depend on a shell script.
+Legacy `rtk-rewrite.sh` integrations still require a Unix shell. Re-run
+`rtk init -g` to migrate RTK's older combined Claude Code command entry to the
+native form; use WSL only when another shell-script integration requires it.
+
+Native Rust hook integrations such as Trae do not depend on a shell script.
 
 ## Graceful degradation
 

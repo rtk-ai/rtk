@@ -16,7 +16,7 @@ use tempfile::NamedTempFile;
 use crate::core::utils::{from_json_str, strip_leading_bom};
 
 use super::integrity;
-use super::is_claude_hook_command;
+use super::{is_claude_hook_command, is_claude_hook_entry};
 use crate::core::config::AwarenessLevel;
 #[cfg(test)]
 use crate::core::test_isolation;
@@ -42,8 +42,8 @@ mod vibe;
 // from here and is imported by name.
 use agents_md::*;
 use claude::{
-    hook_already_present, remove_hook_from_settings, run_claude_md_mode, run_default_mode,
-    run_hook_only_mode,
+    command_hook_entry, hook_already_present, remove_hook_from_settings, run_claude_md_mode,
+    run_default_mode, run_hook_only_mode,
 };
 use codex::{run_codex_mode, show_codex_config, uninstall_codex};
 use cursor::{
@@ -809,24 +809,31 @@ fn prompt_telemetry_consent() -> Result<()> {
     Ok(())
 }
 
-pub(super) fn print_manual_instructions(hook_command: &str, include_opencode: bool) {
+pub(super) fn print_manual_instructions(hook_command: &str, include_opencode: bool) -> Result<()> {
     let settings_path = resolve_claude_dir()
         .unwrap_or_else(|_| PathBuf::from(format!("~/{}", CLAUDE_DIR)))
         .join(SETTINGS_JSON);
-    println!("\n  MANUAL STEP: Add this to {}:", settings_path.display());
-    println!("  {{");
-    println!("    \"hooks\": {{ \"PreToolUse\": [{{");
-    println!("      \"matcher\": \"Bash\",");
-    println!("      \"hooks\": [{{ \"type\": \"command\",");
-    println!("        \"command\": \"{}\"", hook_command);
-    println!("      }}]");
-    println!("    }}]}}");
-    println!("  }}");
+    println!(
+        "\n  MANUAL STEP: Use this RTK hook configuration in {} (replace older RTK hook entries):",
+        settings_path.display()
+    );
+    let manual_config = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [{
+                "matcher": "Bash",
+                "hooks": [command_hook_entry(hook_command)]
+            }]
+        }
+    });
+    let rendered = serde_json::to_string_pretty(&manual_config)
+        .context("Failed to serialize manual hook configuration")?;
+    println!("{}", rendered);
     if include_opencode {
         println!("\n  Then restart Claude Code and OpenCode. Test with: git status\n");
     } else {
         println!("\n  Then restart Claude Code. Test with: git status\n");
     }
+    Ok(())
 }
 
 /// Full uninstall for Claude, Gemini, Codex, Cursor, Pi, or OMP artifacts.
@@ -1242,7 +1249,7 @@ pub(super) fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str
         PRE_TOOL_USE_KEY,
         serde_json::json!({
             "matcher": "Bash",
-            "hooks": [{"type": "command", "command": hook_command}]
+            "hooks": [command_hook_entry(hook_command)]
         }),
     )
 }

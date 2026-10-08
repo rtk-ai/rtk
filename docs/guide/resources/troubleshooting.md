@@ -103,30 +103,17 @@ rtk --version
 - Or open PowerShell or Windows Terminal
 - Then run: `rtk --version`
 
-### Hook not working (no auto-rewrite)
+### Claude Code hook reported as missing
 
-**Symptom:** On native Windows, commands are not auto-rewritten. An older `rtk init -g` printed "Falling back to --claude-md mode".
+**Symptom:** The RTK hook is configured on native Windows, but `rtk init --show` or `rtk gain` reports it as missing.
 
-**Cause:** Before v0.37.2, `rtk init -g` registered no hook on native Windows: it fell back to injecting the full RTK instructions into `~/.claude/CLAUDE.md`. A setup made then still has no hook.
+**Fix:** Update RTK and re-run `rtk init -g`. Current versions register the executable and its arguments separately, without a Unix shell:
 
-**Fix:** Upgrade to v0.37.2 or later, where `rtk init -g` registers the auto-rewrite hook on Windows as a native binary command (`rtk hook claude`). No Unix shell, bash, or jq is required. Re-run `rtk init -g`: it replaces the CLAUDE.md block with an `@RTK.md` reference and, once you confirm, adds `rtk hook claude` to `settings.json`. A legacy `~/.claude/hooks/rtk-rewrite.sh` hook, if one exists, is deleted along with its `.rtk-hook.sha256` and its `settings.json` entry.
-
-Answer `y` when it asks to patch `settings.json`. Outside a terminal it cannot ask and defaults to `N`, so use `--auto-patch` there:
-
-```powershell
-rtk init -g                # answer y at the settings.json prompt
-rtk init -g --auto-patch   # or: patch settings.json without asking
+```json
+{ "type": "command", "command": "rtk", "args": ["hook", "claude"] }
 ```
 
-The default `N` leaves no hook registered: any legacy `rtk-rewrite.sh` entry is removed and `rtk hook claude` is not added. The `RTK hook registered (global).` banner prints either way; the line that confirms the patch is `settings.json: hook added` (or `settings.json: hook already present` when an earlier run added it). Restart Claude Code, then confirm:
-
-```powershell
-rtk init --show
-```
-
-It should report `[ok] Hook: rtk hook claude (native binary command)`.
-
-[WSL](https://learn.microsoft.com/en-us/windows/wsl/install) also works and behaves like Linux if you prefer it.
+An absolute path ending in `rtk.exe` is also recognized with the same arguments. Keep `rtk.exe` on PATH when using the generated form, then restart Claude Code.
 
 ### Node.js tools not found
 

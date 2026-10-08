@@ -42,8 +42,26 @@ fn plugin(home: &Path) -> std::path::PathBuf {
 }
 
 fn claude_hook_registered(home: &Path) -> bool {
-    std::fs::read_to_string(home.join(".claude").join("settings.json"))
-        .is_ok_and(|settings| settings.contains("rtk hook claude"))
+    let Ok(settings) = std::fs::read_to_string(home.join(".claude").join("settings.json")) else {
+        return false;
+    };
+    let Ok(settings) = serde_json::from_str::<serde_json::Value>(&settings) else {
+        return false;
+    };
+    settings["hooks"]["PreToolUse"]
+        .as_array()
+        .is_some_and(|groups| {
+            groups.iter().any(|group| {
+                group["matcher"] == "Bash"
+                    && group["hooks"].as_array().is_some_and(|hooks| {
+                        hooks.iter().any(|hook| {
+                            hook["type"] == "command"
+                                && hook["command"] == "rtk"
+                                && hook["args"] == serde_json::json!(["hook", "claude"])
+                        })
+                    })
+            })
+        })
 }
 
 #[test]
