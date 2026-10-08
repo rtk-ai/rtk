@@ -1803,17 +1803,17 @@ fn rewrite_command_part(rule: &RtkRule, cmd_part: &str) -> Option<String> {
     }
 
     if rule.rtk_cmd == "rtk kubectl" {
-        for (resource, alias) in [("pods", "pods"), ("services", "services")] {
+        for resource in ["pods", "services"] {
             let prefix = format!("kubectl get {resource}");
-            if let Some(rest) = strip_word_prefix(cmd_part, &prefix) {
-                if kubectl_alias_args_supported(rest) {
-                    let rewritten = if rest.is_empty() {
-                        format!("rtk kubectl {alias}{redirect_suffix}")
-                    } else {
-                        format!("rtk kubectl {alias} {rest}{redirect_suffix}")
-                    };
-                    return Some(rewritten);
-                }
+            if let Some(rest) = strip_word_prefix(cmd_part, &prefix)
+                && kubectl_alias_args_supported(rest)
+            {
+                let rewritten = if rest.is_empty() {
+                    format!("rtk kubectl {resource}")
+                } else {
+                    format!("rtk kubectl {resource} {rest}")
+                };
+                return Some(rewritten);
             }
         }
     }
@@ -2035,9 +2035,29 @@ fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
     }
 }
 
+// The CLI tests consume these same lists so every rewrite flag must parse.
+pub(crate) const KUBECTL_ALIAS_FLAGS: &[&str] = &["-A", "--all-namespaces"];
+pub(crate) const KUBECTL_ALIAS_VALUE_FLAGS: &[&str] = &[
+    "-n",
+    "--namespace",
+    "--context",
+    "--kubeconfig",
+    "--as",
+    "-l",
+    "--selector",
+];
+pub(crate) const KUBECTL_ALIAS_VALUE_PREFIXES: &[&str] = &[
+    "--namespace=",
+    "--context=",
+    "--kubeconfig=",
+    "--as=",
+    "--selector=",
+];
+
 fn kubectl_alias_args_supported(args: &str) -> bool {
     let tokens = tokenize(args);
     let mut index = 0;
+    let mut seen_flags = Vec::new();
 
     while index < tokens.len() {
         let token = &tokens[index];
@@ -2045,9 +2065,26 @@ fn kubectl_alias_args_supported(args: &str) -> bool {
             return false;
         }
 
+        // Clap rejects repeated options, including alternate spellings.
+        // Keep those commands on the generic get path instead.
+        let name = token
+            .value
+            .split_once('=')
+            .map_or(token.value.as_str(), |(name, _)| name);
+        let name = match name {
+            "-n" => "--namespace",
+            "-l" => "--selector",
+            "-A" => "--all-namespaces",
+            name => name,
+        };
+        if seen_flags.contains(&name) {
+            return false;
+        }
+        seen_flags.push(name);
+
         match token.value.as_str() {
-            "-A" | "--all-namespaces" => index += 1,
-            "-n" | "--namespace" | "--context" | "--kubeconfig" | "--as" | "-l" | "--selector" => {
+            value if KUBECTL_ALIAS_FLAGS.contains(&value) => index += 1,
+            value if KUBECTL_ALIAS_VALUE_FLAGS.contains(&value) => {
                 let Some(value) = tokens.get(index + 1) else {
                     return false;
                 };
@@ -2057,15 +2094,9 @@ fn kubectl_alias_args_supported(args: &str) -> bool {
                 index += 2;
             }
             value
-                if [
-                    "--namespace=",
-                    "--context=",
-                    "--kubeconfig=",
-                    "--as=",
-                    "--selector=",
-                ]
-                .iter()
-                .any(|prefix| value.strip_prefix(prefix).is_some_and(|v| !v.is_empty())) =>
+                if KUBECTL_ALIAS_VALUE_PREFIXES
+                    .iter()
+                    .any(|prefix| value.strip_prefix(prefix).is_some_and(|v| !v.is_empty())) =>
             {
                 index += 1;
             }
@@ -4819,6 +4850,21 @@ mod tests {
             rewrite_command_no_prefixes("kubectl get pods -n default", &[]),
             Some("rtk kubectl pods -n default".into())
         );
+    }
+
+    #[test]
+    fn test_rewrite_kubectl_alias_preserves_redirect_once() {
+        for resource in ["pods", "services"] {
+            for args in ["", " -n default"] {
+                assert_eq!(
+                    rewrite_command_no_prefixes(
+                        &format!("kubectl get {resource}{args} 2>/dev/null"),
+                        &[],
+                    ),
+                    Some(format!("rtk kubectl {resource}{args} 2>/dev/null")),
+                );
+            }
+        }
     }
 
     #[test]
