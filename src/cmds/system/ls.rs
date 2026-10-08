@@ -450,14 +450,14 @@ fn run_native(paths: &[&str], show_all: bool, show_long: bool, verbose: u8) -> R
     Ok(exit_code)
 }
 
-/// Whether the native listing hides `entry` without `-a`.
+/// Whether the native listing (ls and tree) hides `entry` without `-a`.
 ///
 /// On Windows the native path stands in for `Get-ChildItem` (PowerShell's `ls`
 /// and `dir` are aliases of it), which hides entries by the Hidden/System
 /// attributes, not by a leading dot: `.gitignore` is listed, while `.git`
 /// (which git marks Hidden) is not. Elsewhere it is POSIX `ls`.
 #[cfg(windows)]
-fn is_hidden_entry(entry: &std::fs::DirEntry, _name: &str) -> bool {
+pub(crate) fn is_hidden_entry(entry: &std::fs::DirEntry, _name: &str) -> bool {
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
     const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
@@ -467,7 +467,7 @@ fn is_hidden_entry(entry: &std::fs::DirEntry, _name: &str) -> bool {
 }
 
 #[cfg(not(windows))]
-fn is_hidden_entry(_entry: &std::fs::DirEntry, name: &str) -> bool {
+pub(crate) fn is_hidden_entry(_entry: &std::fs::DirEntry, name: &str) -> bool {
     name.starts_with('.')
 }
 

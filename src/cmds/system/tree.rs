@@ -175,7 +175,7 @@ fn render_dir(
             .filter_map(|e| {
                 let name = e.file_name().to_string_lossy().to_string();
                 let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                if !opts.show_all && name.starts_with('.') {
+                if !opts.show_all && super::ls::is_hidden_entry(&e, &name) {
                     return None;
                 }
                 if !opts.show_all && is_dir && NOISE_DIRS.contains(&name.as_str()) {
