@@ -1,6 +1,6 @@
 [filters.trunk-build]
 description = "Compact trunk build output"
-match_command = "^trunk\\s+build"
+match_command = "^trunk\\s+build(\\s|$|[;|&()<>])"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

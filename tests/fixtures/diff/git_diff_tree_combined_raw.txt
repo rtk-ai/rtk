@@ -1,0 +1,10 @@
+0d53b1b7a52d2be86b906de952f08cd14ae5cfd5
+diff --combined x.txt
+index 01e79c3,01e79c3,01e79c3..8b04714
+--- a/x.txt
++++ b/x.txt
+@@@@ -1,3 -1,3 -1,3 +1,3 @@@@
+   1
+---2
++++EVIL
+   3

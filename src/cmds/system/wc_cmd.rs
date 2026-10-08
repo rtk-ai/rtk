@@ -1,14 +1,16 @@
-/// Compact filter for `wc` — strips redundant paths and alignment padding.
-///
-/// Compression examples:
-/// - `wc file.py`     → `30L 96W 978B`
-/// - `wc -l file.py`  → `30`
-/// - `wc -w file.py`  → `96`
-/// - `wc -c file.py`  → `978`
-/// - `wc -l *.py`     → table with common path prefix stripped
+//! Compact filter for `wc` — strips redundant paths and alignment padding.
+//!
+//! Compression examples:
+//! - `wc file.py`     → `30L 96W 978B`
+//! - `wc -l file.py`  → `30`
+//! - `wc -w file.py`  → `96`
+//! - `wc -c file.py`  → `978`
+//! - `wc -l *.py`     → table with common path prefix stripped
+
 use crate::core::runner::{self, RunOptions};
+use crate::core::shell::display_args;
 use crate::core::tracking::TimedExecution;
-use crate::core::utils::{resolved_command, tool_exists};
+use crate::core::utils::{ChildArgExt, resolved_command, tool_exists};
 use anyhow::Result;
 use std::io::Read;
 
@@ -22,9 +24,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     }
 
     let mut cmd = resolved_command("wc");
-    for arg in args {
-        cmd.arg(arg);
-    }
+    cmd.child_args(args);
 
     if verbose > 0 {
         eprintln!("Running: wc {}", args.join(" "));
@@ -42,7 +42,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "wc",
-        &args.join(" "),
+        &display_args(args),
         |stdout| filter_wc_output(stdout, &mode),
         opts,
     )

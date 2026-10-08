@@ -12,7 +12,9 @@
 //! - `RTK_TRUST_PROJECT_FILTERS=1` overrides for CI pipelines
 
 use super::integrity;
-use crate::core::constants::{RTK_DATA_DIR, TRUSTED_FILTERS_JSON};
+use crate::core::constants::TRUSTED_FILTERS_JSON;
+use crate::core::user_dirs;
+use crate::core::user_env;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -47,8 +49,8 @@ pub enum TrustStatus {
 // ---------------------------------------------------------------------------
 
 fn store_path() -> Result<PathBuf> {
-    let data_dir = dirs::data_local_dir().context("Cannot determine local data directory")?;
-    Ok(data_dir.join(RTK_DATA_DIR).join(TRUSTED_FILTERS_JSON))
+    let data_dir = user_dirs::data().context("Cannot determine local data directory")?;
+    Ok(data_dir.join(TRUSTED_FILTERS_JSON))
 }
 
 fn read_store() -> Result<TrustStore> {
@@ -101,12 +103,12 @@ pub fn check_trust(filter_path: &Path) -> Result<TrustStatus> {
 /// Reads the file once, hashes those bytes, and returns the trust status with
 /// the verified content. Content is `Some` only for `Trusted` / `EnvOverride`.
 pub fn check_trust_with_content(filter_path: &Path) -> Result<(TrustStatus, Option<String>)> {
-    if std::env::var("RTK_TRUST_PROJECT_FILTERS").as_deref() == Ok("1") {
-        let in_ci = std::env::var("CI").is_ok()
-            || std::env::var("GITHUB_ACTIONS").is_ok()
-            || std::env::var("GITLAB_CI").is_ok()
-            || std::env::var("JENKINS_URL").is_ok()
-            || std::env::var("BUILDKITE").is_ok();
+    if user_env::var("RTK_TRUST_PROJECT_FILTERS").as_deref() == Some("1") {
+        let in_ci = user_env::var("CI").is_some()
+            || user_env::var("GITHUB_ACTIONS").is_some()
+            || user_env::var("GITLAB_CI").is_some()
+            || user_env::var("JENKINS_URL").is_some()
+            || user_env::var("BUILDKITE").is_some();
         if in_ci {
             let content = std::fs::read_to_string(filter_path)
                 .with_context(|| format!("Failed to read filter: {}", filter_path.display()))?;
@@ -204,13 +206,9 @@ pub fn gated_filter_paths() -> Vec<PathBuf> {
 }
 
 pub fn gated_filter_paths_labeled() -> Vec<(&'static str, PathBuf)> {
-    let mut paths = vec![("project", PathBuf::from(".rtk/filters.toml"))];
-    if let Some(dir) = dirs::config_dir() {
-        paths.push((
-            "global",
-            dir.join(RTK_DATA_DIR)
-                .join(crate::core::constants::FILTERS_TOML),
-        ));
+    let mut paths = vec![("project", user_dirs::in_working_dir(".rtk/filters.toml"))];
+    if let Some(dir) = user_dirs::config() {
+        paths.push(("global", dir.join(crate::core::constants::FILTERS_TOML)));
     }
     paths
 }
@@ -403,8 +401,7 @@ mod tests {
     /// Overrides the store path via a scoped env var (not possible with
     /// the real function), so we test the logic by calling internal fns.
     fn setup_test_env(temp: &TempDir) -> PathBuf {
-        let store_file = temp.path().join("trusted_filters.json");
-        store_file
+        temp.path().join("trusted_filters.json")
     }
 
     fn check_trust_with_store(filter_path: &Path, store_file: &Path) -> Result<TrustStatus> {
@@ -485,8 +482,8 @@ mod tests {
     #[test]
     fn test_gated_filter_paths_covers_project_and_global() {
         let paths = gated_filter_paths();
-        assert_eq!(paths[0], PathBuf::from(".rtk/filters.toml"));
-        if dirs::config_dir().is_some() {
+        assert_eq!(paths[0], user_dirs::in_working_dir(".rtk/filters.toml"));
+        if user_dirs::config().is_some() {
             assert_eq!(paths.len(), 2);
             assert!(paths[1].ends_with("filters.toml"));
             assert!(paths[1].is_absolute());
@@ -565,15 +562,13 @@ mod tests {
         std::fs::write(&filter, "[filters.test]\nmatch_command = \"echo\"").unwrap();
 
         // Both env vars must be set: trust override + CI indicator
-        #[allow(deprecated)]
-        std::env::set_var("RTK_TRUST_PROJECT_FILTERS", "1");
-        #[allow(deprecated)]
-        std::env::set_var("CI", "true");
-        let status = check_trust(&filter).unwrap();
-        #[allow(deprecated)]
-        std::env::remove_var("RTK_TRUST_PROJECT_FILTERS");
-        #[allow(deprecated)]
-        std::env::remove_var("CI");
+        let status = user_env::with_vars(
+            &[
+                ("RTK_TRUST_PROJECT_FILTERS", Some("1")),
+                ("CI", Some("true")),
+            ],
+            || check_trust(&filter).unwrap(),
+        );
 
         assert_eq!(status, TrustStatus::EnvOverride);
     }

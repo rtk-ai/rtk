@@ -1,8 +1,9 @@
 //! PHP command filter: syntax-check summaries and generic cleanup.
 
 use super::artisan_cmd::{filter_artisan_output, filter_artisan_test_output};
-use super::utils::{detect_php_test_runner, strip_ansi_and_controls, PhpTestRunner};
+use super::utils::{PhpTestRunner, detect_php_test_runner, strip_ansi_and_controls};
 use crate::core::runner;
+use crate::core::shell::display_args;
 use crate::core::utils::resolved_command;
 use anyhow::Result;
 
@@ -32,7 +33,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "php",
-        &args.join(" "),
+        &display_args(args),
         move |raw| {
             if is_lint {
                 return filter_php_lint_output(raw);

@@ -1,0 +1,21 @@
+From 6ffaad11d337f4555c414a1c29bee0d0f6e1976f2c3be28c42039ab91c1d337a Mon Sep 17 00:00:00 2001
+From: F <f@e.com>
+Date: Sat, 29 Aug 2026 23:37:05 -0400
+Subject: [PATCH] fix: beta
+
+- upper-case the beta line
+---
+ f.txt | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/f.txt b/f.txt
+index 8a2bc75..8e6f198 100644
+--- a/f.txt
++++ b/f.txt
+@@ -1,2 +1,2 @@
+ alpha
+-beta
++BETA
+-- 
+2.54.0.windows.1
+

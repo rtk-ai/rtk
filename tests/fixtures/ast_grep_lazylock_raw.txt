@@ -1,0 +1,387 @@
+src/learn/detector.rs:51:static UNKNOWN_FLAG_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/learn/detector.rs:52:    Regex::new(
+src/learn/detector.rs:53:        r"(?i)(unexpected argument|unknown (option|flag)|unrecognized (option|flag)|invalid (option|flag))"
+src/learn/detector.rs:54:    ).unwrap()
+src/learn/detector.rs:55:});
+src/learn/detector.rs:57:static CMD_NOT_FOUND_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/learn/detector.rs:58:    Regex::new(
+src/learn/detector.rs:59:        r"(?i)(command not found|not recognized as an internal|no such file or directory.*command)",
+src/learn/detector.rs:60:    )
+src/learn/detector.rs:61:    .unwrap()
+src/learn/detector.rs:62:});
+src/learn/detector.rs:64:static WRONG_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/learn/detector.rs:65:    Regex::new(r"(?i)(no such file or directory|cannot find the path|file not found)").unwrap()
+src/learn/detector.rs:66:});
+src/learn/detector.rs:68:static MISSING_ARG_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/learn/detector.rs:69:    Regex::new(
+src/learn/detector.rs:70:        r"(?i)(requires a value|requires an argument|missing (required )?argument|expected.*argument)"
+src/learn/detector.rs:71:    ).unwrap()
+src/learn/detector.rs:72:});
+src/learn/detector.rs:75:    LazyLock::new(|| Regex::new(r"(?i)(permission denied|access denied|not permitted)").unwrap());
+src/learn/detector.rs:78:static USER_REJECTION_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/learn/detector.rs:79:    Regex::new(
+src/learn/detector.rs:80:        r"(?i)(user (doesn't want|declined|rejected|cancelled)|operation (cancelled|aborted) by user)"
+src/learn/detector.rs:81:    ).unwrap()
+src/learn/detector.rs:82:});
+src/cmds/git/gh_cmd.rs:16:static HTML_COMMENT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<!--.*?-->").unwrap());
+src/cmds/git/gh_cmd.rs:18:    LazyLock::new(|| Regex::new(r"(?m)^\s*\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)\s*$").unwrap());
+src/cmds/git/gh_cmd.rs:20:    LazyLock::new(|| Regex::new(r"(?m)^\s*!\[[^\]]*\]\([^)]*\)\s*$").unwrap());
+src/cmds/git/gh_cmd.rs:22:    LazyLock::new(|| Regex::new(r"(?m)^\s*(?:---+|\*\*\*+|___+)\s*$").unwrap());
+src/cmds/git/gh_cmd.rs:23:static MULTI_BLANK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
+src/cmds/system/ctest_cmd.rs:24:static TEST_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/system/ctest_cmd.rs:25:    Regex::new(
+src/cmds/system/ctest_cmd.rs:26:        r"(?s)^\s*(?:\d+/(\d+)\s+)?Test\s+#(\d+):\s+(.+?)\s+\.{2,}\s*(?:\*{3})?\s*(.+?)\s+([\d.]+)\s+sec\s*$",
+src/cmds/system/ctest_cmd.rs:27:    )
+src/cmds/system/ctest_cmd.rs:28:    .expect("invalid ctest result regex")
+src/cmds/system/ctest_cmd.rs:29:});
+src/cmds/system/ctest_cmd.rs:30:static RESULT_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/system/ctest_cmd.rs:31:    Regex::new(r"^\s*(?:\d+/\d+\s+)?Test\s+#\d+:")
+src/cmds/system/ctest_cmd.rs:32:        .expect("invalid ctest result prefix regex")
+src/cmds/system/ctest_cmd.rs:33:});
+src/cmds/system/ctest_cmd.rs:34:static RESULT_TERMINATOR_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/system/ctest_cmd.rs:35:    Regex::new(r"[\d.]+\s+sec\s*$").expect("invalid ctest result terminator regex")
+src/cmds/system/ctest_cmd.rs:36:});
+src/cmds/system/ctest_cmd.rs:37:static START_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/system/ctest_cmd.rs:38:    Regex::new(r"^\s*Start\s+(\d+):\s*(.*?)\s*$").expect("invalid ctest start regex")
+src/cmds/system/ctest_cmd.rs:39:});
+src/cmds/system/ctest_cmd.rs:40:static SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/system/ctest_cmd.rs:41:    Regex::new(r"^\s*\d+%\s+tests passed,\s+(\d+)\s+tests failed out of\s+(\d+)")
+src/cmds/system/ctest_cmd.rs:42:        .expect("invalid ctest summary regex")
+src/cmds/system/ctest_cmd.rs:43:});
+src/cmds/system/ctest_cmd.rs:44:static TIME_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/system/ctest_cmd.rs:45:    Regex::new(r"^\s*Total Test time \(real\)\s+=\s+([\d.]+)\s+sec")
+src/cmds/system/ctest_cmd.rs:46:        .expect("invalid ctest time regex")
+src/cmds/system/ctest_cmd.rs:47:});
+src/cmds/git/glab_cmd.rs:23:static HTML_COMMENT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<!--.*?-->").unwrap());
+src/cmds/git/glab_cmd.rs:25:    LazyLock::new(|| Regex::new(r"(?m)^\s*\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)\s*$").unwrap());
+src/cmds/git/glab_cmd.rs:27:    LazyLock::new(|| Regex::new(r"(?m)^\s*!\[[^\]]*\]\([^)]*\)\s*$").unwrap());
+src/cmds/git/glab_cmd.rs:29:    LazyLock::new(|| Regex::new(r"(?m)^\s*(?:---+|\*\*\*+|___+)\s*$").unwrap());
+src/cmds/git/glab_cmd.rs:30:static MULTI_BLANK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
+src/cmds/git/glab_cmd.rs:32:    LazyLock::new(|| Regex::new(r"/-/merge_requests/(\d+)").unwrap());
+src/cmds/git/glab_cmd.rs:34:static SECTION_MARKER_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/git/glab_cmd.rs:35:    Regex::new(r"section_(?:start|end):\d+:[a-z0-9_]+(?:\x1b\[0K|\[0K)*").unwrap()
+src/cmds/git/glab_cmd.rs:36:});
+src/cmds/git/glab_cmd.rs:38:static BARE_ANSI_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[[\d;]+[A-Za-z]").unwrap());
+src/cmds/ruby/rake_cmd.rs:168:        LazyLock::new(|| regex::Regex::new(r"^\d+\)\s+(Failure|Error):$").unwrap());
+src/cmds/system/ls.rs:14:static LS_DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/system/ls.rs:15:    Regex::new(
+src/cmds/system/ls.rs:16:        r"\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(?:\d{4}|\d{2}:\d{2})\s+"
+src/cmds/system/ls.rs:17:    )
+src/cmds/system/ls.rs:18:    .unwrap()
+src/cmds/system/ls.rs:19:});
+src/cmds/git/gt_cmd.rs:13:    LazyLock::new(|| Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b").unwrap());
+src/cmds/git/gt_cmd.rs:14:static BRANCH_NAME_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/git/gt_cmd.rs:15:    Regex::new(
+src/cmds/git/gt_cmd.rs:16:        r#"(?:Created|Pushed|pushed|Deleted|deleted)\s+branch\s+[`"']?([a-zA-Z0-9/_.\-+@]+)"#,
+src/cmds/git/gt_cmd.rs:17:    )
+src/cmds/git/gt_cmd.rs:18:    .unwrap()
+src/cmds/git/gt_cmd.rs:19:});
+src/cmds/git/gt_cmd.rs:20:static PR_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/git/gt_cmd.rs:21:    Regex::new(r"(Created|Updated)\s+pull\s+request\s+#(\d+)\s+for\s+([^\s:]+)(?::\s*(\S+))?")
+src/cmds/git/gt_cmd.rs:22:        .unwrap()
+src/cmds/git/gt_cmd.rs:23:});
+src/cmds/system/search.rs:739:        LazyLock::new(|| Regex::new(r"^([^\x00]+)\x00(\d+)([:-])(.*)$").unwrap());
+src/discover/registry.rs:54:static REGEX_SET: LazyLock<RegexSet> = LazyLock::new(|| {
+src/discover/registry.rs:55:    RegexSet::new(RULES.iter().map(|r| r.pattern)).expect("invalid regex patterns")
+src/discover/registry.rs:56:});
+src/discover/registry.rs:57:static COMPILED: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+src/discover/registry.rs:58:    RULES
+src/discover/registry.rs:59:        .iter()
+src/discover/registry.rs:60:        .map(|r| Regex::new(r.pattern).expect("invalid regex"))
+src/discover/registry.rs:61:        .collect()
+src/discover/registry.rs:62:});
+src/discover/registry.rs:63:static ENV_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
+src/discover/registry.rs:64:    let double_quoted = r#""(?:[^"\\]|\\.)*""#;
+src/discover/registry.rs:65:    let single_quoted = r#"'(?:[^'\\]|\\.)*'"#;
+src/discover/registry.rs:66:    let unquoted = r#"[^\s]*"#;
+src/discover/registry.rs:67:    let env_value = format!("(?:{}|{}|{})", double_quoted, single_quoted, unquoted);
+src/discover/registry.rs:68:    let env_assign = format!(r#"[A-Z_][A-Z0-9_]*={}"#, env_value);
+src/discover/registry.rs:69:    Regex::new(&format!(r#"^(?:sudo\s+|env\s+|{}\s+)+"#, env_assign)).unwrap()
+src/discover/registry.rs:70:});
+src/discover/registry.rs:73:static GIT_GLOBAL_OPT: LazyLock<Regex> = LazyLock::new(|| {
+src/discover/registry.rs:74:    Regex::new(r"^(?:(?:-C\s+\S+|-c\s+\S+|--git-dir(?:=\S+|\s+\S+)|--work-tree(?:=\S+|\s+\S+)|--no-pager|--no-optional-locks|--bare|--literal-pathspecs)\s+)+").unwrap()
+src/discover/registry.rs:75:});
+src/discover/registry.rs:80:static HEAD_N: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^head\s+-(\d+)\s+(\S+)$").unwrap());
+src/discover/registry.rs:82:    LazyLock::new(|| Regex::new(r"^head\s+--lines=(\d+)\s+(\S+)$").unwrap());
+src/discover/registry.rs:83:static TAIL_N: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^tail\s+-(\d+)\s+(\S+)$").unwrap());
+src/discover/registry.rs:85:    LazyLock::new(|| Regex::new(r"^tail\s+-n\s+(\d+)\s+(\S+)$").unwrap());
+src/discover/registry.rs:87:    LazyLock::new(|| Regex::new(r"^tail\s+--lines=(\d+)\s+(\S+)$").unwrap());
+src/discover/registry.rs:89:    LazyLock::new(|| Regex::new(r"^tail\s+--lines\s+(\d+)\s+(\S+)$").unwrap());
+src/discover/registry.rs:539:    LazyLock::new(|| Regex::new(r"(?m)[ \t\x0B\x0C]*\\\r?\n[ \t\x0B\x0C]*").unwrap());
+src/discover/registry.rs:541:static BASH_JOIN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\\\r?\n").unwrap());
+src/cmds/system/log_cmd.rs:14:static TIMESTAMP_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/system/log_cmd.rs:15:    Regex::new(r"^\d{4}[-/]\d{2}[-/]\d{2}[T ]\d{2}:\d{2}:\d{2}[.,]?\d*\s*").unwrap()
+src/cmds/system/log_cmd.rs:16:});
+src/cmds/system/log_cmd.rs:17:static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/system/log_cmd.rs:18:    Regex::new(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+src/cmds/system/log_cmd.rs:19:        .unwrap()
+src/cmds/system/log_cmd.rs:20:});
+src/cmds/system/log_cmd.rs:21:static HEX_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"0x[0-9a-fA-F]+").unwrap());
+src/cmds/system/log_cmd.rs:22:static NUM_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b\d{4,}\b").unwrap());
+src/cmds/system/log_cmd.rs:23:static PATH_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"/[\w./\-]+").unwrap());
+src/cmds/ruby/rspec_cmd.rs:22:    LazyLock::new(|| Regex::new(r"(?i)running via spring preloader").unwrap());
+src/cmds/ruby/rspec_cmd.rs:23:static RE_SIMPLECOV: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/ruby/rspec_cmd.rs:24:    Regex::new(r"(?i)(coverage report|simplecov|coverage/|\.simplecov|All Files.*Lines)").unwrap()
+src/cmds/ruby/rspec_cmd.rs:25:});
+src/cmds/ruby/rspec_cmd.rs:27:    LazyLock::new(|| Regex::new(r"^DEPRECATION WARNING:").unwrap());
+src/cmds/ruby/rspec_cmd.rs:28:static RE_FINISHED_IN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^Finished in \d").unwrap());
+src/cmds/ruby/rspec_cmd.rs:30:    LazyLock::new(|| Regex::new(r"saved screenshot to (.+)").unwrap());
+src/cmds/ruby/rspec_cmd.rs:32:    LazyLock::new(|| Regex::new(r"(\d+) examples?, (\d+) failures?").unwrap());
+src/cmds/js/playwright_cmd.rs:168:        LazyLock::new(|| Regex::new(r"(\d+)\s+(passed|failed|flaky|skipped)").unwrap());
+src/cmds/js/playwright_cmd.rs:170:        LazyLock::new(|| Regex::new(r"\((\d+(?:\.\d+)?)(ms|s|m)\)").unwrap());
+src/cmds/js/playwright_cmd.rs:220:        LazyLock::new(|| Regex::new(r"[×✗]\s+.*?›\s+([^›]+\.spec\.[tj]sx?)").unwrap());
+src/cmds/js/next_cmd.rs:45:    static BUNDLE_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/js/next_cmd.rs:46:        Regex::new(r"^[○●◐λ✓]\s+([\w/\-\.]+)\s+(\d+(?:\.\d+)?)\s*(kB|B)\s+(\d+(?:\.\d+)?)\s*(kB|B)")
+src/cmds/js/next_cmd.rs:47:            .unwrap()
+src/cmds/js/next_cmd.rs:48:    });
+src/cmds/js/next_cmd.rs:172:        LazyLock::new(|| Regex::new(r"(\d+(?:\.\d+)?)\s*(s|ms)").unwrap());
+src/cmds/php/artisan_cmd.rs:8:static BOX_CHARS_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/php/artisan_cmd.rs:9:    Regex::new(r"[\u{2500}-\u{257F}\u{2580}-\u{259F}\u{25A0}-\u{25FF}\u{27A0}-\u{27BF}]+").unwrap()
+src/cmds/php/artisan_cmd.rs:10:});
+src/cmds/php/artisan_cmd.rs:11:static DOTS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.{3,}").unwrap());
+src/cmds/php/artisan_cmd.rs:12:static MULTI_SPACE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[ \t]{2,}").unwrap());
+src/cmds/php/artisan_cmd.rs:13:static MULTI_BLANK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
+src/cmds/jvm/gradlew_cmd.rs:13:static TASK_LINE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^> Task :").unwrap());
+src/cmds/jvm/gradlew_cmd.rs:15:    LazyLock::new(|| Regex::new(r"^\* Try:|^> Run with --|^> Get more help at").unwrap());
+src/cmds/jvm/gradlew_cmd.rs:17:    LazyLock::new(|| Regex::new(r"^BUILD (SUCCESSFUL|FAILED)").unwrap());
+src/cmds/jvm/gradlew_cmd.rs:19:    LazyLock::new(|| Regex::new(r"^\d+ actionable tasks?").unwrap());
+src/cmds/jvm/gradlew_cmd.rs:180:    static DAEMON_LINE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/jvm/gradlew_cmd.rs:181:        Regex::new(
+src/cmds/jvm/gradlew_cmd.rs:182:            r"^(Starting a Gradle Daemon|Daemon will be stopped|Reusing configuration cache|Calculating task graph|> Configure project|Deprecated Gradle features|You can use|For more on this|Configuration cache entry)"
+src/cmds/jvm/gradlew_cmd.rs:183:        )
+src/cmds/jvm/gradlew_cmd.rs:184:        .unwrap()
+src/cmds/jvm/gradlew_cmd.rs:185:    });
+src/cmds/jvm/gradlew_cmd.rs:186:    static PROGRESS: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/jvm/gradlew_cmd.rs:187:        Regex::new(r"^\s*\d+%|^Downloading|^Configuring|^Resolving|^\[Incubating\]|^Wrote HTML report|^class \S+ could not|^\[android-")
+src/cmds/jvm/gradlew_cmd.rs:188:                .unwrap()
+src/cmds/jvm/gradlew_cmd.rs:189:    });
+src/cmds/jvm/gradlew_cmd.rs:190:    static ERROR_LINE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/jvm/gradlew_cmd.rs:191:        Regex::new(
+src/cmds/jvm/gradlew_cmd.rs:192:            r"(?i)(^FAILURE:|^\* What went wrong:|^\* Where:|> Could not|e: |error:|^Execution failed|Lint found \d+ error)"
+src/cmds/jvm/gradlew_cmd.rs:193:        )
+src/cmds/jvm/gradlew_cmd.rs:194:        .unwrap()
+src/cmds/jvm/gradlew_cmd.rs:195:    });
+src/cmds/jvm/gradlew_cmd.rs:198:        LazyLock::new(|| Regex::new(r"^(w: |warning:|Warning:|WARNING:)").unwrap());
+src/cmds/jvm/gradlew_cmd.rs:200:        LazyLock::new(|| Regex::new(r"gradle\.com/s/|Publishing build scan").unwrap());
+src/cmds/jvm/gradlew_cmd.rs:234:        LazyLock::new(|| Regex::new(r"FAILED$| FAILED ").unwrap());
+src/cmds/jvm/gradlew_cmd.rs:236:        LazyLock::new(|| Regex::new(r" PASSED$| SKIPPED$").unwrap());
+src/cmds/jvm/gradlew_cmd.rs:237:    static SUMMARY_LINE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/jvm/gradlew_cmd.rs:238:        Regex::new(
+src/cmds/jvm/gradlew_cmd.rs:239:            r"\d+ tests? completed|\d+ tests? failed|There were failing tests|See the report at",
+src/cmds/jvm/gradlew_cmd.rs:240:        )
+src/cmds/jvm/gradlew_cmd.rs:241:        .unwrap()
+src/cmds/jvm/gradlew_cmd.rs:242:    });
+src/cmds/jvm/gradlew_cmd.rs:312:        LazyLock::new(|| Regex::new(r"^INSTRUMENTATION_STATUS[_CODE]*:").unwrap());
+src/cmds/jvm/gradlew_cmd.rs:314:        LazyLock::new(|| Regex::new(r"^INSTRUMENTATION_RESULT:").unwrap());
+src/cmds/jvm/gradlew_cmd.rs:316:        LazyLock::new(|| Regex::new(r"^INSTRUMENTATION_CODE:").unwrap());
+src/cmds/jvm/gradlew_cmd.rs:318:        LazyLock::new(|| Regex::new(r"^Starting \d+ tests? on ").unwrap());
+src/cmds/jvm/gradlew_cmd.rs:320:        LazyLock::new(|| Regex::new(r"^Installing APK").unwrap());
+src/cmds/jvm/gradlew_cmd.rs:363:        LazyLock::new(|| Regex::new(r"[^:]+:\d+:.*[Ee]rror:.*\[").unwrap());
+src/cmds/jvm/gradlew_cmd.rs:366:        LazyLock::new(|| Regex::new(r"[^:]+:\d+:.*[Ww]arning:.*\[").unwrap());
+src/cmds/jvm/gradlew_cmd.rs:369:        LazyLock::new(|| Regex::new(r"[^:]+:\d+:\d+:.*[Ll]int").unwrap());
+src/cmds/jvm/gradlew_cmd.rs:372:        LazyLock::new(|| Regex::new(r"[^:]+:\d+:\d+:.*error").unwrap());
+src/cmds/jvm/gradlew_cmd.rs:375:        LazyLock::new(|| Regex::new(r"\d+ (issues?|errors?|warnings?)").unwrap());
+src/cmds/jvm/gradlew_cmd.rs:377:    static REPORT_LINE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/jvm/gradlew_cmd.rs:378:        Regex::new(r"Wrote (HTML|XML|text) report|file://|/build/reports/lint").unwrap()
+src/cmds/jvm/gradlew_cmd.rs:379:    });
+src/cmds/php/utils.rs:7:static ANSI_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").unwrap());
+src/cmds/php/utils.rs:9:    LazyLock::new(|| Regex::new(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]").unwrap());
+src/cmds/cloud/psql_cmd.rs:17:    LazyLock::new(|| Regex::new(r"-\[ RECORD \d+ \]-").unwrap());
+src/cmds/cloud/psql_cmd.rs:18:static SEPARATOR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[-+]+$").unwrap());
+src/cmds/cloud/psql_cmd.rs:19:static ROW_COUNT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\(\d+ rows?\)$").unwrap());
+src/cmds/cloud/psql_cmd.rs:21:    LazyLock::new(|| Regex::new(r"^-\[ RECORD (\d+) \]-").unwrap());
+src/cmds/php/phpunit_cmd.rs:20:static FAILURE_HEADING_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d+\) \S").unwrap());
+src/cmds/rust/runner.rs:13:static ERROR_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+src/cmds/rust/runner.rs:14:    vec![
+src/cmds/rust/runner.rs:15:        // Generic errors
+src/cmds/rust/runner.rs:16:        Regex::new(r"(?i)^.*error[\s:\[].*$").unwrap(),
+src/cmds/rust/runner.rs:17:        Regex::new(r"(?i)^.*\berr\b.*$").unwrap(),
+src/cmds/rust/runner.rs:18:        Regex::new(r"(?i)^.*warning[\s:\[].*$").unwrap(),
+src/cmds/rust/runner.rs:19:        Regex::new(r"(?i)^.*\bwarn\b.*$").unwrap(),
+src/cmds/rust/runner.rs:20:        Regex::new(r"(?i)^.*failed.*$").unwrap(),
+src/cmds/rust/runner.rs:21:        Regex::new(r"(?i)^.*failure.*$").unwrap(),
+src/cmds/rust/runner.rs:22:        Regex::new(r"(?i)^.*exception.*$").unwrap(),
+src/cmds/rust/runner.rs:23:        Regex::new(r"(?i)^.*panic.*$").unwrap(),
+src/cmds/rust/runner.rs:24:        // Rust specific
+src/cmds/rust/runner.rs:25:        Regex::new(r"^error\[E\d+\]:.*$").unwrap(),
+src/cmds/rust/runner.rs:26:        Regex::new(r"^\s*--> .*:\d+:\d+$").unwrap(),
+src/cmds/rust/runner.rs:27:        // Python
+src/cmds/rust/runner.rs:28:        Regex::new(r"^Traceback.*$").unwrap(),
+src/cmds/rust/runner.rs:29:        Regex::new(r#"^\s*File ".*", line \d+.*$"#).unwrap(),
+src/cmds/rust/runner.rs:30:        // JavaScript/TypeScript
+src/cmds/rust/runner.rs:31:        Regex::new(r"^\s*at .*:\d+:\d+.*$").unwrap(),
+src/cmds/rust/runner.rs:32:        // Go
+src/cmds/rust/runner.rs:33:        Regex::new(r"^.*\.go:\d+:.*$").unwrap(),
+src/cmds/rust/runner.rs:34:    ]
+src/cmds/rust/runner.rs:35:});
+src/cmds/js/vitest_cmd.rs:121:        LazyLock::new(|| Regex::new(r"Tests\s+(?:(\d+)\s+failed\s+\|\s+)?(\d+)\s+passed").unwrap());
+src/cmds/js/vitest_cmd.rs:123:        LazyLock::new(|| Regex::new(r"Duration\s+([\d.]+)(ms|s)").unwrap());
+src/cmds/dotnet/binlog.rs:55:static ISSUE_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/dotnet/binlog.rs:56:    Regex::new(
+src/cmds/dotnet/binlog.rs:57:        r"(?m)^\s*(?P<file>[^\r\n:(]+)\((?P<line>\d+),(?P<column>\d+)\):\s*(?P<kind>error|warning)\s*(?:(?P<code>[A-Za-z]+\d+)\s*:\s*)?(?P<msg>.*)$"
+src/cmds/dotnet/binlog.rs:58:    )
+src/cmds/dotnet/binlog.rs:59:    .expect("valid regex")
+src/cmds/dotnet/binlog.rs:60:});
+src/cmds/dotnet/binlog.rs:61:static BUILD_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/dotnet/binlog.rs:62:    Regex::new(r"(?mi)^\s*(?P<count>\d+)\s+(?P<kind>warning|error)\(s\)").expect("valid regex")
+src/cmds/dotnet/binlog.rs:63:});
+src/cmds/dotnet/binlog.rs:65:    LazyLock::new(|| Regex::new(r"(?i)\b(?P<count>\d+)\s+error\(s\)").expect("valid regex"));
+src/cmds/dotnet/binlog.rs:67:    LazyLock::new(|| Regex::new(r"(?i)\b(?P<count>\d+)\s+warning\(s\)").expect("valid regex"));
+src/cmds/dotnet/binlog.rs:68:static FALLBACK_ERROR_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/dotnet/binlog.rs:69:    Regex::new(r"(?mi)^.+\(\d+,\d+\):\s*error(?:\s+[A-Za-z]{2,}\d{3,})?(?:\s*:.*)?$")
+src/cmds/dotnet/binlog.rs:70:        .expect("valid regex")
+src/cmds/dotnet/binlog.rs:71:});
+src/cmds/dotnet/binlog.rs:72:static FALLBACK_WARNING_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/dotnet/binlog.rs:73:    Regex::new(r"(?mi)^.+\(\d+,\d+\):\s*warning(?:\s+[A-Za-z]{2,}\d{3,})?(?:\s*:.*)?$")
+src/cmds/dotnet/binlog.rs:74:        .expect("valid regex")
+src/cmds/dotnet/binlog.rs:75:});
+src/cmds/dotnet/binlog.rs:76:static DURATION_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/dotnet/binlog.rs:77:    Regex::new(r"(?m)^\s*Time Elapsed\s+(?P<duration>[^\r\n]+)$").expect("valid regex")
+src/cmds/dotnet/binlog.rs:78:});
+src/cmds/dotnet/binlog.rs:79:static TEST_RESULT_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/dotnet/binlog.rs:80:    Regex::new(
+src/cmds/dotnet/binlog.rs:81:        r"(?m)(?:Passed!|Failed!)\s*-\s*Failed:\s*(?P<failed>\d+),\s*Passed:\s*(?P<passed>\d+),\s*Skipped:\s*(?P<skipped>\d+),\s*Total:\s*(?P<total>\d+),\s*Duration:\s*(?P<duration>[^\r\n-]+)"
+src/cmds/dotnet/binlog.rs:82:    )
+src/cmds/dotnet/binlog.rs:83:    .expect("valid regex")
+src/cmds/dotnet/binlog.rs:84:});
+src/cmds/dotnet/binlog.rs:85:static TEST_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/dotnet/binlog.rs:86:    Regex::new(
+src/cmds/dotnet/binlog.rs:87:        r"(?mi)^\s*Test summary:\s*total:\s*(?P<total>\d+),\s*failed:\s*(?P<failed>\d+),\s*(?:succeeded|passed):\s*(?P<passed>\d+),\s*skipped:\s*(?P<skipped>\d+),\s*duration:\s*(?P<duration>[^\r\n]+)$"
+src/cmds/dotnet/binlog.rs:88:    )
+src/cmds/dotnet/binlog.rs:89:    .expect("valid regex")
+src/cmds/dotnet/binlog.rs:90:});
+src/cmds/dotnet/binlog.rs:91:static FAILED_TEST_HEAD_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/dotnet/binlog.rs:92:    Regex::new(r"(?m)^\s*Failed\s+(?P<name>[^\r\n\[]+)\s+\[[^\]\r\n]+\]\s*$").expect("valid regex")
+src/cmds/dotnet/binlog.rs:93:});
+src/cmds/dotnet/binlog.rs:95:    LazyLock::new(|| Regex::new(r"(?m)^\s*Restored\s+.+\.csproj\s*\(").expect("valid regex"));
+src/cmds/dotnet/binlog.rs:96:static RESTORE_DIAGNOSTIC_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/dotnet/binlog.rs:97:    Regex::new(
+src/cmds/dotnet/binlog.rs:98:        r"(?mi)^\s*(?:(?P<file>.+?)\s+:\s+)?(?P<kind>warning|error)\s+(?P<code>[A-Za-z]{2,}\d{3,})\s*:\s*(?P<msg>.+)$"
+src/cmds/dotnet/binlog.rs:99:    )
+src/cmds/dotnet/binlog.rs:100:    .expect("valid regex")
+src/cmds/dotnet/binlog.rs:101:});
+src/cmds/dotnet/binlog.rs:102:static PROJECT_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/dotnet/binlog.rs:103:    Regex::new(r"(?m)^\s*([A-Za-z]:)?[^\r\n]*\.csproj(?:\s|$)").expect("valid regex")
+src/cmds/dotnet/binlog.rs:104:});
+src/cmds/dotnet/binlog.rs:106:    LazyLock::new(|| Regex::new(r"[\x20-\x7E]{5,}").expect("valid regex"));
+src/cmds/dotnet/binlog.rs:108:    LazyLock::new(|| Regex::new(r"^[A-Za-z]{2,}\d{3,}$").expect("valid regex"));
+src/cmds/dotnet/binlog.rs:110:    LazyLock::new(|| Regex::new(r"(?i)([A-Za-z]:)?[/\\][^\s]+\.(cs|vb|fs)").expect("valid regex"));
+src/cmds/dotnet/binlog.rs:111:static SENSITIVE_ENV_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/dotnet/binlog.rs:112:    let keys = SENSITIVE_ENV_VARS
+src/cmds/dotnet/binlog.rs:113:        .iter()
+src/cmds/dotnet/binlog.rs:114:        .map(|key| regex::escape(key))
+src/cmds/dotnet/binlog.rs:115:        .collect::<Vec<_>>()
+src/cmds/dotnet/binlog.rs:116:        .join("|");
+src/cmds/dotnet/binlog.rs:117:    Regex::new(&format!(
+src/cmds/dotnet/binlog.rs:118:        r"(?P<prefix>\b(?:{})\s*(?:=|:)\s*)(?P<value>[^\s;]+)",
+src/cmds/dotnet/binlog.rs:119:        keys
+src/cmds/dotnet/binlog.rs:120:    ))
+src/cmds/dotnet/binlog.rs:121:    .expect("valid regex")
+src/cmds/dotnet/binlog.rs:122:});
+src/cmds/jvm/mvn_cmd.rs:34:static RUNNING: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[INFO\] Running ").unwrap());
+src/cmds/jvm/mvn_cmd.rs:45:    LazyLock::new(|| Regex::new(r"^\[INFO\] Running \S+\s*$").unwrap());
+src/cmds/jvm/mvn_cmd.rs:55:static CLOSE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/jvm/mvn_cmd.rs:56:    Regex::new(
+src/cmds/jvm/mvn_cmd.rs:57:        r"^\[(?:INFO|ERROR|WARNING)\] Tests run: \d+, Failures: (\d+), Errors: (\d+), Skipped: \d+, Time elapsed: [^ ]+ s(?:\s+<<<\s*(?:FAILURE|ERROR)!)?\s+--?\s+in (.+)$"
+src/cmds/jvm/mvn_cmd.rs:58:    ).unwrap()
+src/cmds/jvm/mvn_cmd.rs:59:});
+src/cmds/jvm/mvn_cmd.rs:63:    LazyLock::new(|| Regex::new(r"^\[(?:INFO|ERROR)\] BUILD (?:SUCCESS|FAILURE)$").unwrap());
+src/cmds/jvm/mvn_cmd.rs:66:static RESULTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[INFO\] Results:\s*$").unwrap());
+src/cmds/jvm/mvn_cmd.rs:69:static AGG: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/jvm/mvn_cmd.rs:70:    Regex::new(r"^\[(?:INFO|ERROR)\] Tests run: \d+, Failures: \d+, Errors: \d+, Skipped: \d+\s*$")
+src/cmds/jvm/mvn_cmd.rs:71:        .unwrap()
+src/cmds/jvm/mvn_cmd.rs:72:});
+src/cmds/jvm/mvn_cmd.rs:76:    LazyLock::new(|| Regex::new(r"^\[INFO\] --- .* @ .* ---$").unwrap());
+src/cmds/jvm/mvn_cmd.rs:109:static TEST_PLUGIN_BANNER: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/jvm/mvn_cmd.rs:110:    Regex::new(r"^\[INFO\] --- (?:maven-)?(surefire|failsafe)(?:-plugin)?:\S+ \([^)]*\) @ .* ---$")
+src/cmds/jvm/mvn_cmd.rs:111:        .unwrap()
+src/cmds/jvm/mvn_cmd.rs:112:});
+src/cmds/jvm/mvn_cmd.rs:125:    LazyLock::new(|| Regex::new(r"^\[INFO\] Building .*\[\d+/\d+\]\s*$").unwrap());
+src/cmds/jvm/mvn_cmd.rs:129:    LazyLock::new(|| Regex::new(r"^\[INFO\] -+< .+ >-+$").unwrap());
+src/cmds/jvm/mvn_cmd.rs:134:    LazyLock::new(|| Regex::new(r"^\[INFO\] Reactor Summary for ").unwrap());
+src/cmds/jvm/mvn_cmd.rs:138:    LazyLock::new(|| Regex::new(r"/[^:]+\.java:\[\d+,\d+\]").unwrap());
+src/cmds/php/phpt_cmd.rs:163:    static STATUS_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/php/phpt_cmd.rs:164:        // Matches a status line. Anchor: either start-of-line ("FAIL desc [x.phpt]")
+src/cmds/php/phpt_cmd.rs:165:        // or immediately after the test bracket ("TEST N/M [x.phpt]PASS desc [x.phpt]").
+src/cmds/php/phpt_cmd.rs:166:        // We only accept the token after `]` or at line start so that prose like
+src/cmds/php/phpt_cmd.rs:167:        // "FAILED TEST SUMMARY" does not match.
+src/cmds/php/phpt_cmd.rs:168:        Regex::new(
+src/cmds/php/phpt_cmd.rs:169:            r"(?:^|\])(PASS|FAIL|SKIP|BORK|WARN|XLEAK|LEAK|XFAIL)\s+(.*?)\s*\[([^\[\]]+\.phpt)\]",
+src/cmds/php/phpt_cmd.rs:170:        )
+src/cmds/php/phpt_cmd.rs:171:        .unwrap()
+src/cmds/php/phpt_cmd.rs:172:    });
+src/cmds/php/phpt_cmd.rs:173:    static STAT_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/php/phpt_cmd.rs:174:        Regex::new(
+src/cmds/php/phpt_cmd.rs:175:            r"^\s*(Tests passed|Tests failed|Tests skipped|Tests warned|Expected fail|Expected leak|Tests leaked|Tests borked)\s*:\s*(\d+)",
+src/cmds/php/phpt_cmd.rs:176:        )
+src/cmds/php/phpt_cmd.rs:177:        .unwrap()
+src/cmds/php/phpt_cmd.rs:178:    });
+src/cmds/php/phpt_cmd.rs:180:        LazyLock::new(|| Regex::new(r"^\s*Number of tests\s*:\s*(\d+)").unwrap());
+src/cmds/php/phpt_cmd.rs:182:        LazyLock::new(|| Regex::new(r"^\s*Time taken\s*:\s*([0-9.]+)").unwrap());
+src/cmds/cloud/aws_cmd.rs:1327:    LazyLock::new(|| Regex::new(r"^(upload|download|delete|copy|move):").unwrap());
+src/cmds/js/tsc_cmd.rs:22:static TSC_ERROR: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/js/tsc_cmd.rs:23:    Regex::new(r"^(.+?)\((\d+),(\d+)\):\s+(error|warning)\s+(TS\d+):\s+(.+)$").unwrap()
+src/cmds/js/tsc_cmd.rs:24:});
+src/cmds/js/tsc_cmd.rs:26:static TSC_PRETTY_ERROR: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/js/tsc_cmd.rs:27:    Regex::new(r"^(.+?):(\d+):(\d+)\s+-\s+(error|warning)\s+(TS\d+):\s+(.+)$").unwrap()
+src/cmds/js/tsc_cmd.rs:28:});
+src/cmds/js/tsc_cmd.rs:30:    LazyLock::new(|| Regex::new(r"^(error|warning)\s+(TS\d+):\s+(.+)$").unwrap());
+src/core/utils.rs:54:        LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap());
+src/cmds/python/uv_cmd.rs:20:    LazyLock::new(|| Regex::new(r#"^\s*File ".*", line \d+.*$"#).unwrap());
+src/cmds/python/uv_cmd.rs:22:    LazyLock::new(|| Regex::new(r"^\s*[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception):").unwrap());
+src/cmds/python/uv_cmd.rs:24:    LazyLock::new(|| Regex::new(r"^\s*at .+:\d+:\d+.*$").unwrap());
+src/cmds/python/uv_cmd.rs:25:static ERROR_START_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+src/cmds/python/uv_cmd.rs:26:    vec![
+src/cmds/python/uv_cmd.rs:27:        Regex::new(r"(?i)\berror\b").unwrap(),
+src/cmds/python/uv_cmd.rs:28:        Regex::new(r"(?i)\bfailed\b").unwrap(),
+src/cmds/python/uv_cmd.rs:29:        Regex::new(r"(?i)\bfailure\b").unwrap(),
+src/cmds/python/uv_cmd.rs:30:        Regex::new(r"(?i)\bexception\b").unwrap(),
+src/cmds/python/uv_cmd.rs:31:        Regex::new(r"(?i)\bpanic\b").unwrap(),
+src/cmds/python/uv_cmd.rs:32:        Regex::new(r"(?i)\bwarn(?:ing)?\b").unwrap(),
+src/cmds/python/uv_cmd.rs:33:        Regex::new(r"(?i)\bassert(?:ion)?\b").unwrap(),
+src/cmds/python/uv_cmd.rs:34:        Regex::new(r"^\s*FAILED\b").unwrap(),
+src/cmds/python/uv_cmd.rs:35:        Regex::new(r"^\s*ERROR\b").unwrap(),
+src/cmds/python/uv_cmd.rs:36:        Regex::new(r"^\s*E\s+").unwrap(),
+src/cmds/python/uv_cmd.rs:37:        Regex::new(r"^\s*Caused by:").unwrap(),
+src/cmds/python/uv_cmd.rs:38:        Regex::new(r"^\s*note:").unwrap(),
+src/cmds/python/uv_cmd.rs:39:        Regex::new(r"^\s*help:").unwrap(),
+src/cmds/python/uv_cmd.rs:40:    ]
+src/cmds/python/uv_cmd.rs:41:});
+src/core/filter.rs:158:static MULTIPLE_BLANK_LINES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
+src/core/filter.rs:233:    LazyLock::new(|| Regex::new(r"^(use |import |from |require\(|#include)").unwrap());
+src/core/filter.rs:234:static FUNC_SIGNATURE: LazyLock<Regex> = LazyLock::new(|| {
+src/core/filter.rs:235:    Regex::new(
+src/core/filter.rs:236:        r"^(pub\s+)?(async\s+)?(fn|def|function|func|class|struct|enum|trait|interface|type)\s+\w+",
+src/core/filter.rs:237:    )
+src/core/filter.rs:238:    .unwrap()
+src/core/filter.rs:239:});
+src/cmds/rust/cargo_cmd.rs:1050:        static RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+src/cmds/rust/cargo_cmd.rs:1051:            regex::Regex::new(
+src/cmds/rust/cargo_cmd.rs:1052:                r"test result: (\w+)\.\s+(\d+) passed;\s+(\d+) failed;\s+(\d+) ignored;\s+(\d+) measured;\s+(\d+) filtered out(?:;\s+finished in ([\d.]+)s)?"
+src/cmds/rust/cargo_cmd.rs:1053:            ).unwrap()
+src/cmds/rust/cargo_cmd.rs:1054:        });
+src/cmds/python/mypy_cmd.rs:57:    static MYPY_DIAG: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/python/mypy_cmd.rs:58:        Regex::new(r"^(.+?):(\d+)(?::\d+)?: (error|warning|note): (.+?)(?:\s+\[(.+)\])?$").unwrap()
+src/cmds/python/mypy_cmd.rs:59:    });
+src/cmds/scala/sbt_cmd.rs:10:static TEST_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/scala/sbt_cmd.rs:11:    Regex::new(
+src/cmds/scala/sbt_cmd.rs:12:        r"Tests: succeeded (\d+), failed (\d+), canceled (\d+), ignored (\d+), pending (\d+)",
+src/cmds/scala/sbt_cmd.rs:13:    )
+src/cmds/scala/sbt_cmd.rs:14:    .unwrap()
+src/cmds/scala/sbt_cmd.rs:15:});
+src/cmds/scala/sbt_cmd.rs:20:static MUNIT_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/scala/sbt_cmd.rs:21:    Regex::new(r"^\[info\] (?:Passed|Failed): Total \d+, Failed (\d+), Errors (\d+), Passed (\d+)")
+src/cmds/scala/sbt_cmd.rs:22:        .unwrap()
+src/cmds/scala/sbt_cmd.rs:23:});
+src/cmds/scala/sbt_cmd.rs:28:    LazyLock::new(|| Regex::new(r"Suites: completed (\d+), aborted (\d+)").unwrap());
+src/cmds/scala/sbt_cmd.rs:32:    LazyLock::new(|| Regex::new(r"Run completed in (\d+) seconds?").unwrap());
+src/cmds/scala/sbt_cmd.rs:36:    LazyLock::new(|| Regex::new(r"\[info\] Compiling (\d+) Scala source").unwrap());
+src/cmds/scala/sbt_cmd.rs:40:    LazyLock::new(|| Regex::new(r"\[success\] Total time: (\d+) s").unwrap());
+src/cmds/scala/sbt_cmd.rs:43:static ERROR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[error\]").unwrap());
+src/cmds/scala/sbt_cmd.rs:46:static NOISE_RE: LazyLock<Regex> = LazyLock::new(|| {
+src/cmds/scala/sbt_cmd.rs:47:    Regex::new(
+src/cmds/scala/sbt_cmd.rs:48:        r"^\[info\] (welcome to sbt|loading |set current project|Updating |Resolved |Fetching |downloading |Done )"
+src/cmds/scala/sbt_cmd.rs:49:    ).unwrap()
+src/cmds/scala/sbt_cmd.rs:50:});
+src/core/toml_filter.rs:399:static REGISTRY: LazyLock<TomlFilterRegistry> = LazyLock::new(TomlFilterRegistry::load);
+src/core/toml_filter.rs:422:static MATCH_SET: LazyLock<RegexSet> = LazyLock::new(build_match_set);

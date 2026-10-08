@@ -1,0 +1,4 @@
+diff --git a/main.rs b/copied_main.rs
+similarity index 100%
+copy from main.rs
+copy to copied_main.rs

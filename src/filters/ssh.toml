@@ -1,6 +1,6 @@
 [filters.ssh]
 description = "Compact ssh output — strip connection banners, keep command output"
-match_command = "^ssh\\b"
+match_command = "^ssh(?:\\s|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

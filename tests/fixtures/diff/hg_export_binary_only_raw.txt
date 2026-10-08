@@ -1,0 +1,11 @@
+# HG changeset patch
+# User u
+# Date 1788785644 0
+#      Mon Sep 07 12:54:04 2026 +0000
+# Node ID 88c27fa85f86b9a8b0ed05aa0638df4c844cb655
+# Parent  de261df8d670684aa81af5ab6eab474f9177cbe9
+binary only
+-Wall added to CFLAGS
+
+diff -r de261df8d670 -r 88c27fa85f86 b.dat
+Binary file b.dat has changed

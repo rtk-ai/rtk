@@ -1,0 +1,23 @@
+diff --git bin.dat bin.dat
+index bdc955b..8835708 100644
+Binary files bin.dat and bin.dat differ
+diff --git src.txt dst.txt
+similarity index 57%
+rename from src.txt
+rename to dst.txt
+index 814f4a4..4cb29ea 100644
+--- src.txt
++++ dst.txt
+@@ -1,2 +1,3 @@
+ one
+ two
++three
+diff --git f.txt f.txt
+index de98044..7be73ce 100644
+--- f.txt
++++ f.txt
+@@ -1,3 +1,3 @@
+ a
+-b
++B
+ c

@@ -1,6 +1,6 @@
 [filters.spring-boot]
-description = "Compact Spring Boot output — strip banner and verbose startup logs, keep key events"
-match_command = "^(mvn\\s+spring-boot:run|java\\s+-jar.*\\.jar|gradle\\s+.*bootRun)"
+description = "Compact Spring Boot output — strip banner and verbose startup logs, keep key events. Matches gradle bootRun, and java -jar only when the jar filename itself contains \"spring\" (mvn spring-boot:run is routed to RTK's dedicated Maven filter and never reaches this one). Jars using the Maven/Gradle default <artifactId>-<version>.jar name, and jars under a path containing spaces, are deliberately left to full passthrough rather than risk misclassifying an unrelated tool."
+match_command = "^(mvn\\s+spring-boot:run|java\\s+-jar\\s+(?:\\S*[/\\\\])?[^/\\\\\\s]*(?i:spring)[^/\\\\\\s]*\\.jar|gradle\\s+.*bootRun)"
 strip_ansi = true
 keep_lines_matching = [
   "Started\\s.*\\sin\\s",

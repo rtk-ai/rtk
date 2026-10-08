@@ -1,0 +1,34 @@
+Test project /tmp/build
+    Start 2: b_fail
+1/3 Test #2: b_fail ...........................***Failed    0.00 sec
+REAL-EVIDENCE-b_fail-broke
+
+    Start 8: a_fail
+2/3 Test #8: a_fail ...........................***Failed  Error regular expression found in output. Regex=[EVIDENCE]  0.00 sec
+REAL FAILURE EVIDENCE for a_fail
+EVIDENCE
+
+    Start 9: b_regex
+3/3 Test #9: b_regex ..........................***Failed  Required regular expression not found. Regex=[r1
+r2
+r3
+r4
+r5
+r6
+r7
+r8
+r9
+r10
+]  0.00 sec
+hello from b_regex
+
+
+0% tests passed, 3 tests failed out of 3
+
+Total Test time (real) =   0.01 sec
+
+The following tests FAILED:
+	  2 - b_fail (Failed)
+	  8 - a_fail (Failed)
+	  9 - b_regex (Failed)
+Errors while running CTest

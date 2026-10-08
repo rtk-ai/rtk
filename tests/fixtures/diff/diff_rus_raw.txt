@@ -1,0 +1,8 @@
+diff -rus g1/c.txt g2/c.txt
+--- g1/c.txt	2026-09-07 04:09:35.111470577 +0000
++++ g2/c.txt	2026-09-07 04:09:35.111470577 +0000
+@@ -1,2 +1,2 @@
+ one
+-two
++TWO
+Files g1/s.txt and g2/s.txt are identical

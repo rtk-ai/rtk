@@ -1,0 +1,92 @@
+* Unmerged path b/blob.bin
+* Unmerged path b/inb.txt
+diff --git i/b/inb.txt w/b/inb.txt
+index ba2906d..58487cf 100644
+--- i/b/inb.txt
++++ w/b/inb.txt
+@@ -1 +1,5 @@
++<<<<<<< HEAD
+ main
++=======
++side
++>>>>>>> side
+* Unmerged path café.txt
+diff --git "i/caf\303\251.txt" "w/caf\303\251.txt"
+index ba2906d..58487cf 100644
+--- "i/caf\303\251.txt"
++++ "w/caf\303\251.txt"
+@@ -1 +1,5 @@
++<<<<<<< HEAD
+ main
++=======
++side
++>>>>>>> side
+* Unmerged path café.txt.bin
+* Unmerged path colon: x.txt
+diff --git i/colon: x.txt w/colon: x.txt
+index ba2906d..58487cf 100644
+--- i/colon: x.txt	
++++ w/colon: x.txt	
+@@ -1 +1,5 @@
++<<<<<<< HEAD
+ main
++=======
++side
++>>>>>>> side
+* Unmerged path d: x/f.txt
+diff --git i/d: x/f.txt w/d: x/f.txt
+index ba2906d..58487cf 100644
+--- i/d: x/f.txt	
++++ w/d: x/f.txt	
+@@ -1 +1,5 @@
++<<<<<<< HEAD
+ main
++=======
++side
++>>>>>>> side
+* Unmerged path new
+line.txt
+diff --git "i/new\nline.txt" "w/new\nline.txt"
+index ba2906d..58487cf 100644
+--- "i/new\nline.txt"
++++ "w/new\nline.txt"
+@@ -1 +1,5 @@
++<<<<<<< HEAD
+ main
++=======
++side
++>>>>>>> side
+* Unmerged path say "hi".txt
+diff --git "i/say \"hi\".txt" "w/say \"hi\".txt"
+index ba2906d..58487cf 100644
+--- "i/say \"hi\".txt"	
++++ "w/say \"hi\".txt"	
+@@ -1 +1,5 @@
++<<<<<<< HEAD
+ main
++=======
++side
++>>>>>>> side
+* Unmerged path say "hi".txt.bin
+* Unmerged path tab	here.txt
+diff --git "i/tab\there.txt" "w/tab\there.txt"
+index ba2906d..58487cf 100644
+--- "i/tab\there.txt"
++++ "w/tab\there.txt"
+@@ -1 +1,5 @@
++<<<<<<< HEAD
+ main
++=======
++side
++>>>>>>> side
+* Unmerged path trail .txt
+diff --git i/trail .txt w/trail .txt
+index ba2906d..58487cf 100644
+--- i/trail .txt	
++++ w/trail .txt	
+@@ -1 +1,5 @@
++<<<<<<< HEAD
+ main
++=======
++side
++>>>>>>> side

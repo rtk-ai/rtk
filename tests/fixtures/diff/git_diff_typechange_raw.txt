@@ -1,0 +1,26 @@
+diff --git a/f.txt b/f.txt
+index 422c2b7..0f7bc76 100644
+--- a/f.txt
++++ b/f.txt
+@@ -1,2 +1,2 @@
+ a
+-b
++c
+diff --git a/link b/link
+deleted file mode 120000
+index 7f66e4f..0000000
+--- a/link
++++ /dev/null
+@@ -1 +0,0 @@
+-f.txt
+\ No newline at end of file
+diff --git a/link b/link
+new file mode 100644
+index 0000000..3f899ea
+--- /dev/null
++++ b/link
+@@ -0,0 +1 @@
++now a file
+diff --git a/x b/y.bin b/x b/y.bin
+index bdc955b..8835708 100644
+Binary files a/x b/y.bin and b/x b/y.bin differ

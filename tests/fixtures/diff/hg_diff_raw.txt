@@ -1,0 +1,66 @@
+diff -r 2ff83e3c3f94 a and b.txt
+--- a/a and b.txt	Mon Sep 07 12:55:24 2026 +0000
++++ b/a and b.txt	Mon Sep 07 12:55:24 2026 +0000
+@@ -1,1 +1,1 @@
+-one
++two
+diff -r 2ff83e3c3f94 b/blob.bin
+Binary file b/blob.bin has changed
+diff -r 2ff83e3c3f94 b/inb.txt
+--- a/b/inb.txt	Mon Sep 07 12:55:24 2026 +0000
++++ b/b/inb.txt	Mon Sep 07 12:55:24 2026 +0000
+@@ -1,1 +1,1 @@
+-one
++two
+diff -r 2ff83e3c3f94 back\slash.txt
+--- a/back\slash.txt	Mon Sep 07 12:55:24 2026 +0000
++++ b/back\slash.txt	Mon Sep 07 12:55:24 2026 +0000
+@@ -1,1 +1,1 @@
+-one
++two
+diff -r 2ff83e3c3f94 café.txt
+--- a/café.txt	Mon Sep 07 12:55:24 2026 +0000
++++ b/café.txt	Mon Sep 07 12:55:24 2026 +0000
+@@ -1,1 +1,1 @@
+-one
++two
+diff -r 2ff83e3c3f94 colon: x.txt
+--- a/colon: x.txt	Mon Sep 07 12:55:24 2026 +0000
++++ b/colon: x.txt	Mon Sep 07 12:55:24 2026 +0000
+@@ -1,1 +1,1 @@
+-one
++two
+diff -r 2ff83e3c3f94 it's.txt
+--- a/it's.txt	Mon Sep 07 12:55:24 2026 +0000
++++ b/it's.txt	Mon Sep 07 12:55:24 2026 +0000
+@@ -1,1 +1,1 @@
+-one
++two
+diff -r 2ff83e3c3f94 say "hi".txt
+--- a/say "hi".txt	Mon Sep 07 12:55:24 2026 +0000
++++ b/say "hi".txt	Mon Sep 07 12:55:24 2026 +0000
+@@ -1,1 +1,1 @@
+-one
++two
+diff -r 2ff83e3c3f94 say "hi".txt.bin
+Binary file say "hi".txt.bin has changed
+diff -r 2ff83e3c3f94 tab	here.txt
+--- a/tab	here.txt	Mon Sep 07 12:55:24 2026 +0000
++++ b/tab	here.txt	Mon Sep 07 12:55:24 2026 +0000
+@@ -1,1 +1,1 @@
+-one
++two
+diff -r 2ff83e3c3f94 tab	here.txt.bin
+Binary file tab	here.txt.bin has changed
+diff -r 2ff83e3c3f94 trail .txt
+--- a/trail .txt	Mon Sep 07 12:55:24 2026 +0000
++++ b/trail .txt	Mon Sep 07 12:55:24 2026 +0000
+@@ -1,1 +1,1 @@
+-one
++two
+diff -r 2ff83e3c3f94 x b/y.txt
+--- a/x b/y.txt	Mon Sep 07 12:55:24 2026 +0000
++++ b/x b/y.txt	Mon Sep 07 12:55:24 2026 +0000
+@@ -1,1 +1,1 @@
+-one
++two

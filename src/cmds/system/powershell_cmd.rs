@@ -477,7 +477,8 @@ mod tests {
     #[test]
     fn hook_rewrite_preserves_wrapper_arguments() {
         assert_eq!(
-            rewrite_for_hook(r#"PowerShell.exe -NoProfile -Command "Get-ChildItem src""#).as_deref(),
+            rewrite_for_hook(r#"PowerShell.exe -NoProfile -Command "Get-ChildItem src""#)
+                .as_deref(),
             Some(r#"rtk powershell -NoProfile -Command "Get-ChildItem src""#)
         );
         assert_eq!(
@@ -498,18 +499,22 @@ mod tests {
             .as_deref(),
             Some("Get-ChildItem src")
         );
-        assert!(extract_rewritable_script(&[
-            "-WorkingDirectory".to_string(),
-            "C:\\".to_string(),
-            "-Command".to_string(),
-            "Get-ChildItem".to_string(),
-        ])
-        .is_none());
-        assert!(extract_rewritable_script(&[
-            "-EncodedCommand".to_string(),
-            "RwBlAHQALQBEAGEAdABlAA==".to_string(),
-        ])
-        .is_none());
+        assert!(
+            extract_rewritable_script(&[
+                "-WorkingDirectory".to_string(),
+                "C:\\".to_string(),
+                "-Command".to_string(),
+                "Get-ChildItem".to_string(),
+            ])
+            .is_none()
+        );
+        assert!(
+            extract_rewritable_script(&[
+                "-EncodedCommand".to_string(),
+                "RwBlAHQALQBEAGEAdABlAA==".to_string(),
+            ])
+            .is_none()
+        );
     }
 
     #[test]

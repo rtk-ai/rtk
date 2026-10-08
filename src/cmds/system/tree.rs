@@ -8,8 +8,9 @@
 
 use super::constants::NOISE_DIRS;
 use crate::core::runner::{self, RunOptions};
+use crate::core::shell::display_args;
 use crate::core::tracking::TimedExecution;
-use crate::core::utils::{resolved_command, tool_exists};
+use crate::core::utils::{ChildArgExt, resolved_command, tool_exists};
 use anyhow::Result;
 use std::path::Path;
 
@@ -31,14 +32,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         cmd.arg("-I").arg(&ignore_pattern);
     }
 
-    for arg in args {
-        cmd.arg(arg);
-    }
+    cmd.child_args(args);
 
     runner::run_filtered(
         cmd,
         "tree",
-        &args.join(" "),
+        &display_args(args),
         |raw| {
             let filtered = filter_tree_output(raw);
             if verbose > 0 {
@@ -106,7 +105,10 @@ fn parse_tree_args(args: &[String]) -> TreeOpts {
         show_all,
         dirs_only,
         max_depth,
-        root: positionals.first().cloned().unwrap_or_else(|| ".".to_string()),
+        root: positionals
+            .first()
+            .cloned()
+            .unwrap_or_else(|| ".".to_string()),
     }
 }
 

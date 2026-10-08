@@ -1,0 +1,135 @@
+commit 22396ff169c6be4715fcef4ca9a7178968d19e5d
+Author: Fixture <fix@example.com>
+Date:   Sat Aug 29 22:45:00 2026 -0400
+
+    chore: rename, delete, binary bump
+
+diff --git a/blob.bin b/blob.bin
+index 03a10de..198c845 100644
+Binary files a/blob.bin and b/blob.bin differ
+diff --git a/doomed.txt b/doomed.txt
+deleted file mode 100644
+index cbec1ee..0000000
+--- a/doomed.txt
++++ /dev/null
+@@ -1,3 +0,0 @@
+-line a
+-line b
+-line c
+diff --git a/renamed_src.txt b/renamed_dst.txt
+similarity index 100%
+rename from renamed_src.txt
+rename to renamed_dst.txt
+
+commit 0e7632a01b00c70cbc9dafcf1f23c71fa6b10de1
+Author: Fixture <fix@example.com>
+Date:   Sat Aug 29 22:44:59 2026 -0400
+
+    fix: drop SQL comments, tweak main, document ++
+    
+    - remove the -- comments from schema.sql
+    - change two -> 2 and add five
+    - notes.md gains a ++ line
+
+diff --git a/main.rs b/main.rs
+index 5d804c0..0658d30 100644
+--- a/main.rs
++++ b/main.rs
+@@ -1,6 +1,7 @@
+ fn main() {
+     println!("one");
+-    println!("two");
++    println!("2");
+     println!("three");
+     println!("four");
++    println!("five");
+ }
+diff --git a/notes.md b/notes.md
+index d4d7d60..976bcb5 100644
+--- a/notes.md
++++ b/notes.md
+@@ -3,3 +3,4 @@ Some intro text.
+ ---
+ A horizontal rule above.
+ increment operator: x
++++ can also start a line
+diff --git a/schema.sql b/schema.sql
+index bb42838..07010ac 100644
+--- a/schema.sql
++++ b/schema.sql
+@@ -1,7 +1,4 @@
+--- users table
+--- created 2024
+ CREATE TABLE users (
+   id INTEGER PRIMARY KEY,
+-  -- legacy column
+   name TEXT
+ );
+
+commit fe6a6d0d8316535b5ac232f5d7cc6d227b187b9e
+Author: Fixture <fix@example.com>
+Date:   Sat Aug 29 22:44:57 2026 -0400
+
+    feat: initial layout
+    
+    - add schema.sql with SQL comments
+    - add main.rs skeleton
+
+diff --git a/blob.bin b/blob.bin
+new file mode 100644
+index 0000000..03a10de
+Binary files /dev/null and b/blob.bin differ
+diff --git a/doomed.txt b/doomed.txt
+new file mode 100644
+index 0000000..cbec1ee
+--- /dev/null
++++ b/doomed.txt
+@@ -0,0 +1,3 @@
++line a
++line b
++line c
+diff --git a/main.rs b/main.rs
+new file mode 100644
+index 0000000..5d804c0
+--- /dev/null
++++ b/main.rs
+@@ -0,0 +1,6 @@
++fn main() {
++    println!("one");
++    println!("two");
++    println!("three");
++    println!("four");
++}
+diff --git a/notes.md b/notes.md
+new file mode 100644
+index 0000000..d4d7d60
+--- /dev/null
++++ b/notes.md
+@@ -0,0 +1,5 @@
++# Notes
++Some intro text.
++---
++A horizontal rule above.
++increment operator: x
+diff --git a/renamed_src.txt b/renamed_src.txt
+new file mode 100644
+index 0000000..1177bda
+--- /dev/null
++++ b/renamed_src.txt
+@@ -0,0 +1,3 @@
++stable content 1
++stable content 2
++stable content 3
+diff --git a/schema.sql b/schema.sql
+new file mode 100644
+index 0000000..bb42838
+--- /dev/null
++++ b/schema.sql
+@@ -0,0 +1,7 @@
++-- users table
++-- created 2024
++CREATE TABLE users (
++  id INTEGER PRIMARY KEY,
++  -- legacy column
++  name TEXT
++);

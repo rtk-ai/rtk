@@ -1,0 +1,38 @@
+[INFO] Processing build on daemon 94a4d17c
+[INFO] Scanning for projects...
+[INFO] BuildTimeEventSpy is registered.
+[INFO] 
+[INFO] Using the SmartBuilder implementation with a thread count of 17
+[INFO] 
+[INFO] -----------------< com.example.rtk:multifail-skeleton >-----------------
+[INFO] Building multifail-skeleton 1.0.0-SNAPSHOT
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- resources:3.4.0:resources (default-resources) @ multifail-skeleton ---
+[INFO] skip non existing resourceDirectory C:\work\multifail-skeleton\src\main\resources
+[INFO] 
+[INFO] --- compiler:3.15.0:compile (default-compile) @ multifail-skeleton ---
+[INFO] Recompiling the module because of changed source code.
+[INFO] Compiling 1 source file with javac [debug target 21] to target\classes
+[INFO] -------------------------------------------------------------
+[ERROR] COMPILATION ERROR : 
+[INFO] -------------------------------------------------------------
+[ERROR] /C:/work/multifail-skeleton/src/main/java/com/example/rtk/Calc.java:[5,21] ';' expected
+[INFO] 1 error
+[INFO] -------------------------------------------------------------
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD FAILURE
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  0.188 s (Wall Clock)
+[INFO] Finished at: 2026-08-12T12:04:59-04:00
+[INFO] ------------------------------------------------------------------------
+[ERROR] Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin:3.15.0:compile (default-compile) on project multifail-skeleton: Compilation failure
+[ERROR] /C:/work/multifail-skeleton/src/main/java/com/example/rtk/Calc.java:[5,21] ';' expected
+[ERROR] -> [Help 1]
+[ERROR] 
+[ERROR] To see the full stack trace of the errors, re-run Maven with the -e switch.
+[ERROR] Re-run Maven using the -X switch to enable full debug logging.
+[ERROR] 
+[ERROR] For more information about the errors and possible solutions, please read the following articles:
+[ERROR] [Help 1] http://cwiki.apache.org/confluence/display/MAVEN/MojoFailureException
