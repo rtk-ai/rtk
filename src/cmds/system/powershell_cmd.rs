@@ -203,7 +203,8 @@ fn rewrite_get_content(tokens: &[PsToken]) -> Option<RtkRewrite> {
                 paths.push(path.as_rtk_arg());
                 index += 2;
             }
-            "-totalcount" => {
+            // -Head and -First are PowerShell aliases of -TotalCount.
+            "-totalcount" | "-head" | "-first" => {
                 let count = tokens.get(index + 1)?;
                 count.value.parse::<usize>().ok()?;
                 max_lines = Some(count.as_rtk_arg());
@@ -233,7 +234,9 @@ fn rewrite_get_content(tokens: &[PsToken]) -> Option<RtkRewrite> {
     let mut args = vec![RtkArg::literal("read")];
     args.extend(paths);
     if let Some(count) = max_lines {
-        args.push(RtkArg::literal("--max-lines"));
+        // -TotalCount is an exact head window; --max-lines is a smart truncation
+        // that may print fewer lines plus a "[N more lines]" marker.
+        args.push(RtkArg::literal("--head-lines"));
         args.push(count);
     }
     if let Some(count) = tail_lines {
@@ -351,6 +354,8 @@ fn rewrite_select_string(tokens: &[PsToken]) -> Option<RtkRewrite> {
     }
 
     let mut args = vec![RtkArg::literal("grep")];
+    // Select-String always reports the line number (path:line:text).
+    args.push(RtkArg::literal("-n"));
     if !case_sensitive {
         args.push(RtkArg::literal("-i"));
     }
@@ -529,7 +534,30 @@ mod tests {
         );
         assert_eq!(
             rewrite_for_hook(r#"Select-String -Pattern "fn run" -Path src\main.rs"#).as_deref(),
-            Some(r#"rtk grep -i "fn run" src\main.rs"#)
+            Some(r#"rtk grep -n -i "fn run" src\main.rs"#)
+        );
+    }
+
+    #[test]
+    fn total_count_and_its_aliases_are_an_exact_head_window() {
+        for flag in ["-TotalCount", "-Head", "-First", "-totalcount"] {
+            assert_eq!(
+                rewrite_for_hook(&format!("Get-Content {flag} 5 README.md")).as_deref(),
+                Some("rtk read README.md --head-lines 5"),
+                "{flag}"
+            );
+        }
+    }
+
+    #[test]
+    fn select_string_keeps_line_numbers_and_case_sensitivity() {
+        assert_eq!(
+            rewrite_for_hook("Select-String TODO notes.txt").as_deref(),
+            Some("rtk grep -n -i TODO notes.txt")
+        );
+        assert_eq!(
+            rewrite_for_hook("sls -CaseSensitive -NotMatch TODO notes.txt").as_deref(),
+            Some("rtk grep -n -v TODO notes.txt")
         );
     }
 

@@ -2667,7 +2667,7 @@ mod tests {
                 r#"Select-String -Pattern "fn run" -Path src\main.rs"#,
                 &[]
             ),
-            Some(r#"rtk grep -i "fn run" src\main.rs"#.to_string())
+            Some(r#"rtk grep -n -i "fn run" src\main.rs"#.to_string())
         );
     }
 
