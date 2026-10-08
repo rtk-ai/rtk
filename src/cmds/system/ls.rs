@@ -393,7 +393,7 @@ fn run_native(paths: &[&str], show_all: bool, show_long: bool, verbose: u8) -> R
                     let mut lines: Vec<String> = Vec::new();
                     for entry in entries.flatten() {
                         let name = entry.file_name().to_string_lossy().to_string();
-                        if !show_all && name.starts_with('.') {
+                        if !show_all && is_hidden_entry(&entry, &name) {
                             continue;
                         }
                         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
@@ -424,7 +424,13 @@ fn run_native(paths: &[&str], show_all: bool, show_long: bool, verbose: u8) -> R
     }
 
     let (entries, _parsed, truncated, hidden) = compact_ls(&raw, show_all, show_long);
-    let mut filtered = entries;
+    // Every target failed: the errors are already on stderr, so print no
+    // "(empty)" placeholder after them.
+    let mut filtered = if raw.is_empty() && exit_code != 0 {
+        String::new()
+    } else {
+        entries
+    };
     if let Some(hint) = hidden_hint(&truncated, &hidden) {
         filtered.push_str(&hint);
         filtered.push('\n');
@@ -442,6 +448,27 @@ fn run_native(paths: &[&str], show_all: bool, show_long: bool, verbose: u8) -> R
         &filtered,
     );
     Ok(exit_code)
+}
+
+/// Whether the native listing hides `entry` without `-a`.
+///
+/// On Windows the native path stands in for `Get-ChildItem` (PowerShell's `ls`
+/// and `dir` are aliases of it), which hides entries by the Hidden/System
+/// attributes, not by a leading dot: `.gitignore` is listed, while `.git`
+/// (which git marks Hidden) is not. Elsewhere it is POSIX `ls`.
+#[cfg(windows)]
+fn is_hidden_entry(entry: &std::fs::DirEntry, _name: &str) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
+    entry
+        .metadata()
+        .is_ok_and(|m| m.file_attributes() & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) != 0)
+}
+
+#[cfg(not(windows))]
+fn is_hidden_entry(_entry: &std::fs::DirEntry, name: &str) -> bool {
+    name.starts_with('.')
 }
 
 /// Build a synthetic `ls -la` line that [`parse_ls_line`] can parse.
@@ -694,6 +721,37 @@ fn compact_ls(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_listing_hides_by_the_platform_rule() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in [".gitignore", "plain.txt", "hid.txt"] {
+            std::fs::write(dir.path().join(name), "x").expect("write fixture");
+        }
+        #[cfg(windows)]
+        {
+            let status = std::process::Command::new("attrib")
+                .arg("+h")
+                .arg(dir.path().join("hid.txt"))
+                .status()
+                .expect("run attrib");
+            assert!(status.success());
+        }
+        let mut hidden: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                is_hidden_entry(&e, &name).then_some(name)
+            })
+            .collect();
+        hidden.sort();
+        // Windows follows Get-ChildItem (Hidden attribute), elsewhere POSIX ls (leading dot).
+        #[cfg(windows)]
+        assert_eq!(hidden, vec!["hid.txt"]);
+        #[cfg(not(windows))]
+        assert_eq!(hidden, vec![".gitignore"]);
+    }
 
     #[test]
     fn test_synth_ls_line_parses() {
