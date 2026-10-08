@@ -2134,6 +2134,30 @@ fn run_cli() -> Result<i32> {
         hooks::integrity::runtime_check()?;
     }
 
+    dispatch(cli)
+}
+
+/// `rtk powershell|pwsh -Command <cmdlet>`: a cmdlet with a faithful rtk
+/// equivalent runs in-process through [`dispatch`], never by spawning rtk
+/// again; anything else goes to the real shell unchanged.
+fn run_powershell(shell: &str, args: &[String], verbose: u8) -> Result<i32> {
+    let Some(argv) = powershell_cmd::rewrite_invocation(args) else {
+        return powershell_cmd::run(shell, args);
+    };
+    if verbose > 0 {
+        eprintln!(
+            "PowerShell rewrite: rtk {}",
+            core::shell::display_args(&argv)
+        );
+    }
+    let mut cli = Cli::try_parse_from(std::iter::once("rtk".to_string()).chain(argv))
+        .context("Failed to parse the rewritten PowerShell command")?;
+    cli.verbose = verbose;
+    dispatch(cli)
+}
+
+/// Run a parsed command and return its exit code.
+fn dispatch(cli: Cli) -> Result<i32> {
     let code = match cli.command {
         Commands::Ls { args } => ls::run(&args, cli.verbose)?,
 
@@ -2567,9 +2591,9 @@ fn run_cli() -> Result<i32> {
             search::run(search::Engine::Rg, 80, 200, false, &extra_args, cli.verbose)?
         }
 
-        Commands::PowerShell { args } => powershell_cmd::run("powershell", &args, cli.verbose)?,
+        Commands::PowerShell { args } => run_powershell("powershell", &args, cli.verbose)?,
 
-        Commands::Pwsh { args } => powershell_cmd::run("pwsh", &args, cli.verbose)?,
+        Commands::Pwsh { args } => run_powershell("pwsh", &args, cli.verbose)?,
 
         Commands::Init {
             global,

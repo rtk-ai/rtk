@@ -1,7 +1,6 @@
 use crate::core::tracking::TimedExecution;
 use crate::core::utils::{exit_code_from_status, resolved_command};
 use anyhow::{Context, Result};
-use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PsToken {
@@ -67,24 +66,19 @@ pub fn rewrite_for_hook(command: &str) -> Option<String> {
     rewrite_shell_wrapper(command).or_else(|| rewrite_cmdlet(command).map(|r| r.command_line()))
 }
 
-/// Execute `powershell`/`pwsh`, dispatching a safe `-Command` cmdlet through
-/// RTK and preserving all other invocations as transparent passthrough.
-pub fn run(shell: &str, args: &[String], verbose: u8) -> Result<i32> {
-    if let Some(script) = extract_rewritable_script(args)
-        && let Some(rewrite) = rewrite_cmdlet(&script)
-    {
-        if verbose > 0 {
-            eprintln!("PowerShell rewrite: {}", rewrite.command_line());
-        }
-        let current_exe =
-            std::env::current_exe().context("Failed to locate the current rtk executable")?;
-        let status = Command::new(current_exe)
-            .args(rewrite.process_args())
-            .status()
-            .context("Failed to execute rewritten PowerShell command")?;
-        return Ok(exit_code_from_status(&status, "PowerShell rewrite"));
-    }
+/// The rtk argv (without the leading `rtk`) a `powershell`/`pwsh` invocation
+/// maps to, when it is a single `-Command` cmdlet with a faithful rtk
+/// equivalent. The caller runs it in-process through the normal dispatch, so
+/// no second rtk process is spawned.
+pub fn rewrite_invocation(args: &[String]) -> Option<Vec<String>> {
+    let script = extract_rewritable_script(args)?;
+    let rewrite = rewrite_cmdlet(&script)?;
+    Some(rewrite.process_args().map(str::to_string).collect())
+}
 
+/// Execute `powershell`/`pwsh` unchanged, as a tracked passthrough. Callers
+/// try [`rewrite_invocation`] first.
+pub fn run(shell: &str, args: &[String]) -> Result<i32> {
     let timer = TimedExecution::start();
     let status = resolved_command(shell)
         .args(args)
@@ -535,6 +529,23 @@ mod tests {
         assert_eq!(
             rewrite_for_hook(r#"Select-String -Pattern "fn run" -Path src\main.rs"#).as_deref(),
             Some(r#"rtk grep -n -i "fn run" src\main.rs"#)
+        );
+    }
+
+    #[test]
+    fn rewrite_invocation_yields_the_rtk_argv_or_none() {
+        let args = |s: &[&str]| s.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            rewrite_invocation(&args(&[
+                "-NoProfile",
+                "-Command",
+                "Get-Content -TotalCount 2 f.txt"
+            ])),
+            Some(args(&["read", "f.txt", "--head-lines", "2"]))
+        );
+        assert_eq!(
+            rewrite_invocation(&args(&["-Command", "Get-ChildItem | Measure-Object"])),
+            None
         );
     }
 
