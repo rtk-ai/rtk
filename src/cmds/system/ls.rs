@@ -436,7 +436,7 @@ fn run_native(paths: &[&str], show_all: bool, show_long: bool, verbose: u8) -> R
 
     print!("{filtered}");
     timer.track(
-        &format!("ls {}", targets.join(" ")),
+        &format!("ls {}", display_args(&targets)),
         "rtk ls",
         &raw,
         &filtered,

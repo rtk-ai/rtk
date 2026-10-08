@@ -145,7 +145,7 @@ fn run_native(args: &[String], verbose: u8) -> Result<i32> {
 
     print!("{filtered}");
     timer.track(
-        &format!("tree {}", args.join(" ")),
+        &format!("tree {}", display_args(args)),
         "rtk tree",
         &out,
         &filtered,
@@ -163,10 +163,10 @@ fn render_dir(
     dirs: &mut usize,
     files: &mut usize,
 ) {
-    if let Some(max) = opts.max_depth {
-        if depth > max {
-            return;
-        }
+    if let Some(max) = opts.max_depth
+        && depth > max
+    {
+        return;
     }
 
     let mut entries: Vec<(String, bool)> = match std::fs::read_dir(dir) {

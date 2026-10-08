@@ -1704,13 +1704,13 @@ fn rewrite_segment_inner(
         return Some(trimmed.to_string());
     }
 
-    if context == RewriteContext::Normal {
-        if let Some(rewritten) = crate::cmds::system::powershell_cmd::rewrite_for_hook(cmd_part) {
-            if is_excluded(cmd_part, excluded) {
-                return None;
-            }
-            return Some(format!("{rewritten}{redirect_suffix}"));
+    if context == RewriteContext::Normal
+        && let Some(rewritten) = crate::cmds::system::powershell_cmd::rewrite_for_hook(cmd_part)
+    {
+        if is_excluded(cmd_part, excluded) {
+            return None;
         }
+        return Some(format!("{rewritten}{redirect_suffix}"));
     }
 
     if context == RewriteContext::Normal

@@ -27,7 +27,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     cmd.child_args(args);
 
     if verbose > 0 {
-        eprintln!("Running: wc {}", args.join(" "));
+        eprintln!("Running: wc {}", display_args(args));
     }
 
     // No file operands → wc reads from stdin. Forward rtk's stdin to the child
@@ -210,7 +210,12 @@ fn run_native(args: &[String], mode: &WcMode, verbose: u8) -> Result<i32> {
     }
 
     println!("{filtered}");
-    timer.track(&format!("wc {}", args.join(" ")), "rtk wc", &raw, &filtered);
+    timer.track(
+        &format!("wc {}", display_args(args)),
+        "rtk wc",
+        &raw,
+        &filtered,
+    );
     Ok(exit_code)
 }
 

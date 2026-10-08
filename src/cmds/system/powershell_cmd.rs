@@ -70,19 +70,19 @@ pub fn rewrite_for_hook(command: &str) -> Option<String> {
 /// Execute `powershell`/`pwsh`, dispatching a safe `-Command` cmdlet through
 /// RTK and preserving all other invocations as transparent passthrough.
 pub fn run(shell: &str, args: &[String], verbose: u8) -> Result<i32> {
-    if let Some(script) = extract_rewritable_script(args) {
-        if let Some(rewrite) = rewrite_cmdlet(&script) {
-            if verbose > 0 {
-                eprintln!("PowerShell rewrite: {}", rewrite.command_line());
-            }
-            let current_exe =
-                std::env::current_exe().context("Failed to locate the current rtk executable")?;
-            let status = Command::new(current_exe)
-                .args(rewrite.process_args())
-                .status()
-                .context("Failed to execute rewritten PowerShell command")?;
-            return Ok(exit_code_from_status(&status, "PowerShell rewrite"));
+    if let Some(script) = extract_rewritable_script(args)
+        && let Some(rewrite) = rewrite_cmdlet(&script)
+    {
+        if verbose > 0 {
+            eprintln!("PowerShell rewrite: {}", rewrite.command_line());
         }
+        let current_exe =
+            std::env::current_exe().context("Failed to locate the current rtk executable")?;
+        let status = Command::new(current_exe)
+            .args(rewrite.process_args())
+            .status()
+            .context("Failed to execute rewritten PowerShell command")?;
+        return Ok(exit_code_from_status(&status, "PowerShell rewrite"));
     }
 
     let timer = TimedExecution::start();
