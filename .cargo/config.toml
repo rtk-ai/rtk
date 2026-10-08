@@ -1,0 +1,7 @@
+[env]
+# Test threads get the same 8 MiB stack build.rs reserves for the rtk main
+# thread. Parsing the full clap command graph in an unoptimized Windows build
+# needs more than the 2 MiB a spawned test thread gets by default, so every
+# new subcommand risked a STATUS_STACK_OVERFLOW in `cargo test` on Windows.
+# An explicit RUST_MIN_STACK in the environment still wins.
+RUST_MIN_STACK = { value = "8388608", force = false }
