@@ -164,31 +164,39 @@ rewrite_compound(cmd, excluded)                    [src/discover/registry.rs]
   v
 rewrite_segment(seg, excluded)                     [src/discover/registry.rs]
   |
-  |  Step 3 — Strip trailing redirects
-  |  strip_trailing_redirects() re-tokenizes the segment:
-  |    "cargo test 2>&1" → cmd_part="cargo test", redirect=" 2>&1"
-  |  (simple commands like "cargo fmt --all" → no redirect, suffix is "")
+  |  Step 3 — Walk the layers, on the segment's own tokens
+  |  Left to right: env assignments, built-in wrappers (noglob, uv run),
+  |  process wrappers (timeout, nice), user transparent_prefixes
+  |    "RUST_LOG=1 timeout 5 cargo test 2>&1" → command "cargo test 2>&1"
+  |  RTK_DISABLED=1 in an env run ends the walk with no command, so
+  |  nothing under it is decided. Under a routable wrapper the wrapper's own
+  |  text is then decided on (Step 4): "uv run RTK_DISABLED=1 git status"
+  |  becomes "rtk uv run RTK_DISABLED=1 git status"; with no routable
+  |  wrapper, no edit
   |
-  |  Step 4 — Already RTK → return as-is
+  |  Step 4 — decide() on the command under the layers
+  |  a. Trailing redirects are left out of the match:
+  |     "cargo test 2>&1" → matches "cargo test", " 2>&1" stays as written
+  |  b. Already RTK → no edit
+  |  c. Special cases (short-circuit before classification)
+  |     head -N / -n N / --lines[= ]N / bare → rewrite_line_range() → "rtk read file --head-lines N"
+  |     tail -N / -n N / --lines N → rewrite_line_range() → "rtk read file --tail-lines N"
+  |     head/tail with unsupported flag (-c, -f) → no edit
+  |     cat with an option rtk read lacks (-A, -v, -e) → no edit
+  |  d. classify_command(command) [see below]
+  |     → Supported → check excluded list → continue
+  |     → Unsupported → a matching TOML filter inserts "rtk " in front
+  |     → Ignored → no edit
+  |  e. Guard: gh with --json/--jq/--template → no edit
+  |  f. Apply the rule's rewrite_prefixes: "cargo test" → "rtk cargo test"
+  |  (#2768: when nothing is decided under a routable wrapper such as
+  |  `uv run`, the wrapper's own text is decided on as the command)
   |
-  |  Step 5 — Special cases (short-circuit before classification)
-  |  head -N / -n N / --lines[= ]N / bare → rewrite_line_range() → "rtk read file --head-lines N"
-  |  tail -N / -n N / --lines N → rewrite_line_range() → "rtk read file --tail-lines N"
-  |  head/tail with unsupported flag (-c, -f) → None (skip rewrite)
-  |  cat with incompatible flag (-A, -v, -e) → None (skip rewrite)
-  |
-  |  Step 6 — classify_command(cmd_part) [see below]
-  |  → Supported → check excluded list → continue
-  |  → Unsupported/Ignored → None (skip rewrite)
-  |
-  |  Step 7 — Build rewritten command
-  |  a. Find matching rule from rules.rs
-  |  b. Extract env prefix (ENV_PREFIX regex, second pass — first was in classify)
-  |     e.g. "GIT_SSH_COMMAND=\"ssh -o ...\" git push" → prefix="GIT_SSH_COMMAND=..."
-  |  c. Guard: RTK_DISABLED=1 in prefix → None
-  |  d. Guard: gh with --json/--jq/--template → None
-  |  e. Apply rule's rewrite_prefixes: "cargo fmt" → "rtk cargo fmt"
-  |  f. Reassemble: env_prefix + rtk_cmd + args + redirect_suffix
+  |  Step 5 — One edit against the line           [src/core/cmdline/edit.rs]
+  |  Replace { span, text } renames the decided command, Insert { at, text }
+  |  puts "rtk " in front of it. apply_edits() copies every byte outside the
+  |  edits as written: the layers, the redirects, the operators and the
+  |  blanks between them keep their spelling.
   |
   v
 classify_command(cmd)                              [src/discover/registry.rs]
@@ -214,10 +222,10 @@ LLM Agent executes rewritten command
 ```
 
 Key design decisions:
-- **Lexer-based tokenization**: A single-pass state machine (`src/core/cmdline/lexer.rs`) handles all shell constructs (quotes, escapes, redirects, operators). Used for both compound splitting and redirect stripping.
+- **Lexer-based tokenization**: A single-pass state machine (`src/core/cmdline/lexer.rs`) handles all shell constructs (quotes, escapes, redirects, operators). Each line is lexed once, and compound splitting, the layer walk and the redirect split all read those tokens.
 - **Segment-level rewriting**: Compound commands are split by operators, each segment rewritten independently. Bash recombines them at execution time.
 - **Pipe semantics**: Producers and intermediate stages of `|` remain raw. Only an argument-safe final stage whose rule has `pipeline_final_safe` may be rewritten; initially this is limited to ordinary `grep` and `rg` invocations. Search pattern-file forms (`-f`/`--file`) defer because they can consume pipeline stdin as configuration. `|&` is recognized separately and its complete pipeline stays raw.
-- **Double env prefix handling**: `classify_command()` strips env prefixes to match the underlying command against rules. `rewrite_segment()` extracts the same prefix separately to re-prepend it to the rewritten command.
+- **Span edits**: `classify_command()` looks past env prefixes to match the underlying command against rules, and the walk peels the same assignments as a layer. The rewrite edits only the decided command's span, so an env prefix, a wrapper and a redirect stay exactly as written.
 - **Fallback contract**: If any segment fails to match, it stays raw. `rewrite_command()` returns `None` only when zero segments were rewritten.
 
 ### 3.3 CLI Parsing and Routing
