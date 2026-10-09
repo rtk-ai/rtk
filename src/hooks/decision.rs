@@ -128,10 +128,13 @@ impl ApprovalOwner {
 ///    gate can check individually, so a rewrite could smuggle an unchecked
 ///    command past an allow rule. `check_command_with_rules` already forces
 ///    such a command to `Ask`; refusing to rewrite it at all is the stronger
-///    guarantee. Heredocs reach the same outcome, though most of them stop at
-///    this gate only because a `<<` operand reads as a file target; what
-///    actually refuses them is `rewrite_command`'s own `has_heredoc`, which
-///    catches the forms this gate lets past (see #3980).
+///    guarantee. The one exception is Claude Code's literal
+///    `git commit -m "$(cat <<TAG ...)"` shape: [`is_git_commit_cat_heredoc`]
+///    validates the whole wrapper, and the result is always `AskRewrite`, even
+///    when an allow rule matched. Other heredocs reach the same refusal,
+///    though most of them stop at this gate only because a `<<` operand reads
+///    as a file target; what actually refuses them is `rewrite_command`'s own
+///    `has_heredoc`, which catches the forms this gate lets past (see #3980).
 /// 3. **Otherwise rewrite if a rule matches**, and auto-allow only on an
 ///    explicit `Allow`. Every other verdict — including `Default`, where no
 ///    rule matched at all — yields `AskRewrite`. `Default` must never reach
@@ -163,17 +166,120 @@ pub(crate) fn decide_with_params(
         return HookDecision::Deny;
     }
 
-    if crate::discover::lexer::contains_unattestable_construct(cmd) {
+    let contains_unattestable = crate::discover::lexer::contains_unattestable_construct(cmd);
+    if contains_unattestable && !is_git_commit_cat_heredoc(cmd) {
         return HookDecision::Defer;
     }
 
     match rewrite_command(cmd, excluded, transparent_prefixes) {
-        Some(rewritten) if verdict == PermissionVerdict::Allow => {
+        Some(rewritten) if verdict == PermissionVerdict::Allow && !contains_unattestable => {
             HookDecision::AllowRewrite(rewritten)
         }
         Some(rewritten) => HookDecision::AskRewrite(rewritten),
         None => HookDecision::Defer,
     }
+}
+
+/// Recognize Claude Code's generated multi-line commit-message wrapper.
+///
+/// The exception stays intentionally narrow: the top-level command must be
+/// `git commit`, `-m`/`--message` must directly introduce a double-quoted
+/// `$(cat <<TAG ...)` substitution, and the delimiter plus closing lines must
+/// consume the rest of the command. The caller still forces `AskRewrite`, so
+/// even an unquoted delimiter whose body performs shell expansion can never
+/// inherit an allow rule from the outer `git commit`.
+fn is_git_commit_cat_heredoc(cmd: &str) -> bool {
+    let mut lines = cmd.trim().split('\n');
+    let Some(first_line) = lines
+        .next()
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+    else {
+        return false;
+    };
+    let Some(substitution_offset) = first_line.find("$(cat") else {
+        return false;
+    };
+
+    let before_substitution = &first_line[..substitution_offset];
+    let commit_prefix = before_substitution
+        .strip_suffix("-m \"")
+        .or_else(|| before_substitution.strip_suffix("--message \""))
+        .map(str::trim_end);
+    let Some(commit_prefix) = commit_prefix else {
+        return false;
+    };
+    if !is_plain_git_commit_prefix(commit_prefix) {
+        return false;
+    }
+
+    let Some(cat_command) = first_line[substitution_offset..].strip_prefix("$(cat") else {
+        return false;
+    };
+    if !cat_command.starts_with(char::is_whitespace) {
+        return false;
+    }
+    let Some(redirection) = cat_command.trim_start().strip_prefix("<<") else {
+        return false;
+    };
+    if redirection.starts_with('<') {
+        return false;
+    }
+    let (strip_tabs, delimiter_token) = match redirection.strip_prefix('-') {
+        Some(rest) => (true, rest.trim_start()),
+        None => (false, redirection.trim_start()),
+    };
+    if delimiter_token.is_empty() || delimiter_token.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let delimiter = delimiter_token
+        .strip_prefix('\'')
+        .and_then(|token| token.strip_suffix('\''))
+        .or_else(|| {
+            delimiter_token
+                .strip_prefix('"')
+                .and_then(|token| token.strip_suffix('"'))
+        })
+        .unwrap_or(delimiter_token);
+    if delimiter.is_empty()
+        || !delimiter
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+    {
+        return false;
+    }
+
+    let mut found_closer = false;
+    for line in &mut lines {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let candidate = if strip_tabs {
+            line.trim_start_matches('\t')
+        } else {
+            line
+        };
+        if candidate == delimiter {
+            found_closer = true;
+            break;
+        }
+    }
+    let closing_substitution = lines
+        .next()
+        .map(|line| line.strip_suffix('\r').unwrap_or(line));
+    found_closer && closing_substitution == Some(")\"") && lines.next().is_none()
+}
+
+fn is_plain_git_commit_prefix(prefix: &str) -> bool {
+    let Some(args) = prefix
+        .strip_prefix("git commit")
+        .filter(|args| args.is_empty() || args.starts_with(char::is_whitespace))
+    else {
+        return false;
+    };
+
+    args.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || c.is_ascii_whitespace()
+            || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | '+' | '@' | '%' | ',')
+    })
 }
 
 /// [`decide`], plus the no-op suppression every agent applies.
@@ -405,6 +511,36 @@ mod tests {
         ] {
             assert_eq!(
                 decide_with_params(cmd, PermissionVerdict::Default, &[], &[]),
+                HookDecision::Defer,
+                "cmd: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn git_commit_cat_heredoc_rewrites_but_never_auto_allows() {
+        for cmd in [
+            "git commit -m \"$(cat <<'MSG'\nfeat: test\nMSG\n)\"",
+            "git commit --amend --message \"$(cat <<EOF\nfix: test\nEOF\n)\"",
+        ] {
+            assert_eq!(
+                decide_with_params(cmd, PermissionVerdict::Allow, &[], &[]),
+                HookDecision::AskRewrite(format!("rtk {cmd}")),
+                "cmd: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_or_compound_commit_heredocs_defer() {
+        for cmd in [
+            "git commit -m \"$(rm -rf /tmp/x)\"",
+            "git commit -m \"$(cat <<EOF; rm -rf /tmp/x\nmessage\nEOF\n)\"",
+            "git commit -m \"$(cat <<EOF\nmessage\nEOF\n)\" && git push",
+            "git status -m \"$(cat <<EOF\nmessage\nEOF\n)\"",
+        ] {
+            assert_eq!(
+                decide_with_params(cmd, PermissionVerdict::Allow, &[], &[]),
                 HookDecision::Defer,
                 "cmd: {cmd}"
             );
