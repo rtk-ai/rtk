@@ -2092,12 +2092,12 @@ fn require_single_script(subcommand: &str, shell: Option<&str>, command: &[Strin
 }
 
 fn run_cli() -> Result<i32> {
-    // Fire-and-forget telemetry ping (1/day, non-blocking)
-    core::telemetry::maybe_ping();
-
     let cli = match Cli::try_parse_from(std::env::args_os()) {
         Ok(cli) => cli,
         Err(e) => {
+            // Preserve the historical startup telemetry for clap exits and
+            // passthrough commands; only parsed hook commands skip it below.
+            core::telemetry::maybe_ping();
             if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
                 e.exit();
             }
@@ -2105,12 +2105,23 @@ fn run_cli() -> Result<i32> {
         }
     };
 
+    let is_hook_command = matches!(cli.command, Commands::Hook { .. });
+
+    // Hook invocations are latency-sensitive and must not trigger background
+    // telemetry or hook-status I/O themselves.
+    if !is_hook_command {
+        core::telemetry::maybe_ping();
+    }
+
     // Warn if installed hook is outdated/missing (1/day, non-blocking).
-    // Skip for Gain (shows its own inline warning), Init/Verify (manage the hook themselves).
-    if !matches!(
-        cli.command,
-        Commands::Gain { .. } | Commands::Init { .. } | Commands::Verify { .. }
-    ) {
+    // Skip for hooks themselves, Gain (shows its own inline warning), and
+    // Init/Verify (manage the hook themselves).
+    if !is_hook_command
+        && !matches!(
+            cli.command,
+            Commands::Gain { .. } | Commands::Init { .. } | Commands::Verify { .. }
+        )
+    {
         hooks::hook_check::maybe_warn();
     }
 
