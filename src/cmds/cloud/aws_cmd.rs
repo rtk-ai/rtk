@@ -196,6 +196,18 @@ pub fn run(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
             verbose,
             filter_secrets_get,
         ),
+        "cloudwatch"
+            if !args.is_empty()
+                && args[0] == "describe-alarm-history"
+                && !has_explicit_output(&args[1..]) =>
+        {
+            run_aws_filtered(
+                &["cloudwatch", "describe-alarm-history"],
+                &args[1..],
+                verbose,
+                filter_cloudwatch_alarm_history,
+            )
+        }
         _ => run_generic(subcommand, args, verbose, &full_sub),
     }
 }
@@ -215,6 +227,13 @@ fn is_structured_operation(args: &[String]) -> bool {
         || op == "scan"
         || op == "query"
         || op == "receive-message"
+}
+
+/// True when the user picked an output format; the filter is then skipped so the
+/// requested format reaches them (`run_aws_json` would otherwise replace it with JSON).
+fn has_explicit_output(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| a == "--output" || a.starts_with("--output="))
 }
 
 /// Generic strategy: force --output json for structured ops, compress via json_cmd compact (values preserved)
@@ -1529,6 +1548,75 @@ fn filter_secrets_get(json_str: &str) -> Option<FilterResult> {
     Some(FilterResult::new(lines.join("\n")))
 }
 
+const MAX_STATE_REASON_CHARS: usize = 200;
+
+fn filter_cloudwatch_alarm_history(json_str: &str) -> Option<FilterResult> {
+    let v: Value = serde_json::from_str(json_str).ok()?;
+    let items = v["AlarmHistoryItems"].as_array()?;
+
+    let total = items.len();
+    if total == 0 {
+        return Some(FilterResult::new("0 history items".to_string()));
+    }
+
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for item in items {
+        let kind = item["HistoryItemType"].as_str().unwrap_or("?");
+        match counts.iter_mut().find(|(k, _)| *k == kind) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((kind, 1)),
+        }
+    }
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let breakdown: Vec<String> = counts.iter().map(|(k, n)| format!("{} {}", n, k)).collect();
+
+    let lines: Vec<String> = items
+        .iter()
+        .take(MAX_ITEMS)
+        .map(format_alarm_history_item)
+        .collect();
+    let text = format!(
+        "{} history items ({})\n{}",
+        total,
+        breakdown.join(", "),
+        join_with_overflow(&lines, total, MAX_ITEMS, "history items")
+    );
+
+    Some(if total > MAX_ITEMS {
+        FilterResult::truncated(text)
+    } else {
+        FilterResult::new(text)
+    })
+}
+
+fn format_alarm_history_item(item: &Value) -> String {
+    let kind = item["HistoryItemType"].as_str().unwrap_or("?");
+    let mut line = format!(
+        "{} {} {} {}",
+        item["Timestamp"].as_str().unwrap_or("?"),
+        kind,
+        item["AlarmName"].as_str().unwrap_or("?"),
+        item["HistorySummary"].as_str().unwrap_or("")
+    );
+    // HistoryData is a JSON document in a string; only the new state's reason explains why the alarm fired.
+    if kind == "StateUpdate" {
+        let reason = item["HistoryData"]
+            .as_str()
+            .and_then(|data| serde_json::from_str::<Value>(data).ok())
+            .and_then(|data| data["newState"]["stateReason"].as_str().map(str::to_string));
+        if let Some(reason) = reason {
+            line.push_str(" | ");
+            if reason.chars().count() > MAX_STATE_REASON_CHARS {
+                line.extend(reason.chars().take(MAX_STATE_REASON_CHARS));
+                line.push('…');
+            } else {
+                line.push_str(&reason);
+            }
+        }
+    }
+    line
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2788,6 +2876,99 @@ upload: file10.txt to s3://bucket/file10.txt
         assert!(
             output.contains("isMpaEnabled"),
             "object keys must be preserved, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_filter_cloudwatch_alarm_history_fixture() {
+        let input =
+            include_str!("../../../tests/fixtures/aws_cloudwatch_describe_alarm_history.json");
+        let result = filter_cloudwatch_alarm_history(input).unwrap();
+        let lines: Vec<&str> = result.text.lines().collect();
+
+        assert!(result.truncated);
+        assert!(lines[0].starts_with("30 history items ("));
+        assert_eq!(lines.len(), 1 + MAX_ITEMS + 1);
+        assert_eq!(lines[MAX_ITEMS + 1], "… +10 more history items");
+        let state_updates: Vec<&&str> = lines
+            .iter()
+            .filter(|l| l.contains(" StateUpdate "))
+            .collect();
+        assert!(!state_updates.is_empty());
+        assert!(
+            state_updates.iter().all(|l| l.contains(" | ")),
+            "StateUpdate lines carry the reason"
+        );
+        assert!(
+            !result.text.contains("\"oldState\""),
+            "raw HistoryData must not leak"
+        );
+    }
+
+    #[test]
+    fn test_snapshot_cloudwatch_alarm_history_format() {
+        let json = r#"{"AlarmHistoryItems": [
+            {"AlarmName": "api-errors", "AlarmType": "MetricAlarm", "Timestamp": "2026-01-01T00:01:00.000+00:00",
+             "HistoryItemType": "Action", "HistorySummary": "Successfully executed action arn:aws:sns:us-east-1:123456789012:alerts",
+             "HistoryData": "{}"},
+            {"AlarmName": "api-errors", "AlarmType": "MetricAlarm", "Timestamp": "2026-01-01T00:00:00.000+00:00",
+             "HistoryItemType": "StateUpdate", "HistorySummary": "Alarm updated from OK to ALARM",
+             "HistoryData": "{\"newState\":{\"stateValue\":\"ALARM\",\"stateReason\":\"Threshold Crossed: 1 datapoint [3.0] was greater than the threshold (0.0).\"}}"}
+        ]}"#;
+        let result = filter_cloudwatch_alarm_history(json).unwrap();
+        assert_eq!(
+            result.text,
+            "2 history items (1 Action, 1 StateUpdate)\n\
+             2026-01-01T00:01:00.000+00:00 Action api-errors Successfully executed action arn:aws:sns:us-east-1:123456789012:alerts\n\
+             2026-01-01T00:00:00.000+00:00 StateUpdate api-errors Alarm updated from OK to ALARM | Threshold Crossed: 1 datapoint [3.0] was greater than the threshold (0.0)."
+        );
+    }
+
+    #[test]
+    fn test_filter_cloudwatch_alarm_history_long_reason_is_cut_on_char_boundary() {
+        let reason = "é".repeat(MAX_STATE_REASON_CHARS + 5);
+        let data = serde_json::json!({"newState": {"stateReason": reason}}).to_string();
+        let json = serde_json::json!({"AlarmHistoryItems": [{
+            "AlarmName": "a", "Timestamp": "t", "HistoryItemType": "StateUpdate",
+            "HistorySummary": "s", "HistoryData": data
+        }]})
+        .to_string();
+        let text = filter_cloudwatch_alarm_history(&json).unwrap().text;
+        let tail = text.lines().nth(1).unwrap().split(" | ").nth(1).unwrap();
+        assert_eq!(tail.chars().count(), MAX_STATE_REASON_CHARS + 1);
+        assert!(tail.ends_with('…'));
+    }
+
+    #[test]
+    fn test_filter_cloudwatch_alarm_history_bad_history_data_keeps_line() {
+        let json = r#"{"AlarmHistoryItems": [{"AlarmName": "a", "Timestamp": "t",
+            "HistoryItemType": "StateUpdate", "HistorySummary": "s", "HistoryData": "not json"}]}"#;
+        let text = filter_cloudwatch_alarm_history(json).unwrap().text;
+        assert_eq!(text, "1 history items (1 StateUpdate)\nt StateUpdate a s");
+    }
+
+    #[test]
+    fn test_filter_cloudwatch_alarm_history_empty() {
+        let result = filter_cloudwatch_alarm_history(r#"{"AlarmHistoryItems": []}"#).unwrap();
+        assert_eq!(result.text, "0 history items");
+    }
+
+    #[test]
+    fn test_filter_cloudwatch_alarm_history_query_shaped_output_passes_through() {
+        assert!(filter_cloudwatch_alarm_history(r#"["a"]"#).is_none());
+        assert!(filter_cloudwatch_alarm_history("not json").is_none());
+    }
+
+    #[test]
+    fn test_filter_cloudwatch_alarm_history_token_savings() {
+        let input =
+            include_str!("../../../tests/fixtures/aws_cloudwatch_describe_alarm_history.json");
+        let output = filter_cloudwatch_alarm_history(input).unwrap().text;
+        let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "expected >=60% savings, got {:.1}%",
+            savings
         );
     }
 }
