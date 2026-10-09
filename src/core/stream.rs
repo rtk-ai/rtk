@@ -452,8 +452,17 @@ pub fn run_streaming(
         StdinMode::Inherit => {
             cmd.stdin(Stdio::inherit());
         }
-        StdinMode::Filter(_) | StdinMode::Null => {
+        StdinMode::Filter(_) => {
             cmd.stdin(Stdio::piped());
+        }
+        StdinMode::Null => {
+            // No data is ever written to this child, so attach the null device
+            // instead of a pipe. `Stdio::piped()` would have this process
+            // create a fresh anonymous pipe and hand an inheritable handle to
+            // the child; when the host already holds many pipe handles the
+            // spawn fails outright (observed as `ERROR_PIPE_BUSY`, os error
+            // 231) and the wrapped command never runs.
+            cmd.stdin(Stdio::null());
         }
     }
     cmd.stdout(Stdio::piped());
@@ -977,6 +986,95 @@ pub(crate) mod tests {
         assert_eq!(result.exit_code, 0);
         // Passthrough inherits TTY — raw/filtered are empty
         assert!(result.raw.is_empty());
+    }
+
+    /// `StdinMode::Null` must not depend on creating a pipe for the child.
+    ///
+    /// `Stdio::piped()` makes this process build a fresh anonymous pipe via
+    /// `NtCreateNamedPipeFile` (std: `sys/process/windows/child_pipe.rs`) and
+    /// pass an inheritable handle to the child. Under hosts that already hold
+    /// many pipe handles -- an MSYS2/Git Bash shell, for instance -- spawning
+    /// with that extra pipe fails outright and the wrapped command never runs
+    /// (observed as `ERROR_PIPE_BUSY`, os error 231). `StdinMode::Null` writes
+    /// nothing to the child, so the null device is the correct and cheaper
+    /// wiring.
+    #[test]
+    fn test_run_streaming_null_mode_needs_no_pipe() {
+        let mut cmd = Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        if cfg!(windows) {
+            cmd.args(["/C", "echo", "null-mode"]);
+        } else {
+            cmd.args(["-c", "echo", "null-mode"]);
+        }
+        let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly)
+            .expect("StdinMode::Null must spawn without creating a pipe");
+        assert_eq!(result.exit_code, 0);
+        assert!(
+            result.raw_stdout.contains("null-mode"),
+            "child stdout missing: {:?}",
+            result.raw_stdout
+        );
+    }
+
+    /// A child launched with `StdinMode::Null` sees EOF on stdin, the same as
+    /// the null device it is now wired to -- not a hang, and not inherited
+    /// terminal input.
+    #[test]
+    fn test_run_streaming_null_mode_child_sees_eof() {
+        let mut cmd = Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        if cfg!(windows) {
+            // findstr reads stdin and exits at EOF; a match would prove the
+            // child inherited our terminal input instead of the null device.
+            cmd.args(["/C", "findstr", "zzz"]);
+        } else {
+            cmd.args(["-c", "cat"]);
+        }
+        let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly)
+            .expect("StdinMode::Null must spawn");
+        assert!(
+            result.raw_stdout.is_empty() || !result.raw_stdout.contains("zzz"),
+            "child read inherited stdin instead of the null device: {:?}",
+            result.raw_stdout
+        );
+    }
+
+    /// `StdinMode::Filter` still has to reach the child: it is the one mode
+    /// that writes data in, so its stdin must stay a pipe.
+    ///
+    /// This asserts the wiring and the data path. Whether `piped()` succeeds
+    /// on a given host depends on how many pipe handles that host holds, which
+    /// is exactly the condition this PR removes for `Null` -- but `Filter`
+    /// still needs the pipe, so hosts that cannot spare one will fail here.
+    #[test]
+    fn test_run_streaming_filter_mode_still_writes_stdin() {
+        struct Upper;
+        impl StdinFilter for Upper {
+            fn feed_line(&mut self, line: &str) -> Option<String> {
+                Some(line.trim().to_uppercase())
+            }
+            fn flush(&mut self) -> String {
+                String::new()
+            }
+        }
+
+        // Both children copy stdin to stdout, so whatever the filter writes
+        // is exactly what comes back. `findstr` needs a pattern to echo a line.
+        let mut cmd = Command::new(if cfg!(windows) { "findstr" } else { "cat" });
+        if cfg!(windows) {
+            cmd.arg("FILTERED");
+        }
+        let result = run_streaming(
+            &mut cmd,
+            StdinMode::Filter(Box::new(Upper)),
+            FilterMode::CaptureOnly,
+        )
+        .expect("StdinMode::Filter must spawn with a piped stdin");
+        assert_eq!(result.exit_code, 0);
+        assert!(
+            result.raw_stdout.contains("FILTERED"),
+            "filtered stdin never reached the child: {:?}",
+            result.raw_stdout
+        );
     }
 
     #[test]
