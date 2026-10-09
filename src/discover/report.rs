@@ -108,6 +108,7 @@ pub enum ScanScope {
 #[derive(Debug, Serialize)]
 pub struct DiscoverReport {
     pub sessions_scanned: usize,
+    pub sessions_with_bash: usize,
     /// Which sessions the scan covered. Drives the zero-session message only; not
     /// serialized, because a JSON consumer already knows which flags it passed.
     #[serde(skip)]
@@ -169,8 +170,11 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
     out.push_str(&"=".repeat(52));
     out.push('\n');
     out.push_str(&format!(
-        "Scanned: {} sessions (last {} days), {} Bash commands\n",
-        report.sessions_scanned, report.since_days, report.total_commands
+        "Scanned: {} sessions ({} with Bash commands, last {} days), {} Bash commands\n",
+        report.sessions_scanned,
+        report.sessions_with_bash,
+        report.since_days,
+        report.total_commands
     ));
     out.push_str(&format!(
         "Already using RTK: {} commands ({:.1}%)\n",
@@ -366,6 +370,7 @@ mod tests {
     fn make_report(total_commands: usize, already_rtk: usize) -> DiscoverReport {
         DiscoverReport {
             sessions_scanned: 1,
+            sessions_with_bash: 1,
             scope: ScanScope::CurrentProject("-home-user-proj".to_string()),
             total_commands,
             already_rtk,
@@ -380,6 +385,42 @@ mod tests {
             rtk_disabled_examples: vec![],
             agent_status: AgentIntegrationStatus::default(),
         }
+    }
+
+    #[test]
+    fn test_session_summary_distinguishes_bash_sessions() {
+        let mut report = make_report(3, 0);
+        report.sessions_scanned = 4;
+        report.sessions_with_bash = 1;
+
+        let output = format_text(&report, 10, false);
+
+        assert!(output.contains("Scanned: 4 sessions (1 with Bash commands"));
+    }
+
+    #[test]
+    fn test_json_summary_distinguishes_bash_sessions() {
+        let mut report = make_report(3, 0);
+        report.sessions_scanned = 4;
+        report.sessions_with_bash = 1;
+
+        let output: serde_json::Value = serde_json::from_str(&format_json(&report)).unwrap();
+
+        assert_eq!(output["sessions_scanned"], 4);
+        assert_eq!(output["sessions_with_bash"], 1);
+        assert_eq!(output["total_commands"], 3);
+    }
+
+    #[test]
+    fn test_session_summary_with_no_bash_commands() {
+        let mut report = make_report(0, 0);
+        report.sessions_scanned = 4;
+        report.sessions_with_bash = 0;
+
+        let output = format_text(&report, 10, false);
+
+        assert!(output.contains("Scanned: 4 sessions (0 with Bash commands"));
+        assert!(output.contains("0 Bash commands"));
     }
 
     #[test]
@@ -505,6 +546,7 @@ mod tests {
     fn test_zero_sessions_does_not_report_success() {
         let mut report = make_report(0, 0);
         report.sessions_scanned = 0;
+        report.sessions_with_bash = 0;
         report.agent_status = AgentIntegrationStatus {
             copilot_hook_installed: true,
             ..Default::default()
@@ -525,6 +567,7 @@ mod tests {
     fn test_zero_sessions_all_projects_does_not_suggest_all() {
         let mut report = make_report(0, 0);
         report.sessions_scanned = 0;
+        report.sessions_with_bash = 0;
         report.scope = ScanScope::AllProjects;
         report.since_days = 7;
 
@@ -539,6 +582,7 @@ mod tests {
     fn test_zero_sessions_project_filter_names_the_filter() {
         let mut report = make_report(0, 0);
         report.sessions_scanned = 0;
+        report.sessions_with_bash = 0;
         report.scope = ScanScope::ProjectFilter("my-app".to_string());
 
         let output = format_text(&report, 10, false);
@@ -555,6 +599,7 @@ mod tests {
     fn test_zero_sessions_json_is_scope_independent() {
         let mut report = make_report(0, 0);
         report.sessions_scanned = 0;
+        report.sessions_with_bash = 0;
         let current = format_json(&report);
         report.scope = ScanScope::AllProjects;
         let all = format_json(&report);
