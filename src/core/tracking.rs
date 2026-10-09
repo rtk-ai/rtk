@@ -1693,7 +1693,7 @@ fn categorize_command(rtk_cmd: &str) -> String {
     let words = stored_words(rtk_cmd);
     let tool = words.get(1).map_or("other", |word| tool_name(word));
     match tool {
-        "git" | "gh" | "gt" => "git",
+        "git" | "gh" | "gt" | "svn" => "git",
         "cargo" => "cargo",
         "npm" | "npx" | "pnpm" | "bun" | "bunx" | "deno" | "vitest" | "tsc" | "lint"
         | "prettier" | "next" | "playwright" | "prisma" => "js",
@@ -2502,6 +2502,11 @@ mod tests {
             OsString::from("foo()"),
         ];
         assert_eq!(args_display(&quoted), "-m 'a b' 'foo()'");
+    }
+
+    #[test]
+    fn test_svn_is_categorized_as_vcs() {
+        assert_eq!(categorize_command("rtk svn log"), "git");
     }
 
     // 3. Tracker::record + get_recent — round-trip DB
