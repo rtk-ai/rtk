@@ -190,6 +190,8 @@ rtk find [args...]
 
 Supporte a la fois la syntaxe RTK et la syntaxe native `find` (`-name`, `-type`, etc.).
 
+`rtk find '*.rs' src` reste la syntaxe RTK : le premier argument est un motif seulement s'il contient `*` ou `?`. Tout autre positionnel est un chemin `find`, qu'il existe ou non — `rtk find stale.log -delete` vise ce fichier seul. Une recherche par nom litteral s'ecrit `rtk find . -name README.md` ou `rtk find src -name README.md`. Un nom de fichier qui contient `*` ou `?` se donne avec le prefixe `./` (`rtk find ./file*.log`).
+
 **Avant / Apres :**
 ```
 # find . -name "*.rs" (30 lignes)           # rtk find "*.rs" . (8 lignes)
