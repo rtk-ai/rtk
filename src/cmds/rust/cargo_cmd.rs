@@ -5,7 +5,7 @@ use crate::core::runner;
 use crate::core::shell::display_args;
 use crate::core::stream::{BlockHandler, BlockStreamFilter, StreamFilter};
 use crate::core::truncate::{CAP_ERRORS, CAP_LIST, CAP_WARNINGS};
-use crate::core::utils::{join_with_overflow, resolved_command, truncate};
+use crate::core::utils::{join_with_overflow, resolved_command, strip_ansi, truncate};
 use anyhow::Result;
 use serde::Deserialize;
 use std::cmp::Ordering;
@@ -1138,6 +1138,12 @@ impl AggregatedTestResult {
 }
 
 pub(crate) fn filter_cargo_test(output: &str) -> String {
+    // Cargo colors its output even when piped (force-color CI setups), and the
+    // "test result:" / "failures:" anchors below never match through ANSI codes.
+    // The parser owns the stripping, as filter_pytest_output does, so no caller
+    // carries a precondition.
+    let cleaned = strip_ansi(output);
+    let output = cleaned.as_str();
     let mut failures: Vec<String> = Vec::new();
     let mut summary_lines: Vec<String> = Vec::new();
     let mut in_failure_section = false;
@@ -2896,5 +2902,19 @@ error: could not compile `rtk` (test "repro_compile_fail") due to 1 previous err
             result
         );
         assert!(result.contains("could not compile"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_filter_cargo_test_strips_ansi() {
+        // Colored cargo test output (force-color CI) must aggregate correctly,
+        // not fall through to raw lines with ANSI codes.
+        let input = "\u{1b}[32m   Compiling\u{1b}[0m rtk v0.49.0\n\u{1b}[32m    Finished\u{1b}[0m test profile\nrunning 2 tests\ntest foo ... \u{1b}[32mok\u{1b}[0m\ntest bar ... \u{1b}[32mok\u{1b}[0m\n\ntest result: \u{1b}[32mok\u{1b}[0m. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n";
+        let out = filter_cargo_test(input);
+        assert!(out.contains("2 passed"), "out={}", out);
+        assert!(
+            !out.contains("\u{1b}"),
+            "ANSI codes should be stripped, out={}",
+            out
+        );
     }
 }
