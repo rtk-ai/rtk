@@ -661,14 +661,6 @@ pub fn strip_disabled_prefix_for_analytics(cmd: &str) -> (&str, &str) {
     strip_disabled_prefix(trimmed)
 }
 
-/// Check if a command has RTK_DISABLED= prefix in its env prefix portion.
-pub fn cmd_has_rtk_disabled_prefix(cmd: &str) -> bool {
-    // `gain` has no coverage gate, so this stays on the syntactic rewrite-path
-    // stripper; the wrapper-aware peel is for discover, where the gate judges it.
-    let (prefix_part, _) = strip_disabled_prefix(cmd);
-    prefix_contains_rtk_disabled(prefix_part)
-}
-
 /// Strip RTK_DISABLED=X and other env prefixes, returns `(env_prefix, actual_command)`.
 pub fn strip_disabled_prefix(cmd: &str) -> (&str, &str) {
     let trimmed = cmd.trim();
@@ -6713,64 +6705,14 @@ mod tests {
     // --- #508: RTK_DISABLED detection helpers ---
 
     #[test]
-    fn test_cmd_has_rtk_disabled_prefix() {
-        assert!(cmd_has_rtk_disabled_prefix("RTK_DISABLED=1 git status"));
-        assert!(cmd_has_rtk_disabled_prefix(
-            "FOO=1 RTK_DISABLED=1 cargo test"
-        ));
-        assert!(cmd_has_rtk_disabled_prefix(
-            "RTK_DISABLED=true git log --oneline"
-        ));
-        // `gain`'s warning has no coverage gate, so this predicate stays purely
-        // syntactic (`ENV_PREFIX`): a `sudo`-first bypass is not counted there.
-        // The wrapper-aware peel is discover-only, where the gate can judge it.
-        assert!(!cmd_has_rtk_disabled_prefix(
-            "sudo RTK_DISABLED=1 docker ps"
-        ));
-        assert!(!cmd_has_rtk_disabled_prefix(
-            "sudo -E RTK_DISABLED=1 docker ps"
-        ));
-        assert!(cmd_has_rtk_disabled_prefix("RTK_DISABLED=1 sudo docker ps"));
-        assert!(cmd_has_rtk_disabled_prefix(
-            "RTK_DISABLED=1 sudo -E docker ps"
-        ));
-        assert!(!cmd_has_rtk_disabled_prefix("git status"));
-        assert!(!cmd_has_rtk_disabled_prefix("rtk git status"));
-        assert!(!cmd_has_rtk_disabled_prefix("SOME_VAR=1 git status"));
-        assert!(!cmd_has_rtk_disabled_prefix("sudo docker ps"));
-
-        // Leading RTK_DISABLED= still reports true via strip_disabled_prefix
-        // fallthrough when the command word is unsupported (pre-existing gain
-        // behavior). Discover only counts Supported actual commands, so this
-        // does not create a false bypass example — see analytics strip tests
-        // for the "do not peel into docker/git" guarantee.
-        assert!(cmd_has_rtk_disabled_prefix(
-            "RTK_DISABLED=1 ssh host docker ps"
-        ));
-
-        // sudo-wrapped disabled + unsupported command word: rewrite helper does
-        // not strip sudo, so this is not a detected bypass prefix.
-        assert!(!cmd_has_rtk_disabled_prefix(
-            "sudo -E RTK_DISABLED=1 ./deploy.sh docker ps"
-        ));
-
-        // KuSh #3808: sudo -flag must not make later -e RTK_DISABLED= a prefix.
-        assert!(!cmd_has_rtk_disabled_prefix(
-            "sudo -E docker run -e RTK_DISABLED=1 myimage npm run build"
-        ));
-        assert!(!cmd_has_rtk_disabled_prefix(
-            "sudo docker run -e RTK_DISABLED=1 myimage npm run build"
-        ));
-
-        // KuSh #3808: do not look past && (gain passes unsplit lines).
-        assert!(!cmd_has_rtk_disabled_prefix(
-            "sudo -E ls && docker run -e RTK_DISABLED=1 img git status"
-        ));
-
-        // Shallow parse: value-taking sudo flags (`-u root`) are not a prefix.
-        assert!(!cmd_has_rtk_disabled_prefix(
-            "sudo -E -u root RTK_DISABLED=1 docker ps"
-        ));
+    fn test_prefix_contains_rtk_disabled() {
+        let has = |cmd| prefix_contains_rtk_disabled(strip_disabled_prefix(cmd).0);
+        assert!(has("RTK_DISABLED=1 git status"));
+        assert!(has("FOO=1 RTK_DISABLED=1 cargo test"));
+        assert!(has("RTK_DISABLED=true git log --oneline"));
+        assert!(!has("git status"));
+        assert!(!has("rtk git status"));
+        assert!(!has("SOME_VAR=1 git status"));
     }
 
     #[test]

@@ -76,12 +76,37 @@ struct PermissionRules {
 /// elsewhere, left as a hot-loop cost in `estimate_hook_coverage_with_verdict`'s
 /// `registry::rewrite_command` call until now (code-review finding on rtk-ai/rtk#3206's
 /// second fixup round).
-struct CoverageContext {
+pub(crate) struct CoverageContext {
     hook_log: HashMap<String, HookDecisionRecord>,
     hook_installed: bool,
     rules: PermissionRules,
     exclude_patterns: Vec<ExcludePattern>,
     normalized_transparent_prefixes: Vec<String>,
+}
+
+impl CoverageContext {
+    /// Load today's hook-install state, config exclusions/transparent prefixes and
+    /// permission rules — everything but the measured `hook_decisions` log, which
+    /// only `discover::run` reads. Enough on its own for the `RTK_DISABLED=`
+    /// counterfactual, which never consults the log (see
+    /// `would_be_covered_without_bypass`).
+    pub(crate) fn load_without_hook_log() -> Self {
+        let hook_installed = hook_status() != HookStatus::Missing;
+        let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
+        // Compiled once here, not once per command inside `registry::rewrite_command`.
+        let exclude_patterns = registry::compile_exclude_patterns(&excluded);
+        let normalized_transparent_prefixes =
+            registry::normalize_transparent_prefixes(&transparent_prefixes);
+        // Loaded once up front (see `PermissionRules`), not once per command.
+        let (deny, ask, allow) = permissions::load_rules_for(permissions::Host::Claude);
+        CoverageContext {
+            hook_log: HashMap::new(),
+            hook_installed,
+            rules: PermissionRules { deny, ask, allow },
+            exclude_patterns,
+            normalized_transparent_prefixes,
+        }
+    }
 }
 
 /// Determine whether `cmd` was (or, absent a log entry, likely would have been)
@@ -285,6 +310,19 @@ fn judge_disabled_segment(
     }
 }
 
+/// Whether any segment of a raw command line is a counted `RTK_DISABLED=` bypass.
+/// `rtk gain`'s overuse warning goes through this so it judges each segment with
+/// `judge_disabled_segment`, exactly as `rtk discover`'s report does, and the two
+/// cannot disagree (rtk-ai/rtk#4277).
+pub(crate) fn line_has_counted_bypass(raw_cmd: &str, ctx: &CoverageContext) -> bool {
+    split_command_chain(raw_cmd).into_iter().any(|part| {
+        let (env_prefix, actual_cmd) = strip_disabled_prefix_for_analytics(part);
+        prefix_contains_rtk_disabled(env_prefix)
+            && judge_disabled_segment(raw_cmd, env_prefix, actual_cmd, ctx)
+                == DisabledSegment::Bypass
+    })
+}
+
 /// Whether an already-`rtk`-prefixed command counts as coverage. `rtk proxy <cmd>`
 /// deliberately runs the raw command unfiltered, so it must not count — that would
 /// let the audit flatter itself via its own escape hatch. This is ground truth read
@@ -358,18 +396,6 @@ pub fn run(
     // `tool_use_id`, populated at the moment the hook actually ran) over guessing from
     // today's hook-install state; fall back to a heuristic only for history that
     // predates logging (or isn't Claude Code).
-    let hook_installed = hook_status() != HookStatus::Missing;
-    let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
-    // Compiled once here (see `CoverageContext`'s doc comment), not once per
-    // command inside `registry::rewrite_command`.
-    let exclude_patterns = registry::compile_exclude_patterns(&excluded);
-    let normalized_transparent_prefixes =
-        registry::normalize_transparent_prefixes(&transparent_prefixes);
-
-    // Loaded once up front (see `PermissionRules`), not once per command.
-    let (deny, ask, allow) = permissions::load_rules_for(permissions::Host::Claude);
-    let rules = PermissionRules { deny, ask, allow };
-
     let cutoff = crate::core::utils::days_ago_cutoff(since_days);
     // Every other hook_decisions-touching path (record()/record_parse_failure()/
     // record_hook_decision() in tracking.rs) warns the user when a write fails
@@ -410,10 +436,7 @@ pub fn run(
 
     let coverage_ctx = CoverageContext {
         hook_log,
-        hook_installed,
-        rules,
-        exclude_patterns,
-        normalized_transparent_prefixes,
+        ..CoverageContext::load_without_hook_log()
     };
 
     let mut total_commands: usize = 0;
@@ -716,6 +739,60 @@ mod tests {
             exclude_patterns: vec![],
             normalized_transparent_prefixes: vec![],
         }
+    }
+
+    // rtk-ai/rtk#4277: `rtk gain`'s bypass warning counted every line with an
+    // `RTK_DISABLED=` env prefix, while `rtk discover` only counts a part the hook
+    // would actually have rewritten absent the bypass. Both now share one gate.
+    #[test]
+    fn test_line_bypass_not_counted_when_hook_would_not_rewrite() {
+        let ctx = test_ctx(true);
+        assert!(!line_has_counted_bypass(
+            "RTK_DISABLED=1 xargs -n1 git show",
+            &ctx
+        ));
+    }
+
+    #[test]
+    fn test_line_bypass_counted_for_rewritable_command() {
+        let ctx = test_ctx(true);
+        assert!(line_has_counted_bypass("RTK_DISABLED=1 git status", &ctx));
+    }
+
+    #[test]
+    fn test_line_bypass_counted_in_later_chain_segment() {
+        let ctx = test_ctx(true);
+        assert!(line_has_counted_bypass(
+            "git status && RTK_DISABLED=1 git diff",
+            &ctx
+        ));
+    }
+
+    #[test]
+    fn test_line_bypass_not_counted_without_hook() {
+        let ctx = test_ctx(false);
+        assert!(!line_has_counted_bypass("RTK_DISABLED=1 git status", &ctx));
+    }
+
+    #[test]
+    fn test_line_bypass_not_counted_without_prefix() {
+        let ctx = test_ctx(true);
+        assert!(!line_has_counted_bypass("git status", &ctx));
+    }
+
+    // The #3808 cases gain's old syntactic predicate guarded against: an
+    // `RTK_DISABLED=` passed to a container, or past `&&`, is not a bypass.
+    #[test]
+    fn test_line_bypass_not_counted_for_assignment_inside_a_command() {
+        let ctx = test_ctx(true);
+        assert!(!line_has_counted_bypass(
+            "sudo -E docker run -e RTK_DISABLED=1 myimage npm run build",
+            &ctx
+        ));
+        assert!(!line_has_counted_bypass(
+            "sudo -E ls && docker run -e RTK_DISABLED=1 img git status",
+            &ctx
+        ));
     }
 
     #[test]
