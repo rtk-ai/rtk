@@ -1,9 +1,61 @@
 //! OpenCode plugin: install/uninstall helpers.
 use super::*;
 use crate::hooks::constants::{CONFIG_DIR, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR};
+use std::process::Command;
 
 // Embedded OpenCode plugin (auto-rewrite)
 const OPENCODE_PLUGIN: &str = include_str!("../../../hooks/opencode/rtk.ts");
+
+/// Oldest OpenCode that can load `OPENCODE_PLUGIN`.
+///
+/// The plugin default-exports an object carrying a V1 `server()` and a V2
+/// `setup()`, which is the shape OpenCode's own V2 plugin docs prescribe, and
+/// those docs put the object form at 1.18.29: older V1 releases call every
+/// export as `fn(input)`, so they read the object as a plugin function and fail
+/// on the first hook. 2.x reads `id` and `setup()` and ignores `server()`.
+const MIN_OPENCODE: (u32, u32, u32) = (1, 18, 29);
+
+/// Pull `major.minor.patch` out of `opencode --version` ("1.3.3", "opencode 1.3.3",
+/// "v2.0.22"). `None` when there is no such run of digits.
+fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
+    let word = s.split_whitespace().find(|w| {
+        w.trim_start_matches(|c: char| !c.is_ascii_digit())
+            .starts_with(|c: char| c.is_ascii_digit())
+    })?;
+    let mut it = word
+        .trim_start_matches(|c: char| !c.is_ascii_digit())
+        .split('.');
+    let major = it.next()?.parse().ok()?;
+    let minor = it.next()?.parse().ok()?;
+    let patch = it.next().unwrap_or("0").parse().ok()?;
+    Some((major, minor, patch))
+}
+
+/// The installed OpenCode version banner, or `None` when there is none we can read.
+fn opencode_version() -> Option<String> {
+    let out = Command::new("opencode").arg("--version").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The installed version banner when that OpenCode is older than `MIN_OPENCODE`.
+///
+/// `None` for an OpenCode we could not ask, could not parse, or one that is new
+/// enough, so an unreadable version never turns into a complaint.
+fn too_old_opencode() -> Option<String> {
+    let out = opencode_version()?;
+    is_too_old(&out).then_some(out)
+}
+
+/// Is this `opencode --version` banner older than `MIN_OPENCODE`?
+fn is_too_old(banner: &str) -> bool {
+    let Some((major, minor, patch)) = parse_version(banner) else {
+        return false;
+    };
+    (major, minor, patch) < MIN_OPENCODE
+}
 
 // Embedded Pi extension (auto-rewrite)
 // Stable code marker used to recognize a modified RTK extension without
@@ -47,6 +99,13 @@ pub(super) fn ensure_opencode_plugin_installed(path: &Path, ctx: InitContext) ->
                 parent.display()
             )
         })?;
+    }
+    if !dry_run && let Some(found) = too_old_opencode() {
+        let need = format!("{}.{}.{}", MIN_OPENCODE.0, MIN_OPENCODE.1, MIN_OPENCODE.2);
+        println!(
+            "  [rtk] OpenCode {found} is older than {need}, and the rtk plugin will not load there.\n        \
+             Upgrade OpenCode, then re-run `rtk init -g --opencode`."
+        );
     }
     write_if_changed(path, OPENCODE_PLUGIN, "OpenCode plugin", ctx)
 }
@@ -93,6 +152,37 @@ pub(super) fn run_opencode_only_mode(ctx: InitContext) -> Result<()> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    // One shape, two loaders: the 2.x loader reads `id` and `setup()` off the
+    // default export, and 1.x calls `server()` on it. A callable default fails
+    // the 2.x schema check, so neither half may become a function again.
+    #[test]
+    fn plugin_is_an_object_default_with_both_entrypoints() {
+        assert!(OPENCODE_PLUGIN.contains("const RtkOpenCodePlugin = {"));
+        assert!(OPENCODE_PLUGIN.contains("id: \"rtk\""));
+        assert!(OPENCODE_PLUGIN.contains("setup(ctx"));
+        assert!(OPENCODE_PLUGIN.contains("server()"));
+        assert!(OPENCODE_PLUGIN.contains("\"execute.before\""));
+        assert!(OPENCODE_PLUGIN.contains("\"tool.execute.before\""));
+        assert!(!OPENCODE_PLUGIN.contains("export default RtkOpenCodePlugin("));
+    }
+
+    // The floor is load-bearing: below it OpenCode calls the object export as a
+    // plugin function and refuses to start, which is why init says so out loud.
+    #[test]
+    fn version_floor_is_pinned() {
+        assert!(is_too_old("1.18.28"));
+        assert!(is_too_old("opencode 1.3.3"));
+        assert!(is_too_old("1.1.4"));
+        assert!(is_too_old("0.14.2"));
+        assert!(!is_too_old("1.18.29"));
+        assert!(!is_too_old("1.18.34"));
+        assert!(!is_too_old("2.0.22"));
+        // unreadable or unparsable is not evidence of an old OpenCode
+        assert!(!is_too_old(""));
+        assert!(!is_too_old("opencode (unknown)"));
+        assert!(!is_too_old("v"));
+    }
 
     #[test]
     fn test_opencode_plugin_install_and_update() {

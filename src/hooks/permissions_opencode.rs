@@ -121,16 +121,76 @@ pub(crate) fn check_command_with_opencode_rules(cmd: &str, rules: &[Rule]) -> Pe
 pub(crate) fn load_opencode_rules(agent: Option<&str>) -> Vec<Rule> {
     let mut rules = Vec::new();
     for config in opencode_configs() {
-        if let Some(permission) = config.get("permission") {
-            append_rules(permission, &mut rules);
-        }
-        if let Some(block) =
-            agent.and_then(|name| config.pointer(&format!("/agent/{name}/permission")))
-        {
-            append_rules(block, &mut rules);
+        append_config_rules(&config, None, &mut rules);
+        if agent.is_some() {
+            append_config_rules(&config, agent, &mut rules);
         }
     }
     rules
+}
+
+/// OpenCode 2.x renamed the shell tool to `shell` and spelled agent blocks
+/// `agents.<name>`. Rules are stored under the axis rtk's evaluator matches on,
+/// so both spellings of the tool land on `bash`.
+fn permission_axis(name: &str) -> &str {
+    if name == "shell" { "bash" } else { name }
+}
+
+/// One config's rules, in the order OpenCode resolves them: the legacy
+/// `permission` map first, then the 2.x `permissions` list, regardless of which
+/// the file declares first — a legacy allow plus a list deny has to come out
+/// denied. With `agent`, this is the agent's own block and loads last.
+fn append_config_rules(config: &Value, agent: Option<&str>, rules: &mut Vec<Rule>) {
+    let prefix = agent
+        .map(|name| format!("/agents/{name}"))
+        .unwrap_or_default();
+    let legacy = config.pointer(&format!("{prefix}/permission"));
+    let modern = config.pointer(&format!("{prefix}/permissions"));
+
+    if let Some(legacy) = legacy {
+        append_rules(legacy, rules);
+    }
+    append_permission_list(modern, rules);
+    // 1.x spelled it `agent.<name>`; 2.x spells it `agents.<name>`.
+    if let Some(legacy) =
+        agent.and_then(|name| config.pointer(&format!("/agent/{name}/permission")))
+    {
+        append_rules(legacy, rules);
+    }
+}
+
+/// OpenCode 2.x's native rule list: `{ "action": "shell", "resource": "git *",
+/// "effect": "deny" }`. Entries for other tools cannot match a shell command
+/// and are skipped.
+fn append_permission_list(list: Option<&Value>, rules: &mut Vec<Rule>) {
+    let Some(entries) = list.and_then(Value::as_array) else {
+        return;
+    };
+    for entry in entries {
+        let action = entry
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if action != "shell" && action != "*" {
+            continue;
+        }
+        let Some(effect) = entry
+            .get("effect")
+            .and_then(Value::as_str)
+            .and_then(Action::parse)
+        else {
+            continue;
+        };
+        rules.push(Rule {
+            permission: "bash".to_string(),
+            pattern: entry
+                .get("resource")
+                .and_then(Value::as_str)
+                .unwrap_or("*")
+                .to_string(),
+            action: effect,
+        });
+    }
 }
 
 fn append_rules(permission: &Value, rules: &mut Vec<Rule>) {
@@ -138,11 +198,12 @@ fn append_rules(permission: &Value, rules: &mut Vec<Rule>) {
         return;
     };
     for (name, value) in entries {
+        let permission = permission_axis(name).to_string();
         match value {
             Value::String(action) => {
                 if let Some(action) = Action::parse(action) {
                     rules.push(Rule {
-                        permission: name.clone(),
+                        permission,
                         pattern: "*".to_string(),
                         action,
                     });
@@ -152,7 +213,7 @@ fn append_rules(permission: &Value, rules: &mut Vec<Rule>) {
                 for (pattern, action) in patterns {
                     if let Some(action) = action.as_str().and_then(Action::parse) {
                         rules.push(Rule {
-                            permission: name.clone(),
+                            permission: permission.clone(),
                             pattern: pattern.clone(),
                             action,
                         });
@@ -565,6 +626,135 @@ mod tests {
                 check_command_for_agent("git status", Host::OpenCode, None),
                 PermissionVerdict::Deny
             );
+        });
+    }
+
+    #[test]
+    fn the_2x_permission_list_is_read() {
+        let config: Value = serde_json::from_str(
+            r#"{ "permissions": [
+                { "action": "shell", "resource": "git *", "effect": "allow" },
+                { "action": "shell", "resource": "git push *", "effect": "deny" }
+            ] }"#,
+        )
+        .expect("valid json");
+        let mut rules = Vec::new();
+        append_permission_list(config.get("permissions"), &mut rules);
+        assert_eq!(
+            rules,
+            vec![
+                rule("git *", Action::Allow),
+                rule("git push *", Action::Deny)
+            ],
+            "list order is load-bearing: the last match wins"
+        );
+        assert_eq!(
+            check_command_with_opencode_rules("git push origin main", &rules),
+            PermissionVerdict::Deny
+        );
+        assert_eq!(
+            check_command_with_opencode_rules("git status", &rules),
+            PermissionVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn a_list_entry_without_a_resource_covers_every_command() {
+        let config: Value =
+            serde_json::from_str(r#"{ "permissions": [{ "action": "*", "effect": "deny" }] }"#)
+                .expect("valid json");
+        let mut rules = Vec::new();
+        append_permission_list(config.get("permissions"), &mut rules);
+        assert_eq!(rules, vec![rule("*", Action::Deny)]);
+    }
+
+    #[test]
+    fn list_entries_for_other_tools_are_dropped() {
+        let config: Value = serde_json::from_str(
+            r#"{ "permissions": [
+                { "action": "edit", "resource": "src/*", "effect": "allow" },
+                { "action": "webfetch", "resource": "*", "effect": "deny" }
+            ] }"#,
+        )
+        .expect("valid json");
+        let mut rules = Vec::new();
+        append_permission_list(config.get("permissions"), &mut rules);
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn a_list_entry_with_an_unknown_effect_is_dropped_rather_than_guessed() {
+        let config: Value = serde_json::from_str(
+            r#"{ "permissions": [{ "action": "shell", "resource": "*", "effect": "maybe" }] }"#,
+        )
+        .expect("valid json");
+        let mut rules = Vec::new();
+        append_permission_list(config.get("permissions"), &mut rules);
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn the_shell_alias_of_bash_matches_a_shell_command() {
+        let config: Value =
+            serde_json::from_str(r#"{ "permission": { "shell": "deny" } }"#).expect("valid json");
+        let mut rules = Vec::new();
+        append_rules(config.get("permission").expect("permission"), &mut rules);
+        assert_eq!(rules, vec![rule("*", Action::Deny)]);
+        assert_eq!(
+            check_command_with_opencode_rules("git status", &rules),
+            PermissionVerdict::Deny
+        );
+    }
+
+    #[test]
+    fn the_legacy_map_is_applied_before_the_2x_list_whatever_the_file_order() {
+        let tmp = test_isolation::tempdir();
+        let project = tmp.path().join("project");
+        // The list is declared first and still has to lose to the legacy map.
+        write_json(
+            &project.join("opencode.json"),
+            r#"{ "permissions": [
+                { "action": "shell", "resource": "git *", "effect": "deny" }
+            ],
+            "permission": { "bash": { "git *": "allow" } } }"#,
+        );
+
+        test_isolation::with_root(&tmp.path().join("home"), || {
+            let _entered = test_isolation::enter(&project);
+            let rules = load_opencode_rules(None);
+            assert_eq!(
+                rules,
+                vec![rule("git *", Action::Allow), rule("git *", Action::Deny)],
+                "the legacy map loads first, so the list can still deny what it allows"
+            );
+            assert_eq!(
+                check_command_with_opencode_rules("git status", &rules),
+                PermissionVerdict::Deny
+            );
+        });
+    }
+
+    #[test]
+    fn an_agents_2x_block_loads_after_the_root_rules_so_it_wins_ties() {
+        let tmp = test_isolation::tempdir();
+        let project = tmp.path().join("project");
+        write_json(
+            &project.join("opencode.json"),
+            r#"{ "permission": { "bash": { "git *": "deny" } },
+                "agents": { "build": { "permissions": [
+                    { "action": "shell", "resource": "git *", "effect": "allow" }
+                ] } } }"#,
+        );
+
+        test_isolation::with_root(&tmp.path().join("home"), || {
+            let _entered = test_isolation::enter(&project);
+            let rules = load_opencode_rules(Some("build"));
+            assert_eq!(
+                rules,
+                vec![rule("git *", Action::Deny), rule("git *", Action::Allow)],
+                "the agent block appends after root, matching OpenCode's resolution"
+            );
+            assert_eq!(load_opencode_rules(None), vec![rule("git *", Action::Deny)]);
         });
     }
 

@@ -164,6 +164,18 @@ rtk init --global --opencode
 rtk init --show    # should show "OpenCode: plugin installed"
 ```
 
+The plugin needs OpenCode 1.18.29 or newer, or 2.x. On older versions the
+plugin does not load at all: OpenCode 1.1.4 exits 1 at startup with
+`fn3 is not a function`, and 1.3.3 logs `failed to load plugin`. `rtk init`
+prints the version it found when that one is too old. Upgrade OpenCode rather
+than looking for a rewrite setting.
+
+If the plugin loads but nothing changes, check that `rtk` is on the `PATH`
+OpenCode itself sees. The plugin only resolves it from `PATH`, because
+OpenCode's shell tool does not source `.profile`, `.bashrc` or `.bash_profile`
+and a binary found elsewhere cannot be spawned as a bare `rtk`. Set
+`RTK_DISABLED=1` to confirm which way round the behaviour goes.
+
 ## `cargo install rtk` installs the wrong package
 
 If Rust Type Kit is published to crates.io under the name `rtk`, `cargo install rtk` may install the wrong one.
