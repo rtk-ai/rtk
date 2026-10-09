@@ -1693,18 +1693,20 @@ fn categorize_command(rtk_cmd: &str) -> String {
     let words = stored_words(rtk_cmd);
     let tool = words.get(1).map_or("other", |word| tool_name(word));
     match tool {
-        "git" | "gh" | "gt" => "git",
+        "git" | "gh" | "glab" | "gt" => "git",
         "cargo" => "cargo",
         "npm" | "npx" | "pnpm" | "bun" | "bunx" | "deno" | "vitest" | "tsc" | "lint"
-        | "prettier" | "next" | "playwright" | "prisma" => "js",
+        | "prettier" | "next" | "playwright" | "prisma" | "jest" => "js",
         "pytest" | "ruff" | "mypy" | "pip" | "sqlfluff" | "uv" => "python",
         "go" | "golangci-lint" => "go",
-        "docker" | "kubectl" => "cloud",
+        "aws" | "curl" | "docker" | "kubectl" | "oc" | "psql" | "wget" => "cloud",
         "rspec" | "rubocop" | "rake" => "ruby",
+        "ecs" | "paratest" | "pest" | "php" | "phpstan" | "phpt" | "phpunit" | "pint" => "php",
+        "gradlew" | "mvn" | "mvnd" | "sbt" => "jvm",
         "dotnet" => "dotnet",
         "ctest" => "cpp",
         "ls" | "tree" | "grep" | "find" | "wc" | "read" | "env" | "json" | "log" | "smart"
-        | "diff" | "deps" | "summary" | "format" => "system",
+        | "diff" | "deps" | "summary" | "format" | "rg" | "ast-grep" => "system",
         _ => "other",
     }
     .to_string()
@@ -2475,6 +2477,7 @@ mod command_label_tests {
 mod tests {
     use super::*;
     use crate::core::test_isolation;
+    use clap::CommandFactory;
 
     // 1. estimate_tokens — verify ~4 chars/token ratio
     #[test]
@@ -3160,6 +3163,24 @@ mod tests {
         for cmd in ["rtk uv sync", "rtk uv run pytest", "rtk uv pip install foo"] {
             assert_eq!(categorize_command(cmd), "python", "{cmd}");
         }
+    }
+
+    #[test]
+    fn test_filtering_subcommands_have_a_category() {
+        let cli = crate::Cli::command();
+        let uncategorized: Vec<_> = cli
+            .get_subcommands()
+            .map(|command| command.get_name())
+            .filter(|name| {
+                !crate::core::constants::RTK_META_COMMANDS.contains(name) && *name != "test"
+            })
+            .filter(|name| categorize_command(&format!("rtk {name}")) == "other")
+            .collect();
+
+        assert!(
+            uncategorized.is_empty(),
+            "uncategorized filtering commands: {uncategorized:?}"
+        );
     }
 
     // 14. get_by_command uses weighted savings rate, not unweighted average
