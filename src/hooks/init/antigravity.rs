@@ -35,6 +35,7 @@ pub const ANTIGRAVITY_HOOKS_JSON: &str = r#"{
 const ANTIGRAVITY_RULES_FILE: &str = "AGENTS.md";
 
 pub fn run_antigravity_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let _scope = (!global).then(|| ProjectScope::enter(ctx));
     if global {
         let home = user_dirs::home().context("Could not determine user home directory")?;
         let base_dir = home.join(".gemini/config");
@@ -46,9 +47,7 @@ pub fn run_antigravity_mode(global: bool, ctx: InitContext) -> Result<()> {
 }
 
 pub fn run_antigravity_mode_at(base_dir: &Path, global: bool, ctx: InitContext) -> Result<()> {
-    let InitContext {
-        verbose, dry_run, ..
-    } = ctx;
+    let InitContext { dry_run, .. } = ctx;
     let plugin_dir = if global {
         base_dir.join("plugins/rtk")
     } else {
@@ -60,53 +59,54 @@ pub fn run_antigravity_mode_at(base_dir: &Path, global: bool, ctx: InitContext) 
     // Rules under `rules/` apply whenever the plugin is active, as plain markdown
     // with no frontmatter (Antigravity's plugin docs); `awareness.level` picks
     // the text, as it does for every agent with a command hook.
-    let rules_dir = plugin_dir.join("rules");
-    let rules_path = rules_dir.join(ANTIGRAVITY_RULES_FILE);
+    let rules_path = plugin_dir.join("rules").join(ANTIGRAVITY_RULES_FILE);
     let rules_content = awareness_content(ctx.awareness);
+    // The plugin makes Antigravity run `rtk hook antigravity`, so a project install keeps
+    // every file of it inside the project.
+    for path in [&rules_path, &hooks_json_path, &plugin_json_path] {
+        ensure_project_file_inside(path, "Antigravity")?;
+    }
 
     if dry_run {
         println!(
             "[dry-run] would create plugin directory: {}",
             plugin_dir.display()
         );
-        println!("[dry-run] would write {}", rules_path.display());
-        println!("[dry-run] would write {}", hooks_json_path.display());
-        println!("[dry-run] would write {}", plugin_json_path.display());
-        if verbose > 0 {
-            println!(
-                "[dry-run] plugin.json content:\n{}",
-                ANTIGRAVITY_PLUGIN_JSON
-            );
-            println!("[dry-run] hooks.json content:\n{}", ANTIGRAVITY_HOOKS_JSON);
-            println!(
-                "[dry-run] rules/{ANTIGRAVITY_RULES_FILE} content:\n{}",
-                rules_content
-            );
-        }
+    }
+    // plugin.json is what makes Antigravity discover the directory, so it goes last: a first
+    // install that fails halfway leaves no plugin rather than one missing its rules. A re-run
+    // over an existing plugin has no such guarantee.
+    let rules_name = format!("rules/{ANTIGRAVITY_RULES_FILE}");
+    for (path, content, name, what) in [
+        (
+            &rules_path,
+            rules_content,
+            rules_name.as_str(),
+            "plugin rules",
+        ),
+        (
+            &hooks_json_path,
+            ANTIGRAVITY_HOOKS_JSON,
+            "hooks.json",
+            "hooks.json",
+        ),
+        (
+            &plugin_json_path,
+            ANTIGRAVITY_PLUGIN_JSON,
+            "plugin.json",
+            "plugin.json",
+        ),
+    ] {
+        let report = Report::new(format!("[dry-run] would write {}", path.display()))
+            .with_detail(format!("[dry-run] {name} content:\n{content}"))
+            .done_verbose(format!("Wrote {}", path.display()));
+        write_reported(path, WriteKind::Owned, content, ctx, report)
+            .with_context(|| format!("Failed to write Antigravity {what}"))?;
+    }
+
+    if dry_run {
         print_dry_run_footer();
     } else {
-        fs::create_dir_all(&rules_dir).with_context(|| {
-            format!(
-                "Failed to create Antigravity plugin rules directory: {}",
-                rules_dir.display()
-            )
-        })?;
-        // plugin.json is what makes Antigravity discover the directory, so it goes last:
-        // a first install that fails halfway leaves no plugin rather than one missing its
-        // rules. A re-run over an existing plugin has no such guarantee.
-        atomic_write(&rules_path, rules_content)
-            .context("Failed to write Antigravity plugin rules")?;
-        atomic_write(&hooks_json_path, ANTIGRAVITY_HOOKS_JSON)
-            .context("Failed to write Antigravity hooks.json")?;
-        atomic_write(&plugin_json_path, ANTIGRAVITY_PLUGIN_JSON)
-            .context("Failed to write Antigravity plugin.json")?;
-
-        if verbose > 0 {
-            eprintln!("Wrote {}", rules_path.display());
-            eprintln!("Wrote {}", hooks_json_path.display());
-            eprintln!("Wrote {}", plugin_json_path.display());
-        }
-
         println!("\nRTK plugin configured for Google Antigravity.\n");
         println!("  Plugin: {} (installed)", plugin_dir.display());
         println!("  Hooks:  PreToolUse -> rtk hook antigravity");
@@ -126,6 +126,7 @@ pub fn run_antigravity_mode_at(base_dir: &Path, global: bool, ctx: InitContext) 
 }
 
 pub fn uninstall_antigravity_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let _scope = (!global).then(|| ProjectScope::enter(ctx));
     let base_dir = if global {
         user_dirs::home()
             .context("Could not determine user home directory")?
@@ -171,6 +172,8 @@ pub fn uninstall_antigravity_mode_at(
     } else {
         base_dir.join(".agents/plugins/rtk")
     };
+    // Removed whole, so a project uninstall must not reach a directory outside the project.
+    ensure_project_file_inside(&plugin_dir, "Antigravity")?;
 
     if plugin_dir.exists() {
         if !dry_run {
@@ -336,5 +339,50 @@ mod tests {
 
         let plugin_dir = temp.path().join(".agents/plugins/rtk");
         assert!(!plugin_dir.exists(), "Plugin dir should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_project_install_refuses_a_plugin_dir_linked_outside_the_project() {
+        use crate::core::test_isolation;
+        use std::os::unix::fs::symlink;
+
+        let project = test_isolation::tempdir();
+        let elsewhere = TempDir::new().expect("elsewhere");
+        symlink(elsewhere.path(), project.path().join(".agents")).expect("symlink");
+
+        let _entered = test_isolation::enter(project.path());
+        let error = run_antigravity_mode(false, InitContext::default())
+            .expect_err("a plugin outside the project is refused");
+
+        assert!(error.to_string().contains("outside the project"), "{error}");
+        assert!(
+            !elsewhere.path().join("plugins").exists(),
+            "nothing is written through the link"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_project_uninstall_leaves_a_plugin_dir_linked_outside_the_project_alone() {
+        use crate::core::test_isolation;
+        use std::os::unix::fs::symlink;
+
+        let project = test_isolation::tempdir();
+        let elsewhere = TempDir::new().expect("elsewhere");
+        let outside_plugin = elsewhere.path().join("plugins/rtk");
+        fs::create_dir_all(&outside_plugin).expect("outside plugin dir");
+        fs::write(outside_plugin.join("plugin.json"), ANTIGRAVITY_PLUGIN_JSON).expect("write");
+        symlink(elsewhere.path(), project.path().join(".agents")).expect("symlink");
+
+        let _entered = test_isolation::enter(project.path());
+        let error = uninstall_antigravity_mode(false, InitContext::default())
+            .expect_err("a plugin outside the project is refused");
+
+        assert!(error.to_string().contains("outside the project"), "{error}");
+        assert!(
+            outside_plugin.join("plugin.json").exists(),
+            "a directory outside the project is not removed"
+        );
     }
 }

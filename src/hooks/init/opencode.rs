@@ -28,26 +28,13 @@ pub(super) fn opencode_plugin_path(opencode_dir: &Path) -> PathBuf {
     opencode_dir.join(PLUGIN_SUBDIR).join(OPENCODE_PLUGIN_FILE)
 }
 
-/// Prepare OpenCode plugin directory and return install path
+/// Return the OpenCode plugin install path; the write creates its directory.
 pub(super) fn prepare_opencode_plugin_path() -> Result<PathBuf> {
-    let opencode_dir = resolve_opencode_dir()?;
-    let path = opencode_plugin_path(&opencode_dir);
-    // Directory creation is deferred to install time (caller guards on dry_run).
-    Ok(path)
+    Ok(opencode_plugin_path(&resolve_opencode_dir()?))
 }
 
 /// Write OpenCode plugin file if missing or outdated
 pub(super) fn ensure_opencode_plugin_installed(path: &Path, ctx: InitContext) -> Result<bool> {
-    let InitContext { dry_run, .. } = ctx;
-    // Ensure parent dir exists (skip in dry-run)
-    if !dry_run && let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "Failed to create OpenCode plugin directory: {}",
-                parent.display()
-            )
-        })?;
-    }
     write_if_changed(path, OPENCODE_PLUGIN, "OpenCode plugin", ctx)
 }
 
