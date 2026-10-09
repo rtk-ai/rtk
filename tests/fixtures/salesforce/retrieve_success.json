@@ -1,0 +1,54 @@
+{
+  "status": 0,
+  "result": {
+    "done": true,
+    "fileProperties": [
+      {
+        "createdById": "005XXXXXXXXXXXXXXX",
+        "createdByName": "Test User",
+        "createdDate": "2026-07-28T14:43:29.000Z",
+        "fileName": "unpackaged/classes/AccountService.cls",
+        "fullName": "AccountService",
+        "id": "01pXXXXXXXXXXXXXXX",
+        "lastModifiedById": "005XXXXXXXXXXXXXXX",
+        "lastModifiedByName": "Test User",
+        "lastModifiedDate": "2026-07-28T20:19:36.000Z",
+        "manageableState": "released",
+        "namespacePrefix": "acme",
+        "type": "ApexClass"
+      },
+      {
+        "createdById": "005XXXXXXXXXXXXXXX",
+        "createdByName": "Test User",
+        "createdDate": "2026-07-30T20:13:00.950Z",
+        "fileName": "unpackaged/package.xml",
+        "fullName": "unpackaged/package.xml",
+        "id": "",
+        "lastModifiedById": "005XXXXXXXXXXXXXXX",
+        "lastModifiedByName": "Test User",
+        "lastModifiedDate": "2026-07-30T20:13:00.950Z",
+        "manageableState": "unmanaged",
+        "type": "Package"
+      }
+    ],
+    "id": "09SXXXXXXXXXXXXXXX",
+    "status": "Succeeded",
+    "success": true,
+    "messages": [],
+    "files": [
+      {
+        "fullName": "AccountService",
+        "type": "ApexClass",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/accountPkg/default/classes/AccountService.cls"
+      },
+      {
+        "fullName": "AccountService",
+        "type": "ApexClass",
+        "state": "Changed",
+        "filePath": "/project/sfdx/force-app/accountPkg/default/classes/AccountService.cls-meta.xml"
+      }
+    ]
+  },
+  "warnings": []
+}

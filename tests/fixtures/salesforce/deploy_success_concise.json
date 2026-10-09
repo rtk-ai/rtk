@@ -1,0 +1,45 @@
+{
+  "status": 0,
+  "result": {
+    "checkOnly": true,
+    "completedDate": "2026-07-30T20:12:57.000Z",
+    "createdBy": "005XXXXXXXXXXXX",
+    "createdByName": "Test User",
+    "createdDate": "2026-07-30T20:12:51.000Z",
+    "details": {
+      "componentFailures": [],
+      "runTestResult": {
+        "numFailures": 0,
+        "numTestsRun": 0,
+        "totalTime": 0,
+        "codeCoverage": [],
+        "codeCoverageWarnings": [],
+        "failures": [],
+        "flowCoverage": [],
+        "flowCoverageWarnings": [],
+        "successes": []
+      }
+    },
+    "done": true,
+    "id": "0AfXXXXXXXXXXXXXXX",
+    "ignoreWarnings": false,
+    "lastModifiedDate": "2026-07-30T20:12:57.000Z",
+    "numberComponentErrors": 0,
+    "numberComponentsDeployed": 26,
+    "numberComponentsTotal": 26,
+    "numberFiles": "71",
+    "numberTestErrors": 0,
+    "numberTestsCompleted": 0,
+    "numberTestsTotal": 0,
+    "rollbackOnError": true,
+    "runTestsEnabled": false,
+    "startDate": "2026-07-30T20:12:51.000Z",
+    "status": "Succeeded",
+    "success": true,
+    "zipSize": 30123,
+    "files": [],
+    "zipFileCount": 55,
+    "deployUrl": "https://scratch.example.my.salesforce.com/lightning/setup/DeployStatus/page?address=%2Fchangemgmt%2FmonitorDeploymentsDetails.apexp%3FasyncId%3D0AfXXXXXXXXXXXXXXX%26retURL%3D%252Fchangemgmt%252FmonitorDeployment.apexp"
+  },
+  "warnings": []
+}
