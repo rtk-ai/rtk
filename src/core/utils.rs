@@ -132,6 +132,19 @@ pub fn format_tokens(n: usize) -> String {
     }
 }
 
+/// Format a signed token delta, including losses and the full i64 range.
+pub fn format_signed_tokens(n: i64) -> String {
+    let magnitude = n.unsigned_abs();
+    let sign = if n < 0 { "-" } else { "" };
+    if magnitude >= 1_000_000 {
+        format!("{}{:.1}M", sign, magnitude as f64 / 1_000_000.0)
+    } else if magnitude >= 1_000 {
+        format!("{}{:.1}K", sign, magnitude as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 /// Formats a USD amount with adaptive precision.
 ///
 /// # Arguments
@@ -1044,6 +1057,24 @@ mod tests {
     fn test_strip_ansi_complex() {
         let input = "\x1b[32mGreen\x1b[0m normal \x1b[31mRed\x1b[0m";
         assert_eq!(strip_ansi(input), "Green normal Red");
+    }
+
+    #[test]
+    fn test_format_signed_tokens() {
+        for (tokens, expected) in [
+            (0, "0"),
+            (694, "694"),
+            (-10, "-10"),
+            (1_000, "1.0K"),
+            (-1_000, "-1.0K"),
+            (-999, "-999"),
+            (1_234_567, "1.2M"),
+            (-1_234_567, "-1.2M"),
+            (i64::MIN, "-9223372036854.8M"),
+            (i64::MAX, "9223372036854.8M"),
+        ] {
+            assert_eq!(format_signed_tokens(tokens), expected);
+        }
     }
 
     #[test]
