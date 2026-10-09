@@ -1998,7 +1998,24 @@ fn is_native_test_expression(command: &[String]) -> bool {
         // `!` and `(` are shell syntax too, so they only mark a native
         // expression when what they apply to is one.
         Some("!") | Some("(") => is_native_test_expression(&command[1..]),
-        Some(arg) => arg.starts_with('-'),
+        Some(arg) => {
+            arg.starts_with('-')
+                || command.get(1).is_some_and(|operator| {
+                    matches!(
+                        operator.as_str(),
+                        "=" | "!="
+                            | "-eq"
+                            | "-ne"
+                            | "-lt"
+                            | "-le"
+                            | "-gt"
+                            | "-ge"
+                            | "-ef"
+                            | "-nt"
+                            | "-ot"
+                    )
+                })
+        }
         None => false,
     }
 }
@@ -3523,6 +3540,82 @@ fn is_operational_command(cmd: &Commands) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    // --- POSIX `test` builtin vs test-runner classification ---
+
+    #[test]
+    fn test_posix_predicate_detects_unary_file_ops() {
+        for op in ["-f", "-d", "-e", "-x", "-z", "-n", "-s", "-L"] {
+            assert!(
+                is_native_test_expression(&[op.to_string(), "/etc/hostname".to_string()]),
+                "`test {} path` is the POSIX builtin, not a runner",
+                op
+            );
+        }
+    }
+
+    #[test]
+    fn test_posix_predicate_detects_binary_comparisons() {
+        assert!(is_native_test_expression(&[
+            "1".to_string(),
+            "-eq".to_string(),
+            "2".to_string()
+        ]));
+        assert!(is_native_test_expression(&[
+            "a".to_string(),
+            "=".to_string(),
+            "b".to_string()
+        ]));
+        assert!(is_native_test_expression(&[
+            "!".to_string(),
+            "a".to_string(),
+            "=".to_string(),
+            "b".to_string()
+        ]));
+        assert!(is_native_test_expression(&[
+            "(".to_string(),
+            "1".to_string(),
+            "-eq".to_string(),
+            "2".to_string(),
+            ")".to_string()
+        ]));
+    }
+
+    #[test]
+    fn test_posix_predicate_leaves_test_runners_alone() {
+        // These must still reach the runner filter, which is the whole point of
+        // `rtk test`.
+        assert!(!is_native_test_expression(&[
+            "cargo".to_string(),
+            "test".to_string()
+        ]));
+        assert!(!is_native_test_expression(&[
+            "pytest".to_string(),
+            "-v".to_string()
+        ]));
+        assert!(!is_native_test_expression(&[
+            "npm".to_string(),
+            "test".to_string()
+        ]));
+        // A runner flag that looks unary but is not in a leading position.
+        assert!(!is_native_test_expression(&[
+            "cargo".to_string(),
+            "test".to_string(),
+            "-f".to_string()
+        ]));
+        assert!(!is_native_test_expression(&[]));
+        assert!(!is_native_test_expression(&[
+            "echo".to_string(),
+            "a".to_string(),
+            "=".to_string(),
+            "b".to_string()
+        ]));
+        assert!(!is_native_test_expression(&[
+            "/usr/bin/printf".to_string(),
+            "%s".to_string(),
+            "=".to_string()
+        ]));
+    }
     use super::*;
     use crate::core::test_isolation;
     use clap::Parser;

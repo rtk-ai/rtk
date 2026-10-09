@@ -82,6 +82,19 @@ fn native_expressions_keep_argument_boundaries() {
     assert_eq!(exit_code(dir.path(), &["test", "-f", "a file"]), 0);
 }
 
+#[test]
+fn binary_comparisons_keep_the_test_exit_code_and_argument_boundaries() {
+    let dir = fixture();
+    let cwd = dir.path();
+
+    assert_eq!(exit_code(cwd, &["test", "a value", "=", "a value"]), 0);
+    assert_eq!(exit_code(cwd, &["test", "a value", "!=", "a value"]), 1);
+    assert_eq!(exit_code(cwd, &["test", "1", "-eq", "2"]), 1);
+    assert_eq!(exit_code(cwd, &["test", "1", "-lt", "2"]), 0);
+    assert_eq!(exit_code(cwd, &["test", "!", "1", "-eq", "2"]), 0);
+    assert_eq!(exit_code(cwd, &["test", "(", "a", "=", "b", ")"]), 1);
+}
+
 /// The other direction: a command to run under the test filter still goes to the
 /// filter, not to the system `test`, which would reject it as too many arguments.
 #[test]
@@ -89,4 +102,8 @@ fn commands_still_reach_the_test_runner() {
     let dir = fixture();
 
     assert_eq!(exit_code(dir.path(), &["test", "echo", "hello"]), 0);
+    assert_eq!(
+        exit_code(dir.path(), &["test", "/usr/bin/printf", "%s", "="]),
+        0
+    );
 }
