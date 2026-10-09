@@ -1813,14 +1813,18 @@ mod tests {
     }
 
     /// #3864: the Claude hook feeds the payload cwd into the decision, so a
-    /// git command from inside a managed worktree is left to Claude Code.
+    /// git command from inside a linked worktree is left to Claude Code —
+    /// whatever path it lives at, not only `.claude/worktrees/<name>`.
     #[test]
     fn test_claude_payload_cwd_in_worktree_skips_git_rewrite() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".git"), "gitdir: /elsewhere/.git/worktrees/feat-x\n")
+            .unwrap();
         let v = claude_payload_with_ids(
             "git status",
             "sess-1",
             "toolu_01ABC",
-            "/repo/.claude/worktrees/feat-x",
+            root.path().to_str().unwrap(),
         );
         assert!(matches!(
             process_claude_payload(&v),
