@@ -1,0 +1,9 @@
+Compiling root (1 Scala source)
+[0m[31m[E][0m [0m[34m[E1] [0m[0m[4msrc/main/scala/example/Defect1.scala[0m:5:21
+[0m[31m[E][0m      Found:    ([32m"not an int"[0m : String)
+[0m[31m[E][0m      Required: Int
+[0m[31m[E][0m      [0m[31mL5: [0m  val broken: Int = "not an int"
+[0m[31m[E][0m                              ^^^^^^^^^^^^
+[0m[31m[E][0m src/main/scala/example/Defect1.scala: [0m[31mL5[0m[0m[34m [E1][0m
+Compiled root (1777ms)
+[0m[31m[E][0m Failed to compile 'root'

@@ -1,0 +1,33 @@
+Compiling root (1 Scala source)
+Compiled root (1490ms)
+Compiling root-test (1 Scala source)
+Compiled root-test (1135ms)
+CalculatorSpec
+ 
+Calculator
+  + add returns the sum
+  x sub returns the difference
+[E]    6 != 7 (CalculatorSpec.scala:11)
+[E]  
+  + mul returns the product
+  x div returns the quotient
+[E]    5 != 4 (CalculatorSpec.scala:17)
+[E]  
+ 
+ 
+Total for specification CalculatorSpec
+Finished in 74 ms
+4 examples, 2 failures, 0 error
+ 
+Execution took 37ms
+4 tests, 2 passed, 2 failed
+
+====================================================================================================
+Total duration: 37ms
+1 failed
+
+Failed:
+- example.CalculatorSpec:
+  * Calculator::sub returns the difference - 6 != 7
+  * Calculator::div returns the quotient - 5 != 4
+====================================================================================================

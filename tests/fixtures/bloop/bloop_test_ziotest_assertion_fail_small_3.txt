@@ -1,0 +1,57 @@
+Compiling root (1 Scala source)
+Compiled root (1426ms)
+Compiling root-test (1 Scala source)
+Compiled root-test (1144ms)
++ Calculator
+  + add returns the sum
+  - sub returns the difference
+    ✗ 6 was not equal to 7
+    Calculator.sub(10, 4) did not satisfy Assertion.equalTo(7)
+    Calculator.sub(10, 4) = 6
+    at /tmp/workspace/ziotest-assertion-fail-small/src/test/scala/example/CalculatorSpec.scala:11 
+
+  + mul returns the product
+  - div returns the quotient
+    ✗ 5 was not equal to 4
+    Calculator.div(20, 4) did not satisfy Assertion.equalTo(4)
+    Calculator.div(20, 4) = 5
+    at /tmp/workspace/ziotest-assertion-fail-small/src/test/scala/example/CalculatorSpec.scala:17 
+
+2 tests passed. 2 tests failed. 0 tests ignored.
+
+
+  - Calculator / sub returns the difference
+    ✗ 6 was not equal to 7
+    Calculator.sub(10, 4) did not satisfy Assertion.equalTo(7)
+    Calculator.sub(10, 4) = 6
+    at /tmp/workspace/ziotest-assertion-fail-small/src/test/scala/example/CalculatorSpec.scala:11 
+
+  - Calculator / div returns the quotient
+    ✗ 5 was not equal to 4
+    Calculator.div(20, 4) did not satisfy Assertion.equalTo(4)
+    Calculator.div(20, 4) = 5
+    at /tmp/workspace/ziotest-assertion-fail-small/src/test/scala/example/CalculatorSpec.scala:17 
+
+Executed in 195 ms
+
+Execution took 0.1s
+4 tests, 2 passed, 2 failed
+
+The test execution was successfully closed.
+====================================================================================================
+Total duration: 0.1s
+1 failed
+
+Failed:
+- example.CalculatorSpec:
+  * Calculator - sub returns the difference -   - sub returns the difference
+    ✗ 6 was not equal to 7
+    Calculator.sub(10, 4) did not satisfy Assertion.equalTo(7)
+    Calculator.sub(10, 4) = 6
+    at /tmp/workspace/ziotest-assertion-fail-small/src/test/scala/example/CalculatorSpec.scala:11 
+  * Calculator - div returns the quotient -   - div returns the quotient
+    ✗ 5 was not equal to 4
+    Calculator.div(20, 4) did not satisfy Assertion.equalTo(4)
+    Calculator.div(20, 4) = 5
+    at /tmp/workspace/ziotest-assertion-fail-small/src/test/scala/example/CalculatorSpec.scala:17 
+====================================================================================================
