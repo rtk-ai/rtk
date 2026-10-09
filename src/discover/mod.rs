@@ -229,13 +229,10 @@ fn would_be_covered_without_bypass(
 /// The segment `strip_disabled_prefix_for_analytics` split into `env_prefix` and
 /// `actual_cmd`, with its `RTK_DISABLED=` words removed and every other word kept
 /// verbatim, wrapper included. Words are split the way the rest of discover splits
-/// them (`lexer::tokenize` + `coalesce_words`), so a quoted or expanded value
+/// them (`lexer::words_and_spans`), so a quoted or expanded value
 /// (`RTK_DISABLED='1 2'`, `RTK_DISABLED=$CI`) goes as a whole.
 fn without_rtk_disabled(env_prefix: &str, actual_cmd: &str) -> String {
-    let starts: Vec<usize> = lexer::coalesce_words(env_prefix, &lexer::tokenize(env_prefix))
-        .iter()
-        .map(|&(_, start)| start)
-        .collect();
+    let (_, starts) = lexer::words_and_spans(env_prefix);
     let mut line = String::with_capacity(env_prefix.len() + actual_cmd.len() + 1);
     for (i, &start) in starts.iter().enumerate() {
         let end = starts.get(i + 1).copied().unwrap_or(env_prefix.len());
