@@ -854,7 +854,13 @@ fn process_workbuddy_payload(v: &Value) -> Option<Value> {
 
 /// Native WorkBuddy adapter. No Claude permission settings are consulted.
 pub fn run_workbuddy() -> Result<()> {
-    let input = read_stdin_limited()?;
+    let input = match read_stdin_limited() {
+        Ok(input) => input,
+        Err(error) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to read input: {error}");
+            return Ok(());
+        }
+    };
     let input = strip_leading_bom(&input).trim();
     if input.is_empty() {
         return Ok(());
