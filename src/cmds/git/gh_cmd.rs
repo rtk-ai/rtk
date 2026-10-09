@@ -418,15 +418,21 @@ fn state_icon(state: &str, ultra_compact: bool) -> &'static str {
 }
 
 fn should_passthrough_pr_view(extra_args: &[String]) -> bool {
-    extra_args
-        .iter()
-        .any(|a| a == "--json" || a == "--jq" || a == "--web" || a == "--comments")
+    extra_args.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "--json" | "--jq" | "-q" | "--web" | "-w" | "--comments" | "-c"
+        )
+    })
 }
 
 fn should_passthrough_issue_view(extra_args: &[String]) -> bool {
-    extra_args
-        .iter()
-        .any(|a| a == "--json" || a == "--jq" || a == "--web" || a == "--comments")
+    extra_args.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "--json" | "--jq" | "-q" | "--web" | "-w" | "--comments" | "-c"
+        )
+    })
 }
 
 fn should_passthrough_pr_status(args: &[String]) -> bool {
@@ -1603,6 +1609,13 @@ mod tests {
     }
 
     #[test]
+    fn test_should_passthrough_pr_view_short_aliases() {
+        assert!(should_passthrough_pr_view(&["-c".into()]));
+        assert!(should_passthrough_pr_view(&["-q".into(), ".body".into()]));
+        assert!(should_passthrough_pr_view(&["-w".into()]));
+    }
+
+    #[test]
     fn test_should_passthrough_pr_status_help() {
         assert!(should_passthrough_pr_status(&["--help".into()]));
         assert!(should_passthrough_pr_status(&["-h".into()]));
@@ -1694,6 +1707,16 @@ mod tests {
     #[test]
     fn test_should_passthrough_issue_view_default() {
         assert!(!should_passthrough_issue_view(&[]));
+    }
+
+    #[test]
+    fn test_should_passthrough_issue_view_short_aliases() {
+        assert!(should_passthrough_issue_view(&["-c".into()]));
+        assert!(should_passthrough_issue_view(&[
+            "-q".into(),
+            ".body".into()
+        ]));
+        assert!(should_passthrough_issue_view(&["-w".into()]));
     }
 
     // --- has_non_diff_format_flag tests ---
