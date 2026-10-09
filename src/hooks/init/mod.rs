@@ -45,7 +45,10 @@ use claude::{
     hook_already_present, remove_hook_from_settings, run_claude_md_mode, run_default_mode,
     run_hook_only_mode,
 };
-use codex::{run_codex_mode, show_codex_config, uninstall_codex};
+use codex::{
+    BackupSlot, free_backup_slot, resolve_symlink_components, resolve_symlink_target,
+    run_codex_mode, show_codex_config, uninstall_codex,
+};
 use cursor::{
     cursor_hook_already_present, install_cursor_hooks, remove_cursor_hooks, resolve_cursor_dir,
 };
@@ -63,7 +66,7 @@ pub use droid::{run_droid_mode, uninstall_droid};
 pub use gemini::run_gemini;
 pub use hermes::{run_hermes_mode, uninstall_hermes};
 pub use instructions_agents::{run_kilocode_mode, run_kimi_mode};
-pub use pi::{run_omp_mode_with_patch_mode, run_pi_mode_with_patch_mode};
+pub use pi::{PiCompatibleAgent, run_omp_mode_with_patch_mode, run_pi_mode_with_patch_mode};
 pub use trae::{run_trae_mode, uninstall_trae_mode};
 pub use vibe::{run_vibe_mode, uninstall_vibe};
 
@@ -551,7 +554,20 @@ pub(super) fn ensure_parent_dir(path: &Path) -> Result<()> {
 /// Resolve the final write target: if `path` is a symlink, follow it so
 /// the atomic rename lands on the real file and the symlink is preserved.
 fn resolve_atomic_target(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return canonical;
+    }
+
+    // Follow a not-yet-resolvable symlink so the write lands on its target
+    // instead of replacing the link. Every `atomic_write` caller reaches this,
+    // so redirect only when the target directory exists: callers that have not
+    // prepared one keep the previous behaviour rather than failing.
+    match resolve_symlink_target(path) {
+        Some(target) if target.parent().is_some_and(Path::is_dir) => {
+            fs::canonicalize(&target).unwrap_or(target)
+        }
+        _ => path.to_path_buf(),
+    }
 }
 
 /// Atomic write using tempfile + rename
@@ -612,6 +628,12 @@ pub(super) fn canonicalize_path_for_comparison(path: &Path) -> PathBuf {
     if let Ok(canonical) = fs::canonicalize(path) {
         return canonical;
     }
+
+    // A symlink whose target does not exist yet fails `canonicalize`, and the
+    // ancestor walk below would resolve it to its own location rather than the
+    // file it points at.
+    let resolved = resolve_symlink_target(path);
+    let path = resolved.as_deref().unwrap_or(path);
 
     let mut missing_components = Vec::new();
     let mut candidate = path;
@@ -1420,9 +1442,9 @@ pub(super) fn resolve_claude_dir_from(
 }
 
 /// Show current rtk configuration
-pub fn show_config(codex: bool, omp: bool) -> Result<()> {
-    if omp {
-        return show_omp_config();
+pub fn show_config(codex: bool, pi_compatible: Option<PiCompatibleAgent>) -> Result<()> {
+    if let Some(agent) = pi_compatible {
+        return show_pi_compatible_config(agent);
     }
     if codex {
         return show_codex_config();

@@ -71,6 +71,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          # Full history: the Pi extension history guard checks every revision
+          # of hooks/pi/rtk.ts against its allowlist; on a shallow clone it sees
+          # only the tip and passes without checking the rest.
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
