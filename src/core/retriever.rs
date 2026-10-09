@@ -18,7 +18,7 @@ const DEFAULT_MAX_ENTRY_BYTES: usize = 10 * 1024 * 1024;
 const DEFAULT_MAX_ENTRIES: usize = 200;
 const DEFAULT_RETENTION_DAYS: u32 = 30;
 pub const MIN_FAILURE_BYTES: usize = 500;
-const HASH_HEX_LEN: usize = 12;
+const HASH_HEX_LEN: usize = 16;
 const DEFAULT_TEE_MAX_FILES: usize = 20;
 const DEFAULT_TEE_MAX_FILE_SIZE: usize = 1_048_576;
 
@@ -731,7 +731,7 @@ fn list_entries(conn: &Connection) -> Result<i32> {
     })?;
 
     println!(
-        "{:<14} {:<26} {:>7} {:>7} {:>9} {:>5} TRUNC",
+        "{:<18} {:<26} {:>7} {:>7} {:>9} {:>5} TRUNC",
         "HASH", "COMMAND", "LINES", "HIDDEN", "ORIG", "EXIT"
     );
     let mut n = 0;
@@ -745,7 +745,7 @@ fn list_entries(conn: &Connection) -> Result<i32> {
             command
         };
         println!(
-            "{:<14} {:<26} {:>7} {:>7} {:>9} {:>5} {}",
+            "{:<18} {:<26} {:>7} {:>7} {:>9} {:>5} {}",
             hash,
             cmd,
             total,
@@ -856,6 +856,23 @@ mod tests {
         assert_eq!(a.len(), HASH_HEX_LEN);
         assert_ne!(a, content_hash("cmd2", b"output"));
         assert_ne!(a, content_hash("cmd", b"output2"));
+    }
+
+    #[test]
+    fn test_store_keeps_outputs_sharing_a_48_bit_hash_prefix() {
+        // SHA-256("cmd\0out-25833387") and SHA-256("cmd\0out-36334097") both
+        // start with 4ce95baf880e.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        let first = store_inner(&cfg, b"out-25833387", "cmd", Some(1), 1).unwrap();
+        let second = store_inner(&cfg, b"out-36334097", "cmd", Some(1), 1).unwrap();
+        assert_ne!(first.hash, second.hash);
+
+        let conn = open(&cfg).unwrap();
+        for (stored, content) in [(&first, b"out-25833387"), (&second, b"out-36334097")] {
+            let row = load_by_hash(&conn, &stored.hash).unwrap().expect("row");
+            assert_eq!(decode(&row).unwrap(), content);
+        }
     }
 
     #[test]

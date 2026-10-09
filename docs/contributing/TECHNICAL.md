@@ -289,7 +289,7 @@ Analytics commands (`rtk gain`, `rtk cc-economics`, `rtk session`) query this da
 On command failure (non-zero exit code) — or when a filter truncates a long list:
 
 1. Raw unfiltered output is stored in a content-addressed sqlite database (`~/.local/share/rtk/recall.db`, gzip, byte-faithful)
-2. A hint line is printed: `[full output: rtk recall 3f9c2a81d4e7]` (failures) or `[+N hidden: rtk recall <hash>]` (truncated lists)
+2. A hint line is printed: `[full output: rtk recall 3f9c2a81d4e7b05a]` (failures) or `[+N hidden: rtk recall <hash>]` (truncated lists)
 3. LLM agents run `rtk recall <hash>` to get back exactly what was elided instead of re-running the command
 
 The mode is selectable via `rtk config recall <sqlite|tee|disabled>` — `tee` keeps the legacy per-file behavior (`~/.local/share/rtk/tee/{epoch}_{slug}.log`). Recovery never affects command output or exit code. `rtk gain --recalls` reports how often elided output is actually consulted, per filter.
