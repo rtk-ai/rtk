@@ -2402,10 +2402,12 @@ fn run_cli() -> Result<i32> {
                 let (negations, command) = split_leading_negations(command);
                 let code = runner::run_test(&command, shell.as_deref(), cli.verbose)
                     .context("Failed to run test command")?;
-                if negations % 2 == 1 {
+                if negations == 0 {
+                    code
+                } else if negations % 2 == 1 {
                     i32::from(code == 0)
                 } else {
-                    code
+                    i32::from(code != 0)
                 }
             }
         }

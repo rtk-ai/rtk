@@ -90,3 +90,17 @@ fn commands_still_reach_the_test_runner() {
 
     assert_eq!(exit_code(dir.path(), &["test", "echo", "hello"]), 0);
 }
+
+/// Once negation syntax is present, the result is a shell truth value (0 or 1),
+/// never the wrapped command's arbitrary exit status.
+#[test]
+fn even_nonzero_negations_normalize_the_exit_code() {
+    let dir = fixture();
+
+    assert_eq!(
+        exit_code(dir.path(), &["test", "!", "!", "sh", "-c", "exit 2"]),
+        1
+    );
+    assert_eq!(exit_code(dir.path(), &["test", "!", "!", "false"]), 1);
+    assert_eq!(exit_code(dir.path(), &["test", "!", "!", "true"]), 0);
+}
