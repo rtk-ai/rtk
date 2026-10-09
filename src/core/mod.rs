@@ -2,6 +2,7 @@
 
 pub mod arg_tokenizer;
 pub mod args_utils;
+pub mod cmdline;
 pub mod config;
 pub mod constants;
 pub mod display_helpers;
