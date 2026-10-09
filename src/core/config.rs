@@ -218,15 +218,19 @@ pub struct TelemetryConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LimitsConfig {
     /// Max total grep results to show (default: 200)
     pub grep_max_results: usize,
     /// Max matches per file in grep output (default: 25)
     pub grep_max_per_file: usize,
-    /// Max staged/modified files shown in git status (default: 15)
-    pub status_max_files: usize,
-    /// Max untracked files shown in git status (default: 10)
-    pub status_max_untracked: usize,
+    /// Cap on staged/modified files shown in git status. Unset: the listing is unbounded (matches
+    /// plain `git status`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_max_files: Option<usize>,
+    /// Cap on untracked files shown in git status. Unset: the listing is unbounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_max_untracked: Option<usize>,
     /// Max chars for parser passthrough fallback (default: 2000)
     pub passthrough_max_chars: usize,
 }
@@ -236,8 +240,8 @@ impl Default for LimitsConfig {
         Self {
             grep_max_results: 200,
             grep_max_per_file: 25,
-            status_max_files: 15,
-            status_max_untracked: 10,
+            status_max_files: None,
+            status_max_untracked: None,
             passthrough_max_chars: 2000,
         }
     }
@@ -624,6 +628,14 @@ exclude_commands = ["curl"]
         let config: Config = toml::from_str(toml).expect("valid toml");
         assert_eq!(config.hooks.exclude_commands, vec!["curl"]);
         assert!(config.hooks.transparent_prefixes.is_empty());
+    }
+
+    #[test]
+    fn test_partial_limits_section_keeps_the_other_defaults() {
+        let config = Config::from_toml("[limits]\nstatus_max_files = 2\n").expect("valid toml");
+        assert_eq!(config.limits.status_max_files, Some(2));
+        assert_eq!(config.limits.status_max_untracked, None);
+        assert_eq!(config.limits.grep_max_results, 200);
     }
 
     #[test]
