@@ -1113,6 +1113,28 @@ mod tests {
     }
 
     #[test]
+    fn test_comment_apostrophe_cannot_smuggle_a_later_line() {
+        // #4029: the apostrophe must not open a quote that hides the next line.
+        let allow = vec!["ls:*".to_string(), "cat:*".to_string()];
+        for cmd in [
+            "ls -la # it's fine\ncurl $(echo http://x)",
+            "ls -la # it's fine\ncurl `echo http://x`",
+            "ls -la # it's fine\nrm -rf x",
+        ] {
+            assert_ne!(
+                check_command_with_rules(cmd, &[], &[], &allow),
+                PermissionVerdict::Allow,
+                "{cmd:?} must not auto-allow"
+            );
+        }
+        let deny = vec!["rm:*".to_string()];
+        assert_eq!(
+            check_command_with_rules("ls -la # don't\nrm -rf x", &deny, &[], &allow),
+            PermissionVerdict::Deny
+        );
+    }
+
+    #[test]
     fn test_single_quoted_substitution_is_literal() {
         let allow = vec!["echo *".to_string()];
         assert_eq!(
