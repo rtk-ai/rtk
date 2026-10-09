@@ -565,11 +565,28 @@ fn push_child_arg(cmd: &mut Command, arg: &OsStr) {
     }
 }
 
+/// std runs a program as a batch file when the path Windows resolves it to ends
+/// in `.bat` or `.cmd`, and tests a verbatim path as written. That resolution,
+/// which drops trailing dots and spaces and folds `.` and `..`, is what
+/// `path::absolute` returns; a path it cannot resolve stays on std's encoder.
 #[cfg(windows)]
 fn is_batch_program(cmd: &Command) -> bool {
-    std::path::Path::new(cmd.get_program())
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("bat") || ext.eq_ignore_ascii_case("cmd"))
+    let program = cmd.get_program();
+    let bytes = program.as_encoded_bytes();
+    if bytes.starts_with(br"\\?\") || bytes.starts_with(br"\??\") {
+        return has_batch_suffix(program);
+    }
+    std::path::absolute(program).map_or(true, |path| has_batch_suffix(path.as_os_str()))
+}
+
+/// std's test: `.bat` or `.cmd` at the end of the path, in any case.
+#[cfg(any(windows, test))]
+fn has_batch_suffix(path: &OsStr) -> bool {
+    let bytes = path.as_encoded_bytes();
+    bytes.len().checked_sub(4).is_some_and(|start| {
+        let tail = &bytes[start..];
+        tail.eq_ignore_ascii_case(b".bat") || tail.eq_ignore_ascii_case(b".cmd")
+    })
 }
 
 /// Unix: the argument vector reaches `execvp` verbatim, so there is nothing to
@@ -905,6 +922,16 @@ fn output_codepage() -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_batch_suffix_is_matched_as_std_matches_it() {
+        for path in ["x.bat", "X.CMD", r"C:\tools\x.bat", ".cmd", "C:.bat"] {
+            assert!(has_batch_suffix(OsStr::new(path)), "{path:?}");
+        }
+        for path in ["x.bat.exe", "x.bat.", "x.batch", "bat", ""] {
+            assert!(!has_batch_suffix(OsStr::new(path)), "{path:?}");
+        }
+    }
 
     #[test]
     fn test_strip_leading_bom_helper() {
@@ -1296,10 +1323,34 @@ mod tests {
     #[test]
     fn test_child_arg_leaves_batch_shims_on_stds_encoding() {
         // cmd.exe parses by its own rules, so `raw_arg` must not be used there.
-        let mut cmd = Command::new("gradlew.bat");
-        cmd.child_arg(r#""type""#);
-        let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, [r#""type""#]);
+        // Windows resolves each of these paths to one ending in `.bat` or `.cmd`.
+        for program in [
+            "gradlew.bat",
+            r"C:\tools\x.bat.",
+            r"C:\tools\x.bat ",
+            r"C:\tools\x.bat. .",
+            r"C:\tools\x.bat\.",
+            r"C:\tools\.cmd",
+        ] {
+            // nosemgrep: dynamic-command-execution -- test programs, the literals listed above
+            let mut cmd = Command::new(program);
+            cmd.child_arg(r#""type""#);
+            let args: Vec<_> = cmd.get_args().collect();
+            assert_eq!(args, [r#""type""#], "{program}");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_batch_program_follows_the_path_windows_resolves() {
+        for program in [
+            r"C:\tools\x.bat\..",
+            r"\\?\C:\tools\x.bat.",
+            r"\??\C:\tools\x.bat.",
+            r"C:\tools\x.exe",
+        ] {
+            assert!(!is_batch_program(&Command::new(program)), "{program}");
+        }
     }
 
     // ===== Windows-specific PATHEXT resolution tests (issue #212) =====
