@@ -924,6 +924,27 @@ fn print_omp_extension_status(label: &str, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Returns true if Pi or OMP RTK extension is installed.
+pub fn is_configured() -> bool {
+    // 1. Pi extension (local or global)
+    for global in [false, true] {
+        if let Ok(path) = pi_plugin_path_for_scope(global)
+            && path.is_file()
+        {
+            return true;
+        }
+    }
+    // 2. OMP extension (local or global)
+    for global in [false, true] {
+        if let Ok(path) = omp_extension_path_for_scope(global)
+            && path.is_file()
+        {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

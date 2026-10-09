@@ -194,6 +194,25 @@ pub fn uninstall_antigravity_mode_at(
     Ok(removed)
 }
 
+/// Returns true if an Antigravity RTK plugin is configured (workspace or global).
+pub fn is_configured() -> bool {
+    // 1. Workspace plugin
+    if let Ok(cwd) = user_dirs::current_dir() {
+        let ws = cwd.join(".agents/plugins/rtk");
+        if ws.join("plugin.json").is_file() || ws.join("hooks.json").is_file() {
+            return true;
+        }
+    }
+    // 2. Global plugin
+    if let Some(home) = user_dirs::home() {
+        let global = home.join(".gemini/config/plugins/rtk");
+        if global.join("plugin.json").is_file() || global.join("hooks.json").is_file() {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

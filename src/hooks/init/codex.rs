@@ -979,6 +979,21 @@ fn is_codex_hook_command(command: &str) -> bool {
     crate::hooks::is_rtk_hook_command(command, "codex")
 }
 
+/// Returns true if Codex RTK hook is configured.
+pub fn is_configured() -> bool {
+    let Ok(codex_dir) = resolve_codex_dir() else {
+        return false;
+    };
+    let hooks_json = codex_dir.join(HOOKS_JSON);
+    if let Ok(content) = fs::read_to_string(&hooks_json) {
+        let content = strip_leading_bom(&content);
+        if let Ok(root) = from_json_str::<serde_json::Value>(content.trim()) {
+            return codex_hook_already_present(&root);
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
