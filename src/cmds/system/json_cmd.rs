@@ -82,16 +82,27 @@ pub fn run_stdin(max_depth: usize, schema_only: bool, verbose: u8) -> Result<()>
 /// carry the BOM into piped output (`rtk json foo.json | jq .` failing to
 /// parse it) even though `filter_json_*` already tolerates a BOM on input.
 ///
+/// `schema_only` skips the fallback entirely rather than falling back through
+/// it — see the comment on that branch.
+///
 /// Returns `Cow` rather than an owned `String`: the raw-fallback case can
 /// then stay a zero-copy borrow of `content` instead of paying for another
 /// full copy of the (potentially large) input on every fallback.
 fn render_json<'a>(content: &'a str, max_depth: usize, schema_only: bool) -> Result<Cow<'a, str>> {
     let content = strip_leading_bom(content);
-    let output = if schema_only {
-        filter_json_string(content, max_depth)?
-    } else {
-        filter_json_compact(content, max_depth)?
-    };
+    if schema_only {
+        // `--keys-only` asks for the structure without the values, so the raw
+        // fallback prints every value back. never_worse reaches for raw
+        // whenever the schema is the longer of the two, which short values
+        // make the common case (`  k: string,` outgrows `"k":"v",`), so a
+        // small config or credential file is likelier to leak than a large
+        // one. There is no cheaper fallback that is still correct: re-emitting
+        // the structure without values *is* the schema, so bypassing the guard
+        // is the only fix. The extra tokens are bounded by the gap against an
+        // input too small to win that race, never by the size of the payload.
+        return Ok(Cow::Owned(filter_json_string(content, max_depth)?));
+    }
+    let output = filter_json_compact(content, max_depth)?;
     let shown = never_worse(content, &output);
     // never_worse hands back one of its two inputs (no allocation); compare
     // the `&str` fat pointers to tell which, instead of re-deriving the
@@ -427,5 +438,34 @@ mod tests {
     #[test]
     fn test_compact_truncates_mixed_ascii_multibyte_string() {
         assert_value_truncated(&("a".repeat(76) + &"日本語".repeat(5)));
+    }
+
+    #[test]
+    fn test_keys_only_never_prints_values() {
+        // `--keys-only` promises to strip values, but never_worse used to hand
+        // the raw JSON back whenever the schema was longer — printing the very
+        // values the flag exists to hide. Short values make that the common
+        // case, so a small config or credential file leaked while a large one
+        // did not. Assert on quotes: extract_schema emits keys unquoted, so a
+        // `"` anywhere in the output can only have come from a raw value.
+        let short_values = format!(
+            "{{{}}}",
+            (0..11)
+                .map(|i| format!("\"k{i}\":\"v{i}\""))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+
+        for raw in [r#"{"a":1,"b":"secretvalue","c":3}"#, short_values.as_str()] {
+            let shown = render_json(raw, 5, true).expect("must render");
+            assert!(
+                !shown.contains('"'),
+                "keys-only output quoted a value: {shown:?}"
+            );
+            assert!(
+                shown.contains("string"),
+                "expected a schema, got: {shown:?}"
+            );
+        }
     }
 }

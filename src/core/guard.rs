@@ -14,6 +14,13 @@
 //! The other is a clean run of a command whose output format rtk injected
 //! (`runner::RunOptions::clean_outputs`): ruff's `[]` answers a question the
 //! user never asked, so the filter's summary is shown although it is longer.
+//!
+//! `rtk json --keys-only` bypasses the guard outright rather than being allowed
+//! past it. It asks for the structure *without* the values, so a raw fallback
+//! prints exactly what the flag exists to hide — and it reaches for raw
+//! whenever the schema is longer, which short values make the common case. The
+//! schema is already the smallest form that answers the question; unlike the
+//! two above there is no cheaper fallback that is still correct.
 
 use crate::core::tracking::estimate_tokens;
 
