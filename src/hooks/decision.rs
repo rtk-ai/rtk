@@ -182,7 +182,59 @@ pub(crate) fn decide_with_params(
 /// which is what the `rtk rewrite` CLI renders. Every hook entry point goes
 /// through here so they cannot drift apart.
 pub(crate) fn decide_for_agent(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
-    suppress_identity(cmd, decide(cmd, verdict))
+    decide_for_agent_at(cmd, verdict, None)
+}
+
+/// [`decide_for_agent`] for a hook whose payload reports the command's working
+/// directory: inside a linked git worktree, `git` is left unrewritten.
+///
+/// Claude Code's worktree-isolation guard runs on the command *after* the hook
+/// has rewritten it, and it only accepts git spelled plainly (or under the few
+/// launchers it models). A rewritten `rtk git …` is refused outright as
+/// "cannot be shown not to be git", so no git command could run from an
+/// isolated session (#3864). The payload carries no isolation flag, so
+/// [`is_linked_git_worktree`] is the signal instead — it is true for any
+/// linked worktree, not only the `<repo>/.claude/worktrees/<name>` shape
+/// Claude Code's own harness happens to use, so a worktree hand-provisioned
+/// with `git worktree add` at an arbitrary path (e.g. this repo's own
+/// `.worktrees/<slug>` convention) is covered too. The rest of a chain is
+/// still rewritten: `git status && cargo build` → `git status && rtk cargo build`.
+pub(crate) fn decide_for_agent_at(
+    cmd: &str,
+    verdict: PermissionVerdict,
+    cwd: Option<&str>,
+) -> HookDecision {
+    let (mut excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
+    if cwd.is_some_and(is_linked_git_worktree) {
+        excluded.push("git".to_string());
+    }
+    suppress_identity(
+        cmd,
+        decide_with_params(cmd, verdict, &excluded, &transparent_prefixes),
+    )
+}
+
+/// Whether `cwd` is inside a linked git worktree rather than the main checkout.
+///
+/// Git marks a linked worktree by making `.git` at its root a *file*
+/// containing `gitdir: <path>`, rather than the directory the main checkout
+/// has (<https://git-scm.com/docs/gitrepository-layout>). Walking up from
+/// `cwd` for the nearest `.git` entry and checking which kind it is needs no
+/// subprocess, matches git's own upward search, and is path-shape-agnostic —
+/// unlike matching `cwd` against a fixed convention, it also covers a
+/// worktree Claude Code's own harness didn't create.
+pub(crate) fn is_linked_git_worktree(cwd: &str) -> bool {
+    let mut dir = std::path::Path::new(cwd);
+    loop {
+        let candidate = dir.join(".git");
+        if let Ok(metadata) = std::fs::metadata(&candidate) {
+            return metadata.is_file();
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => return false,
+        }
+    }
 }
 
 /// Turn a rewrite that changed nothing into a [`HookDecision::Defer`].
@@ -357,6 +409,80 @@ impl AgentPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- #3864: Claude Code worktree isolation ---
+
+    /// Lays out `root/.git` as either a linked-worktree file (`gitdir: ...`)
+    /// or a main-checkout directory, returning `root` and the leaf dir the
+    /// test should pass as `cwd` (`root` itself, or a subdirectory of it).
+    fn fixture_worktree(root: &std::path::Path, leaf: &str) {
+        std::fs::write(root.join(".git"), "gitdir: /elsewhere/.git/worktrees/feat-x\n").unwrap();
+        std::fs::create_dir_all(root.join(leaf)).unwrap();
+    }
+
+    fn fixture_main_checkout(root: &std::path::Path, leaf: &str) {
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join(leaf)).unwrap();
+    }
+
+    #[test]
+    fn is_linked_git_worktree_detects_a_dot_git_file_at_any_path_shape() {
+        // Not the `.claude/worktrees/<name>` convention Claude Code's own
+        // harness uses — a worktree hand-provisioned with `git worktree add`
+        // at an arbitrary location, exactly the gap #3879's reviewers flagged.
+        let root = tempfile::tempdir().unwrap();
+        fixture_worktree(root.path(), "src");
+        assert!(is_linked_git_worktree(root.path().to_str().unwrap()));
+        assert!(is_linked_git_worktree(
+            root.path().join("src").to_str().unwrap()
+        ));
+    }
+
+    #[test]
+    fn is_linked_git_worktree_rejects_the_main_checkout() {
+        let root = tempfile::tempdir().unwrap();
+        fixture_main_checkout(root.path(), "src");
+        assert!(!is_linked_git_worktree(root.path().to_str().unwrap()));
+        assert!(!is_linked_git_worktree(
+            root.path().join("src").to_str().unwrap()
+        ));
+    }
+
+    #[test]
+    fn is_linked_git_worktree_false_outside_any_repository() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(!is_linked_git_worktree(root.path().to_str().unwrap()));
+    }
+
+    #[test]
+    fn linked_worktree_leaves_git_plain_but_rewrites_the_rest() {
+        let root = tempfile::tempdir().unwrap();
+        fixture_worktree(root.path(), "src");
+        let wt = Some(root.path().join("src").to_str().unwrap().to_string());
+        assert_eq!(
+            decide_for_agent_at("git status", PermissionVerdict::Default, wt.as_deref()),
+            HookDecision::Defer
+        );
+        assert_eq!(
+            decide_for_agent_at(
+                "git status && cargo build",
+                PermissionVerdict::Allow,
+                wt.as_deref()
+            ),
+            HookDecision::AllowRewrite("git status && rtk cargo build".into())
+        );
+
+        let main = tempfile::tempdir().unwrap();
+        fixture_main_checkout(main.path(), "src");
+        assert_eq!(
+            decide_for_agent_at(
+                "git status",
+                PermissionVerdict::Allow,
+                main.path().to_str()
+            ),
+            HookDecision::AllowRewrite("rtk git status".into())
+        );
+    }
 
     /// A rewritable command with no rule matching it is an ask-rewrite, never
     /// an allow-rewrite (#1155).
