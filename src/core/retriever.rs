@@ -11,7 +11,7 @@ use flate2::write::GzEncoder;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_MAX_ENTRY_BYTES: usize = 10 * 1024 * 1024;
@@ -199,20 +199,39 @@ fn open(cfg: &RetrieverConfig) -> Result<Connection> {
     Ok(conn)
 }
 
+type FileId = (u64, u64);
+
 thread_local! {
-    static CONN_CACHE: std::cell::RefCell<Option<(PathBuf, Connection)>> =
+    static CONN_CACHE: std::cell::RefCell<Option<(PathBuf, FileId, Connection)>> =
         const { std::cell::RefCell::new(None) };
+}
+
+/// Identity of the file at `path`, so a store replaced at the same path (rm and
+/// recreate, restore from backup) is not served through a handle on the old inode.
+#[cfg(unix)]
+fn file_id(path: &Path) -> Option<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_id(path: &Path) -> Option<FileId> {
+    path.exists().then_some((0, 0))
 }
 
 fn with_open<T>(cfg: &RetrieverConfig, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
     let path = db_path(cfg)?;
     CONN_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        let reuse = matches!(&*cache, Some((p, _)) if *p == path && path.exists());
+        let current = file_id(&path);
+        let reuse = matches!(&*cache, Some((p, id, _)) if *p == path && current == Some(*id));
         if !reuse {
-            *cache = Some((path.clone(), open(cfg)?));
+            let conn = open(cfg)?;
+            let id =
+                file_id(&path).with_context(|| format!("stat recall DB: {}", path.display()))?;
+            *cache = Some((path.clone(), id, conn));
         }
-        let (_, conn) = cache.as_ref().expect("cache populated above");
+        let (_, _, conn) = cache.as_ref().expect("cache populated above");
         f(conn)
     })
 }
@@ -1141,6 +1160,28 @@ mod tests {
         assert!(
             load_by_hash(&conn, &old.hash).unwrap().is_some(),
             "a refreshed (recent created_at) entry must not be evicted before stale ones"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_store_reopens_a_replaced_db_file() {
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+        store_inner(&cfg, b"before\n", "cmd", Some(1), 1).expect("store into the first file");
+        let db = cfg.database_path.clone().expect("temp_cfg names the db");
+        for suffix in ["", "-wal", "-shm"] {
+            let mut p = db.clone().into_os_string();
+            p.push(suffix);
+            let _ = std::fs::remove_file(p);
+        }
+        drop(open(&cfg).expect("recreate the db at the same path"));
+
+        let stored = store_inner(&cfg, b"after\n", "cmd", Some(1), 1).expect("store after replace");
+        let conn = open(&cfg).expect("open the replacement file");
+        assert!(
+            load_by_hash(&conn, &stored.hash).expect("lookup").is_some(),
+            "a store after the file was replaced must land in the file now at the path"
         );
     }
 
