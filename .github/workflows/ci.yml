@@ -75,6 +75,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all
+        env:
+          RUST_MIN_STACK: '8388608'
 
   security:
     name: Security Scan
