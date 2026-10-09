@@ -61,7 +61,7 @@ Download from [GitHub releases](https://github.com/rtk-ai/rtk/releases):
 - Linux: `rtk-x86_64-unknown-linux-musl.tar.gz` / `rtk-aarch64-unknown-linux-gnu.tar.gz`
 - Windows: `rtk-x86_64-pc-windows-msvc.zip`
 
-**Windows users**: Extract the zip and place `rtk.exe` in a directory on your PATH. Run RTK from Command Prompt, PowerShell, or Windows Terminal — do not double-click the `.exe` (it prints usage and exits immediately). For full hook support, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) instead.
+**Windows users**: Extract the zip and place `rtk.exe` in a directory on your PATH. Run RTK from Command Prompt, PowerShell, or Windows Terminal — do not double-click the `.exe` (it prints usage and exits immediately). Claude Code hook support works natively on Windows; WSL is optional.
 
 ## Verify installation
 
@@ -78,18 +78,64 @@ cargo uninstall rtk
 
 Then reinstall using one of the methods above.
 
-## Project initialization
+## Claude Code setup
 
-Run once per project to enable the Claude Code hook:
-
-```bash
-rtk init
-```
-
-For a global install that patches `settings.json` automatically:
+For the recommended global setup:
 
 ```bash
 rtk init --global
+```
+
+For a minimal global hook without `RTK.md`:
+
+```bash
+rtk init -g --hook-only
+```
+
+### Manual hook setup
+
+By default, Claude Code uses `~/.claude/settings.json`; if `CLAUDE_CONFIG_DIR` is set, use `settings.json` in that directory instead.
+
+Make sure `rtk` is available on your `PATH`, then add the following `PreToolUse` hook to Claude Code's `settings.json`.
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "rtk hook claude"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+If `settings.json` already contains other settings or hooks, merge this entry into the existing file instead of replacing the file.
+
+To preview the minimal manual hook registration without writing any files, run:
+
+```bash
+rtk init -g --hook-only --no-patch --dry-run
+```
+
+Restart Claude Code, then verify the hook registration:
+
+```bash
+rtk init --show
+```
+
+It should report `[ok] Hook: rtk hook claude (native binary command)`.
+
+For a local prompt-only setup without a hook:
+
+```bash
+rtk init
 ```
 
 ## Uninstall
