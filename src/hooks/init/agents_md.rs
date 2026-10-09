@@ -294,8 +294,10 @@ pub(super) fn remove_rtk_reference_from_agents(
 /// Strip the inline RTK block from an instructions file's content, returning the cleaned
 /// text and whether a block was removed.
 pub(super) fn remove_rtk_block(content: &str) -> (String, bool) {
-    if let (Some(start), Some(end)) = (content.find(RTK_BLOCK_START), content.find(RTK_BLOCK_END)) {
-        let end_pos = end + RTK_BLOCK_END.len();
+    if let Some(start) = content.find(RTK_BLOCK_START)
+        && let Some(relative_end) = content[start..].find(RTK_BLOCK_END)
+    {
+        let end_pos = start + relative_end + RTK_BLOCK_END.len();
         let before = content[..start].trim_end();
         let after = content[end_pos..].trim_start();
 
@@ -333,6 +335,33 @@ pub(super) fn remove_rtk_block(content: &str) -> (String, bool) {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_remove_rtk_block_ignores_end_marker_before_start() {
+        let before =
+            format!("# My rules\n\nThe closing marker is `{RTK_BLOCK_END}`.\nKeep these notes.");
+        let input = format!("{before}\n\n{RTK_INSTRUCTIONS}\n\nMore user content.");
+
+        let (cleaned, removed) = remove_rtk_block(&input);
+
+        assert!(removed);
+        assert_eq!(cleaned, format!("{before}\n\nMore user content."));
+        assert_eq!(remove_rtk_block(&cleaned), (cleaned.clone(), false));
+    }
+
+    #[test]
+    fn test_remove_rtk_block_preserves_unmatched_markers() {
+        for input in [
+            "# User rules\n".to_string(),
+            format!("# User rules\n{RTK_BLOCK_END}\nKeep this.\n"),
+            format!("# User rules\n{RTK_BLOCK_START} v2 -->\nKeep this.\n"),
+            format!(
+                "# User rules\n{RTK_BLOCK_END}\nKeep this.\n{RTK_BLOCK_START} v2 -->\nUnfinished.\n"
+            ),
+        ] {
+            assert_eq!(remove_rtk_block(&input), (input.clone(), false));
+        }
+    }
 
     #[test]
     fn test_upsert_rtk_block_appends_when_missing() {
