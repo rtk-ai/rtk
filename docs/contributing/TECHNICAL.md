@@ -292,7 +292,7 @@ On command failure (non-zero exit code) — or when a filter truncates a long li
 2. A hint line is printed: `[full output: rtk recall 3f9c2a81d4e7]` (failures) or `[+N hidden: rtk recall <hash>]` (truncated lists)
 3. LLM agents run `rtk recall <hash>` to get back exactly what was elided instead of re-running the command
 
-The mode is selectable via `rtk config recall <sqlite|tee|disabled>` — `tee` keeps the legacy per-file behavior (`~/.local/share/rtk/tee/{epoch}_{slug}.log`). Recovery never affects command output or exit code. `rtk gain --recalls` reports how often elided output is actually consulted, per filter.
+The mode is selectable via `rtk config recall <sqlite|tee|disabled>` — `tee` keeps the legacy per-file behavior (`~/.local/share/rtk/tee/{epoch}-{pid}-{seq}_{slug}.log`, one new file per write). Recovery never affects command output or exit code. `rtk gain --recalls` reports how often elided output is actually consulted, per filter.
 
 > **Details**: [`src/core/README.md`](../../src/core/README.md) covers the recall store, tee mode configuration, and the rotation strategy.
 
