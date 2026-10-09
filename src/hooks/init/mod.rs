@@ -45,7 +45,7 @@ use claude::{
     hook_already_present, remove_hook_from_settings, run_claude_md_mode, run_default_mode,
     run_hook_only_mode,
 };
-use codex::{run_codex_mode, show_codex_config, uninstall_codex};
+use codex::{run_codex_mode, show_codex_config, uninstall_codex, UninstallCodexError};
 use cursor::{
     cursor_hook_already_present, install_cursor_hooks, remove_cursor_hooks, resolve_cursor_dir,
 };
@@ -860,7 +860,11 @@ pub fn uninstall_with_patch_mode(
         verbose, dry_run, ..
     } = ctx;
     if codex {
-        uninstall_codex(global, ctx)?;
+        match uninstall_codex(global, ctx) {
+            Ok(()) => {}
+            Err(UninstallCodexError::HookRefused(e)) => return Err(e),
+            Err(UninstallCodexError::Other(e)) => return Err(e),
+        }
         if dry_run {
             print_dry_run_footer();
         }

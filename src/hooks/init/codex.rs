@@ -5,6 +5,38 @@ use crate::core::user_dirs;
 use crate::hooks::constants::{CODEX_DIR, CODEX_HOOK_COMMAND, HOOKS_JSON, PRE_TOOL_USE_KEY};
 use std::path::Component;
 
+/// Error type for `uninstall_codex` to distinguish guard refusal from other failures.
+#[derive(Debug)]
+pub enum UninstallCodexError {
+    /// The containment guard refused to touch the hook path (symlink outside project).
+    HookRefused(anyhow::Error),
+    /// Any other failure during uninstall.
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for UninstallCodexError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UninstallCodexError::HookRefused(e) => write!(f, "hook refused: {e}"),
+            UninstallCodexError::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for UninstallCodexError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            UninstallCodexError::HookRefused(e) | UninstallCodexError::Other(e) => Some(e.as_ref()),
+        }
+    }
+}
+
+impl From<anyhow::Error> for UninstallCodexError {
+    fn from(e: anyhow::Error) -> Self {
+        UninstallCodexError::Other(e)
+    }
+}
+
 /// The line that says an `RTK.md` is RTK's to rewrite and to remove.
 ///
 /// `--codex` is the one mode whose `RTK.md` sits at the project root, next to the user's own
@@ -444,7 +476,7 @@ fn lexically_normalized(path: &Path) -> PathBuf {
     normalized
 }
 
-pub(super) fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
+pub(super) fn uninstall_codex(global: bool, ctx: InitContext) -> Result<(), UninstallCodexError> {
     let InitContext { dry_run, .. } = ctx;
     let mut hook_left_in_place = None;
     let removed = if global {
@@ -481,6 +513,9 @@ pub(super) fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
         codex_uninstall_report(&removed, hook_left_in_place.as_ref(), dry_run)
     );
 
+    if let Some(err) = hook_left_in_place {
+        return Err(UninstallCodexError::HookRefused(err));
+    }
     Ok(())
 }
 
@@ -2204,7 +2239,9 @@ mod tests {
         let _entered = test_isolation::enter(project.path());
         let result = uninstall_codex(false, InitContext::default());
 
-        result.expect("uninstall still cleans the project");
+        // Should return HookRefused error, but still clean the project
+        let err = result.expect_err("uninstall returns HookRefused when guard refuses hook");
+        assert!(matches!(err, UninstallCodexError::HookRefused(_)));
         assert_eq!(
             fs::read_to_string(elsewhere.path().join(HOOKS_JSON)).expect("read"),
             registered,

@@ -5,3 +5,4 @@ tests/fixtures/** -text
 # Hook payloads are installed byte-for-byte; keep their line endings stable
 # across platforms for embedded fixtures, hashes, and generated installs.
 hooks/**/*.ts -text
+graphify-out/graph.json merge=graphify

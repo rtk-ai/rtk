@@ -8,6 +8,7 @@ mod parser;
 
 // Re-export command modules for routing
 use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
+use hooks::init::codex::UninstallCodexError;
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git_cmd, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
@@ -2596,7 +2597,7 @@ fn run_cli() -> Result<i32> {
                     hooks::init::uninstall_copilot(ctx)?;
                 }
             } else if uninstall {
-                uninstall_init_dispatch(
+                let result = uninstall_init_dispatch(
                     agent,
                     global,
                     gemini,
@@ -2605,7 +2606,13 @@ fn run_cli() -> Result<i32> {
                     ctx,
                     hooks::init::uninstall_hermes,
                     hooks::init::uninstall_with_patch_mode,
-                )?;
+                );
+                // Map UninstallCodexError::HookRefused to exit code 2
+                match result {
+                    Ok(()) => {}
+                    Err(e) if e.downcast_ref::<UninstallCodexError>().is_some_and(|uce| matches!(uce, UninstallCodexError::HookRefused(_))) => return Ok(2),
+                    Err(e) => return Err(e),
+                }
             } else if gemini {
                 hooks::init::run_gemini(global, hook_only, patch_mode, ctx)?;
             } else if copilot {
