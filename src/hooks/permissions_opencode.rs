@@ -215,17 +215,20 @@ fn read_config(path: &Path) -> Option<Value> {
     }
 }
 
+/// A `bash` rule, for tests.
+#[cfg(test)]
+pub(crate) fn bash_rule(pattern: &str, action: Action) -> Rule {
+    Rule {
+        permission: "bash".to_string(),
+        pattern: pattern.to_string(),
+        action,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::bash_rule as rule;
     use super::*;
-
-    fn rule(pattern: &str, action: Action) -> Rule {
-        Rule {
-            permission: "bash".to_string(),
-            pattern: pattern.to_string(),
-            action,
-        }
-    }
 
     #[test]
     fn trailing_space_star_also_matches_the_bare_command() {
@@ -545,12 +548,11 @@ mod tests {
         });
     }
 
-    /// `check_command_for_agent` must route `Host::OpenCode` through this
-    /// module's rules, not another host's (empty) rule source, where every
-    /// verdict would collapse to `Default`.
+    /// `Host::OpenCode` loads this module's rules, not another host's (empty)
+    /// rule source, where every verdict would collapse to `Default`.
     #[test]
-    fn check_command_for_agent_consults_opencode_rules() {
-        use crate::hooks::permissions::{Host, check_command_for_agent};
+    fn opencode_host_rules_are_opencodes_own() {
+        use crate::hooks::permissions::{Host, HostRules};
 
         let tmp = test_isolation::tempdir();
         let project = tmp.path().join("project");
@@ -562,7 +564,7 @@ mod tests {
         test_isolation::with_root(&tmp.path().join("home"), || {
             let _entered = test_isolation::enter(&project);
             assert_eq!(
-                check_command_for_agent("git status", Host::OpenCode, None),
+                HostRules::load(Host::OpenCode, None).verdict("git status"),
                 PermissionVerdict::Deny
             );
         });

@@ -115,7 +115,8 @@ rewrite`, since it is inherited by every child process. See `decision.rs`'s
 
 ### Implementation
 
-- `permissions.rs` — loads deny/ask/allow rules, evaluates precedence, returns `PermissionVerdict`
+- `permissions.rs` — `HostRules`: loads a host's rules once (deny/ask/allow lists, or OpenCode's ordered last-match-wins list), evaluates them, returns `PermissionVerdict`
+- `decision.rs` — `decide_for_host`: what a hook does with a command under those rules, shared by every `rtk hook <agent>` processor and `rtk hook check`
 - `rewrite_cmd.rs` — maps verdict to exit code (consumed by shell hook)
 - `hook_cmd.rs` — maps decisions to each agent's JSON protocol, including Codex `updatedInput`
 
@@ -124,4 +125,4 @@ rewrite`, since it is inherited by every child process. See `decision.rs`'s
 Hook processors in `hook_cmd.rs` must return `Ok(())` on every path — success, no-match, parse error, and unexpected input. Returning `Err` propagates to `main()` and exits non-zero, which blocks the agent's command from executing. This violates the non-blocking guarantee documented in `hooks/README.md`.
 
 ## Adding New Functionality
-To add support for a new AI coding agent: (1) add the hook installation logic to `src/hooks/init/` following the existing agent patterns, (2) if the agent requires a custom hook protocol (like Gemini's `BeforeTool` or Vibe's `pre_tool`), add a processor function in `hook_cmd.rs` and a matching `HookCommands::<Agent>` variant + `AgentTarget::<Agent>` enum entry in `main.rs`, (3) if the agent has installable permission surfaces (denylist / allowlist), wire them into `permissions.rs::check_command_for` via a new `Host::<Agent>` variant, and (4) update `integrity.rs` with the expected hash for the new hook file. Note that `hook_check.rs::maybe_warn()` only checks the Claude Code hook — other agents don't have an outdated-hook warning path. Test by running `rtk init` in a fresh environment and verifying the hook rewrites commands correctly in the target agent.
+To add support for a new AI coding agent: (1) add the hook installation logic to `src/hooks/init/` following the existing agent patterns, (2) if the agent requires a custom hook protocol (like Gemini's `BeforeTool` or Vibe's `pre_tool`), add a processor function in `hook_cmd.rs` and a matching `HookCommands::<Agent>` variant + `AgentTarget::<Agent>` enum entry in `main.rs`, (3) if the agent has installable permission surfaces (denylist / allowlist), load them in `permissions.rs::HostRules::load` via a new `Host::<Agent>` variant, saying there whether the host judges the command its hook hands back, and (4) update `integrity.rs` with the expected hash for the new hook file. Note that `hook_check.rs::maybe_warn()` only checks the Claude Code hook — other agents don't have an outdated-hook warning path. Test by running `rtk init` in a fresh environment and verifying the hook rewrites commands correctly in the target agent.

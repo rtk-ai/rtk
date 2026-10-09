@@ -3,6 +3,7 @@ use super::constants::{
     SETTINGS_JSON, SETTINGS_LOCAL_JSON,
 };
 use super::init::resolve_claude_dir;
+use super::permissions_opencode::{Rule, check_command_with_opencode_rules, load_opencode_rules};
 use crate::core::user_dirs;
 use crate::core::user_env;
 use crate::discover::lexer::{is_word_boundary_whitespace, split_for_permissions};
@@ -46,38 +47,103 @@ pub enum Host {
 }
 
 pub fn check_command_for(cmd: &str, host: Host) -> PermissionVerdict {
-    check_command_for_agent(cmd, host, None)
+    HostRules::load(host, None).verdict(cmd)
 }
 
-pub fn check_command_for_agent(cmd: &str, host: Host, agent: Option<&str>) -> PermissionVerdict {
-    if host == Host::OpenCode {
-        let rules = super::permissions_opencode::load_opencode_rules(agent);
-        return super::permissions_opencode::check_command_with_opencode_rules(cmd, &rules);
+/// A host's permission rules, read from disk once. A hook judges the command
+/// as typed against them and, on a host that judges the command its hook
+/// hands back, the rewrite against the same rules.
+pub(crate) struct HostRules {
+    rules: Rules,
+    judges_final_command: bool,
+}
+
+enum Rules {
+    /// Deny, ask and allow lists: deny wins, then ask, then allow.
+    Buckets {
+        deny: Vec<String>,
+        ask: Vec<String>,
+        allow: Vec<String>,
+    },
+    /// One ordered list in which the last matching rule wins.
+    Ordered(Vec<Rule>),
+    /// No rules and no hook to apply them: nothing is judged.
+    Nothing,
+}
+
+impl Rules {
+    fn buckets((deny, ask, allow): (Vec<String>, Vec<String>, Vec<String>)) -> Self {
+        Self::Buckets { deny, ask, allow }
     }
-    let (deny_rules, ask_rules, allow_rules) = load_rules_for(host);
-    check_command_with_rules(cmd, &deny_rules, &ask_rules, &allow_rules)
+
+    fn empty() -> Self {
+        Self::buckets((Vec::new(), Vec::new(), Vec::new()))
+    }
 }
 
-/// Load `host`'s deny/ask/allow Bash rules from disk, doing the settings-file I/O
-/// exactly once. Exposed so a caller that checks many commands against the same
-/// host in a loop (e.g. `rtk discover` scanning thousands of transcript commands)
-/// can load once up front and reuse `check_command_with_rules` per command instead
-/// of going through `check_command_for` and re-reading every settings file from
-/// disk on every single call.
-pub(crate) fn load_rules_for(host: Host) -> (Vec<String>, Vec<String>, Vec<String>) {
-    match host {
-        Host::Claude => load_permission_rules(),
-        Host::Cursor => load_cursor_rules(),
-        Host::Gemini => load_gemini_rules(),
-        Host::Droid => load_droid_rules(),
-        // Hosts with no RTK-side rule source. Codex enforces its native
-        // execution rules after updatedInput. Do not interpret these hosts'
-        // rules as Claude Bash patterns or borrow another host's settings.
-        // No RTK-side match means Default, not an explicit Allow.
-        Host::Codex | Host::Trae | Host::Vibe | Host::Antigravity => {
-            (Vec::new(), Vec::new(), Vec::new())
+impl HostRules {
+    /// Read `host`'s rules. `agent` selects agent-scoped rules on a host that
+    /// has them.
+    pub(crate) fn load(host: Host, agent: Option<&str>) -> Self {
+        let (rules, judges_final_command) = match host {
+            Host::Claude => (Rules::buckets(load_permission_rules()), false),
+            Host::Cursor => (Rules::buckets(load_cursor_rules()), false),
+            Host::Gemini => (Rules::buckets(load_gemini_rules()), false),
+            Host::Droid => (Rules::buckets(load_droid_rules()), false),
+            // Hosts with no RTK-side rule source. Codex enforces its native
+            // execution rules after updatedInput. Do not interpret these hosts'
+            // rules as Claude Bash patterns or borrow another host's settings.
+            // No RTK-side match means Default, not an explicit Allow.
+            Host::Codex | Host::Trae | Host::Vibe | Host::Antigravity => (Rules::empty(), false),
+            // OpenCode judges the command its plugin hands back against these
+            // same rules, and a plugin cannot change that verdict.
+            Host::OpenCode => (Rules::Ordered(load_opencode_rules(agent)), true),
+        };
+        Self {
+            rules,
+            judges_final_command,
         }
-        Host::OpenCode => (Vec::new(), Vec::new(), Vec::new()),
+    }
+
+    /// No rules and no hook: every command gets [`PermissionVerdict::Default`].
+    pub(crate) fn none() -> Self {
+        Self {
+            rules: Rules::Nothing,
+            judges_final_command: false,
+        }
+    }
+
+    /// Deny, ask and allow lists a test supplies, for a host that does not
+    /// judge the command its hook hands back.
+    #[cfg(test)]
+    pub(crate) fn lists(deny: &[String], ask: &[String], allow: &[String]) -> Self {
+        Self {
+            rules: Rules::buckets((deny.to_vec(), ask.to_vec(), allow.to_vec())),
+            judges_final_command: false,
+        }
+    }
+
+    /// OpenCode's rules as [`HostRules::load`] builds them, from `rules`.
+    #[cfg(test)]
+    pub(crate) fn opencode(rules: Vec<Rule>) -> Self {
+        Self {
+            rules: Rules::Ordered(rules),
+            judges_final_command: true,
+        }
+    }
+
+    pub(crate) fn verdict(&self, cmd: &str) -> PermissionVerdict {
+        match &self.rules {
+            Rules::Buckets { deny, ask, allow } => check_command_with_rules(cmd, deny, ask, allow),
+            Rules::Ordered(rules) => check_command_with_opencode_rules(cmd, rules),
+            Rules::Nothing => PermissionVerdict::Default,
+        }
+    }
+
+    /// Whether the host judges the command its hook hands back against these
+    /// same rules, so that a rewrite must leave the verdict unchanged.
+    pub(crate) fn judges_final_command(&self) -> bool {
+        self.judges_final_command
     }
 }
 
@@ -543,6 +609,70 @@ fn split_compound_command(cmd: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each host reads its own rule file and no other: a command is judged by
+    /// its rule only on the host whose file holds it, and hosts with no rule
+    /// source judge every command `Default`.
+    #[test]
+    fn each_host_reads_its_own_rules_and_no_other() {
+        use crate::core::test_isolation;
+
+        let tmp = test_isolation::tempdir();
+        let home = tmp.path().join("home");
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).expect("create project dir");
+        for (dir, file, body) in [
+            (
+                ".claude",
+                "settings.json",
+                r#"{ "permissions": { "deny": ["Bash(rm:*)"] } }"#,
+            ),
+            (
+                ".cursor",
+                "cli-config.json",
+                r#"{ "permissions": { "deny": ["Shell(curl)"] } }"#,
+            ),
+            (
+                ".gemini",
+                "settings.json",
+                r#"{ "tools": { "confirmationRequired": ["run_shell_command(wget)"] } }"#,
+            ),
+            (
+                ".factory",
+                "settings.json",
+                r#"{ "commandDenylist": ["chmod 777"] }"#,
+            ),
+        ] {
+            std::fs::create_dir_all(home.join(dir)).expect("create host dir");
+            std::fs::write(home.join(dir).join(file), body).expect("write host settings");
+        }
+        let commands = ["rm -rf x", "curl x", "wget x", "chmod 777 x"];
+        let own = [
+            (Host::Claude, Some(("rm -rf x", PermissionVerdict::Deny))),
+            (Host::Cursor, Some(("curl x", PermissionVerdict::Deny))),
+            (Host::Gemini, Some(("wget x", PermissionVerdict::Ask))),
+            (Host::Droid, Some(("chmod 777 x", PermissionVerdict::Deny))),
+            (Host::Codex, None),
+            (Host::Trae, None),
+            (Host::Vibe, None),
+            (Host::Antigravity, None),
+            (Host::OpenCode, None),
+        ];
+
+        test_isolation::with_root(&home, || {
+            let _entered = test_isolation::enter(&project);
+            for (host, rule) in own {
+                let rules = HostRules::load(host, None);
+                for cmd in commands {
+                    let expected = match rule {
+                        Some((ruled, verdict)) if ruled == cmd => verdict,
+                        _ => PermissionVerdict::Default,
+                    };
+                    assert_eq!(rules.verdict(cmd), expected, "host {host:?}, command {cmd}");
+                }
+            }
+        });
+    }
 
     #[test]
     fn test_get_settings_paths_uses_the_resolved_claude_dir() {

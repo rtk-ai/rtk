@@ -49,39 +49,32 @@ impl Coverage {
     }
 }
 
-/// Preloaded permission rules, read from disk once per `discover` run instead of
-/// once per command. `check_command_for` re-reads every settings file on disk on
-/// every call; over a large history (tens of thousands of commands) that dominated
-/// runtime (see rtk-ai/rtk#3206 review: 80s vs 2.5s on the measured path).
-struct PermissionRules {
-    deny: Vec<String>,
-    ask: Vec<String>,
-    allow: Vec<String>,
-}
-
 /// Everything `hook_coverage`/`estimate_hook_coverage` need to judge a command,
 /// besides the command (and `tool_use_id`) itself — built once per `discover` run
 /// and passed by reference to every per-command call.
 ///
-/// Grouped into one struct rather than several individual positional params: with
-/// `excluded`/`transparent_prefixes` both `Vec<String>`, a swapped argument order
-/// at a call site would compile silently and misclassify RTK_DISABLED bypass
-/// coverage (code-review finding on rtk-ai/rtk#3206's fixup round).
+/// One struct rather than positional parameters: `excluded` and
+/// `transparent_prefixes` are both `Vec<String>`, so a swapped argument order would
+/// compile and misclassify RTK_DISABLED bypass coverage.
 ///
 /// `exclude_patterns`/`normalized_transparent_prefixes` are `registry::
-/// rewrite_command`'s exclude-pattern regexes and normalized prefixes,
-/// precompiled once here instead of inside `rewrite_command` on every call — that
-/// recompilation is exactly the "recompute per command instead of once per run"
-/// class of cost this PR's `PermissionRules`/`hook_status` caching already fixed
-/// elsewhere, left as a hot-loop cost in `estimate_hook_coverage_with_verdict`'s
-/// `registry::rewrite_command` call until now (code-review finding on rtk-ai/rtk#3206's
-/// second fixup round).
+/// rewrite_command`'s exclude-pattern regexes and normalized prefixes, compiled once
+/// per run like `rules`, not inside `rewrite_command` on every call.
 struct CoverageContext {
     hook_log: HashMap<String, HookDecisionRecord>,
     hook_installed: bool,
-    rules: PermissionRules,
+    /// Claude Code's rules, read from disk once per run instead of once per
+    /// command: over tens of thousands of commands, re-reading every settings
+    /// file dominated the runtime (80s vs 2.5s on the measured path).
+    rules: permissions::HostRules,
     exclude_patterns: Vec<ExcludePattern>,
     normalized_transparent_prefixes: Vec<String>,
+}
+
+/// The rules `discover` judges transcript commands against: Claude Code's,
+/// whose transcripts it reads.
+fn coverage_rules() -> permissions::HostRules {
+    permissions::HostRules::load(permissions::Host::Claude, None)
 }
 
 /// Determine whether `cmd` was (or, absent a log entry, likely would have been)
@@ -163,12 +156,7 @@ fn estimate_hook_coverage(permission_cmd: &str, rewrite_cmd: &str, ctx: &Coverag
     if !ctx.hook_installed {
         return false;
     }
-    let verdict = permissions::check_command_with_rules(
-        permission_cmd,
-        &ctx.rules.deny,
-        &ctx.rules.ask,
-        &ctx.rules.allow,
-    );
+    let verdict = ctx.rules.verdict(permission_cmd);
     estimate_hook_coverage_with_verdict(permission_cmd, rewrite_cmd, verdict, ctx)
 }
 
@@ -366,9 +354,8 @@ pub fn run(
     let normalized_transparent_prefixes =
         registry::normalize_transparent_prefixes(&transparent_prefixes);
 
-    // Loaded once up front (see `PermissionRules`), not once per command.
-    let (deny, ask, allow) = permissions::load_rules_for(permissions::Host::Claude);
-    let rules = PermissionRules { deny, ask, allow };
+    // Loaded once up front (see `CoverageContext::rules`), not once per command.
+    let rules = coverage_rules();
 
     let cutoff = crate::core::utils::days_ago_cutoff(since_days);
     // Every other hook_decisions-touching path (record()/record_parse_failure()/
@@ -697,12 +684,8 @@ mod tests {
         HookDecisionRecord { decision }
     }
 
-    fn empty_rules() -> PermissionRules {
-        PermissionRules {
-            deny: vec![],
-            ask: vec![],
-            allow: vec![],
-        }
+    fn empty_rules() -> permissions::HostRules {
+        permissions::HostRules::lists(&[], &[], &[])
     }
 
     /// Build a `CoverageContext` for tests, with an empty `hook_log` (so every
@@ -716,6 +699,30 @@ mod tests {
             exclude_patterns: vec![],
             normalized_transparent_prefixes: vec![],
         }
+    }
+
+    #[test]
+    fn coverage_is_judged_against_claude_codes_rules() {
+        use crate::core::test_isolation;
+
+        let tmp = test_isolation::tempdir();
+        let home = tmp.path().join("home");
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).expect("create project dir");
+        std::fs::create_dir_all(home.join(".claude")).expect("create .claude dir");
+        std::fs::write(
+            home.join(".claude").join("settings.json"),
+            r#"{ "permissions": { "deny": ["Bash(rm:*)"] } }"#,
+        )
+        .expect("write Claude settings");
+
+        test_isolation::with_root(&home, || {
+            let _entered = test_isolation::enter(&project);
+            assert_eq!(
+                coverage_rules().verdict("rm -rf x"),
+                PermissionVerdict::Deny
+            );
+        });
     }
 
     #[test]
@@ -873,7 +880,8 @@ mod tests {
         // check needs the stripped form. An exact-match deny rule on the literal
         // prefixed command only matches the raw form, not the stripped one.
         let mut ctx = test_ctx(true);
-        ctx.rules.deny = vec!["RTK_DISABLED=1 git status".to_string()];
+        ctx.rules =
+            permissions::HostRules::lists(&["RTK_DISABLED=1 git status".to_string()], &[], &[]);
 
         assert!(
             !would_be_covered_without_bypass("RTK_DISABLED=1 git status", "git status", &ctx),
@@ -897,7 +905,7 @@ mod tests {
         // would NOT do (it always evaluates the whole raw line). Must pass the
         // full, unsplit command as `raw_cmd`, not the isolated `rewrite_cmd`.
         let mut ctx = test_ctx(true);
-        ctx.rules.deny = vec!["cd /sensitive".to_string()];
+        ctx.rules = permissions::HostRules::lists(&["cd /sensitive".to_string()], &[], &[]);
         let full_chain = "cd /sensitive && grep -rn foo .";
         let isolated_segment = "grep -rn foo .";
 
