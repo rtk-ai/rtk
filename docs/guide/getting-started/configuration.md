@@ -110,6 +110,8 @@ FAILED: 2/15 tests
 
 Your AI assistant runs `rtk recall <hash>` exactly as printed in the hint — that is the whole agent interface. For humans inspecting the store: `rtk recall <hash> --full | --from N | --lines N | --grep PAT` and `rtk recall --list`. Storage is byte-faithful (`BLOB` + lossless gzip); the stored input is the captured command text, as with the previous tee files.
 
+Streaming `grep`/`rg` searches also report the final capped count, for example `capped: showing 200 of 250`, and include a recall hint when recovery is enabled. The live stream still stops at the configured result cap; use `rtk recall <hash>` to retrieve the elided matching output. Setting `RTK_RECALL=0` or `RTK_TEE=0` disables storage and the hint, but the final count is still shown.
+
 ### Choosing the recovery mode
 
 The simplest way is the CLI — no file editing needed:
