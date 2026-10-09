@@ -612,19 +612,37 @@ fn is_analytics_env_wrapper_token(value: &str) -> bool {
 pub fn strip_disabled_prefix_for_analytics(cmd: &str) -> (&str, &str) {
     let trimmed = cmd.trim();
     let tokens = tokenize(trimmed);
+    // Walk coalesced words (as `without_rtk_disabled` does) rather than raw
+    // tokens: `tokenize` splits `RTK_DISABLED=$CI` into `RTK_DISABLED=` +
+    // `$CI`, so the raw-token walk mistook `$CI` for the command word, found
+    // it unsupported, and fell back to `strip_disabled_prefix` — which never
+    // peels `sudo` (rtk-ai/rtk#4412). Coalescing keeps the whole assignment
+    // as one word while still splitting on spaces.
+    let words = coalesce_words(trimmed, &tokens);
+
+    // A coalesced word may span several adjacent tokens; a non-`Arg` one
+    // inside it (operator, redirect, shellism glued to an assignment) ends
+    // the prefix exactly as a standalone non-`Arg` token did in the raw walk.
+    let has_non_arg = |i: usize| {
+        let (word, start) = words[i];
+        let end = start + word.len();
+        tokens
+            .iter()
+            .any(|t| t.offset >= start && t.offset < end && t.kind != TokenKind::Arg)
+    };
 
     let mut disabled_index = None;
-    for (i, token) in tokens.iter().enumerate() {
+    for (i, &(word, _)) in words.iter().enumerate() {
         // A non-`Arg` token (operator, redirect) ends the prefix: an
         // `RTK_DISABLED=` after it belongs to another command.
-        if token.kind != TokenKind::Arg {
+        if has_non_arg(i) {
             break;
         }
-        if token.value.starts_with("RTK_DISABLED=") {
+        if word.starts_with("RTK_DISABLED=") {
             disabled_index = Some(i);
             break;
         }
-        if !is_analytics_env_wrapper_token(&token.value) {
+        if !is_analytics_env_wrapper_token(word) {
             // A real command word before RTK_DISABLED= (e.g. `docker run -e
             // RTK_DISABLED=1 …`) — not an RTK bypass prefix.
             return strip_disabled_prefix(trimmed);
@@ -635,25 +653,25 @@ pub fn strip_disabled_prefix_for_analytics(cmd: &str) -> (&str, &str) {
         return strip_disabled_prefix(trimmed);
     };
 
-    // Walk past RTK_DISABLED= and any remaining wrapper tokens; the next Arg
+    // Walk past RTK_DISABLED= and any remaining wrapper tokens; the next word
     // is the command word. If it isn't Supported, give up — do not keep
     // searching for an inner Supported command (ssh/xargs/watch/script args).
     let mut i = disabled_index + 1;
-    while i < tokens.len() {
-        let token = &tokens[i];
-        if token.kind != TokenKind::Arg {
+    while i < words.len() {
+        if has_non_arg(i) {
             break;
         }
-        if is_analytics_env_wrapper_token(&token.value) {
+        let (word, start) = words[i];
+        if is_analytics_env_wrapper_token(word) {
             i += 1;
             continue;
         }
-        let candidate = trimmed[token.offset..].trim();
+        let candidate = trimmed[start..].trim();
         if matches!(
             classify_command(candidate),
             Classification::Supported { .. }
         ) {
-            return (&trimmed[..token.offset], candidate);
+            return (&trimmed[..start], candidate);
         }
         break;
     }
@@ -6808,6 +6826,26 @@ mod tests {
         assert_eq!(
             strip_disabled_prefix_for_analytics("RTK_DISABLED=1 sudo -E docker ps"),
             ("RTK_DISABLED=1 sudo -E ", "docker ps")
+        );
+
+        // rtk-ai/rtk#4412: an expanded env value (e.g. $CI) is one coalesced
+        // word, not `RTK_DISABLED=` + `$CI`, so the sudo wrapper must be
+        // peeled exactly as it is for a literal value.
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("sudo RTK_DISABLED=$CI docker ps"),
+            ("sudo RTK_DISABLED=$CI ", "docker ps")
+        );
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("RTK_DISABLED=$CI sudo docker ps"),
+            ("RTK_DISABLED=$CI sudo ", "docker ps")
+        );
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("sudo RTK_DISABLED=$CI sudo -E docker ps"),
+            ("sudo RTK_DISABLED=$CI sudo -E ", "docker ps")
+        );
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("RTK_DISABLED=$CI docker ps"),
+            ("RTK_DISABLED=$CI ", "docker ps")
         );
 
         // Wrapper commands: do not peel into arguments / inner Supported cmds.
