@@ -89,6 +89,29 @@ struct Cli {
     skip_env: bool,
 }
 
+// A separate derive keeps these new arguments out of Commands' large generated
+// parser frame, which is already close to the Windows test-thread stack limit.
+#[derive(Debug, clap::Args)]
+#[group(id = "command_selection", multiple = true,
+    conflicts_with_all = ["daily", "weekly", "monthly", "all", "failures", "recalls", "reset"])]
+struct GainCommandArgs {
+    /// Sort By Command by saved tokens, invocation count, or weighted savings ratio
+    #[arg(long, value_enum, default_value = "saved")]
+    sort: core::tracking::CommandSort,
+    /// Sort By Command ascending instead of descending
+    #[arg(long)]
+    reverse: bool,
+    /// Maximum By Command rows (0 shows all)
+    #[arg(long, default_value = "10")]
+    limit: usize,
+    /// Include command names containing this case-sensitive literal text
+    #[arg(long)]
+    filter: Option<String>,
+    /// Exclude command names containing this case-sensitive literal text
+    #[arg(long)]
+    exclude: Option<String>,
+}
+
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// List directory contents with token-optimized output (proxy to native ls)
@@ -479,6 +502,8 @@ enum Commands {
         /// Filter statistics to current project (current working directory) // added
         #[arg(short, long)]
         project: bool,
+        #[command(flatten)]
+        command_options: Box<GainCommandArgs>,
         /// Show ASCII graph of daily savings
         #[arg(short, long)]
         graph: bool,
@@ -2693,6 +2718,7 @@ fn run_cli() -> Result<i32> {
 
         Commands::Gain {
             project, // added
+            command_options,
             graph,
             history,
             quota,
@@ -2707,8 +2733,22 @@ fn run_cli() -> Result<i32> {
             reset,
             yes,
         } => {
+            let GainCommandArgs {
+                sort,
+                reverse,
+                limit,
+                filter,
+                exclude,
+            } = *command_options;
             analytics::gain::run(
                 project, // added: pass project flag
+                &core::tracking::CommandQuery {
+                    sort,
+                    reverse,
+                    limit,
+                    filter,
+                    exclude,
+                },
                 graph,
                 history,
                 quota,
