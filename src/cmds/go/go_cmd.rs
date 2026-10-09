@@ -545,10 +545,11 @@ fn select_go_test_failure_lines(outputs: &[String]) -> Vec<String> {
 
         let is_location = is_go_test_location_line(trimmed);
         let is_failure = is_go_test_failure_line(trimmed);
+        let is_rerun_marker = is_go_test_fuzz_rerun_marker(trimmed);
 
-        if is_location || is_failure || keep_next_context_line {
+        if is_location || is_failure || is_rerun_marker || keep_next_context_line {
             relevant.push(trimmed.to_string());
-            keep_next_context_line = is_location;
+            keep_next_context_line = is_location || is_rerun_marker;
         } else {
             keep_next_context_line = false;
         }
@@ -570,6 +571,13 @@ fn select_go_test_failure_lines(outputs: &[String]) -> Vec<String> {
     }
 
     relevant
+}
+
+/// Go's fuzzing failure report names the corpus file that failed and the command
+/// that re-runs it. `To re-run:` is only a label for the command on the line
+/// after it, so the two have to survive the filter as a pair.
+fn is_go_test_fuzz_rerun_marker(line: &str) -> bool {
+    line.starts_with("Failing input written to") || line.starts_with("To re-run:")
 }
 
 fn is_go_test_location_line(line: &str) -> bool {
@@ -1263,5 +1271,43 @@ utils.go:15:5: unreachable code"#;
         assert!(result.contains("foo [FAIL]"), "got: {}", result);
         assert!(result.contains("teardown failed"), "got: {}", result);
         assert!(!result.contains("fuzz in"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_filter_go_test_failing_fuzz_keeps_corpus_path_and_rerun_command() {
+        // A failing fuzz target reports where the failing input was saved and
+        // how to re-run it. Without those two lines the agent cannot reproduce
+        // the failure or hand the corpus file to anyone else.
+        let output = r#"{"Action":"start","Package":"example.com/foo"}
+{"Action":"run","Package":"example.com/foo","Test":"FuzzRev"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"=== RUN   FuzzRev\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"fuzz: elapsed: 0s, gathering baseline coverage: 0/3 completed\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"--- FAIL: FuzzRev (0.01s)\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"    === ERROR\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"    rev_test.go:18: not involutive\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"    Failing input written to testdata/fuzz/FuzzRev/f7d774048ada30d0\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"    To re-run:\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"    go test -run=FuzzRev/f7d774048ada30d0\n"}
+{"Action":"fail","Package":"example.com/foo","Test":"FuzzRev","Elapsed":0.01}
+{"Action":"output","Package":"example.com/foo","Output":"FAIL\n"}
+{"Action":"fail","Package":"example.com/foo","Elapsed":0.02}"#;
+
+        let result = filter_go_test_json(output);
+
+        assert!(
+            result.starts_with("Go test: 0 passed, 1 failed"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("testdata/fuzz/FuzzRev/f7d774048ada30d0"),
+            "corpus path should be kept, got: {}",
+            result
+        );
+        assert!(
+            result.contains("go test -run=FuzzRev/f7d774048ada30d0"),
+            "re-run command should be kept, got: {}",
+            result
+        );
     }
 }
