@@ -80,6 +80,7 @@ Every percentage below measures **bash output bytes removed** — the only thing
 |---------|----------------------|--------------|
 | `go test` | 80-90% | Failures only |
 | `golangci-lint run` | 75% | Violations grouped by file |
+| `gotestsum` | ~70% | Failures only (same filter as `go test`) |
 | `go build` | 75% | Errors only |
 
 ## Ruby
