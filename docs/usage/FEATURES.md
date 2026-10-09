@@ -63,7 +63,7 @@ Ces drapeaux s'appliquent a **toutes** les sous-commandes :
 | Drapeau | Court | Description |
 |---------|-------|-------------|
 | `--verbose` | `-v` | Augmenter la verbosite (-v, -vv, -vvv). Montre les details de filtrage. |
-| `--ultra-compact` | `-u` | Mode ultra-compact : icones ASCII, format inline. Reduit encore la sortie bash. |
+| `--ultra-compact` | -- | Mode ultra-compact : icones ASCII, format inline. Pris en compte uniquement par `gh` et `glab`. |
 | `--skip-env` | -- | Definit `SKIP_ENV_VALIDATION=1` pour les processus enfants (Next.js, tsc, lint, prisma). |
 
 **Exemples :**
@@ -71,7 +71,7 @@ Ces drapeaux s'appliquent a **toutes** les sous-commandes :
 ```bash
 rtk -v git status          # Status compact + details de filtrage sur stderr
 rtk -vvv cargo test        # Verbosite maximale (debug)
-rtk -u git log             # Log ultra-compact, icones ASCII
+rtk --ultra-compact gh pr list  # Liste de PR ultra-compacte, icones ASCII
 rtk --skip-env next build  # Desactive la validation d'env de Next.js
 ```
 

@@ -132,23 +132,23 @@ Every percentage below measures **bash output bytes removed** — the only thing
 
 ## Global flags
 
-These flags apply to all RTK commands and can push the bash output reduction even higher:
+RTK's own flags:
 
 | Flag | Description |
 |------|-------------|
-| `--ultra-compact` | ASCII icons, inline format — extra token reduction on top of normal filtering |
-| `-v` / `--verbose` | Show filtering details on stderr (`-v`, `-vv`, `-vvv` for increasing detail) |
+| `--ultra-compact` | ASCII icons, inline format — extra token reduction on top of normal filtering. Currently read by `rtk gh` and `rtk glab`; other commands accept it and ignore it |
+| `-v` / `--verbose` | Show filtering details on stderr (`-v`, `-vv`, `-vvv` for increasing detail). Put it before the subcommand |
 
 ```bash
 # Ultra-compact: even smaller output
-rtk git log --ultra-compact
+rtk gh pr list --ultra-compact
 
 # Debug: see what RTK is doing
-rtk git status -vvv
+rtk -vvv git status
 ```
 
 :::note
-Use `--ultra-compact` (long form) rather than `-u` when working with Git commands. Git's own `-u` flag means `--set-upstream` and the short form can cause confusion.
+`--ultra-compact` has no short form. `-u` was removed so that Git's own `-u` (`git push -u`, `--set-upstream`) keeps its meaning.
 :::
 
 ## Commands that are not rewritten

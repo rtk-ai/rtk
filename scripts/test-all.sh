@@ -474,7 +474,7 @@ fi
 
 section "Global flags"
 
-assert_ok      "rtk -u ls ."                  rtk -u ls .
+assert_ok      "rtk --ultra-compact ls ."     rtk --ultra-compact ls .
 assert_ok      "rtk --skip-env npm --help"    rtk --skip-env npm --help
 
 # ── 32. CcEconomics ─────────────────────────────────
