@@ -550,7 +550,6 @@ mod windows {
             .env("HOME", home.path())
             .env("USERPROFILE", home.path())
             .env("XDG_CONFIG_HOME", home.path())
-            .env("RTK_TELEMETRY_DISABLED", "1")
             .output()
             .expect("run rtk run");
 

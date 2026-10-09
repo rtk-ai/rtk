@@ -2,6 +2,7 @@
 
 use crate::core::config;
 use crate::core::runner;
+use crate::core::shell::display_args;
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, truncate};
 use anyhow::Result;
@@ -107,7 +108,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "ruff",
-        &args.join(" "),
+        &display_args(args),
         move |stdout| {
             if is_check && use_json_filter && !stdout.trim().is_empty() {
                 filter_ruff_check_json(stdout)

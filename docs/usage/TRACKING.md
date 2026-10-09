@@ -283,7 +283,7 @@ fn main() -> anyhow::Result<()> {
 For commands that stream output or run interactively (no output capture):
 
 ```rust
-use rtk::tracking::TimedExecution;
+use rtk::tracking::{passthrough_label, TimedExecution};
 
 fn main() -> anyhow::Result<()> {
     let timer = TimedExecution::start();
@@ -291,8 +291,11 @@ fn main() -> anyhow::Result<()> {
     // Execute streaming command (e.g., git tag --list)
     execute_streaming_command()?;
 
-    // Track timing only (input_tokens=0, output_tokens=0)
-    timer.track_passthrough("git tag --list", "rtk git tag --list");
+    // Track timing only (input_tokens=0, output_tokens=0). The rtk_cmd is
+    // "rtk:passthrough git tag --list", so the row stays apart from a filtered
+    // "rtk git tag --list" run.
+    let tracked = "git tag --list";
+    timer.track_passthrough(tracked, &passthrough_label(tracked));
 
     Ok(())
 }
@@ -507,6 +510,13 @@ CREATE TABLE commands (
 CREATE INDEX idx_timestamp ON commands(timestamp);
 ```
 
+Both command columns store the command's words as given, each quoted only when
+it needs to be (`display_args` / `quote_word` in `src/core/shell.rs`, the rules of
+Python's `shlex.quote`), so `grep 'a b' f` and `grep a b f` stay distinct and a
+row reads back as the same words. `rtk_cmd` starts with `rtk`, with
+`rtk:toml` for a TOML-filtered run, or with `rtk:passthrough` for a run passed
+through unfiltered (`passthrough_label`).
+
 ### Automatic Cleanup
 
 On every write operation (`Tracker::record`), records older than 90 days are deleted:
@@ -584,6 +594,6 @@ Planned improvements (contributions welcome):
 
 ## See Also
 
-- [README.md](../README.md) - Main project documentation
-- [COMMAND_AUDIT.md](../claudedocs/COMMAND_AUDIT.md) - List of all RTK commands
+- [README.md](../../README.md) - Main project documentation
+- [What RTK covers](../guide/resources/what-rtk-covers.md) - The commands RTK filters
 - [Rust docs](https://docs.rs/) - Run `cargo doc --open` for API docs

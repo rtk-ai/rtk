@@ -313,6 +313,16 @@ mod tests {
     }
 
     #[test]
+    fn test_pipe_pytest_strips_ansi_before_parsing() {
+        // A colored pytest summary must not be reported as "No tests collected".
+        let input = "\u{1b}[32m===== \u{1b}[32m\u{1b}[1m12 passed\u{1b}[0m\u{1b}[32m in 21.90s\u{1b}[0m\u{1b}[32m =====\u{1b}[0m\n";
+        let f = resolve_filter("pytest").expect("pytest filter must exist");
+        let out = f(input);
+        assert!(out.contains("12 passed"), "out={}", out);
+        assert!(!out.contains("No tests collected"), "out={}", out);
+    }
+
+    #[test]
     fn test_resolve_filter_phpunit() {
         assert!(resolve_filter("phpunit").is_some());
     }

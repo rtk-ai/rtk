@@ -21,7 +21,7 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 → [Arg("cargo"), Arg("test"), Redirect("2>&1"), Operator("&&"), Arg("git"), Arg("status")]
 ```
 
-**Compound splitting** — The rewrite engine walks the tokens, splitting on `Operator` (`&&`, `||`, `;`) and typed `Pipe` tokens (`|`, `|&`). For normal pipelines, intermediate stages stay raw. A final stage whose rule's `pipeline_safety` allows it (ordinary `grep` and `rg` invocations) is rewritten; search pattern-file forms (`-f`/`--file`) defer because they can consume pipeline stdin as configuration. The producer stage is rewritten when its rule's `pipeline_safety` allows it and every downstream stage is a display-only consumer (`cat`, `head`, non-following `tail`) with no file-target redirect (#3171). Stderr pipelines (`|&`) and pipelines containing opaque shell groups remain raw.
+**Compound splitting** — The rewrite engine walks the tokens, splitting on `Operator` (`&&`, `||`, `;`, and the `case` terminators `;;`, `;&`, `;;&`) and typed `Pipe` tokens (`|`, `|&`). For normal pipelines, intermediate stages stay raw. A final stage whose rule's `pipeline_safety` allows it (ordinary `grep` and `rg` invocations) is rewritten; search pattern-file forms (`-f`/`--file`) defer because they can consume pipeline stdin as configuration. The producer stage is rewritten when its rule's `pipeline_safety` allows it and every downstream stage is a display-only consumer (`cat`, `head`, non-following `tail`) with no file-target redirect (#3171). Stderr pipelines (`|&`) and pipelines containing opaque shell groups remain raw.
 
 **Per-segment rewriting** — Each segment goes through:
 
@@ -50,7 +50,7 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 | `shell_split(cmd)` | Quote-aware split into argv-ready words (quotes stripped, escapes resolved) | `hooks/mod.rs::is_claude_hook_command`, `main.rs`'s `rtk proxy '...'` |
 | `split_for_permissions(cmd)` | Segments a compound command for the **permission gate** — deliberately the most conservative of three segmenters (see its doc comment for the full comparison table) | `hooks/permissions.rs::check_command_with_rules` |
 | `split_on_operators(cmd, stop_at_pipe)` | Segments for classification only — not safe for permission/security decisions | `registry.rs::split_command_chain` |
-| `contains_unattestable_construct(cmd)` | True for command/process substitution or a file-target redirect — constructs the permission gate can't decompose and must never auto-allow | `hooks/permissions.rs::check_command_with_rules` |
+| `contains_unattestable_construct(cmd)` | True for command/process substitution, quoting the lexer reads differently from bash (`$'\''`), or a file-target redirect — constructs the permission gate can't decompose and must never auto-allow | `hooks/permissions.rs::check_command_with_rules` |
 
 The permission gate, discover/analytics classification, and rewrite each segment compound commands (`&&`, `;`, `|`, background `&`, subshells) slightly differently on purpose — the gate must never under-segment (a hidden command could evade a deny rule), while rewrite and analytics only need to reproduce or classify the command's actual shape. Don't reuse `split_on_operators` or `rewrite_compound`'s segmenting for a permission/security decision; use `split_for_permissions`.
 

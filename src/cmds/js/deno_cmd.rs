@@ -1,5 +1,6 @@
 //! Filters deno output — lint, check, and task command output.
 
+use crate::core::shell::display_args;
 use crate::core::utils::{join_or_ok, resolved_command, strip_ansi};
 use anyhow::Result;
 use std::ffi::OsString;
@@ -33,7 +34,7 @@ fn run_filtered_subcmd(subcmd: &str, args: &[String], verbose: u8) -> Result<i32
         eprintln!("Running: deno {} {}", subcmd, args.join(" "));
     }
 
-    let display = format!("{} {}", subcmd, args.join(" "));
+    let display = format!("{} {}", subcmd, display_args(args));
     let tee_label = format!("deno_{}", subcmd);
     crate::core::runner::run_filtered(
         cmd,
@@ -84,7 +85,7 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
 
     let mut cmd = resolved_command("deno");
     cmd.arg("test").args(args);
-    let display = format!("test {}", args.join(" "));
+    let display = format!("test {}", display_args(args));
     crate::core::runner::run_test_cmd(
         cmd,
         "deno",

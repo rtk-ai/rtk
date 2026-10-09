@@ -201,11 +201,18 @@ integration tests):
   and a *negative* assertion (`!out.contains("Is a directory")`) is worse, passing vacuously
   while testing nothing. Assert RTK's own output, or the structure (exit code, which stream
   the message went to). Spawn rtk through `test_isolation::rtk_command()`
-  (`common::rtk_command()` under `tests/`): it redirects rtk's data and neutralizes the
-  contributor's git config and exported `GIT_*` variables, but leaves the locale to the
-  test. When a test genuinely needs a tool's English text, set `LC_ALL=C` on that command,
-  and on any native tool its output is compared with. A git the test runs itself goes
-  through `isolate_git()`, which pins it.
+  (`common::rtk_command()` under `tests/`): the child starts from an empty environment that
+  keeps only what `KEPT` (and `WINDOWS_KEPT` on Windows) in `test_isolation/scratch.rs`
+  names, with rtk's data and git config pinned to a scratch directory. A variable the child
+  or a tool it runs needs is set on the command, or added to `KEPT`. A cargo the child runs
+  keeps its `CARGO_HOME` in the scratch home and has no proxy or certificate settings, so a
+  fixture crate with dependencies fetches into an empty cache unless they are set on the
+  command. Under `tests/`, a native tool whose output a test compares with rtk's is built by
+  `common::native_command()`, in the same environment, so a setting only the contributor's
+  shell exports reaches neither side; it starts in the test's directory rather than the
+  child's, so give both the same `current_dir` or absolute paths. The locale is left to the
+  test: when it genuinely needs a tool's English text, set `LC_ALL=C` on that command, and
+  on the native one. A git the test runs itself goes through `isolate_git()`, which pins it.
 - **Never touch the ambient repository.** Use `test_isolation::temp_git_repo()` and
   `.current_dir(repo.path())`. A test that runs `git branch` in whatever repo the
   contributor is sitting in mutates their work, and one that assumes it is inside a repo at
