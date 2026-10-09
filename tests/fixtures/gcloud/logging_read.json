@@ -1,0 +1,4 @@
+[
+  {"timestamp":"2026-01-01T00:00:01Z","severity":"ERROR","logName":"application","textPayload":"request failed safely"},
+  {"timestamp":"2026-01-01T00:00:02Z","severity":"WARNING","logName":"worker","jsonPayload":{"message":"retry scheduled"}}
+]

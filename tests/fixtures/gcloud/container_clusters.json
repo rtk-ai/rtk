@@ -1,0 +1,4 @@
+[
+  {"name":"redacted-cluster-a","location":"region-a","status":"RUNNING","currentMasterVersion":"1.30.5","currentNodeVersion":"1.30.4"},
+  {"name":"redacted-cluster-b","location":"region-b","status":"RECONCILING","currentMasterVersion":"1.29.8","currentNodeVersion":"1.29.7"}
+]
