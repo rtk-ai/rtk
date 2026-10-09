@@ -5,6 +5,7 @@ pub mod args_utils;
 pub mod cmdline;
 pub mod config;
 pub mod constants;
+pub mod deferred;
 pub mod display_helpers;
 pub mod filter;
 pub mod guard;
