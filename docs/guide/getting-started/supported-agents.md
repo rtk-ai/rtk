@@ -44,7 +44,7 @@ Agent runs "cargo test"
 | Windsurf | Rules file (prompt-level) | N/A |
 | Codex CLI | Rust binary (`PreToolUse`) | Yes |
 | Kilo Code | Rules file (prompt-level) | N/A |
-| Google Antigravity | Rules file (prompt-level) | N/A |
+| Google Antigravity | Rust binary (`PreToolUse` plugin) | Yes |
 | Mistral Vibe | Rust binary (`pre_tool`) | Yes |
 
 Agents that rewrite transparently receive the awareness file selected by `awareness.level` in
@@ -130,7 +130,8 @@ rtk init --global --gemini
 rtk init --global --opencode
 ```
 
-Creates `~/.config/opencode/plugins/rtk.ts`. Uses the `tool.execute.before` hook.
+Installs the Claude Code setup and creates `~/.config/opencode/plugins/rtk.ts`.
+The plugin uses the `tool.execute.before` hook.
 
 ### Pi
 
@@ -271,13 +272,23 @@ rtk init --agent kilocode    # creates .kilocode/rules/rtk-rules.md in current p
 
 Kilo Code reads `.kilocode/rules/` as custom instructions. RTK adds guidance telling Kilo Code to prefer `rtk <cmd>` over raw commands.
 
-### Google Antigravity
+### Google Antigravity (CLI, IDE & 2.0)
 
 ```bash
-rtk init --agent antigravity    # creates .agents/rules/antigravity-rtk-rules.md in current project
+rtk init --agent antigravity          # workspace-scoped (<repo>/.agents/plugins/rtk/)
+rtk init -g --agent antigravity       # machine-scoped (~/.gemini/config/plugins/rtk/)
 ```
 
-Antigravity reads `.agents/rules/` as custom instructions. RTK adds guidance telling Antigravity to prefer `rtk <cmd>` over raw commands.
+Installs an Antigravity plugin bundle: `hooks.json` maps `PreToolUse` on `run_command` to the native `rtk hook antigravity` binary, and `rules/AGENTS.md` carries the awareness file selected by `awareness.level`. Before any command executes, RTK rewrites the tool call arguments in place using `overwrite.CommandLine`.
+
+Antigravity checks permissions after lifecycle hooks rewrite a command. If you enforce command allowlists, ensure permitted commands include `rtk` (e.g. `command(rtk git status)` or `command(rtk *)`).
+
+Uninstall:
+
+```bash
+rtk init --agent antigravity --uninstall       # workspace
+rtk init -g --agent antigravity --uninstall    # global
+```
 
 ### Mistral Vibe
 
@@ -310,17 +321,13 @@ Strips only RTK's `[[hooks]]` block and the `~/.vibe/prompts/rtk.md` file. Any o
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Trae, Cursor, Gemini, Codex, Factory Droid) apply rewrites before execution whenever RTK supports and can safely attest the command. Plugin integrations (OpenCode, Pi, Hermes) use in-place mutation via the agent's extension or plugin API.
+Rules file integrations (Cline, Windsurf, Kilo Code) rely on the model following instructions. Full hook integrations (Claude Code, Trae, Cursor, Gemini, Codex, Factory Droid, Antigravity) apply rewrites before execution whenever RTK supports and can safely attest the command. Plugin integrations (OpenCode, Pi, Hermes) use in-place mutation via the agent's extension or plugin API.
 
 ## Windows support
 
-The shell hook (`rtk-rewrite.sh`) requires a Unix shell. On native Windows:
+Since v0.37.2, `rtk init -g` registers the native `rtk hook claude` command on Windows, so Claude Code gets full auto-rewrite without a Unix shell. Setups created before v0.37.2 used CLAUDE.md injection and have no hook; re-running `rtk init -g` migrates them, and adds the hook once you answer `y` to the `settings.json` prompt (or pass `--auto-patch`).
 
-- `rtk init -g` automatically falls back to **CLAUDE.md injection mode** (prompt-level instructions)
-- Filters work normally (`rtk cargo test`, `rtk git status`)
-- Auto-rewrite does not work — the AI assistant is instructed to use RTK but commands are not intercepted
-
-For full shell-hook support on Windows, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install). Inside WSL, agents with shell hook integration (Claude Code, Cursor, Gemini) work identically to Linux. Native Rust hook integrations such as Trae do not depend on `rtk-rewrite.sh`.
+Integrations that install a shell wrapper script (such as Gemini) still need a Unix shell. For those, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install), where they work identically to Linux. Native Rust hook integrations such as Trae do not depend on a shell script.
 
 ## Graceful degradation
 

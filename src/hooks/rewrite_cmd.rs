@@ -2,6 +2,7 @@
 
 use super::decision::{self, HookDecision};
 use super::permissions::check_command;
+use crate::core::user_dirs;
 use std::io::Write;
 
 const TEE_READERS: &[&str] = &[
@@ -10,12 +11,12 @@ const TEE_READERS: &[&str] = &[
 
 fn expand_home(token: &str) -> String {
     if let Some(rest) = token.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
+        && let Some(home) = user_dirs::home()
     {
         return home.join(rest).to_string_lossy().into_owned();
     }
     if let Some(rest) = token.strip_prefix("$HOME/")
-        && let Some(home) = dirs::home_dir()
+        && let Some(home) = user_dirs::home()
     {
         return home.join(rest).to_string_lossy().into_owned();
     }

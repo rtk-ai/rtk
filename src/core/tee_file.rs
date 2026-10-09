@@ -2,8 +2,9 @@
 //! sqlite recall store (`[retriever] mode = "sqlite"`); see retriever.rs.
 
 use crate::core::config::Config;
-use crate::core::constants::RTK_DATA_DIR;
 use crate::core::retriever::RetrieverConfig;
+use crate::core::user_dirs;
+use crate::core::user_env;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -95,14 +96,19 @@ pub(crate) fn resolved_tee_dir() -> Option<PathBuf> {
     get_tee_dir(&cfg)
 }
 
+/// In a test build `RTK_TEE_DIR` is only what the test itself set, never an
+/// exported one — that names the developer's own spool — and `tee_directory`
+/// comes from the test's own configuration. `cleanup_old_files` deletes from
+/// whatever this returns, so a test that sets either points it at a directory
+/// of its own.
 fn get_tee_dir(cfg: &RetrieverConfig) -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("RTK_TEE_DIR") {
+    if let Some(dir) = user_env::var("RTK_TEE_DIR") {
         return Some(PathBuf::from(dir));
     }
     if let Some(ref dir) = cfg.tee_directory {
         return Some(dir.clone());
     }
-    dirs::data_local_dir().map(|d| d.join(RTK_DATA_DIR).join("tee"))
+    super::user_dirs::data().map(|d| d.join("tee"))
 }
 
 fn cleanup_old_files(dir: &Path, max_files: usize) {
@@ -172,7 +178,7 @@ fn write_tee_file(
 }
 
 fn display_path(path: &Path) -> String {
-    if let Some(home) = dirs::home_dir()
+    if let Some(home) = user_dirs::home()
         && let Ok(relative) = path.strip_prefix(&home)
     {
         return format!("~/{}", relative.display());
@@ -430,7 +436,7 @@ mod tests {
 
     #[test]
     fn test_display_shell_path_uses_home_var_for_home_paths_with_spaces() {
-        let Some(home) = dirs::home_dir() else {
+        let Some(home) = user_dirs::home() else {
             return;
         };
         let path = home

@@ -11,12 +11,14 @@
 //! otherwise replace non-UTF-8 bytes with U+FFFD and corrupt the stream
 //! (`#1087`).
 
+use crate::core::shell::display_args;
 use crate::core::tee::force_tee_hint;
 use crate::core::tracking;
 use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
 use std::borrow::Cow;
 use std::io::{IsTerminal, Write};
+use std::process::Stdio;
 
 const MAX_RESPONSE_SIZE: usize = 500;
 
@@ -32,6 +34,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     if verbose > 0 {
         eprintln!("Running: curl -s {}", args.join(" "));
     }
+
+    // Forward our stdin: `Command::output()` gives the child an immediate-EOF
+    // stdin, which empties stdin-based bodies (`-d @-`, `--data-binary @-`,
+    // `-T -`, `-K -`). Mirrors `RunOptions::inherit_stdin` (#4084).
+    cmd.stdin(Stdio::inherit());
 
     // Capture stdout as raw bytes (not UTF-8 String) so binary downloads
     // survive intact. `String::from_utf8_lossy` would otherwise replace
@@ -67,10 +74,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         handle
             .write_all(&output.stdout)
             .context("Failed to write binary response to stdout")?;
-        timer.track_passthrough(
-            &format!("curl {}", args.join(" ")),
-            &format!("rtk curl {}", args.join(" ")),
-        );
+        let tracked = format!("curl {}", display_args(args));
+        timer.track_passthrough(&tracked, &format!("rtk {tracked}"));
         return Ok(exit_code);
     }
 
@@ -86,12 +91,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let shown =
         crate::core::runner::emit_guarded(&filtered.content, filtered.tee_hint.as_deref(), &raw);
 
-    timer.track(
-        &format!("curl {}", args.join(" ")),
-        &format!("rtk curl {}", args.join(" ")),
-        &raw,
-        &shown,
-    );
+    let tracked = format!("curl {}", display_args(args));
+    timer.track(&tracked, &format!("rtk {tracked}"), &raw, &shown);
 
     Ok(exit_code)
 }

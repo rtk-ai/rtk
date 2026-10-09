@@ -6,6 +6,7 @@
 
 use super::utils::php_tool_command;
 use crate::core::runner;
+use crate::core::shell::display_args;
 use crate::core::utils::exit_code_from_status;
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -83,7 +84,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "phpstan",
-        &args.join(" "),
+        &display_args(args),
         move |stdout| {
             if use_text {
                 filter_phpstan_text(stdout)

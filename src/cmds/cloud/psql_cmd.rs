@@ -4,6 +4,7 @@
 //! and produces compact tab-separated or key=value output.
 
 use crate::core::runner::{self, RunOptions};
+use crate::core::shell::display_args;
 use crate::core::truncate::CAP_LIST;
 use crate::core::utils::resolved_command;
 use anyhow::Result;
@@ -37,7 +38,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "psql",
-        &args.join(" "),
+        &display_args(args),
         filter_psql_output,
         RunOptions::stdout_only()
             .tee("psql")

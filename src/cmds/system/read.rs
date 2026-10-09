@@ -2,6 +2,7 @@
 
 use crate::core::filter::{self, FilterLevel, Language};
 use crate::core::guard::never_worse;
+use crate::core::shell::quote_word;
 use crate::core::tracking;
 use anyhow::{Context, Result};
 use std::fs;
@@ -36,7 +37,7 @@ pub fn run(
             .write_all(&window)
             .context("Failed to write line window")?;
         timer.track_bytes(
-            &format!("cat {}", file.display()),
+            &cat_label(file),
             "rtk read",
             // The bytes `cat` would have written. Unknowable without reading the file, which is
             // the whole point of not doing that, so it is taken from the size on disk -- and
@@ -60,7 +61,7 @@ pub fn run(
             .write_all(window)
             .context("Failed to write line window")?;
         timer.track(
-            &format!("cat {}", file.display()),
+            &cat_label(file),
             "rtk read",
             &String::from_utf8_lossy(&bytes),
             &String::from_utf8_lossy(window),
@@ -121,7 +122,7 @@ pub fn run(
     };
     let shown = never_worse(&raw, &rtk_output);
     print!("{}", shown);
-    timer.track(&format!("cat {}", file.display()), "rtk read", &raw, shown);
+    timer.track(&cat_label(file), "rtk read", &raw, shown);
     Ok(())
 }
 
@@ -203,6 +204,11 @@ pub fn run_stdin(
 
     timer.track("cat - (stdin)", "rtk read -", &raw, shown);
     Ok(())
+}
+
+/// The tracked command for reading `file`, with the path quoted as one word.
+pub(crate) fn cat_label(file: &Path) -> String {
+    format!("cat {}", quote_word(&file.to_string_lossy()))
 }
 
 fn format_with_line_numbers(content: &str) -> String {
@@ -342,8 +348,15 @@ fn byte_line_window(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::test_isolation;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn cat_label_quotes_a_path_as_one_word() {
+        assert_eq!(cat_label(Path::new("src/main.rs")), "cat src/main.rs");
+        assert_eq!(cat_label(Path::new("my notes.txt")), "cat 'my notes.txt'");
+    }
 
     /// `read_head_lines` must agree with `head_window` byte-for-byte on every shape, since it
     /// replaces it on the unfiltered path -- CRLF endings and an unterminated last line
@@ -663,25 +676,15 @@ fn main() {{
         assert!(output.contains("more lines"));
     }
 
-    fn rtk_bin() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("debug")
-            .join("rtk")
-    }
-
     #[test]
     #[ignore]
     fn test_read_two_valid_files_concatenated() {
-        let bin = rtk_bin();
-        assert!(bin.exists(), "Run `cargo build` first");
-
         let mut f1 = NamedTempFile::with_suffix(".txt").unwrap();
         let mut f2 = NamedTempFile::with_suffix(".txt").unwrap();
         writeln!(f1, "alpha\nbravo").unwrap();
         writeln!(f2, "charlie\ndelta").unwrap();
 
-        let output = std::process::Command::new(&bin)
+        let output = test_isolation::rtk_command()
             .args([
                 "read",
                 &f1.path().to_string_lossy(),
@@ -699,13 +702,10 @@ fn main() {{
     #[test]
     #[ignore]
     fn test_read_valid_and_nonexistent() {
-        let bin = rtk_bin();
-        assert!(bin.exists(), "Run `cargo build` first");
-
         let mut f1 = NamedTempFile::with_suffix(".txt").unwrap();
         writeln!(f1, "valid content").unwrap();
 
-        let output = std::process::Command::new(&bin)
+        let output = test_isolation::rtk_command()
             .args([
                 "read",
                 &f1.path().to_string_lossy(),
@@ -733,10 +733,7 @@ fn main() {{
     #[test]
     #[ignore]
     fn test_read_stdin_dedup_warning() {
-        let bin = rtk_bin();
-        assert!(bin.exists(), "Run `cargo build` first");
-
-        let output = std::process::Command::new(&bin)
+        let output = test_isolation::rtk_command()
             .args(["read", "-", "-"])
             .stdin(std::process::Stdio::piped())
             .output()

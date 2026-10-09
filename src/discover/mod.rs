@@ -13,11 +13,12 @@ use std::collections::HashMap;
 use provider::{ClaudeProvider, SessionProvider};
 use registry::{
     Classification, ExcludePattern, category_avg_tokens, classify_command, split_command_chain,
-    strip_disabled_prefix,
+    strip_disabled_prefix_for_analytics,
 };
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
 use crate::core::tracking::{HookDecisionRecord, Tracker};
+use crate::core::user_dirs;
 use crate::discover::registry::prefix_contains_rtk_disabled;
 use crate::hooks::hook_check::{HookStatus, status as hook_status};
 use crate::hooks::permissions::{self, PermissionVerdict};
@@ -145,9 +146,10 @@ fn hook_coverage(
 /// segment would blind the deny/ask check to sibling segments). `rewrite_cmd` is
 /// passed to `registry::rewrite_command`, which is genuinely best-effort
 /// *per segment* — pass the isolated segment being evaluated. For the RTK_DISABLED=
-/// bypass call site specifically, `rewrite_cmd` must also have the prefix already
-/// *stripped*, since `rewrite_command` itself detects and refuses a raw
-/// `RTK_DISABLED=` prefix (registry.rs #345) — passing it unstripped there would
+/// bypass call site specifically, `rewrite_cmd` must also have its `RTK_DISABLED=`
+/// words removed (`without_rtk_disabled` does it, keeping any wrapper),
+/// since `rewrite_command` itself detects and refuses a raw
+/// `RTK_DISABLED=` prefix (registry.rs #345) — passing it unremoved there would
 /// make every bypassed command register as never-covered regardless of whether
 /// it's otherwise supported, defeating the point of the RTK_DISABLED bucket.
 ///
@@ -212,16 +214,75 @@ fn estimate_hook_coverage_with_verdict(
 /// (`ExtractedCommand::command`), prefix and any sibling chain segments intact —
 /// what the real hook's permission check would have seen (see `hook_coverage`'s
 /// doc comment for why an isolated segment would blind the deny/ask check to
-/// siblings). `stripped_cmd` is the isolated, prefix-*removed* segment being
-/// evaluated, which is what `registry::rewrite_command` needs since it refuses a
-/// raw `RTK_DISABLED=`-prefixed string on its own — see `estimate_hook_coverage`'s
-/// doc comment for the full reasoning.
+/// siblings). `unbypassed_cmd` is the segment as [`without_rtk_disabled`]
+/// rebuilds it: `docker ps` rewrites by default, while `sudo docker ps` only does when
+/// `sudo` is in `hooks.transparent_prefixes`, so asking about the peeled command
+/// alone would report savings the hook never offered.
 fn would_be_covered_without_bypass(
     raw_cmd: &str,
-    stripped_cmd: &str,
+    unbypassed_cmd: &str,
     ctx: &CoverageContext,
 ) -> bool {
-    estimate_hook_coverage(raw_cmd, stripped_cmd, ctx)
+    estimate_hook_coverage(raw_cmd, unbypassed_cmd, ctx)
+}
+
+/// The segment `strip_disabled_prefix_for_analytics` split into `env_prefix` and
+/// `actual_cmd`, with its `RTK_DISABLED=` words removed and every other word kept
+/// verbatim, wrapper included. Words are split the way the rest of discover splits
+/// them (`lexer::tokenize` + `coalesce_words`), so a quoted or expanded value
+/// (`RTK_DISABLED='1 2'`, `RTK_DISABLED=$CI`) goes as a whole.
+fn without_rtk_disabled(env_prefix: &str, actual_cmd: &str) -> String {
+    let starts: Vec<usize> = lexer::coalesce_words(env_prefix, &lexer::tokenize(env_prefix))
+        .iter()
+        .map(|&(_, start)| start)
+        .collect();
+    let mut line = String::with_capacity(env_prefix.len() + actual_cmd.len() + 1);
+    for (i, &start) in starts.iter().enumerate() {
+        let end = starts.get(i + 1).copied().unwrap_or(env_prefix.len());
+        let word = &env_prefix[start..end];
+        if !word.starts_with("RTK_DISABLED=") {
+            line.push_str(word);
+        }
+    }
+    if !line.is_empty() && !line.ends_with(char::is_whitespace) {
+        line.push(' ');
+    }
+    line.push_str(actual_cmd);
+    line
+}
+
+/// What a segment carrying `RTK_DISABLED=` contributes to the report.
+#[derive(Debug, PartialEq)]
+enum DisabledSegment {
+    /// The hook would have rewritten the line without the assignment: lost savings.
+    Bypass,
+    /// The assignment cost nothing. The line as typed without it is classified like
+    /// any other command, so `sudo RTK_DISABLED=1 docker ps` is an unhandled `sudo`
+    /// line rather than hook coverage of `docker ps`.
+    Unbypassed(String),
+    /// `classify_command` does not recognise the peeled command; the segment is left
+    /// out of the report.
+    Unhandled,
+}
+
+fn judge_disabled_segment(
+    raw_cmd: &str,
+    env_prefix: &str,
+    actual_cmd: &str,
+    ctx: &CoverageContext,
+) -> DisabledSegment {
+    if !matches!(
+        classify_command(actual_cmd),
+        Classification::Supported { .. }
+    ) {
+        return DisabledSegment::Unhandled;
+    }
+    let line = without_rtk_disabled(env_prefix, actual_cmd);
+    if would_be_covered_without_bypass(raw_cmd, &line, ctx) {
+        DisabledSegment::Bypass
+    } else {
+        DisabledSegment::Unbypassed(line)
+    }
 }
 
 /// Whether an already-`rtk`-prefixed command counts as coverage. `rtk proxy <cmd>`
@@ -266,19 +327,24 @@ pub fn run(
     let provider = ClaudeProvider;
 
     // Determine project filter
-    let project_filter = if all {
-        None
+    let scope = if all {
+        report::ScanScope::AllProjects
     } else if let Some(p) = project {
-        Some(p.to_string())
+        report::ScanScope::ProjectFilter(p.to_string())
     } else {
         // Default: current working directory
-        let cwd = std::env::current_dir()?;
+        let cwd = user_dirs::current_dir()?;
         let cwd_str = cwd.to_string_lossy().to_string();
-        let encoded = ClaudeProvider::encode_project_path(&cwd_str);
-        Some(encoded)
+        report::ScanScope::CurrentProject(ClaudeProvider::encode_project_path(&cwd_str))
+    };
+    let project_filter = match &scope {
+        report::ScanScope::AllProjects => None,
+        report::ScanScope::ProjectFilter(f) | report::ScanScope::CurrentProject(f) => {
+            Some(f.as_str())
+        }
     };
 
-    let sessions = provider.discover_sessions(project_filter.as_deref(), Some(since_days))?;
+    let sessions = provider.discover_sessions(project_filter, Some(since_days))?;
 
     if verbose > 0 {
         eprintln!("Scanning {} session files...", sessions.len());
@@ -378,42 +444,36 @@ pub fn run(
                 total_commands += 1;
 
                 // Detect RTK_DISABLED= bypass before classification
-                let (env_prefix, actual_cmd) = strip_disabled_prefix(part);
+                let (env_prefix, actual_cmd) = strip_disabled_prefix_for_analytics(part);
+                let unbypassed;
                 let part = if prefix_contains_rtk_disabled(env_prefix) {
-                    match classify_command(actual_cmd) {
-                        Classification::Supported { .. } => {
-                            // Only count as a "bypass" if the hook would actually have
-                            // covered it absent the bypass — otherwise RTK_DISABLED=
-                            // bypassed nothing (hook wasn't installed / excluded / would
-                            // defer / would deny), and flagging it as a "bypass" would be
-                            // false advice. See `would_be_covered_without_bypass`'s doc
-                            // comment for why this must never go through `hook_coverage`'s
-                            // measured-log path.
-                            if would_be_covered_without_bypass(
-                                &ext_cmd.command,
-                                actual_cmd,
-                                &coverage_ctx,
-                            ) {
-                                rtk_disabled_count += 1;
-                                rtk_disabled_estimated += 1;
-                                let display = truncate_command(actual_cmd);
-                                *rtk_disabled_cmds.entry(display).or_insert(0) += 1;
-                                continue;
-                            }
-                            // Genuinely never had a chance regardless of the bypass (no
-                            // hook installed / excluded by config / etc.) — a real
-                            // missed-savings opportunity like any other command, not a
-                            // "bypass" of anything. Fall through to the normal
-                            // classification below (using the env-stripped command)
-                            // instead of vanishing from the whole report — previously
-                            // this case was counted only in `total_commands` and nowhere
-                            // else (rtk-ai/rtk#3206 review).
-                            actual_cmd
+                    // A bypass counts only if the hook would have covered the line
+                    // without it — otherwise RTK_DISABLED= bypassed nothing (hook not
+                    // installed / excluded / would defer / would deny / the wrapper is
+                    // not rewritable), and flagging it would be false advice. See
+                    // `would_be_covered_without_bypass`'s doc comment for why this must
+                    // never go through `hook_coverage`'s measured-log path. A segment
+                    // that bypassed nothing falls through to the normal classification
+                    // as typed without the assignment, instead of vanishing from the
+                    // report (rtk-ai/rtk#3206 review).
+                    match judge_disabled_segment(
+                        &ext_cmd.command,
+                        env_prefix,
+                        actual_cmd,
+                        &coverage_ctx,
+                    ) {
+                        DisabledSegment::Bypass => {
+                            rtk_disabled_count += 1;
+                            rtk_disabled_estimated += 1;
+                            let display = truncate_command(actual_cmd);
+                            *rtk_disabled_cmds.entry(display).or_insert(0) += 1;
+                            continue;
                         }
-                        // Unsupported/Ignored under RTK_DISABLED= isn't interesting
-                        // either way — rtk was never going to touch it regardless of
-                        // the bypass.
-                        _ => continue,
+                        DisabledSegment::Unbypassed(line) => {
+                            unbypassed = line;
+                            unbypassed.as_str()
+                        }
+                        DisabledSegment::Unhandled => continue,
                     }
                 } else {
                     part
@@ -579,6 +639,7 @@ pub fn run(
 
     let report = DiscoverReport {
         sessions_scanned: sessions.len(),
+        scope,
         total_commands,
         already_rtk,
         already_rtk_estimated,
@@ -686,6 +747,86 @@ mod tests {
     }
 
     #[test]
+    fn test_without_rtk_disabled_keeps_every_other_word() {
+        for (env_prefix, expected) in [
+            ("RTK_DISABLED=1 ", "docker ps"),
+            ("sudo RTK_DISABLED=1 ", "sudo docker ps"),
+            ("RTK_DISABLED=1 sudo -E ", "sudo -E docker ps"),
+            ("FOO=1 RTK_DISABLED=true ", "FOO=1 docker ps"),
+            ("FOO='a  b' RTK_DISABLED=1 ", "FOO='a  b' docker ps"),
+            ("RTK_DISABLED='1 2' ", "docker ps"),
+            ("RTK_DISABLED=$CI ", "docker ps"),
+            ("sudo", "sudo docker ps"),
+        ] {
+            assert_eq!(
+                without_rtk_disabled(env_prefix, "docker ps"),
+                expected,
+                "{env_prefix:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_disabled_segment_is_judged_as_typed_without_the_bypass() {
+        // The analytics peel strips `sudo` so the bypass can be *detected*, but the
+        // counterfactual ("would the hook have rewritten this without the
+        // RTK_DISABLED=") keeps the wrapper. `docker ps` always rewrites; `sudo
+        // docker ps` does not (#146 / test_rewrite_sudo_passthrough), so a
+        // sudo-wrapped bypass recovers no savings: it is judged as the line
+        // without the assignment, not as a bypass.
+        fn judge(raw: &str, ctx: &CoverageContext) -> DisabledSegment {
+            let (env_prefix, actual_cmd) = strip_disabled_prefix_for_analytics(raw);
+            judge_disabled_segment(raw, env_prefix, actual_cmd, ctx)
+        }
+        let unbypassed = |line: &str| DisabledSegment::Unbypassed(line.to_string());
+        let ctx = test_ctx(true);
+        assert_eq!(
+            judge("sudo RTK_DISABLED=1 docker ps", &ctx),
+            unbypassed("sudo docker ps")
+        );
+        assert_eq!(
+            judge("RTK_DISABLED=1 env -i git status", &ctx),
+            unbypassed("env -i git status")
+        );
+        // The stripped segment alone would say yes.
+        assert!(estimate_hook_coverage(
+            "sudo RTK_DISABLED=1 docker ps",
+            "docker ps",
+            &ctx
+        ));
+        // …and it becomes a real bypass once the user declares sudo transparent.
+        let mut ctx_sudo = test_ctx(true);
+        ctx_sudo.normalized_transparent_prefixes = vec!["sudo".to_string()];
+        assert_eq!(
+            judge("sudo RTK_DISABLED=1 docker ps", &ctx_sudo),
+            DisabledSegment::Bypass
+        );
+        assert_eq!(
+            judge("RTK_DISABLED=1 sudo docker ps", &ctx_sudo),
+            DisabledSegment::Bypass
+        );
+        // Only the RTK_DISABLED= word is removed, whole: a bare bypass, one next
+        // to another assignment, and a quoted or expanded value are all bypasses.
+        for raw in [
+            "RTK_DISABLED=1 docker ps",
+            "FOO=1 RTK_DISABLED=true cargo test",
+            "RTK_DISABLED='1 2' docker ps",
+            "RTK_DISABLED=$CI docker ps",
+        ] {
+            assert_eq!(judge(raw, &ctx), DisabledSegment::Bypass, "{raw}");
+        }
+        // No hook installed: nothing was bypassed; the command is a plain miss.
+        assert_eq!(
+            judge("RTK_DISABLED=1 docker ps", &test_ctx(false)),
+            unbypassed("docker ps")
+        );
+        assert_eq!(
+            judge("RTK_DISABLED=1 frobnicate x", &ctx),
+            DisabledSegment::Unhandled
+        );
+    }
+
+    #[test]
     fn test_estimate_hook_coverage_false_for_unattestable_construct() {
         // The hook itself defers on unattestable constructs (substitutions, etc.),
         // so a command containing one was never actually rewritten — genuine miss.
@@ -741,7 +882,7 @@ mod tests {
 
         // Sanity check: the same deny rule does NOT match the stripped form alone —
         // if `estimate_hook_coverage` regressed to checking permissions against
-        // `stripped_cmd` instead of `raw_cmd`, this assertion would start failing
+        // `rewrite_cmd` instead of `permission_cmd`, this assertion would start failing
         // (the bug would make it come back true instead of false above).
         assert!(estimate_hook_coverage("git status", "git status", &ctx));
     }

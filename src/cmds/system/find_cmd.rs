@@ -1,5 +1,6 @@
 //! Filters find results by grouping files by directory.
 
+use crate::core::shell::{display_args, with_args};
 use crate::core::tracking;
 use crate::core::truncate::CAP_INVENTORY;
 use crate::core::utils::ChildArgExt;
@@ -60,13 +61,17 @@ const VERBATIM_ACTIONS: &[&str] = &[
 ];
 
 enum Dispatch {
-    Native(FindArgs),
+    Native {
+        parsed: FindArgs,
+        label: String,
+    },
     Compress {
         options: Vec<String>,
         paths: Vec<String>,
         expr: Vec<String>,
         max: Option<usize>,
         file_type: Option<String>,
+        label: String,
     },
     Verbatim(Vec<String>),
 }
@@ -187,7 +192,10 @@ fn dispatch(original: &[String]) -> Result<Dispatch> {
             if let Some(t) = file_type {
                 parsed.file_type = t;
             }
-            return Ok(Dispatch::Native(parsed));
+            return Ok(Dispatch::Native {
+                parsed,
+                label: find_label(original),
+            });
         }
     }
     Ok(Dispatch::Compress {
@@ -196,6 +204,7 @@ fn dispatch(original: &[String]) -> Result<Dispatch> {
         expr,
         max,
         file_type,
+        label: find_label(original),
     })
 }
 
@@ -244,12 +253,19 @@ fn run_verbatim(args: &[String], verbose: u8) -> Result<i32> {
     crate::core::runner::run_passthrough("find", &os_args, verbose)
 }
 
+/// The tracked command for a find run: the arguments exactly as they were passed to
+/// `rtk find`, quoted, with one blank between words.
+fn find_label(args: &[String]) -> String {
+    with_args("find", &display_args(args))
+}
+
 fn run_compress(
     options: &[String],
     paths: &[String],
     expr: &[String],
     max: Option<usize>,
     file_type: Option<&str>,
+    track_cmd: &str,
     verbose: u8,
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
@@ -282,18 +298,12 @@ fn run_compress(
         .split(|b| *b == 0)
         .filter(|s| !s.is_empty())
         .collect();
-    let track_cmd = format!(
-        "find {} {} {}",
-        options.join(" "),
-        paths.join(" "),
-        expr.join(" ")
-    );
     if entries.iter().any(|e| std::str::from_utf8(e).is_err()) {
         let raw: Vec<u8> = entries.iter().flat_map(|e| [*e, b"\n"].concat()).collect();
         let mut stdout = std::io::stdout().lock();
         stdout.write_all(&raw)?;
         stdout.flush()?;
-        timer.track_passthrough(&track_cmd, "rtk find (passthrough)");
+        timer.track_passthrough(track_cmd, &tracking::passthrough_label(track_cmd));
     } else {
         let files: Vec<String> = entries
             .iter()
@@ -311,7 +321,7 @@ fn run_compress(
             max_results,
             max_explicit,
             &[],
-            &track_cmd,
+            track_cmd,
             &raw_output,
             &timer,
         );
@@ -322,7 +332,8 @@ fn run_compress(
 /// Entry point from main.rs — dispatches on find's grammar then delegates.
 pub fn run_from_args(args: &[String], verbose: u8) -> Result<i32> {
     match dispatch(args)? {
-        Dispatch::Native(parsed) => run(
+        Dispatch::Native { parsed, label } => run(
+            &label,
             &parsed.pattern,
             &parsed.path,
             parsed.max_results,
@@ -338,7 +349,16 @@ pub fn run_from_args(args: &[String], verbose: u8) -> Result<i32> {
             expr,
             max,
             file_type,
-        } => run_compress(&options, &paths, &expr, max, file_type.as_deref(), verbose),
+            label,
+        } => run_compress(
+            &options,
+            &paths,
+            &expr,
+            max,
+            file_type.as_deref(),
+            &label,
+            verbose,
+        ),
         Dispatch::Verbatim(args) => run_verbatim(&args, verbose),
     }
 }
@@ -394,6 +414,7 @@ fn build_capped_listing(files: &[String], max_results: usize) -> String {
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
+    label: &str,
     pattern: &str,
     path: &str,
     max_results: usize,
@@ -438,7 +459,7 @@ pub fn run(
         max_results,
         max_explicit,
         &filtered,
-        &format!("find {} -name '{}'", path, effective_pattern),
+        label,
         &raw_output,
         &timer,
     );
@@ -454,7 +475,7 @@ fn native_walk(
     max_depth: Option<usize>,
     want_dirs: bool,
     case_insensitive: bool,
-    git_global: bool,
+    ambient_ignores: bool,
 ) -> (Vec<String>, Vec<String>) {
     // When the pattern targets dotfiles (e.g. -name ".claude.json"), we must walk hidden
     // entries; otherwise skip them to keep results tidy (#1101).
@@ -464,7 +485,11 @@ fn native_walk(
     builder
         .hidden(!search_hidden) // skip hidden files/dirs unless pattern targets dotfiles
         .git_ignore(true) // respect .gitignore
-        .git_global(git_global)
+        // Rules from outside the tree walked: the global gitignore, and ignore
+        // files in the directories above it. A test turns them off, so the
+        // developer's own do not decide what it finds.
+        .git_global(ambient_ignores)
+        .parents(ambient_ignores)
         .git_exclude(true);
     if let Some(depth) = max_depth {
         builder.max_depth(Some(depth));
@@ -630,13 +655,14 @@ fn render(
 ) -> String {
     files.sort();
     let note = filtered_hint(filtered);
+    let rtk_cmd = format!("rtk {track_cmd}");
 
     if files.is_empty() {
         let shown = match &note {
             Some(note) => crate::core::runner::emit_guarded(note, None, note),
             None => String::new(),
         };
-        timer.track(track_cmd, "rtk find", raw_output, &shown);
+        timer.track(track_cmd, &rtk_cmd, raw_output, &shown);
         return shown;
     }
 
@@ -739,13 +765,15 @@ fn render(
     }
     let shown =
         crate::core::runner::emit_guarded(body.trim_end_matches('\n'), hint.as_deref(), &baseline);
-    timer.track(track_cmd, "rtk find", raw_output, &shown);
+    timer.track(track_cmd, &rtk_cmd, raw_output, &shown);
     shown
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::test_isolation;
+    use crate::core::user_env;
 
     /// Convert string slices to Vec<String> for test convenience.
     fn args(values: &[&str]) -> Vec<String> {
@@ -754,7 +782,7 @@ mod tests {
 
     fn parse_find_args(a: &[String]) -> Result<FindArgs> {
         match dispatch(a)? {
-            Dispatch::Native(p) => Ok(p),
+            Dispatch::Native { parsed, .. } => Ok(parsed),
             Dispatch::Compress { .. } => anyhow::bail!("dispatched to compress"),
             Dispatch::Verbatim(_) => anyhow::bail!("dispatched to verbatim"),
         }
@@ -762,7 +790,7 @@ mod tests {
 
     fn class(a: &[&str]) -> &'static str {
         match dispatch(&args(a)) {
-            Ok(Dispatch::Native(_)) => "native",
+            Ok(Dispatch::Native { .. }) => "native",
             Ok(Dispatch::Compress { .. }) => "compress",
             Ok(Dispatch::Verbatim(_)) => "verbatim",
             Err(_) => "error",
@@ -994,6 +1022,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("f.txt"), "").unwrap();
         let result = run(
+            "find",
             "*.txt",
             root.path().to_str().unwrap(),
             50,
@@ -1184,14 +1213,14 @@ mod tests {
     #[test]
     fn find_dotfile_pattern_includes_hidden() {
         // .gitignore exists at the repo root — must be found when using a dotfile pattern
-        let result = run(".gitignore", ".", 50, true, Some(1), "f", false, 0);
+        let result = run("find", ".gitignore", ".", 50, true, Some(1), "f", false, 0);
         assert!(result.is_ok(), "run with dotfile pattern should not error");
     }
 
     #[test]
     fn find_regular_pattern_skips_hidden() {
         // Non-dot pattern should not error (hidden dirs remain skipped)
-        let result = run("*.rs", "src", 5, true, None, "f", false, 0);
+        let result = run("find", "*.rs", "src", 5, true, None, "f", false, 0);
         assert!(result.is_ok());
     }
 
@@ -1200,27 +1229,37 @@ mod tests {
     #[test]
     fn find_rs_files_in_src() {
         // Should find .rs files without error
-        let result = run("*.rs", "src", 100, true, None, "f", false, 0);
+        let result = run("find", "*.rs", "src", 100, true, None, "f", false, 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_dot_pattern_works() {
         // "." pattern should not error (was broken before)
-        let result = run(".", "src", 10, true, None, "f", false, 0);
+        let result = run("find", ".", "src", 10, true, None, "f", false, 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_no_matches() {
-        let result = run("*.xyz_nonexistent", "src", 50, true, None, "f", false, 0);
+        let result = run(
+            "find",
+            "*.xyz_nonexistent",
+            "src",
+            50,
+            true,
+            None,
+            "f",
+            false,
+            0,
+        );
         assert!(result.is_ok());
     }
 
     #[test]
     fn find_respects_max() {
         // With max=2, should not error
-        let result = run("*.rs", "src", 2, true, None, "f", false, 0);
+        let result = run("find", "*.rs", "src", 2, true, None, "f", false, 0);
         assert!(result.is_ok());
     }
 
@@ -1306,7 +1345,7 @@ mod tests {
     #[test]
     fn find_gitignored_excluded() {
         // target/ is in .gitignore — files inside should not appear
-        let result = run("*", ".", 1000, true, None, "f", false, 0);
+        let result = run("find", "*", ".", 1000, true, None, "f", false, 0);
         assert!(result.is_ok());
         // We can't easily capture stdout in unit tests, but at least
         // verify it runs without error. The smoke tests verify content.
@@ -1332,6 +1371,7 @@ mod tests {
     #[test]
     fn native_run_reports_missing_path_as_exit_1() {
         let code = run(
+            "find",
             "*",
             "/definitely/missing/xyz",
             10,
@@ -1346,13 +1386,136 @@ mod tests {
     }
 
     #[test]
+    fn the_find_label_has_one_blank_between_words() {
+        let w = |v: &[&str]| args(v);
+        assert_eq!(
+            find_label(&w(&["-L", "a b", "-name", "*.rs"])),
+            "find -L 'a b' -name '*.rs'"
+        );
+        assert_eq!(
+            find_label(&w(&["d", "-name", "*.rs"])),
+            "find d -name '*.rs'"
+        );
+        assert_eq!(find_label(&w(&["-L", "d"])), "find -L d");
+        assert_eq!(find_label(&w(&["d"])), "find d");
+        assert_eq!(find_label(&[]), "find");
+    }
+
+    /// The rtk column of a filtered row holds the arguments as typed, for the native walk
+    /// and for the compressed `find` alike.
+    #[test]
+    fn a_filtered_row_keeps_the_find_arguments() {
+        let tmp = test_isolation::tempdir();
+        let home = test_isolation::tempdir();
+        std::fs::create_dir(tmp.path().join("sub.rs")).expect("create a directory to find");
+        std::fs::write(tmp.path().join("a.rs"), "").expect("create a file to find");
+        let root = tmp.path().to_string_lossy().into_owned();
+        let quoted = crate::core::shell::quote_word(&root);
+        let cases: [(Vec<&str>, bool, String); 5] = [
+            (
+                vec![&root, "-iname", "*.RS", "-maxdepth", "1", "-type", "d"],
+                true,
+                format!("rtk find {quoted} -iname '*.RS' -maxdepth 1 -type d"),
+            ),
+            (
+                vec![&root, "-iname", "*.RS", "-t", "d"],
+                true,
+                format!("rtk find {quoted} -iname '*.RS' -t d"),
+            ),
+            (
+                vec![&root, "-iname", "*.RS", "-maxdepth", "1", "-m", "5"],
+                true,
+                format!("rtk find {quoted} -iname '*.RS' -maxdepth 1 -m 5"),
+            ),
+            (
+                vec!["*.rs", &root],
+                true,
+                format!("rtk find '*.rs' {quoted}"),
+            ),
+            (
+                vec![&root, "-name", "*.rs", "-mmin", "-600", "-t", "d"],
+                false,
+                format!("rtk find {quoted} -name '*.rs' -mmin -600 -t d"),
+            ),
+        ];
+        test_isolation::with_root(home.path(), || {
+            for (words, native, _) in &cases {
+                let given = args(words);
+                match dispatch(&given).expect("dispatch") {
+                    Dispatch::Native { parsed, .. } => {
+                        assert!(*native, "{words:?} went native");
+                        let (files, _) = native_walk(
+                            &parsed.path,
+                            &parsed.pattern,
+                            parsed.max_depth,
+                            parsed.file_type == "d",
+                            parsed.case_insensitive,
+                            true,
+                        );
+                        assert!(!files.is_empty(), "{words:?} matches no entry");
+                    }
+                    Dispatch::Compress { .. } => assert!(!*native, "{words:?} went to compress"),
+                    Dispatch::Verbatim(_) => panic!("{words:?} went verbatim"),
+                }
+                run_from_args(&given, 0).expect("find");
+            }
+            let tracker = tracking::Tracker::new().expect("open the tracking database");
+            let recent = tracker.get_recent(20).expect("read recent rows");
+            let stored: Vec<&str> = recent.iter().map(|r| r.rtk_cmd.as_str()).collect();
+            for (_, _, expected) in &cases {
+                assert!(
+                    stored.contains(&expected.as_str()),
+                    "no row {expected:?} in {stored:?}"
+                );
+            }
+        });
+    }
+
+    /// Output that is not UTF-8 passes through unfiltered, and its row keeps the
+    /// arguments that ran, so it reads back as the command. Run as a child, so the
+    /// raw bytes go to its captured stdout rather than the harness's. Linux only:
+    /// other file systems refuse a name that is not UTF-8.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_passthrough_row_keeps_the_find_arguments() {
+        use std::os::unix::ffi::OsStrExt;
+
+        if !test_isolation::rtk_binary_is_built() {
+            return;
+        }
+        let tmp = test_isolation::tempdir();
+        let home = test_isolation::tempdir();
+        let bad = std::ffi::OsStr::from_bytes(b"bad\xff.rs");
+        std::fs::write(tmp.path().join(bad), "x").expect("create a non-UTF-8 file name");
+        let root = tmp.path().to_string_lossy().into_owned();
+        test_isolation::with_root(home.path(), || {
+            let output = test_isolation::rtk_command()
+                .args(["find", &root, "-name", "*.rs", "-mmin", "-600"])
+                .output()
+                .expect("run rtk find");
+            assert!(output.status.success(), "{output:?}");
+
+            let tracker = tracking::Tracker::new().expect("open the tracking database");
+            let recent = tracker.get_recent(5).expect("read recent rows");
+            let expected = format!(
+                "rtk:passthrough find {} -name '*.rs' -mmin -600",
+                crate::core::shell::quote_word(&root)
+            );
+            assert!(
+                recent.iter().any(|r| r.rtk_cmd == expected),
+                "no row {expected:?} in {recent:?}"
+            );
+        });
+    }
+
+    #[test]
     fn native_run_returns_zero_on_success() {
-        let tmp = tempfile::tempdir().unwrap();
-        temp_env::with_var("RTK_TEE_DIR", Some(tmp.path()), || {
+        let tmp = test_isolation::tempdir();
+        user_env::with_path("RTK_TEE_DIR", Some(tmp.path()), || {
             std::fs::write(tmp.path().join("a.txt"), "x").unwrap();
             let root = tmp.path().to_string_lossy().into_owned();
             assert_eq!(
-                run("*.txt", &root, 10, false, None, "f", false, 0).unwrap(),
+                run("find", "*.txt", &root, 10, false, None, "f", false, 0).unwrap(),
                 0
             );
         });
@@ -1372,15 +1535,14 @@ mod tests {
 
     #[test]
     fn hidden_and_ignored_matches_are_collected_for_disclosure() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = test_isolation::tempdir();
         let root = tmp.path();
-        if !std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(root)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
+        // The developer's init template could seed `.git/info/exclude`, which
+        // the walk honours.
+        let mut init = std::process::Command::new("git");
+        init.args(["init", "-q"]).current_dir(root);
+        test_isolation::isolate_git(&mut init);
+        if !init.status().map(|s| s.success()).unwrap_or(false) {
             return; // no git: .gitignore cannot apply, nothing to assert
         }
         std::fs::write(root.join(".gitignore"), "secret.txt\nbuild/\n").unwrap();
@@ -1413,8 +1575,8 @@ mod tests {
 
     #[test]
     fn disclosure_survives_the_output_guard() {
-        let tee = tempfile::tempdir().unwrap();
-        temp_env::with_var("RTK_TEE_DIR", Some(tee.path()), || {
+        let tee = test_isolation::tempdir();
+        user_env::with_path("RTK_TEE_DIR", Some(tee.path()), || {
             let timer = tracking::TimedExecution::start();
             let shown = render(
                 vec!["visible.txt".to_string()],
@@ -1442,7 +1604,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn symlinked_root_still_discloses() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = test_isolation::tempdir();
         let root = tmp.path();
         std::fs::create_dir_all(root.join("sub").join(".hidden")).unwrap();
         std::fs::write(root.join("sub").join("a.txt"), "a").unwrap();

@@ -2,6 +2,8 @@
 
 use super::constants::RECALL_DB;
 use crate::core::config::Config;
+use crate::core::user_dirs;
+use crate::core::user_env;
 use anyhow::{Context, Result};
 use flate2::Compression;
 use flate2::read::GzDecoder;
@@ -169,20 +171,17 @@ fn gunzip(data: &[u8]) -> Result<Vec<u8>> {
 }
 
 fn db_path(cfg: &RetrieverConfig) -> Result<PathBuf> {
-    if let Ok(p) = std::env::var("RTK_RECALL_DB") {
+    if let Some(p) = user_env::var("RTK_RECALL_DB") {
         return Ok(PathBuf::from(p));
     }
     if let Some(ref p) = cfg.database_path {
         return Ok(p.clone());
     }
     // A test that names no store must never reach the developer's own: its rows
-    // would ship as real usage through the telemetry ping.
-    #[cfg(test)]
-    let base = std::env::temp_dir().join(format!("rtk-test-store-{}", std::process::id()));
-    #[cfg(not(test))]
-    let base = dirs::data_local_dir()
-        .ok_or_else(|| anyhow::anyhow!("no local data directory available"))?
-        .join(super::constants::RTK_DATA_DIR);
+    // would ship as real usage through the telemetry ping. `user_dirs::data` answers
+    // with a scratch directory in a test build.
+    let base = super::user_dirs::data()
+        .ok_or_else(|| anyhow::anyhow!("no local data directory available"))?;
     Ok(base.join(RECALL_DB))
 }
 
@@ -422,8 +421,8 @@ fn record_tee_recall_on(conn: &Connection, slug: &str, path: &str) {
 }
 
 pub(crate) fn recovery_disabled_by_env() -> bool {
-    matches!(std::env::var("RTK_RECALL").ok().as_deref(), Some("0"))
-        || matches!(std::env::var("RTK_TEE").ok().as_deref(), Some("0"))
+    matches!(user_env::var("RTK_RECALL").as_deref(), Some("0"))
+        || matches!(user_env::var("RTK_TEE").as_deref(), Some("0"))
 }
 
 fn record_tee_recall_with(cfg: &RetrieverConfig, slug: &str, path: &str) {
@@ -521,7 +520,7 @@ fn store_inner(
     } else {
         (payload.to_vec(), "raw")
     };
-    let cwd = std::env::current_dir()
+    let cwd = user_dirs::current_dir()
         .ok()
         .map(|p| p.to_string_lossy().into_owned());
 
@@ -1263,10 +1262,9 @@ mod tests {
 
     #[test]
     fn test_record_tee_recall_respects_kill_switch() {
-        let _guard = crate::core::utils::TEST_ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
-        temp_env::with_var("RTK_RECALL", Some("0"), || {
+        user_env::with_vars(&[("RTK_RECALL", Some("0"))], || {
             record_tee_recall_with(&cfg, "grep", "/tee/1_grep.log");
         });
         assert!(
