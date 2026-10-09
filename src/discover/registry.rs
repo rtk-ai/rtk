@@ -3341,6 +3341,23 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_xcodebuild_build_action() {
+        assert_eq!(
+            rewrite_command_no_prefixes("xcodebuild -scheme App build", &[]),
+            Some("rtk xcodebuild -scheme App build".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_xcodebuild_informational_flags_pass_through() {
+        assert_eq!(rewrite_command_no_prefixes("xcodebuild -list", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("xcodebuild -showBuildSettings -scheme App", &[]),
+            None
+        );
+    }
+
+    #[test]
     fn test_rewrite_toml_absolute_path() {
         assert_eq!(
             rewrite_command_no_prefixes("/usr/bin/jj log", &[]),
