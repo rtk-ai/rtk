@@ -908,7 +908,7 @@ pub(super) fn codex_hook_already_present(root: &serde_json::Value) -> bool {
         PRE_TOOL_USE_KEY,
         HookEntries::Grouped,
         |group| group_covers_tool(group, "Bash"),
-        |hook| is_command_hook(hook, is_codex_hook_command),
+        |hook| is_command_hook(hook, is_native_codex_hook_command),
     )
 }
 
@@ -916,11 +916,17 @@ fn patch_codex_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
     let InitContext { dry_run, .. } = ctx;
     let mut root = read_json_file(path)?.unwrap_or_else(|| serde_json::json!({}));
 
+    let legacy_removed =
+        remove_hook_entries(&mut root, PRE_TOOL_USE_KEY, HookEntries::Grouped, |hook| {
+            is_command_hook(hook, is_legacy_codex_hook_command)
+        });
     if codex_hook_already_present(&root) {
-        return Ok(false);
+        if !legacy_removed {
+            return Ok(false);
+        }
+    } else {
+        insert_hook_entry(&mut root, CODEX_HOOK_COMMAND)?;
     }
-
-    insert_hook_entry(&mut root, CODEX_HOOK_COMMAND)?;
 
     if !dry_run && let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| {
@@ -975,8 +981,24 @@ fn remove_codex_hook_from_file(path: &Path, ctx: InitContext) -> Result<bool> {
 
 /// Matches this agent's RTK hook command: `rtk hook codex` from a bare, absolute or
 /// Windows `rtk` path, and nothing else.
-fn is_codex_hook_command(command: &str) -> bool {
+fn is_native_codex_hook_command(command: &str) -> bool {
     crate::hooks::is_rtk_hook_command(command, "codex")
+}
+
+fn is_legacy_codex_hook_command(command: &str) -> bool {
+    if crate::hooks::is_rtk_hook_command(command, "claude") {
+        return true;
+    }
+
+    let argv = crate::discover::lexer::shell_split(command);
+    argv.len() == 1
+        && std::path::Path::new(&argv[0])
+            .file_name()
+            .is_some_and(|name| name == "rtk-rewrite.sh")
+}
+
+fn is_codex_hook_command(command: &str) -> bool {
+    is_native_codex_hook_command(command) || is_legacy_codex_hook_command(command)
 }
 
 #[cfg(test)]
@@ -996,8 +1018,29 @@ mod tests {
 
     #[test]
     fn codex_hook_command_rejects_other_commands() {
-        assert!(!is_codex_hook_command("rtk hook claude"));
+        assert!(is_codex_hook_command("rtk hook claude"));
+        assert!(is_codex_hook_command(
+            "/home/user/.claude/hooks/rtk-rewrite.sh"
+        ));
         assert!(!is_codex_hook_command("echo rtk hook codex"));
+        assert!(!is_codex_hook_command("echo rtk-rewrite.sh"));
+        assert!(!is_codex_hook_command("/custom/rtk-rewrite.sh.backup"));
+        assert!(!is_codex_hook_command(
+            "python3 /custom/audit.py --label rtk-rewrite.sh"
+        ));
+        assert!(!is_codex_hook_command(
+            "/home/user/.claude/hooks/rtk-rewrite.sh && logger -t audit done"
+        ));
+        assert!(!is_codex_hook_command(
+            "/home/user/.claude/hooks/rtk-rewrite.sh | tee -a /tmp/audit.log"
+        ));
+        assert!(!is_codex_hook_command(
+            "/home/user/.claude/hooks/rtk-rewrite.sh\nmy-audit"
+        ));
+        assert!(!is_codex_hook_command(
+            "/home/user/.claude/hooks/rtk-rewrite.sh --flag"
+        ));
+        assert!(!is_codex_hook_command("rtk hook cursor"));
         assert!(!is_codex_hook_command("\"rtk\"evil hook codex"));
     }
 
@@ -1261,6 +1304,144 @@ mod tests {
         );
         assert_eq!(root["hooks"]["Stop"][0]["hooks"][0]["command"], "echo stop");
         assert!(hooks_json.with_extension("json.bak").exists());
+    }
+
+    #[test]
+    fn codex_hook_presence_ignores_legacy_only_configuration() {
+        let root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [
+                        {"type": "command", "command": "rtk hook claude"},
+                        {"type": "command", "command": "/home/user/.claude/hooks/rtk-rewrite.sh"}
+                    ]
+                }]
+            }
+        });
+
+        assert!(!codex_hook_already_present(&root));
+    }
+
+    #[test]
+    fn remove_codex_hook_removes_legacy_entries_and_preserves_user_hook() {
+        let mut root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [
+                        {"type": "command", "command": "rtk hook claude"},
+                        {"type": "command", "command": "/home/user/.claude/hooks/rtk-rewrite.sh"},
+                        {"type": "command", "command": "my-guard"}
+                    ]
+                }]
+            }
+        });
+
+        assert!(remove_codex_hook_from_json(&mut root));
+        let hooks = root["hooks"]["PreToolUse"][0]["hooks"].as_array().unwrap();
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0]["command"], "my-guard");
+    }
+
+    #[test]
+    fn test_codex_install_migrates_legacy_hooks_with_or_without_native_hook() {
+        for native_present in [false, true] {
+            for legacy_command in ["rtk hook claude", "/home/user/.claude/hooks/rtk-rewrite.sh"] {
+                let temp = TempDir::new().unwrap();
+                let hooks_json = temp.path().join(HOOKS_JSON);
+                let mut entries = vec![
+                    serde_json::json!({"type": "command", "command": legacy_command}),
+                    serde_json::json!({"type": "command", "command": "echo rtk-rewrite.sh"}),
+                    serde_json::json!({"type": "command", "command": "echo rtk hook claude"}),
+                    serde_json::json!({"type": "command", "command": "/home/user/.claude/hooks/rtk-rewrite.sh && logger -t audit done"}),
+                ];
+                let native = serde_json::json!({
+                    "type": "command", "command": "/opt/bin/rtk hook codex", "timeout": 37
+                });
+                if native_present {
+                    entries.push(native.clone());
+                }
+                let original = serde_json::json!({
+                    "custom": true,
+                    "hooks": {
+                        "PreToolUse": [{"matcher": "Bash", "hooks": entries}],
+                        "Stop": [{"hooks": [{"type": "command", "command": "echo stop"}]}]
+                    }
+                });
+                let original_bytes = serde_json::to_string_pretty(&original).unwrap();
+                fs::write(&hooks_json, &original_bytes).unwrap();
+                let install = |ctx| {
+                    run_codex_mode_with_paths(
+                        temp.path().join(AGENTS_MD),
+                        temp.path().join(RTK_MD),
+                        hooks_json.clone(),
+                        false,
+                        ctx,
+                    )
+                    .unwrap();
+                };
+                install(InitContext {
+                    dry_run: true,
+                    ..InitContext::default()
+                });
+                assert_eq!(fs::read_to_string(&hooks_json).unwrap(), original_bytes);
+                assert!(!hooks_json.with_extension("json.bak").exists());
+
+                install(InitContext::default());
+                let migrated_bytes = fs::read_to_string(&hooks_json).unwrap();
+                let root: serde_json::Value = serde_json::from_str(&migrated_bytes).unwrap();
+                let hooks: Vec<_> = root["hooks"]["PreToolUse"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|group| group["hooks"].as_array().unwrap())
+                    .collect();
+                assert_eq!(hooks.len(), 4);
+                assert_eq!(
+                    hooks
+                        .iter()
+                        .filter(|hook| is_command_hook(hook, is_native_codex_hook_command))
+                        .count(),
+                    1
+                );
+                assert!(
+                    !hooks
+                        .iter()
+                        .any(|hook| is_command_hook(hook, is_legacy_codex_hook_command))
+                );
+                assert!(
+                    hooks
+                        .iter()
+                        .any(|hook| hook["command"] == "echo rtk-rewrite.sh")
+                );
+                assert!(
+                    hooks
+                        .iter()
+                        .any(|hook| hook["command"] == "echo rtk hook claude")
+                );
+                assert!(hooks.iter().any(|hook| {
+                    hook["command"]
+                        == "/home/user/.claude/hooks/rtk-rewrite.sh && logger -t audit done"
+                }));
+                if native_present {
+                    assert!(hooks.contains(&&native));
+                }
+                assert_eq!(root["hooks"]["Stop"], original["hooks"]["Stop"]);
+                assert_eq!(root["custom"], true);
+                assert_eq!(
+                    fs::read_to_string(hooks_json.with_extension("json.bak")).unwrap(),
+                    original_bytes
+                );
+
+                install(InitContext::default());
+                assert_eq!(fs::read_to_string(&hooks_json).unwrap(), migrated_bytes);
+                assert_eq!(
+                    fs::read_to_string(hooks_json.with_extension("json.bak")).unwrap(),
+                    original_bytes
+                );
+            }
+        }
     }
 
     #[test]
