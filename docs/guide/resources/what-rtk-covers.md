@@ -109,6 +109,14 @@ Every percentage below measures **bash output bytes removed** — the only thing
 | `kubectl get pods` | 65% | Name + status + restarts only |
 | `kubectl logs` | 70% | Deduplicated entries |
 
+## Nix
+
+| Command | Bash output reduction | What changes |
+|---------|----------------------|--------------|
+| `nix build` / `nix-build` | 90% | Download/copy progress batched into counts, store paths shortened, errors kept |
+| `nix develop` / `nix-shell` | varies | Same filter; a wrapped `-c`/`--run <cmd>` is delegated to that command's own rtk filter |
+| `nix flake` / `nix profile` / `nix-env` | varies | Progress, eval traces and store listings compressed; clean output passes through |
+
 ## Files and Search
 
 | Command | Bash output reduction | What changes |
