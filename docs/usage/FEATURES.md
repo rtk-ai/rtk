@@ -955,9 +955,17 @@ abc123def456   nginx:1.25     "/dock..."  ...      db   postgres:16 Up 2d (healt
 
 | Commande | Description | Options |
 |----------|-------------|---------|
-| `rtk kubectl pods [-n ns] [-A]` | Liste compacte des pods | Namespace ou tous |
-| `rtk kubectl services [-n ns] [-A]` | Liste compacte des services | Namespace ou tous |
+| `rtk kubectl pods [-n ns] [-A] [-l selector]` | Liste compacte des pods | Namespace, tous ou selection par labels |
+| `rtk kubectl services [-n ns] [-A] [-l selector]` | Liste compacte des services | Namespace, tous ou selection par labels |
 | `rtk kubectl logs <pod> [-c container]` | Logs dedupliques | Container specifique |
+
+Options globales : `--context <nom>`, `--kubeconfig <fichier>`,
+`-n/--namespace <ns>` et `--as <utilisateur>`. Elles peuvent preceder ou suivre
+la sous-commande et sont transmises a kubectl.
+
+`-l/--selector <selector>` est disponible sur `pods` et `services`.
+`-A/--all-namespaces` prend priorite sur le namespace ; `--all` reste un alias
+compatible. Ces trois formes sont aussi acceptees par `rtk oc pods/services`.
 
 Les sous-commandes non reconnues sont transmises directement (passthrough).
 

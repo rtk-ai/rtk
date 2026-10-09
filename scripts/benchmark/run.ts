@@ -240,8 +240,8 @@ if (shouldRun(5)) {
   await testRewrite("cargo test", "rtk cargo test");
   await testRewrite("cargo build --release", "rtk cargo build --release");
   await testRewrite("docker ps", "rtk docker ps");
-  // NOTE: rtk rewrites "kubectl get pods" to "rtk kubectl get pods" (preserves get)
-  await testRewrite("kubectl get pods", "rtk kubectl get pods");
+  await testRewrite("kubectl get pods", "rtk kubectl pods");
+  await testRewrite("kubectl get services -A", "rtk kubectl services -A");
   await testRewrite("ruff check", "rtk ruff check");
   await testRewrite("pytest", "rtk pytest");
   await testRewrite("go test", "rtk go test");
