@@ -5,8 +5,9 @@ use crate::core::arg_tokenizer::{self, Attachment, Dialect, Token, TokenKind, Va
 use crate::core::args_utils;
 use crate::core::runner::{self, RunOptions};
 use crate::core::shell::display_args;
+use crate::core::tracking::TimedExecution;
 use crate::core::truncate::CAP_INVENTORY;
-use crate::core::utils::{ChildArgExt, resolved_command};
+use crate::core::utils::{ChildArgExt, resolved_command, tool_exists};
 use anyhow::Result;
 use regex::Regex;
 use std::sync::LazyLock;
@@ -303,6 +304,17 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         child_args,
     } = plan(args);
 
+    // On Windows (and any host lacking the Unix `ls` binary) fall back to a
+    // native Rust listing so `rtk ls` works without coreutils installed.
+    if !tool_exists("ls") {
+        let paths: Vec<&str> = child_args
+            .iter()
+            .filter(|a| !a.starts_with('-'))
+            .map(String::as_str)
+            .collect();
+        return run_native(&paths, show_all, show_long, verbose);
+    }
+
     let mut cmd = resolved_command("ls");
     cmd.env("LC_ALL", "C");
     cmd.child_args(&child_args);
@@ -354,6 +366,116 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             .early_exit_on_failure()
             .no_trailing_newline(),
     )
+}
+
+/// Native `ls` implementation used when the Unix binary is unavailable
+/// (e.g. on stock Windows). Synthesizes `ls -la`-style lines from the
+/// filesystem and reuses [`compact_ls`] so output matches the spawn path.
+///
+/// Note: POSIX permission bits don't exist on Windows, so synthetic perms
+/// (`drwxr-xr-x` for dirs, `-rw-r--r--` for files) are emitted; the `-l`
+/// octal column is therefore approximate on Windows.
+fn run_native(paths: &[&str], show_all: bool, show_long: bool, verbose: u8) -> Result<i32> {
+    let timer = TimedExecution::start();
+    let targets: Vec<&str> = if paths.is_empty() {
+        vec!["."]
+    } else {
+        paths.to_vec()
+    };
+
+    let mut raw = String::new();
+    let mut exit_code = 0;
+
+    for target in &targets {
+        match std::fs::metadata(target) {
+            Ok(meta) if meta.is_dir() => match std::fs::read_dir(target) {
+                Ok(entries) => {
+                    let mut lines: Vec<String> = Vec::new();
+                    for entry in entries.flatten() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if !show_all && is_hidden_entry(&entry, &name) {
+                            continue;
+                        }
+                        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                        lines.push(synth_ls_line(&name, is_dir, size));
+                    }
+                    lines.sort();
+                    for line in lines {
+                        raw.push_str(&line);
+                        raw.push('\n');
+                    }
+                }
+                Err(e) => {
+                    eprintln!("ls: {target}: {e}");
+                    exit_code = 2;
+                }
+            },
+            Ok(meta) => {
+                // A file argument: ls prints just the name.
+                raw.push_str(&synth_ls_line(target, false, meta.len()));
+                raw.push('\n');
+            }
+            Err(e) => {
+                eprintln!("ls: {target}: {e}");
+                exit_code = 2;
+            }
+        }
+    }
+
+    let (entries, _parsed, truncated, hidden) = compact_ls(&raw, show_all, show_long);
+    // Every target failed: the errors are already on stderr, so print no
+    // "(empty)" placeholder after them.
+    let mut filtered = if raw.is_empty() && exit_code != 0 {
+        String::new()
+    } else {
+        entries
+    };
+    if let Some(hint) = hidden_hint(&truncated, &hidden) {
+        filtered.push_str(&hint);
+        filtered.push('\n');
+    }
+
+    if verbose > 0 {
+        eprintln!("ls (native): {} target(s)", targets.len());
+    }
+
+    print!("{filtered}");
+    timer.track(
+        &format!("ls {}", display_args(&targets)),
+        "rtk ls",
+        &raw,
+        &filtered,
+    );
+    Ok(exit_code)
+}
+
+/// Whether the native listing (ls and tree) hides `entry` without `-a`.
+///
+/// On Windows the native path stands in for `Get-ChildItem` (PowerShell's `ls`
+/// and `dir` are aliases of it), which hides entries by the Hidden/System
+/// attributes, not by a leading dot: `.gitignore` is listed, while `.git`
+/// (which git marks Hidden) is not. Elsewhere it is POSIX `ls`.
+#[cfg(windows)]
+pub(crate) fn is_hidden_entry(entry: &std::fs::DirEntry, _name: &str) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
+    entry
+        .metadata()
+        .is_ok_and(|m| m.file_attributes() & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) != 0)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn is_hidden_entry(_entry: &std::fs::DirEntry, name: &str) -> bool {
+    name.starts_with('.')
+}
+
+/// Build a synthetic `ls -la` line that [`parse_ls_line`] can parse.
+/// The date is a fixed valid anchor (not shown in compact output).
+fn synth_ls_line(name: &str, is_dir: bool, size: u64) -> String {
+    let perms = if is_dir { "drwxr-xr-x" } else { "-rw-r--r--" };
+    format!("{perms} 1 user group {size} Jan  1 00:00 {name}")
 }
 
 /// Build the recovery hint for entries dropped from the listing —
@@ -599,6 +721,71 @@ fn compact_ls(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_listing_hides_by_the_platform_rule() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in [".gitignore", "plain.txt", "hid.txt"] {
+            std::fs::write(dir.path().join(name), "x").expect("write fixture");
+        }
+        #[cfg(windows)]
+        {
+            let status = std::process::Command::new("attrib")
+                .arg("+h")
+                .arg(dir.path().join("hid.txt"))
+                .status()
+                .expect("run attrib");
+            assert!(status.success());
+        }
+        let mut hidden: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                is_hidden_entry(&e, &name).then_some(name)
+            })
+            .collect();
+        hidden.sort();
+        // Windows follows Get-ChildItem (Hidden attribute), elsewhere POSIX ls (leading dot).
+        #[cfg(windows)]
+        assert_eq!(hidden, vec!["hid.txt"]);
+        #[cfg(not(windows))]
+        assert_eq!(hidden, vec![".gitignore"]);
+    }
+
+    #[test]
+    fn test_synth_ls_line_parses() {
+        // A synthetic native line must be parseable by parse_ls_line.
+        let line = synth_ls_line("constants.rs", false, 542);
+        let parsed = parse_ls_line(&line).expect("synth line should parse");
+        let (file_type, _perms, size, name) = parsed;
+        assert_eq!(file_type, '-');
+        assert_eq!(size, 542);
+        assert_eq!(name, "constants.rs");
+    }
+
+    #[test]
+    fn test_synth_ls_line_dir() {
+        let line = synth_ls_line("src", true, 0);
+        let (file_type, _perms, _size, name) = parse_ls_line(&line).expect("dir line parses");
+        assert_eq!(file_type, 'd');
+        assert_eq!(name, "src");
+    }
+
+    #[test]
+    fn test_native_raw_round_trips_through_compact_ls() {
+        // Simulate native run_native output and verify compact_ls compresses it.
+        let mut raw = String::new();
+        raw.push_str(&synth_ls_line("src", true, 0));
+        raw.push('\n');
+        raw.push_str(&synth_ls_line("Cargo.toml", false, 1234));
+        raw.push('\n');
+        let (entries, parsed, _, _) = compact_ls(&raw, false, false);
+        assert_eq!(parsed, 2);
+        assert!(entries.contains("src/"));
+        assert!(entries.contains("Cargo.toml"));
+        assert!(entries.contains("1.2K"));
+    }
 
     #[test]
     fn test_compact_basic() {

@@ -25,7 +25,7 @@ use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
 use cmds::system::{
     ast_grep_cmd, ctest_cmd, deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls,
-    pipe_cmd, read, search, summary, tree, wc_cmd,
+    pipe_cmd, powershell_cmd, read, search, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -386,6 +386,21 @@ enum Commands {
         extra_args: Vec<String>,
     },
 
+    /// Windows PowerShell with safe cmdlet routing and transparent fallback
+    #[command(name = "powershell", disable_help_flag = true)]
+    PowerShell {
+        /// Arguments passed to powershell.exe
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// PowerShell 7+ with safe cmdlet routing and transparent fallback
+    #[command(name = "pwsh", disable_help_flag = true)]
+    Pwsh {
+        /// Arguments passed to pwsh
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Compact ast-grep - runs ast-grep natively, groups matches by file
     AstGrep {
         /// ast-grep subcommand, pattern, path, and any flags (e.g. run -p '$$$', --json)
@@ -2121,6 +2136,30 @@ fn run_cli() -> Result<i32> {
         hooks::integrity::runtime_check()?;
     }
 
+    dispatch(cli)
+}
+
+/// `rtk powershell|pwsh -Command <cmdlet>`: a cmdlet with a faithful rtk
+/// equivalent runs in-process through [`dispatch`], never by spawning rtk
+/// again; anything else goes to the real shell unchanged.
+fn run_powershell(shell: &str, args: &[String], verbose: u8) -> Result<i32> {
+    let Some(argv) = powershell_cmd::rewrite_invocation(args) else {
+        return powershell_cmd::run(shell, args);
+    };
+    if verbose > 0 {
+        eprintln!(
+            "PowerShell rewrite: rtk {}",
+            core::shell::display_args(&argv)
+        );
+    }
+    let mut cli = Cli::try_parse_from(std::iter::once("rtk".to_string()).chain(argv))
+        .context("Failed to parse the rewritten PowerShell command")?;
+    cli.verbose = verbose;
+    dispatch(cli)
+}
+
+/// Run a parsed command and return its exit code.
+fn dispatch(cli: Cli) -> Result<i32> {
     let code = match cli.command {
         Commands::Ls { args } => ls::run(&args, cli.verbose)?,
 
@@ -2553,6 +2592,10 @@ fn run_cli() -> Result<i32> {
         Commands::Rg { extra_args } => {
             search::run(search::Engine::Rg, 80, 200, false, &extra_args, cli.verbose)?
         }
+
+        Commands::PowerShell { args } => run_powershell("powershell", &args, cli.verbose)?,
+
+        Commands::Pwsh { args } => run_powershell("pwsh", &args, cli.verbose)?,
 
         Commands::Init {
             global,
@@ -3480,6 +3523,8 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Summary { .. }
             | Commands::Grep { .. }
             | Commands::Rg { .. }
+            | Commands::PowerShell { .. }
+            | Commands::Pwsh { .. }
             | Commands::AstGrep { .. }
             | Commands::Wget { .. }
             | Commands::Jest { .. }
@@ -4035,6 +4080,8 @@ mod tests {
             "tree",
             "read",
             "rg",
+            "powershell",
+            "pwsh",
             "ast-grep",
             "git",
             "gh",
@@ -4146,6 +4193,21 @@ mod tests {
             }
             _ => panic!("Expected Run command"),
         }
+    }
+
+    #[test]
+    fn test_powershell_commands_parse_trailing_args() {
+        assert!(
+            Cli::try_parse_from([
+                "rtk",
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-ChildItem src"
+            ])
+            .is_ok()
+        );
+        assert!(Cli::try_parse_from(["rtk", "pwsh", "-Command", "Get-Content README.md"]).is_ok());
     }
 
     #[test]

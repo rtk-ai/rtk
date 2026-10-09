@@ -10,6 +10,7 @@ pub mod local_llm;
 pub mod log_cmd;
 pub mod ls;
 pub mod pipe_cmd;
+pub mod powershell_cmd;
 pub mod read;
 pub mod search;
 pub mod summary;
