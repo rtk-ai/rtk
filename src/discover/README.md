@@ -95,6 +95,9 @@ longer be read off the token list.
 `stdbuf` is deliberately not a wrapper here: it exists to make the wrapped
 command emit output incrementally, and routing through rtk buffers that output
 until the child exits, so rewriting it would remove the only reason to type it.
+The permission gate still reads past it, and past a bare `xargs`, when it
+matches deny and ask rules (`matching_readings`): recognising the command
+behind a prefix and rewriting through it are separate decisions.
 
 Wrapping also changes who receives a signal. `timeout 300 rtk cargo test`
 signals rtk rather than cargo, so `core::stream` relays SIGINT/SIGTERM to the

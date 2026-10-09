@@ -6,6 +6,9 @@ use super::init::resolve_claude_dir;
 use crate::core::user_dirs;
 use crate::core::user_env;
 use crate::discover::lexer::{is_word_boundary_whitespace, split_for_permissions};
+#[cfg(test)]
+use crate::discover::registry::MAX_MATCHING_PEELS;
+use crate::discover::registry::{MatchingReadings, matching_readings};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -89,16 +92,39 @@ pub(crate) fn check_command_with_rules(
     allow_rules: &[String],
 ) -> PermissionVerdict {
     let segments = split_compound_command(cmd);
+    // Each segment read every way a deny or ask rule may name it, once: as
+    // written, then without the grammar a split leaves behind (`{`, `!`,
+    // `(`), then past each assignment or wrapper in turn — `HUSKY=0 git
+    // push`, `timeout 30 git push` and `{ env HUSKY=0 git push; }` are all
+    // `git push` to a rule that names it, and the last is `HUSKY=0 git push`
+    // too. Allow does not get these readings, so they can never make a
+    // verdict looser. With no deny or ask rule there is nothing to read them
+    // for, and none are taken.
+    let reads_past_prefixes = !deny_rules.is_empty() || !ask_rules.is_empty();
+    let readings: Vec<(&str, Option<MatchingReadings<'_>>)> = segments
+        .iter()
+        .map(|segment| {
+            let segment = segment.trim();
+            let peeled =
+                reads_past_prefixes.then(|| matching_readings(strip_grammar_residue(segment)));
+            (segment, peeled)
+        })
+        .collect();
+    let matches_any = |segment: &str, peeled: &Option<MatchingReadings<'_>>, pattern: &str| {
+        let readings = peeled.iter().flat_map(|peeled| peeled.readings.iter());
+        command_matches_pattern(segment, pattern)
+            || readings
+                .filter(|reading| **reading != segment)
+                .any(|reading| command_matches_pattern(reading, pattern))
+    };
 
     // Deny takes highest priority and pre-empts every other construct.
-    for segment in &segments {
-        let segment = segment.trim();
-        for pattern in deny_rules {
-            if command_matches_pattern(segment, pattern)
-                || command_matches_pattern(strip_grammar_residue(segment), pattern)
-            {
-                return PermissionVerdict::Deny;
-            }
+    for (segment, peeled) in &readings {
+        if deny_rules
+            .iter()
+            .any(|pattern| matches_any(segment, peeled, pattern))
+        {
+            return PermissionVerdict::Deny;
         }
     }
 
@@ -114,23 +140,20 @@ pub(crate) fn check_command_with_rules(
     let mut all_segments_allowed = true;
     let mut saw_segment = false;
 
-    for segment in &segments {
-        let segment = segment.trim();
+    for (segment, peeled) in &readings {
         if segment.is_empty() {
             continue;
         }
         saw_segment = true;
 
         // Ask — if any segment matches an ask rule, the final verdict is Ask.
+        // A segment whose prefixes ran past the peel's cap hides a command
+        // no deny or ask rule was matched against, so it asks too.
         if !any_ask {
-            for pattern in ask_rules {
-                if command_matches_pattern(segment, pattern)
-                    || command_matches_pattern(strip_grammar_residue(segment), pattern)
-                {
-                    any_ask = true;
-                    break;
-                }
-            }
+            any_ask = peeled.as_ref().is_some_and(|peeled| !peeled.complete)
+                || ask_rules
+                    .iter()
+                    .any(|pattern| matches_any(segment, peeled, pattern));
         }
 
         // Allow — every non-empty segment must match an allow rule independently.
@@ -846,6 +869,279 @@ mod tests {
         let deny = vec!["*:*".to_string()];
         assert_eq!(
             check_command_with_rules("rm -rf /", &deny, &[], &[]),
+            PermissionVerdict::Deny
+        );
+    }
+
+    /// Claude Code matches a deny or ask rule past any leading assignment and
+    /// past a fixed set of wrappers, so a rule written for `git push` also
+    /// stops the same command behind `HUSKY=0`, `timeout 30` or `command`.
+    /// This is that table, row for row, with the host's documented verdict as
+    /// the expected one — the first row is the control that always matched.
+    #[test]
+    fn test_deny_matches_past_assignments_and_wrappers() {
+        let deny = vec!["git push *".to_string(), "rm *".to_string()];
+        for cmd in [
+            "git push origin main",
+            "HUSKY=0 git push origin main",
+            "FOO=bar rm -rf tmp/",
+            "command git push",
+            "builtin git push",
+            "timeout 30 git push",
+            "time git push",
+            "nice git push",
+            "nohup git push",
+            "stdbuf -oL git push",
+            "noglob git push",
+            "xargs git push",
+            // Several at once, as an agent that is trying writes them.
+            "HUSKY=0 nohup timeout 30 git push origin main",
+            // Values the env peel reads as one word: empty, and quoted with a
+            // space inside.
+            "FOO= git push",
+            "FOO=\"a b\" git push",
+            "FOO='a b' git push",
+            // Shell prefixes that only run the next word, past the host's own
+            // list: the command behind them is still `git push`.
+            "env git push",
+            "env FOO=1 git push",
+            "exec git push",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &[]),
+                PermissionVerdict::Deny,
+                "a deny rule for the command behind the prefix did not fire: {cmd}"
+            );
+        }
+    }
+
+    /// Words bash does not treat as assignments are the command, so peeling
+    /// them would put a denied command where none runs. Each of these runs
+    /// something other than `git push`. The quoted rows carry the denied text
+    /// inside the value with more after it, so a peel that split the value at
+    /// its space would leave `git push y" echo hi` — which the rule matches.
+    #[test]
+    fn test_deny_does_not_peel_what_is_not_an_assignment() {
+        let deny = vec!["git push *".to_string()];
+        for cmd in [
+            "1A=b git push",
+            "=x git push",
+            "FOO-BAR=x git push",
+            "\"FOO\"=x git push",
+            "FOO=\"x git push y\" echo hi",
+            "FOO='x git push y' echo hi",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &[]),
+                PermissionVerdict::Default,
+                "denied a command bash would not run as `git push`: {cmd}"
+            );
+        }
+    }
+
+    /// Grammar left by the split and a prefix behind it, together: the `{`,
+    /// `!` or `(` has to go before the prefix can be read past. A rule that
+    /// names the assignment itself still matches the form with only the
+    /// grammar removed.
+    #[test]
+    fn test_deny_matches_past_grammar_and_a_prefix_together() {
+        let deny = vec!["git push *".to_string()];
+        for cmd in [
+            "true && { HUSKY=0 git push ; }",
+            "! timeout 30 git push",
+            "( nice git push )",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &[]),
+                PermissionVerdict::Deny,
+                "grammar and a prefix together hid the command: {cmd}"
+            );
+        }
+        let deny = vec!["HUSKY=0 git push *".to_string()];
+        assert_eq!(
+            check_command_with_rules("true && { HUSKY=0 git push x ; }", &deny, &[], &[]),
+            PermissionVerdict::Deny,
+            "a rule naming the assignment stopped matching once it was peelable"
+        );
+    }
+
+    /// The same reading for ask: a missed ask falls to Default, which the
+    /// hook renders identically today, so this is what makes the difference
+    /// observable.
+    #[test]
+    fn test_ask_matches_past_assignments_and_wrappers() {
+        let ask = vec!["git push *".to_string()];
+        for cmd in [
+            "HUSKY=0 git push",
+            "timeout 30 git push",
+            "stdbuf -oL git push",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &[], &ask, &[]),
+                PermissionVerdict::Ask,
+                "an ask rule for the command behind the prefix did not fire: {cmd}"
+            );
+        }
+    }
+
+    /// Allow is deliberately not read the same way. The host matches allow
+    /// past known-safe variables only, and peeling a wrapper for it would
+    /// let `timeout 30 <cmd>` inherit `<cmd>`'s allow rule — so the peel can
+    /// only ever make a verdict stricter, never looser.
+    #[test]
+    fn test_allow_is_not_matched_past_assignments_or_wrappers() {
+        let allow = vec!["git status".to_string()];
+        assert_eq!(
+            check_command_with_rules("git status", &[], &[], &allow),
+            PermissionVerdict::Allow,
+            "control: the plain command is allowed"
+        );
+        for cmd in [
+            "HUSKY=0 git status",
+            "timeout 30 git status",
+            "nice git status",
+            "env git status",
+        ] {
+            assert_ne!(
+                check_command_with_rules(cmd, &[], &[], &allow),
+                PermissionVerdict::Allow,
+                "allow was widened through a prefix: {cmd}"
+            );
+        }
+    }
+
+    /// Where the peel stops. A shell prefix that only runs the next word is
+    /// peeled; a program's own arguments are not, since reading past them
+    /// means knowing every program's option grammar — `git -C . push` is the
+    /// host's own example of what `Bash(git push *)` does not stop. `xargs`
+    /// with an option is the same case from the other side: `-n1` or `-I{}`
+    /// changes what it runs, so only the bare form is looked through.
+    #[test]
+    fn test_deny_does_not_peel_a_programs_own_arguments() {
+        let deny = vec!["git push *".to_string()];
+        for cmd in ["xargs -n1 git push", "git -C . push origin main"] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &[]),
+                PermissionVerdict::Default,
+                "peeled past a program's own arguments: {cmd}"
+            );
+        }
+    }
+
+    /// A rule may name any layer of the prefixes, not only the command
+    /// behind all of them: `env HUSKY=0 git push` runs `HUSKY=0 git push`
+    /// as much as it runs `git push`. An allow rule on the outer wrapper
+    /// must not win over it. In the `nohup` rows, nohup would look for a
+    /// program named `HUSKY=0`; denying them is stricter than the shell,
+    /// never looser.
+    #[test]
+    fn test_deny_and_ask_match_every_layer_of_the_prefixes() {
+        let deny = vec!["HUSKY=0 git push *".to_string()];
+        let allow = vec![
+            "nohup *".to_string(),
+            "env *".to_string(),
+            "CI=1 *".to_string(),
+        ];
+        for cmd in [
+            "nohup HUSKY=0 git push x",
+            "timeout 30 nohup HUSKY=0 git push x",
+            // Each assignment and each `env` is a layer of its own.
+            "env HUSKY=0 git push x",
+            "CI=1 HUSKY=0 git push x",
+            "nohup CI=1 HUSKY=0 git push x",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &allow),
+                PermissionVerdict::Deny,
+                "a rule naming a middle layer did not fire: {cmd}"
+            );
+            assert_eq!(
+                check_command_with_rules(cmd, &[], &deny, &allow),
+                PermissionVerdict::Ask,
+                "an ask rule naming a middle layer did not fire: {cmd}"
+            );
+        }
+    }
+
+    /// Deny and ask read past a wrapper whose own allow rule matches the
+    /// whole line: the command behind it decides.
+    #[test]
+    fn test_deny_and_ask_win_over_an_allow_on_the_wrapper() {
+        let allow = vec!["timeout *".to_string()];
+        let rule = vec!["git push *".to_string()];
+        assert_eq!(
+            check_command_with_rules("timeout 30 git push", &rule, &[], &allow),
+            PermissionVerdict::Deny
+        );
+        assert_eq!(
+            check_command_with_rules("timeout 30 git push", &[], &rule, &allow),
+            PermissionVerdict::Ask
+        );
+        assert_eq!(
+            check_command_with_rules("timeout 30 git status", &rule, &[], &allow),
+            PermissionVerdict::Allow,
+            "control: an allowed wrapper around an unruled command stays allowed"
+        );
+    }
+
+    /// The peel stops after a fixed number of prefixes. Past it, the command
+    /// behind them is unread, so the gate prompts rather than allow what an
+    /// allow rule on the outer wrapper would match — and a stack of thousands
+    /// takes no more peels than one at the cap.
+    #[test]
+    fn test_prefixes_past_the_peel_cap_ask_never_allow() {
+        let allow = vec!["nohup *".to_string()];
+        let deny = vec!["git push *".to_string()];
+        for depth in [MAX_MATCHING_PEELS - 1, MAX_MATCHING_PEELS] {
+            let within = format!("{}git push", "nohup ".repeat(depth));
+            assert_eq!(
+                check_command_with_rules(&within, &deny, &[], &allow),
+                PermissionVerdict::Deny,
+                "control: a stack of {depth}, within the cap, is read through"
+            );
+        }
+        for depth in [MAX_MATCHING_PEELS + 1, 5000] {
+            let cmd = format!("{}git push", "nohup ".repeat(depth));
+            assert_eq!(
+                check_command_with_rules(&cmd, &deny, &[], &allow),
+                PermissionVerdict::Ask,
+                "{depth} stacked prefixes"
+            );
+        }
+        // Bounded work: the readings stop at the cap however deep the stack.
+        let cmd = format!("{}git push", "nohup ".repeat(5000));
+        let peeled = matching_readings(&cmd);
+        assert!(!peeled.complete);
+        assert_eq!(peeled.readings.len(), MAX_MATCHING_PEELS + 1);
+        // With no deny or ask rule nothing can hide behind the prefixes, so
+        // the cap changes no verdict.
+        let cmd = format!("{}git status", "nohup ".repeat(MAX_MATCHING_PEELS + 1));
+        assert_eq!(
+            check_command_with_rules(&cmd, &[], &[], &allow),
+            PermissionVerdict::Allow
+        );
+        assert_eq!(
+            check_command_with_rules(&cmd, &[], &[], &[]),
+            PermissionVerdict::Default
+        );
+    }
+
+    /// Each assignment is a prefix of its own, so an ordinary line that sets
+    /// many variables before its command stays well inside the cap: no
+    /// prompt where develop answered allow.
+    #[test]
+    fn test_a_long_run_of_assignments_stays_within_the_cap() {
+        let vars: String = (0..20).map(|i| format!("V{i}=1 ")).collect();
+        let cmd = format!("{vars}cargo test");
+        let deny = vec!["rm *".to_string()];
+        let allow = vec!["*".to_string()];
+        assert_eq!(
+            check_command_with_rules(&cmd, &deny, &[], &allow),
+            PermissionVerdict::Allow
+        );
+        let deny = vec!["cargo test *".to_string()];
+        assert_eq!(
+            check_command_with_rules(&format!("{cmd} --all"), &deny, &[], &allow),
             PermissionVerdict::Deny
         );
     }
