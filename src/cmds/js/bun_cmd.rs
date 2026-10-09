@@ -251,9 +251,7 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn count_tokens(text: &str) -> usize {
-        text.split_whitespace().count()
-    }
+    use crate::core::tracking::estimate_tokens as count_tokens;
 
     #[test]
     fn test_filter_bun_install_strips_progress() {
@@ -267,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_bun_install_token_savings() {
+    fn test_filter_bun_install_byte_savings() {
         // Measured against real bun 1.2.20 output rather than a fixture shaped
         // to the filter: what bun prints when piped is a version header, two
         // resolution lines, and one line per package.

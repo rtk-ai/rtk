@@ -56,9 +56,7 @@ mod tests {
     use super::*;
     use insta::assert_snapshot;
 
-    fn count_tokens(s: &str) -> usize {
-        s.split_whitespace().count()
-    }
+    use crate::core::tracking::estimate_tokens as count_tokens;
 
     // Test 1: Output format (snapshot)
     #[test]

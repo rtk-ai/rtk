@@ -1289,9 +1289,7 @@ mod tests {
         assert_eq!(result, "ok approved !42");
     }
 
-    fn count_tokens(text: &str) -> usize {
-        text.split_whitespace().count()
-    }
+    use crate::core::tracking::estimate_tokens as count_tokens;
 
     fn parse_fixture(raw: &str) -> Value {
         serde_json::from_str(raw).expect("valid JSON fixture")
