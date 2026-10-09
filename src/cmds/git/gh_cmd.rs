@@ -951,7 +951,25 @@ fn should_passthrough_run_view(extra_args: &[String]) -> bool {
         .any(|a| a == "--log-failed" || a == "--log" || a == "--json")
 }
 
+/// A job view has its own output format, so the workflow-run summary filter
+/// must not see it. Tokenizing also recognizes `-j` and attached values while
+/// excluding occurrences inside another flag's value or after `--`.
+fn has_run_view_job(args: &[String]) -> bool {
+    let tokens = arg_tokenizer::tokenize_grammar(args, &run_view_takes_value, Dialect::Posix);
+    arg_tokenizer::before_dashdash(&tokens).iter().any(|token| {
+        matches!(
+            (token.kind, token.text),
+            (TokenKind::Long, "job") | (TokenKind::Short, "j")
+        )
+    })
+}
+
 fn view_run(args: &[String], _verbose: u8) -> Result<i32> {
+    if has_run_view_job(args) {
+        // Preserve argument order and raw job output, including when there is
+        // no positional run ID (`gh run view --job <id>`).
+        return run_passthrough_with_extra("gh", &["run", "view"], args);
+    }
     // `gh run view` without an identifier opens an interactive picker — defer to gh.
     let (run_id_opt, extra_args) = split_identifier(args, &run_view_takes_value);
     if should_passthrough_run_view(&extra_args) {
@@ -1403,6 +1421,37 @@ mod tests {
             "--json".into(),
             "jobs".into()
         ]));
+    }
+
+    #[test]
+    fn test_run_view_job_flag_forms() {
+        for args in [
+            vec!["--job", "67890"],
+            vec!["--job=67890"],
+            vec!["-j", "67890"],
+            vec!["-j67890"],
+            vec!["12345", "--job", "67890"],
+            vec!["-vj", "67890"],
+            vec!["-vj67890"],
+            vec!["--template", "--", "--job", "67890"],
+            vec!["--job", "--", "12345"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            assert!(has_run_view_job(&args), "did not detect {args:?}");
+        }
+    }
+
+    #[test]
+    fn test_run_view_job_flag_not_detected_in_flag_values_or_after_separator() {
+        for args in [
+            vec!["--jq", "--job"],
+            vec!["--template", "-j"],
+            vec!["--", "--job", "67890"],
+            vec!["--web"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            assert!(!has_run_view_job(&args), "misdetected {args:?}");
+        }
     }
 
     #[test]
