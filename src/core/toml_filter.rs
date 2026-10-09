@@ -2172,6 +2172,50 @@ match_command = "^make\\b"
         assert!(!is_fully_anchored(r"(?:^|/)liquibase(?:\s|$)"));
     }
 
+    /// A command word ends at a space, a tab, a newline or the end of the line,
+    /// as the lexer ends it. `\b` also ends one at `-`, `.`, `\r`, a vertical
+    /// tab, a form feed or a non-breaking space, and `\s` separates words at the
+    /// last four, so neither may decide which built-in filter a command gets.
+    #[test]
+    fn test_builtin_match_command_words_end_at_ifs() {
+        let file: TomlFilterFile =
+            toml::from_str(BUILTIN_TOML).expect("built-in filters should parse");
+        let offenders: Vec<(&String, &String)> = file
+            .filters
+            .iter()
+            .map(|(name, def)| (name, &def.match_command))
+            .filter(|(_, pattern)| {
+                [r"\b", r"\s", r"\S"]
+                    .iter()
+                    .any(|escape| pattern.contains(escape))
+            })
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "spell a separator `[ \\t\\n]` and end a word with `(?:[ \\t\\n]|$)`: \
+             {offenders:#?}"
+        );
+
+        let builtin = make_filters(BUILTIN_TOML);
+        let name_for = |cmd: &str| find_filter_in(cmd, &builtin).map(|f| f.name.as_str());
+        for (cmd, expected) in [
+            ("helm list", Some("helm")),
+            ("helm", Some("helm")),
+            ("helm-docs", None),
+            ("helm\r", None),
+            ("helm\u{a0}list", None),
+            ("brew install jq", Some("brew-install")),
+            ("brew install\x0b", None),
+            ("dotnet build-server shutdown", None),
+            ("ansible-playbook-grapher site.yml", None),
+            ("g++ -c main.cpp", Some("gcc")),
+            ("pulumi stack ls", Some("pulumi-stack")),
+            ("pulumi stack\x0c", None),
+        ] {
+            assert_eq!(name_for(cmd), expected, "{cmd:?}");
+        }
+    }
+
     /// The invariant above covers `BUILTIN_TOML`; project-local and global
     /// filters are user-authored, so both loaders drop unanchored patterns
     /// rather than letting them match mid-command.

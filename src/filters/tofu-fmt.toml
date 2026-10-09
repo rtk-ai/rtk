@@ -1,6 +1,6 @@
 [filters.tofu-fmt]
 description = "Compact OpenTofu fmt output"
-match_command = "^tofu\\s+fmt(\\s|$)"
+match_command = "^tofu[ \\t\\n]+fmt([ \\t\\n]|$)"
 strip_ansi = true
 on_empty = "tofu fmt: ok (no changes)"
 max_lines = 30

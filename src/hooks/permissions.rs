@@ -3,7 +3,7 @@ use super::constants::{
     SETTINGS_JSON, SETTINGS_LOCAL_JSON,
 };
 use super::init::resolve_claude_dir;
-use crate::core::cmdline::lexer::{is_word_boundary_whitespace, split_for_permissions};
+use crate::core::cmdline::lexer::{split_for_permissions, squeeze_blanks};
 use crate::core::user_dirs;
 use crate::core::user_env;
 use serde_json::Value;
@@ -432,23 +432,10 @@ fn strip_grammar_residue(segment: &str) -> &str {
 /// - `* suffix`, `pre * suf` → glob matching where `*` matches any sequence of characters
 /// - `pattern` → exact match or prefix match (cmd must equal pattern or start with `{pattern} `)
 pub(crate) fn command_matches_pattern(cmd: &str, pattern: &str) -> bool {
-    // Shares the lexer's word-boundary definition rather than
-    // str::split_whitespace(), so a bare `\r` in `cmd` never collapses into a space.
-    //
-    // A line continuation is removed first: bash elides `\<newline>` entirely
-    // and joins the words either side, so splitting on the newline alone would
-    // leave a stray `\` in front of the command that no pattern matches.
-    //
-    // Only the LF form: against CRLF the backslash escapes the `\r` and the
-    // `\n` still terminates the command, in bash and in the lexer alike, so
-    // the words either side are already separate segments.
-    let normalize = |s: &str| {
-        s.replace("\\\n", "")
-            .split(is_word_boundary_whitespace)
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
+    // `normalize` gives the text the comparison reads, for the command and the
+    // pattern alike: its words joined by one space each. Words end at bash's
+    // `$IFS` bytes, so a `\r` stays in its word.
+    let normalize = |s: &str| squeeze_blanks(&s.replace("\\\n", ""));
     let cmd_norm = normalize(cmd);
     let pattern_norm = normalize(pattern);
     let cmd = cmd_norm.as_str();
