@@ -734,13 +734,13 @@ fn hook_log_fields(v: &Value) -> Option<(&str, &str, &str)> {
 ///
 /// Best-effort only — a tracking failure must never affect the hook's real output
 /// (fallback pattern from `rust-patterns.md`): this is a side channel, not the
-/// hook's actual job.
+/// hook's actual job. Nothing is written when `[tracking] enabled = false`.
 fn log_hook_decision(v: &Value, cmd: &str, decision: HookOutcome, rewritten: Option<&str>) {
     let Some((session_id, tool_use_id, project_path)) = hook_log_fields(v) else {
         return;
     };
 
-    let Ok(tracker) = crate::core::tracking::Tracker::new() else {
+    let Some(tracker) = crate::core::tracking::recording_tracker() else {
         return;
     };
     if let Err(e) = tracker.record_hook_decision(
@@ -3344,5 +3344,40 @@ mod tests {
         let v = run_antigravity_inner(&antigravity_input("definitely-not-a-real-binary --foo"));
         assert_eq!(v["decision"], "allow");
         assert!(v.get("overwrite").is_none());
+    }
+
+    // `[tracking] enabled = false` covers `hook_decisions` too: the hook logs
+    // nothing and never opens the database.
+    #[test]
+    fn test_log_hook_decision_skipped_when_tracking_disabled() {
+        let dir = test_isolation::tempdir();
+        let db_path = dir.path().join("history.db");
+        test_isolation::with_root(dir.path(), || {
+            let config_dir = crate::core::user_dirs::config().expect("config dir");
+            std::fs::create_dir_all(&config_dir).expect("create config dir");
+            std::fs::write(
+                config_dir.join(crate::core::constants::CONFIG_TOML),
+                "[tracking]\nenabled = false\n",
+            )
+            .expect("write config.toml");
+            user_env::with_path("RTK_DB_PATH", Some(&db_path), || {
+                let payload = json!({
+                    "session_id": "sess-1",
+                    "tool_use_id": "toolu_disabled",
+                    "cwd": "/tmp/project",
+                });
+                log_hook_decision(
+                    &payload,
+                    "git status",
+                    HookOutcome::Allow,
+                    Some("rtk git status"),
+                );
+            });
+        });
+        assert!(
+            !db_path.exists(),
+            "tracking is disabled, yet {} was created",
+            db_path.display()
+        );
     }
 }

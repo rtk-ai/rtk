@@ -1877,10 +1877,25 @@ pub struct ParseFailureSummary {
     pub recent: Vec<ParseFailureRecord>,
 }
 
+/// A `Tracker` to write a new row with, or `None` when `[tracking] enabled =
+/// false` or the database cannot be opened. Every best-effort writer goes
+/// through this, so turning tracking off stops all recording (`commands`,
+/// `parse_failures`, `hook_decisions`) without even opening the database.
+/// Readers such as `rtk gain` keep using `Tracker::new()` on existing data.
+///
+/// Reads `config::cached_config`, which `get_db_path` (and on the hook path
+/// `hook_rewrite_params`) reads anyway, so the check adds no config I/O.
+pub(crate) fn recording_tracker() -> Option<Tracker> {
+    if !crate::core::config::cached_config().tracking.enabled {
+        return None;
+    }
+    Tracker::new().ok()
+}
+
 /// Record a parse failure without ever crashing.
 /// Silently ignores all errors — used in the fallback path.
 pub fn record_parse_failure_silent(raw_command: &str, error_message: &str, succeeded: bool) {
-    if let Ok(tracker) = Tracker::new() {
+    if let Some(tracker) = recording_tracker() {
         let _ = tracker.record_parse_failure(raw_command, error_message, succeeded);
     }
 }
@@ -1987,7 +2002,7 @@ impl TimedExecution {
         let input_tokens = estimate_tokens(input);
         let output_tokens = estimate_tokens(output);
 
-        if let Ok(tracker) = Tracker::new() {
+        if let Some(tracker) = recording_tracker() {
             let _ = tracker.record(
                 original_cmd,
                 rtk_cmd,
@@ -2008,7 +2023,7 @@ impl TimedExecution {
         let input_tokens = estimate_tokens_from_len(input_len);
         let output_tokens = estimate_tokens(output);
 
-        if let Ok(tracker) = Tracker::new() {
+        if let Some(tracker) = recording_tracker() {
             let _ = tracker.record(
                 original_cmd,
                 rtk_cmd,
@@ -2044,7 +2059,7 @@ impl TimedExecution {
     pub fn track_passthrough(&self, original_cmd: &str, rtk_cmd: &str) {
         let elapsed_ms = self.start.elapsed().as_millis() as u64;
         // input_tokens=0, output_tokens=0 won't dilute savings statistics
-        if let Ok(tracker) = Tracker::new() {
+        if let Some(tracker) = recording_tracker() {
             let _ = tracker.record(original_cmd, rtk_cmd, 0, 0, elapsed_ms);
         }
     }
@@ -3414,5 +3429,61 @@ mod tests {
             "expected ({ls_rate:.1} + 24 - 50) / 3 = {expected:.1}%, got {avg:.1}% \
              (an unweighted inner AVG(savings_pct) would give (19 + 12.5 - 50) / 3 = -6.2%)"
         );
+    }
+
+    /// Run `f` with a `config.toml` of its own carrying `tracking_toml`, and
+    /// `RTK_DB_PATH` naming a database inside the same temp dir, which `f` gets.
+    /// The database is not created up front, so whether it exists afterwards
+    /// says whether anything opened it to write.
+    fn with_tracking_config<R>(tracking_toml: &str, f: impl FnOnce(&std::path::Path) -> R) -> R {
+        let dir = test_isolation::tempdir();
+        let db_path = dir.path().join("history.db");
+        test_isolation::with_root(dir.path(), || {
+            let config_dir = user_dirs::config().expect("config dir");
+            std::fs::create_dir_all(&config_dir).expect("create config dir");
+            std::fs::write(
+                config_dir.join(crate::core::constants::CONFIG_TOML),
+                tracking_toml,
+            )
+            .expect("write config.toml");
+            user_env::with_path("RTK_DB_PATH", Some(&db_path), || f(&db_path))
+        })
+    }
+
+    // `[tracking] enabled = false` stops every writer: `commands` (track,
+    // track_bytes, track_passthrough) and `parse_failures`. None of them so
+    // much as opens the database.
+    #[test]
+    fn test_tracking_disabled_records_nothing() {
+        with_tracking_config("[tracking]\nenabled = false\n", |db_path| {
+            let timer = TimedExecution::start();
+            timer.track("ls -la", "rtk ls", "raw input", "filtered");
+            timer.track_bytes("ls -la", "rtk ls", 9, "filtered");
+            timer.track_passthrough("git tag", "rtk git tag (passthrough)");
+            record_parse_failure_silent("rtk bogus", "unrecognized", false);
+
+            assert!(
+                !db_path.exists(),
+                "tracking is disabled, yet {} was created",
+                db_path.display()
+            );
+        });
+    }
+
+    // Control for the test above: the same setup with tracking on does write,
+    // so the absence there comes from the flag, not from a misrouted path.
+    #[test]
+    fn test_tracking_enabled_records_through_same_setup() {
+        with_tracking_config("[tracking]\nenabled = true\n", |db_path| {
+            TimedExecution::start().track("ls -la", "rtk ls", "raw input", "filtered");
+            record_parse_failure_silent("rtk bogus", "unrecognized", false);
+
+            assert!(db_path.exists());
+            let tracker = Tracker::new().expect("open tracker");
+            let recent = tracker.get_recent(5).expect("get recent");
+            assert!(recent.iter().any(|r| r.rtk_cmd == "rtk ls"));
+            let failures = tracker.get_parse_failure_summary().expect("summary");
+            assert_eq!(failures.total, 1);
+        });
     }
 }

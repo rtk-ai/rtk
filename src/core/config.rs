@@ -151,7 +151,11 @@ pub struct HooksConfig {
     pub suppress_hook_warning: bool,
 }
 
+/// Fields a user leaves out take their `Default` values, so a `[tracking]`
+/// table holding only `enabled = false` parses (rather than failing the whole
+/// load and silently falling back to tracking on).
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TrackingConfig {
     pub enabled: bool,
     pub history_days: u32,
@@ -624,6 +628,17 @@ exclude_commands = ["curl"]
         let config: Config = toml::from_str(toml).expect("valid toml");
         assert_eq!(config.hooks.exclude_commands, vec!["curl"]);
         assert!(config.hooks.transparent_prefixes.is_empty());
+    }
+
+    // `[tracking] enabled = false` is the whole opt-out a user writes. Without
+    // field defaults the missing `history_days` failed the parse, `load()`
+    // callers fell back to `Config::default()`, and tracking stayed on.
+    #[test]
+    fn test_tracking_section_with_only_enabled_parses() {
+        let config = Config::from_toml("[tracking]\nenabled = false\n").expect("valid toml");
+        assert!(!config.tracking.enabled);
+        assert_eq!(config.tracking.history_days, DEFAULT_HISTORY_DAYS as u32);
+        assert!(config.tracking.database_path.is_none());
     }
 
     #[test]
