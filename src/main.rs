@@ -59,6 +59,8 @@ pub enum AgentTarget {
     Hermes,
     /// Factory Droid CLI
     Droid,
+    /// Kiro IDE and CLI
+    Kiro,
     /// Mistral Vibe CLI
     Vibe,
     /// Oh My Pi (OMP)
@@ -1011,6 +1013,8 @@ enum HookCommands {
     Copilot,
     /// Process Factory Droid PreToolUse hook (reads JSON from stdin)
     Droid,
+    /// Process Kiro IDE/CLI PreToolUse hook (reads JSON from stdin)
+    Kiro,
     /// Process Google Antigravity PreToolUse hook (reads JSON from stdin)
     Antigravity,
     /// Process Mistral Vibe CLI pre_tool hook (reads JSON from stdin)
@@ -1983,6 +1987,8 @@ where
         hooks::init::uninstall_antigravity_mode(global, ctx)
     } else if agent == Some(AgentTarget::Droid) {
         hooks::init::uninstall_droid(global, ctx)
+    } else if agent == Some(AgentTarget::Kiro) {
+        hooks::init::uninstall_kiro(global, ctx)
     } else if agent == Some(AgentTarget::Vibe) {
         hooks::init::uninstall_vibe(ctx)
     } else {
@@ -2589,6 +2595,7 @@ fn run_cli() -> Result<i32> {
             };
             if show {
                 hooks::init::show_config(codex, agent == Some(AgentTarget::Omp))?;
+                hooks::init::show_kiro_config();
             } else if uninstall && copilot {
                 if global {
                     hooks::init::uninstall_copilot_global(ctx)?;
@@ -2636,6 +2643,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_hermes_mode(ctx)?;
             } else if agent == Some(AgentTarget::Droid) {
                 hooks::init::run_droid_mode(global, ctx)?;
+            } else if agent == Some(AgentTarget::Kiro) {
+                hooks::init::run_kiro_mode(global, ctx)?;
             } else if agent == Some(AgentTarget::Vibe) {
                 hooks::init::run_vibe_mode(global, hook_only, patch_mode, ctx)?;
             } else {
@@ -3100,6 +3109,9 @@ fn run_cli() -> Result<i32> {
                 hooks::hook_cmd::run_droid()?;
                 0
             }
+            // Kiro uses deny-with-suggestion: exit 2 blocks the raw command and
+            // forwards the stderr hint so the agent re-issues it as `rtk <cmd>`.
+            HookCommands::Kiro => hooks::hook_cmd::run_kiro()?,
             HookCommands::Antigravity => {
                 hooks::hook_cmd::run_antigravity()?;
                 0
@@ -4664,6 +4676,52 @@ mod tests {
             }
             _ => panic!("Expected Init command"),
         }
+    }
+
+    #[test]
+    fn test_init_agent_kiro_parses() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "kiro"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, .. } => {
+                assert_eq!(
+                    agent,
+                    Some(AgentTarget::Kiro),
+                    "--agent kiro must set Kiro variant"
+                );
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_init_uninstall_agent_kiro_parses() {
+        let cli =
+            Cli::try_parse_from(["rtk", "init", "--uninstall", "--agent", "kiro", "--global"])
+                .unwrap();
+        match cli.command {
+            Commands::Init {
+                uninstall,
+                agent,
+                global,
+                ..
+            } => {
+                assert!(uninstall);
+                assert_eq!(agent, Some(AgentTarget::Kiro));
+                assert!(global);
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_hook_kiro_parses() {
+        let cli = Cli::try_parse_from(["rtk", "hook", "kiro"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Hook {
+                command: HookCommands::Kiro
+            }
+        ));
     }
 
     // --- grep argument routing (clap layer) ---
