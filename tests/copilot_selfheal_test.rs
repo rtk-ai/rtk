@@ -413,6 +413,17 @@ fn unwritable_hooks_dir_never_breaks_the_hook() {
     perms.set_mode(0o555);
     std::fs::set_permissions(&hooks_dir, perms.clone()).expect("chmod");
 
+    // root (or any process with CAP_DAC_OVERRIDE) writes through a 0555 directory, so there
+    // is no write failure to survive: probe instead of guessing from the uid.
+    let probe = hooks_dir.join(".writable-probe");
+    if std::fs::write(&probe, b"").is_ok() {
+        let _ = std::fs::remove_file(&probe);
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&hooks_dir, perms).expect("chmod back");
+        eprintln!("skipped: permission bits do not restrict this user (running as root?)");
+        return;
+    }
+
     let (stdout, stderr, code) = sb.run_hook(LEGACY_PAYLOAD);
 
     perms.set_mode(0o755);
