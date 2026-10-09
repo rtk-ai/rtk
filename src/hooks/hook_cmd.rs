@@ -2029,6 +2029,27 @@ mod tests {
     }
 
     #[test]
+    fn test_claude_rewrites_git_commit_message_from_heredoc() {
+        let command = "git commit -m \"$(cat <<'MSG'\nfeat: preserve commit message\n\nMore detail.\nMSG\n)\"";
+        let result = run_claude_inner(&claude_input(command)).unwrap();
+        let output: Value = serde_json::from_str(&result).unwrap();
+        let expected = format!("rtk {command}");
+
+        assert_eq!(
+            output
+                .pointer("/hookSpecificOutput/updatedInput/command")
+                .and_then(Value::as_str),
+            Some(expected.as_str())
+        );
+        assert!(
+            output
+                .pointer("/hookSpecificOutput/permissionDecision")
+                .is_none(),
+            "commands containing substitutions must still require host approval"
+        );
+    }
+
+    #[test]
     fn test_claude_file_redirect_not_rewritten() {
         assert!(run_claude_inner(&claude_input("git log > /tmp/out.txt")).is_none());
     }
