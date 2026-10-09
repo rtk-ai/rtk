@@ -358,11 +358,11 @@ fn set_owner_only(_path: &std::path::Path, _mode: u32) {}
 /// won't appear in the Gemfile but still need bundler for version isolation).
 pub fn ruby_exec(tool: &str) -> Command {
     if std::path::Path::new("Gemfile").exists() {
-        let mut c = Command::new("bundle");
+        let mut c = resolved_command("bundle");
         c.arg("exec").arg(tool);
         return c;
     }
-    Command::new(tool)
+    resolved_command(tool)
 }
 
 /// Count whitespace-delimited tokens in text. Used by filter tests to verify
@@ -1219,6 +1219,99 @@ mod tests {
             output.status.success(),
             "cargo --version should succeed via resolved_command"
         );
+    }
+
+    // ===== ruby_exec tests (issue #4497) =====
+
+    fn path_prepending_dir(dir: &std::path::Path) -> String {
+        let original = std::env::var_os("PATH").unwrap_or_default();
+        let mut path = dir.as_os_str().to_owned();
+        path.push(if cfg!(windows) { ";" } else { ":" });
+        path.push(&original);
+        path.to_string_lossy().into_owned()
+    }
+
+    fn write_fake_ruby_tool(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        #[cfg(windows)]
+        let path = dir.join(format!("{}.bat", name));
+        #[cfg(not(windows))]
+        let path = dir.join(name);
+        #[cfg(windows)]
+        std::fs::write(&path, "@echo off\r\nexit /b 0\r\n").expect("write fake tool");
+        #[cfg(not(windows))]
+        {
+            std::fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write fake tool");
+            set_owner_only(&path, 0o755);
+        }
+        path
+    }
+
+    #[test]
+    fn test_ruby_exec_resolves_tool_without_gemfile() {
+        assert!(
+            !std::path::Path::new("Gemfile").exists(),
+            "test assumes no Gemfile in the project root"
+        );
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let tool_name = "rtk-ruby-exec-fake-rake";
+        write_fake_ruby_tool(temp_dir.path(), tool_name);
+        let search_path = path_prepending_dir(temp_dir.path());
+        temp_env::with_var("PATH", Some(&search_path), || {
+            let cmd = ruby_exec(tool_name);
+            let resolved = resolve_binary(tool_name).expect("fake tool on PATH");
+            assert_eq!(
+                cmd.get_program(),
+                resolved.as_os_str(),
+                "ruby_exec should use PATHEXT-aware resolution"
+            );
+            assert!(
+                resolved.is_absolute(),
+                "resolved program should be an absolute path"
+            );
+            assert!(
+                cmd.get_args().next().is_none(),
+                "ruby_exec without Gemfile should not prepend bundle exec args"
+            );
+        });
+        #[cfg(windows)]
+        assert!(
+            temp_dir
+                .path()
+                .join(format!("{}.bat", tool_name))
+                .is_file(),
+            "Windows RubyGems binstub uses .bat (not run on CI Linux)"
+        );
+    }
+
+    static RUBY_EXEC_GEMFILE_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
+    #[test]
+    fn test_ruby_exec_resolves_bundle_when_gemfile_present() {
+        let _lock = RUBY_EXEC_GEMFILE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp_bin = tempfile::tempdir().expect("tempdir");
+        write_fake_ruby_tool(temp_bin.path(), "bundle");
+        let gemfile = std::path::Path::new("Gemfile");
+        let created_gemfile = !gemfile.exists();
+        if created_gemfile {
+            std::fs::write(gemfile, "# test fixture\n").expect("write Gemfile");
+        }
+        let search_path = path_prepending_dir(temp_bin.path());
+        temp_env::with_var("PATH", Some(&search_path), || {
+            let cmd = ruby_exec("rake");
+            let bundle = resolve_binary("bundle").expect("fake bundle on PATH");
+            assert_eq!(cmd.get_program(), bundle.as_os_str());
+            let args: Vec<_> = cmd
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(args, ["exec", "rake"]);
+        });
+        if created_gemfile {
+            let _ = std::fs::remove_file(gemfile);
+        }
     }
 
     // ===== tool_exists tests (issue #212) =====
