@@ -12,7 +12,7 @@ use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git_cmd, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
-    bun_cmd, deno_cmd, lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd,
+    bun_cmd, deno_cmd, lint_cmd, next_cmd, ng_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd,
     prisma_cmd, tsc_cmd, vitest_cmd,
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
@@ -579,6 +579,13 @@ enum Commands {
     /// TypeScript compiler with grouped error output
     Tsc {
         /// TypeScript compiler arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Angular build with compact tables; other commands pass through
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Ng {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2809,6 +2816,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Next { args } => next_cmd::run(&args, cli.verbose)?,
 
+        Commands::Ng { args } => ng_cmd::run(&args, cli.verbose)?,
+
         Commands::Lint { args } => lint_cmd::run(None, &args, cli.verbose)?,
 
         Commands::Prettier { args } => prettier_cmd::run(&args, cli.verbose)?,
@@ -3488,6 +3497,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Prisma { .. }
             | Commands::Tsc { .. }
             | Commands::Next { .. }
+            | Commands::Ng { .. }
             | Commands::Lint { .. }
             | Commands::Prettier { .. }
             | Commands::Playwright { .. }
@@ -4060,6 +4070,7 @@ mod tests {
             "prisma",
             "tsc",
             "next",
+            "ng",
             "lint",
             "prettier",
             "format",

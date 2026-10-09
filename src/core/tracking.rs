@@ -482,6 +482,7 @@ const SUBCOMMAND_ROUTERS: &[&str] = &[
     "kubectl",
     "mvn",
     "next",
+    "ng",
     "npm",
     "php",
     "pip",
