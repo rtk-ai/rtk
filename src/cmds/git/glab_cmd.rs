@@ -11,7 +11,7 @@
 //! - Pipeline: `head_pipeline.status` (not `statusCheckRollup`)
 
 use super::git_cmd;
-use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
+use crate::core::arg_tokenizer::{self, Dialect, Flag, Grammar, TokenKind, ValueSpec};
 use crate::core::args_utils;
 use crate::core::runner::{self, RunOptions};
 use crate::core::shell::quote_word;
@@ -170,98 +170,69 @@ fn extract_mr_number(text: &str) -> Option<String> {
 
 /// pflag reads a literal `--` as the value of a value-taking flag rather than as the
 /// end-of-options boundary: `glab mr view --page -- 5` rejects `--` as the page number.
-fn glab_value() -> ValueSpec {
-    ValueSpec::value().claiming_dash_dash()
-}
+const GLAB_VALUE: ValueSpec = ValueSpec::value().claiming_dash_dash();
 
 /// glab's inherited flags, available on every subcommand. `--group` is only glab's own on the
 /// list/search family, but rtk's `Commands::Glab` injects it into any subcommand's args, so it
 /// has to be classified everywhere or its value is read as the identifier.
-fn inherited_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    match kind {
-        TokenKind::Long => matches!(name, "repo" | "group").then(glab_value),
-        TokenKind::Short => matches!(name, "R" | "g").then(glab_value),
-        _ => None,
-    }
-}
+const INHERITED_FLAGS: &[Flag] = &[
+    Flag::pair("R", "repo").takes(GLAB_VALUE),
+    Flag::pair("g", "group").takes(GLAB_VALUE),
+];
 
 /// `glab mr view` and `glab issue view` share one grammar — their value-taking flag sets are
 /// identical on both glab 1.36 and 1.117. The table is the union over those two: 1.117 added
 /// `--jq` and `-F/--output` to the `-p/-P/-R` set 1.36 had.
-fn view_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    let own = match kind {
-        TokenKind::Long => matches!(name, "jq" | "output" | "page" | "per-page").then(glab_value),
-        TokenKind::Short => matches!(name, "F" | "p" | "P").then(glab_value),
-        _ => None,
-    };
-    own.or_else(|| inherited_takes_value(kind, name))
-}
+const VIEW_FLAGS: &[Flag] = &[
+    Flag::long("jq").takes(GLAB_VALUE),
+    Flag::pair("F", "output").takes(GLAB_VALUE),
+    Flag::pair("p", "page").takes(GLAB_VALUE),
+    Flag::pair("P", "per-page").takes(GLAB_VALUE),
+];
+const VIEW_GRAMMAR: Grammar = Grammar::new(Dialect::Posix, &[VIEW_FLAGS, INHERITED_FLAGS]);
 
 /// `glab mr merge`: `-s` is the boolean `--squash` here but the value-taking `--sha` on
-/// `glab mr approve`, so the two cannot share a table.
-fn mr_merge_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    let own = match kind {
-        TokenKind::Long => matches!(name, "message" | "sha" | "squash-message").then(glab_value),
-        TokenKind::Short => (name == "m").then(glab_value),
-        _ => None,
-    };
-    own.or_else(|| inherited_takes_value(kind, name))
-}
+/// `glab mr approve`, so the two cannot share a grammar.
+const MR_MERGE_FLAGS: &[Flag] = &[
+    Flag::pair("m", "message").takes(GLAB_VALUE),
+    Flag::long("sha").takes(GLAB_VALUE),
+    Flag::long("squash-message").takes(GLAB_VALUE),
+];
+const MR_MERGE_GRAMMAR: Grammar = Grammar::new(Dialect::Posix, &[MR_MERGE_FLAGS, INHERITED_FLAGS]);
 
 /// `glab mr approve`: `-s/--sha` is its only own value-taking flag.
-fn mr_approve_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    let own = match kind {
-        TokenKind::Long => (name == "sha").then(glab_value),
-        TokenKind::Short => (name == "s").then(glab_value),
-        _ => None,
-    };
-    own.or_else(|| inherited_takes_value(kind, name))
-}
+const MR_APPROVE_FLAGS: &[Flag] = &[Flag::pair("s", "sha").takes(GLAB_VALUE)];
+const MR_APPROVE_GRAMMAR: Grammar =
+    Grammar::new(Dialect::Posix, &[MR_APPROVE_FLAGS, INHERITED_FLAGS]);
 
 /// `glab mr note`: `-m/--message` carries the comment body. 1.117 moved it onto the
-/// `note create` sub-subcommand; 1.36 still takes it here, so the table keeps both.
-fn mr_note_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    let own = match kind {
-        TokenKind::Long => (name == "message").then(glab_value),
-        TokenKind::Short => (name == "m").then(glab_value),
-        _ => None,
-    };
-    own.or_else(|| inherited_takes_value(kind, name))
-}
+/// `note create` sub-subcommand; 1.36 still takes it here, so the grammar keeps both.
+const MR_NOTE_FLAGS: &[Flag] = &[Flag::pair("m", "message").takes(GLAB_VALUE)];
+const MR_NOTE_GRAMMAR: Grammar = Grammar::new(Dialect::Posix, &[MR_NOTE_FLAGS, INHERITED_FLAGS]);
 
 /// `glab mr update`: nearly every flag takes a value, so a missing entry turns a label, a
 /// title or a username into the MR number.
-fn mr_update_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    let own = match kind {
-        TokenKind::Long => matches!(
-            name,
-            "assignee"
-                | "attach"
-                | "description"
-                | "description-file"
-                | "label"
-                | "milestone"
-                | "reviewer"
-                | "target-branch"
-                | "title"
-                | "unlabel"
-        )
-        .then(glab_value),
-        TokenKind::Short => matches!(name, "a" | "d" | "l" | "m" | "t" | "u").then(glab_value),
-        _ => None,
-    };
-    own.or_else(|| inherited_takes_value(kind, name))
-}
+const MR_UPDATE_FLAGS: &[Flag] = &[
+    Flag::pair("a", "assignee").takes(GLAB_VALUE),
+    Flag::long("attach").takes(GLAB_VALUE),
+    Flag::pair("d", "description").takes(GLAB_VALUE),
+    Flag::long("description-file").takes(GLAB_VALUE),
+    Flag::pair("l", "label").takes(GLAB_VALUE),
+    Flag::pair("m", "milestone").takes(GLAB_VALUE),
+    Flag::long("reviewer").takes(GLAB_VALUE),
+    Flag::long("target-branch").takes(GLAB_VALUE),
+    Flag::pair("t", "title").takes(GLAB_VALUE),
+    Flag::pair("u", "unlabel").takes(GLAB_VALUE),
+];
+const MR_UPDATE_GRAMMAR: Grammar =
+    Grammar::new(Dialect::Posix, &[MR_UPDATE_FLAGS, INHERITED_FLAGS]);
 
-/// Splits `args` into the MR/issue identifier — the first free positional under `takes_value` —
+/// Splits `args` into the MR/issue identifier — the first free positional under `grammar` —
 /// and everything else, verbatim and in order. glab keeps reading positionals past `--`
 /// (`glab mr view -- 42` views MR 42), so the search reaches past the boundary, but only while
 /// the boundary escapes a lone token that is not itself flag-shaped.
-fn split_identifier(
-    args: &[String],
-    takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
-) -> (Option<String>, Vec<String>) {
-    let tokens = arg_tokenizer::tokenize_grammar(args, takes_value, Dialect::Posix);
+fn split_identifier(args: &[String], grammar: &Grammar) -> (Option<String>, Vec<String>) {
+    let tokens = arg_tokenizer::tokenize_grammar(args, grammar);
 
     // Re-emitting the identifier in front of the `--` unescapes it along with whatever else
     // trailed it, so reach past the boundary only where that is a no-op: one token, still read
@@ -368,7 +339,7 @@ pub fn run(
         injected.extend(["-g".to_string(), g.to_string()]);
     }
     if !injected.is_empty() {
-        // Grammar-less: the sub-subcommand that picks a `takes_value` table is only known after
+        // Grammar-less: the sub-subcommand that picks a grammar is only known after
         // the split below, so a `--` that is some flag's own value reads as the boundary here.
         let at = arg_tokenizer::injection_point(&arg_tokenizer::tokenize(&region), region.len());
         region.splice(at..at, injected);
@@ -417,29 +388,17 @@ fn run_mr(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
         "list" => mr_list(&args[1..], verbose, ultra_compact),
         "view" => mr_view(&args[1..], verbose, ultra_compact),
         "create" => mr_create(&args[1..], verbose),
-        "merge" => mr_action(
-            "merge",
-            "merged",
-            &args[1..],
-            verbose,
-            &mr_merge_takes_value,
-        ),
+        "merge" => mr_action("merge", "merged", &args[1..], verbose, &MR_MERGE_GRAMMAR),
         "approve" => mr_action(
             "approve",
             "approved",
             &args[1..],
             verbose,
-            &mr_approve_takes_value,
+            &MR_APPROVE_GRAMMAR,
         ),
         "diff" => mr_diff(&args[1..], verbose),
-        "note" => mr_action("note", "noted", &args[1..], verbose, &mr_note_takes_value),
-        "update" => mr_action(
-            "update",
-            "updated",
-            &args[1..],
-            verbose,
-            &mr_update_takes_value,
-        ),
+        "note" => mr_action("note", "noted", &args[1..], verbose, &MR_NOTE_GRAMMAR),
+        "update" => mr_action("update", "updated", &args[1..], verbose, &MR_UPDATE_GRAMMAR),
         _ => run_passthrough("glab", "mr", args),
     }
 }
@@ -572,7 +531,7 @@ fn format_mr_view(json: &Value, ultra_compact: bool) -> String {
 
 fn mr_view(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
     // `glab mr view` without an identifier defaults to the MR for the current branch.
-    let (mr_number_opt, extra_args) = split_identifier(args, &view_takes_value);
+    let (mr_number_opt, extra_args) = split_identifier(args, &VIEW_GRAMMAR);
 
     // Passthrough for --web, --comments, or explicit output format
     if should_passthrough_view(&extra_args) {
@@ -645,15 +604,15 @@ fn mr_diff(args: &[String], _verbose: u8) -> Result<i32> {
     )
 }
 
-/// Generic MR action handler for merge/approve/note/update. Each takes its own `takes_value`
-/// table: the MR number is only reported, but reading it out of a flag's value would put a
+/// Generic MR action handler for merge/approve/note/update. Each takes its own grammar: the
+/// MR number is only reported, but reading it out of a flag's value would put a
 /// commit message or a label in the confirmation line.
 fn mr_action(
     subcmd: &str,
     label: &str,
     args: &[String],
     _verbose: u8,
-    takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
+    grammar: &Grammar,
 ) -> Result<i32> {
     let mut cmd = resolved_command("glab");
     cmd.args(["mr", subcmd]);
@@ -661,7 +620,7 @@ fn mr_action(
         cmd.arg(arg);
     }
 
-    let mr_num = split_identifier(args, takes_value)
+    let mr_num = split_identifier(args, grammar)
         .0
         .map(|id| format!("!{}", id))
         .unwrap_or_default();
@@ -783,7 +742,7 @@ fn format_issue_view(json: &Value) -> String {
 
 fn issue_view(args: &[String], _verbose: u8) -> Result<i32> {
     // Let glab emit its own error message when the identifier is missing rather than pre-rejecting.
-    let (issue_number_opt, extra_args) = split_identifier(args, &view_takes_value);
+    let (issue_number_opt, extra_args) = split_identifier(args, &VIEW_GRAMMAR);
 
     if should_passthrough_view(&extra_args) {
         let mut base: Vec<&str> = vec!["issue", "view"];
@@ -1168,6 +1127,7 @@ fn run_passthrough_with_extra(cmd: &str, base_args: &[&str], extra_args: &[Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::arg_tokenizer::assert_takes_value_table;
 
     #[test]
     fn test_state_icon_opened() {
@@ -1375,9 +1335,85 @@ mod tests {
     }
 
     #[test]
+    fn test_grammars_match_their_tables() {
+        assert_takes_value_table(
+            &VIEW_GRAMMAR,
+            &[
+                (
+                    TokenKind::Long,
+                    &["jq", "output", "page", "per-page", "repo", "group"],
+                    Some(GLAB_VALUE),
+                ),
+                (
+                    TokenKind::Short,
+                    &["F", "p", "P", "R", "g"],
+                    Some(GLAB_VALUE),
+                ),
+            ],
+        );
+        assert_takes_value_table(
+            &MR_MERGE_GRAMMAR,
+            &[
+                (
+                    TokenKind::Long,
+                    &["message", "sha", "squash-message", "repo", "group"],
+                    Some(GLAB_VALUE),
+                ),
+                (TokenKind::Short, &["m", "R", "g"], Some(GLAB_VALUE)),
+            ],
+        );
+        assert_takes_value_table(
+            &MR_APPROVE_GRAMMAR,
+            &[
+                (TokenKind::Long, &["sha", "repo", "group"], Some(GLAB_VALUE)),
+                (TokenKind::Short, &["s", "R", "g"], Some(GLAB_VALUE)),
+            ],
+        );
+        assert_takes_value_table(
+            &MR_NOTE_GRAMMAR,
+            &[
+                (
+                    TokenKind::Long,
+                    &["message", "repo", "group"],
+                    Some(GLAB_VALUE),
+                ),
+                (TokenKind::Short, &["m", "R", "g"], Some(GLAB_VALUE)),
+            ],
+        );
+        assert_takes_value_table(
+            &MR_UPDATE_GRAMMAR,
+            &[
+                (
+                    TokenKind::Long,
+                    &[
+                        "assignee",
+                        "attach",
+                        "description",
+                        "description-file",
+                        "label",
+                        "milestone",
+                        "reviewer",
+                        "target-branch",
+                        "title",
+                        "unlabel",
+                        "repo",
+                        "group",
+                    ],
+                    Some(GLAB_VALUE),
+                ),
+                (
+                    TokenKind::Short,
+                    &["a", "d", "l", "m", "t", "u", "R", "g"],
+                    Some(GLAB_VALUE),
+                ),
+            ],
+        );
+    }
+
+    #[test]
     fn test_split_identifier_simple() {
         let args: Vec<String> = vec!["42".into()];
-        let (id, extra) = split_identifier(&args, &view_takes_value);
+        let (id, extra) = split_identifier(&args, &VIEW_GRAMMAR);
         assert_eq!(id.as_deref(), Some("42"));
         assert!(extra.is_empty());
     }
@@ -1386,7 +1422,7 @@ mod tests {
     fn test_split_identifier_with_repo_flag_before() {
         // glab mr view -R group/project 42
         let args: Vec<String> = vec!["-R".into(), "group/project".into(), "42".into()];
-        let (id, extra) = split_identifier(&args, &view_takes_value);
+        let (id, extra) = split_identifier(&args, &VIEW_GRAMMAR);
         assert_eq!(id.as_deref(), Some("42"));
         assert_eq!(extra, vec!["-R", "group/project"]);
     }
@@ -1395,7 +1431,7 @@ mod tests {
     fn test_split_identifier_with_repo_flag_after() {
         // glab mr view 42 -R group/project
         let args: Vec<String> = vec!["42".into(), "-R".into(), "group/project".into()];
-        let (id, extra) = split_identifier(&args, &view_takes_value);
+        let (id, extra) = split_identifier(&args, &VIEW_GRAMMAR);
         assert_eq!(id.as_deref(), Some("42"));
         assert_eq!(extra, vec!["-R", "group/project"]);
     }
@@ -1403,7 +1439,7 @@ mod tests {
     #[test]
     fn test_split_identifier_with_group_flag() {
         let args: Vec<String> = vec!["-g".into(), "mygroup".into(), "7".into()];
-        let (id, extra) = split_identifier(&args, &view_takes_value);
+        let (id, extra) = split_identifier(&args, &VIEW_GRAMMAR);
         assert_eq!(id.as_deref(), Some("7"));
         assert_eq!(extra, vec!["-g", "mygroup"]);
     }
@@ -1412,7 +1448,7 @@ mod tests {
     fn test_split_identifier_empty_yields_no_id() {
         // `glab mr view` (no args) must surface as (None, []) so the caller
         // hands the request to glab, which resolves the current branch's MR.
-        let (id, extra) = split_identifier(&[], &view_takes_value);
+        let (id, extra) = split_identifier(&[], &VIEW_GRAMMAR);
         assert!(id.is_none());
         assert!(extra.is_empty());
     }
@@ -1422,7 +1458,7 @@ mod tests {
         // Regression: `glab mr view -R group/project` previously triggered
         // "MR number required". Now flags must round-trip into `extra`.
         let args: Vec<String> = vec!["-R".into(), "group/project".into()];
-        let (id, extra) = split_identifier(&args, &view_takes_value);
+        let (id, extra) = split_identifier(&args, &VIEW_GRAMMAR);
         assert!(id.is_none());
         assert_eq!(extra, vec!["-R", "group/project"]);
     }
@@ -1433,7 +1469,7 @@ mod tests {
     fn test_view_pagination_values_are_not_the_identifier() {
         for flag in ["-p", "--page", "-P", "--per-page"] {
             let args: Vec<String> = vec![flag.into(), "2".into()];
-            let (id, extra) = split_identifier(&args, &view_takes_value);
+            let (id, extra) = split_identifier(&args, &VIEW_GRAMMAR);
             assert!(id.is_none(), "{} swallowed its value as the id", flag);
             assert_eq!(extra, vec![flag, "2"]);
         }
@@ -1442,7 +1478,7 @@ mod tests {
     #[test]
     fn test_view_jq_expression_is_not_the_identifier() {
         let args: Vec<String> = vec!["--jq".into(), ".iid".into()];
-        let (id, _) = split_identifier(&args, &view_takes_value);
+        let (id, _) = split_identifier(&args, &VIEW_GRAMMAR);
         assert!(id.is_none());
     }
 
@@ -1450,7 +1486,7 @@ mod tests {
     fn test_view_identifier_past_double_dash() {
         // `glab mr view -- 42` views MR 42: `--` ends flag parsing, not positional parsing.
         let args: Vec<String> = vec!["--".into(), "42".into()];
-        let (id, extra) = split_identifier(&args, &view_takes_value);
+        let (id, extra) = split_identifier(&args, &VIEW_GRAMMAR);
         assert_eq!(id.as_deref(), Some("42"));
         assert_eq!(extra, vec!["--"]);
     }
@@ -1460,7 +1496,7 @@ mod tests {
         // glab mr merge -m "ship it" previously confirmed "ok merged !ship it".
         for flag in ["-m", "--message", "--squash-message"] {
             let args: Vec<String> = vec![flag.into(), "ship it".into()];
-            let (id, _) = split_identifier(&args, &mr_merge_takes_value);
+            let (id, _) = split_identifier(&args, &MR_MERGE_GRAMMAR);
             assert!(
                 id.is_none(),
                 "{} swallowed its value as the MR number",
@@ -1474,10 +1510,10 @@ mod tests {
         // -s is --squash on merge and --sha on approve: one shared table would break one of them.
         let args: Vec<String> = vec!["-s".into(), "42".into()];
         assert_eq!(
-            split_identifier(&args, &mr_merge_takes_value).0.as_deref(),
+            split_identifier(&args, &MR_MERGE_GRAMMAR).0.as_deref(),
             Some("42")
         );
-        assert!(split_identifier(&args, &mr_approve_takes_value).0.is_none());
+        assert!(split_identifier(&args, &MR_APPROVE_GRAMMAR).0.is_none());
     }
 
     #[test]
@@ -1485,7 +1521,7 @@ mod tests {
         // glab mr update --add a label: -l/-t/-a values are not identifiers.
         for flag in ["-l", "--label", "-t", "--title", "-a", "--assignee"] {
             let args: Vec<String> = vec![flag.into(), "bug".into()];
-            let (id, _) = split_identifier(&args, &mr_update_takes_value);
+            let (id, _) = split_identifier(&args, &MR_UPDATE_GRAMMAR);
             assert!(
                 id.is_none(),
                 "{} swallowed its value as the MR number",
@@ -1497,14 +1533,14 @@ mod tests {
     #[test]
     fn test_mr_update_keeps_an_explicit_mr_number() {
         let args: Vec<String> = vec!["--label".into(), "bug".into(), "42".into()];
-        let (id, _) = split_identifier(&args, &mr_update_takes_value);
+        let (id, _) = split_identifier(&args, &MR_UPDATE_GRAMMAR);
         assert_eq!(id.as_deref(), Some("42"));
     }
 
     #[test]
     fn test_mr_note_message_is_not_the_mr_number() {
         let args: Vec<String> = vec!["-m".into(), "looks good".into()];
-        let (id, _) = split_identifier(&args, &mr_note_takes_value);
+        let (id, _) = split_identifier(&args, &MR_NOTE_GRAMMAR);
         assert!(id.is_none());
     }
 
@@ -1565,7 +1601,7 @@ mod tests {
     fn test_split_identifier_with_message_flag() {
         // glab mr note -m "comment" 42 — number should be 42, not "comment"
         let args: Vec<String> = vec!["-m".into(), "comment".into(), "42".into()];
-        let (id, extra) = split_identifier(&args, &mr_note_takes_value);
+        let (id, extra) = split_identifier(&args, &MR_NOTE_GRAMMAR);
         assert_eq!(id.as_deref(), Some("42"));
         assert_eq!(extra, vec!["-m", "comment"]);
     }

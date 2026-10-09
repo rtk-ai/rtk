@@ -14,12 +14,14 @@ use std::sync::LazyLock;
 
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 use crate::core::arg_tokenizer::{self, TokenKind as ArgKind};
+use crate::core::cmdline::bash_grammar::{ReservedWord, reserved_word};
 use crate::core::cmdline::edit::{Edit, apply_edits};
 use crate::core::cmdline::lexer::{
-    CaseTracker, PipeKind, QuoteScan, SubstitutionDepth, Token, TokenKind, Word,
-    ansi_c_quote_defeats_lexer, content_bounds, is_ifs, redirect_has_file_target, resolve_words,
-    split_for_classify, split_for_permissions, split_ifs, squeeze_blanks, tokenize, tokenize_at,
-    tokenize_trimmed, trim_ifs, trim_ifs_end, trim_ifs_start, words,
+    CommandStart, PipeKind, QuoteScan, Reading, SubstitutionDepth, Token, TokenKind, Word,
+    ansi_c_quote_defeats_lexer, assignment_value, content_bounds, is_ifs, read_grammar,
+    redirect_has_file_target, resolve_words, split_for_classify, split_for_permissions, split_ifs,
+    squeeze_blanks, starts_with_grammar, tokenize, tokenize_at, tokenize_trimmed, trim_ifs,
+    trim_ifs_end, trim_ifs_start, words,
 };
 use crate::core::cmdline::rtk::rtk_invocation;
 
@@ -72,15 +74,6 @@ static COMPILED: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         .map(|r| Regex::new(r.pattern).expect("invalid regex"))
         .collect()
 });
-/// One assignment word, in bash's own sense: a name of letters, digits and `_`
-/// not starting with a digit, then `=` or `+=`, in any case. The value is
-/// whatever the rest of the word is, since [`words`] has already decided
-/// where the word ends — quotes included.
-///
-/// Anything else before the `=` makes the word a command: bash runs `1a=b`,
-/// `foo-bar=x` and `"foo"=x` rather than assigning them.
-static ENV_ASSIGN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*\+?=").unwrap());
 // Git global options that appear before the subcommand: -C <path>, -c <key=val>,
 // --git-dir <dir>, --work-tree <dir>, and flag-only options (#163)
 static GIT_GLOBAL_OPT: LazyLock<Regex> = LazyLock::new(|| {
@@ -183,15 +176,28 @@ struct GolangciRunParts<'a> {
     run_segment: &'a str,
 }
 
-/// Classify a single (already-split) command.
+/// Classify a single (already-split) command, one that starts where a
+/// pipeline does.
 pub fn classify_command(cmd: &str) -> Classification {
-    classify_words(cmd, &words(cmd, &tokenize(cmd)))
+    classify_command_at(cmd, CommandStart::Pipeline)
 }
 
-/// [`classify_command`] for the command made of `words`, spans of `text`. It
-/// runs from the first word to the end of the last, so an escaped blank that
-/// ends the last word stays in it.
-fn classify_words(text: &str, words: &[Word<'_>]) -> Classification {
+/// [`classify_command`] for a command that starts at `start`: a stage after
+/// `|` reads `time` as the program `time`.
+pub(crate) fn classify_command_at(cmd: &str, start: CommandStart) -> Classification {
+    let tokens = tokenize(cmd);
+    classify_words(cmd, &tokens, &words(cmd, &tokens), start)
+}
+
+/// [`classify_command_at`] for the command made of `words`, spans of `text`,
+/// lexed as `tokens`. It runs from the first word to the end of the last, so
+/// an escaped blank that ends the last word stays in it.
+fn classify_words(
+    text: &str,
+    tokens: &[Token<'_>],
+    words: &[Word<'_>],
+    start: CommandStart,
+) -> Classification {
     let (Some(first), Some(last)) = (words.first(), words.last()) else {
         return Classification::Ignored;
     };
@@ -200,6 +206,16 @@ fn classify_words(text: &str, words: &[Word<'_>]) -> Classification {
     // A command that runs rtk is not an opportunity: the report counts it as
     // already rtk, unless it is `rtk proxy`.
     if rtk_invocation(words).is_some() {
+        return Classification::Ignored;
+    }
+
+    // A segment that starts with a reserved word is grammar around commands,
+    // not a command: `rtk until …` or `rtk esac` would break the construct.
+    // Nor is one that starts with the `((` of an arithmetic command, which
+    // runs no command. `read_grammar`'s rules decide both, so `[[(-f a)]]`
+    // starts with `[[`, `"if"` is an ordinary word, `((ls) )` is two
+    // subshells, and after `|` `time` is a program.
+    if starts_with_grammar(tokens, start) {
         return Classification::Ignored;
     }
 
@@ -773,8 +789,11 @@ pub fn split_env_prefix(cmd: &str) -> (&str, &str) {
     }
 }
 
+/// Whether `word` is `env` or an assignment word, in bash's own sense (see
+/// [`assignment_value`]). The value is whatever the rest of the word is,
+/// since [`words`] has already decided where the word ends, quotes included.
 fn is_env_word(word: &str) -> bool {
-    word == "env" || ENV_ASSIGN.is_match(word)
+    word == "env" || assignment_value(word).is_some()
 }
 
 /// Where the run of `env` and `NAME=value` words that opens `words` ends: at
@@ -941,14 +960,6 @@ fn rewrite_single(
         .flatten()
 }
 
-/// Shell keywords that open or close a multi-line construct. A line inside a
-/// loop, conditional, case arm, function body, or group is not an independent
-/// command, so the whole block passes through untouched.
-const BLOCK_KEYWORDS: &[&str] = &[
-    "for", "while", "until", "if", "then", "else", "elif", "fi", "do", "done", "case", "esac",
-    "select", "function", "coproc", "{", "}", "(", ")",
-];
-
 /// Byte offset where an unquoted `#` at the start of a word begins a trailing
 /// comment, if any. The lexer has no comment state, so the independence checks
 /// must ignore comment text themselves: `git log | # keep pipeline` continues
@@ -1036,7 +1047,12 @@ fn classify_line(line: &str) -> LineRole {
     let comment = comment_start(line);
     let code = comment.map_or(line, |i| trim_ifs_end(&line[..i]));
     let first = split_ifs(code).next().unwrap_or("");
-    if BLOCK_KEYWORDS.contains(&first) {
+    // A line inside a loop, conditional, case arm, function body, group or
+    // subshell is not an independent command, so the whole block passes
+    // through untouched.
+    if matches!(first, "(" | ")")
+        || reserved_word(first).is_some_and(ReservedWord::delimits_command_list)
+    {
         return LineRole::Unsafe;
     }
     const CONTINUATION_OPS: [&str; 4] = ["&&", "||", "|&", "|"];
@@ -1184,6 +1200,7 @@ struct PipelineAnalysis {
 
 fn analyze_pipeline(
     line: &Slice<'_, '_>,
+    readings: &[Reading],
     segment_start: usize,
     first_pipe: usize,
 ) -> PipelineAnalysis {
@@ -1191,12 +1208,17 @@ fn analyze_pipeline(
     // A stage ends where its last word does, which keeps an escaped blank:
     // `head\ ` is the program `head␠`, not a safe consumer.
     let stage = |range: Range<usize>| Slice::new(line.text, &tokens[range]);
+    // Only a token read as command text joins or ends a stage: the `||` of a
+    // `[[ ]]` expression is part of that stage's command.
+    let in_commands = |i: usize| readings[i] == Reading::Commands;
     let next_clause = tokens
         .iter()
         .enumerate()
         .skip(first_pipe + 1)
-        .find(|(_, tok)| {
-            tok.kind == TokenKind::Operator || (tok.kind == TokenKind::Shellism && tok.value == "&")
+        .find(|&(i, tok)| {
+            in_commands(i)
+                && (tok.kind == TokenKind::Operator
+                    || (tok.kind == TokenKind::Shellism && tok.value == "&"))
         })
         .map(|(i, _)| i);
     let end = next_clause.unwrap_or(tokens.len());
@@ -1207,6 +1229,9 @@ fn analyze_pipeline(
     let mut consumers_all_safe = true;
 
     for (i, tok) in tokens.iter().enumerate().take(end).skip(first_pipe) {
+        if !in_commands(i) {
+            continue;
+        }
         if tok.kind == TokenKind::Redirect {
             if redirect_has_file_target(tokens, i) {
                 consumers_all_safe = false;
@@ -1276,7 +1301,11 @@ fn rewrite_pipeline(
 /// Rewrites each command of `line`, pushing one edit per rewritten command
 /// onto `edits`. Third of three compound-command segmenters — see the
 /// comparison table on [`split_for_permissions`]. Less conservative than that
-/// gate: a redirect stays part of its command rather than truncating it.
+/// gate: a redirect stays part of its command rather than truncating it. It
+/// also reads bash's grammar through [`read_grammar`]: a `[[ … ]]` expression
+/// is part of the one command `[[` starts, word text (an extglob group, an
+/// array literal, a `${ }`) part of the command its word belongs to, and a
+/// `case` pattern belongs to no command.
 ///
 /// The blanks and operators between two commands belong to no edit, so they
 /// are emitted as written: an operator's own spacing is nobody's to normalise,
@@ -1288,11 +1317,19 @@ fn rewrite_compound(
     edits: &mut Vec<Edit>,
 ) {
     let tokens = line.tokens;
-    let has_pipe = tokens
-        .iter()
-        .any(|tok| matches!(tok.kind, TokenKind::Pipe(_)));
-    let has_opaque_grouping = tokens
-        .iter()
+    let readings = read_grammar(line.text, tokens);
+    // A `case` pattern's `|` and brackets, and a `[[ ]]` regex's, belong to no
+    // pipeline. Word text's count here, as they do for the permission gate's
+    // segmenter, so a line holding them next to a pipe is left as written.
+    let commands = || {
+        tokens
+            .iter()
+            .zip(&readings)
+            .filter(|(_, reading)| matches!(reading, Reading::Commands | Reading::WordText))
+            .map(|(tok, _)| tok)
+    };
+    let has_pipe = commands().any(|tok| matches!(tok.kind, TokenKind::Pipe(_)));
+    let has_opaque_grouping = commands()
         .any(|tok| tok.kind == TokenKind::Shellism && matches!(tok.value, "(" | ")" | "{" | "}"));
     if has_pipe && has_opaque_grouping {
         return;
@@ -1309,10 +1346,7 @@ fn rewrite_compound(
         }));
     };
     let mut seg_start = 0;
-    // Whether a word or operator sits between `seg_start` and the token read.
-    let mut seg_has_text = false;
     let mut substitution = SubstitutionDepth::default();
-    let mut cases = CaseTracker::default();
 
     for (i, tok) in tokens.iter().enumerate() {
         // A blank ends nothing here: a newline that reaches this loop follows
@@ -1320,10 +1354,20 @@ fn rewrite_compound(
         if i < seg_start || tok.is_blank() {
             continue;
         }
-        // Nothing since the last boundary means this token is the command,
-        // which is where `case` is the keyword and not a word.
-        let at_command_position = !seg_has_text;
-        seg_has_text = true;
+        match readings[i] {
+            // A `case` pattern runs nothing, so it belongs to no command: what
+            // precedes it ends, and the arm's commands start after its `)`.
+            Reading::Pattern => {
+                segment(seg_start..i, edits);
+                seg_start = i + 1;
+                continue;
+            }
+            // A `[[ ]]` expression is part of the command `[[` starts, and
+            // word text part of the command its word belongs to: nothing
+            // inside either ends that command.
+            Reading::Expression | Reading::WordText => continue,
+            Reading::Commands => {}
+        }
         // `$( )`, `<( )` and `>( )` all run a command in service of the outer
         // one — as text it is built from, or as a file it reads. Filtering that
         // output would change what the outer command parses rather than what
@@ -1332,12 +1376,10 @@ fn rewrite_compound(
         if substitution.absorbs(line.text, tok) || substitution.is_inside() {
             continue;
         }
-        let in_case_pattern = cases.in_pattern();
-        cases.observe(tok, at_command_position);
         let boundary = match tok.kind {
             TokenKind::Operator => true,
             TokenKind::Pipe(_) => {
-                let analysis = analyze_pipeline(&line, seg_start, i);
+                let analysis = analyze_pipeline(&line, &readings, seg_start, i);
                 edits.extend(rewrite_pipeline(
                     &line,
                     seg_start,
@@ -1349,23 +1391,17 @@ fn rewrite_compound(
                 match analysis.next_clause {
                     Some(next_clause) => {
                         seg_start = next_clause;
-                        seg_has_text = false;
                         continue;
                     }
                     None => return,
                 }
             }
-            // `case x in (ls) …` is the same statement as `case x in ls) …`:
-            // that bracket opens the pattern, not a subshell. Rewriting inside
-            // it would make the one-word pattern two words, which bash rejects.
-            TokenKind::Shellism if tok.value == "(" && in_case_pattern => false,
             TokenKind::Shellism => matches!(tok.value, "&" | "(" | ")"),
             _ => false,
         };
         if boundary {
             segment(seg_start..i, edits);
             seg_start = i + 1;
-            seg_has_text = false;
         }
     }
 
@@ -2169,7 +2205,12 @@ fn decide(
     }
 
     // Use classify_command for correct ignore/prefix handling
-    let rtk_equivalent = match classify_words(text, &words) {
+    let start = if context == RewriteContext::PipelineFinal {
+        CommandStart::PipeStage
+    } else {
+        CommandStart::Pipeline
+    };
+    let rtk_equivalent = match classify_words(text, part.tokens, &words, start) {
         Classification::Supported { rtk_equivalent, .. } => {
             if !excluded.is_empty() {
                 let cmd_clean = env_run_end(&words).map_or(cmd_part, |end| &text[end..part.end()]);
@@ -2568,12 +2609,19 @@ mod tests {
                 Some("echo case; (rtk git status)".into())
             );
 
-            // The gate and analytics read the pattern the same way, so neither
-            // reports an `ls` that no shell ever runs.
+            // Nor does the gate or analytics read a subshell there: the gate
+            // keeps the pattern in the segment before it, and analytics leaves
+            // it out of every segment, so neither reports an `ls` that no shell
+            // ever runs.
             let bracketed = "case $x in (ls) echo 1;; esac";
-            let expected = vec!["case $x in (ls", "echo 1", "esac"];
-            assert_eq!(split_for_permissions(bracketed), expected);
-            assert_eq!(split_command_chain(bracketed), expected);
+            assert_eq!(
+                split_for_permissions(bracketed),
+                vec!["case $x in (ls", "echo 1", "esac"]
+            );
+            assert_eq!(
+                split_command_chain(bracketed),
+                vec!["case $x in", "echo 1", "esac"]
+            );
         }
 
         /// Every stage of a pipeline is a command that ran, and all three see
@@ -2613,6 +2661,85 @@ mod tests {
                 rewrite_command_no_prefixes(cmd, &[]),
                 Some("rtk git status 2>&1 && rtk cargo build".into())
             );
+        }
+
+        /// Divergence, with a reason. Classification and the rewrite read a
+        /// `[[ … ]]` expression, an arithmetic command and a `case` pattern as
+        /// bash does, as no command at all: an `rtk` there breaks the line, and
+        /// a report that counts one promises a saving the hook never takes. The
+        /// gate keeps its own splitting at every `&&`, `||` and `)`, which can
+        /// only check a segment that runs nothing, never leave one unchecked.
+        #[test]
+        fn the_gate_alone_splits_expressions_and_patterns() {
+            let test = "[[ -f a || ls ]] && git status";
+            assert_eq!(
+                split_for_permissions(test),
+                vec!["[[ -f a", "ls ]]", "git status"]
+            );
+            assert_eq!(
+                split_command_chain(test),
+                vec!["[[ -f a || ls ]]", "git status"]
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes(test, &[]),
+                Some("[[ -f a || ls ]] && rtk git status".into())
+            );
+
+            let arithmetic = "(( a || ls )) && git status";
+            assert_eq!(
+                split_for_permissions(arithmetic),
+                vec!["a", "ls", "git status"]
+            );
+            assert_eq!(
+                split_command_chain(arithmetic),
+                vec!["(( a || ls ))", "git status"]
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes(arithmetic, &[]),
+                Some("(( a || ls )) && rtk git status".into())
+            );
+
+            let case = "case $x in a) echo esac;; ls) ls;; esac";
+            assert_eq!(
+                split_for_permissions(case),
+                vec!["case $x in a", "echo esac", "ls", "ls", "esac"]
+            );
+            assert_eq!(
+                split_command_chain(case),
+                vec!["case $x in", "echo esac", "ls", "esac"]
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes(case, &[]),
+                Some("case $x in a) echo esac;; ls) rtk ls;; esac".into())
+            );
+        }
+
+        /// No piece that classification finds inside an expression or a
+        /// pattern is a supported command, and an ordinary chain still yields
+        /// one supported piece per command.
+        #[test]
+        fn no_supported_piece_inside_expressions_and_patterns() {
+            use super::super::{Classification, classify_command};
+
+            fn supported(cmd: &str) -> Vec<&str> {
+                split_command_chain(cmd)
+                    .into_iter()
+                    .filter(|part| {
+                        matches!(classify_command(part), Classification::Supported { .. })
+                    })
+                    .collect()
+            }
+            for cmd in [
+                "[[ -f a || ls ]]",
+                "[[ -f a && git status ]]",
+                "(( a || b ))",
+                "(( a || ls ))",
+                "case $x in ls) echo 1;; git|ls) echo 2;; esac",
+                "case $x in (ls) echo 1;; esac",
+            ] {
+                assert_eq!(supported(cmd), Vec::<&str>::new(), "{cmd:?}");
+            }
+            assert_eq!(supported("ls && git status"), vec!["ls", "git status"]);
         }
 
         /// Divergence, with a reason. A command inside `$( )` runs, so the gate
@@ -3101,7 +3228,8 @@ mod tests {
             .iter()
             .position(|token| matches!(token.kind, TokenKind::Pipe(_)))
             .expect("test command must contain a pipe");
-        let analysis = analyze_pipeline(&whole, 0, first_pipe);
+        let readings = read_grammar(whole.text, whole.tokens);
+        let analysis = analyze_pipeline(&whole, &readings, 0, first_pipe);
         let offset = |i: usize| whole.tokens.get(i).map_or(cmd.len(), |t| t.offset);
         PipelineOffsets {
             end_offset: offset(analysis.end),
@@ -3554,6 +3682,68 @@ mod tests {
     fn test_done_still_ignored_exact() {
         // Bare "done" (shell keyword) should still be ignored
         assert_eq!(classify_command("done"), Classification::Ignored);
+    }
+
+    /// A segment whose first word is a bash reserved word is grammar around
+    /// commands, never a command of that name, whatever follows the word.
+    #[test]
+    fn test_reserved_word_segments_are_ignored() {
+        for cmd in [
+            "if git status",
+            "then\tgit log",
+            "elif true",
+            "else",
+            "fi >/dev/null",
+            "case $x in",
+            "in a b",
+            "esac",
+            "for f in a b",
+            "select x in a",
+            "while true",
+            "until false",
+            "do git status",
+            "done < f",
+            "function f",
+            "coproc git status",
+            "time cargo test",
+            "[[ -f x ]]",
+            "[[(-f x)]]",
+            "]]",
+            "(( x++ ))",
+            "((x>1))",
+            "((x || y",
+        ] {
+            assert_eq!(classify_command(cmd), Classification::Ignored, "{cmd:?}");
+        }
+        // Quoted, escaped or glued to more text, the word is an ordinary one.
+        for cmd in [
+            "\"if\" x",
+            "\\if x",
+            "donex",
+            "\"[[\"(x)",
+            "\\[[(x)",
+            "\"((\" x",
+            "\\((x",
+            // Two subshells, one inside the other, not an arithmetic command.
+            "((ls) )",
+        ] {
+            assert_ne!(classify_command(cmd), Classification::Ignored, "{cmd:?}");
+        }
+        // After `|`, `time` is the program `time`, and other reserved words
+        // read as they do where a pipeline starts.
+        for (cmd, ignored) in [
+            ("time cargo test", false),
+            ("time -p git status", false),
+            ("if git status", true),
+            ("[[ -f x ]]", true),
+            ("(( x++ ))", true),
+        ] {
+            assert_eq!(
+                classify_command_at(cmd, CommandStart::PipeStage) == Classification::Ignored,
+                ignored,
+                "{cmd:?}"
+            );
+        }
     }
 
     #[test]
@@ -4458,6 +4648,226 @@ mod tests {
                 rewrite_command_no_prefixes(cmd, &[]).as_deref(),
                 Some(expected),
                 "case terminator was not preserved: {cmd}"
+            );
+        }
+    }
+
+    /// Inside `[[ … ]]` nothing is a command: `&&`, `||`, `(` and `)` there
+    /// are operators of the expression, so the rewrite never puts `rtk`
+    /// inside one, wherever the `[[` sits and whatever the expression holds.
+    #[test]
+    fn test_rewrite_reads_a_test_expression_as_one_command() {
+        for (cmd, expected) in [
+            ("[[ -f a || ls ]]", None),
+            ("[[ -f a || ls ]] && ls", Some("[[ -f a || ls ]] && rtk ls")),
+            (
+                "[[ ( -f a || ls ) && -e c ]] || git status",
+                Some("[[ ( -f a || ls ) && -e c ]] || rtk git status"),
+            ),
+            ("if [[ -f a || ls ]]; then :; fi", None),
+            ("while [[ -f a && ls ]]; do :; done", None),
+            (
+                "ls && [[ -f a || ls ]] && git status",
+                Some("rtk ls && [[ -f a || ls ]] && rtk git status"),
+            ),
+            (
+                "time [[ -f a || ls ]] && ls",
+                Some("time [[ -f a || ls ]] && rtk ls"),
+            ),
+            // `time`'s options `-p` and `--` leave `[[` in command position.
+            (
+                "time -p [[ -f a || ls ]] && ls",
+                Some("time -p [[ -f a || ls ]] && rtk ls"),
+            ),
+            ("time -- [[ -f a || ls ]]", None),
+            (
+                "time -p -- [[ -f a || ls ]] && ls",
+                Some("time -p -- [[ -f a || ls ]] && rtk ls"),
+            ),
+            // Anything else after `time` is a command, and `[[` its argument.
+            (
+                "time -- -p [[ -f a || ls ]]",
+                Some("time -- -p [[ -f a || rtk ls ]]"),
+            ),
+            (
+                "time \"-p\" [[ -f a || ls ]]",
+                Some("time \"-p\" [[ -f a || rtk ls ]]"),
+            ),
+            (
+                "[[ $x =~ a||ls ]] && ls",
+                Some("[[ $x =~ a||ls ]] && rtk ls"),
+            ),
+            (
+                "[[ $x =~ ^(ls)+$ ]] || ls",
+                Some("[[ $x =~ ^(ls)+$ ]] || rtk ls"),
+            ),
+            (
+                "ls | [[ -f a || ls ]] && git status",
+                Some("ls | [[ -f a || ls ]] && rtk git status"),
+            ),
+            // `*]]` is one word, so it does not close the expression.
+            (
+                "[[ $x == *]] || ls ]] && ls",
+                Some("[[ $x == *]] || ls ]] && rtk ls"),
+            ),
+            // With no `]]`, the rest of the line is the expression.
+            ("[[ -f a || ls", None),
+            ("[[ -f a && ls; git status", None),
+            // Where `[[` is not in command position it is an ordinary word,
+            // and `||` separates commands.
+            ("echo [[ -f a || ls ]]", Some("echo [[ -f a || rtk ls ]]")),
+            ("a=1 [[ -f a || ls ]]", Some("a=1 [[ -f a || rtk ls ]]")),
+            ("\"[[\" -f a || ls ]]", Some("\"[[\" -f a || rtk ls ]]")),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                expected,
+                "{cmd:?}"
+            );
+        }
+    }
+
+    /// An arithmetic command `(( … ))` runs no command: `||`, `&&`, `;` and
+    /// the brackets inside it belong to its expression, so the rewrite never
+    /// puts `rtk` inside one.
+    #[test]
+    fn test_rewrite_reads_an_arithmetic_command_as_one_command() {
+        for (cmd, expected) in [
+            ("(( ls || x ))", None),
+            ("((ls||x)) && ls", Some("((ls||x)) && rtk ls")),
+            (
+                "ls && (( ls++ )) || git status",
+                Some("rtk ls && (( ls++ )) || rtk git status"),
+            ),
+            ("time -p (( ls )) && ls", Some("time -p (( ls )) && rtk ls")),
+            ("if (( ls || x )); then :; fi", None),
+            (
+                "case $x in a) (( ls )) || ls;; esac",
+                Some("case $x in a) (( ls )) || rtk ls;; esac"),
+            ),
+            ("( (( ls )) && ls )", Some("( (( ls )) && rtk ls )")),
+            (
+                "(( ( ls ) || ( x ) )) && ls",
+                Some("(( ( ls ) || ( x ) )) && rtk ls"),
+            ),
+            (
+                "(( ls = \"x)\" )) || ls",
+                Some("(( ls = \"x)\" )) || rtk ls"),
+            ),
+            ("coproc (( ls ))", None),
+            // No `)` right after the one that closes the second `(`: two
+            // subshells, whose commands are rewritten.
+            ("((ls) )", Some("((rtk ls) )")),
+            ("((ls); (git status))", Some("((rtk ls); (rtk git status))")),
+            ("((ls) || (ls))", Some("((rtk ls) || (rtk ls))")),
+            // With no `)` to close the second `(`, the rest of the line is the
+            // expression.
+            ("(( ls || x", None),
+            ("(( ls || x; git status", None),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                expected,
+                "{cmd:?}"
+            );
+        }
+    }
+
+    /// After a compound command's last word, and after the name of a `for`,
+    /// `select` or `coproc`, bash reads a reserved word, so the `then` or `do`
+    /// there is one and the `[[ ]]` or `(( ))` behind it runs no command.
+    #[test]
+    fn test_rewrite_reads_a_reserved_word_after_a_closer() {
+        for (cmd, expected) in [
+            ("for x do [[ -f a || ls ]]; done", None),
+            ("select x do [[ -f a || ls ]]; done", None),
+            ("if (true) then [[ -f a || ls ]]; fi", None),
+            ("if [[ b ]] then [[ -f a || ls ]]; fi", None),
+            ("while (( 0 )) do [[ -f a || ls ]]; done", None),
+            ("coproc NAME [[ -f a || ls ]]", None),
+            ("for x do (( ls || x )); done", None),
+            ("if (true) then (( ls || x )); fi", None),
+            (
+                "for x do [[ -f a || ls ]] && ls; done",
+                Some("for x do [[ -f a || ls ]] && rtk ls; done"),
+            ),
+            (
+                "if (true) then [[ -f a || ls ]] && git status; fi",
+                Some("if (true) then [[ -f a || ls ]] && rtk git status; fi"),
+            ),
+            (
+                "while (( 0 )) do [[ -f a || ls ]]; done; git status",
+                Some("while (( 0 )) do [[ -f a || ls ]]; done; rtk git status"),
+            ),
+            (
+                "case x in a) (ls) esac; [[ -f a || ls ]] || git status",
+                Some("case x in a) (rtk ls) esac; [[ -f a || ls ]] || rtk git status"),
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                expected,
+                "{cmd:?}"
+            );
+        }
+    }
+
+    /// A `case` pattern is never a command: after `in` and after each `;;`,
+    /// `;&` or `;;&`, the words up to the pattern's `)` are patterns, and only
+    /// an `esac` there or in command position closes the `case`.
+    #[test]
+    fn test_rewrite_never_reads_a_case_pattern_as_a_command() {
+        for (cmd, expected) in [
+            (
+                "case $x in a) echo hi ;; ls) ls ;; esac",
+                Some("case $x in a) echo hi ;; ls) rtk ls ;; esac"),
+            ),
+            (
+                "case $x in a) echo esac ;; (ls) ls ;; esac",
+                Some("case $x in a) echo esac ;; (ls) rtk ls ;; esac"),
+            ),
+            (
+                "case $x in a) ls;;& ls) ls;& (ls) ls;; esac",
+                Some("case $x in a) rtk ls;;& ls) rtk ls;& (ls) rtk ls;; esac"),
+            ),
+            (
+                "case $x in ls) echo esac; ls;; git) git status;; esac",
+                Some("case $x in ls) echo esac; rtk ls;; git) rtk git status;; esac"),
+            ),
+            // An `esac` in command position ends the last arm.
+            (
+                "case $x in a) echo hi; esac; ls",
+                Some("case $x in a) echo hi; esac; rtk ls"),
+            ),
+            (
+                "case $x in a) case $y in ls) ls;; esac;; ls) ls;; esac; ls",
+                Some("case $x in a) case $y in ls) rtk ls;; esac;; ls) rtk ls;; esac; rtk ls"),
+            ),
+            (
+                "case $x in a) [[ -f a || ls ]] || ls;; esac",
+                Some("case $x in a) [[ -f a || ls ]] || rtk ls;; esac"),
+            ),
+            (
+                "(case $x in ls) ls;; esac) && git status",
+                Some("(case $x in ls) rtk ls;; esac) && rtk git status"),
+            ),
+            (
+                "case in in in) ls;; esac",
+                Some("case in in in) rtk ls;; esac"),
+            ),
+            // Glued to more text, `esac` is a pattern word.
+            (
+                "case $x in a) ls;; esac*) ls;; esac",
+                Some("case $x in a) rtk ls;; esac*) rtk ls;; esac"),
+            ),
+            ("case $x in esac; ls", Some("case $x in esac; rtk ls")),
+            // A pattern with no `)` runs to the end of the line.
+            ("case $x in a) echo;; ls; git status", None),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                expected,
+                "{cmd:?}"
             );
         }
     }
@@ -9428,6 +9838,155 @@ mod tests {
             rewrite_command_no_prefixes("echo x | { cat; git log; } | grep feat", &[]),
             None
         );
+    }
+
+    /// Only command text pipes or groups commands: a `case` pattern's `|` and
+    /// brackets, and a `[[ ]]` regex's, leave the line to the rewrite, while
+    /// a subshell next to a pipe still keeps it raw.
+    #[test]
+    fn test_rewrite_pattern_and_regex_brackets_group_nothing() {
+        for (cmd, expected) in [
+            (
+                "[[ $y =~ ^(a|b)$ ]] && git status",
+                Some("[[ $y =~ ^(a|b)$ ]] && rtk git status"),
+            ),
+            (
+                "[[ $y =~ (a|b) ]] && git status | head",
+                Some("[[ $y =~ (a|b) ]] && rtk git status | head"),
+            ),
+            (
+                "case $y in a|b) git status;; esac",
+                Some("case $y in a|b) rtk git status;; esac"),
+            ),
+            (
+                "case $y in (a|b) git status | head;; esac",
+                Some("case $y in (a|b) rtk git status | head;; esac"),
+            ),
+            (
+                "case $y in @(a|b)) git status | head;; esac",
+                Some("case $y in @(a|b)) rtk git status | head;; esac"),
+            ),
+            ("(ls) | head", None),
+            ("ls | (head)", None),
+            ("case $y in a) (ls) | head;; esac", None),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                expected,
+                "{cmd:?}"
+            );
+        }
+    }
+
+    /// Word text is one word's, never a command: an extglob group, an array
+    /// literal and a `${ }` keep their text as written, and nothing inside
+    /// one ends the command it belongs to.
+    #[test]
+    fn test_rewrite_leaves_word_text_as_written() {
+        for (cmd, expected) in [
+            ("x=(git status)", None),
+            ("declare -a a=(git status)", None),
+            ("a+=(git status) && ls", Some("a+=(git status) && rtk ls")),
+            ("arr=(a b) git status", Some("arr=(a b) rtk git status")),
+            ("arr=(a b); git status", Some("arr=(a b); rtk git status")),
+            ("ls !(ls)", Some("rtk ls !(ls)")),
+            ("git log !(a) && ls", Some("rtk git log !(a) && rtk ls")),
+            ("ls ?((ls))", Some("rtk ls ?((ls))")),
+            (
+                "ls x@(a;b)&&git status",
+                Some("rtk ls x@(a;b)&&rtk git status"),
+            ),
+            // Word text's `|` and brackets count as a pipe and a group.
+            ("ls @(a|b) && git status", None),
+            (
+                "ls ${x-;ls }; git status",
+                Some("rtk ls ${x-;ls }; rtk git status"),
+            ),
+            (
+                "ls ${y+git status} && git status",
+                Some("rtk ls ${y+git status} && rtk git status"),
+            ),
+            ("git log ${x:-a b} | head", None),
+            (
+                "x=(${y-a b} c) && git status",
+                Some("x=(${y-a b} c) && rtk git status"),
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                expected,
+                "{cmd:?}"
+            );
+        }
+    }
+
+    /// `time` after `|` or `|&` is the program `time`, so a `[[` after it is
+    /// an argument and `||` ends that command.
+    #[test]
+    fn test_rewrite_reads_time_after_a_pipe_as_a_program() {
+        for (cmd, expected) in [
+            (
+                "ls | time [[ -f a || ls ]]",
+                Some("ls | time [[ -f a || rtk ls ]]"),
+            ),
+            (
+                "ls |& time [[ -f a || ls ]]",
+                Some("ls |& time [[ -f a || rtk ls ]]"),
+            ),
+            (
+                "ls | time -p [[ -f a || ls ]]",
+                Some("ls | time -p [[ -f a || rtk ls ]]"),
+            ),
+            (
+                "ls && time [[ -f a || ls ]] && ls",
+                Some("rtk ls && time [[ -f a || ls ]] && rtk ls"),
+            ),
+            // The stage runs the program `time`, which no rule takes.
+            ("ls | time git status", None),
+            ("ls | time -p git status", None),
+            ("git log | time head", None),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                expected,
+                "{cmd:?}"
+            );
+        }
+    }
+
+    /// In a `case` pattern or a `[[ ]]` expression, word text is text of one
+    /// of its words: a `)`, a `|` or a `]]` in a `${ }` ends nothing.
+    #[test]
+    fn test_rewrite_reads_word_text_in_patterns_and_expressions() {
+        for (cmd, expected) in [
+            (
+                "case $x in ${y:-a)b}) ls;; esac",
+                Some("case $x in ${y:-a)b}) rtk ls;; esac"),
+            ),
+            (
+                "case $x in ${y:-a|b}) ls;; esac",
+                Some("case $x in ${y:-a|b}) rtk ls;; esac"),
+            ),
+            (
+                "case $x in ${y-a) ls;; b}) git status;; esac",
+                Some("case $x in ${y-a) ls;; b}) rtk git status;; esac"),
+            ),
+            ("[[ ${x- ]] } == a || ls ]]", None),
+            (
+                "[[ ${x-)} == a || ls ]] && ls",
+                Some("[[ ${x-)} == a || ls ]] && rtk ls"),
+            ),
+            (
+                "[[ ${x-a ]] || ls } ]] && git status",
+                Some("[[ ${x-a ]] || ls } ]] && rtk git status"),
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                expected,
+                "{cmd:?}"
+            );
+        }
     }
 
     #[test]

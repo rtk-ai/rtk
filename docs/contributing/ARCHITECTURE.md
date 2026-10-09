@@ -577,7 +577,7 @@ When adding Python/Go module support:
 
 Every command that inspects its own arguments — which flags were passed, which tokens are paths, what to inject or strip — classifies them with `src/core/arg_tokenizer.rs`. String scans (`starts_with('-')`, `arg == "--flag"`) miss a flag's own value, attached values, short clusters and everything past `--`, which is where this module's whole bug class lives.
 
-> For the predicate contract and the four rules that come with it (one grammar per subcommand, scope the lookup to the region the tool parses, inject before the boundary, detect and act with one rule), see [src/core/README.md](../../src/core/README.md#argument-tokenizer-arg_tokenizerrs).
+> For how a tool declares its flag grammar once, as data, and the four rules that come with it (one grammar per subcommand, scope the lookup to the region the tool parses, inject before the boundary, detect and act with one rule), see [src/core/README.md](../../src/core/README.md#argument-tokenizer-arg_tokenizerrs).
 
 ### Package Manager Detection Pattern
 

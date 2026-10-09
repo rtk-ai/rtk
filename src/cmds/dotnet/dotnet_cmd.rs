@@ -1,7 +1,7 @@
 //! Filters dotnet CLI output — build, test, and format results.
 
 use crate::binlog;
-use crate::core::arg_tokenizer::{self, Dialect, Token, TokenKind, ValueSpec};
+use crate::core::arg_tokenizer::{self, Dialect, Flag, Grammar, Token, TokenKind, ValueSpec};
 use crate::core::args_utils;
 use crate::core::guard::never_worse;
 use crate::core::shell::{display_args, quote_word, with_args};
@@ -580,7 +580,7 @@ fn build_effective_dotnet_args(
 fn has_binlog_arg(tokens: &[Token<'_>]) -> bool {
     // Unscoped: wherever the user put `-bl`, that is the binlog that gets written, and RTK
     // adding its own would give MSBuild two binary loggers and parse the wrong one.
-    arg_tokenizer::has_flag(tokens, Dialect::Msbuild, "bl")
+    arg_tokenizer::has_flag(tokens, &DOTNET_GRAMMAR, "bl")
 }
 
 fn has_verbosity_arg(tokens: &[Token<'_>]) -> bool {
@@ -681,7 +681,7 @@ fn is_global_json_mtp_mode(start_dir: &Path) -> bool {
 /// overrides project-level properties) > project-file/Directory.Build.props (MtpVsTestBridge) >
 /// Classic.
 ///
-/// `explicit_projects` below relies on `dotnet_takes_value`'s allowlist being exhaustive; a
+/// `explicit_projects` below relies on [`DOTNET_GRAMMAR`]'s allowlist being exhaustive; a
 /// missing value-taking flag whose value ends in `.csproj`/`.fsproj`/`.vbproj` would be misread
 /// as an explicit project path.
 fn detect_test_runner_mode(tokens: &[Token<'_>]) -> TestRunnerMode {
@@ -773,30 +773,26 @@ fn detect_test_runner_mode_in_dir(tokens: &[Token<'_>], scan_dir: &Path) -> Test
 
 /// The value-taking flags that matter for RTK's own decisions, not every flag dotnet accepts:
 /// a missing entry leaves the value as a free positional, which `detect_test_runner_mode`'s
-/// project-path scan then has to filter by extension for exactly that reason.
-fn dotnet_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    (kind == TokenKind::Long
-        && matches!(
-            name.to_ascii_lowercase().as_str(),
-            "a" | "arch"
-                | "c"
-                | "configuration"
-                | "f"
-                | "filter"
-                | "framework"
-                | "l"
-                | "logger"
-                | "os"
-                | "r"
-                | "report"
-                | "results-directory"
-                | "runtime"
-        ))
-    .then(ValueSpec::value)
-}
+/// project-path scan then has to filter by extension for exactly that reason. Under the MSBuild
+/// dialect `-c`, `--c` and `/c` are all the `Long` flag `c`, so every row is an atomic flag
+/// listing each name dotnet gives the option (`-c` and `--configuration` are one flag).
+const DOTNET_GRAMMAR: Grammar = Grammar::new(
+    Dialect::Msbuild,
+    &[&[
+        Flag::atomic(&["a", "arch"]).takes(ValueSpec::value()),
+        Flag::atomic(&["c", "configuration"]).takes(ValueSpec::value()),
+        Flag::atomic(&["f", "framework"]).takes(ValueSpec::value()),
+        Flag::atomic(&["filter"]).takes(ValueSpec::value()),
+        Flag::atomic(&["l", "logger"]).takes(ValueSpec::value()),
+        Flag::atomic(&["os"]).takes(ValueSpec::value()),
+        Flag::atomic(&["r", "runtime"]).takes(ValueSpec::value()),
+        Flag::atomic(&["report"]).takes(ValueSpec::value()),
+        Flag::atomic(&["results-directory"]).takes(ValueSpec::value()),
+    ]],
+);
 
 fn tokenize_dotnet_args(args: &[String]) -> Vec<Token<'_>> {
-    arg_tokenizer::tokenize_grammar(args, &dotnet_takes_value, Dialect::Msbuild)
+    arg_tokenizer::tokenize_grammar(args, &DOTNET_GRAMMAR)
 }
 
 /// The tokens dotnet itself parses: everything the user put after `--` is forwarded to the
@@ -810,17 +806,17 @@ fn dotnet_own_tokens<'t, 'a>(tokens: &'t [Token<'a>]) -> &'t [Token<'a>] {
 /// of a modern option doesn't get rejected, it gets silently misparsed as an unrelated MSBuild
 /// switch (`MSB100x` errors) -- except the legacy passthrough switches in `dotnet_has_loose_flag`.
 fn dotnet_double_dash_flag_value<'a>(tokens: &[Token<'a>], name: &str) -> Option<&'a str> {
-    arg_tokenizer::double_dash_flag_value(dotnet_own_tokens(tokens), Dialect::Msbuild, name)
+    arg_tokenizer::double_dash_flag_value(dotnet_own_tokens(tokens), &DOTNET_GRAMMAR, name)
 }
 
 fn dotnet_has_flag(tokens: &[Token<'_>], name: &str) -> bool {
-    arg_tokenizer::has_double_dash_flag(dotnet_own_tokens(tokens), Dialect::Msbuild, name)
+    arg_tokenizer::has_double_dash_flag(dotnet_own_tokens(tokens), &DOTNET_GRAMMAR, name)
 }
 
 /// Loose lookup: `-flag`/`--flag`/`/flag` all match. Only correct for genuine legacy MSBuild.exe
 /// passthrough switches (`nologo`, `bl`, `v`/`verbosity`) -- see [`dotnet_double_dash_flag_value`].
 fn dotnet_has_loose_flag(tokens: &[Token<'_>], name: &str) -> bool {
-    arg_tokenizer::has_flag(dotnet_own_tokens(tokens), Dialect::Msbuild, name)
+    arg_tokenizer::has_flag(dotnet_own_tokens(tokens), &DOTNET_GRAMMAR, name)
 }
 
 /// Loose match, but only when the flag is bare (no attached value) -- a boolean switch's broken
@@ -855,7 +851,7 @@ fn has_trx_logger_arg(tokens: &[Token<'_>]) -> bool {
     // --help` says the arguments after `--` go "to the application that is being run", so a
     // `--logger` there is the test app's, not VSTest's, and RTK still owes it a trx logger.
     let own = dotnet_own_tokens(tokens);
-    arg_tokenizer::double_dash_flag_values(own, Dialect::Msbuild, "logger")
+    arg_tokenizer::double_dash_flag_values(own, &DOTNET_GRAMMAR, "logger")
         .chain(
             own.iter()
                 .filter(|t| {
@@ -894,7 +890,7 @@ fn results_directory_scope<'t, 'a>(
 fn has_results_directory_arg(tokens: &[Token<'_>], runner_mode: TestRunnerMode) -> bool {
     arg_tokenizer::has_double_dash_flag(
         results_directory_scope(tokens, runner_mode),
-        Dialect::Msbuild,
+        &DOTNET_GRAMMAR,
         "results-directory",
     )
 }
@@ -964,7 +960,7 @@ fn extract_results_directory_arg(
 ) -> Option<PathBuf> {
     arg_tokenizer::double_dash_flag_value(
         results_directory_scope(tokens, runner_mode),
-        Dialect::Msbuild,
+        &DOTNET_GRAMMAR,
         "results-directory",
     )
     .map(PathBuf::from)
@@ -1459,6 +1455,7 @@ fn format_restore_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::arg_tokenizer::assert_takes_value_table;
     use crate::core::test_isolation;
     use crate::dotnet_format_report;
     use std::fs;
@@ -3317,5 +3314,37 @@ mod tests {
         cleanup_temp_file(&missing_file);
 
         assert!(!missing_file.exists());
+    }
+
+    #[test]
+    fn test_dotnet_grammar_matches_its_table() {
+        assert_takes_value_table(
+            &DOTNET_GRAMMAR,
+            &[(
+                TokenKind::Long,
+                &[
+                    "a",
+                    "arch",
+                    "c",
+                    "configuration",
+                    "f",
+                    "filter",
+                    "framework",
+                    "l",
+                    "logger",
+                    "os",
+                    "r",
+                    "report",
+                    "results-directory",
+                    "runtime",
+                    // The MSBuild dialect folds ASCII case.
+                    "A",
+                    "Configuration",
+                    "RESULTS-DIRECTORY",
+                    "Logger",
+                ],
+                Some(ValueSpec::value()),
+            )],
+        );
     }
 }
