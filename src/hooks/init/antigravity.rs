@@ -1,6 +1,7 @@
 //! Google Antigravity support: transparent command rewriting via PreToolUse lifecycle hook plugin.
 
 use super::*;
+use crate::core::user_dirs;
 
 pub const ANTIGRAVITY_PLUGIN_JSON: &str = r#"{
   "name": "rtk",
@@ -35,11 +36,11 @@ const ANTIGRAVITY_RULES_FILE: &str = "AGENTS.md";
 
 pub fn run_antigravity_mode(global: bool, ctx: InitContext) -> Result<()> {
     if global {
-        let home = dirs::home_dir().context("Could not determine user home directory")?;
+        let home = user_dirs::home().context("Could not determine user home directory")?;
         let base_dir = home.join(".gemini/config");
         run_antigravity_mode_at(&base_dir, true, ctx)
     } else {
-        let cwd = std::env::current_dir().context("Failed to read current directory")?;
+        let cwd = user_dirs::current_dir().context("Failed to read current directory")?;
         run_antigravity_mode_at(&cwd, false, ctx)
     }
 }
@@ -126,11 +127,11 @@ pub fn run_antigravity_mode_at(base_dir: &Path, global: bool, ctx: InitContext) 
 
 pub fn uninstall_antigravity_mode(global: bool, ctx: InitContext) -> Result<()> {
     let base_dir = if global {
-        dirs::home_dir()
+        user_dirs::home()
             .context("Could not determine user home directory")?
             .join(".gemini/config")
     } else {
-        std::env::current_dir().context("Failed to read current directory")?
+        user_dirs::current_dir().context("Failed to read current directory")?
     };
     let removed = uninstall_antigravity_mode_at(&base_dir, global, ctx)?;
 

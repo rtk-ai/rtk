@@ -2,6 +2,7 @@
 
 use crate::core::config;
 use crate::core::runner;
+use crate::core::shell::display_args;
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
@@ -57,13 +58,15 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered_with_exit(
         cmd,
         "pytest",
-        &args.join(" "),
+        &display_args(args),
         |raw, exit_code| {
-            let clean = strip_ansi(raw);
-            let filtered = filter_pytest_output(&clean);
+            let filtered = filter_pytest_output(raw);
             // Any other failure parsed as empty means the run broke before reporting.
             if exit_code != 0 && exit_code != PYTEST_EXIT_NO_TESTS && filtered == PYTEST_NO_TESTS {
-                return truncate(clean.trim(), config::limits().passthrough_max_chars);
+                return truncate(
+                    strip_ansi(raw).trim(),
+                    config::limits().passthrough_max_chars,
+                );
             }
             filtered
         },
@@ -75,6 +78,11 @@ const PYTEST_NO_TESTS: &str = "Pytest: No tests collected";
 const PYTEST_EXIT_NO_TESTS: i32 = 5;
 
 pub(crate) fn filter_pytest_output(output: &str) -> String {
+    // pytest colors its summary even when piped (force-color CI/venv setups), and the
+    // `N passed` / FAILURES anchors below never match through ANSI codes. The parser owns
+    // the stripping, as `filter_phpunit_output` does, so no caller carries a precondition.
+    let cleaned = strip_ansi(output);
+    let output = cleaned.as_str();
     let mut state = ParseState::Header;
     let mut test_files: Vec<String> = Vec::new();
     let mut failures: Vec<String> = Vec::new();

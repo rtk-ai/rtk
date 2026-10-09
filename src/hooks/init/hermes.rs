@@ -1,6 +1,7 @@
 //! Hermes agent: hook install/uninstall helpers.
 
 use super::*;
+use crate::core::user_dirs;
 use crate::hooks::constants::{
     HERMES_DIR, HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME,
     HERMES_PLUGINS_SUBDIR,
@@ -510,7 +511,7 @@ fn normalized_yaml_scalar(value: &str) -> Option<String> {
 }
 
 fn resolve_hermes_home() -> Result<PathBuf> {
-    resolve_hermes_home_from_env(dirs::home_dir(), std::env::var_os("HERMES_HOME"))
+    resolve_hermes_home_from_env(user_dirs::home(), user_dirs::env_path("HERMES_HOME"))
 }
 
 fn resolve_hermes_home_from_env(

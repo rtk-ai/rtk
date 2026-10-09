@@ -109,12 +109,12 @@ pub fn force_tee_tail_hint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::user_env;
 
     #[test]
     fn test_disabled_env_emits_nothing() {
-        let _guard = crate::core::utils::TEST_ENV_LOCK.lock().unwrap();
         let big = "x".repeat(1000);
-        let (hint, forced, tail) = temp_env::with_var("RTK_RECALL", Some("0"), || {
+        let (hint, forced, tail) = user_env::with_vars(&[("RTK_RECALL", Some("0"))], || {
             (
                 tee_and_hint(&big, "cmd", 1),
                 force_tee_hint(&big, "cmd"),

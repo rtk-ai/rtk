@@ -13,7 +13,7 @@ fn workbuddy_settings_path(global: bool) -> Result<PathBuf> {
             "WorkBuddy installation is global-only. Use: rtk init -g --agent workbuddy. Project settings are shared with CodeBuddy and are not managed by this installer."
         );
     }
-    let dir = std::env::var_os("WORKBUDDY_CONFIG_DIR")
+    let dir = user_dirs::env_path("WORKBUDDY_CONFIG_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .map(Ok)

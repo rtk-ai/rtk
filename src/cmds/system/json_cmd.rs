@@ -52,12 +52,7 @@ pub fn run(file: &Path, max_depth: usize, schema_only: bool, verbose: u8) -> Res
 
     let shown = render_json(&content, max_depth, schema_only)?;
     println!("{}", shown);
-    timer.track(
-        &format!("cat {}", file.display()),
-        "rtk json",
-        &content,
-        &shown,
-    );
+    timer.track(&super::read::cat_label(file), "rtk json", &content, &shown);
     Ok(())
 }
 

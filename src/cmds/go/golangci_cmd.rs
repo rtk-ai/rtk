@@ -4,6 +4,7 @@ use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
 use crate::core::args_utils;
 use crate::core::config;
 use crate::core::runner;
+use crate::core::shell::display_args;
 use crate::core::stream::exec_capture;
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, truncate};
@@ -220,7 +221,7 @@ fn run_filtered(original_args: &[String], invocation: &RunInvocation, verbose: u
     let exit_code = runner::run_filtered(
         cmd,
         "golangci-lint",
-        &original_args.join(" "),
+        &display_args(original_args),
         |stdout| {
             // v2 outputs JSON on first line + trailing text; v1 outputs just JSON
             let json_output = if version >= 2 {

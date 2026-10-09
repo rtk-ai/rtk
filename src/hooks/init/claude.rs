@@ -3,6 +3,7 @@
 
 use super::opencode::{ensure_opencode_plugin_installed, prepare_opencode_plugin_path};
 use super::*;
+use crate::core::user_dirs;
 use crate::hooks::constants::{
     CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CURSOR_DIR, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
     SETTINGS_JSON,
@@ -29,7 +30,7 @@ fn run_claude_md_mode_with(
     let path = if global {
         resolve_claude_dir()?.join(CLAUDE_MD)
     } else {
-        PathBuf::from(CLAUDE_MD)
+        user_dirs::in_working_dir(CLAUDE_MD)
     };
 
     if global
@@ -51,21 +52,23 @@ fn run_claude_md_mode_with(
 
     let action = write_rtk_block(&path, block, "rtk instructions", recovery_cmd, ctx)?;
 
+    // Runs before the Unchanged return so that re-running restores a deleted plugin.
+    if global && install_opencode {
+        let opencode_plugin_path = prepare_opencode_plugin_path()?;
+        ensure_opencode_plugin_installed(&opencode_plugin_path, ctx)?;
+        if !dry_run {
+            println!(
+                "[ok] OpenCode plugin installed: {}",
+                opencode_plugin_path.display()
+            );
+        }
+    }
+
     if matches!(action, RtkBlockUpsert::Unchanged) {
         return Ok(());
     }
 
     if global {
-        if install_opencode {
-            let opencode_plugin_path = prepare_opencode_plugin_path()?;
-            ensure_opencode_plugin_installed(&opencode_plugin_path, ctx)?;
-            if !dry_run {
-                println!(
-                    "[ok] OpenCode plugin installed: {}",
-                    opencode_plugin_path.display()
-                );
-            }
-        }
         if !dry_run {
             println!("   Claude Code will now use rtk in all sessions");
         }
@@ -415,7 +418,7 @@ fn migrate_old_hook_script(ctx: InitContext) {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = user_dirs::home() {
         let old_hook = home
             .join(CLAUDE_DIR)
             .join(HOOKS_SUBDIR)
@@ -607,7 +610,7 @@ pub(super) fn run_hook_only_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
+    use crate::core::test_isolation;
 
     #[test]
     fn test_hook_already_present_exact_match() {
@@ -927,7 +930,7 @@ mod tests {
 
     #[test]
     fn test_global_default_mode_creates_artifacts() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
 
@@ -944,12 +947,24 @@ mod tests {
                 content.contains(CLAUDE_HOOK_COMMAND),
                 "settings.json must contain hook command"
             );
+
+            // Global mode also writes the user-wide filters template, through
+            // `user_dirs::config`, which resolves under this test's own root.
+            let filters = user_dirs::config()
+                .expect("test build always resolves a config dir")
+                .join(crate::core::constants::FILTERS_TOML);
+            assert_eq!(
+                fs::read_to_string(&filters).ok().as_deref(),
+                Some(super::super::FILTERS_GLOBAL_TEMPLATE),
+                "global filters template must be written at {}",
+                filters.display()
+            );
         });
     }
 
     #[test]
     fn test_patch_settings_json_dry_run_idempotency_and_backup() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |dir| {
             let path = dir.join(SETTINGS_JSON);
             let original = "\u{feff}{\"permissions\":{\"allow\":[\"Bash(ls)\"]},\"hooks\":{\"PreToolUse\":[{\"matcher\":\"Bash\",\"hooks\":[{\"type\":\"command\",\"command\":\"echo user\"}]}]}}";
@@ -1002,7 +1017,7 @@ mod tests {
 
     #[test]
     fn test_patch_settings_json_backup_failure_preserves_original() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |dir| {
             let path = dir.join(SETTINGS_JSON);
             fs::write(&path, "{}").unwrap();
@@ -1021,7 +1036,7 @@ mod tests {
 
     #[test]
     fn test_global_default_mode_creates_missing_claude_dir() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_missing_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
 
@@ -1042,27 +1057,25 @@ mod tests {
     }
 
     /// `--opencode` is installed after RTK.md. A missing Claude dir must not
-    /// abort before that install. Unix only: OpenCode resolves through
-    /// `dirs::home_dir()`, which follows `$HOME` on Unix and ignores it on Windows.
-    #[cfg(unix)]
+    /// abort before that install.
     #[test]
     fn test_global_opencode_installs_when_claude_dir_missing() {
-        use crate::hooks::constants::{
-            CONFIG_DIR, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
-        };
+        use crate::hooks::constants::{OPENCODE_PLUGIN_FILE, PLUGIN_SUBDIR};
 
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_missing_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, true, InitContext::default()).unwrap();
 
             assert!(claude_dir.join(RTK_MD).exists(), "RTK.md must be created");
-            let plugin = tmp
-                .path()
-                .join("home")
-                .join(CONFIG_DIR)
-                .join(OPENCODE_SUBDIR)
+            let plugin = super::super::opencode::resolve_opencode_dir()
+                .expect("opencode dir resolves in a test build")
                 .join(PLUGIN_SUBDIR)
                 .join(OPENCODE_PLUGIN_FILE);
+            assert!(
+                plugin.starts_with(tmp.path()),
+                "the plugin must land in this test's own directory, not {}",
+                plugin.display()
+            );
             assert!(
                 plugin.exists(),
                 "OpenCode plugin must be installed when ~/.claude was missing"
@@ -1072,7 +1085,7 @@ mod tests {
 
     #[test]
     fn test_patch_settings_json_tolerates_utf8_bom() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             // Notepad and PowerShell 5.1 `Out-File -Encoding utf8` prepend a BOM.
             let settings = claude_dir.join(SETTINGS_JSON);
@@ -1105,7 +1118,7 @@ mod tests {
         // Stripping the BOM must not mask genuinely broken JSON: the
         // parse-error context has to survive so the user gets blamed for
         // the right thing.
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             let settings = claude_dir.join(SETTINGS_JSON);
             fs::write(&settings, "\u{feff}{not valid json").unwrap();
@@ -1128,7 +1141,7 @@ mod tests {
     fn test_patch_settings_json_bom_only_file() {
         // U+FEFF is not whitespace, so the `content.trim().is_empty()`
         // empty-file guard does not catch a BOM-only file.
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             let settings = claude_dir.join(SETTINGS_JSON);
             fs::write(&settings, "\u{feff}").unwrap();
@@ -1149,7 +1162,7 @@ mod tests {
 
     #[test]
     fn test_global_uninstall_removes_artifacts() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
             uninstall(
@@ -1175,7 +1188,7 @@ mod tests {
 
     #[test]
     fn test_global_default_mode_idempotent() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
@@ -1188,13 +1201,10 @@ mod tests {
 
     #[test]
     fn test_local_init_no_hook() {
-        let tmp = TempDir::new().unwrap();
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let tmp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(tmp.path());
 
         let result = run_default_mode(false, PatchMode::Auto, false, InitContext::default());
-        std::env::set_current_dir(&cwd).unwrap();
 
         result.unwrap();
         assert!(
@@ -1209,7 +1219,7 @@ mod tests {
 
     #[test]
     fn test_global_hook_only_mode_creates_settings() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_hook_only_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
 
@@ -1227,7 +1237,7 @@ mod tests {
 
     #[test]
     fn test_global_hook_only_mode_creates_missing_claude_dir() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_missing_claude_dir_override(&tmp, |claude_dir| {
             run_hook_only_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
 
@@ -1249,7 +1259,7 @@ mod tests {
 
     #[test]
     fn test_run_default_mode_dry_run_writes_nothing() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             let dry = InitContext {
                 dry_run: true,
@@ -1274,7 +1284,7 @@ mod tests {
 
     #[test]
     fn test_run_default_mode_dry_run_does_not_create_missing_claude_dir() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_missing_claude_dir_override(&tmp, |claude_dir| {
             let dry = InitContext {
                 dry_run: true,
@@ -1291,7 +1301,7 @@ mod tests {
 
     #[test]
     fn test_uninstall_dry_run_preserves_artifacts() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             // Stage a real install first
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
@@ -1332,7 +1342,7 @@ mod tests {
 
     #[test]
     fn test_write_if_changed_switches_awareness_level() {
-        let temp = TempDir::new().unwrap();
+        let temp = test_isolation::tempdir();
         let rtk_md_path = temp.path().join("RTK.md");
 
         let default_ctx = InitContext::default();
@@ -1429,7 +1439,7 @@ mod tests {
 
     #[test]
     fn test_upgrade_from_claude_md_to_hook_mode() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_claude_md_mode(true, false, InitContext::default()).unwrap();
             let claude_md_content = fs::read_to_string(claude_dir.join(CLAUDE_MD)).unwrap();
@@ -1465,7 +1475,7 @@ mod tests {
         // CLAUDE.md previously emitted a warning and exited 0, silently
         // skipping the OpenCode plugin step. The shared `write_rtk_block`
         // dispatcher now bails for both paths.
-        let tmp = TempDir::new().unwrap();
+        let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             let claude_md = claude_dir.join(CLAUDE_MD);
             let malformed = format!(

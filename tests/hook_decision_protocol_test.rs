@@ -10,8 +10,9 @@
 //! including the #1155 invariant that a `Default` verdict exits 3 and never 0.
 
 use std::path::PathBuf;
-use std::process::Command;
 use tempfile::TempDir;
+
+mod common;
 
 /// An isolated machine: no developer settings, no user rtk config, no real HOME.
 struct Sandbox {
@@ -75,12 +76,7 @@ impl Sandbox {
     /// [`Sandbox::run`] with extra environment variables, for the knobs a
     /// delegate sets on the `rtk rewrite` subprocess rather than in argv.
     fn run_with_env(&self, args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_rtk"));
-        // Keep the host channel out of the inherited environment. Exporting it
-        // in a developer's shell would otherwise turn the suite red on that
-        // machine, or hide a real regression, rather than testing the code; a
-        // test that wants it opts in through `env` below.
-        command.env_remove("RTK_REWRITE_HOST");
+        let mut command = common::rtk_command();
         for (key, value) in env {
             command.env(key, value);
         }
@@ -145,14 +141,20 @@ impl Sandbox {
     }
 
     /// Run a shipped shell hook the way an agent does: the hook input on stdin
-    /// and the built `rtk` first on PATH. The environment is cleared first, so
-    /// nothing inherited -- a `BASH_ENV`, another `rtk`, an audit or data
-    /// directory -- can change what runs or where it writes; config, data and
-    /// cache all live in this sandbox.
+    /// and the built `rtk` first on PATH. It runs in the environment
+    /// `isolate_rtk` gives a child, so of what the developer's shell exports it
+    /// gets only what every isolated child keeps, never a `BASH_ENV`, another
+    /// `rtk`, an audit or data directory; config, data and cache all live in
+    /// this sandbox, and temporary files go to `TMPDIR` as they do for any
+    /// child.
     #[cfg(unix)]
     fn run_hook(&self, hook: &str, cmd: &str, env: &[(&str, &str)]) -> (i32, String, String) {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let rtk_dir = std::path::Path::new(env!("CARGO_BIN_EXE_rtk"))
+        // Only the binary's path is taken from this command: the hook gets an
+        // isolated environment of its own, and the variables below keep its
+        // data in the sandbox.
+        let rtk = common::rtk_command();
+        let rtk_dir = std::path::Path::new(rtk.get_program())
             .parent()
             .expect("rtk binary has a parent directory")
             .to_path_buf();
@@ -171,9 +173,9 @@ impl Sandbox {
             .to_string(),
         )
         .expect("write hook input");
-        let mut command = Command::new("bash");
+        let mut command = std::process::Command::new("bash");
+        common::isolate_rtk(&mut command);
         command
-            .env_clear()
             .arg(root.join(hook))
             .current_dir(&self.project)
             .env("PATH", path)
@@ -211,7 +213,7 @@ impl Sandbox {
             "tool_input": { "command": cmd },
         })
         .to_string();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        let mut child = common::rtk_command()
             .args(["hook", "claude"])
             .current_dir(&self.project)
             .env("HOME", &self.home)

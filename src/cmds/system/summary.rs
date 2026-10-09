@@ -14,7 +14,7 @@ const MAX_SUMMARY_KEYS: usize = CAP_WARNINGS;
 /// Run a command and provide a heuristic summary
 pub fn run(command: &[String], shell: Option<&str>, verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
-    let command_display = crate::core::shell::display_args(command);
+    let command_display = crate::core::shell::display_command(command);
     let program = crate::core::shell::program_name(command, shell);
 
     if verbose > 0 {

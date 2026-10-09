@@ -4,8 +4,10 @@ use std::io::Write;
 use std::process::{Command, Output, Stdio};
 use tempfile::TempDir;
 
+mod common;
+
 fn command(temp: &TempDir) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rtk"));
+    let mut cmd = common::rtk_command();
     cmd.current_dir(temp.path())
         .env("HOME", temp.path())
         .env("WORKBUDDY_CONFIG_DIR", temp.path().join("workbuddy"))
