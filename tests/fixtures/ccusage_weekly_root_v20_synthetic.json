@@ -1,0 +1,31 @@
+{
+  "weekly": [
+    {
+      "agent": "all",
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 10,
+      "inputTokens": 100,
+      "metadata": {
+        "agents": [
+          "codex"
+        ]
+      },
+      "modelBreakdowns": [],
+      "modelsUsed": [
+        "gpt-5"
+      ],
+      "outputTokens": 20,
+      "period": "2025-12-29",
+      "totalCost": 0.01,
+      "totalTokens": 120
+    }
+  ],
+  "totals": {
+    "cacheCreationTokens": 0,
+    "cacheReadTokens": 10,
+    "inputTokens": 100,
+    "outputTokens": 20,
+    "totalCost": 0.01,
+    "totalTokens": 120
+  }
+}

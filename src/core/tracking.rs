@@ -255,12 +255,12 @@ pub struct DayStats {
 /// Weekly statistics for token savings and execution metrics.
 ///
 /// Serializable to JSON for export via `rtk gain --weekly --format json`.
-/// Weeks start on Sunday (SQLite default).
+/// Weeks run from Monday through Sunday.
 #[derive(Debug, Serialize)]
 pub struct WeekStats {
-    /// Week start date (YYYY-MM-DD)
+    /// Monday's date (YYYY-MM-DD)
     pub week_start: String,
-    /// Week end date (YYYY-MM-DD)
+    /// Sunday's date (YYYY-MM-DD)
     pub week_end: String,
     /// Number of commands executed this week
     pub commands: usize,
@@ -1201,7 +1201,7 @@ impl Tracker {
     /// Get weekly statistics grouped by week.
     ///
     /// Returns one [`WeekStats`] per week with aggregated metrics.
-    /// Weeks start on Sunday (SQLite default). Results ordered chronologically.
+    /// Weeks run from Monday through Sunday. Results ordered chronologically.
     ///
     /// # Examples
     ///
@@ -2475,6 +2475,252 @@ mod command_label_tests {
 mod tests {
     use super::*;
     use crate::core::test_isolation;
+
+    // Fixed timestamps bypass record(), which uses the wall clock and prunes old
+    // rows. The in-memory tracker still creates the real production schema.
+    fn insert_weekly_command(
+        tracker: &Tracker,
+        timestamp: &str,
+        project_path: &str,
+        rtk_cmd: &str,
+        input: i64,
+        output: i64,
+        exec_time_ms: i64,
+    ) {
+        let saved = input - output;
+        let savings_pct = if input > 0 {
+            saved as f64 / input as f64 * 100.0
+        } else {
+            0.0
+        };
+        tracker
+            .conn
+            .execute(
+                "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path,
+                 input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
+                 VALUES (?1, 'fixture command', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    timestamp,
+                    rtk_cmd,
+                    project_path,
+                    input,
+                    output,
+                    saved,
+                    savings_pct,
+                    exec_time_ms
+                ],
+            )
+            .expect("Failed to insert weekly command fixture");
+    }
+
+    #[test]
+    fn test_get_by_week_groups_all_weekdays_monday_through_sunday() {
+        for dates in [
+            [
+                "2026-09-28",
+                "2026-09-29",
+                "2026-09-30",
+                "2026-10-01",
+                "2026-10-02",
+                "2026-10-03",
+                "2026-10-04",
+            ],
+            // ISO week 2020-W53 crosses the calendar-year boundary.
+            [
+                "2020-12-28",
+                "2020-12-29",
+                "2020-12-30",
+                "2020-12-31",
+                "2021-01-01",
+                "2021-01-02",
+                "2021-01-03",
+            ],
+            // The leap day belongs to the same Monday-to-Sunday week.
+            [
+                "2024-02-26",
+                "2024-02-27",
+                "2024-02-28",
+                "2024-02-29",
+                "2024-03-01",
+                "2024-03-02",
+                "2024-03-03",
+            ],
+        ] {
+            let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+            for date in dates {
+                insert_weekly_command(
+                    &tracker,
+                    &format!("{date}T12:00:00Z"),
+                    "",
+                    "rtk git status",
+                    100,
+                    25,
+                    10,
+                );
+            }
+
+            let weeks = tracker.get_by_week().expect("Failed to get weeks");
+            assert_eq!(
+                weeks.len(),
+                1,
+                "All seven dates must share a week: {dates:?}"
+            );
+            let week = &weeks[0];
+            assert_eq!(week.week_start, dates[0]);
+            assert_eq!(week.week_end, dates[6]);
+            assert_eq!(week.commands, 7);
+            assert_eq!(week.input_tokens, 700);
+            assert_eq!(week.output_tokens, 175);
+            assert_eq!(week.saved_tokens, 525);
+        }
+    }
+
+    #[test]
+    fn test_get_by_week_sunday_monday_boundaries_are_chronological() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        // Deliberately insert out of order, one second either side of both
+        // boundaries of the week beginning 2026-09-28.
+        for (timestamp, input) in [
+            ("2026-10-05T00:00:00Z", 40),
+            ("2026-09-28T00:00:00Z", 20),
+            ("2026-10-04T23:59:59Z", 30),
+            ("2026-09-27T23:59:59Z", 10),
+        ] {
+            insert_weekly_command(&tracker, timestamp, "", "rtk git status", input, 1, input);
+        }
+
+        let weeks = tracker.get_by_week().expect("Failed to get weeks");
+        let actual: Vec<_> = weeks
+            .iter()
+            .map(|week| {
+                (
+                    week.week_start.as_str(),
+                    week.week_end.as_str(),
+                    week.commands,
+                    week.input_tokens,
+                    week.total_time_ms,
+                )
+            })
+            .collect();
+        assert_eq!(
+            actual,
+            vec![
+                ("2026-09-21", "2026-09-27", 1, 10, 10),
+                ("2026-09-28", "2026-10-04", 2, 50, 50),
+                ("2026-10-05", "2026-10-11", 1, 40, 40),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_get_by_week_aggregates_weighted_savings_and_execution_time() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        for (timestamp, command, input, output, time) in [
+            ("2026-09-28T09:00:00Z", "rtk git status", 900, 90, 101),
+            ("2026-10-02T12:00:00Z", "rtk ls", 100, 90, 202),
+            ("2026-10-04T23:59:59Z", "rtk proxy true", 0, 0, 8),
+        ] {
+            insert_weekly_command(&tracker, timestamp, "", command, input, output, time);
+        }
+
+        let weeks = tracker.get_by_week().expect("Failed to get weeks");
+        assert_eq!(weeks.len(), 1);
+        let week = &weeks[0];
+        assert_eq!(week.commands, 3);
+        assert_eq!(week.input_tokens, 1000);
+        assert_eq!(week.output_tokens, 180);
+        assert_eq!(week.saved_tokens, 820);
+        // A mean of the individual rates (90%, 10%, 0%) would be incorrect.
+        assert!((week.savings_pct - 82.0).abs() < 1e-9);
+        assert_eq!(week.total_time_ms, 311);
+        assert_eq!(week.avg_time_ms, 103);
+    }
+
+    #[test]
+    fn test_get_by_week_zero_input_has_zero_savings_rate() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        for (timestamp, time) in [("2026-09-28T00:00:00Z", 7), ("2026-10-04T23:59:59Z", 12)] {
+            insert_weekly_command(&tracker, timestamp, "", "rtk proxy true", 0, 0, time);
+        }
+
+        let weeks = tracker.get_by_week().expect("Failed to get weeks");
+        assert_eq!(weeks.len(), 1);
+        let week = &weeks[0];
+        assert_eq!(week.commands, 2);
+        assert_eq!(week.input_tokens, 0);
+        assert_eq!(week.output_tokens, 0);
+        assert_eq!(week.saved_tokens, 0);
+        assert_eq!(week.savings_pct, 0.0);
+        assert_eq!(week.total_time_ms, 19);
+        assert_eq!(week.avg_time_ms, 9);
+    }
+
+    #[test]
+    fn test_get_by_week_project_filter_includes_exact_and_child_not_sibling() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        let project = PathBuf::from("projects").join("demo");
+        let child = project.join("child");
+        let sibling = PathBuf::from("projects").join("demo-sibling");
+        let unrelated = PathBuf::from("elsewhere");
+        for (path, input, output, time) in [
+            (&project, 100, 20, 10),
+            (&child, 200, 50, 20),
+            (&sibling, 400, 0, 40),
+            (&unrelated, 800, 0, 80),
+        ] {
+            insert_weekly_command(
+                &tracker,
+                "2026-09-28T12:00:00Z",
+                &path.to_string_lossy(),
+                "rtk git status",
+                input,
+                output,
+                time,
+            );
+        }
+
+        let weeks = tracker
+            .get_by_week_filtered(Some(&project.to_string_lossy()))
+            .expect("Failed to get project weeks");
+        assert_eq!(weeks.len(), 1);
+        let week = &weeks[0];
+        assert_eq!(week.week_start, "2026-09-28");
+        assert_eq!(week.week_end, "2026-10-04");
+        assert_eq!(week.commands, 2);
+        assert_eq!(week.input_tokens, 300);
+        assert_eq!(week.output_tokens, 70);
+        assert_eq!(week.saved_tokens, 230);
+        assert!((week.savings_pct - 230.0 / 300.0 * 100.0).abs() < 1e-9);
+        assert_eq!(week.total_time_ms, 30);
+        assert_eq!(week.avg_time_ms, 15);
+        assert_eq!(
+            tracker.get_by_week().expect("Failed to get all weeks")[0].commands,
+            4
+        );
+        assert!(
+            tracker
+                .get_by_week_filtered(Some("missing-project"))
+                .expect("Failed to query missing project")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_get_by_week_empty_database() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        assert!(
+            tracker
+                .get_by_week()
+                .expect("Failed to get weeks")
+                .is_empty()
+        );
+        assert!(
+            tracker
+                .get_by_week_filtered(Some("project"))
+                .expect("Failed to get project weeks")
+                .is_empty()
+        );
+    }
 
     // 1. estimate_tokens — verify ~4 chars/token ratio
     #[test]
