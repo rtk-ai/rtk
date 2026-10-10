@@ -15,6 +15,10 @@ These override general Rust conventions:
    arguments through `tokenize`/`tokenize_grammar`, never a `starts_with('-')` or
    `arg == "--flag"` scan. See [`src/core/README.md`](../../src/core/README.md#argument-tokenizer-arg_tokenizerrs)
    for the four rules that go with it.
+7. **Spawn through `ChildCommand`** — build child processes with `resolved_command()` /
+   `ChildCommand`, never `std::process::Command::new`; clippy denies it outside tests
+   (`clippy.toml`). See
+   [`src/core/README.md`](../../src/core/README.md#child-arguments-child_commandrs).
 
 ## Error Handling
 

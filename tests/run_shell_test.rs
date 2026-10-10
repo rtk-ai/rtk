@@ -1,5 +1,43 @@
 mod common;
 
+/// Run `script` through `run -c` and through `run`, `err`, `test` and
+/// `summary --shell` naming the same default shell, each in a fresh directory,
+/// and check that it exits 7 having appended exactly the line `expected` to
+/// `out.txt`. The file is the witness because `err`, `test` and `summary`
+/// filter what a script prints. Without `--shell` those three would still
+/// reach the same shell through the single-string fallback, so its notice
+/// must stay absent.
+#[cfg(any(unix, windows))]
+fn assert_script_surfaces(script: &str, expected: &str) {
+    const SHELL: &str = if cfg!(windows) { "cmd" } else { "sh" };
+    let surfaces: [&[&str]; 5] = [
+        &["run", "-c"],
+        &["run", "--shell", SHELL, "-c"],
+        &["err", "--shell", SHELL],
+        &["test", "--shell", SHELL],
+        &["summary", "--shell", SHELL],
+    ];
+    for surface in surfaces {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let output = common::rtk_command()
+            .args(surface)
+            .arg(script)
+            .current_dir(dir.path())
+            .output()
+            .unwrap_or_else(|e| panic!("run rtk {surface:?}: {e}"));
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let context = format!("{surface:?} {stdout:?} {stderr:?}");
+        assert_eq!(output.status.code(), Some(7), "{context}");
+        assert!(!stderr.contains("pass arguments separately"), "{context}");
+        let written = std::fs::read_to_string(dir.path().join("out.txt"))
+            .unwrap_or_else(|e| panic!("{context} wrote no out.txt: {e}"));
+        let lines: Vec<&str> = written.lines().map(str::trim_end).collect();
+        assert_eq!(lines, [expected], "{context}");
+    }
+}
+
 #[cfg(unix)]
 mod unix {
     use std::process::Command;
@@ -316,6 +354,13 @@ mod unix {
         assert_eq!(String::from_utf8_lossy(&output.stdout), "shell_ok");
     }
 
+    /// A `&` inside a script's quotes stays there on every surface that hands
+    /// sh a script; out of its quotes it would put `printf` in the background.
+    #[test]
+    fn shell_scripts_keep_a_quoted_ampersand_and_their_exit_code() {
+        crate::assert_script_surfaces(r#"printf '%s\n' "a & b" >> out.txt; exit 7"#, "a & b");
+    }
+
     #[test]
     fn an_unresolvable_shell_reports_the_shell_contract() {
         let output = rtk()
@@ -532,8 +577,59 @@ mod windows {
         assert!(String::from_utf8_lossy(&output.stdout).contains("windows_ok"));
     }
 
+    /// A command string runs through cmd, the Windows default, as
+    /// `cmd /S /C "<script>"`: cmd strips exactly that wrapping pair of quotes,
+    /// so the script's own quotes and its `&` reach cmd as written. `echo "a b"`
+    /// prints the quotes, and `&` runs the second command.
+    #[test]
+    fn command_string_reaches_cmd_as_written() {
+        let output = rtk()
+            .args(["run", "-c", r#"echo "a b" & echo c"#])
+            .output()
+            .expect("run rtk run -c");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout:?}");
+        // cmd's `echo` keeps the space before `&`, hence the trim.
+        let lines: Vec<&str> = stdout.lines().map(str::trim_end).collect();
+        assert_eq!(lines, [r#""a b""#, "c"], "{stdout:?}");
+    }
+
+    /// A script that starts with a quoted program path holding a space runs
+    /// that program (#4288): cmd receives `""<dir with space>\rtk copy.exe"
+    /// --version"`, strips the outer pair, and runs the quoted path.
+    #[test]
+    fn command_string_runs_a_quoted_program_path_with_a_space() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let spaced = dir.path().join("dir with space");
+        std::fs::create_dir(&spaced).expect("create spaced dir");
+        let program = spaced.join("rtk copy.exe");
+        // The copy only ever runs under the rtk spawned below, as a child of its
+        // cmd, so it inherits the data redirection `rtk()` gives that process.
+        std::fs::copy(rtk().get_program(), &program).expect("copy rtk");
+
+        let script = format!("\"{}\" --version", program.display());
+        let output = rtk()
+            .args(["run", "-c", &script])
+            .output()
+            .expect("run rtk run -c");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout:?} {stderr:?}");
+        assert!(stdout.starts_with("rtk "), "{stdout:?} {stderr:?}");
+    }
+
+    /// A `&` inside a cmd script's quotes stays there on every surface that
+    /// hands cmd a script. Escaped quotes would write `\"a & b\"`, and a `&`
+    /// out of its quotes would split the echo.
+    #[test]
+    fn cmd_scripts_keep_a_quoted_ampersand_and_their_exit_code() {
+        crate::assert_script_surfaces(r#"echo "a & b">> out.txt & exit 7"#, r#""a & b""#);
+    }
+
     /// An argument carrying a `"` reaches a non-batch child with the encoding
-    /// MSYS/Cygwin and libuv children expect (`child_args`, #3728).
+    /// MSYS/Cygwin and libuv children expect (`ChildCommand::args`, #3728).
     ///
     /// `cmd.exe` is the wrong witness for this — it parses its own way and
     /// echoes the encoding back verbatim — so the child here is `rtk` itself:

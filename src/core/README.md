@@ -128,12 +128,24 @@ Key functions available to all command modules:
 |----------|---------|
 | `truncate(s, max)` | Truncate string with `...` suffix |
 | `strip_ansi(text)` | Remove ANSI escape/color codes |
-| `resolved_command(name)` | Find command in PATH, returns `Command` |
+| `resolved_command(name)` | Find command in PATH, returns `ChildCommand` |
 | `tool_exists(name)` | Check if a CLI tool is available |
 | `detect_package_manager()` | Detect pnpm/yarn/npm from lockfiles |
-| `package_manager_exec(tool)` | Build `Command` using detected package manager |
+| `package_manager_exec(tool)` | Build `ChildCommand` using detected package manager |
 | `ruby_exec(tool)` | Auto-detect `bundle exec` when `Gemfile` exists |
 | `count_tokens(text)` | Estimate tokens: `ceil(chars / 4.0)` |
+
+### Child arguments (child_command.rs)
+
+In production code every child process is built as a `ChildCommand` (usually through `resolved_command`), never a `std::process::Command`: `clippy.toml` disallows `Command::new`, and `src/main.rs` denies that lint outside test builds. On Windows an MSYS/Cygwin child (Git for Windows' `grep`, `find`, `ls`, …) re-parses its command line with its own rules, so each argument has to be encoded for it. `ChildCommand` owns that encoding and keeps its `Command` out of reach.
+
+`arg` and `args` quote an argument whenever it holds a character Cygwin's `build_argv`/`globify` would reinterpret (a quote, `?*[(){}`, a leading `~` or `@`, a line break), so the child sees the bytes literally. Glob metacharacters and a leading `~` are among them: an MSYS child never glob- or tilde-expands an argument rtk hands it, so a pattern or `~` the calling shell left unexpanded reaches the tool as written. Git Bash expands both before rtk runs; cmd.exe expands neither, and PowerShell expands no glob for a native program.
+
+The literal quoting is libuv's, exact for a native child. An MSYS child differs in one case: a run of two or more backslashes that is not in front of a quote loses one backslash of each pair (#4326). A UNC path whose host starts with a letter (`\\srv\share\…`) would lose half of its leading `\\` that way, and sent bare its glob and brace characters expand, so the `\\` and the host's first letter go out before the opening quote (`\\s"rv\share\x(1)"`), which both parsers read as written.
+
+A shell script is one argument to the shell, so `shell::shell_command` passes it with `arg` like any other: an MSYS/Cygwin `sh` or `bash` re-parses its command line the same way `grep` does. The exception is `cmd`, which parses its own command line and understands neither that quoting nor std's `\"` escape: it runs as `cmd /S /C "<script>"`, the script wrapped once and otherwise verbatim. Plain `/C` strips that pair too, except when exactly two quotes surround an executable's name; `/S` drops that heuristic, so cmd always strips exactly the wrapping pair.
+
+Other arguments to a program cmd.exe parses skip the literal quoting too, since cmd does not decode it: `.bat`/`.cmd` shims get std's batch-aware encoder, and `cmd` itself std's general-purpose one, which is not cmd-aware either.
 
 ## Argument Tokenizer (arg_tokenizer.rs)
 
@@ -188,7 +200,7 @@ Use `shell::direct_command()` when the caller already has an argv vector. It
 preserves argument boundaries and never expands globs, variables, redirects,
 or operators. Use `shell::shell_command()` only for an intentional command
 string, with an explicit shell when syntax is shell-specific. The platform
-default remains `sh -c` on Unix and `cmd /C` on Windows for compatibility.
+default is `sh -c` on Unix and `cmd /S /C` on Windows.
 
 Never infer the command parser from `$SHELL`: agent hosts and terminal wrappers
 can execute a different shell while preserving the user's login-shell value.
