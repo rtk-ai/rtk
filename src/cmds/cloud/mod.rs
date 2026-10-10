@@ -1,4 +1,5 @@
 pub mod aws_cmd;
+pub mod az_cmd;
 pub mod container;
 pub mod curl_cmd;
 pub mod psql_cmd;
