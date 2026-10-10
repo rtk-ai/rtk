@@ -63,17 +63,17 @@ In `openclaw.json`:
 
 RTK keeps the deny gate. OpenClaw owns approval.
 
-The plugin runs `rtk rewrite` with `RTK_REWRITE_HOST=openclaw`. That tells RTK this host applies its own exec policy -- `tools.exec.mode`, `security`, `ask` -- to whatever the `before_tool_call` hook returns, so RTK does not prompt for a command that matched **no** rule.
+The plugin runs `rtk rewrite` with `RTK_REWRITE_HOST=openclaw`. That tells RTK this host applies its own exec policy -- `tools.exec.mode`, `security`, `ask` -- to whatever the `before_tool_call` hook returns, so RTK does not raise its own default ask: for a command that matched **no** rule, or for a chain that your `allow` rules cover only in part (with only `Bash(cargo test)` allowed, `cargo test && git log` is still a default ask).
 
 Without it, RTK evaluates every command against Claude Code's four settings files (`.claude/settings.json`, `.claude/settings.local.json`, and the two under `~/.claude/`) and returns "ask" for anything they do not explicitly allow. The plugin turned that into a blocking approval that denied on timeout, so a host running `tools.exec.mode=full` still stopped on every rewritable command, waiting on a decision derived from another agent's config file. See [#3908](https://github.com/rtk-ai/rtk/issues/3908).
 
 What does **not** change:
 
 - A command matching a `permissions.deny` rule in those Claude Code settings files is still refused, and the plugin blocks the tool call. As in Claude Code, a rule matches the command as written rather than every way of invoking the program — `Bash(git push *)` does not stop `git -C . push` — so a deny rule is not a security boundary.
-- A command matching a `permissions.ask` rule **you wrote** still prompts when RTK rewrites it: RTK returns exit 3 and the plugin raises its approval request. Only the *default* ask -- no rule matched -- is relaxed. A command RTK does not rewrite passes through to OpenClaw's own policy unchanged.
+- A command matching a `permissions.ask` rule **you wrote** still prompts when RTK rewrites it: RTK returns exit 3 and the plugin raises its approval request. Only the *default* ask -- no rule matched, or `allow` rules covering only some commands of a chain -- is relaxed: every exit 3 except an ask rule's becomes exit 0. A command RTK does not rewrite passes through to OpenClaw's own policy unchanged.
 - A command containing a command substitution (`` ` ``, `$(...)`) or a redirect to a file is never rewritten, on any host.
 
-What does change: the plugin no longer prompts for a command that matched no rule. Any approval prompt you still see comes from OpenClaw itself, or from an explicit `ask` rule.
+What does change: the plugin no longer prompts for a default ask, meaning a command that matched no rule or a chain that `allow` rules cover only in part. Any approval prompt you still see comes from OpenClaw itself, or from an explicit `ask` rule.
 
 ### Writing exec rules
 

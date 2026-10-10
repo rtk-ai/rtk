@@ -65,8 +65,10 @@ pub(crate) const REWRITE_HOST_ENV: &str = "RTK_REWRITE_HOST";
 /// This only ever relaxes the *default* ask. It is applied by
 /// [`ApprovalOwner::apply`], which matches on a [`HookDecision::AskRewrite`]
 /// carrying [`PermissionVerdict::Default`] alone. A `Default` verdict means no
-/// rule matched, so RTK is imposing another agent's settings on a runtime that
-/// never opted into them — that is the prompt #3908 is about. An explicit
+/// rule matched, or the allow rules cover only some commands of a chain (with
+/// only `Bash(cargo test)` allowed, `cargo test && git log` is one). Either way
+/// RTK is imposing another agent's settings on a runtime that never opted into
+/// them — that is the prompt #3908 is about. An explicit
 /// [`PermissionVerdict::Ask`] is the user's own instruction and is left for the
 /// host to honour, and a [`HookDecision::Deny`] and a [`HookDecision::Defer`]
 /// are structurally out of reach — a host name cannot turn a denied command
@@ -103,8 +105,9 @@ impl ApprovalOwner {
     /// Relax the default ask into an allow when the delegate owns approval.
     ///
     /// Only a [`PermissionVerdict::Default`] verdict relaxes: it means no rule
-    /// matched, so RTK is imposing another agent's settings on a runtime that
-    /// never opted into them (#3908). An explicit [`PermissionVerdict::Ask`] is
+    /// matched, or the allow rules cover only some commands of a chain, so RTK
+    /// is imposing another agent's settings on a runtime that never opted into
+    /// them (#3908). An explicit [`PermissionVerdict::Ask`] is
     /// the user's own instruction and is left for the host to honour; every
     /// other decision passes through by construction.
     pub(crate) fn apply(self, decision: HookDecision, verdict: PermissionVerdict) -> HookDecision {
@@ -244,7 +247,8 @@ pub(crate) enum AgentPath {
     ///
     /// They differ only in what they do with the answer, which is what the
     /// [`ApprovalOwner`] records: a delegate that gates the rewritten command
-    /// itself does not want RTK to ask as well for a command no rule matched.
+    /// itself does not want RTK to ask as well for a command no rule matched, or a
+    /// chain the allow rules cover only in part.
     ViaRewrite(ApprovalOwner),
     /// A rules-file install — RTK ships instructions telling the agent to
     /// prefix commands itself. There is no hook and no permission surface, so
