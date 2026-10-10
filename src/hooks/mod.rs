@@ -13,6 +13,7 @@ pub mod hook_cmd;
 pub mod init;
 pub mod integrity;
 pub mod permissions;
+pub mod permissions_opencode;
 pub mod rewrite_cmd;
 pub mod trust;
 pub mod verify_cmd;

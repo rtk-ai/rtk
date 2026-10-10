@@ -13,9 +13,8 @@ mod scratch;
 
 use std::process::Command;
 
-/// Build a `Command` for the rtk binary with its tracking database and tee
-/// spool redirected to this test binary's scratch directory. Use it in place
-/// of `Command::new(env!("CARGO_BIN_EXE_rtk"))`.
+/// Build a `Command` for the rtk binary, isolated by [`isolate_rtk`]. Use it in
+/// place of `Command::new(env!("CARGO_BIN_EXE_rtk"))`.
 ///
 /// A spawned rtk resolves the same data directory a normal invocation would,
 /// writing into the contributor's `~/.local/share/rtk/`: rows in their savings
@@ -24,13 +23,40 @@ use std::process::Command;
 /// `core::test_isolation` fails the suite on a spawn that skips this.
 pub fn rtk_command() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rtk"));
-    scratch::redirect_rtk_data(&mut cmd);
+    scratch::isolate_rtk(&mut cmd);
     cmd
 }
 
-/// Run git isolated from the developer's configuration and repository
-/// variables, as every rtk child from [`rtk_command`] runs it, and with its
-/// messages in English, which a child's git is not.
+/// Isolate a child the way [`rtk_command`] does: an empty environment but for
+/// what `scratch::kept` lets through, with rtk's data in this test binary's
+/// scratch directory. It clears whatever the command set before and starts it
+/// in a project directory of its own, so call it before setting the test's own
+/// variables or directory.
+pub fn isolate_rtk(cmd: &mut Command) {
+    scratch::isolate_rtk(cmd);
+}
+
+/// This test binary's scratch directory, where an isolated child's data goes.
+pub fn scratch_dir() -> &'static std::path::Path {
+    scratch::scratch_dir()
+}
+
+/// Build a `Command` for a native tool whose output a test compares with
+/// rtk's, in the environment an rtk child gets, so a setting only the
+/// developer's shell exports, such as `RIPGREP_CONFIG_PATH`, reaches neither
+/// side rather than one. It starts in the test's directory, not the child's,
+/// so give both the same `current_dir` or absolute paths.
+pub fn native_command(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    scratch::isolate_environment(&mut cmd);
+    cmd
+}
+
+/// Run git in the environment every rtk child from [`rtk_command`] gets, with
+/// no configuration of the developer's and its messages in English, where a
+/// child's git passes its output through in the test's locale. It clears
+/// whatever the command set before, so call it before setting the test's own
+/// variables.
 pub fn isolate_git(cmd: &mut Command) {
     scratch::isolate_git(cmd);
 }

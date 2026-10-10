@@ -110,15 +110,13 @@ fn with_suppress_config(home: &Path, value: bool) {
     }
 }
 
-/// Like [`run`], but pins `RTK_SUPPRESS_HOOK_WARNING` — `None` unsets it, so an
-/// exported value in the developer's own shell cannot decide the outcome.
+/// Like [`run`], with `RTK_SUPPRESS_HOOK_WARNING` set to `value`, or unset.
 fn run_with_env(home: &Path, args: &[&str], value: Option<&str>) -> String {
     let mut cmd = common::rtk_command();
     cmd.args(args).envs(isolating_env(home));
-    match value {
-        Some(v) => cmd.env("RTK_SUPPRESS_HOOK_WARNING", v),
-        None => cmd.env_remove("RTK_SUPPRESS_HOOK_WARNING"),
-    };
+    if let Some(value) = value {
+        cmd.env("RTK_SUPPRESS_HOOK_WARNING", value);
+    }
     let out = cmd.output().expect("run rtk");
     String::from_utf8_lossy(&out.stderr).into_owned()
 }

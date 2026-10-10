@@ -68,22 +68,23 @@ pub(crate) fn track_tee_read(cmd: &str) {
 /// Prints the RTK-rewritten command to stdout and exits with a code that tells
 /// the caller how to handle permissions:
 ///
-/// | Exit | Stdout   | Meaning                                                      |
-/// |------|----------|--------------------------------------------------------------|
-/// | 0    | rewritten| Rewrite allowed — hook may auto-allow the rewritten command. |
-/// | 1    | (none)   | No RTK equivalent — hook passes through unchanged.           |
-/// | 2    | (none)   | Deny rule matched — hook defers to Claude Code native deny.  |
-/// | 3    | rewritten| Ask rule or no rule matched — hook rewrites, host prompts.   |
+/// | Exit | Stdout   | Meaning                                                                  |
+/// |------|----------|--------------------------------------------------------------------------|
+/// | 0    | rewritten| Allow rules cover every command — hook may auto-allow the rewrite.       |
+/// | 1    | (none)   | No rewrite ([`decision::decide`] deferred) — hook passes through.        |
+/// | 2    | (none)   | Deny rule matched — hook defers to the host's native deny.               |
+/// | 3    | rewritten| Ask rule, or allow rules short of every command (also with no rules) — hook rewrites, host prompts. |
 ///
 /// The decision itself is [`decision::decide`], shared with the in-process
 /// `rtk hook <agent>` path; this function is only its exit-code rendering.
 ///
 /// A delegate that gates the rewritten command itself can set
-/// [`decision::REWRITE_HOST_ENV`] to its own agent name, which renders a
-/// *default* ask (no rule matched) as exit 0 for it and nothing else — see
-/// [`decision::ApprovalOwner`]. An explicit `ask` rule the user wrote still
-/// renders as exit 3, so the host can keep prompting for the command the user
-/// asked about, and [`decision::ApprovalOwner::apply`] cannot transform a
+/// [`decision::REWRITE_HOST_ENV`] to its agent name (`openclaw` is the only one
+/// that resolves to [`decision::ApprovalOwner::Delegate`]), which renders a
+/// *default* ask (no ask rule, allow rules short of every command) as exit 0
+/// for it and nothing else. An explicit `ask` rule the user wrote still renders
+/// as exit 3, so the host can keep prompting for the command the user asked
+/// about, and [`decision::ApprovalOwner::apply`] cannot transform a
 /// [`HookDecision::Deny`]: an explicit deny still reaches this function as
 /// `Deny` and still renders as exit 2, for every delegate, named or not.
 pub fn run(cmd: &str) -> anyhow::Result<()> {

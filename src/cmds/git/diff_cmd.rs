@@ -1,6 +1,7 @@
 //! Compares two files and shows only the changed lines.
 
 use crate::core::guard::never_worse;
+use crate::core::shell::display_args;
 use crate::core::tracking;
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -42,7 +43,10 @@ const DIFF_EXIT_TROUBLE: i32 = 2;
 /// 2 if an operand cannot be read.
 pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
-    let command = format!("diff {} {}", file1.display(), file2.display());
+    let command = format!(
+        "diff {}",
+        display_args(&[file1.to_string_lossy(), file2.to_string_lossy()])
+    );
 
     if verbose > 0 {
         eprintln!("Comparing: {} vs {}", file1.display(), file2.display());
