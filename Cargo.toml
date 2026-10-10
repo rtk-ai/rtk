@@ -14,6 +14,7 @@ categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 anyhow = "1.0"
 # Console code page decoding for child-process output. Kept off the
 # cfg(windows) target so the mapping and the incremental UTF-8 walk stay
