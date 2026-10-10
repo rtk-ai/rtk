@@ -7,17 +7,14 @@ use std::process::{Command, Stdio};
 
 mod common;
 
-/// Runs rtk against `home` with every directory it resolves from the
-/// environment pinned inside it, so an exported `CLAUDE_CONFIG_DIR` or `XDG_*`
-/// can neither change the outcome nor receive writes.
+/// Runs rtk with `home` as its home, and its configuration, data and history
+/// database inside it; its tee spool and recall database stay in scratch.
 fn rtk(home: &Path) -> Command {
     let mut cmd = common::rtk_command();
     cmd.env("HOME", home)
         .env("RTK_DB_PATH", home.join("rtk.db"))
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", home.join(".local").join("share"))
-        .env_remove("CLAUDE_CONFIG_DIR")
-        .env("RTK_TELEMETRY_DISABLED", "1")
         .env("LC_ALL", "C")
         .stdin(Stdio::null());
     cmd

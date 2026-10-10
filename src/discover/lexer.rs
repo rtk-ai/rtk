@@ -283,12 +283,28 @@ fn tokenize_inner(input: &str, newline_mode: NewlineMode) -> Vec<ParsedToken> {
             }
             ';' => {
                 flush_arg(&mut tokens, &mut current, current_start);
+                let start = byte_pos;
+                let mut val = String::from(";");
+                byte_pos += char_len;
+                // `;;`, `;&` and `;;&` are single `case` terminators. Split
+                // apart, the second half reads as an empty command, and the
+                // rewrite emits `; ;` or `; &` in its place — a syntax error,
+                // or a background job where a fall-through was written.
+                if chars.peek() == Some(&';') {
+                    chars.next();
+                    byte_pos += 1;
+                    val.push(';');
+                }
+                if chars.peek() == Some(&'&') {
+                    chars.next();
+                    byte_pos += 1;
+                    val.push('&');
+                }
                 tokens.push(ParsedToken {
                     kind: TokenKind::Operator,
-                    value: ";".into(),
-                    offset: byte_pos,
+                    value: val,
+                    offset: start,
                 });
-                byte_pos += char_len;
                 current_start = byte_pos;
             }
             '&' => {
@@ -541,7 +557,7 @@ pub(crate) fn redirect_has_file_target(tokens: &[ParsedToken], i: usize) -> bool
 ///
 /// | | here (permission gate) | [`split_on_operators`] (analytics) | `rewrite_compound` (rewrite) |
 /// |---|---|---|---|
-/// | `&&` / `\|\|` / `;` | splits | splits | splits |
+/// | `&&` / `\|\|` / `;` / `;;` / `;&` / `;;&` | splits | splits | splits |
 /// | `\|` | always splits | stops at first `\|` | pipeline handled specially |
 /// | background `&` | splits (Shellism boundary) | does not split | splits |
 /// | `( ... )` grouping | splits (Shellism boundary) | does not split | does not split standalone |
@@ -629,7 +645,8 @@ pub fn split_for_permissions(cmd: &str) -> Vec<&str> {
     results
 }
 
-/// Split a shell command on operators (`&&`, `||`, `;`) and optionally pipes
+/// Split a shell command on operators (`&&`, `||`, `;`, and the `case`
+/// terminators `;;`, `;&`, `;;&`) and optionally pipes
 /// (`|`), quote-aware. `stop_at_pipe: true` returns only segments before the
 /// first `|` (rewrite's left-side-only case); `false` splits through pipes
 /// too (permission checking, every segment validated).

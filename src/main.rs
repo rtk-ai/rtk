@@ -143,6 +143,8 @@ enum Commands {
 
     /// Git commands with compact output
     Git {
+        // Backticks would leak into clap's --help text, so silence rustdoc here instead.
+        #[allow(rustdoc::invalid_html_tags)]
         /// Change to directory before executing (like git -C <path>, can be repeated)
         #[arg(short = 'C', action = clap::ArgAction::Append)]
         directory: Vec<String>,
@@ -974,11 +976,31 @@ enum Commands {
 
     /// Rewrite a raw command to its RTK equivalent (single source of truth for hooks)
     ///
-    /// Exits 0 and prints the rewritten command if supported.
-    /// Exits 1 with no output if the command has no RTK equivalent.
+    /// Exit codes (a hook must handle all four). The rules are Claude Code's
+    /// permission rules, checked against every command in a chain.
     ///
-    /// Used by Claude Code, Gemini CLI, and other LLM hooks:
-    ///   REWRITTEN=$(rtk rewrite "$CMD") || exit 0
+    /// 0 - rewrite printed, allow rules cover every command: the hook may
+    /// auto-allow it. RTK_REWRITE_HOST=openclaw, for a delegate that gates
+    /// commands itself, turns every 3 but an ask rule's into 0, so a hook that
+    /// auto-allows on 0 runs rtk with that variable unset.
+    ///
+    /// 1 - nothing printed, no rewrite (no RTK equivalent, nothing left to
+    /// rewrite, a command excluded in config, or a construct RTK does not
+    /// rewrite such as `$(...)` or a file redirect): run the command unchanged.
+    ///
+    /// 2 - nothing printed, a deny rule matched (checked before anything
+    /// else): defer to the agent's own deny.
+    ///
+    /// 3 - rewrite printed, an ask rule matched or allow rules do not cover
+    /// every command, including when there are no rules at all: use the
+    /// rewrite and defer approval to the host.
+    ///
+    /// Compare the rewrite with the original: a command already in RTK form can
+    /// come back as itself under 0 or 3.
+    ///
+    /// Exit 3 is still a rewrite, so `REWRITTEN=$(rtk rewrite "$CMD") || exit 0` drops it.
+    ///
+    /// See hooks/claude/rtk-rewrite.sh in the RTK repository for reference handling.
     Rewrite {
         /// Raw command to rewrite (e.g. "git status", "cargo test && git push")
         /// Accepts multiple args: `rtk rewrite ls -al` is equivalent to `rtk rewrite "ls -al"`
@@ -4366,6 +4388,27 @@ mod tests {
                 _ => panic!("expected Rewrite command"),
             }
         }
+    }
+
+    #[test]
+    fn test_rewrite_help_documents_each_exit_code() {
+        use clap::CommandFactory;
+
+        let help = Cli::command()
+            .find_subcommand_mut("rewrite")
+            .expect("rewrite subcommand should exist")
+            .render_long_help()
+            .to_string();
+
+        // clap joins consecutive doc lines into one paragraph, so each code
+        // needs its own paragraph to render on its own line.
+        for code in 0..=3 {
+            assert!(
+                help.contains(&format!("\n\n{code} - ")),
+                "rewrite help should give exit {code} its own paragraph:\n{help}"
+            );
+        }
+        assert!(help.contains("RTK_REWRITE_HOST"), "{help}");
     }
 
     #[test]

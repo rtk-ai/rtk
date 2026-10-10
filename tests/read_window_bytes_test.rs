@@ -2,7 +2,7 @@ use std::fs;
 use std::io::Write;
 use std::process::{Child, Output, Stdio};
 use std::time::{Duration, Instant};
-// The native `head` comparison and FIFO creation are Unix only.
+// FIFO creation is Unix only; native head uses the shared isolated helper.
 #[cfg(unix)]
 use std::process::Command;
 
@@ -244,7 +244,7 @@ fn rewritten_head_spellings_match_native_on_non_utf8_files() {
             )
             .output()
             .expect("execute rewritten head");
-        let native = Command::new("head")
+        let native = common::native_command("head")
             .args(flags.split_whitespace())
             .arg(&file)
             .output()

@@ -249,9 +249,9 @@ src/ls.rs:25:fn run_tree(...)                src/ls.rs
 rtk ast-grep run -p '<pattern>' [chemin] [options]
 ```
 
-Regroupe les correspondances par fichier, plafonnees a 5 par fichier et 50 au total ; le surplus est remplace par une note de comptage ("N more match line(s) in X" / "N more match line(s) in M more file(s) not shown"), suivie d'un indice `[full output: ...]` qui pointe vers la sortie complete -- aucune ligne n'est perdue tant que la recuperation est active (`[retriever] mode`), sinon la note de comptage reste seule. ast-grep imprime une ligne par ligne source d'une correspondance, et une correspondance structurelle s'etend sur plusieurs lignes : le decompte porte donc sur les lignes, pas sur les correspondances. Sur une recherche reelle dans ce depot, ~85% de reduction.
+Regroupe les correspondances par fichier, plafonnees a 5 par fichier et 50 au total ; le surplus est remplace par une note de comptage ("N more match line(s) in X" / "N more match line(s) in M more file(s) not shown"), suivie d'un indice `[full output: ...]` qui pointe vers la sortie complete, des lors que la recuperation est active (`[retriever] mode`) et que la compaction gagne de quoi payer l'indice. Sinon la note de comptage est suivie d'un repli (`--json`, motif plus etroit, ou `rtk proxy ast-grep`) : la sortie complete n'est alors pas archivee. Et quand la sortie compactee finit par couter plus que la brute -- des notes de comptage qui coutent plus que les lignes qu'elles remplacent, ou un indice ou un repli plus long que la marge gagnee -- c'est la sortie brute qui est imprimee entiere, sans note ni repli. ast-grep imprime une ligne par ligne source d'une correspondance, et une correspondance structurelle s'etend sur plusieurs lignes : le decompte porte donc sur les lignes, pas sur les correspondances. Sur une recherche reelle dans ce depot, ~85% de reduction.
 
-Seul `run` est filtre : soit nomme explicitement, soit implicite quand aucun positionnel avant `--` ne porte le nom d'une autre sous-commande. `scan`, `test`, `new`, `lsp`, `completions`, `docs` et `run --stdin` passent tels quels : leur sortie n'a pas cette forme, et `lsp` dialogue sur stdin.
+Seul `run` est filtre : soit nomme explicitement, soit implicite quand aucun positionnel avant `--` ne porte le nom d'une autre sous-commande. `scan`, `test`, `new`, `lsp`, `outline`, `completions` et `help` passent tels quels (les sous-commandes d'ast-grep 0.45.3 autres que `run`) : leur sortie n'a pas cette forme, et `lsp` dialogue sur stdin. `run --stdin` et `run -i` aussi : le premier lit la source sur le tube que la capture ferme, le second ouvre une session plein ecran (une question par correspondance) qu'il ecrit sur stdout tout en lisant les reponses sur /dev/tty : la capture avalerait la session entiere, question comprise, pendant qu'ast-grep attend une reponse.
 
 `--json` n'est pas filtre -- une demande explicite de sortie structuree passe telle quelle, sans compression.
 
@@ -1284,14 +1284,21 @@ rtk init -g --uninstall         # Desinstaller
 | `~/.claude/RTK.md` | Instructions minimales pour le LLM |
 | `~/.claude/settings.json` | Enregistrement du hook PreToolUse |
 
-### `rtk rewrite` -- Recriture de commande
+### `rtk rewrite` -- Reecriture de commande
 
-Commande interne utilisee par le hook. Imprime la commande reecrite sur stdout (exit 0) ou sort avec exit 1 si aucun equivalent RTK n'existe.
+Commande interne utilisee par le hook. Le code de sortie porte la decision de permission, prise d'apres les regles de permission de Claude Code appliquees a chaque commande d'une chaine :
+
+- `0` : imprime la commande reecrite, des regles allow couvrent chaque commande ; le hook peut l'autoriser sans demander
+- `1` : sans sortie, pas de reecriture (aucun equivalent RTK, rien a reecrire, commande exclue dans la config, ou construction que RTK ne reecrit pas, comme `$(...)` ou une redirection de fichier) ; la commande passe inchangee
+- `2` : sans sortie, une regle deny correspond (verifie avant tout le reste) ; le hook s'en remet au refus de l'agent
+- `3` : imprime la commande reecrite, une regle ask correspond ou les regles allow ne couvrent pas chaque commande, y compris sans aucune regle ; l'agent demande confirmation
+
+Une integration lit donc stdout pour les codes `0` et `3`, et garde la demande de confirmation pour le code `3`. Avec `RTK_REWRITE_HOST=openclaw`, une integration qui gere elle-meme l'approbation recoit `0` a la place de tout `3` qui ne vient pas d'une regle ask ; une integration qui autorise sans demander sur `0` lance donc `rtk rewrite` sans cette variable.
 
 ```bash
-rtk rewrite "git status"           # -> "rtk git status" (exit 0)
-rtk rewrite "terraform plan"       # -> (exit 1, pas de recriture)
-rtk rewrite "rtk git status"       # -> "rtk git status" (exit 0, inchange)
+rtk rewrite "git status"           # -> "rtk git status" (exit 3 sans regle)
+rtk rewrite "echo hello"           # -> (exit 1, pas de reecriture)
+rtk rewrite "rtk git status"       # -> "rtk git status" (exit 3 sans regle, inchange)
 ```
 
 ### `rtk verify` -- Verification d'integrite

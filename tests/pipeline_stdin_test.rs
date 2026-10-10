@@ -47,7 +47,7 @@ fn wc_preserves_native_failure_exit_code() {
         common::rtk_command().args(["wc", invalid_option]),
         b"input\n",
     );
-    let native = run_with_stdin(Command::new("wc").arg(invalid_option), b"input\n");
+    let native = run_with_stdin(common::native_command("wc").arg(invalid_option), b"input\n");
 
     assert!(!rtk.status.success());
     assert_eq!(rtk.status.code(), native.status.code());

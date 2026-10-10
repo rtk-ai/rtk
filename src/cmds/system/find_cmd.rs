@@ -755,10 +755,7 @@ fn render(
         None
     };
     let listing = capped_raw.trim_end_matches('\n');
-    let mut baseline = match &hint {
-        Some(h) => format!("{}\n{}", listing, h),
-        None => listing.to_string(),
-    };
+    let mut baseline = crate::core::runner::with_hint(listing, hint.as_deref()).into_owned();
     if let Some(note) = &note {
         baseline.push('\n');
         baseline.push_str(note);

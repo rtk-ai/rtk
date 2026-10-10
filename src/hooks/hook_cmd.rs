@@ -516,7 +516,7 @@ fn run_antigravity_inner(input: &str) -> Value {
 
 /// Run the Mistral Vibe CLI pre_tool hook.
 ///
-/// Vibe hook contract (https://docs.mistral.ai/vibe/code/cli/hooks):
+/// Vibe hook contract (<https://docs.mistral.ai/vibe/code/cli/hooks>):
 /// - stdin: JSON with `tool_name`, `tool_input`, `hook_event_name`, etc.
 /// - Passthrough: exit 0 with empty stdout.
 /// - Rewrite: emit `{"hook_specific_output": {"tool_input": {"command": "..."}}}`.

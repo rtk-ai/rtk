@@ -152,7 +152,7 @@ fn count_with_list_is_verbatim() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!stdout.contains("files)"), "no header under -c:\n{stdout}");
     // GNU grep lets -l win over -c, BSD grep prints both; either way rtk forwards it as is.
-    let raw = Command::new("grep")
+    let raw = common::native_command("grep")
         .args(["-rlc", "needle", src.to_str().unwrap()])
         .output()
         .expect("grep");

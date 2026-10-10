@@ -22,7 +22,6 @@ fn run_trae_payload(payload: &str, home: &Path, audit: bool) -> Output {
     let mut child = common::rtk_command()
         .args(["hook", "trae"])
         .env("HOME", home)
-        .env("RTK_TELEMETRY_DISABLED", "1")
         .env("RTK_HOOK_AUDIT", if audit { "1" } else { "0" })
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

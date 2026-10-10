@@ -2240,8 +2240,9 @@ fn extract_state_header(raw: &str) -> Option<String> {
 }
 
 /// Porcelain `-b` collapses a detached HEAD to the opaque `## HEAD (no branch)`, which can be
-/// misread as a branch literally named `HEAD`. Extracts the explicit "HEAD detached at/from
-/// <ref>" line from plain `git status` output instead. `None` if HEAD is on a branch.
+/// misread as a branch literally named `HEAD`. Extracts the explicit
+/// `HEAD detached at/from <ref>` line from plain `git status` output instead. `None` if HEAD
+/// is on a branch.
 fn extract_detached_head(raw: &str) -> Option<String> {
     raw.lines()
         .map(str::trim)
@@ -3162,7 +3163,7 @@ fn run_fetch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32
 
 /// Format status message for stash operations.
 /// - For create operations (push/save): checks for "No local changes"
-/// - For other operations: uses "ok stash <subcommand>" format
+/// - For other operations: uses `ok stash <subcommand>` format
 fn format_stash_message(subcommand: Option<&str>, result: &CaptureResult) -> String {
     match subcommand {
         None | Some("push") | Some("save") => {
