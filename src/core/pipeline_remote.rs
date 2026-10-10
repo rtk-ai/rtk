@@ -184,7 +184,12 @@ fn ledger_write(name: &str, updates: &[(&str, String)]) {
 pub fn record_install(name: &str, source: &str, sha: Option<&str>) {
     let mut updates = vec![
         ("source", source.to_string()),
-        ("date", chrono::Local::now().format("%Y-%m-%d").to_string()),
+        (
+            "date",
+            crate::core::utils::local_time(chrono::Utc::now())
+                .format("%Y-%m-%d")
+                .to_string(),
+        ),
     ];
     if let Some(sha) = sha {
         updates.push(("sha", sha.to_string()));

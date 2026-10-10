@@ -1183,7 +1183,9 @@ pub(crate) fn collect_card(name: Option<&str>) -> Result<Option<CardData>> {
         tasks,
         proxy,
         published,
-        date: chrono::Local::now().format("%Y-%m-%d").to_string(),
+        date: crate::core::utils::local_time(chrono::Utc::now())
+            .format("%Y-%m-%d")
+            .to_string(),
     }))
 }
 
