@@ -354,6 +354,60 @@ mod rewrite_exit_codes {
     }
 }
 
+/// One line out, or nothing: the shape exit 0 and 3 stdout must keep (#4351).
+///
+/// A hook applies the rewrite to stdout verbatim as the command, so a value
+/// spanning several shell lines is worse than no rewrite at all. Two paths
+/// could break that: a rewrite carrying a newline (vector 1), and clap's own
+/// `-h`/`--help`, which exited 0 with the help text and so read as "allow"
+/// (vector 2).
+mod single_line_stdout_shape {
+    use super::Sandbox;
+
+    /// `-h`/`--help` are command text, not flags for `rewrite`. Before the
+    /// `disable_help_flag` gate both exited 0 with the help text; a hook reading
+    /// 0 as allow would have substituted that help text for the user's command.
+    #[test]
+    fn help_flags_are_command_text_not_flags() {
+        let sb = Sandbox::bare();
+        assert_eq!(sb.rewrite("-h"), (1, String::new()));
+        assert_eq!(sb.rewrite("--help"), (1, String::new()));
+    }
+
+    /// Vector 1: a rewrite carrying a newline defers, printing nothing, rather
+    /// than emitting a second shell line under exit 3.
+    #[test]
+    fn multi_line_rewrite_defers() {
+        let sb = Sandbox::bare();
+        assert_eq!(
+            sb.rewrite("git commit -m \"line1\nline2\""),
+            (1, String::new())
+        );
+    }
+
+    /// The gate touches only the multi-line case: a single-line rewrite is
+    /// still printed, with its exit code unchanged.
+    #[test]
+    fn single_line_rewrite_is_unchanged() {
+        let sb = Sandbox::bare();
+        assert_eq!(sb.rewrite("ls -la"), (3, "rtk ls -la".into()));
+    }
+
+    /// Disabling the help flag does not lose the documentation: `rtk help
+    /// rewrite` still reaches it through clap's own help mechanism, which the
+    /// hook shelling out to `rtk rewrite` cannot reach.
+    #[test]
+    fn help_rewrite_still_documents_the_exit_codes() {
+        let sb = Sandbox::bare();
+        let (code, stdout, _) = sb.run(&["help", "rewrite"]);
+        assert_eq!(code, 0, "rtk help rewrite must still succeed");
+        assert!(
+            stdout.contains("Exit codes"),
+            "rtk help rewrite must still document the exit codes:\n{stdout}"
+        );
+    }
+}
+
 /// Reading back a tee artefact records a recall, and a denied command does not.
 ///
 /// Both entry points perform that bookkeeping themselves rather than through the
