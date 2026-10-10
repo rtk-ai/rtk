@@ -33,7 +33,10 @@ dirs = "7"
 rusqlite = { version = "0.31", features = ["bundled"] }
 toml = "0.8"
 toml_edit = "0.22"
-chrono = "0.4"
+# No `clock` feature: on macOS it links CoreFoundation (through iana-time-zone), which
+# every rtk process then loads at launch, about a third of `rtk --version`'s
+# instructions. Local times come from `core::utils::local_time`.
+chrono = { version = "0.4", default-features = false, features = ["std", "now"] }
 tempfile = "3"
 sha2 = "0.10"
 ureq = "2"
@@ -46,6 +49,7 @@ which = "8"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
+chrono = { version = "0.4", features = ["clock"] }
 windows-sys = { version = "0.59", features = [
     "Win32_System_Console",
     "Win32_Globalization",

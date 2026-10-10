@@ -10,7 +10,7 @@ use crate::core::test_isolation;
 use crate::core::user_dirs;
 use crate::core::user_env;
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset, Offset, Utc};
 use regex::Regex;
 use serde_json::Value;
 use std::ffi::OsStr;
@@ -18,6 +18,44 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::LazyLock;
+
+/// `ts` in the local time zone, for display.
+///
+/// chrono's `Local` needs its `clock` feature, and on macOS that feature links
+/// CoreFoundation through iana-time-zone: every rtk process loaded the framework at
+/// launch for the two places that show a local time. libc's `localtime_r` reads the
+/// same `TZ` and tzdata, and gives the offset in effect at `ts` (DST included).
+#[cfg(unix)]
+pub fn local_time(ts: DateTime<Utc>) -> DateTime<FixedOffset> {
+    // POSIX; the libc crate does not bind it
+    #[allow(unsafe_code)]
+    unsafe extern "C" {
+        fn tzset();
+    }
+    let secs = ts.timestamp() as libc::time_t;
+    #[allow(unsafe_code)]
+    // nosemgrep: unsafe-block
+    let gmtoff = unsafe {
+        tzset();
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&secs, &mut tm).is_null() {
+            0
+        } else {
+            tm.tm_gmtoff
+        }
+    };
+    let offset = i32::try_from(gmtoff)
+        .ok()
+        .and_then(FixedOffset::east_opt)
+        .unwrap_or_else(|| Utc.fix());
+    ts.with_timezone(&offset)
+}
+
+/// `ts` in the local time zone, for display.
+#[cfg(windows)]
+pub fn local_time(ts: DateTime<Utc>) -> DateTime<FixedOffset> {
+    ts.with_timezone(&chrono::Local).fixed_offset()
+}
 
 /// Compute `days` ago from now, clamped instead of panicking on overflow.
 ///
@@ -905,6 +943,36 @@ fn output_codepage() -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn test_local_time_uses_the_offset_in_effect() {
+        let at = |s: &str| {
+            DateTime::parse_from_rfc3339(s)
+                .expect("rfc3339")
+                .with_timezone(&Utc)
+        };
+        temp_env::with_var("TZ", Some("UTC"), || {
+            assert_eq!(
+                local_time(at("2026-01-15T12:00:00Z"))
+                    .offset()
+                    .local_minus_utc(),
+                0
+            );
+        });
+        // POSIX sign: Etc/GMT-2 is two hours east of UTC
+        temp_env::with_var("TZ", Some("Etc/GMT-2"), || {
+            let t = local_time(at("2026-01-15T12:00:00Z"));
+            assert_eq!(t.format("%m-%d %H:%M").to_string(), "01-15 14:00");
+        });
+        // DST comes from the timestamp, not from now
+        temp_env::with_var("TZ", Some("Europe/Warsaw"), || {
+            let winter = local_time(at("2026-01-15T12:00:00Z"));
+            let summer = local_time(at("2026-07-15T12:00:00Z"));
+            assert_eq!(winter.offset().local_minus_utc(), 3600);
+            assert_eq!(summer.offset().local_minus_utc(), 7200);
+        });
+    }
 
     #[test]
     fn test_strip_leading_bom_helper() {

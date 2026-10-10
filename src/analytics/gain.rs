@@ -6,7 +6,6 @@ use crate::core::user_dirs;
 use crate::core::utils::{format_tokens, truncate};
 use crate::hooks::hook_check;
 use anyhow::{Context, Result};
-use chrono::Local;
 use colored::Colorize;
 use serde::Serialize;
 use std::io::IsTerminal;
@@ -292,7 +291,7 @@ pub fn run(
                 println!("{}", styled("Recent Commands", true)); // added: styled header
                 println!("──────────────────────────────────────────────────────────");
                 for rec in recent {
-                    let time = rec.timestamp.with_timezone(&Local).format("%m-%d %H:%M");
+                    let time = crate::core::utils::local_time(rec.timestamp).format("%m-%d %H:%M");
                     let cmd_short = truncate(&rec.rtk_cmd, 25);
                     // added: tier indicators by savings level
                     let sign = if rec.savings_pct >= 70.0 {
