@@ -1086,7 +1086,15 @@ fn extract_test_summary(output: &str, eco: TestEcosystem) -> String {
                 if line.contains("Tests:") || line.contains("Test Suites:") {
                     result.push(line.to_string());
                 }
-                if line.contains("✕") || line.contains("FAIL") {
+                // Jest opens a failed suite with a "FAIL <path>" header and
+                // marks a failed test with a leading ✕; node --test, the usual
+                // bare `npm test`, uses ✖. Anchor on that leading marker: a
+                // passing test is free to carry "FAIL" in its own name.
+                let trimmed = line.trim_start();
+                if trimmed.starts_with('✕')
+                    || trimmed.starts_with('✖')
+                    || trimmed.starts_with("FAIL ")
+                {
                     failures.push(line.to_string());
                 }
             }
@@ -1453,6 +1461,62 @@ mod err_test_runner_tests {
         assert!(out.contains("[FAIL]"), "expected failure block, got: {out}");
         assert!(out.contains("adds numbers"));
         assert!(out.contains("1 fail"));
+    }
+
+    /// #3741: a passing test named after the thing it checks ("... FAIL ...")
+    /// must not turn a green run red. Only the runner's own leading markers
+    /// say a line is a failure.
+    #[test]
+    fn test_jest_green_run_with_fail_in_a_test_name_stays_green() {
+        let node = "✔ contains uppercase word FAIL in the name (0.45ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 57.6223
+";
+        let jest = " PASS  src/report.test.js
+  ✓ keeps every FAIL line verbatim (2 ms)
+
+Tests:       1 passed, 1 total
+Test Suites: 1 passed, 1 total
+";
+        for (raw, ok_marker) in [(node, "ℹ fail 0"), (jest, "1 passed, 1 total")] {
+            let out = extract_test_summary(raw, TestEcosystem::Jest);
+            assert!(!out.contains("[FAIL]"), "{out}");
+            assert!(out.contains(ok_marker), "{out}");
+        }
+    }
+
+    #[test]
+    fn test_jest_leading_failure_markers_are_still_reported() {
+        let jest = extract_test_summary(
+            " FAIL  src/report.test.js
+  ✓ keeps every FAIL line verbatim (2 ms)
+  ✕ rejects a FAIL response (3 ms)
+
+Tests:       1 failed, 1 passed, 2 total
+",
+            TestEcosystem::Jest,
+        );
+        assert!(jest.contains("[FAIL]"), "{jest}");
+        assert!(jest.contains("FAIL  src/report.test.js"), "{jest}");
+        assert!(jest.contains("✕ rejects a FAIL response"), "{jest}");
+        assert!(!jest.contains("✓ keeps every FAIL line"), "{jest}");
+
+        let node = extract_test_summary(
+            "✖ rejects a FAIL response (0.45ms)
+ℹ tests 1
+ℹ pass 0
+ℹ fail 1
+",
+            TestEcosystem::Jest,
+        );
+        assert!(node.contains("[FAIL]"), "{node}");
+        assert!(node.contains("✖ rejects a FAIL response"), "{node}");
     }
 
     #[test]
