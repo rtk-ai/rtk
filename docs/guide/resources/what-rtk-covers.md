@@ -80,6 +80,7 @@ Every percentage below measures **bash output bytes removed** — the only thing
 |---------|----------------------|--------------|
 | `go test` | 80-90% | Failures only |
 | `golangci-lint run` | 75% | Violations grouped by file |
+| `govulncheck` | ~50% vs text, >99% vs JSON | Affected modules, upgrade target, call sites |
 | `go build` | 75% | Errors only |
 
 ## Ruby
