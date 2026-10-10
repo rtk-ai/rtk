@@ -1001,6 +1001,13 @@ enum Commands {
     /// Exit 3 is still a rewrite, so `REWRITTEN=$(rtk rewrite "$CMD") || exit 0` drops it.
     ///
     /// See hooks/claude/rtk-rewrite.sh in the RTK repository for reference handling.
+    ///
+    /// `-h`/`--help` are deliberately not flags for this subcommand: its stdout
+    /// and exit code are a machine contract, and clap's help exits 0 with many
+    /// lines on stdout, so a hook reading 0 as "allow" would replace the user's
+    /// command with help text. `rtk help rewrite` still prints the same
+    /// documentation through a clap mechanism the hook cannot reach.
+    #[command(disable_help_flag = true)]
     Rewrite {
         /// Raw command to rewrite (e.g. "git status", "cargo test && git push")
         /// Accepts multiple args: `rtk rewrite ls -al` is equivalent to `rtk rewrite "ls -al"`
