@@ -127,13 +127,14 @@ fn remove_at_exit(dir: &Path) {
 /// whether a project's settings are read; the CI indicators the filter-trust
 /// override checks; and Composer's bin directory, which decides which tool a
 /// PHP command runs.
-const INHERITED_VARS: [&str; 13] = [
+const INHERITED_VARS: [&str; 14] = [
     "CLAUDE_CONFIG_DIR",
     "CODEX_HOME",
     "HERMES_HOME",
     "COPILOT_HOME",
     "PI_CODING_AGENT_DIR",
     "FACTORY_HOME_OVERRIDE",
+    "OPENCODE_CONFIG",
     "GEMINI_CLI_TRUST_WORKSPACE",
     "CI",
     "GITHUB_ACTIONS",

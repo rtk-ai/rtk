@@ -52,21 +52,23 @@ fn run_claude_md_mode_with(
 
     let action = write_rtk_block(&path, block, "rtk instructions", recovery_cmd, ctx)?;
 
+    // Runs before the Unchanged return so that re-running restores a deleted plugin.
+    if global && install_opencode {
+        let opencode_plugin_path = prepare_opencode_plugin_path()?;
+        ensure_opencode_plugin_installed(&opencode_plugin_path, ctx)?;
+        if !dry_run {
+            println!(
+                "[ok] OpenCode plugin installed: {}",
+                opencode_plugin_path.display()
+            );
+        }
+    }
+
     if matches!(action, RtkBlockUpsert::Unchanged) {
         return Ok(());
     }
 
     if global {
-        if install_opencode {
-            let opencode_plugin_path = prepare_opencode_plugin_path()?;
-            ensure_opencode_plugin_installed(&opencode_plugin_path, ctx)?;
-            if !dry_run {
-                println!(
-                    "[ok] OpenCode plugin installed: {}",
-                    opencode_plugin_path.display()
-                );
-            }
-        }
         if !dry_run {
             println!("   Claude Code will now use rtk in all sessions");
         }

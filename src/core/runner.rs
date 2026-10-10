@@ -290,7 +290,7 @@ fn run_inner(
     opts: RunOptions<'_>,
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
-    let cmd_label = format!("{} {}", tool_name, args_display);
+    let cmd_label = crate::core::shell::with_args(tool_name, args_display);
 
     match mode {
         RunMode::Filtered(filter_fn) => run_captured_filter(
@@ -334,7 +334,7 @@ fn run_inner(
                 stream::run_streaming(&mut cmd, StdinMode::Inherit, FilterMode::Passthrough)
                     .with_context(|| format!("Failed to run {}", tool_name))?;
 
-            timer.track_passthrough(&cmd_label, &format!("rtk {} (passthrough)", cmd_label));
+            timer.track_passthrough(&cmd_label, &tracking::passthrough_label(&cmd_label));
             Ok(result.exit_code)
         }
     }
@@ -809,7 +809,7 @@ const BUN_POLICY: BlockPolicy = BlockPolicy {
     },
 };
 
-/// Deno's type-check diagnostics, "TS2322 [ERROR]: Type 'string' is not
+/// Deno's type-check diagnostics, "TS2322 `[ERROR]`: Type 'string' is not
 /// assignable to type 'number'." They are not introduced by an `error:` line and
 /// carry no ERRORS section, so nothing else in the deno policy would keep them.
 static DENO_TS_ERROR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^TS\d+ \[ERROR\]:").unwrap());

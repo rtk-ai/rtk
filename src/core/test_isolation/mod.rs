@@ -355,7 +355,7 @@ static CURRENT_DIR_READ: LazyLock<Regex> = LazyLock::new(|| {
 /// character literals are skipped. The attribute on anything smaller than an
 /// item — a statement, a field, a match arm — strips too much, which only ever
 /// hides code from the scan.
-fn without_test_items(code: &str) -> String {
+pub(crate) fn without_test_items(code: &str) -> String {
     let mut kept = String::with_capacity(code.len());
     let mut rest = code;
     while let Some(at) = rest.find("#[cfg(test)]") {
@@ -573,17 +573,21 @@ fn only_user_dirs_resolves_user_locations() {
 fn every_variable_rtk_reads_is_redirected_for_a_child() {
     let mut read = Vec::new();
     for (relative, code) in source_code() {
-        if RESOLVERS.contains(&relative.as_str()) {
-            continue;
-        }
+        // A resolver is not exempt here, only forgiven its own forwarding: it
+        // defines the accessors, so `var_os(name)` names no variable. A
+        // literal read in one is a variable the child still inherits, and
+        // `user_dirs` is where the next one would naturally be written.
+        let resolver = RESOLVERS.contains(&relative.as_str());
         for head in ACCESSOR_READ.find_iter(&code) {
             let (text, arg) = call_text(&code, head);
-            let name = env_var_name(arg.trim_end_matches(',').trim()).unwrap_or_else(|| {
-                panic!(
+            let Some(name) = env_var_name(arg.trim_end_matches(',').trim()) else {
+                assert!(
+                    resolver,
                     "{relative}: {text} names no variable `env_var_name` can resolve; \
                      name it with a literal, or add the constant there"
-                )
-            });
+                );
+                continue;
+            };
             read.push((relative.clone(), name));
         }
     }
@@ -623,7 +627,7 @@ fn every_variable_rtk_reads_is_redirected_for_a_child() {
     );
 }
 
-fn rust_files(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn rust_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return out;

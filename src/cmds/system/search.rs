@@ -5,6 +5,7 @@
 
 use crate::core::arg_tokenizer::{self, Dialect, Token, TokenKind, ValueSpec};
 use crate::core::guard::never_worse;
+use crate::core::shell::{display_args, with_args};
 use crate::core::stream::{
     self, CaptureResult, FilterMode, StdinMode, StreamFilter, exec_capture, exec_capture_stdin,
 };
@@ -576,7 +577,7 @@ fn passthrough<T: AsRef<str>>(
             stream::run_streaming(&mut cmd, StdinMode::Inherit, FilterMode::Passthrough)
                 .context("search failed")?
                 .exit_code;
-        timer.track_passthrough(real_cmd, &format!("rtk {} (passthrough)", real_cmd));
+        timer.track_passthrough(real_cmd, &tracking::passthrough_label(real_cmd));
         return Ok(exit_code);
     }
 
@@ -604,7 +605,7 @@ fn passthrough<T: AsRef<str>>(
             folded,
         ),
         // 0/0 keeps an unchanged passthrough from diluting the savings statistics.
-        None => timer.track_passthrough(real_cmd, &format!("rtk {} (passthrough)", real_cmd)),
+        None => timer.track_passthrough(real_cmd, &tracking::passthrough_label(real_cmd)),
     }
     Ok(result.exit_code)
 }
@@ -703,7 +704,7 @@ pub fn run(
             && t.value(&help_tokens).is_none()
     });
     if dangling_value_flag {
-        let real_cmd = format!("{} {}", engine.bin(), args.join(" "));
+        let real_cmd = with_args(engine.bin(), &display_args(args));
         return passthrough(&timer, engine, args, &real_cmd, false, false);
     }
 
@@ -718,7 +719,7 @@ pub fn run(
         return Ok(result.exit_code);
     }
 
-    let real_cmd = format!("{} {}", engine.label(), args.join(" "));
+    let real_cmd = with_args(engine.label(), &display_args(args));
     let rtk_label = format!("rtk {}", engine.label());
 
     let (patterns, paths, extra_args, extra_args_has_format_flag, detected_flags) =

@@ -7,8 +7,9 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use super::lexer::{
-    ParsedToken, PipeKind, TokenKind, advance_quote_state, coalesce_words, is_crlf_at,
-    redirect_has_file_target, shell_split, split_on_operators, tokenize, tokenize_with_newlines,
+    ParsedToken, PipeKind, QuoteScan, TokenKind, ansi_c_quote_defeats_lexer, coalesce_words,
+    is_crlf_at, redirect_has_file_target, shell_split, split_on_operators, tokenize,
+    tokenize_with_newlines,
 };
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 
@@ -590,8 +591,80 @@ pub fn prefix_contains_rtk_disabled(prefix_part: &str) -> bool {
     prefix_part.contains("RTK_DISABLED=")
 }
 
+/// Whether a token is allowed in an analytics env/sudo prefix before/after
+/// `RTK_DISABLED=`. Deliberately shallow: no sudo flag-arity table — only
+/// `sudo`, `env`, `KEY=VALUE`, and `-flags`. Value-taking sudo options like
+/// `-u root` are therefore not treated as a bypass prefix (see #3808 review).
+fn is_analytics_env_wrapper_token(value: &str) -> bool {
+    value == "sudo" || value == "env" || value.contains('=') || value.starts_with('-')
+}
+
+/// Strip an `RTK_DISABLED=` prefix for analytics, including a shallow `sudo` /
+/// `env` / assign / `-flag` wrapper around it.
+///
+/// Unlike [`strip_disabled_prefix`] (rewrite path), this recognizes
+/// `sudo RTK_DISABLED=1 …` and `RTK_DISABLED=1 sudo …` so discover can find
+/// them; whether one counts as a bypass is `judge_disabled_segment`'s call. It is intentionally stricter than a full shell parse:
+/// - never looks past `|` / `&&` / other non-`Arg` tokens for `RTK_DISABLED=`
+/// - prefix before `RTK_DISABLED=` may only be wrapper tokens (above)
+/// - after `RTK_DISABLED=`, takes the first non-wrapper command word and
+///   stops — no scanning into wrapper arguments (`ssh host docker …`)
+pub fn strip_disabled_prefix_for_analytics(cmd: &str) -> (&str, &str) {
+    let trimmed = cmd.trim();
+    let tokens = tokenize(trimmed);
+
+    let mut disabled_index = None;
+    for (i, token) in tokens.iter().enumerate() {
+        // A non-`Arg` token (operator, redirect) ends the prefix: an
+        // `RTK_DISABLED=` after it belongs to another command.
+        if token.kind != TokenKind::Arg {
+            break;
+        }
+        if token.value.starts_with("RTK_DISABLED=") {
+            disabled_index = Some(i);
+            break;
+        }
+        if !is_analytics_env_wrapper_token(&token.value) {
+            // A real command word before RTK_DISABLED= (e.g. `docker run -e
+            // RTK_DISABLED=1 …`) — not an RTK bypass prefix.
+            return strip_disabled_prefix(trimmed);
+        }
+    }
+
+    let Some(disabled_index) = disabled_index else {
+        return strip_disabled_prefix(trimmed);
+    };
+
+    // Walk past RTK_DISABLED= and any remaining wrapper tokens; the next Arg
+    // is the command word. If it isn't Supported, give up — do not keep
+    // searching for an inner Supported command (ssh/xargs/watch/script args).
+    let mut i = disabled_index + 1;
+    while i < tokens.len() {
+        let token = &tokens[i];
+        if token.kind != TokenKind::Arg {
+            break;
+        }
+        if is_analytics_env_wrapper_token(&token.value) {
+            i += 1;
+            continue;
+        }
+        let candidate = trimmed[token.offset..].trim();
+        if matches!(
+            classify_command(candidate),
+            Classification::Supported { .. }
+        ) {
+            return (&trimmed[..token.offset], candidate);
+        }
+        break;
+    }
+
+    strip_disabled_prefix(trimmed)
+}
+
 /// Check if a command has RTK_DISABLED= prefix in its env prefix portion.
 pub fn cmd_has_rtk_disabled_prefix(cmd: &str) -> bool {
+    // `gain` has no coverage gate, so this stays on the syntactic rewrite-path
+    // stripper; the wrapper-aware peel is for discover, where the gate judges it.
     let (prefix_part, _) = strip_disabled_prefix(cmd);
     prefix_contains_rtk_disabled(prefix_part)
 }
@@ -765,55 +838,6 @@ const BLOCK_KEYWORDS: &[&str] = &[
     "select", "function", "coproc", "{", "}", "(", ")",
 ];
 
-/// Shared quote-state byte walker used by all line scanners. Yields
-/// `(offset, byte, in_single_before, in_double_before)`, skipping backslash
-/// escape pairs outside single quotes and toggling quote state — the same
-/// model the lexer applies.
-struct QuoteScan<'a> {
-    bytes: &'a [u8],
-    i: usize,
-    // Same `Option<char>` model `tokenize_inner`/`shell_split` use, driven by
-    // the shared `advance_quote_state` — not an independently-maintained pair
-    // of bools, so this can't drift from the lexer's own quote handling.
-    quote: Option<char>,
-}
-
-impl<'a> QuoteScan<'a> {
-    fn new(s: &'a str) -> Self {
-        Self {
-            bytes: s.as_bytes(),
-            i: 0,
-            quote: None,
-        }
-    }
-
-    fn balanced(&self) -> bool {
-        self.quote.is_none()
-    }
-}
-
-impl Iterator for QuoteScan<'_> {
-    type Item = (usize, u8, bool, bool);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.i < self.bytes.len() {
-            let i = self.i;
-            let b = self.bytes[i];
-            if b == b'\\' && self.quote != Some('\'') {
-                self.i += 2;
-                continue;
-            }
-            let item = (i, b, self.quote == Some('\''), self.quote == Some('"'));
-            if b == b'\'' || b == b'"' {
-                self.quote = advance_quote_state(self.quote, b as char);
-            }
-            self.i += 1;
-            return Some(item);
-        }
-        None
-    }
-}
-
 /// Byte offset where an unquoted `#` at the start of a word begins a trailing
 /// comment, if any. The lexer has no comment state, so the independence checks
 /// must ignore comment text themselves: `git log | # keep pipeline` continues
@@ -877,31 +901,6 @@ fn line_has_unbalanced_test_brackets(code: &str) -> bool {
         }
     }
     depth != 0
-}
-
-// Only `\'` inside `$'…'` diverges: bash keeps the string open, the lexer
-// closes it — an extra split point the newline-count check can't see (#3188).
-fn ansi_c_quote_defeats_lexer(cmd: &str) -> bool {
-    let bytes = cmd.as_bytes();
-    let mut ansi_span = false;
-    let mut backslash_run = 0u32;
-    for (i, b, in_single, in_double) in QuoteScan::new(cmd) {
-        if b == b'\'' && !in_double {
-            if !in_single {
-                ansi_span = i > 0 && bytes[i - 1] == b'$';
-                backslash_run = 0;
-            } else if ansi_span && backslash_run % 2 == 1 {
-                return true;
-            }
-        } else if in_single {
-            if b == b'\\' {
-                backslash_run += 1;
-            } else {
-                backslash_run = 0;
-            }
-        }
-    }
-    false
 }
 
 fn quotes_balanced(cmd: &str) -> bool {
@@ -1616,6 +1615,34 @@ fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
     })
 }
 
+/// True if `cmd` is a grep invocation with recursive traversal flags.
+/// Handles combined short flags (`-rn`, `-Rn`, `-rA`), long flags, and `-d recurse` spellings.
+fn is_recursive_grep(cmd: &str) -> bool {
+    let words = crate::discover::shell_split(cmd);
+    // First word is "grep" (or path to grep), check remaining
+    for word in words.iter().skip(1) {
+        // Long flags
+        if word == "--recursive" || word == "--dereference-recursive" {
+            return true;
+        }
+        if word.starts_with("--directories=") && word == "--directories=recurse" {
+            return true;
+        }
+        // Short flags: combined like -rn, -rA, -Rn, -r
+        if word.starts_with('-') && !word.starts_with("--") {
+            let chars: Vec<char> = word.chars().skip(1).collect(); // skip '-'
+            if chars.contains(&'r') || chars.contains(&'R') {
+                return true;
+            }
+        }
+        // -d recurse / -drecurse
+        if word == "-d" || word == "-drecurse" {
+            return true;
+        }
+    }
+    false
+}
+
 fn rewrite_segment_inner(
     seg: &str,
     excluded: &[ExcludePattern],
@@ -1730,6 +1757,10 @@ fn rewrite_segment_inner(
     // Use classify_command for correct ignore/prefix handling
     let rtk_equivalent = match classify_command(cmd_part) {
         Classification::Supported { rtk_equivalent, .. } => {
+            // Skip rewrite for recursive grep: let shell's ugrep handle it
+            if rtk_equivalent == "rtk grep" && is_recursive_grep(cmd_part) {
+                return None;
+            }
             let stripped = ENV_PREFIX.replace(cmd_part, "");
             let cmd_clean = stripped.trim();
             if !excluded.is_empty()
@@ -1780,7 +1811,18 @@ fn rewrite_segment_inner(
         return None;
     }
 
-    if let Some(parts) = parse_golangci_run_parts(cmd_part) {
+    // The trailing redirect is the shell's, not the tool's: every rewrite of a
+    // supported command re-attaches it here, once, exactly as typed.
+    rewrite_command_part(rule, cmd_part)
+        .map(|rewritten| format!("{}{}", rewritten, redirect_suffix))
+}
+
+/// Rewrite the command part of a segment (trailing redirects already split
+/// off) with `rule`, or `None` when this rule does not rewrite it.
+fn rewrite_command_part(rule: &RtkRule, cmd_part: &str) -> Option<String> {
+    if rule.rtk_cmd == "rtk golangci-lint run"
+        && let Some(parts) = parse_golangci_run_parts(cmd_part)
+    {
         let rewritten = if parts.global_segment.is_empty() {
             format!("rtk golangci-lint {}", parts.run_segment)
         } else {
@@ -1821,9 +1863,9 @@ fn rewrite_segment_inner(
     for &prefix in rule.rewrite_prefixes {
         if let Some(rest) = strip_word_prefix(strip_target, prefix) {
             let rewritten = if rest.is_empty() {
-                format!("{}{}", rule.rtk_cmd, redirect_suffix)
+                rule.rtk_cmd.to_string()
             } else {
-                format!("{} {}{}", rule.rtk_cmd, rest, redirect_suffix)
+                format!("{} {}", rule.rtk_cmd, rest)
             };
             return Some(rewritten);
         }
@@ -5398,6 +5440,79 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_golangci_lint_keeps_trailing_redirects() {
+        // The redirect belongs to the shell, not to golangci-lint: dropping it
+        // sends output meant for a file or /dev/null to the terminal.
+        for (input, expected) in [
+            ("golangci-lint run 2>&1", "rtk golangci-lint run 2>&1"),
+            (
+                "golangci-lint run ./... >/dev/null",
+                "rtk golangci-lint run ./... >/dev/null",
+            ),
+            (
+                "golangci-lint run 2>/dev/null",
+                "rtk golangci-lint run 2>/dev/null",
+            ),
+            (
+                "golangci-lint run &>/dev/null",
+                "rtk golangci-lint run &>/dev/null",
+            ),
+            (
+                "FOO=1 golangci-lint run 2>&1",
+                "FOO=1 rtk golangci-lint run 2>&1",
+            ),
+            (
+                "golangci-lint --color never run ./... 2>&1",
+                "rtk golangci-lint --color never run ./... 2>&1",
+            ),
+            (
+                "golangci-lint run ./... 2>&1 | tail -5",
+                "rtk golangci-lint run ./... 2>&1 | tail -5",
+            ),
+            // No space before the redirect: the boundary is kept exactly as
+            // typed, so a word ending in digits is not turned into a
+            // descriptor number and vice versa.
+            (
+                "golangci-lint run -c x.yml>/dev/null",
+                "rtk golangci-lint run -c x.yml>/dev/null",
+            ),
+            (
+                "golangci-lint run ${PKG}2>/dev/null",
+                "rtk golangci-lint run ${PKG}2>/dev/null",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]).as_deref(),
+                Some(expected),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_supported_commands_reattach_redirects_as_typed() {
+        for (input, expected) in [
+            (
+                "git status ${PKG}2>/dev/null",
+                Some("rtk git status ${PKG}2>/dev/null"),
+            ),
+            ("git status 2>&1", Some("rtk git status 2>&1")),
+            // gh's structured-output flags still skip the rewrite with a redirect.
+            ("gh pr list --json number 2>&1", None),
+            (
+                "vendor/bin/phpunit tests 2>&1",
+                Some("rtk phpunit tests 2>&1"),
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]).as_deref(),
+                expected,
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
     fn test_rewrite_golangci_lint_with_flag_before_run() {
         assert_eq!(
             rewrite_command_no_prefixes("golangci-lint -v run ./...", &[]),
@@ -6638,9 +6753,56 @@ mod tests {
         assert!(cmd_has_rtk_disabled_prefix(
             "RTK_DISABLED=true git log --oneline"
         ));
+        // `gain`'s warning has no coverage gate, so this predicate stays purely
+        // syntactic (`ENV_PREFIX`): a `sudo`-first bypass is not counted there.
+        // The wrapper-aware peel is discover-only, where the gate can judge it.
+        assert!(!cmd_has_rtk_disabled_prefix(
+            "sudo RTK_DISABLED=1 docker ps"
+        ));
+        assert!(!cmd_has_rtk_disabled_prefix(
+            "sudo -E RTK_DISABLED=1 docker ps"
+        ));
+        assert!(cmd_has_rtk_disabled_prefix("RTK_DISABLED=1 sudo docker ps"));
+        assert!(cmd_has_rtk_disabled_prefix(
+            "RTK_DISABLED=1 sudo -E docker ps"
+        ));
         assert!(!cmd_has_rtk_disabled_prefix("git status"));
         assert!(!cmd_has_rtk_disabled_prefix("rtk git status"));
         assert!(!cmd_has_rtk_disabled_prefix("SOME_VAR=1 git status"));
+        assert!(!cmd_has_rtk_disabled_prefix("sudo docker ps"));
+
+        // Leading RTK_DISABLED= still reports true via strip_disabled_prefix
+        // fallthrough when the command word is unsupported (pre-existing gain
+        // behavior). Discover only counts Supported actual commands, so this
+        // does not create a false bypass example — see analytics strip tests
+        // for the "do not peel into docker/git" guarantee.
+        assert!(cmd_has_rtk_disabled_prefix(
+            "RTK_DISABLED=1 ssh host docker ps"
+        ));
+
+        // sudo-wrapped disabled + unsupported command word: rewrite helper does
+        // not strip sudo, so this is not a detected bypass prefix.
+        assert!(!cmd_has_rtk_disabled_prefix(
+            "sudo -E RTK_DISABLED=1 ./deploy.sh docker ps"
+        ));
+
+        // KuSh #3808: sudo -flag must not make later -e RTK_DISABLED= a prefix.
+        assert!(!cmd_has_rtk_disabled_prefix(
+            "sudo -E docker run -e RTK_DISABLED=1 myimage npm run build"
+        ));
+        assert!(!cmd_has_rtk_disabled_prefix(
+            "sudo docker run -e RTK_DISABLED=1 myimage npm run build"
+        ));
+
+        // KuSh #3808: do not look past && (gain passes unsplit lines).
+        assert!(!cmd_has_rtk_disabled_prefix(
+            "sudo -E ls && docker run -e RTK_DISABLED=1 img git status"
+        ));
+
+        // Shallow parse: value-taking sudo flags (`-u root`) are not a prefix.
+        assert!(!cmd_has_rtk_disabled_prefix(
+            "sudo -E -u root RTK_DISABLED=1 docker ps"
+        ));
     }
 
     #[test]
@@ -6654,6 +6816,75 @@ mod tests {
             ("FOO=1 RTK_DISABLED=1 ", "cargo test")
         );
         assert_eq!(strip_disabled_prefix("git status"), ("", "git status"));
+        // Rewrite helper still does not strip sudo (see ENV_PREFIX / #146).
+        assert_eq!(
+            strip_disabled_prefix("sudo RTK_DISABLED=1 docker ps"),
+            ("", "sudo RTK_DISABLED=1 docker ps")
+        );
+    }
+
+    #[test]
+    fn test_strip_disabled_prefix_for_analytics() {
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("sudo RTK_DISABLED=1 docker ps"),
+            ("sudo RTK_DISABLED=1 ", "docker ps")
+        );
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("sudo -E RTK_DISABLED=1 docker ps"),
+            ("sudo -E RTK_DISABLED=1 ", "docker ps")
+        );
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("RTK_DISABLED=1 sudo docker ps"),
+            ("RTK_DISABLED=1 sudo ", "docker ps")
+        );
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("RTK_DISABLED=1 sudo -E docker ps"),
+            ("RTK_DISABLED=1 sudo -E ", "docker ps")
+        );
+
+        // Wrapper commands: do not peel into arguments / inner Supported cmds.
+        for cmd in [
+            "RTK_DISABLED=1 ssh host docker ps",
+            "RTK_DISABLED=1 xargs -n1 git show",
+            "RTK_DISABLED=1 watch -n1 git status",
+            "sudo -E RTK_DISABLED=1 ./deploy.sh docker ps",
+        ] {
+            let (prefix, actual) = strip_disabled_prefix_for_analytics(cmd);
+            assert_eq!((prefix, actual), strip_disabled_prefix(cmd), "{cmd}");
+            assert!(
+                !actual.starts_with("docker") && !actual.starts_with("git "),
+                "must not attribute inner command for {cmd}: {actual}"
+            );
+        }
+
+        // Every wrapper class is peeled: an assignment after `sudo`, and `env`.
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("sudo FOO=1 RTK_DISABLED=1 docker ps"),
+            ("sudo FOO=1 RTK_DISABLED=1 ", "docker ps")
+        );
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("sudo env RTK_DISABLED=1 docker ps"),
+            ("sudo env RTK_DISABLED=1 ", "docker ps")
+        );
+        // An operator ends the prefix even when only wrapper words precede it.
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("sudo -v && RTK_DISABLED=1 docker ps"),
+            ("", "sudo -v && RTK_DISABLED=1 docker ps")
+        );
+
+        // Buried -e / && cases fall back to the rewrite stripper (no sudo peel).
+        assert_eq!(
+            strip_disabled_prefix_for_analytics(
+                "sudo -E docker run -e RTK_DISABLED=1 myimage npm run build"
+            ),
+            strip_disabled_prefix("sudo -E docker run -e RTK_DISABLED=1 myimage npm run build")
+        );
+        assert_eq!(
+            strip_disabled_prefix_for_analytics(
+                "sudo -E ls && docker run -e RTK_DISABLED=1 img git status"
+            ),
+            strip_disabled_prefix("sudo -E ls && docker run -e RTK_DISABLED=1 img git status")
+        );
     }
 
     // --- #485: absolute path normalization ---
@@ -7713,5 +7944,64 @@ mod tests {
             rewrite_command_no_prefixes("/usr/bin/liquibase update", &[]),
             None,
         );
+    }
+
+    #[test]
+    fn is_recursive_grep_detects_all_spellings() {
+        assert!(is_recursive_grep("grep -r foo ."));
+        assert!(is_recursive_grep("grep -R foo ."));
+        assert!(is_recursive_grep("grep --recursive foo ."));
+        assert!(is_recursive_grep("grep --dereference-recursive foo ."));
+        assert!(is_recursive_grep("grep -d recurse foo ."));
+        assert!(is_recursive_grep("grep -drecurse foo ."));
+        assert!(is_recursive_grep("grep --directories=recurse foo ."));
+        // Combined short flags
+        assert!(is_recursive_grep("grep -rn foo ."));
+        assert!(is_recursive_grep("grep -Rn foo ."));
+        assert!(is_recursive_grep("grep -rA foo ."));
+        assert!(is_recursive_grep("grep -rnv foo ."));
+        // Non-recursive should be false
+        assert!(!is_recursive_grep("grep foo file.txt"));
+        assert!(!is_recursive_grep("grep -n foo file.txt"));
+        assert!(!is_recursive_grep("grep -l foo *.rs"));
+        assert!(!is_recursive_grep("grep -i foo src/main.rs"));
+        assert!(!is_recursive_grep("grep -v foo file.txt"));
+    }
+
+    #[test]
+    fn recursive_grep_not_rewritten() {
+        let recursive = [
+            "grep -r foo .",
+            "grep -R foo .",
+            "grep --recursive foo .",
+            "grep --dereference-recursive foo .",
+            "grep -d recurse foo .",
+            "grep -drecurse foo .",
+            "grep --directories=recurse foo .",
+            "grep -rn foo src/",
+            "grep -Rn foo .",
+            "grep -rA foo .",
+        ];
+        for cmd in recursive {
+            let result = rewrite_command_no_prefixes(cmd, &[]);
+            assert_eq!(result, None, "recursive grep should not be rewritten: {}", cmd);
+        }
+    }
+
+    #[test]
+    fn non_recursive_grep_still_rewritten() {
+        let non_recursive = [
+            "grep foo file.txt",
+            "grep -n foo file.txt",
+            "grep -l foo *.rs",
+            "grep -i foo src/main.rs",
+            "grep -v foo file.txt",
+            "grep -c foo file.txt",
+        ];
+        for cmd in non_recursive {
+            let result = rewrite_command_no_prefixes(cmd, &[]);
+            assert!(result.is_some(), "non-recursive grep should be rewritten: {}", cmd);
+            assert!(result.unwrap().starts_with("rtk grep"));
+        }
     }
 }

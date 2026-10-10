@@ -130,7 +130,8 @@ rtk init --global --gemini
 rtk init --global --opencode
 ```
 
-Creates `~/.config/opencode/plugins/rtk.ts`. Uses the `tool.execute.before` hook.
+Installs the Claude Code setup and creates `~/.config/opencode/plugins/rtk.ts`.
+The plugin uses the `tool.execute.before` hook.
 
 ### Pi
 
@@ -324,13 +325,9 @@ Rules file integrations (Cline, Windsurf, Kilo Code) rely on the model following
 
 ## Windows support
 
-The shell hook (`rtk-rewrite.sh`) requires a Unix shell. On native Windows:
+Since v0.37.2, `rtk init -g` registers the native `rtk hook claude` command on Windows, so Claude Code gets full auto-rewrite without a Unix shell. Setups created before v0.37.2 used CLAUDE.md injection and have no hook; re-running `rtk init -g` migrates them, and adds the hook once you answer `y` to the `settings.json` prompt (or pass `--auto-patch`).
 
-- `rtk init -g` automatically falls back to **CLAUDE.md injection mode** (prompt-level instructions)
-- Filters work normally (`rtk cargo test`, `rtk git status`)
-- Auto-rewrite does not work — the AI assistant is instructed to use RTK but commands are not intercepted
-
-For full shell-hook support on Windows, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install). Inside WSL, agents with shell hook integration (Claude Code, Cursor, Gemini) work identically to Linux. Native Rust hook integrations such as Trae do not depend on `rtk-rewrite.sh`.
+Integrations that install a shell wrapper script (such as Gemini) still need a Unix shell. For those, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install), where they work identically to Linux. Native Rust hook integrations such as Trae do not depend on a shell script.
 
 ## Graceful degradation
 

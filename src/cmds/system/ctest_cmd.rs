@@ -8,6 +8,7 @@ use std::ffi::OsString;
 use std::sync::LazyLock;
 
 use crate::core::runner::{self, RunOptions};
+use crate::core::shell::display_args;
 use crate::core::truncate::{self, CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{resolved_command, strip_ansi};
 
@@ -87,7 +88,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "ctest",
-        &args.join(" "),
+        &display_args(args),
         filter_ctest_output,
         RunOptions::with_tee("ctest"),
     )
