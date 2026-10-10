@@ -81,6 +81,19 @@ fn uses_compact_status_path(args: &[String]) -> bool {
     saw_branch || !saw_flag
 }
 
+/// The plain `git status` the compact path reads for state and detached-HEAD lines.
+///
+/// It runs next to the porcelain status, so it skips git's optional index refresh write
+/// (`GIT_OPTIONAL_LOCKS=0`, what editors use for background status): the porcelain run
+/// still writes it, and the two no longer contend for `index.lock`. Output is unchanged.
+fn build_raw_status_command(args: &[String], global_args: &[String]) -> Command {
+    let mut cmd = git_cmd_c_locale(global_args);
+    cmd.env("GIT_OPTIONAL_LOCKS", "0");
+    cmd.arg("status");
+    cmd.args(args);
+    cmd
+}
+
 fn build_status_command(args: &[String], global_args: &[String]) -> Command {
     let mut cmd = git_cmd(global_args);
     cmd.arg("status");
@@ -2329,15 +2342,21 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         return Ok(0);
     }
 
-    let mut raw_cmd = git_cmd_c_locale(global_args);
-    raw_cmd.arg("status");
-    raw_cmd.args(args);
-    let raw_output = exec_capture(&mut raw_cmd)
-        .map(|r| r.stdout)
-        .unwrap_or_default();
-
+    // Two full status runs (index refresh plus untracked scan each): the plain one only
+    // feeds the state header, the detached-HEAD line and the never-worse baseline, so it
+    // runs alongside the porcelain one instead of before it.
+    let mut raw_cmd = build_raw_status_command(args, global_args);
     let mut cmd = build_status_command(args, global_args);
-    let result = exec_capture(&mut cmd).context("Failed to run git status")?;
+    let (raw_output, result) = std::thread::scope(|scope| {
+        let raw = scope.spawn(move || {
+            exec_capture(&mut raw_cmd)
+                .map(|r| r.stdout)
+                .unwrap_or_default()
+        });
+        let result = exec_capture(&mut cmd);
+        (raw.join().unwrap_or_default(), result)
+    });
+    let result = result.context("Failed to run git status")?;
 
     if !result.success() {
         let message = if result.stderr.contains("not a git repository") {
@@ -3742,6 +3761,24 @@ mod tests {
             })
             .collect();
         assert!(envs.contains(&("LC_ALL".to_string(), "C".to_string())));
+    }
+
+    #[test]
+    fn test_build_raw_status_command_skips_optional_locks() {
+        let cmd = build_raw_status_command(&["-b".to_string()], &[]);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, vec!["status", "-b"]);
+        let envs: Vec<_> = cmd
+            .get_envs()
+            .filter_map(|(key, value)| {
+                Some((
+                    key.to_string_lossy().to_string(),
+                    value?.to_string_lossy().to_string(),
+                ))
+            })
+            .collect();
+        assert!(envs.contains(&("LC_ALL".to_string(), "C".to_string())));
+        assert!(envs.contains(&("GIT_OPTIONAL_LOCKS".to_string(), "0".to_string())));
     }
 
     #[test]
