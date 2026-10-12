@@ -72,16 +72,27 @@ impl OutputParser for VitestParser {
             Ok(json) => {
                 let failures = extract_failures_from_json(&json);
 
-                // numFailedTestSuites counts whole files that failed to load
-                // (syntax errors, import crashes). Those are real failures even
-                // when numFailedTests is 0 — they must surface as failed, not
-                // as an all-green "PASS (N) FAIL (0)" run.
-                let failed_suites = if json.num_failed_test_suites > 0 {
-                    json.num_failed_test_suites
-                } else if json.success == Some(false) && failures.is_empty() {
-                    1
-                } else {
-                    0
+                // numFailedTestSuites counts whole files with status=failed —
+                // INCLUDING files that merely contain failing tests (vitest
+                // sets status=failed for any file with a failing test, not
+                // just load failures). Adding it to numFailedTests
+                // double-counts every ordinary failing run, so only genuine
+                // load failures (status=failed with zero assertionResults)
+                // count on top. A genuine load failure reports status=failed
+                // with assertionResults=0.
+                let failed_suites = {
+                    let load_failures = json
+                        .test_results
+                        .iter()
+                        .filter(|f| f.status == "failed" && f.assertion_results.is_empty())
+                        .count();
+                    if load_failures > 0 {
+                        load_failures
+                    } else if json.success == Some(false) && failures.is_empty() {
+                        1
+                    } else {
+                        0
+                    }
                 };
 
                 let result = TestResult {
@@ -115,10 +126,13 @@ impl OutputParser for VitestParser {
 fn extract_failures_from_json(json: &VitestJsonOutput) -> Vec<TestFailure> {
     let mut failures = Vec::new();
 
-    // Failed suites first — the whole file failed to load, so there is no
-    // per-test breakdown to show.
+    // Failed suites first — but ONLY genuine load failures (status=failed with
+    // zero assertionResults: syntax errors, import crashes). A file that merely
+    // contains failing tests also reports status=failed, and counting those
+    // here would double-count every ordinary failing run against
+    // numFailedTests (see failed_suites computation in parse()).
     for file in &json.test_results {
-        if file.status == "failed" {
+        if file.status == "failed" && file.assertion_results.is_empty() {
             failures.push(TestFailure {
                 test_name: format!("[suite] {}", file.name),
                 file_path: file.name.clone(),
@@ -582,9 +596,9 @@ Scope: all 6 workspace projects
 
     #[test]
     fn test_vitest_parser_failed_suite_counts_as_failure() {
-        // A test file that fails to load (syntax error) reports
-        // numFailedTestSuites > 0 even when numFailedTests is 0. It must not
-        // render as an all-green run.
+        // A test file that fails to load (syntax error, empty
+        // assertionResults) reports numFailedTestSuites > 0 even when
+        // numFailedTests is 0. It must not render as an all-green run.
         let json = r#"{
             "numTotalTests": 10,
             "numPassedTests": 10,
@@ -614,6 +628,42 @@ Scope: all 6 workspace projects
         let rendered = data.format(FormatMode::Compact);
         assert!(rendered.contains("FAIL (1)"), "got: {}", rendered);
         assert!(rendered.contains("broken.spec.ts"), "got: {}", rendered);
+    }
+
+    #[test]
+    fn test_vitest_parser_does_not_double_count_failing_files() {
+        // Review round 1: vitest sets status=failed for any file that merely
+        // contains a failing test. Adding numFailedTestSuites to
+        // numFailedTests double-counts every ordinary failing run
+        // (2 failing tests in 1 of 2 files rendered FAIL (3) against total 4).
+        // Only genuine load failures (status=failed with zero
+        // assertionResults) count on top of numFailedTests.
+        let json = r#"{
+            "numTotalTests": 4,
+            "numPassedTests": 2,
+            "numFailedTests": 2,
+            "numFailedTestSuites": 1,
+            "numPendingTests": 0,
+            "success": false,
+            "testResults": [
+                {"name": "pass.spec.ts", "status": "passed", "assertionResults": [
+                    {"fullName": "a", "status": "passed", "failureMessages": []},
+                    {"fullName": "b", "status": "passed", "failureMessages": []}
+                ]},
+                {"name": "fail.spec.ts", "status": "failed", "assertionResults": [
+                    {"fullName": "c", "status": "passed", "failureMessages": []},
+                    {"fullName": "d", "status": "failed", "failureMessages": ["boom"]},
+                    {"fullName": "e", "status": "failed", "failureMessages": ["boom"]}
+                ]}
+            ],
+            "startTime": 1000
+        }"#;
+
+        let result = VitestParser::parse(json);
+        let data = result.unwrap();
+        assert_eq!(data.failed, 2, "failing files must not double-count, got: {}", data.failed);
+        let rendered = data.format(FormatMode::Compact);
+        assert!(rendered.contains("FAIL (2)"), "got: {}", rendered);
     }
 
     #[test]

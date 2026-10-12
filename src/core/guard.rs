@@ -63,8 +63,13 @@ static FAILED_WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bfail\b").u
 static FAIL_ZERO: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bfail\s*\(\s*0\s*\)").unwrap());
 
 /// "Failures:" / "1 failure". Suppressed when a "Failures: 0"/"failures = 0"
-/// count (green) is present, via `FAILURES_ZERO`.
-static FAILURES_WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bfailures?\b").unwrap());
+/// count (green) is present, via `FAILURES_ZERO`. The leading `(?:^|[^-\w])`
+/// excludes the `failure` inside pytest's green `Expected-failure outcomes:`
+/// header (which rtk itself elicits via `-rxX`) and the `failed` inside
+/// `xfailed` — a hyphen or word char before the match means it is part of a
+/// larger token, not a standalone failure word.
+static FAILURES_WORD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?:^|[^-\w])failures?\b").unwrap());
 
 /// "Failures: 0" / "failures = 0" — green counts that suppress `FAILURES_WORD`.
 static FAILURES_ZERO: LazyLock<Regex> =
@@ -86,10 +91,13 @@ static NEED_FORMATTING: LazyLock<Regex> =
 /// True when `text` contains "failed" that is NOT part of a "0 failed" verdict
 /// ("build failed", "1 failed", "10 failed", "test run failed"). The optional
 /// leading count is captured so "0 failed" stays green while "10 failed" /
-/// "20 failed" (counts merely ending in a zero) read as failures.
+/// "20 failed" (counts merely ending in a zero) read as failures. The `\b`
+/// before `failed` excludes the `failed` inside `xfailed` (no word boundary
+/// between two word chars), so a green `1 xfailed` run with a forced non-zero
+/// exit still fires the guard instead of staying silent.
 fn has_failed_word(text: &str) -> bool {
     static FAILED: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?:(\d+)\s+)?failed\b").unwrap());
+        LazyLock::new(|| Regex::new(r"(?:(\d+)\s+)?\bfailed\b").unwrap());
     FAILED
         .captures_iter(text)
         .any(|caps| caps.get(1).is_none_or(|m| m.as_str() != "0"))
@@ -121,7 +129,14 @@ pub fn failure_fallback(tool: &str, exit_code: i32, output: &str) -> String {
     }
 
     let mut result = format!("{}: failed (exit {})", tool, exit_code);
-    result.push_str("\n═══════════════════════════════════════\n");
+    // Short ASCII separator: the previous 117-byte UTF-8 box-drawing rule
+    // plus the 26-char header added ~145 bytes of fixed overhead before any
+    // content. At 8 of the 9 call sites the result passes through `never_worse`,
+    // so on small raw outputs (exactly the "green summary, tiny output" case
+    // this guard exists for) the whole guarded body lost the token comparison
+    // and `never_worse` discarded the verdict, the numbered tail and the tee
+    // hint. A 5-byte rule keeps the visual break without the overhead.
+    result.push_str("\n---\n");
 
     const MAX_FAILURE_LINES: usize = crate::core::truncate::CAP_ERRORS;
     for (i, line) in lines.iter().take(MAX_FAILURE_LINES).enumerate() {
@@ -241,7 +256,7 @@ mod tests {
         let result = guard_exit("opaque failure output", 1, "pytest", "Pytest: 5 passed");
         assert_eq!(
             result,
-            "pytest: failed (exit 1)\n═══════════════════════════════════════\n1. opaque failure output"
+            "pytest: failed (exit 1)\n---\n1. opaque failure output"
         );
     }
 
@@ -293,6 +308,20 @@ mod tests {
         assert!(looks_failed("20 failed"));
         assert!(looks_failed("build failed"));
         assert!(looks_failed("error: test run failed"));
+    }
+
+    #[test]
+    fn xfailed_and_expected_failure_headers_are_not_failures() {
+        // Review round 2: `failed` inside `xfailed` and `failure` inside
+        // pytest's green `Expected-failure outcomes:` header must not read as
+        // failure — otherwise a green run with an xfail on a forced non-zero
+        // exit stays silent instead of firing the guard.
+        assert!(!looks_failed("2 passed, 1 xfailed in 0.01s"));
+        assert!(!looks_failed("Pytest: 2 passed, 0 failed, 1 xfailed"));
+        assert!(!looks_failed("Expected-failure outcomes: 1"));
+        // Sanity: real failures still read as failures.
+        assert!(looks_failed("2 passed, 1 failed in 0.01s"));
+        assert!(looks_failed("Failures:\n1. [FAIL] test_x"));
     }
 
     #[test]
