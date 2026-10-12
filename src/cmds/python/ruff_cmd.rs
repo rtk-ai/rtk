@@ -113,7 +113,12 @@ fn filter_ruff_output(args: &[String], stdout: &str) -> String {
     if is_check && use_json_filter && !trimmed.is_empty() {
         filter_ruff_check_json(stdout)
     } else if is_format {
-        filter_ruff_format(stdout)
+        // Machine-readable format output (json, json-lines, sarif, …) stays raw.
+        if format_output_is_text(args) {
+            filter_ruff_format(stdout)
+        } else {
+            trimmed.to_string()
+        }
     } else if ruff_output_is_complete(route, args) {
         // Help and version output are complete documentation: raw Ruff
         // returns every byte, and so does rtk.
@@ -257,6 +262,23 @@ fn plan_ruff_command(args: &[String]) -> Vec<String> {
         return plan;
     }
     args.to_vec()
+}
+
+/// True when `ruff format` output is one of the human-readable text formats
+/// (default `full`, `concise`, `grouped`) that `filter_ruff_format` knows how to summarize.
+fn format_output_is_text(args: &[String]) -> bool {
+    let tokens = tokenize_grammar(
+        args,
+        &|kind, name| (kind == TokenKind::Long && name == "output-format").then(ValueSpec::value),
+        Dialect::Posix,
+    );
+    // ruff (clap) keeps the last occurrence, so do the same.
+    let selected = before_dashdash(&tokens)
+        .iter()
+        .rev()
+        .filter(|t| t.kind == TokenKind::Long && t.text == "output-format")
+        .find_map(|t| t.value(&tokens));
+    selected.is_none_or(|f| matches!(f, "full" | "concise" | "grouped"))
 }
 
 /// Filter ruff check JSON output - group by rule and file
@@ -430,6 +452,13 @@ pub fn filter_ruff_check_json(output: &str) -> String {
 /// Filter ruff format output - show files that need formatting
 pub fn filter_ruff_format(output: &str) -> String {
     let output = crate::core::utils::strip_ansi(output);
+
+    // JSON / JSON-lines records contain "File would be reformatted" in their
+    // `message` field. Never rewrite structured output into a text summary.
+    if looks_like_structured_output(&output) {
+        return output.trim().to_string();
+    }
+
     let mut files_to_format: Vec<String> = Vec::new();
     let mut files_checked = 0;
 
@@ -439,10 +468,10 @@ pub fn filter_ruff_format(output: &str) -> String {
 
         // Pre-0.12: "Would reformat: path/to/file.py"
         // Current:   "unformatted: path/to/file.py" (or a diagnostic message after the colon)
-        if lower.contains("would reformat:") || lower.starts_with("unformatted:") {
-            if let Some(filename) = path_after_first_colon(trimmed) {
-                push_unique_file(&mut files_to_format, filename);
-            }
+        if (lower.contains("would reformat:") || lower.starts_with("unformatted:"))
+            && let Some(filename) = path_after_first_colon(trimmed)
+        {
+            push_unique_file(&mut files_to_format, filename);
         }
 
         // Default ruff ≥0.12 full format: " --> src/main.py:1:1"
@@ -463,8 +492,8 @@ pub fn filter_ruff_format(output: &str) -> String {
     }
 
     let output_lower = output.to_lowercase();
-    let saw_ok_summary = output_lower.contains("left unchanged")
-        || output_lower.contains("already formatted");
+    let saw_ok_summary =
+        output_lower.contains("left unchanged") || output_lower.contains("already formatted");
     // "would reformat" does not match "would be reformatted" — keep both.
     let saw_check_rewrite = output_lower.contains("would reformat:")
         || output_lower.contains("unformatted:")
@@ -516,6 +545,10 @@ pub fn filter_ruff_format(output: &str) -> String {
     }
 
     result.trim().to_string()
+}
+
+fn looks_like_structured_output(output: &str) -> bool {
+    matches!(output.trim_start().chars().next(), Some('[' | '{' | '<'))
 }
 
 /// Split after the first colon so `unformatted: C:\foo\bar.py` keeps the drive letter.
@@ -574,10 +607,11 @@ fn parse_already_ok_count(trimmed: &str, lower: &str) -> Option<usize> {
         }
         let words: Vec<&str> = part.split_whitespace().collect();
         for (i, word) in words.iter().enumerate() {
-            if (*word == "file" || *word == "files") && i > 0 {
-                if let Ok(count) = words[i - 1].parse::<usize>() {
-                    return Some(count);
-                }
+            if (*word == "file" || *word == "files")
+                && i > 0
+                && let Ok(count) = words[i - 1].parse::<usize>()
+            {
+                return Some(count);
             }
         }
     }
@@ -933,7 +967,10 @@ unformatted: C:\Users\foo\project\src\legacy.py
         assert!(result.contains("3 files need formatting"));
         assert!(result.contains("main.py"));
         assert!(result.contains("test_utils.py"));
-        assert!(result.contains("legacy.py"), "split after first colon must keep the Windows path");
+        assert!(
+            result.contains("legacy.py"),
+            "split after first colon must keep the Windows path"
+        );
         assert!(result.contains("3 files already formatted"));
         assert!(result.contains("[hint] Run `ruff format`"));
     }
@@ -964,7 +1001,10 @@ unformatted: File would be reformatted
         );
         assert!(result.contains("main.py"));
         assert!(result.contains("test_utils.py"));
-        assert!(!result.contains("import   os"), "must drop the diagnostic diff");
+        assert!(
+            !result.contains("import   os"),
+            "must drop the diagnostic diff"
+        );
         assert!(result.contains("3 files already formatted"));
 
         let raw_tokens = output.split_whitespace().count();
@@ -987,6 +1027,88 @@ tests/test_utils.py:3:1: unformatted: File would be reformatted
         assert!(result.contains("main.py"));
         assert!(result.contains("test_utils.py"));
         assert!(result.contains("3 files already formatted"));
+    }
+
+    /// `ruff format --check --output-format=json` with a dirty file: the record's
+    /// `message` says "File would be reformatted", but the array must survive as-is.
+    #[test]
+    fn test_filter_ruff_format_preserves_json_records() {
+        let output = r#"[
+  {
+    "cell": null,
+    "code": "unformatted",
+    "end_location": {"column": 1, "row": 2},
+    "filename": "/tmp/proj/bad.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [{"content": "x = [1, 2, 3]\n", "end_location": {"column": 1, "row": 2}, "location": {"column": 1, "row": 1}}],
+      "message": null
+    },
+    "location": {"column": 1, "row": 1},
+    "message": "File would be reformatted",
+    "noqa_row": null,
+    "url": null
+  }
+]"#;
+        let result = filter_ruff_format(output);
+        assert_eq!(result, output.trim());
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("still valid JSON");
+        assert_eq!(parsed[0]["filename"], "/tmp/proj/bad.py");
+        assert!(!result.contains("files need formatting"));
+    }
+
+    /// Same for `--output-format=json-lines`: one record per line, kept verbatim.
+    #[test]
+    fn test_filter_ruff_format_preserves_json_lines_records() {
+        let output = concat!(
+            r#"{"code":"unformatted","filename":"/tmp/proj/bad.py","location":{"column":1,"row":1},"message":"File would be reformatted","fix":{"applicability":"safe","edits":[{"content":"x = [1, 2, 3]\n"}]}}"#,
+            "\n",
+            r#"{"code":"unformatted","filename":"/tmp/proj/other.py","location":{"column":1,"row":1},"message":"File would be reformatted","fix":null}"#,
+            "\n"
+        );
+        let result = filter_ruff_format(output);
+        assert_eq!(result, output.trim());
+        for line in result.lines() {
+            serde_json::from_str::<serde_json::Value>(line).expect("each line stays valid JSON");
+        }
+        assert!(!result.contains("files need formatting"));
+    }
+
+    #[test]
+    fn test_format_output_is_text() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(format_output_is_text(&a(&["format", "--check"])));
+        assert!(format_output_is_text(&a(&[
+            "format",
+            "--check",
+            "--output-format=concise"
+        ])));
+        assert!(format_output_is_text(&a(&[
+            "format",
+            "--output-format",
+            "full"
+        ])));
+        assert!(!format_output_is_text(&a(&[
+            "format",
+            "--check",
+            "--output-format=json"
+        ])));
+        assert!(!format_output_is_text(&a(&[
+            "format",
+            "--check",
+            "--output-format",
+            "json"
+        ])));
+        assert!(!format_output_is_text(&a(&[
+            "format",
+            "--check",
+            "--output-format=json-lines"
+        ])));
+        assert!(!format_output_is_text(&a(&[
+            "format",
+            "--output-format",
+            "sarif"
+        ])));
     }
 
     #[test]
