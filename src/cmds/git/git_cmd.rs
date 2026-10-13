@@ -2,6 +2,7 @@
 
 use crate::core::arg_tokenizer::{self, Dialect, Token, TokenKind, ValueSpec, is_digit_run};
 use crate::core::args_utils;
+use crate::core::child_command::ChildCommand;
 use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
 use crate::core::shell::{display_args, quote_word, with_args};
@@ -15,7 +16,6 @@ use crate::core::user_dirs;
 use crate::core::utils::{exit_code_from_status, join_with_overflow, resolved_command, strip_ansi};
 use anyhow::{Context, Result};
 use std::ffi::OsString;
-use std::process::Command;
 
 #[derive(Debug, Clone)]
 pub enum GitCommand {
@@ -36,7 +36,7 @@ pub enum GitCommand {
 
 /// Create a git Command with global options (e.g. -C, -c, --git-dir, --work-tree)
 /// prepended before any subcommand arguments.
-fn git_cmd(global_args: &[String]) -> Command {
+fn git_cmd(global_args: &[String]) -> ChildCommand {
     let mut cmd = resolved_command("git");
     for arg in global_args {
         cmd.arg(arg);
@@ -49,7 +49,7 @@ fn git_cmd(global_args: &[String]) -> Command {
 /// We only use this for non-user-facing parses where RTK depends on git's
 /// English status phrases. User-visible passthrough output keeps the user's
 /// locale.
-fn git_cmd_c_locale(global_args: &[String]) -> Command {
+fn git_cmd_c_locale(global_args: &[String]) -> ChildCommand {
     let mut cmd = git_cmd(global_args);
     cmd.env("LC_ALL", "C");
     cmd
@@ -81,7 +81,7 @@ fn uses_compact_status_path(args: &[String]) -> bool {
     saw_branch || !saw_flag
 }
 
-fn build_status_command(args: &[String], global_args: &[String]) -> Command {
+fn build_status_command(args: &[String], global_args: &[String]) -> ChildCommand {
     let mut cmd = git_cmd(global_args);
     cmd.arg("status");
     if uses_compact_status_path(args) {
@@ -415,7 +415,7 @@ fn show_cmd(
     tokens: &[Token<'_>],
     rtk_flags: &[&str],
     drop_patch_shape: bool,
-) -> Command {
+) -> ChildCommand {
     let mut cmd = git_cmd(global_args);
     cmd.arg("show");
     cmd.args(rtk_flags);
@@ -2443,7 +2443,7 @@ fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> 
     Ok(0)
 }
 
-fn build_commit_command(args: &[String], global_args: &[String]) -> Command {
+fn build_commit_command(args: &[String], global_args: &[String]) -> ChildCommand {
     let mut cmd = git_cmd(global_args);
     cmd.arg("commit");
     for arg in args {
@@ -3635,6 +3635,7 @@ pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -
 mod tests {
     use super::*;
     use crate::core::test_isolation;
+    use std::process::Command;
 
     #[test]
     fn test_branch_dash_u_links_its_upstream_value_not_a_free_positional() {
@@ -6410,6 +6411,14 @@ no changes added to commit (use "git add" and/or "git commit -a")
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
             .collect();
+        // The message holds quote characters, so on Windows it is encoded for
+        // the child when it is appended rather than at spawn time, and that is
+        // the form `get_args` reports. Both spellings reach git as the same
+        // argument; only where the escaping is applied differs.
+        #[cfg(not(windows))]
+        let message = "This allows git commit -m \"title\" -m \"body\".";
+        #[cfg(windows)]
+        let message = r#""This allows git commit -m \"title\" -m \"body\".""#;
         assert_eq!(
             cmd_args,
             vec![
@@ -6417,7 +6426,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
                 "-m",
                 "feat: add multi-paragraph support",
                 "-m",
-                "This allows git commit -m \"title\" -m \"body\"."
+                message
             ]
         );
     }

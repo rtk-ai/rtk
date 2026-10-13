@@ -87,3 +87,8 @@ assets = [
 [lints.rust]
 unsafe_code = "deny"
 warnings = "deny"
+
+[lints.clippy]
+# clippy.toml's ban covers production code only: `src/main.rs` denies it
+# outside test builds, and tests, integration tests included, stay allowed.
+disallowed_methods = "allow"

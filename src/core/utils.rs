@@ -5,18 +5,15 @@
 //! - Text truncation
 //! - Command execution with error context
 
-#[cfg(test)]
-use crate::core::test_isolation;
+use crate::core::child_command::ChildCommand;
 use crate::core::user_dirs;
 use crate::core::user_env;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde_json::Value;
-use std::ffi::OsStr;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::LazyLock;
 
 /// Compute `days` ago from now, clamped instead of panicking on overflow.
@@ -356,13 +353,14 @@ fn set_owner_only(_path: &std::path::Path, _mode: u32) {}
 /// Build a Command for Ruby tools, auto-detecting bundle exec.
 /// Uses `bundle exec <tool>` when a Gemfile exists (transitive deps like rake
 /// won't appear in the Gemfile but still need bundler for version isolation).
-pub fn ruby_exec(tool: &str) -> Command {
+pub fn ruby_exec(tool: &str) -> ChildCommand {
     if std::path::Path::new("Gemfile").exists() {
-        let mut c = Command::new("bundle");
+        let mut c = ChildCommand::new("bundle");
         c.arg("exec").arg(tool);
         return c;
     }
-    Command::new(tool)
+    // nosemgrep: dynamic-command-execution -- tool is one of rtk's known ruby entry points
+    ChildCommand::new(tool)
 }
 
 /// Count whitespace-delimited tokens in text. Used by filter tests to verify
@@ -402,7 +400,7 @@ pub fn detect_package_manager_in(dir: &std::path::Path) -> &'static str {
 
 /// Build a Command using the detected package manager's exec mechanism.
 /// Returns a Command ready to have tool-specific args appended.
-pub fn package_manager_exec(tool: &str) -> Command {
+pub fn package_manager_exec(tool: &str) -> ChildCommand {
     tool_exec(None, tool, MissingTool::Fail)
 }
 
@@ -443,7 +441,7 @@ pub fn exec_runner(runner: Option<&str>, missing: MissingTool) -> &str {
 /// Detection applies only when nothing was named, as with a bare `rtk tsc`.
 ///
 /// A tool already on PATH is run directly only when no runner was named.
-pub fn tool_exec(runner: Option<&str>, tool: &str, missing: MissingTool) -> Command {
+pub fn tool_exec(runner: Option<&str>, tool: &str, missing: MissingTool) -> ChildCommand {
     // Only when nothing was named: `bunx tsc` must resolve the project's tsc,
     // not a global one that happens to be on PATH. Both bunx and npx prefer
     // node_modules/.bin before fetching, so naming one is a real choice.
@@ -478,107 +476,6 @@ pub fn tool_exec(runner: Option<&str>, tool: &str, missing: MissingTool) -> Comm
     }
 }
 
-/// Encode one argument for a child's raw command line the way libuv's
-/// `quote_cmd_arg` does: wrap it in `"`, escape an inner `"` as `\"`, and double
-/// every backslash run that ends up in front of a quote so it stays literal.
-///
-/// std's encoder emits the same bytes but wraps only for a space or a tab, which
-/// is what leaves MSYS children with a mangled command line (#3727).
-// Windows-only in production; the rules stay unit-tested on every platform.
-#[cfg_attr(not(windows), allow(dead_code))]
-pub fn quote_arg_for_child(arg: &str) -> String {
-    let mut out = String::with_capacity(arg.len() + 2);
-    out.push('"');
-    let mut backslashes = 0usize;
-    for ch in arg.chars() {
-        match ch {
-            '\\' => backslashes += 1,
-            '"' => {
-                for _ in 0..backslashes * 2 + 1 {
-                    out.push('\\');
-                }
-                backslashes = 0;
-                out.push('"');
-            }
-            _ => {
-                for _ in 0..backslashes {
-                    out.push('\\');
-                }
-                backslashes = 0;
-                out.push(ch);
-            }
-        }
-    }
-    // The closing quote is a quote too, so a trailing run is doubled as well.
-    for _ in 0..backslashes * 2 {
-        out.push('\\');
-    }
-    out.push('"');
-    out
-}
-
-/// Pass caller-supplied arguments to a child so that MSYS/Cygwin children on
-/// Windows receive them intact.
-///
-/// Use instead of `Command::arg`/`args` for anything that arrived on rtk's own
-/// command line — a pattern, a path, a flag value.
-pub trait ChildArgExt {
-    fn child_arg<S: AsRef<OsStr>>(&mut self, arg: S) -> &mut Command;
-
-    fn child_args<I, S>(&mut self, args: I) -> &mut Command
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>;
-}
-
-impl ChildArgExt for Command {
-    fn child_arg<S: AsRef<OsStr>>(&mut self, arg: S) -> &mut Command {
-        push_child_arg(self, arg.as_ref());
-        self
-    }
-
-    fn child_args<I, S>(&mut self, args: I) -> &mut Command
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        for arg in args {
-            push_child_arg(self, arg.as_ref());
-        }
-        self
-    }
-}
-
-/// Windows: `"` is the only character std encodes differently from libuv, so
-/// re-encode just those arguments and leave the rest on std's path. `.bat`/`.cmd`
-/// shims stay on it too — cmd.exe parses by its own rules and `raw_arg` would
-/// bypass the escaping std applies for them.
-#[cfg(windows)]
-fn push_child_arg(cmd: &mut Command, arg: &OsStr) {
-    match arg.to_str() {
-        Some(s) if s.contains('"') && !is_batch_program(cmd) => {
-            std::os::windows::process::CommandExt::raw_arg(cmd, quote_arg_for_child(s));
-        }
-        _ => {
-            cmd.arg(arg);
-        }
-    }
-}
-
-#[cfg(windows)]
-fn is_batch_program(cmd: &Command) -> bool {
-    std::path::Path::new(cmd.get_program())
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("bat") || ext.eq_ignore_ascii_case("cmd"))
-}
-
-/// Unix: the argument vector reaches `execvp` verbatim, so there is nothing to
-/// encode.
-#[cfg(not(windows))]
-fn push_child_arg(cmd: &mut Command, arg: &OsStr) {
-    cmd.arg(arg);
-}
-
 /// Resolve a binary name to its full path, honoring PATHEXT on Windows.
 ///
 /// On Windows, Node.js tools are installed as `.CMD`/`.BAT`/`.PS1` shims.
@@ -596,28 +493,30 @@ pub fn resolve_binary(name: &str) -> Result<PathBuf> {
     which::which(name).context(format!("Binary '{}' not found on PATH", name))
 }
 
-/// Create a `Command` with PATHEXT-aware binary resolution.
+/// Create a [`ChildCommand`] with PATHEXT-aware binary resolution.
 ///
-/// Drop-in replacement for `Command::new(name)` that works on Windows
-/// with `.CMD`/`.BAT`/`.PS1` wrappers.
+/// Use instead of `std::process::Command::new(name)`: it finds the
+/// `.CMD`/`.BAT`/`.PS1` wrappers that std misses on Windows, and the result
+/// encodes its arguments for the child.
 ///
-/// Falls back to `Command::new(name)` if resolution fails, so native
+/// Falls back to `ChildCommand::new(name)` if resolution fails, so native
 /// commands (git, cargo) still work even if `which` can't find them.
 ///
 /// # Arguments
 /// * `name` - Binary name (e.g., "vitest", "eslint")
 ///
 /// # Returns
-/// A `Command` configured with the resolved binary path.
+/// A `ChildCommand` configured with the resolved binary path.
 ///
 /// In a test build a `git` command comes isolated as
 /// `test_isolation::isolate_git_config` does it, so a test that runs rtk's own
 /// git in-process neither obeys the developer's configuration nor an exported
 /// `GIT_DIR` or `GIT_INDEX_FILE` — which git sets inside a pre-commit hook.
-pub fn resolved_command(name: &str) -> Command {
+pub fn resolved_command(name: &str) -> ChildCommand {
     #[allow(unused_mut)]
     let mut cmd = match resolve_binary(name) {
-        Ok(path) => Command::new(path),
+        // nosemgrep: dynamic-command-execution -- this IS the resolver; the path comes from resolve_binary
+        Ok(path) => ChildCommand::new(path),
         Err(e) => {
             // On Windows, resolution failure likely means a .CMD/.BAT wrapper
             // wasn't found — always warn so users have a signal.
@@ -629,13 +528,14 @@ pub fn resolved_command(name: &str) -> Command {
                 );
             }
 
-            Command::new(name)
+            // nosemgrep: dynamic-command-execution -- unresolved fallback, name is an rtk tool name
+            ChildCommand::new(name)
         }
     };
     #[cfg(test)]
     {
         if name == "git" {
-            test_isolation::isolate_git_config(&mut cmd);
+            cmd.isolate_git_config();
         }
     }
     cmd
@@ -905,6 +805,18 @@ fn output_codepage() -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_test_build_isolates_the_git_it_resolves() {
+        let mut expected = std::process::Command::new("git");
+        crate::core::test_isolation::isolate_git_config(&mut expected);
+        let expected: Vec<_> = expected.get_envs().collect();
+        assert!(!expected.is_empty());
+        assert_eq!(
+            resolved_command("git").get_envs().collect::<Vec<_>>(),
+            expected
+        );
+    }
 
     #[test]
     fn test_strip_leading_bom_helper() {
@@ -1244,70 +1156,13 @@ mod tests {
         assert!(tool_exists("git"), "tool_exists('git') should return true");
     }
 
-    // ===== Child-process argument quoting (issue #3727) =====
-
-    #[test]
-    fn test_quote_arg_wraps_a_quote_with_no_space_around_it() {
-        assert_eq!(quote_arg_for_child(r#"a"b"#), r#""a\"b""#);
-    }
-
-    #[test]
-    fn test_quote_arg_wraps_the_reported_json_key_pattern() {
-        // `rtk grep -c '"type"' file`, the shape reported in #3727.
-        assert_eq!(quote_arg_for_child(r#""type""#), r#""\"type\"""#);
-    }
-
-    #[test]
-    fn test_quote_arg_wraps_repeated_quotes() {
-        assert_eq!(quote_arg_for_child(r#"a""b"#), r#""a\"\"b""#);
-    }
-
-    #[test]
-    fn test_quote_arg_doubles_backslash_runs_before_a_quote() {
-        assert_eq!(quote_arg_for_child(r#"a\"b"#), r#""a\\\"b""#);
-        assert_eq!(quote_arg_for_child(r#"a\\"b"#), r#""a\\\\\"b""#);
-    }
-
-    #[test]
-    fn test_quote_arg_doubles_a_trailing_backslash_run() {
-        assert_eq!(quote_arg_for_child(r#"a"b\"#), r#""a\"b\\""#);
-    }
-
-    #[test]
-    fn test_quote_arg_keeps_backslashes_that_precede_ordinary_text() {
-        assert_eq!(quote_arg_for_child(r#"C:\a\b "x""#), r#""C:\a\b \"x\"""#);
-    }
-
-    #[test]
-    fn test_quote_arg_keeps_a_space_inside_the_wrapping() {
-        assert_eq!(quote_arg_for_child(r#"a b "c""#), r#""a b \"c\"""#);
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn test_child_arg_re_encodes_only_arguments_holding_a_quote() {
-        let mut cmd = Command::new("grep");
-        cmd.child_args(["-c", r#""type""#, "q.jsonl"]);
-        let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, ["-c", r#""\"type\"""#, "q.jsonl"]);
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn test_child_arg_leaves_batch_shims_on_stds_encoding() {
-        // cmd.exe parses by its own rules, so `raw_arg` must not be used there.
-        let mut cmd = Command::new("gradlew.bat");
-        cmd.child_arg(r#""type""#);
-        let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, [r#""type""#]);
-    }
-
     // ===== Windows-specific PATHEXT resolution tests (issue #212) =====
 
     #[cfg(target_os = "windows")]
     mod windows_tests {
         use super::super::*;
         use std::fs;
+        use std::process::Command;
 
         /// Create a temporary .cmd wrapper to simulate Node.js tool installation
         fn create_temp_cmd_wrapper(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
@@ -1393,6 +1248,7 @@ mod tests {
             )
             .expect("should resolve fake-exec-test");
 
+            // nosemgrep: dynamic-command-execution -- the test checks std itself runs a resolved .cmd wrapper
             let output = Command::new(&resolved).output();
 
             assert!(
@@ -1411,7 +1267,7 @@ mod tests {
         #[test]
         fn test_resolved_command_fallback_on_unknown_binary() {
             // When resolve_binary fails, resolved_command should fall back to
-            // Command::new(name) instead of panicking.  On Windows this also
+            // ChildCommand::new(name) instead of panicking.  On Windows this also
             // prints a warning to stderr.
             let mut cmd = resolved_command("nonexistent_binary_xyz_99999");
             // The Command should be created (not panic).  Attempting to run it

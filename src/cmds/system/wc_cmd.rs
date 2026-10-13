@@ -7,14 +7,39 @@
 //! - `wc -c file.py`  → `978`
 //! - `wc -l *.py`     → table with common path prefix stripped
 
+use crate::core::operand_glob;
 use crate::core::runner::{self, RunOptions};
 use crate::core::shell::display_args;
-use crate::core::utils::{ChildArgExt, resolved_command};
+use crate::core::utils::resolved_command;
 use anyhow::Result;
+
+/// `args` with every file operand glob expanded (see `operand_glob`). The only wc
+/// option that takes a separate value is `--files0-from`, which getopt also
+/// accepts abbreviated down to `--f`; after `--` every argument is an operand.
+fn expand_file_operands(args: &[String], expand: impl Fn(&str) -> Vec<String>) -> Vec<String> {
+    let mut expanded = Vec::with_capacity(args.len());
+    let mut operands_only = false;
+    let mut is_value = false;
+    for arg in args {
+        if is_value {
+            is_value = false;
+            expanded.push(arg.clone());
+        } else if !operands_only && arg.starts_with('-') && arg != "-" {
+            operands_only = arg == "--";
+            is_value = arg.len() >= 3 && "--files0-from".starts_with(arg.as_str());
+            expanded.push(arg.clone());
+        } else {
+            expanded.extend(expand(arg));
+        }
+    }
+    expanded
+}
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("wc");
-    cmd.child_args(args);
+    cmd.args(expand_file_operands(args, |operand| {
+        operand_glob::expand_operands([operand])
+    }));
 
     if verbose > 0 {
         eprintln!("Running: wc {}", args.join(" "));
@@ -284,6 +309,27 @@ fn strip_prefix<'a>(path: &'a str, prefix: &str) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Marks each argument `expand_file_operands` hands to the expander.
+    fn marked(args: &[&str]) -> Vec<String> {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        expand_file_operands(&args, |operand| vec![format!("<{operand}>")])
+    }
+
+    #[test]
+    fn only_file_operands_are_expanded() {
+        assert_eq!(marked(&["-l", "*.rs", "-"]), ["-l", "<*.rs>", "<->"]);
+        assert_eq!(
+            marked(&["--files0-from", "list*", "a*"]),
+            ["--files0-from", "list*", "<a*>"]
+        );
+        assert_eq!(
+            marked(&["--files0-from=l*", "a*"]),
+            ["--files0-from=l*", "<a*>"]
+        );
+        assert_eq!(marked(&["--f", "l*"]), ["--f", "l*"]);
+        assert_eq!(marked(&["--", "-w*", "--"]), ["--", "<-w*>", "<-->"]);
+    }
 
     #[test]
     fn test_single_file_full() {
