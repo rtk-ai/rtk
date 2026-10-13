@@ -1965,7 +1965,8 @@ fn main() {
     let code = match run_cli() {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("rtk: {:#}", e);
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr(), "rtk: {:#}", e);
             1
         }
     };
@@ -2156,12 +2157,16 @@ fn run_cli() -> Result<i32> {
             tail_lines,
             line_numbers,
         } => {
+            use std::io::Write;
             let mut had_error = false;
             let mut stdin_seen = false;
             for file in &files {
                 let result = if file == Path::new("-") {
                     if stdin_seen {
-                        eprintln!("rtk: warning: stdin specified more than once");
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "rtk: warning: stdin specified more than once"
+                        );
                         continue;
                     }
                     stdin_seen = true;
@@ -2185,7 +2190,7 @@ fn run_cli() -> Result<i32> {
                     )
                 };
                 if let Err(e) = result {
-                    eprintln!("cat: {}: {}", file.display(), e.root_cause());
+                    let _ = writeln!(std::io::stderr(), "cat: {}: {}", file.display(), e.root_cause());
                     had_error = true;
                 }
             }

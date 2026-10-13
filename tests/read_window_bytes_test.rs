@@ -175,3 +175,81 @@ fn rewritten_head_spellings_match_native_on_non_utf8_files() {
         assert_eq!(actual.stdout, native.stdout, "{command}");
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn read_stdout_full_disk_exits_nonzero_without_abort() {
+    let full = std::path::Path::new("/dev/full");
+    if !full.exists() {
+        return;
+    }
+    let Ok(dev_full) = fs::OpenOptions::new().write(true).open(full) else {
+        return;
+    };
+    let output = common::rtk_command()
+        .args(["read", "Cargo.toml"])
+        .stdout(dev_full)
+        .output()
+        .expect("run rtk read");
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("No space left on device") || stderr.contains("Failed to write output"),
+        "stderr was: {stderr}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn read_stdout_and_stderr_full_disk_exits_nonzero_without_abort() {
+    let full = std::path::Path::new("/dev/full");
+    if !full.exists() {
+        return;
+    }
+    let Ok(dev_full_out) = fs::OpenOptions::new().write(true).open(full) else {
+        return;
+    };
+    let Ok(dev_full_err) = fs::OpenOptions::new().write(true).open(full) else {
+        return;
+    };
+    let output = common::rtk_command()
+        .args(["read", "Cargo.toml"])
+        .stdout(dev_full_out)
+        .stderr(dev_full_err)
+        .output()
+        .expect("run rtk read");
+
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn read_stdin_full_disk_exits_nonzero_without_abort() {
+    let full = std::path::Path::new("/dev/full");
+    if !full.exists() {
+        return;
+    }
+    let Ok(dev_full) = fs::OpenOptions::new().write(true).open(full) else {
+        return;
+    };
+    let mut child = common::rtk_command()
+        .args(["read", "-"])
+        .stdin(Stdio::piped())
+        .stdout(dev_full)
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run rtk read");
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(b"sample stdin content\n");
+    }
+    let output = child.wait_with_output().expect("wait for rtk read");
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("No space left on device") || stderr.contains("Failed to write output"),
+        "stderr was: {stderr}"
+    );
+}
+
