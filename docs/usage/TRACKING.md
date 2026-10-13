@@ -119,6 +119,12 @@ pub struct GainSummary {
 }
 ```
 
+`total_time_ms` and `avg_time_ms` (here and in the daily/weekly/monthly stats) only count
+commands with captured input (`input_tokens > 0`). Passthrough and fallback rows filter
+nothing, and their duration is the wrapped process's lifetime — for an interactive TUI such as
+`rtk claude`, the whole session — so they are left out of the time aggregate while still
+counting toward `commands` and the token totals.
+
 #### `DayStats`
 
 Daily statistics (Serializable for JSON export).
