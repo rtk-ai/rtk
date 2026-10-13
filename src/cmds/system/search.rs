@@ -13,10 +13,10 @@ use crate::core::stream::{
 };
 use crate::core::tracking;
 use crate::core::utils::{resolved_command, strip_ansi};
-use crate::core::{args_utils, config};
+use crate::core::{args_utils, config, operand_glob};
 use anyhow::{Context, Result};
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::sync::LazyLock;
 
@@ -271,6 +271,41 @@ fn match_block(path: &str, entries: &[(usize, bool, String)]) -> String {
         s.push_str(&format!("{}{}{}{}{}\n", path, sep, line_num, sep, content));
     }
     s
+}
+
+/// `args` with every path operand glob expanded (see `operand_glob`) and everything else as
+/// written. The paths are the free positionals after the pattern, or all of them when
+/// `-e`/`--regexp` or `-f`/`--file` (or rg's `--files`) leaves no positional pattern — the same
+/// reading as [`extract_pattern_path`], so every mode that follows sees the same operands.
+fn expand_path_operands(
+    args: &[String],
+    engine: Engine,
+    expand: impl Fn(&str) -> Vec<String>,
+) -> Vec<String> {
+    let tokens = tokenize_search_args(args, engine);
+    let no_positional_pattern = tokens.iter().any(|t| match t.kind {
+        TokenKind::Long => {
+            matches!(t.text, "regexp" | "file") || (engine == Engine::Rg && t.text == "files")
+        }
+        TokenKind::Short => matches!(t.text, "e" | "f"),
+        _ => false,
+    });
+    let paths: HashSet<usize> = tokens
+        .iter()
+        .filter(|t| t.is_free_positional())
+        .skip(usize::from(!no_positional_pattern))
+        .map(|t| t.source_index)
+        .collect();
+    args.iter()
+        .enumerate()
+        .flat_map(|(index, arg)| {
+            if paths.contains(&index) {
+                expand(arg)
+            } else {
+                vec![arg.clone()]
+            }
+        })
+        .collect()
 }
 
 /// Extracts `(patterns, paths, flags, has_format_flag, detected)` from the trailing args' tokens,
@@ -817,7 +852,10 @@ pub fn run(
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
     // Restored first: every check below classifies these args, and clap ate the boundary.
-    let args = &args_utils::restore_double_dash(args);
+    let typed = &args_utils::restore_double_dash(args);
+    // The child gets the expanded paths; the tracked command stays what the user typed, as for
+    // `ls`, `wc` and `find`.
+    let args = &expand_path_operands(typed, engine, |path| operand_glob::expand_operands([path]));
 
     let tokens = tokenize_search_args(args, engine);
     let asks_for_help = asks_for_help(engine, &tokens);
@@ -825,7 +863,7 @@ pub fn run(
         .iter()
         .any(|t| t.value_spec().is_some() && t.value(&tokens).is_none());
     if dangling_value_flag {
-        let real_cmd = with_args(engine.bin(), &display_args(args));
+        let real_cmd = with_args(engine.bin(), &display_args(typed));
         return passthrough(&timer, engine, args, &real_cmd, false, false);
     }
 
@@ -840,7 +878,7 @@ pub fn run(
         return Ok(result.exit_code);
     }
 
-    let real_cmd = with_args(engine.label(), &display_args(args));
+    let real_cmd = with_args(engine.label(), &display_args(typed));
     let rtk_label = format!("rtk {}", engine.label());
 
     let (patterns, paths, extra_args, extra_args_has_format_flag, detected_flags) =
@@ -1289,6 +1327,36 @@ mod tests {
         engine: Engine,
     ) -> (Vec<String>, Vec<String>, Vec<String>, bool, DetectedFlags) {
         super::extract_pattern_path(&tokenize_search_args(args, engine), engine)
+    }
+
+    /// Marks each argument `expand_path_operands` hands to the expander.
+    fn marked_paths(engine: Engine, args: &[&str]) -> Vec<String> {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        expand_path_operands(&args, engine, |path| vec![format!("<{path}>")])
+    }
+
+    #[test]
+    fn only_path_operands_are_expanded() {
+        assert_eq!(
+            marked_paths(Engine::Grep, &["-n", "fo*", "*.rs", "src/*"]),
+            ["-n", "fo*", "<*.rs>", "<src/*>"]
+        );
+        assert_eq!(
+            marked_paths(Engine::Grep, &["-e", "a*", "*.rs"]),
+            ["-e", "a*", "<*.rs>"]
+        );
+        assert_eq!(
+            marked_paths(Engine::Grep, &["--include", "*.rs", "x", "*"]),
+            ["--include", "*.rs", "x", "<*>"]
+        );
+        assert_eq!(
+            marked_paths(Engine::Grep, &["-c", "--", "-x*", "*.rs"]),
+            ["-c", "--", "-x*", "<*.rs>"]
+        );
+        assert_eq!(
+            marked_paths(Engine::Rg, &["--files", "src*"]),
+            ["--files", "<src*>"]
+        );
     }
 
     #[test]
