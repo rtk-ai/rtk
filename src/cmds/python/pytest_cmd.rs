@@ -819,6 +819,21 @@ FAILED test_outer - AssertionError
     }
 
     #[test]
+    fn test_filter_pytest_collection_error_stays_plain() {
+        // Collection error under FORCE_COLOR: no summary line survives, so
+        // the filter reports no tests and run() falls back to the stripped
+        // raw tail. That tail must carry no ANSI codes.
+        let raw = "\x1b[31mERROR tests/test_x.py - ImportError: cannot import name 'foo'\x1b[0m\n\x1b[1mE   File \"tests/test_x.py\", line 3, in <module>\x1b[0m\n\x1b[33m! Interrupted: 1 error during collection !\x1b[0m";
+        assert_eq!(filter_pytest_output(raw), PYTEST_NO_TESTS);
+        let tail = truncate(
+            strip_ansi(raw).trim(),
+            config::limits().passthrough_max_chars,
+        );
+        assert!(!tail.contains('\x1b'), "got: {:?}", tail);
+        assert!(tail.contains("ERROR tests/test_x.py"), "got: {}", tail);
+    }
+
+    #[test]
     fn test_filter_pytest_only_skipped() {
         // If only skipped tests, should NOT say "No tests collected"
         let output = r#"=== test session starts ===

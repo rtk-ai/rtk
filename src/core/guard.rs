@@ -118,7 +118,11 @@ pub fn never_worse<'a>(raw: &'a str, filtered: &'a str) -> &'a str {
 /// Mirrors `filter_go_build_with_exit`'s failure shape so every tool reports
 /// hard failures identically instead of an all-green verdict.
 pub fn failure_fallback(tool: &str, exit_code: i32, output: &str) -> String {
-    let lines: Vec<&str> = output
+    // pytest colors failures even when piped (FORCE_COLOR CI setups): without
+    // stripping, the numbered tail carries the escape codes, and the extra
+    // bytes lose the `never_worse` comparison against the raw output.
+    let stripped = crate::core::utils::strip_ansi(output);
+    let lines: Vec<&str> = stripped
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
@@ -322,6 +326,81 @@ mod tests {
         // Sanity: real failures still read as failures.
         assert!(looks_failed("2 passed, 1 failed in 0.01s"));
         assert!(looks_failed("Failures:\n1. [FAIL] test_x"));
+    }
+
+    #[test]
+    fn guard_fires_on_xfail_green_with_nonzero_exit() {
+        // An xfail-only run is green: `failed` inside `xfailed` must not read
+        // as failure, so a forced non-zero exit fires the guard ...
+        let result = guard_exit(
+            "2 passed, 1 xfailed in 0.01s",
+            1,
+            "pytest",
+            "Pytest: 2 passed, 0 failed, 1 xfailed in 0.01s",
+        );
+        assert!(
+            result.contains("pytest: failed (exit 1)"),
+            "got: {}",
+            result
+        );
+        // ... while a genuine failure keeps its summary (control).
+        let filtered = "Pytest: 2 passed, 1 failed in 0.01s\n\nFailures:\n1. [FAIL] test_x";
+        assert_eq!(
+            guard_exit("2 passed, 1 failed in 0.01s", 1, "pytest", filtered),
+            filtered
+        );
+    }
+
+    #[test]
+    fn failure_fallback_strips_ansi() {
+        let raw = "\x1b[31mERROR\x1b[0m: collection failed\n\x1b[1mE   ImportError\x1b[0m";
+        let result = failure_fallback("pytest", 2, raw);
+        assert!(!result.contains('\x1b'), "got: {:?}", result);
+        assert!(result.contains("pytest: failed (exit 2)"));
+        assert!(result.contains("ERROR: collection failed"));
+    }
+
+    #[test]
+    fn failure_fallback_survives_never_worse_on_colored_output() {
+        // Collection error under FORCE_COLOR: the raw output is mostly escape
+        // codes, so the stripped fallback comes in under the raw size and
+        // `never_worse` keeps the verdict instead of discarding it.
+        let lines = [
+            "\x1b[31mERROR tests/test_x.py - ImportError: cannot import name 'foo'\x1b[0m",
+            "\x1b[1mE   File \"tests/test_x.py\", line 3, in <module>\x1b[0m",
+            "\x1b[1mE     from app import foo  # noqa: F401\x1b[0m",
+            "\x1b[31mE   ImportError: attempted relative import with no known parent\x1b[0m",
+            "\x1b[33m! Interrupted: 1 error during collection !\x1b[0m",
+            "\x1b[31m=== 1 error in 0.42s ===\x1b[0m",
+        ];
+        let raw = lines.join("\n");
+        let guarded = guard_exit(&raw, 2, "pytest", "Pytest: No tests collected");
+        let shown = never_worse(&raw, &guarded);
+        assert_eq!(
+            shown, guarded,
+            "fallback lost to never_worse, got: {:?}",
+            shown
+        );
+        assert!(!shown.contains('\x1b'), "got: {:?}", shown);
+        assert!(
+            shown.contains("pytest: failed (exit 2)"),
+            "got: {:?}",
+            shown
+        );
+        assert!(shown.len() <= raw.len(), "never-worse violated");
+    }
+
+    #[test]
+    fn guard_renders_verdict_on_green_with_forced_exit() {
+        // Control: a green verdict on a forced non-zero exit renders the
+        // failure verdict, never the green summary.
+        let result = guard_exit("some green output", 1, "pytest", "Pytest: 5 passed");
+        assert!(
+            result.contains("pytest: failed (exit 1)"),
+            "got: {}",
+            result
+        );
+        assert!(!result.contains("5 passed"), "got: {}", result);
     }
 
     #[test]

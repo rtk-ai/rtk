@@ -85,12 +85,26 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         &display_args(args),
         move |stdout, exit_code| {
             let filtered = filter_ruff_output(&owned_args, stdout);
+            // `ruff check --fix --exit-non-zero-on-fix` exits 1 when it fixed
+            // files: that is success, not failure. The guard must not fire on
+            // it (a config error still exits 2, which falls through below).
+            if exit_code == 1 && is_fix_success_invocation(&owned_args) {
+                return filtered;
+            }
             // "All files formatted correctly" / "No issues found" must never
             // be shown when ruff exited non-zero (config error, etc.).
             crate::core::guard::guard_exit(stdout, exit_code, "ruff", &filtered)
         },
         runner::RunOptions::stdout_only().clean_outputs(clean_outputs),
     )
+}
+
+/// True for `ruff check --fix --exit-non-zero-on-fix` (and `--fix-only`):
+/// exit 1 reports fixed files, not remaining violations.
+fn is_fix_success_invocation(args: &[String]) -> bool {
+    let fixes = args.iter().any(|a| a == "--fix" || a == "--fix-only");
+    let reports_fix = args.iter().any(|a| a == "--exit-non-zero-on-fix");
+    fixes && reports_fix
 }
 
 fn is_analyze_graph_invocation(args: &[String]) -> bool {
@@ -662,6 +676,51 @@ mod tests {
             result.len(),
             raw.len()
         );
+    }
+
+    #[test]
+    fn test_ruff_fix_flag_exit_one_keeps_no_issues() {
+        // `ruff check --fix --exit-non-zero-on-fix` exits 1 when it fixed
+        // files: success, not failure. The guard would fire on the green
+        // verdict, so the exemption must keep it.
+        let args = ["check", "--fix", "--exit-non-zero-on-fix", "."]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        assert!(is_fix_success_invocation(&args));
+        let filtered = filter_ruff_check_json("[]");
+        assert_eq!(filtered, "Ruff: No issues found");
+        let guarded = crate::core::guard::guard_exit("[]", 1, "ruff", &filtered);
+        assert!(
+            guarded.contains("failed (exit 1)"),
+            "guard fires here; run() must exempt this arm, got: {}",
+            guarded
+        );
+    }
+
+    #[test]
+    fn test_ruff_fix_predicate_needs_both_flags() {
+        let both = ["--fix", "--exit-non-zero-on-fix"];
+        let fix_only = ["--fix"];
+        let flag_only = ["--exit-non-zero-on-fix"];
+        let fix_only_flag = ["--fix-only", "--exit-non-zero-on-fix"];
+        let mk = |flags: &[&str]| flags.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(is_fix_success_invocation(&mk(&both)));
+        assert!(is_fix_success_invocation(&mk(&fix_only_flag)));
+        assert!(!is_fix_success_invocation(&mk(&fix_only)));
+        assert!(!is_fix_success_invocation(&mk(&flag_only)));
+        assert!(!is_fix_success_invocation(&[]));
+    }
+
+    #[test]
+    fn test_ruff_config_error_exit_two_empty_stdout_refuses_green() {
+        // Config error: exit 2, empty stdout. A green verdict must still
+        // refuse to render.
+        let args = ["check"].iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(!is_fix_success_invocation(&args));
+        let result = crate::core::guard::guard_exit("", 2, "ruff", "Ruff: No issues found");
+        assert!(result.contains("ruff: failed (exit 2)"), "got: {}", result);
+        assert!(!result.contains("No issues found"), "got: {}", result);
     }
 
     #[test]

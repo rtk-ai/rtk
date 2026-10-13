@@ -27,8 +27,6 @@ struct VitestJsonOutput {
     num_failed_tests: usize,
     #[serde(rename = "numPendingTests", default)]
     num_pending_tests: usize,
-    #[serde(rename = "numFailedTestSuites", default)]
-    num_failed_test_suites: usize,
     #[serde(rename = "success", default)]
     success: Option<bool>,
 }
@@ -328,7 +326,14 @@ fn run_framework_test(invocation: TestInvocation, verbose: u8) -> Result<i32> {
     let rendered = render_test_output(&filtered, &combined, &tee_label, result.exit_code);
     // Never render an all-green verdict when the test runner exited non-zero.
     let guarded = crate::core::guard::guard_exit(&combined, result.exit_code, framework, &rendered);
-    let shown = crate::core::runner::emit_guarded(&guarded, None, &combined);
+    // The guard swaps the whole rendered body (verdict + recovery hint) for
+    // the failure fallback: re-attach the hint so a capped raw tail stays
+    // recoverable. None when the guard kept the body (it already carries its
+    // hint) or the output sits below the tee floor.
+    let hint = (guarded != rendered)
+        .then(|| crate::core::tee::tee_and_hint(&combined, &tee_label, result.exit_code))
+        .flatten();
+    let shown = crate::core::runner::emit_guarded(&guarded, hint.as_deref(), &combined);
 
     timer.track(
         format!("{} run", framework).as_str(),
@@ -661,7 +666,32 @@ Scope: all 6 workspace projects
 
         let result = VitestParser::parse(json);
         let data = result.unwrap();
-        assert_eq!(data.failed, 2, "failing files must not double-count, got: {}", data.failed);
+        assert_eq!(
+            data.failed, 2,
+            "failing files must not double-count, got: {}",
+            data.failed
+        );
+        assert!(
+            !data
+                .failures
+                .iter()
+                .any(|f| f.test_name.contains("[suite]")),
+            "ordinary failing tests must not gain a [suite] entry: {:?}",
+            data.failures
+                .iter()
+                .map(|f| &f.test_name)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            data.failures
+                .iter()
+                .any(|f| f.error_message.contains("boom")),
+            "real assertion messages must survive: {:?}",
+            data.failures
+                .iter()
+                .map(|f| &f.error_message)
+                .collect::<Vec<_>>()
+        );
         let rendered = data.format(FormatMode::Compact);
         assert!(rendered.contains("FAIL (2)"), "got: {}", rendered);
     }
