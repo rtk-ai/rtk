@@ -15,7 +15,7 @@ use regex::Regex;
 use serde_json::Value;
 use std::ffi::OsStr;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
 
@@ -281,6 +281,34 @@ pub fn fallback_tail(output: &str, label: &str, n: usize) -> String {
     let lines: Vec<&str> = output.lines().collect();
     let start = lines.len().saturating_sub(n);
     lines[start..].join("\n")
+}
+
+/// Whether a path operand names stdin rather than a file.
+///
+/// `-` is a convention each program implements, not a shell or OS feature: the
+/// shell hands the literal string through unchanged, so this holds the same
+/// under bash, Git Bash, MSYS and PowerShell.
+pub fn is_stdin_operand(path: &Path) -> bool {
+    path.as_os_str() == "-"
+}
+
+/// A duplicate of the stdin descriptor as a `File`, for asking what stdin is
+/// open on without going through `io::stdin()` and its buffer. The duplicate
+/// shares stdin's file offset, so its position is stdin's position.
+#[cfg(unix)]
+pub fn stdin_file() -> Option<fs::File> {
+    use std::os::fd::AsFd;
+    std::io::stdin()
+        .as_fd()
+        .try_clone_to_owned()
+        .map(fs::File::from)
+        .ok()
+}
+
+/// Metadata of the file stdin is open on, or `None` if it cannot be read.
+#[cfg(unix)]
+pub fn stdin_metadata() -> Option<fs::Metadata> {
+    stdin_file()?.metadata().ok()
 }
 
 /// Create a directory owner-only (0700 on Unix), tightening one that already exists.
@@ -905,6 +933,14 @@ fn output_codepage() -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_stdin_operand_matches_only_a_lone_dash() {
+        assert!(is_stdin_operand(Path::new("-")));
+        assert!(!is_stdin_operand(Path::new("-x")));
+        assert!(!is_stdin_operand(Path::new("./-")));
+        assert!(!is_stdin_operand(Path::new("a.txt")));
+    }
 
     #[test]
     fn test_strip_leading_bom_helper() {
