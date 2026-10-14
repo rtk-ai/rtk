@@ -15,7 +15,7 @@ use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git_cmd, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
-    bun_cmd, deno_cmd, lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd,
+    bun_cmd, deno_cmd, lint_cmd, next_cmd, ng_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd,
     prisma_cmd, tsc_cmd, vitest_cmd,
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
@@ -653,6 +653,13 @@ enum Commands {
     /// TypeScript compiler with grouped error output
     Tsc {
         /// TypeScript compiler arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Angular build with compact tables; other commands pass through
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Ng {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -3237,6 +3244,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Next { args } => next_cmd::run(&args, cli.verbose)?,
 
+        Commands::Ng { args } => ng_cmd::run(&args, cli.verbose)?,
+
         Commands::Lint { args } => lint_cmd::run(None, &args, cli.verbose)?,
 
         Commands::Prettier { args } => prettier_cmd::run(&args, cli.verbose)?,
@@ -3921,6 +3930,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Prisma { .. }
             | Commands::Tsc { .. }
             | Commands::Next { .. }
+            | Commands::Ng { .. }
             | Commands::Lint { .. }
             | Commands::Prettier { .. }
             | Commands::Playwright { .. }
@@ -4493,6 +4503,7 @@ mod tests {
             "prisma",
             "tsc",
             "next",
+            "ng",
             "lint",
             "prettier",
             "format",
@@ -5076,6 +5087,25 @@ mod tests {
             code, 134,
             "rtk crashed with SIGABRT (exit 134) on broken pipe - SIGPIPE handler missing"
         );
+    }
+
+    #[test]
+    fn ng_native_flags_and_separator_reach_the_filter() {
+        for flags in [
+            vec!["build", "--help"],
+            vec!["build", "--verbose"],
+            vec!["build", "--watch"],
+            vec!["build", "--output-path", "dist folder"],
+            vec!["build", "--", "--help"],
+        ] {
+            let mut argv = vec!["rtk", "ng"];
+            argv.extend(flags.iter().copied());
+            let cli = Cli::try_parse_from(argv).unwrap();
+            match cli.command {
+                Commands::Ng { args } => assert_eq!(args, flags),
+                _ => panic!("expected Angular command"),
+            }
+        }
     }
 
     #[test]

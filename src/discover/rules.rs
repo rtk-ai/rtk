@@ -282,6 +282,15 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^ng\s+build(?:\s|$|[;|&()<>])",
+        rtk_cmd: "rtk ng",
+        rewrite_prefixes: &["ng"],
+        category: "Build",
+        // Angular 22.2.1 real default/lazy build fixtures; diagnostics remain intact.
+        savings_pct: 20.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?next\s+build(?:\s|$|[;|&()<>])",
         rtk_cmd: "rtk next",
         pipeline_safety: PipelineSafety::ProducerOnly,

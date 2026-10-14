@@ -60,6 +60,7 @@ RTK reduces **bash output bytes** — the only thing it controls. Those bytes ar
 | `pnpm list` | Compact dependency tree |
 | `pnpm outdated` | Package + current + latest only |
 | `next build` | Route summary + errors only |
+| `ng build` | Compact Angular build tables; every bundle and diagnostic retained |
 | `prisma migrate` | Migration status only |
 | `playwright test` | Failures + trace links only |
 
