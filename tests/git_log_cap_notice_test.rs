@@ -46,6 +46,13 @@ fn git_ok(repo: &Path, home: &Path, args: &[&str]) {
     );
 }
 
+fn git_log(repo: &Path, home: &Path, args: &[&str]) -> Output {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(repo).arg("log").args(args);
+    isolate(&mut cmd, home);
+    cmd.output().expect("run git log")
+}
+
 fn rtk_log(repo: &Path, home: &Path, args: &[&str]) -> Output {
     let mut cmd = common::rtk_command();
     cmd.arg("git").arg("log").args(args).current_dir(repo);
@@ -75,6 +82,48 @@ fn repo_with(commits: usize) -> Repo {
         _dir: dir,
         path,
         home,
+    }
+}
+
+#[test]
+fn nul_delimited_formatted_walks_preserve_records_and_limits() {
+    let repo = repo_with(60);
+    for (args, expected_args, should_announce_cap) in [
+        (
+            &["--format=%H", "-z"][..],
+            &["-50", "--format=%H", "-z"][..],
+            true,
+        ),
+        (
+            &["--oneline", "-z"][..],
+            &["-50", "--oneline", "-z"][..],
+            true,
+        ),
+        (
+            &["-n", "5", "--format=%H", "-z"][..],
+            &["-n", "5", "--format=%H", "-z"][..],
+            false,
+        ),
+    ] {
+        let expected = git_log(&repo.path, &repo.home, expected_args);
+        assert!(
+            expected.status.success(),
+            "git log {expected_args:?} failed"
+        );
+
+        let actual = rtk_log(&repo.path, &repo.home, args);
+        assert!(actual.status.success(), "rtk git log {args:?} failed");
+        assert_eq!(
+            actual.stdout, expected.stdout,
+            "rtk git log {args:?} changed the NUL-delimited output"
+        );
+
+        let stderr = String::from_utf8_lossy(&actual.stderr);
+        assert_eq!(
+            stderr.contains("[rtk] capped at 50 commits"),
+            should_announce_cap,
+            "unexpected cap notice for {args:?}: {stderr:?}"
+        );
     }
 }
 
