@@ -1,6 +1,6 @@
 [filters.swift-build]
 description = "Compact swift build output — short-circuit on success, strip Compiling/Linking"
-match_command = "^swift\\s+build\\b"
+match_command = "^swift[ \\t\\n]+build(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

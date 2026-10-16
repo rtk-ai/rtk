@@ -1,6 +1,6 @@
 [filters.skopeo]
 description = "Compact skopeo output — truncate large manifests, strip verbosity"
-match_command = "^skopeo\\b"
+match_command = "^skopeo(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

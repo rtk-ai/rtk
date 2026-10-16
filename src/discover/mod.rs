@@ -17,7 +17,8 @@ use registry::{
 };
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
-use crate::core::cmdline::lexer;
+use crate::core::cmdline::lexer::{self, tokenize, words};
+use crate::core::cmdline::rtk::rtk_invocation;
 use crate::core::tracking::{HookDecisionRecord, Tracker};
 use crate::core::user_dirs;
 use crate::discover::registry::prefix_contains_rtk_disabled;
@@ -231,12 +232,12 @@ fn would_be_covered_without_bypass(
 /// The segment `strip_disabled_prefix_for_analytics` split into `env_prefix` and
 /// `actual_cmd`, with its `RTK_DISABLED=` words removed and every other word kept
 /// verbatim, wrapper included. Words are split the way the rest of discover splits
-/// them (`lexer::tokenize` + `coalesce_words`), so a quoted or expanded value
+/// them (`lexer::tokenize` + `lexer::words`), so a quoted or expanded value
 /// (`RTK_DISABLED='1 2'`, `RTK_DISABLED=$CI`) goes as a whole.
 fn without_rtk_disabled(env_prefix: &str, actual_cmd: &str) -> String {
-    let starts: Vec<usize> = lexer::coalesce_words(env_prefix, &lexer::tokenize(env_prefix))
+    let starts: Vec<usize> = words(env_prefix, &tokenize(env_prefix))
         .iter()
-        .map(|&(_, start)| start)
+        .map(|word| word.start)
         .collect();
     let mut line = String::with_capacity(env_prefix.len() + actual_cmd.len() + 1);
     for (i, &start) in starts.iter().enumerate() {
@@ -287,22 +288,14 @@ fn judge_disabled_segment(
     }
 }
 
-/// Whether an already-`rtk`-prefixed command counts as coverage. `rtk bypass <cmd>`
-/// deliberately runs the raw command unfiltered, so it must not count — that would
-/// let the audit flatter itself via its own escape hatch. This is ground truth read
-/// directly from the transcript (the model really did invoke `rtk`), not a guess.
+/// Whether a command that runs rtk counts as coverage. `rtk bypass <cmd>` (or its
+/// deprecated alias `rtk proxy`) deliberately runs the raw command unfiltered, so it
+/// must not count — that would let the audit flatter itself via its own escape
+/// hatch. This is ground truth read directly from the transcript (the model really
+/// did invoke `rtk`), not a guess.
 pub(crate) fn is_already_rtk(cmd: &str) -> bool {
-    let trimmed = cmd.trim();
-    trimmed.starts_with("rtk ")
-        && !UNFILTERED_ESCAPE_HATCHES
-            .iter()
-            .any(|hatch| trimmed.starts_with(hatch))
+    rtk_invocation(&words(cmd, &tokenize(cmd))).is_some_and(|rtk| !rtk.bypass)
 }
-
-/// Spellings of the unfiltered escape hatch. `rtk proxy` is the deprecated
-/// alias of `rtk bypass` and runs exactly as unfiltered, so a transcript
-/// written before the rename must not read as covered either.
-const UNFILTERED_ESCAPE_HATCHES: &[&str] = &["rtk bypass", "rtk proxy"];
 
 /// Aggregation bucket for supported commands.
 struct SupportedBucket {
@@ -447,7 +440,7 @@ impl Tally {
                     DisabledSegment::Bypass => {
                         self.rtk_disabled_count += 1;
                         self.rtk_disabled_estimated += 1;
-                        let display = truncate_command(actual_cmd);
+                        let display = head_words(actual_cmd).join(" ");
                         *self.rtk_disabled_cmds.entry(display).or_insert(0) += 1;
                         continue;
                     }
@@ -519,7 +512,7 @@ impl Tally {
                         len / 4
                     } else {
                         // Fallback: category average
-                        let subcmd = extract_subcmd(part);
+                        let subcmd = head_words(part).get(1).copied().unwrap_or("");
                         category_avg_tokens(category, subcmd)
                     };
 
@@ -530,7 +523,7 @@ impl Tally {
                     bucket.total_raw_output_tokens += output_tokens;
 
                     // Track the display name with status
-                    let display_name = truncate_command(part);
+                    let display_name = head_words(part).join(" ");
                     let entry = bucket
                         .command_counts
                         .entry(format!("{}:{:?}", display_name, status))
@@ -815,22 +808,16 @@ pub fn run(
     Ok(())
 }
 
-/// Extract the subcommand from a command string (second word).
-fn extract_subcmd(cmd: &str) -> &str {
-    let parts: Vec<&str> = cmd.trim().splitn(3, char::is_whitespace).collect();
-    if parts.len() >= 2 { parts[1] } else { "" }
-}
-
-/// Truncate a command for display (keep first meaningful portion).
-fn truncate_command(cmd: &str) -> String {
-    let trimmed = cmd.trim();
-    // Keep first two words for display
-    let parts: Vec<&str> = trimmed.splitn(3, char::is_whitespace).collect();
-    match parts.len() {
-        0 => String::new(),
-        1 => parts[0].to_string(),
-        _ => format!("{} {}", parts[0], parts[1]),
-    }
+/// A command's first two words as written, the program and its subcommand, as
+/// the lexer ends them: a quoted or escaped blank stays inside its word. The
+/// report files a command under the second one and shows the two joined by one
+/// space.
+fn head_words(cmd: &str) -> Vec<&str> {
+    words(cmd, &tokenize(cmd))
+        .into_iter()
+        .take(2)
+        .map(|word| word.text)
+        .collect()
 }
 
 #[cfg(test)]
@@ -1034,6 +1021,28 @@ mod tests {
             let tally = tally_of(&[line], &test_ctx(true));
             assert_eq!(tally.total_commands, parts, "wrong part count for {line:?}");
         }
+    }
+
+    /// A command that runs rtk counts as adoption however its first word is
+    /// spelled, and `rtk bypass` (or its deprecated alias `rtk proxy`) does
+    /// not, as in `rtk session`.
+    #[test]
+    fn test_every_spelling_of_rtk_counts_as_adoption() {
+        let tally = tally_of(
+            &[
+                "rtk git status",
+                "rtk\tgit status",
+                "'rtk' git status",
+                "\\rtk git status",
+                "rtk bypass git status",
+                "rtk proxy git status",
+            ],
+            &test_ctx(false),
+        );
+
+        assert_eq!(tally.total_commands, 6);
+        assert_eq!(tally.already_rtk, 4);
+        assert!(tally.unsupported.is_empty());
     }
 
     /// Classification normalises an absolute path and the rewriter does not
@@ -1330,6 +1339,49 @@ mod tests {
     #[test]
     fn test_is_already_rtk_false_for_unrelated_command() {
         assert!(!is_already_rtk("grep -n foo bar.py"));
+    }
+
+    /// The first word decides, as bash ends it (at a space, a tab or a newline)
+    /// and removes its quoting.
+    #[test]
+    fn test_is_already_rtk_reads_the_first_word() {
+        for cmd in [
+            "rtk\tgit status",
+            "  rtk  ls",
+            "rtk\nls",
+            "rtk",
+            "rtk proxyfoo x",
+            "'rtk' git status",
+            "\\rtk git status",
+        ] {
+            assert!(is_already_rtk(cmd), "{cmd:?}");
+        }
+        for cmd in [
+            "rtk\tproxy git status",
+            "rtk  proxy ls",
+            "'rtk' 'proxy' ls",
+            "rtkx ls",
+            "rtk\r ls",
+            "xrtk ls",
+        ] {
+            assert!(!is_already_rtk(cmd), "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn test_head_words_are_the_first_two_words_as_written() {
+        for (cmd, expected) in [
+            ("git status -s", &["git", "status"][..]),
+            ("git  status", &["git", "status"]),
+            ("git\tstatus\t-s", &["git", "status"]),
+            ("  git \t status", &["git", "status"]),
+            ("  git  ", &["git"]),
+            ("grep 'a b' src", &["grep", "'a b'"]),
+            ("cat f\\ g h", &["cat", "f\\ g"]),
+            ("", &[]),
+        ] {
+            assert_eq!(head_words(cmd), expected, "{cmd:?}");
+        }
     }
 
     #[test]
