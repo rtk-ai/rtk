@@ -99,6 +99,7 @@ max_width = 120
 mode = "sqlite"             # sqlite (default) | tee (legacy files) | disabled
 max_entry_bytes = 10485760  # sqlite: 10 MiB per entry
 max_entries = 200           # sqlite: FIFO cap
+max_total_bytes = 0         # sqlite: combined encoded blobs; 0 = unlimited (legacy default)
 retention_days = 30         # sqlite: 0 disables age eviction
 compression = true          # sqlite: gzip blobs (lossless)
 # database_path = "/custom/recall.db"
@@ -203,9 +204,29 @@ Consumers must call `timer.track()` on **all** code paths — success, failure, 
 
 Consumers that parse structured output (JSON, NDJSON, state machines) should call `tee::tee_and_hint()` to persist raw output for LLM recovery on failure. It must be called before `std::process::exit()`.
 
-For truncation recovery on **success** (e.g. a list capped at 20 items), use `tee::force_tee_hint()` (multi-line blocks) or `tee::force_tee_tail_hint(content, slug, offset)` (flat lists). All three persist the full output to the content-addressed recall store ([`retriever.rs`](retriever.rs)) and emit a runnable hint — `[full output: rtk recall <hash>]` or `[+N hidden: rtk recall <hash>]` — instead of burning tokens working around missing data.
+For truncation recovery on **success** (e.g. a list capped at 20 items), use `tee::force_tee_hint()` (multi-line blocks) or `tee::force_tee_tail_hint(content, slug, offset)` (flat lists). All three persist the full output to the content-addressed recall store ([`retriever.rs`](retriever.rs)) and emit a runnable hint — `[full output: rtk recall <reference>] (unfiltered; may contain sensitive data)` or `[+N hidden: rtk recall <reference>] (unfiltered; may contain sensitive data)` — instead of burning tokens working around missing data.
 
-The agent runs `rtk recall <hash>` to get back exactly what was elided. For `force_tee_tail_hint`, `offset` is the 1-based first hidden line (`header_lines + MAX_CAP + 1`); it is stored so the default recall returns only the hidden tail. Storage is byte-faithful (`BLOB` + lossless gzip); tune limits via the `[retriever]` config section.
+The notice is appended outside the existing brackets on both backends, including tail hints, to preserve the recovery command/path and prefix-based hint filtering. It is part of the string charged by `runner::emit_guarded`; do not print it separately after the guard. Call sites may supply raw captured output or reconstructed recovery text; the notice means neither backend applies secret redaction. Sensitive values omitted from a summary may remain in that payload.
+
+The agent runs `rtk recall <reference>` to get back exactly what was elided. For `force_tee_tail_hint`, `offset` is the 1-based first hidden line (`header_lines + MAX_CAP + 1`); it is stored so the default recall returns only the hidden tail. Storage is byte-faithful (`BLOB` + lossless gzip); tune limits via the `[retriever]` config section.
+
+`recall_stats` has a separate fixed 500-row cap across `(slug, mode)` pairs. An insert trigger atomically evicts the least-used row (`elisions + recalls`, then oldest `rowid`), protecting the new row; repeated upserts keep accumulating without eviction. Opening an older oversized store trims it to the same limit. This bound allows hundreds of filter/mode pairs while preventing dynamic command names from growing statistics indefinitely. Evicted counters are discarded, so [recall efficiency](../../docs/guide/analytics/gain.md#recall-efficiency) is not a lifetime total.
+
+Use `max_total_bytes = 104857600` for a 100 MiB combined encoded-payload budget.
+This counts `length(blob)` after compression, excluding SQLite pages/indexes and
+WAL/journal overhead. An oversized individual blob is rejected without a hint;
+accepted inserts and oldest-first eviction commit atomically. SQLite triggers
+maintain byte/count totals, including upserts and deletes, without summing every
+blob on each write. Existing databases initialize the totals once.
+
+`rtk recall --gc` applies age/count/byte retention and compacts SQLite;
+`rtk recall --purge` removes all payload rows and compacts SQLite. Neither creates
+an absent database nor deletes recall counters, tracking history, or tee files.
+Both honor `RTK_RECALL_DB` over `database_path` and work with capture disabled.
+Active readers can delay WAL compaction: the command reports this and suggests
+retrying `--gc`. Maintenance does not securely erase backups or snapshots.
+
+`rtk telemetry forget` clears both recovery backends, including when recovery is disabled. Each backend owns its cleanup and reuses its write-path resolver: the recall database and SQLite sidecars are removed without opening a new store; tee cleanup removes top-level `<epoch>_<sanitized-slug>.log` files and `<epoch-ms>_<pid>-<sequence>_<sanitized-slug>.log` files directly inside `posthook`, preserving unrelated files and directories. Cleanup errors are reported as failures; file symlinks are not followed.
 
 ### Truncation Caps (`truncate`)
 

@@ -850,6 +850,8 @@ pub fn run(
     let mut shown = 0;
     let mut skipped_files = 0;
     let mut skipped_block = String::new();
+    let mut tails = Vec::new();
+    let mut hint_positions = Vec::new();
     for (idx, (file, entries)) in files.into_iter().enumerate() {
         if shown >= max_results {
             skipped_files += 1;
@@ -889,26 +891,35 @@ pub fn run(
         }
         // Tee the file's full matches (real path) so the tail hint recovers them
         // openably, skipping the lines already shown.
-        let full_block = match_block(file, entries);
-        match crate::core::tee::force_tee_tail_hint(
-            &full_block,
-            &grep_slug(idx, file),
+        tails.push((
+            match_block(file, entries),
+            grep_slug(idx, file),
             file_shown + 1,
-        ) {
-            Some(hint) => body.push_str(&format!(
-                "  +{} more in {} {}\n",
-                remaining, file_display, hint
-            )),
-            None => body.push_str(&format!("  +{} more in {}\n", remaining, file_display)),
-        }
+        ));
+        body.push_str(&format!("  +{} more in {}", remaining, file_display));
+        hint_positions.push(body.len());
+        body.push('\n');
     }
 
     if skipped_files > 0 {
-        let hint = crate::core::tee::force_tee_tail_hint(&skipped_block, "grep_skipped", 1)
-            .map(|h| format!(" {}", h))
-            .unwrap_or_default();
-        body.push_str(&format!("+{} more files{}\n", skipped_files, hint));
+        tails.push((skipped_block, "grep_skipped".to_string(), 1));
+        body.push_str(&format!("+{} more files", skipped_files));
+        hint_positions.push(body.len());
+        body.push('\n');
     }
+
+    // Finish all stores before emitting hints, since this run's final eviction
+    // may discard earlier files when the batch itself exceeds max_entries.
+    let requests: Vec<_> = tails
+        .iter()
+        .map(|(content, slug, offset)| crate::core::tee::TailHint {
+            content,
+            command_slug: slug,
+            line_offset: *offset,
+        })
+        .collect();
+    let hints = crate::core::tee::force_tee_tail_hints(&requests);
+    let body = insert_recovery_hints(&body, &hint_positions, hints);
 
     // Switch to the grouped form only when capping actually shrank the output;
     // otherwise emit the faithful baseline, so RTK never exceeds the real command.
@@ -934,6 +945,21 @@ pub fn run(
     timer.track(&real_cmd, &rtk_label, &raw_output, &output);
 
     Ok(exit_code)
+}
+
+fn insert_recovery_hints(body: &str, positions: &[usize], hints: Vec<Option<String>>) -> String {
+    let mut output = String::with_capacity(body.len());
+    let mut start = 0;
+    for (&position, hint) in positions.iter().zip(hints) {
+        output.push_str(&body[start..position]);
+        if let Some(hint) = hint {
+            output.push(' ');
+            output.push_str(&hint);
+        }
+        start = position;
+    }
+    output.push_str(&body[start..]);
+    output
 }
 
 /// Parses a single rg/grep match or context line of the form `file\0line_number[:-]content`.
@@ -1196,6 +1222,18 @@ fn compact_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_hints_keep_byte_positions_with_unicode_and_failed_stores() {
+        let body = "匹配\n  +2 more in 文件\nnext\n  +3 more in b\n";
+        let first = body.find("\nnext").expect("first position");
+        let second = body.len() - 1;
+        assert_eq!(
+            insert_recovery_hints(body, &[first, second], vec![None, Some("[hint]".into())]),
+            "匹配\n  +2 more in 文件\nnext\n  +3 more in b [hint]\n"
+        );
+        assert_eq!(insert_recovery_hints(body, &[], vec![]), body);
+    }
 
     #[test]
     fn test_clean_line() {

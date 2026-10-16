@@ -263,6 +263,16 @@ For how to write tests (fixtures, snapshots, token savings verification), see [d
 
 ### Pre-Commit Gate (mandatory)
 
+On Windows, `build.rs` gives Cargo-launched test workers at least an 8 MiB stack via
+`RUST_MIN_STACK`, matching the CLI executable's existing main-thread reserve.
+The full Clap command graph can exceed Rust's default 2 MiB worker stack in debug
+builds. This applies to local `cargo test` as well as CI; all parser tests and
+assertions still run. Cargo also supplies this environment to `cargo run` and
+its child processes, preserving a valid larger `RUST_MIN_STACK` setting; a
+directly launched installed CLI is unaffected. If you launch a compiled test
+executable directly instead of using Cargo, set
+`$env:RUST_MIN_STACK = "8388608"` in PowerShell first.
+
 All three must pass before any PR:
 
 ```bash

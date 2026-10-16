@@ -42,6 +42,7 @@ ignore_files = ["*.lock", "*.min.js", "*.min.css"]
 mode = "sqlite"             # sqlite (default) | tee (legacy files) | disabled
 max_entry_bytes = 10485760  # sqlite: 10 MiB per entry
 max_entries = 200           # sqlite: FIFO cap (0 = no cap)
+max_total_bytes = 0         # sqlite: aggregate encoded blob cap (0 = no cap)
 retention_days = 30         # sqlite: age eviction (0 = off)
 compression = true          # sqlite: gzip blobs (lossless)
 # database_path = "/custom/recall.db"
@@ -105,10 +106,18 @@ When a command fails — or a filter trims a long list — RTK persists the full
 
 ```
 FAILED: 2/15 tests
-[full output: rtk recall 36365b69eda6]
+[full output: rtk recall c_7d16363b493245f9857c323349f42ba0] (unfiltered; may contain sensitive data)
 ```
 
-Your AI assistant runs `rtk recall <hash>` exactly as printed in the hint — that is the whole agent interface. For humans inspecting the store: `rtk recall <hash> --full | --from N | --lines N | --grep PAT` and `rtk recall --list`. Storage is byte-faithful (`BLOB` + lossless gzip); the stored input is the captured command text, as with the previous tee files.
+Your AI assistant runs `rtk recall <reference>` exactly as printed in the hint — that is the whole agent interface. For humans inspecting the store: `rtk recall <reference> --full | --from N | --lines N | --grep PAT` and `rtk recall --list`. Storage is byte-faithful (`BLOB` + lossless gzip); the stored input is the captured command text, as with the previous tee files.
+
+New hints identify one immutable capture: repeating the same command output cannot change an earlier hint’s saved bytes, starting line, working directory, exit status or truncation metadata. Identical retained payloads are deduplicated. Use the complete `c_...` reference; capture prefixes are not accepted. Existing legacy hashes and their unique prefixes remain readable.
+
+References expire when their payload is evicted or their capture record ages out of the bounded 1,000-record history. Expired references fail rather than pointing at a later run, even if that run saves identical bytes. Caps apply when capturing: `--full` returns all bytes saved for that capture, which may be less than the original command output.
+
+Both SQLite recall and legacy tee files keep the payload supplied by a filter without secret redaction. This may be raw captured output or reconstructed recovery text. A summary that omits a sensitive field does not remove it from stored recovery output. Review recovered content before copying it into a transcript or bug report. The same notice follows full-output and hidden-tail hints; the command or shell-quoted path inside the brackets remains unchanged.
+
+To stop future recovery storage, set `RTK_RECALL=0` for an invocation or run `rtk config recall disabled`. Neither deletes existing entries or tee files.
 
 ### Choosing the recovery mode
 
@@ -116,7 +125,7 @@ The simplest way is the CLI — no file editing needed:
 
 ```bash
 rtk config recall           # show the active mode and its source
-rtk config recall sqlite    # hash-addressed sqlite store (default)
+rtk config recall sqlite    # capture-addressed sqlite store (default)
 rtk config recall tee       # legacy .log files in ~/.local/share/rtk/tee/
 rtk config recall disabled  # no recovery storage
 ```
@@ -130,12 +139,22 @@ To see how often your assistant actually goes back for elided output — and whi
 | `retriever.mode` | `"sqlite"` | `sqlite` (default), `tee` (legacy files), `disabled` |
 | `retriever.max_entry_bytes` | `10485760` | Per-entry storage cap (10 MiB) |
 | `retriever.max_entries` | `200` | FIFO cap on retained entries (0 = no cap) |
+| `retriever.max_total_bytes` | `0` | Combined encoded blob bytes (0 = no aggregate limit) |
 | `retriever.retention_days` | `30` | Age eviction in days (0 = off) |
 | `retriever.compression` | `true` | gzip stored blobs (lossless) |
 | `retriever.tee_max_files` | `20` | tee mode: how many files are kept before rotation |
 | `retriever.tee_max_file_size` | `1048576` | tee mode: per-file cap (1 MiB) |
 | `retriever.tee_on_success` | `false` | tee mode: also archive successful runs — the legacy `[tee] mode = "always"` |
-| Max file size | 1 MB | Truncated above this |
+
+For example, `max_total_bytes = 104857600` limits gzip blobs (or raw blobs when
+compression is off) to 100 MiB, excluding SQLite pages, indexes and WAL files.
+An individual blob larger than the budget is rejected without a recovery hint.
+`--gc` applies retention without waiting for a write; `--purge` removes all stored
+output. Both compact the configured recall database (`RTK_RECALL_DB` takes
+precedence), even when capture is disabled, while preserving recall statistics,
+tracking history and tee files. Active readers can delay WAL compaction; retry
+`--gc` after they finish. Purging does not promise secure erasure from backups or
+filesystem snapshots.
 
 ## Excluding commands from auto-rewrite
 

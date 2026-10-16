@@ -651,6 +651,7 @@ pub fn run(
         "json" => {
             return export_json(
                 &tracker,
+                history,
                 daily,
                 weekly,
                 monthly,
@@ -1537,6 +1538,11 @@ fn print_monthly(tracker: &Tracker, project_scope: Option<&str>) -> Result<()> {
 #[derive(Serialize)]
 struct ExportData {
     summary: ExportSummary,
+    output_accounting: crate::core::tracking::OutputAccounting,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commands: Option<Vec<crate::core::tracking::InvocationRecord>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recall_events: Option<Vec<crate::core::tracking::RecallEventRecord>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     daily: Option<Vec<DayStats>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1557,8 +1563,10 @@ struct ExportSummary {
     oversized_excluded: usize,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn export_json(
     tracker: &Tracker,
+    history: bool,
     daily: bool,
     weekly: bool,
     monthly: bool,
@@ -1570,6 +1578,13 @@ fn export_json(
         .context("Failed to load token savings summary from database")?;
 
     let export = ExportData {
+        output_accounting: tracker.output_accounting(project_scope)?,
+        commands: history
+            .then(|| tracker.invocation_history(100, project_scope))
+            .transpose()?,
+        recall_events: history
+            .then(|| tracker.recall_event_history(100, project_scope))
+            .transpose()?,
         summary: ExportSummary {
             total_commands: summary.total_commands,
             total_input: summary.total_input,

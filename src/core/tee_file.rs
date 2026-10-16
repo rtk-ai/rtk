@@ -1,6 +1,7 @@
 //! Legacy file-based recovery ("tee" mode) — may be deprecated. Prefer the
 //! sqlite recall store (`[retriever] mode = "sqlite"`); see retriever.rs.
 
+use super::tee::RECOVERY_OUTPUT_NOTICE;
 use crate::core::config::Config;
 use crate::core::retriever::RetrieverConfig;
 use crate::core::user_dirs;
@@ -109,6 +110,123 @@ pub(crate) fn get_tee_dir(cfg: &RetrieverConfig) -> Option<PathBuf> {
         return Some(dir.clone());
     }
     super::user_dirs::data().map(|d| d.join("tee"))
+}
+
+/// Remove RTK-owned recovery logs, preserving unrelated files and directories.
+pub(crate) fn forget(cfg: &RetrieverConfig) -> anyhow::Result<()> {
+    let Some(dir) = get_tee_dir(cfg) else {
+        return Ok(());
+    };
+    // A trailing separator or `.` must not make symlink_metadata follow the
+    // configured root before the refusal check.
+    let dir: PathBuf = dir.components().collect();
+    match std::fs::symlink_metadata(&dir) {
+        Ok(metadata) => anyhow::ensure!(
+            !metadata.file_type().is_symlink(),
+            "Refusing to follow tee spool symlink: {}",
+            dir.display()
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => anyhow::bail!("Inspect {}: {e}", dir.display()),
+    }
+    let mut errors = Vec::new();
+    if let Err(e) = forget_directory(&dir, false) {
+        errors.push(format!("{e:#}"));
+    }
+    // Also clean full-edition logs after switching to an OSS binary. Never
+    // recurse into arbitrary directories or follow a posthook symlink.
+    let posthook = dir.join(super::tee::POSTHOOK_SUBDIR);
+    let result = match std::fs::symlink_metadata(&posthook) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(anyhow::anyhow!(
+            "Refusing to follow posthook spool symlink: {}",
+            posthook.display()
+        )),
+        Ok(metadata) if metadata.is_dir() => forget_directory(&posthook, true),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(anyhow::anyhow!("Inspect {}: {e}", posthook.display())),
+    };
+    if let Err(e) = result {
+        errors.push(format!("{e:#}"));
+    }
+    anyhow::ensure!(errors.is_empty(), "{}", errors.join("; "));
+    Ok(())
+}
+
+fn forget_directory(dir: &Path, posthook: bool) -> anyhow::Result<()> {
+    use anyhow::Context;
+
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("Read tee spool {}", dir.display())),
+    };
+    let mut errors = Vec::new();
+    for entry in entries {
+        if let Err(e) = entry
+            .map_err(anyhow::Error::from)
+            .and_then(|entry| forget_entry(entry, posthook))
+        {
+            errors.push(format!("{e:#}"));
+        }
+    }
+    anyhow::ensure!(errors.is_empty(), "{}", errors.join("; "));
+    Ok(())
+}
+
+fn is_posthook_slug(slug: &str) -> bool {
+    let Some((identity, _)) = slug.split_once('_') else {
+        return false;
+    };
+    let Some((pid, sequence)) = identity.split_once('-') else {
+        return false;
+    };
+    pid.parse::<u32>().is_ok()
+        && sequence.parse::<u64>().is_ok()
+        && pid.bytes().all(|b| b.is_ascii_digit())
+        && sequence.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn forget_entry(entry: std::fs::DirEntry, posthook: bool) -> anyhow::Result<()> {
+    use anyhow::Context;
+
+    let name = entry.file_name();
+    let Some((epoch, slug)) = name
+        .to_str()
+        .and_then(|s| s.strip_suffix(".log"))
+        .and_then(|s| s.split_once('_'))
+    else {
+        return Ok(());
+    };
+    // Match write_tee_file, including old unshortened slugs. A custom tee
+    // directory can hold unrelated .log files, so extension alone is unsafe.
+    if epoch.parse::<u64>().is_err()
+        || (posthook && !is_posthook_slug(slug))
+        || !epoch.bytes().all(|b| b.is_ascii_digit())
+        || !slug
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Ok(());
+    }
+    let path = entry.path();
+    let kind = entry
+        .file_type()
+        .with_context(|| format!("Inspect {}", path.display()))?;
+    anyhow::ensure!(
+        !kind.is_symlink(),
+        "Refusing to follow tee log symlink: {}",
+        path.display()
+    );
+    if kind.is_file() {
+        // nosemgrep: filesystem-deletion
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("Delete {}", path.display())),
+        }
+    }
+    Ok(())
 }
 
 fn cleanup_old_files(dir: &Path, max_files: usize) {
@@ -262,7 +380,10 @@ fn write(cfg: &RetrieverConfig, content: &str, slug: &str) -> Option<PathBuf> {
 }
 
 pub(crate) fn format_hint(path: &Path) -> String {
-    format!("[full output: {}]", display_shell_path(path))
+    format!(
+        "[full output: {}]{RECOVERY_OUTPUT_NOTICE}",
+        display_shell_path(path)
+    )
 }
 
 pub fn tee_and_hint(cfg: &RetrieverConfig, raw: &str, slug: &str) -> Option<String> {
@@ -272,7 +393,10 @@ pub fn tee_and_hint(cfg: &RetrieverConfig, raw: &str, slug: &str) -> Option<Stri
 
 pub fn force_tee_hint(cfg: &RetrieverConfig, content: &str, slug: &str) -> Option<String> {
     let path = write(cfg, content, slug)?;
-    Some(format!("[full output: {}]", display_shell_path(&path)))
+    Some(format!(
+        "[full output: {}]{RECOVERY_OUTPUT_NOTICE}",
+        display_shell_path(&path)
+    ))
 }
 
 pub fn force_tee_tail_hint(
@@ -283,7 +407,7 @@ pub fn force_tee_tail_hint(
 ) -> Option<String> {
     let path = write(cfg, content, slug)?;
     Some(format!(
-        "[see remaining: tail -n +{} {}]",
+        "[see remaining: tail -n +{} {}]{RECOVERY_OUTPUT_NOTICE}",
         line_offset,
         display_shell_path(&path)
     ))
@@ -295,6 +419,191 @@ mod tests {
     use std::fs;
 
     const MAX_FILE_SIZE: usize = 1_048_576;
+
+    #[test]
+    fn test_forget_only_removes_top_level_tee_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            tee_directory: Some(dir.path().to_path_buf()),
+            ..RetrieverConfig::default()
+        };
+        let written = write(&cfg, "private output", "cargo test").unwrap();
+        // Old versions accepted arbitrarily long sanitized slugs.
+        let legacy = dir
+            .path()
+            .join(format!("1700000000_{}.log", "x".repeat(100)));
+        std::fs::write(&legacy, "legacy output").unwrap();
+        for name in [
+            "notes.log",
+            "1234_report final.log",
+            "_cmd.log",
+            "12_cmd.txt",
+            "-123_cmd.log",
+            "18446744073709551616_cmd.log",
+        ] {
+            std::fs::write(dir.path().join(name), "keep").unwrap();
+        }
+        let nested = dir.path().join("1234_directory.log");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("1234_cmd.log"), "keep").unwrap();
+        forget(&cfg).unwrap();
+        assert!(!written.exists());
+        assert!(!legacy.exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 7);
+        assert!(nested.join("1234_cmd.log").exists());
+        forget(&cfg).unwrap();
+    }
+
+    #[test]
+    fn test_forget_posthook_scope_and_disabled_capture() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            mode: super::super::retriever::RecoveryMode::Disabled,
+            tee_directory: Some(dir.path().to_path_buf()),
+            ..RetrieverConfig::default()
+        };
+        let posthook = dir.path().join(super::super::tee::POSTHOOK_SUBDIR);
+        std::fs::create_dir(&posthook).unwrap();
+        let owned = posthook.join("1791928800123_1234-0_read_data_json.log");
+        std::fs::write(&owned, "private posthook output").unwrap();
+        for name in [
+            "notes.log",
+            "1791928800123_read_data_json.log",
+            "1791928800123_abc-0_read_data_json.log",
+            "1791928800123_1234-abc_read_data_json.log",
+            "1791928800123_1234-0_read data.log",
+        ] {
+            std::fs::write(posthook.join(name), "keep").unwrap();
+        }
+        let nested = posthook.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join(owned.file_name().unwrap()), "keep").unwrap();
+        forget(&cfg).unwrap();
+        assert!(!owned.exists());
+        assert_eq!(std::fs::read_dir(&posthook).unwrap().count(), 6);
+        assert!(nested.join(owned.file_name().unwrap()).exists());
+        forget(&cfg).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_forget_rejects_posthook_directory_and_file_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            tee_directory: Some(dir.path().join("tee")),
+            ..RetrieverConfig::default()
+        };
+        std::fs::create_dir(cfg.tee_directory.as_ref().unwrap()).unwrap();
+        let outside = dir.path().join("unrelated");
+        std::fs::create_dir(&outside).unwrap();
+        let name = "1791928800123_1234-0_read_data_json.log";
+        let target = outside.join(name);
+        std::fs::write(&target, "keep").unwrap();
+        let posthook = cfg
+            .tee_directory
+            .as_ref()
+            .unwrap()
+            .join(super::super::tee::POSTHOOK_SUBDIR);
+        std::os::unix::fs::symlink(&outside, &posthook).unwrap();
+        let legacy = write(&cfg, "private legacy output", "cargo test").unwrap();
+        assert!(forget(&cfg).is_err());
+        assert!(!legacy.exists(), "other cleanup still proceeds");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+        std::fs::remove_file(&posthook).unwrap();
+        std::fs::create_dir(&posthook).unwrap();
+        std::os::unix::fs::symlink(&target, posthook.join(name)).unwrap();
+        assert!(forget(&cfg).is_err());
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_forget_rejects_symlinked_tee_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("unrelated");
+        std::fs::create_dir(&target).unwrap();
+        let legacy = target.join("1791928800_cargo_test.log");
+        std::fs::write(&legacy, "keep legacy-shaped data").unwrap();
+        let posthook = target.join(super::super::tee::POSTHOOK_SUBDIR);
+        std::fs::create_dir(&posthook).unwrap();
+        let log = posthook.join("1791928800123_1234-0_read_data_json.log");
+        std::fs::write(&log, "keep posthook-shaped data").unwrap();
+        let link = dir.path().join("linked-tee");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        for path in [link.clone(), link.join(""), link.join(".")] {
+            let cfg = RetrieverConfig {
+                tee_directory: Some(path),
+                ..RetrieverConfig::default()
+            };
+            assert!(forget(&cfg).is_err());
+            assert!(legacy.exists());
+            assert!(log.exists());
+        }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn test_forget_removes_logs_from_the_posthook_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::core::config::Config::default();
+        config.retriever.mode = super::super::retriever::RecoveryMode::Tee;
+        config.retriever.tee_directory = Some(dir.path().to_path_buf());
+        assert!(
+            super::super::tee::posthook_tee_hint(
+                &config,
+                &"private output\n".repeat(50),
+                "read data.json"
+            )
+            .is_some()
+        );
+        let posthook = dir.path().join(super::super::tee::POSTHOOK_SUBDIR);
+        assert_eq!(std::fs::read_dir(&posthook).unwrap().count(), 1);
+        forget(&config.retriever).unwrap();
+        assert_eq!(std::fs::read_dir(&posthook).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn test_forget_missing_spool_does_not_create_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            tee_directory: Some(dir.path().join("missing")),
+            ..RetrieverConfig::default()
+        };
+        forget(&cfg).unwrap();
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn test_forget_honors_tee_environment_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            tee_directory: Some(dir.path().join("configured")),
+            ..RetrieverConfig::default()
+        };
+        let configured = write(&cfg, "keep", "cmd").unwrap();
+        let overridden = dir.path().join("overridden");
+        user_env::with_path("RTK_TEE_DIR", Some(&overridden), || {
+            let written = write(&cfg, "forget", "cmd").unwrap();
+            forget(&cfg).unwrap();
+            assert!(!written.exists());
+        });
+        assert!(configured.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_forget_does_not_follow_log_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            tee_directory: Some(dir.path().to_path_buf()),
+            ..RetrieverConfig::default()
+        };
+        let target = dir.path().join("unrelated");
+        std::fs::write(&target, "keep").unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join("1234_cmd.log")).unwrap();
+        assert!(forget(&cfg).is_err());
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "keep");
+    }
 
     #[test]
     fn test_sanitize_slug() {

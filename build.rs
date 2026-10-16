@@ -32,6 +32,20 @@ fn set_windows_stack_size() {
 fn main() {
     set_windows_stack_size();
 
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        // libtest parses the same graph on worker threads, whose 2 MiB default
+        // is independent of the executable's main-thread reserve. Cargo also
+        // supplies rustc-env values during `cargo test` and `cargo run`, but
+        // this does not change the environment of the installed CLI.
+        println!("cargo:rerun-if-env-changed=RUST_MIN_STACK");
+        let stack_size = std::env::var("RUST_MIN_STACK")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0)
+            .max(8 * 1024 * 1024);
+        println!("cargo:rustc-env=RUST_MIN_STACK={stack_size}");
+    }
+
     check_cmds_modules_declared();
 
     let filters_dir = Path::new("src/filters");

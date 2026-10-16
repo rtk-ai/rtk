@@ -290,10 +290,20 @@ Analytics commands (`rtk gain`, `rtk cc-economics`, `rtk session`) query this da
 On command failure (non-zero exit code) — or when a filter truncates a long list:
 
 1. Raw unfiltered output is stored in a content-addressed sqlite database (`~/.local/share/rtk/recall.db`, gzip, byte-faithful)
-2. A hint line is printed: `[full output: rtk recall 3f9c2a81d4e7]` (failures) or `[+N hidden: rtk recall <hash>]` (truncated lists)
+2. A hint line is printed: `[full output: rtk recall 3f9c2a81d4e7] (unfiltered; may contain sensitive data)` (failures) or `[+N hidden: rtk recall <hash>] (unfiltered; may contain sensitive data)` (truncated lists)
 3. LLM agents run `rtk recall <hash>` to get back exactly what was elided instead of re-running the command
 
+The notice also follows legacy tee hints, outside the brackets so the recovery command or shell-quoted path stays intact. Recovery storage does not redact sensitive values, including fields omitted from a summary; review recovered output before sharing it.
+
 The mode is selectable via `rtk config recall <sqlite|tee|disabled>` — `tee` keeps the legacy per-file behavior (`~/.local/share/rtk/tee/{epoch}_{slug}.log`). Recovery never affects command output or exit code. `rtk gain --recalls` reports how often elided output is actually consulted, per filter.
+
+The optional `retriever.max_total_bytes` budget counts encoded payload bytes,
+not physical SQLite/WAL size. Inserts, trigger-maintained totals and eviction
+share one immediate transaction; a returned hash cannot be evicted by its own
+write. The compatibility default (`0`) keeps the existing count/age-only limits.
+`rtk recall --gc` applies retention and reclaims free pages; `--purge` removes
+stored output while keeping aggregate recall statistics. Maintenance opens only
+the existing configured recall store and validates its schema before mutation.
 
 > **Details**: [`src/core/README.md`](../../src/core/README.md) covers the recall store, tee mode configuration, and the rotation strategy.
 

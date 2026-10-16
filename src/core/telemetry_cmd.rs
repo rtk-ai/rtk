@@ -196,6 +196,9 @@ fn run_disable() -> Result<()> {
 }
 
 fn run_forget() -> Result<()> {
+    // Do not lose configured recovery paths by falling back to defaults when
+    // the config is unreadable or malformed.
+    let config = crate::core::config::Config::load().context("Load recovery paths for erasure")?;
     crate::hooks::init::save_telemetry_consent(false)?;
 
     let salt_path = super::telemetry::salt_file_path();
@@ -226,6 +229,18 @@ fn run_forget() -> Result<()> {
         }
     }
 
+    // Try both stores even when one fails; neither mode nor write-disable
+    // switches imply that previously captured output has already been erased.
+    let mut recovery_errors = Vec::new();
+    for result in [
+        super::retriever::forget(&config.retriever),
+        super::tee_file::forget(&config.retriever),
+    ] {
+        if let Err(e) = result {
+            recovery_errors.push(format!("{e:#}"));
+        }
+    }
+
     // Send server-side erasure request
     if let Some(hash) = device_hash {
         match send_erasure_request(&hash) {
@@ -240,6 +255,12 @@ fn run_forget() -> Result<()> {
         }
     }
 
+    anyhow::ensure!(
+        recovery_errors.is_empty(),
+        "Telemetry disabled, but recovery data cleanup failed: {}",
+        recovery_errors.join("; ")
+    );
+    println!("Local recall store and legacy tee logs deleted.");
     println!("Local telemetry data deleted. Telemetry disabled.");
     Ok(())
 }
@@ -270,6 +291,113 @@ fn send_erasure_request(device_hash: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_forget_clears_both_recovery_modes_even_when_disabled() {
+        use crate::core::{config::Config, retriever, test_isolation};
+
+        let dir = tempfile::tempdir().unwrap();
+        test_isolation::with_root(dir.path(), || {
+            let mut cfg = Config::default();
+            cfg.retriever.mode = retriever::RecoveryMode::Disabled;
+            cfg.retriever.database_path = Some(dir.path().join("custom.sqlite"));
+            cfg.retriever.tee_directory = Some(dir.path().join("spool"));
+            cfg.save().unwrap();
+            assert!(matches!(
+                retriever::store(&cfg.retriever, b"private output", "cmd", Some(1), 1),
+                retriever::Stored::Saved(_)
+            ));
+            crate::core::tee_file::force_tee_hint(&cfg.retriever, "private output", "cmd").unwrap();
+            user_env::with_vars(&[("RTK_RECALL", Some("0")), ("RTK_TEE", Some("0"))], || {
+                run_forget().unwrap();
+            });
+            assert!(!cfg.retriever.database_path.unwrap().exists());
+            assert_eq!(
+                std::fs::read_dir(cfg.retriever.tee_directory.unwrap())
+                    .unwrap()
+                    .count(),
+                0
+            );
+            assert_eq!(Config::load().unwrap().telemetry.consent_given, Some(false));
+            run_forget().unwrap();
+        });
+    }
+
+    #[test]
+    fn test_forget_attempts_tee_cleanup_when_recall_cleanup_fails() {
+        use crate::core::{config::Config, test_isolation};
+
+        let dir = tempfile::tempdir().unwrap();
+        test_isolation::with_root(dir.path(), || {
+            let mut cfg = Config::default();
+            cfg.retriever.database_path = Some(dir.path().to_path_buf());
+            cfg.retriever.tee_directory = Some(dir.path().join("spool"));
+            cfg.save().unwrap();
+            crate::core::tee_file::force_tee_hint(&cfg.retriever, "private output", "cmd").unwrap();
+            assert!(run_forget().is_err());
+            assert_eq!(
+                std::fs::read_dir(cfg.retriever.tee_directory.unwrap())
+                    .unwrap()
+                    .count(),
+                0
+            );
+            assert_eq!(Config::load().unwrap().telemetry.consent_given, Some(false));
+        });
+    }
+
+    #[test]
+    fn test_forget_uses_defaults_and_migrated_legacy_paths() {
+        use crate::core::{config::Config, retriever, tee_file, test_isolation, user_dirs};
+
+        for legacy in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            test_isolation::with_root(dir.path(), || {
+                if legacy {
+                    let config_dir = user_dirs::config().unwrap();
+                    std::fs::create_dir_all(&config_dir).unwrap();
+                    let spool =
+                        toml::Value::String(dir.path().join("legacy").to_str().unwrap().into());
+                    std::fs::write(
+                        config_dir.join("config.toml"),
+                        format!("[tee]\nenabled = false\ndirectory = {spool}\n"),
+                    )
+                    .unwrap();
+                }
+                let cfg = Config::load().unwrap();
+                assert!(matches!(
+                    retriever::store(&cfg.retriever, b"private output", "cmd", None, 1),
+                    retriever::Stored::Saved(_)
+                ));
+                tee_file::force_tee_hint(&cfg.retriever, "private output", "cmd").unwrap();
+                run_forget().unwrap();
+                assert!(
+                    !user_dirs::data()
+                        .unwrap()
+                        .join(crate::core::constants::RECALL_DB)
+                        .exists()
+                );
+                assert_eq!(
+                    std::fs::read_dir(tee_file::resolved_tee_dir().unwrap())
+                        .unwrap()
+                        .count(),
+                    0
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn test_forget_does_not_replace_invalid_configuration_with_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::core::test_isolation::with_root(dir.path(), || {
+            let config_dir = crate::core::user_dirs::config().unwrap();
+            std::fs::create_dir_all(&config_dir).unwrap();
+            let path = config_dir.join("config.toml");
+            std::fs::write(&path, "[retriever\n").unwrap();
+            assert!(run_forget().is_err());
+            assert_eq!(std::fs::read_to_string(path).unwrap(), "[retriever\n");
+        });
+    }
 
     /// Regression for #1307: the env opt-out must short-circuit telemetry
     /// consent paths so `rtk init` cannot hang in non-interactive environments.

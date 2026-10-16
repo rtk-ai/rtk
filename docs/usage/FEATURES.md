@@ -1403,20 +1403,34 @@ exclude_commands = []       # Commands excluded from automatic rewriting
 
 ### Raw output recovery
 
-When a command fails (or a filter truncates a list), RTK saves the complete raw output in a local SQLite database, addressed by content hash. This lets the LLM retrieve the output without re-running the command.
+When a command fails (or a filter truncates a list), RTK saves the complete raw output in a local SQLite database, addressed by an immutable capture reference. This lets the LLM retrieve the output without re-running the command.
 
 **How it works:**
 1. The command fails (exit code != 0) or the output is truncated
 2. RTK stores the raw output (gzip) in `~/.local/share/rtk/recall.db`
-3. A hint with the hash is shown: `[full output: rtk recall <hash>]` or `[+N hidden: rtk recall <hash>]`
-4. `rtk recall <hash>` returns the missing part (delta); `--full` returns the complete output
+3. A hint with the capture reference is shown: `[full output: rtk recall <reference>] (unfiltered; may contain sensitive data)` or `[+N hidden: rtk recall <reference>] (unfiltered; may contain sensitive data)`
+4. `rtk recall <reference>` returns the missing part (delta); `--full` returns the complete output
+
+Recovered output, in SQLite and legacy tee files, is not redacted: fields absent
+from a summary may remain in recovery storage. Review it before sharing.
+`RTK_RECALL=0` or `rtk config recall disabled` stops future storage without
+removing existing copies. The same notice follows tee hints, outside the brackets
+to preserve the quoted command or path.
+
+New references have the form `c_<32-hex capture ID>` and require an exact match.
+Each reference retains its original hidden-line offset and saved bytes even if
+the same command output is captured again. `--full` returns all bytes saved for
+that capture, subject to its original storage cap. Expired captures fail clearly;
+legacy hashes and their unique prefixes remain supported.
 
 **Commands:**
 ```bash
-rtk recall <hash>            # Part not shown (delta)
-rtk recall <hash> --full     # Complete output
-rtk recall <hash> --grep RE  # Filter by regex
+rtk recall <reference>            # Part not shown (delta)
+rtk recall <reference> --full     # Complete output
+rtk recall <reference> --grep RE  # Filter by regex
 rtk recall --list            # List entries
+rtk recall --gc              # Apply retention and compact SQLite
+rtk recall --purge           # Delete stored output and compact SQLite
 rtk gain --recalls           # Retrieval rate per filter
 rtk config recall <mode>     # Change mode without editing the config (sqlite|tee|disabled)
 ```
@@ -1432,9 +1446,20 @@ that hides output the agent comes back for.
 |---------|---------|-------------|
 | `retriever.mode` | `"sqlite"` | `"sqlite"`, `"tee"` (legacy files), `"disabled"` |
 | `retriever.max_entries` | `200` | FIFO eviction beyond this |
+| `retriever.max_total_bytes` | `0` | Combined encoded blob bytes (0 = no aggregate limit) |
 | `retriever.retention_days` | `30` | Old entries are purged |
 | `retriever.max_entry_bytes` | `10 MB` | Truncated beyond this (at the last complete line) |
 | Minimum size | 500 bytes | Failures that are too short are not saved |
+
+For example, `max_total_bytes = 104857600` limits gzip blobs (or raw blobs when
+compression is off) to 100 MiB, excluding SQLite pages, indexes and WAL files.
+An individual blob larger than the budget is rejected without a recovery hint.
+`--gc` applies retention without waiting for a write; `--purge` removes all stored
+output. Both compact the configured recall database (`RTK_RECALL_DB` takes
+precedence), even when capture is disabled, while preserving recall statistics,
+tracking history and tee files. Active readers can delay WAL compaction; retry
+`--gc` after they finish. Purging does not promise secure erasure from backups or
+filesystem snapshots.
 
 The `"tee"` mode keeps the legacy behavior (`.log` files in `~/.local/share/rtk/tee/`, rotation via `tee_max_files`). A legacy `[tee]` section in the config is mapped automatically (see above).
 
