@@ -1273,7 +1273,7 @@ rtk init -g --uninstall         # Uninstall
 Internal command used by the hooks. The exit code carries the permission decision, taken from Claude Code's permission rules applied to every command in a chain:
 
 - `0`: prints the rewritten command; allow rules cover every command, so the hook may allow it without asking
-- `1`: no output, no rewrite (no RTK equivalent, nothing to rewrite, a command excluded in config, a construct RTK does not rewrite such as `$(...)` or a file redirect, or a deny rule matched inside a shell wrapper's script); the command runs unchanged
+- `1`: no output, no rewrite (no RTK equivalent, nothing to rewrite, a command excluded in config, a construct RTK does not rewrite such as `$(...)` or a file redirect, or a deny rule matched inside a shell wrapper's script, or not ruled out there because the script has more prefixes than RTK reads); the command runs unchanged
 - `2`: a deny matched (checked before anything else). With no output, a deny rule matched and the hook defers to the agent's own deny. With output, an rtk pipeline rule denied or routed the command, and the hook blocks it with that message
 - `3`: prints the rewritten command; an ask rule matched, or allow rules do not cover every command, including when there are no rules at all; the agent asks for confirmation
 

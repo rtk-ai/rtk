@@ -1,5 +1,6 @@
 //! Scans AI coding sessions to find commands that could benefit from RTK filtering.
 
+pub(crate) mod families;
 pub mod provider;
 pub mod registry;
 mod report;

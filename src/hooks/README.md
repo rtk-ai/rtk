@@ -82,9 +82,11 @@ second command-parsing boundary. RTK checks deny rules against both the outer
 wrapper and the parsed inner segments, including a wrapper behind a prefix the
 rewrite strips (`env bash -c '…'`, `timeout 5 sh -c '…'`, a configured
 `transparent_prefixes` entry — `registry::shell_wrapper_positions`). A shell
-name that is merely an argument (`grep -rn bash -c src`) is not a wrapper. A
-deny rule matching an inner segment yields `Defer`: RTK neither rewrites nor
-decides, so the host sees the command exactly as typed.
+name that is merely an argument (`grep -rn bash -c src`) is not a wrapper.
+Each inner segment is read past its prefixes as an outer one is (below). A
+deny rule matching an inner segment, or, where a deny rule exists, a script
+whose prefixes outrun that peel, yields `Defer`: RTK neither rewrites nor decides, so the host sees the
+command exactly as typed.
 A wrapper at the start of a segment is never auto-allowed: its strongest RTK
 verdict is `Ask`. A wrapper behind a prefix is only checked for deny rules and
 otherwise keeps the outer command's verdict, as on master. Ask-capable hosts
@@ -99,7 +101,7 @@ them.
 | Ask | `permissions.ask` rule matched | 3 | Rewrite + let host tool prompt user |
 | Allow | `permissions.allow` rule matched | 0 | Rewrite + auto-allow |
 | Default | No rule matched | 3 | Rewrite + let host tool prompt user |
-| Defer | `permissions.deny` rule matched inside a shell wrapper | 1 | Passthrough — command runs as without RTK |
+| Defer | `permissions.deny` rule matched inside a shell wrapper, or a wrapper's script read past the peel's cap while one exists | 1 | Passthrough — command runs as without RTK |
 
 A deny or ask rule is matched against each segment as written, without the grammar a split leaves (`{`, `!`, `(`), and past each leading assignment or wrapper in turn (`registry::matching_readings`): `env HUSKY=0 git push` is read as `HUSKY=0 git push` and as `git push`, as Claude Code reads it. A reading need not be what the shell runs (`nohup HUSKY=0 git push` makes nohup look for a program named `HUSKY=0`), so it can only make a verdict stricter. Past 32 prefixes the command behind them is unread, and where a deny or ask rule exists the verdict is at least Ask. An allow rule matches the segment as written only, so a wrapper never inherits the allow of the command it runs.
 

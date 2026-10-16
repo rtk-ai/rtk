@@ -123,7 +123,8 @@ impl ApprovalOwner {
 ///
 /// 1. **Deny wins outright.** Checked before anything else so a denied command
 ///    is never even considered for rewriting. A deny rule matched inside a
-///    shell wrapper's script yields `Defer` instead: no rewrite, no decision.
+///    shell wrapper's script, or one that script has too many prefixes to rule
+///    out, yields `Defer` instead: no rewrite, no decision.
 /// 2. **Unattestable constructs are refused.** Command substitution and
 ///    file-target redirects can't be decomposed into segments the permission
 ///    gate can check individually, so a rewrite could smuggle an unchecked

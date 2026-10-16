@@ -25,7 +25,9 @@ pub enum PermissionVerdict {
     Ask,
     /// No rule matched — default to ask (matches Claude Code's least-privilege default).
     Default,
-    /// A deny rule matched inside a shell wrapper's script — RTK neither rewrites nor decides.
+    /// A deny rule matched inside a shell wrapper's script, or, while a deny
+    /// rule exists, the script has more prefixes than RTK reads — RTK neither
+    /// rewrites nor decides.
     Defer,
 }
 
@@ -238,20 +240,29 @@ fn check_shell_wrapper_permissions(
             // Both spellings, exactly as the outer loop above: a segment can open
             // with grammar that is not part of the command (`! rm …`, `{ rm …`),
             // and a rule naming the command has to reach it there too.
-            let inner_denied = split_for_permissions(script).iter().any(|inner_segment| {
-                let inner_segment = inner_segment.trim();
-                let readings = registry::shell_wrapper_positions(
-                    strip_grammar_residue(inner_segment),
-                    transparent_prefixes,
-                );
-                std::iter::once(inner_segment)
-                    .chain(readings)
-                    .any(|reading| {
-                        deny_rules
-                            .iter()
-                            .any(|pattern| command_matches_pattern(reading, pattern))
-                    })
-            });
+            // Past each prefix as the outer gate reads it, and past each one the
+            // rewrite reaches through, a user's prefixes included. A script whose
+            // prefixes outrun the peel's cap leaves its command unread, and goes
+            // to the host.
+            // With no deny rule there is nothing to match, so nothing to read.
+            let inner_denied = !deny_rules.is_empty()
+                && split_for_permissions(script).iter().any(|inner_segment| {
+                    let inner_segment = inner_segment.trim();
+                    let unwrapped = strip_grammar_residue(inner_segment);
+                    let peeled = matching_readings(unwrapped);
+                    !peeled.complete
+                        || std::iter::once(inner_segment)
+                            .chain(peeled.readings)
+                            .chain(registry::shell_wrapper_positions(
+                                unwrapped,
+                                transparent_prefixes,
+                            ))
+                            .any(|reading| {
+                                deny_rules
+                                    .iter()
+                                    .any(|pattern| command_matches_pattern(reading, pattern))
+                            })
+                });
             if inner_denied {
                 return Some(PermissionVerdict::Defer);
             }
@@ -977,6 +988,16 @@ mod tests {
             "env git push",
             "env FOO=1 git push",
             "exec git push",
+            // GNU `time` and its options, which a later stage of a pipeline
+            // and `sh` run where bash's reserved word would read `-v` as the
+            // command.
+            "time -v git push",
+            "time -o out git push",
+            "time -f %e git push",
+            "time -p time -v git push",
+            "echo x | time -v git push",
+            "{ time -v git push; }",
+            "! time -v git push",
         ] {
             assert_eq!(
                 check_command_with_rules(cmd, &deny, &[], &[]),
@@ -2094,6 +2115,9 @@ mod tests {
             "timeout 5 \\\nbash -c 'git push'",
             "true &&\\\nbash -c 'git push'",
             "ls && FOO=a>/dev/null bash -c 'git push'",
+            // A later stage of a pipeline, where `time` is the program.
+            "echo x | time -v bash -c 'git push'",
+            "echo x | time -a -o f bash -c 'git push'",
             ten.as_str(),
         ] {
             assert!(
@@ -2127,6 +2151,15 @@ mod tests {
             "bash -c 'exec git push'",
             "bash -c 'nohup FOO=1 git push'",
             "bash -c 'env HUSKY=0 nohup git push x'",
+            "sh -c 'time -v git push; git status'",
+            // Behind a reserved word, which no walk from a later stage reads.
+            "sh -c 'for f in a; do time -v git push; done'",
+            "bash -c 'echo x | time -v git push; git status'",
+            // Deeper than both the rewrite's walk and the readings' cap.
+            &format!(
+                "bash -c '{}git push'",
+                "command ".repeat(MAX_MATCHING_PEELS + 8)
+            ),
         ] {
             assert_eq!(
                 check_command_with_rules(cmd, &deny, &[], &allow),
@@ -2145,6 +2178,16 @@ mod tests {
                 "{cmd:?}"
             );
         }
+        // With no deny rule, a script too deep to read hides nothing a rule
+        // names: it is any other quoted script, which asks.
+        let deep = format!(
+            "bash -c '{}git status'",
+            "command ".repeat(MAX_MATCHING_PEELS + 8)
+        );
+        assert_eq!(
+            check_command_with_rules(&deep, &[], &[], &[]),
+            PermissionVerdict::Ask
+        );
     }
 
     #[test]

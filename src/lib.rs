@@ -1070,7 +1070,8 @@ enum Commands {
     /// 1 - nothing printed, no rewrite (no RTK equivalent, nothing left to
     /// rewrite, a command excluded in config, a construct RTK does not
     /// rewrite such as `$(...)` or a file redirect, or a deny rule matched
-    /// inside a shell wrapper's script): run the command unchanged.
+    /// inside a shell wrapper's script, or not ruled out there): run the
+    /// command unchanged.
     ///
     /// 2 - a deny matched (checked before anything else). Nothing printed: a
     /// deny rule, defer to the agent's own deny. A message printed: an rtk
