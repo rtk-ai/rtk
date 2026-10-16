@@ -5,6 +5,7 @@
 //! net accounting. The files never enter the agent's context — that is the
 //! saving.
 
+use crate::core::arg_tokenizer::{Dialect, Flag, Grammar, TokenKind, ValueSpec, tokenize_grammar};
 use crate::core::pipeline_config;
 use crate::core::tracking::{Tracker, estimate_tokens};
 use anyhow::{Context, Result, bail};
@@ -71,23 +72,23 @@ struct TaskArgs {
     command: Option<Vec<String>>,
 }
 
-fn parse_args(args: &[String]) -> Result<TaskArgs> {
-    use crate::core::arg_tokenizer::{Dialect, TokenKind, ValueSpec, tokenize_grammar};
+/// `rtk task`'s own options, each taking a value.
+const TASK_FLAGS: &[Flag] = &[
+    Flag::long("question").takes(ValueSpec::value()),
+    Flag::long("spec").takes(ValueSpec::value()),
+    Flag::long("target").takes(ValueSpec::value()),
+    Flag::long("reference").takes(ValueSpec::value()),
+];
 
+/// Posix: a literal `--` ends option parsing, and everything after it is the
+/// command, verbatim.
+const TASK_GRAMMAR: Grammar = Grammar::new(Dialect::Posix, &[TASK_FLAGS]);
+
+fn parse_args(args: &[String]) -> Result<TaskArgs> {
     // Classify through the tokenizer rather than a literal `arg == "--flag"`
     // scan (house rule), so the attached form `--question=why` works, not only
-    // the separate `--question why`. Posix dialect: a literal `--` ends option
-    // parsing, and everything after it is the command, verbatim.
-    let tokens = tokenize_grammar(
-        args,
-        &|kind, name| match (kind, name) {
-            (TokenKind::Long, "question" | "spec" | "target" | "reference") => {
-                Some(ValueSpec::value())
-            }
-            _ => None,
-        },
-        Dialect::Posix,
-    );
+    // the separate `--question why`.
+    let tokens = tokenize_grammar(args, &TASK_GRAMMAR);
 
     let mut parsed = TaskArgs {
         intent: TaskIntent::default(),
@@ -639,6 +640,19 @@ fn call_google(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::arg_tokenizer::assert_takes_value_table;
+
+    #[test]
+    fn task_grammar_matches_its_table() {
+        assert_takes_value_table(
+            &TASK_GRAMMAR,
+            &[(
+                TokenKind::Long,
+                &["question", "spec", "target", "reference"],
+                Some(ValueSpec::value()),
+            )],
+        );
+    }
 
     #[test]
     fn args_parse_flags_and_paths() {

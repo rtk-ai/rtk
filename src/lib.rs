@@ -4708,12 +4708,12 @@ mod tests {
 
     #[test]
     fn grep_dash_h_reaches_grep() {
-        let cli = try_parse_cli_from(["rtk", "grep", "-h", "TODO", "a.txt"]).unwrap();
-        match cli.command {
-            Commands::Grep { extra_args, .. } => {
-                assert_eq!(extra_args, vec!["-h", "TODO", "a.txt"]);
+        for args in [["-h", "TODO", "a.txt"], ["-hr", "TODO", "dir"]] {
+            let cli = try_parse_cli_from(["rtk", "grep"].into_iter().chain(args)).unwrap();
+            match cli.command {
+                Commands::Grep { extra_args, .. } => assert_eq!(extra_args, args),
+                other => panic!("Expected Grep command, got {other:?}"),
             }
-            other => panic!("Expected Grep command, got {other:?}"),
         }
     }
 

@@ -200,8 +200,9 @@ rewrite_segment(seg, excluded)                     [src/discover/registry.rs]
   |
   v
 classify_command(cmd)                              [src/discover/registry.rs]
-  |  1. Check rtk_invocation (a command that runs rtk), IGNORED_EXACT (cd, echo, fi, done, ...)
-  |  2. Check IGNORED_PREFIXES (mkdir, mv, ...)
+  |  1. A command that runs rtk (rtk_invocation), or a first word that is a bash reserved word
+  |     (if, done, ...) or the (( of an arithmetic command → Ignored
+  |  2. Check IGNORED_EXACT (cd, echo, pwd, ...) and IGNORED_PREFIXES (mkdir, mv, ...)
   |  3. Strip env prefix with ENV_PREFIX regex (for pattern matching only)
   |  4. Normalize absolute paths: /usr/bin/grep → grep
   |  5. Strip git global opts: git -C /tmp status → git status

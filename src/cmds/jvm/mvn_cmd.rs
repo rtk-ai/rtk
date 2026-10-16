@@ -6,7 +6,7 @@
 //! mode toggle) that TOML DSL cannot express.
 
 use crate::core::arg_tokenizer::{
-    Dialect, Token, TokenKind, ValueSpec, before_dashdash, has_flag, tokenize_grammar,
+    Dialect, Flag, Grammar, Token, ValueSpec, before_dashdash, has_flag, tokenize_grammar,
 };
 use crate::core::runner::{self, RunOptions};
 use crate::core::shell::display_args;
@@ -154,56 +154,42 @@ fn is_quiet(args: &[String]) -> bool {
 
 // ── Argument grammar ────────────────────────────────────────────────────────
 
-/// Maven's CLI is Apache commons-cli, whose short options are whole multi-character
-/// words (`-pl`, `-gs`, `-amd`) that never cluster.
-const MVN_DIALECT: Dialect = Dialect::CommonsCli;
-
-/// Options declared `<arg>` by `mvn --help` (3.9.16). `SingleDash::Atomic` tags even
-/// `-pl` as `TokenKind::Long`, so the name alone decides and the kind is never read.
-fn mvn_takes_value(_kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    matches!(
-        name,
-        "b" | "builder"
-            | "color"
-            | "D"
-            | "define"
-            | "emp"
-            | "encrypt-master-password"
-            | "ep"
-            | "encrypt-password"
-            | "f"
-            | "file"
-            | "gs"
-            | "global-settings"
-            | "gt"
-            | "global-toolchains"
-            | "l"
-            | "log-file"
-            | "P"
-            | "activate-profiles"
-            | "pl"
-            | "projects"
-            | "rf"
-            | "resume-from"
-            | "s"
-            | "settings"
-            | "t"
-            | "toolchains"
-            | "T"
-            | "threads"
-    )
-    .then(ValueSpec::value)
-}
+/// Maven's grammar. Its CLI is Apache commons-cli, whose short options are whole
+/// multi-character words (`-pl`, `-gs`, `-amd`) that never cluster, so each option is one
+/// atomic flag under both its names. The value-taking ones are those `mvn --help` (3.9.16)
+/// declares `<arg>`.
+const MVN_GRAMMAR: Grammar = Grammar::new(
+    Dialect::CommonsCli,
+    &[&[
+        Flag::atomic(&["b", "builder"]).takes(ValueSpec::value()),
+        Flag::atomic(&["color"]).takes(ValueSpec::value()),
+        Flag::atomic(&["D", "define"]).takes(ValueSpec::value()),
+        Flag::atomic(&["emp", "encrypt-master-password"]).takes(ValueSpec::value()),
+        Flag::atomic(&["ep", "encrypt-password"]).takes(ValueSpec::value()),
+        Flag::atomic(&["f", "file"]).takes(ValueSpec::value()),
+        Flag::atomic(&["gs", "global-settings"]).takes(ValueSpec::value()),
+        Flag::atomic(&["gt", "global-toolchains"]).takes(ValueSpec::value()),
+        Flag::atomic(&["l", "log-file"]).takes(ValueSpec::value()),
+        Flag::atomic(&["P", "activate-profiles"]).takes(ValueSpec::value()),
+        Flag::atomic(&["pl", "projects"]).takes(ValueSpec::value()),
+        Flag::atomic(&["rf", "resume-from"]).takes(ValueSpec::value()),
+        Flag::atomic(&["s", "settings"]).takes(ValueSpec::value()),
+        Flag::atomic(&["t", "toolchains"]).takes(ValueSpec::value()),
+        Flag::atomic(&["T", "threads"]).takes(ValueSpec::value()),
+    ]],
+);
 
 fn mvn_tokens(args: &[String]) -> Vec<Token<'_>> {
-    tokenize_grammar(args, &mvn_takes_value, MVN_DIALECT)
+    tokenize_grammar(args, &MVN_GRAMMAR)
 }
 
 /// True if any of `names` (Maven's long and short spelling of one option) is set.
 fn has_option(args: &[String], names: &[&str]) -> bool {
     let tokens = mvn_tokens(args);
     let scoped = before_dashdash(&tokens);
-    names.iter().any(|name| has_flag(scoped, MVN_DIALECT, name))
+    names
+        .iter()
+        .any(|name| has_flag(scoped, &MVN_GRAMMAR, name))
 }
 
 /// The goals in `args`, in order — including everything past `--`, which
@@ -1972,8 +1958,51 @@ fn run_tool(args: &[String], daemon: bool, verbose: u8) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::arg_tokenizer::{TokenKind, assert_takes_value_table};
     use flate2::read::GzDecoder;
     use std::io::Read;
+
+    #[test]
+    fn test_mvn_grammar_matches_its_table() {
+        assert_takes_value_table(
+            &MVN_GRAMMAR,
+            &[(
+                TokenKind::Long,
+                &[
+                    "D",
+                    "P",
+                    "T",
+                    "activate-profiles",
+                    "b",
+                    "builder",
+                    "color",
+                    "define",
+                    "emp",
+                    "encrypt-master-password",
+                    "encrypt-password",
+                    "ep",
+                    "f",
+                    "file",
+                    "global-settings",
+                    "global-toolchains",
+                    "gs",
+                    "gt",
+                    "l",
+                    "log-file",
+                    "pl",
+                    "projects",
+                    "resume-from",
+                    "rf",
+                    "s",
+                    "settings",
+                    "t",
+                    "threads",
+                    "toolchains",
+                ],
+                Some(ValueSpec::value()),
+            )],
+        );
+    }
 
     fn count_tokens(s: &str) -> usize {
         s.split_whitespace().count()

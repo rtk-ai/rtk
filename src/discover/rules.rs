@@ -1164,18 +1164,6 @@ pub const IGNORED_PREFIXES: &[&str] = &[
     "pwd",
     "bash ",
     "sh ",
-    "then\n",
-    "then ",
-    "else\n",
-    "else ",
-    "do\n",
-    "do ",
-    "for ",
-    "while ",
-    "if ",
-    "case ",
 ];
 
-pub const IGNORED_EXACT: &[&str] = &[
-    "cd", "echo", "true", "false", "wait", "pwd", "bash", "sh", "fi", "done",
-];
+pub const IGNORED_EXACT: &[&str] = &["cd", "echo", "true", "false", "wait", "pwd", "bash", "sh"];

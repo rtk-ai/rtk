@@ -1,7 +1,9 @@
 //! Filters directory listings into a compact tree format.
 
 use super::constants::NOISE_DIRS;
-use crate::core::arg_tokenizer::{self, Attachment, Dialect, Token, TokenKind, ValueSpec};
+use crate::core::arg_tokenizer::{
+    self, Abbreviation, Attachment, Dialect, Flag, Grammar, Token, TokenKind, ValueSpec,
+};
 use crate::core::args_utils;
 use crate::core::runner::{self, RunOptions};
 use crate::core::shell::display_args;
@@ -21,54 +23,69 @@ static LS_DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
+/// A `[=WHEN]` option's value: attached only, since real `ls --color always` lists a file
+/// named `always` rather than reading it as the value.
+const WHEN: ValueSpec = ValueSpec::attached_only();
+
+/// A mandatory value, which claims a literal `--` as its value, as `ls -I -- -al` does.
+const MANDATORY: ValueSpec = ValueSpec::value().claiming_dash_dash();
+
+const ALL: Flag = Flag::long("all");
+const ALMOST_ALL: Flag = Flag::long("almost-all");
+const FORMAT: Flag = Flag::long("format").takes(MANDATORY);
+const FULL_TIME: Flag = Flag::long("full-time");
+const HUMAN_READABLE: Flag = Flag::long("human-readable");
+const SI: Flag = Flag::long("si");
+
 /// Every long option GNU ls accepts, transcribed from its own `--help`. Needed in full, not
 /// just the value-taking ones: ls resolves unambiguous abbreviations (`--sor time` sorts by
-/// time), and an abbreviation is only unambiguous against the whole set.
-const LONG_FLAGS: &[&str] = &[
-    "all",
-    "almost-all",
-    "author",
-    "block-size",
-    "classify",
-    "color",
-    "context",
-    "dereference",
-    "dereference-command-line",
-    "dereference-command-line-symlink-to-dir",
-    "directory",
-    "dired",
-    "escape",
-    "file-type",
-    "format",
-    "full-time",
-    "group-directories-first",
-    "help",
-    "hide",
-    "hide-control-chars",
-    "human-readable",
-    "hyperlink",
-    "ignore",
-    "ignore-backups",
-    "indicator-style",
-    "inode",
-    "kibibytes",
-    "literal",
-    "no-group",
-    "numeric-uid-gid",
-    "quote-name",
-    "quoting-style",
-    "recursive",
-    "reverse",
-    "show-control-chars",
-    "si",
-    "size",
-    "sort",
-    "tabsize",
-    "time",
-    "time-style",
-    "version",
-    "width",
-    "zero",
+/// time), and an abbreviation is only unambiguous against the whole set. Both flavours share it:
+/// they differ in their short options.
+const LONG_FLAGS: &[Flag] = &[
+    ALL,
+    ALMOST_ALL,
+    Flag::long("author"),
+    Flag::long("block-size").takes(MANDATORY),
+    Flag::long("classify").takes(WHEN),
+    Flag::long("color").takes(WHEN),
+    Flag::long("context"),
+    Flag::long("dereference"),
+    Flag::long("dereference-command-line"),
+    Flag::long("dereference-command-line-symlink-to-dir"),
+    Flag::long("directory"),
+    Flag::long("dired"),
+    Flag::long("escape"),
+    Flag::long("file-type"),
+    FORMAT,
+    FULL_TIME,
+    Flag::long("group-directories-first"),
+    Flag::long("help"),
+    Flag::long("hide").takes(MANDATORY),
+    Flag::long("hide-control-chars"),
+    HUMAN_READABLE,
+    Flag::long("hyperlink").takes(WHEN),
+    Flag::long("ignore").takes(MANDATORY),
+    Flag::long("ignore-backups"),
+    Flag::long("indicator-style").takes(MANDATORY),
+    Flag::long("inode"),
+    Flag::long("kibibytes"),
+    Flag::long("literal"),
+    Flag::long("no-group"),
+    Flag::long("numeric-uid-gid"),
+    Flag::long("quote-name"),
+    Flag::long("quoting-style").takes(MANDATORY),
+    Flag::long("recursive"),
+    Flag::long("reverse"),
+    Flag::long("show-control-chars"),
+    SI,
+    Flag::long("size"),
+    Flag::long("sort").takes(MANDATORY),
+    Flag::long("tabsize").takes(MANDATORY),
+    Flag::long("time").takes(MANDATORY),
+    Flag::long("time-style").takes(MANDATORY),
+    Flag::long("version"),
+    Flag::long("width").takes(MANDATORY),
+    Flag::long("zero"),
 ];
 
 /// Every word GNU ls accepts for `--format=WORD`. ls resolves an unambiguous abbreviation of a
@@ -96,18 +113,6 @@ fn resolve_abbrev(candidates: &[&'static str], name: &str) -> Option<&'static st
     matches.next().is_none().then_some(*first)
 }
 
-/// The option `name` names, resolving a GNU-style abbreviation.
-fn canonical_long(name: &str) -> Option<&'static str> {
-    resolve_abbrev(LONG_FLAGS, name)
-}
-
-/// The canonical long-option name `token` spells, or `None` for any other kind of token.
-fn long_name(token: &Token<'_>) -> Option<&'static str> {
-    (token.kind == TokenKind::Long)
-        .then(|| canonical_long(token.text))
-        .flatten()
-}
-
 /// Which `ls` the child process will be. The two disagree on short-option grammar outright:
 /// GNU's `-I`/`-T`/`-w` take `--ignore`/`--tabsize`/`--width` values, while on BSD all three
 /// are booleans and only `-D` takes one (a strftime format). Reading a BSD operand as a value
@@ -131,31 +136,33 @@ const HOST_FLAVOR: Flavor = if cfg!(any(
     Flavor::Gnu
 };
 
-/// `ls`'s option grammar, transcribed from GNU's `--help` and FreeBSD/macOS `ls(1)`.
-///
-/// The `[=WHEN]` flags are attached-only: real `ls --color always` lists a file named `always`
-/// rather than reading it as the value. The mandatory-value ones do claim a literal `--` as
-/// their value, as `ls -I -- -al` does.
-fn ls_takes_value(kind: TokenKind, name: &str, flavor: Flavor) -> Option<ValueSpec> {
-    match kind {
-        // BSD ls accepts no long option that takes a separate value, so the GNU table is
-        // harmless there: the flags it names are rejected by BSD ls either way.
-        TokenKind::Long => match canonical_long(name)? {
-            "color" | "classify" | "hyperlink" => Some(ValueSpec::attached_only()),
-            "block-size" | "format" | "hide" | "ignore" | "indicator-style" | "quoting-style"
-            | "sort" | "tabsize" | "time" | "time-style" | "width" => {
-                Some(ValueSpec::value().claiming_dash_dash())
-            }
-            _ => None,
-        },
-        TokenKind::Short => {
-            let takes_value = match flavor {
-                Flavor::Gnu => matches!(name, "I" | "T" | "w"),
-                Flavor::Bsd => name == "D",
-            };
-            takes_value.then(|| ValueSpec::value().claiming_dash_dash())
-        }
-        _ => None,
+/// GNU ls reads its options with `getopt_long`: short flags cluster, and a long one may be
+/// abbreviated to any prefix that names it alone.
+const LS_DIALECT: Dialect = Dialect {
+    abbreviation: Abbreviation::UniquePrefix,
+    ..Dialect::Posix
+};
+
+/// GNU ls's short options that take a value: `-I`, `-T` and `-w` take `--ignore`/`--tabsize`/
+/// `--width` values.
+const GNU_SHORT: &[Flag] = &[
+    Flag::short("I").takes(MANDATORY),
+    Flag::short("T").takes(MANDATORY),
+    Flag::short("w").takes(MANDATORY),
+];
+
+/// FreeBSD/macOS `ls(1)`: `-I`/`-T`/`-w` are booleans there, and only `-D` takes a value (a
+/// strftime format).
+const BSD_SHORT: &[Flag] = &[Flag::short("D").takes(MANDATORY)];
+
+const GNU_GRAMMAR: Grammar = Grammar::new(LS_DIALECT, &[LONG_FLAGS, GNU_SHORT]);
+const BSD_GRAMMAR: Grammar = Grammar::new(LS_DIALECT, &[LONG_FLAGS, BSD_SHORT]);
+
+/// The grammar of the `ls` the child process will be.
+fn grammar(flavor: Flavor) -> &'static Grammar {
+    match flavor {
+        Flavor::Gnu => &GNU_GRAMMAR,
+        Flavor::Bsd => &BSD_GRAMMAR,
     }
 }
 
@@ -172,7 +179,7 @@ fn is_short_in(token: &Token<'_>, letters: &[char]) -> bool {
 fn shows_dotfiles(tokens: &[Token<'_>]) -> bool {
     tokens
         .iter()
-        .any(|t| is_short_in(t, &['a', 'A']) || matches!(long_name(t), Some("all" | "almost-all")))
+        .any(|t| is_short_in(t, &['a', 'A']) || t.is_one_of(&[ALL, ALMOST_ALL]))
 }
 
 /// What the user's arguments ask for: how to render the listing, and the argv to hand the
@@ -188,11 +195,7 @@ fn plan(args: &[String]) -> LsPlan {
 }
 
 fn plan_for(args: &[String], flavor: Flavor) -> LsPlan {
-    let tokens = arg_tokenizer::tokenize_grammar(
-        args,
-        &|kind, name| ls_takes_value(kind, name, flavor),
-        Dialect::Posix,
-    );
+    let tokens = arg_tokenizer::tokenize_grammar(args, grammar(flavor));
 
     let show_all = shows_dotfiles(&tokens);
 
@@ -201,46 +204,42 @@ fn plan_for(args: &[String], flavor: Flavor) -> LsPlan {
     // In any of those cases we preserve permission info as octal.
     let show_long = tokens.iter().any(|t| {
         is_short_in(t, &['l', 'g', 'n', 'o'])
-            || match long_name(t) {
-                Some("full-time") => true,
-                Some("format") => matches!(
+            || t.is(&FULL_TIME)
+            || (t.is(&FORMAT)
+                && matches!(
                     t.value(&tokens)
                         .and_then(|word| resolve_abbrev(FORMAT_WORDS, word)),
                     Some("long" | "verbose")
-                ),
-                _ => false,
-            }
+                ))
     });
 
     LsPlan {
         show_all,
         show_long,
-        child_args: build_child_args(&tokens, flavor),
+        child_args: build_child_args(&tokens),
     }
 }
 
 /// The index of a trailing flag left without the value it requires, if any. Such a flag can only
 /// be the user's very last argument — anything after it would have been consumed as its value —
 /// so no positional before it can have been `--`-protected.
-fn dangling_value_flag(tokens: &[Token<'_>], flavor: Flavor) -> Option<usize> {
+fn dangling_value_flag(tokens: &[Token<'_>]) -> Option<usize> {
     let index = tokens.len().checked_sub(1)?;
     let last = tokens.get(index)?;
-    let spec = ls_takes_value(last.kind, last.text, flavor)?;
+    let spec = last.value_spec()?;
     (spec.attachment != Attachment::AttachedOnly && last.value(tokens).is_none()).then_some(index)
 }
 
 /// Rebuilds the user's options as argv for the child `ls`, re-attaching every flag's value to
 /// the flag rather than letting it drift into the path list.
-fn build_child_args(tokens: &[Token<'_>], flavor: Flavor) -> Vec<String> {
+fn build_child_args(tokens: &[Token<'_>]) -> Vec<String> {
     // RTK asks for its own long listing, so `-l`/`-a`/`--all` from the user are redundant, and
     // the human-readable ones would pre-format the sizes RTK renders itself. Bare spellings
     // only: `--all=x` is an error the child still has to report.
-    let wants_all = tokens
-        .iter()
-        .any(|t| is_short_in(t, &['a']) || long_name(t) == Some("all"));
+    let wants_all = tokens.iter().any(|t| is_short_in(t, &['a']) || t.is(&ALL));
     let mut child_args = vec![if wants_all { "-la" } else { "-l" }.to_string()];
 
-    let dangling = dangling_value_flag(tokens, flavor);
+    let dangling = dangling_value_flag(tokens);
 
     for (index, token) in tokens.iter().enumerate() {
         if Some(index) == dangling {
@@ -249,7 +248,7 @@ fn build_child_args(tokens: &[Token<'_>], flavor: Flavor) -> Vec<String> {
         match token.kind {
             TokenKind::Long => match token.value(tokens) {
                 Some(value) => child_args.push(format!("--{}={}", token.text, value)),
-                None if matches!(long_name(token), Some("all" | "human-readable" | "si")) => {}
+                None if token.is_one_of(&[ALL, HUMAN_READABLE, SI]) => {}
                 None => child_args.push(format!("--{}", token.text)),
             },
             TokenKind::Short => match token.value(tokens) {
@@ -599,6 +598,83 @@ fn compact_ls(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::arg_tokenizer::{TakesValueRow, assert_takes_value_table};
+
+    /// The long options both flavours share: every one GNU ls has, with the spec each takes.
+    const LONG_ROWS: [TakesValueRow; 3] = [
+        (
+            TokenKind::Long,
+            &[
+                "all",
+                "almost-all",
+                "author",
+                "context",
+                "dereference",
+                "dereference-command-line",
+                "dereference-command-line-symlink-to-dir",
+                "directory",
+                "dired",
+                "escape",
+                "file-type",
+                "full-time",
+                "group-directories-first",
+                "help",
+                "hide-control-chars",
+                "human-readable",
+                "ignore-backups",
+                "inode",
+                "kibibytes",
+                "literal",
+                "no-group",
+                "numeric-uid-gid",
+                "quote-name",
+                "recursive",
+                "reverse",
+                "show-control-chars",
+                "si",
+                "size",
+                "version",
+                "zero",
+            ],
+            None,
+        ),
+        (
+            TokenKind::Long,
+            &["classify", "color", "hyperlink"],
+            Some(WHEN),
+        ),
+        (
+            TokenKind::Long,
+            &[
+                "block-size",
+                "format",
+                "hide",
+                "ignore",
+                "indicator-style",
+                "quoting-style",
+                "sort",
+                "tabsize",
+                "time",
+                "time-style",
+                "width",
+            ],
+            Some(MANDATORY),
+        ),
+    ];
+
+    #[test]
+    fn test_gnu_grammar_matches_its_table() {
+        let mut table = LONG_ROWS.to_vec();
+        table.push((TokenKind::Short, &["I", "T", "w"], Some(MANDATORY)));
+        assert_takes_value_table(&GNU_GRAMMAR, &table);
+    }
+
+    #[test]
+    fn test_bsd_grammar_matches_its_table() {
+        let mut table = LONG_ROWS.to_vec();
+        table.push((TokenKind::Short, &["D"], Some(MANDATORY)));
+        assert_takes_value_table(&BSD_GRAMMAR, &table);
+    }
 
     #[test]
     fn test_compact_basic() {
