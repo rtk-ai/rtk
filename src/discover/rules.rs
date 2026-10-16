@@ -651,10 +651,10 @@ pub const RULES: &[RtkRule] = &[
         pattern: r"^(?:php[ \t\n]+)?(?:\./)?(?:(?:vendor/)?bin/)?phpunit(?:[ \t\n]|$)",
         rtk_cmd: "rtk phpunit",
         pipeline_safety: PipelineSafety::ProducerOnly,
-        // rewrite_segment_inner normalizes the php wrapper, `./`, vendor/bin and
-        // composer bin-dir before matching, so only the residual forms remain:
-        // a plain `bin/` (not a Composer dir, so it survives normalization) and
-        // the bare tool name.
+        // The rewrite (`registry.rs`'s `decide`) normalizes the php wrapper,
+        // `./`, vendor/bin and composer bin-dir before matching, so only the
+        // residual forms remain: a plain `bin/` (not a Composer dir, so it
+        // survives normalization) and the bare tool name.
         rewrite_prefixes: &["bin/phpunit", "phpunit"],
         category: "Tests",
         savings_pct: 75.0,
