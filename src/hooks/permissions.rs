@@ -1212,6 +1212,31 @@ mod tests {
         );
     }
 
+    /// A quoted value is one word up to its closing quote, also where it ends
+    /// the statement: an assignment that is a whole statement runs nothing, so
+    /// the text inside its value is never a reading a rule matches.
+    #[test]
+    fn test_a_quoted_assignment_ending_its_statement_is_one_word() {
+        let deny = vec!["rm -rf *".to_string()];
+        let allow = vec!["*".to_string()];
+        for cmd in [
+            "MSG=\"chore: rm -rf build dir\" && git commit -m \"$MSG\"",
+            "MSG='chore: rm -rf build dir'; git status",
+            "MSG=\"chore: rm -rf build dir\"",
+        ] {
+            assert_ne!(
+                check_command_with_rules(cmd, &deny, &[], &allow),
+                PermissionVerdict::Deny,
+                "{cmd:?}"
+            );
+        }
+        // The command behind a quoted assignment is still read.
+        assert_eq!(
+            check_command_with_rules("MSG=\"a b\" rm -rf build", &deny, &[], &allow),
+            PermissionVerdict::Deny
+        );
+    }
+
     /// Each assignment is a prefix of its own, so an ordinary line that sets
     /// many variables before its command stays well inside the cap: no
     /// prompt where develop answered allow.
