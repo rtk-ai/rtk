@@ -1408,8 +1408,14 @@ When a command fails (or a filter truncates a list), RTK saves the complete raw 
 **How it works:**
 1. The command fails (exit code != 0) or the output is truncated
 2. RTK stores the raw output (gzip) in `~/.local/share/rtk/recall.db`
-3. A hint with the hash is shown: `[full output: rtk recall <hash>]` or `[+N hidden: rtk recall <hash>]`
+3. A hint with the hash is shown: `[full output: rtk recall <hash>] (unfiltered; may contain sensitive data)` or `[+N hidden: rtk recall <hash>] (unfiltered; may contain sensitive data)`
 4. `rtk recall <hash>` returns the missing part (delta); `--full` returns the complete output
+
+Recovered output, in SQLite and legacy tee files, is not redacted: fields absent
+from a summary may remain in recovery storage. Review it before sharing.
+`RTK_RECALL=0` or `rtk config recall disabled` stops future storage without
+removing existing copies. The same notice follows tee hints, outside the brackets
+to preserve the quoted command or path.
 
 **Commands:**
 ```bash

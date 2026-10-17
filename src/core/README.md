@@ -203,7 +203,9 @@ Consumers must call `timer.track()` on **all** code paths — success, failure, 
 
 Consumers that parse structured output (JSON, NDJSON, state machines) should call `tee::tee_and_hint()` to persist raw output for LLM recovery on failure. It must be called before `std::process::exit()`.
 
-For truncation recovery on **success** (e.g. a list capped at 20 items), use `tee::force_tee_hint()` (multi-line blocks) or `tee::force_tee_tail_hint(content, slug, offset)` (flat lists). All three persist the full output to the content-addressed recall store ([`retriever.rs`](retriever.rs)) and emit a runnable hint — `[full output: rtk recall <hash>]` or `[+N hidden: rtk recall <hash>]` — instead of burning tokens working around missing data.
+For truncation recovery on **success** (e.g. a list capped at 20 items), use `tee::force_tee_hint()` (multi-line blocks) or `tee::force_tee_tail_hint(content, slug, offset)` (flat lists). All three persist the full output to the content-addressed recall store ([`retriever.rs`](retriever.rs)) and emit a runnable hint — `[full output: rtk recall <hash>] (unfiltered; may contain sensitive data)` or `[+N hidden: rtk recall <hash>] (unfiltered; may contain sensitive data)` — instead of burning tokens working around missing data.
+
+The notice is appended outside the existing brackets on both backends, including tail hints, to preserve the recovery command/path and prefix-based hint filtering. It is part of the string charged by `runner::emit_guarded`; do not print it separately after the guard. Call sites may supply raw captured output or reconstructed recovery text; the notice means neither backend applies secret redaction. Sensitive values omitted from a summary may remain in that payload.
 
 The agent runs `rtk recall <hash>` to get back exactly what was elided. For `force_tee_tail_hint`, `offset` is the 1-based first hidden line (`header_lines + MAX_CAP + 1`); it is stored so the default recall returns only the hidden tail. Storage is byte-faithful (`BLOB` + lossless gzip); tune limits via the `[retriever]` config section.
 

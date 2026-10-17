@@ -1,6 +1,7 @@
 //! Legacy file-based recovery ("tee" mode) — may be deprecated. Prefer the
 //! sqlite recall store (`[retriever] mode = "sqlite"`); see retriever.rs.
 
+use super::tee::RECOVERY_OUTPUT_NOTICE;
 use crate::core::config::Config;
 use crate::core::retriever::RetrieverConfig;
 use crate::core::user_dirs;
@@ -262,7 +263,10 @@ fn write(cfg: &RetrieverConfig, content: &str, slug: &str) -> Option<PathBuf> {
 }
 
 pub(crate) fn format_hint(path: &Path) -> String {
-    format!("[full output: {}]", display_shell_path(path))
+    format!(
+        "[full output: {}]{RECOVERY_OUTPUT_NOTICE}",
+        display_shell_path(path)
+    )
 }
 
 pub fn tee_and_hint(cfg: &RetrieverConfig, raw: &str, slug: &str) -> Option<String> {
@@ -272,7 +276,10 @@ pub fn tee_and_hint(cfg: &RetrieverConfig, raw: &str, slug: &str) -> Option<Stri
 
 pub fn force_tee_hint(cfg: &RetrieverConfig, content: &str, slug: &str) -> Option<String> {
     let path = write(cfg, content, slug)?;
-    Some(format!("[full output: {}]", display_shell_path(&path)))
+    Some(format!(
+        "[full output: {}]{RECOVERY_OUTPUT_NOTICE}",
+        display_shell_path(&path)
+    ))
 }
 
 pub fn force_tee_tail_hint(
@@ -283,7 +290,7 @@ pub fn force_tee_tail_hint(
 ) -> Option<String> {
     let path = write(cfg, content, slug)?;
     Some(format!(
-        "[see remaining: tail -n +{} {}]",
+        "[see remaining: tail -n +{} {}]{RECOVERY_OUTPUT_NOTICE}",
         line_offset,
         display_shell_path(&path)
     ))

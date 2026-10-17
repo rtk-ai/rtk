@@ -4,6 +4,9 @@ use crate::core::config::Config;
 pub(crate) use crate::core::retriever::MIN_FAILURE_BYTES as MIN_TEE_SIZE;
 use crate::core::retriever::{self, MIN_FAILURE_BYTES, RecoveryMode, RetrieverConfig, Stored};
 
+// Keep the notice outside the brackets so recovery commands and paths stay intact.
+pub(super) const RECOVERY_OUTPUT_NOTICE: &str = " (unfiltered; may contain sensitive data)";
+
 fn active() -> Option<(RecoveryMode, RetrieverConfig)> {
     if retriever::recovery_disabled_by_env() {
         return None;
@@ -21,7 +24,10 @@ fn store_hint(
     exit_code: Option<i32>,
 ) -> Option<String> {
     match retriever::store(cfg, content.as_bytes(), slug, exit_code, 1) {
-        Stored::Saved(s) => Some(format!("[full output: rtk recall {}]", s.hash)),
+        Stored::Saved(s) => Some(format!(
+            "[full output: rtk recall {}]{RECOVERY_OUTPUT_NOTICE}",
+            s.hash
+        )),
         Stored::Unavailable | Stored::Empty => None,
     }
 }
@@ -97,7 +103,7 @@ pub fn force_tee_tail_hint(
         RecoveryMode::Sqlite => {
             match retriever::store(&cfg, content.as_bytes(), command_slug, None, line_offset) {
                 Stored::Saved(s) if s.hidden_lines > 0 => Some(format!(
-                    "[+{} hidden: rtk recall {}]",
+                    "[+{} hidden: rtk recall {}]{RECOVERY_OUTPUT_NOTICE}",
                     s.hidden_lines, s.hash
                 )),
                 Stored::Saved(_) | Stored::Unavailable | Stored::Empty => None,
@@ -212,6 +218,7 @@ mod tests {
         let hint = posthook_tee_hint(&config, &"x".repeat(600), "read_data_json")
             .expect("tee mode writes a file");
         assert!(hint.starts_with("[full output: "));
+        assert!(hint.ends_with(RECOVERY_OUTPUT_NOTICE), "{hint}");
         assert!(tmp.path().join(POSTHOOK_SUBDIR).exists());
     }
 
@@ -226,6 +233,7 @@ mod tests {
         let hint = posthook_tee_hint(&config, &"x".repeat(600), "bash_cargo")
             .expect("sqlite mode stores the output");
         assert!(hint.starts_with("[full output: rtk recall "), "{hint}");
+        assert!(hint.ends_with(RECOVERY_OUTPUT_NOTICE), "{hint}");
         assert!(
             !tmp.path().join("tee").exists(),
             "sqlite mode must not write tee files"
@@ -283,6 +291,110 @@ mod tests {
 
         assert!(posthook_tee_hint(&config, &"x".repeat(600), "slug").is_none());
         assert!(!tmp.path().join(POSTHOOK_SUBDIR).exists());
+    }
+
+    #[test]
+    fn test_recovery_hints_disclose_unfiltered_sensitive_output() {
+        for mode in [RecoveryMode::Sqlite, RecoveryMode::Tee] {
+            let dir = tempfile::tempdir().expect("temporary recovery directory");
+            crate::core::test_isolation::with_root(dir.path(), || {
+                let mut cfg = Config::default();
+                cfg.retriever = RetrieverConfig {
+                    mode,
+                    tee_directory: Some(dir.path().join("tee with spaces")),
+                    ..RetrieverConfig::default()
+                };
+                cfg.save().expect("save isolated recovery config");
+                let raw = "unfiltered captured output\n".repeat(30);
+                let hints = [
+                    tee_and_hint(&raw, "failure", 1).expect("failure hint"),
+                    force_tee_hint(&raw, "forced").expect("forced hint"),
+                    force_tee_tail_hint(&raw, "tail", 21).expect("tail hint"),
+                ];
+                for (index, hint) in hints.iter().enumerate() {
+                    let (recovery, notice) = hint.split_once(']').expect("bracketed recovery");
+                    assert_eq!(notice, " (unfiltered; may contain sensitive data)");
+                    assert_eq!(hint.lines().count(), 1, "keep prefix-based hint filtering");
+                    if mode == RecoveryMode::Sqlite {
+                        let prefix = if index == 2 {
+                            "[+10 hidden: rtk recall "
+                        } else {
+                            "[full output: rtk recall "
+                        };
+                        let hash = recovery
+                            .strip_prefix(prefix)
+                            .expect("unchanged hint prefix");
+                        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+                        assert!(
+                            !hash.is_empty(),
+                            "keep the recall command directly runnable"
+                        );
+                    } else {
+                        let prefix = if index == 2 {
+                            "[see remaining: tail -n +21 "
+                        } else {
+                            "[full output: "
+                        };
+                        let path = recovery
+                            .strip_prefix(prefix)
+                            .expect("unchanged hint prefix");
+                        assert!(path.starts_with('"') && path.ends_with('"'));
+                        assert!(path.contains("tee with spaces"), "keep paths shell-quoted");
+                    }
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn test_unavailable_recovery_does_not_emit_disclosure() {
+        for mode in [RecoveryMode::Sqlite, RecoveryMode::Tee] {
+            let dir = tempfile::tempdir().expect("temporary recovery directory");
+            crate::core::test_isolation::with_root(dir.path(), || {
+                let blocked = dir.path().join("regular-file");
+                std::fs::write(&blocked, "not a directory").expect("block storage paths");
+                let mut cfg = Config::default();
+                cfg.retriever = RetrieverConfig {
+                    mode,
+                    database_path: Some(blocked.join("recall.db")),
+                    tee_directory: Some(blocked.join("tee")),
+                    ..RetrieverConfig::default()
+                };
+                cfg.save().expect("save isolated recovery config");
+                let raw = "unfiltered captured output\n".repeat(30);
+                assert!(tee_and_hint(&raw, "failure", 1).is_none());
+                assert!(force_tee_hint(&raw, "forced").is_none());
+                assert!(force_tee_tail_hint(&raw, "tail", 21).is_none());
+                assert_eq!(
+                    crate::core::runner::emit_guarded(&raw, None, &raw),
+                    raw,
+                    "unavailable storage must leave the raw fallback unchanged"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn test_disclosure_counts_toward_never_worse_budget() {
+        let dir = tempfile::tempdir().expect("temporary recovery directory");
+        let cfg = RetrieverConfig {
+            database_path: Some(dir.path().join("recall.db")),
+            ..RetrieverConfig::default()
+        };
+        let raw = "x".repeat(60);
+        let hint = store_hint(&cfg, &raw, "budget", None).expect("recovery hint");
+        let original_hint = hint.split_once(']').expect("bracketed hint").0.to_owned() + "]";
+        let before = crate::core::runner::emit_guarded("short", Some(&original_hint), &raw);
+        assert!(
+            before.contains("[full output:"),
+            "fixture fits before the notice"
+        );
+        let shown = crate::core::runner::emit_guarded("short", Some(&hint), &raw);
+        assert_eq!(
+            shown,
+            format!("{raw}\n"),
+            "notice must not bypass the guard"
+        );
     }
 
     #[test]

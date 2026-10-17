@@ -105,10 +105,14 @@ When a command fails — or a filter trims a long list — RTK persists the full
 
 ```
 FAILED: 2/15 tests
-[full output: rtk recall 36365b69eda6]
+[full output: rtk recall 36365b69eda6] (unfiltered; may contain sensitive data)
 ```
 
 Your AI assistant runs `rtk recall <hash>` exactly as printed in the hint — that is the whole agent interface. For humans inspecting the store: `rtk recall <hash> --full | --from N | --lines N | --grep PAT` and `rtk recall --list`. Storage is byte-faithful (`BLOB` + lossless gzip); the stored input is the captured command text, as with the previous tee files.
+
+Both SQLite recall and legacy tee files keep the payload supplied by a filter without secret redaction. This may be raw captured output or reconstructed recovery text. A summary that omits a sensitive field does not remove it from stored recovery output. Review recovered content before copying it into a transcript or bug report. The same notice follows full-output and hidden-tail hints; the command or shell-quoted path inside the brackets remains unchanged.
+
+To stop future recovery storage, set `RTK_RECALL=0` for an invocation or run `rtk config recall disabled`. Neither deletes existing entries or tee files.
 
 ### Choosing the recovery mode
 
