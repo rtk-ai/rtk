@@ -524,7 +524,7 @@ pub(crate) fn contains_unattestable_construct_in(cmd: &str, dialect: ShellDialec
     // refuses to parse or silently turns into a different command. Bash has
     // neither operator (`a &| b` is a syntax error spaced or not), so the
     // Posix dialect keeps the rewrite it has always had.
-    if dialect != ShellDialect::Posix && opens_disown_pair(cmd) {
+    if dialect != ShellDialect::Posix && opens_disown_pair(cmd, dialect) {
         return true;
     }
     // The fish check needs newlines as boundaries, so a keyword opening a line
@@ -542,20 +542,14 @@ pub(crate) fn contains_unattestable_construct_in(cmd: &str, dialect: ShellDialec
         .any(|(i, tok)| tok.kind == TokenKind::Redirect && redirect_has_file_target(&tokens, i))
 }
 
-/// Fish's own syntax: bare `(…)` substitution anywhere, a control keyword at a
-/// command boundary, or the `&|` pipe. Newlines are boundaries here, so a
-/// keyword opening a line of a multi-line script is seen.
+/// Fish's own syntax: bare `(…)` substitution anywhere, or a control keyword at
+/// a command boundary. Newlines are boundaries here, so a keyword opening a line
+/// of a multi-line script is seen. (`&|` is handled by [`opens_disown_pair`].)
 fn contains_fish_only_construct(tokens: &[ParsedToken]) -> bool {
     const FISH_CONTROL_KEYWORDS: &[&str] = &[
         "and", "or", "not", "begin", "end", "if", "else", "switch", "case", "for", "while",
         "function",
     ];
-
-    // `&|` pipes stdout and stderr in fish, and the rewrite would re-emit the
-    // two spaced, which fish rejects outright — so leave the script alone.
-    if disown_pair(tokens) {
-        return true;
-    }
 
     let mut command_position = true;
     for token in tokens {
@@ -577,22 +571,22 @@ fn contains_fish_only_construct(tokens: &[ParsedToken]) -> bool {
 }
 
 /// True for the pair `&` opens when the next token is glued to it: `&|` in
-/// fish and zsh, `&!` in zsh. Each is one operator to the shell that named
-/// itself and two tokens to this lexer, so a rewrite that re-emits them
-/// spaced hands that shell something it reads differently.
-fn opens_disown_pair(cmd: &str) -> bool {
-    disown_pair(&tokenize_inner(cmd, NewlineMode::Conservative))
+/// fish and zsh, `&!` in zsh only (fish treats spaced and glued `&!` the same).
+/// Each is one operator to the shell that named itself and two tokens to this
+/// lexer, so a rewrite that re-emits them spaced hands that shell something it
+/// reads differently.
+fn opens_disown_pair(cmd: &str, dialect: ShellDialect) -> bool {
+    disown_pair(&tokenize_inner(cmd, NewlineMode::Conservative), dialect)
 }
 
-fn disown_pair(tokens: &[ParsedToken]) -> bool {
+fn disown_pair(tokens: &[ParsedToken], dialect: ShellDialect) -> bool {
     // Byte just past a `&` token, so the pair is spotted by adjacency.
     let mut ampersand_end = None;
     for token in tokens {
         let glued = ampersand_end == Some(token.offset);
         let pairs = match &token.kind {
             TokenKind::Pipe(_) => true,
-            TokenKind::Shellism => token.value == "!",
-            TokenKind::Arg => token.value.starts_with('!'),
+            TokenKind::Shellism if dialect == ShellDialect::Zsh => token.value == "!",
             _ => false,
         };
         if glued && pairs {
@@ -1790,6 +1784,31 @@ mod tests {
             "git status; cargo test",
             ShellDialect::Fish
         ));
+    }
+
+    #[test]
+    fn test_fish_dialect_attests_glued_disown_bang() {
+        // fish 3.7+/4.x: `&!` and `& !` behave the same, so the rewrite stays faithful.
+        for script in [
+            "git status &! echo b",
+            "git status&!echo b",
+            "echo a & ! echo b",
+        ] {
+            assert!(
+                !contains_unattestable_construct_in(script, ShellDialect::Fish),
+                "fish `&!` must stay attestable: {script:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_zsh_dialect_still_refuses_disown_bang() {
+        for script in ["ls &! ls /nonexistent", "cargo build&!echo hi"] {
+            assert!(
+                contains_unattestable_construct_in(script, ShellDialect::Zsh),
+                "zsh `&!` must not be attested: {script:?}"
+            );
+        }
     }
 
     #[test]
