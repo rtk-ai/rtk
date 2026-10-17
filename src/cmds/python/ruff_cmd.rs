@@ -1,5 +1,6 @@
 //! Filters Ruff linter and formatter output.
 
+use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
 use crate::core::config;
 use crate::core::runner;
 use crate::core::shell::display_args;
@@ -71,6 +72,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     } else {
         &[]
     };
+    // `ruff format --output-format=json|json-lines|sarif|...` is machine-readable:
+    // hand it back untouched instead of running the text summarizer over it.
+    let format_raw_output = is_format && !format_output_is_text(args);
 
     if is_check {
         if user_set_output_format {
@@ -112,6 +116,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         move |stdout| {
             if is_check && use_json_filter && !stdout.trim().is_empty() {
                 filter_ruff_check_json(stdout)
+            } else if format_raw_output {
+                stdout.trim().to_string()
             } else if is_format {
                 filter_ruff_format(stdout)
             } else {
@@ -120,6 +126,23 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         },
         runner::RunOptions::stdout_only().clean_outputs(clean_outputs),
     )
+}
+
+/// True when `ruff format` output is one of the human-readable text formats
+/// (default `full`, `concise`, `grouped`) that `filter_ruff_format` knows how to summarize.
+fn format_output_is_text(args: &[String]) -> bool {
+    let tokens = arg_tokenizer::tokenize_grammar(
+        args,
+        &|kind, name| (kind == TokenKind::Long && name == "output-format").then(ValueSpec::value),
+        Dialect::Posix,
+    );
+    // ruff (clap) keeps the last occurrence, so do the same.
+    let selected = arg_tokenizer::before_dashdash(&tokens)
+        .iter()
+        .rev()
+        .filter(|t| t.kind == TokenKind::Long && t.text == "output-format")
+        .find_map(|t| t.value(&tokens));
+    selected.is_none_or(|f| matches!(f, "full" | "concise" | "grouped"))
 }
 
 fn is_check_invocation(args: &[String]) -> bool {
@@ -268,6 +291,14 @@ pub fn filter_ruff_check_json(output: &str) -> String {
 
 /// Filter ruff format output - show files that need formatting
 pub fn filter_ruff_format(output: &str) -> String {
+    let output = crate::core::utils::strip_ansi(output);
+
+    // JSON / JSON-lines records contain "File would be reformatted" in their
+    // `message` field. Never rewrite structured output into a text summary.
+    if looks_like_structured_output(&output) {
+        return output.trim().to_string();
+    }
+
     let mut files_to_format: Vec<String> = Vec::new();
     let mut files_checked = 0;
 
@@ -275,52 +306,51 @@ pub fn filter_ruff_format(output: &str) -> String {
         let trimmed = line.trim();
         let lower = trimmed.to_lowercase();
 
-        // Count "would reformat" lines (check mode) - case insensitive
-        if lower.contains("would reformat:") {
-            // Extract filename from "Would reformat: path/to/file.py"
-            if let Some(filename) = trimmed.split(':').nth(1) {
-                files_to_format.push(filename.trim().to_string());
-            }
+        // Pre-0.12: "Would reformat: path/to/file.py"
+        // Current:   "unformatted: path/to/file.py" (or a diagnostic message after the colon)
+        if (lower.contains("would reformat:") || lower.starts_with("unformatted:"))
+            && let Some(filename) = path_after_first_colon(trimmed)
+        {
+            push_unique_file(&mut files_to_format, filename);
         }
 
-        // Count total checked files - look for patterns like "3 files left unchanged"
-        if lower.contains("left unchanged") {
-            // Find "X file(s) left unchanged" pattern specifically
-            // Split by comma to handle "2 files would be reformatted, 3 files left unchanged"
-            let parts: Vec<&str> = trimmed.split(',').collect();
-            for part in parts {
-                let part_lower = part.to_lowercase();
-                if part_lower.contains("left unchanged") {
-                    let words: Vec<&str> = part.split_whitespace().collect();
-                    // Look for number before "file" or "files"
-                    for (i, word) in words.iter().enumerate() {
-                        if (word == &"file" || word == &"files")
-                            && i > 0
-                            && let Ok(count) = words[i - 1].parse::<usize>()
-                        {
-                            files_checked = count;
-                            break;
-                        }
-                    }
-                    break;
-                }
-            }
+        // Default ruff ≥0.12 full format: " --> src/main.py:1:1"
+        if let Some(filename) = path_from_arrow_location(trimmed) {
+            push_unique_file(&mut files_to_format, filename);
+        }
+
+        // Concise format: "src/main.py:1:1: unformatted: File would be reformatted"
+        if let Some(filename) = path_from_concise_unformatted(trimmed, &lower) {
+            push_unique_file(&mut files_to_format, filename);
+        }
+
+        // Pre-0.12 / write mode: "3 files left unchanged"
+        // Current check:         "3 files already formatted"
+        if let Some(count) = parse_already_ok_count(trimmed, &lower) {
+            files_checked = count;
         }
     }
 
     let output_lower = output.to_lowercase();
+    let saw_ok_summary =
+        output_lower.contains("left unchanged") || output_lower.contains("already formatted");
+    // "would reformat" does not match "would be reformatted" — keep both.
+    let saw_check_rewrite = output_lower.contains("would reformat:")
+        || output_lower.contains("unformatted:")
+        || output_lower.contains("would be reformatted");
 
     // Check if all files are formatted
-    if files_to_format.is_empty() && output_lower.contains("left unchanged") {
+    if files_to_format.is_empty() && saw_ok_summary && !saw_check_rewrite {
         return "Ruff format: All files formatted correctly".to_string();
     }
 
     let mut result = String::new();
 
-    if output_lower.contains("would reformat") {
+    if saw_check_rewrite {
         // Check mode: show files that need formatting
         if files_to_format.is_empty() {
-            result.push_str("Ruff format: All files formatted correctly\n");
+            result.push_str("Ruff format: files need formatting\n");
+            result.push_str("\n[hint] Run `ruff format` to format these files\n");
         } else {
             result.push_str(&format!(
                 "Ruff format: {} files need formatting\n",
@@ -355,6 +385,83 @@ pub fn filter_ruff_format(output: &str) -> String {
     }
 
     result.trim().to_string()
+}
+
+fn looks_like_structured_output(output: &str) -> bool {
+    matches!(output.trim_start().chars().next(), Some('[' | '{' | '<'))
+}
+
+/// Split after the first colon so `unformatted: C:\foo\bar.py` keeps the drive letter.
+fn path_after_first_colon(line: &str) -> Option<String> {
+    let rest = line.split_once(':')?.1.trim();
+    looks_like_source_path(rest).then(|| rest.to_string())
+}
+
+fn looks_like_source_path(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let has_sep = s.contains('/') || s.contains('\\');
+    if s.contains(' ') && !has_sep {
+        return false;
+    }
+    has_sep || s.contains('.')
+}
+
+/// ` --> src/main.py:1:1` from ruff's default `full` format --check output.
+fn path_from_arrow_location(line: &str) -> Option<String> {
+    let rest = line.trim().strip_prefix("-->")?.trim();
+    strip_trailing_line_col(rest).map(str::to_string)
+}
+
+/// `src/main.py:1:1: unformatted: File would be reformatted`
+fn path_from_concise_unformatted(line: &str, lower: &str) -> Option<String> {
+    let idx = lower.find(": unformatted:")?;
+    strip_trailing_line_col(line[..idx].trim()).map(str::to_string)
+}
+
+fn strip_trailing_line_col(s: &str) -> Option<&str> {
+    let mut parts = s.rsplitn(3, ':');
+    let col = parts.next()?;
+    let row = parts.next()?;
+    let path = parts.next()?;
+    if !row.is_empty()
+        && !col.is_empty()
+        && row.chars().all(|c| c.is_ascii_digit())
+        && col.chars().all(|c| c.is_ascii_digit())
+    {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+fn parse_already_ok_count(trimmed: &str, lower: &str) -> Option<usize> {
+    if !lower.contains("left unchanged") && !lower.contains("already formatted") {
+        return None;
+    }
+    for part in trimmed.split(',') {
+        let part_lower = part.to_lowercase();
+        if !part_lower.contains("left unchanged") && !part_lower.contains("already formatted") {
+            continue;
+        }
+        let words: Vec<&str> = part.split_whitespace().collect();
+        for (i, word) in words.iter().enumerate() {
+            if (*word == "file" || *word == "files")
+                && i > 0
+                && let Ok(count) = words[i - 1].parse::<usize>()
+            {
+                return Some(count);
+            }
+        }
+    }
+    None
+}
+
+fn push_unique_file(files: &mut Vec<String>, filename: String) {
+    if !files.iter().any(|existing| existing == &filename) {
+        files.push(filename);
+    }
 }
 
 /// Compact file path (remove common prefixes)
@@ -492,6 +599,170 @@ Would reformat: tests/test_utils.py
         assert!(result.contains("main.py"));
         assert!(result.contains("test_utils.py"));
         assert!(result.contains("3 files already formatted"));
+    }
+
+    /// ruff ≥0.12 `format --check` when every file is already clean.
+    #[test]
+    fn test_filter_ruff_format_all_formatted_current_check() {
+        let output = "5 files already formatted";
+        let result = filter_ruff_format(output);
+        assert!(result.contains("Ruff format"));
+        assert!(result.contains("All files formatted correctly"));
+    }
+
+    /// ruff ≥0.12 per-file line is `unformatted: <path>` (split after first colon).
+    #[test]
+    fn test_filter_ruff_format_needs_formatting_current_check_paths() {
+        let output = r#"unformatted: src/main.py
+unformatted: tests/test_utils.py
+unformatted: C:\Users\foo\project\src\legacy.py
+3 files would be reformatted, 3 files already formatted"#;
+        let result = filter_ruff_format(output);
+        assert!(result.contains("3 files need formatting"));
+        assert!(result.contains("main.py"));
+        assert!(result.contains("test_utils.py"));
+        assert!(
+            result.contains("legacy.py"),
+            "split after first colon must keep the Windows path"
+        );
+        assert!(result.contains("3 files already formatted"));
+        assert!(result.contains("[hint] Run `ruff format`"));
+    }
+
+    /// Default ruff 0.16.x `format --check` (full diagnostic + summary).
+    /// This is the wording that currently falls through to identity (0% savings).
+    #[test]
+    fn test_filter_ruff_format_needs_formatting_current_check_full() {
+        let output = r#"unformatted: File would be reformatted
+ --> src/main.py:1:1
+  |
+1 | import   os
+1 + import os
+  |
+
+unformatted: File would be reformatted
+ --> tests/test_utils.py:3:1
+  |
+3 | def  bad( x ):
+3 + def bad(x):
+  |
+
+2 files would be reformatted, 3 files already formatted"#;
+        let result = filter_ruff_format(output);
+        assert!(
+            result.contains("2 files need formatting"),
+            "current ruff check output should compress, got:\n{result}"
+        );
+        assert!(result.contains("main.py"));
+        assert!(result.contains("test_utils.py"));
+        assert!(
+            !result.contains("import   os"),
+            "must drop the diagnostic diff"
+        );
+        assert!(result.contains("3 files already formatted"));
+
+        let raw_tokens = output.split_whitespace().count();
+        let out_tokens = result.split_whitespace().count();
+        let savings = 100.0 - (out_tokens as f64 / raw_tokens as f64) * 100.0;
+        assert!(
+            savings >= 20.0,
+            "current ruff check path must compress: {savings:.1}%"
+        );
+    }
+
+    /// ruff ≥0.12 `--output-format concise`.
+    #[test]
+    fn test_filter_ruff_format_needs_formatting_current_check_concise() {
+        let output = r#"src/main.py:1:1: unformatted: File would be reformatted
+tests/test_utils.py:3:1: unformatted: File would be reformatted
+2 files would be reformatted, 3 files already formatted"#;
+        let result = filter_ruff_format(output);
+        assert!(result.contains("2 files need formatting"));
+        assert!(result.contains("main.py"));
+        assert!(result.contains("test_utils.py"));
+        assert!(result.contains("3 files already formatted"));
+    }
+
+    /// `ruff format --check --output-format=json` with a dirty file: the record's
+    /// `message` says "File would be reformatted", but the array must survive as-is.
+    #[test]
+    fn test_filter_ruff_format_preserves_json_records() {
+        let output = r#"[
+  {
+    "cell": null,
+    "code": "unformatted",
+    "end_location": {"column": 1, "row": 2},
+    "filename": "/tmp/proj/bad.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [{"content": "x = [1, 2, 3]\n", "end_location": {"column": 1, "row": 2}, "location": {"column": 1, "row": 1}}],
+      "message": null
+    },
+    "location": {"column": 1, "row": 1},
+    "message": "File would be reformatted",
+    "noqa_row": null,
+    "url": null
+  }
+]"#;
+        let result = filter_ruff_format(output);
+        assert_eq!(result, output.trim());
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("still valid JSON");
+        assert_eq!(parsed[0]["filename"], "/tmp/proj/bad.py");
+        assert!(!result.contains("files need formatting"));
+    }
+
+    /// Same for `--output-format=json-lines`: one record per line, kept verbatim.
+    #[test]
+    fn test_filter_ruff_format_preserves_json_lines_records() {
+        let output = concat!(
+            r#"{"code":"unformatted","filename":"/tmp/proj/bad.py","location":{"column":1,"row":1},"message":"File would be reformatted","fix":{"applicability":"safe","edits":[{"content":"x = [1, 2, 3]\n"}]}}"#,
+            "\n",
+            r#"{"code":"unformatted","filename":"/tmp/proj/other.py","location":{"column":1,"row":1},"message":"File would be reformatted","fix":null}"#,
+            "\n"
+        );
+        let result = filter_ruff_format(output);
+        assert_eq!(result, output.trim());
+        for line in result.lines() {
+            serde_json::from_str::<serde_json::Value>(line).expect("each line stays valid JSON");
+        }
+        assert!(!result.contains("files need formatting"));
+    }
+
+    #[test]
+    fn test_format_output_is_text() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(format_output_is_text(&a(&["format", "--check"])));
+        assert!(format_output_is_text(&a(&[
+            "format",
+            "--check",
+            "--output-format=concise"
+        ])));
+        assert!(format_output_is_text(&a(&[
+            "format",
+            "--output-format",
+            "full"
+        ])));
+        assert!(!format_output_is_text(&a(&[
+            "format",
+            "--check",
+            "--output-format=json"
+        ])));
+        assert!(!format_output_is_text(&a(&[
+            "format",
+            "--check",
+            "--output-format",
+            "json"
+        ])));
+        assert!(!format_output_is_text(&a(&[
+            "format",
+            "--check",
+            "--output-format=json-lines"
+        ])));
+        assert!(!format_output_is_text(&a(&[
+            "format",
+            "--output-format",
+            "sarif"
+        ])));
     }
 
     #[test]
