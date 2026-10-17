@@ -261,6 +261,23 @@ const CASES: &[Case] = &[
         tool: "jest",
         native_args: &["--help"],
     },
+    // A whole command the caller named (#4548). Its `-h` stays unread, see
+    // `an_arbitrary_commands_flags_are_not_rtks_to_read`.
+    Case {
+        rtk_args: &["err", "cargo", "build", "--help"],
+        tool: "cargo",
+        native_args: &["build", "--help"],
+    },
+    Case {
+        rtk_args: &["test", "cargo", "build", "--help"],
+        tool: "cargo",
+        native_args: &["build", "--help"],
+    },
+    Case {
+        rtk_args: &["summary", "cargo", "build", "--help"],
+        tool: "cargo",
+        native_args: &["build", "--help"],
+    },
 ];
 
 #[test]
