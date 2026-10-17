@@ -6,7 +6,9 @@
 //! saving.
 
 use crate::core::pipeline_config;
+use crate::core::shell::{Launch, shell_command};
 use crate::core::tracking::{Tracker, estimate_tokens};
+use crate::core::utils::{ChildArgExt, resolved_command};
 use anyhow::{Context, Result, bail};
 use rtk_engine::pipeline::{TaskDef, UpstreamDef};
 use rtk_engine::task::{CorpusFile, TaskIntent, TaskOutcome, WorkerRequest, find_kind};
@@ -150,8 +152,9 @@ fn run_for_output(command: &[String]) -> Result<(CorpusFile, i32)> {
     let (program, rest) = command
         .split_first()
         .context("`--` needs a command after it")?;
-    let output = std::process::Command::new(program)
-        .args(rest)
+    let mut cmd = resolved_command(program);
+    cmd.child_args(rest);
+    let output = cmd
         .output()
         .with_context(|| format!("Failed to run {program}"))?;
     let mut content = String::new();
@@ -322,18 +325,22 @@ fn default_key_env(provider: &str) -> Option<&'static str> {
 /// conventional one when the upstream does not name it.
 fn api_key(upstream: &UpstreamDef) -> Result<String> {
     if let Some(command) = upstream.api_key_command.as_deref() {
-        let out = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(command)
+        let mut cmd = match shell_command(command, None)? {
+            Launch::Ready(cmd) => cmd,
+            Launch::Unrunnable(unrunnable) => {
+                bail!("api_key_command could not be run: {}", unrunnable.message.trim());
+            }
+        };
+        let out = cmd
             .output()
             .with_context(|| format!("running api_key_command: {command}"))?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
-            anyhow::bail!("api_key_command failed: {}", err.trim());
+            bail!("api_key_command failed: {}", err.trim());
         }
         let key = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if key.is_empty() {
-            anyhow::bail!("api_key_command printed nothing: {command}");
+            bail!("api_key_command printed nothing: {command}");
         }
         return Ok(key);
     }
@@ -472,8 +479,8 @@ fn claude_project_dir(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '-' })
         .collect();
-    let dir = crate::core::user_dirs::home()?
-        .join(".claude")
+    let dir = crate::hooks::init::resolve_claude_dir()
+        .ok()?
         .join("projects")
         .join(slug);
     dir.is_dir().then_some(dir)
@@ -676,6 +683,33 @@ mod tests {
         assert!(parse_args(&["--quesiton".to_string(), "x".to_string()]).is_err());
         assert!(parse_args(&["--question".to_string()]).is_err());
     }
+
+    #[test]
+    fn claude_project_dir_respects_custom_config_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let custom_claude = temp.path().join("custom_claude");
+        let project_cwd = temp.path().join("my-project");
+        std::fs::create_dir_all(&project_cwd).expect("cwd");
+
+        let slug: String = project_cwd
+            .to_str()
+            .unwrap()
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '-' })
+            .collect();
+        let expected_dir = custom_claude.join("projects").join(&slug);
+        std::fs::create_dir_all(&expected_dir).expect("project dir");
+
+        crate::core::test_isolation::with_agent_dir(
+            temp.path(),
+            "CLAUDE_CONFIG_DIR",
+            &custom_claude,
+            || {
+                let resolved = claude_project_dir(&project_cwd);
+                assert_eq!(resolved, Some(expected_dir));
+            },
+        );
+    }
 }
 
 #[cfg(test)]
@@ -754,6 +788,38 @@ mod command_tests {
     fn a_successful_command_reports_zero() {
         let (_, code) = run_for_output(&args(&["sh", "-c", "exit 0"])).expect("runs");
         assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn api_key_command_resolves_credential_from_stdout() {
+        let upstream = UpstreamDef {
+            api_key_command: Some("echo secret-token-abc".to_string()),
+            ..Default::default()
+        };
+        let key = api_key(&upstream).expect("resolves");
+        assert_eq!(key, "secret-token-abc");
+    }
+
+    #[test]
+    fn api_key_command_nonzero_exit_errors() {
+        let upstream = UpstreamDef {
+            api_key_command: Some("exit 1".to_string()),
+            ..Default::default()
+        };
+        assert!(api_key(&upstream).is_err());
+    }
+
+    #[test]
+    fn api_key_command_empty_output_errors() {
+        #[cfg(unix)]
+        let cmd = "printf ''";
+        #[cfg(windows)]
+        let cmd = "type nul";
+        let upstream = UpstreamDef {
+            api_key_command: Some(cmd.to_string()),
+            ..Default::default()
+        };
+        assert!(api_key(&upstream).is_err());
     }
 }
 
