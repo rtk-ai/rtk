@@ -137,6 +137,43 @@ class RtkRewritePluginTest(unittest.TestCase):
 
         self.assertEqual({"command": "rtk git status"}, args)
 
+    def test_rewrite_decodes_rtk_output_as_utf8(self):
+        module, callback = self.load_callback()
+        args = {"command": "cat 中文测试.md"}
+
+        with mock.patch.object(
+            module.subprocess,
+            "run",
+            return_value=FakeCompletedProcess(stdout="rtk read 中文测试.md\n"),
+        ) as run:
+            callback(tool_name="terminal", args=args)
+
+        self.assertEqual({"command": "rtk read 中文测试.md"}, args)
+        run.assert_called_once_with(
+            ["rtk", "rewrite", "cat 中文测试.md"],
+            shell=False,
+            timeout=2,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+    def test_missing_captured_streams_do_not_raise_another_plugin_error(self):
+        module, callback = self.load_callback()
+        args = {"command": "git status"}
+
+        with mock.patch.object(
+            module.subprocess,
+            "run",
+            return_value=FakeCompletedProcess(stdout=None, stderr=None),
+        ):
+            with mock.patch.object(module.sys, "stderr", new_callable=io.StringIO) as stderr:
+                callback(tool_name="terminal", args=args)
+
+        self.assertEqual({"command": "git status"}, args)
+        self.assertEqual("", stderr.getvalue())
+
     def test_rewrite_returncode_three_mutates_same_terminal_args_dict(self):
         module, callback = self.load_callback()
         args = {"command": "git status"}
