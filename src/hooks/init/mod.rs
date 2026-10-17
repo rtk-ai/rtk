@@ -663,6 +663,7 @@ fn resolve_atomic_target(path: &Path) -> PathBuf {
 /// Atomic write using tempfile + rename
 /// Prevents corruption on crash/interrupt
 /// Follows symlinks so the link itself is preserved.
+/// Preserves existing file permissions when overwriting an existing target.
 pub(super) fn atomic_write(path: &Path, content: &str) -> Result<()> {
     let target = resolve_atomic_target(path);
     let parent = target.parent().with_context(|| {
@@ -672,6 +673,19 @@ pub(super) fn atomic_write(path: &Path, content: &str) -> Result<()> {
         )
     })?;
 
+    let existing_permissions = match fs::metadata(&target) {
+        Ok(meta) => Some(meta.permissions()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "Failed to read metadata for existing file {}",
+                    target.display()
+                )
+            });
+        }
+    };
+
     // Create temp file in same directory (ensures same filesystem for atomic rename)
     let mut temp_file = NamedTempFile::new_in(parent)
         .with_context(|| format!("Failed to create temp file in {}", parent.display()))?;
@@ -680,6 +694,19 @@ pub(super) fn atomic_write(path: &Path, content: &str) -> Result<()> {
     temp_file
         .write_all(content.as_bytes())
         .with_context(|| format!("Failed to write {} bytes to temp file", content.len()))?;
+
+    // Preserve existing file permissions if the target already exists
+    if let Some(permissions) = existing_permissions {
+        temp_file
+            .as_file()
+            .set_permissions(permissions)
+            .with_context(|| {
+                format!(
+                    "Failed to preserve permissions on temp file for {}",
+                    target.display()
+                )
+            })?;
+    }
 
     // Atomic rename
     temp_file.persist(&target).with_context(|| {
@@ -2731,6 +2758,69 @@ level = "high"
         assert!(file_path.exists());
         let written = fs::read_to_string(&file_path).unwrap();
         assert_eq!(written, content);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_preserves_existing_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let file_path = temp.path().join("existing.txt");
+
+        fs::write(&file_path, "original content").unwrap();
+        fs::set_permissions(&file_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let initial_meta = fs::metadata(&file_path).unwrap();
+        assert_eq!(
+            initial_meta.permissions().mode() & 0o777,
+            0o644,
+            "precondition: file must be set to 0644"
+        );
+
+        atomic_write(&file_path, "rewritten content").unwrap();
+
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "rewritten content");
+
+        let final_meta = fs::metadata(&file_path).unwrap();
+        assert_eq!(
+            final_meta.permissions().mode() & 0o777,
+            0o644,
+            "permissions must be preserved after atomic_write"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_preserves_symlink_target_permissions() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let temp = TempDir::new().unwrap();
+        let target_path = temp.path().join("real.txt");
+        let link_path = temp.path().join("link.txt");
+
+        fs::write(&target_path, "original").unwrap();
+        fs::set_permissions(&target_path, fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&target_path, &link_path).unwrap();
+
+        let initial_meta = fs::metadata(&target_path).unwrap();
+        assert_eq!(
+            initial_meta.permissions().mode() & 0o777,
+            0o644,
+            "precondition: target file must be set to 0644"
+        );
+
+        atomic_write(&link_path, "updated").unwrap();
+
+        let meta = fs::symlink_metadata(&link_path).unwrap();
+        assert!(meta.file_type().is_symlink(), "symlink must survive");
+
+        let target_meta = fs::metadata(&target_path).unwrap();
+        assert_eq!(
+            target_meta.permissions().mode() & 0o777,
+            0o644,
+            "target permissions must be preserved through symlink write"
+        );
     }
 
     #[cfg(unix)]
