@@ -1,0 +1,13 @@
+make: Entering directory '/home/user/proj'
+cc -Wall -O2 -c src/main.c -o build/main.o
+cc -Wall -O2 -c src/parser.c -o build/parser.o
+src/parser.c: In function 'parse_expr':
+src/parser.c:42:5: error: implicit declaration of function 'lookup_token'
+   42 |     return lookup_token(t);
+      |     ^~~~~~~~~~~~~~~~~~
+src/parser.c:55:9: warning: unused variable 'unused' [-Wunused-variable]
+   55 |     int unused = 0;
+      |         ^~~~~~
+make[1]: *** [Makefile:24: build/parser.o] Error 1
+make[1]: Leaving directory '/home/user/proj'
+make: *** [Makefile:8: all] Error 2
