@@ -145,7 +145,7 @@ rtk init -g                     # Claude Code / Copilot (default)
 rtk init -g --gemini            # Gemini CLI
 rtk init -g --codex             # Codex (OpenAI)
 rtk init -g --agent cursor      # Cursor
-rtk init -g --agent windsurf    # Windsurf
+rtk init -g --agent windsurf    # Devin Desktop (formerly Windsurf)
 rtk init --agent cline          # Cline / Roo Code
 rtk init --agent kilocode       # Kilo Code
 rtk init --agent antigravity    # Google Antigravity
@@ -199,7 +199,7 @@ RTK supports 18 AI coding tools. Each integration rewrites shell commands to `rt
 | **Cursor** | `rtk init -g --agent cursor` | preToolUse hook (hooks.json) |
 | **Gemini CLI** | `rtk init -g --gemini` | BeforeTool hook |
 | **Codex** | `rtk init -g --codex` | PreToolUse hook (`updatedInput`) + AGENTS.md |
-| **Windsurf** | `rtk init -g --agent windsurf` | .windsurfrules (project-scoped) |
+| **Devin Desktop (formerly Windsurf)** | `rtk init -g --agent windsurf` | .windsurfrules (project-scoped) |
 | **Cline / Roo Code** | `rtk init --agent cline` | .clinerules (project-scoped) |
 | **OpenCode** | `rtk init -g --opencode` | Plugin TS (execute.before / tool.execute.before), needs 1.18.29 or newer |
 | **OpenClaw** | `openclaw plugins install ./openclaw` | Plugin TS (before_tool_call) |

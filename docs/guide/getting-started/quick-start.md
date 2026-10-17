@@ -38,7 +38,7 @@ Using something other than Claude Code? Every agent has its own flag:
 rtk init -g --gemini            # Gemini CLI
 rtk init -g --codex             # Codex (OpenAI)
 rtk init -g --agent cursor      # Cursor
-rtk init -g --agent windsurf    # Windsurf
+rtk init -g --agent windsurf    # Devin Desktop (formerly Windsurf)
 rtk init --agent cline          # Cline / Roo Code
 ```
 
