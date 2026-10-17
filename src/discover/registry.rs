@@ -68,21 +68,29 @@ static ENV_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
     // to `sudo rtk docker ps` breaks at runtime because `rtk` is not on root's
     // secure_path, and (where it is) would run rtk itself as root. sudo commands
     // are left untouched so they pass through unchanged. See #146.
-    Regex::new(&format!(r#"^(?:{})+"#, env_word())).unwrap()
+    Regex::new(&format!(r#"^(?:{})+"#, env_word(true))).unwrap()
 });
 /// One word of [`ENV_PREFIX`]: a single `env` or assignment, so the permission
 /// gate can read the command behind each in turn ([`matching_readings`]).
 static ENV_WORD: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(&format!(r#"^(?:{})"#, env_word())).unwrap());
+    LazyLock::new(|| Regex::new(&format!(r#"^(?:{})"#, env_word(false))).unwrap());
 
 /// An `env` word or an assignment, with the blanks after it.
-fn env_word() -> String {
+fn env_word(with_unset: bool) -> String {
     let double_quoted = r#""(?:[^"\\]|\\.)*""#;
     let single_quoted = r#"'(?:[^'\\]|\\.)*'"#;
     let unquoted = r#"[^\s]*"#;
     let env_value = format!("(?:{}|{}|{})", double_quoted, single_quoted, unquoted);
     let env_assign = format!(r#"[A-Z_][A-Z0-9_]*={}"#, env_value);
-    format!(r#"env\s+|{}\s+"#, env_assign)
+    // Only classification and rewriting consume unset options; the permission
+    // gate retains its existing boundary at env's own options.
+    let env_command = if with_unset {
+        let env_unset = r#"(?:-u(?:\s+\S+|[^\s]+)|--unset(?:=\S+|\s+\S+))"#;
+        format!(r#"env(?:\s+{})*\s+"#, env_unset)
+    } else {
+        r#"env\s+"#.to_string()
+    };
+    format!(r#"{}|{}\s+"#, env_command, env_assign)
 }
 // Git global options that appear before the subcommand: -C <path>, -c <key=val>,
 // --git-dir <dir>, --work-tree <dir>, and flag-only options (#163)
@@ -3145,6 +3153,62 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_env_unset_prefix_stripped() {
+        assert_eq!(
+            classify_command("env -u GH_TOKEN gh pr list"),
+            Classification::Supported {
+                rtk_equivalent: "rtk gh",
+                category: "GitHub",
+                estimated_savings_pct: 87.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_env_unset_rewrite_keeps_permission_readings_boundary() {
+        for option in ["-u FOO", "-uFOO", "--unset FOO", "--unset=FOO"] {
+            let command = format!("env {option} git status");
+            assert_eq!(
+                rewrite_command_no_prefixes(&command, &[]),
+                Some(format!("env {option} rtk git status"))
+            );
+            let readings = matching_readings(&command);
+            assert!(readings.complete);
+            assert_eq!(
+                readings.readings,
+                vec![command.as_str(), command.strip_prefix("env ").unwrap()]
+            );
+        }
+    }
+
+    #[test]
+    fn test_env_unset_preserves_permission_verdicts() {
+        use crate::hooks::permissions::{PermissionVerdict, check_command_with_rules};
+
+        let rule = vec!["git push *".to_string()];
+        for option in ["-u FOO", "-uFOO", "--unset FOO", "--unset=FOO"] {
+            let command = format!("env {option} git push origin main");
+            assert_eq!(
+                check_command_with_rules(&command, &rule, &[], &[]),
+                PermissionVerdict::Default
+            );
+            assert_eq!(
+                check_command_with_rules(&command, &[], &rule, &[]),
+                PermissionVerdict::Default
+            );
+            assert_eq!(
+                check_command_with_rules(&command, &[], &[], &rule),
+                PermissionVerdict::Default
+            );
+        }
+        assert_eq!(
+            check_command_with_rules("env FOO=1 git push origin main", &rule, &[], &[]),
+            PermissionVerdict::Deny
+        );
+    }
+
+    #[test]
     fn test_classify_sudo_not_stripped() {
         // sudo is intentionally not stripped: sudo commands stay unclassified so
         // they pass through unchanged rather than rewriting to a broken `sudo rtk`.
@@ -4476,6 +4540,14 @@ mod tests {
     fn test_rewrite_rtk_disabled_multi_env() {
         assert_eq!(
             rewrite_command_no_prefixes("FOO=1 RTK_DISABLED=1 git status", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rtk_disabled_after_env_unset() {
+        assert_eq!(
+            rewrite_command_no_prefixes("env -u GH_TOKEN RTK_DISABLED=1 git status", &[]),
             None
         );
     }
@@ -6826,6 +6898,10 @@ mod tests {
             rewrite_command_no_prefixes("env FOO=1 sudo docker ps", &[]),
             None
         );
+        assert_eq!(
+            rewrite_command_no_prefixes("env -u FOO sudo git status", &[]),
+            None
+        );
         assert_eq!(rewrite_command_no_prefixes("sudo", &[]), None);
         assert_eq!(
             rewrite_command_no_prefixes("sudoedit /etc/hosts", &[]),
@@ -6839,6 +6915,34 @@ mod tests {
             rewrite_command_no_prefixes("GIT_SSH_COMMAND=ssh git push origin main", &[]),
             Some("GIT_SSH_COMMAND=ssh rtk git push origin main".into())
         );
+    }
+
+    #[test]
+    fn test_rewrite_env_unset_prefix() {
+        for (input, expected) in [
+            (
+                "env -u GH_TOKEN gh pr list",
+                "env -u GH_TOKEN rtk gh pr list",
+            ),
+            (
+                "env -u GH_TOKEN -u GIT_TOKEN git status",
+                "env -u GH_TOKEN -u GIT_TOKEN rtk git status",
+            ),
+            (
+                "env --unset=GH_TOKEN cargo test",
+                "env --unset=GH_TOKEN rtk cargo test",
+            ),
+            (
+                "CI=1 env --unset GITHUB_TOKEN cargo test",
+                "CI=1 env --unset GITHUB_TOKEN rtk cargo test",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                Some(expected.into()),
+                "input: {input}"
+            );
+        }
     }
 
     // --- find with native flags ---
@@ -6914,6 +7018,15 @@ mod tests {
         let excluded = vec!["psql".to_string()];
         assert_eq!(
             rewrite_command_no_prefixes("PGPASSWORD=postgres psql -h localhost", &excluded),
+            None
+        );
+    }
+
+    #[test]
+    fn test_exclude_env_unset_prefixed_command() {
+        let excluded = vec!["gh".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("env -u GH_TOKEN gh pr list", &excluded),
             None
         );
     }
@@ -7236,6 +7349,10 @@ mod tests {
         assert_eq!(
             strip_disabled_prefix("FOO=1 RTK_DISABLED=1 cargo test"),
             ("FOO=1 RTK_DISABLED=1 ", "cargo test")
+        );
+        assert_eq!(
+            strip_disabled_prefix("env -u GH_TOKEN FOO=1 cargo test"),
+            ("env -u GH_TOKEN FOO=1 ", "cargo test")
         );
         assert_eq!(strip_disabled_prefix("git status"), ("", "git status"));
         // Rewrite helper still does not strip sudo (see ENV_PREFIX / #146).
