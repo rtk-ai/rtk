@@ -27,7 +27,8 @@
 <p align="center">
   <a href="README.md">English</a> &bull;
   <a href="README_fr.md">Francais</a> &bull;
-  <a href="README_zh.md">中文</a> &bull;
+  <a href="README_zh.md">简体中文</a> &bull;
+  <a href="README_zh-TW.md">繁體中文</a> &bull;
   <a href="README_ja.md">日本語</a> &bull;
   <a href="README_ko.md">한국어</a> &bull;
   <a href="README_es.md">Espanol</a> &bull;
@@ -332,7 +333,7 @@ RTK collects **no command content and no file contents**. Telemetry is anonymous
 - **Adrien Eppling** — Core contributor
   [GitHub](https://github.com/aeppling) · [LinkedIn](https://www.linkedin.com/in/adrien-eppling/)
 - **Nicolas Le Cam** — Core contributor
-  [Github](https://github.com/kush) · [LinkedIn](https://www.linkedin.com/in/nicolas-le-cam-386387160/)
+  [GitHub](https://github.com/kush) · [LinkedIn](https://www.linkedin.com/in/nicolas-le-cam-386387160/)
 - **Takayuki Maeda** — Core contributor
   [GitHub](https://github.com/TaKO8Ki) · [LinkedIn](https://www.linkedin.com/in/tako8ki/)
 
