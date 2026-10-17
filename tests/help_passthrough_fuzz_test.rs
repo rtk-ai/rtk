@@ -175,6 +175,26 @@ const CASES: &[Case] = &[
         native_args: &["diff", "--help"],
     },
     Case {
+        rtk_args: &["git", "ls-tree", "--help"],
+        tool: "git",
+        native_args: &["ls-tree", "--help"],
+    },
+    Case {
+        rtk_args: &["git", "ls-tree", "-h"],
+        tool: "git",
+        native_args: &["ls-tree", "-h"],
+    },
+    Case {
+        rtk_args: &["git", "ls-files", "--help"],
+        tool: "git",
+        native_args: &["ls-files", "--help"],
+    },
+    Case {
+        rtk_args: &["git", "ls-files", "-h"],
+        tool: "git",
+        native_args: &["ls-files", "-h"],
+    },
+    Case {
         rtk_args: &["go", "vet", "-h"],
         tool: "go",
         native_args: &["vet", "-h"],

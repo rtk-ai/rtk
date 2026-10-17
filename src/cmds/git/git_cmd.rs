@@ -32,6 +32,8 @@ pub enum GitCommand {
     Fetch,
     Stash { subcommand: Option<String> },
     Worktree,
+    LsTree,
+    LsFiles,
 }
 
 impl GitCommand {
@@ -51,6 +53,8 @@ impl GitCommand {
             GitCommand::Fetch => "fetch",
             GitCommand::Stash { .. } => "stash",
             GitCommand::Worktree => "worktree",
+            GitCommand::LsTree => "ls-tree",
+            GitCommand::LsFiles => "ls-files",
         }
     }
 }
@@ -179,6 +183,8 @@ pub fn run(
             run_stash(subcommand.as_deref(), args, verbose, global_args)
         }
         GitCommand::Worktree => run_worktree(args, verbose, global_args),
+        GitCommand::LsTree => run_ls_tree(args, verbose, global_args),
+        GitCommand::LsFiles => run_ls_files(args, verbose, global_args),
     }
 }
 
@@ -3806,6 +3812,55 @@ fn filter_worktree_list(output: &str) -> String {
     result.join("\n")
 }
 
+/// `git ls-tree` and `git ls-files` are script-facing: consumers (xargs,
+/// while-read loops, awk pipelines) require one full path per line. Any
+/// reshape -- even a "summary" -- breaks them, so rtk runs the command with
+/// inherited stdio and only records telemetry. It never touches the output.
+fn run_ls_tree(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    if verbose > 0 {
+        eprintln!("git ls-tree passthrough: {:?}", args);
+    }
+
+    let status = git_cmd(global_args)
+        .arg("ls-tree")
+        .args(args)
+        .status()
+        .context("Failed to run git ls-tree")?;
+
+    let args_display = display_args(args);
+    timer.track_passthrough(
+        &format!("git ls-tree {}", args_display),
+        &format!("rtk git ls-tree {} (passthrough)", args_display),
+    );
+
+    Ok(exit_code_from_status(&status, "git ls-tree"))
+}
+
+/// See `run_ls_tree`: same script-facing contract, same raw passthrough.
+fn run_ls_files(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    if verbose > 0 {
+        eprintln!("git ls-files passthrough: {:?}", args);
+    }
+
+    let status = git_cmd(global_args)
+        .arg("ls-files")
+        .args(args)
+        .status()
+        .context("Failed to run git ls-files")?;
+
+    let args_display = display_args(args);
+    timer.track_passthrough(
+        &format!("git ls-files {}", args_display),
+        &format!("rtk git ls-files {} (passthrough)", args_display),
+    );
+
+    Ok(exit_code_from_status(&status, "git ls-files"))
+}
+
 /// Runs an unsupported git subcommand by passing it through directly
 pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
@@ -3885,6 +3940,8 @@ mod tests {
             (GitCommand::Branch, "branch"),
             (GitCommand::Fetch, "fetch"),
             (GitCommand::Worktree, "worktree"),
+            (GitCommand::LsTree, "ls-tree"),
+            (GitCommand::LsFiles, "ls-files"),
             (GitCommand::Stash { subcommand: None }, "stash"),
         ] {
             assert_eq!(cmd.git_name(), name, "{cmd:?}");
