@@ -239,7 +239,6 @@ pub enum DashDashRole {
     /// the tail belongs to, which decides what a caller may read from it: a `Forwards` tail is
     /// another program's, so reading a flag out of it is always wrong, while this tail is still
     /// the tool's own, just not its global region.
-    #[allow(dead_code)] // No in-tree caller yet: gradlew still parses its args by hand.
     EndsGlobalOptions,
 }
 
