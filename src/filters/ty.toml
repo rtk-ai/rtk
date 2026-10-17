@@ -1,6 +1,6 @@
 [filters.ty]
 description = "Compact ty type checker output — strip blank lines, keep errors"
-match_command = "^ty\\b"
+match_command = "^ty(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",
