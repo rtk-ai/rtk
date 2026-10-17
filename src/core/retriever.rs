@@ -634,6 +634,18 @@ fn decode(row: &Row) -> Result<Vec<u8>> {
     }
 }
 
+/// What `rtk recall <hash>` would print, without the printing: a test that
+/// follows a recovery hint sees what a caller following it sees, down to the
+/// entry's own `shown_upto`, which is where the command starts reading.
+#[cfg(test)]
+pub(crate) fn recalled_content(hash: &str) -> Option<String> {
+    let cfg = Config::load().unwrap_or_default().retriever;
+    let conn = open_existing(&cfg).ok().flatten()?;
+    let row = load_by_hash(&conn, hash).ok().flatten()?;
+    let full = decode(&row).ok()?;
+    String::from_utf8(slice_from_line(&full, row.shown_upto).to_vec()).ok()
+}
+
 pub struct RecallArgs<'a> {
     pub hash: Option<&'a str>,
     pub full: bool,

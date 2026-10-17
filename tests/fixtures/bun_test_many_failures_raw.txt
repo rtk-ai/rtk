@@ -1,0 +1,558 @@
+bun test v1.3.14 (0d9b296a)
+
+many40.test.ts:
+1 | import { expect, test } from "bun:test";
+2 | test("case 0", () => { expect(0).toBe(-1); });
+                                     ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 0
+
+      at <anonymous> (/home/user/project/many40.test.ts:2:34)
+(fail) case 0 [0.15ms]
+1 | import { expect, test } from "bun:test";
+2 | test("case 0", () => { expect(0).toBe(-1); });
+3 | test("case 1", () => { expect(1).toBe(-1); });
+                                     ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 1
+
+      at <anonymous> (/home/user/project/many40.test.ts:3:34)
+(fail) case 1 [0.04ms]
+1 | import { expect, test } from "bun:test";
+2 | test("case 0", () => { expect(0).toBe(-1); });
+3 | test("case 1", () => { expect(1).toBe(-1); });
+4 | test("case 2", () => { expect(2).toBe(-1); });
+                                     ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 2
+
+      at <anonymous> (/home/user/project/many40.test.ts:4:34)
+(fail) case 2 [0.02ms]
+1 | import { expect, test } from "bun:test";
+2 | test("case 0", () => { expect(0).toBe(-1); });
+3 | test("case 1", () => { expect(1).toBe(-1); });
+4 | test("case 2", () => { expect(2).toBe(-1); });
+5 | test("case 3", () => { expect(3).toBe(-1); });
+                                     ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 3
+
+      at <anonymous> (/home/user/project/many40.test.ts:5:34)
+(fail) case 3 [0.02ms]
+1 | import { expect, test } from "bun:test";
+2 | test("case 0", () => { expect(0).toBe(-1); });
+3 | test("case 1", () => { expect(1).toBe(-1); });
+4 | test("case 2", () => { expect(2).toBe(-1); });
+5 | test("case 3", () => { expect(3).toBe(-1); });
+6 | test("case 4", () => { expect(4).toBe(-1); });
+                                     ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 4
+
+      at <anonymous> (/home/user/project/many40.test.ts:6:34)
+(fail) case 4 [0.02ms]
+2 | test("case 0", () => { expect(0).toBe(-1); });
+3 | test("case 1", () => { expect(1).toBe(-1); });
+4 | test("case 2", () => { expect(2).toBe(-1); });
+5 | test("case 3", () => { expect(3).toBe(-1); });
+6 | test("case 4", () => { expect(4).toBe(-1); });
+7 | test("case 5", () => { expect(5).toBe(-1); });
+                                     ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 5
+
+      at <anonymous> (/home/user/project/many40.test.ts:7:34)
+(fail) case 5 [0.02ms]
+3 | test("case 1", () => { expect(1).toBe(-1); });
+4 | test("case 2", () => { expect(2).toBe(-1); });
+5 | test("case 3", () => { expect(3).toBe(-1); });
+6 | test("case 4", () => { expect(4).toBe(-1); });
+7 | test("case 5", () => { expect(5).toBe(-1); });
+8 | test("case 6", () => { expect(6).toBe(-1); });
+                                     ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 6
+
+      at <anonymous> (/home/user/project/many40.test.ts:8:34)
+(fail) case 6 [0.03ms]
+4 | test("case 2", () => { expect(2).toBe(-1); });
+5 | test("case 3", () => { expect(3).toBe(-1); });
+6 | test("case 4", () => { expect(4).toBe(-1); });
+7 | test("case 5", () => { expect(5).toBe(-1); });
+8 | test("case 6", () => { expect(6).toBe(-1); });
+9 | test("case 7", () => { expect(7).toBe(-1); });
+                                     ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 7
+
+      at <anonymous> (/home/user/project/many40.test.ts:9:34)
+(fail) case 7 [0.02ms]
+ 5 | test("case 3", () => { expect(3).toBe(-1); });
+ 6 | test("case 4", () => { expect(4).toBe(-1); });
+ 7 | test("case 5", () => { expect(5).toBe(-1); });
+ 8 | test("case 6", () => { expect(6).toBe(-1); });
+ 9 | test("case 7", () => { expect(7).toBe(-1); });
+10 | test("case 8", () => { expect(8).toBe(-1); });
+                                      ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 8
+
+      at <anonymous> (/home/user/project/many40.test.ts:10:34)
+(fail) case 8 [0.03ms]
+ 6 | test("case 4", () => { expect(4).toBe(-1); });
+ 7 | test("case 5", () => { expect(5).toBe(-1); });
+ 8 | test("case 6", () => { expect(6).toBe(-1); });
+ 9 | test("case 7", () => { expect(7).toBe(-1); });
+10 | test("case 8", () => { expect(8).toBe(-1); });
+11 | test("case 9", () => { expect(9).toBe(-1); });
+                                      ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 9
+
+      at <anonymous> (/home/user/project/many40.test.ts:11:34)
+(fail) case 9 [0.02ms]
+ 7 | test("case 5", () => { expect(5).toBe(-1); });
+ 8 | test("case 6", () => { expect(6).toBe(-1); });
+ 9 | test("case 7", () => { expect(7).toBe(-1); });
+10 | test("case 8", () => { expect(8).toBe(-1); });
+11 | test("case 9", () => { expect(9).toBe(-1); });
+12 | test("case 10", () => { expect(10).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 10
+
+      at <anonymous> (/home/user/project/many40.test.ts:12:36)
+(fail) case 10 [0.01ms]
+ 8 | test("case 6", () => { expect(6).toBe(-1); });
+ 9 | test("case 7", () => { expect(7).toBe(-1); });
+10 | test("case 8", () => { expect(8).toBe(-1); });
+11 | test("case 9", () => { expect(9).toBe(-1); });
+12 | test("case 10", () => { expect(10).toBe(-1); });
+13 | test("case 11", () => { expect(11).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 11
+
+      at <anonymous> (/home/user/project/many40.test.ts:13:36)
+(fail) case 11 [0.02ms]
+ 9 | test("case 7", () => { expect(7).toBe(-1); });
+10 | test("case 8", () => { expect(8).toBe(-1); });
+11 | test("case 9", () => { expect(9).toBe(-1); });
+12 | test("case 10", () => { expect(10).toBe(-1); });
+13 | test("case 11", () => { expect(11).toBe(-1); });
+14 | test("case 12", () => { expect(12).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 12
+
+      at <anonymous> (/home/user/project/many40.test.ts:14:36)
+(fail) case 12 [0.01ms]
+10 | test("case 8", () => { expect(8).toBe(-1); });
+11 | test("case 9", () => { expect(9).toBe(-1); });
+12 | test("case 10", () => { expect(10).toBe(-1); });
+13 | test("case 11", () => { expect(11).toBe(-1); });
+14 | test("case 12", () => { expect(12).toBe(-1); });
+15 | test("case 13", () => { expect(13).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 13
+
+      at <anonymous> (/home/user/project/many40.test.ts:15:36)
+(fail) case 13 [0.02ms]
+11 | test("case 9", () => { expect(9).toBe(-1); });
+12 | test("case 10", () => { expect(10).toBe(-1); });
+13 | test("case 11", () => { expect(11).toBe(-1); });
+14 | test("case 12", () => { expect(12).toBe(-1); });
+15 | test("case 13", () => { expect(13).toBe(-1); });
+16 | test("case 14", () => { expect(14).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 14
+
+      at <anonymous> (/home/user/project/many40.test.ts:16:36)
+(fail) case 14 [0.02ms]
+12 | test("case 10", () => { expect(10).toBe(-1); });
+13 | test("case 11", () => { expect(11).toBe(-1); });
+14 | test("case 12", () => { expect(12).toBe(-1); });
+15 | test("case 13", () => { expect(13).toBe(-1); });
+16 | test("case 14", () => { expect(14).toBe(-1); });
+17 | test("case 15", () => { expect(15).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 15
+
+      at <anonymous> (/home/user/project/many40.test.ts:17:36)
+(fail) case 15 [0.03ms]
+13 | test("case 11", () => { expect(11).toBe(-1); });
+14 | test("case 12", () => { expect(12).toBe(-1); });
+15 | test("case 13", () => { expect(13).toBe(-1); });
+16 | test("case 14", () => { expect(14).toBe(-1); });
+17 | test("case 15", () => { expect(15).toBe(-1); });
+18 | test("case 16", () => { expect(16).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 16
+
+      at <anonymous> (/home/user/project/many40.test.ts:18:36)
+(fail) case 16 [0.03ms]
+14 | test("case 12", () => { expect(12).toBe(-1); });
+15 | test("case 13", () => { expect(13).toBe(-1); });
+16 | test("case 14", () => { expect(14).toBe(-1); });
+17 | test("case 15", () => { expect(15).toBe(-1); });
+18 | test("case 16", () => { expect(16).toBe(-1); });
+19 | test("case 17", () => { expect(17).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 17
+
+      at <anonymous> (/home/user/project/many40.test.ts:19:36)
+(fail) case 17 [0.02ms]
+15 | test("case 13", () => { expect(13).toBe(-1); });
+16 | test("case 14", () => { expect(14).toBe(-1); });
+17 | test("case 15", () => { expect(15).toBe(-1); });
+18 | test("case 16", () => { expect(16).toBe(-1); });
+19 | test("case 17", () => { expect(17).toBe(-1); });
+20 | test("case 18", () => { expect(18).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 18
+
+      at <anonymous> (/home/user/project/many40.test.ts:20:36)
+(fail) case 18 [0.02ms]
+16 | test("case 14", () => { expect(14).toBe(-1); });
+17 | test("case 15", () => { expect(15).toBe(-1); });
+18 | test("case 16", () => { expect(16).toBe(-1); });
+19 | test("case 17", () => { expect(17).toBe(-1); });
+20 | test("case 18", () => { expect(18).toBe(-1); });
+21 | test("case 19", () => { expect(19).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 19
+
+      at <anonymous> (/home/user/project/many40.test.ts:21:36)
+(fail) case 19 [0.02ms]
+17 | test("case 15", () => { expect(15).toBe(-1); });
+18 | test("case 16", () => { expect(16).toBe(-1); });
+19 | test("case 17", () => { expect(17).toBe(-1); });
+20 | test("case 18", () => { expect(18).toBe(-1); });
+21 | test("case 19", () => { expect(19).toBe(-1); });
+22 | test("case 20", () => { expect(20).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 20
+
+      at <anonymous> (/home/user/project/many40.test.ts:22:36)
+(fail) case 20 [0.02ms]
+18 | test("case 16", () => { expect(16).toBe(-1); });
+19 | test("case 17", () => { expect(17).toBe(-1); });
+20 | test("case 18", () => { expect(18).toBe(-1); });
+21 | test("case 19", () => { expect(19).toBe(-1); });
+22 | test("case 20", () => { expect(20).toBe(-1); });
+23 | test("case 21", () => { expect(21).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 21
+
+      at <anonymous> (/home/user/project/many40.test.ts:23:36)
+(fail) case 21 [0.02ms]
+19 | test("case 17", () => { expect(17).toBe(-1); });
+20 | test("case 18", () => { expect(18).toBe(-1); });
+21 | test("case 19", () => { expect(19).toBe(-1); });
+22 | test("case 20", () => { expect(20).toBe(-1); });
+23 | test("case 21", () => { expect(21).toBe(-1); });
+24 | test("case 22", () => { expect(22).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 22
+
+      at <anonymous> (/home/user/project/many40.test.ts:24:36)
+(fail) case 22 [0.02ms]
+20 | test("case 18", () => { expect(18).toBe(-1); });
+21 | test("case 19", () => { expect(19).toBe(-1); });
+22 | test("case 20", () => { expect(20).toBe(-1); });
+23 | test("case 21", () => { expect(21).toBe(-1); });
+24 | test("case 22", () => { expect(22).toBe(-1); });
+25 | test("case 23", () => { expect(23).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 23
+
+      at <anonymous> (/home/user/project/many40.test.ts:25:36)
+(fail) case 23 [0.02ms]
+21 | test("case 19", () => { expect(19).toBe(-1); });
+22 | test("case 20", () => { expect(20).toBe(-1); });
+23 | test("case 21", () => { expect(21).toBe(-1); });
+24 | test("case 22", () => { expect(22).toBe(-1); });
+25 | test("case 23", () => { expect(23).toBe(-1); });
+26 | test("case 24", () => { expect(24).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 24
+
+      at <anonymous> (/home/user/project/many40.test.ts:26:36)
+(fail) case 24 [0.03ms]
+22 | test("case 20", () => { expect(20).toBe(-1); });
+23 | test("case 21", () => { expect(21).toBe(-1); });
+24 | test("case 22", () => { expect(22).toBe(-1); });
+25 | test("case 23", () => { expect(23).toBe(-1); });
+26 | test("case 24", () => { expect(24).toBe(-1); });
+27 | test("case 25", () => { expect(25).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 25
+
+      at <anonymous> (/home/user/project/many40.test.ts:27:36)
+(fail) case 25 [0.02ms]
+23 | test("case 21", () => { expect(21).toBe(-1); });
+24 | test("case 22", () => { expect(22).toBe(-1); });
+25 | test("case 23", () => { expect(23).toBe(-1); });
+26 | test("case 24", () => { expect(24).toBe(-1); });
+27 | test("case 25", () => { expect(25).toBe(-1); });
+28 | test("case 26", () => { expect(26).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 26
+
+      at <anonymous> (/home/user/project/many40.test.ts:28:36)
+(fail) case 26 [0.02ms]
+24 | test("case 22", () => { expect(22).toBe(-1); });
+25 | test("case 23", () => { expect(23).toBe(-1); });
+26 | test("case 24", () => { expect(24).toBe(-1); });
+27 | test("case 25", () => { expect(25).toBe(-1); });
+28 | test("case 26", () => { expect(26).toBe(-1); });
+29 | test("case 27", () => { expect(27).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 27
+
+      at <anonymous> (/home/user/project/many40.test.ts:29:36)
+(fail) case 27 [0.02ms]
+25 | test("case 23", () => { expect(23).toBe(-1); });
+26 | test("case 24", () => { expect(24).toBe(-1); });
+27 | test("case 25", () => { expect(25).toBe(-1); });
+28 | test("case 26", () => { expect(26).toBe(-1); });
+29 | test("case 27", () => { expect(27).toBe(-1); });
+30 | test("case 28", () => { expect(28).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 28
+
+      at <anonymous> (/home/user/project/many40.test.ts:30:36)
+(fail) case 28 [0.03ms]
+26 | test("case 24", () => { expect(24).toBe(-1); });
+27 | test("case 25", () => { expect(25).toBe(-1); });
+28 | test("case 26", () => { expect(26).toBe(-1); });
+29 | test("case 27", () => { expect(27).toBe(-1); });
+30 | test("case 28", () => { expect(28).toBe(-1); });
+31 | test("case 29", () => { expect(29).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 29
+
+      at <anonymous> (/home/user/project/many40.test.ts:31:36)
+(fail) case 29 [0.02ms]
+27 | test("case 25", () => { expect(25).toBe(-1); });
+28 | test("case 26", () => { expect(26).toBe(-1); });
+29 | test("case 27", () => { expect(27).toBe(-1); });
+30 | test("case 28", () => { expect(28).toBe(-1); });
+31 | test("case 29", () => { expect(29).toBe(-1); });
+32 | test("case 30", () => { expect(30).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 30
+
+      at <anonymous> (/home/user/project/many40.test.ts:32:36)
+(fail) case 30 [0.02ms]
+28 | test("case 26", () => { expect(26).toBe(-1); });
+29 | test("case 27", () => { expect(27).toBe(-1); });
+30 | test("case 28", () => { expect(28).toBe(-1); });
+31 | test("case 29", () => { expect(29).toBe(-1); });
+32 | test("case 30", () => { expect(30).toBe(-1); });
+33 | test("case 31", () => { expect(31).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 31
+
+      at <anonymous> (/home/user/project/many40.test.ts:33:36)
+(fail) case 31 [0.02ms]
+29 | test("case 27", () => { expect(27).toBe(-1); });
+30 | test("case 28", () => { expect(28).toBe(-1); });
+31 | test("case 29", () => { expect(29).toBe(-1); });
+32 | test("case 30", () => { expect(30).toBe(-1); });
+33 | test("case 31", () => { expect(31).toBe(-1); });
+34 | test("case 32", () => { expect(32).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 32
+
+      at <anonymous> (/home/user/project/many40.test.ts:34:36)
+(fail) case 32 [0.02ms]
+30 | test("case 28", () => { expect(28).toBe(-1); });
+31 | test("case 29", () => { expect(29).toBe(-1); });
+32 | test("case 30", () => { expect(30).toBe(-1); });
+33 | test("case 31", () => { expect(31).toBe(-1); });
+34 | test("case 32", () => { expect(32).toBe(-1); });
+35 | test("case 33", () => { expect(33).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 33
+
+      at <anonymous> (/home/user/project/many40.test.ts:35:36)
+(fail) case 33 [0.03ms]
+31 | test("case 29", () => { expect(29).toBe(-1); });
+32 | test("case 30", () => { expect(30).toBe(-1); });
+33 | test("case 31", () => { expect(31).toBe(-1); });
+34 | test("case 32", () => { expect(32).toBe(-1); });
+35 | test("case 33", () => { expect(33).toBe(-1); });
+36 | test("case 34", () => { expect(34).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 34
+
+      at <anonymous> (/home/user/project/many40.test.ts:36:36)
+(fail) case 34 [0.02ms]
+32 | test("case 30", () => { expect(30).toBe(-1); });
+33 | test("case 31", () => { expect(31).toBe(-1); });
+34 | test("case 32", () => { expect(32).toBe(-1); });
+35 | test("case 33", () => { expect(33).toBe(-1); });
+36 | test("case 34", () => { expect(34).toBe(-1); });
+37 | test("case 35", () => { expect(35).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 35
+
+      at <anonymous> (/home/user/project/many40.test.ts:37:36)
+(fail) case 35 [0.02ms]
+33 | test("case 31", () => { expect(31).toBe(-1); });
+34 | test("case 32", () => { expect(32).toBe(-1); });
+35 | test("case 33", () => { expect(33).toBe(-1); });
+36 | test("case 34", () => { expect(34).toBe(-1); });
+37 | test("case 35", () => { expect(35).toBe(-1); });
+38 | test("case 36", () => { expect(36).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 36
+
+      at <anonymous> (/home/user/project/many40.test.ts:38:36)
+(fail) case 36 [0.02ms]
+34 | test("case 32", () => { expect(32).toBe(-1); });
+35 | test("case 33", () => { expect(33).toBe(-1); });
+36 | test("case 34", () => { expect(34).toBe(-1); });
+37 | test("case 35", () => { expect(35).toBe(-1); });
+38 | test("case 36", () => { expect(36).toBe(-1); });
+39 | test("case 37", () => { expect(37).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 37
+
+      at <anonymous> (/home/user/project/many40.test.ts:39:36)
+(fail) case 37 [0.02ms]
+35 | test("case 33", () => { expect(33).toBe(-1); });
+36 | test("case 34", () => { expect(34).toBe(-1); });
+37 | test("case 35", () => { expect(35).toBe(-1); });
+38 | test("case 36", () => { expect(36).toBe(-1); });
+39 | test("case 37", () => { expect(37).toBe(-1); });
+40 | test("case 38", () => { expect(38).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 38
+
+      at <anonymous> (/home/user/project/many40.test.ts:40:36)
+(fail) case 38 [0.02ms]
+36 | test("case 34", () => { expect(34).toBe(-1); });
+37 | test("case 35", () => { expect(35).toBe(-1); });
+38 | test("case 36", () => { expect(36).toBe(-1); });
+39 | test("case 37", () => { expect(37).toBe(-1); });
+40 | test("case 38", () => { expect(38).toBe(-1); });
+41 | test("case 39", () => { expect(39).toBe(-1); });
+                                        ^
+error: expect(received).toBe(expected)
+
+Expected: -1
+Received: 39
+
+      at <anonymous> (/home/user/project/many40.test.ts:41:36)
+(fail) case 39 [0.02ms]
+
+ 0 pass
+ 40 fail
+ 40 expect() calls
+Ran 40 tests across 1 file. [19.00ms]
