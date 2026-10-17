@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use super::ccusage::{self, CcusagePeriod, Granularity};
 use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
-use crate::core::utils::{format_cpt, format_tokens, format_usd};
+use crate::core::utils::{format_cpt, format_signed_tokens, format_tokens, format_usd};
 
 // ── Constants ──
 
@@ -36,7 +36,7 @@ pub struct PeriodEconomics {
     pub cc_cache_read_tokens: Option<u64>,
     // rtk metrics
     pub rtk_commands: Option<usize>,
-    pub rtk_saved_tokens: Option<usize>,
+    pub rtk_saved_tokens: Option<i64>,
     pub rtk_savings_pct: Option<f64>,
     // Primary metric (weighted input CPT)
     pub weighted_input_cpt: Option<f64>, // Derived input CPT using API ratios
@@ -101,13 +101,7 @@ impl PeriodEconomics {
     fn set_rtk_from_month(&mut self, stats: &MonthStats) {
         self.rtk_commands = Some(stats.commands);
         self.rtk_saved_tokens = Some(stats.saved_tokens);
-        self.rtk_savings_pct = Some(if stats.input_tokens + stats.output_tokens > 0 {
-            stats.saved_tokens as f64
-                / (stats.saved_tokens + stats.input_tokens + stats.output_tokens) as f64
-                * 100.0
-        } else {
-            0.0
-        });
+        self.rtk_savings_pct = Some(stats.savings_pct);
     }
 
     fn compute_weighted_metrics(&mut self) {
@@ -167,7 +161,7 @@ struct Totals {
     cc_cache_create_tokens: u64,
     cc_cache_read_tokens: u64,
     rtk_commands: usize,
-    rtk_saved_tokens: usize,
+    rtk_saved_tokens: i64,
     rtk_avg_savings_pct: f64,
     weighted_input_cpt: Option<f64>,
     savings_weighted: Option<f64>,
@@ -469,7 +463,7 @@ fn display_summary(tracker: &Tracker, verbose: u8) -> Result<()> {
     println!("  RTK commands:                 {}", totals.rtk_commands);
     println!(
         "  Tokens saved:                 {}",
-        format_tokens(totals.rtk_saved_tokens)
+        format_signed_tokens(totals.rtk_saved_tokens)
     );
     println!();
 
@@ -599,7 +593,7 @@ fn print_period_table(periods: &[PeriodEconomics], verbose: u8) {
             let spent = p.cc_cost.map(format_usd).unwrap_or_else(|| "—".to_string());
             let saved = p
                 .rtk_saved_tokens
-                .map(format_tokens)
+                .map(format_signed_tokens)
                 .unwrap_or_else(|| "—".to_string());
             let weighted = p
                 .savings_weighted
@@ -638,7 +632,7 @@ fn print_period_table(periods: &[PeriodEconomics], verbose: u8) {
             let spent = p.cc_cost.map(format_usd).unwrap_or_else(|| "—".to_string());
             let saved = p
                 .rtk_saved_tokens
-                .map(format_tokens)
+                .map(format_signed_tokens)
                 .unwrap_or_else(|| "—".to_string());
             let weighted = p
                 .savings_weighted
@@ -840,6 +834,43 @@ mod tests {
 
         // Invalid format
         assert_eq!(convert_saturday_to_monday("invalid"), None);
+    }
+
+    #[test]
+    fn test_monthly_economics_preserves_signed_savings_and_rate() {
+        let stats = MonthStats {
+            month: "2026-10".into(),
+            commands: 2,
+            input_tokens: 200,
+            output_tokens: 250,
+            saved_tokens: -50,
+            savings_pct: -25.0,
+            total_time_ms: 10,
+            avg_time_ms: 5,
+        };
+        let mut period = PeriodEconomics::new(&stats.month);
+        period.set_rtk_from_month(&stats);
+        period.cc_cost = Some(10.0);
+        period.cc_input_tokens = Some(100);
+        period.cc_output_tokens = Some(0);
+        period.cc_cache_create_tokens = Some(0);
+        period.cc_cache_read_tokens = Some(0);
+        period.cc_total_tokens = Some(100);
+        period.cc_active_tokens = Some(100);
+        period.compute_weighted_metrics();
+        period.compute_dual_metrics();
+        assert_eq!(period.rtk_saved_tokens, Some(-50));
+        assert_eq!(period.rtk_savings_pct, Some(-25.0));
+        assert_eq!(period.savings_weighted, Some(-5.0));
+        assert_eq!(period.savings_blended, Some(-5.0));
+        assert_eq!(period.savings_active, Some(-5.0));
+        let mut positive = PeriodEconomics::new("2026-09");
+        positive.rtk_saved_tokens = Some(20);
+        let totals = compute_totals(&[positive, period]);
+        assert_eq!(totals.rtk_saved_tokens, -30);
+        assert_eq!(totals.savings_weighted, Some(-3.0));
+        let json = serde_json::to_value(&totals).expect("serialize signed economics");
+        assert_eq!(json["rtk_saved_tokens"], -30);
     }
 
     #[test]

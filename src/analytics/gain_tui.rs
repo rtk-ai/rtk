@@ -9,7 +9,7 @@
 
 use crate::analytics::gain::share_cta_available;
 use crate::core::tracking::{GainSummary as TrackerSummary, Tracker};
-use crate::core::utils::format_tokens;
+use crate::core::utils::{format_signed_tokens, format_tokens};
 use crate::llm_proxy::{self, ProxyGainSummary};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -282,7 +282,7 @@ fn draw_tracker_panel(f: &mut Frame, area: Rect, summary: Option<&TrackerSummary
             "Saved",
             format!(
                 "{} ({:.1}%)",
-                format_tokens(s.total_saved),
+                format_signed_tokens(s.total_saved),
                 s.avg_savings_pct
             ),
             s.avg_savings_pct,
@@ -440,7 +440,7 @@ fn composition_bar(
         Span::styled(format!("{label:<16}"), label_style()),
         Span::styled(bar, Style::default().fg(color)),
         Span::styled(format!(" {pct:>4.1}%  "), Style::default().fg(color)),
-        Span::styled(format_tokens(tokens.max(0) as usize), label_style()),
+        Span::styled(format_signed_tokens(tokens), label_style()),
     ])
 }
 
@@ -478,7 +478,7 @@ fn draw_context_panel(
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let rtk_saved = t.total_saved as i64;
+    let rtk_saved = t.total_saved;
     let other = (p.ctx_total - p.ctx_tool_result - p.ctx_tool_use - p.ctx_image).max(0);
     let combined_total =
         rtk_saved + p.saved_ingest_filter + p.saved_pixel_compress + p.saved_ccr + p.ctx_total;
@@ -535,7 +535,7 @@ fn savings_gauge(pct: f64) -> Gauge<'static> {
     Gauge::default()
         .gauge_style(Style::default().fg(color).add_modifier(Modifier::BOLD))
         .percent(clamped.round() as u16)
-        .label(format!("{clamped:.1}%"))
+        .label(format!("{pct:.1}%"))
 }
 
 fn draw_table(f: &mut Frame, area: Rect, state: &State) {
@@ -585,7 +585,7 @@ fn draw_table(f: &mut Frame, area: Rect, state: &State) {
                         .add_modifier(Modifier::BOLD),
                 )),
                 Cell::from(count.to_string()),
-                Cell::from(format_tokens(*saved)),
+                Cell::from(format_signed_tokens(*saved)),
                 Cell::from(Span::styled(
                     format!("{pct:.1}%"),
                     Style::default().fg(tier_color(*pct)),
@@ -613,4 +613,67 @@ fn draw_footer(f: &mut Frame, area: Rect) {
             .add_modifier(Modifier::ITALIC),
     ));
     f.render_widget(Paragraph::new(line), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    #[test]
+    fn composition_bar_preserves_negative_savings() {
+        let line = composition_bar("RTK (bash/tool)", -150, 200, SAVED_RTK, 18);
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("-75.0%"), "{text}");
+        assert!(text.ends_with("-150"), "{text}");
+    }
+
+    #[test]
+    fn savings_gauge_keeps_signed_label_while_clamping_fill() {
+        let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget(savings_gauge(-75.0), frame.area()))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("-75.0%"), "{text}");
+    }
+
+    #[test]
+    fn tracker_panel_preserves_negative_savings() {
+        let summary = TrackerSummary {
+            total_commands: 2,
+            total_input: 200,
+            total_output: 350,
+            total_saved: -150,
+            avg_savings_pct: -75.0,
+            total_time_ms: 0,
+            avg_time_ms: 0,
+            by_command: vec![],
+            by_day: vec![],
+            oversized_excluded: 0,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal
+            .draw(|frame| draw_tracker_panel(frame, frame.area(), Some(&summary)))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("-150 (-75.0%)"), "{text}");
+    }
 }
