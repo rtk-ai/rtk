@@ -182,6 +182,27 @@ pub(super) fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
     modified
 }
 
+/// Remove the `env.ANTHROPIC_BASE_URL` that the proxy on-ramp of `rtk init -g`
+/// writes, when it still points at the RTK daemon. Left behind, it sends every
+/// Claude Code request to a daemon that uninstall no longer starts (#4604). A
+/// base URL aimed anywhere else belongs to the user and is kept.
+pub(super) fn remove_proxy_env_from_json(root: &mut serde_json::Value) -> bool {
+    let rtk_url = format!("http://{}", crate::llm_proxy::DEFAULT_BIND);
+    let Some(env) = root.get_mut("env").and_then(|e| e.as_object_mut()) else {
+        return false;
+    };
+    if env.get("ANTHROPIC_BASE_URL").and_then(|v| v.as_str()) != Some(rtk_url.as_str()) {
+        return false;
+    }
+    env.remove("ANTHROPIC_BASE_URL");
+    if env.is_empty()
+        && let Some(obj) = root.as_object_mut()
+    {
+        obj.remove("env");
+    }
+    true
+}
+
 /// Remove RTK hook from settings.json file
 /// Backs up before modification, returns true if hook was found and removed
 pub(super) fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
@@ -196,7 +217,9 @@ pub(super) fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
         return Ok(false);
     };
 
-    let removed = remove_hook_from_json(&mut root);
+    let removed_hook = remove_hook_from_json(&mut root);
+    let removed_env = remove_proxy_env_from_json(&mut root);
+    let removed = removed_hook || removed_env;
     if removed {
         update_json_file(
             &settings_path,
@@ -1316,6 +1339,74 @@ mod tests {
         assert_eq!(arr.len(), 1);
         let cmd = arr[0]["hooks"][0]["command"].as_str().unwrap();
         assert_eq!(cmd, "some-other-tool --hook");
+    }
+
+    // #4604: the proxy on-ramp writes env.ANTHROPIC_BASE_URL; uninstall must
+    // take it back, or Claude Code keeps calling a daemon nothing starts.
+    #[test]
+    fn test_uninstall_removes_rtk_proxy_base_url() {
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let settings = claude_dir.join(SETTINGS_JSON);
+            let rtk_url = format!("http://{}", crate::llm_proxy::DEFAULT_BIND);
+            fs::write(
+                &settings,
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "env": { "ANTHROPIC_BASE_URL": rtk_url, "OTHER": "kept" },
+                    "hooks": { (SESSION_START_KEY): [{
+                        "hooks": [{ "type": "command", "command": CLAUDE_HOOK_COMMAND }]
+                    }]}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+
+            assert!(remove_hook_from_settings(InitContext::default()).unwrap());
+
+            let root: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+            assert_eq!(root.pointer("/env/ANTHROPIC_BASE_URL"), None, "{root}");
+            assert_eq!(
+                root.pointer("/env/OTHER").and_then(|v| v.as_str()),
+                Some("kept")
+            );
+            assert_eq!(root.get("hooks"), None, "{root}");
+        });
+    }
+
+    #[test]
+    fn test_uninstall_removes_rtk_proxy_base_url_without_hook() {
+        // Choice 2 of the on-ramp (background service) writes the URL but no
+        // SessionStart hook; the URL alone must still be taken back.
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let settings = claude_dir.join(SETTINGS_JSON);
+            let rtk_url = format!("http://{}", crate::llm_proxy::DEFAULT_BIND);
+            fs::write(
+                &settings,
+                serde_json::json!({ "env": { "ANTHROPIC_BASE_URL": rtk_url } }).to_string(),
+            )
+            .unwrap();
+
+            assert!(remove_hook_from_settings(InitContext::default()).unwrap());
+
+            let root: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+            assert_eq!(root, serde_json::json!({}), "an emptied env is dropped");
+        });
+    }
+
+    #[test]
+    fn test_uninstall_keeps_a_foreign_base_url() {
+        let mut root = serde_json::json!({
+            "env": { "ANTHROPIC_BASE_URL": "https://gateway.example.com" }
+        });
+        assert!(!remove_proxy_env_from_json(&mut root));
+        assert_eq!(
+            root.pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(|v| v.as_str()),
+            Some("https://gateway.example.com")
+        );
     }
 
     #[test]

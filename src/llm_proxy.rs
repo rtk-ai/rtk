@@ -502,6 +502,12 @@ fn binary_candidates() -> Vec<PathBuf> {
     out
 }
 
+/// Whether the daemon binary is installed where `rtk llm-proxy start` looks
+/// for it (next to `rtk`, or on PATH).
+pub fn binary_available() -> bool {
+    binary_candidates().iter().any(|p| p.is_file())
+}
+
 /// Locate the daemon binary, or explain how to get one.
 fn locate_binary() -> Result<PathBuf> {
     let candidates = binary_candidates();

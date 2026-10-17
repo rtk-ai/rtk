@@ -982,6 +982,14 @@ fn project_scope_footer_lines(
     ]
 }
 
+/// The on-ramp may point Claude Code at the daemon only when one can serve it:
+/// its binary is installed, or an rtk-proxy already answers on the port. The
+/// probe is skipped when the binary is found.
+#[cfg(feature = "engine")]
+fn proxy_onramp_can_start(binary_available: bool, daemon_answers: impl FnOnce() -> bool) -> bool {
+    binary_available || daemon_answers()
+}
+
 #[cfg(feature = "engine")]
 fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitContext) -> Result<()> {
     use std::io::{BufRead, IsTerminal};
@@ -1017,6 +1025,21 @@ fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitCont
     let aimed_here = already.as_deref() == Some(base_url.as_str());
     let autostart_present = session_start_entry_present(&root);
     if aimed_here && autostart_present {
+        return Ok(());
+    }
+    // Routing Claude Code at a daemon that cannot be started breaks every
+    // session (#4604): only offer the proxy when its binary is installed or
+    // one is already answering.
+    if !proxy_onramp_can_start(crate::llm_proxy::binary_available(), || {
+        crate::llm_proxy::is_rtk_proxy_at(
+            crate::llm_proxy::DEFAULT_BIND,
+            std::time::Duration::from_millis(400),
+        )
+    }) {
+        eprintln!();
+        eprintln!(
+            "  RTK proxy not offered: rtk-proxy is not installed (`rtk llm-proxy start` says where to get it)."
+        );
         return Ok(());
     }
 
@@ -2280,6 +2303,18 @@ pub(super) fn with_missing_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, 
 #[cfg(test)]
 mod tests {
     use crate::hooks::constants::POST_TOOL_USE_KEY;
+
+    // #4604: without the daemon binary, and with no rtk-proxy answering, the
+    // on-ramp must not offer to route Claude Code at it.
+    #[cfg(feature = "engine")]
+    #[test]
+    fn test_proxy_onramp_needs_a_daemon() {
+        assert!(!super::proxy_onramp_can_start(false, || false));
+        assert!(super::proxy_onramp_can_start(false, || true));
+        assert!(super::proxy_onramp_can_start(true, || {
+            panic!("the daemon is not probed when its binary is installed")
+        }));
+    }
 
     fn settings_with(entries: serde_json::Value) -> serde_json::Value {
         serde_json::json!({ "hooks": entries })
