@@ -570,6 +570,15 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 85.0,
         ..RtkRule::DEFAULT
     },
+    RtkRule {
+        pattern: r"^gotestsum(?:\s|$)",
+        rtk_cmd: "rtk gotestsum",
+        pipeline_safety: PipelineSafety::ProducerOnly,
+        rewrite_prefixes: &["gotestsum"],
+        category: "Go",
+        savings_pct: 70.0,
+        ..RtkRule::DEFAULT
+    },
     // Scala/SBT
     RtkRule {
         pattern: r#"^sbt\s+["']?(testOnly|testQuick|test|compile|run|clean|assembly|package)(?:[\s"']|$)"#,
