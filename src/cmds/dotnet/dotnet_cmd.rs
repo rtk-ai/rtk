@@ -132,6 +132,9 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
         return run_passthrough(&forwarded, verbose);
     }
     let tokens = tokenize_dotnet_args(args);
+    if subcommand == "test" && has_test_discovery_arg(&tokens) {
+        return run_passthrough(&forwarded_dotnet_args(subcommand, args), verbose);
+    }
     let timer = tracking::TimedExecution::start();
     let binlog_path = build_binlog_path(subcommand);
     let should_expect_binlog = subcommand != "test" || has_binlog_arg(&tokens);
@@ -315,6 +318,10 @@ fn resolve_trx_results_dir(
 
     if let Some(user_dir) = extract_results_directory_arg(tokens, runner_mode) {
         return (Some(user_dir), false);
+    }
+
+    if runner_mode == TestRunnerMode::Classic && has_trx_logger_arg(tokens) {
+        return (None, false);
     }
 
     (Some(build_trx_results_dir()), true)
@@ -607,6 +614,20 @@ fn has_binlog_arg(tokens: &[Token<'_>]) -> bool {
 
 fn has_verbosity_arg(tokens: &[Token<'_>]) -> bool {
     dotnet_has_loose_flag(tokens, "v") || dotnet_has_loose_flag(tokens, "verbosity")
+}
+
+fn has_test_discovery_arg(tokens: &[Token<'_>]) -> bool {
+    dotnet_own_tokens(tokens).iter().any(|token| {
+        (token.kind == TokenKind::Long
+            && token.double_dash
+            && token.attached.is_none()
+            && token.text.eq_ignore_ascii_case("list-tests"))
+            || (token.kind == TokenKind::Long
+                && !token.double_dash
+                && !token.slash
+                && token.attached.is_none()
+                && token.text.eq_ignore_ascii_case("t"))
+    })
 }
 
 /// How the targeted test project(s) run tests — determines which TRX injection strategy to use.
@@ -2332,6 +2353,45 @@ mod tests {
         let injected = build_dotnet_args_for_test("test", &args, true);
         let trx_logger_count = injected.iter().filter(|a| *a == "trx").count();
         assert_eq!(trx_logger_count, 1);
+    }
+
+    #[test]
+    fn test_discovery_detection_uses_only_dotnet_owned_bare_flags() {
+        for args in [vec!["--list-tests".to_string()], vec!["-t".to_string()]] {
+            assert!(
+                has_test_discovery_arg(&tokenize_dotnet_args(&args)),
+                "{args:?}"
+            );
+        }
+
+        for args in [
+            vec!["--filter".to_string(), "-t".to_string()],
+            vec!["--filter=-t".to_string()],
+            vec!["--".to_string(), "--list-tests".to_string()],
+            vec!["--logger".to_string(), "--list-tests".to_string()],
+        ] {
+            assert!(
+                !has_test_discovery_arg(&tokenize_dotnet_args(&args)),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_user_trx_logger_uses_native_default_results_directory() {
+        let args = vec![
+            "--logger".to_string(),
+            "trx;LogFileName=rtk-user-report.trx".to_string(),
+        ];
+
+        assert_eq!(
+            resolve_trx_results_dir(
+                "test",
+                &tokenize_dotnet_args(&args),
+                TestRunnerMode::Classic
+            ),
+            (None, false)
+        );
     }
 
     #[test]
