@@ -46,6 +46,8 @@ pub enum AgentTarget {
     Cursor,
     /// Trae IDE
     Trae,
+    /// WorkBuddy desktop (global hook)
+    Workbuddy,
     /// Windsurf IDE (Cascade)
     Windsurf,
     /// Cline / Roo Code (VS Code)
@@ -1270,6 +1272,8 @@ enum HookCommands {
     Claude,
     /// Process Trae PreToolUse hook (reads JSON from stdin)
     Trae,
+    /// Process WorkBuddy PreToolUse hook (reads JSON from stdin)
+    Workbuddy,
     /// Process Codex CLI PreToolUse hook (reads JSON from stdin)
     Codex,
     /// Process Cursor Agent hook (reads JSON from stdin)
@@ -2365,6 +2369,8 @@ where
         uninstall_hermes(ctx)
     } else if agent == Some(AgentTarget::Trae) {
         hooks::init::uninstall_trae_mode(global, ctx)
+    } else if agent == Some(AgentTarget::Workbuddy) {
+        hooks::init::uninstall_workbuddy_mode(global, ctx)
     } else if agent == Some(AgentTarget::Antigravity) {
         hooks::init::uninstall_antigravity_mode(global, ctx)
     } else if agent == Some(AgentTarget::Droid) {
@@ -3017,7 +3023,14 @@ fn run_cli() -> Result<i32> {
             } else {
                 hooks::init::PatchMode::Ask
             };
-            if show {
+            if agent == Some(AgentTarget::Workbuddy)
+                && (gemini || codex || copilot || opencode || claude_md)
+            {
+                anyhow::bail!("--agent workbuddy cannot be combined with another agent mode");
+            }
+            if show && agent == Some(AgentTarget::Workbuddy) {
+                hooks::init::show_workbuddy_config(global)?;
+            } else if show {
                 hooks::init::show_config(codex, agent == Some(AgentTarget::Omp))?;
             } else if uninstall && copilot {
                 if global {
@@ -3048,6 +3061,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_pi_mode_with_patch_mode(global, patch_mode, ctx)?
             } else if agent == Some(AgentTarget::Trae) {
                 hooks::init::run_trae_mode(global, ctx)?
+            } else if agent == Some(AgentTarget::Workbuddy) {
+                hooks::init::run_workbuddy_mode(global, patch_mode, ctx)?
             } else if agent == Some(AgentTarget::Omp) {
                 hooks::init::run_omp_mode_with_patch_mode(global, patch_mode, ctx)?
             } else if agent == Some(AgentTarget::Kilocode) {
@@ -3640,6 +3655,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Trae => {
                 hooks::hook_cmd::run_trae()?;
+                0
+            }
+            HookCommands::Workbuddy => {
+                hooks::hook_cmd::run_workbuddy()?;
                 0
             }
             HookCommands::Codex => {
@@ -5681,6 +5700,30 @@ mod tests {
         // --pi has been removed; --agent pi is the canonical form
         let result = try_parse_cli_from(["rtk", "init", "--pi"]);
         assert!(result.is_err(), "--pi must be rejected as unknown argument");
+    }
+
+    #[test]
+    fn workbuddy_cli_routes_survive_library_entrypoint() {
+        let cli = Cli::try_parse_from(["rtk", "hook", "workbuddy"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Hook {
+                command: HookCommands::Workbuddy
+            }
+        ));
+        for flag in ["--show", "--uninstall", "--dry-run"] {
+            let cli =
+                Cli::try_parse_from(["rtk", "init", "--global", "--agent", "workbuddy", flag])
+                    .unwrap();
+            assert!(matches!(
+                cli.command,
+                Commands::Init {
+                    global: true,
+                    agent: Some(AgentTarget::Workbuddy),
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]
