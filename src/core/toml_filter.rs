@@ -291,6 +291,7 @@ const RUST_HANDLED_COMMANDS: &[&str] = &[
     "gain",
     "config",
     "ctest",
+    "make",
     "vitest",
     "prisma",
     "tsc",
@@ -1031,6 +1032,7 @@ mod tests {
     fn test_is_rtk_reserved_command() {
         assert!(is_rtk_reserved_command("git"));
         assert!(is_rtk_reserved_command("cargo"));
+        assert!(is_rtk_reserved_command("make"));
         assert!(is_rtk_reserved_command("json"));
         assert!(is_rtk_reserved_command("rewrite"));
         assert!(!is_rtk_reserved_command("jj"));
@@ -1528,51 +1530,8 @@ max_lines = 999
         );
     }
 
-    #[test]
-    fn test_make_savings_above_60pct() {
-        let filters = make_filters(BUILTIN_TOML);
-        let filter = find_filter_in("make all", &filters).expect("make built-in");
-
-        let input = r#"make[1]: Entering directory '/home/user/project'
-make[2]: Entering directory '/home/user/project/src'
-gcc -O2 -Wall -c foo.c -o foo.o
-
-make[2]: Nothing to be done for 'install'.
-make[3]: Entering directory '/home/user/project/src/lib'
-ar rcs libfoo.a foo.o bar.o baz.o
-make[3]: Leaving directory '/home/user/project/src/lib'
-make[2]: Leaving directory '/home/user/project/src'
-
-make[1]: Leaving directory '/home/user/project'
-gcc -O2 -Wall -c bar.c -o bar.o
-
-gcc -O2 -Wall -c baz.c -o baz.o
-
-make[1]: Entering directory '/home/user/project/test'
-make[2]: Entering directory '/home/user/project/test/unit'
-./run_tests --verbose
-make[2]: Nothing to be done for 'check'.
-make[2]: Leaving directory '/home/user/project/test/unit'
-make[1]: Leaving directory '/home/user/project/test'
-
-ld -o myapp foo.o bar.o baz.o -lfoo
-
-make[1]: Entering directory '/home/user/project/docs'
-doxygen Doxyfile
-make[1]: Leaving directory '/home/user/project/docs'
-"#;
-        let out = apply_filter(filter, input);
-        let input_words = input.split_whitespace().count();
-        let out_words = out.split_whitespace().count();
-        let savings = 100.0 - (out_words as f64 / input_words as f64 * 100.0);
-        assert!(
-            savings >= 60.0,
-            "make filter: expected >=60% savings, got {:.1}% (in={} out={})",
-            savings,
-            input_words,
-            out_words
-        );
-    }
+    // Note: make savings test removed — make is now a Rust module (src/cmds/system/make_cmd.rs)
+    // with dedicated token savings tests there (test_token_savings_long_build).
 
     #[test]
     fn test_spring_boot_match_command_requires_spring_named_jar() {
@@ -2145,7 +2104,6 @@ match_command = "^make\\b"
             "helm",
             "iptables",
             "liquibase",
-            "make",
             "markdownlint",
             "mix-compile",
             "mix-format",
@@ -2192,8 +2150,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            62,
-            "Expected exactly 62 built-in filters, got {}. \
+            61,
+            "Expected exactly 61 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
@@ -2301,11 +2259,11 @@ expected = "output line 1\noutput line 2"
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
         let filters = make_filters(&combined);
 
-        // All 62 existing filters still present + 1 new = 63
+        // All 61 existing filters still present + 1 new = 62
         assert_eq!(
             filters.len(),
-            63,
-            "Expected 63 filters after concat (62 built-in + 1 new)"
+            62,
+            "Expected 62 filters after concat (61 built-in + 1 new)"
         );
 
         // New filter is discoverable
