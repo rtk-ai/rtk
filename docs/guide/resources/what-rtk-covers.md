@@ -147,6 +147,7 @@ If a command isn't in the list above, RTK runs it through passthrough — the ou
 
 ```bash
 rtk bypass make install    # runs make install, tracks usage, no filtering
+rtk bypass GOFLAGS=-mod=mod go test ./...    # leading NAME=value words go to the command's environment
 ```
 
 To check which commands were missed opportunities: `rtk discover`.
