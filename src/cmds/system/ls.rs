@@ -175,11 +175,28 @@ fn shows_dotfiles(tokens: &[Token<'_>]) -> bool {
         .any(|t| is_short_in(t, &['a', 'A']) || matches!(long_name(t), Some("all" | "almost-all")))
 }
 
+/// True when the user picked the order `ls` lists in: a sort key (`-t`, `-S`, `-U`, `-X`,
+/// `-v`, `-f`, GNU `--sort=WORD`). RTK otherwise regroups the listing with directories first,
+/// which would put the newest file of `ls -t | head -1` behind every directory; with a key
+/// chosen, the child's order is the answer and is kept as-is. BSD's `-U`, `-X` and `-v` are
+/// not sort keys (`-U` only picks the timestamp `-t` sorts by).
+fn requests_sort(tokens: &[Token<'_>], flavor: Flavor) -> bool {
+    let keys: &[char] = match flavor {
+        Flavor::Gnu => &['t', 'S', 'U', 'X', 'v', 'f'],
+        Flavor::Bsd => &['t', 'S', 'f'],
+    };
+    tokens
+        .iter()
+        .any(|t| is_short_in(t, keys) || long_name(t) == Some("sort"))
+}
+
 /// What the user's arguments ask for: how to render the listing, and the argv to hand the
 /// child `ls`.
 struct LsPlan {
     show_all: bool,
     show_long: bool,
+    /// The user chose an ordering, so the listing stays in the child's order.
+    sorted: bool,
     child_args: Vec<String>,
 }
 
@@ -215,6 +232,7 @@ fn plan_for(args: &[String], flavor: Flavor) -> LsPlan {
     LsPlan {
         show_all,
         show_long,
+        sorted: requests_sort(&tokens, flavor),
         child_args: build_child_args(&tokens, flavor),
     }
 }
@@ -300,6 +318,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let LsPlan {
         show_all,
         show_long,
+        sorted,
         child_args,
     } = plan(args);
 
@@ -318,7 +337,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         "ls",
         &label,
         |raw| {
-            let (entries, parsed_count, truncated, filtered) = compact_ls(raw, show_all, show_long);
+            let (entries, parsed_count, truncated, filtered) =
+                compact_ls(raw, show_all, show_long, sorted);
 
             // If no lines were parsed (e.g., unrecognized locale), fall back to raw output.
             // This is safer than returning "(empty)" for a non-empty directory.
@@ -492,6 +512,10 @@ fn perms_to_octal(perms: &str) -> Option<String> {
 ///   755  name/        (dirs)
 ///   644  name  size   (files)
 ///
+/// Directories are listed before files, except with `sorted` (the user passed
+/// a sort key such as `-t` or `-S`): then every entry stays where the child
+/// put it, so the first line is the newest or largest entry of either kind.
+///
 /// Returns (entries, parsed_count, truncated, filtered) so caller can emit
 /// a recovery hint when anything was dropped.
 /// parsed_count tracks how many non-header lines were successfully parsed.
@@ -504,9 +528,9 @@ fn compact_ls(
     raw: &str,
     show_all: bool,
     show_long: bool,
+    sorted: bool,
 ) -> (String, usize, Vec<String>, Vec<String>) {
-    let mut dirs: Vec<(String, Option<String>)> = Vec::new(); // (name, octal_perms)
-    let mut files: Vec<(String, String, Option<String>)> = Vec::new(); // (name, size, octal_perms)
+    let mut listed: Vec<(bool, String)> = Vec::new(); // (is_dir, compact line), child order
     let mut lines_seen: usize = 0;
     let mut parsed_count: usize = 0;
     let mut dotdirs: usize = 0;
@@ -543,15 +567,24 @@ fn compact_ls(
             None
         };
 
-        if file_type == 'd' {
-            dirs.push((name, octal));
+        let is_dir = file_type == 'd';
+        let line = if is_dir {
+            match octal {
+                Some(octal) => format!("{}  {}/", octal, name),
+                None => format!("{}/", name),
+            }
         } else {
             // Regular files, symlinks, character/block devices, pipes, sockets
-            files.push((name, human_size(size), octal));
-        }
+            let size = human_size(size);
+            match octal {
+                Some(octal) => format!("{}  {}  {}", octal, name, size),
+                None => format!("{}  {}", name, size),
+            }
+        };
+        listed.push((is_dir, line));
     }
 
-    if dirs.is_empty() && files.is_empty() {
+    if listed.is_empty() {
         if lines_seen > 0 && parsed_count == 0 {
             if dotdirs == lines_seen {
                 // Only . and .. entries (empty directory)
@@ -565,20 +598,17 @@ fn compact_ls(
         return ("(empty)\n".to_string(), parsed_count, Vec::new(), filtered);
     }
 
-    // Dirs first, then files — one compact line each
-    let mut all_lines: Vec<String> = Vec::with_capacity(dirs.len() + files.len());
-    for (name, octal) in &dirs {
-        all_lines.push(match octal {
-            Some(octal) => format!("{}  {}/", octal, name),
-            None => format!("{}/", name),
-        });
-    }
-    for (name, size, octal) in &files {
-        all_lines.push(match octal {
-            Some(octal) => format!("{}  {}  {}", octal, name, size),
-            None => format!("{}  {}", name, size),
-        });
-    }
+    // Dirs first, then files — unless the user chose the order, which the child
+    // already applied across both kinds.
+    let mut all_lines: Vec<String> = if sorted {
+        listed.into_iter().map(|(_, line)| line).collect()
+    } else {
+        let (dirs, files): (Vec<_>, Vec<_>) = listed.into_iter().partition(|(is_dir, _)| *is_dir);
+        dirs.into_iter()
+            .chain(files)
+            .map(|(_, line)| line)
+            .collect()
+    };
 
     // Cap the displayed listing; the rest is recoverable via the tee hint.
     let truncated = if all_lines.len() > CAP_INVENTORY {
@@ -608,7 +638,7 @@ mod tests {
                      drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 Cargo.toml\n\
                      -rw-r--r--  1 user  staff  5678 Jan  1 12:00 README.md\n";
-        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false, false);
         assert!(entries.contains("src/"));
         assert!(entries.contains("Cargo.toml"));
         assert!(entries.contains("README.md"));
@@ -621,6 +651,51 @@ mod tests {
         assert!(!entries.contains("\n..\n")); // no .. entry
     }
 
+    /// The child's `ls -lt` output from #4302: two files newer than two dirs.
+    const SORTED_BY_MTIME: &str = "total 0\n\
+        -rw-r--r--  1 user  staff   0 Sep 27 00:00 new.txt\n\
+        -rw-r--r--  1 user  staff   0 Sep  1 00:00 old.txt\n\
+        drwxr-xr-x  2 user  staff  64 Jan  2 00:00 zdir\n\
+        drwxr-xr-x  2 user  staff  64 Jan  1 00:00 adir\n";
+
+    #[test]
+    fn test_compact_sorted_keeps_child_order() {
+        let (entries, _parsed, _truncated, _hidden) =
+            compact_ls(SORTED_BY_MTIME, false, false, true);
+        assert_eq!(entries, "new.txt  0B\nold.txt  0B\nzdir/\nadir/\n");
+
+        let (entries, _parsed, _truncated, _hidden) =
+            compact_ls(SORTED_BY_MTIME, false, true, true);
+        assert_eq!(
+            entries,
+            "644  new.txt  0B\n644  old.txt  0B\n755  zdir/\n755  adir/\n"
+        );
+    }
+
+    #[test]
+    fn test_compact_unsorted_groups_dirs_first() {
+        let (entries, _parsed, _truncated, _hidden) =
+            compact_ls(SORTED_BY_MTIME, false, false, false);
+        assert_eq!(entries, "zdir/\nadir/\nnew.txt  0B\nold.txt  0B\n");
+    }
+
+    #[test]
+    fn test_compact_sorted_truncates_from_the_tail() {
+        // The display cap keeps the first entries of the child's order — the newest ones.
+        let mut input = String::from("total 0\n");
+        input.push_str("drwxr-xr-x  2 user  staff  64 Jan  1 12:00 newest\n");
+        for i in 0..CAP_INVENTORY {
+            input.push_str(&format!(
+                "-rw-r--r--  1 user  staff  100 Jan  1 12:00 file{:02}.txt\n",
+                i
+            ));
+        }
+        let (entries, _parsed, truncated, _hidden) = compact_ls(&input, false, false, true);
+        assert!(entries.starts_with("newest/\n"));
+        assert_eq!(entries.lines().count(), CAP_INVENTORY);
+        assert_eq!(truncated.len(), 1);
+    }
+
     #[test]
     fn test_compact_filters_noise() {
         let input = "total 8\n\
@@ -629,7 +704,7 @@ mod tests {
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 target\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  100 Jan  1 12:00 main.rs\n";
-        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false, false);
         assert!(!entries.contains("node_modules"));
         assert!(!entries.contains(".git"));
         assert!(!entries.contains("target"));
@@ -645,14 +720,14 @@ mod tests {
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 target\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  100 Jan  1 12:00 main.rs\n";
-        let (_entries, _parsed, _truncated, hidden) = compact_ls(input, false, false);
+        let (_entries, _parsed, _truncated, hidden) = compact_ls(input, false, false, false);
         assert_eq!(
             hidden,
             vec!["node_modules/", ".git/", "target/"],
             "every noise dir the child printed is recorded"
         );
 
-        let (_entries, _parsed, _truncated, hidden_all) = compact_ls(input, true, false);
+        let (_entries, _parsed, _truncated, hidden_all) = compact_ls(input, true, false, false);
         assert!(hidden_all.is_empty(), "-a shows noise dirs, nothing hidden");
     }
 
@@ -663,7 +738,7 @@ mod tests {
         let input = "total 8\n\
                      -rw-r--r--  1 user  staff  100 Jan  1 12:00 main.rs\n\
                      garbage line without date anchor\n";
-        let (entries, _parsed, _truncated, hidden) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, hidden) = compact_ls(input, false, false, false);
         assert!(entries.contains("main.rs"));
         assert_eq!(hidden, vec!["garbage line without date anchor"]);
     }
@@ -673,7 +748,7 @@ mod tests {
         let input = "total 8\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  100 Jan  1 12:00 main.rs\n";
-        let (_entries, _parsed, _truncated, hidden) = compact_ls(input, false, false);
+        let (_entries, _parsed, _truncated, hidden) = compact_ls(input, false, false, false);
         assert!(hidden.is_empty(), "nothing dropped, no hint expected");
     }
 
@@ -684,7 +759,7 @@ mod tests {
         let input = "total 8\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 node_modules\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .git\n";
-        let (entries, parsed, _truncated, hidden) = compact_ls(input, false, false);
+        let (entries, parsed, _truncated, hidden) = compact_ls(input, false, false, false);
         assert_eq!(entries, "(empty)\n");
         assert_eq!(parsed, 2);
         assert_eq!(hidden, vec!["node_modules/", ".git/"]);
@@ -699,6 +774,34 @@ mod tests {
         assert!(plan_of(&["--almost-all"]).show_all);
         assert!(!plan_of(&["-l", "."]).show_all);
         assert!(!plan_of(&["--author"]).show_all);
+    }
+
+    #[test]
+    fn test_plan_sort_key_keeps_child_order() {
+        // #4302: `ls -t | head -1` asks for the newest entry, so no regrouping.
+        assert!(plan_of(&["-t"]).sorted);
+        assert!(plan_of(&["-lt"]).sorted);
+        assert!(plan_of(&["-tr"]).sorted);
+        assert!(plan_of(&["-S"]).sorted);
+        assert!(plan_of(&["-U"]).sorted);
+        assert!(plan_of(&["-X"]).sorted);
+        assert!(plan_of(&["-v"]).sorted);
+        assert!(plan_of(&["-f"]).sorted);
+        assert!(plan_of(&["--sort=time"]).sorted);
+        assert!(plan_of(&["--sort", "size", "dir"]).sorted);
+        assert!(plan_of(&["--sor", "time"]).sorted);
+        // Without a key, RTK's own dirs-first grouping stays.
+        assert!(!plan_of(&[]).sorted);
+        assert!(!plan_of(&["-l"]).sorted);
+        assert!(!plan_of(&["-la"]).sorted);
+        assert!(!plan_of(&["-r"]).sorted);
+        assert!(!plan_of(&["--reverse"]).sorted);
+        assert!(!plan_of(&["--time=ctime"]).sorted);
+        // On BSD `-t`/`-S` sort but `-U`/`-v` do not.
+        assert!(plan_bsd(&["-t"]).sorted);
+        assert!(plan_bsd(&["-S"]).sorted);
+        assert!(!plan_bsd(&["-U"]).sorted);
+        assert!(!plan_bsd(&["-v"]).sorted);
     }
 
     /// Pins the GNU grammar regardless of the host, so these expectations describe one `ls`
@@ -891,7 +994,7 @@ mod tests {
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .git\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 node_modules\n\
                      -rw-r--r--  1 user  staff  100 Jan  1 12:00 README.md\n";
-        let (entries, _parsed, _truncated, filtered) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, filtered) = compact_ls(input, false, false, false);
         assert!(!entries.contains(".git"));
         assert_eq!(filtered, vec![".git/", "node_modules/"]);
     }
@@ -955,7 +1058,7 @@ mod tests {
                 i
             ));
         }
-        let (entries, _parsed, truncated, _hidden) = compact_ls(&input, false, false);
+        let (entries, _parsed, truncated, _hidden) = compact_ls(&input, false, false, false);
         assert_eq!(entries.lines().count(), CAP_INVENTORY);
         assert_eq!(truncated.len(), 60 - CAP_INVENTORY);
         assert!(entries.contains("file00.txt"));
@@ -971,7 +1074,7 @@ mod tests {
         let input = "total 8\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  100 Jan  1 12:00 main.rs\n";
-        let (_entries, _parsed, truncated, _hidden) = compact_ls(input, false, false);
+        let (_entries, _parsed, truncated, _hidden) = compact_ls(input, false, false, false);
         assert!(truncated.is_empty());
     }
 
@@ -980,7 +1083,7 @@ mod tests {
         let input = "total 8\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .git\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n";
-        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, true, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, true, false, false);
         assert!(entries.contains(".git/"));
         assert!(entries.contains("src/"));
     }
@@ -988,7 +1091,7 @@ mod tests {
     #[test]
     fn test_compact_empty() {
         let input = "total 0\n";
-        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false, false);
         assert_eq!(entries, "(empty)\n");
     }
 
@@ -997,7 +1100,7 @@ mod tests {
         let input = "total 8\n\
                      drwxr-xr-x  2 user user  4096  1月  1 12:00 .\n\
                      drwxr-xr-x 16 user user 20480  1月  1 12:00 ..\n";
-        let (entries, parsed_count, _truncated, _hidden) = compact_ls(input, false, false);
+        let (entries, parsed_count, _truncated, _hidden) = compact_ls(input, false, false, false);
         assert_eq!(parsed_count, 0);
         assert_eq!(entries, "(empty)\n");
     }
@@ -1007,7 +1110,7 @@ mod tests {
         let input = "total 0\n\
                      drwxr-xr-x  2 lumin  wheel  64 Apr 23 00:37 .\n\
                      drwxr-xr-x 16 root  wheel 164576 Apr 23 00:37 ..\n";
-        let (entries, parsed_count, _truncated, _hidden) = compact_ls(input, false, false);
+        let (entries, parsed_count, _truncated, _hidden) = compact_ls(input, false, false, false);
         assert_eq!(parsed_count, 0);
         assert_eq!(entries, "(empty)\n");
     }
@@ -1026,7 +1129,7 @@ mod tests {
     fn test_compact_handles_filenames_with_spaces() {
         let input = "total 8\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 my file.txt\n";
-        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false, false);
         assert!(entries.contains("my file.txt"));
     }
 
@@ -1034,7 +1137,7 @@ mod tests {
     fn test_compact_symlinks() {
         let input = "total 8\n\
                      lrwxr-xr-x  1 user  staff  10 Jan  1 12:00 link -> target\n";
-        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false, false);
         assert!(entries.contains("link -> target"));
     }
 
@@ -1044,7 +1147,7 @@ mod tests {
         let input = "total 48\n\
                      drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n";
-        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false, false);
         assert!(
             !entries.contains("Summary:"),
             "entries must not contain summary"
@@ -1059,7 +1162,7 @@ mod tests {
                      drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n\
                      -rw-r--r--  1 user  staff  5678 Jan  1 12:00 lib.rs\n";
-        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false, false);
         let line_count = entries.lines().count();
         assert_eq!(
             line_count, 3,
@@ -1074,7 +1177,7 @@ mod tests {
         let input = "total 8\n\
                      -rw-r--r--  1 fjeanne utilisa. du domaine    0 Mar 31 16:18 empty.txt\n\
                      -rw-r--r--  1 fjeanne utilisa. du domaine 1234 Mar 31 16:18 data.json\n";
-        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false, false);
         assert!(
             entries.contains("empty.txt"),
             "should contain 'empty.txt', got: {entries}"
@@ -1102,7 +1205,7 @@ mod tests {
         // Some systems show year instead of time for old files
         let input = "total 8\n\
                      -rw-r--r--  1 user staff  5678 Dec 25  2024 archive.tar\n";
-        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false, false);
         assert!(
             entries.contains("archive.tar"),
             "should contain filename, got: {entries}"
@@ -1157,7 +1260,7 @@ mod tests {
         // Regression test for #844: `rtk ls /dev/ttyACM*` returned "(empty)"
         // because character devices (type 'c') were not handled by compact_ls.
         let input = "crw-rw----  1 root  dialout  166, 0 Apr 22 09:46 /dev/ttyACM0\n";
-        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false, false);
         assert!(
             entries.contains("/dev/ttyACM0"),
             "should contain device file, got: {entries}"
@@ -1169,7 +1272,7 @@ mod tests {
     fn test_compact_device_files_macos_hex_size() {
         // macOS shows device major/minor as hex (e.g. 0x2000000)
         let input = "crw-rw-rw-  1 root  wheel  0x2000000 Mar 31 19:25 /dev/tty\n";
-        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false, false);
         assert!(
             entries.contains("/dev/tty"),
             "should contain device file, got: {entries}"
@@ -1179,7 +1282,7 @@ mod tests {
     #[test]
     fn test_compact_block_device() {
         let input = "brw-rw----  1 root  disk  8, 0 Apr 22 09:46 /dev/sda\n";
-        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false, false);
         assert!(
             entries.contains("/dev/sda"),
             "should contain block device, got: {entries}"
@@ -1238,7 +1341,7 @@ mod tests {
                      drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 Cargo.toml\n\
                      -rwxr-xr-x  1 user  staff   500 Jan  1 12:00 build.sh\n";
-        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, true);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, true, false);
         assert!(
             entries.contains("755  src/"),
             "dir should be prefixed with octal perms, got: {entries}"
@@ -1259,7 +1362,7 @@ mod tests {
         // under the hood.
         let input = "total 48\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 Cargo.toml\n";
-        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false, false);
         assert!(
             !entries.contains("644"),
             "short format must not include octal perms, got: {entries}"
@@ -1272,7 +1375,7 @@ mod tests {
         let input = "total 8\n\
                       drwxr-xr-x  2 user staff  64  1月  1 12:00 src\n\
                       -rw-r--r--  1 user staff 1234  1月  1 12:00 main.rs\n";
-        let (entries, parsed_count, _truncated, _hidden) = compact_ls(input, false, false);
+        let (entries, parsed_count, _truncated, _hidden) = compact_ls(input, false, false, false);
         assert_eq!(parsed_count, 0);
         assert!(entries.is_empty());
     }
