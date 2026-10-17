@@ -133,7 +133,7 @@ Key functions available to all command modules:
 | `detect_package_manager()` | Detect pnpm/yarn/npm from lockfiles |
 | `package_manager_exec(tool)` | Build `Command` using detected package manager |
 | `ruby_exec(tool)` | Auto-detect `bundle exec` when `Gemfile` exists |
-| `count_tokens(text)` | Estimate tokens: `ceil(chars / 4.0)` |
+| `count_tokens(text)` | Test-only alias of the production `tracking::estimate_tokens`: `ceil(UTF-8 bytes / 4.0)` |
 
 ## Argument Tokenizer (arg_tokenizer.rs)
 

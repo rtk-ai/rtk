@@ -239,7 +239,7 @@ fn filter_output(input: &str) -> Result<String> { ... }
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn count_tokens(s: &str) -> usize { s.split_whitespace().count() }
+    use crate::core::tracking::estimate_tokens as count_tokens;
     // ... snapshot tests, savings tests
 }
 ```

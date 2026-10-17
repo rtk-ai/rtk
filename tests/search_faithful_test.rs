@@ -94,9 +94,7 @@ fn write_temp(content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     (dir, path)
 }
 
-fn count_tokens(s: &str) -> usize {
-    s.split_whitespace().count()
-}
+use common::estimate_tokens as count_tokens;
 
 // --- regex dialect: the single most important regression guard ---
 

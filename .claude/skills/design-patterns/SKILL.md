@@ -204,7 +204,7 @@ impl RtkStrExt for str {
         self.starts_with("warning")
     }
     fn token_count(&self) -> usize {
-        self.split_whitespace().count()
+        crate::core::tracking::estimate_tokens(self)
     }
 }
 

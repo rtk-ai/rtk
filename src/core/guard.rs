@@ -65,6 +65,26 @@ mod tests {
     }
 
     #[test]
+    fn byte_estimate_boundary_cases() {
+        for (raw, filtered, expected) in [
+            ("", "", ""),
+            ("", " ", ""),
+            (" ", "", ""),
+            ("   ", "ok", "ok"),
+            ("a", "abcd", "abcd"), // Different byte sizes can tie after rounding.
+            ("abcd", "abcde", "abcd"),
+            ("abcd", "ééé", "abcd"),
+            ("日本語", "ééé", "ééé"),
+            ("🦀", "abcd", "abcd"),
+            ("a b c d", "abcdefghijkl", "a b c d"),
+        ] {
+            let output = never_worse(raw, filtered);
+            assert_eq!(output, expected, "raw: {raw:?}, filtered: {filtered:?}");
+            assert!(estimate_tokens(output) <= estimate_tokens(raw));
+        }
+    }
+
+    #[test]
     fn both_empty_returns_filtered() {
         assert_eq!(never_worse("", ""), "");
     }

@@ -539,9 +539,7 @@ fn filter_dependencies(output: &str) -> String {
 mod tests {
     use super::*;
 
-    fn count_tokens(text: &str) -> usize {
-        text.split_whitespace().count()
-    }
+    use crate::core::tracking::estimate_tokens as count_tokens;
 
     // ── TASK DETECTION ────────────────────────────────────────────────────────
 

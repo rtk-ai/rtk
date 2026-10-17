@@ -2639,14 +2639,14 @@ mod tests {
     use super::*;
     use crate::core::test_isolation;
 
-    // 1. estimate_tokens — verify ~4 chars/token ratio
+    // 1. estimate_tokens — verify ~4 bytes/token ratio
     #[test]
     fn test_estimate_tokens() {
         assert_eq!(estimate_tokens(""), 0);
-        assert_eq!(estimate_tokens("abcd"), 1); // 4 chars = 1 token
-        assert_eq!(estimate_tokens("abcde"), 2); // 5 chars = ceil(1.25) = 2
-        assert_eq!(estimate_tokens("a"), 1); // 1 char = ceil(0.25) = 1
-        assert_eq!(estimate_tokens("12345678"), 2); // 8 chars = 2 tokens
+        assert_eq!(estimate_tokens("abcd"), 1); // 4 bytes = 1 token
+        assert_eq!(estimate_tokens("abcde"), 2); // 5 bytes = ceil(1.25) = 2
+        assert_eq!(estimate_tokens("a"), 1); // 1 byte = ceil(0.25) = 1
+        assert_eq!(estimate_tokens("12345678"), 2); // 8 bytes = 2 tokens
     }
 
     // 2. args_display — format OsString vec

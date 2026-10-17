@@ -630,9 +630,7 @@ Total Test time (real) =   0.01 sec\n";
         assert_eq!(result, input);
     }
 
-    fn count_tokens(s: &str) -> usize {
-        s.split_whitespace().count()
-    }
+    use crate::core::tracking::estimate_tokens as count_tokens;
 
     #[test]
     fn test_grep_wrapper_token_savings() {

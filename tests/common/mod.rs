@@ -11,6 +11,10 @@
 #[path = "../../src/core/test_isolation/scratch.rs"]
 mod scratch;
 
+// Share the production implementation without importing the binary crate.
+#[allow(unused_imports)]
+pub use rtk_text::estimate_tokens;
+
 use std::process::Command;
 
 /// Build a `Command` for the rtk binary, isolated by [`isolate_rtk`]. Use it in
