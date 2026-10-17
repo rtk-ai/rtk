@@ -57,7 +57,7 @@ jobs:
     needs: fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --no-deps
@@ -73,7 +73,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: clippy
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -91,7 +91,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: clippy
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -112,18 +112,31 @@ jobs:
           echo "Apache-2.0 edition links no BUSL crate."
 
   test:
-    name: test (${{ matrix.os }})
+    name: test (${{ matrix.os }}${{ matrix.target && format(', {0}', matrix.target) || '' }})
     needs: clippy
     runs-on: ${{ matrix.os }}
+    env:
+      # An explicit target on every leg keeps the run command the same. It also puts
+      # each leg in cross mode, where RUSTFLAGS no longer reach build scripts or proc-macros.
+      CARGO_BUILD_TARGET: ${{ matrix.target || 'host-tuple' }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+          - os: windows-latest
+          # Links with MinGW's ld, which link.exe's `/STACK:` spelling breaks (see build.rs).
+          # The runner's host stays msvc, so build.rs also runs with host != target.
+          - os: windows-latest
+            target: x86_64-pc-windows-gnu
+          - os: macos-latest
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         # `--all` is `--workspace`: `rtk` + `engine`. `proxy/` is tested in
         # its own job, since it is not a member.
