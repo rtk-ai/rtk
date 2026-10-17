@@ -2,6 +2,8 @@
 //!
 //! `run` dispatches on the target agent; each agent's install and uninstall live in its own
 //! submodule, and the helpers shared between them stay here.
+#[cfg(feature = "engine")]
+use crate::core::child_command::ChildCommand;
 use crate::hooks::constants::{
     CLAUDE_DIR, CLAUDE_HOOK_COMMAND, HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
     SETTINGS_JSON,
@@ -1124,7 +1126,8 @@ fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitCont
     }
     if choice == 2 {
         let exe = std::env::current_exe().context("resolve the rtk binary path")?;
-        match std::process::Command::new(exe)
+        // nosemgrep: dynamic-command-execution -- exe is rtk's own path from current_exe
+        match ChildCommand::new(exe)
             .args(["llm-proxy", "service", "install"])
             .status()
         {

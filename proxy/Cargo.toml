@@ -84,3 +84,10 @@ temp-env = "0.3"
 [lints.rust]
 unsafe_code = "deny"
 warnings = "deny"
+
+[lints.clippy]
+# clippy.toml at the repo root names `Command::new`; the level is what decides who
+# the ban binds. This is a separate workspace that does not depend on rtk, so the
+# `ChildCommand` the ban points at is out of reach, and what it spawns is the
+# platform's service manager.
+disallowed_methods = "allow"

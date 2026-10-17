@@ -5,6 +5,7 @@
 //! net accounting. The files never enter the agent's context — that is the
 //! saving.
 
+use crate::core::child_command::ChildCommand;
 use crate::core::pipeline_config;
 use crate::core::tracking::{Tracker, estimate_tokens};
 use anyhow::{Context, Result, bail};
@@ -150,7 +151,8 @@ fn run_for_output(command: &[String]) -> Result<(CorpusFile, i32)> {
     let (program, rest) = command
         .split_first()
         .context("`--` needs a command after it")?;
-    let output = std::process::Command::new(program)
+    // nosemgrep: dynamic-command-execution -- the program the caller named after `--`
+    let output = ChildCommand::new(program)
         .args(rest)
         .output()
         .with_context(|| format!("Failed to run {program}"))?;
@@ -322,6 +324,9 @@ fn default_key_env(provider: &str) -> Option<&'static str> {
 /// conventional one when the upstream does not name it.
 fn api_key(upstream: &UpstreamDef) -> Result<String> {
     if let Some(command) = upstream.api_key_command.as_deref() {
+        // A shell string, not an argument vector: per-argument encoding
+        // must not apply to it.
+        #[allow(clippy::disallowed_methods)]
         let out = std::process::Command::new("sh")
             .arg("-c")
             .arg(command)

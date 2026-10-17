@@ -6,7 +6,7 @@ use crate::core::args_utils;
 use crate::core::runner::{self, RunOptions};
 use crate::core::shell::display_args;
 use crate::core::truncate::CAP_INVENTORY;
-use crate::core::utils::{ChildArgExt, resolved_command};
+use crate::core::utils::resolved_command;
 use anyhow::Result;
 use regex::Regex;
 use std::sync::LazyLock;
@@ -305,7 +305,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     let mut cmd = resolved_command("ls");
     cmd.env("LC_ALL", "C");
-    cmd.child_args(&child_args);
+    cmd.args(&child_args);
 
     let label = if args.is_empty() {
         ".".to_string()

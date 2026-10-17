@@ -19,11 +19,12 @@
 //! [`read_gain_summary`], for `rtk gain`. Read-only and best-effort: `rtk
 //! gain` must never fail or block because the proxy is mid-write.
 
+use crate::core::child_command::ChildCommand;
 use crate::core::utils::tool_exists;
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_BIND: &str = "127.0.0.1:8080";
@@ -675,7 +676,8 @@ pub fn run_agent(agent: &ProxyAgent, args: &[String]) -> Result<i32> {
             false
         }
     };
-    let mut cmd = Command::new(agent.name);
+    // nosemgrep: dynamic-command-execution -- the agent the subcommand names
+    let mut cmd = ChildCommand::new(agent.name);
     cmd.args(args);
     match launch_plan(existing.as_deref(), &base_url, daemon_up) {
         LaunchPlan::Proxied => {
@@ -706,7 +708,6 @@ pub fn run_agent(agent: &ProxyAgent, args: &[String]) -> Result<i32> {
 
     #[cfg(unix)]
     {
-        use std::os::unix::process::CommandExt;
         let err = cmd.exec();
         Err(anyhow::Error::new(err).context(format!("exec {}", agent.name)))
     }
@@ -803,7 +804,8 @@ pub(crate) fn ensure_running(bind: &str) -> Result<Option<DaemonPaths>> {
         .with_context(|| format!("creating {}", log_path.display()))?;
     let log_file_err = log_file.try_clone().context("cloning log file handle")?;
 
-    Command::new(&bin)
+    // nosemgrep: dynamic-command-execution -- bin is the rtk-proxy daemon from locate_binary
+    ChildCommand::new(&bin)
         .arg("start")
         .arg("--bind")
         .arg(bind)
@@ -862,7 +864,8 @@ fn forward_raw(subcmd: &str, extra: &[String]) -> Result<()> {
 
 fn exec(args: &[String]) -> Result<()> {
     let bin = locate_binary()?;
-    let status = Command::new(&bin)
+    // nosemgrep: dynamic-command-execution -- bin is the rtk-proxy daemon from locate_binary
+    let status = ChildCommand::new(&bin)
         .args(args)
         .status()
         .with_context(|| format!("failed to run {} {}", bin.display(), args.join(" ")))?;

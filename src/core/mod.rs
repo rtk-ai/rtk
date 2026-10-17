@@ -4,6 +4,7 @@ pub mod arg_tokenizer;
 pub mod args_utils;
 #[cfg(feature = "engine")]
 pub mod call_context;
+pub mod child_command;
 #[cfg(feature = "engine")]
 pub mod classify;
 pub mod config;

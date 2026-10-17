@@ -1,10 +1,10 @@
 //! Shared command execution skeleton for filter modules.
 
 use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
+use crate::core::child_command::ChildCommand;
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::borrow::Cow;
-use std::process::Command;
 use std::sync::LazyLock;
 
 use crate::core::stream::{self, FilterMode, StdinMode, StreamFilter};
@@ -289,7 +289,7 @@ pub enum RunMode<'a> {
 }
 
 fn run_captured_filter<F>(
-    mut cmd: Command,
+    mut cmd: ChildCommand,
     tool_name: &str,
     cmd_label: &str,
     filter_fn: F,
@@ -550,7 +550,7 @@ fn names_usage(
 
 /// True when `cmd` asks the tool for its usage. Reads the program's stem and its argv; it
 /// never runs anything.
-pub fn requests_help(cmd: &Command) -> bool {
+pub fn requests_help(cmd: &ChildCommand) -> bool {
     let stem = std::path::Path::new(cmd.get_program())
         .file_stem()
         .and_then(|s| s.to_str())
@@ -572,7 +572,7 @@ pub fn requests_help_args(tool: &str, args: &[String]) -> bool {
 }
 
 pub fn run(
-    cmd: Command,
+    cmd: ChildCommand,
     tool_name: &str,
     args_display: &str,
     mode: RunMode<'_>,
@@ -590,7 +590,7 @@ pub fn run(
 }
 
 fn run_inner(
-    mut cmd: Command,
+    mut cmd: ChildCommand,
     tool_name: &str,
     args_display: &str,
     mode: RunMode<'_>,
@@ -648,7 +648,7 @@ fn run_inner(
 }
 
 pub fn run_filtered<F>(
-    cmd: Command,
+    cmd: ChildCommand,
     tool_name: &str,
     args_display: &str,
     filter_fn: F,
@@ -667,7 +667,7 @@ where
 }
 
 pub fn run_filtered_with_exit<F>(
-    cmd: Command,
+    cmd: ChildCommand,
     tool_name: &str,
     args_display: &str,
     filter_fn: F,
@@ -690,7 +690,7 @@ pub fn run_passthrough(tool: &str, args: &[std::ffi::OsString], verbose: u8) -> 
         eprintln!("{} passthrough: {:?}", tool, args);
     }
     let mut cmd = crate::core::utils::resolved_command(tool);
-    crate::core::utils::ChildArgExt::child_args(&mut cmd, args);
+    cmd.args(args);
     let args_str = tracking::args_display(args);
     run(
         cmd,
@@ -702,7 +702,7 @@ pub fn run_passthrough(tool: &str, args: &[std::ffi::OsString], verbose: u8) -> 
 }
 
 pub fn run_streamed(
-    cmd: Command,
+    cmd: ChildCommand,
     tool_name: &str,
     args_display: &str,
     filter: Box<dyn StreamFilter + '_>,
@@ -822,7 +822,7 @@ impl StreamFilter for ErrorStreamFilter {
 /// slug, so passing a real name keeps `rtk gain --history` showing invocations
 /// that exist and stops recovery files colliding across ecosystems.
 pub fn run_err_cmd(
-    cmd: Command,
+    cmd: ChildCommand,
     tool: &str,
     display: &str,
     tee_label: &str,
@@ -948,7 +948,7 @@ pub fn is_watch_mode(args: &[String]) -> bool {
 /// Run a prebuilt test command (no shell), showing only failures.
 /// `display` is used only for logging and tracking, never executed.
 pub fn run_test_cmd(
-    cmd: Command,
+    cmd: ChildCommand,
     tool: &str,
     display: &str,
     tee_label: &str,
@@ -1615,15 +1615,15 @@ mod requests_help_tests {
     /// the program's path and the args off the `Command`.
     #[test]
     fn the_command_form_reads_the_program_stem_and_args() {
-        let mut cargo = Command::new("/usr/bin/cargo");
+        let mut cargo = ChildCommand::new("/usr/bin/cargo");
         cargo.arg("-h");
         assert!(requests_help(&cargo));
 
-        let mut ls = Command::new("/bin/ls");
+        let mut ls = ChildCommand::new("/bin/ls");
         ls.arg("-h");
         assert!(!requests_help(&ls), "-h belongs to ls");
 
-        let mut ls_long = Command::new("/bin/ls");
+        let mut ls_long = ChildCommand::new("/bin/ls");
         ls_long.arg("--help");
         assert!(requests_help(&ls_long));
     }

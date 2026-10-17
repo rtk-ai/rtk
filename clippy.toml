@@ -1,0 +1,6 @@
+# Production code builds a child with `resolved_command()` or `ChildCommand::new`,
+# which encode its arguments for MSYS/Cygwin children on Windows. The lint is
+# denied in `src/main.rs` outside test builds; see `[lints.clippy]` in Cargo.toml.
+disallowed-methods = [
+    { path = "std::process::Command::new", reason = "use resolved_command() or ChildCommand::new, which encode arguments for MSYS/Cygwin children on Windows" },
+]
