@@ -175,6 +175,11 @@ const CASES: &[Case] = &[
         native_args: &["diff", "--help"],
     },
     Case {
+        rtk_args: &["git", "grep", "--help"],
+        tool: "git",
+        native_args: &["grep", "--help"],
+    },
+    Case {
         rtk_args: &["go", "vet", "-h"],
         tool: "go",
         native_args: &["vet", "-h"],
