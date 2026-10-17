@@ -1,6 +1,6 @@
 //! Parses the conservative subset of quoted shell -c wrappers that RTK can rewrite.
 
-use super::lexer::ShellDialect;
+use crate::core::cmdline::lexer::ShellDialect;
 
 /// The shells whose `-c` script RTK will look inside, and the grammar each one
 /// evaluates that script with.

@@ -2142,7 +2142,7 @@ enum GtCommands {
 /// Split a string into shell-like tokens, respecting single and double quotes.
 /// e.g. `git log --format="%H %s"` → ["git", "log", "--format=%H %s"]
 fn shell_split(input: &str) -> Vec<String> {
-    discover::lexer::shell_split(input)
+    core::cmdline::lexer::shell_split(input)
 }
 
 /// The tracked command for `rtk proxy`: the program word is quoted like its
