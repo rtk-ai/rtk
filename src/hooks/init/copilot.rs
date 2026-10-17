@@ -194,6 +194,7 @@ pub(crate) fn copilot_user_dir() -> Result<PathBuf> {
         user_dirs::env_path(COPILOT_HOME_ENV),
         user_dirs::home(),
         COPILOT_USER_DIR,
+        COPILOT_HOME_ENV,
         "Cannot determine Copilot config directory. Set $COPILOT_HOME or $HOME.",
     )
 }
