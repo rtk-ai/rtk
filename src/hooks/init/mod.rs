@@ -23,19 +23,19 @@ use crate::core::test_isolation;
 use crate::core::user_dirs;
 
 mod agents_md;
-mod antigravity;
-mod claude;
-mod codex;
-mod copilot;
-mod cursor;
-mod droid;
-mod gemini;
-mod hermes;
+pub(crate) mod antigravity;
+pub(crate) mod claude;
+pub(crate) mod codex;
+pub(crate) mod copilot;
+pub(crate) mod cursor;
+pub(crate) mod droid;
+pub(crate) mod gemini;
+pub(crate) mod hermes;
 mod instructions_agents;
-mod opencode;
-mod pi;
-mod trae;
-mod vibe;
+pub(crate) mod opencode;
+pub(crate) mod pi;
+pub(crate) mod trae;
+pub(crate) mod vibe;
 
 // `agents_md` and `pi` hold helpers that several submodules share, so they are
 // glob-imported and reach siblings through `use super::*`; every other submodule is used only

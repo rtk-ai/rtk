@@ -353,6 +353,25 @@ fn is_trae_hook_command(command: &str) -> bool {
     crate::hooks::is_rtk_hook_command(command, "trae")
 }
 
+/// Returns true if Trae RTK hook is configured (workspace or global).
+pub fn is_configured() -> bool {
+    for global in [false, true] {
+        if let Ok(paths) = resolve_trae_hook_paths(global) {
+            for path in paths {
+                if let Ok(content) = fs::read_to_string(&path) {
+                    let content = strip_leading_bom(&content);
+                    if let Ok(root) = from_json_str::<serde_json::Value>(content.trim())
+                        && trae_hook_already_present(&root)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

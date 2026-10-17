@@ -453,6 +453,24 @@ fn remove_droid_hook_from_json(root: &mut serde_json::Value, layout: DroidLayout
     modified
 }
 
+/// Returns true if Droid RTK hook is configured in any candidate file.
+pub fn is_configured() -> bool {
+    let Ok(droid_dir) = resolve_droid_dir() else {
+        return false;
+    };
+    for candidate in droid_hook_file_candidates(&droid_dir) {
+        if let Ok(content) = fs::read_to_string(&candidate.path) {
+            let content = strip_leading_bom(&content);
+            if let Ok(root) = from_json_str::<serde_json::Value>(content.trim())
+                && droid_hook_already_present(&root, candidate.layout)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
