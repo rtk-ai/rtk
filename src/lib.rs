@@ -889,6 +889,7 @@ enum Commands {
     },
 
     /// Pytest test runner with compact output
+    #[command(disable_help_flag = true)]
     Pytest {
         /// Pytest arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -5167,6 +5168,17 @@ mod tests {
     #[test]
     fn test_run_shell_requires_command_string() {
         assert!(Cli::try_parse_from(["rtk", "run", "--shell", "fish", "echo"]).is_err());
+    }
+
+    #[test]
+    fn test_pytest_help_passthrough_args() {
+        for flag in ["--help", "-h", "--version"] {
+            let cli = Cli::try_parse_from(["rtk", "pytest", flag]).unwrap();
+            match cli.command {
+                Commands::Pytest { args } => assert_eq!(args, vec![flag]),
+                _ => panic!("Expected Pytest command"),
+            }
+        }
     }
 
     #[test]
