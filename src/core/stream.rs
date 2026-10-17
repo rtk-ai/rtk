@@ -697,6 +697,85 @@ pub struct CaptureResult {
     pub exit_code: i32,
 }
 
+pub struct BoundedCaptureResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    pub stdout_overflow: bool,
+    pub stderr_overflow: bool,
+}
+
+pub fn exec_capture_stdin_bounded(cmd: &mut Command, cap: usize) -> Result<BoundedCaptureResult> {
+    cmd.stdin(Stdio::inherit());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    let mut child = cmd.spawn().context("Failed to execute command")?;
+    let stdout = child.stdout.take().context("No child stdout handle")?;
+    let stderr = child.stderr.take().context("No child stderr handle")?;
+    let cap_out = cap;
+    let read = move |mut input: Box<dyn Read + Send>| {
+        let mut retained = Vec::new();
+        let mut buf = [0u8; 8192];
+        let mut overflow = false;
+        loop {
+            match input.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if retained.len() < cap_out {
+                        let keep = n.min(cap_out - retained.len());
+                        retained.extend_from_slice(&buf[..keep]);
+                        overflow |= keep < n;
+                    } else {
+                        overflow = true;
+                    }
+                }
+                Err(_) => {
+                    overflow = true;
+                    break;
+                }
+            }
+        }
+        (retained, overflow)
+    };
+    let out_thread = std::thread::spawn(move || read(Box::new(stdout)));
+    let err_thread = std::thread::spawn(move || {
+        // Same reader type/layout as stdout; keep both pipes draining concurrently.
+        let mut retained = Vec::new();
+        let mut buf = [0u8; 8192];
+        let mut overflow = false;
+        let mut input = stderr;
+        loop {
+            match input.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if retained.len() < cap {
+                        let keep = n.min(cap - retained.len());
+                        retained.extend_from_slice(&buf[..keep]);
+                        overflow |= keep < n;
+                    } else {
+                        overflow = true;
+                    }
+                }
+                Err(_) => {
+                    overflow = true;
+                    break;
+                }
+            }
+        }
+        (retained, overflow)
+    });
+    let status = child.wait().context("Failed to wait for child")?;
+    let (out, out_overflow) = out_thread.join().unwrap_or((Vec::new(), true));
+    let (err, err_overflow) = err_thread.join().unwrap_or((Vec::new(), true));
+    Ok(BoundedCaptureResult {
+        stdout: super::utils::decode_process_output(&out),
+        stderr: super::utils::decode_process_output(&err),
+        exit_code: status_to_exit_code(status),
+        stdout_overflow: out_overflow,
+        stderr_overflow: err_overflow,
+    })
+}
+
 impl CaptureResult {
     pub fn success(&self) -> bool {
         self.exit_code == 0
