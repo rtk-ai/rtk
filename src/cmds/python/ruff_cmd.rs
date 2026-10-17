@@ -1,5 +1,8 @@
 //! Filters Ruff linter and formatter output.
 
+use crate::core::arg_tokenizer::{
+    Dialect, TokenKind, ValueSpec, before_dashdash, dashdash_index, tokenize_grammar,
+};
 use crate::core::config;
 use crate::core::runner;
 use crate::core::shell::display_args;
@@ -49,9 +52,8 @@ struct RuffDiagnostic {
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let is_check = is_check_invocation(args);
-
-    let is_format = args.iter().any(|a| a == "format");
+    let route = route_ruff_args(args);
+    let is_check = matches!(route, RuffRoute::Check { .. });
 
     let mut cmd = resolved_command("ruff");
 
@@ -60,72 +62,162 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         .iter()
         .any(|a| a == "--output-format" || a.starts_with("--output-format="));
 
-    let user_json_format = args.iter().enumerate().any(|(i, a)| {
-        a == "--output-format=json"
-            || (a == "--output-format" && args.get(i + 1).is_some_and(|n| n == "json"))
-    });
-    let use_json_filter = !user_set_output_format || user_json_format;
-    // `[]` is a clean run only when rtk chose the format; a user who asked for JSON gets `[]` back.
     let clean_outputs: &[&str] = if is_check && !user_set_output_format {
         &["[]"]
     } else {
         &[]
     };
 
-    if is_check {
-        if user_set_output_format {
-            cmd.arg("check");
-        } else {
-            cmd.arg("check").arg("--output-format=json");
-        }
-
-        let start_idx = if !args.is_empty() && args[0] == "check" {
-            1
-        } else {
-            0
-        };
-        for arg in &args[start_idx..] {
-            cmd.arg(arg);
-        }
-
-        if args
-            .iter()
-            .skip(start_idx)
-            .all(|a| a.starts_with('-') || a.contains('='))
-        {
-            cmd.arg(".");
-        }
-    } else {
-        for arg in args {
-            cmd.arg(arg);
-        }
+    for arg in plan_ruff_command(args) {
+        cmd.arg(arg);
     }
 
     if verbose > 0 {
         eprintln!("Running: ruff {}", args.join(" "));
     }
 
+    let owned_args = args.to_vec();
     runner::run_filtered(
         cmd,
         "ruff",
         &display_args(args),
-        move |stdout| {
-            if is_check && use_json_filter && !stdout.trim().is_empty() {
-                filter_ruff_check_json(stdout)
-            } else if is_format {
-                filter_ruff_format(stdout)
-            } else {
-                truncate(stdout.trim(), config::limits().passthrough_max_chars)
-            }
-        },
+        move |stdout| filter_ruff_output(&owned_args, stdout),
         runner::RunOptions::stdout_only().clean_outputs(clean_outputs),
     )
 }
 
-fn is_check_invocation(args: &[String]) -> bool {
-    args.first().is_none_or(|arg| {
-        arg == "check" || (!arg.starts_with('-') && !RUFF_SUBCOMMANDS.contains(&arg.as_str()))
-    })
+/// Choose the output treatment for a routed invocation: check runs get the
+/// JSON summary, format runs the format summary, help and version requests
+/// stay complete, and everything else is a bounded passthrough.
+fn filter_ruff_output(args: &[String], stdout: &str) -> String {
+    let route = route_ruff_args(args);
+    let is_check = matches!(route, RuffRoute::Check { .. });
+    let is_format = matches!(route, RuffRoute::Subcommand { at } if args[at] == "format");
+    let trimmed = stdout.trim();
+
+    let user_set_output_format = args
+        .iter()
+        .any(|a| a == "--output-format" || a.starts_with("--output-format="));
+    let user_json_format = args.iter().enumerate().any(|(i, a)| {
+        a == "--output-format=json"
+            || (a == "--output-format" && args.get(i + 1).is_some_and(|n| n == "json"))
+    });
+    let use_json_filter = !user_set_output_format || user_json_format;
+
+    if is_check && use_json_filter && !trimmed.is_empty() {
+        filter_ruff_check_json(stdout)
+    } else if is_format {
+        filter_ruff_format(stdout)
+    } else if ruff_output_is_complete(route, args) {
+        // Help and version output are complete documentation: raw Ruff
+        // returns every byte, and so does rtk.
+        trimmed.to_string()
+    } else {
+        truncate(trimmed, config::limits().passthrough_max_chars)
+    }
+}
+
+/// Help and version requests must keep their full stdout.
+fn ruff_output_is_complete(route: RuffRoute, args: &[String]) -> bool {
+    match route {
+        RuffRoute::TopLevel => true,
+        RuffRoute::Subcommand { at } => matches!(args[at].as_str(), "help" | "version"),
+        RuffRoute::Check { .. } => false,
+    }
+}
+
+/// Route an invocation through the shared tokenizer, consuming the values of
+/// ruff's value-taking global options so an option value is never mistaken
+/// for the subcommand or a path.
+fn route_ruff_args(args: &[String]) -> RuffRoute {
+    let tokens = tokenize_grammar(args, &ruff_takes_value, Dialect::Posix);
+    for token in before_dashdash(&tokens) {
+        if !token.is_free_positional() {
+            continue;
+        }
+        // The first free positional decides: a known subcommand routes,
+        // anything else is a path and the invocation is an implicit check.
+        if RUFF_SUBCOMMANDS.contains(&token.text) {
+            if token.text == "check" {
+                return RuffRoute::Check {
+                    explicit_at: Some(token.source_index),
+                };
+            }
+            return RuffRoute::Subcommand {
+                at: token.source_index,
+            };
+        }
+        return RuffRoute::Check { explicit_at: None };
+    }
+    // No free positional before the `--` boundary: a path after it keeps the
+    // run an implicit check, because everything past the boundary is a path.
+    if dashdash_index(&tokens).is_some() && tokens.iter().any(|t| t.is_free_positional()) {
+        return RuffRoute::Check { explicit_at: None };
+    }
+    top_level_request(args)
+}
+
+/// Ruff's only global options that consume a separate value
+/// (`ruff --help`, 0.17: `--config` and `--color`). Every other global token
+/// is a flag; rule-selection options belong to the subcommand and only
+/// appear once the routing decision has been made.
+const RUFF_GLOBAL_VALUE_OPTIONS: &[&str] = &["config", "color"];
+
+fn ruff_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    (kind == TokenKind::Long && RUFF_GLOBAL_VALUE_OPTIONS.contains(&name)).then(ValueSpec::value)
+}
+
+/// How an invocation routes once global option values are consumed.
+#[derive(Clone, Copy, Debug)]
+enum RuffRoute {
+    /// Run `ruff check`. `explicit_at` is the index of the user's `check`
+    /// token when present, so it can be forwarded without duplication.
+    Check { explicit_at: Option<usize> },
+    /// An explicit non-check subcommand at `at`; forwarded verbatim.
+    Subcommand { at: usize },
+    /// No subcommand and no path: a top-level request such as `--version`.
+    TopLevel,
+}
+
+/// Flag-only invocations stay top-level for `--version`/`--help`; every other
+/// flags-only call (for example `--statistics`) is an implicit check.
+fn top_level_request(args: &[String]) -> RuffRoute {
+    if args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--version" | "-V" | "--help" | "-h"))
+    {
+        RuffRoute::TopLevel
+    } else {
+        RuffRoute::Check { explicit_at: None }
+    }
+}
+
+/// The complete argument vector rtk passes to ruff.
+fn plan_ruff_command(args: &[String]) -> Vec<String> {
+    let user_set_output_format = args
+        .iter()
+        .any(|a| a == "--output-format" || a.starts_with("--output-format="));
+    if let RuffRoute::Check { explicit_at } = route_ruff_args(args) {
+        let forwarded: Vec<&str> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| Some(*i) != explicit_at)
+            .map(|(_, arg)| arg.as_str())
+            .collect();
+        let mut plan = vec!["check".to_string()];
+        if !user_set_output_format {
+            plan.push("--output-format=json".to_string());
+        }
+        plan.extend(forwarded.iter().map(|arg| (*arg).to_string()));
+        if forwarded
+            .iter()
+            .all(|arg| arg.starts_with('-') || arg.contains('='))
+        {
+            plan.push(".".to_string());
+        }
+        return plan;
+    }
+    args.to_vec()
 }
 
 /// Filter ruff check JSON output - group by rule and file
@@ -383,7 +475,7 @@ mod tests {
         for subcommand in RUFF_SUBCOMMANDS {
             let args = vec![subcommand.to_string()];
             assert_eq!(
-                is_check_invocation(&args),
+                matches!(route_ruff_args(&args), RuffRoute::Check { .. }),
                 *subcommand == "check",
                 "unexpected routing for ruff {subcommand}"
             );
@@ -414,16 +506,46 @@ mod tests {
 
     #[test]
     fn paths_and_explicit_check_route_through_check() {
-        assert!(is_check_invocation(&[]));
-        assert!(is_check_invocation(&["check".to_string(), ".".to_string()]));
-        assert!(is_check_invocation(&["src".to_string()]));
-        assert!(is_check_invocation(&["pyproject.toml".to_string()]));
+        assert_plan(&[], &["check", "--output-format=json", "."]);
+        assert_plan(&["check", "."], &["check", "--output-format=json", "."]);
+        assert_plan(&["src"], &["check", "--output-format=json", "src"]);
+        assert_plan(
+            &["pyproject.toml"],
+            &["check", "--output-format=json", "pyproject.toml"],
+        );
     }
 
     #[test]
     fn top_level_flags_are_not_misclassified_as_paths() {
-        assert!(!is_check_invocation(&["--version".to_string()]));
-        assert!(!is_check_invocation(&["--help".to_string()]));
+        assert_plan(&["--version"], &["--version"]);
+        assert_plan(&["--help"], &["--help"]);
+        assert_plan(&["-V"], &["-V"]);
+        assert_plan(&["-h"], &["-h"]);
+    }
+
+    #[test]
+    fn flag_first_implicit_check_routes_to_check() {
+        assert_plan(
+            &["--select", "F401", "src"],
+            &["check", "--output-format=json", "--select", "F401", "src"],
+        );
+        assert_plan(
+            &["--fix", "src"],
+            &["check", "--output-format=json", "--fix", "src"],
+        );
+        assert_plan(
+            &["-q", "src"],
+            &["check", "--output-format=json", "-q", "src"],
+        );
+    }
+
+    #[test]
+    fn flag_only_implicit_check_routes_to_check() {
+        assert_plan(&["--fix"], &["check", "--output-format=json", "--fix", "."]);
+        assert_plan(
+            &["--statistics"],
+            &["check", "--output-format=json", "--statistics", "."],
+        );
     }
 
     #[test]
@@ -539,5 +661,184 @@ Would reformat: tests/test_utils.py
             "tests/test.py"
         );
         assert_eq!(compact_path("relative/file.py"), "file.py");
+    }
+
+    fn owned(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    fn assert_plan(args: &[&str], expected: &[&str]) {
+        assert_eq!(
+            plan_ruff_command(&owned(args)),
+            owned(expected),
+            "plan for {args:?}"
+        );
+    }
+
+    #[test]
+    fn ruff_routes_implicit_check_flags_before_paths() {
+        // #3927: flags meant for `ruff check` used to bail into passthrough.
+        assert_plan(
+            &["--select", "F401", "bad.py"],
+            &[
+                "check",
+                "--output-format=json",
+                "--select",
+                "F401",
+                "bad.py",
+            ],
+        );
+        assert_plan(
+            &["-q", "clean.py"],
+            &["check", "--output-format=json", "-q", "clean.py"],
+        );
+        assert_plan(
+            &["--statistics"],
+            &["check", "--output-format=json", "--statistics", "."],
+        );
+        assert_plan(&[], &["check", "--output-format=json", "."]);
+    }
+
+    #[test]
+    fn ruff_routes_explicit_check_and_drops_it_in_place() {
+        assert_plan(
+            &["check", "a.py"],
+            &["check", "--output-format=json", "a.py"],
+        );
+        assert_plan(&["check"], &["check", "--output-format=json", "."]);
+        // The reviewer case: an explicit `check` after a global flag must be
+        // consumed at its actual position, not forwarded as a path.
+        assert_plan(
+            &["--isolated", "check", "clean.py"],
+            &["check", "--output-format=json", "--isolated", "clean.py"],
+        );
+        assert_plan(
+            &["--config", "ruff.toml", "check", "clean.py"],
+            &[
+                "check",
+                "--output-format=json",
+                "--config",
+                "ruff.toml",
+                "clean.py",
+            ],
+        );
+    }
+
+    #[test]
+    fn ruff_routes_global_option_values_not_subcommands() {
+        // `ruff.toml` is `--config`'s value: the `format` that follows is the
+        // subcommand and the whole invocation is forwarded verbatim.
+        assert_plan(
+            &["--config", "ruff.toml", "format", "--check", "clean.py"],
+            &["--config", "ruff.toml", "format", "--check", "clean.py"],
+        );
+        // A top-level request keeps its place even after a value-taking option.
+        assert_plan(
+            &["--config", "ruff.toml", "--version"],
+            &["--config", "ruff.toml", "--version"],
+        );
+        assert_plan(&["--version"], &["--version"]);
+        assert_plan(
+            &["--config=ruff.toml", "clean.py"],
+            &[
+                "check",
+                "--output-format=json",
+                "--config=ruff.toml",
+                "clean.py",
+            ],
+        );
+        assert_plan(
+            &["--", "clean.py"],
+            &["check", "--output-format=json", "--", "clean.py"],
+        );
+    }
+
+    #[test]
+    fn ruff_routes_user_output_format_without_json_injection() {
+        assert_plan(
+            &["--output-format", "concise", "bad.py"],
+            &["check", "--output-format", "concise", "bad.py"],
+        );
+        assert_plan(
+            &["--output-format=json", "bad.py"],
+            &["check", "--output-format=json", "bad.py"],
+        );
+    }
+
+    #[test]
+    fn ruff_format_filter_only_for_the_effective_format_subcommand() {
+        // `format` as the effective subcommand routes to the format filter.
+        assert!(matches!(
+            route_ruff_args(&owned(&[
+                "--config",
+                "ruff.toml",
+                "format",
+                "--check",
+                "a.py"
+            ])),
+            RuffRoute::Subcommand { at: 2 }
+        ));
+        // `help format` is a help request, and `check ... format ...` is a
+        // check invocation: neither routes to the format filter.
+        assert!(matches!(
+            route_ruff_args(&owned(&["help", "format"])),
+            RuffRoute::Subcommand { at: 0 }
+        ));
+        assert!(matches!(
+            route_ruff_args(&owned(&["check", "--format", "json"])),
+            RuffRoute::Check {
+                explicit_at: Some(0)
+            }
+        ));
+        // A path named `format.py` never matches a subcommand.
+        assert!(matches!(
+            route_ruff_args(&owned(&["format.py"])),
+            RuffRoute::Check { explicit_at: None }
+        ));
+    }
+
+    #[test]
+    fn ruff_help_and_version_output_stay_complete() {
+        // Pin the stdout bytes: help output longer than the bounded
+        // passthrough must come back exactly as ruff printed it.
+        let max_chars = config::limits().passthrough_max_chars;
+        let help = "usage: ruff help\n".repeat(max_chars);
+        assert_eq!(
+            filter_ruff_output(&owned(&["help", "format"]), &help),
+            help.trim()
+        );
+        assert_eq!(filter_ruff_output(&owned(&["version"]), &help), help.trim());
+        assert_eq!(
+            filter_ruff_output(&owned(&["--version"]), &help),
+            help.trim()
+        );
+        assert_eq!(
+            filter_ruff_output(&owned(&["--config", "ruff.toml", "--help"]), &help),
+            help.trim()
+        );
+    }
+
+    #[test]
+    fn ruff_other_subcommands_keep_the_bounded_passthrough() {
+        let max_chars = config::limits().passthrough_max_chars;
+        let long = "rule F401: ".repeat(max_chars);
+        let out = filter_ruff_output(&owned(&["rule", "F401"]), &long);
+        assert!(out.len() < long.len());
+        assert!(out.ends_with("..."));
+    }
+
+    #[test]
+    fn ruff_output_filter_selects_by_route() {
+        // Check runs keep the JSON summary.
+        let json = r#"[{"code":"F401","message":"`os` imported but unused","location":{"row":1,"column":1},"end_location":{"row":1,"column":9},"filename":"dirty.py","fix":null}]"#;
+        assert!(filter_ruff_output(&owned(&["check", "dirty.py"]), json).contains("F401"));
+        // The format filter still serves effective format subcommands
+        // (pre-0.16 wording; the ruff >= 0.16 shapes are #3965's scope).
+        let mixed =
+            "Would reformat: dirty.py\n2 files would be reformatted, 3 files left unchanged";
+        assert!(
+            filter_ruff_output(&owned(&["format", "--check", "dirty.py"]), mixed)
+                .contains("1 files need formatting")
+        );
     }
 }
