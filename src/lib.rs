@@ -2477,15 +2477,15 @@ fn require_single_script(subcommand: &str, shell: Option<&str>, command: &[Strin
         .exit();
 }
 
-/// Whether this invocation runs the daily telemetry ping. A parsed
-/// `rtk hook …` command does not: the hook processors run before every
-/// command an agent runs. Anything clap rejects (help, version, a
-/// passthrough command) still runs it.
+/// Whether this invocation runs the daily telemetry ping. Parsed
+/// `rtk hook …` and `rtk rewrite …` commands do not: both run on the
+/// hook path before every command. Anything clap rejects (help, version,
+/// a passthrough command) still runs it.
 fn pings_telemetry(parsed: &Result<Cli, clap::Error>) -> bool {
     !matches!(
         parsed,
         Ok(Cli {
-            command: Commands::Hook { .. },
+            command: Commands::Hook { .. } | Commands::Rewrite { .. },
             ..
         })
     )
@@ -2511,14 +2511,15 @@ fn run_cli() -> Result<i32> {
 
     // Warn if installed hook is outdated/missing (1/day, non-blocking).
     // Skip for Gain (shows its own inline warning), Init/Verify (manage the
-    // hook themselves), and Hook: its stderr lands in the agent's hook
-    // stream, and the parse behind the check has no place on the hook path.
+    // hook themselves), and Hook/Rewrite: their stderr lands in the hook
+    // stream or `/dev/null`, and the check has no place on the hook path.
     if !matches!(
         cli.command,
         Commands::Gain(..)
             | Commands::Init { .. }
             | Commands::Verify { .. }
             | Commands::Hook { .. }
+            | Commands::Rewrite { .. }
     ) {
         hooks::hook_check::maybe_warn();
     }
@@ -5182,7 +5183,12 @@ mod tests {
 
     #[test]
     fn hook_commands_skip_the_telemetry_ping() {
-        for args in [&["rtk", "hook", "claude"][..], &["rtk", "hook", "codex"]] {
+        for args in [
+            &["rtk", "hook", "claude"][..],
+            &["rtk", "hook", "codex"],
+            &["rtk", "rewrite", "git status"],
+            &["rtk", "rewrite", "ls", "-la"],
+        ] {
             assert!(
                 !pings_telemetry(&try_parse_cli_from(args)),
                 "{args:?} must not ping"
