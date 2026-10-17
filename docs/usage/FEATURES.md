@@ -911,6 +911,25 @@ Auto-detects `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`, `Gemfile`
 
 ---
 
+### `rtk nix` -- Nix
+
+| Command | Description | Bash output reduction |
+|---------|-------------|------------------------|
+| `rtk nix build` | Progress grouped into counters, store paths shortened | ~90% |
+| `rtk nix develop/shell/run -c <cmd>` | Wrapped command delegated to its own rtk filter | depends on the command |
+| `rtk nix flake <sub>` | Evaluation traces removed, store listings as counters | varies |
+| `rtk nix-build` / `rtk nix-shell` / `rtk nix-env` | Same filtering for legacy commands | ~90% |
+
+- `/nix/store/<hash>-` paths are shortened (`abcdefg...-`)
+- Downloads and copies counted into summaries (`[downloaded N]`, `[copied N]`)
+- Evaluation traces are removed; errors and warnings are kept
+
+Wrapped command: `nix develop -c cargo test` relaunches via a nested `rtk` so the inner
+command is filtered by its own module, while running in the nix environment. The outer layer
+stays passthrough; the inner rtk does the filtering and tracking.
+
+---
+
 ## Containers and orchestration
 
 ### `rtk docker` -- Docker
@@ -1323,6 +1342,8 @@ rtk verify
 | `kubectl get/logs` | `rtk kubectl ...` |
 | `curl` | `rtk curl` |
 | `pnpm list/outdated` | `rtk pnpm ...` |
+| `nix build/develop/flake/shell` | `rtk nix ...` |
+| `nix-build/nix-shell/nix-env` | `rtk nix-build/...` |
 
 ### Excluding commands
 
@@ -1482,9 +1503,10 @@ No personal data, no command content and no file path is transmitted. Server ret
 | **Containers** | docker, kubectl |
 | **Data** | json, env, log, curl, wget |
 | **Analytics** | gain, discover, learn, cc-economics |
+| **Nix** | nix build, develop, shell, flake, nix-build |
 
 ---
 
 ## Coverage
 
-RTK covers the 9 categories above, with automatic passthrough for unrecognized subcommands, so it is always safe to use as a prefix.
+RTK covers the 10 categories above, with automatic passthrough for unrecognized subcommands, so it is always safe to use as a prefix.
