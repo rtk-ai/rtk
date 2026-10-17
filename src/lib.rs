@@ -838,6 +838,12 @@ enum Commands {
         /// List stored entries
         #[arg(long)]
         list: bool,
+        /// Delete all stored recall output and compact the configured database
+        #[arg(long, conflicts_with_all = ["hash", "full", "from", "lines", "grep", "list", "gc"])]
+        purge: bool,
+        /// Apply recall retention limits now and compact the configured database
+        #[arg(long, conflicts_with_all = ["hash", "full", "from", "lines", "grep", "list"])]
+        gc: bool,
     },
 
     /// Read stdin, apply filter, print filtered output (Unix pipe mode)
@@ -3780,14 +3786,22 @@ fn run_cli() -> Result<i32> {
             lines,
             grep,
             list,
-        } => core::retriever::run_recall(core::retriever::RecallArgs {
-            hash: hash.as_deref(),
-            full,
-            from,
-            lines,
-            grep: grep.as_deref(),
-            list,
-        })?,
+            purge,
+            gc,
+        } => {
+            if purge || gc {
+                core::retriever::run_maintenance(purge)?
+            } else {
+                core::retriever::run_recall(core::retriever::RecallArgs {
+                    hash: hash.as_deref(),
+                    full,
+                    from,
+                    lines,
+                    grep: grep.as_deref(),
+                    list,
+                })?
+            }
+        }
 
         Commands::Bypass { args } => {
             use crate::core::utils::ChildArgExt;
@@ -4088,6 +4102,20 @@ mod tests {
     use super::*;
     use crate::core::test_isolation;
     use std::cell::Cell;
+
+    #[test]
+    fn test_recall_maintenance_is_exclusive() {
+        for mode in ["--purge", "--gc"] {
+            assert!(Cli::try_parse_from(["rtk", "recall", mode]).is_ok());
+            for flag in ["--full", "--list", "abc123"] {
+                assert!(Cli::try_parse_from(["rtk", "recall", mode, flag]).is_err());
+            }
+            for flag in ["--from", "--lines", "--grep"] {
+                assert!(Cli::try_parse_from(["rtk", "recall", mode, flag, "1"]).is_err());
+            }
+        }
+        assert!(Cli::try_parse_from(["rtk", "recall", "--purge", "--gc"]).is_err());
+    }
 
     #[test]
     fn test_jest_and_vitest_get_the_hook_integrity_check() {

@@ -42,6 +42,7 @@ ignore_files = ["*.lock", "*.min.js", "*.min.css"]
 mode = "sqlite"             # sqlite (default) | tee (legacy files) | disabled
 max_entry_bytes = 10485760  # sqlite: 10 MiB per entry
 max_entries = 200           # sqlite: FIFO cap (0 = no cap)
+max_total_bytes = 0         # sqlite: aggregate encoded blob cap (0 = no cap)
 retention_days = 30         # sqlite: age eviction (0 = off)
 compression = true          # sqlite: gzip blobs (lossless)
 # database_path = "/custom/recall.db"
@@ -130,12 +131,23 @@ To see how often your assistant actually goes back for elided output — and whi
 | `retriever.mode` | `"sqlite"` | `sqlite` (default), `tee` (legacy files), `disabled` |
 | `retriever.max_entry_bytes` | `10485760` | Per-entry storage cap (10 MiB) |
 | `retriever.max_entries` | `200` | FIFO cap on retained entries (0 = no cap) |
+| `retriever.max_total_bytes` | `0` | Combined encoded blob bytes (0 = no aggregate limit) |
 | `retriever.retention_days` | `30` | Age eviction in days (0 = off) |
 | `retriever.compression` | `true` | gzip stored blobs (lossless) |
 | `retriever.tee_max_files` | `20` | tee mode: how many files are kept before rotation |
 | `retriever.tee_max_file_size` | `1048576` | tee mode: per-file cap (1 MiB) |
 | `retriever.tee_on_success` | `false` | tee mode: also archive successful runs — the legacy `[tee] mode = "always"` |
 | Max file size | 1 MB | Truncated above this |
+
+For example, `max_total_bytes = 104857600` limits gzip blobs (or raw blobs when
+compression is off) to 100 MiB, excluding SQLite pages, indexes and WAL files.
+An individual blob larger than the budget is rejected without a recovery hint.
+`--gc` applies retention without waiting for a write; `--purge` removes all stored
+output. Both compact the configured recall database (`RTK_RECALL_DB` takes
+precedence), even when capture is disabled, while preserving recall statistics,
+tracking history and tee files. Active readers can delay WAL compaction; retry
+`--gc` after they finish. Purging does not promise secure erasure from backups or
+filesystem snapshots.
 
 ## Excluding commands from auto-rewrite
 

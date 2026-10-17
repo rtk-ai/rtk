@@ -8,7 +8,10 @@ use anyhow::{Context, Result};
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+
+mod retention;
+use retention::{evict, init_storage_accounting, maintain_store};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -37,6 +40,8 @@ pub struct RetrieverConfig {
     pub mode: RecoveryMode,
     pub max_entry_bytes: usize,
     pub max_entries: usize,
+    /// Combined encoded blob bytes; zero preserves the legacy unbounded budget.
+    pub max_total_bytes: usize,
     pub retention_days: u32,
     pub compression: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -55,6 +60,7 @@ impl Default for RetrieverConfig {
             mode: RecoveryMode::Sqlite,
             max_entry_bytes: DEFAULT_MAX_ENTRY_BYTES,
             max_entries: DEFAULT_MAX_ENTRIES,
+            max_total_bytes: 0,
             retention_days: DEFAULT_RETENTION_DAYS,
             compression: true,
             database_path: None,
@@ -262,7 +268,7 @@ fn init_schema(conn: &Connection) -> Result<()> {
         "ALTER TABLE recall ADD COLUMN recalled INTEGER NOT NULL DEFAULT 0",
         [],
     );
-    Ok(())
+    init_storage_accounting(conn)
 }
 
 fn stat_family(slug: &str) -> &str {
@@ -439,31 +445,6 @@ pub fn record_tee_recall(slug: &str, path: &str) {
     record_tee_recall_with(&cfg, slug, path);
 }
 
-fn evict(conn: &Connection, cfg: &RetrieverConfig, keep_hash: &str) {
-    if cfg.retention_days > 0 {
-        let cutoff = now_secs() - (cfg.retention_days as i64) * 86_400;
-        let _ = conn.execute(
-            "DELETE FROM recall WHERE created_at < ?1 AND hash != ?2",
-            params![cutoff, keep_hash],
-        );
-    }
-    if cfg.max_entries > 0 {
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM recall", [], |r| r.get(0))
-            .unwrap_or(0);
-        let excess = count - cfg.max_entries as i64;
-        if excess > 0 {
-            let _ = conn.execute(
-                "DELETE FROM recall WHERE rowid IN (
-                    SELECT rowid FROM recall WHERE hash != ?2
-                    ORDER BY created_at ASC, rowid ASC LIMIT ?1
-                )",
-                params![excess, keep_hash],
-            );
-        }
-    }
-}
-
 #[cfg(feature = "engine")]
 pub fn trim_family(cfg: &RetrieverConfig, prefix: &str, keep: usize) {
     let _ = with_open(cfg, |conn| {
@@ -534,12 +515,17 @@ fn store_inner(
     } else {
         (payload.to_vec(), "raw")
     };
+    anyhow::ensure!(
+        cfg.max_total_bytes == 0 || blob.len() <= cfg.max_total_bytes,
+        "encoded recall entry exceeds the total storage budget"
+    );
     let cwd = user_dirs::current_dir()
         .ok()
         .map(|p| p.to_string_lossy().into_owned());
 
     with_open(cfg, |conn| {
-        conn.execute(
+        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+        tx.execute(
         "INSERT INTO recall
          (hash, command, cwd, exit_code, created_at, total_lines, shown_upto, byte_size, truncated, codec, blob)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
@@ -569,8 +555,9 @@ fn store_inner(
         ],
     )
     .context("insert recall row")?;
-        bump_stat(conn, command, "sqlite", "elisions");
-        evict(conn, cfg, &hash);
+        bump_stat(&tx, command, "sqlite", "elisions");
+        evict(&tx, cfg, &[&hash])?;
+        tx.commit().context("commit recall output and retention")?;
 
         Ok(StoredRef {
             hash: hash.clone(),
@@ -641,6 +628,14 @@ pub struct RecallArgs<'a> {
     pub lines: Option<usize>,
     pub grep: Option<&'a str>,
     pub list: bool,
+}
+
+pub fn run_maintenance(purge: bool) -> Result<i32> {
+    // A broken config must not fall back to purging a different default store.
+    let cfg = Config::load()?.retriever;
+    let removed = maintain_store(&cfg, purge)?;
+    println!("rtk recall: removed {removed} stored output(s); recall statistics preserved");
+    Ok(0)
 }
 
 pub fn run_recall(args: RecallArgs) -> Result<i32> {
@@ -785,6 +780,316 @@ mod tests {
             database_path: Some(dir.join("recall_test.db")),
             ..RetrieverConfig::default()
         }
+    }
+
+    fn storage_totals(conn: &Connection) -> (i64, i64) {
+        conn.query_row(
+            "SELECT entries, blob_bytes FROM recall_storage WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_total_budget_defaults_to_legacy_unlimited() {
+        let cfg: RetrieverConfig = toml::from_str("max_entries = 12").unwrap();
+        assert_eq!(cfg.max_total_bytes, 0);
+        assert_eq!(cfg.max_entries, 12);
+    }
+
+    #[test]
+    fn test_total_budget_evicts_oldest_and_keeps_returned_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            max_total_bytes: 8,
+            compression: false,
+            ..temp_cfg(dir.path())
+        };
+        let first = store_inner(&cfg, b"aaa\n", "cmd", None, 1).unwrap();
+        let second = store_inner(&cfg, b"bbb\n", "cmd", None, 1).unwrap();
+        let newest = store_inner(&cfg, b"ccc\n", "cmd", None, 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        assert!(load_by_hash(&conn, &first.hash).unwrap().is_none());
+        assert!(load_by_hash(&conn, &second.hash).unwrap().is_some());
+        assert_eq!(
+            decode(&load_by_hash(&conn, &newest.hash).unwrap().unwrap()).unwrap(),
+            b"ccc\n"
+        );
+        assert_eq!(storage_totals(&conn), (2, 8));
+    }
+
+    #[test]
+    fn test_total_budget_measures_encoded_blob_and_rejects_oversize() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = vec![b'x'; 4096];
+        let bytes = gzip(&content).unwrap().len();
+        let cfg = RetrieverConfig {
+            max_total_bytes: bytes,
+            ..temp_cfg(dir.path())
+        };
+        let saved = store_inner(&cfg, &content, "cmd", None, 1).unwrap();
+        let too_small = RetrieverConfig {
+            max_total_bytes: bytes - 1,
+            ..cfg.clone()
+        };
+        assert!(matches!(
+            store(&too_small, &content, "new", None, 1),
+            Stored::Unavailable
+        ));
+        let conn = open(&cfg).unwrap();
+        assert_eq!(storage_totals(&conn), (1, bytes as i64));
+        assert!(load_by_hash(&conn, &saved.hash).unwrap().is_some());
+        assert_eq!(stats_snapshot_with(&cfg).unwrap()[0].elisions, 1);
+    }
+
+    #[test]
+    fn test_storage_totals_follow_upsert_delete_and_legacy_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        let content = vec![b'a'; 100];
+        let stored = store_inner(&cfg, &content, "cmd", None, 1).unwrap();
+        let raw = RetrieverConfig {
+            compression: false,
+            ..cfg.clone()
+        };
+        store_inner(&raw, &content, "cmd", None, 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        assert_eq!(storage_totals(&conn), (1, 100));
+        conn.execute_batch("DROP TRIGGER recall_storage_insert; DROP TRIGGER recall_storage_update; DROP TRIGGER recall_storage_delete; DROP TABLE recall_storage;").unwrap();
+        init_schema(&conn).unwrap();
+        init_schema(&conn).unwrap();
+        assert_eq!(storage_totals(&conn), (1, 100));
+        conn.execute("DELETE FROM recall WHERE hash = ?1", [&stored.hash])
+            .unwrap();
+        assert_eq!(storage_totals(&conn), (0, 0));
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn test_posthook_family_trim_updates_payload_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            compression: false,
+            max_total_bytes: 16,
+            ..temp_cfg(dir.path())
+        };
+        let failure = store_inner(&cfg, b"err\n", "cargo test", Some(1), 1).unwrap();
+        store_inner(&cfg, b"old\n", "posthook:bash_ls", None, 1).unwrap();
+        let newest = store_inner(&cfg, b"new\n", "posthook:bash_ls", None, 1).unwrap();
+        trim_family(&cfg, "posthook:", 1);
+        let conn = open(&cfg).unwrap();
+        assert_eq!(storage_totals(&conn), (2, 8));
+        assert!(load_by_hash(&conn, &failure.hash).unwrap().is_some());
+        assert!(load_by_hash(&conn, &newest.hash).unwrap().is_some());
+        store_inner(&cfg, b"next log", "cargo build", Some(1), 1).unwrap();
+        assert_eq!(storage_totals(&conn), (3, 16));
+        assert!(load_by_hash(&conn, &failure.hash).unwrap().is_some());
+    }
+
+    #[test]
+    fn test_eviction_failure_rolls_back_store_and_stats() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            max_total_bytes: 4,
+            compression: false,
+            ..temp_cfg(dir.path())
+        };
+        let old = store_inner(&cfg, b"old\n", "cmd", None, 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        conn.execute_batch("CREATE TRIGGER block_eviction BEFORE DELETE ON recall BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;").unwrap();
+        assert!(matches!(
+            store(&cfg, b"new\n", "cmd", None, 1),
+            Stored::Unavailable
+        ));
+        assert!(load_by_hash(&conn, &old.hash).unwrap().is_some());
+        assert_eq!(storage_totals(&conn), (1, 4));
+        assert_eq!(stats_snapshot_with(&cfg).unwrap()[0].elisions, 1);
+    }
+
+    #[test]
+    fn test_gc_applies_retention_and_budget_without_new_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            compression: false,
+            ..temp_cfg(dir.path())
+        };
+        let old = store_inner(&cfg, b"old\n", "cmd", None, 1).unwrap();
+        let keep = store_inner(&cfg, b"new\n", "cmd", None, 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        conn.execute(
+            "UPDATE recall SET created_at = 0 WHERE hash = ?1",
+            [&old.hash],
+        )
+        .unwrap();
+        let bounded = RetrieverConfig {
+            max_total_bytes: 4,
+            ..cfg.clone()
+        };
+        assert_eq!(maintain_store(&bounded, false).unwrap(), 1);
+        assert!(load_by_hash(&conn, &keep.hash).unwrap().is_some());
+        assert_eq!(storage_totals(&conn), (1, 4));
+    }
+
+    #[test]
+    fn test_purge_preserves_stats_and_unrelated_files_even_when_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        store_inner(&cfg, b"stored\n", "cmd", None, 1).unwrap();
+        let unrelated = dir.path().join("tracking.db");
+        std::fs::write(&unrelated, b"unrelated fixture").unwrap();
+        let disabled = RetrieverConfig {
+            mode: RecoveryMode::Disabled,
+            ..cfg.clone()
+        };
+        assert_eq!(maintain_store(&disabled, true).unwrap(), 1);
+        let conn = open(&cfg).unwrap();
+        assert_eq!(storage_totals(&conn), (0, 0));
+        assert_eq!(stats_snapshot_with(&cfg).unwrap()[0].elisions, 1);
+        assert_eq!(std::fs::read(unrelated).unwrap(), b"unrelated fixture");
+        assert_eq!(maintain_store(&cfg, true).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_maintenance_never_creates_store_or_initializes_unrelated_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        assert_eq!(maintain_store(&cfg, false).unwrap(), 0);
+        assert_eq!(maintain_store(&cfg, true).unwrap(), 0);
+        let path = cfg.database_path.as_ref().unwrap();
+        assert!(!path.exists());
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE unrelated (value TEXT); INSERT INTO unrelated VALUES ('fixture');",
+        )
+        .unwrap();
+        assert!(maintain_store(&cfg, true).is_err());
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_concurrent_stores_obey_total_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            max_total_bytes: 40,
+            compression: false,
+            ..temp_cfg(dir.path())
+        };
+        drop(open(&cfg).unwrap());
+        let workers: Vec<_> = (0..8)
+            .map(|i| {
+                let cfg = cfg.clone();
+                std::thread::spawn(move || {
+                    for j in 0..10 {
+                        store_inner(&cfg, format!("{i}:{j}\n").as_bytes(), "cmd", None, 1).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let conn = open(&cfg).unwrap();
+        let (entries, bytes) = storage_totals(&conn);
+        assert!(entries <= 10);
+        assert!(bytes <= 40);
+        let actual: i64 = conn
+            .query_row("SELECT SUM(length(blob)) FROM recall", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(bytes, actual);
+        assert_eq!(stats_snapshot_with(&cfg).unwrap()[0].elisions, 80);
+    }
+
+    #[test]
+    fn test_gc_enforces_lowered_budget_and_compacts_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            compression: false,
+            retention_days: 0,
+            ..temp_cfg(dir.path())
+        };
+        store_inner(&cfg, &vec![b'x'; 256 * 1024], "large", None, 1).unwrap();
+        store_inner(&cfg, b"new\n", "small", None, 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+        let path = cfg.database_path.as_ref().unwrap();
+        let before = std::fs::metadata(path).unwrap().len();
+        let bounded = RetrieverConfig {
+            max_total_bytes: 4,
+            ..cfg.clone()
+        };
+        assert_eq!(maintain_store(&bounded, false).unwrap(), 1);
+        assert_eq!(storage_totals(&conn), (1, 4));
+        assert!(std::fs::metadata(path).unwrap().len() < before);
+        // The blob budget is deliberately not a physical SQLite-file budget.
+        assert!(std::fs::metadata(path).unwrap().len() > 4);
+    }
+
+    #[test]
+    fn test_purge_uses_environment_override_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        store_inner(&cfg, b"config\n", "cmd", None, 1).unwrap();
+        let other = dir.path().join("override.db");
+        user_env::with_path("RTK_RECALL_DB", Some(&other), || {
+            store_inner(&cfg, b"override\n", "cmd", None, 1).unwrap();
+            assert_eq!(maintain_store(&cfg, true).unwrap(), 1);
+            assert_eq!(storage_totals(&open(&cfg).unwrap()), (0, 0));
+        });
+        assert_eq!(storage_totals(&open(&cfg).unwrap()).0, 1);
+    }
+
+    #[test]
+    fn test_budget_evict_protects_all_promised_hashes_or_rolls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            compression: false,
+            ..temp_cfg(dir.path())
+        };
+        let first = store_inner(&cfg, b"one\n", "cmd", None, 1).unwrap();
+        let second = store_inner(&cfg, b"two\n", "cmd", None, 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        let bounded = RetrieverConfig {
+            max_total_bytes: 4,
+            ..cfg
+        };
+        let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate).unwrap();
+        assert!(evict(&tx, &bounded, &[&first.hash, &second.hash]).is_err());
+        drop(tx);
+        assert_eq!(storage_totals(&conn), (2, 8));
+    }
+
+    #[test]
+    fn test_maintenance_accepts_legacy_store_before_recalled_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        store_inner(&cfg, b"legacy\n", "cmd", None, 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        conn.execute_batch("ALTER TABLE recall DROP COLUMN recalled;")
+            .unwrap();
+        assert_eq!(maintain_store(&cfg, true).unwrap(), 1);
+        assert_eq!(storage_totals(&conn), (0, 0));
+    }
+
+    #[test]
+    fn test_eviction_handles_large_protected_hash_sets() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        let saved = store_inner(&cfg, b"keep\n", "cmd", None, 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        conn.execute("UPDATE recall SET created_at = 0", [])
+            .unwrap();
+        let protected = vec![saved.hash.as_str(); 40_000];
+        evict(&conn, &cfg, &protected).unwrap();
+        assert!(load_by_hash(&conn, &saved.hash).unwrap().is_some());
     }
 
     #[test]
@@ -1170,7 +1475,7 @@ mod tests {
         insert_row(&conn, "zzz999999999", "old1");
         insert_row(&conn, "yyy888888888", "old2");
         insert_row(&conn, "aaa111111111", "newest");
-        evict(&conn, &cfg, "aaa111111111");
+        evict(&conn, &cfg, &["aaa111111111"]).unwrap();
         let newest: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM recall WHERE hash = 'aaa111111111'",

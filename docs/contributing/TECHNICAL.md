@@ -295,6 +295,14 @@ On command failure (non-zero exit code) — or when a filter truncates a long li
 
 The mode is selectable via `rtk config recall <sqlite|tee|disabled>` — `tee` keeps the legacy per-file behavior (`~/.local/share/rtk/tee/{epoch}_{slug}.log`). Recovery never affects command output or exit code. `rtk gain --recalls` reports how often elided output is actually consulted, per filter.
 
+The optional `retriever.max_total_bytes` budget counts encoded payload bytes,
+not physical SQLite/WAL size. Inserts, trigger-maintained totals and eviction
+share one immediate transaction; a returned hash cannot be evicted by its own
+write. The compatibility default (`0`) keeps the existing count/age-only limits.
+`rtk recall --gc` applies retention and reclaims free pages; `--purge` removes
+stored output while keeping aggregate recall statistics. Maintenance opens only
+the existing configured recall store and validates its schema before mutation.
+
 > **Details**: [`src/core/README.md`](../../src/core/README.md) covers the recall store, tee mode configuration, and the rotation strategy.
 
 ---
