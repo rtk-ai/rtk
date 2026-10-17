@@ -48,6 +48,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`pi/`](pi/README.md)** — TypeScript extension, `tool_call` event, local `isBashToolCallEvent` guard, in-place mutation, `~/.pi/agent/extensions/`; **shared with Oh My Pi (OMP)** — OMP installs the same file at `.omp/extensions/` via its `legacy-pi-compat` layer
 - **[`hermes/`](hermes/README.md)** — Python plugin, `pre_tool_call` hook, in-place terminal command mutation
 - **[`vibe/`](vibe/README.md)** — Rust binary hook (`rtk hook vibe`), `pre_tool` entry in `~/.vibe/hooks.toml`, `hook_specific_output.tool_input` rewrite plus `system_message` for UI visibility
+- **[`forge/`](forge/README.md)** — Rules file (prompt-level), RTK block in project `AGENTS.md` or `~/.forge/AGENTS.md` (forgecode reads `AGENTS.md` natively; no external hook API)
 - **[`antigravity/`](antigravity/README.md)** — Rust binary hook (`rtk hook antigravity`), `PreToolUse` plugin entry in `.agents/plugins/rtk/hooks.json` or `~/.gemini/config/plugins/rtk/hooks.json`, transparent rewrite via `overwrite.CommandLine`
 
 ## Supported Agents
@@ -69,6 +70,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | Oh My Pi (OMP) | TypeScript extension (`tool_call` event, shared with Pi) | In-place mutation | Yes |
 | Hermes | Python plugin (`pre_tool_call`) | In-place mutation | Yes |
 | Mistral Vibe | Rust binary (`rtk hook vibe`) | Transparent rewrite | Yes (`hook_specific_output.tool_input`) |
+| Forge (forgecode) | Custom instructions (rules file, `rtk init --agent forge`) | Prompt-level guidance | N/A |
 
 ## JSON Formats by Agent
 
