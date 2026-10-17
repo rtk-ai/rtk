@@ -730,7 +730,7 @@ enum Commands {
         args: Vec<String>,
     },
 
-    /// Discover missed RTK savings from Claude Code history
+    /// Discover missed RTK savings from Claude Code and OpenCode history
     Discover {
         /// Filter by project path (substring match; case-insensitive on Windows)
         #[arg(short, long)]
@@ -747,6 +747,9 @@ enum Commands {
         /// Output format: text, json
         #[arg(short, long, default_value = "text")]
         format: String,
+        /// Session history to scan (default: every agent whose storage exists)
+        #[arg(long, value_enum)]
+        agent: Option<discover::DiscoverAgent>,
     },
 
     /// Show RTK adoption across Claude Code sessions
@@ -3458,8 +3461,17 @@ fn run_cli() -> Result<i32> {
             all,
             since,
             format,
+            agent,
         } => {
-            discover::run(project.as_deref(), all, since, limit, &format, cli.verbose)?;
+            discover::run(
+                project.as_deref(),
+                all,
+                since,
+                limit,
+                &format,
+                cli.verbose,
+                agent,
+            )?;
             0
         }
 

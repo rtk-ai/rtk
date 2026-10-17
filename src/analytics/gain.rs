@@ -1684,13 +1684,15 @@ fn export_csv(
 /// Returns a warning string if bypass rate exceeds 10%, None otherwise.
 /// Silently returns None on any error (missing dirs, permission issues, etc.).
 fn check_rtk_disabled_bypass() -> Option<String> {
-    use crate::discover::provider::{ClaudeProvider, SessionProvider};
+    use crate::discover::provider::{ClaudeProvider, ProjectFilter, SessionProvider};
     use crate::discover::registry::cmd_has_rtk_disabled_prefix;
 
     let provider = ClaudeProvider;
 
     // Quick scan: last 7 days only
-    let sessions = provider.discover_sessions(None, Some(7)).ok()?;
+    let sessions = provider
+        .discover_sessions(ProjectFilter::All, Some(7))
+        .ok()?;
 
     // Early bail if no sessions or too many (avoid slow scan)
     if sessions.is_empty() || sessions.len() > 200 {
@@ -1700,8 +1702,8 @@ fn check_rtk_disabled_bypass() -> Option<String> {
     let mut total_bash: usize = 0;
     let mut bypassed: usize = 0;
 
-    for session_path in &sessions {
-        let extracted = match provider.extract_commands(session_path) {
+    for session in &sessions {
+        let extracted = match provider.extract_commands(session) {
             Ok(cmds) => cmds,
             Err(_) => continue,
         };

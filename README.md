@@ -237,6 +237,7 @@ rtk gain --all --format json    # JSON export for dashboards
 
 rtk discover                    # Find missed savings opportunities
 rtk discover --all --since 7    # All projects, last 7 days
+rtk discover --agent opencode   # OpenCode history (default: every agent installed)
 
 rtk session                     # Show RTK adoption across recent sessions
 ```

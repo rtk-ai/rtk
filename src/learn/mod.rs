@@ -4,7 +4,7 @@ pub mod detector;
 pub mod report;
 
 use crate::core::user_dirs;
-use crate::discover::provider::{ClaudeProvider, SessionProvider};
+use crate::discover::provider::{ClaudeProvider, ProjectFilter, SessionProvider};
 use anyhow::Result;
 use detector::{CommandExecution, deduplicate_corrections, find_corrections};
 use report::{format_console_report, write_rules_file};
@@ -20,21 +20,27 @@ pub fn run(
 ) -> Result<()> {
     let provider = ClaudeProvider;
 
-    // Determine project filter (same logic as discover)
-    let project_filter = if all {
+    // Determine project filter (same logic as discover). The provider slugs
+    // the cwd itself, so callers pass raw paths.
+    let cwd = if all || project.is_some() {
         None
-    } else if let Some(p) = project {
-        Some(p)
     } else {
         // Default: current working directory
-        let cwd = user_dirs::current_dir()?;
-        let cwd_str = cwd.to_string_lossy().to_string();
-        let encoded = ClaudeProvider::encode_project_path(&cwd_str);
-        Some(encoded)
+        Some(user_dirs::current_dir()?)
+    };
+    let filter = if all {
+        ProjectFilter::All
+    } else if let Some(p) = project.as_deref() {
+        ProjectFilter::Substring(p)
+    } else {
+        match cwd.as_deref() {
+            Some(cwd) => ProjectFilter::CurrentProject(cwd),
+            None => ProjectFilter::All,
+        }
     };
 
     // Discover sessions
-    let sessions = provider.discover_sessions(project_filter.as_deref(), Some(since))?;
+    let sessions = provider.discover_sessions(filter, Some(since))?;
 
     if sessions.is_empty() {
         println!("No Claude Code sessions found in the last {} days.", since);
@@ -44,8 +50,8 @@ pub fn run(
     // Extract commands from all sessions
     let mut all_commands: Vec<CommandExecution> = Vec::new();
 
-    for session_path in &sessions {
-        let extracted = match provider.extract_commands(session_path) {
+    for session in &sessions {
+        let extracted = match provider.extract_commands(session) {
             Ok(cmds) => cmds,
             Err(_) => continue, // Skip malformed sessions
         };
