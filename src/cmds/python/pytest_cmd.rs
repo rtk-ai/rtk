@@ -111,7 +111,8 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
         } else if trimmed.starts_with("===")
             && (trimmed.contains("passed")
                 || trimmed.contains("failed")
-                || trimmed.contains("skipped"))
+                || trimmed.contains("skipped")
+                || trimmed.contains("collected"))
         {
             summary_line = trimmed.to_string();
             continue;
@@ -120,9 +121,10 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
             && !trimmed.starts_with("===")
             && !trimmed.starts_with("FAILED")
             && !trimmed.starts_with("ERROR")
-            && (trimmed.contains(" passed")
+            && ((trimmed.contains(" passed")
                 || trimmed.contains(" failed")
                 || trimmed.contains(" skipped"))
+                || trimmed.contains(" collected"))
             && trimmed.contains(" in ")
         {
             summary_line = trimmed.to_string();
@@ -174,6 +176,20 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
         failures.push(current_failure.join("\n"));
     }
 
+    // A collection summary can include both the number of discovered tests
+    // and an import/collection error. Preserve pytest's diagnostics in that
+    // case instead of reporting only the collected count.
+    if summary_line.contains("collected")
+        && summary_line.split_whitespace().any(|word| {
+            matches!(
+                word.trim_matches(|c: char| !c.is_ascii_alphabetic()),
+                "error" | "errors"
+            )
+        })
+    {
+        return output.to_string();
+    }
+
     // Build compact output
     build_pytest_summary(&summary_line, &test_files, &failures, &xfail_lines)
 }
@@ -185,6 +201,7 @@ struct PytestCounts {
     skipped: usize,
     xfailed: usize,
     xpassed: usize,
+    collected: usize,
     duration: Option<String>,
 }
 
@@ -201,10 +218,14 @@ fn build_pytest_summary(
         skipped,
         xfailed,
         xpassed,
+        collected,
         duration,
     } = counts;
 
     if passed == 0 && failed == 0 && skipped == 0 && xfailed == 0 && xpassed == 0 {
+        if collected > 0 {
+            return format!("Pytest: {collected} tests collected");
+        }
         return PYTEST_NO_TESTS.to_string();
     }
 
@@ -326,6 +347,15 @@ fn parse_summary_line(summary: &str) -> PytestCounts {
     for part in summary.split(',') {
         let words: Vec<&str> = part.split_whitespace().collect();
         for (i, word) in words.iter().enumerate() {
+            if *word == "collected" && i >= 2 {
+                let count = words[i - 2]
+                    .split_once('/')
+                    .map_or(words[i - 2], |(count, _)| count);
+                if let Ok(n) = count.parse::<usize>() {
+                    counts.collected = n;
+                }
+                continue;
+            }
             if i == 0 {
                 continue;
             }
@@ -442,6 +472,36 @@ collected 0 items
 
         let result = filter_pytest_output(output);
         assert!(result.contains("No tests collected"));
+    }
+
+    #[test]
+    fn test_filter_pytest_collect_only_reports_collected_count() {
+        let output = r#"tests/test_foo.py::test_one
+tests/test_foo.py::test_two
+
+========================= 15 tests collected in 0.17s =========================="#;
+
+        let result = filter_pytest_output(output);
+        assert_eq!(result, "Pytest: 15 tests collected");
+    }
+
+    #[test]
+    fn test_filter_pytest_collect_only_keyword_filter_reports_collected_count() {
+        let output =
+            "================ 2/15 tests collected (13 deselected) in 0.01s =================";
+
+        assert_eq!(filter_pytest_output(output), "Pytest: 2 tests collected");
+    }
+
+    #[test]
+    fn test_filter_pytest_collect_only_preserves_collection_errors() {
+        let output = r#"tests/broken.py::test_one
+
+E   ModuleNotFoundError: No module named 'nonexistent_module_xyz'
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+15 tests collected, 1 error in 0.22s"#;
+
+        assert_eq!(filter_pytest_output(output), output);
     }
 
     #[test]
