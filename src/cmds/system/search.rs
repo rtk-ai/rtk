@@ -11,7 +11,7 @@ use crate::core::stream::{
     exec_capture_unguarded,
 };
 use crate::core::tracking;
-use crate::core::utils::{ChildArgExt, resolved_command, strip_ansi};
+use crate::core::utils::{ChildArgExt, exit_code_from_status, resolved_command, strip_ansi};
 use crate::core::{args_utils, config};
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -677,6 +677,302 @@ fn fold_path_prefix(raw: &str) -> Option<String> {
     Some(out)
 }
 
+/// Groups `file\0line[:-]content` engine output by file, caps it, and tees the overflow.
+/// Returns the grouped form only when capping actually shrank the output; otherwise the
+/// faithful baseline, so RTK never exceeds the real command. `show_file` receives the number
+/// of files that matched.
+#[allow(clippy::too_many_arguments)]
+fn group_matches(
+    raw_output: &str,
+    max_line_len: usize,
+    max_results: usize,
+    context_re: Option<&Regex>,
+    pattern_display: &str,
+    show_file: impl FnOnce(usize) -> bool,
+    show_line: bool,
+    has_context: bool,
+) -> String {
+    let mut by_file: HashMap<String, Vec<(usize, bool, String)>> = HashMap::new();
+    for line in raw_output.lines() {
+        let Some((file, line_num, is_match, content)) = parse_match_line(line) else {
+            continue;
+        };
+        let cleaned = clean_line(content, max_line_len, context_re, pattern_display);
+        by_file
+            .entry(file)
+            .or_default()
+            .push((line_num, is_match, cleaned));
+    }
+
+    let total_matches: usize = by_file
+        .values()
+        .flat_map(|v| v.iter())
+        .filter(|(_, is_match, _)| *is_match)
+        .count();
+
+    // Mirror what the real command prints: the filename only when grep/rg would
+    // show one (multiple files, a directory, -r or -H), the line number only with
+    // -n. We force -nH--null for robust parsing, then drop what the engine itself
+    // would not have shown.
+    let show_file = show_file(by_file.len());
+
+    // Faithful baseline: exactly what the real command prints, full content.
+    let mut plain = String::new();
+    for line in raw_output.lines() {
+        let Some(output) = format_match_line(line, show_file, show_line) else {
+            if line == "--" {
+                plain.push_str("--\n");
+            }
+            continue;
+        };
+        plain.push_str(&output);
+    }
+
+    let per_file = config::limits().grep_max_per_file;
+    let mut files: Vec<_> = by_file.iter().collect();
+    files.sort_by_key(|(f, _)| *f);
+
+    let mut body = String::new();
+    let mut shown = 0;
+    let mut skipped_files = 0;
+    let mut skipped_block = String::new();
+    for (idx, (file, entries)) in files.into_iter().enumerate() {
+        if shown >= max_results {
+            skipped_files += 1;
+            skipped_block.push_str(&match_block(file, entries));
+            continue;
+        }
+
+        let file_display = compact_path(file);
+        let mut file_shown = 0;
+        let mut prev_line: usize = 0;
+        for (line_num, is_match, content) in entries.iter().take(per_file) {
+            if shown >= max_results {
+                break;
+            }
+            if has_context && prev_line > 0 && *line_num > prev_line + 1 {
+                body.push_str("--\n");
+            }
+            prev_line = *line_num;
+            let sep = if *is_match { ':' } else { '-' };
+            if show_file {
+                body.push_str(&file_display);
+                body.push(sep);
+            }
+            if show_line {
+                body.push_str(&line_num.to_string());
+                body.push(sep);
+            }
+            body.push_str(content);
+            body.push('\n');
+            shown += 1;
+            file_shown += 1;
+        }
+
+        let remaining = entries.len() - file_shown;
+        if remaining == 0 {
+            continue;
+        }
+        // Tee the file's full matches (real path) so the tail hint recovers them
+        // openably, skipping the lines already shown.
+        let full_block = match_block(file, entries);
+        match crate::core::tee::force_tee_tail_hint(
+            &full_block,
+            &grep_slug(idx, file),
+            file_shown + 1,
+        ) {
+            Some(hint) => body.push_str(&format!(
+                "  +{} more in {} {}\n",
+                remaining, file_display, hint
+            )),
+            None => body.push_str(&format!("  +{} more in {}\n", remaining, file_display)),
+        }
+    }
+
+    if skipped_files > 0 {
+        let hint = crate::core::tee::force_tee_tail_hint(&skipped_block, "grep_skipped", 1)
+            .map(|h| format!(" {}", h))
+            .unwrap_or_default();
+        body.push_str(&format!("+{} more files{}\n", skipped_files, hint));
+    }
+
+    // Switch to the grouped form only when capping actually shrank the output;
+    // otherwise emit the faithful baseline, so RTK never exceeds the real command.
+    let capped = shown < total_matches || skipped_files > 0;
+    let rtk_output = if capped {
+        format!(
+            "{} matches in {} files:\n\n{}",
+            total_matches,
+            by_file.len(),
+            body
+        )
+    } else {
+        body
+    };
+
+    if capped && rtk_output.len() < plain.len() {
+        rtk_output
+    } else {
+        plain
+    }
+}
+
+/// Value-taking flags of `git grep`, transcribed from its own `-h` listing. Only used to
+/// classify the agent's args; the command itself always runs them verbatim.
+fn git_grep_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    let takes = match kind {
+        TokenKind::Long => matches!(
+            name,
+            "after-context" | "before-context" | "context" | "max-count" | "max-depth" | "threads"
+        ),
+        TokenKind::Short => matches!(name, "A" | "B" | "C" | "e" | "f" | "m"),
+        _ => false,
+    };
+    takes.then(ValueSpec::value)
+}
+
+/// Flags that change the shape of `git grep` output (file lists, counts, context, headings,
+/// function context, pager, color). Those runs go through verbatim: the output is either
+/// already minimal or, for context, `-z` would erase the match/context distinction.
+fn git_grep_is_shape_flag(t: &Token) -> bool {
+    match t.kind {
+        TokenKind::Long => matches!(
+            t.text,
+            "after-context"
+                | "before-context"
+                | "break"
+                | "color"
+                | "colour"
+                | "column"
+                | "context"
+                | "count"
+                | "files-with-matches"
+                | "files-without-match"
+                | "function-context"
+                | "heading"
+                | "help"
+                | "name-only"
+                | "no-filename"
+                | "no-line-number"
+                | "null"
+                | "only-matching"
+                | "open-files-in-pager"
+                | "quiet"
+                | "show-function"
+        ),
+        TokenKind::Short => {
+            matches!(
+                t.text,
+                "A" | "B" | "C" | "L" | "O" | "W" | "c" | "h" | "l" | "o" | "p" | "q" | "z"
+            ) || arg_tokenizer::is_digit_run(t.text)
+        }
+        _ => false,
+    }
+}
+
+/// `git grep -z` writes `file\0line\0content`; the shared parser reads grep's
+/// `file\0line:content`. `None` when a line has another shape, so the caller re-runs verbatim.
+fn normalize_git_grep(raw: &str) -> Option<String> {
+    let mut out = String::with_capacity(raw.len());
+    for line in raw.lines() {
+        let mut parts = line.splitn(3, '\0');
+        let (Some(file), Some(num), Some(content)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return None;
+        };
+        out.push_str(file);
+        out.push('\0');
+        out.push_str(num);
+        out.push(':');
+        out.push_str(content);
+        out.push('\n');
+    }
+    Some(out)
+}
+
+/// `rtk git grep`: groups and caps like `rtk grep`, running git's own engine with the
+/// agent's args verbatim (revisions, pathspecs, `--cached`, `--and`/`--or` included) and
+/// only `--no-color -n -z` prepended as parse aids.
+pub fn run_git_grep(args: &[String], global_args: &[String], verbose: u8) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+    let args = &args_utils::restore_double_dash(args);
+    let real_cmd = with_args("git grep", &display_args(args));
+    let git_grep = || {
+        let mut cmd = resolved_command("git");
+        cmd.child_args(global_args);
+        cmd.child_arg("grep");
+        cmd
+    };
+    let verbatim = |timer: &tracking::TimedExecution| -> Result<i32> {
+        let mut cmd = git_grep();
+        cmd.child_args(args);
+        let status = cmd.status().context("Failed to run git grep")?;
+        timer.track_passthrough(&real_cmd, &tracking::passthrough_label(&real_cmd));
+        Ok(exit_code_from_status(&status, "git"))
+    };
+
+    let tokens = arg_tokenizer::tokenize_grammar(args, &git_grep_takes_value, Dialect::Posix);
+    let flags = arg_tokenizer::before_dashdash(&tokens);
+    if flags.iter().any(git_grep_is_shape_flag) {
+        return verbatim(&timer);
+    }
+    let e_patterns: Vec<&str> = flags
+        .iter()
+        .filter(|t| t.kind == TokenKind::Short && t.text == "e")
+        .filter_map(|t| t.value(&tokens))
+        .collect();
+    let pattern_display = if e_patterns.is_empty() {
+        flags
+            .iter()
+            .find(|t| t.kind == TokenKind::Positional && t.linked.is_none())
+            .map(|t| t.text.to_string())
+            .unwrap_or_default()
+    } else {
+        e_patterns.join("|")
+    };
+    let show_line = flags.iter().any(|t| {
+        (t.kind == TokenKind::Short && t.text == "n")
+            || (t.kind == TokenKind::Long && t.text == "line-number")
+    });
+
+    if verbose > 0 {
+        eprintln!("git grep: '{}'", pattern_display);
+    }
+
+    let mut cmd = git_grep();
+    cmd.child_args(["--no-color", "-n", "-z"]);
+    cmd.child_args(args);
+    let result = exec_capture(&mut cmd).context("Failed to run git grep")?;
+
+    let Some(normalized) = normalize_git_grep(&result.stdout) else {
+        return verbatim(&timer);
+    };
+    if unparsed_signal(&normalized) > 0 {
+        return verbatim(&timer);
+    }
+    if !result.stderr.is_empty() {
+        eprint!("{}", result.stderr);
+    }
+    if normalized.is_empty() {
+        timer.track(&real_cmd, "rtk git grep", "", "");
+        return Ok(result.exit_code);
+    }
+
+    let output = group_matches(
+        &normalized,
+        80,
+        200,
+        None,
+        &pattern_display,
+        |_| true,
+        show_line,
+        false,
+    );
+    print!("{}", output);
+    timer.track(&real_cmd, "rtk git grep", &result.stdout, &output);
+    Ok(result.exit_code)
+}
+
 pub fn run(
     engine: Engine,
     max_line_len: usize,
@@ -796,139 +1092,25 @@ pub fn run(
         None
     };
 
-    let mut by_file: HashMap<String, Vec<(usize, bool, String)>> = HashMap::new();
-    for line in raw_output.lines() {
-        let Some((file, line_num, is_match, content)) = parse_match_line(line) else {
-            continue;
-        };
-        let cleaned = clean_line(content, max_line_len, context_re.as_ref(), &pattern_display);
-        by_file
-            .entry(file)
-            .or_default()
-            .push((line_num, is_match, cleaned));
-    }
-
-    let total_matches: usize = by_file
-        .values()
-        .flat_map(|v| v.iter())
-        .filter(|(_, is_match, _)| *is_match)
-        .count();
-
-    // Mirror what the real command prints: the filename only when grep/rg would
-    // show one (multiple files, a directory, -r or -H), the line number only with
-    // -n. We force -nH--null for robust parsing, then drop what the engine itself
-    // would not have shown.
     // With no path given, rg walks the cwd, and there the filename is the only way to tell
     // matches apart -- real rg prints it even when a single file matched. grep with no path
     // reads stdin instead (whatever stdin is), where a filename would be `(standard input)`,
     // so the same reasoning does not carry over.
     let walks_cwd = engine == Engine::Rg && paths.is_empty();
-    let show_file = detected_flags.show_file.unwrap_or_else(|| {
-        by_file.len() > 1 || walks_cwd || wants_show_file(&paths, detected_flags.recursive)
-    });
-    let show_line = detected_flags.show_line;
-
-    // Faithful baseline: exactly what the real command prints, full content.
-    let mut plain = String::new();
-    for line in raw_output.lines() {
-        let Some(output) = format_match_line(line, show_file, show_line) else {
-            if line == "--" {
-                plain.push_str("--\n");
-            }
-            continue;
-        };
-        plain.push_str(&output);
-    }
-
-    let has_context = detected_flags.context;
-
-    let per_file = config::limits().grep_max_per_file;
-    let mut files: Vec<_> = by_file.iter().collect();
-    files.sort_by_key(|(f, _)| *f);
-
-    let mut body = String::new();
-    let mut shown = 0;
-    let mut skipped_files = 0;
-    let mut skipped_block = String::new();
-    for (idx, (file, entries)) in files.into_iter().enumerate() {
-        if shown >= max_results {
-            skipped_files += 1;
-            skipped_block.push_str(&match_block(file, entries));
-            continue;
-        }
-
-        let file_display = compact_path(file);
-        let mut file_shown = 0;
-        let mut prev_line: usize = 0;
-        for (line_num, is_match, content) in entries.iter().take(per_file) {
-            if shown >= max_results {
-                break;
-            }
-            if has_context && prev_line > 0 && *line_num > prev_line + 1 {
-                body.push_str("--\n");
-            }
-            prev_line = *line_num;
-            let sep = if *is_match { ':' } else { '-' };
-            if show_file {
-                body.push_str(&file_display);
-                body.push(sep);
-            }
-            if show_line {
-                body.push_str(&line_num.to_string());
-                body.push(sep);
-            }
-            body.push_str(content);
-            body.push('\n');
-            shown += 1;
-            file_shown += 1;
-        }
-
-        let remaining = entries.len() - file_shown;
-        if remaining == 0 {
-            continue;
-        }
-        // Tee the file's full matches (real path) so the tail hint recovers them
-        // openably, skipping the lines already shown.
-        let full_block = match_block(file, entries);
-        match crate::core::tee::force_tee_tail_hint(
-            &full_block,
-            &grep_slug(idx, file),
-            file_shown + 1,
-        ) {
-            Some(hint) => body.push_str(&format!(
-                "  +{} more in {} {}\n",
-                remaining, file_display, hint
-            )),
-            None => body.push_str(&format!("  +{} more in {}\n", remaining, file_display)),
-        }
-    }
-
-    if skipped_files > 0 {
-        let hint = crate::core::tee::force_tee_tail_hint(&skipped_block, "grep_skipped", 1)
-            .map(|h| format!(" {}", h))
-            .unwrap_or_default();
-        body.push_str(&format!("+{} more files{}\n", skipped_files, hint));
-    }
-
-    // Switch to the grouped form only when capping actually shrank the output;
-    // otherwise emit the faithful baseline, so RTK never exceeds the real command.
-    let capped = shown < total_matches || skipped_files > 0;
-    let rtk_output = if capped {
-        format!(
-            "{} matches in {} files:\n\n{}",
-            total_matches,
-            by_file.len(),
-            body
-        )
-    } else {
-        body
-    };
-
-    let output = if capped && rtk_output.len() < plain.len() {
-        rtk_output
-    } else {
-        plain
-    };
+    let output = group_matches(
+        &raw_output,
+        max_line_len,
+        max_results,
+        context_re.as_ref(),
+        &pattern_display,
+        |files| {
+            detected_flags.show_file.unwrap_or_else(|| {
+                files > 1 || walks_cwd || wants_show_file(&paths, detected_flags.recursive)
+            })
+        },
+        detected_flags.show_line,
+        detected_flags.context,
+    );
 
     print!("{}", output);
     timer.track(&real_cmd, &rtk_label, &raw_output, &output);
@@ -1196,6 +1378,40 @@ fn compact_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_git_grep_rewrites_line_separator() {
+        let raw = "src/a.rs\x0012\x00let x = a:b;\nHEAD:src/b.rs\x003\x00y\n";
+        assert_eq!(
+            normalize_git_grep(raw).as_deref(),
+            Some("src/a.rs\x0012:let x = a:b;\nHEAD:src/b.rs\x003:y\n")
+        );
+    }
+
+    #[test]
+    fn normalize_git_grep_rejects_other_shapes() {
+        assert_eq!(normalize_git_grep("Binary file x matches\n"), None);
+    }
+
+    #[test]
+    fn git_grep_shape_flags_are_detected_by_token() {
+        let shape = |args: &[&str]| {
+            let tokens =
+                arg_tokenizer::tokenize_grammar(args, &git_grep_takes_value, Dialect::Posix);
+            arg_tokenizer::before_dashdash(&tokens)
+                .iter()
+                .any(git_grep_is_shape_flag)
+        };
+        assert!(shape(&["-l", "foo"]));
+        assert!(shape(&["-in", "-C2", "foo"]));
+        assert!(shape(&["-3", "foo"]));
+        assert!(shape(&["--heading", "--break", "foo"]));
+        assert!(!shape(&["-n", "-i", "foo", "HEAD~1", "--", "src"]));
+        // `-e -l` searches for the text "-l"; it is not the files-with-matches flag.
+        assert!(!shape(&["-e", "-l"]));
+        // After `--` everything is a pathspec.
+        assert!(!shape(&["foo", "--", "-l"]));
+    }
 
     #[test]
     fn test_clean_line() {

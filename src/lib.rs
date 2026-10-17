@@ -1387,6 +1387,12 @@ enum GitCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Compact git grep (grouped by file, capped)
+    Grep {
+        /// Git grep arguments (pattern, revisions, pathspecs, flags)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Passthrough: runs any unsupported git subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -2723,6 +2729,9 @@ fn run_cli() -> Result<i32> {
                     cli.verbose,
                     &global_args,
                 )?,
+                GitCommands::Grep { args } => {
+                    search::run_git_grep(&args, &global_args, cli.verbose)?
+                }
                 GitCommands::Other(args) => {
                     git_cmd::run_passthrough(&args, &global_args, cli.verbose)?
                 }
