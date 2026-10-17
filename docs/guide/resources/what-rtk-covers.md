@@ -78,6 +78,7 @@ RTK reduces **bash output bytes** — the only thing it controls. Those bytes ar
 |---------|--------------|
 | `go test` | Failures only |
 | `golangci-lint run` | Violations grouped by file |
+| `govulncheck` | Affected modules, upgrade target, call sites |
 | `go build` | Errors only |
 
 ## Ruby
