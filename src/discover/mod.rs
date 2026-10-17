@@ -299,6 +299,20 @@ pub(crate) fn is_already_rtk(cmd: &str) -> bool {
             .any(|hatch| trimmed.starts_with(hatch))
 }
 
+fn resolve_scan_scope(project: Option<&str>, all: bool) -> Result<report::ScanScope> {
+    if let Some(project) = project {
+        Ok(report::ScanScope::ProjectFilter(project.to_string()))
+    } else if all {
+        Ok(report::ScanScope::AllProjects)
+    } else {
+        let cwd = user_dirs::current_dir()?;
+        let cwd_str = cwd.to_string_lossy();
+        Ok(report::ScanScope::CurrentProject(
+            ClaudeProvider::encode_project_path(&cwd_str),
+        ))
+    }
+}
+
 /// Spellings of the unfiltered escape hatch. `rtk proxy` is the deprecated
 /// alias of `rtk bypass` and runs exactly as unfiltered, so a transcript
 /// written before the rename must not read as covered either.
@@ -336,17 +350,7 @@ pub fn run(
 ) -> Result<()> {
     let provider = ClaudeProvider;
 
-    // Determine project filter
-    let scope = if all {
-        report::ScanScope::AllProjects
-    } else if let Some(p) = project {
-        report::ScanScope::ProjectFilter(p.to_string())
-    } else {
-        // Default: current working directory
-        let cwd = user_dirs::current_dir()?;
-        let cwd_str = cwd.to_string_lossy().to_string();
-        report::ScanScope::CurrentProject(ClaudeProvider::encode_project_path(&cwd_str))
-    };
+    let scope = resolve_scan_scope(project, all)?;
     let project_filter = match &scope {
         report::ScanScope::AllProjects => None,
         report::ScanScope::ProjectFilter(f) | report::ScanScope::CurrentProject(f) => {
@@ -737,6 +741,14 @@ mod tests {
             PermissionVerdict::Default,
             &test_ctx(false),
         ));
+    }
+
+    #[test]
+    fn test_project_filter_is_applied_when_all_projects_are_scanned() {
+        assert_eq!(
+            resolve_scan_scope(Some("my-project"), true).unwrap(),
+            report::ScanScope::ProjectFilter("my-project".to_string())
+        );
     }
 
     #[test]
