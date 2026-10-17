@@ -12,6 +12,7 @@ use crate::core::stream::{
 use crate::core::tracking;
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 use crate::core::user_dirs;
+use crate::core::user_env;
 use crate::core::utils::{exit_code_from_status, join_with_overflow, resolved_command, strip_ansi};
 use anyhow::{Context, Result};
 use std::ffi::OsString;
@@ -1523,7 +1524,41 @@ const REFUSAL_EXIT_CODE: i32 = 128;
 /// The two lengths `%H` can print, one per object format git has.
 const SHA1_NAME_LEN: usize = 40;
 const SHA256_NAME_LEN: usize = 64;
+/// Closes every commit in the format RTK asks for when the user named none, which is what
+/// lets the filtered path find commit boundaries in what git printed.
+const LOG_ENTRY_MARKER: &str = "---END---";
+/// Opens every commit of that format when RTK asks for one commit past its limit, in git's
+/// spelling: the control character, the commit's `%m` mark, its full object name and a space.
+/// What git prints after a commit's marker (a directory summary, a stat line) and what a file
+/// or a message holds can start with the control character too, but not with the whole of
+/// this, so it is what tells a commit from the rest. It is stripped before anything is
+/// rendered, printed or tracked.
+const LOG_ENTRY_START_SPEC: &str = "%x01%m%H ";
+const LOG_ENTRY_START: char = '\u{1}';
+/// What `%m` prints for a commit of a walk without `--boundary`: `<` and `>` for the two sides
+/// of a symmetric difference (`>` when there is one side only), `=` for a commit whose patch
+/// the other side has too and `^` for one outside the range.
+const OPENING_MARKS: [char; 4] = ['<', '>', '=', '^'];
 const DEFAULT_LOG_LIMIT_ARG: &str = "-10";
+/// The limit the filtered path allows a user-chosen format, which is counted in lines: a
+/// compact shape fits many more commits in the same reading budget.
+const COMPACT_LOG_LIMIT: usize = 50;
+/// The width a log line is cut to when RTK set the limit.
+const LOG_LINE_WIDTH: usize = 80;
+
+/// True when `exit_code` says git refused the command rather than ran it, which owes the user
+/// nothing beyond git's own error. A negative code is a git that crashed: Windows reports the
+/// NTSTATUS of the crash (-1073741819 for an access violation) as the exit code.
+fn refused_by_git(exit_code: i32) -> bool {
+    !(0..REFUSAL_EXIT_CODE).contains(&exit_code)
+}
+
+/// The one wording for a cap RTK applied, so both paths say the same thing and name the same
+/// escape. `unit` is what was counted: commits where RTK knows where they end, lines where
+/// the shape is the user's and it does not.
+fn cap_notice(limit: usize, unit: &str) -> String {
+    format!("[rtk] capped at {limit} {unit}; pass -n <count> for more")
+}
 
 /// `git log <args>` for the raw passthrough, carrying RTK's default limit unless the user named
 /// one. [`run_passthrough`] streams straight to the terminal, so the limit has to be in the args
@@ -1826,6 +1861,442 @@ fn bounds_the_walk(tokens: &[Token<'_>]) -> bool {
     })
 }
 
+/// True when `--output=<file>` sends the walk to a file instead of to RTK, which leaves RTK
+/// with nothing to read it out of.
+fn redirects_output(tokens: &[Token<'_>]) -> bool {
+    tokens
+        .iter()
+        .any(|t| t.kind == TokenKind::Long && t.text == "output")
+}
+
+/// True when the filtered path can ask git for one commit past its limit and drop it again,
+/// which answers whether the cap cut without walking the history twice.
+///
+/// Five shapes cannot. `--output=<file>` puts the walk in the user's file, where the extra
+/// commit would stay. `--reverse` flips the order *after* the limit has chosen the commits,
+/// so the extra one arrives first and dropping the overflow would drop HEAD. `--boundary`
+/// appends the commits just outside what the limit chose, which depend on the limit: asked
+/// for one more, git names other boundary commits, and the walk shown is no longer the one
+/// the user's limit gives. `--log-size` prints the size of each message as git rendered
+/// it, which counts the opening that is stripped afterwards. And a run that prints text of
+/// its own ahead of a commit's format output, see [`prints_ahead_of_a_commit`]: that text sits
+/// between the last commit shown and the opening of the extra one, so it would stay in the
+/// walk the user is shown.
+fn fetches_one_past_the_limit(
+    global_args: &[String],
+    env: impl Fn(&str) -> Option<String>,
+    tokens: &[Token<'_>],
+) -> bool {
+    !redirects_output(tokens)
+        && !prints_ahead_of_a_commit(global_args, env, tokens)
+        && !tokens.iter().any(|t| {
+            t.kind == TokenKind::Long && matches!(t.text, "reverse" | "boundary" | "log-size")
+        })
+}
+
+/// True when the arguments or the environment make git print text ahead of a commit's format
+/// output: the verdict on its signature (`--show-signature`, or `log.showSignature` given
+/// with `-c` or in the environment) and the bar of `--show-linear-break`. Git writes it between
+/// the previous commit's last line and the commit, so the text of the commit past the limit
+/// would end up in the window. `env` reads a variable of the environment git will run in.
+fn prints_ahead_of_a_commit(
+    global_args: &[String],
+    env: impl Fn(&str) -> Option<String>,
+    tokens: &[Token<'_>],
+) -> bool {
+    /// The most `GIT_CONFIG_KEY_<n>` variables looked at.
+    const ENV_KEYS: usize = 256;
+    let in_environment = || {
+        env("GIT_CONFIG_PARAMETERS")
+            .is_some_and(|set| set.to_ascii_lowercase().contains(SIGNATURE_KEY))
+            || env("GIT_CONFIG_COUNT")
+                .and_then(|count| count.parse::<usize>().ok())
+                .is_some_and(|count| {
+                    (0..count.min(ENV_KEYS)).any(|n| {
+                        env(&format!("GIT_CONFIG_KEY_{n}"))
+                            .is_some_and(|key| key.eq_ignore_ascii_case(SIGNATURE_KEY))
+                    })
+                })
+    };
+    arg_tokenizer::before_dashdash(tokens).iter().any(|t| {
+        t.kind == TokenKind::Long && matches!(t.text, "show-signature" | "show-linear-break")
+    }) || sets_signature_verdict(global_args, &env)
+        || in_environment()
+}
+
+/// The git config key behind `log.showSignature`, lower-cased: git compares the section and the
+/// variable name without regard to case.
+const SIGNATURE_KEY: &str = "log.showsignature";
+
+/// Which of git's own global options take a value: the ones whose next argument is a path or a
+/// setting, not an option of `git` itself.
+fn git_global_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    match kind {
+        TokenKind::Short => matches!(name, "C" | "c").then(ValueSpec::value),
+        TokenKind::Long => matches!(
+            name,
+            "config-env" | "git-dir" | "work-tree" | "namespace" | "super-prefix" | "attr-source"
+        )
+        .then(ValueSpec::value),
+        TokenKind::Positional | TokenKind::DashDash => None,
+    }
+}
+
+/// True for a value git reads as a false boolean, in the spellings RTK recognises: empty,
+/// `false`, `no`, `off` in any case, and an integer made of zeros. Anything else, including a
+/// value git would refuse, counts as a signature verdict being asked for, which only costs the
+/// run a probe.
+fn is_false_boolean(value: &str) -> bool {
+    let digits = value.strip_prefix(['+', '-']).unwrap_or(value);
+    ["", "false", "no", "off"]
+        .iter()
+        .any(|spelling| value.eq_ignore_ascii_case(spelling))
+        || (!digits.is_empty() && digits.bytes().all(|b| b == b'0'))
+}
+
+/// True when the global options turn `log.showSignature` on: `-c <key>[=<value>]` or
+/// `--config-env=<key>=<variable>`, with any value but a false one. `env` reads the variable
+/// `--config-env` names.
+fn sets_signature_verdict(global_args: &[String], env: &impl Fn(&str) -> Option<String>) -> bool {
+    let tokens =
+        arg_tokenizer::tokenize_grammar(global_args, &git_global_takes_value, Dialect::Posix);
+    tokens.iter().any(|t| {
+        let Some(setting) = t.value(&tokens) else {
+            return false;
+        };
+        let (key, source) = match setting.split_once('=') {
+            Some((key, source)) => (key, Some(source)),
+            None => (setting, None),
+        };
+        if !key.eq_ignore_ascii_case(SIGNATURE_KEY) {
+            return false;
+        }
+        match (t.kind, t.text) {
+            // `-c <key>` with no value is a true boolean.
+            (TokenKind::Short, "c") => source.is_none_or(|value| !is_false_boolean(value)),
+            (TokenKind::Long, "config-env") => !source
+                .and_then(env)
+                .is_some_and(|value| is_false_boolean(&value)),
+            _ => false,
+        }
+    })
+}
+
+/// True when the user asked for merge commits, so RTK must not add `--no-merges`. Any
+/// `--min-parents=N` with N >= 2 asks for merges, for every such N: `--no-merges` beside
+/// `--min-parents=3` would select nothing at all.
+fn log_wants_merges(tokens: &[Token<'_>]) -> bool {
+    tokens.iter().any(|t| {
+        t.kind == TokenKind::Long
+            && (t.text == "merges"
+                || t.text == "no-merges"
+                || (t.text == "min-parents"
+                    && t.attached
+                        .is_some_and(|v| v.parse::<u32>().is_ok_and(|n| n >= 2))))
+    })
+}
+
+/// The arguments [`walk_exceeds_limit`] is asked about from the filtered path: the user's own,
+/// behind RTK's `--no-merges` when the filtered path put one on the command it ran.
+///
+/// Without it the probe measures a wider walk than the one that was printed: a history of
+/// merges over a handful of ordinary commits would claim a cap that never cut. It goes *first*
+/// because git refuses an option that follows a positional -- and because behind a bare `--`
+/// in the user's arguments it becomes a second pathspec, where git does not error at all and
+/// the merges quietly stay in.
+fn filtered_probe_args(args: &[String], wants_merges: bool) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len() + 1);
+    if !wants_merges {
+        out.push("--no-merges".to_string());
+    }
+    out.extend(args.iter().cloned());
+    out
+}
+
+/// An over-fetched run split at its limit: the part RTK shows, and whether a commit lay past
+/// it.
+struct LogWindow {
+    /// The run up to the first commit past the limit, or all of it when nothing lay past,
+    /// without the openings of its commits.
+    shown: String,
+    /// A commit past the limit existed, which is the whole answer to whether the cap cut.
+    past: bool,
+}
+
+/// What ends a record of git's output: `-z` swaps the newline for a NUL.
+const RECORD_ENDS: [char; 2] = ['\n', '\0'];
+
+/// The characters `--graph` draws ahead of a line: its rails and the mark of a commit, which
+/// is `o` for a boundary one, the side it is on under `--left-right` and `=` for one the other
+/// side has a patch-equivalent of under `--cherry-mark`.
+const GRAPH_RAILS: [char; 12] = [' ', '|', '*', 'o', '\\', '/', '_', '-', '.', '<', '>', '='];
+
+/// A commit's opening within a record of git's output.
+struct Opening {
+    /// Where the opening starts in the record.
+    at: usize,
+    /// How many bytes it takes up.
+    len: usize,
+}
+
+/// Where a commit opens in `record`: the whole of [`LOG_ENTRY_START_SPEC`] as git renders it,
+/// at the start of the line, or behind the rails `--graph` draws when the run has them. The
+/// control character on its own is content, and so is a line that opens like a commit without
+/// a full object name in it.
+fn opening_in(record: &str, graph: bool) -> Option<Opening> {
+    let at = record.find(LOG_ENTRY_START)?;
+    if at > 0
+        && !(graph
+            && strip_ansi(&record[..at])
+                .chars()
+                .all(|c| GRAPH_RAILS.contains(&c)))
+    {
+        return None;
+    }
+    let after = &record[at + LOG_ENTRY_START.len_utf8()..];
+    let mark = after.chars().next()?;
+    if !OPENING_MARKS.contains(&mark) {
+        return None;
+    }
+    let name = &after[mark.len_utf8()..];
+    let name_len = name
+        .bytes()
+        .take_while(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        .count();
+    if !matches!(name_len, SHA1_NAME_LEN | SHA256_NAME_LEN)
+        || name.as_bytes().get(name_len) != Some(&b' ')
+    {
+        return None;
+    }
+    Some(Opening {
+        at,
+        len: LOG_ENTRY_START.len_utf8() + mark.len_utf8() + name_len + 1,
+    })
+}
+
+/// `window` without the opening of each commit. Only the first opening after a marker (or at
+/// the start of the run) is one: what a commit prints between its opening and its marker, and
+/// what git adds after the marker, may hold the character as content.
+fn without_openings(window: &str, graph: bool) -> String {
+    let mut out = String::with_capacity(window.len());
+    let mut between_commits = true;
+    for record in window.split_inclusive(RECORD_ENDS) {
+        match opening_in(record, graph).filter(|_| between_commits) {
+            Some(opening) => {
+                out.push_str(&record[..opening.at]);
+                out.push_str(&record[opening.at + opening.len..]);
+                between_commits = false;
+            }
+            None => out.push_str(record),
+        }
+        if record.contains(LOG_ENTRY_MARKER) {
+            between_commits = true;
+        }
+    }
+    out
+}
+
+/// Splits a run in RTK's own format where [`filter_log_output`] stops rendering: after the
+/// `limit`-th marker-delimited block. `past` is whether a commit *starts* beyond it, and the
+/// window then ends where that commit opens, so everything git printed for the last commit
+/// within the limit, a directory summary or a patch included, is still in it. Git's separator
+/// between that commit and the next stays out, as it does when git is asked for the limit
+/// itself.
+///
+/// A commit is told from the text git prints after its marker (a directory summary, a stat
+/// line, a patch) by the [`Opening`] that opens it in the format, so what git adds after a
+/// commit does not read as another commit. The window is the render's, not a count of commits:
+/// a message that quotes the marker splits its commit in two blocks, and the render really
+/// does drop the last commit of a history that fits the cap, which is a cut to announce.
+fn entries_window(stdout: &str, limit: usize, graph: bool) -> LogWindow {
+    let mut markers = 0;
+    let mut between_commits = true;
+    let mut offset = 0;
+    for record in stdout.split_inclusive(RECORD_ENDS) {
+        if opening_in(record, graph).is_some() && between_commits {
+            between_commits = false;
+            if markers >= limit {
+                let window = stdout[..offset]
+                    .strip_suffix(RECORD_ENDS)
+                    .unwrap_or(&stdout[..offset]);
+                return LogWindow {
+                    shown: without_openings(window, graph),
+                    past: true,
+                };
+            }
+        }
+        let closed = record.matches(LOG_ENTRY_MARKER).count();
+        if closed > 0 {
+            markers += closed;
+            between_commits = true;
+        }
+        offset += record.len();
+    }
+    LogWindow {
+        shown: without_openings(stdout, graph),
+        past: false,
+    }
+}
+
+/// The format flag that decides how the walk is printed: the last one wins, as it does in git.
+fn chosen_log_format<'t, 'a>(tokens: &'t [Token<'a>]) -> Option<&'t Token<'a>> {
+    tokens
+        .iter()
+        .rfind(|t| t.kind == TokenKind::Long && matches!(t.text, "format" | "pretty" | "oneline"))
+}
+
+/// The pretty formats git builds in. Each ends a commit with a newline, which is how `git
+/// log -1 --pretty=<name>` ends for every one of them, and a `pretty.<name>` alias of the
+/// same name is ignored by git, so the name alone settles it.
+const BUILTIN_LOG_FORMATS: [&str; 9] = [
+    "oneline",
+    "short",
+    "medium",
+    "full",
+    "fuller",
+    "reference",
+    "email",
+    "mboxrd",
+    "raw",
+];
+
+/// True when the user's format ends every commit with a newline (`--oneline`, the built-in
+/// formats, `tformat:`, a bare template, which git reads as `tformat:`), where `format:` puts
+/// one between commits and leaves the last open. A name that is not built in may be a
+/// `pretty.<name>` alias of either kind, and is left undecided.
+fn newline_closes_each_commit(tokens: &[Token<'_>]) -> bool {
+    chosen_log_format(tokens).is_some_and(|t| {
+        t.text == "oneline"
+            || t.value(tokens).is_some_and(|value| {
+                BUILTIN_LOG_FORMATS.contains(&value)
+                    || value.starts_with("tformat:")
+                    || (value.contains('%') && !value.starts_with("format:"))
+            })
+    })
+}
+
+/// An upper bound on the commits git returned, for a shape RTK did not choose and so cannot
+/// read commit boundaries out of. `None` when nothing can be concluded.
+///
+/// Git puts a newline after each commit (`--oneline`, a built-in format, `--pretty=tformat:`,
+/// a bare template, which `--pretty` and `--format` both read as `tformat:`) or between them
+/// (`format:`, spelled by either flag). Where each is closed by one, the newline that closes
+/// the last is set aside; where it is a separator it is not, since the last commit can render
+/// as nothing and leave it standing at the end. The pieces left are the commits, and more of
+/// them when the template prints newlines of its own, never fewer.
+///
+/// The exception is a template that renders to nothing at all: `--format=` prints fifty
+/// commits as zero bytes, separators and all. A template that merely *expands* to nothing
+/// still gets its separator, so for every format RTK can see prints something, empty output
+/// bounds the walk at zero.
+fn at_most_commits(stdout: &str, tokens: &[Token<'_>]) -> Option<usize> {
+    if stdout.is_empty() {
+        return format_certainly_prints(tokens).then_some(0);
+    }
+    let separated = if newline_closes_each_commit(tokens) {
+        stdout.strip_suffix('\n').unwrap_or(stdout)
+    } else {
+        stdout
+    };
+    Some(separated.split('\n').count())
+}
+
+/// True when the arguments alone show that the user's format renders a commit as at least one
+/// byte, which is what lets empty output mean an empty walk.
+///
+/// A literal template says so: it is written out, and any non-empty one carries its separator.
+/// A bare name does not -- `--pretty=<name>` reaches `pretty.<name>` in the user's config,
+/// which can resolve to `tformat:` and print nothing at all, so those are left undecided
+/// rather than read as an empty history.
+fn format_certainly_prints(tokens: &[Token<'_>]) -> bool {
+    let Some(chosen) = chosen_log_format(tokens) else {
+        return false;
+    };
+    if chosen.text == "oneline" {
+        return true;
+    }
+    chosen.value(tokens).is_some_and(|value| {
+        let spelled_out = value.starts_with("format:") || value.starts_with("tformat:");
+        let template = value
+            .strip_prefix("format:")
+            .or_else(|| value.strip_prefix("tformat:"))
+            .unwrap_or(value);
+        !template.is_empty() && (spelled_out || template.contains('%'))
+    })
+}
+
+/// What the limit the filtered path injected took away.
+#[derive(Debug, PartialEq)]
+enum LogCut {
+    /// Whole commits past the ones shown.
+    Commits,
+    /// Lines of a user-chosen format, which RTK read in full and did not print.
+    Lines,
+}
+
+/// What the filtered path owes a word about, or `None` when the limit it injected took nothing
+/// away.
+///
+/// Where RTK can read the commits out of the run it already made, it does: it asked git for
+/// one commit more than it shows, so a commit past the limit being there is the whole answer.
+/// That costs no second walk, which matters most for exactly the walks where a second one is
+/// expensive -- `-S`, `-G` and the other diff-based filters re-scan the whole history.
+/// `past_window` is that answer, when the run could be read.
+///
+/// The shapes that cannot be read that way have to ask git, but only where the run leaves the
+/// question open.
+///
+/// Under a format the user chose, the cap is counted in lines, because RTK cannot find the
+/// commit boundaries: a multi-line `--pretty` loses whole commits long before the fiftieth
+/// line, and that cut is visible in the output. `user_lines` holds those lines, and the cut is
+/// the content past the limit: blank lines alone take nothing away. Short of the cap the run
+/// still settles it, through the separator bound rather than the line count. Only between the
+/// two does the probe run. And `--output=<file>` sends the walk somewhere RTK can neither
+/// filter nor count, so there it always does.
+fn filtered_log_cut(
+    global_args: &[String],
+    args: &[String],
+    tokens: &[Token<'_>],
+    stdout: &str,
+    limit: usize,
+    user_lines: Option<&[String]>,
+    past_window: Option<bool>,
+) -> Option<LogCut> {
+    let probed = || filtered_walk_exceeds(global_args, args, tokens, limit);
+
+    if let Some(past) = past_window {
+        return past.then_some(LogCut::Commits);
+    }
+    if let Some(lines) = user_lines {
+        if lines.iter().skip(limit).any(|line| !line.trim().is_empty()) {
+            return Some(LogCut::Lines);
+        }
+        // Short of the limit git was given, so git ran out of history before the limit could
+        // bite and no second walk is needed to say so. Worth the bound: this is where a
+        // `-S`/`-G` filter that matches little ends up, and re-walking for it costs as much
+        // as the command did. `--output=<file>` is excluded because RTK never saw that walk
+        // at all; the bound would read the empty stdout as an empty history.
+        if !redirects_output(tokens) && at_most_commits(stdout, tokens).is_some_and(|n| n < limit) {
+            return None;
+        }
+        return probed().then_some(LogCut::Commits);
+    }
+    probed().then_some(LogCut::Commits)
+}
+
+/// Whether the history holds commits past the `limit` the filtered path asked git for, which
+/// takes a walk of its own.
+fn filtered_walk_exceeds(
+    global_args: &[String],
+    args: &[String],
+    tokens: &[Token<'_>],
+    limit: usize,
+) -> bool {
+    let probe_args = filtered_probe_args(args, log_wants_merges(tokens));
+    let probe_tokens = tokenize_git_log_args(&probe_args);
+    walk_exceeds_limit(global_args, &probe_args, &probe_tokens, limit) == Some(true)
+}
+
 fn run_log(
     args: &[String],
     _max_lines: Option<usize>,
@@ -1873,16 +2344,15 @@ fn run_log(
         // keeps the small codes for what the diff machinery found in a walk it ran and
         // printed in full -- 1 for `--exit-code`'s differences, 2 for `--check`'s whitespace
         // errors. Reading the boundary rather than the flags keeps the next such flag from
-        // silencing the notice again. The one exception is `-h`: git 2.56 answers it with
-        // its usage and exit 0, so a walk that never ran looks like one that did.
-        let refused = result.exit_code >= REFUSAL_EXIT_CODE || asks_for_usage(&tokens);
-        if !refused
+        // silencing the notice again.
+        //
+        // A `-h` ran no walk either: git 2.56 answers it with its usage and exit 0, so the
+        // exit code alone reads it as a walk that ran.
+        if !refused_by_git(result.exit_code)
+            && !asks_for_usage(&tokens)
             && walk_exceeds_limit(global_args, args, &tokens, DEFAULT_LOG_LIMIT) == Some(true)
         {
-            eprintln!(
-                "[rtk] capped at {} commits; pass -n <count> for more",
-                DEFAULT_LOG_LIMIT
-            );
+            eprintln!("{}", cap_notice(DEFAULT_LOG_LIMIT, "commits"));
         }
         if !result.success() {
             return Ok(result.exit_code);
@@ -1896,48 +2366,48 @@ fn run_log(
     cmd.arg("log");
 
     // Check if user provided format flags
-    let has_format_flag = tokens
-        .iter()
-        .any(|t| t.kind == TokenKind::Long && matches!(t.text, "format" | "oneline" | "pretty"));
+    let has_format_flag = chosen_log_format(&tokens).is_some();
 
     // Check if user provided limit flag (-N, -n N, --max-count=N, --max-count N)
     let has_limit_flag = has_limit_flag(&tokens);
+
+    // Determine limit: respect user's explicit -N flag, use sensible defaults otherwise.
+    let (limit, user_set_limit) = if has_limit_flag {
+        // User explicitly passed -N / -n N / --max-count=N → respect their choice
+        (parse_limit_from_tokens(&tokens).unwrap_or(10), true)
+    } else if has_format_flag {
+        // --oneline / --pretty without -N: user wants compact output, allow more
+        (COMPACT_LOG_LIMIT, false)
+    } else {
+        (DEFAULT_LOG_LIMIT, false)
+    };
+
+    // One commit more than will be shown, so the run answers for itself whether the cap cut
+    // and no second walk of the history is needed to find out. Only where RTK chose the
+    // format can it tell the commits in the run apart.
+    let overfetched = !has_limit_flag
+        && !has_format_flag
+        && fetches_one_past_the_limit(global_args, user_env::var, &tokens);
 
     // Apply RTK defaults only if user didn't specify them
     // Use %b (body) to preserve first line of commit body for agent context
     // (BREAKING CHANGE, Closes #xxx, design notes)
     if !has_format_flag {
-        cmd.args(["--pretty=format:%h %s (%ar) <%an>%n%b%n---END---"]);
+        let start = if overfetched {
+            LOG_ENTRY_START_SPEC
+        } else {
+            ""
+        };
+        cmd.arg(format!(
+            "--pretty=format:{start}%h %s (%ar) <%an>%n%b%n{LOG_ENTRY_MARKER}"
+        ));
+    }
+    if !has_limit_flag {
+        cmd.arg(format!("-{}", limit + usize::from(overfetched)));
     }
 
-    // Determine limit: respect user's explicit -N flag, use sensible defaults otherwise
-    let (limit, user_set_limit) = if has_limit_flag {
-        // User explicitly passed -N / -n N / --max-count=N → respect their choice
-        let n = parse_limit_from_tokens(&tokens).unwrap_or(10);
-        (n, true)
-    } else if has_format_flag {
-        // --oneline / --pretty without -N: user wants compact output, allow more
-        cmd.arg("-50");
-        (50, false)
-    } else {
-        // No flags at all: default to 10
-        cmd.arg(DEFAULT_LOG_LIMIT_ARG);
-        (10, false)
-    };
-
-    // Only add --no-merges if user didn't explicitly request merge commits. Any
-    // `--min-parents=N` with N >= 2 asks for merges; pinning it to 2 let `--min-parents=3`
-    // collect RTK's `--no-merges` as well, and the two constraints select nothing at all.
-    let wants_merges = tokens.iter().any(|t| {
-        t.kind == TokenKind::Long
-            && (t.text == "merges"
-                || t.text == "no-merges"
-                || (t.text == "min-parents"
-                    && t.attached
-                        .is_some_and(|v| v.parse::<u32>().is_ok_and(|n| n >= 2))))
-    });
     // Don't add --no-merges if user explicitly requested merges or an exact count (-n N / --max-count)
-    if !wants_merges && !has_limit_flag {
+    if !log_wants_merges(&tokens) && !has_limit_flag {
         cmd.arg("--no-merges");
     }
 
@@ -1957,17 +2427,76 @@ fn run_log(
         eprintln!("Git log output:");
     }
 
-    // Post-process: truncate long messages, cap lines only if RTK set the default
-    let filtered = filter_log_output(&result.stdout, limit, user_set_limit, has_format_flag);
-    let filtered = never_worse(&result.stdout, &filtered).to_string();
-    println!("{}", filtered);
+    // The commit past the limit was fetched to answer one question and is not part of the
+    // walk the user asked for, so everything downstream works from the run without it: the
+    // render, the fallback that prints raw when filtering would cost more, and the savings
+    // ledger. Printing it would contradict the very notice it is there to produce.
+    let window = overfetched.then(|| entries_window(&result.stdout, limit, wants_graph(&tokens)));
+    let shown_raw = window
+        .as_ref()
+        .map_or(result.stdout.as_str(), |window| window.shown.as_str());
+    let past_window = window.as_ref().map(|window| window.past);
 
-    timer.track(
-        &tracked,
-        &format!("rtk {tracked}"),
-        &result.stdout,
-        &filtered,
-    );
+    // A format the user chose is shown line by line, each line cut to width. Every line of the
+    // walk is cut once: the first `limit` are printed, and the rest are stored if the walk
+    // turns out to be cut.
+    let user_lines: Option<Vec<String>> =
+        has_format_flag.then(|| format_user_log_lines(shown_raw, log_line_width(user_set_limit)));
+
+    // Post-process: truncate long messages, cap lines only if RTK set the default
+    let filtered = match &user_lines {
+        Some(lines) => shown_user_log_lines(lines, limit, user_set_limit).join("\n"),
+        None => filter_log_output(shown_raw, limit, user_set_limit),
+    };
+    let mut filtered = never_worse(shown_raw, &filtered).to_string();
+
+    // This path bounds the walk too, and what it prints carries no sign that anything is
+    // missing: an agent reading ten entries takes them for the whole history. The notice
+    // goes to stderr, because stdout is the filtered log an agent parses.
+    //
+    // The gate is the condition this path capped under, which is wider than the raw-shape
+    // one: a revision range leaves that path uncapped but not this one, so `git log
+    // HEAD~20..HEAD` really does show ten of the twenty asked for and really does owe a word.
+    let mut notice = None;
+    if !user_set_limit {
+        let cut = filtered_log_cut(
+            global_args,
+            args,
+            &tokens,
+            &result.stdout,
+            limit,
+            user_lines.as_deref(),
+            past_window,
+        );
+        match cut {
+            Some(LogCut::Commits) => notice = Some(cap_notice(limit, "commits")),
+            // RTK holds the lines it cut and stores them for recall. The hint closes the
+            // output, where the agent finds it. What is stored is the lines as they are shown,
+            // cut to width, and newline-terminated so that a blank last line is still counted
+            // among the hidden ones.
+            Some(LogCut::Lines) => {
+                let mut walk = user_lines.as_deref().unwrap_or_default().join("\n");
+                walk.push('\n');
+                match crate::core::tee::force_tee_tail_hint(&walk, "git-log", limit + 1) {
+                    Some(hint) => {
+                        filtered.push('\n');
+                        filtered.push_str(&hint);
+                    }
+                    // Recall is off or could not store the lines, so the only way back to
+                    // what was cut is git itself.
+                    None => notice = Some(cap_notice(limit, "lines")),
+                }
+            }
+            None => {}
+        }
+    }
+
+    println!("{}", filtered);
+    if let Some(notice) = notice {
+        eprintln!("{notice}");
+    }
+
+    timer.track(&tracked, &format!("rtk {tracked}"), shown_raw, &filtered);
 
     Ok(0)
 }
@@ -2224,33 +2753,37 @@ fn parse_limit_from_tokens(tokens: &[Token<'_>]) -> Option<usize> {
     None
 }
 
+/// The width a log line is cut to: wider under a count the user set, so a commit keeps the
+/// context an LLM needs.
+fn log_line_width(user_set_limit: bool) -> usize {
+    if user_set_limit { 120 } else { LOG_LINE_WIDTH }
+}
+
+/// The lines of a user-chosen format as they are shown: each cut to `width`. The one place the
+/// shown form of such a line is defined, so the recall store and the display cannot differ.
+fn format_user_log_lines(output: &str, width: usize) -> Vec<String> {
+    output.lines().map(|l| truncate_line(l, width)).collect()
+}
+
+/// The lines of a user-chosen format that are printed: all of them under a count the user set,
+/// the first `limit` otherwise.
+fn shown_user_log_lines(lines: &[String], limit: usize, user_set_limit: bool) -> &[String] {
+    if user_set_limit {
+        lines
+    } else {
+        &lines[..lines.len().min(limit)]
+    }
+}
+
 /// When `user_set_limit` is true, the user explicitly passed `-N` to git log,
 /// so we skip line capping (git already returns exactly N commits) and use a
 /// wider truncation threshold (120 chars) to preserve commit context that LLMs
 /// need for rebase/squash operations.
-pub(crate) fn filter_log_output(
-    output: &str,
-    limit: usize,
-    user_set_limit: bool,
-    user_format: bool,
-) -> String {
-    let truncate_width = if user_set_limit { 120 } else { 80 };
-
-    // When user specified their own format (--oneline, --pretty, --format),
-    // RTK did not inject ---END--- markers. Use simple line-based truncation.
-    if user_format {
-        let lines: Vec<&str> = output.lines().collect();
-        let max_lines = if user_set_limit { lines.len() } else { limit };
-        return lines
-            .iter()
-            .take(max_lines)
-            .map(|l| truncate_line(l, truncate_width))
-            .collect::<Vec<_>>()
-            .join("\n");
-    }
+pub(crate) fn filter_log_output(output: &str, limit: usize, user_set_limit: bool) -> String {
+    let truncate_width = log_line_width(user_set_limit);
 
     // RTK injected format: split output into commit blocks separated by ---END---
-    let commits: Vec<&str> = output.split("---END---").collect();
+    let commits: Vec<&str> = output.split(LOG_ENTRY_MARKER).collect();
     let max_commits = if user_set_limit { commits.len() } else { limit };
 
     let mut result = Vec::new();
@@ -5429,7 +5962,7 @@ A  added.rs
     #[test]
     fn test_filter_log_output() {
         let output = "abc1234 This is a commit message (2 days ago) <author>\n\n---END---\ndef5678 Another commit (1 week ago) <other>\n\n---END---\n";
-        let result = filter_log_output(output, 10, false, false);
+        let result = filter_log_output(output, 10, false);
         assert!(result.contains("abc1234"));
         assert!(result.contains("def5678"));
         assert_eq!(result.lines().count(), 2);
@@ -5439,7 +5972,7 @@ A  added.rs
     fn test_filter_log_output_with_body() {
         // Commit with body: first non-trailer body line should appear indented
         let output = "abc1234 feat: add feature (2 days ago) <author>\nBREAKING CHANGE: removed old API\nSigned-off-by: Author <a@b.com>\n---END---\ndef5678 fix: typo (1 day ago) <other>\n\n---END---\n";
-        let result = filter_log_output(output, 10, false, false);
+        let result = filter_log_output(output, 10, false);
         assert!(result.contains("abc1234"));
         assert!(result.contains("BREAKING CHANGE: removed old API"));
         assert!(!result.contains("Signed-off-by:"));
@@ -5453,7 +5986,7 @@ A  added.rs
     fn test_filter_log_output_skips_trailers() {
         // Body with only trailers should not produce a body line
         let output = "abc1234 chore: bump (1 day ago) <bot>\nSigned-off-by: Bot <bot@ci>\nCo-authored-by: Human <h@b>\n---END---\n";
-        let result = filter_log_output(output, 10, false, false);
+        let result = filter_log_output(output, 10, false);
         assert!(result.contains("abc1234"));
         assert!(!result.contains("Signed-off-by:"));
         assert!(!result.contains("Co-authored-by:"));
@@ -5463,7 +5996,7 @@ A  added.rs
     #[test]
     fn test_filter_log_output_truncate_long() {
         let long_line = "abc1234 ".to_string() + &"x".repeat(100) + " (2 days ago) <author>";
-        let result = filter_log_output(&long_line, 10, false, false);
+        let result = filter_log_output(&long_line, 10, false);
         assert!(result.chars().count() < long_line.chars().count());
         assert!(result.contains("..."));
         assert!(result.chars().count() <= 80);
@@ -5475,7 +6008,7 @@ A  added.rs
             .map(|i| format!("hash{} message {} (1 day ago) <author>\n\n---END---", i, i))
             .collect::<Vec<_>>()
             .join("\n");
-        let result = filter_log_output(&output, 5, false, false);
+        let result = filter_log_output(&output, 5, false);
         assert_eq!(result.lines().count(), 5);
     }
 
@@ -5486,7 +6019,7 @@ A  added.rs
             .map(|i| format!("hash{} message {} (1 day ago) <author>\n\n---END---", i, i))
             .collect::<Vec<_>>()
             .join("\n");
-        let result = filter_log_output(&output, 20, true, false);
+        let result = filter_log_output(&output, 20, true);
         assert_eq!(
             result.lines().count(),
             20,
@@ -5501,8 +6034,8 @@ A  added.rs
         assert!(line_90_chars.chars().count() > 80);
         assert!(line_90_chars.chars().count() < 120);
 
-        let result_default = filter_log_output(&line_90_chars, 10, false, false);
-        let result_user = filter_log_output(&line_90_chars, 10, true, false);
+        let result_default = filter_log_output(&line_90_chars, 10, false);
+        let result_user = filter_log_output(&line_90_chars, 10, true);
 
         // Default truncates at 80 chars
         assert!(
@@ -6265,6 +6798,519 @@ A  added.rs
     }
 
     #[test]
+    fn filtered_probe_puts_rtks_no_merges_ahead_of_every_user_argument() {
+        // Two failures ride on the position, not on the presence. Behind a bare pathspec git
+        // refuses the whole command -- "option '--no-merges' must come before non-option
+        // arguments" -- and the probe reports nothing. Behind a `--` it does not error at
+        // all: git reads it as a second pathspec, and the probe quietly measures a walk with
+        // the merges still in it.
+        for args in [
+            vec!["f.txt".to_string()],
+            vec!["--".to_string(), "f.txt".to_string()],
+            vec!["--oneline".to_string(), "f.txt".to_string()],
+        ] {
+            let built = filtered_probe_args(&args, false);
+            assert_eq!(
+                built.first().map(String::as_str),
+                Some("--no-merges"),
+                "{args:?} must carry RTK's --no-merges first, got {built:?}"
+            );
+            assert_eq!(&built[1..], &args[..], "{args:?} must be forwarded intact");
+        }
+    }
+
+    #[test]
+    fn filtered_probe_leaves_no_merges_out_when_the_user_asked_for_merges() {
+        let args = vec!["--merges".to_string()];
+        assert_eq!(filtered_probe_args(&args, true), args);
+    }
+
+    /// What `%m` prints for a commit of a plain walk.
+    const SIDE_MARK: char = '>';
+
+    /// The opening RTK's format gives a commit: the control character, a mark, the full object
+    /// name and a space.
+    fn opening_marked(mark: char, name: &str) -> String {
+        format!("{LOG_ENTRY_START}{mark}{name} ")
+    }
+
+    fn opening(n: usize) -> String {
+        opening_marked(SIDE_MARK, &format!("{n:040x}"))
+    }
+
+    /// A commit as git prints it in RTK's format, without its opening.
+    fn block(n: usize, body: &str) -> String {
+        format!("abc{n} subject (1 day ago) <a>\n{body}\n{LOG_ENTRY_MARKER}")
+    }
+
+    fn entry(n: usize, body: &str) -> String {
+        format!("{}{}", opening(n), block(n, body))
+    }
+
+    #[test]
+    fn the_window_ends_where_the_commits_within_the_limit_end() {
+        // RTK asks git for one commit past its limit and never renders it, so counting it on
+        // the raw side of the ledger would credit RTK with compressing its own request.
+        let run: String = (0..3).map(|n| entry(n, "")).collect::<Vec<_>>().join("\n");
+        let overfetched = format!("{run}\n{}", entry(3, ""));
+        let shown: String = (0..3).map(|n| block(n, "")).collect::<Vec<_>>().join("\n");
+
+        let window = entries_window(&overfetched, 3, false);
+        assert!(window.past);
+        assert_eq!(window.shown, shown);
+        // A walk that ended on its own is left whole.
+        let window = entries_window(&run, 3, false);
+        assert!(!window.past);
+        assert_eq!(window.shown, shown);
+        let window = entries_window("", 3, false);
+        assert!(!window.past);
+        assert_eq!(window.shown, "");
+    }
+
+    #[test]
+    fn text_after_a_commits_marker_is_not_a_commit() {
+        // `--dirstat`, `--stat-count` and the like print after a commit's marker. Only an
+        // opening starts a commit, and the text belongs to the commit it follows: the window
+        // ends where the next one opens, and not at the marker.
+        let entry = |n: usize| format!("{}\n 100.0% d/\n", entry(n, ""));
+        let walk: String = (0..3).map(entry).collect::<Vec<_>>().join("\n");
+        assert!(!entries_window(&walk, 3, false).past);
+        let walk = format!("{walk}\n{}", entry(3));
+        let window = entries_window(&walk, 3, false);
+        assert!(window.past);
+        assert!(
+            window
+                .shown
+                .ends_with(&format!("{LOG_ENTRY_MARKER}\n 100.0% d/\n")),
+            "{:?}",
+            window.shown
+        );
+        assert!(!window.shown.contains("abc3"));
+    }
+
+    #[test]
+    fn a_message_quoting_the_marker_is_a_cut_only_when_the_render_drops_a_commit() {
+        // The quoted marker splits one commit across two blocks, which pushes the commits after
+        // it out of the window. Quoted by the last commit it costs nothing; quoted before it,
+        // the last commit is one the render really does drop.
+        let entry = |n: usize, body: &str| format!("{}\n", entry(n, body));
+        let quoting_last: String = (0..3)
+            .map(|n| entry(n, if n == 2 { LOG_ENTRY_MARKER } else { "" }))
+            .collect();
+        assert!(!entries_window(&quoting_last, 3, false).past);
+        let quoting_middle: String = (0..3)
+            .map(|n| entry(n, if n == 1 { LOG_ENTRY_MARKER } else { "" }))
+            .collect();
+        assert!(entries_window(&quoting_middle, 3, false).past);
+    }
+
+    #[test]
+    fn the_character_that_opens_a_commit_is_content_anywhere_else() {
+        // A file's lines come out of `-L` and a message's out of `%b`, so either can hold the
+        // opening character. Only the whole opening, at the start of a record between a marker
+        // and the commit it opens, is one: it is the only thing stripped, and the only thing
+        // that can be a commit past the limit.
+        let entry = |n: usize, body: &str| format!("{}\n", entry(n, body));
+        let run = |commits: usize, patch: &str| -> String {
+            (0..commits).map(|n| entry(n, "")).collect::<String>() + patch
+        };
+        for graph in [false, true] {
+            // In the middle of a line.
+            let patch = "\n+v1\u{1}x\n";
+            let window = entries_window(&run(3, patch), 3, graph);
+            assert!(!window.past, "content after the last commit forged a cut");
+            assert!(window.shown.contains("+v1\u{1}x"), "{:?}", window.shown);
+            assert!(entries_window(&run(4, patch), 3, graph).past);
+
+            // At the start of a line a patch keeps: a context line, a removed one.
+            let patch = "\n \u{1}a\n-\u{1}b\n+\u{1}c\n";
+            let window = entries_window(&run(3, patch), 3, graph);
+            assert!(!window.past, "graph {graph}: {:?}", window.shown);
+            assert!(window.shown.ends_with(patch), "{:?}", window.shown);
+            let window = entries_window(&run(4, patch), 3, graph);
+            assert!(window.past);
+            assert!(!window.shown.contains("abc3"), "{:?}", window.shown);
+
+            // Something that reads like an opening up to its object name.
+            for forged in [
+                format!("\u{1}{SIDE_MARK}{} x\n", "a".repeat(39)),
+                format!("\u{1}{SIDE_MARK}{} x\n", "a".repeat(41)),
+                format!("\u{1}{SIDE_MARK}{} x\n", "A".repeat(40)),
+                format!("\u{1}{SIDE_MARK}{}x\n", "a".repeat(40)),
+                format!("\u{1}?{} x\n", "a".repeat(40)),
+                format!("\u{1}{SIDE_MARK}{} x\n", "a".repeat(63)),
+                format!("\u{1}{} x\n", "a".repeat(40)),
+                "\u{1}abc9 s\n".to_string(),
+            ] {
+                let window = entries_window(&run(3, &forged), 3, graph);
+                assert!(!window.past, "graph {graph}: {forged:?}");
+                assert!(window.shown.ends_with(&forged), "{forged:?}");
+            }
+        }
+
+        // In a message, in the middle of a line or at the start of one.
+        let body = "line\u{1}x\n\u{1}second";
+        let walk: String = (0..3).map(|n| entry(n, body)).collect();
+        let window = entries_window(&walk, 3, false);
+        assert!(!window.past);
+        assert_eq!(window.shown.matches('\u{1}').count(), 6);
+        assert!(!window.shown.contains(&opening(0)));
+
+        // A whole opening quoted by a message belongs to the message: it is not stripped and
+        // it is not a commit.
+        let quoted = format!("{}quoted", opening(9));
+        for graph in [false, true] {
+            let walk: String = (0..3).map(|n| entry(n, &quoted)).collect();
+            let window = entries_window(&walk, 3, graph);
+            assert!(!window.past);
+            assert_eq!(
+                window.shown.matches(&quoted).count(),
+                3,
+                "{:?}",
+                window.shown
+            );
+        }
+
+        // A line that holds a whole opening, behind the rails the walk does not draw, is
+        // content too; it takes the rails of `--graph` to be a commit.
+        let railed = format!(" {}abc9 s\n", opening(9));
+        let window = entries_window(&run(3, &railed), 3, false);
+        assert!(!window.past);
+        assert!(window.shown.ends_with(&railed));
+        assert!(entries_window(&run(3, &railed), 3, true).past);
+    }
+
+    #[test]
+    fn the_opening_survives_graph_rails_colour_and_nul_separators() {
+        let name = "e".repeat(40);
+        let open = |mark: char| opening_marked(mark, &name);
+        // `--graph` puts its rails ahead of every line, the opening's too.
+        let graphed = format!(
+            "* {}abc0 s\n| ---END---\n* {}abc1 s\n| ---END---\n",
+            open('>'),
+            open('>')
+        );
+        let window = entries_window(&graphed, 1, true);
+        assert!(window.past);
+        assert_eq!(window.shown, "* abc0 s\n| ---END---");
+        // Without `--graph` the same lines are not at the start of a record.
+        assert!(!entries_window(&graphed, 1, false).past);
+        // A boundary commit is drawn `o`, and `--left-right` draws the side.
+        for rail in ["o", "<", ">", "="] {
+            let graphed = format!(
+                "* {}abc0 s\n---END---\n{rail} {}abc1 s\n---END---\n",
+                open('>'),
+                open('>')
+            );
+            assert!(entries_window(&graphed, 1, true).past, "{rail}");
+        }
+        let coloured = format!("\u{1b}[31m*\u{1b}[m {}abc0 s\n---END---\n", open('>'));
+        assert_eq!(
+            entries_window(&coloured, 1, true).shown,
+            "\u{1b}[31m*\u{1b}[m abc0 s\n---END---\n"
+        );
+        // `-z` ends a record with a NUL.
+        let nul_separated = format!(
+            "{}abc0 s\n---END---\0{}abc1 s\n---END---\0",
+            open('>'),
+            open('<')
+        );
+        let window = entries_window(&nul_separated, 1, false);
+        assert!(window.past);
+        assert_eq!(window.shown, "abc0 s\n---END---");
+        assert!(!entries_window(&nul_separated, 2, false).past);
+        // An object name is as long as the repository's format makes it.
+        let sha256 = format!(
+            "{}abc0 s\n---END---\n{}abc1 s\n---END---\n",
+            opening_marked('>', &"f".repeat(64)),
+            opening_marked('>', &"f".repeat(64))
+        );
+        let window = entries_window(&sha256, 1, false);
+        assert!(window.past);
+        assert_eq!(window.shown, "abc0 s\n---END---");
+    }
+
+    #[test]
+    fn every_mark_git_prints_for_a_commit_opens_one() {
+        let name = "b".repeat(40);
+        let entry = |n: usize| format!("{}\n", entry(n, ""));
+        let selected: String = (0..3).map(entry).collect();
+        for mark in OPENING_MARKS {
+            let walk = format!(
+                "{selected}{}{}\n",
+                opening_marked(mark, &name),
+                block(3, "")
+            );
+            let window = entries_window(&walk, 3, false);
+            assert!(window.past, "{mark}");
+            assert!(!window.shown.contains(LOG_ENTRY_START), "{mark}");
+            assert!(!window.shown.contains("abc3"), "{mark}");
+        }
+    }
+
+    #[test]
+    fn only_the_opening_of_a_commit_is_stripped_from_what_follows_it() {
+        // The shape `-L` prints after a commit: its lines, a context line, a removed one and an
+        // added one, any of which may hold the opening character.
+        let patch = "\n \u{1}a\n-\u{1}b\n+v\u{1}x\n";
+        let run = format!("{}{patch}", entry(0, ""));
+        assert_eq!(
+            without_openings(&run, false),
+            format!("{}{patch}", block(0, ""))
+        );
+    }
+
+    #[test]
+    fn a_log_size_run_is_not_fetched_past_the_limit() {
+        let fetched = |args: &[&str]| {
+            let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            fetches_one_past_the_limit(&[], |_| None, &tokenize_git_log_args(&owned))
+        };
+        assert!(fetched(&[]));
+        assert!(fetched(&["--stat"]));
+        for shape in ["--log-size", "--reverse", "--boundary", "--output=o.txt"] {
+            assert!(!fetched(&[shape]), "{shape}");
+        }
+    }
+
+    #[test]
+    fn a_run_that_prints_text_ahead_of_a_commit_is_not_fetched_past_the_limit() {
+        let fetched = |global: &[&str], env: &[(&str, &str)], args: &[&str]| {
+            let global: Vec<String> = global.iter().map(|a| a.to_string()).collect();
+            let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            let env = |name: &str| {
+                env.iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.to_string())
+            };
+            fetches_one_past_the_limit(&global, env, &tokenize_git_log_args(&owned))
+        };
+        for shape in [
+            vec!["--show-signature"],
+            vec!["--show-linear-break"],
+            vec!["--show-linear-break=--"],
+        ] {
+            assert!(!fetched(&[], &[], &shape), "{shape:?}");
+        }
+        assert!(!fetched(&["-c", "log.showSignature=true"], &[], &[]));
+        assert!(!fetched(&["-clog.showsignature=1"], &[], &[]));
+        assert!(!fetched(
+            &[],
+            &[
+                ("GIT_CONFIG_COUNT", "2"),
+                ("GIT_CONFIG_KEY_0", "core.abbrev"),
+                ("GIT_CONFIG_KEY_1", "log.showSignature"),
+            ],
+            &[]
+        ));
+        assert!(!fetched(
+            &[],
+            &[("GIT_CONFIG_PARAMETERS", "'log.showSignature=true'")],
+            &[]
+        ));
+        // A word after `--` is a pathspec, and a config key that is not the verdict's is not it.
+        assert!(fetched(&[], &[], &["--", "--show-signature"]));
+        assert!(fetched(&["-c", "log.decorate=short"], &[], &[]));
+        assert!(fetched(
+            &[],
+            &[
+                ("GIT_CONFIG_COUNT", "1"),
+                ("GIT_CONFIG_KEY_0", "log.decorate"),
+                ("GIT_CONFIG_VALUE_0", "log.showSignature"),
+            ],
+            &[]
+        ));
+        // A key past the count is not read.
+        assert!(fetched(
+            &[],
+            &[
+                ("GIT_CONFIG_COUNT", "1"),
+                ("GIT_CONFIG_KEY_1", "log.showSignature"),
+            ],
+            &[]
+        ));
+        assert!(fetched(&[], &[], &["--graph"]));
+    }
+
+    /// Whether the global options `global` turn the signature verdict on, in an environment that
+    /// holds `env`.
+    fn signature_verdict(global: &[&str], env: &[(&str, &str)]) -> bool {
+        let global: Vec<String> = global.iter().map(|a| a.to_string()).collect();
+        let env = |name: &str| {
+            env.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_string())
+        };
+        sets_signature_verdict(&global, &env)
+    }
+
+    #[test]
+    fn a_config_value_git_reads_as_false_does_not_turn_the_signature_verdict_on() {
+        for value in ["false", "False", "no", "OFF", "0", "00", "-0", ""] {
+            let setting = format!("log.showSignature={value}");
+            assert!(!signature_verdict(&["-c", &setting], &[]), "{setting}");
+        }
+        for value in ["true", "yes", "on", "1", "2", "maybe", " "] {
+            let setting = format!("log.showSignature={value}");
+            assert!(signature_verdict(&["-c", &setting], &[]), "{setting}");
+        }
+        // The key is compared without regard to case, and a key with no value is a true one.
+        assert!(signature_verdict(&["-c", "LOG.SHOWSIGNATURE=true"], &[]));
+        assert!(signature_verdict(&["-c", "log.showsignature"], &[]));
+        assert!(!signature_verdict(&["-c", "log.decorate=short"], &[]));
+    }
+
+    #[test]
+    fn the_signature_verdict_is_read_from_every_form_of_the_option() {
+        assert!(signature_verdict(&["-clog.showSignature=true"], &[]));
+        assert!(!signature_verdict(&["-clog.showSignature=off"], &[]));
+        assert!(signature_verdict(
+            &[
+                "-C",
+                "repo",
+                "-c",
+                "core.abbrev=9",
+                "-c",
+                "log.showSignature=1"
+            ],
+            &[]
+        ));
+        // `--config-env` names a variable that holds the value.
+        let sig = |value| [("SIG", value)];
+        for global in [
+            ["--config-env=log.showSignature=SIG"].as_slice(),
+            ["--config-env", "log.showSignature=SIG"].as_slice(),
+        ] {
+            assert!(signature_verdict(global, &sig("true")), "{global:?}");
+            assert!(signature_verdict(global, &[]), "{global:?}");
+            assert!(!signature_verdict(global, &sig("off")), "{global:?}");
+        }
+        assert!(!signature_verdict(
+            &["--config-env=log.decorate=SIG"],
+            &sig("true")
+        ));
+    }
+
+    #[test]
+    fn text_that_is_not_a_setting_does_not_turn_the_signature_verdict_on() {
+        assert!(!signature_verdict(
+            &["-C", "/home/me/log.showsignature-notes"],
+            &[]
+        ));
+        assert!(!signature_verdict(&["-C", "log.showSignature=true"], &[]));
+        assert!(!signature_verdict(
+            &["--git-dir=/log.showSignature=true"],
+            &[]
+        ));
+        assert!(!signature_verdict(
+            &["--git-dir", "/x/log.showSignature"],
+            &[]
+        ));
+        assert!(!signature_verdict(
+            &["-c", "core.pager=log.showSignature=true"],
+            &[]
+        ));
+        assert!(!signature_verdict(&["--no-pager"], &[]));
+    }
+
+    #[test]
+    fn a_closing_newline_is_not_a_commit() {
+        let bound = |args: &[&str], stdout: &str| {
+            let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            at_most_commits(stdout, &tokenize_git_log_args(&owned))
+        };
+        // Forty-nine commits, each closed by a newline, are forty-nine and not fifty.
+        let forty_nine: String = (0..49).map(|i| format!("abc{i:04} s\n")).collect();
+        assert_eq!(bound(&["--oneline"], &forty_nine), Some(49));
+        let fifty: String = (0..50).map(|i| format!("abc{i:04} s\n")).collect();
+        assert_eq!(bound(&["--oneline"], &fifty), Some(50));
+        assert_eq!(bound(&["--pretty=tformat:%h"], "a\nb\n"), Some(2));
+        assert_eq!(bound(&["--format=%h"], "a\nb\n"), Some(2));
+        assert_eq!(bound(&["--format=tformat:%h"], "a\nb\n"), Some(2));
+        assert_eq!(bound(&["--pretty=%h"], "a\nb\n"), Some(2));
+        // `--pretty=format:` leaves the last one open, and that is the same count.
+        let open = ["--pretty=format:%h"];
+        assert_eq!(bound(&open, "a\nb\nc"), Some(3));
+        // `--format=format:` is the same format as `--pretty=format:`: the newline that ends
+        // fifty commits rendered as no bytes is a separator, not a close.
+        assert_eq!(bound(&["--format=format:%b"], &"\n".repeat(49)), Some(50));
+        assert_eq!(bound(&["--format=format:%h"], "a\nb\nc"), Some(3));
+        // A newline at the end of it separates the last commit from nothing: fifty commits that
+        // render as no bytes are forty-nine newlines.
+        assert_eq!(bound(&["--pretty=format:"], &"\n".repeat(49)), Some(50));
+        // A template that prints a newline of its own can only raise the bound.
+        assert_eq!(bound(&open, "a\n\nb\n"), Some(4));
+        assert_eq!(bound(&["--oneline"], ""), Some(0));
+        assert_eq!(bound(&["--format="], ""), None);
+    }
+
+    #[test]
+    fn a_format_is_classed_by_whether_git_closes_or_separates_its_commits() {
+        let closes = |args: &[&str]| {
+            let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            newline_closes_each_commit(&tokenize_git_log_args(&owned))
+        };
+        // Every format git builds in ends a commit with a newline, by either flag.
+        for name in [
+            "oneline",
+            "short",
+            "medium",
+            "full",
+            "fuller",
+            "reference",
+            "email",
+            "mboxrd",
+            "raw",
+        ] {
+            assert!(closes(&[&format!("--pretty={name}")]), "--pretty={name}");
+            assert!(closes(&[&format!("--format={name}")]), "--format={name}");
+        }
+        assert!(closes(&["--oneline"]));
+        assert!(closes(&["--pretty=tformat:%h"]));
+        assert!(closes(&["--format=tformat:%h"]));
+        assert!(closes(&["--format=%h"]));
+        assert!(closes(&["--pretty=%h"]));
+        // `format:` separates, whichever flag spells it.
+        assert!(!closes(&["--pretty=format:%h"]));
+        assert!(!closes(&["--format=format:%h"]));
+        // A name git does not build in is a `pretty.<name>` alias, which may be either.
+        assert!(!closes(&["--pretty=changelog"]));
+        assert!(!closes(&["--pretty=ref"]));
+        assert!(!closes(&["--pretty=Reference"]));
+        assert!(!closes(&[]));
+        // The last format flag wins, as it does in git.
+        assert!(!closes(&["--oneline", "--pretty=format:%h"]));
+        assert!(closes(&["--pretty=format:%h", "--pretty=reference"]));
+    }
+
+    #[test]
+    fn git_refuses_from_128_up_and_runs_the_walk_below_it() {
+        // 1 and 2 are what `--exit-code` and `--check` report on a walk git printed in full.
+        for code in [0, 1, 2, 127] {
+            assert!(!refused_by_git(code), "{code}");
+        }
+        for code in [128, 129, 130, 255] {
+            assert!(refused_by_git(code), "{code}");
+        }
+        // A git that crashed on Windows reports the NTSTATUS, which is negative.
+        for code in [-1, -1073741819, i32::MIN] {
+            assert!(refused_by_git(code), "{code}");
+        }
+    }
+
+    #[test]
+    fn user_format_lines_are_cut_to_width_and_shown_up_to_the_limit() {
+        let long = format!("    {}", "word ".repeat(30));
+        let output = format!("commit abc\n{long}\nAuthor: t\ncommit def\n{long}\n");
+        let stored = format_user_log_lines(&output, LOG_LINE_WIDTH);
+        assert_eq!(stored.len(), 5);
+        assert!(stored.iter().all(|l| l.chars().count() <= LOG_LINE_WIDTH));
+        assert!(stored[1].ends_with("..."), "{:?}", stored[1]);
+        assert_eq!(shown_user_log_lines(&stored, 3, false), &stored[..3]);
+        assert_eq!(shown_user_log_lines(&stored, 3, true), &stored[..]);
+    }
+
+    #[test]
     fn test_real_flag_args_drops_value_taking_option_values() {
         // `--grep`'s value is not itself a flag and must not appear in the
         // filtered set, even when it looks like -N, --pretty, or --merges.
@@ -6368,7 +7414,7 @@ A  added.rs
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let output = filter_log_output(&input, 10, false, false);
+        let output = filter_log_output(&input, 10, false);
         let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(&input) as f64 * 100.0);
         assert!(
             savings >= 60.0,
@@ -6410,7 +7456,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
     fn test_filter_log_output_multibyte() {
         // Thai characters: each is 3 bytes. A line with >80 bytes but few chars
         let thai_msg = format!("abc1234 {} (2 days ago) <author>", "ก".repeat(30));
-        let result = filter_log_output(&thai_msg, 10, false, false);
+        let result = filter_log_output(&thai_msg, 10, false);
         // Should not panic
         assert!(result.contains("abc1234"));
         // The line has 30 Thai chars + other text, so > 80 chars total
@@ -6422,7 +7468,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
     #[test]
     fn test_filter_log_output_emoji() {
         let emoji_msg = "abc1234 🎉🎊🎈🎁🎂🎄🎃🎆🎇✨🎉🎊🎈🎁🎂🎄🎃🎆🎇✨ (1 day ago) <user>";
-        let result = filter_log_output(emoji_msg, 10, false, false);
+        let result = filter_log_output(emoji_msg, 10, false);
         // Should not panic
         // 20 emoji + ~30 other chars = ~50 chars < 80, no truncation needed
         assert!(result.contains("abc1234"));
@@ -6561,17 +7607,17 @@ no changes added to commit (use "git add" and/or "git commit -a")
     }
 
     /// Regression test: --oneline and other user format flags must preserve all commits.
-    /// Before fix, filter_log_output split on ---END--- which doesn't exist when
-    /// the user specifies their own format, resulting in only 2 commits surviving.
+    /// A user format carries no ---END--- markers, so it is shown line by line.
     #[test]
-    fn test_filter_log_output_user_format_oneline() {
+    fn test_user_format_log_lines_oneline() {
         let oneline_output = "abc1234 feat: add feature\n\
                               def5678 fix: typo\n\
                               ghi9012 chore: bump deps\n\
                               jkl3456 docs: update readme\n\
                               mno7890 test: add tests\n";
 
-        let result = filter_log_output(oneline_output, 10, false, true);
+        let lines = format_user_log_lines(oneline_output, LOG_LINE_WIDTH);
+        let result = shown_user_log_lines(&lines, 10, false).join("\n");
         // All 5 lines must survive — no ---END--- splitting
         assert_eq!(result.lines().count(), 5);
         assert!(result.contains("abc1234"));
@@ -6579,7 +7625,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
     }
 
     #[test]
-    fn test_filter_log_output_user_format_with_limit() {
+    fn test_user_format_log_lines_with_limit() {
         let oneline_output = "abc1234 feat: add feature\n\
                               def5678 fix: typo\n\
                               ghi9012 chore: bump deps\n\
@@ -6587,12 +7633,13 @@ no changes added to commit (use "git add" and/or "git commit -a")
                               mno7890 test: add tests\n";
 
         // user_set_limit=true means respect all lines (no cap)
-        let result = filter_log_output(oneline_output, 3, true, true);
-        assert_eq!(result.lines().count(), 5);
+        let lines = format_user_log_lines(oneline_output, LOG_LINE_WIDTH);
+        let result = shown_user_log_lines(&lines, 3, true);
+        assert_eq!(result.len(), 5);
 
         // user_set_limit=false means cap at limit
-        let result = filter_log_output(oneline_output, 3, false, true);
-        assert_eq!(result.lines().count(), 3);
+        let result = shown_user_log_lines(&lines, 3, false);
+        assert_eq!(result.len(), 3);
     }
 
     /// Regression test: `git branch <name>` must create, not list.
@@ -6863,7 +7910,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
             "abc1234 feat: big change (1 day ago) <author>\n{}\n---END---\n",
             body_lines
         );
-        let result = filter_log_output(&output, 10, false, false);
+        let result = filter_log_output(&output, 10, false);
         assert!(
             result.contains("+3 lines omitted"),
             "Expected '+3 lines omitted' when 6 body lines truncated to 3, got:\n{}",
