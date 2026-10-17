@@ -1,6 +1,7 @@
 //! Matches shell commands against known RTK rewrite rules to decide how to handle them.
 
 use crate::cmds::system::search::{Engine, is_bare_file_list};
+use crate::core::arg_tokenizer;
 use crate::core::utils::composer_bin_dirs;
 use regex::{Regex, RegexSet};
 use std::path::Path;
@@ -1909,8 +1910,17 @@ fn rewrite_segment_inner(
     // semantics than rtk read or no equivalent at all. Only `-n` (line numbers)
     // maps correctly to `rtk read -n`. Skip rewrite for any other flag.
     if let Some(cmd_args) = cmd_part.strip_prefix("cat ") {
-        let args = cmd_args.trim_start();
-        if args.starts_with('-') && !args.starts_with("-n ") && !args.starts_with("-n\t") {
+        let args = shell_split(cmd_args);
+        let tokens = arg_tokenizer::tokenize(&args);
+        let only_line_numbers = tokens.iter().all(|t| match t.kind {
+            arg_tokenizer::TokenKind::Positional => true,
+            arg_tokenizer::TokenKind::Short => t.text == "n" && t.attached.is_none(),
+            _ => false,
+        });
+        let names_a_file = tokens
+            .iter()
+            .any(|t| t.kind == arg_tokenizer::TokenKind::Positional);
+        if !only_line_numbers || !names_a_file {
             return None;
         }
     }
@@ -3799,6 +3809,33 @@ mod tests {
             rewrite_command_no_prefixes("cat --show-all file.txt", &[]),
             None
         );
+    }
+
+    #[test]
+    fn test_rewrite_cat_skips_incompatible_flags_after_n() {
+        for cmd in [
+            "cat -n -s file.txt",
+            "cat -n -b file.txt",
+            "cat -ns file.txt",
+            "cat -n -A -s file.txt",
+            "cat -n5 file.txt",
+            "cat -n --show-all file.txt",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                None,
+                "`{cmd}` has no rtk read equivalent, so it must run as typed"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_cat_n_alone_still_rewrites() {
+        assert_eq!(
+            rewrite_command_no_prefixes("cat -n file.txt", &[]),
+            Some("rtk read -n file.txt".to_string())
+        );
+        assert_eq!(rewrite_command_no_prefixes("cat -n", &[]), None);
     }
 
     #[test]
