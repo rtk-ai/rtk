@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "rtk hook minimax",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

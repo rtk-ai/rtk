@@ -1225,6 +1225,92 @@ fn droid_response_from_decision(v: &Value, cmd: &str, decision: HookDecision) ->
     Some(pre_tool_use_rewrite_output(v, &rewritten, None))
 }
 
+// ── MiniMax Code PreToolUse hook ───────────────────────────────
+//
+// MiniMax Code (MiniMax-AI/minimax-code) runs plugin command hooks with a
+// Claude-shaped payload but its own tool names: the shell tool is `bash`
+// (lowercase) and `tool_input` is `{ command, timeout? }`. It has no RTK-side
+// rule source, so RTK never asserts a permission decision: the rewrite lands
+// via `updatedInput` alone and MiniMax's own permission flow judges the
+// rewritten command. The response must also omit `permissionDecisionReason`:
+// MiniMax rejects a reason that is not paired with a `permissionDecision`,
+// which would drop the whole rewrite, so `pre_tool_use_rewrite_output`
+// (shared with the Claude-shaped hosts) is deliberately not reused here.
+
+/// Extract the shell command when the payload targets MiniMax's `bash` tool.
+fn minimax_bash_command(v: &Value) -> Option<&str> {
+    let tool_name = v.get("tool_name").and_then(|t| t.as_str()).unwrap_or("");
+    // The installed matcher already restricts the hook to `bash`; tolerate a
+    // missing name and Claude-style `Bash` rather than dropping the rewrite.
+    if !matches!(tool_name, "bash" | "Bash" | "") {
+        return None;
+    }
+    v.pointer("/tool_input/command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+}
+
+/// Build the MiniMax hook response for a decision from the shared flow.
+///
+/// `Deny` and `Defer` stay silent so MiniMax handles the original command.
+fn minimax_response_from_decision(v: &Value, cmd: &str, decision: HookDecision) -> Option<Value> {
+    let rewritten = match decision {
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            return None;
+        }
+        HookDecision::Defer => return None,
+        HookDecision::AllowRewrite(r) | HookDecision::AskRewrite(r) => r,
+    };
+
+    audit_log("rewrite", cmd, &rewritten);
+
+    // updatedInput replaces the whole tool input, so keep sibling fields
+    // (e.g. `timeout`) and swap only the command.
+    let mut updated_input = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
+    if let Some(obj) = updated_input.as_object_mut() {
+        obj.insert("command".into(), Value::String(rewritten));
+    }
+    Some(json!({
+        "hookSpecificOutput": {
+            "hookEventName": PRE_TOOL_USE_KEY,
+            "updatedInput": updated_input
+        }
+    }))
+}
+
+fn process_minimax_payload(v: &Value) -> Option<Value> {
+    let cmd = minimax_bash_command(v)?;
+    minimax_response_from_decision(v, cmd, decide_hook_action(cmd, permissions::Host::MiniMax))
+}
+
+/// Run the MiniMax Code PreToolUse hook natively. Never fails the host: any
+/// parse problem exits 0 with empty stdout so the original command runs.
+pub fn run_minimax() -> Result<()> {
+    let input = match read_stdin_limited() {
+        Ok(i) => i,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] {e}");
+            return Ok(());
+        }
+    };
+    let input = strip_leading_bom(&input).trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+    if let Some(output) = process_minimax_payload(&v) {
+        let _ = writeln!(io::stdout(), "{output}");
+    }
+    Ok(())
+}
+
 /// Answer OpenCode's plugin: the rewrite as JSON, or `{}` to leave the
 /// command untouched.
 pub fn run_opencode(cmd: &str, agent: Option<&str>) -> Result<()> {
@@ -3042,6 +3128,76 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(v["decision"], "deny");
+    }
+
+    // --- MiniMax Code hook ---
+
+    fn minimax_input(tool: &str, tool_input: Value) -> Value {
+        json!({
+            "session_id": "s1",
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool,
+            "tool_use_id": "t1",
+            "cwd": "/tmp",
+            "tool_input": tool_input
+        })
+    }
+
+    fn minimax_decide(v: &Value, d: HookDecision) -> Option<Value> {
+        let cmd = minimax_bash_command(v)?;
+        minimax_response_from_decision(v, cmd, d)
+    }
+
+    #[test]
+    fn test_minimax_rewrite_keeps_siblings_and_omits_decision_and_reason() {
+        let v = minimax_input("bash", json!({"command": "git status", "timeout": 30}));
+        let out = minimax_decide(&v, HookDecision::AskRewrite("rtk git status".into())).unwrap();
+        let h = &out["hookSpecificOutput"];
+        assert_eq!(h["hookEventName"], "PreToolUse");
+        assert_eq!(h["updatedInput"]["command"], "rtk git status");
+        assert_eq!(h["updatedInput"]["timeout"], 30);
+        // MiniMax drops the whole response when a reason lacks a decision.
+        assert!(h.get("permissionDecisionReason").is_none());
+        assert!(h.get("permissionDecision").is_none());
+    }
+
+    #[test]
+    fn test_minimax_allow_rewrite_still_asserts_no_decision() {
+        let v = minimax_input("bash", json!({"command": "git status"}));
+        let out = minimax_decide(&v, HookDecision::AllowRewrite("rtk git status".into())).unwrap();
+        assert!(
+            out["hookSpecificOutput"]
+                .get("permissionDecision")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_minimax_deny_and_defer_are_silent() {
+        let v = minimax_input("bash", json!({"command": "git push"}));
+        assert!(minimax_decide(&v, HookDecision::Deny).is_none());
+        assert!(minimax_decide(&v, HookDecision::Defer).is_none());
+    }
+
+    #[test]
+    fn test_minimax_only_handles_the_bash_tool() {
+        let read = minimax_input("read", json!({"command": "git status"}));
+        assert!(process_minimax_payload(&read).is_none());
+        let empty = minimax_input("bash", json!({"command": ""}));
+        assert!(process_minimax_payload(&empty).is_none());
+        let none = minimax_input("bash", json!({}));
+        assert!(process_minimax_payload(&none).is_none());
+    }
+
+    #[test]
+    fn test_minimax_payload_rewrites_a_known_command() {
+        let v = minimax_input("bash", json!({"command": "git status", "timeout": 5}));
+        let out = process_minimax_payload(&v).expect("rewrite expected");
+        assert_eq!(
+            out["hookSpecificOutput"]["updatedInput"]["command"],
+            "rtk git status"
+        );
+        assert_eq!(out["hookSpecificOutput"]["updatedInput"]["timeout"], 5);
     }
 
     // --- Factory Droid hook ---

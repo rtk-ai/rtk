@@ -152,6 +152,17 @@ pub const HERMES_PLUGIN_NAME: &str = "rtk-rewrite";
 pub const HERMES_PLUGIN_INIT_FILE: &str = "__init__.py";
 pub const HERMES_PLUGIN_MANIFEST_FILE: &str = "plugin.yaml";
 
+/// MiniMax Code data directory under the home directory. Overridden by
+/// `$MINIMAX_DATA_DIR`, then `$MAVIS_DATA_DIR` (the order minimax-code resolves them).
+pub const MINIMAX_DIR: &str = ".minimax";
+/// MiniMax Code scans `<data dir>/plugins/*` as its "local" plugin marketplace.
+pub const MINIMAX_PLUGINS_SUBDIR: &str = "plugins";
+/// Plugin package name; MiniMax requires it to equal the directory name.
+pub const MINIMAX_PLUGIN_NAME: &str = "rtk-rewrite";
+pub const MINIMAX_PLUGIN_MANIFEST: &str = ".minimax-plugin/plugin.json";
+pub const MINIMAX_PLUGIN_HOOKS: &str = "hooks/hooks.json";
+pub const MINIMAX_PLUGIN_ICON: &str = "icon.png";
+
 pub const VIBE_DIR: &str = ".vibe";
 pub const VIBE_HOOKS_FILE: &str = "hooks.toml";
 pub const VIBE_PROMPTS_SUBDIR: &str = "prompts";

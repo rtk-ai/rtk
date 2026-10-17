@@ -64,6 +64,8 @@ pub enum AgentTarget {
     Droid,
     /// Mistral Vibe CLI
     Vibe,
+    /// MiniMax Code CLI / desktop
+    Minimax,
     /// Oh My Pi (OMP)
     Omp,
 }
@@ -1284,6 +1286,8 @@ enum HookCommands {
     Antigravity,
     /// Process Mistral Vibe CLI pre_tool hook (reads JSON from stdin)
     Vibe,
+    /// Process MiniMax Code PreToolUse plugin hook (reads JSON from stdin)
+    Minimax,
     /// Answer for OpenCode's plugin: the rewrite as JSON, or `{}` when
     /// rewriting would change what OpenCode's own permission rules decide
     Opencode {
@@ -2371,6 +2375,8 @@ where
         hooks::init::uninstall_droid(global, ctx)
     } else if agent == Some(AgentTarget::Vibe) {
         hooks::init::uninstall_vibe(ctx)
+    } else if agent == Some(AgentTarget::Minimax) {
+        hooks::init::uninstall_minimax(ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -3068,6 +3074,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_droid_mode(global, ctx)?;
             } else if agent == Some(AgentTarget::Vibe) {
                 hooks::init::run_vibe_mode(global, hook_only, patch_mode, ctx)?;
+            } else if agent == Some(AgentTarget::Minimax) {
+                hooks::init::run_minimax_mode(global, ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_cursor = agent == Some(AgentTarget::Cursor);
@@ -3668,6 +3676,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Vibe => {
                 hooks::hook_cmd::run_vibe()?;
+                0
+            }
+            HookCommands::Minimax => {
+                hooks::hook_cmd::run_minimax()?;
                 0
             }
             HookCommands::Opencode { agent, args } => {

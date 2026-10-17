@@ -549,6 +549,7 @@ mod hook_check {
             "gemini",
             "droid",
             "vibe",
+            "minimax",
             "opencode",
             "openclaw",
             "pi",

@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, Mistral Vibe, and Trae
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, Mistral Vibe, MiniMax Code, and Trae
 sidebar:
   order: 3
 ---
@@ -46,6 +46,7 @@ Agent runs "cargo test"
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rust binary (`PreToolUse` plugin) | Yes |
 | Mistral Vibe | Rust binary (`pre_tool`) | Yes |
+| MiniMax Code | Rust binary (`PreToolUse` in a plugin package, matcher `bash`) | Yes |
 
 Agents that rewrite transparently receive the awareness file selected by `awareness.level` in
 `config.toml` (`default` says nothing about RTK). Rules-file agents cannot rewrite, so the agent
@@ -318,6 +319,28 @@ rtk init -g --agent vibe --uninstall
 
 Strips only RTK's `[[hooks]]` block and the `~/.vibe/prompts/rtk.md` file. Any other user-declared hooks in `hooks.toml` are preserved byte-for-byte. `hooks.toml` is removed only when the RTK entry was the sole content.
 
+### MiniMax Code
+
+```bash
+rtk init -g --agent minimax              # installs the rtk-rewrite plugin into MiniMax Code's local plugin dir
+rtk init -g --agent minimax --uninstall
+```
+
+MiniMax Code ([MiniMax-AI/minimax-code](https://github.com/MiniMax-AI/minimax-code)) has no user-level hooks file: command hooks only load from a plugin package. `rtk init` writes one, `rtk-rewrite`, into the plugin directory MiniMax Code scans as its `local` marketplace, `<data dir>/plugins/rtk-rewrite/`:
+
+```text
+rtk-rewrite/
+  .minimax-plugin/plugin.json
+  hooks/hooks.json        # PreToolUse, matcher "bash", command "rtk hook minimax"
+  icon.png                # MiniMax requires the manifest icon to resolve to a real image
+```
+
+The data dir is `$MINIMAX_DATA_DIR`, then `$MAVIS_DATA_DIR`, then `~/.minimax`, the same order MiniMax Code resolves them. A profile (`--profile foo`) uses `~/.minimax-foo`; set `MINIMAX_DATA_DIR` to that path to install there. Local plugins are enabled by default; restart MiniMax Code and check with `mcode plugin list`.
+
+MiniMax calls the native `rtk hook minimax` before each `bash` tool call and RTK answers with `updatedInput` (other fields such as `timeout` are preserved). The matcher is MiniMax's native lowercase `bash`, not Claude's `Bash`. RTK never asserts a permission decision: MiniMax's own permission flow judges the rewritten command, and commands RTK does not handle, or any hook error, run unchanged.
+
+Install is global-only. Re-running the installer rewrites RTK's three files and is otherwise a no-op. Uninstall removes `rtk-rewrite/` only when its manifest is RTK's, so a same-named plugin of your own is left alone.
+
 ## Integration tiers explained
 
 | Tier | Mechanism | How rewrites work |
@@ -326,11 +349,11 @@ Strips only RTK's `[[hooks]]` block and the `~/.vibe/prompts/rtk.md` file. Any o
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Kilo Code) rely on the model following instructions. Full hook integrations (Claude Code, Trae, Cursor, Gemini, Codex, Factory Droid, Antigravity) apply rewrites before execution whenever RTK supports and can safely attest the command. Plugin integrations (OpenCode, Pi, Hermes) use in-place mutation via the agent's extension or plugin API.
+Rules file integrations (Cline, Windsurf, Kilo Code) rely on the model following instructions. Full hook integrations (Claude Code, Trae, Cursor, Gemini, Codex, Factory Droid, Antigravity, MiniMax Code) apply rewrites before execution whenever RTK supports and can safely attest the command. Plugin integrations (OpenCode, Pi, Hermes) use in-place mutation via the agent's extension or plugin API.
 
 ## Windows support
 
-Since v0.37.2 the hooks for Claude Code, Cursor, Copilot, Codex, Trae, Factory Droid and Mistral Vibe are native binary commands (`rtk hook <agent>`), so auto-rewrite works on native Windows — no Unix shell, bash or jq required. `rtk init -g` installs the native hook on Windows exactly as on Linux and macOS, and adds it to Claude Code's `settings.json` once you answer `y` to the prompt (or pass `--auto-patch`).
+Since v0.37.2 the hooks for Claude Code, Cursor, Copilot, Codex, Trae, Factory Droid, Mistral Vibe and MiniMax Code are native binary commands (`rtk hook <agent>`), so auto-rewrite works on native Windows — no Unix shell, bash or jq required. `rtk init -g` installs the native hook on Windows exactly as on Linux and macOS, and adds it to Claude Code's `settings.json` once you answer `y` to the prompt (or pass `--auto-patch`).
 
 The Gemini CLI hook is a small bash wrapper around `rtk hook gemini`, so it needs a bash available; [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) behaves identically to Linux.
 

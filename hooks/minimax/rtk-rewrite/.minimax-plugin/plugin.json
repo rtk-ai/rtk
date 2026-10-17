@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "name": "rtk-rewrite",
+  "version": "1.0.0",
+  "displayName": "RTK",
+  "description": "Rewrites bash commands through rtk to cut LLM token consumption.",
+  "author": "rtk-ai",
+  "icon": "icon.png",
+  "category": "Code",
+  "exampleQueries": [],
+  "apps": [],
+  "mcpServers": [],
+  "skills": [],
+  "hooks": ["hooks/hooks.json"]
+}
