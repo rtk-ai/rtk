@@ -4026,6 +4026,8 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Git { .. }
             | Commands::Gh { .. }
             | Commands::Glab { .. }
+            | Commands::Aws { .. }
+            | Commands::Psql { .. }
             | Commands::Pnpm { .. }
             | Commands::Err { .. }
             | Commands::Test { .. }
@@ -4044,6 +4046,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Rg { .. }
             | Commands::AstGrep { .. }
             | Commands::Wget { .. }
+            | Commands::Wc { .. }
             | Commands::Jest { .. }
             | Commands::Vitest { .. }
             | Commands::Ctest { .. }
@@ -4060,6 +4063,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Ruff { .. }
             | Commands::Sqlfluff { .. }
             | Commands::Pytest { .. }
+            | Commands::Mypy { .. }
             | Commands::Php { .. }
             | Commands::Phpunit { .. }
             | Commands::Phpstan { .. }
@@ -4074,6 +4078,9 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Pip { .. }
             | Commands::Uv { .. }
             | Commands::Go { .. }
+            | Commands::Gradlew { .. }
+            | Commands::Mvn { .. }
+            | Commands::Mvnd { .. }
             | Commands::Sbt { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
@@ -4095,6 +4102,30 @@ mod tests {
             let cli = Cli::try_parse_from(["rtk", framework, "src/a.test.js"])
                 .expect("rtk <framework> <path> parses");
             assert!(is_operational_command(&cli.command), "{framework}");
+        }
+    }
+
+    #[test]
+    fn test_hook_rewritten_commands_get_the_hook_integrity_check() {
+        let commands: &[&[&str]] = &[
+            &["aws", "s3", "ls"],
+            &["psql", "-c", "select 1"],
+            &["wc", "-l", "src/lib.rs"],
+            &["mypy", "src"],
+            &["gradlew", "build"],
+            &["mvn", "test"],
+            &["mvnd", "test"],
+        ];
+
+        for args in commands {
+            let mut argv = vec!["rtk"];
+            argv.extend_from_slice(args);
+            let cli = Cli::try_parse_from(argv).expect("hook-rewritten command parses");
+            assert!(
+                is_operational_command(&cli.command),
+                "{} must receive the hook-integrity check",
+                args[0]
+            );
         }
     }
 
