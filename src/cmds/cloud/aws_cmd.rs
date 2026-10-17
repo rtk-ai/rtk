@@ -221,7 +221,7 @@ fn is_structured_operation(args: &[String]) -> bool {
 fn run_generic(subcommand: &str, args: &[String], verbose: u8, full_sub: &str) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = resolved_command("aws");
+    let mut cmd = resolved_command("aws")?;
     cmd.arg(subcommand);
 
     let mut has_output_flag = false;
@@ -284,7 +284,7 @@ fn run_generic(subcommand: &str, args: &[String], verbose: u8, full_sub: &str) -
 }
 
 fn run_aws_json(sub_args: &[&str], extra_args: &[String], verbose: u8) -> Result<CaptureResult> {
-    let mut cmd = resolved_command("aws");
+    let mut cmd = resolved_command("aws")?;
     for arg in sub_args {
         cmd.arg(arg);
     }
@@ -375,7 +375,7 @@ fn run_aws_filtered(
 fn run_s3_ls(extra_args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = resolved_command("aws");
+    let mut cmd = resolved_command("aws")?;
     cmd.args(["s3", "ls"]);
     for arg in extra_args {
         cmd.arg(arg);
@@ -424,7 +424,7 @@ fn run_s3_transfer(operation: &str, extra_args: &[String], verbose: u8) -> Resul
     let rtk_label = format!("rtk aws s3 {}", operation);
     let slug = format!("aws_s3_{}", operation);
 
-    let mut cmd = resolved_command("aws");
+    let mut cmd = resolved_command("aws")?;
     cmd.args(["s3", operation]);
     for arg in extra_args {
         cmd.arg(arg);

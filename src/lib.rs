@@ -1990,14 +1990,14 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
         // TOML match: capture stdout for filtering
         let result = if filter.filter_stderr {
             // Merge stderr into stdout so the filter can strip banners emitted by tools like liquibase
-            core::utils::resolved_command(&args[0])
+            core::utils::resolved_command(&args[0])?
                 .child_args(&args[1..])
                 .stdin(std::process::Stdio::inherit())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped()) // captured for merging
                 .output()
         } else {
-            core::utils::resolved_command(&args[0])
+            core::utils::resolved_command(&args[0])?
                 .child_args(&args[1..])
                 .stdin(std::process::Stdio::inherit())
                 .stdout(std::process::Stdio::piped()) // capture
@@ -2070,7 +2070,7 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
         }
     } else {
         // No TOML match: original passthrough behaviour (Stdio::inherit, streaming)
-        let status = core::utils::resolved_command(&args[0])
+        let status = core::utils::resolved_command(&args[0])?
             .child_args(&args[1..])
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
@@ -2332,7 +2332,11 @@ pub fn entry() -> i32 {
         Ok(code) => code,
         Err(e) => {
             eprintln!("rtk: {:#}", e);
-            1
+            if e.downcast_ref::<core::utils::CommandNotFound>().is_some() {
+                127
+            } else {
+                1
+            }
         }
     }
 }
@@ -3526,7 +3530,7 @@ fn run_cli() -> Result<i32> {
                             _ => {
                                 // Passthrough other prisma subcommands
                                 let timer = core::tracking::TimedExecution::start();
-                                let mut cmd = core::utils::resolved_command("npx");
+                                let mut cmd = core::utils::resolved_command("npx")?;
                                 for arg in &args {
                                     cmd.arg(arg);
                                 }
@@ -3544,7 +3548,7 @@ fn run_cli() -> Result<i32> {
                         }
                     } else {
                         let timer = core::tracking::TimedExecution::start();
-                        let status = core::utils::resolved_command("npx")
+                        let status = core::utils::resolved_command("npx")?
                             .arg("prisma")
                             .status()
                             .context("Failed to run npx prisma")?;
@@ -3878,7 +3882,7 @@ fn run_cli() -> Result<i32> {
             }
 
             let mut child = ChildGuard(Some(
-                core::utils::resolved_command(cmd_name.as_ref())
+                core::utils::resolved_command(cmd_name.as_ref())?
                     .child_args(&cmd_args)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())

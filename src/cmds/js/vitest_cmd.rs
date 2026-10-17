@@ -265,7 +265,7 @@ fn should_skip_jest_arg(arg: &str) -> bool {
 fn run_framework_test(invocation: TestInvocation, verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
     let framework = invocation.framework;
-    let mut cmd = package_manager_exec(framework);
+    let mut cmd = package_manager_exec(framework)?;
     cmd.args(&invocation.args);
 
     let result = exec_capture(&mut cmd).context(format!("Failed to run {}", framework))?;
