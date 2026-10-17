@@ -6,9 +6,18 @@ use crate::core::shell::display_args;
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
+use regex::Regex;
+use std::sync::LazyLock;
 
 const MAX_XFAIL: usize = CAP_WARNINGS;
 const MAX_PYTEST_FAILURES: usize = CAP_WARNINGS;
+// Pytest plugins supply category names; long runs append a timedelta clock.
+static PYTEST_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^(?:=+\s*)?\d+ [^,\r\n=]+?(?:, \d+ [^,\r\n=]+?)* in \d+(?:\.\d+)?(?:s| seconds)(?: \((?:\d+ days?, )?\d+:\d{2}:\d{2}\))?(?:\s*=+)?$",
+    )
+    .expect("valid pytest summary regex")
+});
 
 #[derive(Debug, PartialEq)]
 enum ParseState {
@@ -93,6 +102,8 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
     for line in output.lines() {
         let trimmed = line.trim();
 
+        // Accept wrapped and quiet-mode summaries, and keep the last match so
+        // traceback source cannot override pytest's trailing result line.
         // State transitions
         if trimmed.starts_with("===") && trimmed.contains("test session starts") {
             state = ParseState::Header;
@@ -108,23 +119,7 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
                 current_failure.clear();
             }
             continue;
-        } else if trimmed.starts_with("===")
-            && (trimmed.contains("passed")
-                || trimmed.contains("failed")
-                || trimmed.contains("skipped"))
-        {
-            summary_line = trimmed.to_string();
-            continue;
-        // quiet mode (-q): bare summary without === wrapper, e.g. "5 failed, 1698 passed, 2 skipped in 108.89s"
-        } else if summary_line.is_empty()
-            && !trimmed.starts_with("===")
-            && !trimmed.starts_with("FAILED")
-            && !trimmed.starts_with("ERROR")
-            && (trimmed.contains(" passed")
-                || trimmed.contains(" failed")
-                || trimmed.contains(" skipped"))
-            && trimmed.contains(" in ")
-        {
+        } else if PYTEST_SUMMARY_RE.is_match(trimmed) {
             summary_line = trimmed.to_string();
             continue;
         }
@@ -353,10 +348,17 @@ fn parse_summary_line(summary: &str) -> PytestCounts {
 fn parse_duration(summary: &str) -> Option<String> {
     let unwrapped = summary.trim().trim_matches('=').trim();
     let (_, duration_tail) = unwrapped.rsplit_once(" in ")?;
-    let duration = duration_tail.split_whitespace().next()?;
-    let seconds = duration.strip_suffix('s')?;
+    let mut words = duration_tail.split_whitespace();
+    let duration = words.next()?;
+    let seconds = if let Some(seconds) = duration.strip_suffix('s') {
+        seconds
+    } else if words.next() == Some("seconds") {
+        duration
+    } else {
+        return None;
+    };
     seconds.parse::<f64>().ok()?;
-    Some(duration.to_string())
+    Some(format!("{seconds}s"))
 }
 
 #[cfg(test)]
@@ -592,6 +594,100 @@ FAILED tests/test_foo.py::test_something - AssertionError
             "Should show actual test counts. Got: {}",
             result
         );
+    }
+
+    #[test]
+    fn test_filter_pytest_summary_over_60s_with_clock() {
+        // Once elapsed time passes 60s, pytest appends a parenthetical clock.
+        let long_runs = [
+            "===== 40 passed in 65.12s (0:01:05) =====",
+            "40 passed in 65.12s (0:01:05)",
+        ];
+        let short = filter_pytest_output("===== 40 passed in 0.12s =====");
+        assert_eq!(short, "Pytest: 40 passed in 0.12s");
+        assert_eq!(
+            filter_pytest_output("40 passed in 12s"),
+            "Pytest: 40 passed in 12s"
+        );
+
+        for line in long_runs {
+            let result = filter_pytest_output(line);
+            assert!(
+                !result.contains("No tests collected"),
+                "summary over 60s was not recognized: {line:?} -> {result}"
+            );
+            assert_eq!(
+                result, "Pytest: 40 passed in 65.12s",
+                "counts diverged for {line:?}: {result}"
+            );
+        }
+
+        let not_a_summary = "see 40 passed in 65.12s (0:01:05) in the log";
+        assert!(
+            !PYTEST_SUMMARY_RE.is_match(not_a_summary),
+            "non-summary lines must still be rejected"
+        );
+    }
+
+    #[test]
+    fn test_filter_pytest_uses_trailing_summary_not_traceback_source() {
+        let output = r#"=== FAILURES ===
+___ test_outer ___
+--- Captured stdout call ---
+1 passed in 0.01s
+E   AssertionError: test_outer failed
+=== short test summary info ===
+FAILED test_outer - AssertionError
+1 failed in 0.02s"#;
+
+        let result = filter_pytest_output(output);
+        assert!(
+            result.starts_with("Pytest: 0 passed, 1 failed in 0.02s"),
+            "{result}"
+        );
+        assert!(result.contains("test_outer"), "{result}");
+    }
+
+    #[test]
+    fn test_filter_pytest_plugin_and_legacy_summaries() {
+        for (input, expected) in [
+            (
+                "2 passed, 3 subtests passed in 0.00s",
+                "Pytest: 2 passed in 0.00s",
+            ),
+            ("2 passed, 1 rerun in 0.01s", "Pytest: 2 passed in 0.01s"),
+            (
+                "===== 5 passed in 90000.00s (1 day, 1:00:00) =====",
+                "Pytest: 5 passed in 90000.00s",
+            ),
+            (
+                "5 passed in 180000.00s (2 days, 2:00:00)",
+                "Pytest: 5 passed in 180000.00s",
+            ),
+            (
+                "1 passed, 1 skipped, 1 xfailed in 0.01 seconds",
+                "Pytest: 1 passed, 0 failed, 1 skipped, 1 xfailed in 0.01s",
+            ),
+            (
+                "2 failed, 1 passed, 2 subtests passed in 0.02s",
+                "Pytest: 1 passed, 2 failed in 0.02s",
+            ),
+        ] {
+            assert_eq!(filter_pytest_output(input), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn test_filter_pytest_rejects_summary_fragments_without_final_result() {
+        for input in [
+            "=== FAILURES ===\n___ test_outer ___\nE + 2 passed in 0.01s",
+            "2 passed in 0.01s, then 1 failed",
+            "2 passed in 0.01s trailing junk",
+            "40 passed",
+            "40 passed in 65.12s (see log)",
+        ] {
+            assert_eq!(filter_pytest_output(input), PYTEST_NO_TESTS, "{input}");
+        }
     }
 
     #[test]
