@@ -207,6 +207,8 @@ For truncation recovery on **success** (e.g. a list capped at 20 items), use `te
 
 The agent runs `rtk recall <hash>` to get back exactly what was elided. For `force_tee_tail_hint`, `offset` is the 1-based first hidden line (`header_lines + MAX_CAP + 1`); it is stored so the default recall returns only the hidden tail. Storage is byte-faithful (`BLOB` + lossless gzip); tune limits via the `[retriever]` config section.
 
+`recall_stats` has a separate fixed 500-row cap across `(slug, mode)` pairs. An insert trigger atomically evicts the least-used row (`elisions + recalls`, then oldest `rowid`), protecting the new row; repeated upserts keep accumulating without eviction. Opening an older oversized store trims it to the same limit. This bound allows hundreds of filter/mode pairs while preventing dynamic command names from growing statistics indefinitely. Evicted counters are discarded, so [recall efficiency](../../docs/guide/analytics/gain.md#recall-efficiency) is not a lifetime total.
+
 ### Truncation Caps (`truncate`)
 
 `src/core/truncate.rs` defines four global cap policies — `CAP_ERRORS`, `CAP_WARNINGS`, `CAP_LIST`, `CAP_INVENTORY` — for the data classes RTK filters truncate. Each filter binds the right CAP to a local `const MAX_*` so the cap is one named jump away from the call site. These CAPs are the staging point for filter-level cap configuration (planned, not yet implemented): once the config surface lands, overriding `CAP_LIST` in `~/.config/rtk/config.toml` will tune every list filter in one place instead of editing 20+ files.
