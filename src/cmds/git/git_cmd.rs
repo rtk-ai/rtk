@@ -579,6 +579,10 @@ fn run_show(
             crate::core::stream::exec_capture_bytes(&mut cmd).context("Failed to run git show")?;
         let rtk_label = format!("rtk {tracked}");
         if !result.success() {
+            // git prints some failures (a usage page) on stdout, so forward it as well, byte for
+            // byte since this route captured raw bytes
+            use std::io::Write;
+            let _ = std::io::stdout().write_all(&result.stdout);
             eprint!(
                 "{}",
                 crate::core::utils::decode_process_output(&result.stderr)
@@ -694,6 +698,8 @@ fn run_show(
     // with RTK's own flags -- the stat step strips the patch-shape flags, so it succeeds where
     // git refused (`git show -pq HEAD` exits 128 raw) and the compaction looked like success.
     if !raw_result.success() {
+        // git prints some failures (a usage page) on stdout, so forward it as well
+        print!("{}", raw_result.stdout);
         if !raw_result.stderr.trim().is_empty() {
             eprint!("{}", raw_result.stderr);
         }
@@ -1835,6 +1841,16 @@ fn run_log(
     let tracked = with_args("git log", &display_args(args));
     let tokens = tokenize_git_log_args(args);
 
+    // Git may answer clustered help (`-hp`) with exit 0. Forward it once before
+    // a cap/probe can mistake the usage page for commits. The grammar keeps
+    // option values (`-Sh`) and paths after `--` from becoming help flags.
+    if tokens
+        .iter()
+        .any(|t| t.kind == TokenKind::Short && t.text == "h")
+    {
+        return run_passthrough(&raw_log_passthrough_args(args, false), global_args, verbose);
+    }
+
     if tokens.iter().any(|t| log_wants_raw_shape(t, &tokens)) {
         let capped = raw_log_is_capped(&tokens);
         let passthrough_args = raw_log_passthrough_args(args, capped);
@@ -1949,7 +1965,9 @@ fn run_log(
     let result = exec_capture(&mut cmd).context("Failed to run git log")?;
 
     if !result.success() {
-        eprintln!("{}", result.stderr);
+        // git prints some failures (a usage page) on stdout, so forward it as well
+        print!("{}", result.stdout);
+        eprint!("{}", result.stderr);
         return Ok(result.exit_code);
     }
 
@@ -3179,6 +3197,8 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
             if !result.stderr.trim().is_empty() {
                 eprintln!("{}", result.stderr);
             }
+            // git prints some failures (a usage page) on stdout, so forward it as well
+            print!("{}", result.stdout);
             return Ok(result.exit_code);
         }
         return Ok(0);
@@ -3205,9 +3225,8 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
             if !result.stderr.trim().is_empty() {
                 eprintln!("{}", result.stderr);
             }
-            if !result.stdout.trim().is_empty() {
-                eprintln!("{}", result.stdout);
-            }
+            // git's usage page (`branch -m --help`) is stdout output, so keep it on stdout
+            print!("{}", result.stdout);
             return Ok(result.exit_code);
         }
         return Ok(0);
@@ -3227,6 +3246,8 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     let result = exec_capture(&mut cmd).context("Failed to run git branch")?;
 
     if !result.success() {
+        // git prints some failures (a usage page) on stdout, so forward it as well
+        print!("{}", result.stdout);
         if !result.stderr.trim().is_empty() {
             eprint!("{}", result.stderr);
         }
@@ -3331,6 +3352,8 @@ fn run_fetch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32
     let raw = result.combined();
 
     if !result.success() {
+        // git prints some failures (a usage page) on stdout, so forward it as well
+        print!("{}", result.stdout);
         eprintln!("FAILED: git fetch");
         if !result.stderr.trim().is_empty() {
             eprintln!("{}", result.stderr);
@@ -3493,6 +3516,8 @@ fn run_stash(
                 if !result.stderr.trim().is_empty() {
                     eprintln!("{}", result.stderr);
                 }
+                // git prints some failures (a usage page, a conflicted pop's status) on stdout
+                print!("{}", result.stdout);
                 combined.clone()
             };
 
@@ -3535,6 +3560,8 @@ fn run_stash(
                 if !result.stderr.trim().is_empty() {
                     eprintln!("{}", result.stderr);
                 }
+                // git prints some failures (a usage page, a conflicted pop's status) on stdout
+                print!("{}", result.stdout);
                 combined.clone()
             };
 
