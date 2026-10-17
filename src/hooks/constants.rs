@@ -129,6 +129,15 @@ pub const PI_CODING_AGENT_DIR_ENV: &str = "PI_CODING_AGENT_DIR";
 pub const OMP_DIR: &str = ".omp/agent";
 pub const OMP_LOCAL_DIR: &str = ".omp";
 
+/// Amp's machine-level configuration directory. Amp appends `plugins` below
+/// this directory; `XDG_CONFIG_HOME` is resolved by the init module first.
+pub const AMP_DIR: &str = ".config/amp";
+pub const AMP_CONFIG_DIR_ENV: &str = "XDG_CONFIG_HOME";
+pub const AMP_PLUGINS_SUBDIR: &str = "plugins";
+pub const AMP_PLUGIN_NAME: &str = "rtk";
+pub const AMP_PLUGIN_ENTRY_FILE: &str = "index.ts";
+pub const AMP_PLUGIN_JS_FILE: &str = "index.js";
+
 /// Factory Droid config directory, joined onto the resolved home directory.
 pub const DROID_DIR: &str = ".factory";
 /// Canonical Droid hooks file (Droid's own /hooks UI reads and writes this).

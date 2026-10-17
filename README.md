@@ -156,6 +156,8 @@ rtk init --agent hermes         # Hermes
 rtk init -g --agent droid       # Factory Droid
 rtk init --agent trae           # Trae (project: .trae/hooks.json)
 rtk init -g --agent trae        # Trae global: ~/.trae and existing ~/.trae-cn
+rtk init --agent amp            # Amp (project: .amp/plugins/rtk/index.ts)
+rtk init -g --agent amp         # Amp global: $XDG_CONFIG_HOME/amp/plugins/rtk/index.ts
 
 # 2. Restart your AI tool, then test
 git status  # Automatically rewritten to rtk git status
@@ -189,7 +191,7 @@ Four strategies applied per command type:
 
 ## Supported AI Tools
 
-RTK supports 18 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents, reducing the bash output the agent reads where the agent supports command interception.
+RTK supports 19 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents, reducing the bash output the agent reads where the agent supports command interception.
 
 | Tool | Install | Method |
 |------|---------|--------|
@@ -206,6 +208,7 @@ RTK supports 18 AI coding tools. Each integration rewrites shell commands to `rt
 | **Pi** | `rtk init -g --agent pi` (global) | TypeScript extension (tool_call) |
 | **Oh My Pi (OMP)** | `rtk init -g --agent omp` (global) / `rtk init --agent omp` (project) | TypeScript extension (tool_call, shared with Pi) |
 | **Hermes** | `rtk init --agent hermes` | Python plugin adapter (terminal command mutation via `rtk rewrite`) |
+| **Amp** | `rtk init --agent amp` / `rtk init -g --agent amp` | Native TypeScript plugin (`tool.call`, `shellCommandFromToolCall`) |
 | **Mistral Vibe** | `rtk init -g --agent vibe` | `pre_tool` hook (hooks.toml) |
 | **Kilo Code** | `rtk init --agent kilocode` | .kilocode/rules/rtk-rules.md (project-scoped) |
 | **Google Antigravity** | `rtk init --agent antigravity` / `rtk init -g --agent antigravity` | .agents/plugins/rtk/ (project) or ~/.gemini/config/plugins/rtk/ (global): plugin.json, hooks.json, rules/AGENTS.md |
@@ -214,7 +217,7 @@ RTK supports 18 AI coding tools. Each integration rewrites shell commands to `rt
 | **Trae** | `rtk init --agent trae` | Native `PreToolUse` hook in `.trae/hooks.json` (`RunCommand`) |
 | **Trae (global)** | `rtk init -g --agent trae` | `~/.trae/hooks.json`, plus `~/.trae-cn/hooks.json` when that directory exists |
 
-For per-agent setup details, override controls, and graceful degradation, see the [Supported Agents guide](https://www.rtk-ai.app/guide/getting-started/supported-agents). The Hermes plugin source and tests live in `hooks/hermes/`; installed Hermes runtime files still live under `~/.hermes/plugins/rtk-rewrite/`.
+For per-agent setup details, override controls, and graceful degradation, see the [Supported Agents guide](https://www.rtk-ai.app/guide/getting-started/supported-agents). The Hermes and Amp plugin sources and tests live in `hooks/hermes/` and `hooks/amp/`; installed runtime files remain under each agent's documented plugin directory.
 ## What RTK Covers
 
 100+ commands across Git, GitHub CLI, Cargo/Rust, JavaScript (npm, pnpm, vitest, jest, tsc, Next.js, Playwright, Prisma), Python (ruff, pytest, mypy, pip), Go (go test, golangci-lint), Ruby, .NET, JVM (Gradle, Maven), PHP, Docker, Kubernetes, AWS, Terraform, and the file/search builtins.

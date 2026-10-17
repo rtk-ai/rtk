@@ -23,6 +23,7 @@ use crate::core::test_isolation;
 use crate::core::user_dirs;
 
 mod agents_md;
+mod amp;
 mod antigravity;
 mod claude;
 mod codex;
@@ -41,6 +42,7 @@ mod vibe;
 // glob-imported and reach siblings through `use super::*`; every other submodule is used only
 // from here and is imported by name.
 use agents_md::*;
+use amp::show_amp_config;
 use claude::{
     hook_already_present, hook_gaps, remove_hook_from_settings, run_claude_md_mode,
     run_default_mode, run_hook_only_mode,
@@ -56,6 +58,7 @@ use opencode::{
 };
 use pi::*;
 
+pub use amp::{run_amp_mode, uninstall_amp_mode};
 pub use antigravity::{run_antigravity_mode, uninstall_antigravity_mode};
 pub use claude::claude_hook_gaps;
 pub(crate) use copilot::{COPILOT_HOOK_JSON, copilot_user_dir};
@@ -1988,7 +1991,10 @@ pub(super) fn resolve_claude_dir_from(
 }
 
 /// Show current rtk configuration
-pub fn show_config(codex: bool, omp: bool) -> Result<()> {
+pub fn show_config(codex: bool, omp: bool, amp: bool) -> Result<()> {
+    if amp {
+        return show_amp_config();
+    }
     if omp {
         return show_omp_config();
     }

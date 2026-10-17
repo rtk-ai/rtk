@@ -64,6 +64,20 @@ jobs:
 
   # ─── Parallel gates (all need code to compile) ───
 
+  amp-plugin:
+    name: Amp plugin
+    runs-on: ubuntu-latest
+    needs: clippy
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.10"
+      - run: cargo build --bin rtk
+      - run: PATH="$PWD/target/debug:$PATH" bun test hooks/amp/rtk/index.test.ts
+
   # `proxy/` is not a workspace member -- a second binary-bearing package
   # breaks `cargo install --git`, the command every README prints. So the
   # daemon gets its own lint and test job here; --workspace above covers only

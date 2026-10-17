@@ -66,6 +66,8 @@ pub enum AgentTarget {
     Vibe,
     /// Oh My Pi (OMP)
     Omp,
+    /// Amp CLI
+    Amp,
 }
 
 #[cfg(feature = "engine")]
@@ -2371,6 +2373,8 @@ where
         hooks::init::uninstall_droid(global, ctx)
     } else if agent == Some(AgentTarget::Vibe) {
         hooks::init::uninstall_vibe(ctx)
+    } else if agent == Some(AgentTarget::Amp) {
+        hooks::init::uninstall_amp_mode(global, ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -3001,6 +3005,13 @@ fn run_cli() -> Result<i32> {
             copilot,
             dry_run,
         } => {
+            if agent == Some(AgentTarget::Amp)
+                && (opencode || gemini || codex || copilot || claude_md || hook_only)
+            {
+                anyhow::bail!(
+                    "--agent amp cannot be combined with --opencode, --gemini, --codex, --copilot, --claude-md, or --hook-only"
+                );
+            }
             let ctx = hooks::init::InitContext {
                 verbose: cli.verbose,
                 dry_run,
@@ -3018,7 +3029,11 @@ fn run_cli() -> Result<i32> {
                 hooks::init::PatchMode::Ask
             };
             if show {
-                hooks::init::show_config(codex, agent == Some(AgentTarget::Omp))?;
+                hooks::init::show_config(
+                    codex,
+                    agent == Some(AgentTarget::Omp),
+                    agent == Some(AgentTarget::Amp),
+                )?;
             } else if uninstall && copilot {
                 if global {
                     hooks::init::uninstall_copilot_global(ctx)?;
@@ -3068,6 +3083,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_droid_mode(global, ctx)?;
             } else if agent == Some(AgentTarget::Vibe) {
                 hooks::init::run_vibe_mode(global, hook_only, patch_mode, ctx)?;
+            } else if agent == Some(AgentTarget::Amp) {
+                hooks::init::run_amp_mode(global, patch_mode, ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_cursor = agent == Some(AgentTarget::Cursor);
@@ -4287,6 +4304,17 @@ mod tests {
         match cli.command {
             Commands::Init { agent, .. } => {
                 assert_eq!(agent, Some(AgentTarget::Hermes));
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_init_agent_amp() {
+        let cli = try_parse_cli_from(["rtk", "init", "--agent", "amp"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, .. } => {
+                assert_eq!(agent, Some(AgentTarget::Amp));
             }
             _ => panic!("Expected Init command"),
         }

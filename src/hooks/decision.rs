@@ -332,6 +332,7 @@ impl AgentPath {
             "cursor" => Some(Self::InProcess(Host::Cursor)),
             "droid" => Some(Self::InProcess(Host::Droid)),
             "gemini" => Some(Self::InProcess(Host::Gemini)),
+            "amp" => Some(Self::ViaRewrite(ApprovalOwner::Rtk)),
             // OpenClaw applies its own exec policy to whatever the
             // `before_tool_call` hook returns, so RTK asking as well is a
             // second gate on a runtime that never opted into Claude Code's
@@ -348,6 +349,7 @@ impl AgentPath {
     /// The `--agent` values [`AgentPath::lookup`] accepts.
     const AGENTS: &'static [&'static str] = &[
         "antigravity",
+        "amp",
         "claude",
         "cline",
         "codex",

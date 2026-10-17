@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, Mistral Vibe, and Trae
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Amp, Hermes, Kilo Code, Antigravity, Factory Droid, Mistral Vibe, and Trae
 sidebar:
   order: 3
 ---
@@ -35,6 +35,7 @@ Agent runs "cargo test"
 | Cursor | Rust binary (`preToolUse`, `rtk hook cursor`) | Yes |
 | Gemini CLI | Rust binary (`BeforeTool`) | Yes |
 | OpenCode | TypeScript plugin (`execute.before` in 2.0, `tool.execute.before` in 1.x >= 1.18.29) | Yes |
+| Amp | Native TypeScript plugin (`tool.call` + `shellCommandFromToolCall`) | Yes |
 | OpenClaw | TypeScript plugin (`before_tool_call`) | Yes |
 | Pi | TypeScript extension (`tool_call` event) | Yes |
 | Oh My Pi (OMP) | TypeScript extension (`tool_call` event, shared with Pi) | Yes |
@@ -137,6 +138,33 @@ rtk init --global --opencode
 ```
 
 Installs the Claude Code setup and creates `~/.config/opencode/plugins/rtk.ts`. The plugin registers both OpenCode 2.0 (`execute.before`) and OpenCode 1.x (`tool.execute.before`) hooks, in one default export carrying both entrypoints. That shape is supported from OpenCode 1.18.29, the floor OpenCode documents for it; with an older OpenCode, when it can read `opencode --version`, `rtk init` writes nothing and says so.
+
+### Amp
+
+```bash
+# Project-local
+rtk init --agent amp
+
+# Machine-level, all projects
+rtk init -g --agent amp
+```
+
+The project install creates `.amp/plugins/rtk/index.ts`. The machine install
+creates `$XDG_CONFIG_HOME/amp/plugins/rtk/index.ts`, or
+`~/.config/amp/plugins/rtk/index.ts` when `XDG_CONFIG_HOME` is unset. Amp loads
+the native plugin through its `tool.call` event; the plugin uses
+`shellCommandFromToolCall` and delegates the rewrite to `rtk rewrite -- <command>`.
+It preserves the other tool input fields and fails open when RTK is unavailable,
+times out, fails, returns an unsupported exit code, or produces no changed
+command. Set `RTK_DISABLED=1` to disable automatic rewrites. Reload Amp after
+installation; `amp plugins list` shows the loaded plugin.
+
+Installation is idempotent. An existing modified or unrelated plugin is
+protected by the normal init prompt; `--auto-patch` approves replacement and
+`--no-patch` leaves it untouched. `--dry-run`, `--show`, and
+`--uninstall --agent amp` follow the same behavior for project and machine
+scopes. The CLI installs this local or machine plugin directly and does not
+publish to an Amp hosted plugin repository.
 
 ### Pi
 
@@ -326,7 +354,7 @@ Strips only RTK's `[[hooks]]` block and the `~/.vibe/prompts/rtk.md` file. Any o
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Kilo Code) rely on the model following instructions. Full hook integrations (Claude Code, Trae, Cursor, Gemini, Codex, Factory Droid, Antigravity) apply rewrites before execution whenever RTK supports and can safely attest the command. Plugin integrations (OpenCode, Pi, Hermes) use in-place mutation via the agent's extension or plugin API.
+Rules file integrations (Cline, Windsurf, Kilo Code) rely on the model following instructions. Full hook integrations (Claude Code, Trae, Cursor, Gemini, Codex, Factory Droid, Antigravity) apply rewrites before execution whenever RTK supports and can safely attest the command. Plugin integrations (OpenCode, Amp, Pi, Hermes) use in-place mutation via the agent's extension or plugin API.
 
 ## Windows support
 
