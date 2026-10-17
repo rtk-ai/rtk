@@ -103,11 +103,36 @@ struct Cli {
     skip_env: bool,
 }
 
+// A separate derive keeps these new arguments out of Commands' large generated
+// parser frame, which is already close to the Windows test-thread stack limit.
+#[derive(Debug, clap::Args)]
+#[group(id = "command_selection", multiple = true,
+    conflicts_with_all = ["daily", "weekly", "monthly", "all", "failures", "recalls", "reset", "watch", "by_method", "by_rule", "by_layer", "by_pipeline", "pipeline", "shadow"])]
+struct GainCommandArgs {
+    /// Sort By Command by saved tokens, invocation count, or weighted savings ratio
+    #[arg(long, value_enum, default_value = "saved")]
+    sort: core::tracking::CommandSort,
+    /// Sort By Command ascending instead of descending
+    #[arg(long)]
+    reverse: bool,
+    /// Maximum By Command rows (0 shows all)
+    #[arg(long, default_value = "10")]
+    limit: usize,
+    /// Include command names containing this case-sensitive literal text
+    #[arg(long)]
+    filter: Option<String>,
+    /// Exclude command names containing this case-sensitive literal text
+    #[arg(long)]
+    exclude: Option<String>,
+}
+
 /// Arguments for `rtk gain`. Its own boxed struct: the variant was the
 /// fattest arm in the Commands parse function, and debug builds pay the
 /// sum of all arms' locals on the stack (see .cargo/config.toml).
 #[derive(clap::Args, Debug)]
 struct GainArgs {
+    #[command(flatten)]
+    command_options: Box<GainCommandArgs>,
     /// Filter statistics to current project (current working directory) // added
     #[arg(short, long)]
     project: bool,
@@ -3123,6 +3148,7 @@ fn run_cli() -> Result<i32> {
 
         Commands::Gain(gain_args) => {
             let GainArgs {
+                command_options,
                 project,
                 graph,
                 history,
@@ -3169,8 +3195,22 @@ fn run_cli() -> Result<i32> {
                 )?;
                 return Ok(0);
             }
+            let GainCommandArgs {
+                sort,
+                reverse,
+                limit,
+                filter,
+                exclude,
+            } = *command_options;
             analytics::gain::run(
                 project, // added: pass project flag
+                &core::tracking::CommandQuery {
+                    sort,
+                    reverse,
+                    limit,
+                    filter,
+                    exclude,
+                },
                 graph,
                 history,
                 quota,

@@ -51,6 +51,43 @@ rtk gain --all --format csv  > savings.csv
 rtk gain --reset          # zero the savings and recall stats (asks first)
 ```
 
+## By Command sorting and filtering
+
+The default summary shows the 10 commands with the most recorded tokens saved.
+Select a different ranking or explore commands outside that top ten:
+
+```bash
+rtk gain --sort count --limit 25         # most frequently invoked commands
+rtk gain --sort ratio --reverse         # lowest weighted savings rates first
+rtk gain --filter gradle --exclude test # Gradle commands except tests
+rtk gain --limit 0                      # all command groups
+rtk gain --project --sort count         # only this directory and its descendants
+rtk gain --sort count --format json     # the same command rows, with full names
+rtk gain --filter gradle --format csv   # export the selected command rows
+```
+
+- `--sort saved|count|ratio` sorts descending; `--reverse` sorts ascending. Ties
+  are ordered by the full command name, ascending
+- `ratio` is the weighted rate `SUM(saved_tokens) / SUM(input_tokens) * 100`,
+  not the average of each invocation's percentage. Zero-input groups have a 0% rate
+- `--filter` includes names containing the text; `--exclude` removes them.
+  Both are case-sensitive, literal substring matches against the full recorded
+  RTK command, including arguments. They can be combined; `%`, `_`, and `*`
+  are ordinary characters, not wildcards
+- Filtering and sorting happen across all matching groups before `--limit`
+  is applied. The limit defaults to 10; `0` means unlimited
+- These options affect only **By Command**, not the summary totals, graph,
+  recent history, or quota estimate. They cannot be combined with time breakdowns,
+  `--failures`, `--recalls`, `--reset`, `--watch`, or the attribution views.
+  `--all` still means all time breakdowns
+
+**Impact** compares each displayed command's saved tokens with the largest
+saved-token count in the displayed rows. It is not a separate ranking or a
+prediction of further savings. Saved-token sorting uses the signed recorded
+sum, even though the existing Saved display clamps negative sums to zero;
+negative weighted rates remain visible. All figures are estimates of command
+output reduction, not billed cost savings.
+
 ## Daily breakdown
 
 ```bash
@@ -94,7 +131,13 @@ Same columns as daily, aggregated by Sunday-Saturday week or calendar month.
 | `json` | `--format json` | Programmatic analysis, dashboards |
 | `csv` | `--format csv` | Excel, Python/R, Google Sheets |
 
-**JSON structure:**
+Without time-breakdown flags, JSON includes a `by_command` array with
+`command`, `count`, `saved_tokens`, `savings_pct`, and `avg_time_ms` fields.
+CSV exports the same columns and selected rows. Command names are untruncated
+in both formats; CSV quotes names containing commas, quotes, or newlines.
+Time-breakdown exports keep their existing structure.
+
+**JSON structure (with time breakdowns):**
 ```json
 {
   "summary": {
@@ -223,7 +266,7 @@ rtk gain --watch
 
 A bare `rtk gain` launches the dashboard **automatically** once the RTK Proxy is running. All four conditions must hold:
 
-1. You passed no flag asking for a specific static view — no `--daily`, `--weekly`, `--monthly`, `--all`, `--history`, `--graph`, `--quota`, and `--format` left at `text`.
+1. You passed no flag asking for a specific static view — no `--daily`, `--weekly`, `--monthly`, `--all`, `--history`, `--graph`, `--quota`, and `--format` left at `text`. The By Command selection must also retain its default sort, direction, limit, and filters.
 2. You did not pass `--text`.
 3. Standard output is an interactive terminal — piping or redirecting opts out, so scripts and cron jobs are unaffected.
 4. The RTK Proxy is running and reachable.
