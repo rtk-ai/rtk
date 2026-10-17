@@ -420,6 +420,8 @@ enum Commands {
 
     /// OpenShift CLI (oc) commands with compact output
     Oc {
+        #[command(flatten)]
+        global: OcGlobalArgs,
         #[command(subcommand)]
         command: OcCommands,
     },
@@ -1514,6 +1516,46 @@ enum KubectlCommands {
     Other(Vec<OsString>),
 }
 
+#[derive(Debug, Default, clap::Args)]
+struct OcGlobalArgs {
+    /// Kubeconfig context to use
+    #[arg(long, global = true)]
+    context: Option<String>,
+    /// Path to the kubeconfig file
+    #[arg(long, global = true)]
+    kubeconfig: Option<String>,
+    /// Namespace to use
+    #[arg(short = 'n', long, global = true)]
+    namespace: Option<String>,
+    /// Username to impersonate
+    #[arg(long = "as", global = true)]
+    impersonate_as: Option<String>,
+}
+
+impl OcGlobalArgs {
+    fn to_args(&self, all_namespaces: bool) -> Vec<String> {
+        let namespace = self.namespace.as_ref().filter(|_| !all_namespaces);
+        [
+            ("--context", self.context.as_ref()),
+            ("--kubeconfig", self.kubeconfig.as_ref()),
+            ("-n", namespace),
+            ("--as", self.impersonate_as.as_ref()),
+        ]
+        .into_iter()
+        .filter_map(|(flag, value)| value.map(|value| [flag.to_string(), value.clone()]))
+        .flatten()
+        .collect()
+    }
+
+    fn merge_args(&self, args: Vec<String>) -> Vec<String> {
+        use core::arg_tokenizer::{injection_point, tokenize};
+        let mut args = core::args_utils::restore_double_dash(&args);
+        let at = injection_point(&tokenize(&args), args.len());
+        args.splice(at..at, self.to_args(false));
+        args
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum OcCommands {
     /// Get OpenShift resources (compact for pods/services)
@@ -1524,8 +1566,6 @@ enum OcCommands {
     },
     /// List pods
     Pods {
-        #[arg(short, long)]
-        namespace: Option<String>,
         /// All namespaces
         #[arg(short = 'A', long)]
         all: bool,
@@ -1536,8 +1576,6 @@ enum OcCommands {
     },
     /// List services
     Services {
-        #[arg(short, long)]
-        namespace: Option<String>,
         /// All namespaces
         #[arg(short = 'A', long)]
         all: bool,
@@ -2205,6 +2243,27 @@ fn build_k8s_logs_args(pod: String, container: Option<String>) -> Vec<String> {
         args.push(cont);
     }
     args
+}
+
+fn build_oc_namespace_args(
+    alias: &str,
+    global: &OcGlobalArgs,
+    all: bool,
+    extra: Vec<String>,
+) -> K8sAlias {
+    match build_k8s_namespace_args(alias, None, all, extra) {
+        K8sAlias::Filtered(args) => {
+            K8sAlias::Filtered(global.to_args(all).into_iter().chain(args).collect())
+        }
+        K8sAlias::Raw(args) => K8sAlias::Raw(
+            global
+                .to_args(false)
+                .into_iter()
+                .map(OsString::from)
+                .chain(args)
+                .collect(),
+        ),
+    }
 }
 
 /// Leading pnpm global flags (recursive / workspace-root), forwarded to pnpm.
@@ -2935,29 +2994,35 @@ fn run_cli() -> Result<i32> {
             KubectlCommands::Other(args) => container::run_kubectl_passthrough(&args, cli.verbose)?,
         },
 
-        Commands::Oc { command } => match command {
-            OcCommands::Get { args } => container::run_oc_get(&args, cli.verbose)?,
-            OcCommands::Pods {
-                namespace,
-                all,
-                extra,
-            } => match build_k8s_namespace_args("pods", namespace, all, extra) {
-                K8sAlias::Filtered(args) => container::k8s_pods("oc", &args, cli.verbose)?,
-                K8sAlias::Raw(argv) => core::runner::run_passthrough("oc", &argv, cli.verbose)?,
-            },
-            OcCommands::Services {
-                namespace,
-                all,
-                extra,
-            } => match build_k8s_namespace_args("services", namespace, all, extra) {
-                K8sAlias::Filtered(args) => container::k8s_services("oc", &args, cli.verbose)?,
-                K8sAlias::Raw(argv) => core::runner::run_passthrough("oc", &argv, cli.verbose)?,
-            },
+        Commands::Oc { global, command } => match command {
+            OcCommands::Get { args } => {
+                container::run_oc_get(&global.merge_args(args), cli.verbose)?
+            }
+            OcCommands::Pods { all, extra } => {
+                match build_oc_namespace_args("pods", &global, all, extra) {
+                    K8sAlias::Filtered(args) => container::k8s_pods("oc", &args, cli.verbose)?,
+                    K8sAlias::Raw(argv) => core::runner::run_passthrough("oc", &argv, cli.verbose)?,
+                }
+            }
+            OcCommands::Services { all, extra } => {
+                match build_oc_namespace_args("services", &global, all, extra) {
+                    K8sAlias::Filtered(args) => container::k8s_services("oc", &args, cli.verbose)?,
+                    K8sAlias::Raw(argv) => core::runner::run_passthrough("oc", &argv, cli.verbose)?,
+                }
+            }
             OcCommands::Logs { pod, container: c } => {
-                let args = build_k8s_logs_args(pod, c);
+                let args = global.merge_args(build_k8s_logs_args(pod, c));
                 container::k8s_logs("oc", &args, cli.verbose)?
             }
-            OcCommands::Other(args) => container::run_oc_passthrough(&args, cli.verbose)?,
+            OcCommands::Other(args) => {
+                let args: Vec<OsString> = global
+                    .to_args(false)
+                    .into_iter()
+                    .map(OsString::from)
+                    .chain(args)
+                    .collect();
+                container::run_oc_passthrough(&args, cli.verbose)?
+            }
         },
 
         Commands::Summary { shell, command } => {
@@ -4325,6 +4390,7 @@ mod tests {
         match cli.command {
             Commands::Oc {
                 command: OcCommands::Get { args },
+                ..
             } => assert_eq!(args, vec!["pods", "-n", "default"]),
             _ => panic!("Expected Oc Get command"),
         }
@@ -4337,9 +4403,74 @@ mod tests {
         match cli.command {
             Commands::Oc {
                 command: OcCommands::Other(_),
+                ..
             } => {}
             _ => panic!("Expected Oc Other command"),
         }
+    }
+
+    #[test]
+    fn test_oc_global_flags_parse_on_both_sides_of_the_subcommand() {
+        let flags = [
+            "--context",
+            "prod",
+            "--kubeconfig",
+            "/tmp/cluster config",
+            "-n",
+            "staging",
+            "--as",
+            "viewer",
+        ];
+        for alias in ["pods", "services"] {
+            for argv in [
+                ["rtk", "oc"]
+                    .into_iter()
+                    .chain(flags)
+                    .chain([alias])
+                    .collect::<Vec<_>>(),
+                ["rtk", "oc", alias].into_iter().chain(flags).collect(),
+            ] {
+                let cli = try_parse_cli_from(argv).expect("oc global flags parse");
+                let Commands::Oc { global, .. } = cli.command else {
+                    panic!("expected oc");
+                };
+                assert_eq!(global.to_args(false), flags);
+            }
+        }
+    }
+
+    #[test]
+    fn test_oc_global_flags_require_values() {
+        for flag in ["--context", "--kubeconfig", "-n", "--namespace", "--as"] {
+            assert!(
+                try_parse_cli_from(["rtk", "oc", "logs", "api", flag]).is_err(),
+                "{flag} needs a value"
+            );
+        }
+    }
+
+    #[test]
+    fn test_oc_merge_globals_injects_before_the_boundary_only() {
+        let global = OcGlobalArgs {
+            context: Some("dev".to_string()),
+            ..Default::default()
+        };
+        let args = ["pods", "-o", "wide", "--", "--context", "literal"]
+            .map(str::to_string)
+            .to_vec();
+        assert_eq!(
+            global.merge_args(args),
+            [
+                "pods",
+                "-o",
+                "wide",
+                "--context",
+                "dev",
+                "--",
+                "--context",
+                "literal"
+            ]
+        );
     }
 
     #[test]
