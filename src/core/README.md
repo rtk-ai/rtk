@@ -207,6 +207,8 @@ For truncation recovery on **success** (e.g. a list capped at 20 items), use `te
 
 The agent runs `rtk recall <hash>` to get back exactly what was elided. For `force_tee_tail_hint`, `offset` is the 1-based first hidden line (`header_lines + MAX_CAP + 1`); it is stored so the default recall returns only the hidden tail. Storage is byte-faithful (`BLOB` + lossless gzip); tune limits via the `[retriever]` config section.
 
+`rtk telemetry forget` clears both recovery backends, including when recovery is disabled. Each backend owns its cleanup and reuses its write-path resolver: the recall database and SQLite sidecars are removed without opening a new store; tee cleanup removes top-level `<epoch>_<sanitized-slug>.log` files and `<epoch-ms>_<pid>-<sequence>_<sanitized-slug>.log` files directly inside `posthook`, preserving unrelated files and directories. Cleanup errors are reported as failures; file symlinks are not followed.
+
 ### Truncation Caps (`truncate`)
 
 `src/core/truncate.rs` defines four global cap policies — `CAP_ERRORS`, `CAP_WARNINGS`, `CAP_LIST`, `CAP_INVENTORY` — for the data classes RTK filters truncate. Each filter binds the right CAP to a local `const MAX_*` so the cap is one named jump away from the call site. These CAPs are the staging point for filter-level cap configuration (planned, not yet implemented): once the config surface lands, overriding `CAP_LIST` in `~/.config/rtk/config.toml` will tune every list filter in one place instead of editing 20+ files.
