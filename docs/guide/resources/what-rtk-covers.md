@@ -93,6 +93,7 @@ RTK reduces **bash output bytes** — the only thing it controls. Those bytes ar
 | Command | What changes |
 |---------|--------------|
 | `dotnet build` | Errors and warnings only |
+| `dotnet restore` | Restore summary, errors and warnings kept |
 | `dotnet test` | Failures only |
 | `dotnet format` | Changed files only |
 

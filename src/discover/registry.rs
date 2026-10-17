@@ -3597,6 +3597,32 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_dotnet_subcommands() {
+        for sub in ["build", "restore"] {
+            assert_eq!(
+                rewrite_command_no_prefixes(&format!("dotnet {}", sub), &[]),
+                Some(format!("rtk dotnet {}", sub)),
+                "dotnet {} should rewrite",
+                sub
+            );
+        }
+        // Trailing args are preserved (the \b stops at the subcommand).
+        assert_eq!(
+            rewrite_command_no_prefixes("dotnet restore --force", &[]),
+            Some("rtk dotnet restore --force".into())
+        );
+        // `rtk dotnet test` and `rtk dotnet format` change what the native
+        // command does (#4603, #4602), so they are not routed until fixed.
+        assert_eq!(rewrite_command_no_prefixes("dotnet test", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("dotnet format", &[]), None);
+        // Subcommands without a proxy must NOT be rewritten.
+        assert_eq!(rewrite_command_no_prefixes("dotnet publish", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("dotnet run", &[]), None);
+        // Word boundary guards against false prefixes.
+        assert_eq!(rewrite_command_no_prefixes("dotnet builder", &[]), None);
+    }
+
+    #[test]
     fn test_rewrite_compound_and() {
         assert_eq!(
             rewrite_command_no_prefixes("git add . && cargo test", &[]),
