@@ -75,7 +75,7 @@ static FAILURES_WORD: LazyLock<Regex> =
 static FAILURES_ZERO: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\bfailures?\s*[:=]\s*0(?:\D|$)").unwrap());
 
-/// Compiler error lines: "error TS2322", "Error:", "error[E0308]". The word
+/// Compiler error lines: "error TS2322", "Error:", `error\[E0308\]`. The word
 /// boundary never matches the plural "errors", so "No errors found" stays green.
 static BARE_ERROR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\berror\b").unwrap());
 
