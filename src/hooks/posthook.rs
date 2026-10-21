@@ -17,7 +17,7 @@
 //! - Never emit an unchanged or larger output — emit nothing instead.
 //! - One `Config::load()` + one pipeline load per invocation.
 
-use super::constants::POST_TOOL_USE_KEY;
+use super::constants::{POST_TOOL_USE_FAILURE_KEY, POST_TOOL_USE_KEY};
 use crate::core::config::Config;
 use crate::core::pipeline_config::{self, LoadedPipeline};
 use crate::core::pipeline_log;
@@ -73,6 +73,41 @@ pub fn run(event: &Value) {
     }
 }
 
+/// Entry point for `PostToolUseFailure`: a failed call's output cannot be
+/// replaced, so only note rules run — the failure is what they read.
+pub fn run_failure(event: &Value) {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| process_failure(event)));
+    if let Ok(Some((output, loaded))) = outcome {
+        let _ = writeln!(io::stdout(), "{output}");
+        pipeline_config::write_status(&loaded);
+    }
+    pipeline_log::flush();
+}
+
+fn process_failure(event: &Value) -> Option<(String, LoadedPipeline)> {
+    if crate::core::user_env::var("RTK_DISABLED").as_deref() == Some("1") {
+        return None;
+    }
+    if crate::core::user_env::var("RTK_POSTHOOK").as_deref() == Some("0") {
+        return None;
+    }
+    let loaded = pipeline_config::load();
+    let note = note_for(event, &loaded.resolved);
+    let output = with_note_as(None, note, POST_TOOL_USE_FAILURE_KEY)?;
+    Some((output, loaded))
+}
+
+/// The exit status a failed shell call reports in its `error` text
+/// (`Exit code 2\n…`), if it does.
+fn exit_code_of(error: &str) -> Option<i64> {
+    error
+        .strip_prefix("Exit code ")?
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
+}
+
 /// Full pipeline behind the fail-open envelope. `None` = emit nothing.
 fn process(event: &Value) -> Option<(String, LoadedPipeline)> {
     if crate::core::user_env::var("RTK_DISABLED").as_deref() == Some("1") {
@@ -103,7 +138,21 @@ fn note_for(event: &Value, pipeline: &Resolved) -> Option<String> {
         .get("duration_ms")
         .and_then(|d| d.as_u64())
         .unwrap_or(0);
-    let (raw, format, source, command, is_rtk_command) = if subject == Subject::Shell {
+    let failed =
+        event.get("hook_event_name").and_then(Value::as_str) == Some(POST_TOOL_USE_FAILURE_KEY);
+    let (raw, format, source, command, is_rtk_command) = if failed {
+        let error = event.get("error")?.as_str()?.to_string();
+        let command = event
+            .pointer("/tool_input/command")
+            .and_then(|c| c.as_str())
+            .map(str::to_string);
+        let source = match &command {
+            Some(c) => c.clone(),
+            None => source_of(event, tool_name),
+        };
+        let is_rtk = command.as_deref().map(|c| RTK_IN_COMMAND.is_match(c));
+        (error, ContentFormat::Term, source, command, is_rtk)
+    } else if subject == Subject::Shell {
         let response = event.get("tool_response")?;
         let text = |key: &str| response.get(key).and_then(Value::as_str).unwrap_or("");
         let command = event
@@ -129,6 +178,11 @@ fn note_for(event: &Value, pipeline: &Resolved) -> Option<String> {
         return None;
     }
 
+    let exit_code = if failed {
+        exit_code_of(&raw)
+    } else {
+        (subject == Subject::Shell).then_some(0)
+    };
     let facts = rule_facts(
         pipeline,
         subject,
@@ -138,6 +192,7 @@ fn note_for(event: &Value, pipeline: &Resolved) -> Option<String> {
         &raw,
         duration_ms,
         is_rtk_command,
+        exit_code,
     );
     let position = Position::hook(Event::AfterTool, subject);
     let mut methods: Vec<&'static dyn Method> = Vec::new();
@@ -214,13 +269,18 @@ fn is_note(decision: &rtk_engine::pipeline::Decision<'_>) -> bool {
 /// already there. With no other change, the response carries the note alone
 /// and the tool output reaches the agent as it was.
 fn with_note(output: Option<String>, note: Option<String>) -> Option<String> {
+    with_note_as(output, note, POST_TOOL_USE_KEY)
+}
+
+/// [`with_note`] for the hook event `event_key` answers.
+fn with_note_as(output: Option<String>, note: Option<String>, event_key: &str) -> Option<String> {
     let Some(note) = note else {
         return output;
     };
     let mut response: Value = output
         .as_deref()
         .and_then(|o| serde_json::from_str(o).ok())
-        .unwrap_or_else(|| json!({ "hookSpecificOutput": { "hookEventName": POST_TOOL_USE_KEY } }));
+        .unwrap_or_else(|| json!({ "hookSpecificOutput": { "hookEventName": event_key } }));
     let hook = response.get_mut("hookSpecificOutput")?.as_object_mut()?;
     let context = match hook.get("additionalContext").and_then(Value::as_str) {
         Some(existing) if !existing.is_empty() => format!("{existing}\n\n{note}"),
@@ -410,6 +470,8 @@ fn run_selected(
     duration_ms: u64,
     is_rtk_command: Option<bool>,
 ) -> Option<Applied> {
+    // PostToolUse only carries calls that succeeded (failures go to
+    // PostToolUseFailure), so a shell call here exited 0.
     let facts = rule_facts(
         pipeline,
         subject,
@@ -419,6 +481,7 @@ fn run_selected(
         raw,
         duration_ms,
         is_rtk_command,
+        (subject == Subject::Shell).then_some(0),
     );
     let position = Position::hook(Event::AfterTool, subject);
     shadow_eval_candidate(subject, format, source, raw, &facts);
@@ -507,8 +570,12 @@ fn rule_facts(
     raw: &str,
     duration_ms: u64,
     is_rtk_command: Option<bool>,
+    exit_code: Option<i64>,
 ) -> Facts {
     let mut facts = facts_for(subject, format, source, raw, duration_ms, is_rtk_command);
+    if let Some(code) = exit_code {
+        facts.insert("exit_code".into(), Fact::Num(code as f64));
+    }
     if subject == Subject::Mcp
         && let Some(rest) = tool_name.strip_prefix("mcp__")
     {
@@ -1400,6 +1467,48 @@ mod tests {
         assert!(stdout.len() < noisy.len());
         let note = hook["additionalContext"].as_str().expect("noted");
         assert!(note.starts_with("line 0: verbose build output"));
+    }
+
+    fn failure(error: &str) -> Value {
+        serde_json::json!({
+            "hook_event_name": POST_TOOL_USE_FAILURE_KEY,
+            "tool_name": "Bash",
+            "tool_input": {"command": "make"},
+            "error": error
+        })
+    }
+
+    #[test]
+    fn a_failed_call_is_read_by_note_rules_and_answered_on_its_event() {
+        let pipeline = note_pipeline("");
+        let note = note_for(
+            &failure("Exit code 2\n\u{1b}[31merror: boom\u{1b}[0m"),
+            &pipeline,
+        )
+        .expect("the failure is noted");
+        assert_eq!(note, "Exit code 2\nerror: boom");
+        let out = with_note_as(None, Some(note), POST_TOOL_USE_FAILURE_KEY).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v["hookSpecificOutput"]["hookEventName"],
+            POST_TOOL_USE_FAILURE_KEY
+        );
+        assert!(v["hookSpecificOutput"].get("updatedToolOutput").is_none());
+    }
+
+    #[test]
+    fn exit_code_is_a_fact_after_a_shell_call() {
+        // Only failures with exit code 2 are noted.
+        let pipeline = pipeline_from(
+            "[pipeline]\nname = \"t\"\n[[hook.after_tool.shell]]\nname = \"note\"\nwhen = { exit_code_gt = 1 }\nuse = [\"ansi\"]\nemit = \"note\"\n",
+        );
+        assert!(note_for(&failure("Exit code 2\n\u{1b}[31mboom\u{1b}[0m"), &pipeline).is_some());
+        assert!(note_for(&failure("Exit code 1\n\u{1b}[31mboom\u{1b}[0m"), &pipeline).is_none());
+        // A PostToolUse shell call succeeded: exit code 0.
+        assert!(note_for(&colored_failure(), &pipeline).is_none());
+        assert_eq!(exit_code_of("Exit code 127\nsh: x: not found"), Some(127));
+        assert_eq!(exit_code_of("Exit code 3"), Some(3));
+        assert_eq!(exit_code_of("permission denied"), None);
     }
 
     #[test]

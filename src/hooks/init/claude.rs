@@ -5,8 +5,8 @@ use super::opencode::{ensure_opencode_plugin_installed, prepare_opencode_plugin_
 use super::*;
 use crate::core::user_dirs;
 use crate::hooks::constants::{
-    CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CURSOR_DIR, HOOKS_SUBDIR, POST_TOOL_USE_KEY, PRE_TOOL_USE_KEY,
-    REWRITE_HOOK_FILE, SESSION_START_KEY, SETTINGS_JSON,
+    CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CURSOR_DIR, HOOKS_SUBDIR, POST_TOOL_USE_FAILURE_KEY,
+    POST_TOOL_USE_KEY, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SESSION_START_KEY, SETTINGS_JSON,
 };
 
 /// Legacy mode (--claude-md): inject the full RTK_INSTRUCTIONS block into CLAUDE.md.
@@ -150,7 +150,12 @@ fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
 
 pub(super) fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
     let mut modified = false;
-    for event_key in [PRE_TOOL_USE_KEY, POST_TOOL_USE_KEY, SESSION_START_KEY] {
+    for event_key in [
+        PRE_TOOL_USE_KEY,
+        POST_TOOL_USE_KEY,
+        POST_TOOL_USE_FAILURE_KEY,
+        SESSION_START_KEY,
+    ] {
         if !remove_hook_entries(root, event_key, HookEntries::Grouped, |hook| {
             is_command_hook(hook, |cmd| {
                 is_claude_hook_command(cmd) || cmd.contains(REWRITE_HOOK_FILE)
@@ -327,13 +332,17 @@ fn patch_settings_json_command(
     // wipe a user's global hooks because of the project directory
     // `init -g` happened to run from. Removal stays where the user
     // asks for it by name (`rtk init -g --uninstall`).
-    let unrequired: Vec<&str> = [PRE_TOOL_USE_KEY, POST_TOOL_USE_KEY]
-        .into_iter()
-        .filter(|event_key| {
-            !events.iter().any(|(k, _)| k == event_key)
-                && hook_already_present(&root, event_key, hook_command)
-        })
-        .collect();
+    let unrequired: Vec<&str> = [
+        PRE_TOOL_USE_KEY,
+        POST_TOOL_USE_KEY,
+        POST_TOOL_USE_FAILURE_KEY,
+    ]
+    .into_iter()
+    .filter(|event_key| {
+        !events.iter().any(|(k, _)| k == event_key)
+            && hook_already_present(&root, event_key, hook_command)
+    })
+    .collect();
     if !unrequired.is_empty() {
         println!(
             "  {}: {} no longer required by the pipeline — left unchanged \
@@ -490,6 +499,11 @@ pub(super) fn claude_events_of(
         };
         let subjects = loaded.resolved.subjects_used(site, event);
         if let Some(matcher) = crate::hooks::constants::claude_matcher(&subjects) {
+            // A failed call goes to PostToolUseFailure, not PostToolUse: the
+            // pipeline's after_tool note rules read it there.
+            if key == POST_TOOL_USE_KEY && loaded.resolved.has_note_rules() {
+                out.push((POST_TOOL_USE_FAILURE_KEY, matcher.clone()));
+            }
             out.push((key, matcher));
         }
     }

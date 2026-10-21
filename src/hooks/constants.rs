@@ -7,6 +7,9 @@ pub const SETTINGS_LOCAL_JSON: &str = "settings.local.json";
 pub const HOOKS_JSON: &str = "hooks.json";
 pub const PRE_TOOL_USE_KEY: &str = "PreToolUse";
 pub const POST_TOOL_USE_KEY: &str = "PostToolUse";
+/// Claude Code sends a failed tool call here, not to `PostToolUse`, with the
+/// failure as an `error` string ("Exit code 1\n…" for a shell command).
+pub const POST_TOOL_USE_FAILURE_KEY: &str = "PostToolUseFailure";
 pub const SESSION_START_KEY: &str = "SessionStart";
 pub const BEFORE_TOOL_KEY: &str = "BeforeTool";
 

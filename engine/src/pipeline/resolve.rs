@@ -854,6 +854,18 @@ impl Resolved {
         out
     }
 
+    /// Whether an active hook rule hands its result to the agent as a note
+    /// (`emit = "note"`): such a rule also reads failed calls, which a
+    /// harness may report on an event of their own.
+    pub fn has_note_rules(&self) -> bool {
+        self.rules.iter().any(|(position, rules)| {
+            position.site == super::position::SiteKind::Hook
+                && rules.iter().any(|r| {
+                    r.def.enabled && !r.def.pro_inert && r.def.emit.as_deref() == Some("note")
+                })
+        })
+    }
+
     pub fn subjects_used(
         &self,
         site: super::position::SiteKind,
@@ -1256,6 +1268,17 @@ mod override_when {
     use crate::block::{Event, Subject};
     use crate::pipeline::resolve::{Scope, SourceFile};
     use crate::pipeline::{Fact, Facts, Position, evaluate, parse, resolve};
+
+    #[test]
+    fn has_note_rules_sees_only_active_note_rules() {
+        let note = "[[hook.after_tool.shell]]\nname = \"n\"\nuse = [\"ansi\"]\nemit = \"note\"\n";
+        assert!(resolved_from(note).has_note_rules());
+        assert!(!resolved_from(&format!("{note}enabled = false\n")).has_note_rules());
+        assert!(
+            !resolved_from("[[hook.after_tool.shell]]\nname = \"o\"\nuse = [\"ansi\"]\n")
+                .has_note_rules()
+        );
+    }
 
     fn resolved_from(text: &str) -> crate::pipeline::Resolved {
         let parsed = parse(text, "t.toml");
