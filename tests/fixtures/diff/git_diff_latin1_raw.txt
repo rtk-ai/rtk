@@ -1,0 +1,14 @@
+diff --git "a/caf\350.txt" "b/caf\350.txt"
+index 4a58007..65b2df8 100644
+--- "a/caf\350.txt"
++++ "b/caf\350.txt"
+@@ -1 +1 @@
+-alpha
++beta
+diff --git "a/caf\351.txt" "b/caf\351.txt"
+index 5626abf..f719efd 100644
+--- "a/caf\351.txt"
++++ "b/caf\351.txt"
+@@ -1 +1 @@
+-one
++two

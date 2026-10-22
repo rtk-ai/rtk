@@ -1,0 +1,128 @@
+# laya-route — a System-1 judge decides which cheaper Anthropic model gets
+# each heavy tool output; the root agent's context only sees the digest.
+#
+# The judge answers ONE calibrated yes/no question about each large shell
+# output — "did something actually fail here?" — a semantic gate no regex or
+# size rule can fake (a failing test run and a bigger `ls` dump are
+# indistinguishable to both). Deterministic size then picks the tier:
+#
+#   noul.broke >= 0.55 and > 6000 tokens  ->  explain-failure on claude-sonnet-5
+#   noul.broke >= 0.55 and > 1500 tokens  ->  skim on claude-haiku-4-5
+#   everything else                        ->  untouched (normal rtk chains)
+#
+# ── PREREQUISITE: a System-1 endpoint (pick one) ──────────────────────────
+#
+# A. Laya, local (no key, no tokens, nothing leaves your machine)
+#    https://github.com/receptron/laya — an open-source Jev-compatible
+#    decision model on ONNX (requires ~1.7 GB of disk for its weights).
+#    Expose it on loopback in the systemone wire format with a ~60-line
+#    Node wrapper around its `systemOne` call (request: {state, questions},
+#    response: {answers} — the shapes match natively; normalize `score` to
+#    0..1), then: export RTK_LAYA_TOKEN=local  (rtk requires a declared
+#    credential per classifier upstream; a local service ignores it).
+#
+# B. TypeSafe Jev, hosted (no local model, needs an API key)
+#    Swap the judge upstream below for classify-routing.toml's
+#    (base_url https://api.typesafe.ai/v1/systemone, api_key_env
+#    TYPESAFE_API_KEY) and point the classifier at it.
+#
+# Workers bill your Anthropic account: with the rtk llm-proxy running they
+# borrow the credential your agent already relays, else ANTHROPIC_API_KEY.
+#
+# Fail-open end to end: endpoint down, token unset, timeout, or an unsure
+# answer inserts no fact, no rule matches, output passes untouched.
+# One consequence of memoization: verdicts are cached per content, and cache
+# hits apply without consulting the endpoint — so removing the credential
+# does NOT stop routing for already-classified output. To turn the pipeline
+# off, disable its rules or remove the file, not just the token.
+# Note: Claude Code dispatches PostToolUse only for commands that exit 0 —
+# failing CONTENT still routes when the command succeeds (CI-log reads,
+# `grep` over logs, wrapper scripts), and rtk-rewritten commands are already
+# compressed inline by rtk's own filters.
+#
+# Tuning: the classifier judges the head of the output (`input_chars`) —
+# don't ask the head about the tail. `choice` is also supported
+# (classify-routing.toml is the worked example): give it few,
+# surface-distinct labels and a low min_confidence, since the entropy
+# confidence it gates on shrinks as label count grows.
+
+schema_version = 1
+
+[pipeline]
+name    = "laya-route"
+extends = "rtk:posthook"
+
+# The JUDGE: answers the classifier's question (one local inference over the
+# output head). NO traffic or work is routed to it — routed work
+# lands on the worker upstreams below.
+[upstream.judge]
+provider     = "laya"
+model        = "laya"
+base_url     = "http://127.0.0.1:41733/v1/systemone"
+api_key_env  = "RTK_LAYA_TOKEN"
+timeout_secs = 4
+
+# The WORKERS: where `action = "route"` sends the work.
+[upstream.haiku]
+provider = "anthropic"
+model    = "claude-haiku-4-5"
+
+[upstream.sonnet]
+provider = "anthropic"
+model    = "claude-sonnet-5"
+
+# The judge's other primitives — `choice` fans one verdict out to different
+# destinations per label (the worked example is classify-routing.toml), and
+# `score` grades on an ordered rubric:
+#
+#   [classifier.need]
+#   upstream       = "judge"
+#   question       = "choice"
+#   instructions   = "What does the agent need from this output?"
+#   min_confidence = 0.3     # gates on the judge's entropy-based confidence
+#   [classifier.need.labels]
+#   diagnose = "Failures or errors the agent must understand"
+#   skim     = "Listings or logs where only a few facts matter"
+#
+#   [[hook.after_tool.shell]]
+#   when   = { "class.need" = "diagnose", tokens_gt = 1500 }
+#   action = "route"
+#   task   = "explain-failure"
+#
+# `choice` is a first-class Laya primitive, same as for Jev, and works
+# through this judge unchanged — labels pass through as criteria, the answer
+# returns the winning label with per-option probabilities. Keep 2-3
+# surface-distinct labels, and set min_confidence low — it gates on entropy
+# confidence, which shrinks mechanically as the label count grows.
+
+# A noul question is a literal statement the System-1 model scores as
+# P(true) — written for the model, not for humans. At after_tool, "did
+# something fail" IS the intention question: it decides whether the agent
+# needs a diagnosis, a skim, or the untouched bytes.
+[classifier.broke]
+upstream     = "judge"
+question     = "noul"
+instructions = "Something failed in this terminal output: a test, a build, or a program crashed"
+input_chars  = 2000
+
+[task.skim]
+kind     = "digest"
+upstream = "haiku"
+
+[task.explain-failure]
+kind     = "digest"
+upstream = "sonnet"
+
+[[hook.after_tool.shell]]
+name   = "big-failures-to-sonnet"
+when   = { "noul.broke_gte" = 0.55, tokens_gt = 6000 }
+action = "route"
+task   = "explain-failure"
+# tighten to specific actions by adding a command condition, e.g.
+#   when = { ..., command_contains = "test" }
+
+[[hook.after_tool.shell]]
+name   = "failures-to-haiku"
+when   = { "noul.broke_gte" = 0.55, tokens_gt = 1500 }
+action = "route"
+task   = "skim"

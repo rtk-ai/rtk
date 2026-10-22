@@ -1,0 +1,43 @@
+changeset:   1:45dd0c288113
+tag:         tip
+user:        Ann <ann@example.com>
+date:        Mon Sep 07 13:10:32 2026 +0000
+summary:     change
+
+diff -r bc299d91c85a -r 45dd0c288113 bin.dat
+Binary file bin.dat has changed
+diff -r bc299d91c85a -r 45dd0c288113 f.txt
+--- a/f.txt	Mon Sep 07 13:10:32 2026 +0000
++++ b/f.txt	Mon Sep 07 13:10:32 2026 +0000
+@@ -1,1 +1,1 @@
+-a
++b
+diff -r bc299d91c85a -r 45dd0c288113 new.txt
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/new.txt	Mon Sep 07 13:10:32 2026 +0000
+@@ -0,0 +1,1 @@
++y
+diff -r bc299d91c85a -r 45dd0c288113 old.txt
+--- a/old.txt	Mon Sep 07 13:10:32 2026 +0000
++++ /dev/null	Thu Jan 01 00:00:00 1970 +0000
+@@ -1,1 +0,0 @@
+-x
+
+changeset:   0:bc299d91c85a
+user:        Ann <ann@example.com>
+date:        Mon Sep 07 13:10:32 2026 +0000
+summary:     init
+
+diff -r 000000000000 -r bc299d91c85a bin.dat
+Binary file bin.dat has changed
+diff -r 000000000000 -r bc299d91c85a f.txt
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/f.txt	Mon Sep 07 13:10:32 2026 +0000
+@@ -0,0 +1,1 @@
++a
+diff -r 000000000000 -r bc299d91c85a old.txt
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/old.txt	Mon Sep 07 13:10:32 2026 +0000
+@@ -0,0 +1,1 @@
++x
+

@@ -22,7 +22,7 @@ Review and simplify Rust code in RTK while respecting the project's constraints.
 
 ## Constraints (never simplify away)
 
-- `lazy_static!` regex — cannot be moved inside functions even if "simpler"
+- `LazyLock` regex — cannot be moved inside functions even if "simpler"
 - `.context()` on every `?` — verbose but mandatory
 - Fallback to raw command — never remove even if it looks like dead code
 - Exit code propagation — never simplify to `Ok(())`
@@ -163,7 +163,7 @@ cargo fmt --all && cargo clippy --all-targets && cargo test
 
 # Verify no new regex in functions
 grep -n "Regex::new" src/<file>.rs
-# All should be inside lazy_static! blocks
+# Fixed, reused patterns should be in `LazyLock<Regex>` statics
 
 # Verify no new unwrap in production
 grep -n "\.unwrap()" src/<file>.rs
@@ -172,7 +172,7 @@ grep -n "\.unwrap()" src/<file>.rs
 
 ## What NOT to Simplify
 
-- `lazy_static! { static ref RE: Regex = Regex::new(...).unwrap(); }` — the `.unwrap()` here is acceptable, it's init-time
+- `static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(...).unwrap());` — the `.unwrap()` here is acceptable, it's init-time
 - `.context("description")?` chains — verbose but required
 - The fallback match arm `Err(e) => { eprintln!(...); raw_output }` — looks redundant but is the safety net
 - `std::process::exit(code)` at end of run() — looks like it could be `Ok(())`but it isn't

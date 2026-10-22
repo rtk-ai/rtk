@@ -13,11 +13,7 @@ pub const CAP_INVENTORY: usize = 50;
 /// A cap reduced for a verbose data class. Falls back to `cap` when `by >= cap`
 /// so a deviation can never empty the list; `0` stays `0`. `const fn`, underflow-safe.
 pub const fn reduced(cap: usize, by: usize) -> usize {
-    if by < cap {
-        cap - by
-    } else {
-        cap
-    }
+    if by < cap { cap - by } else { cap }
 }
 
 #[cfg(test)]

@@ -3,13 +3,13 @@
 </p>
 
 <p align="center">
-  <strong>LLM 토큰 소비를 60-90% 줄이는 고성능 CLI 프록시</strong>
+  <strong>에이전트가 읽는 bash 출력을 최대 90% 줄이는 고성능 CLI 프록시</strong>
 </p>
 
 <p align="center">
   <a href="https://github.com/rtk-ai/rtk/actions"><img src="https://github.com/rtk-ai/rtk/workflows/Security%20Check/badge.svg" alt="CI"></a>
   <a href="https://github.com/rtk-ai/rtk/releases"><img src="https://img.shields.io/github/v/release/rtk-ai/rtk" alt="Release"></a>
-  <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
+  <a href="#라이선스"><img src="https://img.shields.io/badge/license-Apache--2.0%20%2B%20BUSL--1.1-blue.svg" alt="License: Apache-2.0 and BUSL-1.1"></a>
   <a href="https://discord.gg/RySmvNF5kF"><img src="https://img.shields.io/discord/1478373640461488159?label=Discord&logo=discord" alt="Discord"></a>
   <a href="https://formulae.brew.sh/formula/rtk"><img src="https://img.shields.io/homebrew/v/rtk" alt="Homebrew"></a>
 </p>
@@ -35,16 +35,34 @@
 
 rtk는 명령 출력이 LLM 컨텍스트에 도달하기 전에 필터링하고 압축합니다. 단일 Rust 바이너리, 의존성 없음, 10ms 미만의 오버헤드.
 
-## 토큰 절약 (30분 Claude Code 세션)
+## RTK가 하는 일
 
-| 작업 | 빈도 | 표준 | rtk | 절약 |
-|------|------|------|-----|------|
-| `ls` / `tree` | 10x | 2,000 | 400 | -80% |
-| `cat` / `read` | 20x | 40,000 | 12,000 | -70% |
-| `grep` / `rg` | 8x | 16,000 | 3,200 | -80% |
-| `git status` | 10x | 3,000 | 600 | -80% |
-| `cargo test` / `npm test` | 5x | 25,000 | 2,500 | -90% |
-| **합계** | | **~118,000** | **~23,900** | **-80%** |
+RTK는 셸 명령을 가로채 에이전트가 읽기 전에 출력을 압축합니다.
+
+| 작업 | RTK가 출력에 하는 일 |
+|------|----------------------|
+| `ls` / `tree` | 항목당 한 줄 대신 파일 개수가 포함된 트리 형식 |
+| `cat` / `read` | 스마트 파일 읽기: 전체 본문 대신 시그니처와 구조 |
+| `grep` / `rg` | 긴 줄을 잘라내고 매치를 파일별로 그룹화 |
+| `git status` | 컴팩트한 stat 형식, 상태별 그룹화 |
+| `git diff` | 컨텍스트 축소, 헤더 제거 |
+| `git log` | 해시, 작성자, 제목만 |
+| `git add/commit/push` | 전체 진행 출력 대신 확인 한 줄 |
+| `cargo test` / `npm test` | 실패만 표시, 통과한 테스트는 개수로 축약 |
+| `ruff check` | 규칙과 파일별로 그룹화 |
+| `pytest` | 실패만 표시, 트레이스백 축약 |
+| `go test` | NDJSON 파싱, 실패만 표시 |
+| `docker ps` | 핵심 필드만 |
+
+## 절약이 계산되는 방식
+
+RTK는 에이전트가 읽는 **bash 출력을 최대 90%** 줄입니다. 이것이 RTK가 측정하는 값이며, 요금이 90% 줄어드는 것과는 다릅니다.
+
+bash 출력은 프롬프트, 시스템 프롬프트, 대화 기록과 함께 **입력 토큰을 구성하는 요소 중 하나**입니다. 그리고 입력 토큰 역시 출력 토큰까지 포함하는 **요금의 일부일 뿐**입니다. 감소 효과는 각 단계에서 희석됩니다.
+
+RTK가 보고하는 토큰 수는 `바이트 / 4`로 추정됩니다. RTK에는 토크나이저가 포함되어 있지 않으므로 **비율은 신뢰할 수 있지만 토큰 절대값은 근사치**입니다.
+
+> 전체 설명: [RTK의 절약이 계산되는 방식](docs/guide/resources/savings-explained.md)
 
 ## 설치
 
@@ -52,6 +70,14 @@ rtk는 명령 출력이 LLM 컨텍스트에 도달하기 전에 필터링하고 
 
 ```bash
 brew install rtk
+```
+
+### winget (Windows)
+
+Windows에서 가장 쉬운 설치 방법 — 명령어 하나로 끝, PATH 설정 불필요:
+
+```powershell
+winget install rtk-ai.rtk
 ```
 
 ### 빠른 설치 (Linux/macOS)
@@ -63,7 +89,17 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 ### Cargo
 
 ```bash
-cargo install --git https://github.com/rtk-ai/rtk
+cargo install --git https://github.com/rtk-ai/rtk rtk
+```
+
+### Apache-2.0 에디션 (오픈 소스 전용, 상업적 사용 허용)
+
+BUSL-1.1 압축 엔진 없이 빌드한 동일한 `rtk` 바이너리입니다. 훅 재작성 시스템과 모든 명령 필터를 Apache-2.0 으로만 제공합니다.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | RTK_EDITION=oss sh
+brew install rtk-ai/tap/rtk-oss
+cargo install --git https://github.com/rtk-ai/rtk rtk --no-default-features
 ```
 
 ### 확인
@@ -76,10 +112,12 @@ rtk gain        # 토큰 절약 통계 표시되어야 함
 ## 빠른 시작
 
 ```bash
-# 1. Claude Code용 hook 설치 (권장)
-rtk init --global
+# 1. 해당 AI 도구용 hook 설치
+rtk init --global               # Claude Code (기본값)
+rtk init --agent trae           # Trae (프로젝트)
+rtk init --global --agent trae  # Trae (전역)
 
-# 2. Claude Code 재시작 후 테스트
+# 2. 해당 AI 도구를 재시작한 후 테스트
 git status  # 자동으로 rtk git status로 재작성
 ```
 
@@ -103,6 +141,8 @@ git status  # 자동으로 rtk git status로 재작성
 
 ## 명령어
 
+> 아래 백분율은 RTK의 `바이트 / 4` 추정기로 측정한 **bash 출력 바이트 감소율**입니다. [절약이 계산되는 방식](#절약이-계산되는-방식)을 참조하세요.
+
 ### 파일
 ```bash
 rtk ls .                        # 최적화된 디렉토리 트리
@@ -125,7 +165,7 @@ rtk jest                        # Jest 컴팩트
 rtk vitest                      # Vitest 컴팩트
 rtk pytest                      # Python 테스트 (-90%)
 rtk go test                     # Go 테스트 (-90%)
-rtk test <cmd>                  # 실패만 표시 (-90%)
+rtk test <cmd> [args...]        # 실패만 표시 (-90%), argv 직접 실행
 ```
 
 ### 빌드 & 린트
@@ -145,7 +185,7 @@ rtk discover                    # 놓친 절약 기회 발견
 
 ## 문서
 
-- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - 일반적인 문제 해결
+- **[TROUBLESHOOTING.md](docs/guide/resources/troubleshooting.md)** - 일반적인 문제 해결
 - **[INSTALL.md](INSTALL.md)** - 상세 설치 가이드
 - **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - 기술 아키텍처
 
@@ -158,6 +198,8 @@ rtk discover                    # 놓친 절약 기회 발견
 ## 라이선스
 
 Apache 2.0 라이선스 - 자세한 내용은 [LICENSE](LICENSE)를 참조하세요.
+
+> `engine/` and `proxy/` are licensed BUSL-1.1 — see their LICENSE files.
 
 ## 면책 조항
 

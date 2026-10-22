@@ -1,0 +1,53 @@
+bun test v1.3.14 (0d9b296a)
+
+mixed.test.ts:
+1 | import { expect, test, describe } from "bun:test";
+2 | import { add, shape } from "./src/math";
+3 | 
+4 | describe("math", () => {
+5 |   test("adds", () => { expect(add(1, 2)).toBe(3); });
+6 |   test("wrong sum", () => { expect(add(1, 2)).toBe(5); });
+                                                  ^
+error: expect(received).toBe(expected)
+
+Expected: 5
+Received: 3
+
+      at <anonymous> (/home/user/project/mixed.test.ts:6:47)
+(fail) math > wrong sum [0.08ms]
+3 | 
+4 | describe("math", () => {
+5 |   test("adds", () => { expect(add(1, 2)).toBe(3); });
+6 |   test("wrong sum", () => { expect(add(1, 2)).toBe(5); });
+7 |   test("deep diff", () => {
+8 |     expect(shape()).toEqual({ name: "gadget", parts: [1, 2, 4], nested: { deep: false } });
+                        ^
+error: expect(received).toEqual(expected)
+
+@@ -1,5 +1,5 @@
+  {
+-   "name": "gadget",
++   "name": "widget",
+    "nested": {
+-     "deep": false,
++     "deep": true,
+    },
+@@ -8,3 +8,3 @@
+      2,
+-     4,
++     3,
+    ],
+
+- Expected  - 3
++ Received  + 3
+
+      at <anonymous> (/home/user/project/mixed.test.ts:8:21)
+(fail) math > deep diff [0.14ms]
+
+ 2 pass
+ 1 skip
+ 1 todo
+ 2 fail
+snapshots: +1 added
+ 4 expect() calls
+Ran 6 tests across 1 file. [11.00ms]

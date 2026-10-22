@@ -1,0 +1,21 @@
+[info] welcome to sbt 1.9.7 (Eclipse Adoptium Java 17.0.9)
+[info] loading settings for project root-build from plugins.sbt ...
+[info] loading project definition from /home/user/promotion/project
+[info] loading settings for project root from build.sbt ...
+[info] set current project to promotion (in build file:/home/user/promotion/)
+[info] Compiling 6 Scala sources to /home/user/promotion/target/scala-2.13/it-classes ...
+[info] PromotionIntegrationSpec:
+[info] Promotion API integration
+[info]   - should apply discount end-to-end
+[info]   - should reject expired promotions
+[info]   - should handle concurrent promotion requests
+[info] DatabaseIntegrationSpec:
+[info] Database integration
+[info]   - should persist and retrieve promotions
+[info]   - should rollback on failure
+[info] Run completed in 18 seconds, 542 milliseconds.
+[info] Total number of tests run: 5
+[info] Suites: completed 2, aborted 0
+[info] Tests: succeeded 5, failed 0, canceled 0, ignored 0, pending 0
+[info] All tests passed.
+[success] Total time: 22 s, completed Apr 3, 2026 14:30:05

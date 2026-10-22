@@ -1,0 +1,3 @@
+diff --git a/main.rs b/main.rs
+old mode 100644
+new mode 100755

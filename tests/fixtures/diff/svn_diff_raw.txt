@@ -1,0 +1,38 @@
+Index: b.dat
+===================================================================
+Cannot display: file marked as a binary type.
+svn:mime-type = application/octet-stream
+Index: d.txt
+===================================================================
+--- d.txt	(revision 1)
++++ d.txt	(nonexistent)
+@@ -1 +0,0 @@
+-gone
+Index: new.txt
+===================================================================
+--- new.txt	(nonexistent)
++++ new.txt	(working copy)
+@@ -0,0 +1 @@
++n
+Index: sp ace.txt
+===================================================================
+--- sp ace.txt	(revision 1)
++++ sp ace.txt	(working copy)
+@@ -1 +1 @@
+-x
++y
+Index: sub/deep.txt
+===================================================================
+--- sub/deep.txt	(revision 1)
++++ sub/deep.txt	(working copy)
+@@ -1 +1 @@
+-x
++y
+Index: t.txt
+===================================================================
+--- t.txt	(revision 1)
++++ t.txt	(working copy)
+@@ -1,2 +1,2 @@
+ one
+-two
++TWO

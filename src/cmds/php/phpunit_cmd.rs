@@ -7,19 +7,18 @@
 
 use super::utils::{php_tool_command, strip_ansi_and_controls};
 use crate::core::runner;
+use crate::core::shell::display_args;
 use anyhow::Result;
-use lazy_static::lazy_static;
 use regex::Regex;
+use std::sync::LazyLock;
 
 const MAX_FAILURES_SHOWN: usize = 10;
 const MAX_DETAIL_LINES_PER_FAILURE: usize = 2;
 
-lazy_static! {
-    // PHPUnit prints each failure heading as "N) Class::method". Anchor to that
-    // exact shape so detail lines that merely start with a digit and contain ')'
-    // (e.g. "5 of 10 assertions passed in Foo::bar()") don't split a block.
-    static ref FAILURE_HEADING_RE: Regex = Regex::new(r"^\d+\) \S").unwrap();
-}
+// PHPUnit prints each failure heading as "N) Class::method". Anchor to that
+// exact shape so detail lines that merely start with a digit and contain ')'
+// (e.g. "5 of 10 assertions passed in Foo::bar()") don't split a block.
+static FAILURE_HEADING_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d+\) \S").unwrap());
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = php_tool_command("phpunit");
@@ -34,7 +33,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "phpunit",
-        &args.join(" "),
+        &display_args(args),
         filter_phpunit_output,
         runner::RunOptions::stdout_only().tee("phpunit"),
     )
@@ -212,7 +211,9 @@ mod tests {
     #[test]
     fn test_numbered_failure_heading_anchored() {
         // Real PHPUnit failure headings match.
-        assert!(is_numbered_failure_heading("1) App\\Tests\\UserTest::testEmail"));
+        assert!(is_numbered_failure_heading(
+            "1) App\\Tests\\UserTest::testEmail"
+        ));
         assert!(is_numbered_failure_heading("12) Foo::bar"));
         // Detail lines that merely start with a digit and contain ')' must not.
         assert!(!is_numbered_failure_heading(
@@ -282,7 +283,11 @@ Tests: 9, Assertions: 15, Failures: 2."#;
     fn test_phpunit_success() {
         let result = filter_phpunit_output(REAL_PHPUNIT_SUCCESS);
         assert!(result.contains("PHPUnit"), "got: {}", result);
-        assert!(result.contains("OK (9 tests, 20 assertions)"), "got: {}", result);
+        assert!(
+            result.contains("OK (9 tests, 20 assertions)"),
+            "got: {}",
+            result
+        );
     }
 
     #[test]

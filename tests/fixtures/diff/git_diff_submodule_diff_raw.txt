@@ -1,0 +1,18 @@
+diff --git a/o.txt b/o.txt
+index b68fde2..1611241 100644
+--- a/o.txt
++++ b/o.txt
+@@ -1 +1 @@
+-k
++k2
+Submodule sub 0641fef..19e2e29:
+diff --git a/sub/s.txt b/sub/s.txt
+index b478595..5e28b27 100644
+--- a/sub/s.txt
++++ b/sub/s.txt
+@@ -1 +1 @@
+-s
++s2
+diff --git a/sub/sb.bin b/sub/sb.bin
+index bdc955b..8835708 100644
+Binary files a/sub/sb.bin and b/sub/sb.bin differ

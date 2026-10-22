@@ -6,6 +6,15 @@ set -e
 
 REPO="rtk-ai/rtk"
 BINARY_NAME="rtk"
+# RTK_EDITION=oss installs the Apache-2.0 edition: the same `rtk` binary built
+# without the BUSL-1.1 engine. Only the asset name changes -- the installed
+# binary is always `rtk`, so hook commands already in an agent's settings keep
+# working across editions.
+if [ "${RTK_EDITION:-}" = "oss" ]; then
+    ASSET_PREFIX="rtk-oss"
+else
+    ASSET_PREFIX="rtk"
+fi
 INSTALL_DIR="${RTK_INSTALL_DIR:-$HOME/.local/bin}"
 
 # Colors
@@ -89,12 +98,12 @@ install() {
     info "Target: $TARGET"
     info "Version: $VERSION"
 
-    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY_NAME}-${TARGET}.tar.gz"
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${ASSET_PREFIX}-${TARGET}.tar.gz"
     CHECKSUMS_URL="https://github.com/${REPO}/releases/download/${VERSION}/checksums.txt"
     TEMP_DIR=$(mktemp -d)
     ARCHIVE="${TEMP_DIR}/${BINARY_NAME}.tar.gz"
     CHECKSUMS="${TEMP_DIR}/checksums.txt"
-    ASSET_NAME="${BINARY_NAME}-${TARGET}.tar.gz"
+    ASSET_NAME="${ASSET_PREFIX}-${TARGET}.tar.gz"
 
     info "Downloading from: $DOWNLOAD_URL"
     if ! curl -fsSL "$DOWNLOAD_URL" -o "$ARCHIVE"; then
@@ -164,7 +173,7 @@ verify() {
 }
 
 main() {
-    info "Installing $BINARY_NAME..."
+    info "Installing $ASSET_PREFIX..."
 
     detect_os
     detect_arch

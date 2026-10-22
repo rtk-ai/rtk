@@ -3,13 +3,13 @@
 </p>
 
 <p align="center">
-  <strong>Proxy CLI haute performance qui reduit la consommation de tokens LLM de 60-90%</strong>
+  <strong>Proxy CLI haute performance qui elimine jusqu'a 90% de la sortie bash lue par votre agent</strong>
 </p>
 
 <p align="center">
   <a href="https://github.com/rtk-ai/rtk/actions"><img src="https://github.com/rtk-ai/rtk/workflows/Security%20Check/badge.svg" alt="CI"></a>
   <a href="https://github.com/rtk-ai/rtk/releases"><img src="https://img.shields.io/github/v/release/rtk-ai/rtk" alt="Release"></a>
-  <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
+  <a href="#licence"><img src="https://img.shields.io/badge/license-Apache--2.0%20%2B%20BUSL--1.1-blue.svg" alt="License: Apache-2.0 and BUSL-1.1"></a>
   <a href="https://discord.gg/RySmvNF5kF"><img src="https://img.shields.io/discord/1478373640461488159?label=Discord&logo=discord" alt="Discord"></a>
   <a href="https://formulae.brew.sh/formula/rtk"><img src="https://img.shields.io/homebrew/v/rtk" alt="Homebrew"></a>
 </p>
@@ -35,21 +35,34 @@
 
 rtk filtre et compresse les sorties de commandes avant qu'elles n'atteignent le contexte de votre LLM. Binaire Rust unique, zero dependance, <10ms d'overhead.
 
-## Economies de tokens (session Claude Code de 30 min)
+## Ce que fait RTK
 
-| Operation | Frequence | Standard | rtk | Economies |
-|-----------|-----------|----------|-----|-----------|
-| `ls` / `tree` | 10x | 2 000 | 400 | -80% |
-| `cat` / `read` | 20x | 40 000 | 12 000 | -70% |
-| `grep` / `rg` | 8x | 16 000 | 3 200 | -80% |
-| `git status` | 10x | 3 000 | 600 | -80% |
-| `git diff` | 5x | 10 000 | 2 500 | -75% |
-| `git log` | 5x | 2 500 | 500 | -80% |
-| `git add/commit/push` | 8x | 1 600 | 120 | -92% |
-| `cargo test` / `npm test` | 5x | 25 000 | 2 500 | -90% |
-| **Total** | | **~118 000** | **~23 900** | **-80%** |
+RTK intercepte les commandes shell et compresse leur sortie avant que votre agent ne la lise.
 
-> Estimations basees sur des projets TypeScript/Rust de taille moyenne.
+| Operation | Ce que RTK fait de la sortie |
+|-----------|------------------------------|
+| `ls` / `tree` | Format arborescent avec compteurs de fichiers au lieu d'une ligne par entree |
+| `cat` / `read` | Lecture intelligente : signatures et structure plutot que corps complets |
+| `grep` / `rg` | Tronque les lignes longues, regroupe les correspondances par fichier |
+| `git status` | Format stat compact, regroupe par etat |
+| `git diff` | Contexte reduit, en-tetes supprimes |
+| `git log` | Hash, auteur et sujet uniquement |
+| `git add/commit/push` | Ligne de confirmation au lieu de la sortie de progression complete |
+| `cargo test` / `npm test` | Echecs uniquement, tests reussis reduits a un compteur |
+| `ruff check` | Regroupe par regle et par fichier |
+| `pytest` | Echecs uniquement, traceback raccourci |
+| `go test` | NDJSON parse, echecs uniquement |
+| `docker ps` | Champs essentiels uniquement |
+
+## Comment fonctionnent les economies
+
+RTK elimine **jusqu'a 90% de la sortie bash** que votre agent lit. C'est cela que RTK mesure, et ce n'est pas la meme chose que reduire votre facture de 90%.
+
+La sortie bash est **un contributeur parmi d'autres aux tokens d'entree**, aux cotes de votre prompt, du prompt systeme et de l'historique de conversation. Les tokens d'entree ne sont eux-memes **qu'une partie de la facture**, qui compte aussi les tokens de sortie. La reduction se dilue a chaque etape.
+
+Les nombres de tokens rapportes par RTK sont estimes avec `octets / 4` : RTK n'embarque aucun tokenizer, donc les **pourcentages sont fiables mais les valeurs absolues en tokens restent approximatives**.
+
+> Explication complete : [Comment fonctionnent les economies RTK](docs/guide/resources/savings-explained.md)
 
 ## Installation
 
@@ -57,6 +70,14 @@ rtk filtre et compresse les sorties de commandes avant qu'elles n'atteignent le 
 
 ```bash
 brew install rtk
+```
+
+### winget (Windows)
+
+La manière la plus simple d'installer sur Windows — une seule commande, aucune modification de PATH requise :
+
+```powershell
+winget install rtk-ai.rtk
 ```
 
 ### Installation rapide (Linux/macOS)
@@ -68,7 +89,17 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 ### Cargo
 
 ```bash
-cargo install --git https://github.com/rtk-ai/rtk
+cargo install --git https://github.com/rtk-ai/rtk rtk
+```
+
+### Édition Apache-2.0 (open source uniquement, usage commercial autorisé)
+
+Le même binaire `rtk` compilé sans le moteur de compression BUSL-1.1 : le système de réécriture de hooks et tous les filtres de commandes, sous Apache-2.0 seul.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | RTK_EDITION=oss sh
+brew install rtk-ai/tap/rtk-oss
+cargo install --git https://github.com/rtk-ai/rtk rtk --no-default-features
 ```
 
 ### Verification
@@ -83,11 +114,13 @@ rtk gain        # Doit afficher les statistiques d'economies
 ## Demarrage rapide
 
 ```bash
-# 1. Installer le hook pour Claude Code (recommande)
-rtk init --global
+# 1. Installer le hook pour l'outil d'IA correspondant
+rtk init --global               # Claude Code (par defaut)
 # Suivre les instructions pour enregistrer dans ~/.claude/settings.json
+rtk init --agent trae           # Trae (projet)
+rtk init --global --agent trae  # Trae (global)
 
-# 2. Redemarrer Claude Code, puis tester
+# 2. Redemarrer l'outil d'IA correspondant, puis tester
 git status  # Automatiquement reecrit en rtk git status
 ```
 
@@ -113,6 +146,8 @@ Quatre strategies appliquees par type de commande :
 
 ## Commandes
 
+> Les pourcentages ci-dessous sont des **reductions d'octets de sortie bash**, mesurees avec l'estimateur `octets / 4` de RTK. Voir [Comment fonctionnent les economies](#comment-fonctionnent-les-economies).
+
 ### Fichiers
 ```bash
 rtk ls .                        # Arbre de repertoires optimise
@@ -120,7 +155,7 @@ rtk read file.rs                # Lecture intelligente
 rtk read file.rs -l aggressive  # Signatures uniquement
 rtk find "*.rs" .               # Resultats compacts
 rtk grep "pattern" .            # Resultats groupes par fichier
-rtk diff file1 file2            # Diff condense
+rtk diff file1 file2            # Diff condense (code 0 : identiques, 1 : differents, 2 : erreur de lecture)
 ```
 
 ### Git
@@ -140,7 +175,7 @@ rtk vitest                      # Vitest compact
 rtk pytest                      # Tests Python (-90%)
 rtk go test                     # Tests Go (-90%)
 rtk cargo test                  # Tests Cargo (-90%)
-rtk test <cmd>                  # Echecs uniquement (-90%)
+rtk test <cmd> [args...]        # Echecs uniquement (-90%), argv direct
 ```
 
 ### Build & Lint
@@ -183,7 +218,7 @@ mode = "failures"
 
 ## Documentation
 
-- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - Resoudre les problemes courants
+- **[TROUBLESHOOTING.md](docs/guide/resources/troubleshooting.md)** - Resoudre les problemes courants
 - **[INSTALL.md](INSTALL.md)** - Guide d'installation detaille
 - **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - Architecture technique
 
@@ -195,7 +230,7 @@ Rejoignez la communaute sur [Discord](https://discord.gg/RySmvNF5kF).
 
 ## Licence
 
-Licence Apache 2.0 - voir [LICENSE](LICENSE) pour les details.
+Licence Apache 2.0 pour la CLI — voir [LICENSE](LICENSE). Les composants `engine/` et `proxy/` sont sous licence BUSL-1.1 (voir leurs fichiers LICENSE).
 
 ## Avertissement
 

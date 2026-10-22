@@ -2,76 +2,79 @@
 
 Comprehensive testing rules for RTK CLI tool development.
 
-## Snapshot Testing (🔴 Critical)
+## Unit Testing (🔴 Critical)
 
 **Priority**: 🔴 **Triggers**: All filter changes, output format modifications
 
-Use `insta` crate for output validation. This is the **primary testing strategy** for RTK filters.
+Use plain `#[cfg(test)] mod tests` block colocated in the same file as the filter,
+using `assert_eq!`/`assert!` directly against expected output.
 
-### Basic Snapshot Test
+### Basic Unit Test
 
 ```rust
-use insta::assert_snapshot;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[test]
-fn test_git_log_output() {
-    let input = include_str!("../tests/fixtures/git_log_raw.txt");
-    let output = filter_git_log(input);
-
-    // Snapshot test - will fail if output changes
-    assert_snapshot!(output);
+    #[test]
+    fn test_git_log_output() {
+        let input = "abc1234 fix: handle empty commit\ndef5678 feat: add filter\n";
+        let output = filter_git_log(input);
+        assert_eq!(output, "abc1234 fix: handle empty commit\ndef5678 feat: add filter");
+    }
 }
 ```
 
-### Workflow
+### Fixture strategy
 
-1. **Write test**: Add `assert_snapshot!(output);` in test
-2. **Run tests**: `cargo test` (creates new snapshots on first run)
-3. **Review snapshots**: `cargo insta review` (interactive review)
-4. **Accept changes**: `cargo insta accept` (if output is correct)
+Two patterns coexist, pick based on what the filter needs:
+
+1. **Inline literal strings** (most common for `src/cmds/**` unit tests) — build a small
+   representative string directly in the test body. Used throughout `src/cmds/git/git_cmd.rs`,
+   `src/cmds/git/gh_cmd.rs`, etc. Good for quick coverage of a specific format/edge case.
+2. **Real captured fixtures via `include_str!`** — used when the raw output is large or
+   format-sensitive enough that inline strings would be unreadable or drift from reality.
+   `src/cmds/jvm/mvn_cmd.rs` is the reference example (23+ `include_str!` fixtures). Fixtures
+   for these live in `tests/fixtures/` (e.g. `tests/fixtures/mvn_test_pass_slice_raw.txt`,
+   `tests/fixtures/gradlew_build_raw.txt`, `tests/fixtures/glab_mr_list_raw.json`).
 
 ### When to Use
 
-- **Every new filter**: All filters must have snapshot test
-- **Output format changes**: When modifying filter logic
-- **Regression detection**: Catch unintended changes
+- **Every new filter**: cover the common case and at least one edge case (empty input, error output).
+- **Output format changes**: update the relevant `assert_eq!` expectations when filter logic changes.
+- **Regression detection**: prefer a real fixture (`include_str!`) over an inline string once
+  output size/format makes hand-written strings brittle or unrepresentative.
 
 ### Example Workflow
 
 ```bash
-# 1. Create fixture from real command
-git log -20 > tests/fixtures/git_log_raw.txt
+# 1. Capture real output for a fixture-backed test (only needed for the include_str! pattern)
+mvn test > tests/fixtures/mvn_test_example_raw.txt
 
-# 2. Write test with assert_snapshot!
-cat > src/cmds/git/git.rs <<'EOF'
+# 2. Write the test in the module under test
+cat >> src/cmds/jvm/mvn_cmd.rs <<'EOF'
 #[cfg(test)]
 mod tests {
-    use insta::assert_snapshot;
+    use super::*;
 
     #[test]
-    fn test_git_log_format() {
-        let input = include_str!("../tests/fixtures/git_log_raw.txt");
-        let output = filter_git_log(input);
-        assert_snapshot!(output);
+    fn test_mvn_test_example() {
+        let input = include_str!("../../../tests/fixtures/mvn_test_example_raw.txt");
+        let output = filter_mvn_test(input);
+        assert!(output.contains("FAILED") || output.contains("PASSED"));
     }
 }
 EOF
 
-# 3. Run test (creates snapshot)
-cargo test test_git_log_format
-
-# 4. Review snapshot
-cargo insta review
-# Press 'a' to accept, 'r' to reject
-
-# 5. Snapshot saved in src/cmds/git/snapshots/git__tests__*.snap
+# 3. Run the test
+cargo test test_mvn_test_example
 ```
 
 ## Token Accuracy Testing (🔴 Critical)
 
 **Priority**: 🔴 **Triggers**: All filter implementations, token savings claims
 
-All filters **MUST** verify 60-90% token savings claims with real fixtures.
+All filters **MUST** verify the ≥20% savings floor with real fixtures.
 
 ### Token Count Test
 
@@ -84,7 +87,7 @@ mod tests {
 
     #[test]
     fn test_git_log_savings() {
-        let input = include_str!("../tests/fixtures/git_log_raw.txt");
+        let input = "..."; // inline string or include_str! fixture
         let output = filter_git_log(input);
 
         let input_tokens = count_tokens(input);
@@ -93,8 +96,8 @@ mod tests {
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
 
         assert!(
-            savings >= 60.0,
-            "Git log filter: expected ≥60% savings, got {:.1}%",
+            savings >= 20.0,
+            "Git log filter: expected ≥20% savings, got {:.1}%",
             savings
         );
     }
@@ -116,17 +119,15 @@ pnpm list > tests/fixtures/pnpm_list_raw.txt
 # let input = include_str!("../tests/fixtures/git_log_raw.txt");
 ```
 
-### Savings Targets by Filter
+### Savings Target
 
-| Filter | Expected Savings | Rationale |
-|--------|------------------|-----------|
-| `git log` | 80%+ | Condense commits to hash + message |
-| `cargo test` | 90%+ | Show failures only |
-| `gh pr view` | 87%+ | Remove ASCII art, verbose metadata |
-| `pnpm list` | 70%+ | Compact dependency tree |
-| `docker ps` | 60%+ | Essential fields only |
+There is a single enforced floor, not a per-filter table: **≥20% savings is the release
+blocker** (see CLAUDE.md's "Pre-commit Gate" / performance targets). Individual filters often
+exceed this by a wide margin, but don't assert specific per-command percentages (e.g. "87% for
+`gh pr view`") unless you've verified the actual number against that filter's own fixtures —
+asserted thresholds vary per filter and doc tables listing invented numbers rot immediately.
 
-**Release blocker**: If savings drop below 60% for any filter, investigate and fix before merge.
+**Release blocker**: If savings drop below 20% for any filter, investigate and fix before merge.
 
 ## Cross-Platform Testing (🔴 Critical)
 
@@ -161,18 +162,13 @@ fn test_shell_escaping() {
 
 ### Testing Platforms
 
-**macOS (primary)**:
+**Linux/macOS (primary)**:
 ```bash
 cargo test  # Local testing
 ```
 
-**Linux (via Docker)**:
-```bash
-docker run --rm -v $(pwd):/rtk -w /rtk rust:latest cargo test
-```
-
 **Windows (via CI)**:
-Trust GitHub Actions CI/CD pipeline or test manually if Windows machine available.
+Trust GitHub Actions CI/CD pipeline or test manually if a Windows machine is available.
 
 ### Shell Differences
 
@@ -186,7 +182,53 @@ Trust GitHub Actions CI/CD pipeline or test manually if Windows machine availabl
 
 **Priority**: 🟡 **Triggers**: New filter, command routing changes, release preparation
 
-Integration tests execute real commands via RTK to verify end-to-end behavior.
+Integration tests live as top-level files in `tests/` (not colocated with `src/`), e.g.
+`tests/grep_context_test.rs`, `tests/grep_faithful_format_test.rs`,
+`tests/guard_integration_test.rs`, `tests/search_compress_test.rs`,
+`tests/search_error_test.rs`, `tests/search_faithful_test.rs`. These exercise cross-cutting
+behavior (search/grep compression, guard rails, faithful formatting) rather than a single
+filter module, and several of them draw on `tests/fixtures/` (real captured aws/glab/gradlew/
+mvn/phpstan/dotnet output) alongside their own inline cases.
+
+### Machine independence (🔴 Critical)
+
+A test that spawns a real process must not depend on the machine it runs on. Two rules,
+both with `src/core/test_isolation/` helpers behind them (`tests/common/mod.rs` for the
+integration tests):
+
+- **Never assert on a third-party tool's wording.** git, grep and coreutils translate their
+  messages, so `stderr.contains("not a git repository")` fails outright in a French shell —
+  and a *negative* assertion (`!out.contains("Is a directory")`) is worse, passing vacuously
+  while testing nothing. Assert RTK's own output, or the structure (exit code, which stream
+  the message went to). Spawn rtk through `test_isolation::rtk_command()`
+  (`common::rtk_command()` under `tests/`): the child starts from an empty environment that
+  keeps only what `KEPT` (and `WINDOWS_KEPT` on Windows) in `test_isolation/scratch.rs`
+  names, with rtk's data and git config pinned to a scratch directory. A variable the child
+  or a tool it runs needs is set on the command, or added to `KEPT`. A cargo the child runs
+  keeps its `CARGO_HOME` in the scratch home and has no proxy or certificate settings, so a
+  fixture crate with dependencies fetches into an empty cache unless they are set on the
+  command. Under `tests/`, a native tool whose output a test compares with rtk's is built by
+  `common::native_command()`, in the same environment, so a setting only the contributor's
+  shell exports reaches neither side; it starts in the test's directory rather than the
+  child's, so give both the same `current_dir` or absolute paths. The locale is left to the
+  test: when it genuinely needs a tool's English text, set `LC_ALL=C` on that command, and
+  on the native one. A git the test runs itself goes through `isolate_git()`, which pins it.
+- **Never touch the ambient repository.** Use `test_isolation::temp_git_repo()` and
+  `.current_dir(repo.path())`. A test that runs `git branch` in whatever repo the
+  contributor is sitting in mutates their work, and one that assumes it is inside a repo at
+  all silently stops exercising anything when it isn't.
+
+Verify a change here against a hostile environment, not just yours:
+
+```bash
+LC_ALL=de_DE.UTF-8 LANGUAGE=de cargo test --all -- --include-ignored
+GIT_DIR=/path/to/another/repo/.git RTK_NO_TOML=1 RTK_TEE=0 cargo test --all -- --include-ignored
+TMPDIR=/path/inside/a/git/repo cargo test --all -- --include-ignored
+```
+
+and with a `~/.gitconfig` that signs commits, deny rules in `~/.claude/settings.json`, and a
+`global.json` or `.ignore` above `TMPDIR`: none of it may change a result, and none of it may
+be written to.
 
 ### Real Command Execution
 
@@ -194,12 +236,13 @@ Integration tests execute real commands via RTK to verify end-to-end behavior.
 #[test]
 #[ignore] // Run with: cargo test --ignored
 fn test_real_git_log() {
-    // Requires:
-    // 1. RTK binary installed (cargo install --path .)
-    // 2. Git repository available
-
-    let output = std::process::Command::new("rtk")
+    // The binary cargo built for this run, with rtk's data redirected to a
+    // scratch directory (the installed `rtk` would write to the developer's own),
+    // in a throwaway repository rather than the one the tests run from.
+    let repo = common::temp_git_repo();
+    let output = common::rtk_command()
         .args(&["git", "log", "-10"])
+        .current_dir(repo.path())
         .output()
         .expect("Failed to run rtk");
 
@@ -215,10 +258,10 @@ fn test_real_git_log() {
 ### Running Integration Tests
 
 ```bash
-# 1. Install RTK locally
-cargo install --path .
+# 1. Run all tests, including top-level tests/*.rs integration tests
+cargo test --all
 
-# 2. Run integration tests
+# 2. Run ignored (real-process) integration tests
 cargo test --ignored
 
 # 3. Run specific test
@@ -227,9 +270,9 @@ cargo test --ignored test_real_git_log
 
 ### When to Run
 
-- **Before release**: Always run integration tests
-- **After filter changes**: Verify filter works with real command
-- **After hook changes**: Verify Claude Code integration works
+- **Before release**: Always run integration tests.
+- **After filter changes**: Verify the filter works with real command output.
+- **After hook changes**: Verify Claude Code integration works.
 
 ## Performance Testing (🟡 Important)
 
@@ -301,73 +344,74 @@ rtk/
 ├── src/
 │   ├── cmds/
 │   │   ├── git/
-│   │   │   ├── git.rs              # Filter implementation
+│   │   │   ├── git_cmd.rs              # Filter implementation
 │   │   │   │   └── #[cfg(test)] mod tests { ... }
-│   │   │   └── snapshots/          # Insta snapshots for git module
-│   │   ├── js/                     # JS/TS ecosystem filters
-│   │   ├── python/                 # Python ecosystem filters
+│   │   ├── jvm/                    # gradlew, mvn — reference example for include_str! fixtures
+│   │   ├── php/                    # php, artisan, phpunit, phpstan, pest, paratest, ecs, pint
 │   │   └── ...
 │   ├── core/                       # Shared infrastructure
 │   ├── hooks/                      # Hook system
 │   └── analytics/                  # Token savings analytics
 ├── tests/
-│   ├── common/
-│   │   └── mod.rs                  # Shared test utilities (count_tokens)
-│   ├── fixtures/                   # Real command output
-│   │   ├── git_log_raw.txt
-│   │   ├── cargo_test_raw.txt
-│   │   ├── gh_pr_view_raw.txt
-│   │   └── dotnet/                 # Dotnet-specific fixtures
-│   └── integration_test.rs         # Integration tests (#[ignore])
+│   ├── fixtures/                   # Real captured command output
+│   │   ├── mvn_test_pass_slice_raw.txt
+│   │   ├── gradlew_build_raw.txt
+│   │   ├── glab_mr_list_raw.json
+│   │   └── ...
+│   ├── grep_context_test.rs        # Top-level integration tests
+│   ├── grep_faithful_format_test.rs
+│   ├── guard_integration_test.rs
+│   ├── search_compress_test.rs
+│   ├── search_error_test.rs
+│   └── search_faithful_test.rs
 ```
 
 **Best practices**:
-- **Unit tests**: Embedded in module (`#[cfg(test)] mod tests`)
-- **Fixtures**: Real command output in `tests/fixtures/`
-- **Snapshots**: Auto-generated in `src/cmds/<ecosystem>/snapshots/` (by insta)
-- **Shared utils**: `tests/common/mod.rs` (count_tokens, helpers)
-- **Integration**: `tests/` with `#[ignore]` attribute
+- **Unit tests**: Embedded in module (`#[cfg(test)] mod tests`), colocated with the filter.
+- **Fixtures**: Prefer inline strings for small/quick cases; use `include_str!` from
+  `tests/fixtures/` (real command output) once a case gets large or format-sensitive — see
+  `src/cmds/jvm/mvn_cmd.rs` for the pattern.
+- **`count_tokens` helper**: currently duplicated per test module — don't assume a shared
+  `tests/common/mod.rs` exists.
+- **Integration**: top-level `tests/*.rs` files, some with `#[ignore]`-tagged real-process tests.
 
 ## Testing Checklist
 
 When adding/modifying a filter:
 
 ### Implementation Phase
-- [ ] Create fixture from real command output
-- [ ] Add snapshot test with `assert_snapshot!()`
-- [ ] Add token accuracy test (verify ≥60% savings)
+- [ ] Write a unit test in the filter's own `#[cfg(test)] mod tests` block (inline string, or
+      `include_str!` fixture for larger/real output)
+- [ ] Add a token accuracy test (verify ≥20% savings) using a locally-defined `count_tokens`
 - [ ] Test cross-platform shell escaping (if applicable)
 
 ### Quality Checks
 - [ ] Run `cargo test --all` (all tests pass)
-- [ ] Run `cargo insta review` (review snapshots)
 - [ ] Run `cargo test --ignored` (integration tests pass)
 - [ ] Benchmark startup time with `hyperfine` (<10ms)
 
 ### Before Merge
 - [ ] All tests passing (`cargo test --all`)
-- [ ] Snapshots reviewed and accepted (`cargo insta accept`)
-- [ ] Token savings ≥60% verified
-- [ ] Cross-platform tests passed (macOS + Linux)
+- [ ] Token savings ≥20% verified
+- [ ] Cross-platform tests passed (Linux + macOS)
 - [ ] Performance benchmarks passed (<10ms startup)
 
 ### Before Release
 - [ ] Integration tests passed (`cargo test --ignored`)
 - [ ] Performance regression check (hyperfine comparison)
 - [ ] Memory usage verified (<5MB with `time -l`)
-- [ ] Cross-platform CI passed (macOS + Linux + Windows)
+- [ ] Cross-platform CI passed (Linux + macOS + Windows)
 
 ## Common Testing Patterns
 
-### Pattern: Snapshot + Token Accuracy
+### Pattern: Inline Fixture + Token Accuracy
 
-**Use case**: Testing filter output format and savings
+**Use case**: Testing filter output format and savings for a small/synthetic case
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
-    use insta::assert_snapshot;
 
     fn count_tokens(text: &str) -> usize {
         text.split_whitespace().count()
@@ -375,19 +419,33 @@ mod tests {
 
     #[test]
     fn test_output_format() {
-        let input = include_str!("../tests/fixtures/cmd_raw.txt");
+        let input = "raw command output here";
         let output = filter_cmd(input);
-        assert_snapshot!(output);
+        assert_eq!(output, "expected filtered output");
     }
 
     #[test]
     fn test_token_savings() {
-        let input = include_str!("../tests/fixtures/cmd_raw.txt");
+        let input = "raw command output here";
         let output = filter_cmd(input);
 
         let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
-        assert!(savings >= 60.0, "Expected ≥60% savings, got {:.1}%", savings);
+        assert!(savings >= 20.0, "Expected >=20% savings, got {:.1}%", savings);
     }
+}
+```
+
+### Pattern: `include_str!` Fixture (real captured output)
+
+**Use case**: Filter output is large enough or format-sensitive enough that hand-written
+strings would drift from reality — see `src/cmds/jvm/mvn_cmd.rs`.
+
+```rust
+#[test]
+fn test_mvn_test_pass() {
+    let input = include_str!("../../../tests/fixtures/mvn_test_pass_slice_raw.txt");
+    let output = filter_mvn_test(input);
+    assert!(output.contains("BUILD SUCCESS"));
 }
 ```
 
@@ -437,7 +495,7 @@ fn test_ansi_codes() {
 #[test]
 #[ignore]
 fn test_real_command_execution() {
-    let output = std::process::Command::new("rtk")
+    let output = common::rtk_command()
         .args(&["cmd", "args"])
         .output()
         .expect("Failed to run rtk");
@@ -460,12 +518,11 @@ let output = filter_git_log(input);
 // Synthetic data doesn't reflect real command output
 ```
 
-✅ **DO** use real command fixtures
+✅ **DO** assert directly on expected output
 ```rust
 // ✅ RIGHT
-let input = include_str!("../tests/fixtures/git_log_raw.txt");
 let output = filter_git_log(input);
-// Real output from `git log -20`
+assert_eq!(output, "expected output");
 ```
 
 ❌ **DON'T** skip cross-platform tests
@@ -513,7 +570,7 @@ hyperfine 'target/release/rtk cmd' --warmup 3 > /tmp/after.txt
 diff /tmp/before.txt /tmp/after.txt
 ```
 
-❌ **DON'T** accept <60% token savings
+❌ **DON'T** accept <20% token savings
 ```rust
 // ❌ WRONG - no savings verification
 #[test]
@@ -525,10 +582,10 @@ fn test_filter() {
 
 ✅ **DO** verify savings claims
 ```rust
-// ✅ RIGHT - verify ≥60% savings
+// ✅ RIGHT - verify ≥20% savings
 #[test]
 fn test_token_savings() {
     let savings = calculate_savings(input, output);
-    assert!(savings >= 60.0, "Expected ≥60%, got {:.1}%", savings);
+    assert!(savings >= 20.0, "Expected ≥20%, got {:.1}%", savings);
 }
 ```

@@ -6,12 +6,13 @@
 
 The **lifecycle management** layer for LLM agent hooks: install, uninstall, verify integrity, audit usage, and manage trust. This component creates and maintains the hook artifacts that live in `hooks/` (root), but does **not** execute rewrite logic itself — that lives in `discover/registry`.
 
-Owns: `rtk init` installation flows (5 agents via `AgentTarget` enum + 3 special modes: Gemini, Codex, OpenCode), SHA-256 integrity verification, hook version checking, audit log analysis, `rtk rewrite` CLI entry point, and TOML filter trust management.
+Owns: `rtk init` installation flows (6 agents via `AgentTarget` enum, now including Mistral Vibe + 3 special modes: Gemini, Codex, OpenCode), SHA-256 integrity verification, hook version checking, audit log analysis, `rtk rewrite` CLI entry point, and TOML filter trust management.
 
 Does **not** own: the deployed hook scripts themselves (that's `hooks/`), the rewrite pattern registry (that's `discover/`), or command filtering (that's `cmds/`).
 
 Boundary notes:
-- `rewrite_cmd.rs` is a thin CLI bridge — it exists to serve hooks (hooks call `rtk rewrite` as a subprocess) and delegates entirely to `discover/registry`.
+- `decision.rs` is the single place RTK decides what a hook should do with a command — deny, defer, rewrite-and-allow, or rewrite-and-ask. All three entry points route through it: the in-process `rtk hook <agent>` hosts (`hook_cmd.rs`), the `rtk rewrite` subprocess path (`rewrite_cmd.rs`), and the `rtk hook check` diagnostic (`main.rs`). Add a gate there, not in a caller.
+- `rewrite_cmd.rs` is a thin CLI bridge — it exists to serve hooks (hooks call `rtk rewrite` as a subprocess) and renders `decision.rs`'s verdict as the exit codes those delegates branch on.
 - `trust.rs` gates project-local TOML filter execution. It lives here because the trust workflow is tied to hook-installed filter discovery, not to the core filter engine.
 
 ## Purpose
@@ -28,9 +29,12 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 | Claude-MD (legacy) | `rtk init --claude-md` | 134-line RTK block | CLAUDE.md |
 | Windsurf | `rtk init -g --agent windsurf` | `.windsurfrules` | -- |
 | Cline | `rtk init --agent cline` | `.clinerules` | -- |
-| Codex | `rtk init --codex` | RTK.md in `$CODEX_HOME` or `~/.codex` | AGENTS.md |
+| Codex | `rtk init --codex` | RTK.md + `.codex/hooks.json` (local) or `$CODEX_HOME/hooks.json` (global) | AGENTS.md + `PreToolUse` hook |
 | Cursor | `rtk init -g --agent cursor` | Cursor hook | hooks.json |
+| Trae | `rtk init --agent trae` (project) or `rtk init -g --agent trae` (global) | Native `rtk hook trae` registration | `.trae/hooks.json`; global also patches existing `~/.trae-cn/hooks.json` |
+| Google Antigravity | `rtk init --agent antigravity` / `rtk init -g --agent antigravity` | Antigravity Plugin in `plugins/rtk/` | plugin.json, hooks.json, rules/AGENTS.md (awareness) |
 | Pi | `rtk init --agent pi` | `.pi/extensions/rtk.ts` | -- |
+| Oh My Pi (OMP) | `rtk init --agent omp` | `.omp/extensions/rtk.ts` (shared Pi extension) | -- |
 | Hermes | `rtk init --agent hermes` | Python plugin in `~/.hermes/plugins/rtk-rewrite/` | `config.yaml` `plugins.enabled` |
 
 
@@ -55,9 +59,9 @@ Controls how `rtk init` modifies agent settings files:
 
 | Mode | Flag | Behavior |
 |------|------|----------|
-| Ask (default) | -- | Prompts user `[y/N]`; defaults to No if stdin not terminal |
-| Auto | `--auto-patch` | Patches without prompting; for CI/scripted installs |
-| Skip | `--no-patch` | Prints manual instructions; user patches manually |
+| Ask (default) | -- | Prompts before settings changes, protected Pi/OMP overwrites, and definitively shared uninstalls; defaults to No if stdin not terminal |
+| Auto | `--auto-patch` | Patches without prompting and approves protected Pi/OMP extension updates; for CI/scripted installs |
+| Skip | `--no-patch` | Protected Pi/OMP actions leave files unchanged and exit nonzero; settings changes print manual instructions and succeed |
 
 ## Atomicity and Safety
 
@@ -68,10 +72,26 @@ All file operations use atomic writes (tempfile + rename) to prevent corruption 
 RTK enforces a permission precedence that matches Claude Code's least-privilege default:
 
 ```
-Deny > Ask > Allow (explicit) > Default (ask)
+Deny > Defer > Ask > Allow (explicit) > Default (ask)
 ```
 
 Rules are loaded from all Claude Code `settings.json` files (project + global, including `.local` variants). Only `Bash(...)` rules are extracted; other scopes (Read, Write) are ignored.
+
+Quoted `sh -c`, `bash -c`, `zsh -c` and `fish -c` scripts add a
+second command-parsing boundary. RTK checks deny rules against both the outer
+wrapper and the parsed inner segments, including a wrapper behind a prefix the
+rewrite strips (`env bash -c '…'`, `timeout 5 sh -c '…'`, a configured
+`transparent_prefixes` entry — `registry::shell_wrapper_positions`). A shell
+name that is merely an argument (`grep -rn bash -c src`) is not a wrapper. A
+deny rule matching an inner segment yields `Defer`: RTK neither rewrites nor
+decides, so the host sees the command exactly as typed.
+A wrapper at the start of a segment is never auto-allowed: its strongest RTK
+verdict is `Ask`. A wrapper behind a prefix is only checked for deny rules and
+otherwise keeps the outer command's verdict, as on master. Ask-capable hosts
+prompt, while other hosts retain their existing native permission flow.
+Unsupported or ambiguous wrapper syntax is left unchanged for the host to
+evaluate. Line continuations are joined before the check, as the rewrite joins
+them.
 
 | Verdict | Trigger | rewrite_cmd exit | Hook behavior |
 |---------|---------|-----------------|---------------|
@@ -79,6 +99,23 @@ Rules are loaded from all Claude Code `settings.json` files (project + global, i
 | Ask | `permissions.ask` rule matched | 3 | Rewrite + let host tool prompt user |
 | Allow | `permissions.allow` rule matched | 0 | Rewrite + auto-allow |
 | Default | No rule matched | 3 | Rewrite + let host tool prompt user |
+| Defer | `permissions.deny` rule matched inside a shell wrapper | 1 | Passthrough — command runs as without RTK |
+
+A deny or ask rule is matched against each segment as written, without the grammar a split leaves (`{`, `!`, `(`), and past each leading assignment or wrapper in turn (`registry::matching_readings`): `env HUSKY=0 git push` is read as `HUSKY=0 git push` and as `git push`, as Claude Code reads it. A reading need not be what the shell runs (`nohup HUSKY=0 git push` makes nohup look for a program named `HUSKY=0`), so it can only make a verdict stricter. Past 32 prefixes the command behind them is unread, and where a deny or ask rule exists the verdict is at least Ask. An allow rule matches the segment as written only, so a wrapper never inherits the allow of the command it runs.
+
+A delegate that shells out to `rtk rewrite` and applies its own exec policy to
+the result can set `RTK_REWRITE_HOST=<agent>` on that subprocess. For an agent
+whose `AgentPath` records it as owning approval — OpenClaw is the only one —
+`Default` renders as exit 0 instead of 3, because a `Default` verdict means no
+rule matched and RTK asking as well would be a second gate sourced from Claude
+Code's settings the runtime never opted into (#3908). An explicit `Ask` rule is
+the user's own instruction, so it still renders as exit 3 and the host still
+prompts. The verdict source is unchanged, and `Deny` still renders as exit 2 for
+every delegate, so naming a host can never relax an explicit deny or discard an
+explicit ask. An unknown or unset value keeps the table above — and a caller
+that does *not* own approval should scrub the variable before invoking `rtk
+rewrite`, since it is inherited by every child process. See `decision.rs`'s
+`ApprovalOwner`.
 
 ### Per-tool support
 
@@ -89,17 +126,22 @@ Rules are loaded from all Claude Code `settings.json` files (project + global, i
 | Cursor (rtk hook cursor) | Ready | `permission: "ask",` — users will be prompted when Cursor enforces the permission; in the meantime, allow |
 | Gemini CLI (rtk hook gemini) | No (allow/deny only) | allow (limitation — no ask mode in Gemini) |
 | Copilot CLI (rtk hook copilot) | No updatedInput | deny-with-suggestion (unchanged) |
-| Codex | ask parsed but no-op | allow (limitation — fails open) |
+| Codex (`rtk hook codex`) | Native approval runs after rewrite | Emit required protocol `allow` with `updatedInput`; Codex then evaluates the rewritten command normally |
+| Trae (`rtk hook trae`) | Host-owned approval | Return only `updatedInput`; omit `permissionDecision` |
+| Mistral Vibe (rtk hook vibe) | No native ask surface | passthrough — Vibe's own approval prompt fires on the rewritten command |
+| OpenClaw (`openclaw/index.ts` → `rtk rewrite`) | Host-owned approval (`RTK_REWRITE_HOST=openclaw`) | Rewrite with no RTK prompt when no rule matched; an explicit `Ask` still exits 3 and the plugin prompts. OpenClaw's `tools.exec.mode`/`security`/`ask` decide. A `Deny` still exits 2 and the plugin blocks the call |
+| Google Antigravity (rtk hook antigravity) | Native approval runs after rewrite | allow with overwrite.CommandLine — Antigravity evaluates permissions after hook |
 
 ### Implementation
 
 - `permissions.rs` — loads deny/ask/allow rules, evaluates precedence, returns `PermissionVerdict`
 - `rewrite_cmd.rs` — maps verdict to exit code (consumed by shell hook)
-- `hook_cmd.rs` — maps verdict to JSON `permissionDecision` field (Copilot/Gemini)
+- `hook_cmd.rs` — maps decisions to each agent's JSON protocol, including Codex `updatedInput`
+- `discover/shell_wrapper.rs` — shares conservative script-span parsing between rewrite and permission checks
 
 ## Exit Code Contract
 
 Hook processors in `hook_cmd.rs` must return `Ok(())` on every path — success, no-match, parse error, and unexpected input. Returning `Err` propagates to `main()` and exits non-zero, which blocks the agent's command from executing. This violates the non-blocking guarantee documented in `hooks/README.md`.
 
 ## Adding New Functionality
-To add support for a new AI coding agent: (1) add the hook installation logic to `init.rs` following the existing agent patterns, (2) if the agent requires a custom hook protocol (like Gemini's `BeforeTool`), add a processor function in `hook_cmd.rs`, (3) add the agent's hook file path to `hook_check.rs` for validation, and (4) update `integrity.rs` with the expected hash for the new hook file. Test by running `rtk init` in a fresh environment and verifying the hook rewrites commands correctly in the target agent.
+To add support for a new AI coding agent: (1) add the hook installation logic to `src/hooks/init/` following the existing agent patterns, (2) if the agent requires a custom hook protocol (like Gemini's `BeforeTool` or Vibe's `pre_tool`), add a processor function in `hook_cmd.rs` and a matching `HookCommands::<Agent>` variant + `AgentTarget::<Agent>` enum entry in `main.rs`, (3) if the agent has installable permission surfaces (denylist / allowlist), wire them into `permissions.rs::check_command_for` via a new `Host::<Agent>` variant, and (4) update `integrity.rs` with the expected hash for the new hook file. Note that `hook_check.rs::maybe_warn()` only checks the Claude Code hook — other agents don't have an outdated-hook warning path. Test by running `rtk init` in a fresh environment and verifying the hook rewrites commands correctly in the target agent.

@@ -3,6 +3,7 @@
 use super::test_output::filter_test_runner_output;
 use super::utils::php_tool_command;
 use crate::core::runner;
+use crate::core::shell::display_args;
 use anyhow::Result;
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
@@ -24,7 +25,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "paratest",
-        &args.join(" "),
+        &display_args(args),
         filter_test_runner_output,
         runner::RunOptions::default(),
     )
