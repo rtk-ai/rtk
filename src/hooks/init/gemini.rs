@@ -66,12 +66,7 @@ pub fn run_gemini(
     // 2. Install GEMINI.md (RTK awareness for Gemini)
     if !hook_only {
         let gemini_md_path = gemini_dir.join(GEMINI_MD);
-        write_if_changed(
-            &gemini_md_path,
-            awareness_content(ctx.awareness),
-            GEMINI_MD,
-            ctx,
-        )?;
+        install_gemini_md(&gemini_md_path, ctx)?;
     }
 
     // 3. Patch ~/.gemini/settings.json
@@ -93,6 +88,112 @@ pub fn run_gemini(
         println!("  Restart Gemini CLI. Test with: git status\n");
     }
     Ok(())
+}
+
+/// Build the RTK-owned marker block written into GEMINI.md.
+fn gemini_md_block(level: AwarenessLevel) -> String {
+    format!(
+        "{RTK_BLOCK_START} v2 -->\n{}\n{RTK_BLOCK_END}",
+        awareness_content(level).trim()
+    )
+}
+
+/// True when `content` is exactly what a pre-#834 `rtk init -g --gemini` wrote:
+/// one of the awareness documents, unmarked. Such a file is RTK-only, so it is
+/// safe to replace on install and delete on uninstall.
+fn is_legacy_rtk_gemini_md(content: &str) -> bool {
+    let trimmed = content.trim();
+    !trimmed.is_empty()
+        && [
+            RTK_AWARENESS_DEFAULT,
+            RTK_AWARENESS_HIGH,
+            RTK_AWARENESS_FULL,
+        ]
+        .iter()
+        .any(|doc| doc.trim() == trimmed)
+}
+
+/// Upsert the RTK block into GEMINI.md instead of overwriting the file, so a
+/// user's own GEMINI.md is preserved (#834). A legacy RTK-only file (written
+/// whole by older versions, without markers) is replaced rather than appended
+/// to, otherwise the awareness text would end up in the file twice.
+fn install_gemini_md(path: &Path, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    if path.exists() {
+        let existing = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        if is_legacy_rtk_gemini_md(&existing) {
+            if dry_run {
+                println!(
+                    "[dry-run] would replace legacy RTK-only {}: {}",
+                    GEMINI_MD,
+                    path.display()
+                );
+                return Ok(());
+            }
+            atomic_write(path, "")
+                .with_context(|| format!("Failed to write {}", path.display()))?;
+        }
+    }
+    write_rtk_block(
+        path,
+        &gemini_md_block(ctx.awareness),
+        GEMINI_MD,
+        "rtk init -g --gemini",
+        ctx,
+    )?;
+    Ok(())
+}
+
+/// Remove RTK's part of GEMINI.md. Returns the summary line for the uninstall
+/// report, or `None` when the file holds no RTK content.
+///
+/// - marker block present: strip it; delete the file if nothing else remains
+/// - legacy RTK-only file (no markers): delete it, as before #834
+/// - anything else is the user's and is left alone
+fn uninstall_gemini_md(path: &Path, dry_run: bool) -> Result<Option<String>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+
+    let (cleaned, had_block) = remove_rtk_block(&content);
+    let delete_whole_file = if had_block {
+        cleaned.trim().is_empty()
+    } else {
+        is_legacy_rtk_gemini_md(&content)
+    };
+
+    if delete_whole_file {
+        if dry_run {
+            println!("[dry-run] would remove {}: {}", GEMINI_MD, path.display());
+        } else {
+            // nosemgrep: filesystem-deletion -- expected in hooks/init uninstall-path cleanup and tests.
+            fs::remove_file(path)
+                .with_context(|| format!("Failed to remove {}", path.display()))?;
+        }
+        return Ok(Some(format!("{}: {}", GEMINI_MD, path.display())));
+    }
+
+    if had_block {
+        if dry_run {
+            println!(
+                "[dry-run] would remove rtk-instructions block from {}",
+                path.display()
+            );
+        } else {
+            atomic_write(path, &cleaned)
+                .with_context(|| format!("Failed to write {}", path.display()))?;
+        }
+        return Ok(Some(format!(
+            "{}: removed rtk-instructions block from {}",
+            GEMINI_MD,
+            path.display()
+        )));
+    }
+
+    Ok(None)
 }
 
 /// Print the manual-setup instructions for ~/.gemini/settings.json, shared by
@@ -274,17 +375,10 @@ pub(super) fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
         removed.push(format!("Gemini hook: {}", hook_path.display()));
     }
 
-    // Remove GEMINI.md
+    // Remove the RTK block from GEMINI.md, preserving user content (#834).
     let gemini_md = gemini_dir.join(GEMINI_MD);
-    if gemini_md.exists() {
-        if dry_run {
-            println!("[dry-run] would remove GEMINI.md: {}", gemini_md.display());
-        } else {
-            // nosemgrep: filesystem-deletion -- expected in hooks/init uninstall-path cleanup and tests.
-            fs::remove_file(&gemini_md)
-                .with_context(|| format!("Failed to remove {}", gemini_md.display()))?;
-        }
-        removed.push(format!("GEMINI.md: {}", gemini_md.display()));
+    if let Some(msg) = uninstall_gemini_md(&gemini_md, dry_run)? {
+        removed.push(msg);
     }
 
     // Remove hook from settings.json
@@ -366,5 +460,106 @@ mod tests {
             content, original,
             "settings.json must not be overwritten when parsing fails"
         );
+    }
+}
+
+#[cfg(test)]
+mod gemini_md_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn ctx() -> InitContext {
+        InitContext {
+            dry_run: false,
+            ..InitContext::default()
+        }
+    }
+
+    fn read(p: &Path) -> String {
+        fs::read_to_string(p).expect("read GEMINI.md")
+    }
+
+    #[test]
+    fn install_preserves_user_content_and_uninstall_strips_only_the_block() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join(GEMINI_MD);
+        fs::write(&path, "# My Gemini notes\n\nDo the thing.\n").expect("seed");
+
+        install_gemini_md(&path, ctx()).expect("install");
+        let installed = read(&path);
+        assert!(installed.starts_with("# My Gemini notes"));
+        assert_eq!(installed.matches(RTK_BLOCK_START).count(), 1);
+
+        // Idempotent.
+        install_gemini_md(&path, ctx()).expect("reinstall");
+        assert_eq!(read(&path), installed);
+
+        let msg = uninstall_gemini_md(&path, false).expect("uninstall");
+        assert!(msg.is_some_and(|m| m.contains("removed rtk-instructions block")));
+        let cleaned = read(&path);
+        assert!(cleaned.contains("My Gemini notes"));
+        assert!(!cleaned.contains(RTK_BLOCK_START));
+    }
+
+    #[test]
+    fn legacy_rtk_only_file_is_replaced_not_duplicated() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join(GEMINI_MD);
+        // What a pre-#834 init wrote: the awareness document, no markers.
+        fs::write(&path, RTK_AWARENESS_DEFAULT).expect("seed");
+
+        install_gemini_md(&path, ctx()).expect("install");
+        let installed = read(&path);
+        assert!(installed.starts_with(RTK_BLOCK_START));
+        assert_eq!(installed.matches(RTK_BLOCK_START).count(), 1);
+        let first_line = RTK_AWARENESS_DEFAULT.lines().next().expect("line");
+        assert_eq!(
+            installed.matches(first_line).count(),
+            1,
+            "awareness text duplicated"
+        );
+
+        // RTK-only after install: uninstall deletes the file.
+        uninstall_gemini_md(&path, false).expect("uninstall");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn legacy_rtk_only_file_is_deleted_on_uninstall() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join(GEMINI_MD);
+        fs::write(&path, RTK_AWARENESS_HIGH).expect("seed");
+
+        let msg = uninstall_gemini_md(&path, false).expect("uninstall");
+        assert!(msg.is_some());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn user_file_without_rtk_content_is_left_alone() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join(GEMINI_MD);
+        fs::write(&path, "# Mine\n").expect("seed");
+
+        assert!(
+            uninstall_gemini_md(&path, false)
+                .expect("uninstall")
+                .is_none()
+        );
+        assert_eq!(read(&path), "# Mine\n");
+    }
+
+    #[test]
+    fn end_marker_above_the_block_does_not_eat_user_content() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join(GEMINI_MD);
+        let user = format!("# Notes\nThe closing marker is `{RTK_BLOCK_END}`.\nKeep me.\n");
+        fs::write(&path, &user).expect("seed");
+
+        install_gemini_md(&path, ctx()).expect("install");
+        uninstall_gemini_md(&path, false).expect("uninstall");
+        let cleaned = read(&path);
+        assert!(cleaned.contains("Keep me."));
+        assert!(!cleaned.contains(RTK_BLOCK_START));
     }
 }
