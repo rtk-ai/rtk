@@ -26,6 +26,33 @@ jobs:
           git fetch origin "${{ github.base_ref }}" --depth=1 || true
           bash scripts/check-test-presence.sh "origin/${{ github.base_ref }}"
 
+  plugin-tests:
+    name: agent plugin test suites
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build RTK for hook integration tests
+        run: |
+          cargo build --locked --bin rtk
+          echo "$PWD/target/debug" >> "$GITHUB_PATH"
+      - name: Hermes plugin (Python)
+        run: python3 -m unittest discover -s hooks/hermes/tests -v
+      - name: JavaScript agent extensions (OpenCode and optional Pi)
+        shell: bash
+        run: |
+          shopt -s nullglob
+          tests=(hooks/opencode/rtk.test.mjs hooks/pi/*.test.mjs)
+          node --test "${tests[@]}"
+      - name: Claude rewrite hook (Bash)
+        run: HOOK="$PWD/hooks/claude/rtk-rewrite.sh" bash hooks/claude/test-rtk-rewrite.sh
+      - name: Copilot rewrite hook (Bash)
+        run: RTK="$PWD/target/debug/rtk" bash hooks/copilot/test-rtk-rewrite.sh
+
   fmt:
     name: fmt
     runs-on: ubuntu-latest
