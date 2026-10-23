@@ -2927,10 +2927,88 @@ const GIT_PUSH_NOISE_PREFIXES: &[&str] = &[
     "Total ",
 ];
 
+// Remote (server-side) progress echoed back during a push — dropped from the stream.
+const GIT_PUSH_REMOTE_NOISE_PREFIXES: &[&str] = &["Resolving deltas:"];
+
+/// One `<flag> <summary> <from> -> <to> [(<reason>)]` line from the ref table git
+/// prints under `To <url>`, reduced to how the summary line names it.
+fn parse_push_ref_line(line: &str) -> Option<String> {
+    let mut chars = line.chars();
+    let (Some(' '), Some(flag), Some(' ')) = (chars.next(), chars.next(), chars.next()) else {
+        return None;
+    };
+    if !matches!(flag, ' ' | '+' | '-' | '*' | '!' | '=') {
+        return None;
+    }
+    let rest = line[3..].trim_start();
+    let (summary, refs) = if rest.starts_with('[') {
+        let end = rest.find(']')?;
+        (&rest[..=end], &rest[end + 1..])
+    } else {
+        rest.split_once(char::is_whitespace)?
+    };
+    let refs = refs.trim();
+    let refs = match refs.rfind(" (") {
+        Some(idx) if refs.ends_with(')') => &refs[..idx],
+        _ => refs,
+    };
+    let dest = refs.rsplit_once(" -> ").map_or(refs, |(_, to)| to).trim();
+    if dest.is_empty() || dest.contains(char::is_whitespace) {
+        return None;
+    }
+    let note = match flag {
+        '+' => " (forced)",
+        '-' => " (deleted)",
+        '=' => " (up-to-date)",
+        '!' => " (rejected)",
+        '*' if summary.contains("tag") => " (new tag)",
+        '*' if summary.contains("branch") => " (new branch)",
+        '*' => " (new)",
+        _ => "",
+    };
+    Some(format!("{dest}{note}"))
+}
+
+/// Holds back the `To <url>` block and "Everything up-to-date": on success the
+/// summary line says the same in one line; on failure they are replayed verbatim.
 #[derive(Default)]
 struct GitPushLineHandler {
     up_to_date: bool,
-    pushed_ref: Option<String>,
+    in_ref_table: bool,
+    held: Vec<String>,
+    refs: Vec<String>,
+    in_dependabot_notice: bool,
+}
+
+impl GitPushLineHandler {
+    /// GitHub appends a Dependabot alert banner to every push on a repo with open
+    /// alerts. It reports the default branch's standing state, not anything the push
+    /// did, so it is dropped: the summary line, then its indented `.../security/dependabot`
+    /// link.
+    fn is_remote_noise(&mut self, msg: &str) -> bool {
+        let msg_trimmed = msg.trim();
+        if msg_trimmed.is_empty() {
+            return true;
+        }
+        if self.in_dependabot_notice {
+            self.in_dependabot_notice = false;
+            if msg_trimmed.ends_with("/security/dependabot") {
+                return true;
+            }
+        }
+        if msg.starts_with("GitHub found ") && msg.contains(" vulnerabilit") {
+            self.in_dependabot_notice = true;
+            return true;
+        }
+        GIT_PUSH_REMOTE_NOISE_PREFIXES
+            .iter()
+            .any(|p| msg.starts_with(p))
+    }
+
+    fn hold(&mut self, line: &str) -> bool {
+        self.held.push(line.to_string());
+        true
+    }
 }
 
 impl LineHandler for GitPushLineHandler {
@@ -2938,38 +3016,57 @@ impl LineHandler for GitPushLineHandler {
         if line.is_empty() {
             return true;
         }
+        if let Some(msg) = line.strip_prefix("remote:") {
+            return self.is_remote_noise(msg.trim_start());
+        }
+        if line.starts_with("To ") {
+            self.in_ref_table = true;
+            return self.hold(line);
+        }
+        if line.trim() == "Everything up-to-date" {
+            self.up_to_date = true;
+            return self.hold(line);
+        }
+        if self.in_ref_table {
+            if let Some(name) = parse_push_ref_line(line) {
+                self.refs.push(name);
+                return self.hold(line);
+            }
+            self.in_ref_table = false;
+        }
         let trimmed = line.trim_start();
         GIT_PUSH_NOISE_PREFIXES
             .iter()
             .any(|p| trimmed.starts_with(p))
     }
 
-    fn observe_line(&mut self, line: &str) {
-        if line.contains("Everything up-to-date") {
-            self.up_to_date = true;
-        }
-        if self.pushed_ref.is_none()
-            && let Some(idx) = line.find(" -> ")
-        {
-            let after = &line[idx + 4..];
-            if let Some(dest) = after.split_whitespace().next() {
-                self.pushed_ref = Some(dest.to_string());
+    fn format_summary(&self, exit_code: i32, _raw: &str) -> Option<String> {
+        let mut out = String::new();
+        // Failure, or a To block in a format we did not parse (e.g. --porcelain):
+        // nothing held back may be lost.
+        if exit_code != 0 || (self.refs.is_empty() && !self.up_to_date) {
+            for line in &self.held {
+                out.push_str(line);
+                out.push('\n');
             }
         }
-    }
-
-    fn format_summary(&self, exit_code: i32, _raw: &str) -> Option<String> {
         if exit_code != 0 {
-            return None;
+            return (!out.is_empty()).then_some(out);
         }
-        let summary = if self.up_to_date {
-            "ok (up-to-date)".to_string()
-        } else if let Some(dest) = &self.pushed_ref {
-            format!("ok {}", dest)
+        if !self.refs.is_empty() {
+            let shown = &self.refs[..self.refs.len().min(CAP_LIST)];
+            out.push_str("ok ");
+            out.push_str(&shown.join(", "));
+            if self.refs.len() > CAP_LIST {
+                out.push_str(&format!(", … +{} more", self.refs.len() - CAP_LIST));
+            }
+        } else if self.up_to_date {
+            out.push_str("ok (up-to-date)");
         } else {
-            "ok".to_string()
-        };
-        Some(format!("{}\n", summary))
+            out.push_str("ok");
+        }
+        out.push('\n');
+        Some(out)
     }
 }
 
@@ -2980,7 +3077,8 @@ fn run_push(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
         eprintln!("git push");
     }
 
-    let mut cmd = git_cmd(global_args);
+    // The handler matches git's English progress and "Everything up-to-date" phrases.
+    let mut cmd = git_cmd_c_locale(global_args);
     cmd.arg("push");
     for arg in args {
         cmd.arg(arg);
@@ -3012,7 +3110,8 @@ fn run_pull(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
         eprintln!("git pull");
     }
 
-    let mut cmd = git_cmd(global_args);
+    // The summary matches git's English "Already up to date" / "files changed" phrases.
+    let mut cmd = git_cmd_c_locale(global_args);
     cmd.arg("pull");
     for arg in args {
         cmd.arg(arg);
@@ -6908,31 +7007,66 @@ To https://github.com/foo/bar.git
                 result
             );
         }
-        assert!(result.contains("To https://github.com/foo/bar.git"));
-        assert!(result.contains("master -> master"));
-        assert!(result.ends_with("ok master\n"), "got: {}", result);
+        assert_eq!(result, "ok master\n");
     }
 
     #[test]
     fn test_push_filter_up_to_date_summary() {
         let input = "Everything up-to-date\n";
         let result = run_push_filter(input, 0);
-        assert!(result.contains("Everything up-to-date"));
-        assert!(result.ends_with("ok (up-to-date)\n"), "got: {}", result);
+        assert_eq!(result, "ok (up-to-date)\n");
     }
 
     #[test]
     fn test_push_filter_passes_remote_messages_through() {
         let input = "\
-remote: Resolving deltas: 100% (2/2), completed with 2 local objects.
-remote: GitHub found 1 vulnerability on foo/bar's default branch (1 moderate).
+remote: error: GH006: Protected branch update failed for refs/heads/main.
+remote: Create a pull request for 'feature' on GitHub by visiting:
+remote:      https://github.com/foo/bar/pull/new/feature
 To https://github.com/foo/bar.git
    abc1234..def5678  feature -> feature
 ";
         let result = run_push_filter(input, 0);
-        assert!(result.contains("remote: Resolving deltas"));
-        assert!(result.contains("remote: GitHub found 1 vulnerability"));
+        assert!(result.contains("remote: error: GH006"));
+        assert!(result.contains("remote: Create a pull request"));
+        assert!(result.contains("remote:      https://github.com/foo/bar/pull/new/feature"));
         assert!(result.ends_with("ok feature\n"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_push_filter_drops_dependabot_banner_and_remote_progress() {
+        let input = "\
+Enumerating objects: 7, done.
+Counting objects: 100% (7/7), done.
+Delta compression using up to 16 threads
+Compressing objects: 100% (3/3), done.
+Writing objects: 100% (3/3), 569 bytes | 569.00 KiB/s, done.
+Total 3 (delta 2), reused 0 (delta 0), pack-reused 0 (from 0)
+remote: Resolving deltas: 100% (2/2), completed with 2 local objects.
+remote: 
+remote: GitHub found 49 vulnerabilities on foo/bar's default branch (3 critical, 27 high, 17 moderate, 2 low). To find out more, visit:
+remote:      https://github.com/foo/bar/security/dependabot
+remote: 
+To github.com:foo/bar.git
+   8023489420..f866479bd2  feat/x -> feat/x
+";
+        let result = run_push_filter(input, 0);
+        assert_eq!(result, "ok feat/x\n");
+    }
+
+    #[test]
+    fn test_push_filter_dependabot_skip_only_consumes_its_own_link() {
+        let input = "\
+remote: GitHub found 1 vulnerability on foo/bar's default branch (1 moderate). To find out more, visit:
+remote: Create a pull request for 'feature' on GitHub by visiting:
+";
+        let result = run_push_filter(input, 0);
+        assert!(!result.contains("vulnerability"), "got: {}", result);
+        assert!(
+            result.contains("remote: Create a pull request"),
+            "got: {}",
+            result
+        );
     }
 
     #[test]
@@ -6953,14 +7087,73 @@ error: failed to push some refs to 'https://github.com/foo/bar.git'
     }
 
     #[test]
-    fn test_push_filter_first_ref_wins_for_summary() {
+    fn test_push_filter_lists_every_ref_with_its_kind() {
         let input = "\
-To https://github.com/foo/bar.git
+To github.com:foo/bar.git
    abc1234..def5678  feat/a -> feat/a
-   1111111..2222222  feat/b -> feat/b
+ + 1111111...2222222 feat/b -> feat/b (forced update)
+ * [new branch]      feat/c -> feat/c
+ * [new tag]         v1.2.0 -> v1.2.0
+ - [deleted]         old
 ";
         let result = run_push_filter(input, 0);
-        assert!(result.ends_with("ok feat/a\n"), "got: {}", result);
+        assert_eq!(
+            result,
+            "ok feat/a, feat/b (forced), feat/c (new branch), v1.2.0 (new tag), old (deleted)\n"
+        );
+    }
+
+    #[test]
+    fn test_push_filter_collapses_plain_push_to_one_line() {
+        let input = "\
+To github.com:foo/bar.git
+   efa2b6f47d..94521b17e6  lol -> lol
+";
+        assert_eq!(run_push_filter(input, 0), "ok lol\n");
+    }
+
+    #[test]
+    fn test_push_filter_replays_ref_table_on_failure() {
+        let input = "\
+To github.com:foo/bar.git
+   abc1234..def5678  feat/a -> feat/a
+ ! [rejected]        main -> main (fetch first)
+error: failed to push some refs to 'github.com:foo/bar.git'
+hint: Updates were rejected because the remote contains work that you do not
+";
+        let result = run_push_filter(input, 1);
+        assert_eq!(
+            result,
+            concat!(
+                "error: failed to push some refs to 'github.com:foo/bar.git'\n",
+                "hint: Updates were rejected because the remote contains work that you do not\n",
+                "To github.com:foo/bar.git\n",
+                "   abc1234..def5678  feat/a -> feat/a\n",
+                " ! [rejected]        main -> main (fetch first)\n",
+            )
+        );
+    }
+
+    #[test]
+    fn test_push_filter_keeps_unparsed_ref_table() {
+        // --porcelain prints a tab-separated table the parser does not claim.
+        let input = "\
+To github.com:foo/bar.git
+*\trefs/heads/x:refs/heads/x\t[new branch]
+Done
+";
+        let result = run_push_filter(input, 0);
+        assert!(
+            result.contains("*\trefs/heads/x:refs/heads/x"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("To github.com:foo/bar.git"),
+            "got: {}",
+            result
+        );
+        assert!(result.ends_with("ok\n"), "got: {}", result);
     }
 
     #[test]
