@@ -1698,6 +1698,14 @@ fn rewrite_shell_wrapper(
     wrapper.replace_script(command, &rewritten)
 }
 
+#[cfg(feature = "engine")]
+pub(crate) fn chain_mentions_excluded(cmd: &str, excluded: &[String]) -> bool {
+    let compiled = compile_exclude_patterns(excluded);
+    split_command_chain(cmd)
+        .iter()
+        .any(|segment| is_excluded(segment.trim(), &compiled))
+}
+
 fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
     excluded.iter().any(|pat| match pat {
         ExcludePattern::Regex(re) => re.is_match(cmd),

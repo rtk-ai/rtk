@@ -151,16 +151,48 @@ fn shell_gate(v: &Value) -> bool {
         }
         ShellHookDecision::Swap { command, rule } => {
             let verdict = permissions::check_command_for(cmd, permissions::Host::Claude);
-            match decision::decide_for_agent(cmd, verdict) {
-                HookDecision::AllowRewrite(_) | HookDecision::AskRewrite(_) => {
-                    let output = pre_tool_use_rewrite_output(v, &command, None);
-                    let _ = writeln!(io::stdout(), "{output}");
-                    audit_log("rewrite", cmd, &command);
-                    log(v, "shell", cmd, &rule, "swap");
-                    true
-                }
-                HookDecision::Deny | HookDecision::Defer => false,
+            let (excluded, transparent) = crate::core::config::hook_rewrite_params();
+            if !swappable(
+                cmd,
+                verdict,
+                decision::decide_for_agent(cmd, verdict),
+                &excluded,
+                &transparent,
+            ) {
+                return false;
             }
+            let output = pre_tool_use_rewrite_output(v, &command, None);
+            let _ = writeln!(io::stdout(), "{output}");
+            audit_log("rewrite", cmd, &command);
+            log(v, "shell", cmd, &rule, "swap");
+            true
+        }
+    }
+}
+
+fn swappable(
+    cmd: &str,
+    verdict: permissions::PermissionVerdict,
+    rewrite: HookDecision,
+    excluded: &[String],
+    transparent: &[String],
+) -> bool {
+    use crate::discover::registry;
+    use permissions::PermissionVerdict;
+    match rewrite {
+        HookDecision::AllowRewrite(_) | HookDecision::AskRewrite(_) => true,
+        HookDecision::Deny => false,
+        HookDecision::Defer => {
+            matches!(
+                verdict,
+                PermissionVerdict::Allow | PermissionVerdict::Ask | PermissionVerdict::Default
+            ) && !crate::discover::lexer::contains_unattestable_construct(cmd)
+                && cmd.split_whitespace().next() != Some("rtk")
+                && !cmd.contains(['\n', '\r', '\\'])
+                && !registry::has_heredoc(cmd)
+                && !cmd.contains("$((")
+                && !registry::chain_mentions_excluded(cmd, excluded)
+                && registry::rewrite_command(cmd, &[], transparent).is_none()
         }
     }
 }
@@ -192,4 +224,96 @@ fn log(v: &Value, subject: &str, target: &str, rule: &str, action: &str) {
         action: Some(action.to_string()),
         ..pipeline_log::LogEntry::default()
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use permissions::PermissionVerdict;
+
+    fn decide(cmd: &str, verdict: PermissionVerdict, excluded: &[String]) -> bool {
+        let rewrite = decision::decide_with_params(cmd, verdict, excluded, &[]);
+        let rewrite = decision::suppress_identity(cmd, rewrite);
+        swappable(cmd, verdict, rewrite, excluded, &[])
+    }
+
+    #[test]
+    fn a_command_rtk_has_no_filter_for_is_swapped() {
+        assert!(decide("./run-suite.sh", PermissionVerdict::Default, &[]));
+        assert!(decide("python3 -c 1", PermissionVerdict::Allow, &[]));
+        assert!(decide(
+            "./run-suite.sh --fast && ./lint.sh",
+            PermissionVerdict::Default,
+            &[]
+        ));
+    }
+
+    #[test]
+    fn a_filtered_command_is_swapped_as_before() {
+        assert!(decide("git log -3", PermissionVerdict::Default, &[]));
+        assert!(decide("git log -3", PermissionVerdict::Allow, &[]));
+        assert!(decide("bash -c 'ls'", PermissionVerdict::Ask, &[]));
+    }
+
+    #[test]
+    fn an_ask_rule_swaps_like_any_other() {
+        assert!(decide("./run-suite.sh", PermissionVerdict::Ask, &[]));
+        assert!(decide("git log -3", PermissionVerdict::Ask, &[]));
+    }
+
+    #[test]
+    fn deny_and_defer_rules_stop_the_swap() {
+        assert!(!decide("./run-suite.sh", PermissionVerdict::Deny, &[]));
+        assert!(!decide("git log -3", PermissionVerdict::Deny, &[]));
+        assert!(!decide("./run-suite.sh", PermissionVerdict::Defer, &[]));
+    }
+
+    #[test]
+    fn commands_the_gate_cannot_attest_are_not_swapped() {
+        for cmd in [
+            "./run-suite.sh $(cat flags)",
+            "./run-suite.sh `cat flags`",
+            "cat <<EOF\nx\nEOF",
+            "echo $((1 + 2))",
+            "./run-suite.sh \\\n --fast",
+            "./a.sh\n./b.sh",
+        ] {
+            assert!(!decide(cmd, PermissionVerdict::Allow, &[]), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn rtk_commands_are_not_swapped_again() {
+        assert!(!decide("rtk git log -3", PermissionVerdict::Allow, &[]));
+        assert!(!decide(
+            "rtk check --question q -- ./run-suite.sh",
+            PermissionVerdict::Default,
+            &[]
+        ));
+    }
+
+    #[test]
+    fn excluded_commands_are_not_swapped() {
+        let excluded = vec!["./run-suite.sh".to_string(), "curl".to_string()];
+        assert!(!decide(
+            "./run-suite.sh",
+            PermissionVerdict::Allow,
+            &excluded
+        ));
+        assert!(!decide(
+            "cd x && curl -s a",
+            PermissionVerdict::Allow,
+            &excluded
+        ));
+        assert!(decide("python3 -c 1", PermissionVerdict::Allow, &excluded));
+    }
+
+    #[test]
+    fn an_excluded_command_behind_a_wrapper_is_not_swapped() {
+        let excluded = vec!["make".to_string()];
+        for cmd in ["sh -c 'make'", "env FOO=1 make", "time make", "make test"] {
+            assert!(!decide(cmd, PermissionVerdict::Allow, &excluded), "{cmd}");
+            assert!(decide(cmd, PermissionVerdict::Allow, &[]), "{cmd}");
+        }
+    }
 }
