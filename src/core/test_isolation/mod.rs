@@ -96,6 +96,28 @@ pub fn with_agent_dir<R>(tmp: &Path, var: &str, dir: &Path, f: impl FnOnce() -> 
     with_root(&home, || user_env::with_path(var, Some(dir), f))
 }
 
+/// Run `f` with the process umask set to `mask`, restored when `f` returns or
+/// panics. The umask is process-wide: the tests that set it run one at a time
+/// through here, and any other test running meanwhile creates its files under
+/// `mask` too, so a test whose expected mode depends on the umask goes through
+/// here as well. Not reentrant: `f` must not call it again.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub fn with_umask<R>(mask: libc::mode_t, f: impl FnOnce() -> R) -> R {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    struct Restore(libc::mode_t);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            // nosemgrep: unsafe-block
+            unsafe { libc::umask(self.0) };
+        }
+    }
+    let _lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    // nosemgrep: unsafe-block
+    let _restore = Restore(unsafe { libc::umask(mask) });
+    f()
+}
+
 /// Whether `path` lies inside the scratch directory, as spelt or with links
 /// resolved: the working directory comes back resolved (`/private/var/…` on
 /// macOS), while the scratch path is spelt as the temporary directory was.

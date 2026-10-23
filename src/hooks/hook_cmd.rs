@@ -157,15 +157,22 @@ fn heal_legacy_copilot_configs() -> Vec<std::path::PathBuf> {
     use super::constants::{COPILOT_HOOK_FILE, GITHUB_DIR, HOOKS_SUBDIR};
 
     let mut healed = Vec::new();
-    let project = std::path::Path::new(GITHUB_DIR)
-        .join(HOOKS_SUBDIR)
-        .join(COPILOT_HOOK_FILE);
-    if heal_legacy_hook_file(&project) {
+    let github = user_dirs::in_working_dir(GITHUB_DIR);
+    let hooks_dir = github.join(HOOKS_SUBDIR);
+    let project = hooks_dir.join(COPILOT_HOOK_FILE);
+    // A project config reached through a symlink came with the repository:
+    // reading it could block on whatever the link names, and healing it would
+    // write there.
+    if !github.is_symlink()
+        && !hooks_dir.is_symlink()
+        && std::fs::symlink_metadata(&project).is_ok_and(|meta| meta.is_file())
+        && heal(&project)
+    {
         healed.push(project);
     }
     if let Ok(dir) = super::init::copilot_user_dir() {
         let global = dir.join(HOOKS_SUBDIR).join(COPILOT_HOOK_FILE);
-        if heal_legacy_hook_file(&global) {
+        if std::fs::metadata(&global).is_ok_and(|meta| meta.is_file()) && heal(&global) {
             healed.push(global);
         }
     }
@@ -185,18 +192,19 @@ fn legacy_camelcase_entry() -> Value {
     }])
 }
 
-fn heal_legacy_hook_file(path: &std::path::Path) -> bool {
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return false;
-    };
-    let Ok(mut config) = serde_json::from_str::<Value>(&raw) else {
-        return false;
-    };
-    let Some(hooks) = config.get("hooks").and_then(|h| h.as_object()) else {
-        return false;
-    };
+/// Rewrite `path` without the stale camelCase entry, when it holds one.
+fn heal(path: &std::path::Path) -> bool {
+    healed_config(path).is_some_and(|content| super::init::atomic_write(path, &content).is_ok())
+}
+
+/// The content `path` heals to, when it holds rtk's stale camelCase entry next
+/// to the current one.
+fn healed_config(path: &std::path::Path) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let mut config = serde_json::from_str::<Value>(&raw).ok()?;
+    let hooks = config.get("hooks").and_then(|h| h.as_object())?;
     if hooks.get("preToolUse") != Some(&legacy_camelcase_entry()) {
-        return false;
+        return None;
     }
     let pascalcase_still_registered = hooks
         .get("PreToolUse")
@@ -207,31 +215,20 @@ fn heal_legacy_hook_file(path: &std::path::Path) -> bool {
                 .any(|e| e.get("command").and_then(|c| c.as_str()) == Some("rtk hook copilot"))
         });
     if !pascalcase_still_registered {
-        return false;
+        return None;
     }
-    let Some(hooks) = config.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
-        return false;
-    };
+    let hooks = config.get_mut("hooks").and_then(|h| h.as_object_mut())?;
     hooks.shift_remove("preToolUse");
 
     let stock = serde_json::from_str::<Value>(super::init::COPILOT_HOOK_JSON).ok();
     let content = if stock.is_some_and(|s| s == config) {
         super::init::COPILOT_HOOK_JSON.to_string()
     } else {
-        let Ok(mut pretty) = serde_json::to_string_pretty(&config) else {
-            return false;
-        };
+        let mut pretty = serde_json::to_string_pretty(&config).ok()?;
         pretty.push('\n');
         pretty
     };
-    let tmp = path.with_extension(format!("heal.{}", std::process::id()));
-    std::fs::write(&tmp, content)
-        .and_then(|()| std::fs::rename(&tmp, path))
-        .map_err(|_| {
-            // Cleanup of our own temp file after a failed atomic write.
-            let _ = std::fs::remove_file(&tmp); // nosemgrep: filesystem-deletion
-        })
-        .is_ok()
+    Some(content)
 }
 
 /// The decision every hook applies -- [`decision::decide_for_agent_at`] -- plus

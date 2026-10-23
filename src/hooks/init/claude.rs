@@ -420,7 +420,7 @@ fn patch_settings_json_command(
     // Backup original
     if settings_path.exists() {
         let backup_path = settings_path.with_extension("json.bak");
-        fs::copy(&settings_path, &backup_path)
+        replace_backup(&settings_path, &backup_path)
             .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
         if verbose > 0 {
             eprintln!("Backup: {}", backup_path.display());
@@ -902,7 +902,7 @@ fn remove_legacy_settings_entries(ctx: InitContext) -> Result<()> {
 
     // Backup before modifying
     let backup_path = settings_path.with_extension("json.bak");
-    fs::copy(&settings_path, &backup_path)
+    replace_backup(&settings_path, &backup_path)
         .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
 
     let serialized =
@@ -1544,6 +1544,40 @@ mod tests {
             .unwrap_err();
             assert!(format!("{error:#}").contains(&path.display().to_string()));
             assert_eq!(fs::read_to_string(&path).unwrap(), "{}");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_settings_json_rewrites_replace_a_read_only_backup() {
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |dir| {
+            let path = dir.join(SETTINGS_JSON);
+            let backup = path.with_extension("json.bak");
+            let legacy = r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/home/u/.claude/hooks/rtk-rewrite.sh"}]}]}}"#;
+            fs::write(&path, legacy).expect("seed settings.json");
+            if !seed_read_only(&backup, "older") {
+                return;
+            }
+
+            remove_legacy_settings_entries(InitContext::default())
+                .expect("remove the legacy entry");
+            assert_eq!(fs::read_to_string(&backup).expect("read backup"), legacy);
+
+            let cleaned = fs::read_to_string(&path).expect("read settings.json");
+            assert!(seed_read_only(&backup, "older"));
+            assert!(matches!(
+                patch_settings_json_command(
+                    CLAUDE_HOOK_COMMAND,
+                    PatchMode::Auto,
+                    false,
+                    InitContext::default(),
+                    HookInstallScope::UserGlobal,
+                )
+                .expect("add the hook"),
+                PatchResult::Patched
+            ));
+            assert_eq!(fs::read_to_string(&backup).expect("read backup"), cleaned);
         });
     }
 

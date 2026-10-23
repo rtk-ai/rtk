@@ -11,7 +11,6 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use tempfile::NamedTempFile;
 
 use crate::core::utils::{from_json_str, strip_leading_bom};
 
@@ -556,8 +555,8 @@ pub(super) fn write_if_changed(
     write_if_changed_internal(path, content, name, ctx, false)
 }
 
-/// Variant used for protected RTK files. A file that cannot be decoded is
-/// still replaceable after the caller's policy allows it (for example,
+/// Variant used for protected RTK files. A file that cannot be read or decoded
+/// is still replaceable after the caller's policy allows it (for example,
 /// `--auto-patch`), so a read error is treated like differing content instead
 /// of preventing recovery.
 pub(super) fn write_if_changed_allow_read_error(
@@ -662,7 +661,13 @@ fn resolve_atomic_target(path: &Path) -> PathBuf {
 
 /// Atomic write using tempfile + rename
 /// Prevents corruption on crash/interrupt
+/// Flushed to disk before the rename where the filesystem can sync; a sync that
+/// reports lost data fails the write.
 /// Follows symlinks so the link itself is preserved.
+/// On Unix an existing file its owner can read keeps its rwx bits, or is left
+/// owner-only when the filesystem refuses the chmod. Any other file gets the
+/// mode `fs::write` would create it with: a mode without owner read is no mode
+/// to keep.
 pub(super) fn atomic_write(path: &Path, content: &str) -> Result<()> {
     let target = resolve_atomic_target(path);
     let parent = target.parent().with_context(|| {
@@ -672,14 +677,47 @@ pub(super) fn atomic_write(path: &Path, content: &str) -> Result<()> {
         )
     })?;
 
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    let (builder, kept_mode) = {
+        let kept_mode = fs::metadata(&target)
+            .ok()
+            .map(|meta| meta.permissions().mode() & 0o777)
+            .filter(|mode| mode & 0o400 != 0);
+        // Owner-only until the chmod after the write, so a failed chmod never
+        // leaves the content readable by more users than the file it replaces.
+        let create_mode = if kept_mode.is_some() { 0o600 } else { 0o666 };
+        let mut builder = tempfile::Builder::new();
+        builder.permissions(fs::Permissions::from_mode(create_mode));
+        (builder, kept_mode)
+    };
+    #[cfg(not(unix))]
+    let builder = tempfile::Builder::new();
+
     // Create temp file in same directory (ensures same filesystem for atomic rename)
-    let mut temp_file = NamedTempFile::new_in(parent)
+    let mut temp_file = builder
+        .tempfile_in(parent)
         .with_context(|| format!("Failed to create temp file in {}", parent.display()))?;
 
     // Write content
     temp_file
         .write_all(content.as_bytes())
         .with_context(|| format!("Failed to write {} bytes to temp file", content.len()))?;
+
+    // On disk before the rename where the filesystem can sync, so a crash
+    // cannot leave the target empty
+    sync_to_disk(temp_file.as_file()).context("Failed to flush temp file to disk")?;
+
+    // After the write and its flush: some network filesystems check the mode on
+    // every write, so a read-only mode set first would refuse it. Best effort: a
+    // filesystem that refuses chmod still gets the content.
+    #[cfg(unix)]
+    if let Some(mode) = kept_mode {
+        let _ = temp_file
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(mode));
+    }
 
     // Atomic rename
     temp_file.persist(&target).with_context(|| {
@@ -690,6 +728,31 @@ pub(super) fn atomic_write(path: &Path, content: &str) -> Result<()> {
     })?;
 
     Ok(())
+}
+
+/// `sync_all`, failing only when the content did not reach the disk: some network
+/// filesystems report a failed write only when it is synced. Any other failure,
+/// such as a filesystem that cannot sync, is no error.
+fn sync_to_disk(file: &fs::File) -> std::io::Result<()> {
+    match file.sync_all() {
+        Err(error) if lost_write(&error) => Err(error),
+        _ => Ok(()),
+    }
+}
+
+fn lost_write(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    let lost = matches!(
+        error.kind(),
+        ErrorKind::StorageFull | ErrorKind::QuotaExceeded | ErrorKind::StaleNetworkFileHandle
+    );
+    #[cfg(unix)]
+    let lost = lost || error.raw_os_error() == Some(libc::EIO);
+    // ERROR_NETNAME_DELETED, ERROR_LOST_WRITEBEHIND_DATA and ERROR_IO_DEVICE,
+    // which std files under no `ErrorKind`.
+    #[cfg(windows)]
+    let lost = lost || matches!(error.raw_os_error(), Some(64 | 596 | 1117));
+    lost
 }
 
 /// Read a JSON file with path-aware errors. Missing files return `None` and
@@ -797,7 +860,7 @@ pub(super) fn update_json_file(
 fn backup_and_atomic_write(path: &Path, content: &str) -> Result<Option<PathBuf>> {
     let backup_path = if path.exists() {
         let backup_path = backup_path_for(path);
-        fs::copy(path, &backup_path).with_context(|| {
+        replace_backup(path, &backup_path).with_context(|| {
             format!(
                 "Failed to backup {} to {}",
                 path.display(),
@@ -812,6 +875,51 @@ fn backup_and_atomic_write(path: &Path, content: &str) -> Result<Option<PathBuf>
     atomic_write(path, content)
         .with_context(|| format!("Failed to update JSON file: {}", path.display()))?;
     Ok(backup_path)
+}
+
+/// `fs::copy` `path` to `backup_path`. The backup takes the file's mode, so a
+/// read-only file leaves a read-only backup; on Unix, the next backup unlocks
+/// it for its owner so the copy can replace it, rather than failing on it.
+fn replace_backup(path: &Path, backup_path: &Path) -> std::io::Result<()> {
+    let Err(error) = fs::copy(path, backup_path) else {
+        return Ok(());
+    };
+    #[cfg(unix)]
+    if error.kind() == std::io::ErrorKind::PermissionDenied
+        && unlock_read_only_backup(path, backup_path)
+    {
+        return fs::copy(path, backup_path).map(drop);
+    }
+    Err(error)
+}
+
+/// Give the backup its owner's write permission back when it is what refused
+/// the copy: `path` opens, and the backup is a regular file without owner write,
+/// with no other name and not `path` itself. A symlink or a hard link may lead
+/// to a file that is no backup at all, and a backup that is `path` would be
+/// emptied by the copy.
+#[cfg(unix)]
+fn unlock_read_only_backup(path: &Path, backup_path: &Path) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let (Ok(source), Ok(backup)) = (
+        fs::File::open(path).and_then(|file| file.metadata()),
+        fs::symlink_metadata(backup_path),
+    ) else {
+        return false;
+    };
+    let same_file = (source.dev(), source.ino()) == (backup.dev(), backup.ino());
+    if !backup.file_type().is_file()
+        || backup.nlink() > 1
+        || same_file
+        || backup.mode() & 0o200 != 0
+    {
+        return false;
+    }
+    fs::set_permissions(
+        backup_path,
+        fs::Permissions::from_mode(backup.mode() & 0o7777 | 0o200),
+    )
+    .is_ok()
 }
 
 /// Prompt user for confirmation.
@@ -2292,6 +2400,21 @@ pub(super) fn with_missing_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, 
     });
 }
 
+/// Write `content` to `path` and make it read-only. False, with a notice, when a
+/// read-only file can still be opened for writing here (as root), so the caller skips.
+#[cfg(all(test, unix))]
+pub(super) fn seed_read_only(path: &Path, content: &str) -> bool {
+    fs::write(path, content).expect("seed file");
+    let mut permissions = fs::metadata(path).expect("stat seed").permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(path, permissions).expect("make seed read-only");
+    let refused = fs::OpenOptions::new().write(true).open(path).is_err();
+    if !refused {
+        eprintln!("skipping: a read-only file is writable here (running as root?)");
+    }
+    refused
+}
+
 #[cfg(test)]
 mod tests {
     use crate::hooks::constants::POST_TOOL_USE_KEY;
@@ -2749,6 +2872,277 @@ level = "high"
     }
 
     #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).expect("stat file").permissions().mode() & 0o7777
+    }
+
+    /// The mode `fs::write` gives a new file in `dir` under the current umask,
+    /// which a default ACL on `dir` can change.
+    #[cfg(unix)]
+    fn new_file_mode_in(dir: &Path) -> u32 {
+        let probe = dir.join("mode-probe");
+        fs::write(&probe, "").expect("create probe");
+        let mode = mode_of(&probe);
+        fs::remove_file(&probe).expect("remove probe");
+        mode
+    }
+
+    /// Write `content` to `path` with `mode`. False, with a notice, when the
+    /// filesystem does not keep the mode, so the caller skips.
+    #[cfg(unix)]
+    fn seed_with_mode(path: &Path, content: &[u8], mode: u32) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(path, content).expect("seed file");
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("chmod seed");
+        let kept = mode_of(path) == mode;
+        if !kept {
+            eprintln!("skipping: this filesystem does not keep mode {mode:o}");
+        }
+        kept
+    }
+
+    // The keep-mode tests pick a umask under which neither a new file nor a temp
+    // file created with the kept mode would come out with the expected mode.
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_keeps_existing_mode() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("rules.md");
+        if !seed_with_mode(&path, b"user content\n", 0o640) {
+            return;
+        }
+
+        test_isolation::with_umask(0o077, || atomic_write(&path, "user content\nrtk block\n"))
+            .expect("rewrite file");
+
+        assert_eq!(mode_of(&path), 0o640, "rewrite must keep the file's mode");
+        assert_eq!(
+            fs::read_to_string(&path).expect("read rewritten file"),
+            "user content\nrtk block\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_keeps_mode_of_symlink_target() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("create temp dir");
+        let target_path = temp.path().join("real-settings.json");
+        let link_path = temp.path().join("settings.json");
+        if !seed_with_mode(&target_path, b"{}", 0o640) {
+            return;
+        }
+        symlink(&target_path, &link_path).expect("create symlink");
+
+        test_isolation::with_umask(0o077, || atomic_write(&link_path, "{\"hooks\":{}}"))
+            .expect("rewrite through symlink");
+
+        let link = fs::symlink_metadata(&link_path).expect("lstat link");
+        assert!(link.file_type().is_symlink(), "symlink must survive");
+        assert_eq!(
+            fs::read_to_string(&target_path).expect("read target"),
+            "{\"hooks\":{}}"
+        );
+        assert_eq!(
+            mode_of(&target_path),
+            0o640,
+            "rewrite must keep the target's mode"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_keeps_read_only_mode() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("AGENTS.md");
+        if !seed_with_mode(&path, b"old", 0o444) {
+            return;
+        }
+
+        test_isolation::with_umask(0o077, || atomic_write(&path, "new")).expect("rewrite file");
+
+        assert_eq!(
+            fs::read_to_string(&path).expect("read rewritten file"),
+            "new"
+        );
+        assert_eq!(
+            mode_of(&path),
+            0o444,
+            "rewrite must keep the file read-only"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_does_not_widen_owner_only_file() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("settings.json");
+        if !seed_with_mode(&path, b"{}", 0o600) {
+            return;
+        }
+
+        test_isolation::with_umask(0o000, || atomic_write(&path, "{\"hooks\":{}}"))
+            .expect("rewrite file");
+
+        assert_eq!(
+            mode_of(&path),
+            0o600,
+            "rewrite must keep the file owner-only"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_rewrites_owner_unreadable_file_as_new() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("plugin.json");
+        if !seed_with_mode(&path, b"{}", 0o200) {
+            return;
+        }
+
+        let (expected, written) = test_isolation::with_umask(0o022, || {
+            (
+                new_file_mode_in(temp.path()),
+                atomic_write(&path, "{\"rtk\":true}"),
+            )
+        });
+        written.expect("rewrite file");
+
+        assert_eq!(
+            mode_of(&path),
+            expected,
+            "a mode without owner read is not kept"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("read rewritten file"),
+            "{\"rtk\":true}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_read_error_rewrite_keeps_a_readable_mode() {
+        let temp = TempDir::new().expect("create temp dir");
+        let undecodable = temp.path().join("undecodable.ts");
+        let denied = temp.path().join("denied.ts");
+        if !seed_with_mode(&undecodable, &[0xff, 0xfe, 0xfd], 0o600)
+            || !seed_with_mode(&denied, b"old", 0o200)
+        {
+            return;
+        }
+        let (new_mode, results) = test_isolation::with_umask(0o000, || {
+            let rewrite = |path: &Path| {
+                write_if_changed_allow_read_error(
+                    path,
+                    "new",
+                    "Pi extension",
+                    InitContext::default(),
+                )
+            };
+            (
+                new_file_mode_in(temp.path()),
+                [rewrite(&undecodable), rewrite(&denied)],
+            )
+        });
+        for result in results {
+            assert!(result.expect("replace unreadable file"));
+        }
+
+        for path in [&undecodable, &denied] {
+            assert_eq!(
+                fs::read_to_string(path).expect("read rewritten file"),
+                "new"
+            );
+        }
+        if new_mode == 0o600 {
+            eprintln!("skipping the mode checks: a new file here is 0600 too");
+            return;
+        }
+        assert_eq!(
+            mode_of(&undecodable),
+            0o600,
+            "an undecodable 0600 file stays 0600"
+        );
+        assert_eq!(
+            mode_of(&denied),
+            new_mode,
+            "an unreadable file is rewritten as new"
+        );
+    }
+
+    // Linux only: BSD refuses the sticky bit on a regular file.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_atomic_write_drops_special_mode_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("hook.sh");
+        fs::write(&path, "old").expect("seed file");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o5755)).expect("chmod 5755");
+        // Some sandboxed filesystems drop setuid from an unprivileged chmod;
+        // the sticky bit still holds there.
+        if mode_of(&path) & 0o7000 == 0 {
+            eprintln!("skipping: this filesystem drops special bits from chmod");
+            return;
+        }
+
+        test_isolation::with_umask(0o077, || atomic_write(&path, "new")).expect("rewrite file");
+
+        assert_eq!(
+            mode_of(&path),
+            0o755,
+            "special bits must not survive a rewrite"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_replaces_symlink_loop() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("create temp dir");
+        let a = temp.path().join("a.json");
+        let b = temp.path().join("b.json");
+        symlink(&b, &a).expect("link a -> b");
+        symlink(&a, &b).expect("link b -> a");
+
+        let (expected, written) = test_isolation::with_umask(0o022, || {
+            (new_file_mode_in(temp.path()), atomic_write(&a, "{}"))
+        });
+        written.expect("replace the looping link");
+
+        assert!(fs::symlink_metadata(&a).expect("lstat a.json").is_file());
+        let b_meta = fs::symlink_metadata(&b).expect("lstat b.json");
+        assert!(b_meta.file_type().is_symlink(), "b.json must stay a link");
+
+        assert_eq!(fs::read_to_string(&a).expect("read a.json"), "{}");
+        assert_eq!(
+            mode_of(&a),
+            expected,
+            "an unstat-able path gets a new file's mode"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_new_file_follows_umask() {
+        let temp = TempDir::new().expect("create temp dir");
+        let shared = temp.path().join("shared.json");
+        let private = temp.path().join("private.json");
+
+        for (mask, path) in [(0o022, &shared), (0o077, &private)] {
+            let (expected, written) = test_isolation::with_umask(mask, || {
+                (new_file_mode_in(temp.path()), atomic_write(path, "{}"))
+            });
+            written.expect("create file");
+            assert_eq!(mode_of(path), expected, "umask {mask:o}");
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn test_atomic_write_preserves_symlink() {
         use std::os::unix::fs::symlink;
@@ -3192,5 +3586,190 @@ level = "high"
 
         assert!(format!("{err:#}").contains("backup"));
         assert_eq!(fs::read_to_string(path).unwrap(), "old");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_backup_and_atomic_write_replaces_read_only_backup() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("hooks.json");
+        let backup = backup_path_for(&path);
+        fs::write(&path, "current").expect("seed file");
+        if !seed_read_only(&backup, "older") {
+            return;
+        }
+
+        backup_and_atomic_write(&path, "new").expect("replace the read-only backup");
+
+        assert_eq!(fs::read_to_string(&path).expect("read file"), "new");
+        assert_eq!(fs::read_to_string(&backup).expect("read backup"), "current");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_read_only_backup_that_is_the_file_itself_is_left_alone() {
+        use std::os::unix::fs::symlink;
+
+        for shared in ["hard link", "symlinked file"] {
+            let temp = TempDir::new().expect("create temp dir");
+            let path = temp.path().join("hooks.json");
+            let backup = backup_path_for(&path);
+            if !seed_read_only(&backup, "current") {
+                return;
+            }
+            if shared == "hard link" {
+                fs::hard_link(&backup, &path).expect("link the file to its backup");
+            } else {
+                symlink(&backup, &path).expect("link the file to its backup");
+            }
+
+            backup_and_atomic_write(&path, "new").expect_err("the backup is the file itself");
+
+            assert_eq!(
+                fs::read_to_string(&backup).expect("read backup"),
+                "current",
+                "{shared}: the copy must not empty the file"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_read_only_backup_with_another_name_is_left_alone() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("hooks.json");
+        let archived = temp.path().join("archived.json");
+        fs::write(&path, "current").expect("seed file");
+        if !seed_read_only(&archived, "archived") {
+            return;
+        }
+        fs::hard_link(&archived, backup_path_for(&path)).expect("link the backup");
+
+        backup_and_atomic_write(&path, "new").expect_err("the backup has another name");
+
+        assert_eq!(
+            fs::read_to_string(&archived).expect("read archived file"),
+            "archived"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_read_only_backup_of_an_unreadable_file_is_not_unlocked() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("hooks.json");
+        let backup = backup_path_for(&path);
+        if !seed_with_mode(&path, b"unreadable", 0o200) || !seed_read_only(&backup, "older") {
+            return;
+        }
+        let read_only = mode_of(&backup);
+
+        backup_and_atomic_write(&path, "new").expect_err("the file cannot be read");
+
+        assert_eq!(
+            mode_of(&backup),
+            read_only,
+            "the backup must stay read-only"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_backup_its_owner_can_write_is_not_unlocked() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("hooks.json");
+        let backup = backup_path_for(&path);
+        fs::write(&path, "current").expect("seed file");
+        if !seed_with_mode(&backup, b"older", 0o640) {
+            return;
+        }
+
+        assert!(!unlock_read_only_backup(&path, &backup));
+        assert_eq!(mode_of(&backup), 0o640, "the backup's mode must not change");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_read_only_fifo_backup_is_not_unlocked() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("hooks.json");
+        let backup = backup_path_for(&path);
+        fs::write(&path, "current").expect("seed file");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&backup)
+            .status()
+            .is_ok_and(|status| status.success());
+        if !made {
+            eprintln!("skipping: mkfifo is not available");
+            return;
+        }
+        let mut permissions = fs::metadata(&backup).expect("stat fifo").permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&backup, permissions).expect("make fifo read-only");
+
+        assert!(!unlock_read_only_backup(&path, &backup));
+        assert_eq!(mode_of(&backup) & 0o200, 0, "the FIFO must stay read-only");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_symlinked_read_only_backup_is_left_alone() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("hooks.json");
+        let elsewhere = temp.path().join("elsewhere");
+        fs::write(&path, "current").expect("seed file");
+        if !seed_read_only(&elsewhere, "not a backup") {
+            return;
+        }
+        symlink(&elsewhere, backup_path_for(&path)).expect("link the backup");
+        let read_only = mode_of(&elsewhere);
+
+        backup_and_atomic_write(&path, "new").expect_err("the link's target is read-only");
+
+        assert_eq!(
+            mode_of(&elsewhere),
+            read_only,
+            "the target must stay read-only"
+        );
+        assert_eq!(
+            fs::read_to_string(&elsewhere).expect("read target"),
+            "not a backup"
+        );
+        assert_eq!(fs::read_to_string(&path).expect("read file"), "current");
+    }
+
+    #[test]
+    fn test_only_a_lost_write_fails_the_sync() {
+        use std::io::{Error, ErrorKind};
+
+        assert!(lost_write(&Error::from(ErrorKind::StorageFull)));
+        assert!(lost_write(&Error::from(ErrorKind::QuotaExceeded)));
+        assert!(lost_write(&Error::from(ErrorKind::StaleNetworkFileHandle)));
+        assert!(!lost_write(&Error::from(ErrorKind::Unsupported)));
+        assert!(!lost_write(&Error::from(ErrorKind::InvalidInput)));
+        #[cfg(unix)]
+        let (lost, excused) = (
+            [libc::EIO, libc::ENOSPC, libc::EDQUOT, libc::ESTALE],
+            [
+                libc::ENOTSUP,
+                libc::EOPNOTSUPP,
+                libc::ENOTTY,
+                libc::ENOSYS,
+                libc::EINVAL,
+            ],
+        );
+        // ERROR_DISK_FULL, ERROR_HANDLE_DISK_FULL, ERROR_DISK_QUOTA_EXCEEDED,
+        // ERROR_NETNAME_DELETED, ERROR_LOST_WRITEBEHIND_DATA, ERROR_IO_DEVICE;
+        // ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED, ERROR_INVALID_PARAMETER.
+        #[cfg(windows)]
+        let (lost, excused) = ([112, 39, 1295, 64, 596, 1117], [1, 50, 87]);
+        for code in lost {
+            assert!(lost_write(&Error::from_raw_os_error(code)), "{code}");
+        }
+        for code in excused {
+            assert!(!lost_write(&Error::from_raw_os_error(code)), "{code}");
+        }
     }
 }

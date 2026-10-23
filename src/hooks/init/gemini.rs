@@ -234,10 +234,7 @@ fn patch_gemini_settings(
         return Ok(false);
     }
 
-    // Write atomically
-    let tmp = NamedTempFile::new_in(gemini_dir)?;
-    fs::write(tmp.path(), &content)?;
-    tmp.persist(&settings_path)
+    atomic_write(&settings_path, &content)
         .with_context(|| format!("Failed to write {}", settings_path.display()))?;
 
     if verbose > 0 {
@@ -330,6 +327,49 @@ pub(super) fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    #[test]
+    fn test_patch_gemini_settings_keeps_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().expect("create temp dir");
+        let gemini_dir = tmp.path().join(".gemini");
+        fs::create_dir_all(&gemini_dir).expect("create .gemini");
+        let settings_path = gemini_dir.join(SETTINGS_JSON);
+        fs::write(&settings_path, "{\"model\": \"foo\"}").expect("seed settings.json");
+        fs::set_permissions(&settings_path, fs::Permissions::from_mode(0o640)).expect("chmod 640");
+        let mode_of = |path: &Path| {
+            fs::metadata(path)
+                .expect("stat settings.json")
+                .permissions()
+                .mode()
+                & 0o7777
+        };
+        if mode_of(&settings_path) != 0o640 {
+            eprintln!("skipping: this filesystem does not keep mode 640");
+            return;
+        }
+
+        // Under umask 077 a new file would come out 0600.
+        test_isolation::with_umask(0o077, || {
+            patch_gemini_settings(
+                &gemini_dir,
+                Path::new("/fake/hook/path"),
+                PatchMode::Auto,
+                InitContext::default(),
+            )
+        })
+        .expect("patch settings.json");
+
+        let content = fs::read_to_string(&settings_path).expect("read settings.json");
+        assert!(content.contains("/fake/hook/path"), "hook must be added");
+        assert_eq!(
+            mode_of(&settings_path),
+            0o640,
+            "patch must keep settings.json's mode"
+        );
+    }
 
     #[test]
     fn test_patch_gemini_settings_malformed_json_warns_without_overwriting() {

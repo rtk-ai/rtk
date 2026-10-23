@@ -139,7 +139,7 @@ fn patch_trae_hooks_json_paths(paths: &[PathBuf], ctx: InitContext) -> Result<Ve
 
             if patch.existed {
                 let backup_path = patch.path.with_extension("json.bak");
-                fs::copy(&patch.path, &backup_path)
+                replace_backup(&patch.path, &backup_path)
                     .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
                 if ctx.verbose > 0 {
                     eprintln!("Backup: {}", backup_path.display());
@@ -296,7 +296,7 @@ fn remove_trae_hooks_json_paths(paths: &[PathBuf], ctx: InitContext) -> Result<V
 
         let write_result: Result<()> = (|| {
             let backup_path = removal.path.with_extension("json.bak");
-            fs::copy(&removal.path, &backup_path)
+            replace_backup(&removal.path, &backup_path)
                 .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
             atomic_write(&removal.path, &removal.serialized)
         })();
@@ -543,6 +543,34 @@ mod tests {
             "hooks": [{ "command": "rtk hook trae" }]
         }] } });
         assert!(trae_hook_already_present(&no_matcher));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_trae_rewrites_replace_a_read_only_backup() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join(".trae/hooks.json");
+        let backup = path.with_extension("json.bak");
+        fs::create_dir_all(temp.path().join(".trae")).expect("create .trae");
+        fs::write(&path, "{}").expect("seed hooks.json");
+        if !seed_read_only(&backup, "older") {
+            return;
+        }
+        let paths = vec![path.clone()];
+
+        assert_eq!(
+            patch_trae_hooks_json_paths(&paths, InitContext::default()).expect("install"),
+            vec![PatchResult::Patched]
+        );
+        assert_eq!(fs::read_to_string(&backup).expect("read backup"), "{}");
+
+        let installed = fs::read_to_string(&path).expect("read hooks.json");
+        assert!(seed_read_only(&backup, "older"));
+        assert_eq!(
+            remove_trae_hooks_json_paths(&paths, InitContext::default()).expect("uninstall"),
+            vec![true]
+        );
+        assert_eq!(fs::read_to_string(&backup).expect("read backup"), installed);
     }
 
     #[test]
