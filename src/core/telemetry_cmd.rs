@@ -245,8 +245,8 @@ fn run_forget() -> Result<()> {
 }
 
 fn send_erasure_request(device_hash: &str) -> Result<()> {
-    let url = match super::telemetry::endpoint_url() {
-        Some(u) => format!("{}/erasure", u),
+    let url = match super::telemetry::erasure_endpoint_url() {
+        Some(u) => u,
         None => anyhow::bail!("no telemetry endpoint configured"),
     };
 
