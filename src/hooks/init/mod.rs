@@ -983,23 +983,23 @@ fn project_scope_footer_lines(
 }
 
 #[cfg(feature = "engine")]
-fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitContext) -> Result<()> {
-    use std::io::{BufRead, IsTerminal};
-    // Only `PatchMode::Ask` may prompt. `--auto-patch` exists to run without a
-    // terminal, and neither it nor `--no-patch` may adopt the proxy on the
-    // user's behalf: routing an agent's traffic through a daemon is not a
-    // "supported init change", it is a feature the user has to choose.
-    if !matches!(patch_mode, PatchMode::Ask) {
-        return Ok(());
-    }
-    if ctx.dry_run || !std::io::stdin().is_terminal() {
-        return Ok(());
-    }
-    if crate::core::user_env::var("RTK_ONRAMP_DISABLED").as_deref() == Some("1") {
-        return Ok(());
-    }
-    let base_url = format!("http://{}", crate::llm_proxy::DEFAULT_BIND);
+#[derive(Debug, PartialEq, Eq)]
+enum ProxyOnrampState {
+    Unavailable {
+        removed_stale_url: bool,
+    },
+    AlreadyConfigured,
+    Ready {
+        root: serde_json::Value,
+        already: Option<String>,
+        aimed_here: bool,
+        autostart_present: bool,
+    },
+}
 
+#[cfg(feature = "engine")]
+fn prepare_proxy_onramp(settings_path: &Path, binary_available: bool) -> Result<ProxyOnrampState> {
+    let base_url = format!("http://{}", crate::llm_proxy::DEFAULT_BIND);
     let mut root: serde_json::Value = if settings_path.exists() {
         let content = fs::read_to_string(settings_path)?;
         let content = strip_leading_bom(&content);
@@ -1016,20 +1016,75 @@ fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitCont
         .and_then(|v| v.as_str().map(str::to_string));
     let aimed_here = already.as_deref() == Some(base_url.as_str());
     let autostart_present = session_start_entry_present(&root);
-    if aimed_here && autostart_present {
-        return Ok(());
-    }
+
     // Routing Claude Code at a daemon that cannot be started breaks every
     // session (#4604): only offer the proxy when its binary is installed, so
-    // the SessionStart hook can start it again after a reboot. A daemon that
-    // merely answers on the port today may not be startable tomorrow.
-    if !crate::llm_proxy::binary_available() {
+    // the SessionStart hook can start it again after a reboot. If a previous
+    // setup left `env.ANTHROPIC_BASE_URL` aimed at the RTK daemon while the
+    // binary is missing, remove it so Claude Code is not left pointed at a
+    // dead port.
+    if !binary_available {
+        if aimed_here && claude::remove_proxy_env_from_json(&mut root) {
+            let serialized = serde_json::to_string_pretty(&root)?;
+            let backup = backup_and_atomic_write(settings_path, &serialized)?;
+            eprintln!();
+            eprintln!(
+                "  settings.json: removed env.ANTHROPIC_BASE_URL (rtk-proxy is not installed)"
+            );
+            if let Some(path) = backup {
+                eprintln!("  Backup: {}", path.display());
+            }
+            return Ok(ProxyOnrampState::Unavailable {
+                removed_stale_url: true,
+            });
+        }
         eprintln!();
         eprintln!(
             "  RTK proxy not offered: rtk-proxy is not installed (`rtk llm-proxy start` says where to get it)."
         );
+        return Ok(ProxyOnrampState::Unavailable {
+            removed_stale_url: false,
+        });
+    }
+
+    if aimed_here && autostart_present {
+        return Ok(ProxyOnrampState::AlreadyConfigured);
+    }
+
+    Ok(ProxyOnrampState::Ready {
+        root,
+        already,
+        aimed_here,
+        autostart_present,
+    })
+}
+
+#[cfg(feature = "engine")]
+fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitContext) -> Result<()> {
+    use std::io::{BufRead, IsTerminal};
+    // Only `PatchMode::Ask` may prompt. `--auto-patch` exists to run without a
+    // terminal, and neither it nor `--no-patch` may adopt the proxy on the
+    // user's behalf: routing an agent's traffic through a daemon is not a
+    // "supported init change", it is a feature the user has to choose.
+    if !matches!(patch_mode, PatchMode::Ask) {
         return Ok(());
     }
+    if ctx.dry_run || !std::io::stdin().is_terminal() {
+        return Ok(());
+    }
+    if crate::core::user_env::var("RTK_ONRAMP_DISABLED").as_deref() == Some("1") {
+        return Ok(());
+    }
+    let base_url = format!("http://{}", crate::llm_proxy::DEFAULT_BIND);
+    let ProxyOnrampState::Ready {
+        mut root,
+        already,
+        aimed_here,
+        autostart_present,
+    } = prepare_proxy_onramp(settings_path, crate::llm_proxy::binary_available())?
+    else {
+        return Ok(());
+    };
 
     if aimed_here {
         // The failure this flow exists to prevent: a base URL that outlives
@@ -2295,6 +2350,130 @@ pub(super) fn with_missing_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, 
 #[cfg(test)]
 mod tests {
     use crate::hooks::constants::POST_TOOL_USE_KEY;
+    #[cfg(feature = "engine")]
+    use crate::hooks::constants::SESSION_START_KEY;
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn test_proxy_onramp_not_offered_when_binary_missing() {
+        let tmp = test_isolation::tempdir();
+        let settings = tmp.path().join(SETTINGS_JSON);
+        let state = prepare_proxy_onramp(&settings, false).unwrap();
+        assert_eq!(
+            state,
+            ProxyOnrampState::Unavailable {
+                removed_stale_url: false
+            }
+        );
+        assert!(
+            !settings.exists(),
+            "settings.json must stay untouched when rtk-proxy is missing"
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn test_proxy_onramp_removes_stale_rtk_base_url_when_binary_missing() {
+        let tmp = test_isolation::tempdir();
+        let settings = tmp.path().join(SETTINGS_JSON);
+        let rtk_url = format!("http://{}", crate::llm_proxy::DEFAULT_BIND);
+        fs::write(
+            &settings,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "env": { "ANTHROPIC_BASE_URL": rtk_url, "OTHER": "kept" },
+                "hooks": { (SESSION_START_KEY): [{
+                    "hooks": [{ "type": "command", "command": CLAUDE_HOOK_COMMAND }]
+                }]}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let state = prepare_proxy_onramp(&settings, false).unwrap();
+        assert_eq!(
+            state,
+            ProxyOnrampState::Unavailable {
+                removed_stale_url: true
+            }
+        );
+
+        let root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(root.pointer("/env/ANTHROPIC_BASE_URL"), None, "{root}");
+        assert_eq!(
+            root.pointer("/env/OTHER").and_then(|v| v.as_str()),
+            Some("kept")
+        );
+        assert!(
+            backup_path_for(&settings).exists(),
+            "settings.json.bak must be written before removing the stale URL"
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn test_proxy_onramp_keeps_foreign_base_url_when_binary_missing() {
+        let tmp = test_isolation::tempdir();
+        let settings = tmp.path().join(SETTINGS_JSON);
+        fs::write(
+            &settings,
+            serde_json::json!({
+                "env": { "ANTHROPIC_BASE_URL": "https://gateway.example.com" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let state = prepare_proxy_onramp(&settings, false).unwrap();
+        assert_eq!(
+            state,
+            ProxyOnrampState::Unavailable {
+                removed_stale_url: false
+            }
+        );
+
+        let root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(
+            root.pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(|v| v.as_str()),
+            Some("https://gateway.example.com")
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn test_proxy_onramp_ready_and_already_configured_states_when_binary_present() {
+        let tmp = test_isolation::tempdir();
+        let settings = tmp.path().join(SETTINGS_JSON);
+        let rtk_url = format!("http://{}", crate::llm_proxy::DEFAULT_BIND);
+
+        let state = prepare_proxy_onramp(&settings, true).unwrap();
+        assert_eq!(
+            state,
+            ProxyOnrampState::Ready {
+                root: serde_json::json!({}),
+                already: None,
+                aimed_here: false,
+                autostart_present: false,
+            }
+        );
+
+        fs::write(
+            &settings,
+            serde_json::json!({
+                "env": { "ANTHROPIC_BASE_URL": rtk_url },
+                "hooks": { (SESSION_START_KEY): [{
+                    "hooks": [{ "type": "command", "command": CLAUDE_HOOK_COMMAND }]
+                }]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let configured = prepare_proxy_onramp(&settings, true).unwrap();
+        assert_eq!(configured, ProxyOnrampState::AlreadyConfigured);
+    }
 
     fn settings_with(entries: serde_json::Value) -> serde_json::Value {
         serde_json::json!({ "hooks": entries })
