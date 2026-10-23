@@ -948,6 +948,27 @@ Unrecognized subcommands are passed through directly (passthrough).
 
 ---
 
+### `rtk oc` -- OpenShift
+
+`pods`, `services`, `get pods`, `get services`, and `logs <pod>` use the shared
+Kubernetes filters. Other subcommands pass through to `oc`.
+
+`--context`, `--kubeconfig`, `-n`/`--namespace`, and `--as` can appear before
+the subcommand or on a supported subcommand. They are forwarded to `oc`,
+including on passthrough commands.
+
+```bash
+rtk oc --context staging pods
+rtk oc services --kubeconfig "/path/to/cluster config" -n app
+rtk oc logs api --context staging -n app -c server
+rtk oc --as viewer describe deployment api
+```
+
+`pods` and `services` retain `-A`/`--all`; all namespaces takes precedence over
+`-n` on these aliases.
+
+---
+
 ## Data and network
 
 ### `rtk json` -- JSON structure
