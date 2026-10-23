@@ -133,7 +133,7 @@ pub fn run(
         (content.clone(), filtered.clone())
     };
     let shown = never_worse(&raw, &rtk_output);
-    print!("{}", shown);
+    write_output(io::stdout().lock(), shown)?;
     timer.track(&cat_label(file), "rtk read", &raw, shown);
     Ok(())
 }
@@ -212,7 +212,7 @@ pub fn run_stdin(
         (content.clone(), filtered.clone())
     };
     let shown = never_worse(&raw, &rtk_output);
-    print!("{}", shown);
+    write_output(io::stdout().lock(), shown)?;
 
     timer.track("cat - (stdin)", "rtk read -", &raw, shown);
     Ok(())
@@ -231,6 +231,15 @@ fn format_with_line_numbers(content: &str) -> String {
         out.push_str(&format!("{:>width$} │ {}\n", i + 1, line, width = width));
     }
     out
+}
+
+fn write_output<W: io::Write>(mut writer: W, text: &str) -> Result<()> {
+    writer
+        .write_all(text.as_bytes())
+        .context("Failed to write output")?;
+    // Stdout is line buffered and the exit-time flush discards its error, so
+    // flush here for a failed write to reach the caller.
+    writer.flush().context("Failed to write output")
 }
 
 fn apply_line_window(
@@ -717,5 +726,42 @@ fn main() {{
             "should warn about duplicate stdin, got stderr: {}",
             stderr
         );
+    }
+
+    struct FailingWriter;
+    impl io::Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::StorageFull, "disk full"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_write_output_propagates_io_error() {
+        let res = write_output(FailingWriter, "test content");
+        assert!(res.is_err());
+        if let Err(err) = res {
+            assert!(err.to_string().contains("Failed to write output"));
+            assert!(err.root_cause().to_string().contains("disk full"));
+        }
+    }
+
+    #[test]
+    fn test_write_output_success() {
+        let mut buf = Vec::new();
+        let res = write_output(&mut buf, "test content");
+        assert!(res.is_ok());
+        assert_eq!(buf, b"test content");
+    }
+
+    #[test]
+    fn test_write_output_surfaces_error_held_back_by_line_buffering() {
+        // Stdout is a LineWriter: text without a newline is only buffered by
+        // write_all, so the failing write happens when the buffer is flushed.
+        let res = write_output(io::LineWriter::new(FailingWriter), "no newline");
+        let err = res.expect_err("a buffered write must still report the failure");
+        assert!(err.root_cause().to_string().contains("disk full"));
     }
 }
