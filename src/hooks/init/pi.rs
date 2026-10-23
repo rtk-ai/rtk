@@ -7,8 +7,8 @@ use crate::core::test_isolation;
 use crate::core::user_dirs;
 use crate::core::user_env;
 use crate::hooks::constants::{
-    OMP_DIR, OMP_LOCAL_DIR, PI_AGENT_STATE_FILE, PI_CODING_AGENT_DIR_ENV, PI_DIR,
-    PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
+    OMP_DIR, OMP_LOCAL_DIR, PI_AGENT_STATE_FILE, PI_AGENT_STATE_UNKNOWN_PRIOR,
+    PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
 };
 
 const PI_PLUGIN: &str = include_str!("../../../hooks/pi/rtk.ts");
@@ -16,7 +16,7 @@ const PI_PLUGIN: &str = include_str!("../../../hooks/pi/rtk.ts");
 const PI_PLUGIN_REWRITE_MARKER: &str = "exec(\"rtk\", [\"rewrite\"";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PiCompatibleAgent {
+pub enum PiCompatibleAgent {
     Pi,
     Omp,
 }
@@ -50,11 +50,31 @@ impl PiCompatibleAgent {
             _ => None,
         }
     }
+
+    fn extension_path_for_scope(self, global: bool) -> Result<PathBuf> {
+        match self {
+            Self::Pi => pi_plugin_path_for_scope(global),
+            Self::Omp => omp_extension_path_for_scope(global),
+        }
+    }
+
+    /// The program the uninstall message asks the user to restart.
+    fn program_name(self) -> &'static str {
+        match self {
+            Self::Pi => "pi",
+            Self::Omp => "OMP",
+        }
+    }
 }
 
 enum ManagedAgentState {
     Absent,
-    Known(Vec<PiCompatibleAgent>),
+    /// Ownership was recorded. `prior_unknown` is the persisted marker: the record was
+    /// started over an extension that already existed, so it cannot be assumed exhaustive.
+    Known {
+        agents: Vec<PiCompatibleAgent>,
+        prior_unknown: bool,
+    },
     Unknown,
 }
 
@@ -218,30 +238,69 @@ fn is_known_stock_pi_plugin(content: &str) -> bool {
         .any(|expected| *expected == hash)
 }
 
-/// Check whether the Pi and OMP extension paths for the selected scope resolve
-/// to the same target.
-fn extension_paths_alias(global: bool, path: &Path, agent: PiCompatibleAgent) -> Result<bool> {
-    let other_path = match agent {
-        PiCompatibleAgent::Pi => omp_extension_path_for_scope(global)?,
-        PiCompatibleAgent::Omp => pi_plugin_path_for_scope(global)?,
-    };
-
-    Ok(canonicalize_path_for_comparison(path) == canonicalize_path_for_comparison(&other_path))
+/// One agent's extension in one scope, and whether the other agent's path for the
+/// same scope resolves to the same file. Resolved once when a command starts, so its
+/// reads of the ownership record, its warnings and its decisions act on one answer.
+/// The one exception is `record_managed_agent`, which resolves a site that was not
+/// shared at the start again, since the install itself can make the paths meet.
+struct ExtensionSite {
+    agent: PiCompatibleAgent,
+    global: bool,
+    path: PathBuf,
+    /// The ownership record, beside the file the path resolves to.
+    state_path: PathBuf,
+    /// The other agent's extension path for this scope resolves to the same file.
+    shared_path: bool,
 }
 
-fn shared_agent_state_path(path: &Path) -> PathBuf {
-    canonicalize_path_for_comparison(path).with_file_name(PI_AGENT_STATE_FILE)
+impl ExtensionSite {
+    fn resolve(agent: PiCompatibleAgent, global: bool) -> Result<Self> {
+        let path = agent.extension_path_for_scope(global)?;
+        let canonical = canonicalize_path_for_comparison(&path);
+        let other_path = agent.other().extension_path_for_scope(global)?;
+        Ok(Self {
+            agent,
+            global,
+            state_path: canonical.with_file_name(PI_AGENT_STATE_FILE),
+            shared_path: canonical == canonicalize_path_for_comparison(&other_path),
+            path,
+        })
+    }
+
+    /// Reads the sidecar only when both agents resolve to this path. Elsewhere the
+    /// record plays no part in the command, so reporting on its contents would
+    /// announce an ownership decision that is never made.
+    fn read_ownership(&self) -> Result<ManagedAgentState> {
+        self.read_ownership_reporting(true)
+    }
+
+    fn read_ownership_reporting(&self, warn: bool) -> Result<ManagedAgentState> {
+        if self.shared_path {
+            read_managed_agents_reporting(&self.state_path, warn)
+        } else {
+            Ok(ManagedAgentState::Absent)
+        }
+    }
 }
 
-fn read_managed_agents(path: &Path) -> Result<ManagedAgentState> {
-    let state_path = shared_agent_state_path(path);
-    let content = match fs::read_to_string(&state_path) {
+/// Reads the ownership sidecar. `warn` is false for a re-read after a question or
+/// before a write, where a warning would repeat what the command's first read
+/// reported, or describe a record the write is about to replace.
+fn read_managed_agents_reporting(state_path: &Path, warn: bool) -> Result<ManagedAgentState> {
+    macro_rules! report {
+        ($($arg:tt)*) => {
+            if warn {
+                eprintln!($($arg)*);
+            }
+        };
+    }
+    let content = match fs::read_to_string(state_path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(ManagedAgentState::Absent);
         }
         Err(error) => {
-            eprintln!(
+            report!(
                 "[warn] RTK extension ownership state at {} could not be read; treating ownership as unknown: {}",
                 state_path.display(),
                 error
@@ -250,10 +309,15 @@ fn read_managed_agents(path: &Path) -> Result<ManagedAgentState> {
         }
     };
     let mut agents = Vec::new();
+    let mut prior_unknown = false;
     let mut has_invalid_entry = false;
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() {
+            continue;
+        }
+        if line == PI_AGENT_STATE_UNKNOWN_PRIOR {
+            prior_unknown = true;
             continue;
         }
         match PiCompatibleAgent::from_state_name(line) {
@@ -267,79 +331,100 @@ fn read_managed_agents(path: &Path) -> Result<ManagedAgentState> {
     }
 
     if has_invalid_entry {
-        eprintln!(
+        report!(
             "[warn] RTK extension ownership state at {} contains unknown entries; treating ownership as unknown",
             state_path.display()
         );
         return Ok(ManagedAgentState::Unknown);
     }
 
-    if agents.is_empty() {
-        eprintln!(
+    // A record carrying only the marker still states that ownership is partial, and must
+    // stay writable, or the next install can never repair it.
+    if agents.is_empty() && !prior_unknown {
+        report!(
             "[warn] RTK extension ownership state at {} is empty; treating ownership as unknown",
             state_path.display()
         );
         return Ok(ManagedAgentState::Unknown);
     }
 
-    Ok(ManagedAgentState::Known(agents))
+    Ok(ManagedAgentState::Known {
+        agents,
+        prior_unknown,
+    })
 }
 
 fn record_managed_agent(
-    global: bool,
-    path: &Path,
-    agent: PiCompatibleAgent,
+    site: &ExtensionSite,
     extension_was_present: bool,
     ctx: InitContext,
 ) -> Result<()> {
-    if !extension_paths_alias(global, path, agent)? {
+    // The install can itself make both agents' paths resolve to one file, by
+    // creating the directory a link points to or writing the file a link names,
+    // so a site that was not shared when the command started is resolved again.
+    let resolved_now;
+    let site = if site.shared_path {
+        site
+    } else {
+        resolved_now = ExtensionSite::resolve(site.agent, site.global)?;
+        &resolved_now
+    };
+    if !site.shared_path {
         return Ok(());
     }
 
-    let state_path = shared_agent_state_path(path);
-    let mut agents = if !extension_was_present {
-        // If the extension was absent before this install, any remaining
-        // sidecar describes a file that no longer exists and must not be
-        // carried into the new installation.
-        Vec::new()
-    } else {
-        match read_managed_agents(path)? {
-            ManagedAgentState::Absent => {
-                eprintln!(
-                    "[warn] RTK extension ownership state at {} could not be established because this pre-existing extension has no ownership record; preserving the absent state and proceeding without recording {}",
-                    state_path.display(),
-                    agent.state_name()
-                );
-                return Ok(());
-            }
-            ManagedAgentState::Known(agents) => agents,
-            ManagedAgentState::Unknown => {
-                // Do not turn unknown ownership into a current-agent-only
-                // record. The extension was installed successfully, but the
-                // existing state must remain intact for the fallback path.
-                eprintln!(
-                    "[warn] RTK extension ownership state at {} could not be updated because ownership is unknown; preserving it and proceeding without recording {}",
-                    state_path.display(),
-                    agent.state_name()
-                );
-                return Ok(());
-            }
+    let (state_path, agent) = (&site.state_path, site.agent);
+    // Re-read rather than merging into the caller's snapshot: an `Ask` prompt
+    // sits between that read and this write, so another process may have
+    // recorded itself in the meantime and must not be dropped. Quietly: the
+    // caller's read already reported on a record that bears on an existing
+    // extension, and a record RTK cannot read beside no extension is replaced
+    // below; one it keeps is reported by the arm that keeps it.
+    let state = &read_managed_agents_reporting(state_path, false)?;
+    // Recorded agents are those known to use this path. Deleting the extension
+    // does not unconfigure an agent that points here, so a record RTK can read is
+    // merged into rather than replaced.
+    let (mut agents, mut prior_unknown) = match state {
+        // No record yet. If the extension already existed, somebody installed
+        // it and RTK cannot know who, so the new record is explicitly partial.
+        ManagedAgentState::Absent => (Vec::new(), extension_was_present),
+        ManagedAgentState::Known {
+            agents,
+            prior_unknown,
+        } => (agents.clone(), *prior_unknown),
+        // With no extension beside it, a record RTK cannot read describes nothing that
+        // exists, so this install starts a new one.
+        ManagedAgentState::Unknown if !extension_was_present => (Vec::new(), false),
+        ManagedAgentState::Unknown => {
+            // Do not overwrite state RTK failed to parse: that would turn an
+            // unreadable record into a confident one.
+            eprintln!(
+                "[warn] RTK extension ownership state at {} could not be updated because ownership is unknown; preserving it and proceeding without recording {}",
+                state_path.display(),
+                agent.state_name()
+            );
+            return Ok(());
         }
     };
     if !agents.contains(&agent) {
         agents.push(agent);
     }
     agents.sort_by_key(|agent| agent.state_name());
-    let content = format!(
-        "{}\n",
-        agents
-            .iter()
-            .map(|agent| agent.state_name())
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
-    write_if_changed_allow_read_error(&state_path, &content, "RTK extension ownership state", ctx)?;
+    // A record listing both agents is exhaustive on its own.
+    if agents.len() == 2 {
+        prior_unknown = false;
+    }
+    let content = serialize_managed_agents(&agents, prior_unknown);
+    write_if_changed_allow_read_error(state_path, &content, "RTK extension ownership state", ctx)?;
     Ok(())
+}
+
+fn serialize_managed_agents(agents: &[PiCompatibleAgent], prior_unknown: bool) -> String {
+    let mut entries: Vec<&str> = agents.iter().map(|agent| agent.state_name()).collect();
+    if prior_unknown {
+        entries.push(PI_AGENT_STATE_UNKNOWN_PRIOR);
+    }
+    format!("{}\n", entries.join("\n"))
 }
 
 fn remove_managed_agent_state(state_path: &Path, ctx: InitContext) -> Result<()> {
@@ -370,25 +455,34 @@ fn remove_managed_agent_state(state_path: &Path, ctx: InitContext) -> Result<()>
 /// The ownership sidecar records which agents RTK installed for a relocated
 /// shared path. A missing sidecar is treated as uncertain because the
 /// extension may predate RTK's ownership tracking.
-fn extension_share_status(
-    global: bool,
-    path: &Path,
-    agent: PiCompatibleAgent,
-) -> Result<ExtensionShareStatus> {
-    if !extension_paths_alias(global, path, agent)? {
-        return Ok(ExtensionShareStatus::NotShared);
+///
+/// Takes the ownership state rather than reading it, so the caller decides when
+/// the record is read and whether a re-read reports on it again.
+fn extension_share_status(site: &ExtensionSite, state: &ManagedAgentState) -> ExtensionShareStatus {
+    if !site.shared_path {
+        return ExtensionShareStatus::NotShared;
     }
 
-    let other_agent = agent.other();
-    match read_managed_agents(path)? {
-        ManagedAgentState::Known(agents) => {
+    let other_agent = site.agent.other();
+    match state {
+        ManagedAgentState::Known {
+            agents,
+            prior_unknown,
+        } => {
             if agents.contains(&other_agent) {
-                Ok(ExtensionShareStatus::Shared)
+                ExtensionShareStatus::Shared
+            } else if *prior_unknown {
+                // A partial record lists agents known to use the file, not every one
+                // that does, so the other agent's absence from it proves nothing.
+                ExtensionShareStatus::Unknown
             } else {
-                Ok(ExtensionShareStatus::NotShared)
+                ExtensionShareStatus::NotShared
             }
         }
-        ManagedAgentState::Absent | ManagedAgentState::Unknown => Ok(ExtensionShareStatus::Unknown),
+        // No probe of `~/.pi`/`~/.omp` here: whether those directories exist says
+        // nothing reliable about which agents use an aliased path, and reading their
+        // absence as an uninstall would claim sole ownership over a shared file.
+        ManagedAgentState::Absent | ManagedAgentState::Unknown => ExtensionShareStatus::Unknown,
     }
 }
 
@@ -397,12 +491,12 @@ fn extension_scope_name(global: bool) -> &'static str {
 }
 
 fn warn_if_extension_shared_on_install(
-    global: bool,
-    path: &Path,
-    agent: PiCompatibleAgent,
-) -> Result<()> {
-    let scope = extension_scope_name(global);
-    match extension_share_status(global, path, agent)? {
+    site: &ExtensionSite,
+    extension_was_present: bool,
+    state: &ManagedAgentState,
+) {
+    let (scope, path, agent) = (extension_scope_name(site.global), &site.path, site.agent);
+    match extension_share_status(site, state) {
         ExtensionShareStatus::NotShared => {}
         ExtensionShareStatus::Shared => eprintln!(
             "[warn] Pi and OMP share the {} extension path at {}; installing {} here enables the shared integration for both agents.",
@@ -410,6 +504,9 @@ fn warn_if_extension_shared_on_install(
             path.display(),
             agent.name()
         ),
+        // Nothing was there to have an owner, and this install records one, so
+        // an uncertainty warning would only be noise on a first-ever install.
+        ExtensionShareStatus::Unknown if !extension_was_present => {}
         ExtensionShareStatus::Unknown => eprintln!(
             "[warn] Pi and OMP resolve to the same {} extension path at {}, but RTK could not confirm both agents' ownership; installing {} without a definitive ownership record.",
             scope,
@@ -417,19 +514,16 @@ fn warn_if_extension_shared_on_install(
             agent.name()
         ),
     }
-
-    Ok(())
 }
 
 fn confirm_shared_extension_uninstall(
-    global: bool,
-    path: &Path,
-    agent: PiCompatibleAgent,
+    site: &ExtensionSite,
+    share: ExtensionShareStatus,
     patch_mode: PatchMode,
     ctx: InitContext,
 ) -> Result<bool> {
-    let scope = extension_scope_name(global);
-    match extension_share_status(global, path, agent)? {
+    let (scope, path, agent) = (extension_scope_name(site.global), &site.path, site.agent);
+    match share {
         ExtensionShareStatus::NotShared => return Ok(true),
         ExtensionShareStatus::Unknown => {
             eprintln!(
@@ -469,13 +563,47 @@ fn confirm_shared_extension_uninstall(
             }
 
             let prompt = format!("Remove the shared Pi/OMP extension at {}?", path.display());
-            if prompt_user_confirmation(&prompt)? {
-                Ok(true)
-            } else {
-                println!("Skipped removal of shared Pi/OMP extension.");
-                Ok(false)
-            }
+            // The caller reports the declined removal on stderr and exits
+            // non-zero; announcing it here too would state the outcome twice,
+            // once on a stream that reads as success.
+            prompt_user_confirmation(&prompt)
         }
+    }
+}
+
+/// Decide whether RTK content that no longer matches a known stock revision may
+/// be removed. Mirrors the install side's Ask/Auto/Skip policy so `--auto-patch`
+/// approves a removal the same way it approves an overwrite, instead of leaving
+/// a hand-edited or fork-built extension permanently un-uninstallable.
+fn confirm_modified_extension_removal(
+    path: &Path,
+    name: &str,
+    reach: &str,
+    patch_mode: PatchMode,
+    ctx: InitContext,
+) -> Result<bool> {
+    if ctx.dry_run {
+        let action = match patch_mode {
+            PatchMode::Ask => "prompt before removing modified",
+            PatchMode::Auto => "remove modified",
+            PatchMode::Skip => "refuse to remove",
+        };
+        println!("[dry-run] would {action} {name}: {}", path.display());
+        if !reach.is_empty() {
+            println!("[dry-run] {}", reach.trim_start());
+        }
+        return Ok(matches!(patch_mode, PatchMode::Auto));
+    }
+
+    match patch_mode {
+        PatchMode::Auto => Ok(true),
+        PatchMode::Skip => Ok(false),
+        PatchMode::Ask => prompt_user_confirmation(&format!(
+            "{} at {} has local changes, which will be lost.{} Remove it?",
+            name,
+            path.display(),
+            reach
+        )),
     }
 }
 
@@ -512,11 +640,12 @@ fn read_extension_for_uninstall(
     }
 }
 
-/// Uninstall the Pi extension for the given scope.
+/// Uninstall one agent's extension for the given scope.
 ///
 /// Like `codex::uninstall_codex` and `hermes::uninstall_hermes`, this is the per-agent half
 /// that `uninstall_with_patch_mode` in `mod.rs` dispatches to, so it can be tested on its own.
-pub(super) fn uninstall_pi_with_patch_mode(
+pub(super) fn uninstall_pi_compatible_with_patch_mode(
+    agent: PiCompatibleAgent,
     global: bool,
     patch_mode: PatchMode,
     ctx: InitContext,
@@ -524,82 +653,98 @@ pub(super) fn uninstall_pi_with_patch_mode(
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
-    let plugin_path = pi_plugin_path_for_scope(global)?;
+    let site = ExtensionSite::resolve(agent, global)?;
+    let path = &site.path;
+    let name = format!("{} extension", agent.name());
 
-    if !plugin_path.exists() {
+    if !path.exists() {
         if dry_run {
             print_dry_run_footer();
         } else {
-            println!("RTK Pi extension was not installed (nothing to remove)");
+            println!("RTK {name} was not installed (nothing to remove)");
         }
         return Ok(());
     }
 
-    let ownership_state_path = shared_agent_state_path(&plugin_path);
-    let Some(content) = read_extension_for_uninstall(&plugin_path, "Pi extension", ctx)? else {
+    let Some(content) = read_extension_for_uninstall(path, &name, ctx)? else {
         return Ok(());
     };
 
-    if !is_known_stock_pi_plugin(&content) {
-        if looks_like_rtk_pi_plugin(&content) {
+    let stock = is_known_stock_pi_plugin(&content);
+    if !stock && !looks_like_rtk_pi_plugin(&content) {
+        println!(
+            "{name} at {} is not RTK content; leaving it alone.",
+            path.display()
+        );
+        // The ownership record is deliberately left in place: "not RTK
+        // content" rests on a substring match, so a merely reformatted
+        // extension lands here, and discarding the record would silently
+        // remove the shared-file protection for both agents.
+        if dry_run {
+            print_dry_run_footer();
+        }
+        return Ok(());
+    }
+
+    let mut share = extension_share_status(&site, &site.read_ownership()?);
+
+    if !stock {
+        // Removing the file removes it for the other agent too when it loads the
+        // same file, so the question and the refusal about local changes say so.
+        let other = agent.other().name();
+        let reach = match share {
+            ExtensionShareStatus::NotShared => String::new(),
+            ExtensionShareStatus::Shared => {
+                format!(" {other} loads the same file, so removing it removes it for {other} too.")
+            }
+            ExtensionShareStatus::Unknown => {
+                format!(" {other} may load the same file, and would lose it too.")
+            }
+        };
+        if !confirm_modified_extension_removal(path, &name, &reach, patch_mode, ctx)? {
             if dry_run {
-                println!(
-                    "[dry-run] would refuse to remove Pi extension: {}",
-                    plugin_path.display()
-                );
                 print_dry_run_footer();
                 return Ok(());
             }
             anyhow::bail!(
-                "Pi extension at {} contains RTK content that does not match the stock extension. Remove the file manually.",
-                plugin_path.display()
+                "{name} at {} contains RTK content that does not match the stock extension.{reach} Remove the file manually, or rerun with --auto-patch to remove it.",
+                path.display()
             );
         }
-        println!(
-            "Pi extension at {} is not RTK content; leaving it alone.",
-            plugin_path.display()
-        );
-        if dry_run {
-            print_dry_run_footer();
+        if matches!(patch_mode, PatchMode::Ask) && !dry_run {
+            // The question may have waited on the user while the other agent
+            // recorded itself, so the decision re-reads the record. Quietly: the
+            // read above already reported anything wrong with it.
+            share = extension_share_status(&site, &site.read_ownership_reporting(false)?);
         }
-        return Ok(());
     }
 
-    if !confirm_shared_extension_uninstall(
-        global,
-        &plugin_path,
-        PiCompatibleAgent::Pi,
-        patch_mode,
-        ctx,
-    )? {
+    if !confirm_shared_extension_uninstall(&site, share, patch_mode, ctx)? {
         if dry_run {
             print_dry_run_footer();
             return Ok(());
         }
         anyhow::bail!(
-            "Shared Pi/OMP extension at {} was not removed; rerun with --auto-patch to approve the removal.",
-            plugin_path.display()
+            "Shared Pi/OMP extension at {} was not removed; rerun with --auto-patch to remove it for both agents.",
+            path.display()
         );
     }
 
     if dry_run {
-        println!(
-            "[dry-run] would remove Pi extension: {}",
-            plugin_path.display()
-        );
-        remove_managed_agent_state(&ownership_state_path, ctx)?;
+        println!("[dry-run] would remove {name}: {}", path.display());
+        remove_managed_agent_state(&site.state_path, ctx)?;
         print_dry_run_footer();
     } else {
-        // nosemgrep: filesystem-deletion -- Pi uninstall removes only a known RTK stock extension.
-        fs::remove_file(&plugin_path)
-            .with_context(|| format!("Failed to remove Pi extension: {}", plugin_path.display()))?;
-        remove_managed_agent_state(&ownership_state_path, ctx)?;
+        // nosemgrep: filesystem-deletion -- uninstall removes only RTK content, stock or approved.
+        fs::remove_file(path)
+            .with_context(|| format!("Failed to remove {name}: {}", path.display()))?;
+        remove_managed_agent_state(&site.state_path, ctx)?;
         if verbose > 0 {
-            eprintln!("Removed Pi extension: {}", plugin_path.display());
+            eprintln!("Removed {name}: {}", path.display());
         }
-        println!("RTK uninstalled (Pi):");
-        println!("  - Pi extension: {}", plugin_path.display());
-        println!("\nRestart pi to apply changes.");
+        println!("RTK uninstalled ({}):", agent.name());
+        println!("  - {name}: {}", path.display());
+        println!("\nRestart {} to apply changes.", agent.program_name());
     }
     Ok(())
 }
@@ -611,49 +756,67 @@ pub fn run_pi_mode_with_patch_mode(
     patch_mode: PatchMode,
     ctx: InitContext,
 ) -> Result<()> {
+    install_pi_compatible(PiCompatibleAgent::Pi, global, patch_mode, ctx)
+}
+
+/// Install the shared Pi extension file for OMP with an explicit
+/// confirmation policy for an existing non-stock file.
+pub fn run_omp_mode_with_patch_mode(
+    global: bool,
+    patch_mode: PatchMode,
+    ctx: InitContext,
+) -> Result<()> {
+    install_pi_compatible(PiCompatibleAgent::Omp, global, patch_mode, ctx)
+}
+
+fn install_pi_compatible(
+    agent: PiCompatibleAgent,
+    global: bool,
+    patch_mode: PatchMode,
+    ctx: InitContext,
+) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
-    let plugin_path = pi_plugin_path_for_scope(global)?;
-    let extension_was_present = plugin_path.exists();
+    let site = ExtensionSite::resolve(agent, global)?;
+    let path = &site.path;
+    let name = format!("{} extension", agent.name());
+    let extension_was_present = path.exists();
 
-    warn_if_extension_shared_on_install(global, &plugin_path, PiCompatibleAgent::Pi)?;
+    let ownership_state = site.read_ownership()?;
 
-    if !validate_stock_pi_plugin_path(&plugin_path, "Pi extension", patch_mode, ctx)? {
+    if !validate_stock_pi_plugin_path(path, &name, patch_mode, ctx)? {
         if dry_run {
             print_dry_run_footer();
             return Ok(());
         }
         anyhow::bail!(
-            "Pi extension at {} was not changed; remove or back up the file manually before retrying.",
-            plugin_path.display()
+            "{name} at {} was not changed; remove or back up the file manually before retrying.",
+            path.display()
         );
     }
 
-    if let Some(parent) = plugin_path.parent() {
+    // Only once the write is going ahead: announcing a shared install before the
+    // overwrite is approved would assert something that may never happen.
+    warn_if_extension_shared_on_install(&site, extension_was_present, &ownership_state);
+
+    if let Some(parent) = path.parent() {
+        let scope = if global { "" } else { "local " };
         ensure_pi_extensions_dir(
             parent,
-            if global {
-                "Pi extensions directory"
-            } else {
-                "local Pi extensions directory"
-            },
+            &format!("{scope}{} extensions directory", agent.name()),
             ctx,
         )?;
     }
 
-    let installed =
-        write_if_changed_allow_read_error(&plugin_path, PI_PLUGIN, "Pi extension", ctx)?;
-    record_managed_agent(
-        global,
-        &plugin_path,
-        PiCompatibleAgent::Pi,
-        extension_was_present,
-        ctx,
-    )?;
+    let installed = write_if_changed_allow_read_error(path, PI_PLUGIN, &name, ctx)?;
+    record_managed_agent(&site, extension_was_present, ctx)?;
 
     if dry_run {
         print_dry_run_footer();
     } else {
-        print_pi_result(&plugin_path, installed);
+        match agent {
+            PiCompatibleAgent::Pi => print_pi_result(path, installed),
+            PiCompatibleAgent::Omp => print_omp_result(path, installed),
+        }
     }
 
     Ok(())
@@ -715,61 +878,6 @@ fn resolve_omp_dir() -> Result<PathBuf> {
     resolve_home_subdir(OMP_DIR)
 }
 
-/// Install the shared Pi extension file for OMP with an explicit
-/// confirmation policy for an existing non-stock file.
-pub fn run_omp_mode_with_patch_mode(
-    global: bool,
-    patch_mode: PatchMode,
-    ctx: InitContext,
-) -> Result<()> {
-    let InitContext { dry_run, .. } = ctx;
-    let path = omp_extension_path_for_scope(global)?;
-    let extension_was_present = path.exists();
-
-    warn_if_extension_shared_on_install(global, &path, PiCompatibleAgent::Omp)?;
-
-    if !validate_stock_pi_plugin_path(&path, "OMP extension", patch_mode, ctx)? {
-        if dry_run {
-            print_dry_run_footer();
-            return Ok(());
-        }
-        anyhow::bail!(
-            "OMP extension at {} was not changed; remove or back up the file manually before retrying.",
-            path.display()
-        );
-    }
-
-    if let Some(parent) = path.parent() {
-        ensure_pi_extensions_dir(
-            parent,
-            if global {
-                "OMP extensions directory"
-            } else {
-                "local OMP extensions directory"
-            },
-            ctx,
-        )?;
-    }
-
-    let installed =
-        write_if_changed_allow_read_error(path.as_path(), PI_PLUGIN, "OMP extension", ctx)?;
-    record_managed_agent(
-        global,
-        &path,
-        PiCompatibleAgent::Omp,
-        extension_was_present,
-        ctx,
-    )?;
-
-    if dry_run {
-        print_dry_run_footer();
-    } else {
-        print_omp_result(&path, installed);
-    }
-
-    Ok(())
-}
-
 fn print_omp_result(extension_path: &Path, installed: bool) {
     let status = if installed {
         "installed"
@@ -782,114 +890,36 @@ fn print_omp_result(extension_path: &Path, installed: bool) {
     println!("OMP will load the extension automatically on next start.");
 }
 
-/// Uninstall the OMP extension with an explicit confirmation policy for a
-/// global path shared with Pi.
-pub(super) fn uninstall_omp_with_patch_mode(
-    global: bool,
-    patch_mode: PatchMode,
-    ctx: InitContext,
-) -> Result<()> {
-    let InitContext {
-        verbose, dry_run, ..
-    } = ctx;
-    let path = omp_extension_path_for_scope(global)?;
-
-    if !path.exists() {
-        if dry_run {
-            print_dry_run_footer();
-        } else {
-            println!("RTK OMP extension was not installed (nothing to remove)");
-        }
-        return Ok(());
-    }
-
-    let ownership_state_path = shared_agent_state_path(&path);
-    let Some(content) = read_extension_for_uninstall(&path, "OMP extension", ctx)? else {
-        return Ok(());
+/// Show the extension status for a Pi-compatible agent. Pi and OMP install the
+/// same file, so they share every state the report distinguishes.
+pub(super) fn show_pi_compatible_config(agent: PiCompatibleAgent) -> Result<()> {
+    let global_extension = agent.extension_path_for_scope(true)?;
+    let project_extension = agent.extension_path_for_scope(false)?;
+    let (flag, title) = match agent {
+        PiCompatibleAgent::Pi => ("pi", "Pi"),
+        PiCompatibleAgent::Omp => ("omp", "Oh My Pi"),
     };
 
-    if is_known_stock_pi_plugin(&content) {
-        if !confirm_shared_extension_uninstall(
-            global,
-            &path,
-            PiCompatibleAgent::Omp,
-            patch_mode,
-            ctx,
-        )? {
-            if dry_run {
-                print_dry_run_footer();
-                return Ok(());
-            }
-            anyhow::bail!(
-                "Shared Pi/OMP extension at {} was not removed; rerun with --auto-patch to approve the removal.",
-                path.display()
-            );
-        }
-
-        if dry_run {
-            println!("[dry-run] would remove OMP extension: {}", path.display());
-            remove_managed_agent_state(&ownership_state_path, ctx)?;
-            print_dry_run_footer();
-        } else {
-            // nosemgrep: filesystem-deletion -- OMP uninstall removes only the RTK-managed extension file.
-            fs::remove_file(&path)
-                .with_context(|| format!("Failed to remove OMP extension: {}", path.display()))?;
-            remove_managed_agent_state(&ownership_state_path, ctx)?;
-            if verbose > 0 {
-                eprintln!("Removed OMP extension: {}", path.display());
-            }
-            println!("RTK uninstalled (OMP):");
-            println!("  - Extension: {}", path.display());
-            println!("\nRestart OMP to apply changes.");
-        }
-    } else if looks_like_rtk_pi_plugin(&content) {
-        if dry_run {
-            println!(
-                "[dry-run] would refuse to remove OMP extension: {}",
-                path.display()
-            );
-            print_dry_run_footer();
-            return Ok(());
-        }
-        anyhow::bail!(
-            "OMP extension at {} contains RTK content that does not match the stock extension. Remove the file manually.",
-            path.display()
-        );
-    } else {
-        println!(
-            "OMP extension at {} is not RTK content; leaving it alone.",
-            path.display()
-        );
-        if dry_run {
-            print_dry_run_footer();
-        }
-    }
-
-    Ok(())
-}
-
-/// Show OMP configuration status.
-pub(super) fn show_omp_config() -> Result<()> {
-    let global_extension = omp_extension_path_for_scope(true)?;
-    let project_extension = omp_extension_path_for_scope(false)?;
-
-    println!("rtk Configuration (Oh My Pi):\n");
-    print_omp_extension_status("Global extension", &global_extension)?;
-    print_omp_extension_status("Project extension", &project_extension)?;
+    println!("rtk Configuration ({title}):\n");
+    print_extension_status("Global extension", &global_extension)?;
+    print_extension_status("Project extension", &project_extension)?;
 
     println!("\nUsage:");
-    println!("  rtk init --agent omp                 # Configure ./.omp/extensions/rtk.ts");
     println!(
-        "  rtk init -g --agent omp              # Configure {}",
+        "  rtk init --agent {flag}                 # Configure {}",
+        project_extension.display()
+    );
+    println!(
+        "  rtk init -g --agent {flag}              # Configure {}",
         global_extension.display()
     );
-    println!("  rtk init --agent omp --uninstall     # Remove project OMP RTK extension");
-    println!("  rtk init -g --agent omp --uninstall  # Remove global OMP RTK extension");
+    println!("  rtk init --agent {flag} --uninstall     # Remove project {title} RTK extension");
+    println!("  rtk init -g --agent {flag} --uninstall  # Remove global {title} RTK extension");
 
     Ok(())
 }
 
-fn print_omp_extension_status(label: &str, path: &Path) -> Result<()> {
+fn print_extension_status(label: &str, path: &Path) -> Result<()> {
     if path.exists() {
         let content = match fs::read_to_string(path) {
             Ok(content) => content,
@@ -898,7 +928,10 @@ fn print_omp_extension_status(label: &str, path: &Path) -> Result<()> {
                 return Ok(());
             }
         };
-        if is_current_pi_plugin(&content) {
+        // "Up to date" has to mean the next install writes nothing, so it takes
+        // the byte comparison `write_if_changed` uses. A file that only matches
+        // after CRLF normalisation is still stock, but it will be rewritten.
+        if content == PI_PLUGIN {
             println!("  {}: {} (up to date)", label, path.display());
         } else if is_known_stock_pi_plugin(&content) {
             println!(
@@ -941,10 +974,17 @@ mod tests {
     /// Install the shared Pi extension file for OMP (hook-only; no AGENTS.md
     /// injection). OMP loads the file through its `legacy-pi-compat` layer.
     ///
-    /// global=true  -> `$HOME/.omp/agent/extensions/rtk.ts`
+    /// global=true  -> `$PI_CODING_AGENT_DIR/extensions/rtk.ts`, else
+    ///                 `$HOME/.omp/agent/extensions/rtk.ts`
     /// global=false -> `.omp/extensions/rtk.ts`
     fn run_omp_mode(global: bool, ctx: InitContext) -> Result<()> {
         run_omp_mode_with_patch_mode(global, PatchMode::Ask, ctx)
+    }
+
+    /// Uninstall the OMP extension with the default `Ask` policy for modified
+    /// content.
+    fn uninstall_omp(global: bool, ctx: InitContext) -> Result<()> {
+        uninstall_pi_compatible_with_patch_mode(PiCompatibleAgent::Omp, global, PatchMode::Ask, ctx)
     }
 
     #[test]
@@ -1129,13 +1169,17 @@ mod tests {
         let path = dir.join(PI_PLUGIN_FILE);
         fs::write(&path, format!("{}\n// user modification\n", PI_PLUGIN)).unwrap();
 
-        let result = uninstall(
+        // Pin the patch mode rather than relying on the `Ask` default: under
+        // `cargo test` stdin is the developer's terminal, so `Ask` would block
+        // on the confirmation prompt instead of taking the refusal path.
+        let result = uninstall_with_patch_mode(
             false,
             false,
             false,
             false,
             true,
             false,
+            PatchMode::Skip,
             InitContext::default(),
         );
 
@@ -1199,6 +1243,7 @@ mod tests {
         );
         assert!(is_known_stock_pi_plugin(PI_PLUGIN));
 
+        // Normalise first: a CRLF checkout would otherwise yield \r\r\n.
         let crlf = PI_PLUGIN.replace("\r\n", "\n").replace('\n', "\r\n");
         assert!(is_current_pi_plugin(&crlf));
         assert!(is_known_stock_pi_plugin(&crlf));
@@ -1293,36 +1338,24 @@ mod tests {
             assert_eq!(pi_path, omp_path);
             fs::create_dir_all(omp_path.parent().unwrap()).unwrap();
             fs::write(&omp_path, PI_PLUGIN).unwrap();
-            record_managed_agent(
-                true,
-                &omp_path,
-                PiCompatibleAgent::Pi,
-                false,
-                InitContext::default(),
-            )
-            .unwrap();
+            let pi_site = ExtensionSite::resolve(PiCompatibleAgent::Pi, true).unwrap();
+            let omp_site = ExtensionSite::resolve(PiCompatibleAgent::Omp, true).unwrap();
+            assert!(pi_site.shared_path && omp_site.shared_path);
+            record_managed_agent(&pi_site, false, InitContext::default()).unwrap();
             assert_eq!(
-                extension_share_status(true, &omp_path, PiCompatibleAgent::Omp).unwrap(),
+                extension_share_status(&omp_site, &omp_site.read_ownership().unwrap()),
                 ExtensionShareStatus::Shared
             );
 
-            fs::create_dir_all(OMP_LOCAL_DIR).unwrap();
-            assert!(
-                extension_share_status(true, &pi_path, PiCompatibleAgent::Pi).unwrap()
-                    == ExtensionShareStatus::NotShared,
-                "a definitive Pi-only sidecar must override an unrelated project-local OMP directory"
+            assert_eq!(
+                extension_share_status(&pi_site, &pi_site.read_ownership().unwrap()),
+                ExtensionShareStatus::NotShared,
+                "a sidecar naming only Pi, with no unknown prior owner, must report the aliased file as not shared"
             );
 
-            record_managed_agent(
-                true,
-                &omp_path,
-                PiCompatibleAgent::Omp,
-                true,
-                InitContext::default(),
-            )
-            .unwrap();
+            record_managed_agent(&omp_site, true, InitContext::default()).unwrap();
             assert_eq!(
-                extension_share_status(true, &pi_path, PiCompatibleAgent::Pi).unwrap(),
+                extension_share_status(&pi_site, &pi_site.read_ownership().unwrap()),
                 ExtensionShareStatus::Shared
             );
         });
@@ -1368,7 +1401,9 @@ mod tests {
 
             let plugin = omp_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE);
             assert!(plugin.exists(), "global OMP extension must be created");
-            let state_path = shared_agent_state_path(&plugin);
+            let state_path = ExtensionSite::resolve(PiCompatibleAgent::Omp, true)
+                .unwrap()
+                .state_path;
             assert_eq!(
                 fs::read_to_string(&state_path).unwrap(),
                 "omp\n",
@@ -1405,6 +1440,23 @@ mod tests {
             .join(PI_PLUGIN_FILE);
         let content = fs::read_to_string(&path).unwrap();
         assert_eq!(content.trim(), PI_PLUGIN.trim());
+    }
+
+    #[test]
+    fn test_omp_default_policy_uninstall_removes_stock_extension() {
+        let tmp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(tmp.path());
+
+        run_omp_mode(false, InitContext::default()).unwrap();
+        let path = tmp
+            .path()
+            .join(OMP_LOCAL_DIR)
+            .join(PI_EXTENSIONS_SUBDIR)
+            .join(PI_PLUGIN_FILE);
+        assert!(path.exists());
+
+        uninstall_omp(false, InitContext::default()).unwrap();
+        assert!(!path.exists());
     }
 
     #[test]
@@ -1552,13 +1604,17 @@ mod tests {
         )
         .unwrap();
 
-        let result = uninstall(
+        // Pin the patch mode rather than relying on the `Ask` default: under
+        // `cargo test` stdin is the developer's terminal, so `Ask` would block
+        // on the confirmation prompt instead of taking the refusal path.
+        let result = uninstall_with_patch_mode(
             false,
             false,
             false,
             false,
             false,
             true,
+            PatchMode::Skip,
             InitContext::default(),
         );
 

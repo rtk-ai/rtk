@@ -64,7 +64,7 @@ pub use droid::{run_droid_mode, uninstall_droid};
 pub use gemini::run_gemini;
 pub use hermes::{run_hermes_mode, uninstall_hermes};
 pub use instructions_agents::{run_kilocode_mode, run_kimi_mode};
-pub use pi::{run_omp_mode_with_patch_mode, run_pi_mode_with_patch_mode};
+pub use pi::{PiCompatibleAgent, run_omp_mode_with_patch_mode, run_pi_mode_with_patch_mode};
 pub use trae::{run_trae_mode, uninstall_trae_mode};
 pub use vibe::{run_vibe_mode, uninstall_vibe};
 
@@ -1452,12 +1452,12 @@ pub fn uninstall_with_patch_mode(
     }
 
     if pi {
-        uninstall_pi_with_patch_mode(global, patch_mode, ctx)?;
+        uninstall_pi_compatible_with_patch_mode(PiCompatibleAgent::Pi, global, patch_mode, ctx)?;
         return Ok(());
     }
 
     if omp {
-        uninstall_omp_with_patch_mode(global, patch_mode, ctx)?;
+        uninstall_pi_compatible_with_patch_mode(PiCompatibleAgent::Omp, global, patch_mode, ctx)?;
         return Ok(());
     }
 
@@ -2003,9 +2003,9 @@ pub(super) fn resolve_claude_dir_from(
 }
 
 /// Show current rtk configuration
-pub fn show_config(codex: bool, omp: bool) -> Result<()> {
-    if omp {
-        return show_omp_config();
+pub fn show_config(codex: bool, pi_compatible: Option<PiCompatibleAgent>) -> Result<()> {
+    if let Some(agent) = pi_compatible {
+        return show_pi_compatible_config(agent);
     }
     if codex {
         return show_codex_config();
