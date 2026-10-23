@@ -12,6 +12,7 @@ use crate::ruff_cmd;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize, Serialize)]
 struct EslintMessage {
@@ -124,6 +125,17 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
         tool_exec(runner, linter, MissingTool::Fail)
     };
 
+    // A bare `rtk lint` should use the ESLint declared by the current project,
+    // just as npm scripts and npx do, before considering an unrelated global.
+    // Explicit package runners already resolve their own project-local binary.
+    if linter == "eslint"
+        && runner.is_none()
+        && let Some(binary) =
+            find_project_eslint_bin(crate::core::user_dirs::current_dir().ok().as_deref())
+    {
+        cmd = crate::core::utils::resolved_command(&binary.to_string_lossy());
+    }
+
     // Add format flags based on linter
     match linter {
         "eslint" => {
@@ -197,23 +209,34 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
         linter, linter
     ))?;
 
+    let raw = format!(
+        "{}{}{}",
+        result.stdout,
+        if result.stdout.is_empty() || result.stderr.is_empty() {
+            ""
+        } else {
+            "\n"
+        },
+        result.stderr
+    );
+
     // Check if process was killed by signal (SIGABRT, SIGKILL, etc.)
     if !result.success() && result.exit_code > 128 {
-        eprintln!("[warn] Linter process terminated abnormally (possibly out of memory)");
-        if !result.stderr.is_empty() {
-            eprintln!(
-                "stderr: {}",
-                result.stderr.lines().take(5).collect::<Vec<_>>().join("\n")
-            );
+        eprintln!("[warn] Linter process terminated abnormally; cause is tool-specific");
+        if !raw.is_empty() {
+            eprintln!("{}", raw);
         }
         return Ok(result.exit_code);
     }
 
-    let raw = format!("{}\n{}", result.stdout, result.stderr);
-
     // Dispatch to appropriate filter based on linter
     let filtered = if let Some(plan) = &sqlfluff {
         plan.render(&result.stdout, result.exit_code)
+    } else if linter == "eslint" {
+        // ESLint can fail before emitting JSON (for example, when a global
+        // ESLint predates the project's flat config). In that case its stderr
+        // is the useful diagnostic; a JSON parse error from RTK only obscures it.
+        format_eslint_output(&result.stdout, &result.stderr, result.exit_code)
     } else {
         match linter {
             "eslint" => filter_eslint_json(&result.stdout),
@@ -245,6 +268,43 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
     }
 
     Ok(0)
+}
+
+fn find_project_eslint_bin(cwd: Option<&Path>) -> Option<PathBuf> {
+    let mut current = cwd?;
+    loop {
+        let bin_dir = current.join("node_modules").join(".bin");
+        let candidates = if cfg!(windows) {
+            vec!["eslint.cmd", "eslint.exe", "eslint"]
+        } else {
+            vec!["eslint"]
+        };
+        if let Some(binary) = candidates
+            .iter()
+            .map(|name| bin_dir.join(name))
+            .find(|path| path.is_file())
+        {
+            return Some(binary);
+        }
+        current = current.parent()?;
+    }
+}
+
+fn should_passthrough_eslint(stdout: &str, exit_code: i32) -> bool {
+    exit_code != 0
+        && (stdout.trim().is_empty() || serde_json::from_str::<serde_json::Value>(stdout).is_err())
+}
+
+fn format_eslint_output(stdout: &str, stderr: &str, exit_code: i32) -> String {
+    if should_passthrough_eslint(stdout, exit_code) {
+        if stdout.is_empty() || stderr.is_empty() {
+            format!("{stdout}{stderr}")
+        } else {
+            format!("{stdout}\n{stderr}")
+        }
+    } else {
+        filter_eslint_json(stdout)
+    }
 }
 
 /// Filter ESLint JSON output - group by rule and file
@@ -583,6 +643,59 @@ mod tests {
         assert!(result.contains("prefer-const"));
         assert!(result.contains("no-unused-vars"));
         assert!(result.contains("src/utils.ts"));
+    }
+
+    #[test]
+    fn eslint_without_valid_json_preserves_failure_diagnostics() {
+        let stderr = "ESLint: flat config requires ESLint 9";
+        assert!(should_passthrough_eslint("", 2));
+        assert!(should_passthrough_eslint("not json", 2));
+        assert!(!should_passthrough_eslint("[]", 0));
+        assert!(!should_passthrough_eslint("not json", 0));
+        let output = format_eslint_output("", stderr, 2);
+        assert!(output.contains(stderr));
+        assert!(!output.contains("JSON parse failed"));
+    }
+
+    #[test]
+    fn eslint_malformed_json_failure_uses_raw_diagnostics() {
+        let output = format_eslint_output("partial", "invalid flat config", 2);
+        assert!(output.contains("partial"));
+        assert!(output.contains("invalid flat config"));
+        assert!(!output.contains("JSON parse failed"));
+    }
+
+    #[test]
+    fn resolves_eslint_from_nearest_project_node_modules_bin() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("node_modules/.bin");
+        let nested = temp.path().join("packages/app");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        let local_eslint = root.join("eslint");
+        std::fs::write(&local_eslint, "#!/bin/sh\nexit 0\n").unwrap();
+
+        assert_eq!(find_project_eslint_bin(Some(&nested)), Some(local_eslint));
+    }
+
+    #[test]
+    fn missing_project_eslint_is_not_mistaken_for_a_local_binary() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(find_project_eslint_bin(Some(temp.path())), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolves_windows_project_eslint_cmd_shim() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("app");
+        let bin_dir = temp.path().join("node_modules/.bin");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let local_eslint = bin_dir.join("eslint.cmd");
+        std::fs::write(&local_eslint, "@echo off\r\nexit /b 0\r\n").unwrap();
+
+        assert_eq!(find_project_eslint_bin(Some(&project)), Some(local_eslint));
     }
 
     #[test]
