@@ -219,6 +219,8 @@ For per-agent setup details, override controls, and graceful degradation, see th
 
 100+ commands across Git, GitHub CLI, Cargo/Rust, JavaScript (npm, pnpm, vitest, jest, tsc, Next.js, Playwright, Prisma), Python (ruff, pytest, mypy, pip), Go (go test, golangci-lint), Ruby, .NET, JVM (Gradle, Maven), PHP, Docker, Kubernetes, AWS, Terraform, and the file/search builtins.
 
+C++ build tools: `rtk cmake`, `rtk ctest`, `rtk make`, `rtk ninja`, and `rtk msbuild`.
+
 ```bash
 -v, --verbose          # increase verbosity (-v, -vv, -vvv)
 rtk bypass <cmd>       # run one command unfiltered, still tracked

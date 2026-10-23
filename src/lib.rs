@@ -11,6 +11,7 @@ mod parser;
 
 // Re-export command modules for routing
 use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
+use cmds::cpp::{cmake_cmd, make_cmd, msbuild_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git_cmd, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
@@ -1045,6 +1046,27 @@ enum Commands {
     #[command(name = "mvnd")]
     Mvnd {
         /// Maven goals and arguments (e.g., clean install, -DskipTests test, -X)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// CMake build / configure with compact diagnostics
+    Cmake {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// make with compact diagnostics
+    Make {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// ninja with compact diagnostics
+    Ninja {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// MSBuild with compact compiler/linker diagnostics
+    Msbuild {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -3628,6 +3650,11 @@ fn run_cli() -> Result<i32> {
 
         Commands::Mvnd { args } => mvn_cmd::run_daemon(&args, cli.verbose)?,
 
+        Commands::Cmake { args } => cmake_cmd::run(&args, cli.verbose)?,
+        Commands::Make { args } => make_cmd::run_make(&args, cli.verbose)?,
+        Commands::Ninja { args } => make_cmd::run_ninja(&args, cli.verbose)?,
+        Commands::Msbuild { args } => msbuild_cmd::run(&args, cli.verbose)?,
+
         Commands::HookAudit { since } => {
             hooks::hook_audit_cmd::run(since, cli.verbose)?;
             0
@@ -4050,6 +4077,10 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Jest { .. }
             | Commands::Vitest { .. }
             | Commands::Ctest { .. }
+            | Commands::Cmake { .. }
+            | Commands::Make { .. }
+            | Commands::Ninja { .. }
+            | Commands::Msbuild { .. }
             | Commands::Prisma { .. }
             | Commands::Tsc { .. }
             | Commands::Next { .. }
@@ -4691,6 +4722,7 @@ mod tests {
             "bunx",
             "deno",
         ];
+        const NATIVE: &[&str] = &["cmake", "make", "ninja", "msbuild"];
 
         let unclassified: Vec<String> = Cli::command()
             .get_subcommands()
@@ -4698,6 +4730,7 @@ mod tests {
             .filter(|name| {
                 !core::constants::RTK_META_COMMANDS.contains(&name.as_str())
                     && !PASSTHROUGH.contains(&name.as_str())
+                    && !NATIVE.contains(&name.as_str())
             })
             .collect();
 
