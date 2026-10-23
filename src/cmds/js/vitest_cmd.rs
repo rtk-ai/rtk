@@ -344,19 +344,39 @@ fn format_test_output(
             if verbose > 0 {
                 eprintln!("{} run (Tier 1: Full JSON parse)", framework);
             }
-            FormattedTestOutput::new(data.format(mode))
+            FormattedTestOutput::new(with_coverage_errors(data.format(mode), combined))
         }
         ParseResult::Degraded(data, warnings) => {
             if verbose > 0 {
                 emit_degradation_warning(framework, &warnings.join(", "));
             }
-            FormattedTestOutput::new(data.format(mode))
+            FormattedTestOutput::new(with_coverage_errors(data.format(mode), combined))
         }
         ParseResult::Passthrough(_) => {
             emit_passthrough_warning(framework, "All parsing tiers failed");
             format_passthrough_output(stdout)
         }
     }
+}
+
+/// Vitest reports unmet coverage thresholds on stderr, while the JSON summary
+/// comes from stdout and says the run passed. Keep those lines so the summary
+/// shows why the exit code is non-zero.
+fn with_coverage_errors(summary: String, combined: &str) -> String {
+    let errors: Vec<&str> = combined
+        .lines()
+        .map(str::trim)
+        .filter(|line| is_coverage_threshold_error(line))
+        .collect();
+    if errors.is_empty() {
+        return summary;
+    }
+    format!("{}\n{}", summary, errors.join("\n"))
+}
+
+fn is_coverage_threshold_error(line: &str) -> bool {
+    (line.starts_with("ERROR: Coverage for ") || line.starts_with("ERROR: Uncovered "))
+        && line.contains("threshold")
 }
 
 fn format_passthrough_output(raw: &str) -> FormattedTestOutput {
@@ -665,5 +685,35 @@ Scope: all 6 workspace projects
             "Tests: 1 failed\n[full output: vitest_run.log]"
         );
         assert_eq!(render(""), "[full output: vitest_run.log]");
+    }
+
+    const PASSING_JSON: &str = r#"{"numTotalTests":1,"numPassedTests":1,"numFailedTests":0,"numPendingTests":0,"testResults":[]}"#;
+
+    #[test]
+    fn test_coverage_threshold_errors_survive_a_passing_run() {
+        let combined = format!(
+            "{PASSING_JSON}\nFunctions    : 50% ( 1/2 )\n\
+             ERROR: Coverage for functions (50%) does not meet global threshold (100%)\n\
+             ERROR: Uncovered lines (3) exceed \"src/**\" threshold (1) for src/math.js\n"
+        );
+
+        let out = format_test_output("vitest", PASSING_JSON, &combined, false, 0);
+
+        assert_eq!(
+            out.text,
+            "PASS (1) FAIL (0)\n\
+             ERROR: Coverage for functions (50%) does not meet global threshold (100%)\n\
+             ERROR: Uncovered lines (3) exceed \"src/**\" threshold (1) for src/math.js"
+        );
+    }
+
+    #[test]
+    fn test_coverage_lines_need_vitest_error_prefix() {
+        let combined =
+            format!("{PASSING_JSON}\n ✓ warns when Coverage for lines does not meet threshold\n");
+
+        let out = format_test_output("vitest", PASSING_JSON, &combined, false, 0);
+
+        assert_eq!(out.text, "PASS (1) FAIL (0)");
     }
 }
