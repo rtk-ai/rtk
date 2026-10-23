@@ -105,7 +105,7 @@ cargo install --git https://github.com/rtk-ai/rtk rtk --no-default-features
 ### 確認
 
 ```bash
-rtk --version   # "rtk 0.27.x" と表示されるはず
+rtk --version   # 現在の任意のバージョン
 rtk gain        # トークン節約統計が表示されるはず
 ```
 
