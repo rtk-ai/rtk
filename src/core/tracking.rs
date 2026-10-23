@@ -378,7 +378,7 @@ pub fn average_time_ms(total_time_ms: u64, timed_commands: usize) -> u64 {
 const SCHEMA_VERSION: i64 = 2;
 
 /// Ceiling on a row's `input_tokens` for rate-bearing aggregates (the gain
-/// headline and the daily/weekly/monthly tables). 7,500 DB tokens is exactly
+/// headline, the daily/weekly/monthly tables and the `-g` daily graph). 7,500 DB tokens is exactly
 /// 30,000 chars at the bytes/4 estimate — Claude Code's default Bash output
 /// limit (BASH_MAX_OUTPUT_LENGTH), i.e. the most the agent would have
 /// ingested without rtk. Rows above it claim savings against bytes the agent
@@ -1290,23 +1290,33 @@ impl Tracker {
         project_path: Option<&str>, // added
     ) -> Result<Vec<(String, usize)>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
+        // The daily graph is a period view, so it applies the same input cap as the
+        // daily/weekly/monthly tables; see HEADLINE_INPUT_CAP_TOKENS.
         let mut stmt = self.conn.prepare(
             "SELECT DATE(timestamp), SUM(saved_tokens)
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND input_tokens <= ?3
              GROUP BY DATE(timestamp)
              ORDER BY DATE(timestamp) DESC
              LIMIT 30", // added: project filter in WHERE
         )?;
 
-        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
-            // added: params
-            // SUM(saved_tokens) per day: clamp a net-negative day to 0 (unsigned field).
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?.max(0) as usize,
-            ))
-        })?;
+        let rows = stmt.query_map(
+            params![
+                project_exact,
+                project_glob,
+                HEADLINE_INPUT_CAP_TOKENS as i64
+            ],
+            |row| {
+                // added: params
+                // SUM(saved_tokens) per day: clamp a net-negative day to 0 (unsigned field).
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?.max(0) as usize,
+                ))
+            },
+        )?;
 
         let mut result: Vec<_> = rows.collect::<Result<Vec<_>, _>>()?;
         result.reverse();
@@ -2770,6 +2780,16 @@ mod tests {
             .expect("Failed to get days");
         assert_eq!(days.len(), 1);
         assert_eq!(days[0].input_tokens, 1_000, "period tables use the cap too");
+        assert_eq!(
+            summary
+                .by_day
+                .iter()
+                .map(|(_, saved)| *saved)
+                .sum::<usize>(),
+            days[0].saved_tokens,
+            "the -g daily graph uses the cap like the period tables: {:?}",
+            summary.by_day
+        );
 
         let diagnosable = summary
             .by_command
