@@ -215,6 +215,7 @@ RTK supports 18 AI coding tools. Each integration rewrites shell commands to `rt
 | **Trae (global)** | `rtk init -g --agent trae` | `~/.trae/hooks.json`, plus `~/.trae-cn/hooks.json` when that directory exists |
 
 For per-agent setup details, override controls, and graceful degradation, see the [Supported Agents guide](https://www.rtk-ai.app/guide/getting-started/supported-agents). The Hermes plugin source and tests live in `hooks/hermes/`; installed Hermes runtime files still live under `~/.hermes/plugins/rtk-rewrite/`.
+
 ## What RTK Covers
 
 100+ commands across Git, GitHub CLI, Cargo/Rust, JavaScript (npm, pnpm, vitest, jest, tsc, Next.js, Playwright, Prisma), Python (ruff, pytest, mypy, pip), Go (go test, golangci-lint), Ruby, .NET, JVM (Gradle, Maven), PHP, Docker, Kubernetes, AWS, Terraform, and the file/search builtins.
@@ -279,6 +280,29 @@ extends = ["rtk:posthook", "rtk:proxy"]
 ```
 
 > The tour: **[Pipelines](https://www.rtk-ai.app/guide/pipelines/overview)** · the reference: **[Writing a Pipeline](https://www.rtk-ai.app/guide/pipelines/writing-pipelines)**, **[Conditions and Judges](https://www.rtk-ai.app/guide/pipelines/conditions)**, **[Methods](https://www.rtk-ai.app/guide/pipelines/methods)**, **[Tasks and Upstreams](https://www.rtk-ai.app/guide/pipelines/tasks)** · the commands: **[Pipeline Commands](https://www.rtk-ai.app/guide/pipelines/commands)** · write your own method: **[Plugins](https://www.rtk-ai.app/guide/pipelines/plugins)**
+
+## Shell Completion
+
+Generate and enable tab-completion for `rtk` subcommands:
+
+```bash
+# bash — current shell, or add the source line to ~/.bashrc
+source <(rtk completions bash)
+
+# zsh — current shell, or add the source line to ~/.zshrc
+source <(rtk completions zsh)
+
+# fish — current shell, or copy the script to ~/.config/fish/completions/rtk.fish
+rtk completions fish | source
+
+# powershell — add this line to your $PROFILE
+rtk completions powershell | Out-String | Invoke-Expression
+
+# elvish — copy the script to ~/.config/elvish/lib/rtk-completions.elv and eval it
+rtk completions elvish
+```
+
+Supported shells: `bash`, `zsh`, `fish`, `powershell`, `elvish`.
 
 ## Documentation
 
