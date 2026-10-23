@@ -1,0 +1,11 @@
+E                                                                        [100%]
+==================================== ERRORS ====================================
+__________________________ ERROR at setup of test_fx ___________________________
+file /home/user/project/test_fx.py, line 1
+  def test_fx(missing_fixture):
+E       fixture 'missing_fixture' not found
+>       available fixtures: capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, doctest_namespace, monkeypatch, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, subtests, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/home/user/project/test_fx.py:1
+1 error in 0.01s

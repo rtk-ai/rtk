@@ -1,0 +1,12 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________________________________ test_b ____________________________________
+test_sl.py:5: in test_b
+    boom()
+helpers.py:2: in boom
+    raise RuntimeError('see app.py:12 for details\nsecond line\nthird line')  # app.py:12
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   RuntimeError: see app.py:12 for details
+E   second line
+E   third line
+1 failed in 0.01s
