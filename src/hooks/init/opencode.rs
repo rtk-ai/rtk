@@ -29,13 +29,110 @@ fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
     Some((major, minor, patch))
 }
 
+/// How long `opencode --version` may run before it counts as no version.
+///
+/// A wrapper that fetches or migrates on first launch must not block `rtk init`.
+/// Past this, the probe is abandoned and init proceeds as if OpenCode had not
+/// answered — the same branch as a missing binary. Long enough for a cold
+/// `opencode --version`, short enough that a hung shim does not stall init.
+const OPENCODE_VERSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Run `cmd` and collect its output.
+///
+/// `None` when it cannot be spawned or does not exit within `timeout`. On Unix
+/// the child is its own process group, and a timeout kills that group, so a
+/// wrapper and the fetch or migration it started both stop.
+fn output_with_timeout(
+    cmd: &mut std::process::Command,
+    timeout: std::time::Duration,
+) -> Option<std::process::Output> {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::thread;
+    use std::time::Instant;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    // `.output()` closes stdin; a version probe must not consume the caller's.
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().ok()?;
+    let Some(mut stdout) = child.stdout.take() else {
+        stop_child(&mut child);
+        return None;
+    };
+    let Some(mut stderr) = child.stderr.take() else {
+        stop_child(&mut child);
+        return None;
+    };
+    // Drain both pipes while we wait. A child that writes more than the pipe
+    // buffer would otherwise block forever, and `try_wait` would never see it exit.
+    let stdout_handle = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_handle = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf);
+        buf
+    });
+
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() >= timeout => {
+                stop_child(&mut child);
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                return None;
+            }
+            Ok(None) => thread::sleep(std::time::Duration::from_millis(20)),
+            Err(_) => {
+                stop_child(&mut child);
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                return None;
+            }
+        }
+    };
+
+    Some(std::process::Output {
+        status,
+        stdout: stdout_handle.join().ok()?,
+        stderr: stderr_handle.join().ok()?,
+    })
+}
+
+/// Stop `child` and every process in its group, then reap it.
+fn stop_child(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let pid = child.id() as libc::pid_t;
+        if pid > 0 {
+            #[allow(unsafe_code)]
+            // nosemgrep: unsafe-block
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// The installed OpenCode version banner, or `None` when there is none we can read.
 #[cfg(not(test))]
 fn opencode_version() -> Option<String> {
-    let out = std::process::Command::new("opencode")
-        .arg("--version")
-        .output()
-        .ok()?;
+    let mut cmd = std::process::Command::new("opencode");
+    cmd.arg("--version");
+    let out = output_with_timeout(&mut cmd, OPENCODE_VERSION_TIMEOUT)?;
     if !out.status.success() {
         return None;
     }
@@ -102,12 +199,10 @@ pub(super) fn prepare_opencode_plugin_path() -> Result<PathBuf> {
 /// Returns whether a plugin is in place afterwards, so callers report a plugin
 /// path only when there is one.
 pub(super) fn ensure_opencode_plugin_installed(path: &Path, ctx: InitContext) -> Result<bool> {
-    // A dry run skips the floor check, so it has no reason to spawn OpenCode.
-    let banner = if ctx.dry_run {
-        None
-    } else {
-        opencode_version()
-    };
+    // Reading the version does not touch the filesystem, so a dry run applies
+    // the same floor as a real run. A probe that fails or hangs reads as no
+    // version, and init installs (or previews) the plugin.
+    let banner = opencode_version();
     ensure_opencode_plugin_installed_for(path, ctx, banner.as_deref())
 }
 
@@ -122,7 +217,7 @@ fn ensure_opencode_plugin_installed_for(
     banner: Option<&str>,
 ) -> Result<bool> {
     let InitContext { dry_run, .. } = ctx;
-    if !dry_run && let Some(found) = too_old_opencode(banner) {
+    if let Some(found) = too_old_opencode(banner) {
         let need = format!("{}.{}.{}", MIN_OPENCODE.0, MIN_OPENCODE.1, MIN_OPENCODE.2);
         let existing = if path.exists() {
             "left the plugin that is already there in place"
@@ -227,6 +322,39 @@ mod tests {
         assert_eq!(too_old_opencode(Some("v")), None);
     }
 
+    /// Dry-run used to skip the floor and preview a write the real run refuses.
+    #[test]
+    fn an_old_opencode_dry_run_refuses_and_writes_nothing() {
+        let dry = InitContext {
+            dry_run: true,
+            ..InitContext::default()
+        };
+        let temp = TempDir::new().unwrap();
+        let plugin_path = opencode_plugin_path(&temp.path().join("opencode"));
+
+        let installed =
+            ensure_opencode_plugin_installed_for(&plugin_path, dry, Some("1.1.4")).unwrap();
+        assert!(
+            !installed,
+            "dry-run must refuse an old OpenCode, same as a real run"
+        );
+        assert!(
+            !plugin_path.exists(),
+            "dry-run must not create the plugin it refuses"
+        );
+
+        fs::create_dir_all(plugin_path.parent().unwrap()).unwrap();
+        fs::write(&plugin_path, "// already there").unwrap();
+        let installed =
+            ensure_opencode_plugin_installed_for(&plugin_path, dry, Some("1.1.4")).unwrap();
+        assert!(!installed);
+        assert_eq!(
+            fs::read_to_string(&plugin_path).unwrap(),
+            "// already there",
+            "dry-run must leave an existing plugin untouched"
+        );
+    }
+
     #[test]
     fn an_old_opencode_leaves_the_plugin_file_untouched() {
         // Writing it is what breaks startup, so the no-write branch is the one
@@ -322,6 +450,90 @@ mod tests {
         // nosemgrep: filesystem-deletion -- expected in hooks/init uninstall-path cleanup and tests.
         fs::remove_file(&plugin_path).unwrap();
         assert!(!plugin_path.exists());
+    }
+
+    #[test]
+    fn opencode_version_timeout_stays_within_init_budget() {
+        // A cold `opencode --version` still has to fit, and the integration
+        // test's own deadline (15s) stays above this ceiling.
+        assert!(OPENCODE_VERSION_TIMEOUT >= std::time::Duration::from_secs(1));
+        assert!(OPENCODE_VERSION_TIMEOUT <= std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn version_probe_is_none_when_the_binary_is_missing() {
+        let mut cmd = std::process::Command::new("rtk-no-such-opencode-binary");
+        assert!(output_with_timeout(&mut cmd, std::time::Duration::from_secs(1)).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_returns_output_when_the_command_exits() {
+        let mut cmd = std::process::Command::new("echo");
+        cmd.arg("1.18.29");
+        let out = output_with_timeout(&mut cmd, std::time::Duration::from_secs(2))
+            .expect("echo should finish");
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1.18.29");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_reports_a_failing_command() {
+        let mut cmd = std::process::Command::new("false");
+        let out = output_with_timeout(&mut cmd, std::time::Duration::from_secs(2))
+            .expect("false should finish");
+        assert!(!out.status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_gives_up_when_the_command_hangs() {
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("30");
+        let started = std::time::Instant::now();
+        let out = output_with_timeout(&mut cmd, std::time::Duration::from_millis(200));
+        assert!(out.is_none());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "hung probe took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A shell wrapper that backgrounds `sleep` is the hang the timeout exists
+    /// for. Killing only the shell would leave that child running.
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_stops_a_hanging_wrapper_and_the_child_it_started() {
+        let temp = TempDir::new().unwrap();
+        let pidfile = temp.path().join("child.pid");
+        let script = format!("sleep 30 &\necho $! > '{}'\nwait\n", pidfile.display());
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg(script);
+        let started = std::time::Instant::now();
+        assert!(output_with_timeout(&mut cmd, std::time::Duration::from_millis(500)).is_none());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "hung wrapper took {:?}",
+            started.elapsed()
+        );
+        let pid: i32 = fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .expect("child pid");
+        #[allow(unsafe_code)]
+        // nosemgrep: unsafe-block
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        if alive {
+            #[allow(unsafe_code)]
+            // nosemgrep: unsafe-block
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+        assert!(!alive, "grandchild sleep {pid} still running");
     }
 
     // Pi integration tests
