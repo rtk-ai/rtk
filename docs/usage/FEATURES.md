@@ -924,6 +924,8 @@ Auto-detects `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`, `Gemfile`
 | `rtk docker compose logs [service]` | Deduplicated Compose logs |
 | `rtk docker compose build [service]` | Build summary |
 
+Docker's `-H/--host` and `--context` go before the subcommand, and Compose's `-f/--file` and `-p/--project-name` go after `compose`. RTK forwards them to docker unchanged (`rtk docker --context prod ps`, `rtk docker compose -f ci.yml ps`).
+
 Unrecognized subcommands are passed through directly (passthrough).
 
 **Before / After:**
