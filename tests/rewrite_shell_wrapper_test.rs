@@ -10,6 +10,7 @@ fn rewrite(command: &str) -> Output {
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path())
         .env("RTK_TELEMETRY_DISABLED", "1")
+        .env("RTK_SUPPRESS_HOOK_WARNING", "1")
         .output()
         .expect("run rtk rewrite")
 }

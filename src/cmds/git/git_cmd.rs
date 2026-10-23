@@ -1517,6 +1517,7 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
 
 /// RTK's default `git log` limit, applied whenever the user names none.
 const DEFAULT_LOG_LIMIT: usize = 10;
+const DEFAULT_FORMAT_LOG_LIMIT: usize = 50;
 /// The lowest exit code with which git reports that it refused a command rather than ran it:
 /// 128 is a fatal error, 129 a usage error, and 128 + n a death by signal.
 const REFUSAL_EXIT_CODE: i32 = 128;
@@ -1524,6 +1525,7 @@ const REFUSAL_EXIT_CODE: i32 = 128;
 const SHA1_NAME_LEN: usize = 40;
 const SHA256_NAME_LEN: usize = 64;
 const DEFAULT_LOG_LIMIT_ARG: &str = "-10";
+const DEFAULT_FORMAT_LOG_LIMIT_ARG: &str = "-50";
 
 /// `git log <args>` for the raw passthrough, carrying RTK's default limit unless the user named
 /// one. [`run_passthrough`] streams straight to the terminal, so the limit has to be in the args
@@ -1535,10 +1537,10 @@ const DEFAULT_LOG_LIMIT_ARG: &str = "-10";
 /// positionals ("fatal: -10 option must come before non-option arguments") and a pathspec needs
 /// no boundary to be one. Only the limit is injected -- `--no-merges` would gut `--cc`/`-c`,
 /// whose entire purpose is the merge diff.
-fn raw_log_passthrough_args(args: &[String], capped: bool) -> Vec<OsString> {
+fn raw_log_passthrough_args(args: &[String], capped: bool, limit_arg: &str) -> Vec<OsString> {
     let mut out = vec![OsString::from("log")];
     if capped {
-        out.push(OsString::from(DEFAULT_LOG_LIMIT_ARG));
+        out.push(OsString::from(limit_arg));
     }
     out.extend(args.iter().map(OsString::from));
     out
@@ -1834,10 +1836,26 @@ fn run_log(
 ) -> Result<i32> {
     let tracked = with_args("git log", &display_args(args));
     let tokens = tokenize_git_log_args(args);
+    let has_format_flag = tokens
+        .iter()
+        .any(|t| t.kind == TokenKind::Long && matches!(t.text, "format" | "oneline" | "pretty"));
+    let has_nul_delimiter = tokens
+        .iter()
+        .any(|t| t.kind == TokenKind::Short && t.text == "z");
+    let raw_limit = if has_format_flag && has_nul_delimiter {
+        DEFAULT_FORMAT_LOG_LIMIT
+    } else {
+        DEFAULT_LOG_LIMIT
+    };
+    let raw_limit_arg = if raw_limit == DEFAULT_FORMAT_LOG_LIMIT {
+        DEFAULT_FORMAT_LOG_LIMIT_ARG
+    } else {
+        DEFAULT_LOG_LIMIT_ARG
+    };
 
     if tokens.iter().any(|t| log_wants_raw_shape(t, &tokens)) {
         let capped = raw_log_is_capped(&tokens);
-        let passthrough_args = raw_log_passthrough_args(args, capped);
+        let passthrough_args = raw_log_passthrough_args(args, capped, raw_limit_arg);
         if !capped {
             return run_passthrough(&passthrough_args, global_args, verbose);
         }
@@ -1876,12 +1894,10 @@ fn run_log(
         // silencing the notice again. The one exception is `-h`: git 2.56 answers it with
         // its usage and exit 0, so a walk that never ran looks like one that did.
         let refused = result.exit_code >= REFUSAL_EXIT_CODE || asks_for_usage(&tokens);
-        if !refused
-            && walk_exceeds_limit(global_args, args, &tokens, DEFAULT_LOG_LIMIT) == Some(true)
-        {
+        if !refused && walk_exceeds_limit(global_args, args, &tokens, raw_limit) == Some(true) {
             eprintln!(
                 "[rtk] capped at {} commits; pass -n <count> for more",
-                DEFAULT_LOG_LIMIT
+                raw_limit
             );
         }
         if !result.success() {
@@ -1894,11 +1910,6 @@ fn run_log(
 
     let mut cmd = git_cmd(global_args);
     cmd.arg("log");
-
-    // Check if user provided format flags
-    let has_format_flag = tokens
-        .iter()
-        .any(|t| t.kind == TokenKind::Long && matches!(t.text, "format" | "oneline" | "pretty"));
 
     // Check if user provided limit flag (-N, -n N, --max-count=N, --max-count N)
     let has_limit_flag = has_limit_flag(&tokens);
@@ -1917,8 +1928,8 @@ fn run_log(
         (n, true)
     } else if has_format_flag {
         // --oneline / --pretty without -N: user wants compact output, allow more
-        cmd.arg("-50");
-        (50, false)
+        cmd.arg(DEFAULT_FORMAT_LOG_LIMIT_ARG);
+        (DEFAULT_FORMAT_LOG_LIMIT, false)
     } else {
         // No flags at all: default to 10
         cmd.arg(DEFAULT_LOG_LIMIT_ARG);
@@ -2126,9 +2137,11 @@ fn log_wants_raw_shape(token: &Token<'_>, tokens: &[Token<'_>]) -> bool {
                 | "unified"
         ),
         // `-U<n>` makes `git log` emit a patch the one-line-per-commit compaction cannot
-        // represent, and `-c` is the combined-diff form of `--cc`. `-W`/`--function-context`
-        // is *not* here: against git 2.53 it leaves `git log` byte-identical to plain log.
-        TokenKind::Short => matches!(token.text, "U" | "c" | "p" | "u"),
+        // represent, and `-c` is the combined-diff form of `--cc`. `-z` removes the line
+        // separators that `filter_log_output` relies on, so it would truncate the whole walk
+        // as one line. `-W`/`--function-context` is *not* here: against git 2.53 it leaves
+        // `git log` byte-identical to plain log.
+        TokenKind::Short => matches!(token.text, "U" | "c" | "p" | "u" | "z"),
         _ => false,
     }
 }
@@ -5910,7 +5923,7 @@ A  added.rs
                 tokens.iter().any(|t| log_wants_raw_shape(t, &tokens)),
                 "{args:?} must route raw"
             );
-            raw_log_passthrough_args(&owned, raw_log_is_capped(&tokens))
+            raw_log_passthrough_args(&owned, raw_log_is_capped(&tokens), DEFAULT_LOG_LIMIT_ARG)
                 .iter()
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
@@ -5990,7 +6003,7 @@ A  added.rs
         let built = |args: &[&str]| {
             let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
             let tokens = tokenize_git_log_args(&owned);
-            raw_log_passthrough_args(&owned, raw_log_is_capped(&tokens))
+            raw_log_passthrough_args(&owned, raw_log_is_capped(&tokens), DEFAULT_LOG_LIMIT_ARG)
                 .iter()
                 .any(|a| a == DEFAULT_LOG_LIMIT_ARG)
         };
