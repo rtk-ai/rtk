@@ -1236,7 +1236,8 @@ pub fn run_opencode(cmd: &str, agent: Option<&str>) -> Result<()> {
 fn opencode_answer_for(cmd: &str, agent: Option<&str>) -> Value {
     // Two rule sources rtk cannot judge, and a rewrite judged without them
     // would silence an ask: an agent markdown file whose frontmatter declares
-    // permission rules, and a legacy key only one OpenCode generation applies.
+    // permission rules for the shell tool, and a legacy key only one OpenCode
+    // generation applies.
     // Answer `{}` and let OpenCode apply its own rules.
     if permissions_opencode::agent_rules_unreadable(agent) {
         return json!({});
