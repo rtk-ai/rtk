@@ -961,7 +961,7 @@ pub fn run(
             let time_width = summary
                 .by_command
                 .iter()
-                .map(|(_, _, _, _, avg_time)| format_duration(*avg_time).len())
+                .map(|(command, _, _, _, avg_time)| command_time_label(command, *avg_time).len())
                 .max()
                 .unwrap_or(6)
                 .max(6);
@@ -1017,7 +1017,7 @@ pub fn run(
                 let pct_cell = colorize_pct_cell(*pct, &pct_plain); // added: color-coded percentage
                 let time_cell = format!(
                     "{:>time_width$}",
-                    format_duration(*avg_time),
+                    command_time_label(cmd, *avg_time),
                     time_width = time_width
                 );
                 let impact = mini_bar(*saved, max_saved, impact_width); // added: impact bar
@@ -1266,6 +1266,14 @@ fn styled(text: &str, strong: bool) -> String {
 /// Print a key-value pair in KPI layout. // added
 fn print_kpi(label: &str, value: String) {
     println!("{:<18} {}", format!("{label}:"), value);
+}
+
+fn command_time_label(command: &str, avg_time_ms: u64) -> String {
+    if crate::core::tracking::is_timed_command(command) {
+        format_duration(avg_time_ms)
+    } else {
+        "-".to_string()
+    }
 }
 
 /// Colorize percentage based on savings tier (TTY-aware). // added
@@ -1932,5 +1940,15 @@ mod tests {
         for v in ["-", "ok", "watch", "too aggressive"] {
             assert!(v.len() <= VERDICT_WIDTH, "{v} overflows the column");
         }
+    }
+
+    #[test]
+    fn command_time_label_distinguishes_untimed_groups_from_zero_ms_filters() {
+        assert_eq!(command_time_label("rtk fallback: claude", 2_000), "-");
+        assert_eq!(
+            command_time_label("rtk:passthrough git show HEAD", 1_000),
+            "-"
+        );
+        assert_eq!(command_time_label("rtk grep", 0), "0ms");
     }
 }
