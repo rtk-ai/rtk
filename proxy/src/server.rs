@@ -96,6 +96,7 @@ fn settings_json(s: &AppState) -> serde_json::Value {
     v["recording"] = serde_json::json!(s.store.is_some());
     v["bind"] = serde_json::json!(s.config.bind); // read-only (restart to change)
     v["db"] = serde_json::json!(s.config.db); // read-only
+    v["openai_path"] = serde_json::json!(s.config.openai_path); // read-only (restart to change)
     v
 }
 
@@ -216,15 +217,12 @@ async fn openai_chat_completions(
     body: Bytes,
 ) -> Response {
     let base = upstream_for(&s, Provider::Openai);
-    handle(
-        s,
-        Provider::Openai,
-        base,
-        "/v1/chat/completions",
-        headers,
-        body,
-    )
-    .await
+    // Providers whose OpenAI-compatible endpoint doesn't live under `/v1`
+    // (e.g. Z.AI's `/chat/completions`) set an explicit forward path; the
+    // default matches the historical fixed forward path. Boot-only, same
+    // restart-to-apply contract as the upstream base.
+    let path = s.config.openai_path.clone();
+    handle(s, Provider::Openai, base, &path, headers, body).await
 }
 
 /// The upstream base URL for a dialect. One configured upstream per dialect,
