@@ -21,7 +21,7 @@
 rtk --version
 
 # CRITICAL: Verify it's the Token Killer (not Type Kit)
-rtk gain    # Should show the savings dashboard, NOT "command not found"
+rtk help | head  # Should show the "high-performance CLI proxy", NOT "command not found"
 
 # Check installation path
 which rtk
@@ -49,7 +49,7 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh
 
 After installation, **verify you have the correct rtk**:
 ```bash
-rtk gain  # Must show the savings dashboard (not "command not found")
+rtk help | head # Should show the "high-performance CLI proxy", NOT "command not found"
 ```
 
 ### Quick Install (Windows)
@@ -65,7 +65,7 @@ winget install rtk-ai.rtk
 cargo install --git https://github.com/rtk-ai/rtk rtk
 
 # ALWAYS VERIFY after installation
-rtk gain  # MUST show the savings dashboard, not "command not found"
+rtk help | head # Should show the "high-performance CLI proxy", NOT "command not found"
 ```
 
 ⚠️ **WARNING**: `cargo install rtk` from crates.io might install the wrong package (Rust Type Kit). Use the Git URL above and verify with `rtk gain`.
