@@ -1300,7 +1300,7 @@ rtk verify
 | `git status/diff/log/add/commit/push/pull` | `rtk git ...` |
 | `gh pr/issue/run` | `rtk gh ...` |
 | `cargo test/build/clippy/check` | `rtk cargo ...` |
-| `cat/head/tail <file>` | `rtk read <file>` |
+| `cat/head <file>`, `tail -n <N> <file>` | `rtk read <file>` |
 | `rg/grep <pattern>` | `rtk grep <pattern>` |
 | `ast-grep run -p <pattern>` | `rtk ast-grep run -p <pattern>` |
 | `ls` | `rtk ls` |
