@@ -75,6 +75,7 @@ pub const RULES: &[RtkRule] = &[
     RtkRule {
         pattern: r"^gh\s+(pr|issue|run|repo|api|release)(?:\s|$|[;|&()<>])",
         rtk_cmd: "rtk gh",
+        pipeline_safety: PipelineSafety::ProducerOnly,
         rewrite_prefixes: &["gh"],
         category: "GitHub",
         savings_pct: 82.0,
@@ -84,6 +85,7 @@ pub const RULES: &[RtkRule] = &[
     RtkRule {
         pattern: r"^glab\s+(mr|issue|ci|pipeline|api|release)(?:\s|$|[;|&()<>])",
         rtk_cmd: "rtk glab",
+        pipeline_safety: PipelineSafety::ProducerOnly,
         rewrite_prefixes: &["glab"],
         category: "GitLab",
         savings_pct: 82.0,
