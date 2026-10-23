@@ -91,6 +91,10 @@ pub(crate) fn cli_subcommand_names() -> &'static [String] {
     long_about = "A high-performance CLI proxy designed to filter and summarize system outputs before they reach your LLM context."
 )]
 struct Cli {
+    /// Internal hook association, accepted only before the subcommand.
+    #[arg(long, hide = true, value_parser = parse_hook_event_id)]
+    hook_event_id: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 
@@ -1906,7 +1910,20 @@ where
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     use crate::core::utils::ChildArgExt;
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // The hook's internal option must never become the fallback executable or
+    // leak into a TOML/native command's arguments. Only consume our leading pair.
+    if args.first().is_some_and(|arg| arg == "--hook-event-id")
+        && args.get(1).is_some_and(|id| core::invocation::valid_id(id))
+    {
+        core::invocation::initialize(Some(&args[1]));
+        args.drain(..2);
+    }
+
+    if args.first().is_some_and(|arg| arg == "--hook-event-id") {
+        // Malformed metadata is an RTK usage error, never a native executable.
+        parse_error.exit();
+    }
 
     // No args → show Clap's error (user ran just "rtk" with bad syntax)
     if args.is_empty() {
@@ -2477,6 +2494,14 @@ fn require_single_script(subcommand: &str, shell: Option<&str>, command: &[Strin
         .exit();
 }
 
+fn parse_hook_event_id(value: &str) -> Result<String, String> {
+    if core::invocation::valid_id(value) {
+        Ok(value.to_owned())
+    } else {
+        Err("hook event ID must be 32 lowercase hexadecimal characters".to_owned())
+    }
+}
+
 /// Whether this invocation runs the daily telemetry ping. A parsed
 /// `rtk hook …` command does not: the hook processors run before every
 /// command an agent runs. Anything clap rejects (help, version, a
@@ -2508,6 +2533,8 @@ fn run_cli() -> Result<i32> {
             return run_fallback(e);
         }
     };
+
+    core::invocation::initialize(cli.hook_event_id.as_deref());
 
     // Warn if installed hook is outdated/missing (1/day, non-blocking).
     // Skip for Gain (shows its own inline warning), Init/Verify (manage the
@@ -4154,6 +4181,24 @@ mod tests {
             }
             _ => panic!("Expected Git Commit command"),
         }
+    }
+
+    #[test]
+    fn hook_event_option_does_not_consume_nested_command_operands() {
+        let id = "0123456789abcdef0123456789abcdef";
+        let cli =
+            Cli::try_parse_from(["rtk", "--hook-event-id", id, "git", "log"]).expect("hook option");
+        assert_eq!(cli.hook_event_id.as_deref(), Some(id));
+        let cli = Cli::try_parse_from(["rtk", "proxy", "tool", "--hook-event-id", "operand"])
+            .expect("nested option");
+        assert!(cli.hook_event_id.is_none());
+        match cli.command {
+            Commands::Bypass { args } => {
+                assert_eq!(args, vec!["tool", "--hook-event-id", "operand"])
+            }
+            _ => panic!("proxy command"),
+        }
+        assert!(Cli::try_parse_from(["rtk", "--hook-event-id", "bad;echo", "git", "log"]).is_err());
     }
 
     #[test]

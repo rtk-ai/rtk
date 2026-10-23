@@ -748,7 +748,13 @@ fn hook_log_fields(v: &Value) -> Option<(&str, &str, &str)> {
 /// Best-effort only — a tracking failure must never affect the hook's real output
 /// (fallback pattern from `rust-patterns.md`): this is a side channel, not the
 /// hook's actual job.
-fn log_hook_decision(v: &Value, cmd: &str, decision: HookOutcome, rewritten: Option<&str>) {
+fn log_hook_decision(
+    v: &Value,
+    cmd: &str,
+    decision: HookOutcome,
+    rewritten: Option<&str>,
+    event_id: Option<&str>,
+) {
     let Some((session_id, tool_use_id, project_path)) = hook_log_fields(v) else {
         return;
     };
@@ -756,7 +762,7 @@ fn log_hook_decision(v: &Value, cmd: &str, decision: HookOutcome, rewritten: Opt
     let Ok(tracker) = crate::core::tracking::Tracker::new() else {
         return;
     };
-    if let Err(e) = tracker.record_hook_decision(
+    if let Err(e) = tracker.record_hook_decision_with_event(
         session_id,
         tool_use_id,
         project_path,
@@ -764,6 +770,7 @@ fn log_hook_decision(v: &Value, cmd: &str, decision: HookOutcome, rewritten: Opt
         decision,
         rewritten,
         env!("CARGO_PKG_VERSION"),
+        event_id,
     ) {
         let _ = writeln!(
             io::stderr(),
@@ -804,8 +811,18 @@ pub fn run_claude() -> Result<()> {
             cmd,
             rewritten,
             decision,
-            output,
+            mut output,
         } => {
+            // Bind before printing, without waiting for SQLite. Only opaque IDs
+            // enter command arguments; session/tool IDs stay in local history.
+            let event_id = hook_log_fields(&v).and_then(|_| crate::core::invocation::new_id());
+            let annotated = event_id
+                .as_deref()
+                .and_then(|id| crate::core::invocation::annotate_rewrite(&rewritten, id));
+            if let Some(command) = annotated.as_deref() {
+                output["hookSpecificOutput"]["updatedInput"]["command"] = json!(command);
+            }
+            let rewritten = annotated.as_deref().unwrap_or(&rewritten);
             // Write the response Claude Code is synchronously blocked on FIRST.
             // `log_hook_decision` is a best-effort side channel (see its own doc
             // comment: "a tracking failure must never affect the hook's real
@@ -816,8 +833,8 @@ pub fn run_claude() -> Result<()> {
             // latency must never sit in front of the response, or it directly
             // stalls the tool call it's supposedly just logging.
             let _ = writeln!(io::stdout(), "{output}");
-            audit_log("rewrite", &cmd, &rewritten);
-            log_hook_decision(&v, &cmd, decision, Some(&rewritten));
+            audit_log("rewrite", &cmd, rewritten);
+            log_hook_decision(&v, &cmd, decision, Some(rewritten), event_id.as_deref());
         }
         PayloadAction::Skip {
             decision,
@@ -833,7 +850,7 @@ pub fn run_claude() -> Result<()> {
             // last for the same reason as the Rewrite arm above: it must never be
             // what a Bash tool call is waiting on.
             audit_log(reason, &cmd, "");
-            log_hook_decision(&v, &cmd, decision, None);
+            log_hook_decision(&v, &cmd, decision, None, None);
         }
         PayloadAction::Ignore => {}
     }
