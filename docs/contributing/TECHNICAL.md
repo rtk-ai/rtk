@@ -326,7 +326,7 @@ Start here, then drill down into each README for file-level details.
 | [`copilot/`](../../hooks/copilot/README.md) | GitHub Copilot | Rust binary hook, single `PreToolUse` schema shared by VS Code Chat and Copilot CLI |
 | [`cursor/`](../../hooks/cursor/README.md) | Cursor IDE | Shell hook, empty JSON response requirement |
 | [`cline/`](../../hooks/cline/README.md) | Cline / Roo Code | Rules file (prompt-level, no programmatic hook) |
-| [`windsurf/`](../../hooks/windsurf/README.md) | Windsurf / Cascade | Rules file (workspace-scoped) |
+| [`windsurf/`](../../hooks/windsurf/README.md) | Devin Desktop (formerly Windsurf) | Rules file (workspace-scoped) |
 | [`codex/`](../../hooks/codex/README.md) | OpenAI Codex CLI | Native `PreToolUse` processor, hooks.json registration, AGENTS.md awareness |
 | [`opencode/`](../../hooks/opencode/README.md) | OpenCode | TypeScript plugin, in-place mutation (OpenCode 2.0 and 1.x >= 1.18.29) |
 
@@ -344,7 +344,7 @@ RTK supports the following LLM agents through hook integrations:
 | Cursor | Rust binary | `rtk hook cursor` reads JSON | Yes (`updated_input`) |
 | Gemini CLI | Rust binary | `rtk hook gemini` reads JSON | Yes (`hookSpecificOutput`) |
 | Cline/Roo Code | Rules file | Prompt-level guidance | N/A (prompt) |
-| Windsurf | Rules file | Prompt-level guidance | N/A (prompt) |
+| Devin Desktop (formerly Windsurf) | Rules file | Prompt-level guidance | N/A (prompt) |
 | Codex CLI | Rust binary | `rtk hook codex` reads JSON | Yes (`updatedInput`) |
 | OpenCode | TS plugin | execute.before (v2) / tool.execute.before (v1) | Yes (in-place mutation) |
 
