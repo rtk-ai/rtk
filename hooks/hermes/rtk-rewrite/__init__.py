@@ -54,6 +54,8 @@ def _pre_tool_call(tool_name=None, args=None, **_kwargs):
                 timeout=2,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
         except subprocess.TimeoutExpired:
             _warn("rtk rewrite timed out")
@@ -62,13 +64,13 @@ def _pre_tool_call(tool_name=None, args=None, **_kwargs):
         if result.returncode not in ACCEPTED_REWRITE_RETURN_CODES:
             if result.returncode not in EXPECTED_PASSTHROUGH_RETURN_CODES:
                 details = f"rtk rewrite failed with exit {result.returncode}"
-                stderr = result.stderr.strip()
+                stderr = (result.stderr or "").strip()
                 if stderr:
                     details = f"{details}: {stderr}"
                 _warn(details)
             return
 
-        rewritten = result.stdout.strip()
+        rewritten = (result.stdout or "").strip()
         if rewritten and rewritten != command:
             args["command"] = rewritten
     except Exception as e:
