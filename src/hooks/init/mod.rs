@@ -45,6 +45,7 @@ use claude::{
     hook_already_present, hook_gaps, remove_settings_entries, run_claude_md_mode, run_default_mode,
     run_hook_only_mode,
 };
+pub use codex::UninstallCodexOutcome;
 use codex::{run_codex_mode, show_codex_config, uninstall_codex};
 use cursor::{
     cursor_hook_already_present, install_cursor_hooks, remove_cursor_hooks, resolve_cursor_dir,
@@ -1396,7 +1397,7 @@ pub fn uninstall(
     pi: bool,
     omp: bool,
     ctx: InitContext,
-) -> Result<()> {
+) -> Result<i32> {
     uninstall_with_patch_mode(global, gemini, codex, cursor, pi, omp, PatchMode::Ask, ctx)
 }
 
@@ -1412,16 +1413,20 @@ pub fn uninstall_with_patch_mode(
     omp: bool,
     patch_mode: PatchMode,
     ctx: InitContext,
-) -> Result<()> {
+) -> Result<i32> {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
     if codex {
-        uninstall_codex(global, ctx)?;
+        let outcome = uninstall_codex(global, ctx)?;
         if dry_run {
             print_dry_run_footer();
         }
-        return Ok(());
+        let code = match outcome {
+            UninstallCodexOutcome::Clean => 0,
+            UninstallCodexOutcome::HookRefused => 2,
+        };
+        return Ok(code);
     }
 
     if cursor {
@@ -1448,17 +1453,17 @@ pub fn uninstall_with_patch_mode(
         if dry_run {
             print_dry_run_footer();
         }
-        return Ok(());
+        return Ok(0);
     }
 
     if pi {
         uninstall_pi_with_patch_mode(global, patch_mode, ctx)?;
-        return Ok(());
+        return Ok(0);
     }
 
     if omp {
         uninstall_omp_with_patch_mode(global, patch_mode, ctx)?;
-        return Ok(());
+        return Ok(0);
     }
 
     if !global {
@@ -1493,7 +1498,7 @@ pub fn uninstall_with_patch_mode(
         if dry_run {
             print_dry_run_footer();
         }
-        return Ok(());
+        return Ok(0);
     }
 
     // 1. Remove legacy hook file (if exists from old installation)
@@ -1646,7 +1651,7 @@ pub fn uninstall_with_patch_mode(
         print_dry_run_footer();
     }
 
-    Ok(())
+    Ok(0)
 }
 
 /// Clean up consecutive blank lines (collapse 3+ to 2)
