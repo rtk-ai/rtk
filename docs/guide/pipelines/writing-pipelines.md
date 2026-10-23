@@ -137,6 +137,7 @@ shadow   = false
 | `use` / `action` | exactly one | `use` is a chain of [methods](./methods.md); `action` is control flow (below) |
 | `task` · `upstream` · `message` | with `route` / `deny` | see [Actions](#actions) |
 | `mode` | no | `route` before a tool only: `suggest` (default) · `swap` · `answer` — see [Route modes](#route-modes) |
+| `emit` | no | transforms after a tool only: `output` (default) replaces the tool's output with the chain's result; `note` hands the result to the agent as added context (`additionalContext`) and leaves the output as it was. A note rule runs on the raw result, whatever its size, and never in the output chain — pair it with `continue = true` so the output rules still run |
 | `continue` | no | default `false` — first match wins; `true` keeps evaluating later rules |
 | `enabled` | no | default `true`; a disabled rule is skipped but still shown by `rtk pipeline show` |
 | `shadow` | no | transforms only; decide and record, emit nothing — see [Shadow mode](./commands.md#shadow-mode) |
