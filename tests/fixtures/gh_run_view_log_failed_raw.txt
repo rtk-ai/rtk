@@ -1,0 +1,389 @@
+fmt	UNKNOWN STEP	﻿2026-10-16T22:33:07.2677275Z Current runner version: '2.337.0'
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2694535Z ##[group]Runner Image Provisioner
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2695076Z Hosted Compute Agent
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2695870Z Version: 20261012.601
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2696330Z Commit: f3dc54e1fb89da6852db922499a0233137369e1d
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2696796Z Build Date: 2026-10-12T17:48:21Z
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2697209Z Worker ID: {f734d9c7-6c1a-42d1-9e51-74aeb643632c}
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2697644Z Region: southcentralus
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2698034Z Cloud: Azure
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2698479Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2699403Z ##[group]Operating System
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2699771Z Ubuntu
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2700112Z 24.04.5
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2700448Z LTS
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2700782Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2701154Z ##[group]Runner Image
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2701511Z Image: ubuntu-24.04
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2701876Z Version: 20261012.334.1
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2702650Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20261012.334/images/ubuntu/Ubuntu2404-Readme.md
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2703541Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20261012.334
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2704106Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2704808Z ##[group]GITHUB_TOKEN Permissions
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2706019Z Contents: read
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2706353Z Metadata: read
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2706732Z PullRequests: read
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2707174Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2708793Z Secret source: None
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2709393Z Cache mode: write
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2709808Z Prepare workflow directory
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.2970732Z Prepare all required actions
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.3009336Z Getting action download info
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.5295216Z Download action repository 'actions/checkout@v7' (SHA:3d3c42e5aac5ba805825da76410c181273ba90b1)
+fmt	UNKNOWN STEP	2026-10-16T22:33:07.7834747Z Download action repository 'dtolnay/rust-toolchain@stable' (SHA:b725eda525362e7cf34af9a7243cac1e3f01a7ec)
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.2790920Z Complete job name: fmt
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3237343Z ##[group]Run actions/checkout@v7
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3237769Z with:
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3238025Z   repository: rtk-ai/rtk
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3240302Z   token: ***
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3240546Z   ssh-strict: true
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3240799Z   ssh-user: git
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3241058Z   persist-credentials: true
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3241338Z   clean: true
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3241599Z   sparse-checkout-cone-mode: true
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3241898Z   fetch-depth: 1
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3242148Z   fetch-tags: false
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3242406Z   show-progress: true
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3242662Z   lfs: false
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3242907Z   submodules: false
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3243168Z   set-safe-directory: true
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3243460Z   allow-unsafe-pr-checkout: false
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3243829Z env:
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3244064Z   CARGO_TERM_COLOR: always
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3244338Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3884446Z Syncing repository: rtk-ai/rtk
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3885610Z ##[group]Getting Git version info
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3885994Z Working directory is '/home/runner/work/rtk/rtk'
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3886588Z [command]/usr/bin/git version
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3953908Z git version 2.55.0
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3965105Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3973059Z Temporarily overriding HOME='/home/runner/work/_temp/3680c54d-10b1-4a72-94c3-eed571f8d146' before making global git config changes
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3973876Z Adding repository directory to the temporary git global config as a safe directory
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.3976478Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/rtk/rtk
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4084376Z Deleting the contents of '/home/runner/work/rtk/rtk'
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4087286Z ##[group]Determining repository object format
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4088580Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4089467Z ##[group]Initializing the repository
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4092381Z [command]/usr/bin/git init /home/runner/work/rtk/rtk
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4393684Z hint: Using 'master' as the name for the initial branch. This default branch name
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4394960Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4395575Z hint: to use in all of your new repositories, which will suppress this warning,
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4396000Z hint: call:
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4396234Z hint:
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4396679Z hint: 	git config --global init.defaultBranch <name>
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4397233Z hint:
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4397647Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4398181Z hint: 'development'. The just-created branch can be renamed via this command:
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4399028Z hint:
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4399274Z hint: 	git branch -m <name>
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4399553Z hint:
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4399920Z hint: Disable this message with "git config set advice.defaultBranchName false"
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4400592Z Initialized empty Git repository in /home/runner/work/rtk/rtk/.git/
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4404226Z [command]/usr/bin/git remote add origin https://github.com/rtk-ai/rtk
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4582844Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4583309Z ##[group]Disabling automatic garbage collection
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4585130Z [command]/usr/bin/git config --local gc.auto 0
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4637763Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4638589Z ##[group]Setting up auth
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4639115Z Removing SSH command configuration
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4642445Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.4666937Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.5065095Z Removing HTTP extra header
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.5068802Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.5091640Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.5253971Z Removing includeIf entries pointing to credentials config files
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.5257488Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.5281237Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.5441874Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-c315852b-75cb-4887-9a1e-db4d9ad743ff.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.5484247Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/rtk/rtk/.git.path /home/runner/work/_temp/git-credentials-c315852b-75cb-4887-9a1e-db4d9ad743ff.config
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.5677094Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/rtk/rtk/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-c315852b-75cb-4887-9a1e-db4d9ad743ff.config
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.5704648Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-c315852b-75cb-4887-9a1e-db4d9ad743ff.config
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.5888200Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-c315852b-75cb-4887-9a1e-db4d9ad743ff.config
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.5910932Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.5911590Z ##[group]Fetching the repository
+fmt	UNKNOWN STEP	2026-10-16T22:33:08.5915044Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +46eaef3e71242e4d0f69217708073a205e8a7382:refs/remotes/pull/3521/merge
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.5786287Z From https://github.com/rtk-ai/rtk
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.5787414Z  * [new ref]         46eaef3e71242e4d0f69217708073a205e8a7382 -> pull/3521/merge
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.5790870Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.5792015Z ##[group]Determining the checkout info
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.5793272Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.5794843Z [command]/usr/bin/git sparse-checkout disable
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.5834419Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.5857483Z ##[group]Checking out the ref
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.5858872Z [command]/usr/bin/git checkout --progress --force refs/remotes/pull/3521/merge
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6352602Z Note: switching to 'refs/remotes/pull/3521/merge'.
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6353491Z 
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6354090Z You are in 'detached HEAD' state. You can look around, make experimental
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6355421Z changes and commit them, and you can discard any commits you make in this
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6356932Z state without impacting any branches by switching back to a branch.
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6357835Z 
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6358607Z If you want to create a new branch to retain commits you create, you may
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6360027Z do so (now or later) by using -c with the switch command. Example:
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6360867Z 
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6361322Z   git switch -c <new-branch-name>
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6361939Z 
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6362280Z Or undo this operation with:
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6362808Z 
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6363121Z   git switch -
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6363538Z 
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6364186Z Turn off this advice by setting config variable advice.detachedHead to false
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6365121Z 
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6366173Z HEAD is now at 46eaef3 Merge 19244b7ffe78f61908766ab24a8eff81872a010b into 16a20a2ea25ddb9996393e4285abc3b3d0f7e5b4
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6369579Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6395030Z [command]/usr/bin/git log -1 --format=%H
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6414032Z 46eaef3e71242e4d0f69217708073a205e8a7382
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6888981Z ##[group]Run dtolnay/rust-toolchain@stable
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6889686Z with:
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6890186Z   components: rustfmt
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6890756Z   toolchain: stable
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6891279Z env:
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6891769Z   CARGO_TERM_COLOR: always
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6892344Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.6945912Z ##[start-action display=Parse toolchain version;id=__dtolnay_rust-toolchain.parse]
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7000924Z ##[group]Run if [[ -z $toolchain ]]; then
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7001699Z ^[[36;1mif [[ -z $toolchain ]]; then^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7002836Z ^[[36;1m  # GitHub does not enforce `required: true` inputs itself. https://github.com/actions/runner/issues/1070^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7004040Z ^[[36;1m  echo "'toolchain' is a required input" >&2^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7004753Z ^[[36;1m  exit 1^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7005519Z ^[[36;1melif [[ $toolchain =~ ^stable' '[0-9]+' '(year|month|week|day)s?' 'ago$ ]]; then^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7006505Z ^[[36;1m  if [[ Linux == macOS ]]; then^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7007661Z ^[[36;1m    echo "toolchain=1.$((($(date -v-$(sed 's/stable \([0-9]*\) \(.\).*/\1\2/' <<< $toolchain) +%s)/60/60/24-16569)/7/6))" >> $GITHUB_OUTPUT^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7008913Z ^[[36;1m  else^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7009834Z ^[[36;1m    echo "toolchain=1.$((($(date --date "${toolchain#stable }" +%s)/60/60/24-16569)/7/6))" >> $GITHUB_OUTPUT^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7010878Z ^[[36;1m  fi^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7011589Z ^[[36;1melif [[ $toolchain =~ ^stable' 'minus' '[0-9]+' 'releases?$ ]]; then^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7012769Z ^[[36;1m  echo "toolchain=1.$((($(date +%s)/60/60/24-16569)/7/6-${toolchain//[^0-9]/}))" >> $GITHUB_OUTPUT^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7013810Z ^[[36;1melif [[ $toolchain =~ ^1\.[0-9]+$ ]]; then^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7014975Z ^[[36;1m  echo "toolchain=1.$((i=${toolchain#1.}, c=($(date +%s)/60/60/24-16569)/7/6, i+9*i*(10*i<=c)+90*i*(100*i<=c)))" >> $GITHUB_OUTPUT^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7016098Z ^[[36;1melse^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7016618Z ^[[36;1m  delimiter=EOF^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7017353Z ^[[36;1m  while [[ $toolchain == *$delimiter* ]]; do delimiter+=_; done^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7018711Z ^[[36;1m  printf 'toolchain<<%s\n%s\n%s\n' "$delimiter" "$toolchain" "$delimiter" >> $GITHUB_OUTPUT^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7019674Z ^[[36;1mfi^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7241884Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7242675Z env:
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7243198Z   CARGO_TERM_COLOR: always
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7243794Z   toolchain: stable
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7244332Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7354647Z ##[end-action id=__dtolnay_rust-toolchain.parse;outcome=success;conclusion=success;duration_ms=40]
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7360011Z ##[start-action display=Set $CARGO_HOME;id=__dtolnay_rust-toolchain.__run]
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7399850Z ##[group]Run echo CARGO_HOME=${CARGO_HOME:-"$HOME/.cargo"} >> $GITHUB_ENV
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7400913Z ^[[36;1mecho CARGO_HOME=${CARGO_HOME:-"$HOME/.cargo"} >> $GITHUB_ENV^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7445321Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7446078Z env:
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7446566Z   CARGO_TERM_COLOR: always
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7447126Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7521424Z ##[end-action id=__dtolnay_rust-toolchain.__run;outcome=success;conclusion=success;duration_ms=16]
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7525321Z ##[start-action display=Install rustup if needed;id=__dtolnay_rust-toolchain.__run_2]
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7595076Z ##[group]Run if ! command -v rustup &>/dev/null; then
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7595895Z ^[[36;1mif ! command -v rustup &>/dev/null; then^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7597447Z ^[[36;1m  curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused --location --silent --show-error --fail https://sh.rustup.rs | sh -s -- --default-toolchain none -y^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7599148Z ^[[36;1m  echo "$CARGO_HOME/bin" >> $GITHUB_PATH^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7599831Z ^[[36;1mfi^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7643639Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7644399Z env:
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7644886Z   CARGO_TERM_COLOR: always
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7645483Z   CARGO_HOME: /home/runner/.cargo
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7646092Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7716565Z ##[end-action id=__dtolnay_rust-toolchain.__run_2;outcome=success;conclusion=success;duration_ms=18]
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7720678Z ##[start-action display=Install rustup if needed on windows;id=__dtolnay_rust-toolchain.__run_3]
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7729485Z ##[end-action id=__dtolnay_rust-toolchain.__run_3;outcome=skipped;conclusion=skipped;duration_ms=0]
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7740916Z ##[start-action display=rustup toolchain install stable;id=__dtolnay_rust-toolchain.__run_4]
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7771378Z ##[group]Run set -f  # split targets and components on commas and whitespace, without glob expansion
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7772743Z ^[[36;1mset -f  # split targets and components on commas and whitespace, without glob expansion^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7773715Z ^[[36;1mflags=()^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7774353Z ^[[36;1mfor t in ${targets//,/ }; do flags+=(--target "$t"); done^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7775262Z ^[[36;1mfor c in ${components//,/ }; do flags+=(--component "$c"); done^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7776348Z ^[[36;1mif [[ $toolchain == nightly && -n $components ]]; then flags+=(--allow-downgrade); fi^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7777274Z ^[[36;1mlog=$(mktemp)^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7777822Z ^[[36;1mtrap 'rm -f "$log"' EXIT^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7778583Z ^[[36;1mfor attempt in 1 2 3 4 5; do^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7779768Z ^[[36;1m  if rustup toolchain install "$toolchain" "${flags[@]}" --profile minimal --no-self-update --force-non-host 2>&1 | tee "$log"; then^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7780956Z ^[[36;1m    break^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7781452Z ^[[36;1m  else^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7781935Z ^[[36;1m    status=$?^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7782448Z ^[[36;1m  fi^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7783105Z ^[[36;1m  if [[ $attempt == 5 ]] || ! grep -Fq 'checksum failed for ' "$log" \^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7784275Z ^[[36;1m      || ! grep -Fq 'this is likely due to an ongoing update of the official release server' "$log"; then^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7785404Z ^[[36;1m    exit "$status"^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7785940Z ^[[36;1m  fi^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7786727Z ^[[36;1m  echo "Retrying rustup toolchain install in 30 seconds (retry $attempt of 4)" >&2^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7787650Z ^[[36;1m  sleep 30^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7788153Z ^[[36;1mdone^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7831390Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7832113Z env:
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7832576Z   CARGO_TERM_COLOR: always
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7833144Z   CARGO_HOME: /home/runner/.cargo
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7833722Z   toolchain: stable
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7834204Z   targets: 
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7834663Z   components: rustfmt
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7835186Z   RUSTUP_PERMIT_COPY_RENAME: 1
+fmt	UNKNOWN STEP	2026-10-16T22:33:09.7835743Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:10.0264165Z info: syncing channel updates for stable-x86_64-unknown-linux-gnu
+fmt	UNKNOWN STEP	2026-10-16T22:33:10.2608903Z info: latest update on 2026-10-15 for version 1.99.1 (58cf8f9c3 2026-10-13)
+fmt	UNKNOWN STEP	2026-10-16T22:33:10.2819791Z info: removing previous version of component rustfmt
+fmt	UNKNOWN STEP	2026-10-16T22:33:10.2840068Z info: removing previous version of component clippy
+fmt	UNKNOWN STEP	2026-10-16T22:33:10.2885943Z info: removing previous version of component cargo
+fmt	UNKNOWN STEP	2026-10-16T22:33:10.2965175Z info: removing previous version of component rust-std
+fmt	UNKNOWN STEP	2026-10-16T22:33:10.3017121Z info: removing previous version of component rustc
+fmt	UNKNOWN STEP	2026-10-16T22:33:10.3073283Z info: downloading 5 components
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3016599Z 
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3073418Z   stable-x86_64-unknown-linux-gnu updated - rustc 1.99.1 (58cf8f9c3 2026-10-13) (from rustc 1.99.0 (b940084d7 2026-09-28))
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3073883Z 
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3144666Z ##[end-action id=__dtolnay_rust-toolchain.__run_4;outcome=success;conclusion=success;duration_ms=7540]
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3151474Z ##[start-action display=rustup default stable;id=__dtolnay_rust-toolchain.__run_5]
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3166283Z ##[group]Run rustup default "$toolchain" --force-non-host
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3166530Z ^[[36;1mrustup default "$toolchain" --force-non-host^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3215480Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3215681Z env:
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3215801Z   CARGO_TERM_COLOR: always
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3215944Z   CARGO_HOME: /home/runner/.cargo
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3216091Z   toolchain: stable
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3216217Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3305686Z info: using existing install for stable-x86_64-unknown-linux-gnu
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3312518Z info: default toolchain set to stable-x86_64-unknown-linux-gnu
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3312681Z 
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3364067Z   stable-x86_64-unknown-linux-gnu unchanged - rustc 1.99.1 (58cf8f9c3 2026-10-13)
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3364259Z 
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3379240Z ##[end-action id=__dtolnay_rust-toolchain.__run_5;outcome=success;conclusion=success;duration_ms=22]
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3382366Z ##[start-action display=Create cachekey;id=__dtolnay_rust-toolchain.rustc-version]
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3396541Z ##[group]Run DATE=$(rustc +"$toolchain" --version --verbose | sed -ne 's/^commit-date: \(20[0-9][0-9]\)-\([01][0-9]\)-\([0-3][0-9]\)$/\1\2\3/p')
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3397041Z ^[[36;1mDATE=$(rustc +"$toolchain" --version --verbose | sed -ne 's/^commit-date: \(20[0-9][0-9]\)-\([01][0-9]\)-\([0-3][0-9]\)$/\1\2\3/p')^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3397432Z ^[[36;1mHASH=$(rustc +"$toolchain" --version --verbose | sed -ne 's/^commit-hash: //p')^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3397743Z ^[[36;1mecho "cachekey=$(echo $DATE$HASH | head -c12)" >> $GITHUB_OUTPUT^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3445519Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3445712Z env:
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3445838Z   CARGO_TERM_COLOR: always
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3446009Z   CARGO_HOME: /home/runner/.cargo
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3446157Z   toolchain: stable
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3446283Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3703574Z ##[end-action id=__dtolnay_rust-toolchain.rustc-version;outcome=success;conclusion=success;duration_ms=32]
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3705615Z ##[start-action display=Disable incremental compilation;id=__dtolnay_rust-toolchain.__run_6]
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3740219Z ##[group]Run if [ -z "${CARGO_INCREMENTAL+set}" ]; then
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3740460Z ^[[36;1mif [ -z "${CARGO_INCREMENTAL+set}" ]; then^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3740652Z ^[[36;1m  echo CARGO_INCREMENTAL=0 >> $GITHUB_ENV^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3740819Z ^[[36;1mfi^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3790818Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3791012Z env:
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3791138Z   CARGO_TERM_COLOR: always
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3791282Z   CARGO_HOME: /home/runner/.cargo
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3791431Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3855858Z ##[end-action id=__dtolnay_rust-toolchain.__run_6;outcome=success;conclusion=success;duration_ms=14]
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3857335Z ##[start-action display=Enable colors in Cargo output;id=__dtolnay_rust-toolchain.__run_7]
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3870954Z ##[group]Run if [ -z "${CARGO_TERM_COLOR+set}" ]; then
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3871174Z ^[[36;1mif [ -z "${CARGO_TERM_COLOR+set}" ]; then^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3871375Z ^[[36;1m  echo CARGO_TERM_COLOR=always >> $GITHUB_ENV^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3871547Z ^[[36;1mfi^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3915532Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3915726Z env:
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3915849Z   CARGO_TERM_COLOR: always
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3915991Z   CARGO_HOME: /home/runner/.cargo
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3916139Z   CARGO_INCREMENTAL: 0
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3916267Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3977341Z ##[end-action id=__dtolnay_rust-toolchain.__run_7;outcome=success;conclusion=success;duration_ms=11]
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3980696Z ##[start-action display=Enable Cargo sparse registry;id=__dtolnay_rust-toolchain.__run_8]
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3994925Z ##[group]Run # implemented in 1.66, stabilized in 1.68, made default in 1.70
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3995365Z ^[[36;1m# implemented in 1.66, stabilized in 1.68, made default in 1.70^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3995750Z ^[[36;1mif [ -z "${CARGO_REGISTRIES_CRATES_IO_PROTOCOL+set}" -o -f "/home/runner/work/_temp"/.implicit_cargo_registries_crates_io_protocol ]; then^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3996158Z ^[[36;1m  if rustc +"$toolchain" --version --verbose | grep -q '^release: 1\.6[89]\.'; then^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3996482Z ^[[36;1m    touch "/home/runner/work/_temp"/.implicit_cargo_registries_crates_io_protocol || true^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3996777Z ^[[36;1m    echo CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse >> $GITHUB_ENV^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3997061Z ^[[36;1m  elif rustc +"$toolchain" --version --verbose | grep -q '^release: 1\.6[67]\.'; then^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3997377Z ^[[36;1m    touch "/home/runner/work/_temp"/.implicit_cargo_registries_crates_io_protocol || true^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3997660Z ^[[36;1m    echo CARGO_REGISTRIES_CRATES_IO_PROTOCOL=git >> $GITHUB_ENV^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3997855Z ^[[36;1m  fi^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.3997970Z ^[[36;1mfi^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4040079Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4040269Z env:
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4040390Z   CARGO_TERM_COLOR: always
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4040530Z   CARGO_HOME: /home/runner/.cargo
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4040673Z   CARGO_INCREMENTAL: 0
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4040798Z   toolchain: stable
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4040920Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4271058Z ##[end-action id=__dtolnay_rust-toolchain.__run_8;outcome=success;conclusion=success;duration_ms=28]
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4274426Z ##[start-action display=Work around spurious network errors in curl 8.0;id=__dtolnay_rust-toolchain.__run_9]
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4288873Z ##[group]Run # https://rust-lang.zulipchat.com/#narrow/stream/246057-t-cargo/topic/timeout.20investigation
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4289300Z ^[[36;1m# https://rust-lang.zulipchat.com/#narrow/stream/246057-t-cargo/topic/timeout.20investigation^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4289657Z ^[[36;1mif rustc +"$toolchain" --version --verbose | grep -q '^release: 1\.7[01]\.'; then^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4289917Z ^[[36;1m  echo CARGO_HTTP_MULTIPLEXING=false >> $GITHUB_ENV^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4290229Z ^[[36;1mfi^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4339034Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4339226Z env:
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4339348Z   CARGO_TERM_COLOR: always
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4339496Z   CARGO_HOME: /home/runner/.cargo
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4339643Z   CARGO_INCREMENTAL: 0
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4339769Z   toolchain: stable
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4339890Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4487909Z ##[end-action id=__dtolnay_rust-toolchain.__run_9;outcome=success;conclusion=success;duration_ms=21]
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4491868Z ##[start-action display=rustc +stable --version --verbose;id=__dtolnay_rust-toolchain.__run_10]
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4505455Z ##[group]Run rustc +"$toolchain" --version --verbose
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4505675Z ^[[36;1mrustc +"$toolchain" --version --verbose^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4552113Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4552304Z env:
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4552423Z   CARGO_TERM_COLOR: always
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4552576Z   CARGO_HOME: /home/runner/.cargo
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4552724Z   CARGO_INCREMENTAL: 0
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4552850Z   toolchain: stable
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4552971Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4686972Z rustc 1.99.1 (58cf8f9c3 2026-10-13)
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4687431Z binary: rustc
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4687608Z commit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4687839Z commit-date: 2026-10-13
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4688004Z host: x86_64-unknown-linux-gnu
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4688346Z release: 1.99.1
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4688592Z LLVM version: 23.1.1
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4700694Z ##[end-action id=__dtolnay_rust-toolchain.__run_10;outcome=success;conclusion=success;duration_ms=20]
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4744417Z ##[group]Run cargo fmt --all -- --check
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4744612Z ^[[36;1mcargo fmt --all -- --check^[[0m
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4790902Z shell: /usr/bin/bash -e {0}
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4791046Z env:
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4791164Z   CARGO_TERM_COLOR: always
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4791320Z   CARGO_HOME: /home/runner/.cargo
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4791464Z   CARGO_INCREMENTAL: 0
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.4791597Z ##[endgroup]
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.8709084Z Diff in /home/runner/work/rtk/rtk/src/cmds/go/go_cmd.rs:880:
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.8709368Z      fn test_no_skip_for_run_benchmark_filter() {
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.8709614Z          // `-run=BenchmarkX` selects a test by name; it is not `-bench` and must
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.8709849Z          // still go through the JSON filter.
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.8710105Z -        assert!(!skip_json_injection(&args(&["-run=BenchmarkParse", "./..."])));
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.8710354Z +        assert!(!skip_json_injection(&args(&[
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.8710610Z +            "-run=BenchmarkParse",
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.8710769Z +            "./..."
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.8710895Z +        ])));
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.8711008Z      }
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.8711115Z  
+fmt	UNKNOWN STEP	2026-10-16T22:33:17.8711222Z      #[test]
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.3764456Z ##[error]Process completed with exit code 1.
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.3847990Z Post job cleanup.
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.4393013Z [command]/usr/bin/git version
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.4420320Z git version 2.55.0
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.4440890Z Temporarily overriding HOME='/home/runner/work/_temp/dbd3afea-bf75-4a9e-ac51-64481c934b8d' before making global git config changes
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.4441617Z Adding repository directory to the temporary git global config as a safe directory
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.4444081Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/rtk/rtk
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.4467885Z Removing SSH command configuration
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.4471953Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.4496481Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.4664907Z Removing HTTP extra header
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.4667969Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.4692269Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.4857874Z Removing includeIf entries pointing to credentials config files
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.4861623Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.4881126Z includeif.gitdir:/home/runner/work/rtk/rtk/.git.path
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.4881505Z includeif.gitdir:/home/runner/work/rtk/rtk/.git/worktrees/*.path
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.4881881Z includeif.gitdir:/github/workspace/.git.path
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.4882383Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.4887889Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/rtk/rtk/.git.path
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.4904603Z /home/runner/work/_temp/git-credentials-c315852b-75cb-4887-9a1e-db4d9ad743ff.config
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.4910946Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/rtk/rtk/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-c315852b\-75cb\-4887\-9a1e\-db4d9ad743ff\.config
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.4937721Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/rtk/rtk/.git/worktrees/*.path
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.4958992Z /home/runner/work/_temp/git-credentials-c315852b-75cb-4887-9a1e-db4d9ad743ff.config
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.5013491Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/rtk/rtk/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-c315852b\-75cb\-4887\-9a1e\-db4d9ad743ff\.config
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.5016444Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.5017048Z /github/runner_temp/git-credentials-c315852b-75cb-4887-9a1e-db4d9ad743ff.config
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.5037132Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path \/github\/runner_temp\/git\-credentials\-c315852b\-75cb\-4887\-9a1e\-db4d9ad743ff\.config
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.5038457Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.5054647Z /github/runner_temp/git-credentials-c315852b-75cb-4887-9a1e-db4d9ad743ff.config
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.5059488Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-c315852b\-75cb\-4887\-9a1e\-db4d9ad743ff\.config
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.5086308Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.5251019Z Removing credentials config '/home/runner/work/_temp/git-credentials-c315852b-75cb-4887-9a1e-db4d9ad743ff.config'
+fmt	UNKNOWN STEP	2026-10-16T22:33:18.5361435Z Cleaning up orphan processes
