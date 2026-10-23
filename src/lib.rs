@@ -1935,6 +1935,10 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
         parse_error.exit();
     }
 
+    // Fallbacks execute tools too, including TOML filters and typed commands
+    // whose native arguments clap rejects. Keep meta diagnostics above the gate.
+    hooks::integrity::runtime_check()?;
+
     // Dynamic task subcommands: `rtk bulk-read ...` resolves from
     // the active pipeline before anything falls back to raw execution.
     #[cfg(feature = "engine")]
