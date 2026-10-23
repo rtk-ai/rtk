@@ -3154,6 +3154,14 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         _ => false,
     });
 
+    // An explicit -a/--all asks for the remote-tracking branches themselves, so they are listed
+    // even when a local branch of the same name exists (the default view dedups them).
+    let explicit_all = tokens.iter().any(|t| match t.kind {
+        TokenKind::Short => t.text == "a",
+        TokenKind::Long => t.text == "all",
+        _ => false,
+    });
+
     // Detect positional arguments (not flags) — indicates branch creation. A value consumed by
     // a preceding flag (e.g. -u/--set-upstream-to's upstream ref) is that flag's value, not an
     // independent positional branch name, so linked tokens are excluded.
@@ -3239,7 +3247,7 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         return Ok(result.exit_code);
     }
 
-    let filtered = filter_branch_output(&result.stdout);
+    let filtered = filter_branch_output(&result.stdout, explicit_all);
     let filtered = never_worse(&result.stdout, &filtered).to_string();
     println!("{}", filtered);
 
@@ -3253,10 +3261,14 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     Ok(0)
 }
 
-fn filter_branch_output(output: &str) -> String {
+/// Compacts `git branch` list output. Remote-tracking branches are normally reduced to the
+/// names not already present locally; with `all_remotes` (the user passed `-a`/`--all`) every
+/// remote-tracking branch is listed as `<remote>/<branch>`.
+fn filter_branch_output(output: &str, all_remotes: bool) -> String {
     let mut current = String::new();
     let mut local: Vec<String> = Vec::new();
     let mut remote: Vec<String> = Vec::new();
+    let mut remote_full: Vec<String> = Vec::new();
     let mut seen_remote: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for line in output.lines() {
@@ -3273,6 +3285,7 @@ fn filter_branch_output(output: &str) -> String {
                 if branch.starts_with("HEAD ") {
                     continue;
                 }
+                remote_full.push(rest.to_string());
                 if seen_remote.insert(branch.to_string()) {
                     remote.push(branch.to_string());
                 }
@@ -3283,7 +3296,10 @@ fn filter_branch_output(output: &str) -> String {
     }
 
     let mut result = Vec::new();
-    result.push(format!("* {}", current));
+    // No current branch in the listing (e.g. `-r`): don't emit an empty `* ` marker.
+    if !current.is_empty() {
+        result.push(format!("* {}", current));
+    }
 
     if !local.is_empty() {
         for b in &local {
@@ -3291,7 +3307,21 @@ fn filter_branch_output(output: &str) -> String {
         }
     }
 
-    if !remote.is_empty() {
+    if all_remotes {
+        if !remote_full.is_empty() {
+            const MAX_REMOTE_BRANCHES: usize = CAP_WARNINGS;
+            result.push(format!("  remotes ({}):", remote_full.len()));
+            for b in remote_full.iter().take(MAX_REMOTE_BRANCHES) {
+                result.push(format!("    {}", b));
+            }
+            if remote_full.len() > MAX_REMOTE_BRANCHES {
+                result.push(format!(
+                    "    ... +{} more",
+                    remote_full.len() - MAX_REMOTE_BRANCHES
+                ));
+            }
+        }
+    } else if !remote.is_empty() {
         let remote_only: Vec<&String> = remote
             .iter()
             .filter(|r| *r != &current && !local.contains(r))
@@ -5070,7 +5100,7 @@ mod tests {
     #[test]
     fn test_filter_branch_output() {
         let output = "* main\n  feature/auth\n  fix/bug-123\n  remotes/origin/HEAD -> origin/main\n  remotes/origin/main\n  remotes/origin/feature/auth\n  remotes/origin/release/v2\n";
-        let result = filter_branch_output(output);
+        let result = filter_branch_output(output, false);
         assert!(result.contains("* main"));
         assert!(result.contains("feature/auth"));
         assert!(result.contains("fix/bug-123"));
@@ -5082,16 +5112,47 @@ mod tests {
     #[test]
     fn test_filter_branch_no_remotes() {
         let output = "* main\n  develop\n";
-        let result = filter_branch_output(output);
+        let result = filter_branch_output(output, false);
         assert!(result.contains("* main"));
         assert!(result.contains("develop"));
         assert!(!result.contains("remote-only"));
     }
 
     #[test]
+    fn test_filter_branch_explicit_all_keeps_remotes_matching_local() {
+        // Issue #2137: `git branch -a` where the only remote branch mirrors the local one.
+        let output = "* main\n  remotes/origin/HEAD -> origin/main\n  remotes/origin/main\n";
+        let result = filter_branch_output(output, true);
+        assert_eq!(result, "* main\n  remotes (1):\n    origin/main");
+    }
+
+    #[test]
+    fn test_filter_branch_explicit_all_lists_every_remote() {
+        let output = "* main\n  develop\n  remotes/origin/HEAD -> origin/main\n  remotes/origin/main\n  remotes/origin/develop\n  remotes/upstream/main\n";
+        let result = filter_branch_output(output, true);
+        assert_eq!(
+            result,
+            "* main\n  develop\n  remotes (3):\n    origin/main\n    origin/develop\n    upstream/main"
+        );
+    }
+
+    #[test]
+    fn test_filter_branch_remotes_only_no_empty_current_marker() {
+        // `git branch -r` has no `* ` line; the filter must not invent an empty one.
+        let output = "  origin/HEAD -> origin/main\n  origin/main\n";
+        let result = filter_branch_output(output, false);
+        assert!(
+            !result.lines().any(|l| l.trim() == "*"),
+            "spurious empty current marker: {:?}",
+            result
+        );
+        assert!(result.contains("origin/main"));
+    }
+
+    #[test]
     fn test_filter_branch_multi_remote() {
         let output = "* main\n  develop\n  remotes/origin/HEAD -> origin/main\n  remotes/origin/main\n  remotes/origin/feature-x\n  remotes/upstream/main\n  remotes/upstream/release-v3\n  remotes/fork/main\n  remotes/fork/experiment\n";
-        let result = filter_branch_output(output);
+        let result = filter_branch_output(output, false);
         assert!(result.contains("* main"));
         assert!(result.contains("develop"));
         assert!(
