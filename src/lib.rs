@@ -5909,6 +5909,29 @@ mod tests {
     }
 
     #[test]
+    fn test_cargo_double_dash_consumed_by_clap() {
+        // Same premise as grep above, through a nested subcommand enum rather than a flat
+        // trailing_var_arg field: only the first `--` of the trailing region is stripped.
+        let cli = try_parse_cli_from(["rtk", "cargo", "clippy", "--", "--message-format=json"])
+            .expect("parse");
+        match cli.command {
+            Commands::Cargo {
+                command: CargoCommands::Clippy { args },
+            } => assert_eq!(args, vec!["--message-format=json"]),
+            _ => panic!("Expected Cargo Clippy command"),
+        }
+
+        let cli = try_parse_cli_from(["rtk", "cargo", "test", "name", "--", "--nocapture"])
+            .expect("parse");
+        match cli.command {
+            Commands::Cargo {
+                command: CargoCommands::Test { args },
+            } => assert_eq!(args, vec!["name", "--", "--nocapture"]),
+            _ => panic!("Expected Cargo Test command"),
+        }
+    }
+
+    #[test]
     fn test_bun_build_parses_to_arg_vector() {
         let cli = try_parse_cli_from(["rtk", "bun", "build", "--outdir", "dist"]).unwrap();
         match cli.command {
