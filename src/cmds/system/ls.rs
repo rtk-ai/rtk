@@ -238,7 +238,8 @@ fn build_child_args(tokens: &[Token<'_>], flavor: Flavor) -> Vec<String> {
     let wants_all = tokens
         .iter()
         .any(|t| is_short_in(t, &['a']) || long_name(t) == Some("all"));
-    let mut child_args = vec![if wants_all { "-la" } else { "-l" }.to_string()];
+    // Follow command-line symlinks by default; later user flags can still override this.
+    let mut child_args = vec![if wants_all { "-laH" } else { "-lH" }.to_string()];
 
     let dangling = dangling_value_flag(tokens, flavor);
 
@@ -721,7 +722,7 @@ mod tests {
     #[test]
     fn test_plan_double_dash_makes_following_arg_a_path() {
         let p = plan_of(&["--", "-al"]);
-        assert_eq!(p.child_args, vec!["-l", "--", "-al"]);
+        assert_eq!(p.child_args, vec!["-lH", "--", "-al"]);
         assert!(!p.show_all);
         assert!(!p.show_long);
     }
@@ -729,13 +730,13 @@ mod tests {
     #[test]
     fn test_plan_keeps_flag_value_with_its_flag_when_a_path_comes_first() {
         let p = plan_of(&["dir", "-I", "pattern"]);
-        assert_eq!(p.child_args, vec!["-l", "-I", "pattern", "--", "dir"]);
+        assert_eq!(p.child_args, vec!["-lH", "-I", "pattern", "--", "dir"]);
     }
 
     #[test]
     fn test_plan_flag_value_looking_like_a_flag_is_not_read_as_one() {
         let p = plan_of(&["-I", "-al"]);
-        assert_eq!(p.child_args, vec!["-l", "-I", "-al", "--", "."]);
+        assert_eq!(p.child_args, vec!["-lH", "-I", "-al", "--", "."]);
         assert!(!p.show_all);
         assert!(!p.show_long);
     }
@@ -752,10 +753,10 @@ mod tests {
     fn test_plan_color_optional_value_leaves_next_arg_a_path() {
         // `ls --color always` lists a file named `always`; the value only ever attaches.
         let p = plan_of(&["--color", "always"]);
-        assert_eq!(p.child_args, vec!["-l", "--color", "--", "always"]);
+        assert_eq!(p.child_args, vec!["-lH", "--color", "--", "always"]);
         assert_eq!(
             plan_of(&["--color=always"]).child_args,
-            vec!["-l", "--color=always", "--", "."]
+            vec!["-lH", "--color=always", "--", "."]
         );
     }
 
@@ -763,7 +764,7 @@ mod tests {
     fn test_plan_resolves_unambiguous_long_abbreviation() {
         // Real `ls --sor time` sorts by time, so the value must not become a path.
         let p = plan_of(&["--sor", "time", "dir"]);
-        assert_eq!(p.child_args, vec!["-l", "--sor=time", "--", "dir"]);
+        assert_eq!(p.child_args, vec!["-lH", "--sor=time", "--", "dir"]);
         assert!(plan_of(&["--forma", "long"]).show_long);
         assert!(plan_of(&["--alm"]).show_all);
     }
@@ -772,25 +773,51 @@ mod tests {
     fn test_plan_leaves_ambiguous_abbreviation_for_ls_to_reject() {
         // `--ign` spans --ignore and --ignore-backups; ls errors, so RTK must not guess.
         let p = plan_of(&["--ign", "beta*"]);
-        assert_eq!(p.child_args, vec!["-l", "--ign", "--", "beta*"]);
+        assert_eq!(p.child_args, vec!["-lH", "--ign", "--", "beta*"]);
     }
 
     #[test]
     fn test_plan_short_cluster_still_expands() {
         let p = plan_of(&["-la"]);
-        assert_eq!(p.child_args, vec!["-la", "--", "."]);
+        assert_eq!(p.child_args, vec!["-laH", "--", "."]);
         assert!(p.show_all);
         assert!(p.show_long);
         let almost = plan_of(&["-lA"]);
-        assert_eq!(almost.child_args, vec!["-l", "-A", "--", "."]);
+        assert_eq!(almost.child_args, vec!["-lH", "-A", "--", "."]);
         assert!(almost.show_all);
         // -h is dropped because RTK renders sizes itself; -1 is a flag, not a digit-run value.
-        assert_eq!(plan_of(&["-lh1"]).child_args, vec!["-l", "-1", "--", "."]);
+        assert_eq!(plan_of(&["-lh1"]).child_args, vec!["-lH", "-1", "--", "."]);
     }
 
     #[test]
     fn test_plan_defaults_to_current_dir() {
-        assert_eq!(plan_of(&[]).child_args, vec!["-l", "--", "."]);
+        assert_eq!(plan_of(&[]).child_args, vec!["-lH", "--", "."]);
+    }
+
+    #[test]
+    fn test_plan_default_follow_applies_to_both_flavors() {
+        for flavor in [Flavor::Gnu, Flavor::Bsd] {
+            assert_eq!(
+                plan_flavored(&["directory-link"], flavor).child_args,
+                vec!["-lH", "--", "directory-link"]
+            );
+            assert_eq!(
+                plan_flavored(&["-a", "directory-link"], flavor).child_args,
+                vec!["-laH", "--", "directory-link"]
+            );
+        }
+    }
+
+    #[test]
+    fn test_plan_keeps_dereference_overrides_after_default() {
+        assert_eq!(
+            plan_bsd(&["-P", "directory-link"]).child_args,
+            vec!["-lH", "-P", "--", "directory-link"]
+        );
+        assert_eq!(
+            plan_of(&["-L", "directory-link"]).child_args,
+            vec!["-lH", "-L", "--", "directory-link"]
+        );
     }
 
     #[test]
@@ -816,15 +843,15 @@ mod tests {
         // BSD's non-permuting getopt would list `--` and the current directory too.
         assert_eq!(
             plan_bsd(&["-lT", "/tmp"]).child_args,
-            vec!["-l", "-T", "--", "/tmp"]
+            vec!["-lH", "-T", "--", "/tmp"]
         );
         assert_eq!(
             plan_bsd(&["-lw", "/tmp"]).child_args,
-            vec!["-l", "-w", "--", "/tmp"]
+            vec!["-lH", "-w", "--", "/tmp"]
         );
         assert_eq!(
             plan_bsd(&["-lI", "/tmp"]).child_args,
-            vec!["-l", "-I", "--", "/tmp"]
+            vec!["-lH", "-I", "--", "/tmp"]
         );
     }
 
@@ -832,7 +859,7 @@ mod tests {
     fn test_plan_bsd_date_format_flag_keeps_its_value() {
         assert_eq!(
             plan_bsd(&["-D", "%F", "/tmp"]).child_args,
-            vec!["-l", "-D", "%F", "--", "/tmp"]
+            vec!["-lH", "-D", "%F", "--", "/tmp"]
         );
     }
 
@@ -842,9 +869,9 @@ mod tests {
         // `--all` would turn that into a successful listing.
         assert_eq!(
             plan_of(&["--all=x"]).child_args,
-            vec!["-la", "--all=x", "--", "."]
+            vec!["-laH", "--all=x", "--", "."]
         );
-        assert_eq!(plan_of(&["--all"]).child_args, vec!["-la", "--", "."]);
+        assert_eq!(plan_of(&["--all"]).child_args, vec!["-laH", "--", "."]);
     }
 
     #[test]
@@ -852,10 +879,10 @@ mod tests {
         // They pre-format sizes RTK renders itself, leaving `200K` where a byte count belongs.
         assert_eq!(
             plan_of(&["--human-readable", "big.bin"]).child_args,
-            vec!["-l", "--", "big.bin"]
+            vec!["-lH", "--", "big.bin"]
         );
-        assert_eq!(plan_of(&["--si"]).child_args, vec!["-l", "--", "."]);
-        assert_eq!(plan_of(&["-h"]).child_args, vec!["-l", "--", "."]);
+        assert_eq!(plan_of(&["--si"]).child_args, vec!["-lH", "--", "."]);
+        assert_eq!(plan_of(&["-h"]).child_args, vec!["-lH", "--", "."]);
     }
 
     #[test]
@@ -873,13 +900,13 @@ mod tests {
         // missing one; last, the child sees no value at all and says so.
         assert_eq!(
             plan_of(&["-a", "--indicator-style"]).child_args,
-            vec!["-la", ".", "--indicator-style"]
+            vec!["-laH", ".", "--indicator-style"]
         );
-        assert_eq!(plan_of(&["sub", "-I"]).child_args, vec!["-l", "sub", "-I"]);
+        assert_eq!(plan_of(&["sub", "-I"]).child_args, vec!["-lH", "sub", "-I"]);
         // An optional-value flag is not waiting for anything.
         assert_eq!(
             plan_of(&["--color"]).child_args,
-            vec!["-l", "--color", "--", "."]
+            vec!["-lH", "--color", "--", "."]
         );
     }
 
@@ -1036,6 +1063,58 @@ mod tests {
                      lrwxr-xr-x  1 user  staff  10 Jan  1 12:00 link -> target\n";
         let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
         assert!(entries.contains("link -> target"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_command_line_directory_symlink_is_followed() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().expect("create symlink fixture directory");
+        let target_dir = temp_dir.path().join("target");
+        let link_path = temp_dir.path().join("directory-link");
+        std::fs::create_dir(&target_dir).expect("create symlink target");
+        std::fs::write(target_dir.join("inside.txt"), "content").expect("write target marker");
+        symlink(&target_dir, &link_path).expect("create directory symlink");
+
+        let link = link_path.to_string_lossy().into_owned();
+        let output = resolved_command("ls")
+            .env("LC_ALL", "C")
+            .args(plan(std::slice::from_ref(&link)).child_args)
+            .output()
+            .expect("run ls with the production child argv");
+        assert!(output.status.success());
+
+        let raw = String::from_utf8(output.stdout).expect("UTF-8 fixture listing");
+        let (entries, _, _, _) = compact_ls(&raw, false, false);
+        assert!(
+            entries.contains("inside.txt"),
+            "directory target should be listed, got: {entries}"
+        );
+        assert!(
+            !entries.contains("directory-link ->"),
+            "the command-line symlink itself should not replace the target listing"
+        );
+
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        ))]
+        {
+            let output = resolved_command("ls")
+                .env("LC_ALL", "C")
+                .args(plan(&["-P".to_string(), link]).child_args)
+                .output()
+                .expect("run ls with an explicit no-follow override");
+            assert!(output.status.success());
+            let raw = String::from_utf8(output.stdout).expect("UTF-8 fixture listing");
+            assert!(raw.contains("directory-link ->"));
+            assert!(!raw.contains("inside.txt"));
+        }
     }
 
     #[test]
