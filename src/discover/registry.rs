@@ -1591,14 +1591,31 @@ fn pipeline_command_is_safe(rtk_cmd: &str, cmd: &str) -> bool {
 
 /// A folded file list (`-l`/`-L`/`--files`) carries its shared prefix in a header line, so a
 /// display consumer that keeps only some lines (`tail`) would return tails with no prefix.
+/// A folded `git ls-tree` path list puts many paths on one line, so `head -5` or `cat` would
+/// no longer see git's lines either.
 fn producer_output_is_line_faithful(rtk_cmd: &str, cmd: &str) -> bool {
     let engine = match rtk_cmd {
         "rtk grep" => Engine::Grep,
         "rtk rg" => Engine::Rg,
+        "rtk git" => return !git_ls_tree_folds(cmd),
         _ => return true,
     };
     let args: Vec<String> = shell_split(cmd).into_iter().skip(1).collect();
     !is_bare_file_list(engine, &args)
+}
+
+/// True when `cmd` is a `git ls-tree` whose arguments rtk folds, using the classifier's
+/// git global-option pattern.
+fn git_ls_tree_folds(cmd: &str) -> bool {
+    let Some((_, args)) = cmd.split_once(char::is_whitespace) else {
+        return false;
+    };
+    let normalized = GIT_GLOBAL_OPT.replace(args.trim_start(), "");
+    let words = shell_split(&normalized);
+    if words.first().map(String::as_str) != Some("ls-tree") {
+        return false;
+    }
+    crate::cmds::git::git_cmd::ls_tree_folds(&words[1..])
 }
 
 pub(crate) enum ExcludePattern {
@@ -3229,7 +3246,7 @@ mod tests {
         // Verify that every GitCommand subcommand has a matching pattern
         for subcmd in [
             "status", "log", "diff", "show", "add", "commit", "push", "pull", "branch", "fetch",
-            "stash", "worktree",
+            "stash", "worktree", "ls-tree",
         ] {
             let cmd = format!("git {subcmd}");
             match classify_command(&cmd) {
@@ -4187,6 +4204,87 @@ mod tests {
             rewrite_command_no_prefixes("RUST_BACKTRACE=1 cargo test 2>&1 | tail -50", &[]),
             Some("RUST_BACKTRACE=1 rtk cargo test 2>&1 | tail -50".into())
         );
+    }
+
+    #[test]
+    fn test_rewrite_git_ls_tree_folds_only_where_nothing_reads_its_lines() {
+        for (cmd, expected) in [
+            (
+                "git ls-tree -r --name-only HEAD",
+                Some("rtk git ls-tree -r --name-only HEAD"),
+            ),
+            (
+                "git ls-tree HEAD | head -3",
+                Some("rtk git ls-tree HEAD | head -3"),
+            ),
+            (
+                "git ls-tree -r -z --name-only HEAD | cat",
+                Some("rtk git ls-tree -r -z --name-only HEAD | cat"),
+            ),
+            ("git ls-tree -r --name-only HEAD | head -5", None),
+            ("git ls-tree -r --name-only HEAD | cat", None),
+            ("git ls-tree --name-status HEAD | tail -2", None),
+            ("git -C src ls-tree -r --name-only HEAD | head -5", None),
+            ("yadm -C src ls-tree -r --name-only HEAD | head -5", None),
+            (
+                "yadm -c core.quotePath=false ls-tree -r --name-only HEAD | cat",
+                None,
+            ),
+            ("git\tls-tree -r --name-only HEAD | cat", None),
+            (
+                "git ls-tree -r --name-only HEAD | while read f; do echo \"$f\"; done",
+                None,
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                expected,
+                "{cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_git_ls_tree_globals_preserve_pipeline_lines() {
+        for globals in [
+            "-c core.quotePath=false",
+            "-C src",
+            "--git-dir=.git",
+            "--git-dir .git",
+            "--work-tree=.",
+            "--work-tree .",
+            "--no-pager",
+            "--no-optional-locks",
+            "--bare",
+            "--literal-pathspecs",
+            "--no-pager -c core.quotePath=false",
+        ] {
+            for format in ["--name-only", "--name-status"] {
+                let cmd = format!("git {globals} ls-tree -r {format} HEAD");
+                assert_eq!(
+                    rewrite_command_no_prefixes(&cmd, &[]),
+                    Some(format!("rtk {cmd}")),
+                    "{cmd}"
+                );
+                for consumer in ["head -5", "tail -2", "cat"] {
+                    let piped = format!("{cmd} | {consumer}");
+                    assert_eq!(rewrite_command_no_prefixes(&piped, &[]), None, "{piped}");
+                    let raw = format!("git {globals} ls-tree -r -z {format} HEAD | {consumer}");
+                    assert_eq!(
+                        rewrite_command_no_prefixes(&raw, &[]),
+                        Some(format!("rtk {raw}")),
+                        "{raw}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_git_ls_tree_declares_measured_savings() {
+        let (status, savings) = status_and_savings("git ls-tree -r --name-only HEAD");
+        assert_eq!(status, RtkStatus::Existing);
+        assert_eq!(savings, 37.0);
     }
 
     #[test]

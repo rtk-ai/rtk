@@ -2940,6 +2940,29 @@ mod tests {
     }
 
     #[test]
+    fn test_decide_leaves_folded_ls_tree_to_git_where_its_lines_are_read() {
+        assert!(matches!(
+            decide_with_rules("git ls-tree -r --name-only HEAD", &[], &[], &all_allowed()),
+            HookDecision::AllowRewrite(ref r) if r == "rtk git ls-tree -r --name-only HEAD"
+        ));
+        for cmd in [
+            "git ls-tree -r --name-only HEAD > files.txt",
+            "git ls-tree -r --name-only HEAD | head -5",
+            "git ls-tree -r --name-only HEAD | cat",
+            "for f in $(git ls-tree -r --name-only HEAD); do echo \"$f\"; done",
+            "git ls-tree -r --name-only HEAD | while read f; do echo \"$f\"; done",
+        ] {
+            assert!(
+                matches!(
+                    decide_with_rules(cmd, &[], &[], &all_allowed()),
+                    HookDecision::Defer
+                ),
+                "{cmd}"
+            );
+        }
+    }
+
+    #[test]
     fn test_decide_allow_for_fd_dup_redirect() {
         assert!(matches!(
             decide_with_rules("git status 2>&1", &[], &[], &all_allowed()),

@@ -32,6 +32,7 @@ pub enum GitCommand {
     Fetch,
     Stash { subcommand: Option<String> },
     Worktree,
+    LsTree,
 }
 
 impl GitCommand {
@@ -51,6 +52,7 @@ impl GitCommand {
             GitCommand::Fetch => "fetch",
             GitCommand::Stash { .. } => "stash",
             GitCommand::Worktree => "worktree",
+            GitCommand::LsTree => "ls-tree",
         }
     }
 }
@@ -179,6 +181,7 @@ pub fn run(
             run_stash(subcommand.as_deref(), args, verbose, global_args)
         }
         GitCommand::Worktree => run_worktree(args, verbose, global_args),
+        GitCommand::LsTree => run_ls_tree(args, verbose, global_args),
     }
 }
 
@@ -3806,6 +3809,147 @@ fn filter_worktree_list(output: &str) -> String {
     result.join("\n")
 }
 
+/// True when `git ls-tree` with `args` prints a plain path list: `--name-only` (or its alias
+/// `--name-status`) with nothing but `-r`, `-t`, `-d`, `--full-name`, `--full-tree`,
+/// `--abbrev` and positionals beside it. Everything else -- the default
+/// `<mode> <type> <object>\t<path>` lines, `-l`, `-z`, `--format`, `--object-only`, or a
+/// flag rtk does not know, including git's abbreviations of the ones it does -- is not one
+/// path per line, so it passes through byte-identical.
+pub(crate) fn ls_tree_folds<T: AsRef<str>>(args: &[T]) -> bool {
+    let tokens = arg_tokenizer::tokenize(args);
+    let name_only = tokens
+        .iter()
+        .any(|t| t.kind == TokenKind::Long && matches!(t.text, "name-only" | "name-status"));
+    name_only
+        && tokens.iter().all(|t| match t.kind {
+            TokenKind::Short => matches!(t.text, "r" | "t" | "d"),
+            TokenKind::Long => matches!(
+                t.text,
+                "name-only" | "name-status" | "full-name" | "full-tree" | "abbrev"
+            ),
+            TokenKind::Positional | TokenKind::DashDash => true,
+        })
+}
+
+/// Folds a `git ls-tree --name-only` listing into one line per run of paths that share a
+/// directory, `src/cmds/git/ diff_cmd.rs gh_cmd.rs`, with `./` standing for no directory part.
+/// Runs follow git's order, so joining each directory to each of its names gives back git's
+/// list line for line.
+///
+/// A path that a space-separated line cannot carry stands alone, in double quotes: a path
+/// git C-quoted is printed as git printed it, and it always holds a `\` escape; a path with a
+/// space is wrapped in quotes with nothing escaped, which is unambiguous because git leaves
+/// spaces unquoted but quotes any path holding a `"` or `\`.
+///
+/// `None` when the listing is not a newline-terminated list of two or more paths, or when
+/// folding would not make it smaller.
+fn fold_ls_tree_paths(listing: &str) -> Option<String> {
+    let body = listing.strip_suffix('\n')?;
+    let mut out = String::with_capacity(listing.len());
+    let mut run_dir: Option<&str> = None;
+    let mut paths = 0usize;
+    for path in body.split('\n') {
+        if path.is_empty() || path.ends_with('/') {
+            return None;
+        }
+        paths += 1;
+        if path.starts_with('"') || path.contains(' ') {
+            if run_dir.take().is_some() {
+                out.push('\n');
+            }
+            if path.starts_with('"') {
+                out.push_str(path);
+            } else {
+                out.push('"');
+                out.push_str(path);
+                out.push('"');
+            }
+            out.push('\n');
+            continue;
+        }
+        let (dir, name) = match path.rfind('/') {
+            Some(slash) => path.split_at(slash + 1),
+            None => ("./", path),
+        };
+        if run_dir != Some(dir) {
+            if run_dir.is_some() {
+                out.push('\n');
+            }
+            out.push_str(dir);
+            run_dir = Some(dir);
+        }
+        out.push(' ');
+        out.push_str(name);
+    }
+    if run_dir.is_some() {
+        out.push('\n');
+    }
+    (paths >= 2 && out.len() < listing.len()).then_some(out)
+}
+
+/// What rtk prints for a `git ls-tree` run that produced `stdout`: the folded listing when
+/// `args` ask for a plain path list, git succeeded, and folding makes it smaller; `None`
+/// means git's bytes go out unchanged.
+fn render_ls_tree(args: &[String], stdout: &[u8], success: bool) -> Option<String> {
+    if !success || !ls_tree_folds(args) {
+        return None;
+    }
+    std::str::from_utf8(stdout)
+        .ok()
+        .and_then(fold_ls_tree_paths)
+}
+
+fn run_ls_tree(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    use std::io::Write;
+
+    let timer = tracking::TimedExecution::start();
+    let tracked = with_args("git ls-tree", &display_args(args));
+    let passthrough = tracking::passthrough_label(&tracked);
+
+    if !ls_tree_folds(args) {
+        if verbose > 0 {
+            eprintln!("git ls-tree passthrough: {:?}", args);
+        }
+        let status = git_cmd(global_args)
+            .arg("ls-tree")
+            .args(args)
+            .status()
+            .context("Failed to run git ls-tree")?;
+        timer.track_passthrough(&tracked, &passthrough);
+        return Ok(exit_code_from_status(&status, "git ls-tree"));
+    }
+
+    if verbose > 0 {
+        eprintln!("git ls-tree (paths folded by directory)");
+    }
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("ls-tree").args(args);
+    let result =
+        crate::core::stream::exec_capture_bytes(&mut cmd).context("Failed to run git ls-tree")?;
+    std::io::stderr()
+        .write_all(&result.stderr)
+        .context("Failed to write git ls-tree stderr")?;
+
+    match render_ls_tree(args, &result.stdout, result.success()) {
+        Some(folded) => {
+            std::io::stdout()
+                .lock()
+                .write_all(folded.as_bytes())
+                .context("Failed to write git ls-tree output")?;
+            let raw = String::from_utf8_lossy(&result.stdout);
+            timer.track(&tracked, &format!("rtk {tracked}"), &raw, &folded);
+            Ok(result.exit_code)
+        }
+        None => emit_raw_bytes_passthrough(
+            &result.stdout,
+            &tracked,
+            &passthrough,
+            &timer,
+            result.exit_code,
+        ),
+    }
+}
+
 /// Runs an unsupported git subcommand by passing it through directly
 pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
@@ -3885,6 +4029,7 @@ mod tests {
             (GitCommand::Branch, "branch"),
             (GitCommand::Fetch, "fetch"),
             (GitCommand::Worktree, "worktree"),
+            (GitCommand::LsTree, "ls-tree"),
             (GitCommand::Stash { subcommand: None }, "stash"),
         ] {
             assert_eq!(cmd.git_name(), name, "{cmd:?}");
@@ -7096,5 +7241,181 @@ To https://github.com/foo/bar.git
         // behind it.
         assert!(probe_args(&["-p", "--line-prefix=zz"]).is_empty());
         assert!(probe_args(&["-p", "--line-prefix", "zz"]).is_empty());
+    }
+
+    /// Rebuilds git's `--name-only` lines from a folded listing, reading it the way
+    /// `fold_ls_tree_paths` documents it.
+    fn unfold_ls_tree(folded: &str) -> String {
+        let mut paths = String::new();
+        for line in folded.lines() {
+            if let Some(inner) = line.strip_prefix('"') {
+                if line.contains('\\') {
+                    paths.push_str(line);
+                } else {
+                    paths.push_str(inner.strip_suffix('"').expect("closing quote"));
+                }
+                paths.push('\n');
+                continue;
+            }
+            let mut words = line.split(' ');
+            let dir = words.next().expect("directory");
+            assert!(
+                dir.ends_with('/'),
+                "a fold line starts with its directory: {line:?}"
+            );
+            let dir = if dir == "./" { "" } else { dir };
+            for name in words {
+                paths.push_str(dir);
+                paths.push_str(name);
+                paths.push('\n');
+            }
+        }
+        paths
+    }
+
+    fn ls_tree_args(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    const LS_TREE_LISTING: &str =
+        include_str!("../../../tests/fixtures/git/ls_tree_name_only_raw.txt");
+
+    #[test]
+    fn ls_tree_fold_rebuilds_a_real_listing_line_for_line() {
+        let args = ls_tree_args(&["-r", "--name-only", "HEAD"]);
+        let folded = render_ls_tree(&args, LS_TREE_LISTING.as_bytes(), true).expect("folds");
+        assert_eq!(unfold_ls_tree(&folded), LS_TREE_LISTING);
+        assert!(folded.starts_with(".cargo/ config.toml\n"), "{folded}");
+        assert!(
+            folded.contains("\nsrc/cmds/git/ README.md diff_cmd.rs "),
+            "one line per directory run:\n{folded}"
+        );
+    }
+
+    #[test]
+    fn ls_tree_fold_savings_match_the_declared_figure() {
+        let args = ls_tree_args(&["-r", "--name-only", "HEAD"]);
+        let folded = render_ls_tree(&args, LS_TREE_LISTING.as_bytes(), true).expect("folds");
+        let savings = 100.0 - folded.len() as f64 / LS_TREE_LISTING.len() as f64 * 100.0;
+        assert!(
+            savings >= 20.0,
+            "ls-tree fold: expected >=20%, got {savings:.1}%"
+        );
+        let declared = crate::discover::rules::RULES
+            .iter()
+            .find(|r| r.rtk_cmd == "rtk git")
+            .and_then(|r| r.subcmd_savings.iter().find(|(sub, _)| *sub == "ls-tree"))
+            .map(|(_, pct)| *pct)
+            .expect("ls-tree declares its savings");
+        assert!(
+            (savings - declared).abs() < 1.0,
+            "subcmd_savings says {declared}%, the captured listing measures {savings:.1}%"
+        );
+    }
+
+    #[test]
+    fn ls_tree_fold_keeps_unsplittable_paths_on_their_own_lines() {
+        let listing = concat!(
+            "Cargo.toml\n",
+            "README.md\n",
+            "dir with space/a.rs\n",
+            "my file.txt\n",
+            "\"quote\\\"name\"\n",
+            "\"src/\\303\\251.rs\"\n",
+            "src/lib.rs\n",
+            "src/main.rs\n",
+            "src/parser.rs\n",
+            "src/runner.rs\n",
+        );
+        let args = ls_tree_args(&["-r", "--name-only", "HEAD"]);
+        let folded = render_ls_tree(&args, listing.as_bytes(), true).expect("folds");
+        assert_eq!(
+            folded,
+            concat!(
+                "./ Cargo.toml README.md\n",
+                "\"dir with space/a.rs\"\n",
+                "\"my file.txt\"\n",
+                "\"quote\\\"name\"\n",
+                "\"src/\\303\\251.rs\"\n",
+                "src/ lib.rs main.rs parser.rs runner.rs\n",
+            )
+        );
+        assert_eq!(unfold_ls_tree(&folded), listing);
+    }
+
+    #[test]
+    fn ls_tree_fold_follows_git_order_instead_of_merging_directories() {
+        let listing = "src/a.rs\nsrc/cmds/x.rs\nsrc/cmds/y.rs\nsrc/lib.rs\nsrc/main.rs\n";
+        let args = ls_tree_args(&["-r", "--name-only"]);
+        let folded = render_ls_tree(&args, listing.as_bytes(), true).expect("folds");
+        assert_eq!(
+            folded,
+            "src/ a.rs\nsrc/cmds/ x.rs y.rs\nsrc/ lib.rs main.rs\n"
+        );
+        assert_eq!(unfold_ls_tree(&folded), listing);
+    }
+
+    #[test]
+    fn ls_tree_renders_git_bytes_unless_a_plain_path_list_shrinks() {
+        let name_only = ls_tree_args(&["-r", "--name-only", "HEAD"]);
+        let listing = LS_TREE_LISTING.as_bytes();
+        // One path, nothing to fold.
+        assert_eq!(render_ls_tree(&name_only, b"src/main.rs\n", true), None);
+        // Folding that does not shrink the listing.
+        assert_eq!(render_ls_tree(&name_only, b"a/x\nb/y\n", true), None);
+        // git failed: its stdout is not a listing to trust.
+        assert_eq!(render_ls_tree(&name_only, listing, false), None);
+        // Not UTF-8, missing final newline, a blank line: not a listing rtk reads.
+        assert_eq!(
+            render_ls_tree(&name_only, b"a/\xff\na/y\na/z\n", true),
+            None
+        );
+        assert_eq!(
+            render_ls_tree(&name_only, b"src/a.rs\nsrc/b.rs", true),
+            None
+        );
+        assert_eq!(
+            render_ls_tree(&name_only, b"src/a.rs\n\nsrc/b.rs\n", true),
+            None
+        );
+        // `--name-status` is git's alias for `--name-only`.
+        let name_status = ls_tree_args(&["-r", "--name-status", "HEAD"]);
+        assert!(render_ls_tree(&name_status, listing, true).is_some());
+    }
+
+    #[test]
+    fn ls_tree_folds_only_plain_path_list_forms() {
+        for folds in [
+            &["--name-only", "HEAD"][..],
+            &["-r", "--name-only", "HEAD"],
+            &["-rt", "--name-status", "HEAD", "src"],
+            &["-d", "--name-only", "--full-name", "HEAD"],
+            &[
+                "--name-only",
+                "--full-tree",
+                "--abbrev=8",
+                "HEAD",
+                "--",
+                "src",
+            ],
+        ] {
+            assert!(ls_tree_folds(folds), "{folds:?} should fold");
+        }
+        for verbatim in [
+            &["HEAD"][..],
+            &["-r", "HEAD"],
+            &["-l", "--name-only", "HEAD"],
+            &["--long", "--name-only", "HEAD"],
+            &["-z", "--name-only", "HEAD"],
+            &["-rz", "--name-only", "HEAD"],
+            &["--name-only", "--format=%(path)", "HEAD"],
+            &["--name-only", "--format", "%(path)", "HEAD"],
+            &["--name-only", "--object-only", "HEAD"],
+            &["--name-o", "HEAD"],
+            &["--name-only", "-h"],
+            &["HEAD", "--", "--name-only"],
+        ] {
+            assert!(!ls_tree_folds(verbatim), "{verbatim:?} must pass through");
+        }
     }
 }
