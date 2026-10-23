@@ -796,6 +796,15 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^bitbake(?:\s|$)",
+        rtk_cmd: "rtk bitbake",
+        pipeline_safety: PipelineSafety::ProducerOnly,
+        rewrite_prefixes: &["bitbake"],
+        category: "Build",
+        savings_pct: 90.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^brew\s+(install|upgrade)\b",
         rtk_cmd: "rtk brew",
         pipeline_safety: PipelineSafety::ProducerOnly,
