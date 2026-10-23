@@ -298,16 +298,21 @@ pub enum Forwarded {
 /// usage outcome for the stats store. `stream` (the client's `stream: true`)
 /// selects the SSE relay, which counts tokens as the bytes flow; otherwise the
 /// body is buffered and parsed once.
+pub struct UpstreamTarget {
+    pub name: String,
+    pub base: String,
+}
+
 pub async fn relay(
     state: &AppState,
-    base: &str,
+    target: &UpstreamTarget,
     path: &str,
     headers: HeaderMap,
     body: Bytes,
     provider: Provider,
     stream: bool,
 ) -> Forwarded {
-    let url = format!("{}{}", base.trim_end_matches('/'), path);
+    let url = format!("{}{}", target.base.trim_end_matches('/'), path);
     let retries = state.config.upstream_retries;
     let timeout = state.config.upstream_timeout_secs;
     let started = Instant::now();
@@ -328,7 +333,8 @@ pub async fn relay(
         // A local worker that sent no credential borrows the one the agent is
         // already relaying, rather than needing a second copy of it.
         if state.config.relay_borrowing {
-            if let Some((name, value)) = state.relayed_auth.lend_if_missing(provider, &headers) {
+            if let Some((name, value)) = state.relayed_auth.lend_if_missing(&target.name, &headers)
+            {
                 req = req.header(name, value);
             }
         }
@@ -679,6 +685,13 @@ impl SseAccumulator {
         if let Some(usage) = json.get("usage").filter(|u| !u.is_null()) {
             self.merge(usage);
         }
+        if let Some(usage) = json
+            .get("response")
+            .and_then(|r| r.get("usage"))
+            .filter(|u| !u.is_null())
+        {
+            self.merge(usage);
+        }
         // Native Gemini streams usage under `usageMetadata`.
         if let Some(usage) = json.get("usageMetadata").filter(|u| !u.is_null()) {
             self.merge(usage);
@@ -689,6 +702,28 @@ impl SseAccumulator {
 
     /// Reconstruct streamed tool calls across the three dialects.
     fn feed_tool_use(&mut self, json: &serde_json::Value) {
+        if matches!(self.provider, Provider::OpenaiResponses) {
+            if json.get("type").and_then(|t| t.as_str()) == Some("response.output_item.done")
+                && json.pointer("/item/type").and_then(|t| t.as_str()) == Some("function_call")
+            {
+                let index = json
+                    .get("output_index")
+                    .and_then(|i| i.as_i64())
+                    .unwrap_or(self.tool_buf.len() as i64);
+                let name = json
+                    .pointer("/item/name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let arguments = json
+                    .pointer("/item/arguments")
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("null")
+                    .to_string();
+                self.tool_buf.insert(index, (name, arguments));
+            }
+            return;
+        }
         // Native Gemini streams a whole functionCall (name + args) per chunk.
         if matches!(self.provider, Provider::Google) {
             if let Some(parts) = json
@@ -809,6 +844,13 @@ impl SseAccumulator {
                     }
                 }
             }
+            Provider::OpenaiResponses => {
+                if json.get("type").and_then(|t| t.as_str()) == Some("response.output_text.delta") {
+                    if let Some(t) = json.get("delta").and_then(|d| d.as_str()) {
+                        self.text.push_str(t);
+                    }
+                }
+            }
         }
     }
 
@@ -873,6 +915,7 @@ mod tests {
             bind: "127.0.0.1:0".into(),
             anthropic_upstream: "https://api.anthropic.com".into(),
             openai_upstream: "https://api.openai.com".into(),
+            upstreams: Default::default(),
             ccr,
             compression: "off".into(),
             pixel_compress: Default::default(),

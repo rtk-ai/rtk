@@ -570,6 +570,13 @@ fn antigravity_pipeline(v: &Value) -> Option<Value> {
 /// - Rewrite: emit `{"hook_specific_output": {"tool_input": {"command": "..."}}}`.
 /// - Deny: emit `{"decision": "deny", "reason": "..."}`.
 pub fn run_vibe() -> Result<()> {
+    #[cfg(feature = "engine")]
+    if let Some(message) = crate::hooks::session_start::throttled_keepalive(
+        "vibe",
+        std::time::Duration::from_secs(300),
+    ) {
+        let _ = writeln!(io::stderr(), "{message}");
+    }
     let input = read_stdin_limited()?;
     if let Some(output) = run_vibe_inner(&input) {
         let _ = writeln!(io::stdout(), "{output}");

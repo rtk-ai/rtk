@@ -109,3 +109,39 @@ cache_read_mult = 0.1
 [default]
 family = "other"
 cache_read_mult = 0.1
+
+# ── Mistral (Vibe) ────────────────────────────────────────────────────────
+[[model]]
+pattern = "devstral"
+family = "mistral"
+cache_read_mult = 0.1
+
+[[model]]
+pattern = "codestral"
+family = "mistral"
+cache_read_mult = 0.1
+
+[[model]]
+pattern = "magistral"
+family = "mistral"
+cache_read_mult = 0.1
+
+[[model]]
+pattern = "ministral"
+family = "mistral"
+cache_read_mult = 0.1
+
+[[model]]
+pattern = "pixtral"
+family = "mistral"
+cache_read_mult = 0.1
+
+[[model]]
+pattern = "mixtral"
+family = "mistral"
+cache_read_mult = 0.1
+
+[[model]]
+pattern = "mistral"
+family = "mistral"
+cache_read_mult = 0.1

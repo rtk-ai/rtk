@@ -13,6 +13,8 @@ pub enum Provider {
     Anthropic,
     /// OpenAI Chat Completions API (`/v1/chat/completions`) — OpenCode and others.
     Openai,
+    #[serde(rename = "openai-responses")]
+    OpenaiResponses,
     /// Google Gemini API (`generateContent`) — reached only via cross-provider
     /// translation (there is no native Gemini inbound handler for the offload
     /// direction; a Gemini client is served on a mapped path).
@@ -24,6 +26,7 @@ impl Provider {
         match self {
             Provider::Anthropic => "anthropic",
             Provider::Openai => "openai",
+            Provider::OpenaiResponses => "openai-responses",
             Provider::Google => "google",
         }
     }

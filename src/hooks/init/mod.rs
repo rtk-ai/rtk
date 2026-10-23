@@ -38,6 +38,8 @@ mod pi;
 mod plan;
 #[cfg(feature = "engine")]
 pub use plan::plan_with;
+#[cfg(feature = "engine")]
+mod proxy_onramp;
 mod trae;
 mod vibe;
 
@@ -49,6 +51,7 @@ use claude::{
     hook_already_present, hook_gaps, remove_settings_entries, run_claude_md_mode, run_default_mode,
     run_hook_only_mode,
 };
+pub(crate) use codex::{openai_base_url as codex_openai_base_url, proxy_path as codex_proxy_path};
 use codex::{run_codex_mode, show_codex_config, uninstall_codex};
 use cursor::{
     cursor_hook_already_present, install_cursor_hooks, remove_cursor_hooks, resolve_cursor_dir,
@@ -70,6 +73,7 @@ pub use hermes::{run_hermes_mode, uninstall_hermes};
 pub use instructions_agents::{run_kilocode_mode, run_kimi_mode};
 pub use pi::{run_omp_mode_with_patch_mode, run_pi_mode_with_patch_mode};
 pub use trae::{run_trae_mode, uninstall_trae_mode};
+pub(crate) use vibe::{VIBE_PROXY_PATH, mistral_api_base as vibe_mistral_api_base};
 pub use vibe::{run_vibe_mode, uninstall_vibe};
 
 // Embedded agent-neutral RTK awareness instructions, one file per `awareness.level`.
@@ -869,10 +873,6 @@ fn report_pipeline_health() {
     }
 }
 
-/// Proxy on-ramp: offer to point Claude Code at the RTK proxy for the
-/// history/cache layers. Claude Code is the one agent with a confirmed
-/// config channel (settings.json `env`); everyone else keeps the manual
-/// export line from `rtk llm-proxy start --env`.
 /// The base URL the global settings point Claude Code at, if any.
 fn proxy_env_target() -> Option<String> {
     let dir = resolve_claude_dir().ok()?;
@@ -881,71 +881,6 @@ fn proxy_env_target() -> Option<String> {
     root.pointer("/env/ANTHROPIC_BASE_URL")?
         .as_str()
         .map(str::to_string)
-}
-
-#[cfg(feature = "engine")]
-fn verify_proxy_setup(base_url: &str, persistence: Option<&str>) {
-    for line in proxy_verification_lines(
-        base_url,
-        crate::llm_proxy::is_reachable(),
-        proxy_env_target().as_deref(),
-        persistence,
-    ) {
-        println!("{line}");
-    }
-}
-
-#[cfg(feature = "engine")]
-/// Both halves have to hold: an env var aimed at a dead daemon is not set up,
-/// and a running daemon nothing points at records nothing — the state that
-/// leaves `rtk gain` empty and looking broken.
-///
-/// Deliberately local. Verifying a real round trip would mean sending a request
-/// to the provider during `init`, and the two failures worth catching are here.
-fn proxy_verification_lines(
-    base_url: &str,
-    reachable: bool,
-    target: Option<&str>,
-    persistence: Option<&str>,
-) -> Vec<String> {
-    let aimed_here = target == Some(base_url);
-    let mut out = vec![
-        format!(
-            "  verify: daemon {}",
-            if reachable {
-                "responding".to_string()
-            } else {
-                format!("NOT responding on {}", crate::llm_proxy::DEFAULT_BIND)
-            }
-        ),
-        format!(
-            "  verify: settings.json {}",
-            match target {
-                Some(t) if aimed_here => format!("env.ANTHROPIC_BASE_URL = {t}"),
-                Some(t) => format!("env.ANTHROPIC_BASE_URL = {t} (not this daemon)"),
-                None => "env.ANTHROPIC_BASE_URL missing".to_string(),
-            }
-        ),
-    ];
-    if reachable && aimed_here {
-        out.push(
-            "  proxy: configured — restart Claude Code, then `rtk gain` shows requests".to_string(),
-        );
-        out.push(match persistence {
-            Some(p) => format!("  verify: restart persistence — {p}"),
-            None => "  [warn] nothing restarts the daemon after a reboot — rerun `rtk init -g`"
-                .to_string(),
-        });
-        out.push(
-            "  Compression: cache-breakpoint alignment — a no-op for clients that set their own, Claude Code included; CCR ships off (`rtk pipeline show rtk:proxy`)"
-                .to_string(),
-        );
-    } else {
-        out.push(
-            "  proxy: NOT fully configured — `rtk gain` will report no proxy data".to_string(),
-        );
-    }
-    out
 }
 
 /// Project scope writes the awareness block and a filters template, and stops.
@@ -984,222 +919,6 @@ fn project_scope_footer_lines(
         format!("  hooks:     {hooks}"),
         format!("  proxy:     {proxy}"),
     ]
-}
-
-#[cfg(feature = "engine")]
-fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitContext) -> Result<()> {
-    use std::io::{BufRead, IsTerminal};
-    // Only `PatchMode::Ask` may prompt. `--auto-patch` exists to run without a
-    // terminal, and neither it nor `--no-patch` may adopt the proxy on the
-    // user's behalf: routing an agent's traffic through a daemon is not a
-    // "supported init change", it is a feature the user has to choose.
-    if !matches!(patch_mode, PatchMode::Ask) {
-        return Ok(());
-    }
-    if ctx.dry_run || !std::io::stdin().is_terminal() {
-        return Ok(());
-    }
-    if crate::core::user_env::var("RTK_ONRAMP_DISABLED").as_deref() == Some("1") {
-        return Ok(());
-    }
-    let base_url = format!("http://{}", crate::llm_proxy::DEFAULT_BIND);
-
-    let mut root: serde_json::Value = if settings_path.exists() {
-        let content = fs::read_to_string(settings_path)?;
-        let content = strip_leading_bom(&content);
-        if content.trim().is_empty() {
-            serde_json::json!({})
-        } else {
-            from_json_str(content)?
-        }
-    } else {
-        serde_json::json!({})
-    };
-    let already = root
-        .pointer("/env/ANTHROPIC_BASE_URL")
-        .and_then(|v| v.as_str().map(str::to_string));
-    let aimed_here = already.as_deref() == Some(base_url.as_str());
-    let autostart_present = session_start_entry_present(&root);
-    if aimed_here && autostart_present {
-        return Ok(());
-    }
-    // Routing Claude Code at a daemon that cannot be started breaks every
-    // session (#4604): only offer the proxy when its binary is installed, so
-    // the SessionStart hook can start it again after a reboot. A daemon that
-    // merely answers on the port today may not be startable tomorrow.
-    if !crate::llm_proxy::binary_available() {
-        eprintln!();
-        eprintln!(
-            "  RTK proxy not offered: rtk-proxy is not installed (`rtk llm-proxy start` says where to get it)."
-        );
-        return Ok(());
-    }
-
-    if aimed_here {
-        // The failure this flow exists to prevent: a base URL that outlives
-        // the daemon it points at. The env is set but nothing brings the
-        // daemon back after a reboot — offer only the persistence question.
-        eprintln!();
-        eprintln!(
-            "  The RTK proxy is configured in settings.json, but nothing restarts the daemon after a reboot."
-        );
-    } else {
-        eprintln!();
-        if let Some(foreign) = already.as_deref() {
-            eprintln!(
-                "  settings.json already routes Claude Code through {foreign} — another proxy or gateway."
-            );
-            eprint!("  Replace it with the RTK proxy? Your current routing stops working. [y/N] ");
-        } else {
-            eprint!(
-                "  Set up the RTK proxy (routes Claude Code's API traffic through a local daemon)? [y/N] "
-            );
-        }
-        let mut line = String::new();
-        let n = std::io::stdin().lock().read_line(&mut line)?;
-        if n == 0 || !matches!(line.trim().to_lowercase().as_str(), "y" | "yes") {
-            println!("  Skipped — enable later with `rtk init -g` or `rtk llm-proxy start --env`.");
-            return Ok(());
-        }
-    }
-
-    eprintln!("  How should the daemon come back after a reboot?");
-    eprintln!(
-        "    1) SessionStart hook — start it automatically when a Claude session begins (recommended)"
-    );
-    eprintln!("    2) Background service — `rtk llm-proxy service install`");
-    eprintln!("    3) Neither — print the export line; settings.json is not touched");
-    eprint!("  [1/2/3, default 1] ");
-    let mut choice_line = String::new();
-    let n = std::io::stdin().lock().read_line(&mut choice_line)?;
-    if n == 0 {
-        println!("  No answer — nothing changed. Re-run `rtk init -g` to decide later.");
-        return Ok(());
-    }
-    let choice = match choice_line.trim() {
-        "" | "1" => 1,
-        "2" => 2,
-        "3" => 3,
-        other => {
-            println!("  Unrecognized `{other}` — nothing changed.");
-            return Ok(());
-        }
-    };
-
-    if choice == 3 {
-        println!("  settings.json left untouched. Point a session at the daemon with:");
-        println!("    export ANTHROPIC_BASE_URL={base_url}");
-    } else {
-        {
-            let obj = root
-                .as_object_mut()
-                .context("settings.json root is not an object")?;
-            let env = obj
-                .entry("env")
-                .or_insert_with(|| serde_json::json!({}))
-                .as_object_mut()
-                .context("settings.json `env` is not an object")?;
-            env.insert("ANTHROPIC_BASE_URL".into(), serde_json::json!(base_url));
-        }
-        if choice == 1 && !autostart_present {
-            insert_session_start_entry(&mut root)?;
-        }
-        let serialized = serde_json::to_string_pretty(&root)?;
-        let backup = backup_and_atomic_write(settings_path, &serialized)?;
-        println!("  settings.json: env.ANTHROPIC_BASE_URL = {base_url}");
-        if let Some(path) = backup {
-            println!("  Backup: {}", path.display());
-        }
-        if choice == 1 {
-            println!(
-                "  settings.json: SessionStart hook registered — the proxy starts with each session"
-            );
-        }
-    }
-
-    match ensure_pipeline_extends("rtk:proxy", "") {
-        PipelineChange::Created(path) => {
-            println!("  {path}: created with extends = \"rtk:proxy\"");
-        }
-        PipelineChange::AlreadyActive => {}
-        PipelineChange::ManualNeeded => {
-            println!(
-                "  Add `extends = \"rtk:proxy\"` to [pipeline] in your pipeline.toml — \
-                 without it the daemon forwards unchanged."
-            );
-        }
-    }
-
-    match crate::llm_proxy::ensure_running(crate::llm_proxy::DEFAULT_BIND) {
-        Ok(_) => println!("  rtk-proxy: running"),
-        Err(e) => {
-            println!("  [warn] rtk-proxy not started: {e}");
-            println!("  Start it manually: rtk llm-proxy start");
-        }
-    }
-    if choice == 2 {
-        let exe = std::env::current_exe().context("resolve the rtk binary path")?;
-        match std::process::Command::new(exe)
-            .args(["llm-proxy", "service", "install"])
-            .status()
-        {
-            Ok(s) if s.success() => println!("  service: installed"),
-            Ok(s) => println!("  [warn] service install exited with {s}"),
-            Err(e) => println!("  [warn] service install failed: {e}"),
-        }
-    }
-    match choice {
-        1 => verify_proxy_setup(&base_url, Some("SessionStart autostart")),
-        2 => verify_proxy_setup(&base_url, Some("background service")),
-        _ => println!("  Keep it across logins: rtk llm-proxy service install"),
-    }
-    Ok(())
-}
-
-#[cfg(feature = "engine")]
-/// True when any SessionStart entry already carries the rtk claude hook.
-fn session_start_entry_present(root: &serde_json::Value) -> bool {
-    root.pointer(&format!(
-        "/hooks/{}",
-        crate::hooks::constants::SESSION_START_KEY
-    ))
-    .and_then(|v| v.as_array())
-    .is_some_and(|arr| {
-        arr.iter().any(|entry| {
-            entry
-                .get("hooks")
-                .and_then(|h| h.as_array())
-                .is_some_and(|hs| {
-                    hs.iter().any(|h| {
-                        h.get("command")
-                            .and_then(|c| c.as_str())
-                            .is_some_and(is_claude_hook_command)
-                    })
-                })
-        })
-    })
-}
-
-#[cfg(feature = "engine")]
-/// SessionStart entries carry no matcher: the hook fires for every session.
-fn insert_session_start_entry(root: &mut serde_json::Value) -> Result<()> {
-    let obj = root
-        .as_object_mut()
-        .context("settings.json root is not an object")?;
-    let hooks = obj
-        .entry("hooks")
-        .or_insert_with(|| serde_json::json!({}))
-        .as_object_mut()
-        .context("settings.json `hooks` is not an object")?;
-    let arr = hooks
-        .entry(crate::hooks::constants::SESSION_START_KEY)
-        .or_insert_with(|| serde_json::json!([]))
-        .as_array_mut()
-        .context("settings.json `SessionStart` is not an array")?;
-    arr.push(serde_json::json!({
-        "hooks": [{ "type": "command", "command": "rtk hook claude" }]
-    }));
-    Ok(())
 }
 
 #[cfg(feature = "engine")]

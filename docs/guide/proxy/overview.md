@@ -10,13 +10,16 @@ sidebar:
 `rtk gain` and the agent hooks work on **bash output** — what a command prints before your agent reads it. The RTK Proxy works one layer up, on the **request your agent sends to the model**: conversation history, tool results, file contents. It is a local HTTP daemon your agent talks to instead of talking to the model provider directly. The daemon binary is `rtk-proxy`; you drive it with `rtk llm-proxy`.
 
 ```
-  Claude Code ──▶ rtk-proxy ──▶ api.anthropic.com
-                     │
-                     ├─ normalize: strip ANSI / redraws / dupes
-                     ├─ your proxy.request.tool_result rules
-                     ├─ (opt-in) cache-align
-                     └─ record usage ──▶ rtk gain
+  your agent ──▶ rtk-proxy ──▶ the provider it was already talking to
+                    │            (api.anthropic.com, api.openai.com,
+                    │             chatgpt.com, api.mistral.ai, …)
+                    ├─ normalize: strip ANSI / redraws / dupes
+                    ├─ your proxy.request.tool_result rules
+                    ├─ (opt-in) cache-align
+                    └─ record usage ──▶ rtk gain
 ```
+
+The daemon is agent-agnostic: it speaks the provider's dialect, not the agent's. Each upstream has its own namespace under the proxy's address (`/mistral/…`, `/chatgpt/…`, `/openai/…`), so an agent points its base URL at `http://127.0.0.1:8080/<upstream>` and keeps calling the paths it always called. Today Claude Code, Codex and Mistral Vibe are wired end to end; Cursor and Antigravity offer no base-URL override and keep the hooks alone (see [Agents the proxy cannot serve](#agents-the-proxy-cannot-serve)).
 
 It is local: one background process on your machine. It does four things — **intercept, compress, forward, record** — and does not store prompt or completion text (the opt-in [CCR](./compression.md#large-tool-results-ccr) keeps the originals it compresses). What it compresses is in [What the Proxy Compresses](./compression.md); its settings and endpoints are in [Proxy Configuration](./configuration.md).
 
@@ -50,61 +53,90 @@ rtk llm-proxy stop      # ask it to shut down
 
 `setup` is the one to run first: it reports which AI agents on this machine can be pointed at the proxy, and how.
 
-You rarely need `start` by hand — `rtk claude` starts the daemon for you. See [Getting your agent onto the proxy](#getting-your-agent-onto-the-proxy).
+You rarely need `start` by hand — `rtk claude`, `rtk codex` and `rtk vibe` start the daemon for you. See [Getting your agent onto the proxy](#getting-your-agent-onto-the-proxy).
 
 ## Getting your agent onto the proxy
 
-Two independent ways in. `rtk init` configures your agent once and persists it; `rtk <harness>` needs no configuration at all.
+Two independent ways in. `rtk init` configures your agent once and persists it; `rtk <agent>` needs no configuration at all. Each agent has exactly one channel through which it can be pointed at another base URL, and RTK uses that channel and no other:
+
+| Agent | Channel | What RTK sets it to |
+|---|---|---|
+| Claude Code | `ANTHROPIC_BASE_URL` (env, or `env` in `~/.claude/settings.json`) | `http://127.0.0.1:8080` |
+| Codex | `openai_base_url` in `~/.codex/config.toml`, or `-c openai_base_url=…` for one run | `http://127.0.0.1:8080/openai/v1` with an API-key login, `http://127.0.0.1:8080/chatgpt/backend-api/codex` with a ChatGPT login |
+| Mistral Vibe | the `[[providers]]` entry named `mistral` in `~/.vibe/config.toml` | `api_base = "http://127.0.0.1:8080/mistral/v1"` |
+
+Codex has no environment variable for its base URL, and Vibe has none for its provider table, so neither can be routed by `--env`; the launcher and the guided setup use the channel each agent actually reads.
 
 ### `rtk init -g` — the guided setup
 
-On a Claude Code init, RTK asks:
+On a global init for Claude Code (`rtk init -g`), Codex (`rtk init -g --codex`) or Mistral Vibe (`rtk init -g --agent vibe`), RTK asks:
 
 ```
 Set up the RTK proxy (routes Claude Code's API traffic through a local daemon)? [y/N]
 ```
 
-Say yes and it writes `env.ANTHROPIC_BASE_URL` into `settings.json` and adds `extends = "rtk:proxy"` to your pipeline. Then it asks how the daemon should come back after a reboot:
+Say yes and it writes the agent's channel (above) and adds `extends = "rtk:proxy"` to your pipeline. Then it asks how the daemon should come back after a reboot:
 
 | Choice | What it does |
 |---|---|
-| **1. SessionStart hook** (default) | Registers a hook that starts the daemon when a Claude session begins |
+| **1. SessionStart hook** (default; Claude Code and Codex) | Registers a hook that starts the daemon when a session begins |
 | **2. Background service** | `rtk llm-proxy service install` — a per-user service, independent of any agent |
-| **3. Neither** | Prints the `export` line and leaves `settings.json` untouched |
+| **3. Neither** | Prints what to set by hand and leaves the agent's config untouched |
+
+Mistral Vibe has no session-start hook, so its menu offers the service and the manual line only; its keep-alive is described below.
 
 Declining leaves everything alone: *"Skipped — enable later with `rtk init -g` or `rtk llm-proxy start --env`."*
 
-If you already have the base URL set but nothing restarting the daemon, re-running `rtk init -g` asks only the persistence question.
+If you already have the channel set but nothing restarting the daemon, re-running the same init asks only the persistence question.
 
-The question is only asked when the daemon can actually run: the `rtk-proxy` binary is installed (next to `rtk` or on `PATH`) or an rtk-proxy already answers on `127.0.0.1:8080`. Otherwise init says the proxy was not offered and leaves `settings.json` alone. `rtk init -g --uninstall` removes the `env.ANTHROPIC_BASE_URL` this flow wrote, when it still points at the RTK daemon; a base URL aimed anywhere else is kept.
+The question is only asked when the daemon can actually run: the `rtk-proxy` binary is installed (next to `rtk` or on `PATH`) or an rtk-proxy already answers on `127.0.0.1:8080`. Otherwise init says the proxy was not offered and leaves the config alone. `--uninstall` removes what this flow wrote, when it still points at the RTK daemon: Claude Code's `env.ANTHROPIC_BASE_URL`, Codex's `openai_base_url`, Vibe's `mistral` provider entry (a customised entry gets its default `api_base` back instead). A base URL aimed anywhere else is kept.
 
-#### What the SessionStart hook actually does
+Codex's namespace follows its login mode at the time of the init. `rtk codex` picks the right namespace at every launch, so if you switch between an API key and a ChatGPT login, either launch with `rtk codex` or re-run `rtk init -g --codex`.
 
-It does **not** do the redirection — that is the `settings.json` entry above. The hook is a *keep-alive*: when a session whose `ANTHROPIC_BASE_URL` points at a loopback address finds nothing listening there, it runs `rtk llm-proxy start`.
+#### What the keep-alive actually does
 
-It reports through `systemMessage`, which is user-visible and never enters model context — RTK spends no tokens configuring itself. Every failure path stays silent rather than disrupting the session.
+It does **not** do the redirection — that is the config entry above. The keep-alive checks whether the agent's channel points at a loopback address with nothing listening there, and if so runs `rtk llm-proxy start`:
 
-This route only exists on harnesses that *have* a SessionStart hook, which is why the next one matters.
+| Agent | When it runs | How it reports |
+|---|---|---|
+| Claude Code | `SessionStart` hook (`rtk hook claude`) | `systemMessage`, user-visible, never in model context |
+| Codex | `SessionStart` hook (`rtk hook codex`) | stderr, and `additionalContext` when the daemon could not be started so the failure is visible |
+| Mistral Vibe | the `pre_tool` hook it already has (`rtk hook vibe`), at most once every five minutes | stderr |
 
-### `rtk <harness>` — the launcher
+Every failure path stays quiet rather than disrupting the session.
+
+### `rtk <agent>` — the launcher
 
 ```bash
 rtk claude
+rtk codex
+rtk vibe
 ```
 
-One command, no configuration, nothing persisted: it starts the daemon if it is not already up, points the harness at it, and execs the real binary. On Unix this is a genuine `exec`, so signals, stdio and the exit code behave exactly as if you had launched the harness directly.
+One command, nothing persisted: it starts the daemon if it is not already up, points the agent at it through the agent's own channel, and execs the real binary. On Unix this is a genuine `exec`, so signals, stdio and the exit code behave exactly as if you had launched the agent directly.
 
-**This route needs no hook system.** Not every harness has a SessionStart hook, but most offer a base-URL override — so this is how an agent without hooks still gets onto the proxy.
-
-The daemon is agent-agnostic by design: it speaks the provider's dialect, not the agent's. A subcommand exists only where that redirection has been verified end to end, so `rtk <harness>` resolving is itself the signal that traffic really goes through the daemon. Today the list is:
-
-| Subcommand | Base-URL variable |
+| Subcommand | How it redirects |
 |---|---|
-| `rtk claude` | `ANTHROPIC_BASE_URL` |
+| `rtk claude` | sets `ANTHROPIC_BASE_URL` for that process |
+| `rtk codex` | passes `-c openai_base_url="…"` for that run, choosing the namespace from your login mode |
+| `rtk vibe` | writes nothing: it checks that `rtk init -g --agent vibe` has pointed the `mistral` provider at the daemon, and tells you to run it otherwise |
 
-A harness absent from the list is never *silently* unproxied — it falls through to plain passthrough. `rtk llm-proxy setup` reports what can be launched on this machine.
+A subcommand exists only where the redirection has been verified end to end, so `rtk <agent>` resolving is itself the signal that traffic really goes through the daemon. An agent absent from the list is never *silently* unproxied — it falls through to plain passthrough. `rtk llm-proxy setup` reports what can be launched on this machine.
 
-The launcher never blocks you: if the daemon cannot start, the harness launches unproxied with a warning rather than failing.
+The launcher never clobbers a route you chose: a base URL already aimed at another gateway is left alone and named. And it never launches an agent at a dead port: when the daemon cannot start, Claude Code and Codex launch unproxied with a warning, and Vibe, whose config file cannot be overridden per run, is refused with the command that fixes it.
+
+:::note[Codex and WebSockets]
+Codex opens the Responses API over a WebSocket first. The proxy answers the upgrade with a plain HTTP error rather than relaying it, and Codex then falls back to HTTP for the rest of the session, which is the transport the proxy measures. The fallback is Codex's own behaviour on an exhausted retry budget, so the first turn of a proxied session can start a little later than usual.
+:::
+
+### Agents the proxy cannot serve
+
+| Agent | Why | What RTK does instead |
+|---|---|---|
+| Cursor | every model request is routed through Cursor's servers, and the CLI has no base-URL override | hooks only; `rtk llm-proxy setup` says so when `cursor-agent` is detected |
+| Antigravity | sign-in is OAuth through `agy login` only, and no base-URL or proxy setting exists | hooks only; `rtk llm-proxy setup` says so when `agy` is detected |
+
+Both facts come from the vendors' own documentation and staff answers, checked on 2026-10-23. `rtk init -g --agent cursor` and `rtk init -g --agent antigravity` print the same line after installing the hooks, so the absence is visible rather than silent.
 
 ### `--env` — one shell, by hand
 
@@ -112,7 +144,7 @@ The launcher never blocks you: if the daemon cannot start, the harness launches 
 eval "$(rtk llm-proxy start --env)"
 ```
 
-Any agent launched from that shell routes through the proxy. This is choice 3 above, done manually.
+Any agent that reads `ANTHROPIC_BASE_URL` and is launched from that shell routes through the proxy. This is choice 3 above, done manually. Codex and Vibe do not read an environment variable for this; use `rtk codex`, `rtk vibe` or the guided setup.
 
 ## Binding to another address
 

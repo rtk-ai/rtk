@@ -16,20 +16,21 @@
 between your AI coding tool and the real provider endpoint, runs the pipeline
 on the traffic — compression, and the relay of calls your pipeline routes to
 cheaper models — then relays the response back. It is agent-agnostic by
-design: it speaks the provider's dialect, not the agent's. Today Claude Code
-is wired, through `rtk claude`; other agents follow as their redirection is
-verified end to end.
+design: it speaks the provider's dialect, not the agent's. Claude Code
+(`rtk claude`), Codex (`rtk codex`) and Mistral Vibe (`rtk vibe`) are wired
+end to end; Cursor and Antigravity offer no base-URL override, so they keep
+RTK's hooks and never reach the daemon.
 
 It is a **local daemon**: one background process on your machine, driven by the
 `rtk` CLI. It does four things: **intercept, compress, forward, record**.
 
 ```
-  Claude Code ──▶ rtk-proxy ──▶ api.anthropic.com
-                     │
-                     ├─ normalize: strip ANSI / redraws / dupes
-                     ├─ your proxy.request.tool_result method rules
-                     ├─ (opt-in) cache-align
-                     └─ record usage ──▶ rtk gain
+  your agent ──▶ rtk-proxy ──▶ its provider (api.anthropic.com, api.openai.com,
+                    │                        chatgpt.com, api.mistral.ai, …)
+                    ├─ normalize: strip ANSI / redraws / dupes
+                    ├─ your proxy.request.tool_result method rules
+                    ├─ (opt-in) cache-align
+                    └─ record usage ──▶ rtk gain
 ```
 
 ## User documentation
@@ -38,12 +39,14 @@ Setup, what the daemon compresses, its settings and endpoints live in the user g
 
 | Page | Covers |
 |---|---|
-| [RTK Proxy](../docs/guide/proxy/overview.md) | install, `rtk claude`, `rtk init -g`, `--env`, binding, state, savings |
+| [RTK Proxy](../docs/guide/proxy/overview.md) | install, `rtk <agent>`, `rtk init -g`, `--env`, which agents can be routed, binding, state, savings |
 | [What the Proxy Compresses](../docs/guide/proxy/compression.md) | normalisation, cache alignment, your `proxy.request` rules |
 | [Proxy Configuration](../docs/guide/proxy/configuration.md) | settings, provider dialects, HTTP endpoints, attribution headers |
 
 ```bash
-rtk claude              # start the daemon if needed, then launch Claude through it
+rtk claude              # start the daemon if needed, then launch Claude Code through it
+rtk codex               # same for Codex (API-key or ChatGPT login)
+rtk vibe                # same for Mistral Vibe, once `rtk init -g --agent vibe` pointed it here
 rtk llm-proxy status    # is it up
 rtk gain                # savings, RTK and proxy side by side
 ```

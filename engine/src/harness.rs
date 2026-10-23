@@ -9,6 +9,17 @@ pub enum Channel {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigChannel {
+    Env {
+        var: &'static str,
+    },
+    ConfigKey {
+        file: &'static str,
+        key: &'static str,
+    },
+    ProviderTable {
+        file: &'static str,
+        provider: &'static str,
+    },
     SettingsEnv,
 }
 
@@ -449,7 +460,9 @@ pub static HARNESSES: &[HarnessProfile] = &[
             Channel::SessionStart,
             Channel::PerTurn,
         ],
-        base_url_config: Some(ConfigChannel::SettingsEnv),
+        base_url_config: Some(ConfigChannel::Env {
+            var: "ANTHROPIC_BASE_URL",
+        }),
         wiring: Some(Wiring {
             path: ".claude/settings.json",
             format: ConfigFormat::ClaudeNested,
@@ -615,7 +628,10 @@ pub static HARNESSES: &[HarnessProfile] = &[
             Channel::SessionStart,
             Channel::PerTurn,
         ],
-        base_url_config: Some(ConfigChannel::SettingsEnv),
+        base_url_config: Some(ConfigChannel::ConfigKey {
+            file: ".codex/config.toml",
+            key: "openai_base_url",
+        }),
         wiring: Some(Wiring {
             path: ".codex/hooks.json",
             format: ConfigFormat::ClaudeNested,
@@ -663,7 +679,10 @@ pub static HARNESSES: &[HarnessProfile] = &[
         unreachable: &[],
         session_start: false,
         directive_channels: &[Channel::AwarenessFile],
-        base_url_config: None,
+        base_url_config: Some(ConfigChannel::ProviderTable {
+            file: ".vibe/config.toml",
+            provider: "mistral",
+        }),
         wiring: Some(Wiring {
             path: ".vibe/hooks.toml",
             format: ConfigFormat::TomlTables,
@@ -1551,7 +1570,7 @@ mod tests {
     }
 
     #[test]
-    fn base_url_channels_match_the_documented_env_vars() {
+    fn every_redirectable_harness_records_its_base_url_channel() {
         let mut routable: Vec<&str> = HARNESSES
             .iter()
             .filter(|h| h.base_url_config.is_some())
@@ -1572,8 +1591,33 @@ mod tests {
                 "omp",
                 "openclaw",
                 "roo",
+                "vibe",
             ]
         );
+        let channel = |id: &str| profile(id).unwrap().base_url_config;
+        assert_eq!(
+            channel("claude-code"),
+            Some(ConfigChannel::Env {
+                var: "ANTHROPIC_BASE_URL"
+            })
+        );
+        assert_eq!(
+            channel("codex"),
+            Some(ConfigChannel::ConfigKey {
+                file: ".codex/config.toml",
+                key: "openai_base_url"
+            })
+        );
+        assert_eq!(
+            channel("vibe"),
+            Some(ConfigChannel::ProviderTable {
+                file: ".vibe/config.toml",
+                provider: "mistral"
+            })
+        );
+        for id in ["cursor", "antigravity"] {
+            assert_eq!(channel(id), None, "{id} offers no base-URL override");
+        }
     }
 
     #[test]

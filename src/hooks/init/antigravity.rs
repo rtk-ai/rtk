@@ -161,6 +161,9 @@ pub fn run_antigravity_mode_at(base_dir: &Path, global: bool, ctx: InitContext) 
             ctx.awareness
         );
         println!("  Restart Antigravity to load the plugin. Test with: git status");
+        if let Some(line) = crate::llm_proxy::proxy_unavailable_line("antigravity") {
+            println!("  {line}");
+        }
         println!(
             "\n  Note: Antigravity checks permissions after hooks rewrite a command.\n  \
              If you use command allowlists, ensure `rtk` commands are permitted,\n  \

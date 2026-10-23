@@ -26,12 +26,28 @@ pub(super) fn plan_for(agent: &str, global: bool) -> Option<AgentPlan> {
     } else {
         crate::core::pipeline_config::load()
     };
-    Some(plan_with(profile, &loaded.resolved))
+    let routed = crate::hooks::session_start::routed_through_rtk(agent);
+    Some(plan_with_routed(profile, &loaded.resolved, routed))
 }
 
 pub fn plan_with(profile: &'static HarnessProfile, resolved: &Resolved) -> AgentPlan {
+    plan_with_routed(profile, resolved, false)
+}
+
+pub(super) fn plan_with_routed(
+    profile: &'static HarnessProfile,
+    resolved: &Resolved,
+    routed_through_rtk: bool,
+) -> AgentPlan {
     let used = hook_events_used(resolved);
-    let wants_session_start = crate::core::pipeline_config::session_start_text(resolved).is_some();
+    let keepalive = routed_through_rtk
+        && profile.session_start
+        && profile
+            .wiring
+            .as_ref()
+            .is_some_and(|wiring| wiring.session_start.is_some());
+    let wants_session_start =
+        crate::core::pipeline_config::session_start_text(resolved).is_some() || keepalive;
     let (planned, skipped) = harness::plan_hooks(profile, &used, wants_session_start);
     AgentPlan {
         profile,
@@ -140,6 +156,23 @@ mod tests {
             &super::tests::resolved(""),
         );
         assert_eq!(plain.session_start_event(), None);
+    }
+
+    #[test]
+    fn a_proxied_agent_registers_session_start_for_the_keepalive_where_one_exists() {
+        let resolved = resolved("");
+        let codex = plan_with_routed(harness::profile("codex").unwrap(), &resolved, true);
+        assert_eq!(codex.session_start_event(), Some("SessionStart"));
+        assert!(codex.skipped.is_empty(), "{:?}", codex.skipped_lines());
+        let vibe = plan_with_routed(harness::profile("vibe").unwrap(), &resolved, true);
+        assert_eq!(vibe.session_start_event(), None);
+        assert!(
+            vibe.skipped.is_empty(),
+            "the keep-alive is not a directive and must not be reported as unserved: {:?}",
+            vibe.skipped_lines()
+        );
+        let unrouted = plan_with_routed(harness::profile("codex").unwrap(), &resolved, false);
+        assert_eq!(unrouted.session_start_event(), None);
     }
 
     #[test]

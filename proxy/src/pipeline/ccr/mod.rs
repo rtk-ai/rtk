@@ -708,7 +708,7 @@ pub fn compress_request(
     match req.provider {
         Provider::Anthropic => anthropic::compress_request(req),
         Provider::Openai => openai::compress_request(req),
-        Provider::Google => None,
+        Provider::Google | Provider::OpenaiResponses => None,
     }
 }
 
@@ -731,7 +731,7 @@ pub fn ensure_retrieve_tool(provider: Provider, body: &mut serde_json::Value) {
     match provider {
         Provider::Anthropic => anthropic::inject_retrieve_tool(body),
         Provider::Openai => openai::inject_retrieve_tool(body),
-        Provider::Google => {}
+        Provider::Google | Provider::OpenaiResponses => {}
     }
 }
 

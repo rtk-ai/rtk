@@ -16,6 +16,7 @@ pub struct UsageRow {
     /// RFC3339 UTC timestamp.
     pub ts: String,
     pub provider: String,
+    pub upstream: Option<String>,
     pub model: String,
     /// Estimated input tokens (request body).
     pub tokens_in: i64,
@@ -115,7 +116,8 @@ CREATE TABLE IF NOT EXISTS usage_records (
     session TEXT,
     pipeline TEXT,
     routed_from TEXT,
-    cost_without REAL NOT NULL DEFAULT 0
+    cost_without REAL NOT NULL DEFAULT 0,
+    upstream TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_usage_ts    ON usage_records(ts);
 CREATE INDEX IF NOT EXISTS idx_usage_model ON usage_records(model);
@@ -171,6 +173,7 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE usage_records ADD COLUMN saved_normalize INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE usage_records ADD COLUMN routed_from TEXT",
     "ALTER TABLE usage_records ADD COLUMN cost_without REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE usage_records ADD COLUMN upstream TEXT",
 ];
 
 impl Store {
@@ -240,8 +243,8 @@ impl Store {
                     path,
                     compression_level, ctx_total, ctx_tool_result, ctx_tool_use, ctx_duplicate, ctx_image,
                     saved_ingest_filter, saved_pixel_compress, saved_ccr, saved_normalize, project, session, pipeline,
-                    routed_from, cost_without)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)",
+                    routed_from, cost_without, upstream)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30)",
                 params![
                     row.ts, row.provider, row.model, row.tokens_in, row.tokens_out,
                     row.tokens_saved, row.cost_usd, row.status, row.client,
@@ -251,7 +254,7 @@ impl Store {
                     row.ctx_total, row.ctx_tool_result, row.ctx_tool_use, row.ctx_duplicate, row.ctx_image,
                     row.saved_ingest_filter, row.saved_pixel_compress, row.saved_ccr,
                     row.saved_normalize, row.project, row.session, row.pipeline,
-                    row.routed_from, row.cost_without
+                    row.routed_from, row.cost_without, row.upstream
                 ],
             )?;
             Ok(())

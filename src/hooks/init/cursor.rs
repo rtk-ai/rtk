@@ -77,6 +77,9 @@ pub(super) fn install_cursor_hooks(ctx: InitContext) -> Result<()> {
         for line in &skipped {
             println!("  {line}");
         }
+        if let Some(line) = crate::llm_proxy::proxy_unavailable_line("cursor") {
+            println!("  {line}");
+        }
     }
 
     Ok(())

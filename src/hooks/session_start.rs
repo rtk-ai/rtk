@@ -8,7 +8,8 @@
 //! returns silence rather than disrupting the session.
 
 use std::io::Write;
-use std::time::{Duration, Instant};
+use std::path::Path;
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
 use rtk_engine::harness::{Channel, HarnessProfile};
@@ -24,23 +25,59 @@ pub(super) fn run() {
 
 pub(crate) fn response_for(agent: &str) -> Option<String> {
     let profile = rtk_engine::harness::profile(agent)?;
-    let keepalive = base_url(agent).and_then(|(var, url)| ensure_proxy_at(var, &url));
+    let keepalive = base_url(agent).and_then(|(setting, url)| ensure_proxy_at(&setting, &url));
+    if let Some(message) = keepalive.as_deref().filter(|_| agent != "claude-code") {
+        let _ = writeln!(std::io::stderr(), "{message}");
+    }
     let context = crate::core::pipeline_config::session_start_text(
         &crate::core::pipeline_config::load().resolved,
     );
     encode(profile, keepalive.as_deref(), context.as_deref()).map(|v| v.to_string())
 }
 
-fn base_url(agent: &str) -> Option<(&'static str, String)> {
+fn base_url(agent: &str) -> Option<(String, String)> {
     match agent {
-        "claude-code" => {
-            crate::core::user_env::var("ANTHROPIC_BASE_URL").map(|url| ("ANTHROPIC_BASE_URL", url))
-        }
-        "codex" => {
-            crate::core::user_env::var("OPENAI_BASE_URL").map(|url| ("OPENAI_BASE_URL", url))
-        }
+        "claude-code" => crate::core::user_env::var("ANTHROPIC_BASE_URL")
+            .map(|url| ("ANTHROPIC_BASE_URL".to_string(), url)),
+        "codex" => crate::hooks::init::codex_openai_base_url()
+            .map(|url| ("openai_base_url".to_string(), url)),
+        "vibe" => crate::hooks::init::vibe_mistral_api_base()
+            .map(|url| ("providers[mistral].api_base".to_string(), url)),
         _ => None,
     }
+}
+
+pub(crate) fn routed_through_rtk(agent: &str) -> bool {
+    base_url(agent).is_some_and(|(_, url)| loopback_hostport(&url).is_some())
+}
+
+pub(crate) fn throttled_keepalive(agent: &str, interval: Duration) -> Option<String> {
+    let (setting, url) = base_url(agent)?;
+    let stamp = crate::core::user_dirs::config()?
+        .join("llm-proxy")
+        .join(format!("keepalive.{agent}"));
+    if !stamp_due(&stamp, SystemTime::now(), interval) {
+        return None;
+    }
+    touch(&stamp);
+    ensure_proxy_at(&setting, &url)
+}
+
+fn stamp_due(stamp: &Path, now: SystemTime, interval: Duration) -> bool {
+    match std::fs::metadata(stamp).and_then(|m| m.modified()) {
+        Ok(modified) => now
+            .duration_since(modified)
+            .map(|age| age >= interval)
+            .unwrap_or(true),
+        Err(_) => true,
+    }
+}
+
+fn touch(stamp: &Path) {
+    if let Some(dir) = stamp.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(stamp, b"");
 }
 
 pub(crate) fn encode(
@@ -64,12 +101,19 @@ pub(crate) fn encode(
             }
             Some(payload)
         }
-        ("codex", _, Some(context)) => Some(json!({
-            "hookSpecificOutput": {
-                "hookEventName": crate::hooks::constants::SESSION_START_KEY,
-                "additionalContext": context,
-            }
-        })),
+        ("codex", keepalive, context) => {
+            let text = [keepalive, context]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            Some(json!({
+                "hookSpecificOutput": {
+                    "hookEventName": crate::hooks::constants::SESSION_START_KEY,
+                    "additionalContext": text,
+                }
+            }))
+        }
         ("cursor", _, Some(context)) => Some(json!({ "additional_context": context })),
         ("antigravity", _, Some(context)) => Some(json!({
             "injectSteps": [{ "systemMessage": context }]
@@ -269,17 +313,34 @@ mod tests {
     }
 
     #[test]
-    fn spawn_failure_names_the_variable() {
+    fn spawn_failure_names_the_setting() {
         let out = ensure_proxy_impl(
-            "OPENAI_BASE_URL",
+            "openai_base_url",
             "http://127.0.0.1:8080",
             |_| false,
             |_| Err(anyhow::anyhow!("no binary")),
             Duration::ZERO,
         );
         let message = out.unwrap();
-        assert!(message.contains("OPENAI_BASE_URL points at"));
+        assert!(message.contains("openai_base_url points at"));
         assert!(message.contains("no binary"));
+    }
+
+    #[test]
+    fn the_throttle_fires_on_a_missing_or_old_stamp_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stamp = dir.path().join("llm-proxy").join("keepalive.vibe");
+        let five_minutes = Duration::from_secs(300);
+        assert!(stamp_due(&stamp, SystemTime::now(), five_minutes));
+        touch(&stamp);
+        assert!(stamp.is_file());
+        assert!(!stamp_due(&stamp, SystemTime::now(), five_minutes));
+        assert!(stamp_due(&stamp, SystemTime::now(), Duration::ZERO));
+        assert!(stamp_due(
+            &stamp,
+            SystemTime::now() + Duration::from_secs(600),
+            five_minutes
+        ));
     }
 
     #[test]
@@ -299,7 +360,13 @@ mod tests {
         let codex = encode(profile("codex"), None, Some("be terse")).unwrap();
         assert_eq!(codex["hookSpecificOutput"]["hookEventName"], "SessionStart");
         assert_eq!(codex["hookSpecificOutput"]["additionalContext"], "be terse");
-        assert_eq!(encode(profile("codex"), Some("started"), None), None);
+        let codex = encode(profile("codex"), Some("started"), None).unwrap();
+        assert_eq!(codex["hookSpecificOutput"]["additionalContext"], "started");
+        let codex = encode(profile("codex"), Some("started"), Some("be terse")).unwrap();
+        assert_eq!(
+            codex["hookSpecificOutput"]["additionalContext"],
+            "started\n\nbe terse"
+        );
 
         assert_eq!(
             encode(profile("cursor"), None, Some("be terse")).unwrap(),

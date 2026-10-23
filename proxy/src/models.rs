@@ -160,6 +160,9 @@ mod tests {
         assert_eq!(r.cache_read_mult("gpt-4o"), 0.5);
         assert_eq!(r.family("gpt-4o"), "openai");
         assert_eq!(r.family("gemini-1.5-pro"), "google");
+        assert_eq!(r.family("devstral-medium-latest"), "mistral");
+        assert_eq!(r.family("ministral-8b-latest"), "mistral");
+        assert_eq!(r.cache_read_mult("codestral-latest"), 0.1);
     }
 
     #[test]

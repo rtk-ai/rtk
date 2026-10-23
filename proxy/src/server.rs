@@ -15,9 +15,13 @@
 //! [`crate::config::Config::binds_loopback`]).
 
 use crate::AppState;
+use crate::config::ANTHROPIC_UPSTREAM_NAME;
+use crate::config::OPENAI_UPSTREAM_NAME;
+use crate::forward::UpstreamTarget;
 use crate::model::Provider;
 use axum::body::Bytes;
 use axum::extract::DefaultBodyLimit;
+use axum::extract::Path;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -40,6 +44,17 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/v1/messages", post(anthropic_messages))
         .route("/v1/chat/completions", post(openai_chat_completions))
+        .route("/v1/responses", post(openai_responses))
+        .route("/:upstream/v1/messages", post(anthropic_messages_at))
+        .route(
+            "/:upstream/v1/chat/completions",
+            post(openai_chat_completions_at),
+        )
+        .route("/:upstream/v1/responses", post(openai_responses_at))
+        .route(
+            "/:upstream/backend-api/codex/responses",
+            post(codex_backend_responses_at),
+        )
         .route("/health", get(health))
         // Only the reads `rtk-proxy stats` performs: a route with no caller is
         // surface, and one returning prompt or completion text could leak a
@@ -205,8 +220,15 @@ async fn anthropic_messages(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let base = upstream_for(&s, Provider::Anthropic);
-    handle(s, Provider::Anthropic, base, "/v1/messages", headers, body).await
+    intercept(
+        s,
+        Provider::Anthropic,
+        ANTHROPIC_UPSTREAM_NAME,
+        "/v1/messages",
+        headers,
+        body,
+    )
+    .await
 }
 
 /// `POST /v1/chat/completions` — OpenAI Chat Completions API.
@@ -215,11 +237,10 @@ async fn openai_chat_completions(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let base = upstream_for(&s, Provider::Openai);
-    handle(
+    intercept(
         s,
         Provider::Openai,
-        base,
+        OPENAI_UPSTREAM_NAME,
         "/v1/chat/completions",
         headers,
         body,
@@ -227,16 +248,113 @@ async fn openai_chat_completions(
     .await
 }
 
-/// The upstream base URL for a dialect. One configured upstream per dialect,
-/// swappable at runtime (`config set anthropic_upstream …`) — that covers
-/// pointing the proxy at an API-compatible gateway without needing a routing
-/// table. The request path is forwarded unchanged.
-fn upstream_for(s: &AppState, dialect: Provider) -> String {
+async fn openai_responses(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    intercept(
+        s,
+        Provider::OpenaiResponses,
+        OPENAI_UPSTREAM_NAME,
+        "/v1/responses",
+        headers,
+        body,
+    )
+    .await
+}
+
+async fn openai_responses_at(
+    State(s): State<AppState>,
+    Path(upstream): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    intercept(
+        s,
+        Provider::OpenaiResponses,
+        &upstream,
+        "/v1/responses",
+        headers,
+        body,
+    )
+    .await
+}
+
+async fn codex_backend_responses_at(
+    State(s): State<AppState>,
+    Path(upstream): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    intercept(
+        s,
+        Provider::OpenaiResponses,
+        &upstream,
+        "/backend-api/codex/responses",
+        headers,
+        body,
+    )
+    .await
+}
+
+async fn anthropic_messages_at(
+    State(s): State<AppState>,
+    Path(upstream): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    intercept(
+        s,
+        Provider::Anthropic,
+        &upstream,
+        "/v1/messages",
+        headers,
+        body,
+    )
+    .await
+}
+
+async fn openai_chat_completions_at(
+    State(s): State<AppState>,
+    Path(upstream): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    intercept(
+        s,
+        Provider::Openai,
+        &upstream,
+        "/v1/chat/completions",
+        headers,
+        body,
+    )
+    .await
+}
+
+async fn intercept(
+    s: AppState,
+    provider: Provider,
+    upstream: &str,
+    path: &str,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(target) = upstream_target(&s, upstream) else {
+        return routing_unknown(&s, "POST", &format!("/{upstream}{path}"));
+    };
+    handle(s, provider, target, path, headers, body).await
+}
+
+fn upstream_target(s: &AppState, name: &str) -> Option<UpstreamTarget> {
     let rt = s.runtime.read().expect("runtime settings lock");
-    match dialect {
-        Provider::Anthropic => rt.anthropic_upstream.clone(),
-        _ => rt.openai_upstream.clone(),
-    }
+    rt.upstream(name).map(|base| UpstreamTarget {
+        name: name.to_string(),
+        base,
+    })
+}
+
+fn upstream_names(s: &AppState) -> Vec<String> {
+    s.runtime
+        .read()
+        .map(|rt| rt.upstream_names())
+        .unwrap_or_default()
 }
 
 /// Shared flow: run the compression pipeline, forward, and record usage (the
@@ -244,7 +362,7 @@ fn upstream_for(s: &AppState, dialect: Provider) -> String {
 async fn handle(
     s: AppState,
     provider: Provider,
-    base: String,
+    target: UpstreamTarget,
     path: &str,
     headers: HeaderMap,
     body: Bytes,
@@ -253,7 +371,7 @@ async fn handle(
         crate::extract::detect_client(headers.get("user-agent").and_then(|v| v.to_str().ok()));
     // The agent's credential, kept so a local worker routing to this same
     // provider can borrow it instead of being handed a second copy.
-    s.relayed_auth.remember(provider, &headers);
+    s.relayed_auth.remember(&target.name, &headers);
     let applied = crate::forward::apply(&s, provider, path, &headers, body).await;
     let (model, tokens_in, tokens_saved, stream) = (
         applied.model.clone(),
@@ -293,16 +411,16 @@ async fn handle(
             &headers,
         );
         let memory = s.memory.as_ref().expect("checked above");
-        match crate::ccr_forward::execute(&s, &base, &headers, &req, memory).await {
+        match crate::ccr_forward::execute(&s, &target.base, &headers, &req, memory).await {
             Ok(f) => f,
             Err(e) => {
                 tracing::warn!(error = %e, "ccr forward failed; falling back to plain relay");
-                crate::forward::relay(&s, &base, path, headers, applied.body, provider, stream)
+                crate::forward::relay(&s, &target, path, headers, applied.body, provider, stream)
                     .await
             }
         }
     } else {
-        crate::forward::relay(&s, &base, path, headers, applied.body, provider, stream).await
+        crate::forward::relay(&s, &target, path, headers, applied.body, provider, stream).await
     };
 
     match fwd {
@@ -311,6 +429,7 @@ async fn handle(
             record_usage(
                 &s,
                 provider,
+                &target.name,
                 path,
                 &model,
                 tokens_in,
@@ -334,6 +453,7 @@ async fn handle(
             if s.store.is_some() {
                 let s2 = s.clone();
                 let path = path.to_string();
+                let upstream = target.name.clone();
                 let saved_by_stage = saved_by_stage.clone();
                 let (project, session) = (project.clone(), session.clone());
                 let routed_from = routed_from.clone();
@@ -342,6 +462,7 @@ async fn handle(
                         record_usage(
                             &s2,
                             provider,
+                            &upstream,
                             &path,
                             &model,
                             tokens_in,
@@ -368,6 +489,7 @@ async fn handle(
 fn record_usage(
     s: &AppState,
     provider: Provider,
+    upstream: &str,
     path: &str,
     model: &str,
     tokens_in: i64,
@@ -434,6 +556,7 @@ fn record_usage(
     let row = crate::store::UsageRow {
         ts: chrono::Utc::now().to_rfc3339(),
         provider: provider.as_str().to_string(),
+        upstream: Some(upstream.to_string()),
         model: model.to_string(),
         tokens_in,
         tokens_out: outcome.tokens_output,
@@ -488,38 +611,82 @@ fn saved_for(stage: &str, saved_by_stage: &[(&'static str, i64)]) -> i64 {
 /// API key — to the wrong provider's host (see
 /// `an_openai_clients_key_never_reaches_the_anthropic_upstream`). A 404 on an
 /// unknown path is strictly less bad than a credential at the wrong host.
-async fn passthrough(State(s): State<AppState>, req: axum::extract::Request) -> Response {
-    let path = req.uri().path();
-    let in_messages_dialect = path == "/v1/messages" || path.starts_with("/v1/messages/");
-    if !in_messages_dialect {
-        let method = req.method().clone();
-        tracing::warn!(%method, path, "no route: destination unknown, refusing to relay");
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "error": {
-                    "type": "routing_unknown",
-                    "message": format!(
-                        "no route for {method} {path}: the routing destination is unknown. \
-                         This proxy relays only its configured dialect endpoints \
-                         (anthropic: /v1/messages/*, openai: /v1/chat/completions); \
-                         it never picks an upstream for other paths, because sending \
-                         a client's credentials to a guessed host is worse than a 404. \
-                         Run this client un-proxied, or point it directly at its provider."
-                    ),
-                }
-            })),
-        )
-            .into_response();
+async fn passthrough(State(s): State<AppState>, mut req: axum::extract::Request) -> Response {
+    let path = req.uri().path().to_string();
+    let method = req.method().clone();
+    let Some((name, rest)) = passthrough_route(&upstream_names(&s), &path) else {
+        return routing_unknown(&s, method.as_str(), &path);
+    };
+    let Some(target) = upstream_target(&s, &name) else {
+        return routing_unknown(&s, method.as_str(), &path);
+    };
+    if rest != path {
+        let query = req
+            .uri()
+            .query()
+            .map(|q| format!("?{q}"))
+            .unwrap_or_default();
+        match format!("{rest}{query}").parse::<axum::http::Uri>() {
+            Ok(uri) => *req.uri_mut() = uri,
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, format!("invalid path: {e}\n")).into_response();
+            }
+        }
     }
-    let upstream = upstream_for(&s, Provider::Anthropic);
-    match crate::forward::passthrough(&s.http, &upstream, req).await {
+    match crate::forward::passthrough(&s.http, &target.base, req).await {
         Ok(resp) => resp,
         Err(e) => {
             tracing::warn!(error = %e, "passthrough failed");
             e.into_response()
         }
     }
+}
+
+pub fn passthrough_route(upstreams: &[String], path: &str) -> Option<(String, String)> {
+    let mut segments = path.trim_start_matches('/').splitn(2, '/');
+    let first = segments.next()?;
+    if !first.is_empty() && upstreams.iter().any(|name| name == first) {
+        let rest = match segments.next() {
+            Some(rest) => format!("/{rest}"),
+            None => "/".to_string(),
+        };
+        return Some((first.to_string(), rest));
+    }
+    if path == "/v1/messages" || path.starts_with("/v1/messages/") {
+        return Some((ANTHROPIC_UPSTREAM_NAME.to_string(), path.to_string()));
+    }
+    None
+}
+
+fn routing_unknown(s: &AppState, method: &str, path: &str) -> Response {
+    tracing::warn!(
+        method,
+        path,
+        "no route: destination unknown, refusing to relay"
+    );
+    let namespaces = upstream_names(s)
+        .iter()
+        .map(|name| format!("/{name}/…"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({
+            "error": {
+                "type": "routing_unknown",
+                "message": format!(
+                    "no route for {method} {path}: the routing destination is unknown. \
+                     This proxy relays only its configured upstream namespaces ({namespaces}) \
+                     and the bare dialect endpoints \
+                     (anthropic: /v1/messages/*, openai: /v1/chat/completions, /v1/responses); \
+                     it never picks an upstream for other paths, because sending \
+                     a client's credentials to a guessed host is worse than a 404. \
+                     Run this client un-proxied, or point it directly at its provider."
+                ),
+            }
+        })),
+    )
+        .into_response()
 }
 
 /// The model a caller says it displaced (`x-rtk-routed-from`). Consumed here
@@ -547,4 +714,58 @@ async fn health() -> Response {
         "version": env!("CARGO_PKG_VERSION"),
     }))
     .into_response()
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::passthrough_route;
+
+    fn names() -> Vec<String> {
+        ["anthropic", "openai", "mistral"]
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+
+    #[test]
+    fn a_known_namespace_selects_its_upstream_and_strips_itself() {
+        assert_eq!(
+            passthrough_route(&names(), "/mistral/v1/models"),
+            Some(("mistral".into(), "/v1/models".into()))
+        );
+        assert_eq!(
+            passthrough_route(&names(), "/openai/v1/responses"),
+            Some(("openai".into(), "/v1/responses".into()))
+        );
+        assert_eq!(
+            passthrough_route(&names(), "/mistral"),
+            Some(("mistral".into(), "/".into()))
+        );
+    }
+
+    #[test]
+    fn the_bare_messages_dialect_still_reaches_anthropic() {
+        assert_eq!(
+            passthrough_route(&names(), "/v1/messages/count_tokens"),
+            Some(("anthropic".into(), "/v1/messages/count_tokens".into()))
+        );
+        assert_eq!(
+            passthrough_route(&names(), "/v1/messages"),
+            Some(("anthropic".into(), "/v1/messages".into()))
+        );
+    }
+
+    #[test]
+    fn everything_else_is_refused_rather_than_guessed() {
+        for path in [
+            "/v1/models",
+            "/v1/responses",
+            "/nope/v1/messages",
+            "/",
+            "//v1/messages",
+            "/v1/messagesx",
+        ] {
+            assert_eq!(passthrough_route(&names(), path), None, "{path}");
+        }
+    }
 }

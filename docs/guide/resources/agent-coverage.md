@@ -22,7 +22,7 @@ Rows are grouped by what works — output compression first, then command rewrit
 | **Copilot CLI** | `copilot-cli` | — | yes | yes | **yes** | yes | yes | yes |
 | **Hermes** | `hermes` | — | yes | yes | **yes** | yes | yes | yes |
 | **Kilo Code** | `kilocode` | — | yes | yes | **yes** | yes | — | yes |
-| **Mistral Vibe** | `vibe` | yes | yes | yes | **yes** | yes | — | — |
+| **Mistral Vibe** | `vibe` | yes | yes | yes | **yes** | yes | — | yes |
 | **Oh My Pi** | `omp` | — | yes | yes | **yes** | yes | yes | yes |
 | **OpenCode** | `opencode` | — | yes | yes | **yes** | yes | — | — |
 | **Pi** | `pi` | — | yes | yes | **yes** | yes | yes | — |
@@ -50,10 +50,10 @@ Rows are grouped by what works — output compression first, then command rewrit
 
 - **Copilot CLI**: output replacement relies on Copilot CLI's documented `modifiedResult` field.
 - **OpenCode**: built-in tools only. MCP results are rebuilt after the hook runs, and built-in output is already truncated by OpenCode before RTK sees it.
-- **Mistral Vibe**: replacement rides on a `deny` decision, reaches only the text form of the result, and the UI shows it as a warning. `rtk init` registers `post_tool` only when the pipeline has `after_tool` rules. MCP tools are spelled `<server>.<tool>`, so a `[[hook.before_tool.mcp]]` rule reaches them in the hook but `rtk init` cannot write a matcher for them.
+- **Mistral Vibe**: replacement rides on a `deny` decision, reaches only the text form of the result, and the UI shows it as a warning. `rtk init` registers `post_tool` only when the pipeline has `after_tool` rules. MCP tools are spelled `<server>.<tool>`, so a `[[hook.before_tool.mcp]]` rule reaches them in the hook but `rtk init` cannot write a matcher for them. The proxy route is the `mistral` entry of its `[[providers]]` table (`rtk vibe`, `rtk init -g --agent vibe`); there is no session-start event, so the daemon keep-alive runs from `pre_tool`.
 - **Gemini CLI**: input edits merge rather than replace, and each one makes Gemini append a `[System] Tool input parameters were modified` note to the output — so rewriting costs a few tokens back.
-- **Codex**: the rewrite is honoured only alongside an explicit `allow` decision, so Codex never asks on a rewritten command; its own approval runs on the rewritten argv afterwards. Hosted tools such as web search never reach a hook, so a `[[hook.before_tool.web]]` rule is reported as unservable. `PostToolUse` can add context but not replace the result. Project hooks must be trusted once with `/hooks`.
-- **Cursor**: `preToolUse` accepts `ask` but does not enforce it. Matchers test the tool *type* (`Shell`, `Read`, `Write`, `Grep`, `Delete`, `Task`, `MCP:<tool>`); file edits are `Write`, and no web tool is documented, so a `web` rule is reported as unservable. An invalid hook response blocks the call, so RTK always answers with valid JSON.
+- **Codex**: the rewrite is honoured only alongside an explicit `allow` decision, so Codex never asks on a rewritten command; its own approval runs on the rewritten argv afterwards. Hosted tools such as web search never reach a hook, so a `[[hook.before_tool.web]]` rule is reported as unservable. `PostToolUse` can add context but not replace the result. Project hooks must be trusted once with `/hooks`. The proxy route is the `openai_base_url` config key (`rtk codex`, `rtk init -g --codex`), in both the API-key and the ChatGPT login modes.
+- **Cursor**: `preToolUse` accepts `ask` but does not enforce it. Matchers test the tool *type* (`Shell`, `Read`, `Write`, `Grep`, `Delete`, `Task`, `MCP:<tool>`); file edits are `Write`, and no web tool is documented, so a `web` rule is reported as unservable. An invalid hook response blocks the call, so RTK always answers with valid JSON. Every model request goes through Cursor's servers and the CLI has no base-URL override, so the proxy is not available.
 - **Antigravity**: `PreToolUse` rewrites through the documented `overwrite` field (the result then carries a notice naming the changed keys) and can `ask`. `PostToolUse` carries no result and its output is ignored, so output is immutable — the proxy is not available either. `SessionStart` and `PreInvocation` accept injected context.
 - **Windsurf**: now **Devin Desktop**. Older Windsurf installs are block-only and cannot rewrite.
 - **Cline**: the VS Code extension silently drops input overrides and cannot replace output. Both work only in the SDK/CLI plugin runtime, which is a different install. Hooks are also off by default — enable them in Feature Settings.
