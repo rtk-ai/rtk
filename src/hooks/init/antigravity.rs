@@ -10,24 +10,58 @@ pub const ANTIGRAVITY_PLUGIN_JSON: &str = r#"{
 }
 "#;
 
-pub const ANTIGRAVITY_HOOKS_JSON: &str = r#"{
-  "rtk-rewrite": {
-    "enabled": true,
-    "PreToolUse": [
-      {
-        "matcher": "run_command",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "rtk hook antigravity",
-            "timeout": 10
-          }
-        ]
-      }
-    ]
-  }
+const ANTIGRAVITY_HOOK_COMMAND: &str = "rtk hook antigravity";
+
+#[cfg(feature = "engine")]
+fn antigravity_entries(global: bool) -> (Vec<super::plan::Entry>, Vec<String>) {
+    match super::plan::plan_for("antigravity", global) {
+        Some(plan) => (plan.entries(), plan.skipped_lines()),
+        None => (legacy_antigravity_entries(), Vec::new()),
+    }
 }
-"#;
+
+#[cfg(not(feature = "engine"))]
+fn antigravity_entries(_global: bool) -> (Vec<(&'static str, Option<String>)>, Vec<String>) {
+    (legacy_antigravity_entries(), Vec::new())
+}
+
+fn legacy_antigravity_entries() -> Vec<(&'static str, Option<String>)> {
+    vec![("PreToolUse", Some("run_command".to_string()))]
+}
+
+pub(super) fn antigravity_hooks_json(entries: &[(&'static str, Option<String>)]) -> String {
+    let mut group = serde_json::Map::new();
+    group.insert("enabled".into(), serde_json::json!(true));
+    for (event, matcher) in entries {
+        let session_start = *event == crate::hooks::constants::SESSION_START_KEY;
+        let command = if session_start {
+            format!("{ANTIGRAVITY_HOOK_COMMAND} --event {event}")
+        } else {
+            ANTIGRAVITY_HOOK_COMMAND.to_string()
+        };
+        let handler = serde_json::json!({
+            "type": "command",
+            "command": command,
+            "timeout": 10
+        });
+        let entry = match (session_start, matcher) {
+            (true, _) => handler,
+            (false, Some(matcher)) => serde_json::json!({ "matcher": matcher, "hooks": [handler] }),
+            (false, None) => serde_json::json!({ "hooks": [handler] }),
+        };
+        if let Some(list) = group
+            .entry((*event).to_string())
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+        {
+            list.push(entry);
+        }
+    }
+    let root = serde_json::json!({ "rtk-rewrite": group });
+    let mut text = serde_json::to_string_pretty(&root).unwrap_or_default();
+    text.push('\n');
+    text
+}
 
 /// The awareness rules inside the plugin bundle. The plugin docs bundled with `agy`
 /// recommend `rules/AGENTS.md`: plain markdown, no frontmatter, always on while the
@@ -57,6 +91,8 @@ pub fn run_antigravity_mode_at(base_dir: &Path, global: bool, ctx: InitContext) 
 
     let plugin_json_path = plugin_dir.join("plugin.json");
     let hooks_json_path = plugin_dir.join("hooks.json");
+    let (entries, skipped) = antigravity_entries(global);
+    let hooks_json = antigravity_hooks_json(&entries);
     // Rules under `rules/` apply whenever the plugin is active, as plain markdown
     // with no frontmatter (Antigravity's plugin docs); `awareness.level` picks
     // the text, as it does for every agent with a command hook.
@@ -77,11 +113,14 @@ pub fn run_antigravity_mode_at(base_dir: &Path, global: bool, ctx: InitContext) 
                 "[dry-run] plugin.json content:\n{}",
                 ANTIGRAVITY_PLUGIN_JSON
             );
-            println!("[dry-run] hooks.json content:\n{}", ANTIGRAVITY_HOOKS_JSON);
+            println!("[dry-run] hooks.json content:\n{hooks_json}");
             println!(
                 "[dry-run] rules/{ANTIGRAVITY_RULES_FILE} content:\n{}",
                 rules_content
             );
+        }
+        for line in &skipped {
+            println!("[dry-run] {line}");
         }
         print_dry_run_footer();
     } else {
@@ -96,7 +135,7 @@ pub fn run_antigravity_mode_at(base_dir: &Path, global: bool, ctx: InitContext) 
         // rules. A re-run over an existing plugin has no such guarantee.
         atomic_write(&rules_path, rules_content)
             .context("Failed to write Antigravity plugin rules")?;
-        atomic_write(&hooks_json_path, ANTIGRAVITY_HOOKS_JSON)
+        atomic_write(&hooks_json_path, &hooks_json)
             .context("Failed to write Antigravity hooks.json")?;
         atomic_write(&plugin_json_path, ANTIGRAVITY_PLUGIN_JSON)
             .context("Failed to write Antigravity plugin.json")?;
@@ -109,7 +148,14 @@ pub fn run_antigravity_mode_at(base_dir: &Path, global: bool, ctx: InitContext) 
 
         println!("\nRTK plugin configured for Google Antigravity.\n");
         println!("  Plugin: {} (installed)", plugin_dir.display());
-        println!("  Hooks:  PreToolUse -> rtk hook antigravity");
+        let registered: Vec<&str> = entries.iter().map(|(event, _)| *event).collect();
+        println!(
+            "  Hooks:  {} -> {ANTIGRAVITY_HOOK_COMMAND}",
+            registered.join(", ")
+        );
+        for line in &skipped {
+            println!("  {line}");
+        }
         println!(
             "  Rules:  rules/{ANTIGRAVITY_RULES_FILE} (awareness level: {})",
             ctx.awareness

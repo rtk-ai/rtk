@@ -493,6 +493,9 @@ pub(super) fn claude_events_of(
             out.push((key, matcher));
         }
     }
+    if crate::core::pipeline_config::session_start_text(&loaded.resolved).is_some() {
+        out.push((SESSION_START_KEY, String::new()));
+    }
     out
 }
 

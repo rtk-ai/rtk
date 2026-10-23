@@ -170,17 +170,64 @@ pub fn run_show(name: Option<&str>) -> Result<i32> {
     Ok(0)
 }
 
-pub fn run_validate() -> Result<i32> {
+pub fn run_validate(agents: &[String]) -> Result<i32> {
     let loaded = load_for_cli();
     print_diagnostics(&loaded);
     if has_errors(&loaded.diagnostics) {
-        Ok(1)
-    } else {
-        println!("pipeline: ok ({})", loaded.resolved.name);
-        print_auth_guidance(&loaded.resolved);
-        print_hook_gaps();
-        Ok(0)
+        return Ok(1);
     }
+    println!("pipeline: ok ({})", loaded.resolved.name);
+    print_auth_guidance(&loaded.resolved);
+    print_hook_gaps();
+    let mut unknown = false;
+    for line in agent_coverage_lines(&loaded.resolved, agents, &mut unknown) {
+        println!("{line}");
+    }
+    Ok(if unknown { 1 } else { 0 })
+}
+
+pub fn agent_coverage_lines(
+    resolved: &rtk_engine::pipeline::Resolved,
+    agents: &[String],
+    unknown: &mut bool,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let profiles: Vec<&'static rtk_engine::harness::HarnessProfile> =
+        if agents.iter().any(|a| a == "all") {
+            rtk_engine::harness::HARNESSES.iter().collect()
+        } else {
+            agents
+                .iter()
+                .filter_map(|name| {
+                    let profile = rtk_engine::harness::profile(name);
+                    if profile.is_none() {
+                        *unknown = true;
+                        out.push(format!(
+                            "unknown agent `{name}` — known: {}",
+                            rtk_engine::harness::HARNESSES
+                                .iter()
+                                .map(|h| h.id)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                    profile
+                })
+                .collect()
+        };
+    for profile in profiles {
+        let plan = crate::hooks::init::plan_with(profile, resolved);
+        let lines = plan.skipped_lines();
+        if lines.is_empty() {
+            println!(
+                "{}: every position of this pipeline is served",
+                profile.name
+            );
+            continue;
+        }
+        out.extend(lines);
+    }
+    out
 }
 
 pub fn print_hook_gaps() {
@@ -1820,6 +1867,7 @@ pub fn run_explain(
         "agent: {agent}   tool: {tool} -> subject: {}",
         subject.as_str()
     );
+    println!("{}", capability_line(profile, subject));
 
     let before = Position::hook(Event::BeforeTool, subject);
     if profile.event(Event::BeforeTool).is_some() {
@@ -1923,6 +1971,53 @@ pub fn run_explain(
     }
     print_diagnostics(&loaded);
     Ok(0)
+}
+
+pub fn capability_line(
+    profile: &rtk_engine::harness::HarnessProfile,
+    subject: rtk_engine::block::Subject,
+) -> String {
+    use rtk_engine::block::Event;
+    use rtk_engine::harness::{InputResolution, resolve_input_rewrite};
+    let rules = if profile.evaluates.is_empty() {
+        "rtk's hook runs the command rewrite only; pipeline rules are not evaluated".to_string()
+    } else {
+        format!(
+            "pipeline rules evaluated at {}",
+            profile
+                .evaluates
+                .iter()
+                .map(|e| e.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let reach = if profile.unreachable.contains(&subject) {
+        format!(
+            "; {} tools never reach a hook on this agent",
+            subject.as_str()
+        )
+    } else if profile.tools_for(subject).is_empty()
+        && !matches!(
+            subject,
+            rtk_engine::block::Subject::Any | rtk_engine::block::Subject::Mcp
+        )
+    {
+        format!("; no known {} tool on this agent", subject.as_str())
+    } else {
+        String::new()
+    };
+    let before = match resolve_input_rewrite(profile) {
+        InputResolution::Rewrite => "rewrite, deny, route",
+        InputResolution::Suggest => "deny and route (no rewrite)",
+        InputResolution::Directive(_) => "awareness file only",
+        InputResolution::Inert => "nothing",
+    };
+    let ask = profile.can(Event::BeforeTool, |c| c.can_ask);
+    format!(
+        "capabilities: {rules}; before_tool can {before}{}{reach}",
+        if ask { "" } else { " (never asks)" }
+    )
 }
 
 pub fn run_log_toggle(on: bool) -> Result<i32> {

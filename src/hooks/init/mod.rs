@@ -34,6 +34,10 @@ mod hermes;
 mod instructions_agents;
 mod opencode;
 mod pi;
+#[cfg(feature = "engine")]
+mod plan;
+#[cfg(feature = "engine")]
+pub use plan::plan_with;
 mod trae;
 mod vibe;
 
@@ -1790,6 +1794,110 @@ pub(super) fn remove_hook_entries(
         }
     });
     removed
+}
+
+pub(super) fn grouped_hook_present(
+    root: &serde_json::Value,
+    event: &str,
+    owns: impl Fn(&str) -> bool,
+) -> bool {
+    hook_present(
+        root,
+        event,
+        HookEntries::Grouped,
+        |_| true,
+        |hook| is_command_hook(hook, &owns),
+    )
+}
+
+pub(super) fn refresh_grouped_matcher(
+    root: &mut serde_json::Value,
+    event: &str,
+    matcher: Option<&str>,
+    owns: impl Fn(&str) -> bool,
+) -> bool {
+    let Some(entries) = root
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut(event))
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return false;
+    };
+    let mut changed = false;
+    for entry in entries.iter_mut() {
+        let ours = entry
+            .get("hooks")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|hooks| hooks.iter().any(|hook| is_command_hook(hook, &owns)));
+        if !ours {
+            continue;
+        }
+        let current = entry.get("matcher").and_then(serde_json::Value::as_str);
+        if current == matcher {
+            continue;
+        }
+        match (entry.as_object_mut(), matcher) {
+            (Some(obj), Some(value)) => {
+                obj.insert("matcher".into(), serde_json::json!(value));
+            }
+            (Some(obj), None) => {
+                obj.remove("matcher");
+            }
+            (None, _) => continue,
+        }
+        changed = true;
+    }
+    changed
+}
+
+pub(super) fn insert_grouped_hook(
+    root: &mut serde_json::Value,
+    event: &str,
+    matcher: Option<&str>,
+    command: &str,
+) -> Result<()> {
+    let entry = match matcher {
+        Some(matcher) => serde_json::json!({
+            "matcher": matcher,
+            "hooks": [{ "type": "command", "command": command }]
+        }),
+        None => serde_json::json!({
+            "hooks": [{ "type": "command", "command": command }]
+        }),
+    };
+    append_hook_entry(root, event, entry)
+}
+
+pub(super) fn refresh_flat_matcher(
+    root: &mut serde_json::Value,
+    event: &str,
+    matcher: Option<&str>,
+    owns: impl Fn(&serde_json::Value) -> bool,
+) -> bool {
+    let Some(entries) = root
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut(event))
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return false;
+    };
+    let mut changed = false;
+    for entry in entries.iter_mut() {
+        if !owns(entry) || entry.get("matcher").and_then(serde_json::Value::as_str) == matcher {
+            continue;
+        }
+        match (entry.as_object_mut(), matcher) {
+            (Some(obj), Some(value)) => {
+                obj.insert("matcher".into(), serde_json::json!(value));
+            }
+            (Some(obj), None) => {
+                obj.remove("matcher");
+            }
+            (None, _) => continue,
+        }
+        changed = true;
+    }
+    changed
 }
 
 /// Deep-merge RTK hook entry into settings.json under the given event key.

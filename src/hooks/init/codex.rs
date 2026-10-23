@@ -645,9 +645,14 @@ pub(super) fn run_codex_mode_with_paths(
         ctx,
     )?;
     let added_ref = patch_agents_md(&agents_md_path, &rtk_md_ref, ctx)?;
-    let hook_added = patch_codex_hooks_json(&hooks_json_path, ctx)?;
+    let (entries, skipped) = codex_entries(global);
+    let hook_added = patch_codex_hooks_json_with(&hooks_json_path, &entries, ctx)?;
 
-    if !dry_run {
+    if dry_run {
+        for line in &skipped {
+            println!("[dry-run] {line}");
+        }
+    } else {
         println!("\nRTK configured for Codex CLI.\n");
         println!("  RTK.md:    {}", rtk_md_path.display());
         println!(
@@ -678,6 +683,9 @@ pub(super) fn run_codex_mode_with_paths(
         println!(
             "\n  Restart Codex. For a project hook, approve it when Codex asks you to trust it."
         );
+        for line in &skipped {
+            println!("  {line}");
+        }
         match crate::core::tracking::get_db_path().and_then(|path| codex_tracking_config(&path)) {
             Ok(config) => {
                 println!("\n  Optional: if history recording fails with SQLITE_CANTOPEN in the");
@@ -914,20 +922,53 @@ pub(super) fn codex_hook_already_present(root: &serde_json::Value) -> bool {
     )
 }
 
+#[cfg(feature = "engine")]
+fn codex_entries(global: bool) -> (Vec<super::plan::Entry>, Vec<String>) {
+    match super::plan::plan_for("codex", global) {
+        Some(plan) => (plan.entries(), plan.skipped_lines()),
+        None => (legacy_codex_entries(), Vec::new()),
+    }
+}
+
+#[cfg(not(feature = "engine"))]
+fn codex_entries(_global: bool) -> (Vec<(&'static str, Option<String>)>, Vec<String>) {
+    (legacy_codex_entries(), Vec::new())
+}
+
+fn legacy_codex_entries() -> Vec<(&'static str, Option<String>)> {
+    vec![(PRE_TOOL_USE_KEY, Some(CLAUDE_PRE_MATCHER.to_string()))]
+}
+
+#[cfg(test)]
 fn patch_codex_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
+    patch_codex_hooks_json_with(path, &legacy_codex_entries(), ctx)
+}
+
+fn patch_codex_hooks_json_with(
+    path: &Path,
+    entries: &[(&'static str, Option<String>)],
+    ctx: InitContext,
+) -> Result<bool> {
     let InitContext { dry_run, .. } = ctx;
     let mut root = read_json_file(path)?.unwrap_or_else(|| serde_json::json!({}));
 
-    if codex_hook_already_present(&root) {
+    let mut changed = false;
+    for (event, matcher) in entries {
+        if grouped_hook_present(&root, event, is_codex_hook_command) {
+            changed |= refresh_grouped_matcher(
+                &mut root,
+                event,
+                matcher.as_deref(),
+                is_codex_hook_command,
+            );
+        } else {
+            insert_grouped_hook(&mut root, event, matcher.as_deref(), CODEX_HOOK_COMMAND)?;
+            changed = true;
+        }
+    }
+    if !changed {
         return Ok(false);
     }
-
-    insert_hook_entry(
-        &mut root,
-        PRE_TOOL_USE_KEY,
-        CLAUDE_PRE_MATCHER,
-        CODEX_HOOK_COMMAND,
-    )?;
 
     if !dry_run && let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| {
@@ -951,9 +992,18 @@ fn patch_codex_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
 }
 
 pub(super) fn remove_codex_hook_from_json(root: &mut serde_json::Value) -> bool {
-    remove_hook_entries(root, PRE_TOOL_USE_KEY, HookEntries::Grouped, |hook| {
-        is_command_hook(hook, is_codex_hook_command)
-    })
+    let events: Vec<String> = root
+        .get("hooks")
+        .and_then(serde_json::Value::as_object)
+        .map(|hooks| hooks.keys().cloned().collect())
+        .unwrap_or_default();
+    let mut removed = false;
+    for event in events {
+        removed |= remove_hook_entries(root, &event, HookEntries::Grouped, |hook| {
+            is_command_hook(hook, is_codex_hook_command)
+        });
+    }
+    removed
 }
 
 fn remove_codex_hook_from_file(path: &Path, ctx: InitContext) -> Result<bool> {
@@ -1257,6 +1307,13 @@ mod tests {
 
         assert!(patch_codex_hooks_json(&hooks_json, InitContext::default()).unwrap());
         assert!(!patch_codex_hooks_json(&hooks_json, InitContext::default()).unwrap());
+        let widened = [(PRE_TOOL_USE_KEY, Some("^(?:Bash|apply_patch)$".to_string()))];
+        assert!(
+            patch_codex_hooks_json_with(&hooks_json, &widened, InitContext::default()).unwrap()
+        );
+        assert!(
+            !patch_codex_hooks_json_with(&hooks_json, &widened, InitContext::default()).unwrap()
+        );
 
         let root: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&hooks_json).unwrap()).unwrap();
@@ -1265,6 +1322,11 @@ mod tests {
         assert_eq!(
             root["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
             "echo existing"
+        );
+        assert_eq!(root["hooks"]["PreToolUse"][0]["matcher"], "Bash");
+        assert_eq!(
+            root["hooks"]["PreToolUse"][1]["matcher"],
+            "^(?:Bash|apply_patch)$"
         );
         assert_eq!(root["hooks"]["Stop"][0]["hooks"][0]["command"], "echo stop");
         assert!(hooks_json.with_extension("json.bak").exists());

@@ -1108,7 +1108,13 @@ enum PipelineCommands {
         name: Option<String>,
     },
     /// Validate every pipeline file; exits non-zero on errors
-    Validate,
+    Validate {
+        #[arg(
+            long,
+            help = "Also report what each named agent cannot serve (`all` for every agent)"
+        )]
+        agent: Vec<String>,
+    },
     /// Explain what fires for a given agent/tool/format and why
     Explain {
         /// Agent to explain for (claude-code, cursor, cline, ...)
@@ -1281,7 +1287,13 @@ enum HookCommands {
     /// Process Factory Droid PreToolUse hook (reads JSON from stdin)
     Droid,
     /// Process Google Antigravity PreToolUse hook (reads JSON from stdin)
-    Antigravity,
+    Antigravity {
+        #[arg(
+            long,
+            help = "The event this registration serves when the payload does not say (SessionStart)"
+        )]
+        event: Option<String>,
+    },
     /// Process Mistral Vibe CLI pre_tool hook (reads JSON from stdin)
     Vibe,
     /// Answer for OpenCode's plugin: the rewrite as JSON, or `{}` when
@@ -3194,7 +3206,7 @@ fn run_cli() -> Result<i32> {
         #[cfg(feature = "engine")]
         Commands::Pipeline { command } => match *command {
             PipelineCommands::Show { name } => core::pipeline_cmd::run_show(name.as_deref())?,
-            PipelineCommands::Validate => core::pipeline_cmd::run_validate()?,
+            PipelineCommands::Validate { agent } => core::pipeline_cmd::run_validate(&agent)?,
             PipelineCommands::Explain {
                 agent,
                 tool,
@@ -3662,8 +3674,8 @@ fn run_cli() -> Result<i32> {
                 hooks::hook_cmd::run_droid()?;
                 0
             }
-            HookCommands::Antigravity => {
-                hooks::hook_cmd::run_antigravity()?;
+            HookCommands::Antigravity { event } => {
+                hooks::hook_cmd::run_antigravity(event.as_deref())?;
                 0
             }
             HookCommands::Vibe => {

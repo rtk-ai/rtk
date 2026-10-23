@@ -17,6 +17,8 @@ use crate::core::user_env;
 use crate::core::utils::strip_leading_bom;
 
 #[cfg(feature = "engine")]
+mod agent_pipeline;
+#[cfg(feature = "engine")]
 mod claude_pipeline;
 
 const STDIN_CAP: usize = 1_048_576; // 1 MiB
@@ -462,11 +464,26 @@ fn run_gemini_inner_impl(
 ///
 /// Fail-open design: invalid JSON, non-command tools, or unparseable payloads
 /// emit `{"decision": "allow"}` so RTK never blocks agent operations.
-pub fn run_antigravity() -> Result<()> {
-    let input = read_stdin_limited()?;
-    let output = run_antigravity_inner(&input);
+pub fn run_antigravity(event: Option<&str>) -> Result<()> {
+    let output = match event {
+        Some(crate::hooks::constants::SESSION_START_KEY) => antigravity_session_start(),
+        _ => {
+            let input = read_stdin_limited()?;
+            run_antigravity_inner(&input)
+        }
+    };
     let _ = writeln!(io::stdout(), "{output}");
     Ok(())
+}
+
+fn antigravity_session_start() -> Value {
+    #[cfg(feature = "engine")]
+    if let Some(output) = crate::hooks::session_start::response_for("antigravity")
+        && let Ok(value) = serde_json::from_str::<Value>(&output)
+    {
+        return value;
+    }
+    json!({})
 }
 
 fn run_antigravity_inner(input: &str) -> Value {
@@ -479,6 +496,11 @@ fn run_antigravity_inner(input: &str) -> Value {
         Ok(v) => v,
         Err(_) => return json!({ "decision": "allow" }),
     };
+
+    #[cfg(feature = "engine")]
+    if let Some(output) = antigravity_pipeline(&parsed) {
+        return output;
+    }
 
     let tool_name = parsed
         .pointer("/toolCall/name")
@@ -519,6 +541,25 @@ fn run_antigravity_inner(input: &str) -> Value {
     }
 }
 
+#[cfg(feature = "engine")]
+fn antigravity_pipeline(v: &Value) -> Option<Value> {
+    use agent_pipeline::Gate;
+    let profile = rtk_engine::harness::profile("antigravity")?;
+    let tool_name = v.pointer("/toolCall/name").and_then(Value::as_str)?;
+    let input = v.pointer("/toolCall/args").cloned().unwrap_or(Value::Null);
+    agent_pipeline::prepare(profile, v, &input);
+    match agent_pipeline::gate_call(profile, v, tool_name, input) {
+        Gate::Continue => None,
+        Gate::Leave { .. } => Some(json!({ "decision": "allow" })),
+        Gate::Stop { message, .. } => Some(json!({ "decision": "deny", "reason": message })),
+        Gate::Swap { command, .. } => Some(json!({
+            "decision": "allow",
+            "reason": "Rewritten by rtk for token optimization.",
+            "overwrite": { "CommandLine": command }
+        })),
+    }
+}
+
 // ── Vibe hook ─────────────────────────────────────────────────
 
 /// Run the Mistral Vibe CLI pre_tool hook.
@@ -545,6 +586,17 @@ fn run_vibe_inner(input: &str) -> Option<String> {
             return None;
         }
     };
+
+    #[cfg(feature = "engine")]
+    if let Some(handled) = vibe_pipeline(&json) {
+        return match handled {
+            agent_pipeline::Handled::Emit(output) => Some(output),
+            agent_pipeline::Handled::Silent => None,
+        };
+    }
+    if !is_pre_tool_event(&json, "pre_tool") {
+        return None;
+    }
 
     let tool_name = json.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
     // Vibe's Unified Harness namespaces the shell tool as `file_system.bash`.
@@ -583,12 +635,77 @@ fn vibe_rewrite_json(rewritten: &str) -> String {
     .to_string()
 }
 
+#[cfg(feature = "engine")]
+fn vibe_pipeline(v: &Value) -> Option<agent_pipeline::Handled> {
+    use agent_pipeline::{Gate, Handled};
+    if v.get("hook_event_name").and_then(Value::as_str) == Some("post_tool") {
+        return Some(vibe_posthook(v));
+    }
+    if !is_pre_tool_event(v, "pre_tool") {
+        return None;
+    }
+    let profile = rtk_engine::harness::profile("vibe")?;
+    let tool_name = v.get("tool_name").and_then(Value::as_str)?;
+    let input = v.get("tool_input").cloned().unwrap_or(Value::Null);
+    agent_pipeline::prepare(profile, v, &input);
+    match agent_pipeline::gate_call(profile, v, tool_name, input.clone()) {
+        Gate::Continue => None,
+        Gate::Leave { .. } => Some(Handled::Silent),
+        Gate::Stop { message, .. } => Some(Handled::Emit(
+            json!({ "decision": "deny", "reason": message }).to_string(),
+        )),
+        Gate::Swap { command, .. } => Some(Handled::Emit(
+            json!({
+                "hook_specific_output": {
+                    "tool_input": agent_pipeline::with_command(&input, &command)
+                },
+                "system_message": format!("rtk: rewrote to `{command}`"),
+            })
+            .to_string(),
+        )),
+    }
+}
+
 fn gemini_json(decision: &str, rewrite: Option<&str>) -> String {
     let mut output = serde_json::json!({ "decision": decision });
     if let Some(cmd) = rewrite {
         output["hookSpecificOutput"] = serde_json::json!({ "tool_input": { "command": cmd } });
     }
     output.to_string()
+}
+
+#[cfg(feature = "engine")]
+fn vibe_posthook(v: &Value) -> agent_pipeline::Handled {
+    use agent_pipeline::Handled;
+    let Some(profile) = rtk_engine::harness::profile("vibe") else {
+        return Handled::Silent;
+    };
+    let Some(tool_name) = v.get("tool_name").and_then(Value::as_str) else {
+        return Handled::Silent;
+    };
+    let Some(text) = v.get("tool_output_text").and_then(Value::as_str) else {
+        return Handled::Silent;
+    };
+    let input = v.get("tool_input").cloned().unwrap_or(Value::Null);
+    let input = agent_pipeline::normalise_input(profile.map_tool(tool_name), &input);
+    agent_pipeline::prepare(profile, v, &input);
+    let duration = v.get("duration_ms").and_then(Value::as_u64).unwrap_or(0);
+    match crate::hooks::posthook::run_text("vibe", tool_name, &input, text, duration) {
+        Some(composed) => Handled::Emit(
+            json!({
+                "decision": "deny",
+                "reason": composed,
+                "system_message": format!(
+                    "rtk: compressed {} output ({} -> {} tokens)",
+                    tool_name,
+                    crate::core::tracking::estimate_tokens(text),
+                    crate::core::tracking::estimate_tokens(&composed)
+                ),
+            })
+            .to_string(),
+        ),
+        None => Handled::Silent,
+    }
 }
 
 // ── Audit logging ─────────────────────────────────────────────
@@ -1040,6 +1157,14 @@ pub fn run_codex() -> Result<()> {
         }
     };
 
+    #[cfg(feature = "engine")]
+    if let Some(handled) = codex_pipeline(&v) {
+        if let agent_pipeline::Handled::Emit(output) = handled {
+            let _ = writeln!(io::stdout(), "{output}");
+        }
+        return Ok(());
+    }
+
     match process_codex_payload(&v) {
         PayloadAction::Rewrite {
             cmd,
@@ -1057,10 +1182,58 @@ pub fn run_codex() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "engine")]
+fn codex_pipeline(v: &Value) -> Option<agent_pipeline::Handled> {
+    use agent_pipeline::{Gate, Handled};
+    let event = v.get("hook_event_name").and_then(Value::as_str);
+    if event == Some(crate::hooks::constants::SESSION_START_KEY) {
+        return Some(match crate::hooks::session_start::response_for("codex") {
+            Some(output) => Handled::Emit(output),
+            None => Handled::Silent,
+        });
+    }
+    if event != Some(PRE_TOOL_USE_KEY) {
+        return None;
+    }
+    let profile = rtk_engine::harness::profile("codex")?;
+    let tool_name = v.get("tool_name").and_then(Value::as_str)?;
+    let input = v.get("tool_input").cloned().unwrap_or(Value::Null);
+    agent_pipeline::prepare(profile, v, &input);
+    match agent_pipeline::gate_call(profile, v, tool_name, input) {
+        Gate::Continue => None,
+        Gate::Leave { .. } => Some(Handled::Silent),
+        Gate::Stop { message, .. } => Some(Handled::Emit(
+            json!({
+                "hookSpecificOutput": {
+                    "hookEventName": PRE_TOOL_USE_KEY,
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": message,
+                }
+            })
+            .to_string(),
+        )),
+        Gate::Swap { command, .. } => {
+            if !is_supported_codex_permission_mode(v) {
+                return None;
+            }
+            Some(Handled::Emit(
+                pre_tool_use_rewrite_output(v, &command, Some("allow")).to_string(),
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 fn run_codex_inner(input: &str) -> Option<String> {
     let input = strip_leading_bom(input).trim();
     let v: Value = serde_json::from_str(input).ok()?;
+    #[cfg(feature = "engine")]
+    if let Some(handled) = codex_pipeline(&v) {
+        return match handled {
+            agent_pipeline::Handled::Emit(output) => Some(output),
+            agent_pipeline::Handled::Silent => None,
+        };
+    }
     match process_codex_payload(&v) {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
         _ => None,
@@ -1087,11 +1260,13 @@ pub fn run_cursor() -> Result<()> {
         }
     };
 
-    let cmd = match v
-        .pointer("/tool_input/command")
-        .and_then(|c| c.as_str())
-        .filter(|c| !c.is_empty())
-    {
+    #[cfg(feature = "engine")]
+    if let Some(output) = cursor_pipeline(&v) {
+        let _ = writeln!(io::stdout(), "{output}");
+        return Ok(());
+    }
+
+    let cmd = match cursor_shell_command(&v) {
         Some(c) => c.to_string(),
         None => {
             let _ = writeln!(io::stdout(), "{{}}");
@@ -1119,6 +1294,21 @@ pub fn run_cursor() -> Result<()> {
     Ok(())
 }
 
+fn is_pre_tool_event(v: &Value, name: &str) -> bool {
+    v.get("hook_event_name")
+        .and_then(Value::as_str)
+        .is_none_or(|event| event == name)
+}
+
+fn cursor_shell_command(v: &Value) -> Option<&str> {
+    if !is_pre_tool_event(v, "preToolUse") {
+        return None;
+    }
+    v.pointer("/tool_input/command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+}
+
 fn cursor_allow(rewritten: &str) -> String {
     json!({
         "continue": true,
@@ -1135,6 +1325,43 @@ fn cursor_ask(rewritten: &str) -> String {
         "updated_input": { "command": rewritten }
     })
     .to_string()
+}
+
+#[cfg(feature = "engine")]
+fn cursor_pipeline(v: &Value) -> Option<String> {
+    use agent_pipeline::Gate;
+    if v.get("hook_event_name").and_then(Value::as_str) == Some("sessionStart") {
+        return Some(
+            crate::hooks::session_start::response_for("cursor").unwrap_or_else(|| "{}".to_string()),
+        );
+    }
+    if !is_pre_tool_event(v, "preToolUse") {
+        return None;
+    }
+    let profile = rtk_engine::harness::profile("cursor")?;
+    let tool_name = v.get("tool_name").and_then(Value::as_str)?;
+    let input = v.get("tool_input").cloned().unwrap_or(Value::Null);
+    agent_pipeline::prepare(profile, v, &input);
+    match agent_pipeline::gate_call(profile, v, tool_name, input.clone()) {
+        Gate::Continue => None,
+        Gate::Leave { .. } => Some("{}".to_string()),
+        Gate::Stop { message, .. } => Some(
+            json!({
+                "permission": "deny",
+                "user_message": message,
+                "agent_message": message,
+            })
+            .to_string(),
+        ),
+        Gate::Swap { command, ask, .. } => Some(
+            json!({
+                "continue": true,
+                "permission": if ask { "ask" } else { "allow" },
+                "updated_input": agent_pipeline::with_command(&input, &command),
+            })
+            .to_string(),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -1155,11 +1382,12 @@ fn run_cursor_inner_with_rules(
         Err(_) => return "{}".to_string(),
     };
 
-    let cmd = match v
-        .pointer("/tool_input/command")
-        .and_then(|c| c.as_str())
-        .filter(|c| !c.is_empty())
-    {
+    #[cfg(feature = "engine")]
+    if let Some(output) = cursor_pipeline(&v) {
+        return output;
+    }
+
+    let cmd = match cursor_shell_command(&v) {
         Some(c) => c.to_string(),
         None => return "{}".to_string(),
     };
@@ -3580,5 +3808,297 @@ mod tests {
             v.pointer("/hookSpecificOutput/permissionDecision")
                 .is_none()
         );
+    }
+
+    #[cfg(feature = "engine")]
+    mod pipeline_on_every_agent {
+        use super::super::agent_pipeline::with_pipeline;
+        use super::*;
+
+        const DENY_CURL: &str = "[[hook.before_tool.shell]]\nname = \"no-curl\"\nwhen = { command_matches = \"^curl\" }\naction = \"deny\"\nmessage = \"no curl: ${command}\"\n";
+        const DENY_LOCKFILE_EDIT: &str = "[[hook.before_tool.edit]]\nname = \"no-lockfile-edits\"\nwhen = { basename = \"Cargo.lock\" }\naction = \"deny\"\nmessage = \"do not hand-edit lockfiles\"\n";
+        const DENY_LOCKFILE_WRITE: &str = "[[hook.before_tool.write]]\nname = \"no-lockfile-writes\"\nwhen = { basename = \"Cargo.lock\" }\naction = \"deny\"\nmessage = \"do not write lockfiles\"\n";
+        const KEEP_DIFFS: &str = "[[hook.before_tool.shell]]\nname = \"keep-diffs\"\nwhen = { command_matches = \"^git diff\" }\naction = \"passthrough\"\n";
+        const DENY_SERVER: &str = "[[hook.before_tool.mcp]]\nname = \"one-server-only\"\nwhen = { server = \"payments\" }\naction = \"deny\"\nmessage = \"payments is off limits\"\n";
+
+        fn codex_tool(tool: &str, input: Value) -> String {
+            json!({
+                "session_id": "s",
+                "hook_event_name": PRE_TOOL_USE_KEY,
+                "tool_name": tool,
+                "tool_input": input,
+                "permission_mode": "default"
+            })
+            .to_string()
+        }
+
+        #[test]
+        fn codex_denies_through_the_pipeline() {
+            let out = with_pipeline(DENY_CURL, || {
+                run_codex_inner(&codex_tool("Bash", json!({ "command": "curl x" })))
+            })
+            .expect("a deny is emitted");
+            let v: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+            assert_eq!(
+                v["hookSpecificOutput"]["permissionDecisionReason"],
+                "no curl: curl x"
+            );
+        }
+
+        #[test]
+        fn codex_passthrough_rule_leaves_the_command_alone() {
+            let out = with_pipeline(KEEP_DIFFS, || {
+                run_codex_inner(&codex_tool("Bash", json!({ "command": "git diff" })))
+            });
+            assert!(out.is_none());
+            let out = with_pipeline(KEEP_DIFFS, || {
+                run_codex_inner(&codex_tool("Bash", json!({ "command": "git status" })))
+            })
+            .expect("other commands still rewrite");
+            assert!(out.contains("rtk git status"));
+        }
+
+        #[test]
+        fn codex_edit_rule_reaches_apply_patch_and_mcp_rule_reads_the_server() {
+            let out = with_pipeline(DENY_LOCKFILE_EDIT, || {
+                run_codex_inner(&codex_tool(
+                    "apply_patch",
+                    json!({ "command": "*** Begin Patch", "file_path": "/w/Cargo.lock" }),
+                ))
+            })
+            .expect("a deny is emitted");
+            assert!(out.contains("do not hand-edit lockfiles"));
+
+            let out = with_pipeline(DENY_SERVER, || {
+                run_codex_inner(&codex_tool("mcp__payments__charge", json!({ "amount": 3 })))
+            })
+            .expect("a deny is emitted");
+            assert!(out.contains("payments is off limits"));
+        }
+
+        #[test]
+        fn cursor_denies_and_passes_through_in_its_own_dialect() {
+            let shell = |cmd: &str| {
+                json!({
+                    "conversation_id": "c",
+                    "hook_event_name": "preToolUse",
+                    "tool_name": "Shell",
+                    "tool_input": { "command": cmd }
+                })
+                .to_string()
+            };
+            let out = with_pipeline(DENY_CURL, || run_cursor_inner(&shell("curl x")));
+            let v: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(v["permission"], "deny");
+            assert_eq!(v["agent_message"], "no curl: curl x");
+
+            let out = with_pipeline(KEEP_DIFFS, || run_cursor_inner(&shell("git diff")));
+            assert_eq!(out, "{}");
+
+            let write = json!({
+                "hook_event_name": "preToolUse",
+                "tool_name": "Write",
+                "tool_input": { "path": "/w/Cargo.lock", "content": "" }
+            })
+            .to_string();
+            let out = with_pipeline(DENY_LOCKFILE_WRITE, || run_cursor_inner(&write));
+            assert!(out.contains("do not write lockfiles"));
+        }
+
+        #[test]
+        fn cursor_other_events_are_left_to_cursor() {
+            let post = json!({
+                "hook_event_name": "postToolUse",
+                "tool_name": "Shell",
+                "tool_input": { "command": "curl x" }
+            })
+            .to_string();
+            let out = with_pipeline(DENY_CURL, || run_cursor_inner(&post));
+            assert_eq!(out, "{}");
+        }
+
+        #[test]
+        fn antigravity_denies_through_its_own_argument_names() {
+            let v = with_pipeline(DENY_CURL, || {
+                run_antigravity_inner(&antigravity_input("curl x"))
+            });
+            assert_eq!(v["decision"], "deny");
+            assert_eq!(v["reason"], "no curl: curl x");
+
+            let write = json!({
+                "conversationId": "c",
+                "toolCall": {
+                    "name": "write_to_file",
+                    "args": { "TargetFile": "/w/Cargo.lock", "CodeContent": "" }
+                }
+            })
+            .to_string();
+            let v = with_pipeline(DENY_LOCKFILE_WRITE, || run_antigravity_inner(&write));
+            assert_eq!(v["decision"], "deny");
+            assert_eq!(v["reason"], "do not write lockfiles");
+
+            let v = with_pipeline(KEEP_DIFFS, || {
+                run_antigravity_inner(&antigravity_input("git diff"))
+            });
+            assert_eq!(v, json!({ "decision": "allow" }));
+        }
+
+        #[test]
+        fn vibe_denies_and_passes_through_in_its_own_dialect() {
+            let out = with_pipeline(DENY_CURL, || run_vibe_inner(&vibe_input("bash", "curl x")))
+                .expect("a deny is emitted");
+            let v: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(v["decision"], "deny");
+            assert_eq!(v["reason"], "no curl: curl x");
+
+            let out = with_pipeline(KEEP_DIFFS, || {
+                run_vibe_inner(&vibe_input("bash", "git diff"))
+            });
+            assert!(out.is_none());
+
+            let edit = json!({
+                "hook_event_name": "pre_tool",
+                "tool_name": "edit",
+                "tool_input": { "file_path": "/w/Cargo.lock", "old_string": "a", "new_string": "b" }
+            })
+            .to_string();
+            let out = with_pipeline(DENY_LOCKFILE_EDIT, || run_vibe_inner(&edit))
+                .expect("a deny is emitted");
+            assert!(out.contains("do not hand-edit lockfiles"));
+
+            let mcp = json!({
+                "hook_event_name": "pre_tool",
+                "tool_name": "payments.charge",
+                "tool_input": { "amount": 3 }
+            })
+            .to_string();
+            let out =
+                with_pipeline(DENY_SERVER, || run_vibe_inner(&mcp)).expect("a deny is emitted");
+            assert!(out.contains("payments is off limits"));
+        }
+
+        const SESSION_DIRECTIVE: &str = "[[directive]]\nname = \"greeting\"\ntext = \"Prefer rtk commands.\"\nchannel = \"session_start\"\n";
+
+        #[test]
+        fn session_start_directives_reach_codex_cursor_and_antigravity() {
+            let codex = json!({ "session_id": "s", "hook_event_name": "SessionStart", "source": "startup" })
+                .to_string();
+            let out = with_pipeline(SESSION_DIRECTIVE, || run_codex_inner(&codex)).unwrap();
+            let v: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(
+                v["hookSpecificOutput"]["additionalContext"],
+                "Prefer rtk commands."
+            );
+
+            let cursor =
+                json!({ "conversation_id": "c", "hook_event_name": "sessionStart" }).to_string();
+            let out = with_pipeline(SESSION_DIRECTIVE, || run_cursor_inner(&cursor));
+            let v: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(v["additional_context"], "Prefer rtk commands.");
+
+            let v = with_pipeline(SESSION_DIRECTIVE, antigravity_session_start);
+            assert_eq!(v["injectSteps"][0]["systemMessage"], "Prefer rtk commands.");
+
+            assert!(with_pipeline(DENY_CURL, || run_codex_inner(&codex)).is_none());
+            assert_eq!(with_pipeline(DENY_CURL, || run_cursor_inner(&cursor)), "{}");
+            assert_eq!(
+                with_pipeline(DENY_CURL, antigravity_session_start),
+                json!({})
+            );
+        }
+
+        #[test]
+        fn vibe_post_tool_payloads_are_not_gated_as_calls() {
+            let post = json!({
+                "hook_event_name": "post_tool",
+                "tool_name": "bash",
+                "tool_input": { "command": "curl x" },
+                "tool_output_text": "ok"
+            })
+            .to_string();
+            let out = with_pipeline(DENY_CURL, || run_vibe_inner(&post));
+            assert!(out.is_none());
+        }
+
+        #[test]
+        fn vibe_post_tool_output_is_compressed_through_a_deny_reason() {
+            let noisy = "\x1b[32mPASS\x1b[0m test_item\n".repeat(60);
+            let post = json!({
+                "session_id": "s",
+                "hook_event_name": "post_tool",
+                "tool_name": "bash",
+                "tool_input": { "command": "cargo test" },
+                "tool_status": "success",
+                "tool_output_text": noisy,
+                "duration_ms": 0
+            })
+            .to_string();
+            let out = with_pipeline("[pipeline]\nextends = \"rtk:posthook\"\n", || {
+                run_vibe_inner(&post)
+            })
+            .expect("noisy output is replaced");
+            let v: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(v["decision"], "deny");
+            let reason = v["reason"].as_str().unwrap();
+            assert!(!reason.contains('\x1b'));
+            assert!(reason.contains("PASS"));
+            assert!(
+                v["system_message"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("rtk: compressed")
+            );
+
+            let quiet = with_pipeline("[pipeline]\nextends = \"rtk:posthook\"\n", || {
+                run_vibe_inner(
+                    &json!({
+                        "hook_event_name": "post_tool",
+                        "tool_name": "bash",
+                        "tool_input": { "command": "ls" },
+                        "tool_output_text": "a\nb\n"
+                    })
+                    .to_string(),
+                )
+            });
+            assert!(quiet.is_none(), "small clean output is left alone");
+        }
+
+        #[test]
+        fn the_same_file_denies_on_every_agent() {
+            use super::super::agent_pipeline::{Gate, gate_call};
+            let pipeline = DENY_CURL;
+            let claude = rtk_engine::harness::profile("claude-code").unwrap();
+            let event: Value = serde_json::from_str(&claude_input("curl x")).unwrap();
+            let gate = with_pipeline(pipeline, || {
+                gate_call(claude, &event, "Bash", event["tool_input"].clone())
+            });
+            assert!(matches!(gate, Gate::Stop { ref message, .. } if message == "no curl: curl x"));
+            assert!(
+                with_pipeline(pipeline, || run_codex_inner(&codex_tool(
+                    "Bash",
+                    json!({ "command": "curl x" })
+                )))
+                .unwrap()
+                .contains("deny")
+            );
+            assert!(
+                with_pipeline(pipeline, || run_cursor_inner(
+                    &json!({ "hook_event_name": "preToolUse", "tool_name": "Shell", "tool_input": { "command": "curl x" } }).to_string()
+                ))
+                .contains("deny")
+            );
+            assert_eq!(
+                with_pipeline(pipeline, || run_antigravity_inner(&antigravity_input(
+                    "curl x"
+                )))["decision"],
+                "deny"
+            );
+            assert!(
+                with_pipeline(pipeline, || run_vibe_inner(&vibe_input("bash", "curl x")))
+                    .unwrap()
+                    .contains("deny")
+            );
+        }
     }
 }

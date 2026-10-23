@@ -3,7 +3,7 @@
 use super::*;
 use crate::hooks::constants::{
     VIBE_BASH_MATCH, VIBE_DIR, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_HOOKS_FILE,
-    VIBE_PROMPT_FILE, VIBE_PROMPTS_SUBDIR,
+    VIBE_POSTHOOK_NAME, VIBE_PROMPT_FILE, VIBE_PROMPTS_SUBDIR,
 };
 
 // Vibe integration
@@ -45,7 +45,8 @@ fn run_vibe_mode_at(
     }
 
     let hooks_path = vibe_dir.join(VIBE_HOOKS_FILE);
-    let hook_outcome = patch_vibe_hooks_toml(&hooks_path, patch_mode, ctx)?;
+    let (entries, skipped) = vibe_entries();
+    let hook_outcome = patch_vibe_hooks_toml(&hooks_path, &entries, patch_mode, ctx)?;
 
     if !hook_only {
         let prompts_dir = vibe_dir.join(VIBE_PROMPTS_SUBDIR);
@@ -64,6 +65,9 @@ fn run_vibe_mode_at(
     }
 
     if dry_run {
+        for line in &skipped {
+            println!("[dry-run] {line}");
+        }
         print_dry_run_footer();
     } else if let Some(summary_verb) = hook_outcome.summary_verb() {
         println!("\nMistral Vibe CLI hook {summary_verb} (global).\n");
@@ -78,8 +82,36 @@ fn run_vibe_mode_at(
             );
         }
         println!("  Restart Vibe. Test with: git status\n");
+        for line in &skipped {
+            println!("  {line}");
+        }
     }
     Ok(())
+}
+
+#[cfg(feature = "engine")]
+fn vibe_entries() -> (Vec<super::plan::Entry>, Vec<String>) {
+    match super::plan::plan_for("vibe", true) {
+        Some(plan) => (plan.entries(), plan.skipped_lines()),
+        None => (legacy_vibe_entries(), Vec::new()),
+    }
+}
+
+#[cfg(not(feature = "engine"))]
+fn vibe_entries() -> (Vec<(&'static str, Option<String>)>, Vec<String>) {
+    (legacy_vibe_entries(), Vec::new())
+}
+
+fn legacy_vibe_entries() -> Vec<(&'static str, Option<String>)> {
+    vec![("pre_tool", Some(VIBE_BASH_MATCH.to_string()))]
+}
+
+fn vibe_hook_name(event: &str) -> &'static str {
+    if event == "post_tool" {
+        VIBE_POSTHOOK_NAME
+    } else {
+        VIBE_HOOK_NAME
+    }
 }
 
 /// Outcome of `patch_vibe_hooks_toml`. Distinguishes installed / already-present /
@@ -107,6 +139,7 @@ impl VibeHookPatchOutcome {
 /// to preserve any user comments and formatting in the file.
 fn patch_vibe_hooks_toml(
     hooks_path: &Path,
+    entries: &[(&'static str, Option<String>)],
     patch_mode: PatchMode,
     ctx: InitContext,
 ) -> Result<VibeHookPatchOutcome> {
@@ -121,7 +154,27 @@ fn patch_vibe_hooks_toml(
         String::new()
     };
 
-    if vibe_hooks_toml_has_rtk(&existing) {
+    let wanted: Vec<(&'static str, String)> = entries
+        .iter()
+        .map(|(event, matcher)| {
+            (
+                vibe_hook_name(event),
+                vibe_hook_entry(event, matcher.as_deref()),
+            )
+        })
+        .collect();
+    let stale: Vec<&str> = wanted
+        .iter()
+        .filter(|(name, text)| {
+            vibe_hooks_toml_has_entry(&existing, name) && !existing.contains(text.as_str())
+        })
+        .map(|(name, _)| *name)
+        .collect();
+    let missing: Vec<&(&'static str, String)> = wanted
+        .iter()
+        .filter(|(name, _)| !vibe_hooks_toml_has_entry(&existing, name) || stale.contains(name))
+        .collect();
+    if missing.is_empty() {
         if verbose > 0 {
             eprintln!("Vibe hooks.toml already has RTK hook");
         }
@@ -158,8 +211,18 @@ fn patch_vibe_hooks_toml(
         }
     }
 
-    let entry = vibe_hook_entry();
-    let new_content = if existing.is_empty() {
+    let mut existing = existing;
+    for name in &stale {
+        if let Some(stripped) = strip_vibe_entry(&existing, name) {
+            existing = stripped;
+        }
+    }
+    let entry = missing
+        .iter()
+        .map(|(_, text)| text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let new_content = if existing.trim().is_empty() {
         entry.clone()
     } else if existing.ends_with("\n\n") {
         format!("{existing}{entry}")
@@ -184,21 +247,24 @@ fn patch_vibe_hooks_toml(
     Ok(VibeHookPatchOutcome::Installed)
 }
 
-/// TOML entry emitted for the Vibe pre_tool hook. Mirrors the shape documented
-/// at <https://docs.mistral.ai/vibe/code/cli/hooks>.
-fn vibe_hook_entry() -> String {
+fn vibe_hook_entry(event: &str, matcher: Option<&str>) -> String {
+    let description = if event == "post_tool" {
+        "Compress tool output through rtk before the model reads it."
+    } else {
+        "Rewrite bash commands through rtk to save tokens."
+    };
     format!(
         r#"[[hooks]]
 name = "{name}"
-type = "pre_tool"
-match = "{match_glob}"
+type = "{event}"
+match = '{matcher}'
 command = "{command}"
 timeout = 10.0
 strict = false
-description = "Rewrite bash commands through rtk to save tokens."
+description = "{description}"
 "#,
-        name = VIBE_HOOK_NAME,
-        match_glob = VIBE_BASH_MATCH,
+        name = vibe_hook_name(event),
+        matcher = matcher.unwrap_or("*"),
         command = VIBE_HOOK_COMMAND,
     )
 }
@@ -213,9 +279,14 @@ description = "Rewrite bash commands through rtk to save tokens."
 /// installer only ever writes the canonical spacing, and the alternative
 /// (parse-serialize round-trip via toml_edit) would clobber user comments
 /// and formatting in the file.
-fn vibe_hooks_toml_has_rtk(content: &str) -> bool {
-    let needle = format!(r#"name = "{VIBE_HOOK_NAME}""#);
+fn vibe_hooks_toml_has_entry(content: &str, name: &str) -> bool {
+    let needle = format!(r#"name = "{name}""#);
     content.contains(&needle)
+}
+
+#[cfg(test)]
+fn vibe_hooks_toml_has_rtk(content: &str) -> bool {
+    vibe_hooks_toml_has_entry(content, VIBE_HOOK_NAME)
 }
 
 /// Public entry point for `rtk init -g --agent vibe --uninstall`.
@@ -281,7 +352,7 @@ fn uninstall_vibe_at(vibe_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
     if hooks_path.exists() {
         let content = fs::read_to_string(&hooks_path)
             .with_context(|| format!("Failed to read {}", hooks_path.display()))?;
-        if let Some(new_content) = strip_vibe_rtk_entry(&content) {
+        if let Some(new_content) = strip_vibe_rtk_entries(&content) {
             if dry_run {
                 println!(
                     "[dry-run] would remove RTK hook from Vibe hooks.toml: {}",
@@ -313,8 +384,23 @@ fn uninstall_vibe_at(vibe_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
 /// is set. Returns `None` when the entry is absent, `Some(new_content)` after
 /// removal (with surrounding blank lines collapsed). The scan walks `[[hooks]]`
 /// section boundaries — anything else in the file is preserved verbatim.
+fn strip_vibe_rtk_entries(content: &str) -> Option<String> {
+    let mut out: Option<String> = None;
+    for name in [VIBE_HOOK_NAME, VIBE_POSTHOOK_NAME] {
+        if let Some(stripped) = strip_vibe_entry(out.as_deref().unwrap_or(content), name) {
+            out = Some(stripped);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
 fn strip_vibe_rtk_entry(content: &str) -> Option<String> {
-    let needle = format!(r#"name = "{VIBE_HOOK_NAME}""#);
+    strip_vibe_entry(content, VIBE_HOOK_NAME)
+}
+
+fn strip_vibe_entry(content: &str, name: &str) -> Option<String> {
+    let needle = format!(r#"name = "{name}""#);
     if !content.contains(&needle) {
         return None;
     }
@@ -373,13 +459,76 @@ mod tests {
 
     #[test]
     fn test_vibe_hook_entry_shape_matches_docs() {
-        let entry = vibe_hook_entry();
+        let entry = vibe_hook_entry("pre_tool", Some("bash"));
         assert!(entry.contains("[[hooks]]"));
         assert!(entry.contains(r#"name = "rtk-rewrite""#));
         assert!(entry.contains(r#"type = "pre_tool""#));
-        assert!(entry.contains(r#"match = "bash""#));
+        assert!(entry.contains("match = 'bash'"));
         assert!(entry.contains(r#"command = "rtk hook vibe""#));
         assert!(entry.contains("strict = false"));
+
+        let post = vibe_hook_entry("post_tool", Some(r"re:^(?:bash|file_system\.bash)$"));
+        assert!(post.contains(r#"name = "rtk-posthook""#));
+        assert!(post.contains(r#"type = "post_tool""#));
+        assert!(post.contains(r"match = 're:^(?:bash|file_system\.bash)$'"));
+        let parsed: toml::Value = toml::from_str(&post).expect("valid toml");
+        assert_eq!(
+            parsed["hooks"][0]["match"].as_str(),
+            Some(r"re:^(?:bash|file_system\.bash)$")
+        );
+    }
+
+    #[test]
+    fn test_vibe_patch_widens_a_stale_match_and_adds_post_tool() {
+        let temp = TempDir::new().unwrap();
+        let hooks_path = temp.path().join(VIBE_HOOKS_FILE);
+        let user_hook = "[[hooks]]\nname = \"user-audit\"\ntype = \"post_tool\"\nmatch = \"*\"\ncommand = \"audit.py\"\n";
+        fs::write(
+            &hooks_path,
+            format!("{user_hook}\n{}", vibe_hook_entry("pre_tool", Some("bash"))),
+        )
+        .unwrap();
+
+        let entries = vec![
+            ("pre_tool", Some("re:^(?:bash|edit)$".to_string())),
+            ("post_tool", Some("re:^(?:bash)$".to_string())),
+        ];
+        let outcome = patch_vibe_hooks_toml(
+            &hooks_path,
+            &entries,
+            PatchMode::Auto,
+            InitContext::default(),
+        )
+        .unwrap();
+        assert_eq!(outcome, VibeHookPatchOutcome::Installed);
+        let content = fs::read_to_string(&hooks_path).unwrap();
+        assert!(content.contains(r#"name = "user-audit""#));
+        assert_eq!(content.matches(r#"name = "rtk-rewrite""#).count(), 1);
+        assert!(content.contains("match = 're:^(?:bash|edit)$'"));
+        assert!(!content.contains("match = 'bash'"));
+        assert!(content.contains(r#"name = "rtk-posthook""#));
+        let parsed: toml::Value = toml::from_str(&content).expect("valid toml");
+        assert_eq!(parsed["hooks"].as_array().unwrap().len(), 3);
+
+        let outcome = patch_vibe_hooks_toml(
+            &hooks_path,
+            &entries,
+            PatchMode::Auto,
+            InitContext::default(),
+        )
+        .unwrap();
+        assert_eq!(outcome, VibeHookPatchOutcome::AlreadyPresent);
+
+        assert!(
+            strip_vibe_rtk_entries(&content)
+                .unwrap()
+                .contains("user-audit")
+        );
+        assert!(
+            !strip_vibe_rtk_entries(&content)
+                .unwrap()
+                .contains("rtk-posthook")
+        );
     }
 
     #[test]

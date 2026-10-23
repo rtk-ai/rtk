@@ -29,10 +29,10 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 | Claude-MD (legacy) | `rtk init --claude-md` | 134-line RTK block | CLAUDE.md |
 | Windsurf | `rtk init -g --agent windsurf` | `.windsurfrules` | -- |
 | Cline | `rtk init --agent cline` | `.clinerules` | -- |
-| Codex | `rtk init --codex` | RTK.md + `.codex/hooks.json` (local) or `$CODEX_HOME/hooks.json` (global) | AGENTS.md + `PreToolUse` hook |
-| Cursor | `rtk init -g --agent cursor` | Cursor hook | hooks.json |
+| Codex | `rtk init --codex` | RTK.md + `.codex/hooks.json` (local) or `$CODEX_HOME/hooks.json` (global) | AGENTS.md + the hooks the pipeline plan needs (`PreToolUse`, `SessionStart`) |
+| Cursor | `rtk init -g --agent cursor` | Cursor hook | hooks.json (events and matchers from the pipeline plan) |
 | Trae | `rtk init --agent trae` (project) or `rtk init -g --agent trae` (global) | Native `rtk hook trae` registration | `.trae/hooks.json`; global also patches existing `~/.trae-cn/hooks.json` |
-| Google Antigravity | `rtk init --agent antigravity` / `rtk init -g --agent antigravity` | Antigravity Plugin in `plugins/rtk/` | plugin.json, hooks.json, rules/AGENTS.md (awareness) |
+| Google Antigravity | `rtk init --agent antigravity` / `rtk init -g --agent antigravity` | Antigravity Plugin in `plugins/rtk/` | plugin.json, hooks.json (generated from the pipeline plan), rules/AGENTS.md (awareness) |
 | Pi | `rtk init --agent pi` | `.pi/extensions/rtk.ts` | -- |
 | Oh My Pi (OMP) | `rtk init --agent omp` | `.omp/extensions/rtk.ts` (shared Pi extension) | -- |
 | Hermes | `rtk init --agent hermes` | Python plugin in `~/.hermes/plugins/rtk-rewrite/` | `config.yaml` `plugins.enabled` |
@@ -116,6 +116,10 @@ explicit ask. An unknown or unset value keeps the table above — and a caller
 that does *not* own approval should scrub the variable before invoking `rtk
 rewrite`, since it is inherited by every child process. See `decision.rs`'s
 `ApprovalOwner`.
+
+### Pipeline evaluation per agent
+
+`rtk hook claude`, `rtk hook codex`, `rtk hook cursor`, `rtk hook antigravity` and `rtk hook vibe` run every `hook.before_tool` rule of the active pipeline before the legacy rewrite decision: `hook_cmd/agent_pipeline.rs` maps the agent's tool name to a subject through its `rtk_engine::harness` profile, adds the canonical `command` / `file_path` / `url` keys beside the agent's own argument names, evaluates the rule tree and returns a `Gate` that each processor encodes in its own JSON dialect (deny, passthrough, swap). The other processors still answer with the rewrite alone. The user-facing table is `docs/guide/resources/agent-coverage.md`; update the harness profile and that table together.
 
 ### Per-tool support
 
