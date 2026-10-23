@@ -542,11 +542,23 @@ pub fn is_rtk_proxy_at(addr: &str, timeout: Duration) -> bool {
 }
 
 fn health_check_with_timeout(bind: &str, timeout: Duration) -> bool {
-    ureq::get(&format!("http://{bind}/health"))
-        .timeout(timeout)
-        .call()
+    probe_health_response(|| {
+        ureq::get(&format!("http://{bind}/health"))
+            .timeout(timeout)
+            .call()
+            .ok()
+            .and_then(|resp| resp.into_string().ok())
+    })
+}
+
+fn probe_health_response(fetch: impl FnOnce() -> Option<String> + std::panic::UnwindSafe) -> bool {
+    // ureq 2.x can panic while constructing a buffered response if resetting
+    // the socket timeouts fails when returning it to the pool (e.g. on macOS
+    // after the peer closes). A best-effort probe must fail closed rather than
+    // take down the hook. Guard both the request and body read, not the caller.
+    std::panic::catch_unwind(fetch)
         .ok()
-        .and_then(|resp| resp.into_string().ok())
+        .flatten()
         .is_some_and(|body| is_rtk_proxy_health(&body))
 }
 
@@ -892,6 +904,84 @@ mod tests {
         assert!(!is_rtk_proxy_health(r#"{"status":"ok"}"#));
         assert!(!is_rtk_proxy_health("<html>It works!</html>"));
         assert!(!is_rtk_proxy_health(""));
+    }
+
+    #[test]
+    fn health_response_panics_and_errors_fail_closed() {
+        assert!(!probe_health_response(|| {
+            panic!("ureq failed to read exact buffer length from stream")
+        }));
+        assert!(!probe_health_response(|| None));
+    }
+
+    fn accept_health_request(listener: std::net::TcpListener) -> std::net::TcpStream {
+        use std::io::BufRead;
+        let (mut stream, _) = listener.accept().expect("accept health probe");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("bound request read");
+        let mut reader = std::io::BufReader::new(&mut stream);
+        let mut request = String::new();
+        while !request.ends_with("\r\n\r\n") {
+            assert!(reader.read_line(&mut request).expect("read request") > 0);
+        }
+        assert!(request.starts_with("GET /health HTTP/1.1\r\n"));
+        stream
+    }
+
+    #[test]
+    fn health_probe_checks_identity_and_rejects_broken_responses() {
+        use std::io::Write;
+        let identity = r#"{"service":"rtk-proxy"}"#;
+        for (status, body, missing_bytes, expected) in [
+            ("200 OK", identity, 0, true),
+            ("200 OK", "{}", 0, false),
+            ("503 Unavailable", identity, 0, false),
+            ("200 OK", identity, 10, false),
+            ("200 OK", "", 0, false),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            let addr = listener.local_addr().expect("addr").to_string();
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len() + missing_bytes
+            );
+            let server = std::thread::spawn(move || {
+                accept_health_request(listener)
+                    .write_all(response.as_bytes())
+                    .expect("write health response");
+            });
+            let actual = health_check_with_timeout(&addr, Duration::from_millis(300));
+            server.join().expect("health server");
+            assert_eq!(
+                actual, expected,
+                "{status}, {body}, missing {missing_bytes}"
+            );
+        }
+    }
+
+    #[test]
+    fn health_probe_bounds_header_and_body_reads() {
+        use std::io::Write;
+        for prefix in ["", "HTTP/1.1 200 OK\r\nContent-Length: 23\r\n\r\n{"] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            let addr = listener.local_addr().expect("addr").to_string();
+            let (release, wait) = std::sync::mpsc::channel();
+            let server = std::thread::spawn(move || {
+                let mut stream = accept_health_request(listener);
+                stream.write_all(prefix.as_bytes()).expect("write prefix");
+                // Stay connected until the probe returns. The fallback bounds
+                // this fixture too if a regression drops the client deadline.
+                let _ = wait.recv_timeout(Duration::from_secs(2));
+            });
+            let started = Instant::now();
+            let actual = health_check_with_timeout(&addr, Duration::from_millis(80));
+            let elapsed = started.elapsed();
+            let _ = release.send(());
+            server.join().expect("health server");
+            assert!(!actual, "an incomplete response must fail closed");
+            assert!(elapsed < Duration::from_secs(1), "probe took {elapsed:?}");
+        }
     }
 
     #[test]
