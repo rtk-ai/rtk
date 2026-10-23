@@ -187,6 +187,291 @@ Four strategies applied per command type:
 
 > **Does RTK break Claude's prompt cache?** No. RTK filters output once per command. The result is stored in history and cached normally on subsequent API calls, so the cache keeps working as expected. Smaller outputs also mean cheaper cache writes and reads. See [Troubleshooting](docs/guide/resources/troubleshooting.md#does-rtk-break-claudes-prompt-cache) for details.
 
+## Commands
+
+> Percentages below are **reductions in bash output**, not reductions in your bill. See [How Savings Work](#how-savings-work).
+
+### Files
+```bash
+rtk ls .                        # Compact directory tree
+rtk read file.rs                # Smart file reading
+rtk read file.rs -l aggressive  # Signatures only (strips bodies)
+rtk smart file.rs               # 2-line heuristic code summary
+rtk find "*.rs" .               # Compact find results
+rtk grep "pattern" .            # Grouped search results
+rtk diff file1 file2            # Condensed diff (exit 1 if files differ)
+rtk grep "pattern" . --agent-safe # 80 matches, 5/file, 240 Unicode chars/line
+rtk grep "pattern" . --files-only
+rtk grep "pattern" . --count-by-file
+rtk grep "pattern" . --top-files 10
+rtk grep "pattern" . --json     # deterministic rtk.grep.v1 JSON
+```
+
+`rtk grep` agent-safe mode is opt-in via `--agent-safe`, `RTK_AGENT_SAFE=1`,
+or `[agent] safe_mode = true`. Explicit limits override its defaults;
+`--all` disables match caps and `--full-lines` disables clipping. Structured
+capture is bounded to 10 MiB per output stream. `rtk rg --json` remains native
+ripgrep JSON.
+
+### Git
+```bash
+rtk git status                  # Compact status
+rtk git log -n 10               # One-line commits
+rtk git diff                    # Condensed diff
+rtk git add                     # -> "ok"
+rtk git commit -m "msg"         # -> "ok abc1234"
+rtk git push                    # -> "ok main"
+rtk git pull                    # -> "ok 3 files +10 -2"
+```
+
+### GitHub CLI
+```bash
+rtk gh pr list                  # Compact PR listing
+rtk gh pr view 42               # PR details + checks
+rtk gh issue list               # Compact issue listing
+rtk gh run list                 # Workflow run status
+```
+
+### Test Runners
+```bash
+rtk jest                        # Jest compact (failures only)
+rtk vitest                      # Vitest compact (failures only)
+rtk playwright test             # E2E results (failures only)
+rtk pytest                      # Python tests (-90%)
+rtk phpt                        # PHP .phpt tests (run-tests.php, -99%)
+rtk go test                     # Go tests (NDJSON, -90%)
+rtk cargo test                  # Cargo tests (-90%)
+rtk rake test                   # Ruby minitest (-90%)
+rtk rspec                       # RSpec tests (JSON, -60%+)
+rtk err <cmd> [args...]         # Direct argv execution, errors/warnings only
+rtk test <cmd> [args...]        # Direct argv execution, failures only (-90%)
+rtk err --shell fish '<script>' # Explicit shell for shell-specific syntax
+```
+
+### Build & Lint
+```bash
+rtk lint                        # ESLint grouped by rule/file
+rtk lint biome                  # Supports other linters
+rtk sqlfluff lint               # SQL linting (JSON, -75%)
+rtk sqlfluff lint models/       # Lint a specific directory (pass path after `lint`)
+rtk tsc                         # TypeScript errors grouped by file
+rtk next build                  # Next.js build compact
+rtk prettier --check .          # Files needing formatting
+rtk cargo build                 # Cargo build (-80%)
+rtk cargo clippy                # Cargo clippy (-80%)
+rtk ruff check                  # Python linting (JSON, -80%)
+rtk golangci-lint run           # Go linting (JSON, -85%)
+rtk rubocop                     # Ruby linting (JSON, -60%+)
+rtk mvnd verify                 # Maven Daemon (same filters as rtk mvn)
+rtk sbt test                    # ScalaTest output (-90%)
+rtk sbt compile                 # Compilation errors only (-75%)
+rtk sbt run                     # Strip SBT preamble noise
+```
+
+### Package Managers
+```bash
+rtk pnpm list                   # Compact dependency tree
+rtk uv run pytest               # Preserve uv env, keep program output
+rtk pip list                    # Python packages (auto-detect uv)
+rtk pip outdated                # Outdated packages
+rtk bundle install              # Ruby gems (strip Using lines)
+rtk prisma generate             # Schema generation (no ASCII art)
+```
+
+### Runtimes
+```bash
+rtk bun install                  # Strip progress and version lines
+rtk bun test                     # Failures only (-90%)
+rtk bun build                    # Errors only when writing to disk, else passthrough
+rtk bunx tsc                     # Smart routing to tsc filter
+rtk deno test                    # Failures only (-90%)
+rtk deno lint                    # Strip download lines + tee recovery
+rtk deno check                   # Strip download lines + tee recovery
+```
+
+### AWS
+```bash
+rtk aws sts get-caller-identity # One-line identity
+rtk aws ec2 describe-instances  # Compact instance list
+rtk aws lambda list-functions   # Name/runtime/memory (strips secrets)
+rtk aws logs get-log-events     # Timestamped messages only
+rtk aws cloudformation describe-stack-events  # Failures first
+rtk aws dynamodb scan           # Unwraps type annotations
+rtk aws iam list-roles          # Strips policy documents
+rtk aws s3 ls                   # Truncated with recall recovery
+```
+
+### Containers
+```bash
+rtk docker ps                   # Compact container list
+rtk docker images               # Compact image list
+rtk docker logs <container>     # Deduplicated logs
+rtk docker compose ps           # Compose services
+rtk kubectl pods                # Compact pod list
+rtk kubectl logs <pod>          # Deduplicated logs
+rtk kubectl services            # Compact service list
+rtk oc get pods                 # OpenShift pod summary
+rtk oc get services             # OpenShift service list
+rtk oc logs <pod>               # Deduplicated logs
+```
+
+### Infrastructure as Code
+```bash
+rtk pulumi preview              # Strip header/URL/duration noise
+rtk pulumi up                   # Compact apply output
+rtk pulumi destroy              # Compact destroy output
+rtk pulumi refresh              # Drift summary
+rtk pulumi stack                # Stack metadata (strips owner/timestamps)
+```
+
+### Data & Analytics
+```bash
+rtk json config.json            # Structure without values
+rtk deps                        # Dependencies summary
+rtk env -f AWS                  # Filtered env vars
+rtk log app.log                 # Deduplicated logs
+rtk curl <url>                  # Truncate + save full output
+rtk wget <url>                  # Download, strip progress bars
+rtk summary <cmd> [args...]     # Direct argv execution + heuristic summary
+rtk run <cmd> [args...]         # Raw direct execution (no filtering/tracking)
+rtk run -c '<script>'           # Shell string via sh (cmd on Windows)
+rtk run --shell fish -c '<script>' # Explicit shell for shell-specific syntax
+rtk proxy <command>             # Raw passthrough + tracking
+```
+
+`rtk run`, `rtk err`, `rtk test`, and `rtk summary` preserve positional
+argument boundaries and do not expand globs, variables, or operators by
+default. Use `-c` with `rtk run`, or `--shell <name>` with the filtered
+wrappers, only when a command intentionally requires shell syntax. Pass an
+explicit shell script as one quoted argument; RTK does not infer the parser
+from `$SHELL` because the environment value may differ from the actual command
+executor.
+
+A program that cannot be run answers the way the shell used to: `127` with a
+`command not found` line, `126` for a path that exists but is a directory or is
+not executable.
+
+**Windows note.** The `cmd /C` string these commands used to build also
+searched the working directory and carried `cmd`'s builtins (`echo`, `dir`,
+`type`, `set`, `copy`, `del`, …). Direct execution resolves through `%PATH%`
+and `PATHEXT` only, so `rtk err dir`, `rtk summary echo hi`, and a tool sitting
+in the current directory now need the explicit form: `rtk run -c 'dir'`, or
+`rtk err --shell cmd 'echo hi'`. On Unix nothing equivalent is lost — `sh` does
+not search `.`, and `echo`, `test` and `pwd` all exist as real binaries. One
+more difference on both platforms: the child sees the resolved absolute path in
+`argv[0]` where the shell used to pass the spelling as typed, which matters
+only to multi-call binaries and to tools that print usage from `argv[0]`.
+
+### Token Savings Analytics
+```bash
+rtk gain                        # Summary stats
+rtk gain --graph                # ASCII graph (last 30 days)
+rtk gain --history              # Recent command history
+rtk gain --daily                # Day-by-day breakdown
+rtk gain --all --format json    # JSON export for dashboards
+
+rtk discover                    # Find missed savings opportunities
+rtk discover --all --since 7    # All projects, last 7 days
+
+rtk session                     # Show RTK adoption across recent sessions
+```
+
+## Global Flags
+
+```bash
+-u, --ultra-compact    # ASCII icons, inline format (further output reduction)
+-v, --verbose          # Increase verbosity (-v, -vv, -vvv)
+```
+
+## Examples
+
+**Directory listing:**
+```
+# ls -la (45 lines)                     # rtk ls (12 lines)
+drwxr-xr-x  15 user staff 480 ...       my-project/
+-rw-r--r--   1 user staff 1234 ...       +-- src/ (8 files)
+...                                      |   +-- main.rs
+                                         +-- Cargo.toml
+```
+
+**Git operations:**
+```
+# git push (15 lines)                    # rtk git push (1 line)
+Enumerating objects: 5, done.             ok main
+Counting objects: 100% (5/5), done.
+Delta compression using up to 8 threads
+...
+```
+
+**Test output:**
+```
+# cargo test (200+ lines on failure)     # rtk test cargo test (~20 lines)
+running 15 tests                          FAILED: 2/15 tests
+test utils::test_parse ... ok               test_edge_case: assertion failed
+test utils::test_format ... ok              test_overflow: panic at utils.rs:18
+...
+```
+
+## Auto-Rewrite Hook
+
+The most effective way to use rtk. The hook transparently intercepts Bash commands and rewrites them to rtk equivalents before execution.
+
+**Result**: 100% rtk adoption across all conversations and subagents, with no per-command context overhead.
+
+**Scope note:** this only applies to Bash tool calls. Claude Code built-in tools such as `Read`, `Grep`, and `Glob` bypass the hook, so use shell commands or explicit `rtk` commands when you want RTK filtering there.
+
+### Setup
+
+```bash
+rtk init -g                 # Install hook + RTK.md (recommended)
+rtk init -g --opencode      # OpenCode plugin (instead of Claude Code)
+rtk init -g --auto-patch    # Non-interactive (CI/CD)
+rtk init -g --hook-only     # Hook only, no RTK.md
+rtk init --show             # Verify installation
+```
+
+After install, **restart Claude Code**.
+
+By default `RTK.md` says nothing about RTK itself. Set `[awareness] level = "high"` in `config.toml` to let the agent know `rtk gain` / `rtk proxy`, or `"full"` for an agent without hook support (or not yet supported by RTK) so it prefixes `rtk` itself — see [Configuration](docs/guide/getting-started/configuration.md#awareness-level).
+
+## Windows
+
+RTK works fully on native Windows. Since **v0.37.2** the auto-rewrite hook runs as a **native binary command** (`rtk hook claude`) — no Unix shell, bash, or jq required — so commands are rewritten transparently on Command Prompt, PowerShell, and Windows Terminal, just like on Linux and macOS.
+
+### Native Windows (manual install)
+
+Prefer [`winget`](#winget-windows) if you can — it handles PATH for you.
+
+```powershell
+# 1. Download and extract rtk-x86_64-pc-windows-msvc.zip from releases
+# 2. Add rtk.exe to your PATH (e.g. C:\Users\<you>\.local\bin)
+# 3. Initialize — installs the native binary hook
+rtk init -g
+```
+
+**Upgrading from an older install?** If you set RTK up before v0.37.2 you may still have the legacy `rtk-rewrite.sh` shell hook (which does need a Unix shell). Re-run `rtk init -g` to migrate to the native binary hook.
+
+**Prerequisites**: some filters shell out to [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`). Install it and keep it on your PATH (e.g. `winget install BurntSushi.ripgrep.MSVC`) to avoid `Binary 'rg' not found on PATH` warnings.
+
+**Important**: Do not double-click `rtk.exe` — it is a CLI tool that prints usage and exits immediately. Always run it from a terminal (Command Prompt, PowerShell, or Windows Terminal).
+
+### WSL
+
+[WSL](https://learn.microsoft.com/en-us/windows/wsl/install) also works and behaves exactly like Linux:
+
+```bash
+# Inside WSL
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+rtk init -g
+```
+
+| Feature | Native Windows | WSL |
+|---------|----------------|-----|
+| Filters (cargo, git, etc.) | Full | Full |
+| Auto-rewrite hook | Yes (native binary) | Yes |
+| `rtk init -g` | Hook mode | Hook mode |
+| `rtk gain` / analytics | Full | Full |
+
 ## Supported AI Tools
 
 RTK supports 18 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents, reducing the bash output the agent reads where the agent supports command interception.
