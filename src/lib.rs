@@ -13,7 +13,7 @@ mod parser;
 use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git_cmd, glab_cmd, gt_cmd};
-use cmds::go::{go_cmd, golangci_cmd};
+use cmds::go::{go_cmd, golangci_cmd, govulncheck_cmd};
 use cmds::js::{
     bun_cmd, deno_cmd, lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd,
     prisma_cmd, tsc_cmd, vitest_cmd,
@@ -1021,6 +1021,13 @@ enum Commands {
     #[command(name = "golangci-lint")]
     GolangciLint {
         /// Additional golangci-lint arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// govulncheck with compact output (affected modules and call sites only)
+    Govulncheck {
+        /// govulncheck arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -3621,6 +3628,7 @@ fn run_cli() -> Result<i32> {
         },
 
         Commands::GolangciLint { args } => golangci_cmd::run(&args, cli.verbose)?,
+        Commands::Govulncheck { args } => govulncheck_cmd::run(&args, cli.verbose)?,
 
         Commands::Gradlew { args } => gradlew_cmd::run(&args, cli.verbose)?,
 
@@ -4083,6 +4091,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Mvnd { .. }
             | Commands::Sbt { .. }
             | Commands::GolangciLint { .. }
+            | Commands::Govulncheck { .. }
             | Commands::Gt { .. }
             | Commands::Bun { .. }
             | Commands::Bunx { .. }
@@ -4674,6 +4683,7 @@ mod tests {
             "go",
             "gt",
             "golangci-lint",
+            "govulncheck",
             "gradlew",
             "mvn",
             "mvnd",

@@ -570,6 +570,15 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 85.0,
         ..RtkRule::DEFAULT
     },
+    RtkRule {
+        pattern: r"^govulncheck(?:\s|$)",
+        rtk_cmd: "rtk govulncheck",
+        pipeline_safety: PipelineSafety::ProducerOnly,
+        rewrite_prefixes: &["govulncheck"],
+        category: "Go",
+        savings_pct: 75.0,
+        ..RtkRule::DEFAULT
+    },
     // Scala/SBT
     RtkRule {
         pattern: r#"^sbt\s+["']?(testOnly|testQuick|test|compile|run|clean|assembly|package)(?:[\s"']|$)"#,
