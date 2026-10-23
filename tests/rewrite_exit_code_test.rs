@@ -111,6 +111,8 @@ const CASES: &[(&str, i32)] = &[
     ("git log -1 && sh -c 'exit 9'", 9),
     ("git log --no-such-flag", 128),
     ("git diff --exit-code", 1),
+    ("git diff --no-index a.txt /dev/null", 1),
+    ("git diff --no-index a.txt a.txt", 0),
     ("git diff --exit-code HEAD && sh -c 'exit 7'", 1),
     ("git diff --cached --exit-code && sh -c 'exit 7'", 7),
     ("git show no-such-rev && sh -c 'exit 9'", 128),
