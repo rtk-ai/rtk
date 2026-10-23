@@ -37,14 +37,14 @@ pub fn run(cmd: ContainerCmd, args: &[String], verbose: u8) -> Result<i32> {
 
 fn run_k8s_json<F>(cmd: Command, tool: &str, label: &str, filter_fn: F) -> Result<i32>
 where
-    F: Fn(&Value) -> String,
+    F: Fn(&Value) -> Option<String>,
 {
     runner::run_filtered(
         cmd,
         tool,
         label,
         |stdout| match serde_json::from_str::<Value>(stdout) {
-            Ok(json) => filter_fn(&json),
+            Ok(json) => filter_fn(&json).unwrap_or_else(|| stdout.to_string()),
             Err(e) => {
                 eprintln!("[rtk] {}: JSON parse failed: {}", tool, e);
                 stdout.to_string()
@@ -372,10 +372,11 @@ pub fn k8s_pods(tool: &str, args: &[String], _verbose: u8) -> Result<i32> {
     run_k8s_json(cmd, tool, "get pods", format_kubectl_pods)
 }
 
-fn format_kubectl_pods(json: &Value) -> String {
-    let Some(pods) = json["items"].as_array().filter(|a| !a.is_empty()) else {
-        return "No pods found\n".to_string();
-    };
+fn format_kubectl_pods(json: &Value) -> Option<String> {
+    let pods = k8s_resource_list(json)?;
+    if pods.is_empty() {
+        return Some("No pods found\n".to_string());
+    }
     let (mut running, mut pending, mut failed, mut restarts_total) = (0, 0, 0, 0i64);
     let mut issues: Vec<String> = Vec::new();
 
@@ -448,7 +449,7 @@ fn format_kubectl_pods(json: &Value) -> String {
             }
         }
     }
-    out
+    Some(out)
 }
 
 pub fn k8s_services(tool: &str, args: &[String], _verbose: u8) -> Result<i32> {
@@ -460,10 +461,11 @@ pub fn k8s_services(tool: &str, args: &[String], _verbose: u8) -> Result<i32> {
     run_k8s_json(cmd, tool, "get services", format_kubectl_services)
 }
 
-fn format_kubectl_services(json: &Value) -> String {
-    let Some(services) = json["items"].as_array().filter(|a| !a.is_empty()) else {
-        return "No services found\n".to_string();
-    };
+fn format_kubectl_services(json: &Value) -> Option<String> {
+    let services = k8s_resource_list(json)?;
+    if services.is_empty() {
+        return Some("No services found\n".to_string());
+    }
     let mut out = format!("{} services:\n", services.len());
 
     let all_lines: Vec<String> = services
@@ -514,7 +516,26 @@ fn format_kubectl_services(json: &Value) -> String {
         }
         out.push('\n');
     }
-    out
+    Some(out)
+}
+
+/// Items of a `kubectl get -o json` reply, whichever shape it has.
+///
+/// A resource name on the command line answers with the object itself, not a
+/// `List`, so `rtk kubectl get pods web-5dc4d46d9f-hsrcf` saw no `items` and
+/// reported `No pods found` for a pod that exists (#4613). A one-element slice
+/// keeps both shapes on the same summary path.
+///
+/// `None` means the reply is neither shape; the caller then passes the raw
+/// output through instead of answering a question kubectl did not.
+fn k8s_resource_list(json: &Value) -> Option<&[Value]> {
+    if let Some(items) = json["items"].as_array() {
+        return Some(items);
+    }
+    json["metadata"]["name"]
+        .as_str()
+        .is_some()
+        .then(|| std::slice::from_ref(json))
 }
 
 pub fn k8s_logs(tool: &str, args: &[String], _verbose: u8) -> Result<i32> {
@@ -1053,7 +1074,7 @@ api-1  | Connected to database";
     fn test_oc_pods_savings() {
         let input_str = include_str!("../../../tests/fixtures/oc_pods.json");
         let input: Value = serde_json::from_str(input_str).expect("fixture should parse");
-        let output = format_kubectl_pods(&input);
+        let output = format_kubectl_pods(&input).expect("the fixture is a List");
         let input_tokens = input_str.split_whitespace().count();
         let output_tokens = output.split_whitespace().count();
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
@@ -1061,6 +1082,100 @@ api-1  | Connected to database";
             savings >= 60.0,
             "Expected >=60% savings, got {:.1}%",
             savings
+        );
+    }
+    // ── named resources (#4613) ───────────────────────────
+
+    #[test]
+    fn test_format_kubectl_pods_named_pod_is_reported() {
+        // `kubectl get pods -o json <name>` answers with the Pod itself: no `items`.
+        let pod = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": "web-5dc4d46d9f-hsrcf", "namespace": "default"},
+            "status": {
+                "phase": "Running",
+                "containerStatuses": [{"name": "web", "restartCount": 2}],
+            },
+        });
+
+        let out = format_kubectl_pods(&pod).expect("a named pod must produce a summary");
+
+        assert!(out.contains("1 pods"), "should count the named pod: {out}");
+        assert!(out.contains("2 restarts"), "should keep restarts: {out}");
+        assert!(
+            !out.contains("No pods found"),
+            "a present pod must not be reported as missing: {out}"
+        );
+        assert!(
+            !out.contains("web-5dc4d46d9f-hsrcf"),
+            "a running pod needs no issue line: {out}"
+        );
+    }
+
+    #[test]
+    fn test_format_kubectl_pods_named_pod_keeps_issue_line() {
+        let pod = serde_json::json!({
+            "kind": "Pod",
+            "metadata": {"name": "api-7c9f", "namespace": "prod"},
+            "status": {"phase": "Pending"},
+        });
+
+        let out = format_kubectl_pods(&pod).expect("a named pod must produce a summary");
+
+        assert!(out.contains("1 pending"), "should count it pending: {out}");
+        assert!(
+            out.contains("prod/api-7c9f Pending"),
+            "should name it: {out}"
+        );
+    }
+
+    #[test]
+    fn test_format_kubectl_pods_still_reports_an_empty_list() {
+        let empty = serde_json::json!({"kind": "List", "items": []});
+        assert_eq!(
+            format_kubectl_pods(&empty).as_deref(),
+            Some("No pods found\n")
+        );
+
+        // Neither a List nor a named object: pass kubectl's own output through
+        // rather than claiming there are no pods.
+        let not_a_pod = serde_json::json!({"kind": "Status", "status": "Failure"});
+        assert_eq!(format_kubectl_pods(&not_a_pod), None);
+    }
+
+    #[test]
+    fn test_format_kubectl_services_named_service_is_reported() {
+        let svc = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {"name": "kubernetes", "namespace": "default"},
+            "spec": {"type": "ClusterIP", "ports": [{"port": 443, "targetPort": 6443}]},
+        });
+
+        let out = format_kubectl_services(&svc).expect("a named service must produce a summary");
+
+        assert!(out.contains("1 services"), "should count it: {out}");
+        assert!(
+            out.contains("default/kubernetes ClusterIP [443→6443]"),
+            "should render the named service: {out}"
+        );
+        assert!(
+            !out.contains("No services found"),
+            "a present service must not be reported as missing: {out}"
+        );
+    }
+
+    #[test]
+    fn test_format_kubectl_services_still_reports_an_empty_list() {
+        let empty = serde_json::json!({"kind": "List", "items": []});
+        assert_eq!(
+            format_kubectl_services(&empty).as_deref(),
+            Some("No services found\n")
+        );
+        assert_eq!(
+            format_kubectl_services(&serde_json::json!({"kind": "Status"})),
+            None
         );
     }
 }
