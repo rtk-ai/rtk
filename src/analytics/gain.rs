@@ -658,6 +658,13 @@ pub fn run(
                 project_scope.as_deref(), // added: pass project scope
             );
         }
+        "jsonl" => {
+            return export_jsonl(
+                &tracker,
+                project_scope.as_deref(),
+                &mut std::io::BufWriter::new(std::io::stdout().lock()),
+            );
+        }
         "csv" => {
             return export_csv(
                 &tracker,
@@ -689,7 +696,7 @@ pub fn run(
 
     // Reported for every text view, including the empty one: with no hook
     // nothing is tracked, so a missing hook is the likeliest reason there is
-    // nothing to show. The JSON and CSV exports return earlier and stay clean.
+    // nothing to show. The JSON, JSONL and CSV exports return earlier and stay clean.
     warn_hook_issues();
 
     if summary.total_commands == 0 && proxy_summary.is_none() {
@@ -1603,6 +1610,24 @@ fn export_json(
     Ok(())
 }
 
+/// `--format jsonl`: one JSON object per tracked command, oldest first, so a
+/// script can read per-command sizes without opening the database.
+fn export_jsonl(
+    tracker: &Tracker,
+    project_scope: Option<&str>,
+    out: &mut impl std::io::Write,
+) -> Result<()> {
+    tracker
+        .for_each_history_record(project_scope, |record| {
+            serde_json::to_writer(&mut *out, &record)?;
+            out.write_all(b"\n")?;
+            Ok(())
+        })
+        .context("Failed to export command history")?;
+    out.flush()?;
+    Ok(())
+}
+
 fn export_csv(
     tracker: &Tracker,
     daily: bool,
@@ -1873,6 +1898,92 @@ mod tests {
             crate::core::tracking::split_pipeline_slice("plain-name"),
             None
         );
+    }
+
+    fn jsonl_lines(tracker: &Tracker) -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        export_jsonl(tracker, None, &mut out).expect("export");
+        String::from_utf8(out)
+            .expect("utf8")
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("each line is one JSON object"))
+            .collect()
+    }
+
+    #[test]
+    fn jsonl_writes_one_object_per_command_with_raw_counts() {
+        let tracker = Tracker::new_in_memory().expect("tracker");
+        tracker
+            .record("git status", "rtk git status", 400, 100, 7)
+            .expect("record");
+        tracker
+            .record("cat big.log", "rtk read /var/log/big.log", 2_000_000, 50, 3)
+            .expect("record");
+        tracker.record("ls", "rtk ls", 10, 30, 1).expect("record");
+
+        let lines = jsonl_lines(&tracker);
+        assert_eq!(lines.len(), 3);
+
+        let keys: Vec<&str> = lines[0]
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "timestamp",
+                "command",
+                "input_tokens",
+                "output_tokens",
+                "saved_tokens",
+                "savings_pct",
+                "exec_time_ms",
+                "oversized"
+            ]
+        );
+        assert_eq!(lines[0]["command"], "rtk git status");
+        assert_eq!(lines[0]["input_tokens"], 400);
+        assert_eq!(lines[0]["output_tokens"], 100);
+        assert_eq!(lines[0]["saved_tokens"], 300);
+        assert_eq!(lines[0]["savings_pct"], 75.0);
+        assert_eq!(lines[0]["exec_time_ms"], 7);
+        assert_eq!(lines[0]["oversized"], false);
+        assert!(lines[0]["timestamp"].is_string());
+
+        assert_eq!(lines[1]["command"], "rtk read", "no path in the export");
+        assert_eq!(lines[1]["input_tokens"], 2_000_000);
+        assert_eq!(lines[1]["oversized"], true);
+
+        assert_eq!(lines[2]["saved_tokens"], -20);
+        assert_eq!(lines[2]["savings_pct"], -200.0);
+    }
+
+    #[test]
+    fn jsonl_exports_the_whole_history_not_a_recent_page() {
+        let tracker = Tracker::new_in_memory().expect("tracker");
+        for i in 0..25 {
+            tracker
+                .record("ls", &format!("rtk ls dir{i}"), 100, 10, 1)
+                .expect("record");
+        }
+        assert_eq!(jsonl_lines(&tracker).len(), 25);
+    }
+
+    #[test]
+    fn jsonl_keeps_one_line_per_command_whatever_the_command_holds() {
+        let tracker = Tracker::new_in_memory().expect("tracker");
+        tracker
+            .record("x", "rtk\u{7}\"tool\"\\ a\nb\r\u{2028}c", 10, 5, 1)
+            .expect("record");
+        assert_eq!(jsonl_lines(&tracker).len(), 1);
+    }
+
+    #[test]
+    fn jsonl_of_an_empty_history_is_empty() {
+        let tracker = Tracker::new_in_memory().expect("tracker");
+        assert!(jsonl_lines(&tracker).is_empty());
     }
 
     #[test]

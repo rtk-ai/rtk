@@ -1115,6 +1115,7 @@ rtk gain --quota -t pro         # Estimate of bash output saved against the mont
 rtk gain --failures             # Parsing failure log (commands that fell back)
 rtk gain --format json          # JSON export (for dashboards)
 rtk gain --format csv           # CSV export
+rtk gain -H --format jsonl      # One JSON line per tracked command
 ```
 
 **Options:**
@@ -1130,7 +1131,7 @@ rtk gain --format csv           # CSV export
 | `--weekly` | `-w` | Weekly breakdown |
 | `--monthly` | `-m` | Monthly breakdown |
 | `--all` | `-a` | All breakdowns |
-| `--format` | `-f` | Output format: `text`, `json`, `csv` |
+| `--format` | `-f` | Output format: `text`, `json`, `jsonl`, `csv` |
 | `--failures` | `-F` | Show commands that fell back |
 
 **Example output (illustrative values):**
