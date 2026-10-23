@@ -276,8 +276,10 @@ jobs:
       # `--error` alone fails on any finding at any severity, so the rules
       # below .semgrep.yml's "non-blocking, flag for review" divider would block too.
       # Gate on ERROR; report WARNING without failing, as that divider promises.
-      - run: semgrep scan --config .semgrep.yml --baseline-commit ${{ github.event.pull_request.base.sha }} --severity ERROR --error
-      - run: semgrep scan --config .semgrep.yml --baseline-commit ${{ github.event.pull_request.base.sha }} --severity WARNING || true
+      # Checkout scans the PR merge. Its first parent is the base actually
+      # included in that tree; the event's base SHA can predate it.
+      - run: semgrep scan --config .semgrep.yml --baseline-commit HEAD^1 --severity ERROR --error
+      - run: semgrep scan --config .semgrep.yml --baseline-commit HEAD^1 --severity WARNING || true
 
   benchmark:
     name: benchmark
