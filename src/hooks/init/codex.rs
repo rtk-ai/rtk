@@ -1238,14 +1238,22 @@ mod tests {
     fn test_patch_codex_hooks_is_idempotent_and_preserves_existing_hooks() {
         let temp = TempDir::new().unwrap();
         let hooks_json = temp.path().join(HOOKS_JSON);
+        let user_hook = serde_json::json!({
+            "type": "command",
+            "command": "audit;/usr/local/bin/rtk hook codex",
+            "timeout": 11,
+            "metadata": { "owner": "user", "labels": ["keep"] }
+        });
+        let user_group = serde_json::json!({
+            "matcher": "Bash",
+            "description": "user group",
+            "hooks": [user_hook.clone()]
+        });
         fs::write(
             &hooks_json,
             serde_json::to_string_pretty(&serde_json::json!({
                 "hooks": {
-                    "PreToolUse": [{
-                        "matcher": "Bash",
-                        "hooks": [{ "type": "command", "command": "echo existing" }]
-                    }],
+                    "PreToolUse": [user_group.clone()],
                     "Stop": [{
                         "hooks": [{ "type": "command", "command": "echo stop" }]
                     }]
@@ -1262,12 +1270,23 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&hooks_json).unwrap()).unwrap();
         assert!(codex_hook_already_present(&root));
         assert_eq!(root["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
-        assert_eq!(
-            root["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
-            "echo existing"
-        );
+        assert_eq!(root["hooks"]["PreToolUse"][0], user_group,);
         assert_eq!(root["hooks"]["Stop"][0]["hooks"][0]["command"], "echo stop");
         assert!(hooks_json.with_extension("json.bak").exists());
+
+        assert!(remove_codex_hook_from_file(&hooks_json, InitContext::default()).unwrap());
+        let after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&hooks_json).unwrap()).unwrap();
+        assert!(!codex_hook_already_present(&after));
+        assert_eq!(
+            after["hooks"]["PreToolUse"].as_array().unwrap(),
+            std::slice::from_ref(&user_group)
+        );
+        assert_eq!(
+            after["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "echo stop"
+        );
+        assert_eq!(after["hooks"]["PreToolUse"][0]["hooks"][0], user_hook);
     }
 
     #[test]
