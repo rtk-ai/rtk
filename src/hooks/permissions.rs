@@ -31,6 +31,25 @@ pub enum PermissionVerdict {
     Defer,
 }
 
+/// The verdict and attestation already evaluated for this exact command.
+///
+/// Deny and shell-wrapper verdicts can return before the attestation branch.
+/// Keep that fact unknown, not false, until a caller needs it.
+pub(crate) struct PermissionCheck<'a> {
+    pub(crate) verdict: PermissionVerdict,
+    command: &'a str,
+    unattestable: Option<bool>,
+}
+
+impl PermissionCheck<'_> {
+    pub(crate) fn contains_unattestable_construct(&mut self) -> bool {
+        let command = self.command;
+        *self
+            .unattestable
+            .get_or_insert_with(|| crate::discover::lexer::contains_unattestable_construct(command))
+    }
+}
+
 /// Check `cmd` against Claude Code's deny/ask/allow permission rules.
 ///
 /// Precedence: Deny > Defer > Ask > Allow > Default (ask).
@@ -117,6 +136,30 @@ pub(crate) fn check_command_with_rules_and_prefixes(
     allow_rules: &[String],
     transparent_prefixes: &[String],
 ) -> PermissionVerdict {
+    check_command_with_details(
+        cmd,
+        deny_rules,
+        ask_rules,
+        allow_rules,
+        transparent_prefixes,
+    )
+    .verdict
+}
+
+/// Keep the attestation with the verdict so bulk callers need not scan twice.
+/// Verdict-only callers retain their existing API and short-circuit order.
+pub(crate) fn check_command_with_details<'a>(
+    cmd: &'a str,
+    deny_rules: &[String],
+    ask_rules: &[String],
+    allow_rules: &[String],
+    transparent_prefixes: &[String],
+) -> PermissionCheck<'a> {
+    let checked = |verdict, unattestable| PermissionCheck {
+        verdict,
+        command: cmd,
+        unattestable,
+    };
     let segments = split_compound_command(cmd);
     // Each segment read every way a deny or ask rule may name it, once: as
     // written, then without the grammar a split leaves behind (`{`, `!`,
@@ -150,7 +193,7 @@ pub(crate) fn check_command_with_rules_and_prefixes(
             .iter()
             .any(|pattern| matches_any(segment, peeled, pattern))
         {
-            return PermissionVerdict::Deny;
+            return checked(PermissionVerdict::Deny, None);
         }
     }
 
@@ -160,12 +203,12 @@ pub(crate) fn check_command_with_rules_and_prefixes(
     if let Some(verdict) =
         check_shell_wrapper_permissions(&wrapper_segments, deny_rules, &transparent_prefixes)
     {
-        return verdict;
+        return checked(verdict, None);
     }
 
     // Can't decompose substitution / file-target redirects — never auto-allow.
     if crate::discover::lexer::contains_unattestable_construct(cmd) {
-        return PermissionVerdict::Ask;
+        return checked(PermissionVerdict::Ask, Some(true));
     }
 
     let mut any_ask = false;
@@ -205,13 +248,14 @@ pub(crate) fn check_command_with_rules_and_prefixes(
 
     // Precedence: Deny > Defer > Ask > Allow > Default (ask).
     // Allow requires (1) at least one segment seen, (2) all segments matched, (3) non-empty rules.
-    if any_ask {
+    let verdict = if any_ask {
         PermissionVerdict::Ask
     } else if saw_segment && all_segments_allowed && !allow_rules.is_empty() {
         PermissionVerdict::Allow
     } else {
         PermissionVerdict::Default
-    }
+    };
+    checked(verdict, Some(false))
 }
 
 fn check_shell_wrapper_permissions(
@@ -672,6 +716,92 @@ fn split_compound_command(cmd: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_permission_details_reuse_the_evaluated_attestation() {
+        use crate::discover::lexer::attestation_check_count;
+
+        for (command, ask, allow, expected, unattestable) in [
+            (
+                "git status",
+                vec![],
+                vec![],
+                PermissionVerdict::Default,
+                false,
+            ),
+            (
+                "git status",
+                vec!["git *".to_string()],
+                vec![],
+                PermissionVerdict::Ask,
+                false,
+            ),
+            (
+                "git status",
+                vec![],
+                vec!["git *".to_string()],
+                PermissionVerdict::Allow,
+                false,
+            ),
+            (
+                "git status $(printf x)",
+                vec![],
+                vec!["*".to_string()],
+                PermissionVerdict::Ask,
+                true,
+            ),
+        ] {
+            let before = attestation_check_count();
+            let mut check = check_command_with_details(command, &[], &ask, &allow, &[]);
+            assert_eq!(check.verdict, expected, "{command}");
+            assert_eq!(check.unattestable, Some(unattestable));
+            assert_eq!(attestation_check_count() - before, 1);
+            assert_eq!(check.contains_unattestable_construct(), unattestable);
+            assert_eq!(check.contains_unattestable_construct(), unattestable);
+            assert_eq!(attestation_check_count() - before, 1);
+        }
+    }
+
+    #[test]
+    fn test_permission_details_scan_early_verdicts_only_when_requested() {
+        use crate::discover::lexer::attestation_check_count;
+
+        for (command, deny, expected, unattestable) in [
+            (
+                "bash -c 'git status'",
+                vec![],
+                PermissionVerdict::Ask,
+                false,
+            ),
+            (
+                "bash -c 'git status' $(printf x)",
+                vec![],
+                PermissionVerdict::Ask,
+                true,
+            ),
+            (
+                "git status $(printf x)",
+                vec!["git *".to_string()],
+                PermissionVerdict::Deny,
+                true,
+            ),
+            (
+                "bash -c 'git push'",
+                vec!["git push".to_string()],
+                PermissionVerdict::Defer,
+                false,
+            ),
+        ] {
+            let before = attestation_check_count();
+            let mut check = check_command_with_details(command, &deny, &[], &[], &[]);
+            assert_eq!(check.verdict, expected, "{command}");
+            assert_eq!(check.unattestable, None);
+            assert_eq!(attestation_check_count(), before);
+            assert_eq!(check.contains_unattestable_construct(), unattestable);
+            assert_eq!(check.contains_unattestable_construct(), unattestable);
+            assert_eq!(attestation_check_count() - before, 1);
+        }
+    }
 
     #[test]
     fn test_get_settings_paths_uses_the_resolved_claude_dir() {

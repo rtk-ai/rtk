@@ -74,7 +74,7 @@ struct PermissionRules {
 /// precompiled once here instead of inside `rewrite_command` on every call — that
 /// recompilation is exactly the "recompute per command instead of once per run"
 /// class of cost this PR's `PermissionRules`/`hook_status` caching already fixed
-/// elsewhere, left as a hot-loop cost in `estimate_hook_coverage_with_verdict`'s
+/// elsewhere, left as a hot-loop cost in `estimate_hook_coverage`'s
 /// `registry::rewrite_command` call until now (code-review finding on rtk-ai/rtk#3206's
 /// second fixup round).
 struct CoverageContext {
@@ -164,31 +164,19 @@ fn estimate_hook_coverage(permission_cmd: &str, rewrite_cmd: &str, ctx: &Coverag
     if !ctx.hook_installed {
         return false;
     }
-    let verdict = permissions::check_command_with_rules_and_prefixes(
+    let mut check = permissions::check_command_with_details(
         permission_cmd,
         &ctx.rules.deny,
         &ctx.rules.ask,
         &ctx.rules.allow,
         &ctx.normalized_transparent_prefixes,
     );
-    estimate_hook_coverage_with_verdict(permission_cmd, rewrite_cmd, verdict, ctx)
-}
-
-/// Pure core of `estimate_hook_coverage`, taking the permission verdict directly so
-/// it's testable without depending on real config files. Mirrors the real hook's own
-/// decision order (`hooks::decision::decide`): a `Deny`-rule match or an
-/// unattestable construct means the hook would never have rewritten this, regardless
-/// of registry support. See `estimate_hook_coverage` for why `permission_cmd` and
-/// `rewrite_cmd` can differ.
-fn estimate_hook_coverage_with_verdict(
-    permission_cmd: &str,
-    rewrite_cmd: &str,
-    verdict: PermissionVerdict,
-    ctx: &CoverageContext,
-) -> bool {
-    ctx.hook_installed
-        && !matches!(verdict, PermissionVerdict::Deny | PermissionVerdict::Defer)
-        && !lexer::contains_unattestable_construct(permission_cmd)
+    // Mirror the hook's deny/defer/attestation order, reusing the permission
+    // scan. A wrapper Ask may not have reached that scan yet.
+    !matches!(
+        check.verdict,
+        PermissionVerdict::Deny | PermissionVerdict::Defer
+    ) && !check.contains_unattestable_construct()
         && registry::rewrite_command_precompiled(
             rewrite_cmd,
             &ctx.exclude_patterns,
@@ -729,47 +717,108 @@ mod tests {
     }
 
     #[test]
+    fn test_estimate_hook_coverage_scans_attestation_once() {
+        for (ask, allow) in [
+            (vec![], vec![]),
+            (vec!["git *".to_string()], vec![]),
+            (vec![], vec!["git *".to_string()]),
+        ] {
+            let mut ctx = test_ctx(true);
+            ctx.rules.ask = ask;
+            ctx.rules.allow = allow;
+            let before = lexer::attestation_check_count();
+            assert!(estimate_hook_coverage("git status", "git status", &ctx));
+            let checks = lexer::attestation_check_count() - before;
+            assert_eq!(
+                checks, 1,
+                "coverage must reuse the permission check's attestation"
+            );
+        }
+    }
+
+    #[test]
+    fn test_estimate_hook_coverage_short_circuits_before_attestation() {
+        let mut ctx = test_ctx(false);
+        let before = lexer::attestation_check_count();
+        assert!(!estimate_hook_coverage("git status", "git status", &ctx));
+        assert_eq!(lexer::attestation_check_count(), before);
+
+        ctx.hook_installed = true;
+        ctx.rules.deny = vec!["git *".to_string()];
+        assert!(!estimate_hook_coverage("git status", "git status", &ctx));
+        assert_eq!(lexer::attestation_check_count(), before);
+
+        ctx.rules.deny = vec!["git push".to_string()];
+        assert!(!estimate_hook_coverage(
+            "bash -c 'git push'",
+            "bash -c 'git push'",
+            &ctx,
+        ));
+        assert_eq!(lexer::attestation_check_count(), before);
+    }
+
+    #[test]
+    fn test_estimate_hook_coverage_attests_early_wrapper_ask() {
+        for (command, rewrite, expected) in [
+            (
+                "bash -c 'printf x' > /tmp/rtk-3650-not-executed && git status",
+                "git status",
+                false,
+            ),
+            ("bash -c 'git status'", "bash -c 'git status'", true),
+            ("bash -c 'git status' $(printf x)", "git status", false),
+            ("bash -c 'printf x' && git status", "git status", true),
+        ] {
+            let before = lexer::attestation_check_count();
+            assert_eq!(
+                estimate_hook_coverage(command, rewrite, &test_ctx(true)),
+                expected,
+                "{command}"
+            );
+            assert_eq!(
+                lexer::attestation_check_count() - before,
+                1,
+                "a wrapper Ask returns before permission attestation: {command}"
+            );
+        }
+    }
+
+    #[test]
     fn test_estimate_hook_coverage_false_when_hook_not_installed() {
         // No hook installed → the raw command genuinely ran unfiltered; still a miss.
-        assert!(!estimate_hook_coverage_with_verdict(
+        assert!(!estimate_hook_coverage(
             "grep -n foo bar.py",
             "grep -n foo bar.py",
-            PermissionVerdict::Default,
             &test_ctx(false),
         ));
     }
 
     #[test]
     fn test_estimate_hook_coverage_false_for_deferred_wrapper() {
-        assert!(!estimate_hook_coverage_with_verdict(
+        let mut ctx = test_ctx(true);
+        ctx.rules.deny = vec!["git push".to_string()];
+        assert!(!estimate_hook_coverage(
             "env bash -c 'git push'",
             "env bash -c 'git push'",
-            PermissionVerdict::Defer,
-            &test_ctx(true),
+            &ctx,
         ));
-        assert!(estimate_hook_coverage_with_verdict(
+        assert!(estimate_hook_coverage(
             "env bash -c 'git push'",
             "env bash -c 'git push'",
-            PermissionVerdict::Ask,
             &test_ctx(true),
         ));
     }
 
     #[test]
     fn test_estimate_hook_coverage_true_for_rewritable_command() {
-        let ctx = test_ctx(true);
-        assert!(estimate_hook_coverage_with_verdict(
+        let mut ctx = test_ctx(true);
+        assert!(estimate_hook_coverage(
             "grep -n foo bar.py",
             "grep -n foo bar.py",
-            PermissionVerdict::Default,
             &ctx,
         ));
-        assert!(estimate_hook_coverage_with_verdict(
-            "ls -la",
-            "ls -la",
-            PermissionVerdict::Allow,
-            &ctx,
-        ));
+        ctx.rules.allow = vec!["ls *".to_string()];
+        assert!(estimate_hook_coverage("ls -la", "ls -la", &ctx));
     }
 
     #[test]
@@ -856,10 +905,9 @@ mod tests {
     fn test_estimate_hook_coverage_false_for_unattestable_construct() {
         // The hook itself defers on unattestable constructs (substitutions, etc.),
         // so a command containing one was never actually rewritten — genuine miss.
-        assert!(!estimate_hook_coverage_with_verdict(
+        assert!(!estimate_hook_coverage(
             "git status $(rm -rf /tmp/x)",
             "git status $(rm -rf /tmp/x)",
-            PermissionVerdict::Default,
             &test_ctx(true),
         ));
     }
@@ -870,10 +918,9 @@ mod tests {
         // was never rewritten — the hook stepped aside, so it's a genuine miss.
         let mut ctx = test_ctx(true);
         ctx.exclude_patterns = registry::compile_exclude_patterns(&["grep".to_string()]);
-        assert!(!estimate_hook_coverage_with_verdict(
+        assert!(!estimate_hook_coverage(
             "grep -n foo bar.py",
             "grep -n foo bar.py",
-            PermissionVerdict::Default,
             &ctx,
         ));
     }
@@ -883,12 +930,9 @@ mod tests {
         // A command matching a permissions.deny rule is never auto-rewritten by the
         // real hook (it defers to Claude Code's native deny handling) — counting it
         // as covered would over-count savings for commands the hook actually denied.
-        assert!(!estimate_hook_coverage_with_verdict(
-            "rm -rf /",
-            "rm -rf /",
-            PermissionVerdict::Deny,
-            &test_ctx(true),
-        ));
+        let mut ctx = test_ctx(true);
+        ctx.rules.deny = vec!["rm *".to_string()];
+        assert!(!estimate_hook_coverage("rm -rf /", "rm -rf /", &ctx));
     }
 
     #[test]
