@@ -2510,16 +2510,8 @@ fn run_cli() -> Result<i32> {
     };
 
     // Warn if installed hook is outdated/missing (1/day, non-blocking).
-    // Skip for Gain (shows its own inline warning), Init/Verify (manage the
-    // hook themselves), and Hook: its stderr lands in the agent's hook
-    // stream, and the parse behind the check has no place on the hook path.
-    if !matches!(
-        cli.command,
-        Commands::Gain(..)
-            | Commands::Init { .. }
-            | Commands::Verify { .. }
-            | Commands::Hook { .. }
-    ) {
+    // A meta command must leave the daily marker for the next filtered command.
+    if !skips_hook_reminder(&cli.command) {
         hooks::hook_check::maybe_warn();
     }
 
@@ -4006,6 +3998,25 @@ fn run_cli() -> Result<i32> {
     Ok(code)
 }
 
+fn skips_hook_reminder(cmd: &Commands) -> bool {
+    matches!(
+        cmd,
+        Commands::Gain(..)
+            | Commands::Init { .. }
+            | Commands::Verify { .. }
+            | Commands::Hook { .. }
+            | Commands::Config { .. }
+            | Commands::Trust { .. }
+            | Commands::Untrust
+            | Commands::HookAudit { .. }
+            | Commands::Discover { .. }
+            | Commands::Session { .. }
+            | Commands::CcEconomics { .. }
+            | Commands::Telemetry { .. }
+            | Commands::Learn { .. }
+    )
+}
+
 /// Returns true for commands that are invoked via the hook pipeline
 /// (i.e., commands that process rewritten shell commands).
 /// Meta commands (init, gain, verify, etc.) are excluded because
@@ -4577,6 +4588,38 @@ mod tests {
                 Commands::Gain(gain) => assert!(gain.failures),
                 _ => panic!("Expected Gain command"),
             }
+        }
+    }
+
+    #[test]
+    fn test_meta_commands_skip_hook_reminder() {
+        for args in [
+            vec!["gain"],
+            vec!["init", "--show"],
+            vec!["verify"],
+            vec!["hook", "claude"],
+            vec!["config"],
+            vec!["trust"],
+            vec!["untrust"],
+            vec!["hook-audit"],
+            vec!["discover"],
+            vec!["session"],
+            vec!["cc-economics"],
+            vec!["telemetry", "status"],
+            vec!["learn"],
+        ] {
+            let cli = Cli::try_parse_from(std::iter::once("rtk").chain(args.iter().copied()))
+                .unwrap_or_else(|e| panic!("failed to parse {args:?}: {e}"));
+            assert!(skips_hook_reminder(&cli.command), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn test_operational_commands_show_hook_reminder() {
+        for args in [vec!["ls"], vec!["git", "status"], vec!["jest"], vec!["wc"]] {
+            let cli = Cli::try_parse_from(std::iter::once("rtk").chain(args.iter().copied()))
+                .unwrap_or_else(|e| panic!("failed to parse {args:?}: {e}"));
+            assert!(!skips_hook_reminder(&cli.command), "{args:?}");
         }
     }
 
