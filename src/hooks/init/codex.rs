@@ -496,7 +496,10 @@ fn codex_uninstall_report(
     unchecked_hook: Option<&anyhow::Error>,
     dry_run: bool,
 ) -> String {
-    let mut report = if removed.is_empty() {
+    let mut report = if removed.is_empty() && unchecked_hook.is_some() {
+        // The hook was not looked at, so "not installed" would be a guess.
+        "RTK removed nothing for Codex CLI".to_string()
+    } else if removed.is_empty() {
         "RTK was not installed for Codex CLI (nothing to remove)".to_string()
     } else {
         let header = if dry_run {
@@ -2102,10 +2105,21 @@ mod tests {
             assert!(line.starts_with("    "), "unindented reason: {guarded}");
         }
 
-        // And it is still said when there was nothing else to report.
+        // And it is still said when there was nothing else to report, without first
+        // claiming RTK was not installed: the hook it did not check may be.
         let nothing = codex_uninstall_report(&[], Some(&error), false);
-        assert!(nothing.contains("nothing to remove"), "{nothing}");
+        assert!(
+            nothing.starts_with("RTK removed nothing for Codex CLI\n"),
+            "{nothing}"
+        );
+        assert!(!nothing.contains("not installed"), "{nothing}");
         assert!(nothing.contains("Not checked"), "{nothing}");
+
+        let absent = codex_uninstall_report(&[], None, false);
+        assert_eq!(
+            absent,
+            "RTK was not installed for Codex CLI (nothing to remove)"
+        );
     }
 
     /// The containment walk only protects anything if `run_codex_mode` still calls it, for
