@@ -45,6 +45,7 @@ The integrity system prevents unauthorized hook modifications:
 1. At install: `integrity::store_hash()` computes SHA-256 of the hook file, writes to `~/.claude/hooks/.rtk-hook.sha256` (read-only 0o444)
 2. At runtime: `integrity::runtime_check()` re-computes hash and compares; blocks execution if tampered
 3. On demand: `rtk verify` prints detailed verification status (PASS/FAIL/WARN/SKIP)
+4. At install and on `rtk verify`: a `Bash(rtk:*)`-style allow rule in a settings file is reported on stderr, because it grants every command rtk filters, not just rtk's own subcommands
 
 Five integrity states:
 - **Verified**: Hash matches stored value
