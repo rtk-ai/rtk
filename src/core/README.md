@@ -39,21 +39,43 @@ strips comments using the per-language delimiters in
 `Language::comment_patterns()`.
 
 Python does not use that walk. It has no block comments — `"""` opens a
-*string*, which may be a docstring or an ordinary value — so it gets a
-string-aware path that removes `#` comments and leaves string contents alone.
-Matching `"""` as a block delimiter misread both of these:
+*string*, which may be a docstring or an ordinary value — so it gets its own
+scanner. The scanner follows string literals and the replacement fields of
+f-strings and t-strings from line to line, splitting lines where Python does
+(`\n`, `\r\n` or a lone `\r`), and removes whole-line `#` comments outside them.
+In a file Python can parse it never drops a line inside a string, blank ones
+included. Outside strings, runs of blank lines are cut to one and blank lines at
+the start and end are removed, and the first kept line keeps its indentation. A
+UTF-8 byte order mark is not stripped first, so line 1 of a file that starts
+with one is always kept as code (#4273).
+
+Some lines that start with `#` carry meaning and are kept:
+
+- a `#!` at the very start of the file;
+- an encoding declaration where Python reads one: line 1, or line 2 after a
+  blank or comment line that declares none. If it moves up to the first line
+  and starts with `#!`, a blank line stays in front of it, so it does not
+  become a shebang the file never had;
+- a comment line that ends a backslash continuation, so the continuation never
+  joins onto the next statement. A file that ends with a continuation keeps the
+  blank line after it, which Python needs.
+
+Matching `"""` as a block delimiter misread the two cases below:
 
 ```python
-QUERY = """          # contains """ without starting with it
+QUERY = """          # contains the delimiter without starting with it
 SELECT 1
 """
 
 """Module doc."""    # opens and closes on one line
 ```
 
-Docstrings are kept at `minimal`. `aggressive` has no string awareness: it
-keeps a line inside a string when that line looks like an import or a
-signature.
+A file Python cannot parse, such as one being edited, is followed only as far
+as the scan can track it; nothing is promised past the point where it breaks.
+
+Docstrings are kept at `minimal`. `aggressive` runs the minimal pass first and
+adds no string awareness of its own: a line inside a string then goes through
+its code heuristics like any other line.
 
 ## Tracking Database Schema
 
