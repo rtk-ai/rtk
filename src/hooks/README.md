@@ -98,7 +98,7 @@ them.
 | Deny | `permissions.deny` rule matched | 2 | Passthrough — host tool handles denial |
 | Ask | `permissions.ask` rule matched | 3 | Rewrite + let host tool prompt user |
 | Allow | `permissions.allow` rule matched | 0 | Rewrite + auto-allow |
-| Default | No rule matched | 3 | Rewrite + let host tool prompt user |
+| Default | No rule matched, or `permissions.allow` rules do not cover every command of a chain | 3 | Rewrite + let host tool prompt user |
 | Defer | `permissions.deny` rule matched inside a shell wrapper | 1 | Passthrough — command runs as without RTK |
 
 A deny or ask rule is matched against each segment as written, without the grammar a split leaves (`{`, `!`, `(`), and past each leading assignment or wrapper in turn (`registry::matching_readings`): `env HUSKY=0 git push` is read as `HUSKY=0 git push` and as `git push`, as Claude Code reads it. A reading need not be what the shell runs (`nohup HUSKY=0 git push` makes nohup look for a program named `HUSKY=0`), so it can only make a verdict stricter. Past 32 prefixes the command behind them is unread, and where a deny or ask rule exists the verdict is at least Ask. An allow rule matches the segment as written only, so a wrapper never inherits the allow of the command it runs.
@@ -107,8 +107,10 @@ A delegate that shells out to `rtk rewrite` and applies its own exec policy to
 the result can set `RTK_REWRITE_HOST=<agent>` on that subprocess. For an agent
 whose `AgentPath` records it as owning approval — OpenClaw is the only one —
 `Default` renders as exit 0 instead of 3, because a `Default` verdict means no
-rule matched and RTK asking as well would be a second gate sourced from Claude
-Code's settings the runtime never opted into (#3908). An explicit `Ask` rule is
+rule matched, or the allow rules cover only some commands of a chain, and RTK
+asking as well would be a second gate sourced from Claude Code's settings the
+runtime never opted into (#3908). With only `Bash(cargo test)` allowed,
+`cargo test && git log` is a `Default` too. An explicit `Ask` rule is
 the user's own instruction, so it still renders as exit 3 and the host still
 prompts. The verdict source is unchanged, and `Deny` still renders as exit 2 for
 every delegate, so naming a host can never relax an explicit deny or discard an
@@ -129,7 +131,7 @@ rewrite`, since it is inherited by every child process. See `decision.rs`'s
 | Codex (`rtk hook codex`) | Native approval runs after rewrite | Emit required protocol `allow` with `updatedInput`; Codex then evaluates the rewritten command normally |
 | Trae (`rtk hook trae`) | Host-owned approval | Return only `updatedInput`; omit `permissionDecision` |
 | Mistral Vibe (rtk hook vibe) | No native ask surface | passthrough — Vibe's own approval prompt fires on the rewritten command |
-| OpenClaw (`openclaw/index.ts` → `rtk rewrite`) | Host-owned approval (`RTK_REWRITE_HOST=openclaw`) | Rewrite with no RTK prompt when no rule matched; an explicit `Ask` still exits 3 and the plugin prompts. OpenClaw's `tools.exec.mode`/`security`/`ask` decide. A `Deny` still exits 2 and the plugin blocks the call |
+| OpenClaw (`openclaw/index.ts` → `rtk rewrite`) | Host-owned approval (`RTK_REWRITE_HOST=openclaw`) | Rewrite with no RTK prompt on a default ask (no rule matched, or allow rules cover only part of a chain); an explicit `Ask` still exits 3 and the plugin prompts. OpenClaw's `tools.exec.mode`/`security`/`ask` decide. A `Deny` still exits 2 and the plugin blocks the call |
 | Google Antigravity (rtk hook antigravity) | Native approval runs after rewrite | allow with overwrite.CommandLine — Antigravity evaluates permissions after hook |
 
 ### Implementation
