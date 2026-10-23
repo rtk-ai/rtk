@@ -1,0 +1,55 @@
+{
+  "config": {},
+  "stats": {
+    "expected": 0,
+    "unexpected": 1,
+    "skipped": 0,
+    "flaky": 0,
+    "duration": 14
+  },
+  "suites": [
+    {
+      "title": "sample.spec.ts",
+      "file": "tests/sample.spec.ts",
+      "line": 1,
+      "column": 1,
+      "specs": [
+        {
+          "title": "timed-out scenario",
+          "ok": false,
+          "location": {
+            "file": "tests/sample.spec.ts",
+            "line": 3,
+            "column": 1
+          },
+          "tests": [
+            {
+              "projectId": "chromium",
+              "status": "unexpected",
+              "results": [
+                {
+                  "status": "timedOut",
+                  "retry": 0,
+                  "errors": [
+                    {
+                      "message": "Test timeout of 30000ms exceeded",
+                      "stack": "at sample.spec.ts:12:5"
+                    }
+                  ],
+                  "attachments": [
+                    {
+                      "name": "trace",
+                      "contentType": "application/zip",
+                      "path": "test-results/timeout/trace.zip"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "suites": []
+    }
+  ]
+}
