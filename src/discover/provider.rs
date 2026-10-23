@@ -29,23 +29,61 @@ pub struct ExtractedCommand {
     pub sequence_index: usize,
 }
 
+/// A provider-neutral handle to one session. Claude Code stores each session as
+/// a JSONL file; OpenCode stores sessions as rows in a single SQLite database,
+/// so a path alone cannot name a session across providers.
+#[derive(Debug, Clone)]
+pub enum SessionRef {
+    File(PathBuf),
+    OpenCode { session_id: String },
+}
+
+impl SessionRef {
+    /// Human-readable form for verbose scan listings and skip warnings.
+    pub fn display(&self) -> String {
+        match self {
+            SessionRef::File(p) => p.display().to_string(),
+            SessionRef::OpenCode { session_id } => format!("opencode:session/{session_id}"),
+        }
+    }
+}
+
+/// Project scoping for `discover_sessions`, expressed in raw filesystem terms:
+/// each provider translates it to however its own store names projects
+/// (Claude Code slugs the cwd, OpenCode records a plain directory).
+#[derive(Debug, Clone, Copy)]
+pub enum ProjectFilter<'a> {
+    /// No project scoping.
+    All,
+    /// The current working directory, as a raw path (not provider-encoded).
+    CurrentProject(&'a std::path::Path),
+    /// A user-supplied substring, matched verbatim against the provider's
+    /// project identifier (existing `--project` semantics).
+    Substring(&'a str),
+}
+
 /// Trait for session providers (Claude Code, OpenCode, etc.).
 ///
 /// Note: Cursor Agent transcripts use a text-only format without structured
 /// tool_use/tool_result blocks, so command extraction is not possible.
 /// Use `rtk gain` to track savings for Cursor sessions instead.
 pub trait SessionProvider {
+    /// Whether this provider's storage exists at all. Auto-detection offers
+    /// only providers that answer true; a never-installed agent stays silent.
+    fn available(&self) -> bool;
     fn discover_sessions(
         &self,
-        project_filter: Option<&str>,
+        filter: ProjectFilter<'_>,
         since_days: Option<u64>,
-    ) -> Result<Vec<PathBuf>>;
-    fn extract_commands(&self, path: &Path) -> Result<Vec<ExtractedCommand>>;
+    ) -> Result<Vec<SessionRef>>;
+    fn extract_commands(&self, session: &SessionRef) -> Result<Vec<ExtractedCommand>>;
 }
 
 pub struct ClaudeProvider;
 
 /// Substring match of a project filter against a project directory name.
+/// The single definition of `--project` substring semantics, shared by every
+/// provider so one flag means the same thing across stores.
 ///
 /// On Windows the match is case-insensitive: NTFS paths are case-insensitive
 /// and Claude Code encodes the project folder from whatever cwd casing it was
@@ -54,7 +92,7 @@ pub struct ClaudeProvider;
 /// casing the launching shell set (an uppercase drive letter under PowerShell).
 /// Either side can differ from the other, so both are lowered; a case-sensitive
 /// match finds zero sessions.
-fn dir_matches_filter(dir_name: &str, filter: &str) -> bool {
+pub(crate) fn dir_matches_filter(dir_name: &str, filter: &str) -> bool {
     dir_matches_filter_impl(dir_name, filter, cfg!(windows))
 }
 
@@ -178,16 +216,47 @@ impl ClaudeProvider {
 }
 
 impl SessionProvider for ClaudeProvider {
-    fn discover_sessions(
-        &self,
-        project_filter: Option<&str>,
-        since_days: Option<u64>,
-    ) -> Result<Vec<PathBuf>> {
-        let projects_dir = Self::projects_dir()?;
-        Self::discover_sessions_in_projects_dir(&projects_dir, project_filter, since_days)
+    fn available(&self) -> bool {
+        Self::projects_dir().is_ok_and(|d| d.is_dir())
     }
 
-    fn extract_commands(&self, path: &Path) -> Result<Vec<ExtractedCommand>> {
+    fn discover_sessions(
+        &self,
+        filter: ProjectFilter<'_>,
+        since_days: Option<u64>,
+    ) -> Result<Vec<SessionRef>> {
+        let projects_dir = Self::projects_dir()?;
+        // Claude Code names project folders by slugging the cwd, so the current
+        // project is identified by its encoded path; a user substring stays
+        // verbatim (it already matches against encoded folder names).
+        let encoded_cwd = match filter {
+            ProjectFilter::CurrentProject(cwd) => {
+                Some(Self::encode_project_path(&cwd.to_string_lossy()))
+            }
+            _ => None,
+        };
+        let project_filter = match filter {
+            ProjectFilter::All => None,
+            ProjectFilter::CurrentProject(_) => encoded_cwd.as_deref(),
+            ProjectFilter::Substring(s) => Some(s),
+        };
+        Ok(
+            Self::discover_sessions_in_projects_dir(&projects_dir, project_filter, since_days)?
+                .into_iter()
+                .map(SessionRef::File)
+                .collect(),
+        )
+    }
+
+    fn extract_commands(&self, session: &SessionRef) -> Result<Vec<ExtractedCommand>> {
+        let path = match session {
+            SessionRef::File(p) => p.as_path(),
+            SessionRef::OpenCode { .. } => {
+                return Err(anyhow::anyhow!(
+                    "ClaudeProvider cannot read an OpenCode session"
+                ));
+            }
+        };
         let file =
             fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
         let reader = BufReader::new(file);
@@ -325,7 +394,9 @@ mod tests {
         ]);
 
         let provider = ClaudeProvider;
-        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+        let cmds = provider
+            .extract_commands(&SessionRef::File(jsonl.path().to_path_buf()))
+            .unwrap();
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0].command, "git status");
         assert!(cmds[0].output_len.is_some());
@@ -342,7 +413,9 @@ mod tests {
         ]);
 
         let provider = ClaudeProvider;
-        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+        let cmds = provider
+            .extract_commands(&SessionRef::File(jsonl.path().to_path_buf()))
+            .unwrap();
         assert_eq!(cmds.len(), 0);
     }
 
@@ -352,7 +425,9 @@ mod tests {
             make_jsonl(&[r#"{"type":"file-history-snapshot","messageId":"abc","snapshot":{}}"#]);
 
         let provider = ClaudeProvider;
-        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+        let cmds = provider
+            .extract_commands(&SessionRef::File(jsonl.path().to_path_buf()))
+            .unwrap();
         assert_eq!(cmds.len(), 0);
     }
 
@@ -363,7 +438,9 @@ mod tests {
         ]);
 
         let provider = ClaudeProvider;
-        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+        let cmds = provider
+            .extract_commands(&SessionRef::File(jsonl.path().to_path_buf()))
+            .unwrap();
         assert_eq!(cmds.len(), 2);
         assert_eq!(cmds[0].command, "git status");
         assert_eq!(cmds[1].command, "git diff");
@@ -377,7 +454,9 @@ mod tests {
         ]);
 
         let provider = ClaudeProvider;
-        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+        let cmds = provider
+            .extract_commands(&SessionRef::File(jsonl.path().to_path_buf()))
+            .unwrap();
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0].command, "ls");
     }
@@ -575,7 +654,9 @@ mod tests {
         ]);
 
         let provider = ClaudeProvider;
-        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+        let cmds = provider
+            .extract_commands(&SessionRef::File(jsonl.path().to_path_buf()))
+            .unwrap();
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0].command, "git commit --ammend");
         assert!(cmds[0].is_error);
@@ -594,7 +675,9 @@ mod tests {
         ]);
 
         let provider = ClaudeProvider;
-        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+        let cmds = provider
+            .extract_commands(&SessionRef::File(jsonl.path().to_path_buf()))
+            .unwrap();
         assert_eq!(cmds.len(), 2);
         assert!(!cmds[0].is_error);
         assert!(cmds[1].is_error);
@@ -607,7 +690,9 @@ mod tests {
         ]);
 
         let provider = ClaudeProvider;
-        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+        let cmds = provider
+            .extract_commands(&SessionRef::File(jsonl.path().to_path_buf()))
+            .unwrap();
         assert_eq!(cmds.len(), 3);
         assert_eq!(cmds[0].sequence_index, 0);
         assert_eq!(cmds[1].sequence_index, 1);
