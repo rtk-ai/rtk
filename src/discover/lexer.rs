@@ -480,9 +480,9 @@ fn flush_arg(tokens: &mut Vec<ParsedToken>, current: &mut String, offset: usize)
 ///
 /// RTK lexes a host's command string as bash — that is the tool the agent
 /// called, and `is_word_boundary_whitespace`, `advance_quote_state` and
-/// [`NewlineMode::Bash`] all model bash. Only one string in the pipeline is
-/// known to be something else: the script inside a quoted `fish -c '…'`
-/// wrapper, whose shell the wrapper itself names.
+/// [`NewlineMode::Bash`] all model bash. The strings that are known to be
+/// something else are the scripts inside a quoted `<shell> -c '…'` wrapper,
+/// whose shell the wrapper itself names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ShellDialect {
     Posix,
@@ -580,7 +580,10 @@ fn contains_fish_only_construct(tokens: &[ParsedToken]) -> bool {
 /// fish and zsh, `&!` in zsh. Each is one operator to the shell that named
 /// itself and two tokens to this lexer, so a rewrite that re-emits them
 /// spaced hands that shell something it reads differently.
-fn opens_disown_pair(cmd: &str) -> bool {
+///
+/// Every path that hands a rewritten script back to such a shell has to refuse
+/// it: `shell_wrapper`'s `zsh -c`/`fish -c` cases and `fish_script`'s wrap.
+pub(crate) fn opens_disown_pair(cmd: &str) -> bool {
     disown_pair(&tokenize_inner(cmd, NewlineMode::Conservative))
 }
 
@@ -639,17 +642,26 @@ fn is_grammar_word(value: &str) -> bool {
     matches!(value, "{" | "}" | "!")
 }
 
-// `>&N`/`>&-` (and `N>&M`) is fd-dup/close; bare `>&` before a word is
-// `>word 2>&1` — a file target.
+/// True when a redirect names its target in the *next* word rather than inside
+/// the operator.
+///
+/// `>&N`/`>&-` (and `N>&M`) duplicates or closes a descriptor, so the word
+/// after it is an argument of the command. `<&` duplicates exactly as `>&`
+/// does, and the tokenizer only folds digits or `-` after either, so neither
+/// can name a file.
+pub(crate) fn redirect_takes_operand(value: &str) -> bool {
+    let Some(pos) = value.find(">&").or_else(|| value.find("<&")) else {
+        return true;
+    };
+    let tail = &value[pos + 2..];
+    tail.is_empty() || !tail.chars().all(|c| c.is_ascii_digit() || c == '-')
+}
+
+// A redirect that takes an operand names a file unless that operand is
+// `/dev/null`; a bare `>&` before a word is `>word 2>&1` — a file target too.
 pub(crate) fn redirect_has_file_target(tokens: &[ParsedToken], i: usize) -> bool {
-    let value = &tokens[i].value;
-    // `<&` duplicates a descriptor exactly as `>&` does, and the tokenizer
-    // only folds digits or `-` after either, so neither can name a file.
-    if let Some(pos) = value.find(">&").or_else(|| value.find("<&")) {
-        let tail = &value[pos + 2..];
-        if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit() || c == '-') {
-            return false;
-        }
+    if !redirect_takes_operand(&tokens[i].value) {
+        return false;
     }
     match tokens.get(i + 1) {
         Some(next) if next.kind == TokenKind::Arg => next.value != "/dev/null",

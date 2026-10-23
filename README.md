@@ -44,6 +44,8 @@
 
 rtk filters and compresses command outputs before they reach your LLM context. Single Rust binary, 100+ supported commands, <10ms overhead.
 
+Angular builds are supported with `rtk ng build`: compact build tables with every bundle and diagnostic retained.
+
 ## What RTK Does
 
 RTK intercepts shell commands and compresses their output before your agent reads it.

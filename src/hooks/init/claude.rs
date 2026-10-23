@@ -182,9 +182,38 @@ pub(super) fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
     modified
 }
 
-/// Remove RTK hook from settings.json file
-/// Backs up before modification, returns true if hook was found and removed
-pub(super) fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
+/// Remove the `env.ANTHROPIC_BASE_URL` that the proxy on-ramp of `rtk init -g`
+/// writes, when it still points at the RTK daemon. Left behind, it sends every
+/// Claude Code request to a daemon that uninstall no longer starts (#4604). A
+/// base URL aimed anywhere else belongs to the user and is kept.
+pub(super) fn remove_proxy_env_from_json(root: &mut serde_json::Value) -> bool {
+    let rtk_url = format!("http://{}", crate::llm_proxy::DEFAULT_BIND);
+    let Some(env) = root.get_mut("env").and_then(|e| e.as_object_mut()) else {
+        return false;
+    };
+    if env.get("ANTHROPIC_BASE_URL").and_then(|v| v.as_str()) != Some(rtk_url.as_str()) {
+        return false;
+    }
+    env.remove("ANTHROPIC_BASE_URL");
+    if env.is_empty()
+        && let Some(obj) = root.as_object_mut()
+    {
+        obj.remove("env");
+    }
+    true
+}
+
+/// What `remove_settings_entries` took out of settings.json.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SettingsRemoval {
+    pub hook: bool,
+    pub proxy_base_url: bool,
+}
+
+/// Remove the RTK hook and the RTK proxy's `env.ANTHROPIC_BASE_URL` from
+/// settings.json, reporting each separately so uninstall can say which.
+/// Backs up before modification.
+pub(super) fn remove_settings_entries(ctx: InitContext) -> Result<SettingsRemoval> {
     let InitContext { verbose, .. } = ctx;
     let claude_dir = resolve_claude_dir()?;
     let settings_path = claude_dir.join(SETTINGS_JSON);
@@ -193,10 +222,12 @@ pub(super) fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
         if verbose > 0 {
             eprintln!("settings.json not found, nothing to remove");
         }
-        return Ok(false);
+        return Ok(SettingsRemoval::default());
     };
 
-    let removed = remove_hook_from_json(&mut root);
+    let removed_hook = remove_hook_from_json(&mut root);
+    let removed_env = remove_proxy_env_from_json(&mut root);
+    let removed = removed_hook || removed_env;
     if removed {
         update_json_file(
             &settings_path,
@@ -212,7 +243,10 @@ pub(super) fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
         )?;
     }
 
-    Ok(removed)
+    Ok(SettingsRemoval {
+        hook: removed_hook,
+        proxy_base_url: removed_env,
+    })
 }
 
 /// Orchestrator: patch settings.json with RTK hook (binary command variant)
@@ -973,6 +1007,70 @@ pub(super) fn run_hook_only_mode(
     Ok(())
 }
 
+/// Detailed hook status for Claude Code (used by `rtk discover` and warning coordinator).
+pub fn hook_status() -> crate::hooks::hook_check::HookStatus {
+    let Ok(claude_dir) = resolve_claude_dir() else {
+        return crate::hooks::hook_check::HookStatus::Ok;
+    };
+    if !claude_dir.exists() {
+        return crate::hooks::hook_check::HookStatus::Ok;
+    }
+
+    // Check for new binary command in settings.json first
+    if binary_hook_registered(&claude_dir) {
+        // If old script file still exists alongside new command, report Outdated
+        // (migration not complete — user should run `rtk init -g` to clean up)
+        let old_hook = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+        if old_hook.exists() {
+            return crate::hooks::hook_check::HookStatus::Outdated;
+        }
+        return crate::hooks::hook_check::HookStatus::Ok;
+    }
+
+    // Fall back to legacy script file check
+    let hook_path = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+    if !hook_path.exists() {
+        return crate::hooks::hook_check::HookStatus::Missing;
+    }
+    let Ok(content) = fs::read_to_string(&hook_path) else {
+        return crate::hooks::hook_check::HookStatus::Outdated; // exists but unreadable — treat as needs-update
+    };
+    if crate::hooks::hook_check::parse_hook_version(&content)
+        >= crate::hooks::hook_check::CURRENT_HOOK_VERSION
+    {
+        crate::hooks::hook_check::HookStatus::Ok
+    } else {
+        crate::hooks::hook_check::HookStatus::Outdated
+    }
+}
+
+/// Check if the native binary command is registered in settings.json
+fn binary_hook_registered(claude_dir: &Path) -> bool {
+    let settings_path = claude_dir.join(SETTINGS_JSON);
+    let content = match fs::read_to_string(&settings_path) {
+        Ok(c) if !c.trim().is_empty() => c,
+        _ => return false,
+    };
+    let root: serde_json::Value = match from_json_str(&content) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let pre_tool_use = match root
+        .get("hooks")
+        .and_then(|h| h.get(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+    pre_tool_use
+        .iter()
+        .filter_map(|entry| entry.get("hooks")?.as_array())
+        .flatten()
+        .filter_map(|hook| hook.get("command")?.as_str())
+        .any(crate::hooks::is_claude_hook_command)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1316,6 +1414,86 @@ mod tests {
         assert_eq!(arr.len(), 1);
         let cmd = arr[0]["hooks"][0]["command"].as_str().unwrap();
         assert_eq!(cmd, "some-other-tool --hook");
+    }
+
+    // #4604: the proxy on-ramp writes env.ANTHROPIC_BASE_URL; uninstall must
+    // take it back, or Claude Code keeps calling a daemon nothing starts.
+    #[test]
+    fn test_uninstall_removes_rtk_proxy_base_url() {
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let settings = claude_dir.join(SETTINGS_JSON);
+            let rtk_url = format!("http://{}", crate::llm_proxy::DEFAULT_BIND);
+            fs::write(
+                &settings,
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "env": { "ANTHROPIC_BASE_URL": rtk_url, "OTHER": "kept" },
+                    "hooks": { (SESSION_START_KEY): [{
+                        "hooks": [{ "type": "command", "command": CLAUDE_HOOK_COMMAND }]
+                    }]}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+
+            assert_eq!(
+                remove_settings_entries(InitContext::default()).unwrap(),
+                SettingsRemoval {
+                    hook: true,
+                    proxy_base_url: true
+                }
+            );
+
+            let root: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+            assert_eq!(root.pointer("/env/ANTHROPIC_BASE_URL"), None, "{root}");
+            assert_eq!(
+                root.pointer("/env/OTHER").and_then(|v| v.as_str()),
+                Some("kept")
+            );
+            assert_eq!(root.get("hooks"), None, "{root}");
+        });
+    }
+
+    #[test]
+    fn test_uninstall_removes_rtk_proxy_base_url_without_hook() {
+        // Choice 2 of the on-ramp (background service) writes the URL but no
+        // SessionStart hook; the URL alone must still be taken back.
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let settings = claude_dir.join(SETTINGS_JSON);
+            let rtk_url = format!("http://{}", crate::llm_proxy::DEFAULT_BIND);
+            fs::write(
+                &settings,
+                serde_json::json!({ "env": { "ANTHROPIC_BASE_URL": rtk_url } }).to_string(),
+            )
+            .unwrap();
+
+            assert_eq!(
+                remove_settings_entries(InitContext::default()).unwrap(),
+                SettingsRemoval {
+                    hook: false,
+                    proxy_base_url: true
+                }
+            );
+
+            let root: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+            assert_eq!(root, serde_json::json!({}), "an emptied env is dropped");
+        });
+    }
+
+    #[test]
+    fn test_uninstall_keeps_a_foreign_base_url() {
+        let mut root = serde_json::json!({
+            "env": { "ANTHROPIC_BASE_URL": "https://gateway.example.com" }
+        });
+        assert!(!remove_proxy_env_from_json(&mut root));
+        assert_eq!(
+            root.pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(|v| v.as_str()),
+            Some("https://gateway.example.com")
+        );
     }
 
     #[test]
@@ -2037,6 +2215,202 @@ mod tests {
 
             let after = fs::read_to_string(&claude_md).unwrap();
             assert_eq!(after, malformed, "File must not be modified when malformed");
+        });
+    }
+
+    #[test]
+    fn test_binary_hook_registered_accepts_absolute_rtk_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            tmp.path().join(SETTINGS_JSON),
+            r#"{
+                "hooks": {
+                    "PreToolUse": [{
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "/opt/homebrew/bin/rtk hook claude",
+                            "timeout": 5
+                        }]
+                    }]
+                }
+            }"#,
+        )
+        .expect("write settings");
+
+        assert!(binary_hook_registered(tmp.path()));
+    }
+
+    #[test]
+    fn test_hook_status_dangling_script_in_settings_is_missing() {
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            fs::write(
+                claude_dir.join(SETTINGS_JSON),
+                r#"{
+                    "hooks": {
+                        "PreToolUse": [{
+                            "matcher": "Bash",
+                            "hooks": [{
+                                "type": "command",
+                                "command": "~/.claude/hooks/rtk-rewrite.sh"
+                            }]
+                        }]
+                    }
+                }"#,
+            )
+            .expect("write settings");
+
+            assert_eq!(
+                hook_status(),
+                crate::hooks::hook_check::HookStatus::Missing,
+                "settings.json pointing at deleted rtk-rewrite.sh must report Missing"
+            );
+        });
+    }
+
+    #[test]
+    fn test_hook_status_binary_hook_with_leftover_script_is_outdated() {
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let hooks_dir = claude_dir.join(HOOKS_SUBDIR);
+            fs::create_dir_all(&hooks_dir).expect("create hooks dir");
+            fs::write(
+                hooks_dir.join(REWRITE_HOOK_FILE),
+                format!(
+                    "#!/usr/bin/env bash\n# rtk-hook-version: {}\n",
+                    crate::hooks::hook_check::CURRENT_HOOK_VERSION
+                ),
+            )
+            .expect("write leftover script");
+            fs::write(
+                claude_dir.join(SETTINGS_JSON),
+                r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]}]}}"#,
+            )
+            .expect("write settings");
+
+            assert_eq!(
+                hook_status(),
+                crate::hooks::hook_check::HookStatus::Outdated,
+                "a leftover legacy script next to the binary hook means migration is unfinished"
+            );
+        });
+    }
+
+    #[test]
+    fn test_hook_status_v4_script_in_settings_is_ok() {
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let hooks_dir = claude_dir.join(HOOKS_SUBDIR);
+            fs::create_dir_all(&hooks_dir).expect("create hooks dir");
+            fs::write(
+                hooks_dir.join(REWRITE_HOOK_FILE),
+                "#!/usr/bin/env bash\n# rtk-hook-version: 4\n",
+            )
+            .expect("write v4 script");
+            fs::write(
+                claude_dir.join(SETTINGS_JSON),
+                r#"{
+                    "hooks": {
+                        "PreToolUse": [{
+                            "matcher": "Bash",
+                            "hooks": [{
+                                "type": "command",
+                                "command": "~/.claude/hooks/rtk-rewrite.sh"
+                            }]
+                        }]
+                    }
+                }"#,
+            )
+            .expect("write settings");
+
+            assert_eq!(
+                hook_status(),
+                crate::hooks::hook_check::HookStatus::Ok,
+                "registered v4 script must report Ok, not Outdated"
+            );
+        });
+    }
+
+    #[test]
+    fn test_hook_status_post_tool_use_only_is_missing() {
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            fs::write(
+                claude_dir.join(SETTINGS_JSON),
+                r#"{
+                    "hooks": {
+                        "PostToolUse": [{
+                            "matcher": "Bash",
+                            "hooks": [{
+                                "type": "command",
+                                "command": "rtk hook claude"
+                            }]
+                        }]
+                    }
+                }"#,
+            )
+            .expect("write settings");
+
+            assert_eq!(
+                hook_status(),
+                crate::hooks::hook_check::HookStatus::Missing,
+                "PostToolUse-only entry must report Missing"
+            );
+        });
+    }
+
+    #[test]
+    fn test_hook_status_unreadable_script_is_outdated() {
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let hook_path = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+            fs::create_dir_all(hook_path.parent().unwrap()).expect("create hooks dir");
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::write(&hook_path, "#!/usr/bin/env bash\n# rtk-hook-version: 4\n")
+                    .expect("write script");
+                let mut perms = fs::metadata(&hook_path).expect("meta").permissions();
+                perms.set_mode(0o000);
+                fs::set_permissions(&hook_path, perms.clone()).expect("chmod 000");
+
+                // If running as root in a container, mode 000 is bypassed; fall back to
+                // making the path a directory so read_to_string deterministically fails.
+                if fs::read_to_string(&hook_path).is_ok() {
+                    perms.set_mode(0o644);
+                    let _ = fs::set_permissions(&hook_path, perms);
+                    fs::remove_file(&hook_path).expect("remove file");
+                    fs::create_dir_all(&hook_path).expect("create dir at hook_path");
+                    assert_eq!(
+                        hook_status(),
+                        crate::hooks::hook_check::HookStatus::Outdated,
+                        "unreadable hook path must report Outdated"
+                    );
+                    return;
+                }
+
+                let status = hook_status();
+                perms.set_mode(0o644);
+                fs::set_permissions(&hook_path, perms).expect("restore chmod 644");
+                assert_eq!(
+                    status,
+                    crate::hooks::hook_check::HookStatus::Outdated,
+                    "unreadable script file must report Outdated"
+                );
+            }
+
+            #[cfg(not(unix))]
+            {
+                // On non-Unix, a directory at `hook_path` makes `exists()` true and `read_to_string()` Err.
+                fs::create_dir_all(&hook_path).expect("create dir at hook_path");
+                assert_eq!(
+                    hook_status(),
+                    crate::hooks::hook_check::HookStatus::Outdated,
+                    "unreadable hook path must report Outdated"
+                );
+            }
         });
     }
 }

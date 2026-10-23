@@ -37,6 +37,8 @@ pub const RTK_META_COMMANDS: &[&str] = &[
     "methods",
     "tasks",
     "plugins",
+    "test",
+    "format",
     // `err` and `summary` name no real binary, and since they grew `--shell`
     // they have a flag to get wrong. Falling through would try to exec a
     // program called `err` instead of reporting the flag error (#4125 review).

@@ -11,7 +11,7 @@ use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, truncate};
 use anyhow::Result;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Deserialize)]
 struct SqlfluffViolation {
@@ -48,6 +48,13 @@ impl SqlfluffViolation {
 struct SqlfluffFile {
     filepath: String,
     violations: Vec<SqlfluffViolation>,
+}
+
+struct RuleSummary<'a> {
+    count: usize,
+    path: &'a str,
+    line: Option<u64>,
+    description: Option<&'a str>,
 }
 
 /// How rtk should invoke sqlfluff, and how to read the result back.
@@ -205,27 +212,35 @@ fn render_lint_json(output: &str, exit_code: i32) -> String {
     // Group by rule over the raw sqlfluff JSON order (`parsed`, pre-sort), so
     // "first at" is the earliest occurrence in the original output - not the
     // first after the worst-first file sort above.
-    let mut by_rule: HashMap<&str, (usize, &str, Option<u64>)> = HashMap::new();
+    let mut by_rule: HashMap<&str, RuleSummary<'_>> = HashMap::new();
     for file in &parsed {
         for v in &file.violations {
-            let entry =
-                by_rule
-                    .entry(v.code.as_str())
-                    .or_insert((0, file.filepath.as_str(), v.line()));
-            entry.0 += 1;
-            if entry.2.is_none() && v.line().is_some() {
-                entry.1 = file.filepath.as_str();
-                entry.2 = v.line();
+            let description = v.description.trim();
+            let entry = by_rule.entry(v.code.as_str()).or_insert(RuleSummary {
+                count: 0,
+                path: &file.filepath,
+                line: v.line(),
+                description: Some(description),
+            });
+            entry.count += 1;
+            if entry.line.is_none() && v.line().is_some() {
+                entry.path = &file.filepath;
+                entry.line = v.line();
+            }
+            // One code may name several diagnostics (for example RF01 embeds
+            // a column name). Only identical descriptions can move to the key.
+            if entry.description != Some(description) {
+                entry.description = None;
             }
         }
     }
-    let mut rule_counts: Vec<(&str, usize, &str, Option<u64>)> = by_rule
+    let mut rule_counts: Vec<_> = by_rule
         .iter()
-        .map(|(code, (count, path, line))| (*code, *count, *path, *line))
+        .map(|(&code, summary)| (code, summary))
         .collect();
     // Most frequent rule first; ties break alphabetically by rule code so
     // identical input always yields an identical report.
-    rule_counts.sort_by_key(|r| (std::cmp::Reverse(r.1), r.0));
+    rule_counts.sort_by_key(|(code, summary)| (std::cmp::Reverse(summary.count), *code));
 
     // Build compact output
     let mut result = String::new();
@@ -241,13 +256,19 @@ fn render_lint_json(output: &str, exit_code: i32) -> String {
 
     // Top rules
     result.push_str("Top rules:\n");
-    for (rule, count, path, line) in rule_counts.iter().take(MAX_REPORTED_RULES) {
+    let mut described_rules = HashSet::new();
+    for (rule, summary) in rule_counts.iter().take(MAX_REPORTED_RULES) {
         result.push_str(&format!(
-            "  {} ({}x, first at {})\n",
+            "  {} ({}x, first at {})",
             rule,
-            count,
-            sample_location(path, *line)
+            summary.count,
+            sample_location(summary.path, summary.line)
         ));
+        if let Some(description) = summary.description.filter(|s| !s.is_empty()) {
+            result.push_str(&format!(": {}", truncate(description, 100)));
+            described_rules.insert(*rule);
+        }
+        result.push('\n');
     }
     if rule_counts.len() > MAX_REPORTED_RULES {
         result.push_str(&format!(
@@ -321,11 +342,16 @@ fn render_lint_json(output: &str, exit_code: i32) -> String {
                 break 'detail;
             }
             detail.push_str(&format!(
-                "  {} {} {}\n",
+                "  {} {}",
                 location(&path, v.line(), v.col()),
                 v.code,
-                truncate(v.description.trim(), 100),
             ));
+            // A description outside the visible Top rules cap is not a key
+            // the reader has seen; keep it next to every affected location.
+            if !described_rules.contains(v.code.as_str()) {
+                detail.push_str(&format!(" {}", truncate(v.description.trim(), 100)));
+            }
+            detail.push('\n');
             rendered += 1;
         }
     }
@@ -429,6 +455,66 @@ mod tests {
     /// Real `sqlfluff 2.3.5 lint --format json` output: legacy `line_no`
     /// coordinates, no `fixes` key, 51 files whose worst one is emitted last.
     const V2_JSON: &str = include_str!("../../../tests/fixtures/sqlfluff_lint_v2_raw.json");
+
+    #[test]
+    fn repeated_descriptions_are_listed_once_in_visible_top_rules() {
+        let out = filter_sqlfluff_lint_json(V2_JSON);
+        let message = "Query produces an unknown number of result columns.";
+        let (summary, detail) = out.split_once("Violations:\n").expect("detail section");
+        assert!(summary.contains(&format!("): {message}")), "{out}");
+        assert_eq!(out.matches(message).count(), 1, "{out}");
+        assert!(!detail.contains(message), "{out}");
+        assert!(
+            detail.contains("AM04"),
+            "locations must keep their rule code"
+        );
+    }
+
+    #[test]
+    fn distinct_messages_for_one_rule_stay_attached_to_their_locations() {
+        let input = r#"[{"filepath":"models/a.sql","violations":[
+            {"code":"RF01","description":"Reference 'customer' not found.","line_no":1,"line_pos":3},
+            {"code":"RF01","description":"Reference 'order' not found.","line_no":2,"line_pos":4}
+        ]}]"#;
+        let out = filter_sqlfluff_lint_json(input);
+        assert!(out.contains("models/a.sql:1:3 RF01 Reference 'customer' not found."));
+        assert!(out.contains("models/a.sql:2:4 RF01 Reference 'order' not found."));
+    }
+
+    #[test]
+    fn descriptions_for_rules_outside_the_summary_cap_stay_in_details() {
+        let violations: Vec<_> = (0..=MAX_REPORTED_RULES)
+            .map(|i| {
+                serde_json::json!({
+                    "code": format!("RULE{i:02}"),
+                    "description": format!("Distinct diagnostic {i}"),
+                    "line_no": i + 1,
+                })
+            })
+            .collect();
+        let input = serde_json::json!([{"filepath":"models/a.sql","violations":violations}]);
+        let out = filter_sqlfluff_lint_json(&input.to_string());
+        let detail = out.split_once("Violations:\n").expect("detail section").1;
+        assert!(detail.contains("RULE10 Distinct diagnostic 10"), "{out}");
+        assert!(out.contains("+1 more rules"), "{out}");
+    }
+
+    #[test]
+    fn long_shared_descriptions_are_truncated_in_top_rules() {
+        // Captured from SQLFluff 4.3.0:
+        // `sqlfluff lint --dialect ansi --rules RF01 --format json models` over
+        // a.sql and b.sql, each selecting `c.reason` from a table not aliased c.
+        let input = include_str!("../../../tests/fixtures/sqlfluff_lint_long_description_raw.json");
+        let out = filter_sqlfluff_lint_json(input);
+        assert!(
+            out.contains("  RF01 (2x, first at models/a.sql:1): Reference 'c.reason' refers to table/view not found in the FROM clause or found in ancestor state...\n"),
+            "{out}"
+        );
+        assert!(!out.contains("ancestor statement."), "{out}");
+        for location in ["  models/a.sql:1:8 RF01", "  models/b.sql:1:8 RF01"] {
+            assert!(out.lines().any(|line| line == location), "{out}");
+        }
+    }
 
     // ── exit-code semantics ─────────────────────────────────────────────────
     //

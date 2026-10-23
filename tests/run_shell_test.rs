@@ -302,9 +302,10 @@ mod unix {
         }
     }
 
-    /// The two named-shell tests above skip wherever `fish` is absent, which is
-    /// every CI runner — this one names a shell that always exists, so the
-    /// explicit-shell branch is actually exercised somewhere.
+    /// The two named-shell tests above skip wherever `fish` is absent — CI
+    /// installs it on the Linux and macOS runners, a developer machine may not
+    /// have it — so this one names a shell that always exists and keeps the
+    /// explicit-shell branch exercised everywhere.
     #[test]
     fn explicit_shell_by_name_runs_the_named_shell() {
         let output = rtk()

@@ -9,6 +9,9 @@ use crate::discover::lexer::{
     is_word_boundary_whitespace, split_for_permissions, split_for_wrappers,
 };
 use crate::discover::registry;
+#[cfg(test)]
+use crate::discover::registry::MAX_MATCHING_PEELS;
+use crate::discover::registry::{MatchingReadings, matching_readings};
 use crate::discover::shell_wrapper::{is_shell_wrapper_candidate, parse_shell_wrapper};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -71,11 +74,119 @@ pub fn check_command_for_agent(cmd: &str, host: Host, agent: Option<&str>) -> Pe
     )
 }
 
+/// Whether RTK can show that nothing it is about to wrap could escape a deny
+/// rule.
+///
+/// The fish wrap hands a script to a *different* shell, where RTK's own
+/// segmenters cannot say which commands run — fish starts one in places bash
+/// has no grammar for, and resolves words at run time. It also puts *every*
+/// command of the script inside one quoted argument, which is what makes it
+/// different from an ordinary rewrite: a host's own rule on a command RTK
+/// never rewrites still fires today, and would not fire on the wrapped form.
+///
+/// So the wrap is offered on one host only, Claude Code's own hook: RTK reads
+/// its settings files, and the hook asks explicitly for every wrap it builds, so no
+/// allow rule matching `rtk` can run the script unprompted. See
+/// [`claude_hook_deny_rules`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DenyRules {
+    /// Every settings file RTK reads parsed, and none carries a deny rule.
+    NoneConfigured,
+    /// Anything else: a deny rule is present, a file could not be parsed, the
+    /// wrap is off, the command is not provably fish, or this caller is not
+    /// the Claude hook.
+    Unattested,
+}
+
+impl DenyRules {
+    /// True only for [`DenyRules::NoneConfigured`].
+    pub(crate) fn permit_wrap(self) -> bool {
+        self == Self::NoneConfigured
+    }
+}
+
+/// What RTK can say about the deny rules in force for `rtk hook claude`.
+///
+/// The settings files [`load_permission_rules`] reads are the rules RTK can
+/// see, not all of Claude Code's: `--settings`, `--disallowedTools`, managed
+/// settings and the project the agent has `cd`'d away from never reach the
+/// hook, which is why every wrap is also an explicit ask. Within what RTK can
+/// see, an empty deny list is evidence only when RTK read and parsed every
+/// one of those files. A file it had to skip may name the rule that matters.
+///
+/// "No deny rule" means no entry under `permissions.deny` at all, not "no
+/// entry this gate understands": `Bash` on its own denies every Bash call,
+/// and `append_bash_rules` keeps only the `Bash(…)` forms, so counting the
+/// extracted patterns would read a configured user as an unconfigured one.
+///
+/// No other caller gets this answer, and the reasons differ per host rather
+/// than being one oversight:
+///
+/// - Gemini's loader reads `tools.allowed` and `tools.confirmationRequired`
+///   only, and never produces a deny rule, so its exclude lists are invisible
+///   here;
+/// - Droid's built-in defaults are deliberately not mirrored, so an empty
+///   `commandDenylist` says nothing about what Droid refuses;
+/// - Cursor's loader reads the global `cli-config.json`, while the host also
+///   applies its project config;
+/// - Copilot resolves to [`Host::Claude`] for its verdict, but judges the
+///   returned command with its own allowlist flow;
+/// - OpenCode re-evaluates its own patterns against the string RTK hands back;
+/// - Codex, Trae, Vibe and Antigravity have no RTK-side rule source at all;
+/// - `rtk rewrite` reads Claude's rules for delegates that do not prompt on
+///   exit 3 at all (`hooks/pi/rtk.ts`, `hooks/hermes/rtk-rewrite`), and
+///   OpenClaw matches its exec checks against the returned string.
+pub(crate) fn claude_hook_deny_rules() -> DenyRules {
+    let mut scan = SettingsScan::default();
+    let _ = load_permission_rules_tracking(&get_settings_paths(), &mut scan);
+    if scan.every_file_read && !scan.any_deny_entry {
+        DenyRules::NoneConfigured
+    } else {
+        DenyRules::Unattested
+    }
+}
+
+/// [`claude_hook_deny_rules`] where a wrap is possible at all: the wrap is
+/// enabled and `cmd` is provably fish. Anywhere else the answer cannot change
+/// a decision, so the settings are not walked a second time for it.
+///
+/// `rtk hook claude` and `rtk hook check --agent claude` both ask here, so the
+/// two read the settings the same number of times.
+pub(crate) fn claude_hook_deny_rules_for(cmd: &str) -> DenyRules {
+    if crate::core::config::cached_config().hooks.wrap_fish_scripts
+        && crate::discover::fish_script::is_unambiguous_fish(cmd)
+    {
+        claude_hook_deny_rules()
+    } else {
+        DenyRules::Unattested
+    }
+}
+
+/// What [`load_permission_rules_tracking`] saw besides the rules themselves.
+struct SettingsScan {
+    /// Every settings file that exists was opened, decoded and parsed.
+    every_file_read: bool,
+    /// At least one entry appears under `permissions.deny`, whatever its tool.
+    any_deny_entry: bool,
+}
+
+impl Default for SettingsScan {
+    fn default() -> Self {
+        Self {
+            every_file_read: true,
+            any_deny_entry: false,
+        }
+    }
+}
+
 /// Load `host`'s deny/ask/allow Bash rules from disk, doing the settings-file I/O
-/// exactly once. Exposed so a caller that checks many commands against the same
-/// host in a loop (e.g. `rtk discover` scanning thousands of transcript commands)
-/// can load once up front and reuse `check_command_with_rules` per command instead
-/// of going through `check_command_for` and re-reading every settings file from
+/// exactly once.
+///
+/// Every caller reads its rules through here and keeps them: a verdict needs
+/// all three, and a caller that checks many commands against the same host in
+/// a loop (e.g.
+/// `rtk discover` scanning thousands of transcript commands) reuses them per
+/// command instead of re-reading every settings file from
 /// disk on every single call.
 pub(crate) fn load_rules_for(host: Host) -> (Vec<String>, Vec<String>, Vec<String>) {
     match host {
@@ -115,16 +226,39 @@ pub(crate) fn check_command_with_rules_and_prefixes(
     transparent_prefixes: &[String],
 ) -> PermissionVerdict {
     let segments = split_compound_command(cmd);
+    // Each segment read every way a deny or ask rule may name it, once: as
+    // written, then without the grammar a split leaves behind (`{`, `!`,
+    // `(`), then past each assignment or wrapper in turn — `HUSKY=0 git
+    // push`, `timeout 30 git push` and `{ env HUSKY=0 git push; }` are all
+    // `git push` to a rule that names it, and the last is `HUSKY=0 git push`
+    // too. Allow does not get these readings, so they can never make a
+    // verdict looser. With no deny or ask rule there is nothing to read them
+    // for, and none are taken.
+    let reads_past_prefixes = !deny_rules.is_empty() || !ask_rules.is_empty();
+    let readings: Vec<(&str, Option<MatchingReadings<'_>>)> = segments
+        .iter()
+        .map(|segment| {
+            let segment = segment.trim();
+            let peeled =
+                reads_past_prefixes.then(|| matching_readings(strip_grammar_residue(segment)));
+            (segment, peeled)
+        })
+        .collect();
+    let matches_any = |segment: &str, peeled: &Option<MatchingReadings<'_>>, pattern: &str| {
+        let readings = peeled.iter().flat_map(|peeled| peeled.readings.iter());
+        command_matches_pattern(segment, pattern)
+            || readings
+                .filter(|reading| **reading != segment)
+                .any(|reading| command_matches_pattern(reading, pattern))
+    };
 
     // Deny takes highest priority and pre-empts every other construct.
-    for segment in &segments {
-        let segment = segment.trim();
-        for pattern in deny_rules {
-            if command_matches_pattern(segment, pattern)
-                || command_matches_pattern(strip_grammar_residue(segment), pattern)
-            {
-                return PermissionVerdict::Deny;
-            }
+    for (segment, peeled) in &readings {
+        if deny_rules
+            .iter()
+            .any(|pattern| matches_any(segment, peeled, pattern))
+        {
+            return PermissionVerdict::Deny;
         }
     }
 
@@ -149,23 +283,20 @@ pub(crate) fn check_command_with_rules_and_prefixes(
     let mut all_segments_allowed = true;
     let mut saw_segment = false;
 
-    for segment in &segments {
-        let segment = segment.trim();
+    for (segment, peeled) in &readings {
         if segment.is_empty() {
             continue;
         }
         saw_segment = true;
 
         // Ask — if any segment matches an ask rule, the final verdict is Ask.
+        // A segment whose prefixes ran past the peel's cap hides a command
+        // no deny or ask rule was matched against, so it asks too.
         if !any_ask {
-            for pattern in ask_rules {
-                if command_matches_pattern(segment, pattern)
-                    || command_matches_pattern(strip_grammar_residue(segment), pattern)
-                {
-                    any_ask = true;
-                    break;
-                }
-            }
+            any_ask = peeled.as_ref().is_some_and(|peeled| !peeled.complete)
+                || ask_rules
+                    .iter()
+                    .any(|pattern| matches_any(segment, peeled, pattern));
         }
 
         // Allow — every non-empty segment must match an allow rule independently.
@@ -250,27 +381,71 @@ fn check_shell_wrapper_permissions(
 /// 3. `~/.claude/settings.json`
 /// 4. `~/.claude/settings.local.json`
 ///
-/// Missing files and malformed JSON are silently skipped.
+/// Missing and empty files are skipped. A file that exists but cannot be read
+/// or parsed may hold deny rules that can no longer be applied, so it fails
+/// closed: a warning is printed and every command gets at least `Ask`.
 fn load_permission_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
+    load_permission_rules_from(&get_settings_paths())
+}
+
+fn load_permission_rules_from(paths: &[PathBuf]) -> (Vec<String>, Vec<String>, Vec<String>) {
+    load_permission_rules_tracking(paths, &mut SettingsScan::default())
+}
+
+/// [`load_permission_rules_from`], recording in `scan` what the walk saw
+/// besides the rules it extracts: a file it could not read or parse, and
+/// whether any deny entry exists at all.
+///
+/// Both are the difference between "this user configured no deny rule" and
+/// "RTK saw none" — see [`claude_hook_deny_rules`]. The rules themselves are
+/// unaffected: the fail-closed `ask *` a skipped file contributes is the same
+/// either way.
+fn load_permission_rules_tracking(
+    paths: &[PathBuf],
+    scan: &mut SettingsScan,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut deny_rules = Vec::new();
     let mut ask_rules = Vec::new();
     let mut allow_rules = Vec::new();
 
-    for path in get_settings_paths() {
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
+    for path in paths {
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            // A file that is not there denies nothing. One that is there and
+            // could not be read — permissions, or bytes that are not UTF-8 —
+            // may hold anything.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                eprintln!(
+                    "[rtk] warning: failed to read permissions from {}: {}",
+                    path.display(),
+                    e
+                );
+                ask_rules.push("*".to_string());
+                scan.every_file_read = false;
+                continue;
+            }
         };
+        if content.trim().is_empty() {
+            continue;
+        }
         let Ok(json) = crate::core::utils::from_json_str::<Value>(&content) else {
             eprintln!(
                 "[rtk] warning: failed to parse permissions from {}",
                 path.display()
             );
+            ask_rules.push("*".to_string());
+            scan.every_file_read = false;
             continue;
         };
         let Some(permissions) = json.get("permissions") else {
             continue;
         };
 
+        scan.any_deny_entry |= permissions
+            .get("deny")
+            .and_then(Value::as_array)
+            .is_some_and(|rules| !rules.is_empty());
         append_bash_rules(permissions.get("deny"), &mut deny_rules);
         append_bash_rules(permissions.get("ask"), &mut ask_rules);
         append_bash_rules(permissions.get("allow"), &mut allow_rules);
@@ -512,31 +687,34 @@ fn strip_grammar_residue(segment: &str) -> &str {
     }
 }
 
+/// One space between words, line continuations elided.
+///
+/// Shares the lexer's word-boundary definition rather than
+/// `str::split_whitespace()`, so a bare `\r` in a command never collapses into
+/// a space.
+///
+/// A line continuation goes first: bash elides `\<newline>` entirely and joins
+/// the words either side, so splitting on the newline alone would leave a
+/// stray `\` in front of the command that no pattern matches. Only the LF
+/// form: against CRLF the backslash escapes the `\r` and the `\n` still
+/// terminates the command, in bash and in the lexer alike, so the words either
+/// side are already separate segments.
+fn normalize_command_text(text: &str) -> String {
+    text.replace("\\\n", "")
+        .split(is_word_boundary_whitespace)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Pattern forms:
 /// - `*` → matches everything
 /// - `prefix:*` or `prefix *` (trailing `*`, no other wildcards) → prefix match with word boundary
 /// - `* suffix`, `pre * suf` → glob matching where `*` matches any sequence of characters
 /// - `pattern` → exact match or prefix match (cmd must equal pattern or start with `{pattern} `)
 pub(crate) fn command_matches_pattern(cmd: &str, pattern: &str) -> bool {
-    // Shares the lexer's word-boundary definition rather than
-    // str::split_whitespace(), so a bare `\r` in `cmd` never collapses into a space.
-    //
-    // A line continuation is removed first: bash elides `\<newline>` entirely
-    // and joins the words either side, so splitting on the newline alone would
-    // leave a stray `\` in front of the command that no pattern matches.
-    //
-    // Only the LF form: against CRLF the backslash escapes the `\r` and the
-    // `\n` still terminates the command, in bash and in the lexer alike, so
-    // the words either side are already separate segments.
-    let normalize = |s: &str| {
-        s.replace("\\\n", "")
-            .split(is_word_boundary_whitespace)
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-    let cmd_norm = normalize(cmd);
-    let pattern_norm = normalize(pattern);
+    let cmd_norm = normalize_command_text(cmd);
+    let pattern_norm = normalize_command_text(pattern);
     let cmd = cmd_norm.as_str();
     let pattern = pattern_norm.as_str();
 
@@ -661,6 +839,121 @@ mod tests {
                 project.join(CLAUDE_DIR).join(SETTINGS_LOCAL_JSON),
             ]
         );
+    }
+
+    fn rules_from_files(files: &[(&str, Option<&str>)]) -> (Vec<String>, Vec<String>, Vec<String>) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths: Vec<PathBuf> = files
+            .iter()
+            .map(|(name, content)| {
+                let path = tmp.path().join(name);
+                match content {
+                    Some(content) => std::fs::write(&path, content).expect("write settings"),
+                    // A directory in place of the file: it exists but cannot be read.
+                    None => std::fs::create_dir(&path).expect("mkdir settings"),
+                }
+                path
+            })
+            .collect();
+        load_permission_rules_from(&paths)
+    }
+
+    #[test]
+    fn test_valid_settings_file_rules_apply() {
+        let (deny, ask, allow) = rules_from_files(&[(
+            "settings.json",
+            Some(r#"{"permissions":{"deny":["Bash(git push *)"]}}"#),
+        )]);
+        assert_eq!(
+            check_command_with_rules("git push origin main", &deny, &ask, &allow),
+            PermissionVerdict::Deny
+        );
+        assert_eq!(
+            check_command_with_rules("git status", &deny, &ask, &allow),
+            PermissionVerdict::Default
+        );
+    }
+
+    #[test]
+    fn test_unparseable_settings_file_fails_closed_to_ask() {
+        let (deny, ask, allow) = rules_from_files(&[
+            (
+                "settings.json",
+                Some(r#"{"permissions":{"deny":["Bash(git push *)"],}}"#),
+            ),
+            (
+                "settings.local.json",
+                Some(r#"{"permissions":{"allow":["Bash(git status)"]}}"#),
+            ),
+        ]);
+        assert_eq!(
+            check_command_with_rules("git push origin main", &deny, &ask, &allow),
+            PermissionVerdict::Ask
+        );
+        assert_eq!(
+            check_command_with_rules("git status", &deny, &ask, &allow),
+            PermissionVerdict::Ask
+        );
+    }
+
+    #[test]
+    fn test_unreadable_settings_file_fails_closed_to_ask() {
+        let (deny, ask, allow) = rules_from_files(&[("settings.json", None)]);
+        assert_eq!(
+            check_command_with_rules("git push origin main", &deny, &ask, &allow),
+            PermissionVerdict::Ask
+        );
+    }
+
+    #[test]
+    fn test_unreadable_settings_file_keeps_other_files_deny_rules() {
+        let (deny, ask, allow) = rules_from_files(&[
+            ("settings.json", None),
+            (
+                "settings.local.json",
+                Some(r#"{"permissions":{"deny":["Bash(rm *)"]}}"#),
+            ),
+        ]);
+        assert_eq!(
+            check_command_with_rules("rm -rf build", &deny, &ask, &allow),
+            PermissionVerdict::Deny
+        );
+    }
+
+    #[test]
+    fn test_unparseable_settings_file_keeps_other_files_deny_rules() {
+        let (deny, ask, allow) = rules_from_files(&[
+            (
+                "settings.json",
+                Some(r#"{"permissions":{"deny":["Bash(git push *)"],}}"#),
+            ),
+            (
+                "settings.local.json",
+                Some(r#"{"permissions":{"deny":["Bash(rm *)"]}}"#),
+            ),
+        ]);
+        assert_eq!(
+            check_command_with_rules("rm -rf build", &deny, &ask, &allow),
+            PermissionVerdict::Deny
+        );
+        assert_eq!(
+            check_command_with_rules("git push origin main", &deny, &ask, &allow),
+            PermissionVerdict::Ask
+        );
+    }
+
+    #[test]
+    fn test_missing_and_empty_settings_files_add_no_rules() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let empty = tmp.path().join("settings.local.json");
+        std::fs::write(
+            &empty, "  
+",
+        )
+        .expect("write settings");
+        let (deny, ask, allow) =
+            load_permission_rules_from(&[tmp.path().join("settings.json"), empty]);
+        assert!(deny.is_empty() && ask.is_empty() && allow.is_empty());
     }
 
     #[test]
@@ -932,6 +1225,279 @@ mod tests {
         let deny = vec!["*:*".to_string()];
         assert_eq!(
             check_command_with_rules("rm -rf /", &deny, &[], &[]),
+            PermissionVerdict::Deny
+        );
+    }
+
+    /// Claude Code matches a deny or ask rule past any leading assignment and
+    /// past a fixed set of wrappers, so a rule written for `git push` also
+    /// stops the same command behind `HUSKY=0`, `timeout 30` or `command`.
+    /// This is that table, row for row, with the host's documented verdict as
+    /// the expected one — the first row is the control that always matched.
+    #[test]
+    fn test_deny_matches_past_assignments_and_wrappers() {
+        let deny = vec!["git push *".to_string(), "rm *".to_string()];
+        for cmd in [
+            "git push origin main",
+            "HUSKY=0 git push origin main",
+            "FOO=bar rm -rf tmp/",
+            "command git push",
+            "builtin git push",
+            "timeout 30 git push",
+            "time git push",
+            "nice git push",
+            "nohup git push",
+            "stdbuf -oL git push",
+            "noglob git push",
+            "xargs git push",
+            // Several at once, as an agent that is trying writes them.
+            "HUSKY=0 nohup timeout 30 git push origin main",
+            // Values the env peel reads as one word: empty, and quoted with a
+            // space inside.
+            "FOO= git push",
+            "FOO=\"a b\" git push",
+            "FOO='a b' git push",
+            // Shell prefixes that only run the next word, past the host's own
+            // list: the command behind them is still `git push`.
+            "env git push",
+            "env FOO=1 git push",
+            "exec git push",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &[]),
+                PermissionVerdict::Deny,
+                "a deny rule for the command behind the prefix did not fire: {cmd}"
+            );
+        }
+    }
+
+    /// Words bash does not treat as assignments are the command, so peeling
+    /// them would put a denied command where none runs. Each of these runs
+    /// something other than `git push`. The quoted rows carry the denied text
+    /// inside the value with more after it, so a peel that split the value at
+    /// its space would leave `git push y" echo hi` — which the rule matches.
+    #[test]
+    fn test_deny_does_not_peel_what_is_not_an_assignment() {
+        let deny = vec!["git push *".to_string()];
+        for cmd in [
+            "1A=b git push",
+            "=x git push",
+            "FOO-BAR=x git push",
+            "\"FOO\"=x git push",
+            "FOO=\"x git push y\" echo hi",
+            "FOO='x git push y' echo hi",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &[]),
+                PermissionVerdict::Default,
+                "denied a command bash would not run as `git push`: {cmd}"
+            );
+        }
+    }
+
+    /// Grammar left by the split and a prefix behind it, together: the `{`,
+    /// `!` or `(` has to go before the prefix can be read past. A rule that
+    /// names the assignment itself still matches the form with only the
+    /// grammar removed.
+    #[test]
+    fn test_deny_matches_past_grammar_and_a_prefix_together() {
+        let deny = vec!["git push *".to_string()];
+        for cmd in [
+            "true && { HUSKY=0 git push ; }",
+            "! timeout 30 git push",
+            "( nice git push )",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &[]),
+                PermissionVerdict::Deny,
+                "grammar and a prefix together hid the command: {cmd}"
+            );
+        }
+        let deny = vec!["HUSKY=0 git push *".to_string()];
+        assert_eq!(
+            check_command_with_rules("true && { HUSKY=0 git push x ; }", &deny, &[], &[]),
+            PermissionVerdict::Deny,
+            "a rule naming the assignment stopped matching once it was peelable"
+        );
+    }
+
+    /// The same reading for ask: a missed ask falls to Default, which the
+    /// hook renders identically today, so this is what makes the difference
+    /// observable.
+    #[test]
+    fn test_ask_matches_past_assignments_and_wrappers() {
+        let ask = vec!["git push *".to_string()];
+        for cmd in [
+            "HUSKY=0 git push",
+            "timeout 30 git push",
+            "stdbuf -oL git push",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &[], &ask, &[]),
+                PermissionVerdict::Ask,
+                "an ask rule for the command behind the prefix did not fire: {cmd}"
+            );
+        }
+    }
+
+    /// Allow is deliberately not read the same way. The host matches allow
+    /// past known-safe variables only, and peeling a wrapper for it would
+    /// let `timeout 30 <cmd>` inherit `<cmd>`'s allow rule — so the peel can
+    /// only ever make a verdict stricter, never looser.
+    #[test]
+    fn test_allow_is_not_matched_past_assignments_or_wrappers() {
+        let allow = vec!["git status".to_string()];
+        assert_eq!(
+            check_command_with_rules("git status", &[], &[], &allow),
+            PermissionVerdict::Allow,
+            "control: the plain command is allowed"
+        );
+        for cmd in [
+            "HUSKY=0 git status",
+            "timeout 30 git status",
+            "nice git status",
+            "env git status",
+        ] {
+            assert_ne!(
+                check_command_with_rules(cmd, &[], &[], &allow),
+                PermissionVerdict::Allow,
+                "allow was widened through a prefix: {cmd}"
+            );
+        }
+    }
+
+    /// Where the peel stops. A shell prefix that only runs the next word is
+    /// peeled; a program's own arguments are not, since reading past them
+    /// means knowing every program's option grammar — `git -C . push` is the
+    /// host's own example of what `Bash(git push *)` does not stop. `xargs`
+    /// with an option is the same case from the other side: `-n1` or `-I{}`
+    /// changes what it runs, so only the bare form is looked through.
+    #[test]
+    fn test_deny_does_not_peel_a_programs_own_arguments() {
+        let deny = vec!["git push *".to_string()];
+        for cmd in ["xargs -n1 git push", "git -C . push origin main"] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &[]),
+                PermissionVerdict::Default,
+                "peeled past a program's own arguments: {cmd}"
+            );
+        }
+    }
+
+    /// A rule may name any layer of the prefixes, not only the command
+    /// behind all of them: `env HUSKY=0 git push` runs `HUSKY=0 git push`
+    /// as much as it runs `git push`. An allow rule on the outer wrapper
+    /// must not win over it. In the `nohup` rows, nohup would look for a
+    /// program named `HUSKY=0`; denying them is stricter than the shell,
+    /// never looser.
+    #[test]
+    fn test_deny_and_ask_match_every_layer_of_the_prefixes() {
+        let deny = vec!["HUSKY=0 git push *".to_string()];
+        let allow = vec![
+            "nohup *".to_string(),
+            "env *".to_string(),
+            "CI=1 *".to_string(),
+        ];
+        for cmd in [
+            "nohup HUSKY=0 git push x",
+            "timeout 30 nohup HUSKY=0 git push x",
+            // Each assignment and each `env` is a layer of its own.
+            "env HUSKY=0 git push x",
+            "CI=1 HUSKY=0 git push x",
+            "nohup CI=1 HUSKY=0 git push x",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &allow),
+                PermissionVerdict::Deny,
+                "a rule naming a middle layer did not fire: {cmd}"
+            );
+            assert_eq!(
+                check_command_with_rules(cmd, &[], &deny, &allow),
+                PermissionVerdict::Ask,
+                "an ask rule naming a middle layer did not fire: {cmd}"
+            );
+        }
+    }
+
+    /// Deny and ask read past a wrapper whose own allow rule matches the
+    /// whole line: the command behind it decides.
+    #[test]
+    fn test_deny_and_ask_win_over_an_allow_on_the_wrapper() {
+        let allow = vec!["timeout *".to_string()];
+        let rule = vec!["git push *".to_string()];
+        assert_eq!(
+            check_command_with_rules("timeout 30 git push", &rule, &[], &allow),
+            PermissionVerdict::Deny
+        );
+        assert_eq!(
+            check_command_with_rules("timeout 30 git push", &[], &rule, &allow),
+            PermissionVerdict::Ask
+        );
+        assert_eq!(
+            check_command_with_rules("timeout 30 git status", &rule, &[], &allow),
+            PermissionVerdict::Allow,
+            "control: an allowed wrapper around an unruled command stays allowed"
+        );
+    }
+
+    /// The peel stops after a fixed number of prefixes. Past it, the command
+    /// behind them is unread, so the gate prompts rather than allow what an
+    /// allow rule on the outer wrapper would match — and a stack of thousands
+    /// takes no more peels than one at the cap.
+    #[test]
+    fn test_prefixes_past_the_peel_cap_ask_never_allow() {
+        let allow = vec!["nohup *".to_string()];
+        let deny = vec!["git push *".to_string()];
+        for depth in [MAX_MATCHING_PEELS - 1, MAX_MATCHING_PEELS] {
+            let within = format!("{}git push", "nohup ".repeat(depth));
+            assert_eq!(
+                check_command_with_rules(&within, &deny, &[], &allow),
+                PermissionVerdict::Deny,
+                "control: a stack of {depth}, within the cap, is read through"
+            );
+        }
+        for depth in [MAX_MATCHING_PEELS + 1, 5000] {
+            let cmd = format!("{}git push", "nohup ".repeat(depth));
+            assert_eq!(
+                check_command_with_rules(&cmd, &deny, &[], &allow),
+                PermissionVerdict::Ask,
+                "{depth} stacked prefixes"
+            );
+        }
+        // Bounded work: the readings stop at the cap however deep the stack.
+        let cmd = format!("{}git push", "nohup ".repeat(5000));
+        let peeled = matching_readings(&cmd);
+        assert!(!peeled.complete);
+        assert_eq!(peeled.readings.len(), MAX_MATCHING_PEELS + 1);
+        // With no deny or ask rule nothing can hide behind the prefixes, so
+        // the cap changes no verdict.
+        let cmd = format!("{}git status", "nohup ".repeat(MAX_MATCHING_PEELS + 1));
+        assert_eq!(
+            check_command_with_rules(&cmd, &[], &[], &allow),
+            PermissionVerdict::Allow
+        );
+        assert_eq!(
+            check_command_with_rules(&cmd, &[], &[], &[]),
+            PermissionVerdict::Default
+        );
+    }
+
+    /// Each assignment is a prefix of its own, so an ordinary line that sets
+    /// many variables before its command stays well inside the cap: no
+    /// prompt where develop answered allow.
+    #[test]
+    fn test_a_long_run_of_assignments_stays_within_the_cap() {
+        let vars: String = (0..20).map(|i| format!("V{i}=1 ")).collect();
+        let cmd = format!("{vars}cargo test");
+        let deny = vec!["rm *".to_string()];
+        let allow = vec!["*".to_string()];
+        assert_eq!(
+            check_command_with_rules(&cmd, &deny, &[], &allow),
+            PermissionVerdict::Allow
+        );
+        let deny = vec!["cargo test *".to_string()];
+        assert_eq!(
+            check_command_with_rules(&format!("{cmd} --all"), &deny, &[], &allow),
             PermissionVerdict::Deny
         );
     }
@@ -1820,6 +2386,7 @@ mod tests {
             "env bash -c 'git status; ! exec git push'",
             "bash -c 'exec git push'",
             "bash -c 'nohup FOO=1 git push'",
+            "bash -c 'env HUSKY=0 nohup git push x'",
         ] {
             assert_eq!(
                 check_command_with_rules(cmd, &deny, &[], &allow),
@@ -1827,7 +2394,11 @@ mod tests {
                 "{cmd:?}"
             );
         }
-        for cmd in ["env bash -c 'echo git push'", "env bash -c 'git -C . push'"] {
+        for cmd in [
+            "env bash -c 'echo git push'",
+            "env bash -c 'git -C . push'",
+            "env bash -c 'HUSKY=0 git status'",
+        ] {
             assert_eq!(
                 check_command_with_rules(cmd, &deny, &[], &allow),
                 PermissionVerdict::Allow,

@@ -1,0 +1,94 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+────────────
+ Nextest run ID 5468985e-1fdf-40aa-a01e-4759652d1b15 with nextest profile: retry
+    Starting 3 tests across 1 binary (4 tests skipped)
+  TRY 1 FAIL [   0.003s] (───) fx tests::fail_fast
+  stdout ───
+
+    running 1 test
+    test tests::fail_fast ... FAILED
+
+    failures:
+
+    failures:
+        tests::fail_fast
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::fail_fast' (338357) panicked at src/lib.rs:6:30:
+    assertion `left == right` failed
+      left: 1
+     right: 2
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 1 FAIL [   0.004s] (───) fx tests::flaky
+  stdout ───
+
+    running 1 test
+    test tests::flaky ... FAILED
+
+    failures:
+
+    failures:
+        tests::flaky
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::flaky' (338358) panicked at src/lib.rs:13:83:
+    first try fails
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 2 PASS [   0.003s] (1/3) fx tests::flaky
+  TRY 2 FAIL [   0.003s] (───) fx tests::fail_fast
+  stdout ───
+
+    running 1 test
+    test tests::fail_fast ... FAILED
+
+    failures:
+
+    failures:
+        tests::fail_fast
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::fail_fast' (338362) panicked at src/lib.rs:6:30:
+    assertion `left == right` failed
+      left: 1
+     right: 2
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 3 FAIL [   0.003s] (2/3) fx tests::fail_fast
+  stdout ───
+
+    running 1 test
+    test tests::fail_fast ... FAILED
+
+    failures:
+
+    failures:
+        tests::fail_fast
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::fail_fast' (338364) panicked at src/lib.rs:6:30:
+    assertion `left == right` failed
+      left: 1
+     right: 2
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        SLOW [>  1.000s] (───) fx tests::pass_slow
+        PASS [   1.503s] (3/3) fx tests::pass_slow
+────────────
+     Summary [   1.503s] 3 tests run: 2 passed (1 slow, 1 flaky), 1 failed, 4 skipped
+   FLAKY 2/3 [   0.003s] (1/3) fx tests::flaky
+  TRY 3 FAIL [   0.003s] (2/3) fx tests::fail_fast
+error: test run failed

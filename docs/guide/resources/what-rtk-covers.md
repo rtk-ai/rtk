@@ -44,7 +44,6 @@ RTK reduces **bash output bytes** — the only thing it controls. Those bytes ar
 | Command | What changes |
 |---------|--------------|
 | `cargo test` | Failures only, passed tests suppressed |
-| `cargo nextest` | Same as test |
 | `cargo build` | Errors and warnings only |
 | `cargo check` | Errors and warnings only |
 | `cargo clippy` | Lint warnings grouped by file |
@@ -60,6 +59,7 @@ RTK reduces **bash output bytes** — the only thing it controls. Those bytes ar
 | `pnpm list` | Compact dependency tree |
 | `pnpm outdated` | Package + current + latest only |
 | `next build` | Route summary + errors only |
+| `ng build` | Compact Angular build tables; every bundle and diagnostic retained |
 | `prisma migrate` | Migration status only |
 | `playwright test` | Failures + trace links only |
 
@@ -93,8 +93,7 @@ RTK reduces **bash output bytes** — the only thing it controls. Those bytes ar
 | Command | What changes |
 |---------|--------------|
 | `dotnet build` | Errors and warnings only |
-| `dotnet test` | Failures only |
-| `dotnet format` | Changed files only |
+| `dotnet restore` | Restore summary, errors and warnings kept |
 
 ## Docker / Kubernetes
 
@@ -103,7 +102,6 @@ RTK reduces **bash output bytes** — the only thing it controls. Those bytes ar
 | `docker ps` | Essential columns (name, image, status, port) |
 | `docker images` | Name + tag + size only |
 | `docker logs` | Deduplicated, last N lines |
-| `docker compose up` | Service status, errors highlighted |
 | `kubectl get pods` | Name + status + restarts only |
 | `kubectl logs` | Deduplicated entries |
 

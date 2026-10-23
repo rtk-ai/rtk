@@ -6,9 +6,17 @@ use crate::core::shell::display_args;
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
+use regex::Regex;
+use std::sync::LazyLock;
 
 const MAX_XFAIL: usize = CAP_WARNINGS;
 const MAX_PYTEST_FAILURES: usize = CAP_WARNINGS;
+static PYTEST_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^(?:=+\s*)?\d+ [^,\r\n=]+?(?:, \d+ [^,\r\n=]+?)* in \d+(?:\.\d+)?(?:s| seconds)(?: \((?:\d+ days?, )?\d+:\d{2}:\d{2}\))?(?:\s*=+)?$",
+    )
+    .expect("valid pytest summary regex")
+});
 
 #[derive(Debug, PartialEq)]
 enum ParseState {
@@ -97,7 +105,11 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
         if trimmed.starts_with("===") && trimmed.contains("test session starts") {
             state = ParseState::Header;
             continue;
-        } else if trimmed.starts_with("===") && trimmed.contains("FAILURES") {
+        // pytest prints setup/teardown/collection errors in an ERRORS section
+        // shaped like FAILURES, so both feed the same failure blocks.
+        } else if trimmed.starts_with("===")
+            && (trimmed.contains("FAILURES") || trimmed.contains("ERRORS"))
+        {
             state = ParseState::Failures;
             continue;
         } else if trimmed.starts_with("===") && trimmed.contains("short test summary") {
@@ -108,23 +120,7 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
                 current_failure.clear();
             }
             continue;
-        } else if trimmed.starts_with("===")
-            && (trimmed.contains("passed")
-                || trimmed.contains("failed")
-                || trimmed.contains("skipped"))
-        {
-            summary_line = trimmed.to_string();
-            continue;
-        // quiet mode (-q): bare summary without === wrapper, e.g. "5 failed, 1698 passed, 2 skipped in 108.89s"
-        } else if summary_line.is_empty()
-            && !trimmed.starts_with("===")
-            && !trimmed.starts_with("FAILED")
-            && !trimmed.starts_with("ERROR")
-            && (trimmed.contains(" passed")
-                || trimmed.contains(" failed")
-                || trimmed.contains(" skipped"))
-            && trimmed.contains(" in ")
-        {
+        } else if PYTEST_SUMMARY_RE.is_match(trimmed) {
             summary_line = trimmed.to_string();
             continue;
         }
@@ -185,6 +181,7 @@ struct PytestCounts {
     skipped: usize,
     xfailed: usize,
     xpassed: usize,
+    errors: usize,
     duration: Option<String>,
 }
 
@@ -201,10 +198,11 @@ fn build_pytest_summary(
         skipped,
         xfailed,
         xpassed,
+        errors,
         duration,
     } = counts;
 
-    if passed == 0 && failed == 0 && skipped == 0 && xfailed == 0 && xpassed == 0 {
+    if passed == 0 && failed == 0 && skipped == 0 && xfailed == 0 && xpassed == 0 && errors == 0 {
         return PYTEST_NO_TESTS.to_string();
     }
 
@@ -214,7 +212,7 @@ fn build_pytest_summary(
         .map(|value| format!(" in {value}"))
         .unwrap_or_default();
 
-    if failed == 0 && passed > 0 && !extras_present {
+    if failed == 0 && errors == 0 && passed > 0 && !extras_present {
         return format!("Pytest: {passed} passed{duration_suffix}");
     }
 
@@ -228,6 +226,10 @@ fn build_pytest_summary(
     }
     if xpassed > 0 {
         result.push_str(&format!(", {} xpassed", xpassed));
+    }
+    if errors > 0 {
+        let noun = if errors == 1 { "error" } else { "errors" };
+        result.push_str(&format!(", {errors} {noun}"));
     }
     result.push_str(&duration_suffix);
     result.push('\n');
@@ -266,13 +268,20 @@ fn build_pytest_summary(
             if first_line.starts_with("___") {
                 // Extract test name between ___
                 let test_name = first_line.trim_matches('_').trim();
-                result.push_str(&format!("{}. [FAIL] {}\n", i + 1, test_name));
-            } else if first_line.starts_with("FAILED") {
+                // ERRORS section headers read "ERROR at setup of test_x" / "ERROR collecting x.py"
+                match test_name.strip_prefix("ERROR ") {
+                    Some(what) => result.push_str(&format!("{}. [ERROR] {}\n", i + 1, what)),
+                    None => result.push_str(&format!("{}. [FAIL] {}\n", i + 1, test_name)),
+                }
+            } else if first_line.starts_with("FAILED") || first_line.starts_with("ERROR") {
                 // Summary format: "FAILED tests/test_foo.py::test_bar - AssertionError"
                 let parts: Vec<&str> = first_line.split(" - ").collect();
                 if let Some(test_path) = parts.first() {
-                    let test_name = test_path.trim_start_matches("FAILED ");
-                    result.push_str(&format!("{}. [FAIL] {}\n", i + 1, test_name));
+                    let (label, test_name) = match test_path.strip_prefix("ERROR ") {
+                        Some(name) => ("ERROR", name),
+                        None => ("FAIL", test_path.trim_start_matches("FAILED ")),
+                    };
+                    result.push_str(&format!("{}. [{label}] {}\n", i + 1, test_name));
                 }
                 if parts.len() > 1 {
                     result.push_str(&format!("     {}\n", truncate(parts[1], 100)));
@@ -343,6 +352,8 @@ fn parse_summary_line(summary: &str) -> PytestCounts {
                 counts.failed = n;
             } else if word.contains("skipped") {
                 counts.skipped = n;
+            } else if word.starts_with("error") {
+                counts.errors = n;
             }
         }
     }
@@ -353,10 +364,17 @@ fn parse_summary_line(summary: &str) -> PytestCounts {
 fn parse_duration(summary: &str) -> Option<String> {
     let unwrapped = summary.trim().trim_matches('=').trim();
     let (_, duration_tail) = unwrapped.rsplit_once(" in ")?;
-    let duration = duration_tail.split_whitespace().next()?;
-    let seconds = duration.strip_suffix('s')?;
+    let mut words = duration_tail.split_whitespace();
+    let duration = words.next()?;
+    let seconds = if let Some(seconds) = duration.strip_suffix('s') {
+        seconds
+    } else if words.next() == Some("seconds") {
+        duration
+    } else {
+        return None;
+    };
     seconds.parse::<f64>().ok()?;
-    Some(duration.to_string())
+    Some(format!("{seconds}s"))
 }
 
 #[cfg(test)]
@@ -595,6 +613,100 @@ FAILED tests/test_foo.py::test_something - AssertionError
     }
 
     #[test]
+    fn test_filter_pytest_summary_over_60s_with_clock() {
+        // Once elapsed time passes 60s, pytest appends a parenthetical clock.
+        let long_runs = [
+            "===== 40 passed in 65.12s (0:01:05) =====",
+            "40 passed in 65.12s (0:01:05)",
+        ];
+        let short = filter_pytest_output("===== 40 passed in 0.12s =====");
+        assert_eq!(short, "Pytest: 40 passed in 0.12s");
+        assert_eq!(
+            filter_pytest_output("40 passed in 12s"),
+            "Pytest: 40 passed in 12s"
+        );
+
+        for line in long_runs {
+            let result = filter_pytest_output(line);
+            assert!(
+                !result.contains("No tests collected"),
+                "summary over 60s was not recognized: {line:?} -> {result}"
+            );
+            assert_eq!(
+                result, "Pytest: 40 passed in 65.12s",
+                "counts diverged for {line:?}: {result}"
+            );
+        }
+
+        let not_a_summary = "see 40 passed in 65.12s (0:01:05) in the log";
+        assert!(
+            !PYTEST_SUMMARY_RE.is_match(not_a_summary),
+            "non-summary lines must still be rejected"
+        );
+    }
+
+    #[test]
+    fn test_filter_pytest_uses_trailing_summary_not_traceback_source() {
+        let output = r#"=== FAILURES ===
+___ test_outer ___
+--- Captured stdout call ---
+1 passed in 0.01s
+E   AssertionError: test_outer failed
+=== short test summary info ===
+FAILED test_outer - AssertionError
+1 failed in 0.02s"#;
+
+        let result = filter_pytest_output(output);
+        assert!(
+            result.starts_with("Pytest: 0 passed, 1 failed in 0.02s"),
+            "{result}"
+        );
+        assert!(result.contains("test_outer"), "{result}");
+    }
+
+    #[test]
+    fn test_filter_pytest_plugin_and_legacy_summaries() {
+        for (input, expected) in [
+            (
+                "2 passed, 3 subtests passed in 0.00s",
+                "Pytest: 2 passed in 0.00s",
+            ),
+            ("2 passed, 1 rerun in 0.01s", "Pytest: 2 passed in 0.01s"),
+            (
+                "===== 5 passed in 90000.00s (1 day, 1:00:00) =====",
+                "Pytest: 5 passed in 90000.00s",
+            ),
+            (
+                "5 passed in 180000.00s (2 days, 2:00:00)",
+                "Pytest: 5 passed in 180000.00s",
+            ),
+            (
+                "1 passed, 1 skipped, 1 xfailed in 0.01 seconds",
+                "Pytest: 1 passed, 0 failed, 1 skipped, 1 xfailed in 0.01s",
+            ),
+            (
+                "2 failed, 1 passed, 2 subtests passed in 0.02s",
+                "Pytest: 1 passed, 2 failed in 0.02s",
+            ),
+        ] {
+            assert_eq!(filter_pytest_output(input), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn test_filter_pytest_rejects_summary_fragments_without_final_result() {
+        for input in [
+            "=== FAILURES ===\n___ test_outer ___\nE + 2 passed in 0.01s",
+            "2 passed in 0.01s, then 1 failed",
+            "2 passed in 0.01s trailing junk",
+            "40 passed",
+            "40 passed in 65.12s (see log)",
+        ] {
+            assert_eq!(filter_pytest_output(input), PYTEST_NO_TESTS, "{input}");
+        }
+    }
+
+    #[test]
     fn test_filter_pytest_only_skipped() {
         // If only skipped tests, should NOT say "No tests collected"
         let output = r#"=== test session starts ===
@@ -608,5 +720,112 @@ collected 3 items
             "Should not say 'No tests collected' when tests were skipped. Got: {}",
             result
         );
+    }
+
+    #[test]
+    fn test_filter_pytest_fixture_error_is_reported() {
+        // Real pytest 9.1.1 `-q --tb=short -rxX` output for a fixture that raises (#4426).
+        let output = r#"E.                                                                       [100%]
+==================================== ERRORS ====================================
+___________________________ ERROR at setup of test_e ___________________________
+test_e.py:3: in boom
+    def boom(): raise RuntimeError("fixture")
+E   RuntimeError: fixture
+1 passed, 1 error in 0.02s"#;
+
+        let result = filter_pytest_output(output);
+        assert!(
+            result.starts_with("Pytest: 1 passed, 0 failed, 1 error in 0.02s"),
+            "error count missing from summary: {result}"
+        );
+        assert_ne!(result, "Pytest: 1 passed in 0.02s");
+        assert!(
+            result.contains("[ERROR] at setup of test_e"),
+            "error block missing: {result}"
+        );
+        assert!(result.contains("RuntimeError: fixture"), "got: {result}");
+    }
+
+    #[test]
+    fn test_filter_pytest_errors_and_failures_together() {
+        let output = r#"FEE.                                                                     [100%]
+==================================== ERRORS ====================================
+__________________________ ERROR at setup of test_one __________________________
+test_x.py:5: in db
+    raise ConnectionError("db down")
+E   ConnectionError: db down
+______________________ ERROR at teardown of test_two _______________________
+test_x.py:11: in tmp
+    os.remove(path)
+E   FileNotFoundError: [Errno 2] No such file or directory: 'x'
+=================================== FAILURES ===================================
+__________________________________ test_bad ____________________________________
+test_x.py:20: in test_bad
+    assert 1 == 2
+E   assert 1 == 2
+1 failed, 1 passed, 2 errors in 0.05s"#;
+
+        let result = filter_pytest_output(output);
+        assert!(
+            result.starts_with("Pytest: 1 passed, 1 failed, 2 errors in 0.05s"),
+            "got: {result}"
+        );
+        assert!(
+            result.contains("[ERROR] at setup of test_one"),
+            "got: {result}"
+        );
+        assert!(
+            result.contains("[ERROR] at teardown of test_two"),
+            "got: {result}"
+        );
+        assert!(result.contains("[FAIL] test_bad"), "got: {result}");
+        assert!(result.contains("ConnectionError: db down"), "got: {result}");
+    }
+
+    #[test]
+    fn test_filter_pytest_collection_error_is_reported() {
+        // `--continue-on-collection-errors`: other tests still run.
+        let output = r#".                                                                        [100%]
+==================================== ERRORS ====================================
+_______________________ ERROR collecting test_bad.py ________________________
+test_bad.py:1: in <module>
+    raise RuntimeError("boom at import")
+E   RuntimeError: boom at import
+1 passed, 1 error in 0.03s"#;
+
+        let result = filter_pytest_output(output);
+        assert!(
+            result.starts_with("Pytest: 1 passed, 0 failed, 1 error in 0.03s"),
+            "got: {result}"
+        );
+        assert!(
+            result.contains("[ERROR] collecting test_bad.py"),
+            "got: {result}"
+        );
+        assert!(result.contains("boom at import"), "got: {result}");
+    }
+
+    #[test]
+    fn test_filter_pytest_error_short_summary_line() {
+        // With `-rE`/`-ra` pytest also prints an `ERROR <nodeid> - <msg>` line.
+        let output = r#"=== short test summary info ===
+ERROR test_e.py::test_e - RuntimeError: fixture
+=== 1 passed, 1 error in 0.02s ==="#;
+
+        let result = filter_pytest_output(output);
+        assert!(
+            result.contains("[ERROR] test_e.py::test_e"),
+            "got: {result}"
+        );
+        assert!(result.contains("RuntimeError: fixture"), "got: {result}");
+    }
+
+    #[test]
+    fn test_parse_summary_line_errors() {
+        let c = parse_summary_line("1 passed, 1 error in 0.02s");
+        assert_eq!((c.passed, c.failed, c.errors), (1, 0, 1));
+
+        let c = parse_summary_line("=== 1 failed, 3 passed, 2 errors in 0.05s ===");
+        assert_eq!((c.passed, c.failed, c.errors), (3, 1, 2));
     }
 }

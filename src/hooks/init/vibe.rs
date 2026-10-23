@@ -355,6 +355,20 @@ fn strip_vibe_rtk_entry(content: &str) -> Option<String> {
     Some(out)
 }
 
+/// Returns true if Vibe CLI RTK hook is configured.
+pub fn is_configured() -> bool {
+    let Ok(vibe_dir) = resolve_vibe_dir() else {
+        return false;
+    };
+    let hooks_path = vibe_dir.join(VIBE_HOOKS_FILE);
+    if let Ok(content) = fs::read_to_string(&hooks_path)
+        && vibe_hooks_toml_has_rtk(&content)
+    {
+        return true;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

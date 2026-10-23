@@ -1,5 +1,6 @@
 //! Filters Ruff linter and formatter output.
 
+use crate::core::args_utils;
 use crate::core::config;
 use crate::core::runner;
 use crate::core::shell::display_args;
@@ -7,7 +8,7 @@ use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, truncate};
 use anyhow::Result;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// A tool with a list like this also belongs in `core::tracking::SUBCOMMAND_ROUTERS`,
 /// which keeps the subcommand in its telemetry label.
@@ -49,9 +50,11 @@ struct RuffDiagnostic {
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+    let args = &args_utils::restore_double_dash(args);
     let is_check = is_check_invocation(args);
 
     let is_format = args.iter().any(|a| a == "format");
+    let is_analyze_graph = is_analyze_graph_invocation(args);
 
     let mut cmd = resolved_command("ruff");
 
@@ -115,11 +118,23 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             } else if is_format {
                 filter_ruff_format(stdout)
             } else {
-                truncate(stdout.trim(), config::limits().passthrough_max_chars)
+                filter_passthrough_output(stdout, is_analyze_graph)
             }
         },
         runner::RunOptions::stdout_only().clean_outputs(clean_outputs),
     )
+}
+
+fn is_analyze_graph_invocation(args: &[String]) -> bool {
+    matches!(args, [subcommand, action, ..] if subcommand == "analyze" && action == "graph")
+}
+
+fn filter_passthrough_output(stdout: &str, is_analyze_graph: bool) -> String {
+    if is_analyze_graph {
+        stdout.trim().to_string()
+    } else {
+        truncate(stdout.trim(), config::limits().passthrough_max_chars)
+    }
 }
 
 fn is_check_invocation(args: &[String]) -> bool {
@@ -157,9 +172,16 @@ pub fn filter_ruff_check_json(output: &str) -> String {
     let total_files = unique_files.len();
 
     // Group by rule code
-    let mut by_rule: HashMap<String, usize> = HashMap::new();
+    let mut by_rule: HashMap<&str, (usize, Option<&str>)> = HashMap::new();
     for diag in &diagnostics {
-        *by_rule.entry(diag.code.clone()).or_insert(0) += 1;
+        let message = diag.message.trim();
+        let entry = by_rule.entry(&diag.code).or_insert((0, Some(message)));
+        entry.0 += 1;
+        // F401, for example, includes the imported name. Never replace
+        // different messages with the first message seen for that code.
+        if entry.1 != Some(message) {
+            entry.1 = None;
+        }
     }
 
     // Group by file
@@ -169,7 +191,7 @@ pub fn filter_ruff_check_json(output: &str) -> String {
     }
 
     let mut file_counts: Vec<_> = by_file.iter().collect();
-    file_counts.sort_by(|a, b| b.1.cmp(a.1));
+    file_counts.sort_by_key(|(file, count)| (std::cmp::Reverse(**count), **file));
 
     // Build output
     let mut result = String::new();
@@ -184,15 +206,24 @@ pub fn filter_ruff_check_json(output: &str) -> String {
     result.push('\n');
 
     // Show top rules
-    let mut rule_counts: Vec<_> = by_rule.iter().collect();
-    rule_counts.sort_by(|a, b| b.1.cmp(a.1));
+    let mut rule_counts: Vec<_> = by_rule
+        .iter()
+        .map(|(&code, &(count, message))| (code, count, message))
+        .collect();
+    rule_counts.sort_by_key(|&(code, count, _)| (std::cmp::Reverse(count), code));
 
     const MAX_RUFF_RULES: usize = CAP_WARNINGS;
     const MAX_RUFF_FILES: usize = CAP_WARNINGS;
+    let mut described_rules = HashSet::new();
     if !rule_counts.is_empty() {
         result.push_str("Top rules:\n");
-        for (rule, count) in rule_counts.iter().take(MAX_RUFF_RULES) {
-            result.push_str(&format!("  {} ({}x)\n", rule, count));
+        for (rule, count, message) in rule_counts.iter().take(MAX_RUFF_RULES) {
+            result.push_str(&format!("  {} ({}x)", rule, count));
+            if let Some(message) = message.filter(|s| !s.is_empty()) {
+                result.push_str(&format!(": {}", truncate(message, 100)));
+                described_rules.insert(*rule);
+            }
+            result.push('\n');
         }
         result.push('\n');
     }
@@ -210,7 +241,7 @@ pub fn filter_ruff_check_json(output: &str) -> String {
         }
 
         let mut file_rule_counts: Vec<_> = file_rules.iter().collect();
-        file_rule_counts.sort_by(|a, b| b.1.cmp(a.1));
+        file_rule_counts.sort_by_key(|(rule, count)| (std::cmp::Reverse(**count), *rule));
 
         for (rule, count) in file_rule_counts.iter().take(3) {
             result.push_str(&format!("    {} ({})\n", rule, count));
@@ -240,8 +271,22 @@ pub fn filter_ruff_check_json(output: &str) -> String {
         .collect();
 
     result.push_str("\nViolations:\n");
-    for line in violation_lines.iter().take(MAX_VIOLATIONS) {
-        result.push_str(line);
+    for (diag, line) in diagnostics
+        .iter()
+        .zip(&violation_lines)
+        .take(MAX_VIOLATIONS)
+    {
+        if described_rules.contains(diag.code.as_str()) {
+            result.push_str(&format!(
+                "  {}:{}:{} {}\n",
+                compact_path(&diag.filename),
+                diag.location.row,
+                diag.location.column,
+                diag.code,
+            ));
+        } else {
+            result.push_str(line);
+        }
     }
     if violation_lines.len() > MAX_VIOLATIONS {
         result.push_str(&format!(
@@ -427,11 +472,168 @@ mod tests {
     }
 
     #[test]
+    fn analyze_graph_preserves_large_json_output() {
+        let raw = include_str!("../../../tests/fixtures/ruff_analyze_graph_raw.json");
+        assert!(raw.len() > config::limits().passthrough_max_chars);
+
+        let args = ["analyze".to_string(), "graph".to_string()];
+        let result = filter_passthrough_output(raw, is_analyze_graph_invocation(&args));
+
+        assert_eq!(result, raw.trim());
+        serde_json::from_str::<serde_json::Value>(&result)
+            .expect("analyze graph output must remain valid JSON");
+    }
+
+    /// Only invocations starting `analyze graph` are exempt from the passthrough cap:
+    /// `analyze help graph` and every other passthrough subcommand still get it.
+    #[test]
+    fn only_analyze_graph_skips_the_passthrough_cap() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(is_analyze_graph_invocation(&args(&["analyze", "graph"])));
+        assert!(is_analyze_graph_invocation(&args(&[
+            "analyze",
+            "graph",
+            "--direction",
+            "dependents",
+            "src"
+        ])));
+        assert!(!is_analyze_graph_invocation(&args(&[
+            "analyze", "help", "graph"
+        ])));
+        assert!(!is_analyze_graph_invocation(&args(&["rule", "E501"])));
+
+        let raw = include_str!("../../../tests/fixtures/ruff_rule_e501_raw.txt");
+        assert!(raw.len() > config::limits().passthrough_max_chars);
+        let result =
+            filter_passthrough_output(raw, is_analyze_graph_invocation(&args(&["rule", "E501"])));
+        assert!(
+            result.ends_with("...") && raw.starts_with(result.trim_end_matches("...")),
+            "rule output must be a capped prefix of ruff's, got {} of {} bytes",
+            result.len(),
+            raw.len()
+        );
+    }
+
+    #[test]
     fn test_filter_ruff_check_no_issues() {
         let output = "[]";
         let result = filter_ruff_check_json(output);
         assert!(result.contains("Ruff"));
         assert!(result.contains("No issues found"));
+    }
+
+    #[test]
+    fn repeated_descriptions_are_listed_once_in_visible_top_rules() {
+        let input = r#"[
+            {"code":"F401","message":"`os` imported but unused","location":{"row":1,"column":8},"filename":"/project/src/a.py","fix":null},
+            {"code":"F401","message":"`os` imported but unused","location":{"row":2,"column":8},"filename":"/project/src/b.py","fix":null}
+        ]"#;
+        let out = filter_ruff_check_json(input);
+        let (summary, detail) = out.split_once("Violations:\n").expect("detail section");
+        assert!(
+            summary.contains("F401 (2x): `os` imported but unused"),
+            "{out}"
+        );
+        assert_eq!(out.matches("`os` imported but unused").count(), 1, "{out}");
+        assert!(detail.contains("src/a.py:1:8 F401"));
+        assert!(detail.contains("src/b.py:2:8 F401"));
+    }
+
+    #[test]
+    fn distinct_messages_for_one_rule_stay_attached_to_their_locations() {
+        let input = r#"[
+            {"code":"F401","message":"`os` imported but unused","location":{"row":1,"column":8},"filename":"/project/src/a.py","fix":null},
+            {"code":"F401","message":"`sys` imported but unused","location":{"row":2,"column":8},"filename":"/project/src/a.py","fix":null}
+        ]"#;
+        let out = filter_ruff_check_json(input);
+        assert!(out.contains("src/a.py:1:8 F401 `os` imported but unused"));
+        assert!(out.contains("src/a.py:2:8 F401 `sys` imported but unused"));
+    }
+
+    #[test]
+    fn descriptions_for_rules_outside_the_summary_cap_stay_in_details() {
+        let diagnostics: Vec<_> = (0..=CAP_WARNINGS)
+            .map(|i| {
+                serde_json::json!({
+                    "code": format!("RULE{i:02}"), "message": format!("Distinct diagnostic {i}"),
+                    "location": {"row": i + 1, "column": 1}, "filename": "src/a.py", "fix": null,
+                })
+            })
+            .collect();
+        let out =
+            filter_ruff_check_json(&serde_json::to_string(&diagnostics).expect("fixture JSON"));
+        let detail = out.split_once("Violations:\n").expect("detail section").1;
+        assert!(detail.contains("RULE10 Distinct diagnostic 10"), "{out}");
+    }
+
+    #[test]
+    fn real_repeated_diagnostics_keep_locations_and_reduce_output() {
+        // Captured from Ruff 0.16.6:
+        // `ruff check --isolated --select F401,E701 --output-format=json src/four.py`
+        // where four.py imports os and has two one-line if statements. Only
+        // the machine-specific filename prefix was normalized to /fixture.
+        let input = include_str!("../../../tests/fixtures/ruff_check_repeated_raw.json");
+        let out = filter_ruff_check_json(input);
+        assert_eq!(
+            out.matches("Multiple statements on one line (colon)")
+                .count(),
+            1
+        );
+        assert_eq!(out.matches("`os` imported but unused").count(), 1);
+        for location in [
+            "src/four.py:1:8 F401",
+            "src/four.py:3:8 E701",
+            "src/four.py:4:9 E701",
+        ] {
+            assert!(out.contains(location), "{out}");
+        }
+        assert!(out.contains("3 issues in 1 files (1 fixable)"), "{out}");
+        assert!(
+            out.len() * 100 <= input.len() * 80,
+            "must save at least 20%"
+        );
+        for _ in 0..10 {
+            assert_eq!(filter_ruff_check_json(input), out);
+        }
+    }
+
+    #[test]
+    fn tied_files_and_rules_are_listed_by_name() {
+        // Captured from Ruff 0.16.6:
+        // `ruff check --isolated --select ALL --output-format=json src` over
+        // alpha.py, beta.py and gamma.py, each containing `import os, sys`, so
+        // every file and every single-occurrence rule ties on its count. Only
+        // the machine-specific filename prefix was normalized to /fixture.
+        let input = include_str!("../../../tests/fixtures/ruff_check_tied_raw.json");
+        let expected_rules = "Top rules:\n  F401 (6x)\n  CPY001 (3x): Missing copyright notice at top of file\n  D100 (3x): Missing docstring in public module\n  E401 (3x): Multiple imports on one line\n  I001 (3x): Import block is un-sorted or un-formatted\n";
+        let expected_files = "Top files:\n\
+            \x20 src/alpha.py (6 issues)\n    F401 (2)\n    CPY001 (1)\n    D100 (1)\n\
+            \x20 src/beta.py (6 issues)\n    F401 (2)\n    CPY001 (1)\n    D100 (1)\n\
+            \x20 src/gamma.py (6 issues)\n    F401 (2)\n    CPY001 (1)\n    D100 (1)\n";
+        // Each run hashes its maps differently; a count-only sort would pass
+        // one run by luck but not ten.
+        for _ in 0..10 {
+            let out = filter_ruff_check_json(input);
+            assert!(out.contains(expected_rules), "{out}");
+            assert!(out.contains(expected_files), "{out}");
+        }
+    }
+
+    #[test]
+    fn long_shared_descriptions_are_truncated_in_top_rules() {
+        // Captured from Ruff 0.16.6:
+        // `ruff check --isolated --select F401 --output-format=json src` over two
+        // modules importing the same long module name. Only the machine-specific
+        // filename prefix was normalized to /fixture.
+        let input = include_str!("../../../tests/fixtures/ruff_check_long_message_raw.json");
+        let out = filter_ruff_check_json(input);
+        assert!(
+            out.contains("  F401 (2x): `a_really_long_package_name_for_testing.with_a_long_submodule_name.and_yet_another_module` import...\n"),
+            "{out}"
+        );
+        assert!(!out.contains("imported but unused"), "{out}");
+        assert!(out.contains("  src/pkg_a/mod.py:1:8 F401\n"), "{out}");
+        assert!(out.contains("  src/pkg_b/mod.py:1:8 F401\n"), "{out}");
     }
 
     #[test]

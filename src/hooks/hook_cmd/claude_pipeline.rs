@@ -151,7 +151,12 @@ fn shell_gate(v: &Value) -> bool {
         }
         ShellHookDecision::Swap { command, rule } => {
             let verdict = permissions::check_command_for(cmd, permissions::Host::Claude);
-            match decision::decide_for_agent(cmd, verdict) {
+            // A yes/no gate on the pipeline's own replacement command, not a
+            // rewrite RTK emits — so it must answer about `cmd` as it stands.
+            // `Unattested` keeps the wrap out of this gate, so it answers as
+            // it does without the feature: a fish script the ordinary rewrite
+            // would defer stays deferred, and one it would rewrite swaps.
+            match decision::decide_for_agent(cmd, verdict, permissions::DenyRules::Unattested) {
                 HookDecision::AllowRewrite(_) | HookDecision::AskRewrite(_) => {
                     let output = pre_tool_use_rewrite_output(v, &command, None);
                     let _ = writeln!(io::stdout(), "{output}");

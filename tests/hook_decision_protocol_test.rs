@@ -703,6 +703,57 @@ mod rewrite_host_scoping {
         );
     }
 
+    /// A settings file that exists but cannot be read or parsed may hold deny
+    /// rules RTK can no longer apply, so it asks: `git push origin main`, which
+    /// the unparseable file denies, exits 3 in both cases even for a delegate
+    /// that relaxes the default ask, with a warning naming the file.
+    #[test]
+    fn openclaw_asks_when_a_settings_file_cannot_be_read_or_parsed() {
+        let unreadable = Sandbox::bare();
+        let settings = unreadable.project.join(".claude/settings.json");
+        std::fs::remove_file(&settings).expect("remove settings");
+        std::fs::create_dir(&settings).expect("a directory in place of settings.json");
+
+        let unparseable = Sandbox::bare();
+        std::fs::write(
+            unparseable.project.join(".claude/settings.json"),
+            r#"{"permissions":{"deny":["Bash(git push *)"],}}"#,
+        )
+        .expect("write settings");
+
+        let file = std::path::Path::new("project")
+            .join(".claude")
+            .join("settings.json")
+            .display()
+            .to_string();
+        for (sandbox, warning) in [
+            (
+                &unreadable,
+                "[rtk] warning: failed to read permissions from ",
+            ),
+            (
+                &unparseable,
+                "[rtk] warning: failed to parse permissions from ",
+            ),
+        ] {
+            let (code, stdout, stderr) = sandbox.run_with_env(
+                &["rewrite", "git push origin main"],
+                &[("RTK_REWRITE_HOST", "openclaw")],
+            );
+            assert_eq!(
+                (code, stdout.as_str()),
+                (3, "rtk git push origin main"),
+                "{warning}: {stderr}"
+            );
+            assert!(
+                stderr
+                    .lines()
+                    .any(|line| line.starts_with(warning) && line.contains(&file)),
+                "{warning}: {stderr}"
+            );
+        }
+    }
+
     /// The suite is hermetic against the variable: `run_with_env` scrubs it, so
     /// exporting `RTK_REWRITE_HOST=openclaw` in a developer's shell cannot turn
     /// `default_verdict_exits_three_never_zero` red on that machine and green
