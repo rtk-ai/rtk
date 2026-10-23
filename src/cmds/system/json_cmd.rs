@@ -6,6 +6,7 @@ use crate::core::utils::{from_json_str, strip_leading_bom};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
@@ -249,7 +250,12 @@ fn extract_schema(value: &Value, depth: usize, max_depth: usize) -> String {
             if arr.is_empty() {
                 "[]".to_string()
             } else {
-                let first_schema = extract_schema(&arr[0], depth + 1, max_depth);
+                let first_schema = match &arr[0] {
+                    Value::Object(_) => {
+                        object_schema(&merged_object_keys(arr), depth + 1, max_depth)
+                    }
+                    first => extract_schema(first, depth + 1, max_depth),
+                };
                 if arr.len() == 1 {
                     format!("[{}]", first_schema)
                 } else {
@@ -258,25 +264,35 @@ fn extract_schema(value: &Value, depth: usize, max_depth: usize) -> String {
             }
         }
         Value::Object(map) => {
-            if map.is_empty() {
-                "{}".to_string()
-            } else {
-                let mut keys: Vec<_> = map.keys().collect();
-                keys.sort();
-
-                let mut parts = Vec::new();
-                for (i, key) in keys.iter().enumerate() {
-                    if i >= MAX_SCHEMA_KEYS {
-                        parts.push(format!("...+{}", keys.len() - i));
-                        break;
-                    }
-                    let val_schema = extract_schema(&map[*key], depth + 1, max_depth);
-                    parts.push(format!("{}:{}", schema_key(key), val_schema));
-                }
-                format!("{{{}}}", parts.join(","))
-            }
+            let fields: BTreeMap<&str, &Value> = map.iter().map(|(k, v)| (k.as_str(), v)).collect();
+            object_schema(&fields, depth, max_depth)
         }
     }
+}
+
+/// Union of the keys of every object in `arr`, each paired with its value in
+/// the first object that has it, so a key absent from `arr[0]` still shows.
+fn merged_object_keys(arr: &[Value]) -> BTreeMap<&str, &Value> {
+    let mut fields = BTreeMap::new();
+    for map in arr.iter().filter_map(Value::as_object) {
+        for (key, val) in map {
+            fields.entry(key.as_str()).or_insert(val);
+        }
+    }
+    fields
+}
+
+fn object_schema(fields: &BTreeMap<&str, &Value>, depth: usize, max_depth: usize) -> String {
+    let mut parts = Vec::new();
+    for (i, (key, val)) in fields.iter().enumerate() {
+        if i >= MAX_SCHEMA_KEYS {
+            parts.push(format!("...+{}", fields.len() - i));
+            break;
+        }
+        let val_schema = extract_schema(val, depth + 1, max_depth);
+        parts.push(format!("{}:{}", schema_key(key), val_schema));
+    }
+    format!("{{{}}}", parts.join(","))
 }
 
 /// A key that could be read as schema syntax (empty, a delimiter, a `...`
@@ -352,6 +368,16 @@ mod tests {
         let schema = extract_schema(&json, 0, 5);
         assert!(schema.contains("items"));
         assert!(schema.contains("(3)"));
+    }
+
+    #[test]
+    fn test_keys_only_array_shows_keys_of_every_element() {
+        let shown = filter_json_string(r#"[{"a":1},{"b":"x","c":2}]"#, 5).expect("must parse");
+        assert_eq!(shown, "[{a:int,b:string,c:int}] (2)");
+
+        let nested = filter_json_string(r#"{"items":[{"id":1},{"id":2,"tag":null}]}"#, 5)
+            .expect("must parse");
+        assert_eq!(nested, "{items:[{id:int,tag:null}] (2)}");
     }
 
     fn assert_value_truncated(payload: &str) {
