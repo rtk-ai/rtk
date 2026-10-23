@@ -59,7 +59,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let original_cmd = with_args("uv", &args_display);
     let rtk_cmd = with_args("rtk uv", &args_display);
 
-    let mut cmd = resolved_command("uv");
+    let mut cmd = resolved_command("uv")?;
     cmd.args(args);
 
     if verbose > 0 {

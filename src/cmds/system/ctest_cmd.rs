@@ -76,7 +76,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         return runner::run_passthrough("ctest", &os_args, verbose);
     }
 
-    let mut cmd = resolved_command("ctest");
+    let mut cmd = resolved_command("ctest")?;
     for arg in args {
         cmd.arg(arg);
     }

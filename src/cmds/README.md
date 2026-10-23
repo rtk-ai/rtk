@@ -101,7 +101,7 @@ All execution goes through `core::stream::run_streaming()` with one of four `Fil
 
 ```rust
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("mycmd");
+    let mut cmd = resolved_command("mycmd")?;
     for arg in args { cmd.arg(arg); }
     if verbose > 0 { eprintln!("Running: mycmd {}", args.join(" ")); }
 
@@ -128,7 +128,7 @@ use crate::core::shell::display_args;
 use crate::core::stream::{BlockStreamFilter, RegexBlockFilter};
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("mycmd");
+    let mut cmd = resolved_command("mycmd")?;
     for arg in args { cmd.arg(arg); }
 
     let filter = RegexBlockFilter::new("mycmd", r"^error\[")
@@ -202,7 +202,7 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
 
 ```rust
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let output = resolved_command("mycmd").args(args)
+    let output = resolved_command("mycmd")?.args(args)
         .output().context("Failed to run mycmd")?;
     let exit_code = exit_code_from_output(&output, "mycmd");
     // ... custom filtering, tracking ...

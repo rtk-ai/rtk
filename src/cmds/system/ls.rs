@@ -303,7 +303,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         child_args,
     } = plan(args);
 
-    let mut cmd = resolved_command("ls");
+    let mut cmd = resolved_command("ls")?;
     cmd.env("LC_ALL", "C");
     cmd.child_args(&child_args);
 
