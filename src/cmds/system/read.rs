@@ -5,6 +5,7 @@ use crate::core::guard::never_worse;
 use crate::core::shell::quote_word;
 use crate::core::tracking;
 use anyhow::{Context, Result};
+use std::borrow::Cow;
 use std::fs;
 use std::io::{self, Read as IoRead, Write};
 use std::path::Path;
@@ -48,16 +49,10 @@ pub fn run(
             .lock()
             .write_all(&window)
             .context("Failed to write line window")?;
-        timer.track_bytes(
-            &cat_label(file),
-            "rtk read",
-            // The bytes `cat` would have written. Unknowable without reading the file, which is
-            // the whole point of not doing that, so it is taken from the size on disk -- and
-            // for the unbounded sources above there is no size, only a 0 that would book the
-            // window as pure cost. Claim nothing there.
-            regular_file_len(file).unwrap_or(window.len()),
-            &String::from_utf8_lossy(&window),
-        );
+        // The user asked for these lines, so the baseline is the window itself
+        // (what `head -n N` would have printed), not the rest of the file.
+        let window = String::from_utf8_lossy(&window);
+        timer.track(&cat_label(file), "rtk read", &window, &window);
         return Ok(());
     }
 
@@ -72,12 +67,9 @@ pub fn run(
             .lock()
             .write_all(window)
             .context("Failed to write line window")?;
-        timer.track(
-            &cat_label(file),
-            "rtk read",
-            &String::from_utf8_lossy(&bytes),
-            &String::from_utf8_lossy(window),
-        );
+        // A user-requested window is the baseline too: see `tracking_baseline`.
+        let window = String::from_utf8_lossy(window);
+        timer.track(&cat_label(file), "rtk read", &window, &window);
         return Ok(());
     }
     let content = String::from_utf8(bytes)
@@ -134,7 +126,19 @@ pub fn run(
     };
     let shown = never_worse(&raw, &rtk_output);
     print!("{}", shown);
-    timer.track(&cat_label(file), "rtk read", &raw, shown);
+    timer.track(
+        &cat_label(file),
+        "rtk read",
+        &tracking_baseline(
+            &content,
+            &raw,
+            max_lines,
+            head_lines,
+            tail_lines,
+            line_numbers,
+        ),
+        shown,
+    );
     Ok(())
 }
 
@@ -166,12 +170,8 @@ pub fn run_stdin(
             .lock()
             .write_all(window)
             .context("Failed to write line window")?;
-        timer.track(
-            "cat - (stdin)",
-            "rtk read -",
-            &String::from_utf8_lossy(&bytes),
-            &String::from_utf8_lossy(window),
-        );
+        let window = String::from_utf8_lossy(window);
+        timer.track("cat - (stdin)", "rtk read -", &window, &window);
         return Ok(());
     }
     let content = String::from_utf8(bytes).context("Failed to decode stdin")?;
@@ -185,7 +185,7 @@ pub fn run_stdin(
 
     // Apply filter
     let filter = filter::get_filter(level);
-    let mut filtered = filter.filter(&content, &lang);
+    let filtered = filter.filter(&content, &lang);
 
     if verbose > 0 {
         let original_lines = content.lines().count();
@@ -201,7 +201,7 @@ pub fn run_stdin(
         );
     }
 
-    filtered = apply_line_window(&filtered, max_lines, head_lines, tail_lines);
+    let filtered = apply_line_window(&filtered, max_lines, head_lines, tail_lines);
 
     let (raw, rtk_output) = if line_numbers {
         (
@@ -214,7 +214,19 @@ pub fn run_stdin(
     let shown = never_worse(&raw, &rtk_output);
     print!("{}", shown);
 
-    timer.track("cat - (stdin)", "rtk read -", &raw, shown);
+    timer.track(
+        "cat - (stdin)",
+        "rtk read -",
+        &tracking_baseline(
+            &content,
+            &raw,
+            max_lines,
+            head_lines,
+            tail_lines,
+            line_numbers,
+        ),
+        shown,
+    );
     Ok(())
 }
 
@@ -231,6 +243,36 @@ fn format_with_line_numbers(content: &str) -> String {
         out.push_str(&format!("{:>width$} │ {}\n", i + 1, line, width = width));
     }
     out
+}
+
+/// The raw side `timer.track` compares the shown output against.
+///
+/// `--max-lines`, `--head-lines` and `--tail-lines` are the user choosing to
+/// see less of the file, not rtk compressing it, so the baseline is the raw
+/// content cut to the same window as the output. Without this, one windowed
+/// read of a large file books the whole unshown remainder as a saving.
+///
+/// `raw` is the full, already-formatted baseline the caller built for
+/// `never_worse`; with no window it is returned as is, so a whole-file read
+/// costs no extra copy. The windowed baseline is only ever recorded, never
+/// printed: what the user sees is still `never_worse(raw, filtered)`.
+fn tracking_baseline<'a>(
+    content: &str,
+    raw: &'a str,
+    max_lines: Option<usize>,
+    head_lines: Option<usize>,
+    tail_lines: Option<usize>,
+    line_numbers: bool,
+) -> Cow<'a, str> {
+    if max_lines.is_none() && head_lines.is_none() && tail_lines.is_none() {
+        return Cow::Borrowed(raw);
+    }
+    let windowed = apply_line_window(content, max_lines, head_lines, tail_lines);
+    Cow::Owned(if line_numbers {
+        format_with_line_numbers(&windowed)
+    } else {
+        windowed
+    })
 }
 
 fn apply_line_window(
@@ -292,13 +334,6 @@ fn read_head_lines(file: &Path, n: usize) -> Result<Vec<u8>> {
         }
     }
     Ok(window)
-}
-
-/// `file`'s size on disk, and `None` for anything whose size says nothing about how much it
-/// will produce -- a device node, a FIFO, a socket.
-fn regular_file_len(file: &Path) -> Option<usize> {
-    let meta = fs::metadata(file).ok()?;
-    meta.is_file().then_some(meta.len() as usize)
 }
 
 /// First `n` lines, sliced on byte offsets rather than round-tripped through
@@ -458,18 +493,6 @@ mod tests {
 
     /// A device node reports a size of 0, which would book the window as pure cost.
     #[test]
-    fn test_regular_file_len_only_answers_for_a_regular_file() -> Result<()> {
-        let mut file = NamedTempFile::new()?;
-        file.write_all(b"hello\n")?;
-        file.flush()?;
-        assert_eq!(regular_file_len(file.path()), Some(6));
-        assert_eq!(regular_file_len(Path::new("/nonexistent-rtk-test")), None);
-        #[cfg(unix)]
-        assert_eq!(regular_file_len(Path::new("/dev/null")), None);
-        Ok(())
-    }
-
-    #[test]
     fn test_read_rust_file() -> Result<()> {
         let mut file = NamedTempFile::with_suffix(".rs")?;
         writeln!(
@@ -498,6 +521,57 @@ fn main() {{
         // Test that run_stdin has correct signature and compiles
         // We don't actually run it because it would hang waiting for stdin
         // Compile-time verification that the function exists with correct signature
+    }
+
+    // Regression tests for #2805/#1045: the raw tracking baseline must be
+    // windowed the same as the filtered output, or content outside an
+    // explicit --max-lines/--tail-lines window gets counted as a fake
+    // "saving" -- a single large file read this way reported 250M+ phantom
+    // saved tokens in the wild.
+    #[test]
+    fn test_tracking_baseline_max_lines_windows_the_raw_side() {
+        let input = "alpha\nbravo\ncharlie\ndelta\n";
+        let baseline = tracking_baseline(input, input, Some(2), None, None, false);
+
+        assert!(baseline.starts_with("alpha\n"));
+        assert!(baseline.contains("more lines"));
+        assert!(!baseline.contains("bravo"));
+        assert!(!baseline.contains("charlie"));
+    }
+
+    #[test]
+    fn test_tracking_baseline_tail_lines_windows_the_raw_side() {
+        let input = "alpha\nbravo\ncharlie\ndelta\n";
+        let baseline = tracking_baseline(input, input, None, None, Some(2), false);
+
+        assert_eq!(baseline, "charlie\ndelta\n");
+    }
+
+    #[test]
+    fn test_tracking_baseline_head_lines_windows_the_raw_side() {
+        let input = "alpha\nbravo\ncharlie\ndelta\n";
+        let baseline = tracking_baseline(input, input, None, Some(1), None, false);
+
+        assert_eq!(baseline, "alpha\n");
+    }
+
+    #[test]
+    fn test_tracking_baseline_without_a_window_borrows_raw() {
+        let input = "alpha\nbravo\n";
+        let raw = format_with_line_numbers(input);
+        let baseline = tracking_baseline(input, &raw, None, None, None, true);
+
+        assert!(matches!(baseline, Cow::Borrowed(_)));
+        assert_eq!(baseline, raw);
+    }
+
+    #[test]
+    fn test_tracking_baseline_with_line_numbers_numbers_the_window() {
+        let input = "alpha\nbravo\ncharlie\ndelta\n";
+        let raw = format_with_line_numbers(input);
+        let baseline = tracking_baseline(input, &raw, None, None, Some(2), true);
+
+        assert_eq!(baseline, format_with_line_numbers("charlie\ndelta\n"));
     }
 
     #[test]
@@ -699,6 +773,41 @@ fn main() {{
         assert!(
             stderr.contains("rtk_nonexistent_file"),
             "should report missing file on stderr"
+        );
+    }
+
+    // Regression test for a bug caught in review of the tracking_baseline
+    // fix: an earlier version computed a single windowed "raw" value and fed
+    // it into BOTH the tracking comparison AND the actual printed output
+    // (never_worse/print!) -- silently changing what the user sees, not just
+    // what gets tracked. With --max-lines combined with real filtering
+    // (minimal level strips the comment), the printed output must still be
+    // the real filtered content, never a raw/unfiltered windowed excerpt.
+    #[test]
+    #[ignore]
+    fn test_max_lines_does_not_leak_unfiltered_raw_into_printed_output() {
+        let mut f = NamedTempFile::with_suffix(".rs").unwrap();
+        writeln!(f, "short").unwrap();
+        writeln!(f, "// a comment that minimal filtering should strip").unwrap();
+        writeln!(f, "a_very_long_real_code_line_that_should_still_print();").unwrap();
+
+        let output = test_isolation::rtk_command()
+            .args([
+                "read",
+                &f.path().to_string_lossy(),
+                "--level",
+                "minimal",
+                "--max-lines",
+                "2",
+            ])
+            .output()
+            .expect("failed to run rtk read");
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !stdout.contains("// a comment"),
+            "the comment must be filtered out, not leak in via an unwindowed-raw fallback: {stdout:?}"
         );
     }
 
