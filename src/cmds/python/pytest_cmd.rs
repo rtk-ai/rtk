@@ -150,6 +150,12 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
                         current_failure.clear();
                     }
                     current_failure.push(trimmed.to_string());
+                } else if is_report_section_banner(trimmed) {
+                    if !current_failure.is_empty() {
+                        failures.push(current_failure.join("\n"));
+                        current_failure.clear();
+                    }
+                    state = ParseState::TestProgress;
                 } else if !trimmed.is_empty() && !trimmed.starts_with("===") {
                     current_failure.push(trimmed.to_string());
                 }
@@ -172,6 +178,16 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
 
     // Build compact output
     build_pytest_summary(&summary_line, &test_files, &failures, &xfail_lines)
+}
+
+/// Section banners pytest prints after `=== FAILURES ===`. Captured output can print
+/// `=== ... ===` or `=====` lines of its own, so the bare shape must not end the section.
+fn is_report_section_banner(line: &str) -> bool {
+    if !line.starts_with("===") {
+        return false;
+    }
+    let title = line.trim_matches('=').trim();
+    title == "PASSES" || title == "warnings summary"
 }
 
 #[derive(Default)]
@@ -449,6 +465,123 @@ FAILED tests/test_foo.py::test_three - KeyError
         assert!(result.contains("test_one"));
         assert!(result.contains("test_two"));
         assert!(result.contains("expected 5"));
+    }
+
+    #[test]
+    fn test_filter_pytest_passes_section_not_listed_as_failures() {
+        let output = r#"=== test session starts ===
+collected 2 items
+
+test_sample.py .F                                                        [100%]
+
+=================================== FAILURES ===================================
+__________________________________ test_fail ___________________________________
+test_sample.py:6: in test_fail
+    assert False
+E   AssertionError: assert False
+==================================== PASSES ====================================
+__________________________________ test_pass ___________________________________
+----------------------------- Captured stdout call -----------------------------
+hello from passing test
+error-like output in passing test stdout
+=========================== short test summary info ============================
+PASSED test_sample.py::test_pass
+FAILED test_sample.py::test_fail - AssertionError: assert False
+========================= 1 failed, 1 passed in 0.02s =========================="#;
+
+        let result = filter_pytest_output(output);
+        assert!(result.starts_with("Pytest: 1 passed, 1 failed in 0.02s"));
+        assert!(result.contains("[FAIL] test_fail"));
+        assert!(
+            !result.contains("test_pass"),
+            "passing test from PASSES section must not be listed as failure: {result}"
+        );
+        assert!(
+            !result.contains("error-like output in passing test stdout"),
+            "captured stdout from PASSES section must not leak into failures: {result}"
+        );
+    }
+
+    #[test]
+    fn test_filter_pytest_captured_banner_keeps_next_failure() {
+        let output = r#"=== test session starts ===
+collected 2 items
+
+test_failure_banners.py FF                                               [100%]
+
+=================================== FAILURES ===================================
+__________________________________ test_first ___________________________________
+test_failure_banners.py:4: in test_first
+    assert False, "first actual failure"
+E   AssertionError: first actual failure
+----------------------------- Captured stdout call -----------------------------
+=== application diagnostics ===
+FIRST_FAILURE_DIAGNOSTIC_SENTINEL
+__________________________________ test_second __________________________________
+test_failure_banners.py:8: in test_second
+    assert False, "second actual failure"
+E   AssertionError: second actual failure
+=========================== short test summary info ============================
+FAILED test_failure_banners.py::test_first - AssertionError: first actual failure
+FAILED test_failure_banners.py::test_second - AssertionError: second actual failure
+========================= 2 failed in 0.02s =========================="#;
+
+        let result = filter_pytest_output(output);
+        assert!(result.starts_with("Pytest: 0 passed, 2 failed in 0.02s"));
+        assert!(result.contains("[FAIL] test_first"));
+        assert!(
+            result.contains("[FAIL] test_second"),
+            "failure after a captured banner must keep its block: {result}"
+        );
+        assert!(result.contains("test_failure_banners.py:8: in test_second"));
+    }
+
+    #[test]
+    fn test_filter_pytest_captured_separator_keeps_next_failure() {
+        let output = r#"=== test session starts ===
+collected 2 items
+
+=================================== FAILURES ===================================
+__________________________________ test_first ___________________________________
+E   AssertionError: first
+----------------------------- Captured stdout call -----------------------------
+================================================
+__________________________________ test_second __________________________________
+E   AssertionError: second
+=========================== short test summary info ============================
+FAILED t.py::test_first - AssertionError: first
+FAILED t.py::test_second - AssertionError: second
+========================= 2 failed in 0.02s =========================="#;
+
+        let result = filter_pytest_output(output);
+        assert!(
+            result.contains("[FAIL] test_second"),
+            "failure after a captured `=====` line must keep its block: {result}"
+        );
+    }
+
+    #[test]
+    fn test_filter_pytest_warnings_summary_not_listed_as_failure_detail() {
+        let output = r#"=== test session starts ===
+collected 1 item
+
+=================================== FAILURES ===================================
+__________________________________ test_fail ___________________________________
+E   AssertionError: boom
+=============================== warnings summary ===============================
+test_w.py::test_fail
+  test_w.py:3: DeprecationWarning: WARN_SENTINEL
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED test_w.py::test_fail - AssertionError: boom
+======================== 1 failed, 1 warning in 0.02s =========================="#;
+
+        let result = filter_pytest_output(output);
+        assert!(result.contains("[FAIL] test_fail"));
+        assert!(
+            !result.contains("WARN_SENTINEL"),
+            "warnings summary must not leak into the failure block: {result}"
+        );
     }
 
     #[test]
