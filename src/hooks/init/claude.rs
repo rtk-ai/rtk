@@ -105,7 +105,7 @@ fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
     }
 
     // Check if @RTK.md already present
-    if content.contains(RTK_MD_REF) {
+    if has_rtk_reference(&content, &[RTK_MD_REF]) {
         if verbose > 0 {
             eprintln!("@RTK.md reference already present in CLAUDE.md");
         }
@@ -1011,6 +1011,18 @@ pub(super) fn run_hook_only_mode(
 mod tests {
     use super::*;
     use crate::core::test_isolation;
+
+    #[test]
+    fn test_patch_claude_md_adds_reference_when_only_mentioned_in_prose() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let claude_md = temp.path().join("CLAUDE.md");
+        fs::write(&claude_md, "# Mine\n\n@RTK.md is my notes file.\n").expect("write");
+
+        patch_claude_md(&claude_md, InitContext::default()).expect("patch");
+
+        let content = fs::read_to_string(&claude_md).expect("read");
+        assert_eq!(content, "# Mine\n\n@RTK.md is my notes file.\n\n@RTK.md\n");
+    }
 
     #[test]
     fn test_hook_already_present_exact_match() {

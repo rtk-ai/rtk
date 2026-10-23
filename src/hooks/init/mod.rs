@@ -1548,7 +1548,7 @@ pub fn uninstall_with_patch_mode(
         if has_rtk_reference(&working_content, &[RTK_MD_REF]) {
             let new_content = working_content
                 .lines()
-                .filter(|line| line.trim() != RTK_MD_REF)
+                .filter(|line| !is_rtk_reference_line(line, &[RTK_MD_REF]))
                 .collect::<Vec<_>>()
                 .join("\n");
 
@@ -2119,7 +2119,7 @@ fn show_claude_config() -> Result<()> {
     // Check global CLAUDE.md
     if global_claude_md.exists() {
         let content = fs::read_to_string(&global_claude_md)?;
-        if content.contains(RTK_MD_REF) {
+        if has_rtk_reference(&content, &[RTK_MD_REF]) {
             println!("[ok] Global (~/.claude/CLAUDE.md): @RTK.md reference");
         } else if content.contains(RTK_BLOCK_START) {
             println!(

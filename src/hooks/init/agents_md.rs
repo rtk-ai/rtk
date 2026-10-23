@@ -168,14 +168,31 @@ pub(super) fn patch_agents_md(path: &Path, rtk_md_ref: &str, ctx: InitContext) -
     }
 
     // ISSUE #892: Check for both relative and absolute @RTK.md references
-    if content.contains(RTK_MD_REF) || content.contains(rtk_md_ref) {
+    if has_rtk_reference(&content, &[RTK_MD_REF, rtk_md_ref]) {
         if verbose > 0 {
             eprintln!("{} reference already present in AGENTS.md", rtk_md_ref);
         }
         // ISSUE #892: Migrate old relative @RTK.md to absolute path if needed
-        if rtk_md_ref != RTK_MD_REF && content.contains(RTK_MD_REF) && !content.contains(rtk_md_ref)
+        if rtk_md_ref != RTK_MD_REF
+            && has_rtk_reference(&content, &[RTK_MD_REF])
+            && !has_rtk_reference(&content, &[rtk_md_ref])
         {
-            content = content.replace(RTK_MD_REF, rtk_md_ref);
+            // Rewrite only the reference line itself, never prose that mentions it.
+            let mut rewritten = content
+                .lines()
+                .map(|line| {
+                    if is_rtk_reference_line(line, &[RTK_MD_REF]) {
+                        rtk_md_ref
+                    } else {
+                        line
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if content.ends_with('\n') {
+                rewritten.push('\n');
+            }
+            content = rewritten;
             if dry_run {
                 println!(
                     "[dry-run] would migrate {} to {} in {}",
@@ -232,11 +249,18 @@ pub(super) fn patch_agents_md(path: &Path, rtk_md_ref: &str, ctx: InitContext) -
     Ok(true)
 }
 
+/// True when `line`, trimmed, is exactly one of `refs`. A leading BOM is
+/// ignored too: `str::trim` keeps U+FEFF, which a Windows editor may save
+/// in front of a reference on the first line.
+pub(super) fn is_rtk_reference_line(line: &str, refs: &[&str]) -> bool {
+    let line = line.trim_start_matches('\u{feff}').trim();
+    refs.contains(&line)
+}
+
 pub(super) fn has_rtk_reference(content: &str, refs: &[&str]) -> bool {
     content
         .lines()
-        .map(str::trim)
-        .any(|line| refs.contains(&line))
+        .any(|line| is_rtk_reference_line(line, refs))
 }
 
 pub(super) fn remove_rtk_reference_from_agents(
@@ -259,10 +283,7 @@ pub(super) fn remove_rtk_reference_from_agents(
 
     let new_content = content
         .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            !refs.contains(&trimmed)
-        })
+        .filter(|line| !is_rtk_reference_line(line, refs))
         .collect::<Vec<_>>()
         .join("\n");
     let cleaned = clean_double_blanks(&new_content);
@@ -464,5 +485,91 @@ mod tests {
         let content = fs::read_to_string(&agents_md).unwrap();
         assert!(!content.contains("old"));
         assert_eq!(content.matches("@RTK.md").count(), 1);
+    }
+
+    #[test]
+    fn test_has_rtk_reference_ignores_prose_mentions() {
+        assert!(!has_rtk_reference(
+            "# Agents\n\nRead @RTK.md for details.\n",
+            &[RTK_MD_REF]
+        ));
+        assert!(has_rtk_reference(
+            "# Agents\n\n  @RTK.md  \n",
+            &[RTK_MD_REF]
+        ));
+    }
+
+    #[test]
+    fn test_has_rtk_reference_ignores_leading_bom() {
+        assert!(has_rtk_reference("\u{feff}@RTK.md\n", &[RTK_MD_REF]));
+    }
+
+    #[test]
+    fn test_patch_agents_md_adds_reference_when_only_mentioned_in_prose() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        fs::write(&agents_md, "# Agents\n\nRead @RTK.md for details.\n").unwrap();
+
+        let added = patch_agents_md(&agents_md, RTK_MD_REF, InitContext::default()).unwrap();
+
+        assert!(added);
+        let content = fs::read_to_string(&agents_md).unwrap();
+        assert_eq!(
+            content,
+            "# Agents\n\nRead @RTK.md for details.\n\n@RTK.md\n"
+        );
+    }
+
+    #[test]
+    fn test_patch_agents_md_migration_leaves_prose_untouched() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        fs::write(&agents_md, "# Agents\n\nRead @RTK.md for details.\n").unwrap();
+
+        let added =
+            patch_agents_md(&agents_md, "@/home/u/.codex/RTK.md", InitContext::default()).unwrap();
+
+        assert!(added);
+        let content = fs::read_to_string(&agents_md).unwrap();
+        assert_eq!(
+            content,
+            "# Agents\n\nRead @RTK.md for details.\n\n@/home/u/.codex/RTK.md\n"
+        );
+    }
+
+    #[test]
+    fn test_patch_agents_md_migrates_only_reference_line() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        fs::write(
+            &agents_md,
+            "# Agents\n\nRead @RTK.md for details.\n\n@RTK.md\n",
+        )
+        .unwrap();
+
+        let added =
+            patch_agents_md(&agents_md, "@/home/u/.codex/RTK.md", InitContext::default()).unwrap();
+
+        assert!(added);
+        let content = fs::read_to_string(&agents_md).unwrap();
+        assert_eq!(
+            content,
+            "# Agents\n\nRead @RTK.md for details.\n\n@/home/u/.codex/RTK.md\n"
+        );
+    }
+
+    #[test]
+    fn test_remove_rtk_reference_from_agents_strips_bom_prefixed_line() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        fs::write(&agents_md, "\u{feff}@RTK.md\n\n# Agents\n").unwrap();
+
+        let removed =
+            remove_rtk_reference_from_agents(&agents_md, &[RTK_MD_REF], InitContext::default())
+                .unwrap();
+
+        assert!(removed);
+        let content = fs::read_to_string(&agents_md).unwrap();
+        assert!(!content.contains(RTK_MD_REF));
     }
 }
