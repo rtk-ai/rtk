@@ -60,7 +60,7 @@ impl Language {
     pub fn from_extension(ext: &str) -> Self {
         match ext.to_lowercase().as_str() {
             "rs" => Language::Rust,
-            "py" | "pyw" => Language::Python,
+            "py" | "pyw" | "pyi" => Language::Python,
             "js" | "mjs" | "cjs" => Language::JavaScript,
             "ts" | "tsx" => Language::TypeScript,
             "go" => Language::Go,
@@ -75,6 +75,114 @@ impl Language {
             }
             _ => Language::Unknown,
         }
+    }
+
+    /// Detect Python when no file extension is available, such as stdin.
+    ///
+    /// An `import` line counts only when that line is a Python import and the
+    /// source has no ES module specifier (`from 'mod'` / `from "mod"`, including
+    /// when `from` is on the next line). Otherwise the Python filter would
+    /// delete `#` lines from JavaScript.
+    pub fn from_content(content: &str) -> Self {
+        let python_shebang = content
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix("#!"))
+            .is_some_and(|shebang| {
+                shebang.split_whitespace().any(|part| {
+                    part.rsplit('/').next().is_some_and(|interpreter| {
+                        interpreter == "python"
+                            || interpreter.starts_with("python2")
+                            || interpreter.starts_with("python3")
+                    })
+                })
+            });
+
+        let es_module = content
+            .lines()
+            .any(|line| Self::is_es_module_from(line.trim_start()));
+        let python_syntax = content.lines().any(|line| {
+            let line = line.trim_start();
+            (!es_module && Self::is_python_import(line))
+                || (line.starts_with("from ")
+                    && (line.contains(" import ") || line.contains(" import\t")))
+                || (line.starts_with("def ") && line.contains("):"))
+                || (line.starts_with("class ") && line.contains(':'))
+                || line.starts_with("if __name__")
+        });
+
+        if python_shebang || python_syntax {
+            Language::Python
+        } else {
+            Language::Unknown
+        }
+    }
+
+    fn is_es_module_from(line: &str) -> bool {
+        let line = match line.split_once('#') {
+            Some((code, _)) => code,
+            None => line,
+        };
+        let mut words = line.split_whitespace();
+        while let Some(word) = words.next() {
+            if word == "from" {
+                return words
+                    .next()
+                    .is_some_and(|spec| spec.starts_with(['\'', '"', '`']));
+            }
+            if let Some(rest) = word.strip_prefix("from")
+                && rest.starts_with(['\'', '"', '`'])
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn is_python_import(line: &str) -> bool {
+        let rest = line
+            .strip_prefix("import ")
+            .or_else(|| line.strip_prefix("import\t"));
+        let Some(rest) = rest else {
+            return false;
+        };
+        let code = match rest.split_once('#') {
+            Some((code, _)) => code,
+            None => rest,
+        };
+        let code = code.trim();
+        if code.is_empty() {
+            return false;
+        }
+        code.split(',').all(Self::is_python_import_item)
+    }
+
+    fn is_python_import_item(item: &str) -> bool {
+        let mut words = item.split_whitespace();
+        let Some(module) = words.next() else {
+            return false;
+        };
+        if !Self::is_dotted_ident(module) {
+            return false;
+        }
+        match words.next() {
+            None => true,
+            Some("as") => words.next().is_some_and(Self::is_ident) && words.next().is_none(),
+            Some(_) => false,
+        }
+    }
+
+    fn is_dotted_ident(name: &str) -> bool {
+        !name.is_empty() && name.split('.').all(Self::is_ident)
+    }
+
+    fn is_ident(name: &str) -> bool {
+        let mut chars = name.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        (first.is_ascii_alphabetic() || first == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
     }
 
     pub fn comment_patterns(&self) -> CommentPatterns {
@@ -463,7 +571,99 @@ mod tests {
     fn test_language_detection() {
         assert_eq!(Language::from_extension("rs"), Language::Rust);
         assert_eq!(Language::from_extension("py"), Language::Python);
+        assert_eq!(Language::from_extension("pyi"), Language::Python);
         assert_eq!(Language::from_extension("js"), Language::JavaScript);
+    }
+
+    #[test]
+    fn test_minimal_python_stub_strips_comments() {
+        let code = "import glob\nfiles = glob.glob(\"src/**/*.py\")\n# c\nx = 1\n";
+        let lang = Language::from_extension("pyi");
+        let result = MinimalFilter.filter(code, &lang);
+
+        assert_eq!(
+            result,
+            "import glob\nfiles = glob.glob(\"src/**/*.py\")\nx = 1"
+        );
+    }
+
+    #[test]
+    fn test_language_detection_python_shebang() {
+        let code = "#!/usr/bin/env python3\n# c\nx = 1\n";
+        assert_eq!(Language::from_content(code), Language::Python);
+    }
+
+    #[test]
+    fn test_language_detection_python_stdin_source() {
+        let code = "import glob\nfiles = glob.glob(\"src/**/*.py\")\n# c\nx = 1\n";
+        let lang = Language::from_content(code);
+        let result = MinimalFilter.filter(code, &lang);
+
+        assert_eq!(lang, Language::Python);
+        assert_eq!(
+            result,
+            "import glob\nfiles = glob.glob(\"src/**/*.py\")\nx = 1"
+        );
+    }
+
+    #[test]
+    fn test_from_content_es_module_private_field_stays_unknown() {
+        let code = "\
+import fs from 'node:fs';
+class Example {
+  #value = 7;
+  read() { return this.#value; }
+}
+console.log(new Example().read());
+";
+        let lang = Language::from_content(code);
+        let result = MinimalFilter.filter(code, &lang);
+        let parent = MinimalFilter.filter(code, &Language::Unknown);
+
+        assert_eq!(lang, Language::Unknown);
+        assert_eq!(result, parent);
+        assert!(result.contains("#value = 7;"));
+    }
+
+    #[test]
+    fn test_from_content_template_heading_stays_unknown() {
+        let code = "\
+import fs from 'node:fs';
+const text = `
+# important heading
+body
+`;
+console.log(text);
+";
+        let lang = Language::from_content(code);
+        let result = MinimalFilter.filter(code, &lang);
+        let parent = MinimalFilter.filter(code, &Language::Unknown);
+
+        assert_eq!(lang, Language::Unknown);
+        assert_eq!(result, parent);
+        assert!(result.contains("# important heading"));
+    }
+
+    #[test]
+    fn test_from_content_python_import_keeps_hash_comment() {
+        let code = "import glob  # from 'disk'\n# c\nx = 1\n";
+        assert_eq!(Language::from_content(code), Language::Python);
+    }
+
+    #[test]
+    fn test_from_content_split_es_module_import_stays_unknown() {
+        let code = "\
+import fs
+from 'node:fs';
+class Example {
+  #value = 7;
+}
+";
+        let lang = Language::from_content(code);
+        let result = MinimalFilter.filter(code, &lang);
+
+        assert_eq!(lang, Language::Unknown);
+        assert!(result.contains("#value = 7;"));
     }
 
     #[test]
