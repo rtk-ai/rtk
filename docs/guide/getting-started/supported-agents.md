@@ -328,6 +328,8 @@ Strips only RTK's `[[hooks]]` block and the `~/.vibe/prompts/rtk.md` file. Any o
 
 Rules file integrations (Cline, Windsurf, Kilo Code) rely on the model following instructions. Full hook integrations (Claude Code, Trae, Cursor, Gemini, Codex, Factory Droid, Antigravity) apply rewrites before execution whenever RTK supports and can safely attest the command. Plugin integrations (OpenCode, Pi, Hermes) use in-place mutation via the agent's extension or plugin API.
 
+Building a harness of your own? A host can skip these hooks and call `rtk rewrite` from its own bash tool. [Embedding rtk in your own agent harness](embedding.md) covers the exit-code contract, where the call goes, the fail-open rules, and per-session accounting.
+
 ## Windows support
 
 Since v0.37.2 the hooks for Claude Code, Cursor, Copilot, Codex, Trae, Factory Droid and Mistral Vibe are native binary commands (`rtk hook <agent>`), so auto-rewrite works on native Windows — no Unix shell, bash or jq required. `rtk init -g` installs the native hook on Windows exactly as on Linux and macOS, and adds it to Claude Code's `settings.json` once you answer `y` to the prompt (or pass `--auto-patch`).
