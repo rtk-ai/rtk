@@ -175,7 +175,11 @@ pub(super) fn remove_opencode_plugin(ctx: InitContext) -> Result<Vec<PathBuf>> {
     Ok(removed)
 }
 
-pub(super) fn run_opencode_only_mode(ctx: InitContext) -> Result<()> {
+/// Install the OpenCode plugin independently of every other agent's install.
+///
+/// Returns the plugin path when a plugin is in place afterwards, so callers
+/// can report it without re-checking the version floor.
+pub(super) fn run_opencode_only_mode(ctx: InitContext) -> Result<Option<PathBuf>> {
     let InitContext { dry_run, .. } = ctx;
     let opencode_plugin_path = prepare_opencode_plugin_path()?;
     let installed = ensure_opencode_plugin_installed(&opencode_plugin_path, ctx)?;
@@ -184,7 +188,7 @@ pub(super) fn run_opencode_only_mode(ctx: InitContext) -> Result<()> {
         println!("  OpenCode: {}", opencode_plugin_path.display());
         println!("  Restart OpenCode. Test with: git status\n");
     }
-    Ok(())
+    Ok(installed.then_some(opencode_plugin_path))
 }
 
 #[cfg(test)]

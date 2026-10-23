@@ -472,34 +472,60 @@ pub fn run(
             anyhow::bail!("Windsurf support is global-only. Use: rtk init -g --agent windsurf");
         }
 
-        if install_windsurf {
-            run_windsurf_mode(ctx)?;
-        } else if install_cline {
-            run_cline_mode(ctx)?;
-        } else {
-            // Mode selection (Claude Code / OpenCode)
-            match (install_claude, install_opencode, claude_md, hook_only) {
-                (false, true, _, _) => run_opencode_only_mode(ctx)?,
-                (true, opencode, true, _) => run_claude_md_mode(global, opencode, ctx)?,
-                (true, opencode, false, true) => {
-                    run_hook_only_mode(global, patch_mode, opencode, ctx)?
-                }
-                (true, opencode, false, false) => {
-                    run_default_mode(global, patch_mode, opencode, ctx)?
-                }
-                (false, false, _, _) => {
-                    if !install_cursor {
-                        anyhow::bail!(
-                            "at least one of install_claude or install_opencode must be true"
-                        )
+        // The OpenCode plugin is an independent target: install it before any
+        // agent so a Claude/Cursor failure cannot leave it missing, and vice
+        // versa. Its error is reported after the agent's.
+        let opencode_result = install_opencode.then(|| run_opencode_only_mode(ctx));
+        let opencode_plugin = opencode_result
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .and_then(|path| path.as_deref());
+
+        let agent_result = (|| -> Result<()> {
+            if install_windsurf {
+                run_windsurf_mode(ctx)?;
+            } else if install_cline {
+                run_cline_mode(ctx)?;
+            } else {
+                // Mode selection (Claude Code / OpenCode)
+                match (install_claude, install_opencode, claude_md, hook_only) {
+                    // The plugin was installed above, independently.
+                    (false, true, _, _) => {}
+                    (true, _, true, _) => run_claude_md_mode(global, ctx)?,
+                    (true, _, false, true) => {
+                        run_hook_only_mode(global, patch_mode, opencode_plugin, ctx)?
+                    }
+                    (true, _, false, false) => {
+                        run_default_mode(global, patch_mode, opencode_plugin, ctx)?
+                    }
+                    (false, false, _, _) => {
+                        if !install_cursor {
+                            anyhow::bail!(
+                                "at least one of install_claude or install_opencode must be true"
+                            )
+                        }
                     }
                 }
-            }
 
-            // Cursor hooks: on their own, or next to the OpenCode plugin with --opencode
-            if install_cursor {
-                install_cursor_hooks(ctx)?;
+                // Cursor hooks: on their own, or next to the OpenCode plugin with --opencode
+                if install_cursor {
+                    install_cursor_hooks(ctx)?;
+                }
             }
+            Ok(())
+        })();
+
+        match (opencode_result, agent_result) {
+            (Some(Err(opencode_error)), Err(agent_error)) => {
+                return Err(anyhow::anyhow!(
+                    "OpenCode install failed: {opencode_error:#}\nAgent install failed: {agent_error:#}"
+                ));
+            }
+            (Some(Err(error)), Ok(())) => {
+                return Err(error.context("OpenCode install failed"));
+            }
+            (_, Err(error)) => return Err(error),
+            _ => {}
         }
     }
 
