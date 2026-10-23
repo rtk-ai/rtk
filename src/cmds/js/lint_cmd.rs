@@ -6,7 +6,9 @@ use crate::core::shell::{display_args, quote_program, with_args};
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::{CAP_ERRORS, CAP_WARNINGS};
-use crate::core::utils::{MissingTool, resolved_command, tool_exec, truncate};
+use crate::core::utils::{
+    MissingTool, PathLabels, compact_from_first_dir, resolved_command, tool_exec, truncate,
+};
 use crate::mypy_cmd;
 use crate::ruff_cmd;
 use anyhow::{Context, Result};
@@ -290,6 +292,12 @@ fn filter_eslint_json(output: &str) -> String {
         .collect();
     by_file.sort_by_key(|b| std::cmp::Reverse(b.1));
 
+    // One label per file for the whole report; two files never share a label.
+    let labels = PathLabels::new(
+        by_file.iter().map(|(r, _)| r.file_path.as_str()),
+        compact_path,
+    );
+
     // Build output
     let mut result = String::new();
     result.push_str(&format!(
@@ -313,7 +321,7 @@ fn filter_eslint_json(output: &str) -> String {
     const MAX_FILES: usize = CAP_WARNINGS;
     result.push_str("Top files:\n");
     for (file_result, count) in by_file.iter().take(MAX_FILES) {
-        let short_path = compact_path(&file_result.file_path);
+        let short_path = labels.label(&file_result.file_path);
         result.push_str(&format!("  {} ({} issues)\n", short_path, count));
 
         let mut file_rules: HashMap<String, usize> = HashMap::new();
@@ -333,7 +341,7 @@ fn filter_eslint_json(output: &str) -> String {
         result.push_str(&format!("\n… +{} more files\n", by_file.len() - MAX_FILES));
         let all_file_lines = by_file
             .iter()
-            .map(|(r, count)| format!("{} ({} issues)", compact_path(&r.file_path), count))
+            .map(|(r, count)| format!("{} ({} issues)", labels.label(&r.file_path), count))
             .collect::<Vec<_>>()
             .join("\n");
         if let Some(hint) =
@@ -402,6 +410,9 @@ fn filter_pylint_json(output: &str) -> String {
     let mut file_counts: Vec<_> = by_file.iter().collect();
     file_counts.sort_by(|a, b| b.1.cmp(a.1));
 
+    // One label per file for the whole report; two files never share a label.
+    let labels = PathLabels::new(by_file.keys().copied(), compact_path);
+
     // Build output
     let mut result = String::new();
     result.push_str(&format!(
@@ -437,7 +448,7 @@ fn filter_pylint_json(output: &str) -> String {
     const MAX_FILES: usize = CAP_WARNINGS;
     result.push_str("Top files:\n");
     for (file, count) in file_counts.iter().take(MAX_FILES) {
-        let short_path = compact_path(file);
+        let short_path = labels.label(file);
         result.push_str(&format!("  {} ({} issues)\n", short_path, count));
 
         // Show top 3 rules in this file
@@ -462,7 +473,7 @@ fn filter_pylint_json(output: &str) -> String {
         ));
         let all_file_lines = file_counts
             .iter()
-            .map(|(file, count)| format!("{} ({} issues)", compact_path(file), count))
+            .map(|(file, count)| format!("{} ({} issues)", labels.label(file), count))
             .collect::<Vec<_>>()
             .join("\n");
         if let Some(hint) =
@@ -518,20 +529,10 @@ fn filter_generic_lint(output: &str) -> String {
     result.trim().to_string()
 }
 
-/// Compact file path (remove common prefixes)
+/// Compact file path: from the first `src` or `lib` directory, else the file name.
+/// Different files can share the result, so reports label paths through [`PathLabels`].
 fn compact_path(path: &str) -> String {
-    // Remove common prefixes like /Users/..., /home/..., C:\
-    let path = path.replace('\\', "/");
-
-    if let Some(pos) = path.rfind("/src/") {
-        format!("src/{}", &path[pos + 5..])
-    } else if let Some(pos) = path.rfind("/lib/") {
-        format!("lib/{}", &path[pos + 5..])
-    } else if let Some(pos) = path.rfind('/') {
-        path[pos + 1..].to_string()
-    } else {
-        path
-    }
+    compact_from_first_dir(path, &["src", "lib"])
 }
 
 #[cfg(test)]
@@ -583,6 +584,62 @@ mod tests {
         assert!(result.contains("prefer-const"));
         assert!(result.contains("no-unused-vars"));
         assert!(result.contains("src/utils.ts"));
+    }
+
+    fn eslint_result(path: &str) -> serde_json::Value {
+        serde_json::json!({
+            "filePath": path, "errorCount": 0, "warningCount": 1,
+            "messages": [{
+                "ruleId": "prefer-const", "severity": 1, "message": "Use const",
+                "line": 1, "column": 1,
+            }],
+        })
+    }
+
+    #[test]
+    fn eslint_same_named_files_in_different_directories_keep_distinct_labels() {
+        let cwd = crate::core::user_dirs::current_dir()
+            .expect("current dir")
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        let input = serde_json::to_string(&[
+            eslint_result(&format!("{cwd}/web/index.ts")),
+            eslint_result(&format!("{cwd}/api/index.ts")),
+            eslint_result("/repo/src/util.ts"),
+        ])
+        .expect("fixture JSON");
+        let out = filter_eslint_json(&input);
+        assert!(out.contains("web/index.ts (1 issues)"), "{out}");
+        assert!(out.contains("api/index.ts (1 issues)"), "{out}");
+        assert!(!out.contains(&cwd), "label must be cwd-relative: {out}");
+        // A path that is unique keeps the compact form it always had.
+        assert!(out.contains("  src/util.ts (1 issues)\n"), "{out}");
+    }
+
+    #[test]
+    fn pylint_same_named_files_in_different_directories_keep_distinct_labels() {
+        let diagnostic = |path: &str| {
+            serde_json::json!({
+                "type": "warning", "module": "m", "obj": "", "line": 1, "column": 0,
+                "path": path, "symbol": "unused-import", "message": "Unused import os",
+                "message-id": "W0611",
+            })
+        };
+        let input = serde_json::to_string(&[
+            diagnostic("pkg_a/__init__.py"),
+            diagnostic("pkg_b/__init__.py"),
+        ])
+        .expect("fixture JSON");
+        let out = filter_pylint_json(&input);
+        assert!(out.contains("  pkg_a/__init__.py (1 issues)\n"), "{out}");
+        assert!(out.contains("  pkg_b/__init__.py (1 issues)\n"), "{out}");
+    }
+
+    #[test]
+    fn compact_path_keeps_the_first_well_known_directory() {
+        assert_eq!(compact_path("/repo/src/app/src/x.ts"), "src/app/src/x.ts");
+        assert_eq!(compact_path("/repo/lib/a/src/x.ts"), "lib/a/src/x.ts");
     }
 
     #[test]

@@ -12,6 +12,7 @@ use crate::core::user_env;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::PathBuf;
@@ -766,6 +767,113 @@ pub fn human_bytes(bytes: u64) -> String {
         format!("{:.1} KB", bytes as f64 / KB as f64)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+/// Shorten `path` to its suffix from the first directory named in `dirs`
+/// (`/home/me/app/src/a/b.rs` -> `src/a/b.rs`), or to its file name when none
+/// matches. Backslashes count as separators.
+///
+/// A directory only matches when something precedes it and a file follows it, so a
+/// relative `src/b.rs` still shortens to `b.rs`. Two different paths can shorten to
+/// the same text: build a [`PathLabels`] over the paths of one run to tell them apart.
+pub fn compact_from_first_dir(path: &str, dirs: &[&str]) -> String {
+    let path = path.replace('\\', "/");
+    let mut offset = 0;
+    let mut parts = path.split('/').peekable();
+    while let Some(part) = parts.next() {
+        if offset > 0 && parts.peek().is_some() && dirs.contains(&part) {
+            return path[offset..].to_string();
+        }
+        offset += part.len() + 1;
+    }
+    match path.rfind('/') {
+        Some(pos) => path[pos + 1..].to_string(),
+        None => path,
+    }
+}
+
+/// Display labels for the paths of one run, never ambiguous within that run.
+///
+/// Each path gets `compact(path)` while no other path in the run shares that label.
+/// Paths that would print identically fall back to their path relative to the working
+/// directory (as the tool printed it when it is already relative or lies outside the
+/// working directory), and as a last resort to the full path, so the reader can always
+/// tell which file a line is about. Paths that were already unique are left untouched.
+pub struct PathLabels {
+    compact: fn(&str) -> String,
+    labels: HashMap<String, String>,
+}
+
+impl PathLabels {
+    /// Labels for `paths`, relative to the current working directory.
+    pub fn new<'a>(paths: impl IntoIterator<Item = &'a str>, compact: fn(&str) -> String) -> Self {
+        let cwd = user_dirs::current_dir()
+            .ok()
+            .and_then(|dir| dir.to_str().map(str::to_owned));
+        Self::relative_to(paths, compact, cwd.as_deref())
+    }
+
+    fn relative_to<'a>(
+        paths: impl IntoIterator<Item = &'a str>,
+        compact: fn(&str) -> String,
+        cwd: Option<&str>,
+    ) -> Self {
+        let cwd = cwd.map(|dir| dir.replace('\\', "/").trim_end_matches('/').to_owned());
+
+        // Three candidate labels per distinct path, from shortest to longest.
+        let mut index_of: HashMap<String, usize> = HashMap::new();
+        let mut candidates: Vec<[String; 3]> = Vec::new();
+        let mut printed: Vec<(&str, usize)> = Vec::new();
+        for path in paths {
+            let normalized = path.replace('\\', "/");
+            let index = *index_of.entry(normalized).or_insert_with_key(|normalized| {
+                let relative = cwd
+                    .as_deref()
+                    .and_then(|dir| normalized.strip_prefix(dir))
+                    .and_then(|rest| rest.strip_prefix('/'))
+                    .filter(|rest| !rest.is_empty())
+                    .unwrap_or(normalized.as_str());
+                candidates.push([compact(normalized), relative.to_owned(), normalized.clone()]);
+                candidates.len() - 1
+            });
+            printed.push((path, index));
+        }
+
+        // Move every path whose label is shared one step towards its full path, until no
+        // label is shared (or all that share one are already at the full path, which
+        // differs for distinct paths).
+        let mut level = vec![0usize; candidates.len()];
+        loop {
+            let mut uses: HashMap<&str, usize> = HashMap::new();
+            for (candidate, &l) in candidates.iter().zip(&level) {
+                *uses.entry(candidate[l].as_str()).or_insert(0) += 1;
+            }
+            let mut moved = false;
+            for (candidate, l) in candidates.iter().zip(level.iter_mut()) {
+                if *l < 2 && uses.get(candidate[*l].as_str()).is_some_and(|&n| n > 1) {
+                    *l += 1;
+                    moved = true;
+                }
+            }
+            if !moved {
+                break;
+            }
+        }
+
+        let labels = printed
+            .into_iter()
+            .map(|(path, index)| (path.to_owned(), candidates[index][level[index]].clone()))
+            .collect();
+        Self { compact, labels }
+    }
+
+    /// The label of `path`, which should be one of the paths this was built from.
+    pub fn label(&self, path: &str) -> String {
+        match self.labels.get(path) {
+            Some(label) => label.clone(),
+            None => (self.compact)(path),
+        }
     }
 }
 
@@ -1857,5 +1965,109 @@ mod tests {
 
         // Nothing named and rtk may fetch: npx is the only runner that can.
         assert_eq!(exec_runner(None, MissingTool::Fetch), "npx");
+    }
+
+    fn src_lib(path: &str) -> String {
+        compact_from_first_dir(path, &["src", "lib"])
+    }
+
+    fn labels(paths: &[&str], cwd: Option<&str>) -> Vec<String> {
+        let labels = PathLabels::relative_to(paths.iter().copied(), src_lib, cwd);
+        paths.iter().map(|path| labels.label(path)).collect()
+    }
+
+    #[test]
+    fn compact_from_first_dir_starts_at_the_first_matching_directory() {
+        assert_eq!(src_lib("/home/me/app/src/a/b.rs"), "src/a/b.rs");
+        assert_eq!(src_lib("/repo/src/app/src/x.py"), "src/app/src/x.py");
+        assert_eq!(src_lib("/repo/lib/a/src/x.py"), "lib/a/src/x.py");
+        assert_eq!(src_lib(r"C:\work\src\api.ts"), "src/api.ts");
+        assert_eq!(src_lib("/src/x.py"), "src/x.py");
+    }
+
+    #[test]
+    fn compact_from_first_dir_falls_back_to_the_file_name() {
+        assert_eq!(src_lib("/home/me/app/other/b.rs"), "b.rs");
+        assert_eq!(src_lib("relative/file.rs"), "file.rs");
+        assert_eq!(src_lib("file.rs"), "file.rs");
+        // Nothing precedes a leading `src`, and a file called `src` is not a directory.
+        assert_eq!(src_lib("src/file.rs"), "file.rs");
+        assert_eq!(src_lib("/repo/src"), "src");
+    }
+
+    #[test]
+    fn path_labels_leave_unique_paths_compact() {
+        assert_eq!(
+            labels(&["/w/src/a.rs", "/w/other/b.rs", "c.rs"], Some("/w")),
+            ["src/a.rs", "b.rs", "c.rs"]
+        );
+    }
+
+    #[test]
+    fn path_labels_expand_colliding_paths_relative_to_the_working_directory() {
+        assert_eq!(
+            labels(
+                &["/w/a/__init__.py", "/w/b/__init__.py", "/w/src/main.py"],
+                Some("/w")
+            ),
+            ["a/__init__.py", "b/__init__.py", "src/main.py"]
+        );
+        // Windows spelling, a trailing separator on the working directory included.
+        assert_eq!(
+            labels(&[r"C:\w\a\x.py", r"C:\w\b\x.py"], Some(r"C:\w\")),
+            ["a/x.py", "b/x.py"]
+        );
+    }
+
+    #[test]
+    fn path_labels_keep_the_printed_path_when_it_is_not_below_the_working_directory() {
+        assert_eq!(
+            labels(&["pkg_a/__init__.py", "pkg_b/__init__.py"], Some("/w")),
+            ["pkg_a/__init__.py", "pkg_b/__init__.py"]
+        );
+        // `/workshop` is not inside `/work`.
+        assert_eq!(
+            labels(&["/workshop/a/x.py", "/w/b/x.py"], Some("/w")),
+            ["/workshop/a/x.py", "b/x.py"]
+        );
+        assert_eq!(
+            labels(&["/o/a/x.py", "/o/b/x.py"], None),
+            ["/o/a/x.py", "/o/b/x.py"]
+        );
+    }
+
+    #[test]
+    fn path_labels_expand_only_the_colliding_paths() {
+        // Both compact to `src/x.py`; the other two were unique and stay compact.
+        assert_eq!(
+            labels(
+                &["/w/a/src/x.py", "/w/b/src/x.py", "/w/lib/y.py", "/w/z.py"],
+                Some("/w")
+            ),
+            ["a/src/x.py", "b/src/x.py", "lib/y.py", "z.py"]
+        );
+    }
+
+    #[test]
+    fn path_labels_never_share_a_label_between_different_printed_paths() {
+        // The cwd-relative label of `/w/a/x.py` equals the path another entry printed.
+        let paths = ["/w/a/x.py", "/w/b/x.py", "a/x.py"];
+        let out = labels(&paths, Some("/w"));
+        let distinct: std::collections::HashSet<_> = out.iter().collect();
+        assert_eq!(distinct.len(), paths.len(), "{out:?}");
+        assert_eq!(out[1], "b/x.py");
+    }
+
+    #[test]
+    fn path_labels_treat_separator_spellings_of_one_path_as_one_path() {
+        let labels = PathLabels::relative_to(
+            ["/w/a/x.py", r"\w\a\x.py", "/w/b/x.py"],
+            src_lib,
+            Some("/w"),
+        );
+        assert_eq!(labels.label("/w/a/x.py"), "a/x.py");
+        assert_eq!(labels.label(r"\w\a\x.py"), "a/x.py");
+        assert_eq!(labels.label("/w/b/x.py"), "b/x.py");
+        assert_eq!(labels.label("/never/seen/x.py"), "x.py");
     }
 }
