@@ -3561,12 +3561,13 @@ fn filter_stash_list(output: &str) -> String {
         if let Some(colon_pos) = line.find(": ") {
             let index = &line[..colon_pos];
             let rest = &line[colon_pos + 2..];
-            // Compact: strip "WIP on branch:" prefix if present
-            let message = if let Some(second_colon) = rest.find(": ") {
-                rest[second_colon + 2..].trim()
-            } else {
-                rest.trim()
-            };
+            // Compact: drop the "WIP on "/"On " words but keep the branch the stash
+            // was made on, the only thing that tells two same-message stashes apart.
+            let message = rest
+                .strip_prefix("WIP on ")
+                .or_else(|| rest.strip_prefix("On "))
+                .unwrap_or(rest)
+                .trim();
             result.push(format!("{}: {}", index, message));
         } else {
             result.push(line.to_string());
@@ -5128,8 +5129,18 @@ mod tests {
         let output =
             "stash@{0}: WIP on main: abc1234 fix login\nstash@{1}: On feature: def5678 wip\n";
         let result = filter_stash_list(output);
-        assert!(result.contains("stash@{0}: abc1234 fix login"));
-        assert!(result.contains("stash@{1}: def5678 wip"));
+        assert!(result.contains("stash@{0}: main: abc1234 fix login"));
+        assert!(result.contains("stash@{1}: feature: def5678 wip"));
+    }
+
+    #[test]
+    fn test_filter_stash_list_keeps_branch_of_custom_message() {
+        // `git stash push -m` yields "On <branch>: <msg>"; msg may itself contain ": ".
+        let output = "stash@{0}: On hotfix: fix: null check\n";
+        assert_eq!(
+            filter_stash_list(output),
+            "stash@{0}: hotfix: fix: null check"
+        );
     }
 
     #[test]
