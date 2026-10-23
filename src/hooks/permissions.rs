@@ -364,16 +364,36 @@ fn get_settings_paths_from(
     paths
 }
 
-fn read_json(path: &std::path::Path) -> Option<Value> {
-    let content = std::fs::read_to_string(path).ok()?;
+enum JsonRead {
+    Missing,
+    Parsed(Value),
+    Error,
+}
+
+fn read_json(path: &std::path::Path) -> JsonRead {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return JsonRead::Missing,
+        Err(e) => {
+            eprintln!(
+                "[rtk] warning: failed to read permissions from {}: {}",
+                path.display(),
+                e
+            );
+            return JsonRead::Error;
+        }
+    };
+    if content.trim().is_empty() {
+        return JsonRead::Missing;
+    }
     match crate::core::utils::from_json_str::<Value>(&content) {
-        Ok(v) => Some(v),
+        Ok(v) => JsonRead::Parsed(v),
         Err(_) => {
             eprintln!(
                 "[rtk] warning: failed to parse permissions from {}",
                 path.display()
             );
-            None
+            JsonRead::Error
         }
     }
 }
@@ -400,19 +420,25 @@ fn append_wrapped_rules(rules_value: Option<&Value>, prefixes: &[&str], target: 
 // Global config only. RTK auto-allows only the globally-trusted subset; anything
 // else defers to the host, which applies its own project config and folder-trust.
 // This keeps RTK's allow set a subset of the host's — never more permissive.
-fn global_config(dir: &str, file: &str) -> Option<Value> {
-    read_json(&user_dirs::home()?.join(dir).join(file))
+fn global_config(dir: &str, file: &str) -> JsonRead {
+    let Some(home) = user_dirs::home() else {
+        return JsonRead::Missing;
+    };
+    read_json(&home.join(dir).join(file))
 }
 
 fn load_cursor_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut deny = Vec::new();
     let mut allow = Vec::new();
-    if let Some(perms) = global_config(CURSOR_DIR, "cli-config.json")
-        .as_ref()
-        .and_then(|j| j.get("permissions"))
-    {
-        append_wrapped_rules(perms.get("deny"), &["Shell("], &mut deny);
-        append_wrapped_rules(perms.get("allow"), &["Shell("], &mut allow);
+    match global_config(CURSOR_DIR, "cli-config.json") {
+        JsonRead::Error => deny.push("*".to_string()),
+        JsonRead::Parsed(json) => {
+            if let Some(perms) = json.get("permissions") {
+                append_wrapped_rules(perms.get("deny"), &["Shell("], &mut deny);
+                append_wrapped_rules(perms.get("allow"), &["Shell("], &mut allow);
+            }
+        }
+        JsonRead::Missing => {}
     }
     (deny, Vec::new(), allow)
 }
@@ -423,9 +449,12 @@ fn load_cursor_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
 // untrusted → global, which is safe: never more permissive than the host).
 fn gemini_settings() -> Option<Value> {
     let global = global_config(GEMINI_DIR, SETTINGS_JSON);
+    let global_value = match &global {
+        JsonRead::Parsed(value) => Some(value),
+        JsonRead::Missing | JsonRead::Error => None,
+    };
     let trusted = user_env::var("GEMINI_CLI_TRUST_WORKSPACE").as_deref() == Some("true")
-        || !global
-            .as_ref()
+        || !global_value
             .and_then(|j| {
                 j.pointer("/security/folderTrust/enabled")
                     .and_then(Value::as_bool)
@@ -433,11 +462,14 @@ fn gemini_settings() -> Option<Value> {
             .unwrap_or(false);
     if trusted
         && let Some(root) = find_project_root()
-        && let Some(v) = read_json(&root.join(GEMINI_DIR).join(SETTINGS_JSON))
+        && let JsonRead::Parsed(v) = read_json(&root.join(GEMINI_DIR).join(SETTINGS_JSON))
     {
         return Some(v);
     }
-    global
+    match global {
+        JsonRead::Parsed(value) => Some(value),
+        JsonRead::Missing | JsonRead::Error => None,
+    }
 }
 
 fn load_gemini_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
@@ -454,7 +486,7 @@ fn load_gemini_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
 // All four Droid settings scopes: user (honoring $FACTORY_HOME_OVERRIDE) and
 // project `.factory/`, each with settings.json + settings.local.json
 // (docs.factory.ai/cli/configuration/settings). Missing files are skipped.
-fn droid_settings_scopes() -> Vec<Value> {
+fn droid_settings_scopes() -> (Vec<Value>, bool) {
     let mut dirs_to_read = Vec::new();
     if let Some(home) = user_dirs::env_path(DROID_HOME_ENV)
         .filter(|value| !value.is_empty())
@@ -468,14 +500,17 @@ fn droid_settings_scopes() -> Vec<Value> {
     }
 
     let mut scopes = Vec::new();
+    let mut failed = false;
     for dir in dirs_to_read {
         for file in [DROID_SETTINGS_FILE, SETTINGS_LOCAL_JSON] {
-            if let Some(v) = read_json(&dir.join(file)) {
-                scopes.push(v);
+            match read_json(&dir.join(file)) {
+                JsonRead::Parsed(value) => scopes.push(value),
+                JsonRead::Missing => {}
+                JsonRead::Error => failed = true,
             }
         }
     }
-    scopes
+    (scopes, failed)
 }
 
 /// Deny-only: `commandDenylist`/`commandBlocklist` → deny, so RTK steps aside
@@ -485,7 +520,11 @@ fn droid_settings_scopes() -> Vec<Value> {
 /// No allow rules: RTK never asserts a decision for a command it renames to
 /// `rtk …`, and Droid's built-in defaults are not mirrored (they would drift).
 fn load_droid_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
-    droid_rules_from_settings(&droid_settings_scopes())
+    let (scopes, failed) = droid_settings_scopes();
+    if failed {
+        return (vec!["*".to_string()], Vec::new(), Vec::new());
+    }
+    droid_rules_from_settings(&scopes)
 }
 
 pub(crate) fn droid_rules_from_settings(
@@ -811,11 +850,7 @@ mod tests {
     fn test_missing_and_empty_settings_files_add_no_rules() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let empty = tmp.path().join("settings.local.json");
-        std::fs::write(
-            &empty, "  
-",
-        )
-        .expect("write settings");
+        std::fs::write(&empty, "  \n").expect("write settings");
         let (deny, ask, allow) =
             load_permission_rules_from(&[tmp.path().join("settings.json"), empty]);
         assert!(deny.is_empty() && ask.is_empty() && allow.is_empty());
