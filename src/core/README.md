@@ -115,8 +115,8 @@ exclude_commands = ["curl", "playwright"]  # Never auto-rewrite these
 [limits]
 grep_max_results = 200
 grep_max_per_file = 25
-status_max_files = 15
-status_max_untracked = 10
+# status_max_files / status_max_untracked: unset by default (git status stays unbounded);
+# set either to cap the compact `rtk git status` listing.
 passthrough_max_chars = 2000
 ```
 
