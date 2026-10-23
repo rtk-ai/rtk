@@ -1524,21 +1524,25 @@ const REFUSAL_EXIT_CODE: i32 = 128;
 const SHA1_NAME_LEN: usize = 40;
 const SHA256_NAME_LEN: usize = 64;
 const DEFAULT_LOG_LIMIT_ARG: &str = "-10";
+/// Cap for `--oneline` / `--pretty` / `--format` when the user names no limit.
+/// Compact lines, so more of them fit than the default summary. A NUL-separated
+/// walk keeps this cap and is not cut at 80 characters.
+const FORMAT_LOG_LIMIT: usize = 50;
 
-/// `git log <args>` for the raw passthrough, carrying RTK's default limit unless the user named
-/// one. [`run_passthrough`] streams straight to the terminal, so the limit has to be in the args
-/// or it never applies: a patch request became the whole history, 411k lines against 50 for
-/// plain `rtk git log`.
+/// `git log <args>` for the raw passthrough. `inject` is the `-{n}` written ahead of every user
+/// argument, or `None` when the user already bounded the walk. [`run_passthrough`] streams
+/// straight to the terminal, so the limit has to be in the args or it never applies: a patch
+/// request became the whole history, 411k lines against 50 for plain `rtk git log`.
 ///
 /// The limit goes first, ahead of every user argument. `injection_point` is the wrong tool here:
 /// it only guarantees "before the user's `--`", while git requires options to precede *all*
 /// positionals ("fatal: -10 option must come before non-option arguments") and a pathspec needs
 /// no boundary to be one. Only the limit is injected -- `--no-merges` would gut `--cc`/`-c`,
 /// whose entire purpose is the merge diff.
-fn raw_log_passthrough_args(args: &[String], capped: bool) -> Vec<OsString> {
+fn raw_log_passthrough_args(args: &[String], inject: Option<usize>) -> Vec<OsString> {
     let mut out = vec![OsString::from("log")];
-    if capped {
-        out.push(OsString::from(DEFAULT_LOG_LIMIT_ARG));
+    if let Some(limit) = inject {
+        out.push(OsString::from(format!("-{limit}")));
     }
     out.extend(args.iter().map(OsString::from));
     out
@@ -1548,6 +1552,67 @@ fn raw_log_passthrough_args(args: &[String], capped: bool) -> Vec<OsString> {
 /// bound the walk with a revision range.
 fn raw_log_is_capped(tokens: &[Token<'_>]) -> bool {
     !has_limit_flag(tokens) && !bounds_the_walk(tokens)
+}
+
+/// How a raw `git log` is bounded. [`raw_log_plan`] returns `None` for the filtered path.
+struct RawLogPlan {
+    /// `-{n}` to inject ahead of the user's arguments. `None` when they already named a limit,
+    /// or a patch-shaped walk is already a revision range.
+    inject: Option<usize>,
+}
+
+/// #4577: `-z` / `--null` separate commits with NUL, so the walk is one line to
+/// [`filter_log_output`] and `truncate_line(..., 80)` keeps the first record and an ellipsis.
+///
+/// Machine output. It takes the raw path: git's own bytes, no `--no-merges`, no injected
+/// `--pretty`, and no line truncation. The commit cap stays the one the filtered path already
+/// applied — [`FORMAT_LOG_LIMIT`] when the user named `--format` / `--oneline` / `--pretty`,
+/// otherwise [`DEFAULT_LOG_LIMIT`].
+///
+/// Kept out of [`log_wants_raw_shape`]. `diff` and `show` delegate to that list, and a raw log
+/// always injects [`DEFAULT_LOG_LIMIT`]. Putting `-z` there would shrink
+/// `git log --format=%H -z` from 50 commits to 10, and would retarget `show` / `diff` as well.
+fn log_null_separated(tokens: &[Token<'_>]) -> bool {
+    // A value (`--grep -z`) and a pathspec (`-- -z`) are positionals, not these flags.
+    tokens.iter().any(|t| {
+        matches!(
+            (t.kind, t.text),
+            (TokenKind::Short, "z") | (TokenKind::Long, "null")
+        )
+    })
+}
+
+fn log_has_format_flag(tokens: &[Token<'_>]) -> bool {
+    tokens
+        .iter()
+        .any(|t| t.kind == TokenKind::Long && matches!(t.text, "format" | "oneline" | "pretty"))
+}
+
+/// `Some` when `git log` must pass git's bytes through.
+///
+/// Patch-shaped flags keep today's raw route: the default cap, and a revision range is left
+/// alone. A NUL-separated walk that is not otherwise raw keeps the filtered path's cap,
+/// including across a revision range — that cap is what `rtk git log --format=%H` already
+/// applies, and the only thing `-z` was getting wrong was the 80-character cut.
+fn raw_log_plan(tokens: &[Token<'_>]) -> Option<RawLogPlan> {
+    let raw_shape = tokens.iter().any(|t| log_wants_raw_shape(t, tokens));
+    let null_separated = log_null_separated(tokens);
+    if !raw_shape && !null_separated {
+        return None;
+    }
+    let capped = if raw_shape {
+        raw_log_is_capped(tokens)
+    } else {
+        !has_limit_flag(tokens)
+    };
+    let inject = capped.then(|| {
+        if !raw_shape && log_has_format_flag(tokens) {
+            FORMAT_LOG_LIMIT
+        } else {
+            DEFAULT_LOG_LIMIT
+        }
+    });
+    Some(RawLogPlan { inject })
 }
 
 /// Whether the walk holds more commits than RTK's default limit shows -- the question the
@@ -1835,12 +1900,11 @@ fn run_log(
     let tracked = with_args("git log", &display_args(args));
     let tokens = tokenize_git_log_args(args);
 
-    if tokens.iter().any(|t| log_wants_raw_shape(t, &tokens)) {
-        let capped = raw_log_is_capped(&tokens);
-        let passthrough_args = raw_log_passthrough_args(args, capped);
-        if !capped {
+    if let Some(plan) = raw_log_plan(&tokens) {
+        let passthrough_args = raw_log_passthrough_args(args, plan.inject);
+        let Some(limit) = plan.inject else {
             return run_passthrough(&passthrough_args, global_args, verbose);
-        }
+        };
         // Capped, so the output is bounded and worth capturing: it is the only way to say
         // whether the limit actually took anything away. Announcing it up-front announced a
         // truncation that had not happened, on a two-commit repo, and announced it ahead of
@@ -1876,13 +1940,8 @@ fn run_log(
         // silencing the notice again. The one exception is `-h`: git 2.56 answers it with
         // its usage and exit 0, so a walk that never ran looks like one that did.
         let refused = result.exit_code >= REFUSAL_EXIT_CODE || asks_for_usage(&tokens);
-        if !refused
-            && walk_exceeds_limit(global_args, args, &tokens, DEFAULT_LOG_LIMIT) == Some(true)
-        {
-            eprintln!(
-                "[rtk] capped at {} commits; pass -n <count> for more",
-                DEFAULT_LOG_LIMIT
-            );
+        if !refused && walk_exceeds_limit(global_args, args, &tokens, limit) == Some(true) {
+            eprintln!("[rtk] capped at {limit} commits; pass -n <count> for more");
         }
         if !result.success() {
             return Ok(result.exit_code);
@@ -1896,9 +1955,7 @@ fn run_log(
     cmd.arg("log");
 
     // Check if user provided format flags
-    let has_format_flag = tokens
-        .iter()
-        .any(|t| t.kind == TokenKind::Long && matches!(t.text, "format" | "oneline" | "pretty"));
+    let has_format_flag = log_has_format_flag(&tokens);
 
     // Check if user provided limit flag (-N, -n N, --max-count=N, --max-count N)
     let has_limit_flag = has_limit_flag(&tokens);
@@ -1917,8 +1974,8 @@ fn run_log(
         (n, true)
     } else if has_format_flag {
         // --oneline / --pretty without -N: user wants compact output, allow more
-        cmd.arg("-50");
-        (50, false)
+        cmd.arg(format!("-{FORMAT_LOG_LIMIT}"));
+        (FORMAT_LOG_LIMIT, false)
     } else {
         // No flags at all: default to 10
         cmd.arg(DEFAULT_LOG_LIMIT_ARG);
@@ -5910,7 +5967,8 @@ A  added.rs
                 tokens.iter().any(|t| log_wants_raw_shape(t, &tokens)),
                 "{args:?} must route raw"
             );
-            raw_log_passthrough_args(&owned, raw_log_is_capped(&tokens))
+            let plan = raw_log_plan(&tokens).unwrap_or_else(|| panic!("{args:?} must route raw"));
+            raw_log_passthrough_args(&owned, plan.inject)
                 .iter()
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
@@ -5990,7 +6048,8 @@ A  added.rs
         let built = |args: &[&str]| {
             let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
             let tokens = tokenize_git_log_args(&owned);
-            raw_log_passthrough_args(&owned, raw_log_is_capped(&tokens))
+            let plan = raw_log_plan(&tokens).expect("raw");
+            raw_log_passthrough_args(&owned, plan.inject)
                 .iter()
                 .any(|a| a == DEFAULT_LOG_LIMIT_ARG)
         };
@@ -6007,6 +6066,113 @@ A  added.rs
         assert!(built(&["-p", "./a..b"]));
         // And an explicit limit still wins over both.
         assert!(!built(&["-p", "-5"]));
+    }
+
+    #[test]
+    fn null_separated_log_keeps_the_format_cap_and_skips_the_line_cut() {
+        // #4577: `-z` makes the walk one line, and truncate_line(..., 80) kept a hash and
+        // `...`. The raw argv is git's own bytes under the cap the filtered path already used.
+        let built = |args: &[&str]| -> Option<Vec<String>> {
+            let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            let tokens = tokenize_git_log_args(&owned);
+            let plan = raw_log_plan(&tokens)?;
+            Some(
+                raw_log_passthrough_args(&owned, plan.inject)
+                    .iter()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect(),
+            )
+        };
+
+        assert_eq!(
+            built(&["--format=%H", "-z"]),
+            Some(vec![
+                "log".into(),
+                "-50".into(),
+                "--format=%H".into(),
+                "-z".into()
+            ])
+        );
+        assert_eq!(
+            built(&["--oneline", "-z"]),
+            Some(vec![
+                "log".into(),
+                "-50".into(),
+                "--oneline".into(),
+                "-z".into()
+            ])
+        );
+        assert_eq!(
+            built(&["--pretty=format:%H", "--null"]),
+            Some(vec![
+                "log".into(),
+                "-50".into(),
+                "--pretty=format:%H".into(),
+                "--null".into()
+            ])
+        );
+        // A range does not lift the format cap. The filtered path already injected -50 here.
+        assert_eq!(
+            built(&["--format=%H", "-z", "HEAD~100..HEAD"]),
+            Some(vec![
+                "log".into(),
+                "-50".into(),
+                "--format=%H".into(),
+                "-z".into(),
+                "HEAD~100..HEAD".into()
+            ])
+        );
+        // The user's own limit is the walk. No second cap, and no 120-character cut.
+        assert_eq!(
+            built(&["-n", "5", "--format=%H", "-z"]),
+            Some(vec![
+                "log".into(),
+                "-n".into(),
+                "5".into(),
+                "--format=%H".into(),
+                "-z".into()
+            ])
+        );
+        // No format flag: the default log cap, still untruncated.
+        assert_eq!(
+            built(&["-z"]),
+            Some(vec!["log".into(), "-10".into(), "-z".into()])
+        );
+        // A patch flag already owns the raw route, so its cap stays 10.
+        assert_eq!(
+            built(&["-p", "-z"]),
+            Some(vec!["log".into(), "-10".into(), "-p".into(), "-z".into()])
+        );
+        assert_eq!(
+            built(&["--format=%H", "-z", "-p"]),
+            Some(vec![
+                "log".into(),
+                "-10".into(),
+                "--format=%H".into(),
+                "-z".into(),
+                "-p".into()
+            ])
+        );
+
+        // Not a separator: the value of another flag, or a pathspec.
+        assert_eq!(built(&["--grep", "-z"]), None);
+        assert_eq!(built(&["--format=%H", "--", "-z"]), None);
+        assert_eq!(built(&["--format=%H"]), None);
+
+        // diff/show must not inherit this. Their raw list is log_wants_raw_shape, which
+        // still does not name -z/--null.
+        for args in [&["-z"][..], &["--null"][..], &["--format=%H", "-z"][..]] {
+            let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            let tokens = tokenize_git_diff_args(&owned);
+            assert!(
+                !tokens.iter().any(|t| show_wants_raw_shape(t, &tokens)),
+                "{args:?} on show"
+            );
+            assert!(
+                !tokens.iter().any(|t| diff_wants_raw_shape(t, &tokens)),
+                "{args:?} on diff"
+            );
+        }
     }
 
     #[test]
