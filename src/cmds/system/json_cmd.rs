@@ -4,8 +4,9 @@ use crate::core::guard::never_worse;
 use crate::core::tracking;
 use crate::core::utils::{from_json_str, strip_leading_bom};
 use anyhow::{Context, Result, bail};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
@@ -218,65 +219,143 @@ const MAX_SCHEMA_KEYS: usize = 16;
 /// input; a short string value or a small array can still cost a few bytes
 /// more (`"a":"b"` becomes `a:string`).
 fn extract_schema(value: &Value, depth: usize, max_depth: usize) -> String {
+    merged_schema(&[value], depth, max_depth)
+}
+
+/// Render `values` (an array's items, or a single value) as one schema, so a
+/// key or type that only a later item has is not dropped (#4696): objects list
+/// the union of their keys, arrays merge their items, and values of different
+/// types are joined with `|` in order of first appearance (`null|{id:int}`).
+fn merged_schema(values: &[&Value], depth: usize, max_depth: usize) -> String {
     if depth > max_depth {
         return "...".to_string();
     }
 
-    match value {
-        Value::Null => "null".to_string(),
-        Value::Bool(_) => "bool".to_string(),
-        Value::Number(n) => {
-            if n.is_i64() {
-                "int".to_string()
-            } else {
-                "float".to_string()
-            }
+    let mut kinds = Vec::new();
+    let mut alternatives = Vec::new();
+    for value in values {
+        let kind = schema_kind(value);
+        if kinds.contains(&kind) {
+            continue;
         }
-        Value::String(s) => {
-            if s.len() > 50 {
-                format!("string[{}]", s.len())
-            } else if s.is_empty() {
-                "string".to_string()
-            } else if s.starts_with("http") {
-                "url".to_string()
-            } else if s.contains('-') && s.len() == 10 {
-                "date?".to_string()
-            } else {
-                "string".to_string()
-            }
-        }
-        Value::Array(arr) => {
-            if arr.is_empty() {
-                "[]".to_string()
-            } else {
-                let first_schema = extract_schema(&arr[0], depth + 1, max_depth);
-                if arr.len() == 1 {
-                    format!("[{}]", first_schema)
-                } else {
-                    format!("[{}] ({})", first_schema, arr.len())
-                }
-            }
-        }
-        Value::Object(map) => {
-            if map.is_empty() {
-                "{}".to_string()
-            } else {
-                let mut keys: Vec<_> = map.keys().collect();
-                keys.sort();
-
-                let mut parts = Vec::new();
-                for (i, key) in keys.iter().enumerate() {
-                    if i >= MAX_SCHEMA_KEYS {
-                        parts.push(format!("...+{}", keys.len() - i));
-                        break;
-                    }
-                    let val_schema = extract_schema(&map[*key], depth + 1, max_depth);
-                    parts.push(format!("{}:{}", schema_key(key), val_schema));
-                }
-                format!("{{{}}}", parts.join(","))
-            }
-        }
+        kinds.push(kind);
+        alternatives.push(match value {
+            Value::String(_) => merged_string_schema(values),
+            Value::Array(_) => array_schema(values, depth, max_depth),
+            Value::Object(_) => object_schema(values, depth, max_depth),
+            _ => kind.to_string(),
+        });
     }
+    alternatives.join("|")
+}
+
+fn schema_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(n) if n.is_i64() => "int",
+        Value::Number(_) => "float",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum StringFormat {
+    Long,
+    Url,
+    Date,
+    Plain,
+}
+
+fn string_format(s: &str) -> StringFormat {
+    if s.len() > 50 {
+        StringFormat::Long
+    } else if s.starts_with("http") {
+        StringFormat::Url
+    } else if s.contains('-') && s.len() == 10 {
+        StringFormat::Date
+    } else {
+        StringFormat::Plain
+    }
+}
+
+/// All strings in `values` share one alternative. Empty strings carry no
+/// format, so the others decide it: `url` or `date?` when they all agree,
+/// `string[N]` when all are long (`string[60-412]` when their lengths differ),
+/// and plain `string` otherwise.
+fn merged_string_schema(values: &[&Value]) -> String {
+    let strings: Vec<&str> = values
+        .iter()
+        .filter_map(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let Some(shared) = strings.first().map(|s| string_format(s)) else {
+        return "string".to_string();
+    };
+    if strings.iter().any(|s| string_format(s) != shared) {
+        return "string".to_string();
+    }
+
+    match shared {
+        StringFormat::Long => {
+            let (shortest, longest) = len_range(strings.iter().map(|s| s.len()));
+            if shortest == longest {
+                format!("string[{}]", longest)
+            } else {
+                format!("string[{}-{}]", shortest, longest)
+            }
+        }
+        StringFormat::Url => "url".to_string(),
+        StringFormat::Date => "date?".to_string(),
+        StringFormat::Plain => "string".to_string(),
+    }
+}
+
+/// Shortest and longest of `lens`, `(0, 0)` when there are none.
+fn len_range(lens: impl Iterator<Item = usize> + Clone) -> (usize, usize) {
+    (lens.clone().min().unwrap_or(0), lens.max().unwrap_or(0))
+}
+
+/// Arrays merged from several parents can differ in length, so their count is
+/// printed as a range (`(0-3)`) rather than as the first one's length.
+fn array_schema(values: &[&Value], depth: usize, max_depth: usize) -> String {
+    let arrays: Vec<&Vec<Value>> = values.iter().filter_map(|v| v.as_array()).collect();
+    let items: Vec<&Value> = arrays.iter().flat_map(|arr| arr.iter()).collect();
+    if items.is_empty() {
+        return "[]".to_string();
+    }
+
+    let item_schema = merged_schema(&items, depth + 1, max_depth);
+    let (shortest, longest) = len_range(arrays.iter().map(|arr| arr.len()));
+    if shortest != longest {
+        format!("[{}] ({}-{})", item_schema, shortest, longest)
+    } else if longest == 1 {
+        format!("[{}]", item_schema)
+    } else {
+        format!("[{}] ({})", item_schema, longest)
+    }
+}
+
+fn object_schema(values: &[&Value], depth: usize, max_depth: usize) -> String {
+    let objects: Vec<&Map<String, Value>> = values.iter().filter_map(|v| v.as_object()).collect();
+    let keys: BTreeSet<&String> = objects.iter().flat_map(|obj| obj.keys()).collect();
+    if keys.is_empty() {
+        return "{}".to_string();
+    }
+
+    let mut parts = Vec::new();
+    for (i, key) in keys.iter().enumerate() {
+        if i >= MAX_SCHEMA_KEYS {
+            parts.push(format!("...+{}", keys.len() - i));
+            break;
+        }
+        let key_values: Vec<&Value> = objects.iter().filter_map(|obj| obj.get(*key)).collect();
+        let val_schema = merged_schema(&key_values, depth + 1, max_depth);
+        parts.push(format!("{}:{}", schema_key(key), val_schema));
+    }
+    format!("{{{}}}", parts.join(","))
 }
 
 /// A key that could be read as schema syntax (empty, a delimiter, a `...`
@@ -288,7 +367,7 @@ fn schema_key(key: &str) -> Cow<'_, str> {
         && !key.chars().any(|c| {
             c.is_whitespace()
                 || c.is_control()
-                || matches!(c, ',' | ':' | '{' | '}' | '[' | ']' | '"' | '\\')
+                || matches!(c, ',' | ':' | '|' | '{' | '}' | '[' | ']' | '"' | '\\')
         });
     if bare {
         Cow::Borrowed(key)
@@ -551,12 +630,72 @@ mod tests {
     }
 
     #[test]
+    fn test_keys_only_array_shows_keys_of_every_item() {
+        // ISSUE #4696: the schema came from `arr[0]` alone, so a key that only
+        // later items have was reported as not existing.
+        for (raw, expected) in [
+            (
+                r#"[{"a":1},{"b":"x","c":2}]"#,
+                "[{a:int,b:string,c:int}] (2)",
+            ),
+            (
+                r#"[{"a":{"x":1}},{"a":{"y":2}}]"#,
+                "[{a:{x:int,y:int}}] (2)",
+            ),
+            (r#"[{"m":null},{"m":{"id":1}}]"#, "[{m:null|{id:int}}] (2)"),
+            (
+                r#"[{"t":[{"x":1}]},{"t":[{"y":1},{"x":2}]}]"#,
+                "[{t:[{x:int,y:int}] (1-2)}] (2)",
+            ),
+            (r#"[{"t":[]},{"t":[1]}]"#, "[{t:[int] (0-1)}] (2)"),
+            (r#"[1,"a",2.5,null,3]"#, "[int|string|float|null] (5)"),
+            (r#"[{"a":1},{"a":2}]"#, "[{a:int}] (2)"),
+            (r#"[[1,2],[3,4]]"#, "[[int] (2)] (2)"),
+        ] {
+            let shown = filter_json_string(raw, 5).expect("must parse");
+            assert_eq!(shown, expected, "for {raw}");
+        }
+    }
+
+    #[test]
+    fn test_keys_only_merges_string_formats_across_items() {
+        let long = |n: usize| format!("\"{}\"", "a".repeat(n));
+        for (raw, expected) in [
+            (
+                format!("[{},{}]", long(60), long(412)),
+                "[string[60-412]] (2)",
+            ),
+            (format!("[{},{}]", long(60), long(60)), "[string[60]] (2)"),
+            (format!("[{},\"\"]", long(60)), "[string[60]] (2)"),
+            (format!("[{},\"b\"]", long(60)), "[string] (2)"),
+            (r#"["","http://a"]"#.to_string(), "[url] (2)"),
+            (r#"["http://a","b"]"#.to_string(), "[string] (2)"),
+            (r#"["",""]"#.to_string(), "[string] (2)"),
+        ] {
+            let shown = filter_json_string(&raw, 5).expect("must parse");
+            assert_eq!(shown, expected, "for {raw}");
+        }
+    }
+
+    #[test]
+    fn test_keys_only_key_cap_applies_to_merged_items() {
+        let items = (0..17)
+            .map(|i| format!("{{\"k{i:02}\":1}}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let shown = filter_json_string(&format!("[{items}]"), 5).expect("must parse");
+        assert_eq!(shown.matches(":int").count(), 16, "{shown:?}");
+        assert!(shown.contains("...+1"), "{shown:?}");
+    }
+
+    #[test]
     fn test_keys_only_quotes_keys_that_read_as_syntax() {
         for (raw, expected) in [
             (r#"{"user_id":1,"a.b":2}"#, "{a.b:int,user_id:int}"),
             (r#"{"a":{"b":1,"c":1}}"#, "{a:{b:int,c:int}}"),
             (r#"{"a":{"b:int,c":1}}"#, r#"{a:{"b:int,c":int}}"#),
             (r#"{"a,b":1}"#, r#"{"a,b":int}"#),
+            (r#"{"a|b":1}"#, r#"{"a|b":int}"#),
             (r#"{"}":1}"#, r#"{"}":int}"#),
             (r#"{"[x]":1}"#, r#"{"[x]":int}"#),
             (r#"{"a\nb":1}"#, r#"{"a\nb":int}"#),
