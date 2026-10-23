@@ -472,8 +472,11 @@ fn run_s3_transfer(operation: &str, extra_args: &[String], verbose: u8) -> Resul
 
 fn filter_sts_identity(json_str: &str) -> Option<FilterResult> {
     let v: Value = serde_json::from_str(json_str).ok()?;
-    let account = v["Account"].as_str().unwrap_or("?");
-    let arn = v["Arn"].as_str().unwrap_or("?");
+    // Only handle the standard get-caller-identity object response.
+    // Query results (--query) produce JSON arrays or strings; return None to pass through raw.
+    let obj = v.as_object()?;
+    let account = obj.get("Account").and_then(|v| v.as_str()).unwrap_or("?");
+    let arn = obj.get("Arn").and_then(|v| v.as_str()).unwrap_or("?");
     Some(FilterResult::new(format!("AWS: {} {}", account, arn)))
 }
 
@@ -1588,6 +1591,27 @@ mod tests {
     fn test_filter_sts_identity_invalid_json() {
         let result = filter_sts_identity("not json");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn bugfix_issue_4662_filter_sts_identity_returns_none_for_query_output() {
+        // Example 1: --query '[Account,Arn]' --output json produces a JSON array
+        // rtk forces --output json, stripping user's --output text
+        let query_output_array = r#"["123456789012", "arn:aws:iam::123456789012:user/example"]"#;
+        let result = filter_sts_identity(query_output_array);
+        // Should return None to indicate filter doesn't apply, allowing raw passthrough
+        assert!(
+            result.is_none(),
+            "filter should return None for JSON array query output"
+        );
+
+        // Example 2: --query Account --output json produces a JSON string
+        let query_output_string = r#""123456789012""#;
+        let result = filter_sts_identity(query_output_string);
+        assert!(
+            result.is_none(),
+            "filter should return None for JSON string query output"
+        );
     }
 
     #[test]
