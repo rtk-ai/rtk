@@ -74,3 +74,66 @@ fn quoted_pattern_reaches_msys_grep_intact() {
         "MSYS grep lost the quoted pattern\nstdout: {stdout:?}\nstderr: {stderr:?}"
     );
 }
+
+#[test]
+fn escaped_bracket_pattern_reaches_msys_grep_intact() {
+    let Some(grep) = msys_grep() else {
+        eprintln!("skipping: no Git for Windows grep found");
+        return;
+    };
+    if !imports_msys_runtime(&grep) {
+        eprintln!("skipping: {} is not MSYS-linked", grep.display());
+        return;
+    }
+
+    let fixture = "[a]\nx\n";
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("rx.txt"), fixture).expect("write fixture");
+
+    let grep_dir = grep.parent().expect("grep.exe has a parent directory");
+    let mut path = grep_dir.as_os_str().to_os_string();
+    path.push(";");
+    path.push(std::env::var_os("PATH").unwrap_or_default());
+
+    // Single-escape bracket pattern (#4737)
+    let out = common::rtk_command()
+        .args(["grep", "-n", r#"^\["#, "rx.txt"])
+        .current_dir(dir.path())
+        .env("PATH", &path)
+        .output()
+        .expect("failed to run rtk");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "rtk grep exited {:?}, expected 0\nstdout: {stdout:?}\nstderr: {stderr:?}",
+        out.status.code()
+    );
+    assert!(
+        stdout.contains("1:[a]"),
+        "expected match on line 1, got:\nstdout: {stdout:?}\nstderr: {stderr:?}"
+    );
+
+    // Alternation with escaped bracket (#4737)
+    let out_alt = common::rtk_command()
+        .args(["grep", "-n", r#"x\|\[a"#, "rx.txt"])
+        .current_dir(dir.path())
+        .env("PATH", &path)
+        .output()
+        .expect("failed to run rtk");
+
+    let stdout_alt = String::from_utf8_lossy(&out_alt.stdout);
+    let stderr_alt = String::from_utf8_lossy(&out_alt.stderr);
+    assert_eq!(
+        out_alt.status.code(),
+        Some(0),
+        "rtk grep exited {:?}, expected 0\nstdout: {stdout_alt:?}\nstderr: {stderr_alt:?}",
+        out_alt.status.code()
+    );
+    assert!(
+        stdout_alt.contains("1:[a]") && stdout_alt.contains("2:x"),
+        "expected match on both lines, got:\nstdout: {stdout_alt:?}\nstderr: {stderr_alt:?}"
+    );
+}

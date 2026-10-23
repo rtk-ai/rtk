@@ -541,14 +541,14 @@ impl ChildArgExt for Command {
     }
 }
 
-/// Windows: `"` is the only character std encodes differently from libuv, so
-/// re-encode just those arguments and leave the rest on std's path. `.bat`/`.cmd`
+/// Windows: `"` and `\` are encoded differently between MSYS/Cygwin and std, so
+/// re-encode arguments containing them and leave the rest on std's path. `.bat`/`.cmd`
 /// shims stay on it too — cmd.exe parses by its own rules and `raw_arg` would
 /// bypass the escaping std applies for them.
 #[cfg(windows)]
 fn push_child_arg(cmd: &mut Command, arg: &OsStr) {
     match arg.to_str() {
-        Some(s) if s.contains('"') && !is_batch_program(cmd) => {
+        Some(s) if (s.contains('"') || s.contains('\\')) && !is_batch_program(cmd) => {
             std::os::windows::process::CommandExt::raw_arg(cmd, quote_arg_for_child(s));
         }
         _ => {
@@ -1286,11 +1286,11 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn test_child_arg_re_encodes_only_arguments_holding_a_quote() {
+    fn test_child_arg_re_encodes_arguments_holding_a_quote_or_backslash() {
         let mut cmd = Command::new("grep");
-        cmd.child_args(["-c", r#""type""#, "q.jsonl"]);
+        cmd.child_args(["-c", r#""type""#, r#"^\["#, "q.jsonl"]);
         let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, ["-c", r#""\"type\"""#, "q.jsonl"]);
+        assert_eq!(args, ["-c", r#""\"type\"""#, r#""^\[""#, "q.jsonl"]);
     }
 
     #[cfg(target_os = "windows")]
