@@ -262,12 +262,15 @@ Only `run` is filtered: either named explicitly, or implied when no positional a
 **Syntax:**
 ```bash
 rtk diff <file1> <file2>
+rtk diff - <file>             # Compare stdin with the file
+rtk diff <file> -             # Same, stdin as the second operand
 rtk diff -                    # Condense a unified diff read on stdin
 ```
 
-Pour comparer deux fichiers : code de sortie **0** si identiques, **1** si differents,
-**2** si un fichier ne peut pas etre lu. Les fichiers non UTF-8 sont compares octet
-par octet ; seuls leurs noms sont affiches lorsqu'ils different.
+Comparing two files exits **0** if they are identical, **1** if they differ, and **2**
+if an operand (file or stdin) cannot be read. `-` in place of either file means stdin,
+as for `diff`. Non-UTF-8 files are compared byte for byte; only their names are shown
+when they differ.
 
 ---
 
@@ -994,6 +997,7 @@ Sensitive variables (tokens, secrets, passwords) are masked by default: `AWS_SEC
 
 ```bash
 rtk log <file>     # From a file
+rtk log -          # From stdin
 rtk log            # From stdin (pipe)
 ```
 
