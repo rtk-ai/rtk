@@ -1,0 +1,1 @@
+{"about":"PHP CS Fixer 3.95.8 Adalbertus by Fabien Potencier, Dariusz Ruminski and contributors.","files":[{"name":"app\/Foo.php"},{"name":"app\/Bar.php"}],"time":{"total":0},"memory":0}
