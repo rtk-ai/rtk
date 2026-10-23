@@ -45,7 +45,7 @@ export function _resetCachedRtkPath(): void {
 export function resolveRtkPath(): string | null {
   if (cachedRtkPath && existsSync(cachedRtkPath)) return cachedRtkPath
 
-  const dirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean)
+  const dirs = (process.env.PATH ?? process.env.Path ?? "").split(delimiter).filter(Boolean)
   const exts = process.platform === "win32"
     ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";")
     : [""]
