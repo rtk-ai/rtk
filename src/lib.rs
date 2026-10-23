@@ -2145,6 +2145,60 @@ fn shell_split(input: &str) -> Vec<String> {
     discover::lexer::shell_split(input)
 }
 
+/// What `rtk bypass` runs: `cmd` with `args`, and `envs` added to its environment.
+#[derive(Debug)]
+struct BypassPlan {
+    envs: Vec<(String, String)>,
+    cmd: String,
+    args: Vec<String>,
+}
+
+/// Turns the `rtk bypass` arguments into the command to run.
+///
+/// A single quoted argument is split respecting quotes (#388), e.g.
+/// `rtk bypass 'git log --format="%H %s"'` → git ["log", "--format=%H %s"].
+/// Leading `NAME=value` words go to the command's environment instead of being
+/// looked up on PATH as the program: `rtk bypass KUBEBUILDER_ASSETS=/x go test`.
+/// Values are taken literally, the program is still looked up on rtk's own
+/// PATH, and `NAME+=value` is not an assignment.
+fn plan_bypass(args: &[OsString]) -> Result<BypassPlan> {
+    let words: Vec<String> = if args.len() == 1 {
+        let full = args[0].to_string_lossy().into_owned();
+        let parts = shell_split(&full);
+        if parts.len() > 1 { parts } else { vec![full] }
+    } else {
+        args.iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect()
+    };
+
+    let envs: Vec<(String, String)> = words
+        .iter()
+        .map_while(|word| env_assignment(word))
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+    let mut rest = words.into_iter().skip(envs.len());
+    let Some(cmd) = rest.next() else {
+        anyhow::bail!("bypass requires a command after the environment assignments");
+    };
+    Ok(BypassPlan {
+        envs,
+        cmd,
+        args: rest.collect(),
+    })
+}
+
+/// Splits a `NAME=value` word whose NAME a shell accepts as a variable name: a
+/// letter or `_`, then letters, digits and `_`.
+fn env_assignment(word: &str) -> Option<(&str, &str)> {
+    word.split_once('=').filter(|(name, _)| {
+        name.bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+            && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    })
+}
+
 /// The tracked command for `rtk proxy`: the program word is quoted like its
 /// arguments, so the row matches what the fallback records for the same argv.
 fn proxy_label(cmd_name: &str, cmd_args: &[String]) -> String {
@@ -3804,26 +3858,11 @@ fn run_cli() -> Result<i32> {
 
             let timer = core::tracking::TimedExecution::start();
 
-            // If a single quoted arg contains spaces, split it respecting quotes (#388).
-            // e.g. rtk bypass 'head -50 file.php' → cmd=head, args=["-50", "file.php"]
-            // e.g. rtk bypass 'git log --format="%H %s"' → cmd=git, args=["log", "--format=%H %s"]
-            let (cmd_name, cmd_args): (String, Vec<String>) = if args.len() == 1 {
-                let full = args[0].to_string_lossy();
-                let parts = shell_split(&full);
-                if parts.len() > 1 {
-                    (parts[0].clone(), parts[1..].to_vec())
-                } else {
-                    (full.into_owned(), vec![])
-                }
-            } else {
-                (
-                    args[0].to_string_lossy().into_owned(),
-                    args[1..]
-                        .iter()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .collect(),
-                )
-            };
+            let BypassPlan {
+                envs: cmd_envs,
+                cmd: cmd_name,
+                args: cmd_args,
+            } = plan_bypass(&args)?;
 
             if cli.verbose > 0 {
                 eprintln!("Bypass mode: {} {}", cmd_name, cmd_args.join(" "));
@@ -3880,6 +3919,7 @@ fn run_cli() -> Result<i32> {
             let mut child = ChildGuard(Some(
                 core::utils::resolved_command(cmd_name.as_ref())
                     .child_args(&cmd_args)
+                    .envs(cmd_envs)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .spawn()
@@ -4140,6 +4180,107 @@ mod tests {
         );
         assert_eq!(proxy_label("echo", &[]), "echo");
         assert_eq!(proxy_label("FOO=1", &["x".to_string()]), "'FOO=1' x");
+    }
+
+    fn os(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    fn strs(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn bypass_plan_splits_a_single_quoted_argument() {
+        let plan = plan_bypass(&os(&["git log --format=\"%H %s\""])).unwrap();
+        assert_eq!(plan.cmd, "git");
+        assert_eq!(plan.args, strs(&["log", "--format=%H %s"]));
+        assert!(plan.envs.is_empty());
+    }
+
+    #[test]
+    fn bypass_plan_keeps_separate_arguments_verbatim() {
+        let plan = plan_bypass(&os(&["head", "-50", "file with space.txt"])).unwrap();
+        assert_eq!(plan.cmd, "head");
+        assert_eq!(plan.args, strs(&["-50", "file with space.txt"]));
+    }
+
+    #[test]
+    fn bypass_plan_exports_leading_env_assignments() {
+        for form in [
+            os(&["KUBEBUILDER_ASSETS=/x/bin GOFLAGS=-mod=mod go test ./..."]),
+            os(&[
+                "KUBEBUILDER_ASSETS=/x/bin",
+                "GOFLAGS=-mod=mod",
+                "go",
+                "test",
+                "./...",
+            ]),
+        ] {
+            let plan = plan_bypass(&form).unwrap();
+            assert_eq!(
+                plan.envs,
+                vec![
+                    ("KUBEBUILDER_ASSETS".to_string(), "/x/bin".to_string()),
+                    ("GOFLAGS".to_string(), "-mod=mod".to_string()),
+                ]
+            );
+            assert_eq!(plan.cmd, "go");
+            assert_eq!(plan.args, strs(&["test", "./..."]));
+        }
+    }
+
+    #[test]
+    fn bypass_plan_does_not_mistake_other_words_for_env() {
+        // `=` in a later argument is data.
+        let plan = plan_bypass(&os(&["make", "TARGET=all"])).unwrap();
+        assert_eq!(plan.cmd, "make");
+        assert_eq!(plan.args, strs(&["TARGET=all"]));
+        assert!(plan.envs.is_empty());
+        // A word whose name a shell would not assign is the program, and so is
+        // `NAME+=value`.
+        for program in [
+            "./x=1", "1A=2", "=1", "a-b=1", "go.mod=x", "a/b=1", "FOO+=1",
+        ] {
+            let plan = plan_bypass(&os(&[program, "run"])).unwrap();
+            assert_eq!(plan.cmd, program);
+            assert_eq!(plan.args, strs(&["run"]));
+            assert!(plan.envs.is_empty(), "{program}");
+        }
+        let plan = plan_bypass(&os(&["_A1=2", "run"])).unwrap();
+        assert_eq!(plan.envs, vec![("_A1".to_string(), "2".to_string())]);
+        assert_eq!(plan.cmd, "run");
+        // An empty argument stays the (empty) command.
+        let plan = plan_bypass(&os(&[""])).unwrap();
+        assert_eq!(plan.cmd, "");
+        assert!(plan.args.is_empty());
+        assert!(plan.envs.is_empty());
+    }
+
+    #[test]
+    fn bypass_plan_rejects_assignments_without_a_command() {
+        for form in [
+            os(&["FOO=1"]),
+            os(&["FOO=1", "BAR=2"]),
+            os(&["FOO=1 BAR=2"]),
+        ] {
+            let err = plan_bypass(&form).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "bypass requires a command after the environment assignments"
+            );
+        }
+    }
+
+    #[test]
+    fn bypass_plan_passes_glued_shell_operators_through_literally() {
+        let plan = plan_bypass(&os(&["git log --format=%h|%s -3"])).unwrap();
+        assert_eq!(plan.cmd, "git");
+        assert_eq!(plan.args, strs(&["log", "--format=%h|%s", "-3"]));
+        let plan = plan_bypass(&os(&["curl -s https://example.com/api?a=1&b=2"])).unwrap();
+        assert_eq!(plan.cmd, "curl");
+        assert_eq!(plan.args, strs(&["-s", "https://example.com/api?a=1&b=2"]));
+        assert!(plan.envs.is_empty());
     }
 
     #[test]
