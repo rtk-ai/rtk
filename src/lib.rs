@@ -22,7 +22,7 @@ use cmds::jvm::{gradlew_cmd, mvn_cmd};
 use cmds::php::{
     ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpt_cmd, phpunit_cmd, pint_cmd,
 };
-use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, sqlfluff_cmd, uv_cmd};
+use cmds::python::{mypy_cmd, pip_cmd, poetry_cmd, pytest_cmd, ruff_cmd, sqlfluff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
@@ -982,6 +982,13 @@ enum Commands {
     /// Pip package manager with compact output (auto-detects uv)
     Pip {
         /// Pip arguments (e.g., list, outdated, install)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// poetry run with compact output while preserving poetry-managed environment semantics
+    Poetry {
+        /// poetry arguments (e.g., run pytest, run ruff check .)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -3594,6 +3601,14 @@ fn run_cli() -> Result<i32> {
 
         Commands::Pip { args } => pip_cmd::run(&args, cli.verbose)?,
 
+        // Only `poetry run` is handled here. Every other poetry subcommand keeps the
+        // raw-exec fallback so its TOML filter (poetry-install) still applies.
+        Commands::Poetry { args } if poetry_cmd::handles(&args) => {
+            poetry_cmd::run(&args, cli.verbose)?
+        }
+        Commands::Poetry { .. } => {
+            run_fallback(clap::Error::new(clap::error::ErrorKind::UnknownArgument))?
+        }
         Commands::Uv { args } => uv_cmd::run(&args, cli.verbose)?,
 
         Commands::Go { command } => match command {
@@ -4076,6 +4091,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Rubocop { .. }
             | Commands::Rspec { .. }
             | Commands::Pip { .. }
+            | Commands::Poetry { .. }
             | Commands::Uv { .. }
             | Commands::Go { .. }
             | Commands::Gradlew { .. }
@@ -4687,6 +4703,7 @@ mod tests {
             "pint",
             "phpt",
             "uv",
+            "poetry",
             "bun",
             "bunx",
             "deno",
