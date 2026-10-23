@@ -31,9 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
+      - uses: ./.github/actions/update-rust
       - run: cargo fmt --all -- --check
 
   clippy:
@@ -42,9 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      - uses: ./.github/actions/update-rust
       - uses: Swatinem/rust-cache@v2
         # `proxy/` is not a workspace member (it would break
         # `cargo install --git`), so it gets its own job below. Here
@@ -58,7 +54,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/update-rust
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --no-deps
 
@@ -74,9 +70,7 @@ jobs:
     needs: clippy
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
+      - uses: ./.github/actions/update-rust
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --manifest-path proxy/Cargo.toml --all --check
       - run: cargo clippy --manifest-path proxy/Cargo.toml --all-targets
@@ -92,9 +86,7 @@ jobs:
     needs: clippy
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      - uses: ./.github/actions/update-rust
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --no-default-features --all-targets
       - run: cargo test --no-default-features
@@ -134,7 +126,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/update-rust
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
@@ -151,7 +143,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/update-rust
 
       - uses: Swatinem/rust-cache@v2
 
@@ -286,7 +278,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/update-rust
 
       - uses: Swatinem/rust-cache@v2
 
