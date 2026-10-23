@@ -7,7 +7,7 @@ use crate::core::runner;
 use crate::core::shell::display_args;
 use crate::core::stream::exec_capture_unguarded;
 use crate::core::truncate::CAP_WARNINGS;
-use crate::core::utils::{resolved_command, truncate};
+use crate::core::utils::{display_path, resolved_command, truncate};
 use anyhow::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -405,7 +405,7 @@ pub(crate) fn filter_golangci_json(output: &str, version: u32) -> String {
     const MAX_GOLANGCI_FILES: usize = CAP_WARNINGS;
     result.push_str("Top files:\n");
     for (file, count) in file_counts.iter().take(MAX_GOLANGCI_FILES) {
-        let short_path = compact_path(file);
+        let short_path = display_path(file);
         result.push_str(&format!("  {} ({} issues)\n", short_path, count));
 
         // Show top 3 linters in this file
@@ -446,23 +446,6 @@ pub(crate) fn filter_golangci_json(output: &str, version: u32) -> String {
     }
 
     result.trim().to_string()
-}
-
-/// Compact file path (remove common prefixes)
-fn compact_path(path: &str) -> String {
-    let path = path.replace('\\', "/");
-
-    if let Some(pos) = path.rfind("/pkg/") {
-        format!("pkg/{}", &path[pos + 5..])
-    } else if let Some(pos) = path.rfind("/cmd/") {
-        format!("cmd/{}", &path[pos + 5..])
-    } else if let Some(pos) = path.rfind("/internal/") {
-        format!("internal/{}", &path[pos + 10..])
-    } else if let Some(pos) = path.rfind('/') {
-        path[pos + 1..].to_string()
-    } else {
-        path
-    }
 }
 
 #[cfg(test)]
@@ -510,20 +493,19 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_path() {
-        assert_eq!(
-            compact_path("/Users/foo/project/pkg/handler/server.go"),
-            "pkg/handler/server.go"
-        );
-        assert_eq!(
-            compact_path("/home/user/app/cmd/main/main.go"),
-            "cmd/main/main.go"
-        );
-        assert_eq!(
-            compact_path("/project/internal/config/loader.go"),
-            "internal/config/loader.go"
-        );
-        assert_eq!(compact_path("relative/file.go"), "file.go");
+    fn test_filter_golangci_same_named_files_stay_distinct() {
+        let output = r#"{
+  "Issues": [
+    {"FromLinter": "errcheck", "Text": "Error return value not checked", "Pos": {"Filename": "pkg/a/util.go", "Line": 1, "Column": 1}},
+    {"FromLinter": "errcheck", "Text": "Error return value not checked", "Pos": {"Filename": "pkg/b/util.go", "Line": 2, "Column": 1}},
+    {"FromLinter": "errcheck", "Text": "Error return value not checked", "Pos": {"Filename": "internal/app/internal/x.go", "Line": 3, "Column": 1}}
+  ]
+}"#;
+
+        let result = filter_golangci_json(output, 1);
+        assert!(result.contains("pkg/a/util.go"), "{result}");
+        assert!(result.contains("pkg/b/util.go"), "{result}");
+        assert!(result.contains("internal/app/internal/x.go"), "{result}");
     }
 
     #[test]
