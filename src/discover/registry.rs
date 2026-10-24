@@ -1705,6 +1705,36 @@ fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
     })
 }
 
+/// Whether `cmd` is a quoted shell wrapper whose script runs a command the
+/// user opted out of, through an `RTK_DISABLED=` prefix or `exclude_commands`.
+/// A routable wrapper must not fall through to its own filter then, since that
+/// filter would see the opted-out command's output anyway. Nested quoted
+/// shells are inspected too, up to `MAX_PREFIX_DEPTH`. Refs: #4704.
+fn shell_wrapper_script_opts_out(cmd: &str, excluded: &[ExcludePattern], depth: usize) -> bool {
+    if depth >= MAX_PREFIX_DEPTH {
+        return false;
+    }
+    let Some(wrapper) = parse_shell_wrapper(cmd) else {
+        return false;
+    };
+    let Some(script) = wrapper.script(cmd) else {
+        return false;
+    };
+    split_on_operators(script, false).into_iter().any(|seg| {
+        let mut seg = seg;
+        loop {
+            let (env_prefix, rest) = strip_disabled_prefix(seg);
+            if env_prefix.contains("RTK_DISABLED=") || is_excluded(rest, excluded) {
+                return true;
+            }
+            match strip_process_wrapper_prefix(rest) {
+                Some((_, inner)) => seg = inner,
+                None => return shell_wrapper_script_opts_out(rest, excluded, depth + 1),
+            }
+        }
+    })
+}
+
 /// Every position in `seg` where [`rewrite_segment_inner`] would try a quoted
 /// shell wrapper: the segment itself and each tail reached by stripping one
 /// prefix the rewriter is transparent to, following the same branches and
@@ -1845,7 +1875,9 @@ fn rewrite_segment_inner(
             // The inner command may have been dropped because it is excluded.
             // Re-testing the wrapped form would route it through the wrapper's
             // own filter, defeating the exclusion.
-            if is_excluded(ENV_PREFIX.replace(rest, "").trim(), excluded) {
+            if is_excluded(ENV_PREFIX.replace(rest, "").trim(), excluded)
+                || shell_wrapper_script_opts_out(rest, excluded, 0)
+            {
                 return None;
             }
             break;
@@ -4750,6 +4782,55 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("uv run head -20 src/main.rs", &["cat".to_string()]),
             Some("uv run rtk read src/main.rs --head-lines 20".into())
+        );
+    }
+
+    #[test]
+    fn test_routable_wrapper_honours_opt_outs_inside_shell_script() {
+        // #4704: a quoted script that holds an excluded command or an
+        // `RTK_DISABLED=` prefix must not be routed whole through `rtk uv run`.
+        let excluded = vec!["pytest".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run bash -c 'pytest'", &excluded),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run bash -c 'timeout 5 pytest -q'", &excluded),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run bash -c 'RTK_DISABLED=1 git status'", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run sh -c \"FOO=1 RTK_DISABLED=1 git status\"", &[]),
+            None
+        );
+        // The script's other commands are still rewritten in place.
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run bash -c 'pytest && git status'", &excluded),
+            Some("uv run bash -c 'pytest && rtk git status'".into())
+        );
+        // A nested quoted shell is inspected too.
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run bash -c 'bash -c \"pytest\"'", &excluded),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "uv run bash -c 'bash -c \"RTK_DISABLED=1 git status\"'",
+                &[]
+            ),
+            None
+        );
+        // A script with nothing opted out keeps the existing fall-through.
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run bash -c 'pytest'", &[]),
+            Some("uv run bash -c 'rtk pytest'".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run bash -c 'python script.py'", &excluded),
+            Some("rtk uv run bash -c 'python script.py'".into())
         );
     }
 
