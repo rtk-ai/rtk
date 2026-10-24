@@ -94,6 +94,7 @@ RTK reduces **bash output bytes** — the only thing it controls. Those bytes ar
 |---------|--------------|
 | `dotnet build` | Errors and warnings only |
 | `dotnet restore` | Restore summary, errors and warnings kept |
+| `dotnet tool list` | Compact text tables; all tool data kept, explicit JSON unchanged |
 
 ## Docker / Kubernetes
 

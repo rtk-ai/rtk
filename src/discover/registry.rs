@@ -3654,6 +3654,56 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_dotnet_tool_list_only() {
+        for command in [
+            "dotnet tool list",
+            "dotnet tool list --global",
+            "dotnet tool list --local",
+            "dotnet tool list --tool-path '/workspace/tool store'",
+            "dotnet tool list --format json",
+            "dotnet tool list --format=json",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(format!("rtk {command}"))
+            );
+        }
+        for command in [
+            "dotnet tool install csharp-ls",
+            "dotnet tool restore",
+            "dotnet tool run list",
+            "dotnet tool list-extra",
+            "dotnet tool listall",
+            "dotnet tool -- list",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(command, &[]), None);
+        }
+    }
+
+    #[test]
+    fn test_dotnet_has_one_rewrite_rule_with_tool_list_savings() {
+        assert_eq!(
+            RULES
+                .iter()
+                .filter(|rule| rule.rtk_cmd == "rtk dotnet")
+                .count(),
+            1,
+            "rewrite lookup must select the same rule that classification matched"
+        );
+        for command in ["dotnet tool list", "dotnet tool  list --global"] {
+            assert_eq!(
+                classify_command(command),
+                Classification::Supported {
+                    rtk_equivalent: "rtk dotnet",
+                    category: "Build",
+                    estimated_savings_pct: 40.0,
+                    status: RtkStatus::Existing,
+                }
+            );
+        }
+    }
+
+    #[test]
     fn test_rewrite_compound_and() {
         assert_eq!(
             rewrite_command_no_prefixes("git add . && cargo test", &[]),

@@ -831,12 +831,13 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^dotnet\s+(build|restore)\b",
+        pattern: r"^dotnet\s+(build|restore|tool\s+list)(?:\s|$)",
         rtk_cmd: "rtk dotnet",
         pipeline_safety: PipelineSafety::ProducerOnly,
         rewrite_prefixes: &["dotnet"],
         category: "Build",
         savings_pct: 70.0,
+        subcmd_savings: &[("tool list", 40.0)],
         ..RtkRule::DEFAULT
     },
     RtkRule {

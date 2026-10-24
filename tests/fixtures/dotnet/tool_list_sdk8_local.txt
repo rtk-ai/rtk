@@ -1,0 +1,4 @@
+Package Id       Version           Commands                           Manifest
+-----------------------------------------------------------------------------------------------------------------------
+sample.tool      1.2.3             first-command, second-command      C:\workspace\Tool Suite\.config\dotnet-tools.json
+other.tool       2.0.0-beta.1      other-command                      C:\workspace\Tool Suite\.config\dotnet-tools.json
