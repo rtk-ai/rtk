@@ -453,26 +453,151 @@ fn remove_droid_hook_from_json(root: &mut serde_json::Value, layout: DroidLayout
     modified
 }
 
-/// Returns true if Droid RTK hook is configured in any candidate file.
+/// Returns true if a global or project-scoped Droid RTK hook is configured.
 pub fn is_configured() -> bool {
-    let Ok(droid_dir) = resolve_droid_dir() else {
-        return false;
-    };
-    for candidate in droid_hook_file_candidates(&droid_dir) {
-        if let Ok(content) = fs::read_to_string(&candidate.path)
-            && let Ok(root) = from_json_str::<serde_json::Value>(&content)
-            && droid_hook_already_present(&root, candidate.layout)
-        {
-            return true;
+    resolve_droid_dir().is_ok_and(|dir| is_configured_at(&dir))
+        || user_dirs::current_dir().is_ok_and(|cwd| is_configured_at(&cwd.join(DROID_DIR)))
+}
+
+fn is_configured_at(droid_dir: &Path) -> bool {
+    let [root, legacy, settings] = droid_hook_file_candidates(droid_dir);
+    for file in [root, legacy] {
+        match read_json_file(&file.path) {
+            Ok(Some(json)) => {
+                if !json.is_object() {
+                    return false;
+                }
+                // Even an empty PreToolUse overrides settings for this event.
+                if json.get(PRE_TOOL_USE_KEY).is_some() {
+                    return droid_hook_already_present(&json, file.layout);
+                }
+                // An existing root hooks.json shadows the whole legacy file,
+                // but settings may still supply events absent from it.
+                break;
+            }
+            Ok(None) => continue,
+            Err(_) => return false,
         }
     }
-    false
+    read_json_file(&settings.path)
+        .ok()
+        .flatten()
+        .is_some_and(|json| droid_hook_already_present(&json, settings.layout))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_project_droid_detection_ignores_unusable_global_config() {
+        let tmp = test_isolation::tempdir();
+        let project = tmp.path().join("project");
+        let global = tmp.path().join("factory-home");
+        fs::create_dir_all(&project).expect("project directory");
+        fs::create_dir_all(global.join(DROID_DIR).join(DROID_HOOKS_FILE))
+            .expect("unreadable global config");
+        test_isolation::with_agent_dir(tmp.path(), DROID_HOME_ENV, &global, || {
+            let _entered = test_isolation::enter(&project);
+            assert!(!is_configured(), "a directory is not a hook config");
+            run_droid_mode(false, InitContext::default()).expect("install project Droid");
+            assert!(is_configured(), "global read failure must not skip project");
+            fs::create_dir_all(user_dirs::home().expect("test home").join(".claude"))
+                .expect("empty Claude directory");
+            assert_eq!(
+                crate::hooks::hook_check::status(),
+                crate::hooks::hook_check::HookStatus::Missing,
+                "project detection must not change the Claude status used by discover"
+            );
+            uninstall_droid(false, InitContext::default()).expect("uninstall project Droid");
+            assert!(!is_configured(), "uninstalled project must not be detected");
+        });
+    }
+
+    #[test]
+    fn test_project_droid_detection_uses_only_live_pre_tool_use_hooks() {
+        const RTK: &str = r#"{"PreToolUse":[{"matcher":"Execute","hooks":[{"type":"command","command":"rtk hook droid"}]}]}"#;
+        const FOREIGN: &str = r#"{"PreToolUse":[{"matcher":"Execute","hooks":[{"type":"command","command":"other-hook"}]}]}"#;
+        const POST_ONLY: &str = r#"{"PostToolUse":[{"matcher":"Execute","hooks":[{"type":"command","command":"rtk hook droid"}]}]}"#;
+        for (label, root, legacy, settings, configured) in [
+            ("root", Some(RTK), None, None, true),
+            ("legacy", None, Some(RTK), None, true),
+            ("settings", None, None, Some(RTK), true),
+            (
+                "empty root shadows legacy",
+                Some("{}"),
+                Some(RTK),
+                None,
+                false,
+            ),
+            (
+                "foreign root shadows legacy and settings",
+                Some(FOREIGN),
+                Some(RTK),
+                Some(RTK),
+                false,
+            ),
+            (
+                "empty event shadows settings",
+                Some(r#"{"PreToolUse":[]}"#),
+                None,
+                Some(RTK),
+                false,
+            ),
+            (
+                "null event shadows settings",
+                Some(r#"{"PreToolUse":null}"#),
+                None,
+                Some(RTK),
+                false,
+            ),
+            (
+                "legacy shadows settings",
+                None,
+                Some(FOREIGN),
+                Some(RTK),
+                false,
+            ),
+            (
+                "settings event remains live",
+                Some(POST_ONLY),
+                Some(RTK),
+                Some(RTK),
+                true,
+            ),
+            ("non-object root", Some("[]"), Some(RTK), Some(RTK), false),
+            ("malformed root", Some("{"), Some(RTK), Some(RTK), false),
+            ("malformed legacy", None, Some("{"), Some(RTK), false),
+            ("malformed settings", None, None, Some("{"), false),
+            ("foreign", Some(FOREIGN), None, None, false),
+            ("post-tool only", Some(POST_ONLY), None, None, false),
+        ] {
+            let tmp = test_isolation::tempdir();
+            let project = tmp.path().join("project");
+            let droid = project.join(DROID_DIR);
+            fs::create_dir_all(droid.join(DROID_HOOKS_SUBDIR)).expect("project config directory");
+            for (path, content) in [
+                (droid.join(DROID_HOOKS_FILE), root.map(str::to_owned)),
+                (
+                    droid.join(DROID_HOOKS_SUBDIR).join(DROID_HOOKS_FILE),
+                    legacy.map(str::to_owned),
+                ),
+                (
+                    droid.join(DROID_SETTINGS_FILE),
+                    settings.map(|events| format!("{{\"hooks\":{events}}}")),
+                ),
+            ] {
+                if let Some(content) = content {
+                    fs::write(path, content).expect("write Droid config");
+                }
+            }
+            test_isolation::with_root(&tmp.path().join("home"), || {
+                let _entered = test_isolation::enter(&project);
+                assert_eq!(is_configured(), configured, "{label}");
+            });
+        }
+    }
 
     #[test]
     fn test_resolve_droid_dir_prefers_home_override() {

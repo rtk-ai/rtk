@@ -986,11 +986,13 @@ fn is_codex_hook_command(command: &str) -> bool {
     crate::hooks::is_rtk_hook_command(command, "codex")
 }
 
-/// Returns true if Codex RTK hook is configured.
+/// Returns true if a global or project-scoped Codex RTK hook is configured.
 pub fn is_configured() -> bool {
-    let Ok(codex_dir) = resolve_codex_dir() else {
-        return false;
-    };
+    resolve_codex_dir().is_ok_and(|dir| is_configured_at(&dir))
+        || user_dirs::current_dir().is_ok_and(|cwd| is_configured_at(&cwd.join(CODEX_DIR)))
+}
+
+fn is_configured_at(codex_dir: &Path) -> bool {
     let hooks_json = codex_dir.join(HOOKS_JSON);
     if let Ok(content) = fs::read_to_string(&hooks_json)
         && let Ok(root) = from_json_str::<serde_json::Value>(&content)
@@ -1005,6 +1007,70 @@ mod tests {
     use super::*;
     use crate::core::test_isolation;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_project_codex_detection_ignores_unusable_global_config() {
+        let tmp = test_isolation::tempdir();
+        let project = tmp.path().join("project");
+        let global = tmp.path().join("codex-home");
+        fs::create_dir_all(project.join(CODEX_DIR)).expect("project config directory");
+        fs::create_dir_all(&global).expect("global config directory");
+        // A directory in place of hooks.json fails reads on every platform.
+        fs::create_dir(global.join(HOOKS_JSON)).expect("unreadable global config");
+        test_isolation::with_agent_dir(tmp.path(), "CODEX_HOME", &global, || {
+            let _entered = test_isolation::enter(&project);
+            assert!(!is_configured(), "a directory is not a hook config");
+            run_codex_mode(false, InitContext::default()).expect("install project Codex");
+            assert!(is_configured(), "global read failure must not skip project");
+            fs::create_dir_all(user_dirs::home().expect("test home").join(".claude"))
+                .expect("empty Claude directory");
+            assert_eq!(
+                crate::hooks::hook_check::status(),
+                crate::hooks::hook_check::HookStatus::Missing,
+                "project detection must not change the Claude status used by discover"
+            );
+            uninstall_codex(false, InitContext::default()).expect("uninstall project Codex");
+            assert!(!is_configured(), "uninstalled project must not be detected");
+        });
+    }
+
+    #[test]
+    fn test_project_codex_detection_requires_valid_pre_tool_use_hook() {
+        let tmp = test_isolation::tempdir();
+        let project = tmp.path().join("project");
+        fs::create_dir_all(project.join(CODEX_DIR)).expect("project config directory");
+        test_isolation::with_root(&tmp.path().join("home"), || {
+            let _entered = test_isolation::enter(&project);
+            let path = project.join(CODEX_DIR).join(HOOKS_JSON);
+            for (label, content, configured) in [
+                ("malformed", "{", false),
+                ("empty", "{}", false),
+                (
+                    "foreign",
+                    r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo rtk hook codex"}]}]}}"#,
+                    false,
+                ),
+                (
+                    "post-tool only",
+                    r#"{"hooks":{"PostToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook codex"}]}]}}"#,
+                    false,
+                ),
+                (
+                    "non-shell matcher",
+                    r#"{"hooks":{"PreToolUse":[{"matcher":"Read","hooks":[{"type":"command","command":"rtk hook codex"}]}]}}"#,
+                    false,
+                ),
+                (
+                    "valid",
+                    r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook codex"}]}]}}"#,
+                    true,
+                ),
+            ] {
+                fs::write(&path, content).expect("write project hooks");
+                assert_eq!(is_configured(), configured, "{label}");
+            }
+        });
+    }
 
     #[test]
     fn codex_hook_command_matches_bare_absolute_and_windows_rtk() {
