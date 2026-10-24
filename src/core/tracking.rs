@@ -377,6 +377,13 @@ pub fn average_time_ms(total_time_ms: u64, timed_commands: usize) -> u64 {
 /// the pragma is updated so subsequent opens skip straight past it.
 const SCHEMA_VERSION: i64 = 2;
 
+/// How many times `TimedExecution` tries to open the tracking DB before giving
+/// up, and how long it waits between tries. One retry is enough to outlast the
+/// brief window where a hook-spawned `rtk rewrite` telemetry thread leaves the
+/// WAL shared-memory file (.db-shm) transiently inconsistent (see #1082).
+const DB_OPEN_ATTEMPTS: u8 = 2;
+const DB_OPEN_RETRY_DELAY_MS: u64 = 10;
+
 /// Ceiling on a row's `input_tokens` for rate-bearing aggregates (the gain
 /// headline and the daily/weekly/monthly tables). 7,500 DB tokens is exactly
 /// 30,000 chars at the bytes/4 estimate — Claude Code's default Bash output
@@ -2025,14 +2032,19 @@ fn open_and_prepare(mode: MigrationMode) -> Result<Connection> {
     }
 
     let conn = Connection::open(&db_path)?;
-    // WAL mode + busy_timeout for concurrent access (multiple Claude Code instances).
+    // Apply busy_timeout and journal_mode=WAL as SEPARATE statements (#1082).
+    // execute_batch() stops at the first erroring statement, so bundling both
+    // meant a transient `PRAGMA journal_mode=WAL` failure — e.g. a briefly
+    // inconsistent .db-shm when a hook-spawned `rtk rewrite` telemetry thread
+    // exits mid-open — silently left busy_timeout at 0. With busy_timeout=0,
+    // every lock-contended write failed immediately with SQLITE_BUSY instead of
+    // waiting, so hook-rewritten commands were never recorded in `rtk gain`.
+    // Running busy_timeout first and on its own guarantees it is always applied.
     // Non-fatal: NFS/read-only filesystems may not support WAL. Cheap on every
     // open (WAL mode persists in the DB file; busy_timeout is a per-connection
     // in-memory setting), so these stay unconditional.
-    let _ = conn.execute_batch(
-        "PRAGMA journal_mode=WAL;
-         PRAGMA busy_timeout=5000;",
-    );
+    let _ = conn.execute_batch("PRAGMA busy_timeout=5000;");
+    let _ = conn.execute_batch("PRAGMA journal_mode=WAL;");
 
     match mode {
         MigrationMode::Always => run_schema_migrations(&conn)?,
@@ -2166,14 +2178,27 @@ impl TimedExecution {
         let input_tokens = estimate_tokens(input);
         let output_tokens = estimate_tokens(output);
 
-        if let Ok(tracker) = Tracker::new() {
-            let _ = tracker.record(
-                original_cmd,
-                rtk_cmd,
-                input_tokens,
-                output_tokens,
-                elapsed_ms,
-            );
+        // Retry once on transient DB-open failures.  When a Claude Code hook
+        // rewrites a command it first invokes `rtk rewrite`, which spawns a
+        // background telemetry thread that briefly holds a DB connection.  If
+        // that process exits before the thread finishes, SQLite's WAL shared-
+        // memory file (.db-shm) may be inconsistent for a few milliseconds,
+        // causing Tracker::new() to fail.  A single short sleep + retry is
+        // sufficient to outlast that window without blocking the user.
+        for attempt in 0..DB_OPEN_ATTEMPTS {
+            if let Ok(tracker) = Tracker::new() {
+                let _ = tracker.record(
+                    original_cmd,
+                    rtk_cmd,
+                    input_tokens,
+                    output_tokens,
+                    elapsed_ms,
+                );
+                return;
+            }
+            if attempt + 1 < DB_OPEN_ATTEMPTS {
+                std::thread::sleep(std::time::Duration::from_millis(DB_OPEN_RETRY_DELAY_MS));
+            }
         }
     }
 
@@ -2224,9 +2249,17 @@ impl TimedExecution {
     /// ```
     pub fn track_passthrough(&self, original_cmd: &str, rtk_cmd: &str) {
         let elapsed_ms = self.start.elapsed().as_millis() as u64;
-        // input_tokens=0, output_tokens=0 won't dilute savings statistics
-        if let Ok(tracker) = Tracker::new() {
-            let _ = tracker.record(original_cmd, rtk_cmd, 0, 0, elapsed_ms);
+        // input_tokens=0, output_tokens=0 won't dilute savings statistics.
+        // Same retry logic as track() to handle transient DB-open failures in
+        // hook execution contexts.
+        for attempt in 0..DB_OPEN_ATTEMPTS {
+            if let Ok(tracker) = Tracker::new() {
+                let _ = tracker.record(original_cmd, rtk_cmd, 0, 0, elapsed_ms);
+                return;
+            }
+            if attempt + 1 < DB_OPEN_ATTEMPTS {
+                std::thread::sleep(std::time::Duration::from_millis(DB_OPEN_RETRY_DELAY_MS));
+            }
         }
     }
 }
@@ -3365,7 +3398,103 @@ mod tests {
         );
     }
 
-    // 12. record_parse_failure + get_parse_failure_summary roundtrip
+    // 12. busy_timeout pragma lets a tracked write WAIT for a concurrent writer's
+    // lock instead of failing immediately. Regression for #1082: both pragmas were
+    // in one execute_batch() call, so a transient journal_mode=WAL error left
+    // busy_timeout at 0 and every lock-contended write failed with SQLITE_BUSY —
+    // exactly the hook-spawned concurrent-rtk case where gain stats went missing.
+    // We reproduce real contention: a second connection holds the write lock on a
+    // background thread while the tracker (opened through the production
+    // open_and_prepare path, so it carries busy_timeout=5000) attempts its INSERT.
+    #[test]
+    fn test_record_waits_for_concurrent_write_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        // The competing writer holds the lock this long: well under the 5s
+        // busy_timeout (so the waiting write succeeds when the fix is present) but
+        // long enough that a busy_timeout of 0 fails immediately.
+        const LOCK_HOLD_MS: u64 = 300;
+
+        // Isolated scratch DB pinned via RTK_DB_PATH (serialized by user_env) so
+        // this can't race the other tracking tests under `cargo test --all`.
+        let pid = std::process::id();
+        let db_path =
+            test_isolation::scratch_dir().join(format!("rtk_test_busy_timeout_{}.db", pid));
+        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
+        let _ = std::fs::remove_file(&db_path);
+
+        user_env::with_path("RTK_DB_PATH", Some(&db_path), || {
+            // Opened through Tracker::new() → open_and_prepare, carrying busy_timeout=5000.
+            let tracker = Tracker::new().expect("tracker open must succeed");
+
+            // Competing writer grabs the write lock and holds it briefly on a thread.
+            let (locked_tx, locked_rx) = mpsc::channel();
+            let lock_path = db_path.clone();
+            let blocker = std::thread::spawn(move || {
+                let conn = Connection::open(&lock_path).expect("blocker open must succeed");
+                conn.execute_batch("BEGIN IMMEDIATE;")
+                    .expect("blocker must acquire the write lock");
+                locked_tx.send(()).expect("signal lock held");
+                std::thread::sleep(Duration::from_millis(LOCK_HOLD_MS));
+                conn.execute_batch("COMMIT;")
+                    .expect("blocker must release the write lock");
+            });
+
+            locked_rx
+                .recv()
+                .expect("blocker must signal the lock is held");
+
+            // With busy_timeout=5000 this INSERT waits for the lock; with busy_timeout=0
+            // (the bug) it returns SQLITE_BUSY immediately and the stat is lost.
+            let cmd = format!("git status hook_{}", pid);
+            let result = tracker.record("git status", &cmd, 100, 20, 5);
+
+            blocker.join().expect("blocker thread must finish");
+            result.expect("record must wait for the concurrent lock and succeed (busy_timeout)");
+        });
+        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    // 13. TimedExecution::track succeeds even when a concurrent reader holds the DB.
+    // Regression: hook-rewritten commands previously failed to record because a
+    // background telemetry thread (from `rtk rewrite`) held the DB open at the
+    // moment the tracking write was attempted, and busy_timeout was 0.
+    #[test]
+    fn test_track_records_with_concurrent_reader() {
+        let pid = std::process::id();
+        let hook_cmd = format!("rtk git status hook_rewritten_{}", pid);
+        // Isolated scratch DB so this never touches the developer's own history DB.
+        let db_path =
+            test_isolation::scratch_dir().join(format!("rtk_test_concurrent_reader_{}.db", pid));
+        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
+        let _ = std::fs::remove_file(&db_path);
+
+        user_env::with_path("RTK_DB_PATH", Some(&db_path), || {
+            // Simulate concurrent reader (e.g., telemetry thread from `rtk rewrite`).
+            let reader = Tracker::new().expect("reader must open");
+
+            // Now track — must succeed despite the concurrent reader connection.
+            let timer = TimedExecution::start();
+            timer.track("git status", &hook_cmd, "raw output", "filtered");
+
+            // Verify the record was actually written (not silently dropped).
+            let verify = Tracker::new().expect("verify tracker must open");
+            let recent = verify.get_recent(20).expect("get_recent must work");
+            assert!(
+                recent.iter().any(|r| r.rtk_cmd == hook_cmd),
+                "hook-rewritten tracking record must be present in DB (got {} records)",
+                recent.len()
+            );
+
+            drop(reader);
+        });
+        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    // 14. record_parse_failure + get_parse_failure_summary roundtrip
     #[test]
     fn test_parse_failure_roundtrip() {
         // In-memory: isolated per-test DB, see test_tracker_record_and_recent.
@@ -3384,7 +3513,7 @@ mod tests {
         assert!(summary.recent.iter().any(|r| r.raw_command == test_cmd));
     }
 
-    // 13. recovery_rate calculation
+    // 15. recovery_rate calculation
     #[test]
     fn test_parse_failure_recovery_rate() {
         // In-memory: isolated per-test DB, see test_tracker_record_and_recent.
