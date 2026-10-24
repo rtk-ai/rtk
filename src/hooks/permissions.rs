@@ -5,6 +5,7 @@ use super::constants::{
 use super::init::resolve_claude_dir;
 use crate::core::user_dirs;
 use crate::core::user_env;
+use crate::core::utils::strip_leading_bom;
 use crate::discover::lexer::{
     is_word_boundary_whitespace, split_for_permissions, split_for_wrappers,
 };
@@ -414,7 +415,14 @@ fn load_permission_rules_tracking(
             // A file that is not there denies nothing. One that is there and
             // could not be read — permissions, or bytes that are not UTF-8 —
             // may hold anything.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                continue;
+            }
             Err(e) => {
                 eprintln!(
                     "[rtk] warning: failed to read permissions from {}: {}",
@@ -426,10 +434,11 @@ fn load_permission_rules_tracking(
                 continue;
             }
         };
+        let content = strip_leading_bom(&content);
         if content.trim().is_empty() {
             continue;
         }
-        let Ok(json) = crate::core::utils::from_json_str::<Value>(&content) else {
+        let Ok(json) = crate::core::utils::from_json_str::<Value>(content) else {
             eprintln!(
                 "[rtk] warning: failed to parse permissions from {}",
                 path.display()
@@ -953,6 +962,30 @@ mod tests {
         .expect("write settings");
         let (deny, ask, allow) =
             load_permission_rules_from(&[tmp.path().join("settings.json"), empty]);
+        assert!(deny.is_empty() && ask.is_empty() && allow.is_empty());
+    }
+
+    #[test]
+    fn test_bom_only_settings_file_adds_no_rules() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bom_empty = tmp.path().join("settings.local.json");
+        std::fs::write(&bom_empty, b"\xEF\xBB\xBF").expect("write settings");
+        let (deny, ask, allow) = load_permission_rules_from(&[bom_empty]);
+        assert!(deny.is_empty() && ask.is_empty() && allow.is_empty());
+
+        let bom_whitespace = tmp.path().join("settings.json");
+        std::fs::write(&bom_whitespace, b"\xEF\xBB\xBF   \r\n").expect("write settings");
+        let (deny, ask, allow) = load_permission_rules_from(&[bom_whitespace]);
+        assert!(deny.is_empty() && ask.is_empty() && allow.is_empty());
+    }
+
+    #[test]
+    fn test_not_a_directory_settings_file_adds_no_rules() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file_path = tmp.path().join("not_a_dir");
+        std::fs::write(&file_path, "regular file content").expect("write file");
+        let settings_path = file_path.join("settings.json");
+        let (deny, ask, allow) = load_permission_rules_from(&[settings_path]);
         assert!(deny.is_empty() && ask.is_empty() && allow.is_empty());
     }
 
