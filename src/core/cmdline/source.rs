@@ -34,6 +34,9 @@ pub(super) struct SourceReading {
     pub(super) doubtful_comments: Vec<Range<usize>>,
     /// The reading above is the reader's best effort, and it may not be bash's.
     pub(super) too_complex: bool,
+    /// A `#` right after a lone `&` is among the comments. Since fish 3.0 `&` is job
+    /// control only at the end of a job, and `a&#b` is one word to it.
+    pub(super) fish_reads_a_word: bool,
 }
 
 /// One or more line continuations, and the blanks around them if bash reads those
@@ -564,6 +567,7 @@ impl Reader<'_> {
         }
         self.at = start + len;
         self.charge(len);
+        self.reading.fish_reads_a_word |= self.glued_to_a_lone_ampersand(start);
         if self.in_double_quotes == 0 {
             self.reading.comments.push(start..self.at);
         } else {
@@ -588,6 +592,15 @@ impl Reader<'_> {
             }
             _ => false,
         }
+    }
+
+    /// Whether a lone `&` stands right before `at`. A run is lone by what is left of it
+    /// past an escaped first one.
+    fn glued_to_a_lone_ampersand(&self, at: usize) -> bool {
+        let before = &self.text[..at];
+        let ampersands = before.iter().rev().take_while(|b| **b == b'&').count();
+        let first_escaped = ends_in_a_lone_backslash(&before[..at - ampersands]);
+        (ampersands - usize::from(first_escaped)) % 2 == 1
     }
 
     /// Takes the `\⏎`s here and the blanks around them, which become one blank.
@@ -668,6 +681,7 @@ impl Reader<'_> {
         let comments = self.reading.comments.len();
         let doubtful_comments = self.reading.doubtful_comments.len();
         let too_complex = self.reading.too_complex;
+        let fish_reads_a_word = self.reading.fish_reads_a_word;
         // A substitution in the body may read past their line and take them, so they
         // are copied, which the budget answers for.
         let heredocs = self.heredocs.clone();
@@ -683,6 +697,7 @@ impl Reader<'_> {
         self.reading.comments.truncate(comments);
         self.reading.doubtful_comments.truncate(doubtful_comments);
         self.reading.too_complex = too_complex;
+        self.reading.fish_reads_a_word = fish_reads_a_word;
         self.heredocs = heredocs;
         false
     }
@@ -1416,6 +1431,19 @@ mod tests {
             doubtful.doubtful_comments.len() <= 2,
             "one range for a line"
         );
+    }
+
+    #[test]
+    fn test_fish_reads_a_word_where_a_comment_follows_a_lone_ampersand() {
+        for (input, word) in [
+            ("a&#b", true),
+            ("a\\&&#b", true),
+            ("a&&#b", false),
+            ("a #b", false),
+            ("a & #b", false),
+        ] {
+            assert_eq!(read_source(input).fish_reads_a_word, word, "{input:?}");
+        }
     }
 
     #[test]
