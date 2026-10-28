@@ -389,10 +389,13 @@ fn bare_crs_outside_comments(text: &str, comments: &[std::ops::Range<usize>]) ->
 
 /// [`without_comments`], or `None` when the text is
 /// [too complex](super::source::SourceReading::too_complex) to say where its
-/// comments are.
-pub(crate) fn placed_code(text: &str) -> Option<Cow<'_, str>> {
+/// comments are, or where fish, if that is the `dialect`, does not read a comment
+/// bash reads.
+pub(crate) fn placed_code_in(text: &str, dialect: ShellDialect) -> Option<Cow<'_, str>> {
     let reading = read_comments(text);
-    (!reading.too_complex).then(|| cut_spans(text, reading.comments))
+    let unplaced =
+        reading.too_complex || (dialect == ShellDialect::Fish && reading.fish_reads_a_word);
+    (!unplaced).then(|| cut_spans(text, reading.comments))
 }
 
 /// `text` without its comments, the newlines kept.
@@ -840,7 +843,7 @@ pub(crate) fn line_is_unattestable(cmd: &str) -> bool {
 /// merely contains an `if … fi` block.
 pub(crate) fn contains_unattestable_construct_in(cmd: &str, dialect: ShellDialect) -> bool {
     // What reads as code past a `#` that may be a comment is not evidence.
-    let Some(code) = placed_code(cmd) else {
+    let Some(code) = placed_code_in(cmd, dialect) else {
         return true;
     };
     let cmd = code.as_ref();
@@ -857,55 +860,23 @@ pub(crate) fn contains_unattestable_construct_in(cmd: &str, dialect: ShellDialec
     // refuses to parse or silently turns into a different command. Bash has
     // neither operator (`a &| b` is a syntax error spaced or not), so the
     // Posix dialect keeps the rewrite it has always had.
-    if dialect != ShellDialect::Posix && opens_disown_pair(cmd) {
+    let tokens = tokenize(cmd);
+    if dialect != ShellDialect::Posix && disown_pair(&tokens) {
         return true;
     }
-    let tokens = tokenize(cmd);
-    // Each unquoted newline is a token of its own, so a fish keyword opening a
-    // line is at command position.
-    if dialect == ShellDialect::Fish && contains_fish_only_construct(&tokens) {
-        return true;
+    // Fish's own syntax: bare `(…)` substitution anywhere, or a control keyword at a
+    // command boundary. Each unquoted newline is a token of its own, so a fish keyword
+    // opening a line of a multi-line script is at command position.
+    if dialect == ShellDialect::Fish {
+        let reading = super::fish::read(&tokens);
+        if reading.substitution || reading.control {
+            return true;
+        }
     }
     tokens
         .iter()
         .enumerate()
         .any(|(i, tok)| tok.kind == TokenKind::Redirect && redirect_has_file_target(&tokens, i))
-}
-
-/// Fish's own syntax: bare `(…)` substitution anywhere, a control keyword at a
-/// command boundary, or the `&|` pipe. Newlines are boundaries here, so a
-/// keyword opening a line of a multi-line script is seen.
-fn contains_fish_only_construct(tokens: &[Token<'_>]) -> bool {
-    const FISH_CONTROL_KEYWORDS: &[&str] = &[
-        "and", "or", "not", "begin", "end", "if", "else", "switch", "case", "for", "while",
-        "function",
-    ];
-
-    // `&|` pipes stdout and stderr in fish, and the rewrite would re-emit the
-    // two spaced, which fish rejects outright — so leave the script alone.
-    if disown_pair(tokens) {
-        return true;
-    }
-
-    let mut command_position = true;
-    for token in tokens {
-        match token.kind {
-            TokenKind::Shellism if matches!(token.value, "(" | ")") => return true,
-            TokenKind::Operator | TokenKind::Pipe(_) | TokenKind::Newline => {
-                command_position = true
-            }
-            TokenKind::Shellism if token.value == "&" => command_position = true,
-            TokenKind::Arg if command_position => {
-                if FISH_CONTROL_KEYWORDS.contains(&token.value) {
-                    return true;
-                }
-                command_position = false;
-            }
-            _ => {}
-        }
-    }
-
-    false
 }
 
 /// True for the pair `&` opens when the next token is glued to it: `&|` in
@@ -2829,6 +2800,16 @@ mod tests {
             shell_split("gh issue view #12 x"),
             ["gh", "issue", "view", "#12", "x"]
         );
+    }
+
+    #[test]
+    fn test_fish_reads_past_what_bash_reads_as_a_comment() {
+        let cmd = "git status a&#(curl x)";
+        assert!(!contains_unattestable_construct_in(
+            cmd,
+            ShellDialect::Posix
+        ));
+        assert!(contains_unattestable_construct_in(cmd, ShellDialect::Fish));
     }
 
     #[test]

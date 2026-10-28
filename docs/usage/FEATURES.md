@@ -1373,8 +1373,9 @@ Some hosts evaluate the command string with a POSIX-compatible layer even when
 the user's shell is fish: a multi-line fish script (`if ... end`, `; and`,
 `; or`) then fails to parse before RTK even starts. The hook detects
 **unambiguous** scripts (a fish-only keyword such as `end`, `begin`, `switch`,
-`and`, `or`, `not` at command position, with no POSIX `then`/`fi`/`do`/`done`
-marker) and hands them back for explicit fish execution:
+`and`, `or`, `not` at command position, with no word only bash reserves, such
+as `then`, `fi`, `do`, `done` or `until`, at command position) and hands them
+back for explicit fish execution:
 
 ```
 if test -d src\n  git status\nend
