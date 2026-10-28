@@ -790,39 +790,16 @@ pub(crate) fn contains_unattestable_construct_in(cmd: &str, dialect: ShellDialec
 }
 
 /// Fish's own syntax: bare `(…)` substitution anywhere, a control keyword at a
-/// command boundary, or the `&|` pipe. Newlines are boundaries here, so a
-/// keyword opening a line of a multi-line script is seen.
+/// command boundary ([`super::fish::read`]), or the `&|` pipe. Newlines are
+/// boundaries here, so a keyword opening a line of a multi-line script is seen.
 fn contains_fish_only_construct(tokens: &[Token<'_>]) -> bool {
-    const FISH_CONTROL_KEYWORDS: &[&str] = &[
-        "and", "or", "not", "begin", "end", "if", "else", "switch", "case", "for", "while",
-        "function",
-    ];
-
     // `&|` pipes stdout and stderr in fish, and the rewrite would re-emit the
     // two spaced, which fish rejects outright — so leave the script alone.
     if disown_pair(tokens) {
         return true;
     }
-
-    let mut command_position = true;
-    for token in tokens {
-        match token.kind {
-            TokenKind::Shellism if matches!(token.value, "(" | ")") => return true,
-            TokenKind::Operator | TokenKind::Pipe(_) | TokenKind::Newline => {
-                command_position = true
-            }
-            TokenKind::Shellism if token.value == "&" => command_position = true,
-            TokenKind::Arg if command_position => {
-                if FISH_CONTROL_KEYWORDS.contains(&token.value) {
-                    return true;
-                }
-                command_position = false;
-            }
-            _ => {}
-        }
-    }
-
-    false
+    let reading = super::fish::read(tokens);
+    reading.substitution || reading.control
 }
 
 /// True for the pair `&` opens when the next token is glued to it: `&|` in
