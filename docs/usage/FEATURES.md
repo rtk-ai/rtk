@@ -1,151 +1,149 @@
-# RTK - Documentation fonctionnelle complete
+# RTK - Complete Feature Reference
 
-> **rtk (Rust Token Killer)** -- Proxy CLI haute performance qui reduit jusqu'a 90% de la sortie bash lue par votre agent.
+> **rtk (Rust Token Killer)** -- High-performance CLI proxy that cuts up to 90% of the bash output your agent reads.
 
-Binaire Rust unique, zero dependances externes, overhead < 10ms par commande.
+Single Rust binary, zero external dependencies, < 10ms overhead per command.
 
-## A propos de la reduction de sortie bash
+## About bash output reduction
 
-Tous les pourcentages notes **Reduction sortie bash** dans ce document mesurent les **octets de sortie bash supprimes** : la sortie qu'une commande shell renvoie avant que l'agent ne la lise. Ce n'est pas equivalent a une reduction de facture du meme ordre.
+The savings RTK reports (for example in `rtk gain`) measure **bash output bytes removed**: the output a shell command returns before the agent reads it. It is not equivalent to a bill reduction of the same size.
 
-La sortie bash n'est qu'une source parmi d'autres pour les tokens d'entree, aux cotes de votre prompt, du prompt systeme et de l'historique de conversation. Les tokens d'entree ne representent eux-memes qu'une partie de la facture, qui compte aussi les tokens de sortie. La reduction se dilue a chaque etape.
+Bash output is only one source of input tokens, alongside your prompt, the system prompt and the conversation history. Input tokens are themselves only part of the bill, which also counts output tokens. The reduction dilutes at each step.
 
-Les compteurs de tokens affiches par RTK sont estimes a `octets / 4` : RTK n'embarque pas de tokenizer, donc **les pourcentages sont fiables mais les nombres absolus de tokens sont approximatifs**.
+The token counts RTK displays are estimated as `bytes / 4`: RTK ships no tokenizer, so **the percentages are reliable but absolute token counts are approximate**.
 
-Explication complete : [How RTK Savings Work](../guide/resources/savings-explained.md)
+Full explanation: [How RTK Savings Work](../guide/resources/savings-explained.md)
 
 ---
 
-## Table des matieres
+## Table of contents
 
-1. [Vue d'ensemble](#vue-densemble)
-2. [Drapeaux globaux](#drapeaux-globaux)
-3. [Commandes Fichiers](#commandes-fichiers)
-4. [Commandes Git](#commandes-git)
-5. [Commandes GitHub CLI](#commandes-github-cli)
-6. [Commandes Test](#commandes-test)
-7. [Commandes Build et Lint](#commandes-build-et-lint)
-8. [Commandes Formatage](#commandes-formatage)
-9. [Gestionnaires de paquets](#gestionnaires-de-paquets)
-10. [Conteneurs et orchestration](#conteneurs-et-orchestration)
-11. [Donnees et reseau](#donnees-et-reseau)
-12. [Cloud et bases de donnees](#cloud-et-bases-de-donnees)
+1. [Overview](#overview)
+2. [Global flags](#global-flags)
+3. [File commands](#file-commands)
+4. [Git commands](#git-commands)
+5. [GitHub CLI commands](#github-cli-commands)
+6. [Test commands](#test-commands)
+7. [Build and lint commands](#build-and-lint-commands)
+8. [Formatting commands](#formatting-commands)
+9. [Package managers](#package-managers)
+10. [Containers and orchestration](#containers-and-orchestration)
+11. [Data and network](#data-and-network)
+12. [Cloud and databases](#cloud-and-databases)
 13. [Stacked PRs (Graphite)](#stacked-prs-graphite)
-14. [Analytique et suivi](#analytique-et-suivi)
-15. [Systeme de hooks](#systeme-de-hooks)
+14. [Analytics and tracking](#analytics-and-tracking)
+15. [Hook system](#hook-system)
 16. [Configuration](#configuration)
-17. [Systeme Tee (recuperation de sortie)](#systeme-tee)
-18. [Telemetrie](#telemetrie)
+17. [Recall system (output recovery)](#recall-system)
+18. [Telemetry](#telemetry)
 
 ---
 
-## Vue d'ensemble
+## Overview
 
-rtk agit comme un proxy entre un LLM (Claude Code, Gemini CLI, etc.) et les commandes systeme. Quatre strategies de filtrage sont appliquees selon le type de commande :
+rtk acts as a proxy between an LLM (Claude Code, Gemini CLI, etc.) and system commands. Four filtering strategies are applied depending on the command type:
 
-| Strategie | Description | Exemple |
-|-----------|-------------|---------|
-| **Filtrage intelligent** | Supprime le bruit (commentaires, espaces, boilerplate) | `ls -la` -> arbre compact |
-| **Regroupement** | Agregation par repertoire, par type d'erreur, par regle | Tests groupes par fichier |
-| **Troncature** | Conserve le contexte pertinent, supprime la redondance | Diff condense |
-| **Deduplication** | Fusionne les lignes de log repetees avec compteurs | `error x42` |
+| Strategy | Description | Example |
+|----------|-------------|---------|
+| **Smart filtering** | Removes noise (comments, whitespace, boilerplate) | `ls -la` -> compact tree |
+| **Grouping** | Aggregates by directory, error type, rule | Tests grouped by file |
+| **Truncation** | Keeps relevant context, removes redundancy | Condensed diff |
+| **Deduplication** | Merges repeated log lines with counters | `error x42` |
 
-### Mecanisme de fallback
+### Fallback mechanism
 
-Si rtk ne reconnait pas une sous-commande, il execute la commande brute (passthrough) et enregistre l'evenement dans la base de suivi. Cela garantit que rtk est **toujours sur** a utiliser -- aucune commande ne sera bloquee.
+If rtk does not recognize a subcommand, it runs the raw command (passthrough) and records the event in the tracking database. This makes rtk **always safe** to use -- no command is ever blocked.
 
 ---
 
-## Drapeaux globaux
+## Global flags
 
-Ces drapeaux s'appliquent a **toutes** les sous-commandes :
+These flags apply to **all** subcommands:
 
-| Drapeau | Court | Description |
-|---------|-------|-------------|
-| `--verbose` | `-v` | Augmenter la verbosite (-v, -vv, -vvv). Montre les details de filtrage. |
-| `--ultra-compact` | `-u` | Mode ultra-compact : icones ASCII, format inline. Reduit encore la sortie bash. |
-| `--skip-env` | -- | Definit `SKIP_ENV_VALIDATION=1` pour les processus enfants (Next.js, tsc, lint, prisma). |
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--verbose` | `-v` | Increase verbosity (-v, -vv, -vvv). Shows filtering details. |
+| `--skip-env` | -- | Sets `SKIP_ENV_VALIDATION=1` for child processes (Next.js, tsc, lint, prisma). |
 
-**Exemples :**
+**Examples:**
 
 ```bash
-rtk -v git status          # Status compact + details de filtrage sur stderr
-rtk -vvv cargo test        # Verbosite maximale (debug)
-rtk -u git log             # Log ultra-compact, icones ASCII
-rtk --skip-env next build  # Desactive la validation d'env de Next.js
+rtk -v git status          # Compact status + filtering details on stderr
+rtk -vvv cargo test        # Maximum verbosity (debug)
+rtk --skip-env next build  # Disable Next.js env validation
 ```
 
 ---
 
-## Commandes Fichiers
+## File commands
 
-### `rtk ls` -- Listage de repertoire
+### `rtk ls` -- Directory listing
 
-**Objectif :** Remplace `ls` et `tree` avec une sortie optimisee en tokens.
+**Purpose:** Replaces `ls` and `tree` with token-optimized output.
 
-**Syntaxe :**
+**Syntax:**
 ```bash
 rtk ls [args...]
 ```
 
-Tous les drapeaux natifs de `ls` sont supportes (`-l`, `-a`, `-h`, `-R`, etc.).
+All native `ls` flags are supported (`-l`, `-a`, `-h`, `-R`, etc.).
 
-**Avant / Apres :**
+**Before / After:**
 ```
-# ls -la (45 lignes, ~800 tokens)          # rtk ls (12 lignes, ~150 tokens)
+# ls -la (45 lines, ~800 tokens)           # rtk ls (12 lines, ~150 tokens)
 drwxr-xr-x  15 user staff 480 ...          my-project/
 -rw-r--r--   1 user staff 1234 ...          +-- src/ (8 files)
 -rw-r--r--   1 user staff 567 ...           |   +-- main.rs
-...40 lignes de plus...                     +-- Cargo.toml
+...40 more lines...                         +-- Cargo.toml
                                             +-- README.md
 ```
 
 ---
 
-### `rtk tree` -- Arbre de repertoire
+### `rtk tree` -- Directory tree
 
-**Objectif :** Proxy vers `tree` natif avec sortie filtree.
+**Purpose:** Proxy to native `tree` with filtered output.
 
-**Syntaxe :**
+**Syntax:**
 ```bash
 rtk tree [args...]
 ```
 
-Supporte tous les drapeaux natifs de `tree` (`-L`, `-d`, `-a`, etc.).
+Supports all native `tree` flags (`-L`, `-d`, `-a`, etc.).
 
 ---
 
-### `rtk read` -- Lecture de fichier
+### `rtk read` -- File reading
 
-**Objectif :** Remplace `cat`, `head`, `tail` avec un filtrage intelligent du contenu.
+**Purpose:** Replaces `cat`, `head`, `tail` with smart content filtering.
 
-**Syntaxe :**
+**Syntax:**
 ```bash
-rtk read <fichier> [options]
-rtk read - [options]          # Lecture depuis stdin
+rtk read <file> [options]
+rtk read - [options]          # Read from stdin
 ```
 
-**Options :**
+**Options:**
 
-| Option | Court | Defaut | Description |
-|--------|-------|--------|-------------|
-| `--level` | `-l` | `minimal` | Niveau de filtrage : `none`, `minimal`, `aggressive` |
-| `--max-lines` | `-m` | illimite | Apercu structurel plafonne a N lignes (signatures et imports, pas les N premieres) |
-| `--head-lines` | | illimite | Garde seulement les N premieres lignes, a l'octet pres |
-| `--tail-lines` | | illimite | Garde seulement les N dernieres lignes, a l'octet pres |
-| `--line-numbers` | `-n` | non | Afficher les numeros de ligne |
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--level` | `-l` | `minimal` | Filtering level: `none`, `minimal`, `aggressive` |
+| `--max-lines` | `-m` | unlimited | Structural preview capped at N lines (signatures and imports, not the first N) |
+| `--head-lines` | | unlimited | Keep only the first N lines, byte-exact |
+| `--tail-lines` | | unlimited | Keep only the last N lines, byte-exact |
+| `--line-numbers` | `-n` | no | Show line numbers |
 
-**Niveaux de filtrage :**
+**Filtering levels:**
 
-| Niveau | Description | Reduction sortie bash |
-|--------|-------------|-----------|
-| `none` | Aucun filtrage, sortie brute | 0% |
-| `minimal` | Supprime commentaires et lignes vides excessives | ~30% |
-| `aggressive` | Signatures uniquement (supprime les corps de fonctions) | ~74% |
+| Level | Description |
+|-------|-------------|
+| `none` | No filtering, raw output |
+| `minimal` | Removes comments and excessive blank lines |
+| `aggressive` | Signatures only (removes function bodies) |
 
-**Avant / Apres (mode aggressive) :**
+**Before / After (aggressive mode):**
 ```
-# cat main.rs (~200 lignes)                # rtk read main.rs -l aggressive (~50 lignes)
+# cat main.rs (~200 lines)                  # rtk read main.rs -l aggressive (~50 lines)
 fn main() -> Result<()> {                   fn main() -> Result<()> { ... }
     let config = Config::load()?;           fn process_data(input: &str) -> Vec<u8> { ... }
     let data = process_data(&input);        struct Config { ... }
@@ -157,20 +155,20 @@ fn main() -> Result<()> {                   fn main() -> Result<()> { ... }
 ...
 ```
 
-**Langages supportes pour le filtrage :** Rust, Python, JavaScript, TypeScript, Go, C, C++, Java, Ruby, Shell.
+**Languages supported for filtering:** Rust, Python, JavaScript, TypeScript, Go, C, C++, Java, Ruby, Shell.
 
 ---
 
-### `rtk smart` -- Resume heuristique
+### `rtk smart` -- Heuristic summary
 
-**Objectif :** Genere un resume technique de 2 lignes pour un fichier source.
+**Purpose:** Generates a 2-line technical summary of a source file.
 
-**Syntaxe :**
+**Syntax:**
 ```bash
-rtk smart <fichier> [--model heuristic] [--force-download]
+rtk smart <file> [--model heuristic] [--force-download]
 ```
 
-**Exemple :**
+**Example:**
 ```
 $ rtk smart src/tracking.rs
 SQLite-based token tracking system for command executions.
@@ -179,57 +177,57 @@ Records input/output tokens, savings %, execution times with 90-day retention.
 
 ---
 
-### `rtk find` -- Recherche de fichiers
+### `rtk find` -- File search
 
-**Objectif :** Remplace `find` et `fd` avec une sortie compacte groupee par repertoire.
+**Purpose:** Replaces `find` and `fd` with compact output grouped by directory.
 
-**Syntaxe :**
+**Syntax:**
 ```bash
 rtk find [args...]
 ```
 
-Supporte a la fois la syntaxe RTK et la syntaxe native `find` (`-name`, `-type`, etc.).
+Supports both RTK syntax and native `find` syntax (`-name`, `-type`, etc.).
 
-**Avant / Apres :**
+**Before / After:**
 ```
-# find . -name "*.rs" (30 lignes)           # rtk find "*.rs" . (8 lignes)
+# find . -name "*.rs" (30 lines)            # rtk find "*.rs" . (8 lines)
 ./src/main.rs                                src/ (12 .rs)
 ./src/git.rs                                   main.rs, git.rs, config.rs
 ./src/config.rs                                tracking.rs, filter.rs, utils.rs
 ./src/tracking.rs                              ...6 more
 ./src/filter.rs                              tests/ (3 .rs)
 ./src/utils.rs                                 test_git.rs, test_ls.rs, test_filter.rs
-...24 lignes de plus...
+...24 more lines...
 ```
 
 ---
 
-### `rtk grep` -- Recherche dans le contenu
+### `rtk grep` -- Content search
 
-**Objectif :** Remplace `grep` et `rg` avec une sortie groupee par fichier, tronquee.
+**Purpose:** Replaces `grep` and `rg` with truncated output grouped by file.
 
-**Syntaxe :**
+**Syntax:**
 ```bash
-rtk grep <pattern> [chemin] [options]
+rtk grep <pattern> [path] [options]
 ```
 
-**Options :**
+**Options:**
 
-| Option | Court | Defaut | Description |
-|--------|-------|--------|-------------|
-| `--max-len` |  | 80 | Longueur maximale de ligne |
-| `--max` |  | 200 | Nombre maximum de resultats |
-| `--context-only` |  | non | Afficher uniquement le contexte du match |
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--max-len` |  | 80 | Maximum line length |
+| `--max` |  | 200 | Maximum number of results |
+| `--context-only` |  | no | Show only the match context |
 
-Aucune de ces options n'a de raccourci : `-l`, `-m` et `-c` sont reserves aux flags natifs de meme lettre (`--files-with-matches`, `--max-count`, `--count`) et sont transmis au moteur.
+None of these options has a short form: `-l`, `-m` and `-c` are reserved for the native flags with the same letter (`--files-with-matches`, `--max-count`, `--count`) and are passed to the engine.
 
-Les arguments supplementaires sont transmis au moteur reellement invoque -- `grep` pour `rtk grep`, `rg` pour `rtk rg`, RTK ne substituant jamais l'un a l'autre. Un flag propre a ripgrep (`--glob`, `-t`) n'est donc valide que sous `rtk rg`. Les flags qui changent le format de sortie (`-c`, `-l`, `-L`, `-o`, `-Z`) passent directement au moteur sans filtrage RTK.
+Extra arguments are passed to the engine actually invoked -- `grep` for `rtk grep`, `rg` for `rtk rg`; RTK never substitutes one for the other. A ripgrep-specific flag (`--glob`, `-t`) is therefore only valid under `rtk rg`. Flags that change the output format (`-c`, `-l`, `-L`, `-o`, `-Z`) go straight to the engine without RTK filtering.
 
-Il n'y a pas d'option `--file-type` : `rtk rg -t rust` filtre par type, `rtk grep -t rust` remonte l'erreur de grep (`invalid option -- 't'`).
+There is no `--file-type` option: `rtk rg -t rust` filters by type, while `rtk grep -t rust` surfaces grep's error (`invalid option -- 't'`).
 
-**Avant / Apres :**
+**Before / After:**
 ```
-# grep -rn "fn run" (20 lignes)             # rtk grep -rn "fn run" (10 lignes)
+# grep -rn "fn run" (20 lines)              # rtk grep -rn "fn run" (10 lines)
 src/git.rs:45:pub fn run(...)                src/git.rs
 src/git.rs:120:fn run_status(...)              45: pub fn run(...)
 src/ls.rs:12:pub fn run(...)                   120: fn run_status(...)
@@ -240,78 +238,82 @@ src/ls.rs:25:fn run_tree(...)                src/ls.rs
 
 ---
 
-### `rtk ast-grep` -- Recherche structurelle (AST)
+### `rtk ast-grep` -- Structural (AST) search
 
-**Objectif :** Remplace `ast-grep` avec une sortie groupee par fichier, plafonnee.
+**Purpose:** Replaces `ast-grep` with capped output grouped by file.
 
-**Syntaxe :**
+**Syntax:**
 ```bash
-rtk ast-grep run -p '<pattern>' [chemin] [options]
+rtk ast-grep run -p '<pattern>' [path] [options]
 ```
 
-Regroupe les correspondances par fichier, plafonnees a 5 par fichier et 50 au total ; le surplus est remplace par une note de comptage ("N more match line(s) in X" / "N more match line(s) in M more file(s) not shown"), suivie d'un indice `[full output: ...]` qui pointe vers la sortie complete -- aucune ligne n'est perdue tant que la recuperation est active (`[retriever] mode`), sinon la note de comptage reste seule. ast-grep imprime une ligne par ligne source d'une correspondance, et une correspondance structurelle s'etend sur plusieurs lignes : le decompte porte donc sur les lignes, pas sur les correspondances. Sur une recherche reelle dans ce depot, ~85% de reduction.
+Groups matches by file, capped at 5 per file and 50 in total; the overflow is replaced by a count note ("N more match line(s) in X" / "N more match line(s) in M more file(s) not shown"), followed by a `[full output: ...]` hint pointing to the complete output, as long as recall is enabled (`[retriever] mode`) and the compaction saves enough to pay for the hint. Otherwise the count note is followed by a fallback (`--json`, a narrower pattern, or `rtk proxy ast-grep`), and the full output is not archived. When the compacted output would end up costing more than the raw one (count notes that cost more than the lines they replace, or a hint or fallback longer than the margin saved), the raw output is printed whole, with no note and no fallback. ast-grep prints one line per source line of a match, and a structural match can span several lines, so the count is in lines, not matches. On a real search in this repository, ~85% reduction.
 
-Seul `run` est filtre : soit nomme explicitement, soit implicite quand aucun positionnel avant `--` ne porte le nom d'une autre sous-commande. `scan`, `test`, `new`, `lsp`, `completions`, `docs` et `run --stdin` passent tels quels : leur sortie n'a pas cette forme, et `lsp` dialogue sur stdin.
+Only `run` is filtered: either named explicitly, or implied when no positional argument before `--` names another subcommand. `scan`, `test`, `new`, `lsp`, `outline`, `completions` and `help` pass through unchanged (the ast-grep 0.45.3 subcommands other than `run`): their output does not have this shape, and `lsp` talks over stdin. So do `run --stdin` and `run -i`: the first reads the source on the pipe the capture closes, the second opens a full-screen session (one question per match) that it writes to stdout while reading answers from /dev/tty, so the capture would swallow the whole session, question included, while ast-grep waits for an answer.
 
-`--json` n'est pas filtre -- une demande explicite de sortie structuree passe telle quelle, sans compression.
+`--json` is not filtered -- an explicit request for structured output passes through unchanged, without compression.
 
 ---
 
-### `rtk diff` -- Diff condense
+### `rtk diff` -- Condensed diff
 
-**Objectif :** Diff ultra-condense entre deux fichiers (uniquement les lignes modifiees).
+**Purpose:** Ultra-condensed diff between two files (changed lines only).
 
-**Syntaxe :**
+**Syntax:**
 ```bash
-rtk diff <fichier1> <fichier2>
-rtk diff <fichier1>              # Stdin comme second fichier
+rtk diff <file1> <file2>
+rtk diff -                    # Condense a unified diff read on stdin
 ```
+
+Pour comparer deux fichiers : code de sortie **0** si identiques, **1** si differents,
+**2** si un fichier ne peut pas etre lu. Les fichiers non UTF-8 sont compares octet
+par octet ; seuls leurs noms sont affiches lorsqu'ils different.
 
 ---
 
-### `rtk wc` -- Comptage compact
+### `rtk wc` -- Compact count
 
-**Objectif :** Remplace `wc` avec une sortie compacte (supprime les chemins et le padding).
+**Purpose:** Replaces `wc` with compact output (removes paths and padding).
 
-**Syntaxe :**
+**Syntax:**
 ```bash
 rtk wc [args...]
 ```
 
-Supporte tous les drapeaux natifs de `wc` (`-l`, `-w`, `-c`, etc.).
+Supports all native `wc` flags (`-l`, `-w`, `-c`, etc.).
 
 ---
 
-## Commandes Git
+## Git commands
 
-### Vue d'ensemble
+### Overview
 
-Toutes les sous-commandes git sont supportees. Les commandes non reconnues sont transmises directement a git (passthrough).
+All git subcommands are supported. Unrecognized commands are passed directly to git (passthrough).
 
-**Options globales git :**
+**Global git options:**
 
 | Option | Description |
 |--------|-------------|
-| `-C <path>` | Changer de repertoire avant execution |
-| `-c <key=value>` | Surcharger une config git |
-| `--git-dir <path>` | Chemin vers le repertoire .git |
-| `--work-tree <path>` | Chemin vers le working tree |
-| `--no-pager` | Desactiver le pager |
-| `--no-optional-locks` | Ignorer les locks optionnels |
-| `--bare` | Traiter comme repo bare |
-| `--literal-pathspecs` | Pathspecs literals |
+| `-C <path>` | Change directory before running |
+| `-c <key=value>` | Override a git config value |
+| `--git-dir <path>` | Path to the .git directory |
+| `--work-tree <path>` | Path to the working tree |
+| `--no-pager` | Disable the pager |
+| `--no-optional-locks` | Skip optional locks |
+| `--bare` | Treat as a bare repository |
+| `--literal-pathspecs` | Literal pathspecs |
 
 ---
 
-### `rtk git status` -- Status compact
+### `rtk git status` -- Compact status
 
 ```bash
-rtk git status [args...]    # Supporte tous les drapeaux git status
+rtk git status [args...]    # Supports all git status flags
 ```
 
-**Avant / Apres :**
+**Before / After:**
 ```
-# git status (~20 lignes, ~400 tokens)      # rtk git status (~5 lignes, ~80 tokens)
+# git status (~20 lines, ~400 tokens)       # rtk git status (~5 lines, ~80 tokens)
 On branch main                               main | 3M 1? 1A
 Your branch is up to date with               M src/main.rs
   'origin/main'.                              M src/git.rs
@@ -325,15 +327,15 @@ Changes not staged for commit:                ? new_file.txt
 
 ---
 
-### `rtk git log` -- Historique compact
+### `rtk git log` -- Compact history
 
 ```bash
-rtk git log [args...]    # Supporte --oneline, --graph, --all, -n, etc.
+rtk git log [args...]    # Supports --oneline, --graph, --all, -n, etc.
 ```
 
-**Avant / Apres :**
+**Before / After:**
 ```
-# git log (50+ lignes)                      # rtk git log -n 5 (5 lignes)
+# git log (50+ lines)                       # rtk git log -n 5 (5 lines)
 commit abc123def... (HEAD -> main)           abc123 Fix token counting bug
 Author: User <user@email.com>               def456 Add vitest support
 Date:   Mon Jan 15 10:30:00 2024            789abc Refactor filter engine
@@ -344,15 +346,15 @@ Date:   Mon Jan 15 10:30:00 2024            789abc Refactor filter engine
 
 ---
 
-### `rtk git diff` -- Diff compact
+### `rtk git diff` -- Compact diff
 
 ```bash
-rtk git diff [args...]    # Supporte --stat, --cached, --staged, etc.
+rtk git diff [args...]    # Supports --stat, --cached, --staged, etc.
 ```
 
-**Avant / Apres :**
+**Before / After:**
 
-`git diff` brut, 21 lignes :
+Raw `git diff`:
 ```
 diff --git a/git.rs b/git.rs
 index 50f7a19..225f918 100644
@@ -377,7 +379,7 @@ index 765936a..7abfb4f 100644
  }
 ```
 
-`rtk git diff`, 24 lignes :
+`rtk git diff`:
 ```
 git.rs  | 2 +-
  main.rs | 4 ++--
@@ -405,81 +407,66 @@ main.rs
   +2 -2
 ```
 
-Sur un diff aussi petit, rtk economise peu : 440 octets bruts contre 392
-filtres, soit 11 %. La compression vient des diffs ou les en-tetes par fichier
-et les plafonds par hunk pesent. Sur un diff de 4 fichiers dont un hunk de 300
-lignes changees, la sortie passe de 335 a 140 lignes et de 13 262 a 4 880
-octets, soit 63 % de reduction, avec la note de troncature et le rappel
-`[full diff: rtk git diff --no-compact]`.
+On a diff this small, rtk saves little. Compression comes from larger diffs, where per-file headers and per-hunk caps matter; truncated output ends with a truncation note and the hint `[full diff: rtk git diff --no-compact]`.
 
-Les lignes de hunk et les en-tetes `@@` sortent en colonne 0, dans la forme
-unifiee de git, donc `rtk git diff | grep "^-"` fonctionne. Les annotations
-propres a rtk restent indentees de deux espaces pour que ces memes greps ne
-les comptent pas : le total par fichier (`  +2 -2`) et la note de troncature
-(`  ... (30 deletions, 20 additions truncated)`).
+Hunk lines and `@@` headers are printed at column 0, in git's unified form, so `rtk git diff | grep "^-"` works. rtk's own annotations are indented by two spaces so those same greps do not count them: the per-file total (`  +2 -2`) and the truncation note (`  ... (30 deletions, 20 additions truncated)`).
 
-Trois limites de l'audit ancre. Au-dela de 100 lignes de changement par hunk,
-`grep -c "^-"` plafonne a ce qui est affiche ; la note de troncature indique
-le reste, par signe, mais elle est indentee et donc invisible au meme grep.
-Sur un diff combine (`diff --cc`, ce que git produit pour chaque chemin en
-conflit pendant un merge, rebase, cherry-pick ou stash pop), le marqueur peut
-occuper la deuxieme colonne : ` +ours` est compte dans le total `+N -M` mais
-reste invisible a `grep "^+"`. Et la sortie n'est pas un patch applicable :
-rtk supprime les en-tetes `diff --git` / `---` / `+++`. Utilisez
-`rtk proxy git diff` pour un patch fidele, ou `rtk gh pr diff --patch`, qui
-passe sans filtrage.
+Limitations:
+- Beyond 100 changed lines per hunk, `grep -c "^-"` is capped at what is displayed; the truncation note gives the remainder per sign, but it is indented and therefore invisible to the same grep.
+- On a combined diff (`diff --cc`, which git produces for each conflicted path during a merge, rebase, cherry-pick or stash pop), the marker can sit in the second column: ` +ours` is counted in the `+N -M` total but stays invisible to `grep "^+"`.
+- The output is not an applicable patch: rtk removes the `diff --git` / `---` / `+++` headers. Use `rtk bypass git diff` for a faithful patch, or `rtk gh pr diff --patch`, which passes through unfiltered.
 
 ---
 
-### `rtk git show` -- Show compact
+### `rtk git show` -- Compact show
 
 ```bash
 rtk git show [args...]
 ```
 
-Affiche le resume du commit + stat + diff compact.
+Shows the commit summary + stat + compact diff.
 
-> **Attention (redirection vers un fichier).** Pour un blob volumineux
-> (`rtk git show HEAD:gros-fichier`), la sortie est fenetree : seul un apercu
-> est affiche, suivi d'un indice
+> **Warning (redirecting to a file).** For a large blob
+> (`rtk git show HEAD:large-file`), the output is windowed: only a preview
+> is shown, followed by a hint
 > `[see remaining: rtk proxy git show 'HEAD:...' | tail -n +N]`.
-> Un `rtk git show HEAD:x > fichier` ecrit a la main peut donc tronquer
-> silencieusement le contenu (le code de sortie reste 0). Pour capturer le
-> fichier complet, suivez l'indice de recuperation, ou passez par
-> `rtk proxy git show`. Un `git show` nu ne suffit pas quand le hook RTK est
-> actif : il est reecrit en `rtk git show`, qui fenetre a nouveau la sortie.
+> A hand-written `rtk git show HEAD:x > file` can therefore silently
+> truncate the content (the exit code stays 0). To capture the full
+> file, follow the recovery hint, or use `rtk proxy git show`. A bare
+> `git show` is not enough when the RTK hook is active: it is rewritten to
+> `rtk git show`, which windows the output again.
 
 ---
 
-### `rtk git add` -- Add ultra-compact
+### `rtk git add` -- Compact add
 
 ```bash
-rtk git add [args...]    # Supporte -A, -p, --all, etc.
+rtk git add [args...]    # Supports -A, -p, --all, etc.
 ```
 
-**Sortie :** `ok` (un seul mot)
+**Output:** `ok` (a single word)
 
 ---
 
-### `rtk git commit` -- Commit ultra-compact
+### `rtk git commit` -- Compact commit
 
 ```bash
-rtk git commit -m "message" [args...]    # Supporte -a, --amend, --allow-empty, etc.
+rtk git commit -m "message" [args...]    # Supports -a, --amend, --allow-empty, etc.
 ```
 
-**Sortie :** `ok abc1234` (confirmation + hash court)
+**Output:** `ok abc1234` (confirmation + short hash)
 
 ---
 
-### `rtk git push` -- Push ultra-compact
+### `rtk git push` -- Compact push
 
 ```bash
-rtk git push [args...]    # Supporte -u, remote, branch, etc.
+rtk git push [args...]    # Supports -u, remote, branch, etc.
 ```
 
-**Avant / Apres :**
+**Before / After:**
 ```
-# git push (15 lignes, ~200 tokens)         # rtk git push (1 ligne, ~10 tokens)
+# git push (15 lines, ~200 tokens)          # rtk git push (1 line, ~10 tokens)
 Enumerating objects: 5, done.                ok main
 Counting objects: 100% (5/5), done.
 Delta compression using up to 8 threads
@@ -488,37 +475,37 @@ Delta compression using up to 8 threads
 
 ---
 
-### `rtk git pull` -- Pull ultra-compact
+### `rtk git pull` -- Compact pull
 
 ```bash
 rtk git pull [args...]
 ```
 
-**Sortie :** `ok 3 files +10 -2`
+**Output:** `ok 3 files +10 -2`
 
 ---
 
-### `rtk git branch` -- Branches compact
+### `rtk git branch` -- Compact branches
 
 ```bash
-rtk git branch [args...]    # Supporte -d, -D, -m, etc.
+rtk git branch [args...]    # Supports -d, -D, -m, etc.
 ```
 
-Affiche branche courante, branches locales, branches distantes de facon compacte.
+Shows the current branch, local branches and remote branches compactly.
 
 ---
 
-### `rtk git fetch` -- Fetch compact
+### `rtk git fetch` -- Compact fetch
 
 ```bash
 rtk git fetch [args...]
 ```
 
-**Sortie :** `ok fetched (N new refs)`
+**Output:** `ok fetched (N new refs)`
 
 ---
 
-### `rtk git stash` -- Stash compact
+### `rtk git stash` -- Compact stash
 
 ```bash
 rtk git stash [list|show|pop|apply|drop|push] [args...]
@@ -526,7 +513,7 @@ rtk git stash [list|show|pop|apply|drop|push] [args...]
 
 ---
 
-### `rtk git worktree` -- Worktree compact
+### `rtk git worktree` -- Compact worktree
 
 ```bash
 rtk git worktree [add|remove|prune|list] [args...]
@@ -534,43 +521,43 @@ rtk git worktree [add|remove|prune|list] [args...]
 
 ---
 
-### Passthrough git
+### Git passthrough
 
-Toute sous-commande git non listee ci-dessus est executee directement :
+Any git subcommand not listed above is run directly:
 
 ```bash
-rtk git rebase main        # Execute git rebase main
-rtk git cherry-pick abc    # Execute git cherry-pick abc
-rtk git tag v1.0.0         # Execute git tag v1.0.0
+rtk git rebase main        # Runs git rebase main
+rtk git cherry-pick abc    # Runs git cherry-pick abc
+rtk git tag v1.0.0         # Runs git tag v1.0.0
 ```
 
 ---
 
-## Commandes GitHub CLI
+## GitHub CLI commands
 
-### `rtk gh` -- GitHub CLI compact
+### `rtk gh` -- Compact GitHub CLI
 
-**Objectif :** Remplace `gh` avec une sortie optimisee.
+**Purpose:** Replaces `gh` with optimized output.
 
-**Syntaxe :**
+**Syntax:**
 ```bash
-rtk gh <sous-commande> [args...]
+rtk gh <subcommand> [args...]
 ```
 
-**Sous-commandes supportees :**
+**Supported subcommands:**
 
-| Commande | Description | Reduction sortie bash |
-|----------|-------------|-----------|
-| `rtk gh pr list` | Liste des PRs compacte | ~80% |
-| `rtk gh pr view <num>` | Details d'une PR + checks | ~87% |
-| `rtk gh pr checks` | Status des checks CI | ~79% |
-| `rtk gh issue list` | Liste des issues compacte | ~80% |
-| `rtk gh run list` | Status des workflow runs | ~82% |
-| `rtk gh api <endpoint>` | Reponse API compacte | ~26% |
+| Command | Description |
+|---------|-------------|
+| `rtk gh pr list` | Compact PR list |
+| `rtk gh pr view <num>` | PR details + checks |
+| `rtk gh pr checks` | CI check status |
+| `rtk gh issue list` | Compact issue list |
+| `rtk gh run list` | Workflow run status |
+| `rtk gh api <endpoint>` | Compact API response |
 
-**Avant / Apres :**
+**Before / After:**
 ```
-# gh pr list (~30 lignes)                   # rtk gh pr list (~10 lignes)
+# gh pr list (~30 lines)                    # rtk gh pr list (~10 lines)
 Showing 10 of 15 pull requests in org/repo   #42 feat: add vitest (open, 2d)
                                               #41 fix: git diff crash (open, 3d)
 #42  feat: add vitest support                 #40 chore: update deps (merged, 5d)
@@ -581,18 +568,23 @@ Showing 10 of 15 pull requests in org/repo   #42 feat: add vitest (open, 2d)
 
 ---
 
-## Commandes Test
+## Test commands
 
-### `rtk test` -- Wrapper de tests generique
+### `rtk test` -- Generic test wrapper
 
-**Objectif :** Execute n'importe quelle commande de test et affiche uniquement les echecs.
+**Purpose:** Runs any test command and shows only the failures.
 
-**Syntaxe :**
+**Syntax:**
 ```bash
-rtk test <commande...>
+rtk test <command...>
+rtk test --shell fish '<fish command>'
 ```
 
-**Exemple :**
+By default the command and its arguments are run directly, with no shell
+expansion. `--shell` takes a whole command as a single argument when a shell's
+syntax is needed.
+
+**Example:**
 ```bash
 rtk test cargo test
 rtk test npm test
@@ -600,28 +592,32 @@ rtk test bun test
 rtk test pytest
 ```
 
-**Avant / Apres :**
+**Before / After:**
 ```
-# cargo test (200+ lignes en cas d'echec)   # rtk test cargo test (~20 lignes)
+# cargo test (200+ lines on failure)        # rtk test cargo test (~20 lines)
 running 15 tests                             FAILED: 2/15 tests
 test utils::test_parse ... ok                  test_edge_case: assertion failed
 test utils::test_format ... ok                 test_overflow: panic at utils.rs:18
 test utils::test_edge_case ... FAILED
-...150 lignes de backtrace...
+...150 lines of backtrace...
 ```
 
 ---
 
-### `rtk err` -- Erreurs/avertissements uniquement
+### `rtk err` -- Errors/warnings only
 
-**Objectif :** Execute une commande et ne montre que les erreurs et avertissements.
+**Purpose:** Runs a command and shows only errors and warnings.
 
-**Syntaxe :**
+**Syntax:**
 ```bash
-rtk err <commande...>
+rtk err <command...>
+rtk err --shell fish '<fish command>'
 ```
 
-**Exemple :**
+Without `--shell`, argument boundaries are preserved, and globs, variables and
+operators are not interpreted by a shell.
+
+**Example:**
 ```bash
 rtk err npm run build
 rtk err cargo build
@@ -629,27 +625,27 @@ rtk err cargo build
 
 ---
 
-### `rtk cargo test` -- Tests Rust
+### `rtk cargo test` -- Rust tests
 
 ```bash
 rtk cargo test [args...]
 ```
 
-N'affiche que les echecs. Supporte tous les arguments de `cargo test`.
+Shows only failures. Supports all `cargo test` arguments.
 
 ---
 
-### `rtk cargo nextest` -- Tests Rust (nextest)
+### `rtk cargo nextest` -- Rust tests (nextest)
 
 ```bash
 rtk cargo nextest [run|list|--lib] [args...]
 ```
 
-Filtre la sortie de `cargo nextest` pour n'afficher que les echecs.
+Filters `cargo nextest` output to show only failures.
 
 ---
 
-### `rtk jest` / `rtk vitest` -- Tests Jest/Vitest
+### `rtk jest` / `rtk vitest` -- Jest/Vitest tests
 
 ```bash
 rtk jest [args...]
@@ -658,7 +654,7 @@ rtk vitest [args...]
 
 ---
 
-### `rtk playwright test` -- Tests E2E Playwright
+### `rtk playwright test` -- Playwright E2E tests
 
 ```bash
 rtk playwright [args...]
@@ -666,7 +662,7 @@ rtk playwright [args...]
 
 ---
 
-### `rtk pytest` -- Tests Python
+### `rtk pytest` -- Python tests
 
 ```bash
 rtk pytest [args...]
@@ -674,69 +670,69 @@ rtk pytest [args...]
 
 ---
 
-### `rtk go test` -- Tests Go
+### `rtk go test` -- Go tests
 
 ```bash
 rtk go test [args...]
 ```
 
-Utilise le streaming JSON NDJSON de Go pour un filtrage precis.
+Uses Go's NDJSON streaming output for precise filtering.
 
 ---
 
-## Commandes Build et Lint
+## Build and lint commands
 
-### `rtk cargo build` -- Build Rust
+### `rtk cargo build` -- Rust build
 
 ```bash
 rtk cargo build [args...]
 ```
 
-Supprime les lignes "Compiling...", ne conserve que les erreurs et le resultat final.
+Removes "Compiling..." lines, keeping only errors and the final result.
 
 ---
 
-### `rtk cargo check` -- Check Rust
+### `rtk cargo check` -- Rust check
 
 ```bash
 rtk cargo check [args...]
 ```
 
-Supprime les lignes "Checking...", ne conserve que les erreurs.
+Removes "Checking..." lines, keeping only errors.
 
 ---
 
-### `rtk cargo clippy` -- Clippy Rust
+### `rtk cargo clippy` -- Rust Clippy
 
 ```bash
 rtk cargo clippy [args...]
 ```
 
-Regroupe les avertissements par regle de lint.
+Groups warnings by lint rule.
 
 ---
 
-### `rtk cargo install` -- Install Rust
+### `rtk cargo install` -- Rust install
 
 ```bash
 rtk cargo install [args...]
 ```
 
-Supprime la compilation des dependances, ne conserve que le resultat d'installation et les erreurs.
+Removes dependency compilation, keeping only the install result and errors.
 
 ---
 
-### `rtk tsc` -- TypeScript Compiler
+### `rtk tsc` -- TypeScript compiler
 
 ```bash
 rtk tsc [args...]
 ```
 
-Regroupe les erreurs TypeScript par fichier et par code d'erreur.
+Groups TypeScript errors by file and error code.
 
-**Avant / Apres :**
+**Before / After:**
 ```
-# tsc --noEmit (50 lignes)                  # rtk tsc (15 lignes)
+# tsc --noEmit (50 lines)                   # rtk tsc (15 lines)
 src/api.ts(12,5): error TS2345: ...          src/api.ts (3 errors)
 src/api.ts(15,10): error TS2345: ...           TS2345: Argument type mismatch (x2)
 src/api.ts(20,3): error TS7006: ...            TS7006: Parameter implicitly has 'any'
@@ -753,72 +749,72 @@ rtk lint [args...]
 rtk lint biome [args...]
 ```
 
-Regroupe les violations par regle et par fichier. Auto-detecte le linter.
+Groups violations by rule and by file. Auto-detects the linter.
 
 ---
 
-### `rtk prettier` -- Verification du formatage
+### `rtk prettier` -- Format checking
 
 ```bash
-rtk prettier [args...]    # ex: rtk prettier --check .
+rtk prettier [args...]    # e.g. rtk prettier --check .
 ```
 
-Affiche uniquement les fichiers necessitant un formatage.
+Shows only the files that need formatting.
 
 ---
 
-### `rtk format` -- Formateur universel
+### `rtk format` -- Universal formatter
 
 ```bash
 rtk format [args...]
 ```
 
-Auto-detecte le formateur du projet (prettier, black, ruff format) et applique un filtre compact.
+Auto-detects the project formatter (prettier, black, ruff format) and applies a compact filter.
 
 ---
 
-### `rtk next build` -- Build Next.js
+### `rtk next build` -- Next.js build
 
 ```bash
 rtk next [args...]
 ```
 
-Sortie compacte avec metriques de routes.
+Compact output with route metrics.
 
 ---
 
-### `rtk ruff` -- Linter/formateur Python
+### `rtk ruff` -- Python linter/formatter
 
 ```bash
 rtk ruff check [args...]
 rtk ruff format --check [args...]
 ```
 
-Sortie JSON compressee.
+Compressed JSON output.
 
 ---
 
-### `rtk mypy` -- Type checker Python
+### `rtk mypy` -- Python type checker
 
 ```bash
 rtk mypy [args...]
 ```
 
-Regroupe les erreurs de type par fichier.
+Groups type errors by file.
 
 ---
 
-### `rtk golangci-lint` -- Linter Go
+### `rtk golangci-lint` -- Go linter
 
 ```bash
 rtk golangci-lint run [args...]
 ```
 
-Sortie JSON compressee.
+Compressed JSON output.
 
 ---
 
-## Commandes Formatage
+## Formatting commands
 
 ### `rtk prettier` -- Prettier
 
@@ -829,110 +825,110 @@ rtk prettier --write src/
 
 ---
 
-### `rtk format` -- Detecteur universel
+### `rtk format` -- Universal detector
 
 ```bash
 rtk format [args...]
 ```
 
-Detecte automatiquement : prettier, black, ruff format, rustfmt. Applique un filtre compact unifie.
+Automatically detects prettier, black, ruff format and rustfmt. Applies a unified compact filter.
 
 ---
 
-## Gestionnaires de paquets
+## Package managers
 
 ### `rtk pnpm` -- pnpm
 
-| Commande | Description | Reduction sortie bash |
-|----------|-------------|-----------|
-| `rtk pnpm list [-d N]` | Arbre de dependances compact | ~70% |
-| `rtk pnpm outdated` | Paquets obsoletes : `pkg: old -> new` | ~80% |
-| `rtk pnpm install` | Filtre les barres de progression | ~60% |
-| `rtk pnpm build` | Delegue au filtre Next.js | ~87% |
-| `rtk pnpm typecheck` | Delegue au filtre tsc | ~83% |
+| Command | Description |
+|---------|-------------|
+| `rtk pnpm list [-d N]` | Compact dependency tree |
+| `rtk pnpm outdated` | Outdated packages: `pkg: old -> new` |
+| `rtk pnpm install` | Filters progress bars |
+| `rtk pnpm build` | Delegates to the Next.js filter |
+| `rtk pnpm typecheck` | Delegates to the tsc filter |
 
-Les sous-commandes non reconnues sont transmises directement a pnpm (passthrough).
+Unrecognized subcommands are passed directly to pnpm (passthrough).
 
 ---
 
 ### `rtk npm` -- npm
 
 ```bash
-rtk npm [args...]    # ex: rtk npm run build
+rtk npm [args...]    # e.g. rtk npm run build
 ```
 
-Filtre le boilerplate npm (barres de progression, en-tetes, etc.).
+Filters npm boilerplate (progress bars, headers, etc.).
 
 ---
 
-### `rtk npx` -- npx avec routage intelligent
+### `rtk npx` -- npx with smart routing
 
 ```bash
 rtk npx [args...]
 ```
 
-Route intelligemment vers les filtres specialises :
-- `rtk npx tsc` -> filtre tsc
-- `rtk npx eslint` -> filtre lint
-- `rtk npx prisma` -> filtre prisma
-- Autres -> passthrough filtre
+Routes to specialized filters:
+- `rtk npx tsc` -> tsc filter
+- `rtk npx eslint` -> lint filter
+- `rtk npx prisma` -> prisma filter
+- Others -> filtered passthrough
 
 ---
 
 ### `rtk pip` -- pip / uv
 
 ```bash
-rtk pip list              # Liste des paquets (auto-detecte uv)
-rtk pip outdated          # Paquets obsoletes
-rtk pip install <pkg>     # Installation
+rtk pip list              # Package list (auto-detects uv)
+rtk pip outdated          # Outdated packages
+rtk pip install <pkg>     # Install
 ```
 
-Auto-detecte `uv` si disponible et l'utilise a la place de `pip`.
+Auto-detects `uv` when available and uses it instead of `pip`.
 
 ---
 
-### `rtk deps` -- Resume des dependances
+### `rtk deps` -- Dependency summary
 
-**Objectif :** Resume compact des dependances du projet.
+**Purpose:** Compact summary of project dependencies.
 
 ```bash
-rtk deps [chemin]    # Defaut: repertoire courant
+rtk deps [path]    # Default: current directory
 ```
 
-Auto-detecte : `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`, `Gemfile`, etc.
+Auto-detects `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`, `Gemfile`, etc.
 
 ---
 
-### `rtk prisma` -- ORM Prisma
+### `rtk prisma` -- Prisma ORM
 
-| Commande | Description |
-|----------|-------------|
-| `rtk prisma generate` | Generation du client (supprime l'ASCII art) |
-| `rtk prisma migrate dev [--name N]` | Creer et appliquer une migration |
-| `rtk prisma migrate status` | Status des migrations |
-| `rtk prisma migrate deploy` | Deployer en production |
-| `rtk prisma db-push` | Push du schema |
+| Command | Description |
+|---------|-------------|
+| `rtk prisma generate` | Client generation (removes ASCII art) |
+| `rtk prisma migrate dev [--name N]` | Create and apply a migration |
+| `rtk prisma migrate status` | Migration status |
+| `rtk prisma migrate deploy` | Deploy to production |
+| `rtk prisma db-push` | Schema push |
 
 ---
 
-## Conteneurs et orchestration
+## Containers and orchestration
 
 ### `rtk docker` -- Docker
 
-| Commande | Description | Reduction sortie bash |
-|----------|-------------|-----------|
-| `rtk docker ps` | Liste compacte des conteneurs | ~80% |
-| `rtk docker images` | Liste compacte des images | ~80% |
-| `rtk docker logs <conteneur>` | Logs dedupliques | ~70% |
-| `rtk docker compose ps` | Services Compose compacts | ~80% |
-| `rtk docker compose logs [service]` | Logs Compose dedupliques | ~70% |
-| `rtk docker compose build [service]` | Resume du build | ~60% |
+| Command | Description |
+|---------|-------------|
+| `rtk docker ps` | Compact container list |
+| `rtk docker images` | Compact image list |
+| `rtk docker logs <container>` | Deduplicated logs |
+| `rtk docker compose ps` | Compact Compose services |
+| `rtk docker compose logs [service]` | Deduplicated Compose logs |
+| `rtk docker compose build [service]` | Build summary |
 
-Les sous-commandes non reconnues sont transmises directement (passthrough).
+Unrecognized subcommands are passed through directly (passthrough).
 
-**Avant / Apres :**
+**Before / After:**
 ```
-# docker ps (lignes longues, ~30 tokens/ligne)    # rtk docker ps (~10 tokens/ligne)
+# docker ps (long lines, ~30 tokens/line)         # rtk docker ps (~10 tokens/line)
 CONTAINER ID   IMAGE          COMMAND     ...      web  nginx:1.25 Up 2d (healthy)
 abc123def456   nginx:1.25     "/dock..."  ...      db   postgres:16 Up 2d (healthy)
 789012345678   postgres:16    "docker..."           redis redis:7 Up 1d
@@ -942,37 +938,37 @@ abc123def456   nginx:1.25     "/dock..."  ...      db   postgres:16 Up 2d (healt
 
 ### `rtk kubectl` -- Kubernetes
 
-| Commande | Description | Options |
-|----------|-------------|---------|
-| `rtk kubectl pods [-n ns] [-A]` | Liste compacte des pods | Namespace ou tous |
-| `rtk kubectl services [-n ns] [-A]` | Liste compacte des services | Namespace ou tous |
-| `rtk kubectl logs <pod> [-c container]` | Logs dedupliques | Container specifique |
+| Command | Description | Options |
+|---------|-------------|---------|
+| `rtk kubectl pods [-n ns] [-A]` | Compact pod list | Namespace or all |
+| `rtk kubectl services [-n ns] [-A]` | Compact service list | Namespace or all |
+| `rtk kubectl logs <pod> [-c container]` | Deduplicated logs | Specific container |
 
-Les sous-commandes non reconnues sont transmises directement (passthrough).
+Unrecognized subcommands are passed through directly (passthrough).
 
 ---
 
-## Donnees et reseau
+## Data and network
 
-### `rtk json` -- Structure JSON
+### `rtk json` -- JSON structure
 
-**Objectif :** Affiche la structure d'un fichier JSON sans les valeurs.
+**Purpose:** Shows the structure of a JSON file without the values.
 
 ```bash
-rtk json <fichier> [--depth N]    # Defaut: profondeur 5
-rtk json -                         # Depuis stdin
+rtk json <file> [--depth N]    # Default: depth 5
+rtk json -                     # From stdin
 ```
 
-**Avant / Apres :**
+**Before / After:**
 ```
-# cat package.json (50 lignes)              # rtk json package.json (10 lignes)
+# cat package.json (50 lines)               # rtk json package.json (10 lines)
 {                                            {
   "name": "my-app",                            name: string
   "version": "1.0.0",                         version: string
   "dependencies": {                            dependencies: { 15 keys }
     "react": "^18.2.0",                        devDependencies: { 8 keys }
     "next": "^14.0.0",                         scripts: { 6 keys }
-    ...15 dependances...                     }
+    ...15 dependencies...                    }
   },
   ...
 }
@@ -980,77 +976,80 @@ rtk json -                         # Depuis stdin
 
 ---
 
-### `rtk env` -- Variables d'environnement
+### `rtk env` -- Environment variables
 
 ```bash
-rtk env                    # Toutes les variables (sensibles masquees)
-rtk env -f AWS             # Filtrer par nom
-rtk env --show-all         # Inclure les valeurs sensibles
+rtk env                    # All variables (sensitive ones masked)
+rtk env -f AWS             # Filter by name
+rtk env --show-all         # Include sensitive values
 ```
 
-Les variables sensibles (tokens, secrets, mots de passe) sont masquees par defaut : `AWS_SECRET_ACCESS_KEY=***`.
+Sensitive variables (tokens, secrets, passwords) are masked by default: `AWS_SECRET_ACCESS_KEY=***`.
 
 ---
 
-### `rtk log` -- Logs dedupliques
+### `rtk log` -- Deduplicated logs
 
-**Objectif :** Filtre et deduplique la sortie de logs.
+**Purpose:** Filters and deduplicates log output.
 
 ```bash
-rtk log <fichier>     # Depuis un fichier
-rtk log               # Depuis stdin (pipe)
+rtk log <file>     # From a file
+rtk log            # From stdin (pipe)
 ```
 
-Les lignes repetees sont fusionnees : `[ERROR] Connection refused (x42)`.
+Repeated lines are merged: `[ERROR] Connection refused (x42)`.
 
 ---
 
-### `rtk curl` -- HTTP avec troncature
+### `rtk curl` -- HTTP with truncation
 
 ```bash
 rtk curl [args...]
 ```
 
-Tronque les reponses longues et sauvegarde la sortie complete dans un fichier pour recuperation.
+Truncates long responses and saves the full output for recovery.
 
 ---
 
-### `rtk wget` -- Telechargement compact
+### `rtk wget` -- Compact download
 
 ```bash
 rtk wget <url> [args...]
-rtk wget -O - <url>           # Sortie vers stdout
+rtk wget -O - <url>           # Output to stdout
 ```
 
-Supprime les barres de progression et le bruit.
+Removes progress bars and noise.
 
 ---
 
-### `rtk summary` -- Resume heuristique
+### `rtk summary` -- Heuristic summary
 
-**Objectif :** Execute une commande et genere un resume heuristique de la sortie.
+**Purpose:** Runs a command and generates a heuristic summary of its output.
 
 ```bash
-rtk summary <commande...>
+rtk summary <command...>
+rtk summary --shell fish '<fish command>'
 ```
 
-Utile pour les commandes longues dont la sortie n'a pas de filtre dedie.
+Useful for long-running commands whose output has no dedicated filter.
+The command is run directly by default; `--shell` explicitly turns on
+interpretation of a whole command by the chosen shell.
 
 ---
 
-### `rtk proxy` -- Passthrough avec suivi
+### `rtk bypass` -- Passthrough with tracking
 
-**Objectif :** Execute une commande **sans filtrage** mais enregistre l'utilisation pour le suivi.
+**Purpose:** Runs a command **without filtering** but records usage for tracking.
 
 ```bash
-rtk proxy <commande...>
+rtk bypass <command...>
 ```
 
-Utile pour le debug : comparer la sortie brute avec la sortie filtree.
+Useful for debugging: compare raw output with filtered output.
 
 ---
 
-## Cloud et bases de donnees
+## Cloud and databases
 
 ### `rtk aws` -- AWS CLI
 
@@ -1058,7 +1057,7 @@ Utile pour le debug : comparer la sortie brute avec la sortie filtree.
 rtk aws <service> [args...]
 ```
 
-Force la sortie JSON et compresse le resultat. Supporte tous les services AWS (sts, s3, ec2, ecs, rds, cloudformation, etc.).
+Forces JSON output and compresses the result. Supports all AWS services (sts, s3, ec2, ecs, rds, cloudformation, etc.).
 
 ---
 
@@ -1068,7 +1067,7 @@ Force la sortie JSON et compresse le resultat. Supporte tous les services AWS (s
 rtk psql [args...]
 ```
 
-Supprime les bordures de tableaux et compresse la sortie.
+Removes table borders and compresses the output.
 
 ---
 
@@ -1076,155 +1075,155 @@ Supprime les bordures de tableaux et compresse la sortie.
 
 ### `rtk gt` -- Graphite
 
-| Commande | Description |
-|----------|-------------|
-| `rtk gt log` | Stack log compact |
-| `rtk gt submit` | Submit compact |
-| `rtk gt sync` | Sync compact |
-| `rtk gt restack` | Restack compact |
-| `rtk gt create` | Create compact |
-| `rtk gt branch` | Branch info compact |
+| Command | Description |
+|---------|-------------|
+| `rtk gt log` | Compact stack log |
+| `rtk gt submit` | Compact submit |
+| `rtk gt sync` | Compact sync |
+| `rtk gt restack` | Compact restack |
+| `rtk gt create` | Compact create |
+| `rtk gt branch` | Compact branch info |
 
-Les sous-commandes non reconnues sont transmises directement ou detectees comme passthrough git.
-
----
-
-## Analytique et suivi
-
-### Systeme de tracking
-
-RTK enregistre chaque execution de commande dans une base SQLite :
-
-- **Emplacement :** `~/.local/share/rtk/tracking.db` (Linux), `~/Library/Application Support/rtk/tracking.db` (macOS)
-- **Retention :** 90 jours automatique
-- **Metriques :** tokens entree/sortie, pourcentage de reduction de sortie bash, temps d'execution, projet
+Unrecognized subcommands are passed through directly or detected as git passthrough.
 
 ---
 
-### `rtk gain` -- Statistiques de reduction de sortie bash
+## Analytics and tracking
+
+### Tracking system
+
+RTK records every command execution in a SQLite database:
+
+- **Location:** `~/.local/share/rtk/tracking.db` (Linux), `~/Library/Application Support/rtk/tracking.db` (macOS)
+- **Retention:** 90 days, automatic
+- **Metrics:** input/output tokens, bash output reduction percentage, execution time, project
+
+---
+
+### `rtk gain` -- Bash output reduction statistics
 
 ```bash
-rtk gain                        # Resume global
-rtk gain -p                     # Filtre par projet courant
-rtk gain --graph                # Graphe ASCII (30 derniers jours)
-rtk gain --history              # Historique recent des commandes
-rtk gain --daily                # Ventilation jour par jour
-rtk gain --weekly               # Ventilation par semaine
-rtk gain --monthly              # Ventilation par mois
-rtk gain --all                  # Toutes les ventilations
-rtk gain --quota -t pro         # Estimation de la sortie bash economisee sur le quota mensuel
-rtk gain --failures             # Log des echecs de parsing (commandes en fallback)
-rtk gain --format json          # Export JSON (pour dashboards)
-rtk gain --format csv           # Export CSV
+rtk gain                        # Global summary
+rtk gain -p                     # Filter by current project
+rtk gain --graph                # ASCII graph (last 30 days)
+rtk gain --history              # Recent command history
+rtk gain --daily                # Day-by-day breakdown
+rtk gain --weekly               # Weekly breakdown
+rtk gain --monthly              # Monthly breakdown
+rtk gain --all                  # All breakdowns
+rtk gain --quota -t pro         # Estimate of bash output saved against the monthly quota
+rtk gain --failures             # Parsing failure log (commands that fell back)
+rtk gain --format json          # JSON export (for dashboards)
+rtk gain --format csv           # CSV export
 ```
 
-**Options :**
+**Options:**
 
-| Option | Court | Description |
+| Option | Short | Description |
 |--------|-------|-------------|
-| `--project` | `-p` | Filtrer par repertoire courant |
-| `--graph` | `-g` | Graphe ASCII des 30 derniers jours |
-| `--history` | `-H` | Historique recent des commandes |
-| `--quota` | `-q` | Estimation de la sortie bash economisee sur le quota mensuel |
-| `--tier` | `-t` | Tier d'abonnement : `pro`, `5x`, `20x` (defaut: `20x`) |
-| `--daily` | `-d` | Ventilation quotidienne |
-| `--weekly` | `-w` | Ventilation hebdomadaire |
-| `--monthly` | `-m` | Ventilation mensuelle |
-| `--all` | `-a` | Toutes les ventilations |
-| `--format` | `-f` | Format de sortie : `text`, `json`, `csv` |
-| `--failures` | `-F` | Affiche les commandes en fallback |
+| `--project` | `-p` | Filter by current directory |
+| `--graph` | `-g` | ASCII graph of the last 30 days |
+| `--history` | `-H` | Recent command history |
+| `--quota` | `-q` | Estimate of bash output saved against the monthly quota |
+| `--tier` | `-t` | Subscription tier: `pro`, `5x`, `20x` (default: `20x`) |
+| `--daily` | `-d` | Daily breakdown |
+| `--weekly` | `-w` | Weekly breakdown |
+| `--monthly` | `-m` | Monthly breakdown |
+| `--all` | `-a` | All breakdowns |
+| `--format` | `-f` | Output format: `text`, `json`, `csv` |
+| `--failures` | `-F` | Show commands that fell back |
 
-**Exemple de sortie :**
+**Example output (illustrative values):**
 ```
 $ rtk gain
 RTK Token Savings Summary
-  Total commands:     1,247
-  Total input:        2,341,000 tokens
-  Total output:       468,200 tokens
-  Total saved:        1,872,800 tokens (80%)
-  Avg per command:    1,501 tokens saved
+  Total commands:     1,000
+  Total input:        2,000,000 tokens
+  Total output:       400,000 tokens
+  Total saved:        1,600,000 tokens (80%)
+  Avg per command:    1,600 tokens saved
 
 Top commands:
-  git status    312x  -82%
-  cargo test    156x  -91%
-  git diff       98x  -76%
+  git status    300x  -80%
+  cargo test    150x  -90%
+  git diff      100x  -75%
 ```
 
 ---
 
-### `rtk discover` -- Opportunites manquees
+### `rtk discover` -- Missed opportunities
 
-**Objectif :** Analyse l'historique Claude Code pour trouver les commandes qui auraient pu etre optimisees par rtk.
+**Purpose:** Analyzes Claude Code history to find commands that rtk could have optimized.
 
 ```bash
-rtk discover                          # Projet courant, 30 derniers jours
-rtk discover --all --since 7          # Tous les projets, 7 derniers jours
-rtk discover -p /chemin/projet        # Filtrer par projet
-rtk discover --limit 20              # Max commandes par section
-rtk discover --format json            # Export JSON
+rtk discover                          # Current project, last 30 days
+rtk discover --all --since 7          # All projects, last 7 days
+rtk discover -p /path/to/project      # Filter by project
+rtk discover --limit 20               # Max commands per section
+rtk discover --format json            # JSON export
 ```
 
-**Options :**
+**Options:**
 
-| Option | Court | Description |
+| Option | Short | Description |
 |--------|-------|-------------|
-| `--project` | `-p` | Filtrer par chemin de projet |
-| `--limit` | `-l` | Max commandes par section (defaut: 15) |
-| `--all` | `-a` | Scanner tous les projets |
-| `--since` | `-s` | Derniers N jours (defaut: 30) |
-| `--format` | `-f` | Format : `text`, `json` |
+| `--project` | `-p` | Filter by project path |
+| `--limit` | `-l` | Max commands per section (default: 15) |
+| `--all` | `-a` | Scan all projects |
+| `--since` | `-s` | Last N days (default: 30) |
+| `--format` | `-f` | Format: `text`, `json` |
 
 ---
 
-### `rtk learn` -- Apprendre des erreurs
+### `rtk learn` -- Learn from errors
 
-**Objectif :** Analyse l'historique d'erreurs CLI de Claude Code pour detecter les corrections recurrentes.
+**Purpose:** Analyzes Claude Code CLI error history to detect recurring corrections.
 
 ```bash
-rtk learn                             # Projet courant
-rtk learn --all --since 7             # Tous les projets
-rtk learn --write-rules               # Generer .claude/rules/cli-corrections.md
-rtk learn --min-confidence 0.8        # Seuil de confiance (defaut: 0.6)
-rtk learn --min-occurrences 3         # Occurrences minimales (defaut: 1)
-rtk learn --format json               # Export JSON
+rtk learn                             # Current project
+rtk learn --all --since 7             # All projects
+rtk learn --write-rules               # Generate .claude/rules/cli-corrections.md
+rtk learn --min-confidence 0.8        # Confidence threshold (default: 0.6)
+rtk learn --min-occurrences 3         # Minimum occurrences (default: 1)
+rtk learn --format json               # JSON export
 ```
 
 ---
 
-### `rtk cc-economics` -- Analyse economique Claude Code
+### `rtk cc-economics` -- Claude Code economics
 
-**Objectif :** Compare les depenses Claude Code (via ccusage) avec la sortie bash economisee par RTK.
+**Purpose:** Compares Claude Code spending (via ccusage) with the bash output saved by RTK.
 
 ```bash
-rtk cc-economics                      # Resume
-rtk cc-economics --daily              # Ventilation quotidienne
-rtk cc-economics --weekly             # Ventilation hebdomadaire
-rtk cc-economics --monthly            # Ventilation mensuelle
-rtk cc-economics --all                # Toutes les ventilations
-rtk cc-economics --format json        # Export JSON
+rtk cc-economics                      # Summary
+rtk cc-economics --daily              # Daily breakdown
+rtk cc-economics --weekly             # Weekly breakdown
+rtk cc-economics --monthly            # Monthly breakdown
+rtk cc-economics --all                # All breakdowns
+rtk cc-economics --format json        # JSON export
 ```
 
 ---
 
-### `rtk hook-audit` -- Metriques du hook
+### `rtk hook-audit` -- Hook metrics
 
-**Prerequis :** Necessite `RTK_HOOK_AUDIT=1` dans l'environnement.
+**Prerequisite:** Requires `RTK_HOOK_AUDIT=1` in the environment.
 
 ```bash
-rtk hook-audit                        # 7 derniers jours (defaut)
-rtk hook-audit --since 30             # 30 derniers jours
-rtk hook-audit --since 0              # Tout l'historique
+rtk hook-audit                        # Last 7 days (default)
+rtk hook-audit --since 30             # Last 30 days
+rtk hook-audit --since 0              # Full history
 ```
 
 ---
 
-## Systeme de hooks
+## Hook system
 
-### Fonctionnement
+### How it works
 
-Le hook RTK intercepte les commandes Bash dans Claude Code **avant leur execution** et les reecrit automatiquement en equivalent RTK.
+The RTK hook intercepts Bash commands in Claude Code **before they run** and automatically rewrites them to their RTK equivalent.
 
-**Flux :**
+**Flow:**
 ```
 Claude Code "git status"
     |
@@ -1238,64 +1237,70 @@ rtk-rewrite.sh (bash)
 rtk rewrite "git status"  ->  "rtk git status"
     |
     v
-Claude Code execute "rtk git status"
+Claude Code runs "rtk git status"
     |
     v
-Sortie filtree retournee a Claude (~10 tokens vs ~200)
+Filtered output returned to Claude
 ```
 
-**Points cles :**
-- Claude ne voit jamais la recriture -- il recoit simplement une sortie optimisee
-- Le hook est un delegateur leger (~50 lignes bash) qui appelle `rtk rewrite`
-- Toute la logique de recriture est dans le registre Rust (`src/discover/registry.rs`)
-- Les commandes deja prefixees par `rtk` passent sans modification
-- Les heredocs (`<<`) ne sont pas modifies
-- Les commandes non reconnues passent sans modification
+**Key points:**
+- Claude never sees the rewrite -- it simply receives optimized output
+- The hook is a lightweight delegator that calls `rtk rewrite`
+- Commands already prefixed with `rtk` pass through unchanged
+- Heredocs (`<<`) are not modified
+- Unrecognized commands pass through unchanged
 
 ### Installation
 
 ```bash
-rtk init -g                     # Installation recommandee (hook + RTK.md)
-rtk init -g --auto-patch        # Non-interactif (CI/CD)
-rtk init -g --hook-only         # Hook seul, sans RTK.md
-rtk init --show                 # Verifier l'installation
-rtk init -g --uninstall         # Desinstaller
+rtk init -g                     # Recommended install (hook + RTK.md)
+rtk init -g --auto-patch        # Non-interactive (CI/CD)
+rtk init -g --hook-only         # Hook only, without RTK.md
+rtk init --show                 # Check the installation
+rtk init -g --uninstall         # Uninstall
 ```
 
-### Fichiers installes
+### Installed files
 
-| Fichier | Description |
-|---------|-------------|
-| `~/.claude/hooks/rtk-rewrite.sh` | Script hook (delegue a `rtk rewrite`) |
-| `~/.claude/RTK.md` | Instructions minimales pour le LLM |
-| `~/.claude/settings.json` | Enregistrement du hook PreToolUse |
+| File | Description |
+|------|-------------|
+| `~/.claude/hooks/rtk-rewrite.sh` | Hook script (delegates to `rtk rewrite`) |
+| `~/.claude/RTK.md` | Minimal instructions for the LLM |
+| `~/.claude/settings.json` | PreToolUse hook registration |
 
-### `rtk rewrite` -- Recriture de commande
+### `rtk rewrite` -- Command rewriting
 
-Commande interne utilisee par le hook. Imprime la commande reecrite sur stdout (exit 0) ou sort avec exit 1 si aucun equivalent RTK n'existe.
+Internal command used by the hooks. The exit code carries the permission decision, taken from Claude Code's permission rules applied to every command in a chain:
+
+- `0`: prints the rewritten command; allow rules cover every command, so the hook may allow it without asking
+- `1`: no output, no rewrite (no RTK equivalent, nothing to rewrite, a command excluded in config, a construct RTK does not rewrite such as `$(...)` or a file redirect, or a deny rule matched inside a shell wrapper's script); the command runs unchanged
+- `2`: a deny matched (checked before anything else). With no output, a deny rule matched and the hook defers to the agent's own deny. With output, an rtk pipeline rule denied or routed the command, and the hook blocks it with that message
+- `3`: prints the rewritten command; an ask rule matched, or allow rules do not cover every command, including when there are no rules at all; the agent asks for confirmation
+
+An integration therefore reads stdout on `0` and `3` (and on `2`, for the block message), and keeps the confirmation prompt on `3`. With `RTK_REWRITE_HOST=openclaw`, an integration that handles approval itself gets `0` in place of every `3` that does not come from an ask rule; an integration that allows without asking on `0` therefore runs `rtk rewrite` without that variable.
 
 ```bash
-rtk rewrite "git status"           # -> "rtk git status" (exit 0)
-rtk rewrite "terraform plan"       # -> (exit 1, pas de recriture)
-rtk rewrite "rtk git status"       # -> "rtk git status" (exit 0, inchange)
+rtk rewrite "git status"           # -> "rtk git status" (exit 3 with no rules)
+rtk rewrite "echo hello"           # -> (exit 1, no rewrite)
+rtk rewrite "rtk git status"       # -> "rtk git status" (exit 3 with no rules, unchanged)
 ```
 
-### `rtk verify` -- Verification d'integrite
+### `rtk verify` -- Integrity check
 
-Verifie l'integrite du hook installe via un controle SHA-256.
+Checks the integrity of the installed hook with a SHA-256 check.
 
 ```bash
 rtk verify
 ```
 
-### Commandes reecrites automatiquement
+### Automatically rewritten commands
 
-| Commande brute | Reecrite en |
-|----------------|-------------|
+| Raw command | Rewritten to |
+|-------------|--------------|
 | `git status/diff/log/add/commit/push/pull` | `rtk git ...` |
 | `gh pr/issue/run` | `rtk gh ...` |
 | `cargo test/build/clippy/check` | `rtk cargo ...` |
-| `cat/head/tail <fichier>` | `rtk read <fichier>` |
+| `cat/head/tail <file>` | `rtk read <file>` |
 | `rg/grep <pattern>` | `rtk grep <pattern>` |
 | `ast-grep run -p <pattern>` | `rtk ast-grep run -p <pattern>` |
 | `ls` | `rtk ls` |
@@ -1319,169 +1324,217 @@ rtk verify
 | `curl` | `rtk curl` |
 | `pnpm list/outdated` | `rtk pnpm ...` |
 
-### Exclusion de commandes
+### Excluding commands
 
-Pour empecher certaines commandes d'etre reecrites, ajoutez-les dans `config.toml` :
+To prevent some commands from being rewritten, add them to `config.toml`:
 
 ```toml
 [hooks]
 exclude_commands = ["curl", "playwright"]
 ```
 
-Le motif est ancre en debut de commande : `"curl"` exclut `curl https://...` mais pas `curl-config`.
-Avant la comparaison, RTK retire le wrapper, l'interpreteur ou le chemin, donc `"playwright"` couvre
-`playwright test` comme `npx playwright test` ou `pnpm exec playwright test`, et `"pytest"` couvre
-aussi `python3 -m pytest tests/`. Les arguments sont conserves : `"^ls$"` exclut `ls` seul sans
-englober `ls -la`.
+The pattern is anchored at the start of the command: `"curl"` excludes `curl https://...` but not `curl-config`.
+Before comparing, RTK strips the wrapper, interpreter or path, so `"playwright"` covers
+`playwright test` as well as `npx playwright test` or `pnpm exec playwright test`, and `"pytest"` also covers
+`python3 -m pytest tests/`. Arguments are kept: `"^ls$"` excludes bare `ls` without
+also matching `ls -la`.
+
+### Unambiguously-fish scripts
+
+Some hosts evaluate the command string with a POSIX-compatible layer even when
+the user's shell is fish: a multi-line fish script (`if ... end`, `; and`,
+`; or`) then fails to parse before RTK even starts. The hook detects
+**unambiguous** scripts (a fish-only keyword such as `end`, `begin`, `switch`,
+`and`, `or`, `not` at command position, with no POSIX `then`/`fi`/`do`/`done`
+marker) and hands them back for explicit fish execution:
+
+```
+if test -d src\n  git status\nend
+-> rtk run --shell fish -c 'if test -d src\n  git status\nend'
+
+git diff HEAD~3 HEAD; and true
+-> rtk run --shell fish -c 'rtk git diff HEAD~3 HEAD; and true'
+```
+
+Key points:
+
+- **Off by default.** Turn it on with `wrap_fish_scripts = true` under
+  `[hooks]`.
+- **What turning it on costs.** The script reaches Claude Code's approval
+  prompt as a single `rtk run` command, so the prompt — and every permission
+  rule — sees that command, not the script's own. RTK therefore marks every
+  wrap as an explicit *ask*, and withholds it entirely when it can see any
+  `deny` rule, or when a settings file it reads is unparsable or unreadable.
+  Some rule sources never reach the hook at all: `--settings`,
+  `--disallowedTools`, managed settings, and the project directory the agent
+  has `cd`'d away from. A rule in one of those becomes an approval prompt
+  instead of a refusal.
+- **It happens only on `rtk hook claude`, and only when every Claude Code
+  settings file RTK reads parsed and none of them has a `deny` rule.** Once a
+  script reaches a fish, RTK can no longer say which commands run: fish starts
+  one where bash has no grammar at all, and resolves words at run time. Every
+  other host, every rules-only agent and `rtk rewrite` keep the behaviour they
+  had without this feature.
+- The script's own commands go through the ordinary rewrite rules first, so
+  wrapping costs no savings. A *multi-line* block opened by
+  `if`/`for`/`while`/`switch` is carried through unrewritten, as the rewrite
+  rules leave such blocks alone; a single-line `if ...; ...; end` is rewritten
+  like any other chain.
+- Requires a resolvable `fish` binary; disabled on Windows.
+- Also left alone — and so following the usual path, rewrite rules included:
+  ambiguous or POSIX scripts; those RTK cannot decompose for the permission
+  check (command substitution, including fish's own `(cmd)`, and a redirect to
+  a file — so `for f in (ls) ... end`); those containing `\\` or `\'` (fish and
+  POSIX single quotes disagree); and fish's `&|` pipe, which the rewrite cannot
+  re-emit in a form fish accepts.
 
 ---
 
 ## Configuration
 
-### Fichier de configuration
+### Configuration file
 
-**Emplacement :** `~/.config/rtk/config.toml` (Linux) ou `~/Library/Application Support/rtk/config.toml` (macOS)
+**Location:** `~/.config/rtk/config.toml` (Linux) or `~/Library/Application Support/rtk/config.toml` (macOS)
 
-**Commandes :**
+**Commands:**
 ```bash
-rtk config                # Afficher la configuration actuelle
-rtk config --create       # Creer le fichier avec les valeurs par defaut
+rtk config                # Show the current configuration
+rtk config --create       # Create the file with default values
 ```
 
-### Structure complete
+### Full structure
 
 ```toml
 [tracking]
-enabled = true              # Activer/desactiver le suivi
-history_days = 90           # Jours de retention (nettoyage automatique)
-database_path = "/custom/path/tracking.db"  # Chemin personnalise (optionnel)
+enabled = true              # Enable/disable tracking
+history_days = 90           # Retention in days (automatic cleanup)
+database_path = "/custom/path/tracking.db"  # Custom path (optional)
 
 [display]
-colors = true               # Sortie coloree
-emoji = true                # Utiliser les emojis
-max_width = 120             # Largeur maximale de sortie
+colors = true               # Colored output
+emoji = true                # Use emojis
+max_width = 120             # Maximum output width
 
 [filters]
 ignore_dirs = [".git", "node_modules", "target", "__pycache__", ".venv", "vendor"]
 ignore_files = ["*.lock", "*.min.js", "*.min.css"]
 
 [retriever]
-mode = "sqlite"             # sqlite (defaut) | tee (fichiers legacy) | disabled
-max_entries = 200           # Nombre max d'entrees dans la base recall
-retention_days = 30         # Retention des entrees
-# database_path = "/custom/recall.db"  # Chemin personnalise (optionnel)
-# Une ancienne section [tee] reste reconnue : mappee vers mode = "tee",
-# ou "disabled" si enabled = false
+mode = "sqlite"             # sqlite (default) | tee (legacy files) | disabled
+max_entries = 200           # Max entries in the recall database
+retention_days = 30         # Entry retention
+# database_path = "/custom/recall.db"  # Custom path (optional)
+# A legacy [tee] section is still recognized: mapped to mode = "tee",
+# or "disabled" if enabled = false
 
 [telemetry]
-enabled = false             # Telemetrie anonyme (1 ping/jour, requiert consentement)
-# consent_given = true      # Defini automatiquement par `rtk init` ou `rtk telemetry enable`
-# consent_date = "..."      # Date du consentement (RFC 3339)
+enabled = false             # Anonymous telemetry (1 ping/day, requires consent)
+# consent_given = true      # Set automatically by `rtk init` or `rtk telemetry enable`
+# consent_date = "..."      # Consent date (RFC 3339)
 
 [hooks]
-exclude_commands = []       # Commandes a exclure de la recriture automatique
+exclude_commands = []       # Commands excluded from automatic rewriting
+wrap_fish_scripts = false   # Opt in to handing a fish script back as `rtk run --shell fish -c`
 ```
 
-### Variables d'environnement
+### Environment variables
 
 | Variable | Description |
 |----------|-------------|
-| `RTK_RECALL=0` | Desactiver la sauvegarde recall |
-| `RTK_TEE_DIR` | Surcharge le repertoire tee (mode "tee") |
-| `RTK_TELEMETRY_DISABLED=1` | Desactiver la telemetrie |
-| `RTK_HOOK_AUDIT=1` | Activer l'audit du hook |
-| `SKIP_ENV_VALIDATION=1` | Desactiver la validation d'env (Next.js, etc.) |
+| `RTK_RECALL=0` | Disable recall saving |
+| `RTK_TEE_DIR` | Override the tee directory ("tee" mode) |
+| `RTK_TELEMETRY_DISABLED=1` | Disable telemetry |
+| `RTK_HOOK_AUDIT=1` | Enable hook auditing |
+| `SKIP_ENV_VALIDATION=1` | Disable env validation (Next.js, etc.) |
 
 ---
 
-## Systeme Recall
+## Recall system
 
-### Recuperation de sortie brute
+### Raw output recovery
 
-Quand une commande echoue (ou qu'un filtre tronque une liste), RTK sauvegarde la sortie brute complete dans une base SQLite locale, adressee par hash de contenu. Cela permet au LLM de recuperer la sortie sans re-executer la commande.
+When a command fails (or a filter truncates a list), RTK saves the complete raw output in a local SQLite database, addressed by content hash. This lets the LLM retrieve the output without re-running the command.
 
-**Fonctionnement :**
-1. La commande echoue (exit code != 0) ou la sortie est tronquee
-2. RTK stocke la sortie brute (gzip) dans `~/.local/share/rtk/recall.db`
-3. Un hint avec le hash est affiche : `[full output: rtk recall <hash>]` ou `[+N hidden: rtk recall <hash>]`
-4. `rtk recall <hash>` restitue la partie manquante (delta), `--full` la sortie complete
+**How it works:**
+1. The command fails (exit code != 0) or the output is truncated
+2. RTK stores the raw output (gzip) in `~/.local/share/rtk/recall.db`
+3. A hint with the hash is shown: `[full output: rtk recall <hash>]` or `[+N hidden: rtk recall <hash>]`
+4. `rtk recall <hash>` returns the missing part (delta); `--full` returns the complete output
 
-**Commandes :**
+**Commands:**
 ```bash
-rtk recall <hash>            # Partie non montree (delta)
-rtk recall <hash> --full     # Sortie complete
-rtk recall <hash> --grep RE  # Filtrer par regex
-rtk recall --list            # Lister les entrees
-rtk gain --recalls           # Taux de consultation par filtre (calibration des caps)
-rtk config recall <mode>     # Changer de mode sans editer la config (sqlite|tee|disabled)
+rtk recall <hash>            # Part not shown (delta)
+rtk recall <hash> --full     # Complete output
+rtk recall <hash> --grep RE  # Filter by regex
+rtk recall --list            # List entries
+rtk gain --recalls           # Retrieval rate per filter
+rtk config recall <mode>     # Change mode without editing the config (sqlite|tee|disabled)
 ```
 
-`rtk gain --recalls` separe strictement les donnees par mode : taux exact en sqlite
-(la lecture passe par `rtk recall`), approximation (`≥`) en tee (seules les lectures
-bash sont detectables via le hook, pas l'outil Read). Un taux eleve signale un filtre
-qui cache des sorties que l'agent revient chercher.
+`rtk gain --recalls` keeps data strictly separated by mode: an exact rate in sqlite mode
+(reads go through `rtk recall`), an approximation (`≥`) in tee mode (only bash reads
+are detectable through the hook, not the Read tool). A high rate indicates a filter
+that hides output the agent comes back for.
 
-**Configuration :**
+**Configuration:**
 
-| Parametre | Defaut | Description |
-|-----------|--------|-------------|
-| `retriever.mode` | `"sqlite"` | `"sqlite"`, `"tee"` (fichiers legacy), `"disabled"` |
-| `retriever.max_entries` | `200` | Eviction FIFO au-dela |
-| `retriever.retention_days` | `30` | Purge des entrees anciennes |
-| `retriever.max_entry_bytes` | `10 Mo` | Troncature au-dela (a la derniere ligne complete) |
-| Taille min | 500 octets | Les echecs trop courts ne sont pas sauvegardes |
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `retriever.mode` | `"sqlite"` | `"sqlite"`, `"tee"` (legacy files), `"disabled"` |
+| `retriever.max_entries` | `200` | FIFO eviction beyond this |
+| `retriever.retention_days` | `30` | Old entries are purged |
+| `retriever.max_entry_bytes` | `10 MB` | Truncated beyond this (at the last complete line) |
+| Minimum size | 500 bytes | Failures that are too short are not saved |
 
-Le mode `"tee"` conserve l'ancien comportement (fichiers `.log` dans `~/.local/share/rtk/tee/`, rotation `tee_max_files`). Une ancienne section `[tee]` en config est automatiquement mappee (voir plus haut).
+The `"tee"` mode keeps the legacy behavior (`.log` files in `~/.local/share/rtk/tee/`, rotation via `tee_max_files`). A legacy `[tee]` section in the config is mapped automatically (see above).
 
-Le mode se change avec `rtk config recall <sqlite|tee|disabled>` (edition chirurgicale de
-config.toml, commentaires preserves, champs `[tee]` legacy migres) — le champ equivalent
-en edition manuelle est `[retriever] mode`.
+Change the mode with `rtk config recall <sqlite|tee|disabled>` (a targeted edit of
+config.toml that preserves comments and migrates legacy `[tee]` fields); the equivalent
+field for manual editing is `[retriever] mode`.
 
 ---
 
-## Telemetrie
+## Telemetry
 
-RTK peut envoyer un ping anonyme une fois par jour (23h d'intervalle) pour des statistiques d'utilisation. La telemetrie est **desactivee par defaut** et requiert un consentement explicite (RGPD Art. 6, 7).
+RTK can send one anonymous ping per day (23-hour interval) for usage statistics. Telemetry is opt-in and **disabled by default**; it requires explicit consent (GDPR Art. 6, 7). `rtk init` asks for consent with a `[y/N]` prompt.
 
-**Donnees envoyees :** hash de device (SHA-256 d'un sel aleatoire), version, OS, architecture, nombre de commandes/24h, top commandes, pourcentage de reduction de sortie bash, compteurs recall par famille de filtre (elisions/consultations — noms issus d'une allowlist fermee, jamais de hash, chemin, argument ou contenu).
+**Data sent:** device hash (SHA-256 of a random salt), version, OS, architecture, command count over 24h, top commands, bash output reduction percentage, recall counters per filter family (elisions/retrievals -- names taken from a closed allowlist, never a hash, path, argument or content).
 
-**Responsable du traitement :** `RTK AI Labs`, contact@rtk-ai.app
+**Data controller:** `RTK AI Labs`, contact@rtk-ai.app
 
-**Gerer la telemetrie :**
+**Managing telemetry:**
 ```bash
-rtk telemetry status     # Voir l'etat du consentement
-rtk telemetry enable     # Donner son consentement (prompt interactif)
-rtk telemetry disable    # Retirer son consentement
-rtk telemetry forget     # Retirer + supprimer donnees locales + demande d'effacement serveur
+rtk telemetry status     # Show consent status
+rtk telemetry enable     # Give consent (interactive prompt)
+rtk telemetry disable    # Withdraw consent
+rtk telemetry forget     # Withdraw + delete local data + request server-side erasure
 ```
 
-**Desactiver via variable d'environnement :**
+**Disable via environment variable:**
 ```bash
 export RTK_TELEMETRY_DISABLED=1
 ```
 
-Aucune donnee personnelle, aucun contenu de commande, aucun chemin de fichier n'est transmis. Conservation serveur : 12 mois max. Details : [docs/TELEMETRY.md](../TELEMETRY.md)
+No personal data, no command content and no file path is transmitted. Server retention: 12 months max. Details: [docs/TELEMETRY.md](../TELEMETRY.md)
 
 ---
 
-## Resume de la reduction de sortie bash par categorie
+## Commands by category
 
-Octets de sortie bash supprimes (voir [A propos de la reduction de sortie bash](#a-propos-de-la-reduction-de-sortie-bash)).
-
-| Categorie | Commandes | Reduction sortie bash |
-|-----------|-----------|-------------------|
-| **Fichiers** | ls, tree, read, find, grep, ast-grep, diff | 60-85% |
-| **Git** | status, log, diff, show, add, commit, push, pull | 75-92% |
-| **GitHub** | pr, issue, run, api | 79-87% |
-| **Tests** | cargo test, vitest, playwright, pytest, go test | 90-99% |
-| **Build/Lint** | cargo build, tsc, eslint, prettier, next, ruff, clippy | 70-87% |
-| **Paquets** | pnpm, npm, pip, deps, prisma | 60-80% |
-| **Conteneurs** | docker, kubectl | 70-80% |
-| **Donnees** | json, env, log, curl, wget | 60-80% |
-| **Analytique** | gain, discover, learn, cc-economics | N/A (meta) |
+| Category | Commands |
+|----------|----------|
+| **Files** | ls, tree, read, find, grep, ast-grep, diff |
+| **Git** | status, log, diff, show, add, commit, push, pull |
+| **GitHub** | pr, issue, run, api |
+| **Tests** | cargo test, vitest, playwright, pytest, go test |
+| **Build/Lint** | cargo build, tsc, eslint, prettier, next, ruff, clippy |
+| **Packages** | pnpm, npm, pip, deps, prisma |
+| **Containers** | docker, kubectl |
+| **Data** | json, env, log, curl, wget |
+| **Analytics** | gain, discover, learn, cc-economics |
 
 ---
 
-## Nombre total de commandes
+## Coverage
 
-RTK supporte **45+ commandes** reparties en 9 categories, avec passthrough automatique pour les sous-commandes non reconnues. Cela en fait un proxy universel : il est toujours sur a utiliser en prefixe.
+RTK covers the 9 categories above, with automatic passthrough for unrecognized subcommands, so it is always safe to use as a prefix.

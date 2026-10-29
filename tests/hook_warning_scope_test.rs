@@ -8,7 +8,8 @@
 #![cfg(unix)]
 
 use std::path::Path;
-use std::process::Command;
+
+mod common;
 
 const REMINDER: &str = "No hook installed";
 
@@ -32,7 +33,7 @@ fn isolating_env(home: &Path) -> Vec<(String, std::ffi::OsString)> {
 /// Runs `rtk <args>` against a home directory whose Claude config directory
 /// exists but registers no hook, and returns stderr.
 fn run(home: &Path, args: &[&str]) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let out = common::rtk_command()
         .args(args)
         .envs(isolating_env(home))
         .output()
@@ -109,15 +110,13 @@ fn with_suppress_config(home: &Path, value: bool) {
     }
 }
 
-/// Like [`run`], but pins `RTK_SUPPRESS_HOOK_WARNING` — `None` unsets it, so an
-/// exported value in the developer's own shell cannot decide the outcome.
+/// Like [`run`], with `RTK_SUPPRESS_HOOK_WARNING` set to `value`, or unset.
 fn run_with_env(home: &Path, args: &[&str], value: Option<&str>) -> String {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rtk"));
+    let mut cmd = common::rtk_command();
     cmd.args(args).envs(isolating_env(home));
-    match value {
-        Some(v) => cmd.env("RTK_SUPPRESS_HOOK_WARNING", v),
-        None => cmd.env_remove("RTK_SUPPRESS_HOOK_WARNING"),
-    };
+    if let Some(value) = value {
+        cmd.env("RTK_SUPPRESS_HOOK_WARNING", value);
+    }
     let out = cmd.output().expect("run rtk");
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
@@ -173,5 +172,21 @@ fn gain_honours_the_suppression_flag() {
     assert!(
         !suppressed.contains(REMINDER),
         "gain must honour suppress_hook_warning: {suppressed}"
+    );
+}
+
+#[test]
+fn hook_entry_leaves_startup_warning_for_a_normal_command() {
+    let home = fresh_home();
+
+    // Exercise the real binary entry path. The hook processor may reject empty
+    // stdin, but startup background work runs before dispatch, which is the
+    // behavior this regression protects.
+    run(home.path(), &["hook", "claude"]);
+
+    let stderr = run(home.path(), &["ls"]);
+    assert!(
+        stderr.contains(REMINDER),
+        "a hook invocation must not consume the daily startup warning: {stderr}"
     );
 }

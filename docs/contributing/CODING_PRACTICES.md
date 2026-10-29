@@ -51,7 +51,7 @@ When you add an edge-case branch or a non-obvious exception, leave a short comme
 Referencing an issue is often the clearest form:
 
 ```rust
-// ISSUE #463: some `git log` output contains NUL bytes when --format=%x00 is used;
+// ISSUE #123: some `git log` output contains NUL bytes when --format=%x00 is used;
 // skip the line rather than panicking on invalid UTF-8.
 if line.contains('\0') {
     continue;
@@ -68,7 +68,7 @@ Comments are welcome when they add information the code cannot carry on its own.
 
 - **File header (`//!`)** — purpose and scope of the current file.
 - **Edge case** — a non-obvious branch or exception, as described above.
-- **Issue reference** — e.g. `// ISSUE #463: the fix for this`.
+- **Issue reference** — e.g. `// ISSUE #123: the fix for this`.
 - **"Why, not what"** — when the intent or tradeoff behind a decision isn't obvious from the code.
 
 In short: avoid noise comments; keep the ones that would save a future reader a trip to `git blame`.

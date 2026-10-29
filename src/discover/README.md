@@ -21,7 +21,9 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 → [Arg("cargo"), Arg("test"), Redirect("2>&1"), Operator("&&"), Arg("git"), Arg("status")]
 ```
 
-**Compound splitting** — The rewrite engine walks the tokens, splitting on `Operator` (`&&`, `||`, `;`) and typed `Pipe` tokens (`|`, `|&`). For normal pipelines, intermediate stages stay raw. A final stage whose rule's `pipeline_safety` allows it (ordinary `grep` and `rg` invocations) is rewritten; search pattern-file forms (`-f`/`--file`) defer because they can consume pipeline stdin as configuration. The producer stage is rewritten when its rule's `pipeline_safety` allows it and every downstream stage is a display-only consumer (`cat`, `head`, non-following `tail`) with no file-target redirect (#3171). Stderr pipelines (`|&`) and pipelines containing opaque shell groups remain raw.
+**Compound splitting** — The rewrite engine walks the tokens, splitting on `Operator` (`&&`, `||`, `;`, and the `case` terminators `;;`, `;&`, `;;&`) and typed `Pipe` tokens (`|`, `|&`). For normal pipelines, intermediate stages stay raw. A final stage whose rule's `pipeline_safety` allows it (ordinary `grep` and `rg` invocations) is rewritten; search pattern-file forms (`-f`/`--file`) defer because they can consume pipeline stdin as configuration. The producer stage is rewritten when its rule's `pipeline_safety` allows it and every downstream stage is a display-only consumer (`cat`, `head`, non-following `tail`) with no file-target redirect (#3171). Stderr pipelines (`|&`) and pipelines containing opaque shell groups remain raw.
+
+**Quoted shell wrappers** — An exact `sh -c`, `bash -c`, `zsh -c` or `fish -c` segment whose script is one balanced quoted argument has that script rewritten in place, leaving the shell path, quote delimiters, spacing, suffix arguments and redirects byte-identical (`shell_wrapper.rs`). Recursion is capped at one level, so a wrapper inside a wrapper stays raw. A script carrying a newline, heredoc, `$((`, or any construct the lexer cannot attest defers unchanged. The wrapper names the shell, so the script is attested under *that* shell's grammar (`ShellDialect`): inside `fish -c`, `(cmd)` is substitution and `and`/`or`/`end` are control flow, and either one defers — while the same shapes in a host command string or a POSIX wrapper stay ordinary bash and keep rewriting.
 
 **Per-segment rewriting** — Each segment goes through:
 
@@ -41,18 +43,19 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 
 ## Shared Lexer Toolkit
 
-`lexer.rs` is layer 1 of RTK's command parsing (raw string → quote/operator-aware tokens and words) — layer 2, already-split argv → flags/values, is `core/arg_tokenizer.rs`. It's not private to this module: `hooks/permissions.rs`, `hooks/mod.rs`, and `main.rs`'s `rtk proxy` all build on it instead of re-scanning commands themselves.
+`lexer.rs` is layer 1 of RTK's command parsing (raw string → quote/operator-aware tokens and words) — layer 2, already-split argv → flags/values, is `core/arg_tokenizer.rs`. It's not private to this module: `hooks/permissions.rs`, `hooks/mod.rs`, and `main.rs`'s `rtk bypass` all build on it instead of re-scanning commands themselves.
 
 | Function | Purpose | Used outside `discover/` by |
 |---|---|---|
 | `tokenize(cmd)` | Full shell-syntax tokens: quotes, escapes, operators, pipes, redirects, shellisms | — |
 | `tokenize_with_newlines(cmd)` | Like `tokenize`, plus a `\n` `Operator` token per unquoted newline (a lone `\r` stays glued to its word, matching real bash) | — |
-| `shell_split(cmd)` | Quote-aware split into argv-ready words (quotes stripped, escapes resolved) | `hooks/mod.rs::is_claude_hook_command`, `main.rs`'s `rtk proxy '...'` |
+| `shell_split(cmd)` | Quote-aware split into argv-ready words (quotes stripped, escapes resolved) | `hooks/mod.rs::is_claude_hook_command`, `main.rs`'s `rtk bypass '...'` |
 | `split_for_permissions(cmd)` | Segments a compound command for the **permission gate** — deliberately the most conservative of three segmenters (see its doc comment for the full comparison table) | `hooks/permissions.rs::check_command_with_rules` |
-| `split_on_operators(cmd, stop_at_pipe)` | Segments for classification only — not safe for permission/security decisions | `registry.rs::split_command_chain` |
-| `contains_unattestable_construct(cmd)` | True for command/process substitution or a file-target redirect — constructs the permission gate can't decompose and must never auto-allow | `hooks/permissions.rs::check_command_with_rules` |
+| `split_for_classify(cmd)` | Segments for classification only — not safe for permission/security decisions | — (`pub(crate)`; its caller `registry.rs::split_command_chain` is this module) |
+| `contains_unattestable_construct(cmd)` | True for command/process substitution, quoting the lexer reads differently from bash (`$'\''`), or a file-target redirect — constructs the permission gate can't decompose and must never auto-allow | `hooks/permissions.rs::check_command_with_rules` |
+| `contains_unattestable_construct_in(cmd, dialect)` | The same check for a string whose shell is known — adds fish's `(cmd)` substitution and command-position control keywords | `registry.rs::rewrite_shell_wrapper` (fish `-c` scripts only) |
 
-The permission gate, discover/analytics classification, and rewrite each segment compound commands (`&&`, `;`, `|`, background `&`, subshells) slightly differently on purpose — the gate must never under-segment (a hidden command could evade a deny rule), while rewrite and analytics only need to reproduce or classify the command's actual shape. Don't reuse `split_on_operators` or `rewrite_compound`'s segmenting for a permission/security decision; use `split_for_permissions`.
+The permission gate, discover/analytics classification, and rewrite each segment compound commands (`&&`, `;`, `|`, background `&`, subshells) slightly differently on purpose — the gate must never under-segment (a hidden command could evade a deny rule), while rewrite and analytics only need to reproduce or classify the command's actual shape. Don't reuse `split_for_classify` or `rewrite_compound`'s segmenting for a permission/security decision; use `split_for_permissions`.
 
 ## How History Analysis Works
 
@@ -95,6 +98,9 @@ longer be read off the token list.
 `stdbuf` is deliberately not a wrapper here: it exists to make the wrapped
 command emit output incrementally, and routing through rtk buffers that output
 until the child exits, so rewriting it would remove the only reason to type it.
+The permission gate still reads past it, and past a bare `xargs`, when it
+matches deny and ask rules (`matching_readings`): recognising the command
+behind a prefix and rewriting through it are separate decisions.
 
 Wrapping also changes who receives a signal. `timeout 300 rtk cargo test`
 signals rtk rather than cargo, so `core::stream` relays SIGINT/SIGTERM to the

@@ -8,15 +8,7 @@ Rewrites Hermes `terminal` tool commands to RTK equivalents before execution, so
 rtk init --agent hermes
 ```
 
-The installer writes the plugin to `~/.hermes/plugins/rtk-rewrite/` and enables it through `plugins.enabled` in the Hermes config. The repository copy lives in `hooks/hermes/`; don't use that repo path as the runtime install path.
-
-## Development
-
-Run the Hermes plugin tests from the repository root:
-
-```bash
-python3 -m unittest discover -s hooks/hermes
-```
+The installer writes the plugin to `~/.hermes/plugins/rtk-rewrite/` and enables it through `plugins.enabled` in the Hermes config.
 
 ## How it works
 

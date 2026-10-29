@@ -10,11 +10,11 @@
 //! Stubs `dotnet` on PATH with a script that records its argv, since the real
 //! dotnet SDK isn't available in this environment.
 
+mod common;
+
 #[cfg(unix)]
 #[test]
 fn dotnet_test_reuses_users_double_dash_for_report_trx_injection() {
-    use std::process::Command;
-
     fn shell_quote(path: &std::path::Path) -> String {
         format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
     }
@@ -34,6 +34,9 @@ fn dotnet_test_reuses_users_double_dash_for_report_trx_injection() {
 </Project>"#,
     )
     .expect("write csproj");
+    // The mode search walks up for `global.json` and stops at the first; one
+    // here keeps a `global.json` above the temporary directory from deciding it.
+    std::fs::write(dir.path().join("global.json"), "{}").expect("write global.json");
 
     std::fs::write(
         &stub_path,
@@ -55,7 +58,7 @@ fn dotnet_test_reuses_users_double_dash_for_report_trx_injection() {
         std::env::var("PATH").unwrap_or_default()
     );
 
-    let out = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let out = common::rtk_command()
         .env("PATH", path_with_stub)
         .current_dir(dir.path())
         .args(["dotnet", "test", "--", "FullyQualifiedName=MyFilter"])

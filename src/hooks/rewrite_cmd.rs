@@ -1,7 +1,8 @@
 //! Translates a raw shell command into its RTK-optimized equivalent.
 
 use super::decision::{self, HookDecision};
-use super::permissions::check_command;
+use super::permissions;
+use crate::core::user_dirs;
 use std::io::Write;
 
 const TEE_READERS: &[&str] = &[
@@ -10,12 +11,12 @@ const TEE_READERS: &[&str] = &[
 
 fn expand_home(token: &str) -> String {
     if let Some(rest) = token.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
+        && let Some(home) = user_dirs::home()
     {
         return home.join(rest).to_string_lossy().into_owned();
     }
     if let Some(rest) = token.strip_prefix("$HOME/")
-        && let Some(home) = dirs::home_dir()
+        && let Some(home) = user_dirs::home()
     {
         return home.join(rest).to_string_lossy().into_owned();
     }
@@ -67,22 +68,43 @@ pub(crate) fn track_tee_read(cmd: &str) {
 /// Prints the RTK-rewritten command to stdout and exits with a code that tells
 /// the caller how to handle permissions:
 ///
-/// | Exit | Stdout   | Meaning                                                      |
-/// |------|----------|--------------------------------------------------------------|
-/// | 0    | rewritten| Rewrite allowed — hook may auto-allow the rewritten command. |
-/// | 1    | (none)   | No RTK equivalent — hook passes through unchanged.           |
-/// | 2    | (none)   | Deny rule matched — hook defers to Claude Code native deny.  |
-/// | 3    | rewritten| Ask rule matched — hook rewrites but lets Claude Code prompt.|
+/// | Exit | Stdout   | Meaning                                                                  |
+/// |------|----------|--------------------------------------------------------------------------|
+/// | 0    | rewritten| Allow rules cover every command — hook may auto-allow the rewrite.       |
+/// | 1    | (none)   | No rewrite, or a deny rule matched inside a shell wrapper's script ([`decision::decide`] deferred) — hook passes through. |
+/// | 2    | (none)   | Deny rule matched — hook defers to the host's native deny.               |
+/// | 3    | rewritten| Ask rule, or allow rules short of every command (also with no rules) — hook rewrites, host prompts. |
 ///
 /// The decision itself is [`decision::decide`], shared with the in-process
 /// `rtk hook <agent>` path; this function is only its exit-code rendering.
+///
+/// A delegate that gates the rewritten command itself can set
+/// [`decision::REWRITE_HOST_ENV`] to its agent name (`openclaw` is the only one
+/// that resolves to [`decision::ApprovalOwner::Delegate`]), which renders a
+/// *default* ask (no ask rule, allow rules short of every command) as exit 0
+/// for it and nothing else. An explicit `ask` rule the user wrote still renders
+/// as exit 3, so the host can keep prompting for the command the user asked
+/// about. `rtk rewrite` never wraps a fish script, so no wrap passes through
+/// here at all. [`decision::ApprovalOwner::apply`] cannot transform a
+/// [`HookDecision::Deny`]: an explicit deny still reaches this function as
+/// `Deny` and still renders as exit 2, for every delegate, named or not.
 pub fn run(cmd: &str) -> anyhow::Result<()> {
-    // `rtk rewrite` is a subprocess entry point with no way to be told which
-    // host is asking, so every delegate that shells out to it -- hermes, omp,
-    // opencode, openclaw, pi -- is judged against `~/.claude`'s rules. The
-    // in-process `rtk hook <agent>` path is host-parameterized instead
-    // (`permissions::Host`).
-    let decided = decision::decide(cmd, check_command(cmd));
+    // `rtk rewrite` has one rule source for every delegate that shells out to
+    // it -- hermes, omp, opencode, openclaw, pi -- and that is `~/.claude`'s
+    // rules. The in-process `rtk hook <agent>` path is host-parameterized
+    // instead (`permissions::Host`). What a delegate may say about itself is
+    // only who owns approval, never whose rules apply.
+    //
+    // A fish script is never wrapped here. Those rules are read, but they are
+    // not what decides: the delegates apply exit 3 without prompting
+    // (`hooks/pi/rtk.ts`, `hooks/hermes/rtk-rewrite`), and OpenClaw matches
+    // its own exec checks against the returned string — so a wrap would put
+    // the script's commands past a gate RTK does not own.
+    let verdict = permissions::check_command(cmd);
+    let decided = decision::ApprovalOwner::from_env().apply(
+        decision::decide(cmd, verdict, permissions::DenyRules::Unattested),
+        verdict,
+    );
     if !matches!(decided, HookDecision::Deny) {
         track_tee_read(cmd);
     }
@@ -211,12 +233,14 @@ mod tests {
         ///   Ask    → 3 (process::exit(3))
         ///   Default→ 3 (process::exit(3)) — grouped with Ask
         ///   Deny   → 2 (process::exit(2)) — handled before rewrite match
+        ///   Defer  → 1 (process::exit(1)) — passthrough, no rewrite
         fn expected_exit_code(verdict: &PermissionVerdict) -> i32 {
             match verdict {
                 PermissionVerdict::Allow => 0,
                 PermissionVerdict::Deny => 2,
                 PermissionVerdict::Ask => 3,
                 PermissionVerdict::Default => 3, // MUST be 3, not 0!
+                PermissionVerdict::Defer => 1,
             }
         }
 
@@ -230,6 +254,15 @@ mod tests {
                 3,
                 "Default verdict MUST exit with code 3 (ask), not 0 (allow)"
             );
+        }
+
+        #[test]
+        fn test_defer_verdict_maps_to_passthrough_exit_code() {
+            let deny = vec!["git push:*".to_string()];
+            let allow = vec!["*".to_string()];
+            let verdict = check_command_with_rules("env bash -c 'git push'", &deny, &[], &allow);
+            assert_eq!(verdict, PermissionVerdict::Defer);
+            assert_eq!(expected_exit_code(&verdict), 1);
         }
 
         #[test]

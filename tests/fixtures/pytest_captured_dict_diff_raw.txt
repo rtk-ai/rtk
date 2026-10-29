@@ -1,0 +1,16 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________________ test_td ____________________________________
+test_td.py:7: in test_td
+    assert {"a": 1, "b": 2} == {"a": 1, "b": 3}
+E   AssertionError: assert {'a': 1, 'b': 2} == {'a': 1, 'b': 3}
+E     
+E     Omitting 1 identical items, use -vv to show
+E     Differing items:
+E     {'b': 2} != {'b': 3}
+E     Use -v to get more diff
+----------------------------- Captured stdout call -----------------------------
+E out line
+----------------------------- Captured stderr call -----------------------------
+E err line
+1 failed in 0.01s

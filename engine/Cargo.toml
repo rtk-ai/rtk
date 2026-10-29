@@ -1,0 +1,25 @@
+[package]
+name = "rtk-engine"
+version = "0.49.0"
+edition = "2021"
+rust-version = "1.91"
+authors = ["RTK AI Labs"]
+description = "RTK compression engine: methods, chains, markers, and pipeline primitives"
+license = "BUSL-1.1"
+publish = false
+
+[dependencies]
+rtk-text = { path = "../text" }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+toml = "0.8"
+toon-format = { version = "0.5.0", default-features = false }
+htmd = "0.5.5"
+
+[lints.rust]
+unsafe_code = "deny"
+warnings = "deny"
+
+[dev-dependencies]
+tempfile = "3"

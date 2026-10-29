@@ -48,13 +48,88 @@ pub fn tokenize_with_newlines(input: &str) -> Vec<ParsedToken> {
 
 /// Applies one character's effect on quote state, mirroring bash: only the
 /// quote char that opened a span closes it. Shared by `tokenize_inner`,
-/// `shell_split`, and `registry.rs::QuoteScan` so they can't drift.
+/// `shell_split`, and [`QuoteScan`] so they can't drift.
 pub(crate) fn advance_quote_state(quote: Option<char>, c: char) -> Option<char> {
     match (quote, c) {
         (None, '\'' | '"') => Some(c),
         (Some(q), c) if c == q => None,
         (q, _) => q,
     }
+}
+
+/// Byte walker yielding `(offset, byte, in_single_before, in_double_before)`.
+///
+/// Quote state comes from the shared [`advance_quote_state`] rather than an
+/// independently-maintained pair of bools, so it cannot drift from the lexer.
+pub(crate) struct QuoteScan<'a> {
+    bytes: &'a [u8],
+    i: usize,
+    quote: Option<char>,
+}
+
+impl<'a> QuoteScan<'a> {
+    pub(crate) fn new(s: &'a str) -> Self {
+        Self {
+            bytes: s.as_bytes(),
+            i: 0,
+            quote: None,
+        }
+    }
+
+    pub(crate) fn balanced(&self) -> bool {
+        self.quote.is_none()
+    }
+}
+
+impl Iterator for QuoteScan<'_> {
+    type Item = (usize, u8, bool, bool);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.i < self.bytes.len() {
+            let i = self.i;
+            let b = self.bytes[i];
+            if b == b'\\' && self.quote != Some('\'') {
+                self.i += 2;
+                continue;
+            }
+            let item = (i, b, self.quote == Some('\''), self.quote == Some('"'));
+            if b == b'\'' || b == b'"' {
+                self.quote = advance_quote_state(self.quote, b as char);
+            }
+            self.i += 1;
+            return Some(item);
+        }
+        None
+    }
+}
+
+/// Only `\'` inside `$'…'` diverges: bash keeps the string open, the lexer
+/// closes it (#3188). Every operator past that point yields no token, so the
+/// whole line reads as one segment and whatever follows rides along unchecked.
+pub(crate) fn ansi_c_quote_defeats_lexer(cmd: &str) -> bool {
+    let mut ansi_span = false;
+    let mut backslash_run = 0u32;
+    // The `$` must be one QuoteScan yielded: in `\$'...'` it was consumed as an
+    // escape, so indexing the raw bytes would read a `$` that never opened a span.
+    let mut prev_yielded = None;
+    for (_, b, in_single, in_double) in QuoteScan::new(cmd) {
+        if b == b'\'' && !in_double {
+            if !in_single {
+                ansi_span = prev_yielded == Some(b'$');
+                backslash_run = 0;
+            } else if ansi_span && backslash_run % 2 == 1 {
+                return true;
+            }
+        } else if in_single {
+            if b == b'\\' {
+                backslash_run += 1;
+            } else {
+                backslash_run = 0;
+            }
+        }
+        prev_yielded = Some(b);
+    }
+    false
 }
 
 /// Bash's default `$IFS` is exactly space/tab/newline — not Rust's
@@ -208,12 +283,28 @@ fn tokenize_inner(input: &str, newline_mode: NewlineMode) -> Vec<ParsedToken> {
             }
             ';' => {
                 flush_arg(&mut tokens, &mut current, current_start);
+                let start = byte_pos;
+                let mut val = String::from(";");
+                byte_pos += char_len;
+                // `;;`, `;&` and `;;&` are single `case` terminators. Split
+                // apart, the second half reads as an empty command, and the
+                // rewrite emits `; ;` or `; &` in its place — a syntax error,
+                // or a background job where a fall-through was written.
+                if chars.peek() == Some(&';') {
+                    chars.next();
+                    byte_pos += 1;
+                    val.push(';');
+                }
+                if chars.peek() == Some(&'&') {
+                    chars.next();
+                    byte_pos += 1;
+                    val.push('&');
+                }
                 tokens.push(ParsedToken {
                     kind: TokenKind::Operator,
-                    value: ";".into(),
-                    offset: byte_pos,
+                    value: val,
+                    offset: start,
                 });
-                byte_pos += char_len;
                 current_start = byte_pos;
             }
             '&' => {
@@ -293,14 +384,43 @@ fn tokenize_inner(input: &str, newline_mode: NewlineMode) -> Vec<ParsedToken> {
                 current_start = byte_pos;
             }
             '<' => {
-                flush_arg(&mut tokens, &mut current, current_start);
-                let start = byte_pos;
-                let mut val = String::from("<");
+                // A leading fd number belongs to the redirect, as in the `>`
+                // arm: left as its own word it reads as command text, and the
+                // redirect behind it then looks like a trailing one.
+                let fd_prefix =
+                    if !current.is_empty() && current.chars().all(|ch| ch.is_ascii_digit()) {
+                        Some(std::mem::take(&mut current))
+                    } else {
+                        flush_arg(&mut tokens, &mut current, current_start);
+                        None
+                    };
+                let start = if fd_prefix.is_some() {
+                    current_start
+                } else {
+                    byte_pos
+                };
+                let mut val = fd_prefix.unwrap_or_default();
+                val.push('<');
                 byte_pos += char_len;
                 if chars.peek() == Some(&'<') {
                     chars.next();
                     byte_pos += 1;
                     val.push('<');
+                } else if chars.peek() == Some(&'&') {
+                    // `<&N` is one redirection operator, as `>&N` is in the
+                    // `>` arm: split apart, its `&` reads as a background
+                    // operator and its `N` as a command.
+                    chars.next();
+                    byte_pos += 1;
+                    val.push('&');
+                    while let Some(&nc) = chars.peek() {
+                        if !nc.is_ascii_digit() && nc != '-' {
+                            break;
+                        }
+                        chars.next();
+                        byte_pos += 1;
+                        val.push(nc);
+                    }
                 }
                 tokens.push(ParsedToken {
                     kind: TokenKind::Redirect,
@@ -356,12 +476,63 @@ fn flush_arg(tokens: &mut Vec<ParsedToken>, current: &mut String, offset: usize)
     }
 }
 
+/// Which grammar a command string is written in.
+///
+/// RTK lexes a host's command string as bash — that is the tool the agent
+/// called, and `is_word_boundary_whitespace`, `advance_quote_state` and
+/// [`NewlineMode::Bash`] all model bash. The strings that are known to be
+/// something else are the scripts inside a quoted `<shell> -c '…'` wrapper,
+/// whose shell the wrapper itself names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShellDialect {
+    Posix,
+    /// Bash-compatible for everything RTK reads except the pair `&` opens:
+    /// `&|` and `&!` both background-and-disown in zsh, and this lexer reads
+    /// them as two tokens.
+    Zsh,
+    Fish,
+}
+
 /// True for constructs the permission gate can't decompose, so they must never
-/// be auto-allowed: command/process substitution, or a real file-target redirect
-/// (fd-dup like `2>&1` and `/dev/null` are exempt). Separators and subshells are
-/// handled by [`split_for_permissions`], not flagged here.
+/// be auto-allowed: command/process substitution, quoting the lexer reads
+/// differently from bash, or a real file-target redirect (fd-dup like `2>&1`
+/// and `/dev/null` are exempt). Separators and subshells are handled by
+/// [`split_for_permissions`], not flagged here.
 pub fn contains_unattestable_construct(cmd: &str) -> bool {
+    contains_unattestable_construct_in(cmd, ShellDialect::Posix)
+}
+
+/// [`contains_unattestable_construct`] for a string whose dialect is known.
+///
+/// In fish, two more shapes carry meaning this lexer does not model: `(cmd)` is
+/// command substitution rather than a subshell, and `and`, `or`, `end` and
+/// friends are control flow rather than command names. Both are refused — but
+/// only where the wrapper says the script is fish. Refusing them in bash would
+/// drop the rewrite for every ordinary `(cd dir && cmd)` and every line that
+/// merely contains an `if … fi` block.
+pub(crate) fn contains_unattestable_construct_in(cmd: &str, dialect: ShellDialect) -> bool {
     if contains_substitution(cmd) {
+        return true;
+    }
+    // Segments are not evidence about what will run once quoting diverges.
+    if ansi_c_quote_defeats_lexer(cmd) {
+        return true;
+    }
+    // `&|` and `&!` are one operator to the shell that names itself. This
+    // lexer reads them as a background `&` plus a pipe or a negation, and the
+    // rewrite re-emits the two spaced — `cmd & | …`, `cmd & ! …` — which zsh
+    // refuses to parse or silently turns into a different command. Bash has
+    // neither operator (`a &| b` is a syntax error spaced or not), so the
+    // Posix dialect keeps the rewrite it has always had.
+    if dialect != ShellDialect::Posix && opens_disown_pair(cmd) {
+        return true;
+    }
+    // The fish check needs newlines as boundaries, so a keyword opening a line
+    // is at command position; the redirect scan below keeps the bash-shaped
+    // tokens it has always used, where a newline is part of the word.
+    if dialect == ShellDialect::Fish
+        && contains_fish_only_construct(&tokenize_inner(cmd, NewlineMode::Conservative))
+    {
         return true;
     }
     let tokens = tokenize(cmd);
@@ -369,6 +540,73 @@ pub fn contains_unattestable_construct(cmd: &str) -> bool {
         .iter()
         .enumerate()
         .any(|(i, tok)| tok.kind == TokenKind::Redirect && redirect_has_file_target(&tokens, i))
+}
+
+/// Fish's own syntax: bare `(…)` substitution anywhere, a control keyword at a
+/// command boundary, or the `&|` pipe. Newlines are boundaries here, so a
+/// keyword opening a line of a multi-line script is seen.
+fn contains_fish_only_construct(tokens: &[ParsedToken]) -> bool {
+    const FISH_CONTROL_KEYWORDS: &[&str] = &[
+        "and", "or", "not", "begin", "end", "if", "else", "switch", "case", "for", "while",
+        "function",
+    ];
+
+    // `&|` pipes stdout and stderr in fish, and the rewrite would re-emit the
+    // two spaced, which fish rejects outright — so leave the script alone.
+    if disown_pair(tokens) {
+        return true;
+    }
+
+    let mut command_position = true;
+    for token in tokens {
+        match token.kind {
+            TokenKind::Shellism if matches!(token.value.as_str(), "(" | ")") => return true,
+            TokenKind::Operator | TokenKind::Pipe(_) => command_position = true,
+            TokenKind::Shellism if token.value == "&" => command_position = true,
+            TokenKind::Arg if command_position => {
+                if FISH_CONTROL_KEYWORDS.contains(&token.value.as_str()) {
+                    return true;
+                }
+                command_position = false;
+            }
+            _ => {}
+        }
+    }
+
+    false
+}
+
+/// True for the pair `&` opens when the next token is glued to it: `&|` in
+/// fish and zsh, `&!` in zsh. Each is one operator to the shell that named
+/// itself and two tokens to this lexer, so a rewrite that re-emits them
+/// spaced hands that shell something it reads differently.
+///
+/// Every path that hands a rewritten script back to such a shell has to refuse
+/// it: `shell_wrapper`'s `zsh -c`/`fish -c` cases and `fish_script`'s wrap.
+pub(crate) fn opens_disown_pair(cmd: &str) -> bool {
+    disown_pair(&tokenize_inner(cmd, NewlineMode::Conservative))
+}
+
+fn disown_pair(tokens: &[ParsedToken]) -> bool {
+    // Byte just past a `&` token, so the pair is spotted by adjacency.
+    let mut ampersand_end = None;
+    for token in tokens {
+        let glued = ampersand_end == Some(token.offset);
+        let pairs = match &token.kind {
+            TokenKind::Pipe(_) => true,
+            TokenKind::Shellism => token.value == "!",
+            TokenKind::Arg => token.value.starts_with('!'),
+            _ => false,
+        };
+        if glued && pairs {
+            return true;
+        }
+        ampersand_end = match &token.kind {
+            TokenKind::Shellism if token.value == "&" => Some(token.offset + token.value.len()),
+            _ => None,
+        };
+    }
+    false
 }
 
 /// Quote-aware: bash runs backtick/`$(...)` unquoted and inside double quotes,
@@ -398,20 +636,198 @@ fn contains_substitution(cmd: &str) -> bool {
     false
 }
 
-// `>&N`/`>&-` (and `N>&M`) is fd-dup/close; bare `>&` before a word is
-// `>word 2>&1` — a file target.
+/// Grammar that can open a command without being part of it, so it does not
+/// count as command text: a redirect behind one is still a leading redirect.
+fn is_grammar_word(value: &str) -> bool {
+    matches!(value, "{" | "}" | "!")
+}
+
+/// True when a redirect names its target in the *next* word rather than inside
+/// the operator.
+///
+/// `>&N`/`>&-` (and `N>&M`) duplicates or closes a descriptor, so the word
+/// after it is an argument of the command. `<&` duplicates exactly as `>&`
+/// does, and the tokenizer only folds digits or `-` after either, so neither
+/// can name a file.
+pub(crate) fn redirect_takes_operand(value: &str) -> bool {
+    let Some(pos) = value.find(">&").or_else(|| value.find("<&")) else {
+        return true;
+    };
+    let tail = &value[pos + 2..];
+    tail.is_empty() || !tail.chars().all(|c| c.is_ascii_digit() || c == '-')
+}
+
+// A redirect that takes an operand names a file unless that operand is
+// `/dev/null`; a bare `>&` before a word is `>word 2>&1` — a file target too.
 pub(crate) fn redirect_has_file_target(tokens: &[ParsedToken], i: usize) -> bool {
-    let value = &tokens[i].value;
-    if let Some(pos) = value.find(">&") {
-        let tail = &value[pos + 2..];
-        if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit() || c == '-') {
-            return false;
-        }
+    if !redirect_takes_operand(&tokens[i].value) {
+        return false;
     }
     match tokens.get(i + 1) {
         Some(next) if next.kind == TokenKind::Arg => next.value != "/dev/null",
         _ => true,
     }
+}
+
+/// How a policy treats redirect tokens.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RedirectPolicy {
+    /// Ordinary text: the segment keeps the redirect and its operand.
+    Keep,
+    /// The command is what matters, not its plumbing: a redirect before any
+    /// command text is stepped over, and one after it ends the segment.
+    Excise,
+    /// A redirect before any command text is stepped over, and one after it
+    /// stays in the segment: a shell wrapper's quoted script is read up to the
+    /// end of its words, plumbing included, as the rewrite reads it.
+    SkipLeading,
+}
+
+/// What counts as the end of a segment, and what the segment keeps.
+///
+/// The permission gate, analytics classification and the rewrite each need a
+/// different answer, and the gate's must be the most conservative — a segment
+/// it never sees is a command its rules never check. Naming the differences
+/// here keeps them chosen rather than emergent.
+#[derive(Clone, Copy)]
+pub(crate) struct Policy {
+    newline: NewlineMode,
+    /// `&`, `(` and `)` end a segment.
+    group_boundaries: bool,
+    redirects: RedirectPolicy,
+    stop_at_pipe: bool,
+}
+
+impl Policy {
+    /// The permission gate: breaks on everything a command could hide behind.
+    pub(crate) const PERMISSIONS: Self = Self {
+        newline: NewlineMode::Conservative,
+        group_boundaries: true,
+        redirects: RedirectPolicy::Excise,
+        stop_at_pipe: false,
+    };
+
+    /// The permission gate's look for a quoted shell wrapper: its boundaries,
+    /// without cutting a segment at a trailing redirect, so the wrapper's
+    /// script is the text the rewrite reads.
+    pub(crate) const WRAPPERS: Self = Self {
+        redirects: RedirectPolicy::SkipLeading,
+        ..Self::PERMISSIONS
+    };
+
+    /// Classification only, never a security decision.
+    pub(crate) const CLASSIFY: Self = Self {
+        newline: NewlineMode::None,
+        group_boundaries: false,
+        redirects: RedirectPolicy::Keep,
+        stop_at_pipe: false,
+    };
+
+    pub(crate) const fn stopping_at_pipe(self, stop_at_pipe: bool) -> Self {
+        Self {
+            stop_at_pipe,
+            ..self
+        }
+    }
+}
+
+/// One command's text within a compound command, with the byte range it came
+/// from so a caller can splice around it rather than rebuild it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Segment<'a> {
+    pub(crate) text: &'a str,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+}
+
+fn push_segment<'a>(out: &mut Vec<Segment<'a>>, input: &'a str, start: usize, end: usize) {
+    let raw = &input[start..end];
+    let text = raw.trim();
+    if text.is_empty() {
+        return;
+    }
+    let lead = raw.len() - raw.trim_start().len();
+    out.push(Segment {
+        text,
+        start: start + lead,
+        end: start + lead + text.len(),
+    });
+}
+
+/// Split a compound command into the commands it runs, under `policy`.
+///
+/// Offsets are relative to `cmd.trim()`, which is what every caller matches
+/// against.
+pub(crate) fn segment(cmd: &str, policy: Policy) -> Vec<Segment<'_>> {
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() {
+        return vec![];
+    }
+
+    let tokens = tokenize_inner(trimmed, policy.newline);
+    let mut out = Vec::new();
+    let mut seg_start: usize = 0;
+    let mut seg_end: Option<usize> = None;
+    let mut seg_has_text = false;
+
+    let mut i = 0;
+    while let Some(tok) = tokens.get(i) {
+        let is_boundary = match tok.kind {
+            TokenKind::Operator | TokenKind::Pipe(_) => true,
+            TokenKind::Shellism => {
+                policy.group_boundaries && matches!(tok.value.as_str(), "&" | "(" | ")")
+            }
+            _ => false,
+        };
+
+        if is_boundary {
+            let end = seg_end.take().unwrap_or(tok.offset);
+            push_segment(&mut out, trimmed, seg_start, end);
+            if policy.stop_at_pipe && matches!(tok.kind, TokenKind::Pipe(_)) {
+                return out;
+            }
+            seg_start = tok.offset + tok.value.len();
+            seg_has_text = false;
+        } else if tok.kind == TokenKind::Redirect && policy.redirects != RedirectPolicy::Keep {
+            if !seg_has_text {
+                // A redirect before the command word is stepped over instead of
+                // truncating the segment at it, together with the operand
+                // attached to the operator: the tokens that follow it with no
+                // gap, up to a boundary. `>$HOME/x` is several tokens but one
+                // word, and in `>a|rm -rf /` the `|` starts the next command
+                // rather than continuing the filename. A token after a gap
+                // belongs to the segment.
+                let mut end = tok.offset + tok.value.len();
+                let mut next = i + 1;
+                while let Some(part) = tokens.get(next) {
+                    let ends_operand = matches!(
+                        part.kind,
+                        TokenKind::Operator | TokenKind::Pipe(_) | TokenKind::Shellism
+                    );
+                    if part.offset != end || ends_operand {
+                        break;
+                    }
+                    end = part.offset + part.value.len();
+                    next += 1;
+                }
+                seg_start = end;
+                i = next;
+                continue;
+            } else if policy.redirects == RedirectPolicy::Excise && seg_end.is_none() {
+                seg_end = Some(tok.offset);
+            }
+        } else if tok.kind == TokenKind::Arg
+            || (tok.kind == TokenKind::Shellism && !is_grammar_word(&tok.value))
+        {
+            seg_has_text = true;
+        }
+
+        i += 1;
+    }
+
+    let end = seg_end.unwrap_or(trimmed.len());
+    push_segment(&mut out, trimmed, seg_start, end);
+    out
 }
 
 /// Segments `cmd` for the **permission gate** (`permissions.rs::check_command_with_rules`):
@@ -424,59 +840,39 @@ pub(crate) fn redirect_has_file_target(tokens: &[ParsedToken], i: usize) -> bool
 ///
 /// | | here (permission gate) | [`split_on_operators`] (analytics) | `rewrite_compound` (rewrite) |
 /// |---|---|---|---|
-/// | `&&` / `\|\|` / `;` | splits | splits | splits |
+/// | `&&` / `\|\|` / `;` / `;;` / `;&` / `;;&` | splits | splits | splits |
 /// | `\|` | always splits | stops at first `\|` | pipeline handled specially |
 /// | background `&` | splits (Shellism boundary) | does not split | splits |
 /// | `( ... )` grouping | splits (Shellism boundary) | does not split | does not split standalone |
 /// | trailing redirect | truncates the segment | kept | kept (rewritten output preserves it) |
+/// | leading redirect | stepped over with its attached operand, rest kept | kept | kept |
 /// | lone `\r` (no following `\n`) | splits | does not split | does not split |
 ///
 /// Like [`split_on_operators`] but also breaks on newline, background `&`,
 /// subshell `( ... )`, and a lone `\r` (`NewlineMode::Conservative`), and
-/// truncates each segment at its first redirect — deliberately conservative
-/// so a hidden command can't evade the gate by hiding behind a construct
-/// another segmenter would leave intact.
+/// truncates each segment at the first redirect that follows command text —
+/// deliberately conservative so a hidden command can't evade the gate by
+/// hiding behind a construct another segmenter would leave intact.
 /// Callers must still gate on [`contains_unattestable_construct`] first.
 pub fn split_for_permissions(cmd: &str) -> Vec<&str> {
-    let trimmed = cmd.trim();
-    if trimmed.is_empty() {
-        return vec![];
-    }
-
-    let tokens = tokenize_inner(trimmed, NewlineMode::Conservative);
-    let mut results = Vec::new();
-    let mut seg_start: usize = 0;
-    let mut seg_end: Option<usize> = None;
-
-    for tok in &tokens {
-        let is_boundary = match tok.kind {
-            TokenKind::Operator | TokenKind::Pipe(_) => true,
-            TokenKind::Shellism => matches!(tok.value.as_str(), "&" | "(" | ")"),
-            _ => false,
-        };
-
-        if is_boundary {
-            let end = seg_end.take().unwrap_or(tok.offset);
-            let segment = trimmed[seg_start..end].trim();
-            if !segment.is_empty() {
-                results.push(segment);
-            }
-            seg_start = tok.offset + tok.value.len();
-        } else if tok.kind == TokenKind::Redirect && seg_end.is_none() {
-            seg_end = Some(tok.offset);
-        }
-    }
-
-    let end = seg_end.unwrap_or(trimmed.len());
-    let tail = trimmed[seg_start..end].trim();
-    if !tail.is_empty() {
-        results.push(tail);
-    }
-
-    results
+    segment(cmd, Policy::PERMISSIONS)
+        .into_iter()
+        .map(|s| s.text)
+        .collect()
 }
 
-/// Split a shell command on operators (`&&`, `||`, `;`) and optionally pipes
+/// [`split_for_permissions`]'s boundaries, without cutting a segment at a
+/// trailing redirect: where the gate looks for a quoted shell wrapper, whose
+/// script runs to the end of its words as the rewrite reads it.
+pub fn split_for_wrappers(cmd: &str) -> Vec<&str> {
+    segment(cmd, Policy::WRAPPERS)
+        .into_iter()
+        .map(|s| s.text)
+        .collect()
+}
+
+/// Split a shell command on operators (`&&`, `||`, `;`, and the `case`
+/// terminators `;;`, `;&`, `;;&`) and optionally pipes
 /// (`|`), quote-aware. `stop_at_pipe: true` returns only segments before the
 /// first `|` (rewrite's left-side-only case); `false` splits through pipes
 /// too (permission checking, every segment validated).
@@ -486,44 +882,10 @@ pub fn split_for_permissions(cmd: &str) -> Vec<&str> {
 /// function's comparison table), so it must not be repurposed for
 /// permission/security decisions.
 pub fn split_on_operators(cmd: &str, stop_at_pipe: bool) -> Vec<&str> {
-    let trimmed = cmd.trim();
-    if trimmed.is_empty() {
-        return vec![];
-    }
-
-    let tokens = tokenize(trimmed);
-    let mut results = Vec::new();
-    let mut seg_start: usize = 0;
-
-    for tok in &tokens {
-        match tok.kind {
-            TokenKind::Operator => {
-                let segment = trimmed[seg_start..tok.offset].trim();
-                if !segment.is_empty() {
-                    results.push(segment);
-                }
-                seg_start = tok.offset + tok.value.len();
-            }
-            TokenKind::Pipe(_) => {
-                let segment = trimmed[seg_start..tok.offset].trim();
-                if !segment.is_empty() {
-                    results.push(segment);
-                }
-                if stop_at_pipe {
-                    return results;
-                }
-                seg_start = tok.offset + tok.value.len();
-            }
-            _ => {}
-        }
-    }
-
-    let tail = trimmed[seg_start..].trim();
-    if !tail.is_empty() {
-        results.push(tail);
-    }
-
-    results
+    segment(cmd, Policy::CLASSIFY.stopping_at_pipe(stop_at_pipe))
+        .into_iter()
+        .map(|s| s.text)
+        .collect()
 }
 
 #[cfg(test)]
@@ -586,7 +948,7 @@ fn resolve_word_text(raw: &str) -> String {
 /// Quote-aware split of a single shell command into argv-ready words: quotes
 /// stripped, backslash escapes resolved — for callers that hand the result
 /// straight to `Command::new`/exec or compare it against literal words
-/// (`hooks/mod.rs::is_claude_hook_command`, `rtk proxy` arg-splitting).
+/// (`hooks/mod.rs::is_claude_hook_command`, `rtk bypass` arg-splitting).
 pub fn shell_split(input: &str) -> Vec<String> {
     coalesce_words(input, &tokenize(input))
         .into_iter()
@@ -1414,6 +1776,97 @@ mod tests {
     // --- contains_unattestable_construct (security) -------------------------
 
     #[test]
+    fn test_fish_dialect_refuses_fish_only_constructs() {
+        for script in [
+            "git status (pwd)",
+            "git status; and cargo test",
+            "if test -d src; git status; end",
+            "not git status",
+            "for f in (ls)\n  echo $f\nend",
+        ] {
+            assert!(
+                contains_unattestable_construct_in(script, ShellDialect::Fish),
+                "fish script must not be attested: {script:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_posix_dialect_keeps_subshells_and_keywords_attestable() {
+        // The same shapes are ordinary bash. Flagging them here would drop the
+        // rewrite for every command line that merely contains one.
+        for cmd in [
+            "(cd sub && git status)",
+            "git log -20 && (cd www && npm test)",
+            "git status; if true; then echo x; fi",
+            "cargo build; for f in *.rs; do echo $f; done",
+            "git status; and cargo test",
+        ] {
+            assert!(
+                !contains_unattestable_construct(cmd),
+                "bash command must stay attestable: {cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_fish_dialect_refuses_the_stdout_and_stderr_pipe() {
+        // `&|` is one fish operator; re-emitted as `& |` it stops parsing.
+        for script in ["git status &| cargo test", "git status&|cargo test"] {
+            assert!(
+                contains_unattestable_construct_in(script, ShellDialect::Fish),
+                "fish `&|` must not be attested: {script:?}"
+            );
+        }
+        // A background `&` followed by a separate command is still fine.
+        assert!(!contains_unattestable_construct_in(
+            "git status & cargo test",
+            ShellDialect::Fish
+        ));
+    }
+
+    /// zsh reads `&|` and `&!` as one operator each — background and disown —
+    /// and the rewrite re-emits the two spaced. `cmd & | …` is a parse error
+    /// there, and `cmd & ! …` silently becomes a negated command, so a failing
+    /// script reports success. Bash has neither operator (`a &| b` is a syntax
+    /// error spaced or not), so the Posix dialect keeps the rewrite it had.
+    #[test]
+    fn test_zsh_dialect_refuses_the_pairs_an_ampersand_opens() {
+        for script in [
+            "cargo build &| tail -3",
+            "cargo build&|tail -3",
+            "ls &! ls /nonexistent",
+            "ls&!ls /nonexistent",
+            "ls &!",
+        ] {
+            assert!(
+                contains_unattestable_construct_in(script, ShellDialect::Zsh),
+                "zsh pair must not be attested: {script:?}"
+            );
+            assert!(
+                !contains_unattestable_construct_in(script, ShellDialect::Posix),
+                "bash reads no such operator: {script:?}"
+            );
+        }
+        // A background `&` with a command of its own is untouched, and so is a
+        // `!` that starts a command rather than following a `&`.
+        for script in ["sleep 1 & git status", "! git status", "git status | cat"] {
+            assert!(
+                !contains_unattestable_construct_in(script, ShellDialect::Zsh),
+                "ordinary zsh script must stay attestable: {script:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_fish_dialect_attests_a_portable_script() {
+        assert!(!contains_unattestable_construct_in(
+            "git status; cargo test",
+            ShellDialect::Fish
+        ));
+    }
+
+    #[test]
     fn test_unattestable_backtick() {
         assert!(contains_unattestable_construct("git status `whoami`"));
     }
@@ -1505,6 +1958,112 @@ mod tests {
     }
 
     // --- split_for_permissions ---------------------------------------------
+
+    /// `segment()` replaced two hand-rolled walkers. This is the contract for
+    /// that replacement: over a generated corpus of compound commands, both
+    /// policies must return exactly what the walker they replaced returned.
+    ///
+    /// The corpus is built from the constructs each walker treats specially,
+    /// crossed rather than listed, because the shapes that broke the gate in
+    /// practice were spacing variants nobody thought to write out.
+    #[test]
+    fn test_segment_matches_the_walkers_it_replaced() {
+        const COMMANDS: &[&str] = &["ls", "rm -rf /", "git status", "echo a b", ""];
+        const JOINERS: &[&str] = &[
+            " && ", "&&", " || ", "||", "; ", ";", " | ", "|", " |& ", "|&", " & ", "&", " ;; ",
+            ";;", ";&", ";;&", "\n", "\r\n", "\r", " ",
+        ];
+        const WRAPPERS: &[&str] = &["", "( ", "(", "{ ", "! ", ") ", "} "];
+        const REDIRECTS: &[&str] = &[
+            "",
+            "2>&1 ",
+            ">out ",
+            "<in ",
+            "0<&1 ",
+            ">a|",
+            "2>/dev/null ",
+            ">$HOME/x ",
+            "2>&1",
+        ];
+
+        let mut corpus: Vec<String> = Vec::new();
+        for left in COMMANDS {
+            for joiner in JOINERS {
+                for right in COMMANDS {
+                    corpus.push(format!("{left}{joiner}{right}"));
+                    for wrapper in WRAPPERS {
+                        corpus.push(format!("{wrapper}{left}{joiner}{right}"));
+                    }
+                    for redirect in REDIRECTS {
+                        corpus.push(format!("{redirect}{left}{joiner}{right}"));
+                        corpus.push(format!("{left}{joiner}{redirect}{right}"));
+                    }
+                }
+            }
+        }
+        // Quoting, escapes and trailing plumbing, which change tokenization
+        // rather than segmentation.
+        for extra in [
+            "echo 'a; b'",
+            "echo \"a && b\"",
+            "echo a\\;b",
+            "echo $'\\''; rm -rf /",
+            "cat <<EOF\nls\nEOF",
+            "ls 2>&1 | grep x",
+            "ls \\\n rm -rf /",
+            "case x in a) ls;; esac",
+            "  ls  ;  ls  ",
+            "café;;fin",
+        ] {
+            corpus.push(extra.to_string());
+        }
+
+        assert!(corpus.len() > 5000, "corpus collapsed to {}", corpus.len());
+
+        for cmd in &corpus {
+            assert_eq!(
+                split_for_permissions(cmd),
+                legacy_segmenters::split_for_permissions_legacy(cmd),
+                "permission segmentation changed for {cmd:?}"
+            );
+            for stop_at_pipe in [true, false] {
+                assert_eq!(
+                    split_on_operators(cmd, stop_at_pipe),
+                    legacy_segmenters::split_on_operators_legacy(cmd, stop_at_pipe),
+                    "classify segmentation changed for {cmd:?} (stop_at_pipe={stop_at_pipe})"
+                );
+            }
+        }
+    }
+
+    /// The spans exist so a caller can splice around a segment instead of
+    /// rebuilding it, which is only sound if they address the exact text.
+    #[test]
+    fn test_segment_spans_address_their_own_text() {
+        for cmd in [
+            "ls && rm -rf /",
+            "  ls  ;  ls  ",
+            "café;;fin",
+            "(ls; cargo build)",
+            "2>&1 ls | grep x",
+            "ls\r\nls -la",
+        ] {
+            let trimmed = cmd.trim();
+            for policy in [Policy::PERMISSIONS, Policy::CLASSIFY] {
+                for seg in segment(cmd, policy) {
+                    assert_eq!(
+                        &trimmed[seg.start..seg.end],
+                        seg.text,
+                        "span {}..{} does not address {:?} in {cmd:?}",
+                        seg.start,
+                        seg.end,
+                        seg.text
+                    );
+                    assert_eq!(seg.text.trim(), seg.text, "segment text was not trimmed");
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_split_perms_operators() {
@@ -1626,5 +2185,136 @@ mod tests {
             .map(|t| t.value)
             .collect();
         assert_eq!(args, vec!["git", "status\r", "git", "log"]);
+    }
+}
+
+#[cfg(test)]
+mod legacy_segmenters {
+    //! The hand-rolled segmenters `segment()` replaced, kept so the
+    //! differential test can prove the replacement changed nothing.
+    //!
+    //! **Do not edit this module.** It is an oracle, not code: its value is
+    //! that it is what shipped before the refactor. Tidying it, or "keeping it
+    //! in sync" with `segment()`, leaves the test passing while it stops
+    //! proving anything. Delete it outright when the refactor is old enough
+    //! that the comparison no longer earns its keep.
+    use super::*;
+
+    #[allow(dead_code)]
+    pub fn split_for_permissions_legacy(cmd: &str) -> Vec<&str> {
+        let trimmed = cmd.trim();
+        if trimmed.is_empty() {
+            return vec![];
+        }
+
+        let tokens = tokenize_inner(trimmed, NewlineMode::Conservative);
+        let mut results = Vec::new();
+        let mut seg_start: usize = 0;
+        let mut seg_end: Option<usize> = None;
+        let mut seg_has_text = false;
+
+        let mut i = 0;
+        while let Some(tok) = tokens.get(i) {
+            let is_boundary = match tok.kind {
+                TokenKind::Operator | TokenKind::Pipe(_) => true,
+                TokenKind::Shellism => matches!(tok.value.as_str(), "&" | "(" | ")"),
+                _ => false,
+            };
+
+            if is_boundary {
+                let end = seg_end.take().unwrap_or(tok.offset);
+                let segment = trimmed[seg_start..end].trim();
+                if !segment.is_empty() {
+                    results.push(segment);
+                }
+                seg_start = tok.offset + tok.value.len();
+                seg_has_text = false;
+            } else if tok.kind == TokenKind::Redirect {
+                if !seg_has_text {
+                    // A redirect may precede the command it applies to, and that
+                    // command still has to reach the deny rules, so step over the
+                    // redirect instead of truncating the segment at it.
+                    //
+                    // The operand runs to the first gap or boundary. `>$HOME/x` is
+                    // several tokens but one word, and a boundary ends the operand
+                    // even with no gap — in `>a|rm -rf /` the `|` starts the next
+                    // command rather than continuing the filename.
+                    let mut end = tok.offset + tok.value.len();
+                    let mut next = i + 1;
+                    while let Some(part) = tokens.get(next) {
+                        let ends_operand = matches!(
+                            part.kind,
+                            TokenKind::Operator | TokenKind::Pipe(_) | TokenKind::Shellism
+                        );
+                        if part.offset != end || ends_operand {
+                            break;
+                        }
+                        end = part.offset + part.value.len();
+                        next += 1;
+                    }
+                    seg_start = end;
+                    i = next;
+                    continue;
+                } else if seg_end.is_none() {
+                    seg_end = Some(tok.offset);
+                }
+            } else if tok.kind == TokenKind::Arg
+                || (tok.kind == TokenKind::Shellism && !is_grammar_word(&tok.value))
+            {
+                seg_has_text = true;
+            }
+
+            i += 1;
+        }
+
+        let end = seg_end.unwrap_or(trimmed.len());
+        let tail = trimmed[seg_start..end].trim();
+        if !tail.is_empty() {
+            results.push(tail);
+        }
+
+        results
+    }
+
+    #[allow(dead_code)]
+    pub fn split_on_operators_legacy(cmd: &str, stop_at_pipe: bool) -> Vec<&str> {
+        let trimmed = cmd.trim();
+        if trimmed.is_empty() {
+            return vec![];
+        }
+
+        let tokens = tokenize(trimmed);
+        let mut results = Vec::new();
+        let mut seg_start: usize = 0;
+
+        for tok in &tokens {
+            match tok.kind {
+                TokenKind::Operator => {
+                    let segment = trimmed[seg_start..tok.offset].trim();
+                    if !segment.is_empty() {
+                        results.push(segment);
+                    }
+                    seg_start = tok.offset + tok.value.len();
+                }
+                TokenKind::Pipe(_) => {
+                    let segment = trimmed[seg_start..tok.offset].trim();
+                    if !segment.is_empty() {
+                        results.push(segment);
+                    }
+                    if stop_at_pipe {
+                        return results;
+                    }
+                    seg_start = tok.offset + tok.value.len();
+                }
+                _ => {}
+            }
+        }
+
+        let tail = trimmed[seg_start..].trim();
+        if !tail.is_empty() {
+            results.push(tail);
+        }
+
+        results
     }
 }

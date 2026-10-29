@@ -1,12 +1,16 @@
 //! Filters npm output and auto-injects the "run" subcommand when appropriate.
 
 use crate::core::runner;
+use crate::core::shell::display_args;
 use crate::core::utils::resolved_command;
 use anyhow::Result;
 use std::io::IsTerminal;
 
 /// Known npm subcommands that should NOT get "run" injected.
 /// Shared between production code and tests to avoid drift.
+///
+/// A tool with a list like this also belongs in `core::tracking::SUBCOMMAND_ROUTERS`,
+/// which keeps the subcommand in its telemetry label.
 const NPM_SUBCOMMANDS: &[&str] = &[
     "install",
     "i",
@@ -157,7 +161,7 @@ fn run_filtered(
         cmd.env("SKIP_ENV_VALIDATION", "1");
     }
 
-    let args_display = args.join(" ");
+    let args_display = display_args(args);
     if verbose > 0 {
         eprintln!("Running: {} {}", name, args_display);
     }

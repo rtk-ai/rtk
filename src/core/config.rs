@@ -1,6 +1,8 @@
 //! Reads user settings from config.toml.
 
 use super::constants::{CONFIG_TOML, DEFAULT_HISTORY_DAYS, RTK_DATA_DIR};
+use crate::core::user_dirs;
+use crate::core::user_env;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -34,7 +36,7 @@ pub struct Config {
 /// How much the agent is told about RTK by the instructions file `rtk init` writes.
 ///
 /// - `default`: output contract only. The agent never learns rtk exists.
-/// - `high`: adds what RTK is and its meta commands (`rtk gain`, `rtk proxy`, `RTK_DISABLED=1`).
+/// - `high`: adds what RTK is and its meta commands (`rtk gain`, `rtk bypass`, `RTK_DISABLED=1`).
 /// - `full`: adds "prefix every command with `rtk`". Required for agents without a command
 ///   hook; those agents always receive `full` regardless of this setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -113,7 +115,7 @@ fn map_legacy_tee(
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct HooksConfig {
     /// Commands to exclude from auto-rewrite (e.g. ["curl", "playwright"]).
     /// Survives `rtk init -g` re-runs since config.toml is user-owned.
@@ -147,6 +149,20 @@ pub struct HooksConfig {
     /// Does not mute the "Hook outdated" upgrade prompt.
     #[serde(default)]
     pub suppress_hook_warning: bool,
+
+    /// Rewrite unambiguously-fish scripts (`if … end` blocks, `; and` chains)
+    /// to `rtk run --shell fish -c '<script>'` on Claude Code's own hook, so a
+    /// host that evaluates command strings with a POSIX layer does not fail on
+    /// fish-only syntax before RTK runs.
+    ///
+    /// Off by default, because the wrap changes what the host's own permission
+    /// check can see: the script arrives as one `rtk run` command, so a rule
+    /// RTK cannot read — `--settings`, `--disallowedTools`, managed settings,
+    /// or a project directory the agent has moved away from — no longer
+    /// matches the script's own commands. Every wrap is therefore emitted as
+    /// an explicit ask. See `src/hooks/README.md`.
+    #[serde(default)]
+    pub wrap_fish_scripts: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -275,9 +291,22 @@ pub fn hook_rewrite_params() -> (Vec<String>, Vec<String>) {
 /// same process run (e.g. `hooks::init::save_telemetry_consent`'s load-mutate-save),
 /// since those must always observe a fresh read. Only reach for this from a
 /// caller that never itself writes config.toml.
-pub(crate) fn cached_config() -> &'static Config {
-    static CACHE: std::sync::OnceLock<Config> = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| Config::load().unwrap_or_default())
+///
+/// In a test build every call loads afresh from the calling test's own
+/// `user_dirs::config`: a process-wide cache would hold whichever test's
+/// configuration was read first, and hand it to all the others.
+pub(crate) fn cached_config() -> std::sync::Arc<Config> {
+    #[cfg(not(test))]
+    {
+        static CACHE: std::sync::OnceLock<std::sync::Arc<Config>> = std::sync::OnceLock::new();
+        CACHE
+            .get_or_init(|| std::sync::Arc::new(Config::load().unwrap_or_default()))
+            .clone()
+    }
+    #[cfg(test)]
+    {
+        std::sync::Arc::new(Config::load().unwrap_or_default())
+    }
 }
 
 /// Check if the missing-hook warning is suppressed via env var or config.
@@ -287,7 +316,7 @@ pub(crate) fn cached_config() -> &'static Config {
 /// force off, case-insensitive. Unset, empty, or unrecognised values fall
 /// through to `hooks.suppress_hook_warning` instead of vetoing it.
 pub fn hook_warning_suppressed() -> bool {
-    parse_suppress_hook_warning_env(std::env::var("RTK_SUPPRESS_HOOK_WARNING").ok().as_deref())
+    parse_suppress_hook_warning_env(user_env::var("RTK_SUPPRESS_HOOK_WARNING").as_deref())
         .unwrap_or_else(|| cached_config().hooks.suppress_hook_warning)
 }
 
@@ -483,8 +512,8 @@ pub fn show_recall_mode() -> Result<()> {
     if config.migrated_from_legacy_tee {
         println!("source: legacy [tee] section (auto-migrated at load)");
     }
-    if std::env::var("RTK_RECALL").ok().as_deref() == Some("0")
-        || std::env::var("RTK_TEE").ok().as_deref() == Some("0")
+    if user_env::var("RTK_RECALL").as_deref() == Some("0")
+        || user_env::var("RTK_TEE").as_deref() == Some("0")
     {
         println!("note: RTK_RECALL=0/RTK_TEE=0 is set — recovery disabled for this environment");
     }
@@ -493,8 +522,8 @@ pub fn show_recall_mode() -> Result<()> {
 }
 
 fn get_config_path() -> Result<PathBuf> {
-    let config_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-    Ok(config_dir.join(RTK_DATA_DIR).join(CONFIG_TOML))
+    let rtk_dir = user_dirs::config().unwrap_or_else(|| PathBuf::from(".").join(RTK_DATA_DIR));
+    Ok(rtk_dir.join(CONFIG_TOML))
 }
 
 pub fn show_config() -> Result<()> {
@@ -584,6 +613,30 @@ exclude_commands = ["curl", "gh"]
         assert!(config.hooks.exclude_commands.is_empty());
         assert!(!config.hooks.suppress_hook_warning);
         assert!(config.hooks.transparent_prefixes.is_empty());
+        assert!(!config.hooks.wrap_fish_scripts);
+    }
+
+    /// Opt-in: the wrap hands the script to the host as one `rtk run` command,
+    /// which its own permission check reads instead of the script's commands.
+    /// A config that does not name the field must not get that.
+    #[test]
+    fn test_hooks_config_wrap_fish_scripts_missing_defaults_false() {
+        let toml = r#"
+[hooks]
+exclude_commands = ["curl"]
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(!config.hooks.wrap_fish_scripts);
+    }
+
+    #[test]
+    fn test_hooks_config_wrap_fish_scripts_opt_in() {
+        let toml = r#"
+[hooks]
+wrap_fish_scripts = true
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(config.hooks.wrap_fish_scripts);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 pub mod detector;
 pub mod report;
 
+use crate::core::user_dirs;
 use crate::discover::provider::{ClaudeProvider, SessionProvider};
 use anyhow::Result;
 use detector::{CommandExecution, deduplicate_corrections, find_corrections};
@@ -26,7 +27,7 @@ pub fn run(
         Some(p)
     } else {
         // Default: current working directory
-        let cwd = std::env::current_dir()?;
+        let cwd = user_dirs::current_dir()?;
         let cwd_str = cwd.to_string_lossy().to_string();
         let encoded = ClaudeProvider::encode_project_path(&cwd_str);
         Some(encoded)

@@ -1,6 +1,6 @@
 ---
 title: RTK Documentation
-description: RTK (Rust Token Killer) — cut up to 90% of the bash output your agent reads on common dev commands, with zero workflow changes
+description: RTK (Rust Token Killer) — cut the bash output your agent reads on common dev commands, with zero workflow changes
 sidebar:
   order: 1
 ---
@@ -9,7 +9,7 @@ sidebar:
 
 RTK is a CLI proxy that sits between your AI assistant and your development tools. It filters command output before it reaches the LLM, keeping only what matters and discarding boilerplate, progress bars, and noise.
 
-**Result:** up to 90% fewer bash output bytes reaching the LLM per command, without changing how you work. You run `git status` as usual — RTK's hook intercepts it, filters the output, and the LLM sees a compact 3-line summary instead of 40 lines.
+**Result:** fewer bash output bytes reaching the LLM per command, without changing how you work. You run `git status` as usual — RTK's hook intercepts it, filters the output, and the LLM sees a compact 3-line summary instead of 40 lines.
 
 ## How it works
 
@@ -37,7 +37,7 @@ See [How RTK Savings Work](./resources/savings-explained.md) for the full pictur
 
 ## What RTK optimizes
 
-Dozens of commands across all major ecosystems — Git, Cargo/Rust, JavaScript, Python, Go, Ruby, .NET, Docker/Kubernetes, and more. See [What RTK Optimizes](./resources/what-rtk-covers.md) for the full list with per-command bash output reduction.
+Dozens of commands across all major ecosystems — Git, Cargo/Rust, JavaScript, Python, Go, Ruby, .NET, Docker/Kubernetes, and more. See [What RTK Optimizes](./resources/what-rtk-covers.md) for the full list.
 
 ## Get started
 
@@ -64,9 +64,18 @@ rtk session        # RTK adoption rate per Claude Code session
 
 See [Discover and Session](./analytics/discover.md) for details.
 
+## Go further
+
+Two optional layers sit on top of the hooks. Neither changes anything until you opt in.
+
+- **[The engine](./pipelines/overview.md)** — everything RTK does is expressed in one composable `pipeline.toml`: which commands get rewritten, what happens to a tool's output, what the proxy compresses. With no pipeline file you are on `rtk:default` and nothing changes. Start with [Writing a Pipeline](./pipelines/writing-pipelines.md); [Conditions and Judges](./pipelines/conditions.md) and [Methods](./pipelines/methods.md) are the vocabulary, [Pipeline Commands](./pipelines/commands.md) is for inspecting, debugging and sharing one.
+- **[The RTK Proxy](./proxy/overview.md)** — a local daemon that runs the pipeline on the API traffic itself, one layer above bash output. Ships as its own download. See [What the Proxy Compresses](./proxy/compression.md) and [Proxy Configuration](./proxy/configuration.md).
+
 ## Further reading
 
 - [Configuration](./getting-started/configuration.md) — config.toml, global flags, env vars, recall recovery
 - [Troubleshooting](./resources/troubleshooting.md) — common issues and fixes
 - [Telemetry & Privacy](./resources/telemetry.md) — what RTK collects and how to opt out
+- [Agent Coverage](./resources/agent-coverage.md) — what each agent's hook API lets RTK do
+- [Editions and Licensing](./resources/editions.md) — the three downloads, what each contains, where the licence boundary falls
 - [ARCHITECTURE.md](https://github.com/rtk-ai/rtk/blob/master/ARCHITECTURE.md) — system design for contributors

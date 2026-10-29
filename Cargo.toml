@@ -1,9 +1,31 @@
+# Two crates, one binary. `rtk` (Apache-2.0) is the CLI; `engine` (BUSL-1.1)
+# is `rtk-engine`, the pure compression core the CLI LINKS -- so the shipped
+# `rtk` binary contains BUSL-1.1 code, and engine/LICENSE carries an
+# Additional Use Grant covering production use as part of that binary.
+#
+# `proxy/` is DELIBERATELY NOT a member, but note what that does and does
+# not buy: cargo scans every manifest in the repository regardless of
+# membership, so a bare `cargo install --git <url>` still aborts with
+# "multiple packages with binaries found" as long as proxy/ declares a
+# [[bin]]. Non-membership only keeps tokio/axum out of the CLI's dependency
+# graph and lockfile. The documented install command therefore names the
+# package (`cargo install --git <url> rtk`), and the daemon is built
+# explicitly from its own directory:
+#   cargo build --release --manifest-path proxy/Cargo.toml
+#
+# The cost of the split is that `libsqlite3-sys` (which declares
+# `links = "sqlite3"`) is pinned by hand in both lockfiles: rusqlite 0.34 here
+# and in proxy/Cargo.toml, matching what icm-store links. Do not bump one
+# alone. CI lints and tests the daemon in its own job.
+[workspace]
+members = [".", "text", "engine", "plugin"]
+
 [package]
 name = "rtk"
-version = "0.48.0"
+version = "0.49.0"
 edition = "2024"
 rust-version = "1.91"
-authors = ["Patrick Szymkowiak"]
+authors = ["RTK AI Labs"]
 description = "Rust Token Killer - High-performance CLI proxy to minimize LLM token consumption"
 license = "Apache-2.0"
 homepage = "https://www.rtk-ai.app"
@@ -12,7 +34,24 @@ readme = "README.md"
 keywords = ["cli", "llm", "token", "filter", "productivity"]
 categories = ["command-line-utilities", "development-tools"]
 
+[lib]
+# The lib target exists so a plugin host can call `rtk::entry()`. rtk is an
+# application, not a library API: every module here is private, so a doctest —
+# which compiles as an external crate and sees only `pub` items — can never
+# reach them. Running doctests would test the examples against themselves.
+doctest = false
+
+[features]
+# The full edition. `--no-default-features` builds the Apache-2.0 hook core
+# alone: no rtk-engine in the dependency graph, no BUSL code in the binary.
+default = ["engine"]
+engine = ["dep:rtk-engine"]
+example-plugins = ["engine", "dep:rtk-plugin"]
+
 [dependencies]
+rtk-engine = { path = "engine", optional = true }
+rtk-plugin = { path = "plugin", optional = true }
+rtk-text = { path = "text" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1.0"
 # Console code page decoding for child-process output. Kept off the
@@ -29,8 +68,11 @@ regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 colored = "3"
-dirs = "5"
-rusqlite = { version = "0.31", features = ["bundled"] }
+dirs = "7"
+# Pinned to what the proxy crate's icm-store links: libsqlite3-sys declares
+# `links = "sqlite3"`, and two versions of it cannot coexist in one workspace
+# resolve. See proxy/Cargo.toml.
+rusqlite = { version = "0.34", features = ["bundled"] }
 toml = "0.8"
 toml_edit = "0.22"
 chrono = "0.4"
@@ -41,12 +83,17 @@ getrandom = "0.4"
 flate2 = "1.0"
 quick-xml = "0.37"
 which = "8"
+# `rtk gain --watch`: a live full-screen dashboard over the same two SQLite
+# sources the static view reads (core::tracking + the llm-proxy's own DB).
+# Opt-in, not on the hot startup path -- doesn't affect the <10ms budget.
+ratatui = "0.29"
+crossterm = "0.29"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_System_Console",
     "Win32_Globalization",
 ] }
@@ -64,24 +111,56 @@ temp-env = "0.3"
 opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
+# NOT `panic = "abort"`. `hooks::posthook::run` wraps the whole method chain in
+# `catch_unwind` as the fail-open net that keeps a panicking filter from taking
+# the user's tool call down with it, and abort makes that net dead code in the
+# shipped binary. The unwind tables cost a little size; breaking a command
+# costs more.
 strip = true
 
 # cargo-deb configuration
 [package.metadata.deb]
-maintainer = "Patrick Szymkowiak"
-copyright = "2024 Patrick Szymkowiak"
+maintainer = "RTK AI Labs <contact@rtk-ai.app>"
+copyright = "2026 RTK AI Labs"
 license-file = ["LICENSE", "0"]
-extended-description = "rtk filters and compresses command outputs before they reach your LLM context, saving 60-90% of tokens."
+# The binary links the BUSL-1.1 rtk-engine; its text ships alongside.
+extended-description = "rtk filters and compresses command outputs before they reach your LLM context, cutting the bash output your agent reads."
+conflicts = "rtk-oss"
+replaces = "rtk-oss"
 section = "utility"
 priority = "optional"
 assets = [
     ["target/release/rtk", "usr/bin/", "755"],
+    ["LICENSE", "usr/share/doc/rtk/LICENSE", "644"],
+    ["engine/LICENSE", "usr/share/doc/rtk/LICENSE-ENGINE", "644"],
 ]
 # cargo-generate-rpm configuration
 [package.metadata.generate-rpm]
+conflicts = { rtk-oss = "*" }
 assets = [
     { source = "target/release/rtk", dest = "/usr/bin/rtk", mode = "755" },
+    { source = "LICENSE", dest = "/usr/share/doc/rtk/LICENSE", mode = "644", doc = true },
+    { source = "engine/LICENSE", dest = "/usr/share/doc/rtk/LICENSE-ENGINE", mode = "644", doc = true },
+]
+
+# The Apache-2.0 edition: same binary, built without the BUSL engine, so only
+# the Apache text ships with it.
+[package.metadata.deb.variants.oss]
+name = "rtk-oss"
+conflicts = "rtk"
+replaces = "rtk"
+extended-description = "rtk filters and compresses command outputs before they reach your LLM context. Apache-2.0 edition: the hook rewrite system and command filters, without the BUSL-1.1 compression engine."
+assets = [
+    ["target/release/rtk", "usr/bin/", "755"],
+    ["LICENSE", "usr/share/doc/rtk/LICENSE", "644"],
+]
+
+[package.metadata.generate-rpm.variants.oss]
+name = "rtk-oss"
+conflicts = { rtk = "*" }
+assets = [
+    { source = "target/release/rtk", dest = "/usr/bin/rtk", mode = "755" },
+    { source = "LICENSE", dest = "/usr/share/doc/rtk/LICENSE", mode = "644", doc = true },
 ]
 
 [lints.rust]

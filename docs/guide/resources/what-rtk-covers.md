@@ -1,6 +1,6 @@
 ---
 title: What RTK Optimizes
-description: Commands and ecosystems automatically optimized by RTK, with typical bash output reduction
+description: Commands and ecosystems automatically optimized by RTK
 sidebar:
   order: 1
 ---
@@ -9,154 +9,142 @@ sidebar:
 
 Once RTK is installed with a hook, these commands are automatically intercepted and filtered. You run them normally — the hook rewrites them transparently before execution.
 
-Typical bash output reduction: 60-99%.
-
 :::note
-Every percentage below measures **bash output bytes removed** — the only thing RTK controls. Those bytes are one contributor to input tokens, and input tokens are only part of a bill that also counts output tokens. See [How RTK Savings Work](./savings-explained.md) before reading these numbers as cost figures.
+RTK reduces **bash output bytes** — the only thing it controls. Those bytes are one contributor to input tokens, and input tokens are only part of a bill that also counts output tokens. See [How RTK Savings Work](./savings-explained.md).
 :::
 
 ## Git
 
-| Command | Bash output reduction | What changes |
-|---------|----------------------|--------------|
-| `git status` | 75-93% | Compact stat format, grouped by state |
-| `git log` | 80-92% | Hash + author + subject only |
-| `git diff` | 70% | Context reduced, headers stripped |
-| `git show` | 70% | Same as diff |
-| `git stash list` | 75% | Compact one-line per entry |
+| Command | What changes |
+|---------|--------------|
+| `git status` | Compact stat format, grouped by state |
+| `git log` | Hash + author + subject only |
+| `git diff` | Context reduced, headers stripped |
+| `git show` | Same as diff |
+| `git stash list` | Compact one-line per entry |
 
 ## GitHub CLI
 
-| Command | Bash output reduction | What changes |
-|---------|----------------------|--------------|
-| `gh pr view` | 87% | Removes ASCII art and verbose metadata |
-| `gh pr checks` | 79% | Status + name only, failures highlighted |
-| `gh run list` | 82% | Compact workflow run summary |
-| `gh issue view` | 80% | Body only, no decoration |
+| Command | What changes |
+|---------|--------------|
+| `gh pr view` | Removes ASCII art and verbose metadata |
+| `gh pr checks` | Status + name only, failures highlighted |
+| `gh run list` | Compact workflow run summary |
+| `gh issue view` | Body only, no decoration |
 
 ## Graphite (Stacked PRs)
 
-| Command | Bash output reduction | What changes |
-|---------|----------------------|--------------|
-| `gt log` | 75% | Stack summary only |
-| `gt status` | 70% | Current branch context |
+| Command | What changes |
+|---------|--------------|
+| `gt log` | Stack summary only |
+| `gt status` | Current branch context |
 
 ## Cargo / Rust
 
-| Command | Bash output reduction | What changes |
-|---------|----------------------|--------------|
-| `cargo test` | 90% | Failures only, passed tests suppressed |
-| `cargo nextest` | 90% | Same as test |
-| `cargo build` | 80% | Errors and warnings only |
-| `cargo check` | 80% | Errors and warnings only |
-| `cargo clippy` | 80% | Lint warnings grouped by file |
+| Command | What changes |
+|---------|--------------|
+| `cargo test` | Failures only, passed tests suppressed |
+| `cargo build` | Errors and warnings only |
+| `cargo check` | Errors and warnings only |
+| `cargo clippy` | Lint warnings grouped by file |
 
 ## JavaScript / TypeScript
 
-| Command | Bash output reduction | What changes |
-|---------|----------------------|--------------|
-| `jest` | 94-99% | Failures only |
-| `vitest` | 94-99% | Failures only |
-| `tsc` | 75% | Type errors grouped by file |
-| `eslint` | 84% | Violations grouped by rule |
-| `pnpm list` | 70-90% | Compact dependency tree |
-| `pnpm outdated` | 70% | Package + current + latest only |
-| `next build` | 80% | Route summary + errors only |
-| `prisma migrate` | 75% | Migration status only |
-| `playwright test` | 90% | Failures + trace links only |
+| Command | What changes |
+|---------|--------------|
+| `jest` | Failures only |
+| `vitest` | Failures only |
+| `tsc` | Type errors grouped by file |
+| `eslint` | Violations grouped by rule |
+| `pnpm list` | Compact dependency tree |
+| `pnpm outdated` | Package + current + latest only |
+| `next build` | Route summary + errors only |
+| `ng build` | Compact Angular build tables; every bundle and diagnostic retained |
+| `prisma migrate` | Migration status only |
+| `playwright test` | Failures + trace links only |
 
 ## Python
 
-| Command | Bash output reduction | What changes |
-|---------|----------------------|--------------|
-| `pytest` | 80-90% | Failures only |
-| `ruff check` | 75% | Violations grouped by file |
-| `mypy` | 75% | Type errors grouped by file |
-| `pip install` | 70% | Installed packages only, progress stripped |
+| Command | What changes |
+|---------|--------------|
+| `pytest` | Failures only |
+| `ruff check` | Violations grouped by file |
+| `mypy` | Type errors grouped by file |
+| `pip install` | Installed packages only, progress stripped |
 
 ## Go
 
-| Command | Bash output reduction | What changes |
-|---------|----------------------|--------------|
-| `go test` | 80-90% | Failures only |
-| `golangci-lint run` | 75% | Violations grouped by file |
-| `go build` | 75% | Errors only |
+| Command | What changes |
+|---------|--------------|
+| `go test` | Failures only |
+| `golangci-lint run` | Violations grouped by file |
+| `go build` | Errors only |
 
 ## Ruby
 
-| Command | Bash output reduction | What changes |
-|---------|----------------------|--------------|
-| `rspec` | 80-90% | Failures only |
-| `rubocop` | 75% | Offenses grouped by file |
-| `rake` | 70% | Task output, build errors highlighted |
+| Command | What changes |
+|---------|--------------|
+| `rspec` | Failures only |
+| `rubocop` | Offenses grouped by file |
+| `rake` | Task output, build errors highlighted |
 
 ## .NET
 
-| Command | Bash output reduction | What changes |
-|---------|----------------------|--------------|
-| `dotnet build` | 80% | Errors and warnings only |
-| `dotnet test` | 85-90% | Failures only |
-| `dotnet format` | 75% | Changed files only |
+| Command | What changes |
+|---------|--------------|
+| `dotnet build` | Errors and warnings only |
+| `dotnet restore` | Restore summary, errors and warnings kept |
 
 ## Docker / Kubernetes
 
-| Command | Bash output reduction | What changes |
-|---------|----------------------|--------------|
-| `docker ps` | 65% | Essential columns (name, image, status, port) |
-| `docker images` | 60% | Name + tag + size only |
-| `docker logs` | 70% | Deduplicated, last N lines |
-| `docker compose up` | 75% | Service status, errors highlighted |
-| `kubectl get pods` | 65% | Name + status + restarts only |
-| `kubectl logs` | 70% | Deduplicated entries |
+| Command | What changes |
+|---------|--------------|
+| `docker ps` | Essential columns (name, image, status, port) |
+| `docker images` | Name + tag + size only |
+| `docker logs` | Deduplicated, last N lines |
+| `kubectl get pods` | Name + status + restarts only |
+| `kubectl logs` | Deduplicated entries |
 
 ## Files and Search
 
-| Command | Bash output reduction | What changes |
-|---------|----------------------|--------------|
-| `ls` | 80% | Tree format with file counts |
-| `find` | 75% | Tree format |
-| `grep` | 70% | Truncated lines, grouped by file |
-| `ast-grep` | 85% | Grouped by file, capped overflow; `--json` passes through |
-| `diff` | 65% | Context reduced |
-| `wc` | 60% | Compact counts |
-| `cat` / `head` / `tail <file>` | 60-80% | Smart file reading via `rtk read` |
-| `rtk smart <file>` | 85% | 2-line heuristic code summary (signatures only) |
+| Command | What changes |
+|---------|--------------|
+| `ls` | Tree format with file counts |
+| `find` | Tree format |
+| `grep` | Truncated lines, grouped by file |
+| `ast-grep` | Grouped by file, capped overflow; `--json` passes through |
+| `diff` | Context reduced |
+| `wc` | Compact counts |
+| `cat` / `head` / `tail <file>` | Smart file reading via `rtk read` |
+| `rtk smart <file>` | 2-line heuristic code summary (signatures only) |
 
 ## Cloud and Data
 
-| Command | Bash output reduction | What changes |
-|---------|----------------------|--------------|
-| `aws` | 70% | JSON condensed, relevant fields only |
-| `psql` | 65% | Query results without decoration |
-| `curl` | 60% | Response body only, headers stripped |
+| Command | What changes |
+|---------|--------------|
+| `aws` | JSON condensed, relevant fields only |
+| `psql` | Query results without decoration |
+| `curl` | Response body only, headers stripped |
 
 ## Global flags
 
-These flags apply to all RTK commands and can push the bash output reduction even higher:
+These flags apply to all RTK commands and must come before the subcommand:
 
 | Flag | Description |
 |------|-------------|
-| `--ultra-compact` | ASCII icons, inline format — extra token reduction on top of normal filtering |
 | `-v` / `--verbose` | Show filtering details on stderr (`-v`, `-vv`, `-vvv` for increasing detail) |
 
 ```bash
-# Ultra-compact: even smaller output
-rtk git log --ultra-compact
-
 # Debug: see what RTK is doing
-rtk git status -vvv
+rtk -vvv git status
 ```
-
-:::note
-Use `--ultra-compact` (long form) rather than `-u` when working with Git commands. Git's own `-u` flag means `--set-upstream` and the short form can cause confusion.
-:::
 
 ## Commands that are not rewritten
 
 If a command isn't in the list above, RTK runs it through passthrough — the output reaches the LLM unchanged. You can explicitly track unsupported commands:
 
 ```bash
-rtk proxy make install    # runs make install, tracks usage, no filtering
+rtk bypass make install    # runs make install, tracks usage, no filtering
 ```
 
 To check which commands were missed opportunities: `rtk discover`.

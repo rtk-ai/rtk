@@ -2,6 +2,7 @@
 
 use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
+use crate::core::shell::display_args;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::{CAP_INVENTORY, CAP_LIST, CAP_WARNINGS};
@@ -342,10 +343,11 @@ fn docker_logs(args: &[String], _verbose: u8) -> Result<i32> {
         return Ok(0);
     }
 
+    let argv = ["logs", "--tail", "100", container];
     let mut cmd = resolved_command("docker");
-    cmd.args(["logs", "--tail", "100", container]);
+    cmd.args(argv);
 
-    let label = format!("logs {}", container);
+    let label = display_args(&argv);
     runner::run_filtered(
         cmd,
         "docker",
@@ -522,13 +524,14 @@ pub fn k8s_logs(tool: &str, args: &[String], _verbose: u8) -> Result<i32> {
         return Ok(0);
     }
 
+    let argv: Vec<&str> = ["logs", "--tail", "100"]
+        .into_iter()
+        .chain(args.iter().map(String::as_str))
+        .collect();
     let mut cmd = resolved_command(tool);
-    cmd.args(["logs", "--tail", "100", pod]);
-    for arg in args.iter().skip(1) {
-        cmd.arg(arg);
-    }
+    cmd.args(&argv);
 
-    let label = format!("logs {}", pod);
+    let label = display_args(&argv);
     runner::run_filtered(
         cmd,
         tool,
@@ -751,18 +754,18 @@ pub fn run_compose_ps(all: bool, verbose: u8) -> Result<i32> {
 }
 
 pub fn run_compose_logs(service: Option<&str>, tail: u32, verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("docker");
     let tail_str = tail.to_string();
-    cmd.args(["compose", "logs", "--tail", &tail_str]);
-    if let Some(svc) = service {
-        cmd.arg(svc);
-    }
+    let argv: Vec<&str> = ["compose", "logs", "--tail", &tail_str]
+        .into_iter()
+        .chain(service)
+        .collect();
+    let mut cmd = resolved_command("docker");
+    cmd.args(&argv);
 
-    let svc_label = service.unwrap_or("all");
     runner::run_filtered(
         cmd,
         "docker",
-        &format!("compose logs {}", svc_label),
+        &display_args(&argv),
         |raw| {
             if verbose > 0 {
                 eprintln!("raw docker compose logs:\n{}", raw);
@@ -774,17 +777,14 @@ pub fn run_compose_logs(service: Option<&str>, tail: u32, verbose: u8) -> Result
 }
 
 pub fn run_compose_build(service: Option<&str>, verbose: u8) -> Result<i32> {
+    let argv: Vec<&str> = ["compose", "build"].into_iter().chain(service).collect();
     let mut cmd = resolved_command("docker");
-    cmd.args(["compose", "build"]);
-    if let Some(svc) = service {
-        cmd.arg(svc);
-    }
+    cmd.args(&argv);
 
-    let svc_label = service.unwrap_or("all");
     runner::run_filtered(
         cmd,
         "docker",
-        &format!("compose build {}", svc_label),
+        &display_args(&argv),
         |raw| {
             if verbose > 0 {
                 eprintln!("raw docker compose build:\n{}", raw);

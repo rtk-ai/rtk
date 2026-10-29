@@ -45,6 +45,29 @@ pub trait SessionProvider {
 
 pub struct ClaudeProvider;
 
+/// Substring match of a project filter against a project directory name.
+///
+/// On Windows the match is case-insensitive: NTFS paths are case-insensitive
+/// and Claude Code encodes the project folder from whatever cwd casing it was
+/// launched with, so the same project can produce sibling folders like
+/// `E--proj` and `e--proj`, while `std::env::current_dir()` reports whatever
+/// casing the launching shell set (an uppercase drive letter under PowerShell).
+/// Either side can differ from the other, so both are lowered; a case-sensitive
+/// match finds zero sessions.
+fn dir_matches_filter(dir_name: &str, filter: &str) -> bool {
+    dir_matches_filter_impl(dir_name, filter, cfg!(windows))
+}
+
+fn dir_matches_filter_impl(dir_name: &str, filter: &str, case_insensitive: bool) -> bool {
+    if case_insensitive {
+        dir_name
+            .to_ascii_lowercase()
+            .contains(&filter.to_ascii_lowercase())
+    } else {
+        dir_name.contains(filter)
+    }
+}
+
 impl ClaudeProvider {
     /// Get the base directory for Claude Code projects.
     fn projects_dir() -> Result<PathBuf> {
@@ -94,7 +117,7 @@ impl ClaudeProvider {
             // Apply project filter: substring match on directory name
             if let Some(filter) = project_filter {
                 let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !dir_name.contains(filter) {
+                if !dir_matches_filter(dir_name, filter) {
                     continue;
                 }
             }
@@ -427,6 +450,29 @@ mod tests {
     }
 
     #[test]
+    fn test_dir_matches_filter_case_sensitive() {
+        assert!(dir_matches_filter_impl("-Users-foo-rtk", "rtk", false));
+        assert!(!dir_matches_filter_impl("-Users-foo-RTK", "rtk", false));
+    }
+
+    #[test]
+    fn test_dir_matches_filter_case_insensitive_windows() {
+        // Uppercase cwd drive letter vs lowercase history folder
+        assert!(dir_matches_filter_impl(
+            "e--PROJECT-XXX-XXX-xxxx",
+            "E--PROJECT-XXX-XXX-xxxx",
+            true
+        ));
+        // And the reverse: lowercase cwd vs uppercase folder
+        assert!(dir_matches_filter_impl(
+            "E--PROJECT-app",
+            "e--PROJECT-app",
+            true
+        ));
+        assert!(!dir_matches_filter_impl("e--PROJECT-app", "e--OTHER", true));
+    }
+
+    #[test]
     fn test_match_project_filter() {
         let encoded = ClaudeProvider::encode_project_path("/Users/foo/Sites/rtk");
         assert!(encoded.contains("rtk"));
@@ -484,6 +530,30 @@ mod tests {
             sessions[0].file_name().and_then(|name| name.to_str()),
             Some("matching.jsonl")
         );
+    }
+
+    #[test]
+    fn test_discover_sessions_project_filter_case_follows_platform() {
+        // The default filter comes from `current_dir()`, whose drive-letter casing
+        // can differ from the folder Claude Code created (#2919): the walk matches
+        // case-insensitively on Windows and exactly elsewhere. Drives the
+        // `cfg!(windows)` wrapper, which the `_impl` tests cannot reach.
+        let projects_dir = tempfile::tempdir().unwrap();
+        for name in ["E--PROJECT-app", "-Users-test-other"] {
+            let dir = projects_dir.path().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("session.jsonl"), "").unwrap();
+        }
+
+        let sessions = ClaudeProvider::discover_sessions_in_projects_dir(
+            projects_dir.path(),
+            Some("e--project-app"),
+            None,
+        )
+        .unwrap();
+
+        let expected = if cfg!(windows) { 1 } else { 0 };
+        assert_eq!(sessions.len(), expected);
     }
 
     #[test]

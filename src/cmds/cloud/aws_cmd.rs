@@ -4,6 +4,7 @@
 //! Specialized filters for high-frequency commands (STS, S3, EC2, ECS, RDS, CloudFormation).
 
 use crate::core::guard::never_worse;
+use crate::core::shell::display_args;
 use crate::core::stream::{CaptureResult, exec_capture};
 use crate::core::tee::force_tee_hint;
 use crate::core::tracking;
@@ -47,11 +48,11 @@ impl FilterResult {
 /// Run an AWS CLI command with token-optimized output
 pub fn run(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
     // Build the full sub-path: e.g. "sts" + ["get-caller-identity"] -> "sts get-caller-identity"
-    let full_sub = if args.is_empty() {
-        subcommand.to_string()
-    } else {
-        format!("{} {}", subcommand, args.join(" "))
-    };
+    let full_sub = display_args(
+        &std::iter::once(subcommand)
+            .chain(args.iter().map(String::as_str))
+            .collect::<Vec<_>>(),
+    );
 
     // Route to specialized handlers
     match subcommand {
@@ -328,7 +329,7 @@ fn run_aws_filtered(
     verbose: u8,
     filter_fn: fn(&str) -> Option<FilterResult>,
 ) -> Result<i32> {
-    let cmd_label = format!("aws {}", sub_args.join(" "));
+    let cmd_label = format!("aws {}", display_args(sub_args));
     let rtk_label = format!("rtk {}", cmd_label);
     let slug = cmd_label.replace(' ', "_");
     let timer = tracking::TimedExecution::start();

@@ -1,6 +1,7 @@
 //! Compares two files and shows only the changed lines.
 
 use crate::core::guard::never_worse;
+use crate::core::shell::display_args;
 use crate::core::tracking;
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -32,26 +33,69 @@ static MARKED_PROSE_RE: LazyLock<Regex> =
 
 const IDENTICAL_FILES_MESSAGE: &str = "[ok] Files are identical\n";
 
+/// POSIX diff's "trouble" exit code: an operand could not be read at all
+/// (missing, permission denied, is-a-directory). Distinct from 1, which says
+/// the two files differ — the distinction a caller's `if diff a b` relies on.
+const DIFF_EXIT_TROUBLE: i32 = 2;
+
 /// Ultra-condensed diff - only changed lines, no context.
-/// Returns the diff-convention exit code: 0 if identical, 1 if files differ.
+/// Returns the diff-convention exit code: 0 if identical, 1 if files differ,
+/// 2 if an operand cannot be read.
 pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+    let command = format!(
+        "diff {}",
+        display_args(&[file1.to_string_lossy(), file2.to_string_lossy()])
+    );
 
     if verbose > 0 {
         eprintln!("Comparing: {} vs {}", file1.display(), file2.display());
     }
 
-    let content1 = fs::read_to_string(file1)?;
-    let content2 = fs::read_to_string(file2)?;
+    // Read bytes first so non-UTF-8 data is not mistaken for an I/O failure.
+    let (bytes1, bytes2) = match fs::read(file1)
+        .map_err(|error| (file1, error))
+        .and_then(|first| {
+            fs::read(file2)
+                .map(|second| (first, second))
+                .map_err(|error| (file2, error))
+        }) {
+        Ok(contents) => contents,
+        Err((path, error)) => {
+            let message = format!("rtk diff: {}: {}", path.display(), error);
+            eprintln!("{}", message);
+            timer.track(&command, "rtk diff", &message, &message);
+            return Ok(DIFF_EXIT_TROUBLE);
+        }
+    };
+
+    let (content1, content2) = match (std::str::from_utf8(&bytes1), std::str::from_utf8(&bytes2)) {
+        (Ok(first), Ok(second)) => (first, second),
+        _ => {
+            let different = bytes1 != bytes2;
+            let message = if different {
+                format!(
+                    "Binary files {} and {} differ\n",
+                    file1.display(),
+                    file2.display()
+                )
+            } else {
+                String::new()
+            };
+            print!("{}", message);
+            timer.track(&command, "rtk diff", &message, &message);
+            return Ok(i32::from(different));
+        }
+    };
     let both_files = format!("{}\n---\n{}", content1, content2);
 
-    let comparison = compare_files(&content1, &content2);
+    let comparison = compare_files(content1, content2);
     let fallback = classic_fallback(&comparison);
     let (rtk, exit_code) = render_diff(file1, file2, &comparison);
     let shown = select_file_diff_output(&comparison, &fallback, &both_files, &rtk);
     print!("{}", shown);
     timer.track(
-        &format!("diff {} {}", file1.display(), file2.display()),
+        &command,
         "rtk diff",
         tracking_baseline(&fallback, &both_files, shown),
         shown,
@@ -186,7 +230,7 @@ fn render_diff(file1: &Path, file2: &Path, comparison: &FileComparison) -> (Stri
             };
             return (
                 format!(
-                    "{} {}, {}; use `rtk proxy diff` for the full text\n",
+                    "{} {}, {}; use `rtk bypass diff` for the full text\n",
                     count_lines(*count),
                     verb,
                     reason
@@ -208,7 +252,7 @@ fn render_diff(file1: &Path, file2: &Path, comparison: &FileComparison) -> (Stri
             // like one invites reading it as the amount of change.
             return (
                 format!(
-                    "at least {} lines differ, too different to align line by line\ndifferences fall between lines {}-{} of {} and {}-{} of {}; use `rtk proxy diff` for the full text\n",
+                    "at least {} lines differ, too different to align line by line\ndifferences fall between lines {}-{} of {} and {}-{} of {}; use `rtk bypass diff` for the full text\n",
                     differing_floor,
                     first,
                     last1,
@@ -243,7 +287,7 @@ fn render_diff(file1: &Path, file2: &Path, comparison: &FileComparison) -> (Stri
             };
             return (
                 format!(
-                    "{} changed in {}, {} changed in {}; {}, use `rtk proxy diff` for the full text\n",
+                    "{} changed in {}, {} changed in {}; {}, use `rtk bypass diff` for the full text\n",
                     count_lines(*removed),
                     file1.display(),
                     count_lines(*added),
@@ -3891,7 +3935,7 @@ mod tests {
             "got:\n{}",
             out
         );
-        assert!(out.contains("rtk proxy diff"), "got:\n{}", out);
+        assert!(out.contains("rtk bypass diff"), "got:\n{}", out);
         assert!(
             out.lines().count() <= 2,
             "the refusal must not grow with the input, got:\n{}",
@@ -7067,18 +7111,14 @@ diff --git a/b.rs b/b.rs
     #[test]
     fn condensed_output_is_never_larger_than_input() {
         // This filter is a fidelity filter: it keeps every content line by
-        // design, so its savings come only from dropped metadata. Measured on
-        // this corpus that ranges from under 30% (content-heavy) to near 90%
-        // (metadata-heavy) per fixture;
-        // on content-heavy single-file diffs it can fall to single digits
-        // (~4% on this branch's own self-diff). The 20% admission bar in
+        // design, so its savings come only from dropped metadata and vary
+        // widely with how metadata-heavy the diff is; on content-heavy
+        // single-file diffs they can fall to single digits. The 20% admission bar in
         // CONTRIBUTING.md is asserted per-fixture on the metadata-heavy
         // streams in the test below; it is not guaranteed by construction
         // on content-heavy input. What must always hold: the output is never
         // larger than the input (the `never_worse` guard's contract,
-        // verified here at the filter level). Percentages above are by this
-        // test's whitespace-token metric; the runtime guard uses
-        // `estimate_tokens` (bytes/4), which shifts individual numbers.
+        // verified here at the filter level).
         for (name, fixture) in CORPUS.iter().chain(HUNKLESS_CORPUS) {
             let out = condense_unified_diff(fixture);
             assert!(
@@ -7382,7 +7422,7 @@ diff --git a/b.rs b/b.rs
         // are pre-pairing, and these two lines are 99.99991% identical.
         assert_eq!(
             out,
-            "1 line changed in a.txt, 1 line changed in b.txt; 2.2MB of text, too large to list, use `rtk proxy diff` for the full text\n"
+            "1 line changed in a.txt, 1 line changed in b.txt; 2.2MB of text, too large to list, use `rtk bypass diff` for the full text\n"
         );
 
         // The one-sided path reaches the same budget through `DifferingLines`.
@@ -7391,7 +7431,7 @@ diff --git a/b.rs b/b.rs
         assert_eq!(code, 1);
         assert_eq!(
             out,
-            "1 line differs, 3.0MB of text, too large to list; use `rtk proxy diff` for the full text\n"
+            "1 line differs, 3.0MB of text, too large to list; use `rtk bypass diff` for the full text\n"
         );
     }
 }
