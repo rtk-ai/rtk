@@ -171,7 +171,10 @@ const RECORD_NAME_VALUE_LIST: i32 = 23;
 const RECORD_STRING: i32 = 24;
 
 const FLAG_BUILD_EVENT_CONTEXT: i32 = 1 << 0;
+const FLAG_HELP_KEYWORD: i32 = 1 << 1;
 const FLAG_MESSAGE: i32 = 1 << 2;
+const FLAG_SENDER_NAME: i32 = 1 << 3;
+const FLAG_THREAD_ID: i32 = 1 << 4;
 const FLAG_TIMESTAMP: i32 = 1 << 5;
 const FLAG_ARGUMENTS: i32 = 1 << 14;
 const FLAG_IMPORTANCE: i32 = 1 << 15;
@@ -472,6 +475,18 @@ fn read_event_fields(
 
     if flags & FLAG_BUILD_EVENT_CONTEXT != 0 {
         skip_build_event_context(reader, file_format_version)?;
+    }
+
+    if flags & FLAG_THREAD_ID != 0 {
+        let _ = reader.read_7bit_i32()?;
+    }
+
+    if flags & FLAG_HELP_KEYWORD != 0 {
+        let _ = read_deduplicated_string(reader, parsed)?;
+    }
+
+    if flags & FLAG_SENDER_NAME != 0 {
+        let _ = read_deduplicated_string(reader, parsed)?;
     }
 
     if flags & FLAG_TIMESTAMP != 0 {
@@ -1499,6 +1514,111 @@ Restore failed with 1 error(s) in 1.0s
         assert_eq!(summary.errors.len(), 1);
         assert_eq!(summary.errors[0].code, "CS0103");
         assert_eq!(summary.duration_text.as_deref(), Some("00:00:01.00"));
+    }
+
+    #[test]
+    fn test_parse_build_reads_events_with_sender_name_and_optional_flags() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let binlog_path = temp_dir.path().join("build.binlog");
+
+        let mut records = Vec::new();
+
+        // String records (index starts at 10)
+        for s in [
+            "Csc",                                              // 10
+            "CS0168",                                           // 11
+            "The variable 'unused' is declared but never used", // 12
+            "Beta.cs",                                          // 13
+            "/tmp/App/App.csproj",                              // 14
+            "CS0103",                                           // 15
+            "The name 'missing' does not exist",                // 16
+            "Alpha.cs",                                         // 17
+        ] {
+            write_7bit_i32(&mut records, RECORD_STRING);
+            write_dotnet_string(&mut records, s);
+        }
+
+        // Warning event emitted by Csc with BuildEventContext, ThreadId,
+        // HelpKeyword, SenderName, and Timestamp set before the diagnostic fields.
+        let mut warning_event = Vec::new();
+        write_7bit_i32(
+            &mut warning_event,
+            FLAG_MESSAGE
+                | FLAG_BUILD_EVENT_CONTEXT
+                | FLAG_THREAD_ID
+                | FLAG_HELP_KEYWORD
+                | FLAG_SENDER_NAME
+                | FLAG_TIMESTAMP,
+        );
+        write_7bit_i32(&mut warning_event, 12); // Message
+        for ctx_field in [1, 2, 3, 4, 5, 6, 7] {
+            write_7bit_i32(&mut warning_event, ctx_field);
+        }
+        write_7bit_i32(&mut warning_event, 9); // ThreadId
+        write_7bit_i32(&mut warning_event, 11); // HelpKeyword
+        write_7bit_i32(&mut warning_event, 10); // SenderName ("Csc")
+        warning_event.extend_from_slice(&639_000_000_000_000_000_i64.to_le_bytes());
+        write_7bit_i32(&mut warning_event, 1); // Timestamp.Kind
+        write_7bit_i32(&mut warning_event, 1); // Subcategory (empty string)
+        write_7bit_i32(&mut warning_event, 11); // Code ("CS0168")
+        write_7bit_i32(&mut warning_event, 13); // File ("Beta.cs")
+        write_7bit_i32(&mut warning_event, 14); // ProjectFile
+        write_7bit_i32(&mut warning_event, 7); // LineNumber
+        write_7bit_i32(&mut warning_event, 13); // ColumnNumber
+        write_7bit_i32(&mut warning_event, 7); // EndLineNumber
+        write_7bit_i32(&mut warning_event, 19); // EndColumnNumber
+        write_event_record(&mut records, RECORD_WARNING, &warning_event);
+
+        // Error event emitted by Csc with SenderName and Timestamp set.
+        let mut error_event = Vec::new();
+        write_7bit_i32(
+            &mut error_event,
+            FLAG_MESSAGE | FLAG_SENDER_NAME | FLAG_TIMESTAMP,
+        );
+        write_7bit_i32(&mut error_event, 16); // Message
+        write_7bit_i32(&mut error_event, 10); // SenderName ("Csc")
+        error_event.extend_from_slice(&639_000_000_000_000_000_i64.to_le_bytes());
+        write_7bit_i32(&mut error_event, 1); // Timestamp.Kind
+        write_7bit_i32(&mut error_event, 0); // Subcategory
+        write_7bit_i32(&mut error_event, 15); // Code ("CS0103")
+        write_7bit_i32(&mut error_event, 17); // File ("Alpha.cs")
+        write_7bit_i32(&mut error_event, 14); // ProjectFile
+        write_7bit_i32(&mut error_event, 21); // LineNumber
+        write_7bit_i32(&mut error_event, 5); // ColumnNumber
+        write_7bit_i32(&mut error_event, 21); // EndLineNumber
+        write_7bit_i32(&mut error_event, 12); // EndColumnNumber
+        write_event_record(&mut records, RECORD_ERROR, &error_event);
+
+        let mut build_finished = Vec::new();
+        write_7bit_i32(&mut build_finished, 0);
+        build_finished.push(0);
+        write_event_record(&mut records, RECORD_BUILD_FINISHED, &build_finished);
+
+        write_7bit_i32(&mut records, RECORD_END_OF_FILE);
+
+        let binlog_bytes = build_minimal_binlog(&records);
+        std::fs::write(&binlog_path, binlog_bytes).expect("write binlog");
+
+        let summary = parse_build(&binlog_path).expect("parse should succeed");
+        assert!(!summary.succeeded);
+        assert_eq!(summary.warnings.len(), 1);
+        assert_eq!(summary.warnings[0].code, "CS0168");
+        assert_eq!(summary.warnings[0].file, "Beta.cs");
+        assert_eq!(summary.warnings[0].line, 7);
+        assert_eq!(summary.warnings[0].column, 13);
+        assert_eq!(
+            summary.warnings[0].message,
+            "The variable 'unused' is declared but never used"
+        );
+        assert_eq!(summary.errors.len(), 1);
+        assert_eq!(summary.errors[0].code, "CS0103");
+        assert_eq!(summary.errors[0].file, "Alpha.cs");
+        assert_eq!(summary.errors[0].line, 21);
+        assert_eq!(summary.errors[0].column, 5);
+        assert_eq!(
+            summary.errors[0].message,
+            "The name 'missing' does not exist"
+        );
     }
 
     #[test]
