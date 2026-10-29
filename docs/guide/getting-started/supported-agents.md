@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, Mistral Vibe, and Trae
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, Mistral Vibe, Trae, and Swival
 sidebar:
   order: 3
 ---
@@ -46,6 +46,7 @@ Agent runs "cargo test"
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rust binary (`PreToolUse` plugin) | Yes |
 | Mistral Vibe | Rust binary (`pre_tool`) | Yes |
+| Swival | Python adapter (`command_middleware`) | Yes |
 
 Agents that rewrite transparently receive the awareness file selected by `awareness.level` in
 `config.toml` (`default` says nothing about RTK). Rules-file agents cannot rewrite, so the agent
@@ -317,6 +318,31 @@ rtk init -g --agent vibe --uninstall
 ```
 
 Strips only RTK's `[[hooks]]` block and the `~/.vibe/prompts/rtk.md` file. Any other user-declared hooks in `hooks.toml` are preserved byte-for-byte. `hooks.toml` is removed only when the RTK entry was the sole content.
+
+### Swival
+
+```bash
+rtk init --agent swival        # project: .rtk/swival-rtk-adapter.py, swival.toml
+rtk init -g --agent swival     # global: ~/.config/swival/rtk-adapter.py, config.toml
+```
+
+Swival runs a `command_middleware` subprocess before every command, sending it a JSON request on stdin and reading the decision back from stdout.
+RTK installs a small Python adapter as that middleware and points `command_middleware` at it in `swival.toml` (or `~/.config/swival/config.toml` with `-g`).
+Like Swival itself, the global install uses `$XDG_CONFIG_HOME/swival/` when that variable is set.
+The adapter hands the command to `rtk rewrite` and returns the `rtk` form in the same `shell` or `argv` shape Swival sent.
+
+The adapter never denies a command and fails open: if `rtk` is missing, times out or errors, Swival runs the original command.
+If `command_middleware` already points somewhere else, `rtk init` leaves it alone and reports the conflict.
+
+Uninstall:
+
+```bash
+rtk init --agent swival --uninstall
+rtk init -g --agent swival --uninstall
+```
+
+Removes the adapter and the `command_middleware` line RTK wrote.
+A value you set yourself is left untouched.
 
 ## Integration tiers explained
 

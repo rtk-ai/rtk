@@ -66,6 +66,8 @@ pub enum AgentTarget {
     Vibe,
     /// Oh My Pi (OMP)
     Omp,
+    /// Swival CLI agent
+    Swival,
 }
 
 #[cfg(feature = "engine")]
@@ -2378,6 +2380,8 @@ where
         hooks::init::uninstall_droid(global, ctx)
     } else if agent == Some(AgentTarget::Vibe) {
         hooks::init::uninstall_vibe(ctx)
+    } else if agent == Some(AgentTarget::Swival) {
+        hooks::init::uninstall_swival(global, ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -3025,7 +3029,11 @@ fn run_cli() -> Result<i32> {
                 hooks::init::PatchMode::Ask
             };
             if show {
-                hooks::init::show_config(codex, agent == Some(AgentTarget::Omp))?;
+                if agent == Some(AgentTarget::Swival) {
+                    hooks::init::show_swival_config(global)?;
+                } else {
+                    hooks::init::show_config(codex, agent == Some(AgentTarget::Omp))?;
+                }
             } else if uninstall && copilot {
                 if global {
                     hooks::init::uninstall_copilot_global(ctx)?;
@@ -3075,6 +3083,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_droid_mode(global, ctx)?;
             } else if agent == Some(AgentTarget::Vibe) {
                 hooks::init::run_vibe_mode(global, hook_only, patch_mode, ctx)?;
+            } else if agent == Some(AgentTarget::Swival) {
+                hooks::init::run_swival(global, ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_cursor = agent == Some(AgentTarget::Cursor);
