@@ -30,6 +30,7 @@ const AGENT_PROBES: &[fn() -> bool] = &[
     super::init::hermes::is_configured,
     super::init::pi::is_configured,
     super::init::vibe::is_configured,
+    super::init::swival::is_configured,
 ];
 
 /// Returns true if at least one supported non-Claude agent has an active hook/plugin configured.
@@ -510,6 +511,19 @@ mod tests {
             assert!(is_any_agent_configured(), "vibe global");
             super::super::init::vibe::uninstall_vibe(InitContext::default()).unwrap();
             assert!(!is_any_agent_configured(), "vibe uninstalled");
+        });
+
+        // 10. Swival (local & global)
+        run_isolated(&|_home, _ws| {
+            super::super::init::swival::run_swival(false, InitContext::default()).unwrap();
+            assert!(is_any_agent_configured(), "swival local");
+            super::super::init::swival::uninstall_swival(false, InitContext::default()).unwrap();
+            assert!(!is_any_agent_configured(), "swival local uninstalled");
+
+            super::super::init::swival::run_swival(true, InitContext::default()).unwrap();
+            assert!(is_any_agent_configured(), "swival global");
+            super::super::init::swival::uninstall_swival(true, InitContext::default()).unwrap();
+            assert!(!is_any_agent_configured(), "swival global uninstalled");
         });
     }
 }

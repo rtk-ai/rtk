@@ -310,8 +310,9 @@ pub(crate) fn in_claude_worktree(cwd: &str) -> bool {
 /// so it refuses the command and tells the user to re-run the very thing they
 /// ran; Cursor raises a permission prompt for it. The plugins that shell out to
 /// `rtk rewrite` reach the same outcome in their own code --
-/// `hooks/pi/rtk.ts` (shared with omp), `hooks/hermes/rtk-rewrite/__init__.py`
-/// and `openclaw/index.ts` all gate on `rewritten != command`.
+/// `hooks/pi/rtk.ts` (shared with omp), `hooks/hermes/rtk-rewrite/__init__.py`,
+/// `hooks/swival/rtk-adapter.py` and `openclaw/index.ts` all gate on
+/// `rewritten != command`.
 /// `hooks/opencode/rtk.ts` shells out to `rtk hook opencode` instead, which
 /// goes through here in-process and answers `{}` for the no-op.
 ///
@@ -418,7 +419,7 @@ impl AgentPath {
             // `ApprovalOwner`.
             "openclaw" => Some(Self::ViaRewrite(ApprovalOwner::Delegate)),
             "opencode" => Some(Self::InProcess(Host::OpenCode)),
-            "hermes" | "omp" | "pi" => Some(Self::ViaRewrite(ApprovalOwner::Rtk)),
+            "hermes" | "omp" | "pi" | "swival" => Some(Self::ViaRewrite(ApprovalOwner::Rtk)),
             "vibe" => Some(Self::InProcess(Host::Vibe)),
             _ => None,
         }
@@ -441,6 +442,7 @@ impl AgentPath {
         "openclaw",
         "opencode",
         "pi",
+        "swival",
         "trae",
         "vibe",
         "windsurf",
