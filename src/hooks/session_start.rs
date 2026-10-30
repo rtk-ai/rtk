@@ -40,11 +40,18 @@ fn base_url(agent: &str) -> Option<(String, String)> {
         "claude-code" => crate::core::user_env::var("ANTHROPIC_BASE_URL")
             .map(|url| ("ANTHROPIC_BASE_URL".to_string(), url)),
         "codex" => crate::hooks::init::codex_openai_base_url()
+            .filter(|url| rtk_owned(url, crate::hooks::init::CODEX_PROXY_PATHS))
             .map(|url| ("openai_base_url".to_string(), url)),
         "vibe" => crate::hooks::init::vibe_mistral_api_base()
+            .filter(|url| rtk_owned(url, &[crate::hooks::init::VIBE_PROXY_PATH]))
             .map(|url| ("providers[mistral].api_base".to_string(), url)),
         _ => None,
     }
+}
+
+fn rtk_owned(url: &str, paths: &[&str]) -> bool {
+    crate::llm_proxy::is_rtk_url(url, crate::llm_proxy::DEFAULT_BIND, paths)
+        || crate::llm_proxy::is_rtk_url(url, &crate::llm_proxy::daemon_bind(), paths)
 }
 
 pub(crate) fn routed_through_rtk(agent: &str) -> bool {

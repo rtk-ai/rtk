@@ -647,6 +647,16 @@ mod proxy_route_tests {
             remove_rtk_openai_base_url("model = \"gpt-5\"\n", "127.0.0.1:8080"),
             None
         );
+        for own in ["http://127.0.0.1:8080/v1", "http://127.0.0.1:8080"] {
+            assert_eq!(
+                remove_rtk_openai_base_url(
+                    &format!("openai_base_url = \"{own}\"\n"),
+                    "127.0.0.1:8080"
+                ),
+                None,
+                "{own} is the user's server on the daemon's port"
+            );
+        }
     }
 
     #[cfg(feature = "engine")]
@@ -897,6 +907,7 @@ pub(super) fn run_codex_mode_with_paths(
 
 pub(crate) const CODEX_API_PATH: &str = "/openai/v1";
 pub(crate) const CODEX_CHATGPT_PATH: &str = "/chatgpt/backend-api/codex";
+pub(crate) const CODEX_PROXY_PATHS: &[&str] = &[CODEX_API_PATH, CODEX_CHATGPT_PATH];
 const CODEX_CONFIG_FILE: &str = "config.toml";
 const CODEX_AUTH_FILE: &str = "auth.json";
 const OPENAI_BASE_URL_KEY: &str = "openai_base_url";
@@ -958,9 +969,8 @@ fn set_openai_base_url(text: &str, url: &str) -> Result<String> {
 
 fn remove_rtk_openai_base_url(text: &str, bind: &str) -> Option<String> {
     let mut doc: toml_edit::DocumentMut = text.parse().ok()?;
-    let current = doc.get(OPENAI_BASE_URL_KEY)?.as_str()?.trim().to_string();
-    let prefix = format!("http://{bind}");
-    if current != prefix && !current.starts_with(&format!("{prefix}/")) {
+    let current = doc.get(OPENAI_BASE_URL_KEY)?.as_str()?;
+    if !crate::llm_proxy::is_rtk_url(current, bind, CODEX_PROXY_PATHS) {
         return None;
     }
     doc.remove(OPENAI_BASE_URL_KEY);

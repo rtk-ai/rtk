@@ -16,7 +16,6 @@ pub(crate) const VIBE_PROXY_PATH: &str = "/mistral/v1";
 const VIBE_CONFIG_FILE: &str = "config.toml";
 const MISTRAL_PROVIDER: &str = "mistral";
 const MISTRAL_API_BASE_DEFAULT: &str = "https://api.mistral.ai/v1";
-#[cfg(any(feature = "engine", test))]
 const MISTRAL_API_KEY_ENV: &str = "MISTRAL_API_KEY";
 const RTK_PROVIDER_KEYS: &[&str] = &["name", "api_base", "api_key_env_var", "backend"];
 
@@ -92,9 +91,12 @@ fn remove_rtk_mistral_provider(text: &str, rtk_url: &str) -> Option<String> {
         if api_base.trim().trim_end_matches('/') != rtk_url.trim_end_matches('/') {
             return None;
         }
+        let value = |key: &str| table.get(key).and_then(toml_edit::Item::as_str);
         table
             .iter()
             .all(|(key, _)| RTK_PROVIDER_KEYS.contains(&key))
+            && value("api_key_env_var") == Some(MISTRAL_API_KEY_ENV)
+            && value("backend") == Some(MISTRAL_PROVIDER)
     };
     if ours_only {
         providers.remove(idx);
@@ -920,6 +922,11 @@ mod proxy_provider_tests {
         assert!(restored.contains("api_base = \"https://api.mistral.ai/v1\""));
         assert!(restored.contains("temperature = 0.2"));
         assert!(restored.contains("api_key_env_var = \"MY_KEY\""));
+
+        let own_key = "[[providers]]\nname = \"mistral\"\napi_base = \"http://127.0.0.1:8080/mistral/v1\"\napi_key_env_var = \"MY_MISTRAL_KEY\"\nbackend = \"mistral\"\n";
+        let restored = remove_rtk_mistral_provider(own_key, RTK).unwrap();
+        assert!(restored.contains("api_key_env_var = \"MY_MISTRAL_KEY\""));
+        assert!(restored.contains("api_base = \"https://api.mistral.ai/v1\""));
 
         let foreign = "[[providers]]\nname = \"mistral\"\napi_base = \"https://gateway.corp/v1\"\n";
         assert_eq!(remove_rtk_mistral_provider(foreign, RTK), None);

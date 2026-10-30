@@ -643,6 +643,7 @@ pub enum Redirect {
         setup: &'static str,
         read: fn() -> Option<String>,
         path: fn() -> Option<&'static str>,
+        owned: &'static [&'static str],
     },
 }
 
@@ -663,6 +664,7 @@ pub const PROXY_AGENTS: &[ProxyAgent] = &[
             setup: "rtk init -g --codex",
             read: crate::hooks::init::codex_openai_base_url,
             path: crate::hooks::init::codex_proxy_path,
+            owned: crate::hooks::init::CODEX_PROXY_PATHS,
         },
     },
     ProxyAgent {
@@ -715,14 +717,6 @@ pub fn proxy_unavailable_line(harness: &str) -> Option<String> {
         .map(|agent| format!("LLM proxy: {}", agent.line()))
 }
 
-fn proxy_url(redirect: Redirect, bind: &str) -> Option<String> {
-    match redirect {
-        Redirect::Env { .. } => Some(format!("http://{bind}")),
-        Redirect::ConfigFile { path, .. } => Some(format!("http://{bind}{path}")),
-        Redirect::CliOverride { path, .. } => path().map(|path| format!("http://{bind}{path}")),
-    }
-}
-
 fn detected_agents() -> Vec<&'static ProxyAgent> {
     PROXY_AGENTS
         .iter()
@@ -768,9 +762,14 @@ fn launch_plan_with(
     }
 }
 
-fn under_daemon(url: &str, bind: &str) -> bool {
-    let prefix = format!("http://{bind}");
-    url == prefix || url.starts_with(&format!("{prefix}/"))
+/// Whether `url` is a value RTK itself writes: the daemon's address plus one of
+/// this agent's route paths. Anything else on the same host and port is the
+/// user's (a local model server on 8080 has `/v1` there, not `/openai/v1`).
+pub(crate) fn is_rtk_url(url: &str, bind: &str, paths: &[&str]) -> bool {
+    let url = url.trim().trim_end_matches('/');
+    paths
+        .iter()
+        .any(|path| url == format!("http://{bind}{path}").trim_end_matches('/'))
 }
 
 #[derive(Debug, PartialEq)]
@@ -791,121 +790,169 @@ fn config_launch(target: Option<&str>, proxy_url: &str, daemon_up: bool) -> Conf
     }
 }
 
+/// What launching this agent comes down to. Pure apart from the `start` and
+/// `read` callbacks, so the argv, the environment and the exit code can be
+/// asserted without spawning anything.
+#[derive(Debug, Default, PartialEq)]
+struct Launch {
+    set_env: Option<(String, String)>,
+    remove_env: Option<String>,
+    leading: Vec<String>,
+    notices: Vec<String>,
+    refuse: Option<i32>,
+}
+
+fn plan_launch(
+    agent: &ProxyAgent,
+    bind: &str,
+    env: impl Fn(&str) -> Option<String>,
+    start: impl FnOnce() -> Result<()>,
+) -> Launch {
+    let mut plan = Launch::default();
+    let daemon_up = |plan: &mut Launch| match start() {
+        Ok(()) => true,
+        Err(e) => {
+            plan.notices.push(format!("rtk: proxy unavailable ({e:#})"));
+            false
+        }
+    };
+    let unproxied = format!(
+        "rtk: launching `{}` unproxied — API traffic will not be compressed. \
+         Install the daemon (rtk llm-proxy setup) to enable it.",
+        agent.name
+    );
+    match agent.redirect {
+        Redirect::Env { var } => {
+            let base_url = format!("http://{bind}");
+            let existing = env(var);
+            let up = daemon_up(&mut plan);
+            match launch_plan(existing.as_deref(), &base_url, up) {
+                LaunchPlan::Proxied => plan.set_env = Some((var.to_string(), base_url)),
+                LaunchPlan::KeepExisting => plan.notices.push(format!(
+                    "rtk: {var} is already set — leaving it; unset it to route through the rtk proxy"
+                )),
+                LaunchPlan::Unproxied => plan.notices.push(unproxied),
+                LaunchPlan::UnproxiedClear => {
+                    plan.notices.push(format!(
+                        "rtk: {var} pointed at the rtk proxy, which is not running — launching `{}` \
+                         unproxied instead.",
+                        agent.name
+                    ));
+                    plan.remove_env = Some(var.to_string());
+                }
+            }
+        }
+        Redirect::CliOverride {
+            file,
+            key,
+            read,
+            path,
+            owned,
+            ..
+        } => {
+            let existing = read();
+            let ours = |url: &str| is_rtk_url(url, bind, owned);
+            if existing
+                .as_deref()
+                .is_some_and(|url| !url.trim().is_empty() && !ours(url))
+            {
+                plan.notices.push(format!(
+                    "rtk: {file} already sets {key} — leaving it; remove it to route through the rtk proxy"
+                ));
+                return plan;
+            }
+            let Some(path) = path() else {
+                plan.notices.push(format!(
+                    "rtk: {} is not logged in, so no proxy route can be chosen — launching `{}` unproxied; log in, then run `rtk {}` again",
+                    agent.label, agent.name, agent.name
+                ));
+                return plan;
+            };
+            let up = daemon_up(&mut plan);
+            match launch_plan_with(existing.as_deref(), ours, up) {
+                LaunchPlan::Proxied => {
+                    plan.leading.push("-c".to_string());
+                    plan.leading.push(format!("{key}=\"http://{bind}{path}\""));
+                }
+                LaunchPlan::KeepExisting => {}
+                LaunchPlan::Unproxied => plan.notices.push(unproxied),
+                LaunchPlan::UnproxiedClear => {
+                    plan.notices.push(format!(
+                        "rtk: {file} points {} at the rtk proxy, which is not running — launching `{}` \
+                         unproxied instead.",
+                        agent.label, agent.name
+                    ));
+                    plan.leading.push("-c".to_string());
+                    plan.leading.push(format!("{key}=\"\""));
+                }
+            }
+        }
+        Redirect::ConfigFile {
+            file,
+            path,
+            setup,
+            read,
+        } => {
+            let target = read();
+            let base_url = format!("http://{bind}{path}");
+            let up = target
+                .as_deref()
+                .is_some_and(|url| is_rtk_url(url, bind, &[path]))
+                && daemon_up(&mut plan);
+            match config_launch(target.as_deref(), &base_url, up) {
+                ConfigLaunch::Proxied => {}
+                ConfigLaunch::NotConfigured => plan.notices.push(format!(
+                    "rtk: launching `{}` unproxied — API traffic will not be compressed. \
+                     Run `{setup}` to route it through the rtk proxy.",
+                    agent.name
+                )),
+                ConfigLaunch::Foreign => plan.notices.push(format!(
+                    "rtk: {file} already routes {} elsewhere — leaving it; run `{setup}` to route it through the rtk proxy",
+                    agent.label
+                )),
+                ConfigLaunch::DeadProxy => {
+                    plan.notices.push(format!(
+                        "rtk: {file} points {} at the rtk proxy, which is not running and could not be started — \
+                         run `rtk llm-proxy start`, or `{setup} --uninstall` to stop routing it",
+                        agent.label
+                    ));
+                    plan.refuse = Some(1);
+                }
+            }
+        }
+    }
+    plan
+}
+
 /// Start the daemon if possible, point this agent at it, and hand over the
 /// process. On Unix this `exec`s, so signals, stdio and the exit code behave
-/// exactly as if the agent had been launched directly. Never blocks the
-/// agent: when the daemon cannot run, the agent launches unproxied with a
-/// loud warning instead of failing.
+/// exactly as if the agent had been launched directly.
 pub fn run_agent(agent: &ProxyAgent, args: &[String]) -> Result<i32> {
     if !tool_exists(agent.name) {
         eprintln!("rtk: `{}` is not on PATH", agent.name);
         return Ok(127);
     }
     let bind = daemon_bind();
-    let mut cmd = Command::new(agent.name);
-    let mut leading: Vec<String> = Vec::new();
-    if let Some(base_url) = proxy_url(agent.redirect, &bind) {
-        let daemon_up = match ensure_running(&bind) {
-            Ok(_) => true,
-            Err(e) => {
-                eprintln!("rtk: proxy unavailable ({e:#})");
-                false
-            }
-        };
-        let unproxied = || {
-            eprintln!(
-                "rtk: launching `{}` unproxied — API traffic will not be compressed. \
-                 Install the daemon (rtk llm-proxy setup) to enable it.",
-                agent.name
-            );
-        };
-        match agent.redirect {
-            Redirect::Env { var } => {
-                let existing = std::env::var(var).ok();
-                match launch_plan(existing.as_deref(), &base_url, daemon_up) {
-                    LaunchPlan::Proxied => {
-                        cmd.env(var, &base_url);
-                    }
-                    LaunchPlan::KeepExisting => {
-                        eprintln!(
-                            "rtk: {var} is already set — leaving it; unset it to route through the rtk proxy"
-                        );
-                    }
-                    LaunchPlan::Unproxied => unproxied(),
-                    LaunchPlan::UnproxiedClear => {
-                        eprintln!(
-                            "rtk: {var} pointed at the rtk proxy, which is not running — launching `{}` \
-                             unproxied instead.",
-                            agent.name
-                        );
-                        cmd.env_remove(var);
-                    }
-                }
-            }
-            Redirect::CliOverride {
-                file, key, read, ..
-            } => {
-                let existing = read();
-                match launch_plan_with(
-                    existing.as_deref(),
-                    |url| under_daemon(url, &bind),
-                    daemon_up,
-                ) {
-                    LaunchPlan::Proxied => {
-                        leading.push("-c".to_string());
-                        leading.push(format!("{key}=\"{base_url}\""));
-                    }
-                    LaunchPlan::KeepExisting => {
-                        eprintln!(
-                            "rtk: {file} already sets {key} — leaving it; remove it to route through the rtk proxy"
-                        );
-                    }
-                    LaunchPlan::Unproxied => unproxied(),
-                    LaunchPlan::UnproxiedClear => {
-                        eprintln!(
-                            "rtk: {file} points {} at the rtk proxy, which is not running — launching `{}` \
-                             unproxied instead.",
-                            agent.label, agent.name
-                        );
-                        leading.push("-c".to_string());
-                        leading.push(format!("{key}=\"\""));
-                    }
-                }
-            }
-            Redirect::ConfigFile {
-                file, setup, read, ..
-            } => match config_launch(read().as_deref(), &base_url, daemon_up) {
-                ConfigLaunch::Proxied => {}
-                ConfigLaunch::NotConfigured => {
-                    eprintln!(
-                        "rtk: launching `{}` unproxied — API traffic will not be compressed. \
-                         Run `{setup}` to route it through the rtk proxy.",
-                        agent.name
-                    );
-                }
-                ConfigLaunch::Foreign => {
-                    eprintln!(
-                        "rtk: {file} already routes {} elsewhere — leaving it; run `{setup}` to route it through the rtk proxy",
-                        agent.label
-                    );
-                }
-                ConfigLaunch::DeadProxy => {
-                    eprintln!(
-                        "rtk: {file} points {} at the rtk proxy, which is not running and could not be started — \
-                         run `rtk llm-proxy start`, or `{setup} --uninstall` to stop routing it",
-                        agent.label
-                    );
-                    return Ok(1);
-                }
-            },
-        }
-    } else {
-        eprintln!(
-            "rtk: {} is not logged in, so no proxy route can be chosen — launching `{}` unproxied; log in, then run `rtk {}` again",
-            agent.label, agent.name, agent.name
-        );
+    let plan = plan_launch(
+        agent,
+        &bind,
+        |var| std::env::var(var).ok(),
+        || ensure_running(&bind).map(|_| ()),
+    );
+    for notice in &plan.notices {
+        eprintln!("{notice}");
     }
-    cmd.args(leading).args(args);
+    if let Some(code) = plan.refuse {
+        return Ok(code);
+    }
+    let mut cmd = Command::new(agent.name);
+    if let Some((var, value)) = &plan.set_env {
+        cmd.env(var, value);
+    }
+    if let Some(var) = &plan.remove_env {
+        cmd.env_remove(var);
+    }
+    cmd.args(&plan.leading).args(args);
 
     #[cfg(unix)]
     {
@@ -1241,7 +1288,7 @@ mod tests {
     #[test]
     fn a_cli_override_agent_treats_any_daemon_namespace_as_its_own() {
         let bind = "127.0.0.1:8080";
-        let ours = |url: &str| under_daemon(url, bind);
+        let ours = |url: &str| is_rtk_url(url, bind, crate::hooks::init::CODEX_PROXY_PATHS);
         assert_eq!(launch_plan_with(None, ours, true), LaunchPlan::Proxied);
         assert_eq!(
             launch_plan_with(Some("http://127.0.0.1:8080/openai/v1"), ours, true),
@@ -1292,14 +1339,217 @@ mod tests {
             config_launch(Some("https://api.mistral.ai/v1"), ours, true),
             ConfigLaunch::Foreign
         );
+    }
+
+    const BIND: &str = "127.0.0.1:8080";
+    const OWNED: &[&str] = &["/openai/v1", "/chatgpt/backend-api/codex"];
+
+    fn unset() -> Option<String> {
+        None
+    }
+    fn own_server() -> Option<String> {
+        Some("http://127.0.0.1:8080/v1".to_string())
+    }
+    fn rtk_route() -> Option<String> {
+        Some("http://127.0.0.1:8080/openai/v1".to_string())
+    }
+    fn vibe_route() -> Option<String> {
+        Some("http://127.0.0.1:8080/mistral/v1".to_string())
+    }
+    fn logged_in() -> Option<&'static str> {
+        Some("/openai/v1")
+    }
+    fn logged_out() -> Option<&'static str> {
+        None
+    }
+
+    fn cli_agent(read: fn() -> Option<String>, path: fn() -> Option<&'static str>) -> ProxyAgent {
+        ProxyAgent {
+            name: "codex",
+            label: "Codex",
+            redirect: Redirect::CliOverride {
+                file: "config.toml",
+                key: "openai_base_url",
+                setup: "rtk init -g --codex",
+                read,
+                path,
+                owned: OWNED,
+            },
+        }
+    }
+
+    fn config_agent(read: fn() -> Option<String>) -> ProxyAgent {
+        ProxyAgent {
+            name: "vibe",
+            label: "Vibe",
+            redirect: Redirect::ConfigFile {
+                file: "config.toml",
+                path: "/mistral/v1",
+                setup: "rtk init -g --agent vibe",
+                read,
+            },
+        }
+    }
+
+    fn env_agent() -> ProxyAgent {
+        ProxyAgent {
+            name: "claude",
+            label: "Claude Code",
+            redirect: Redirect::Env {
+                var: "ANTHROPIC_BASE_URL",
+            },
+        }
+    }
+
+    fn no_env(_: &str) -> Option<String> {
+        None
+    }
+
+    fn must_not_start() -> Result<()> {
+        panic!("the daemon must not start for a route that is not RTK's")
+    }
+
+    #[test]
+    fn is_rtk_url_takes_only_the_exact_values_rtk_writes() {
+        for ours in [
+            "http://127.0.0.1:8080/openai/v1",
+            "http://127.0.0.1:8080/openai/v1/",
+            " http://127.0.0.1:8080/chatgpt/backend-api/codex ",
+        ] {
+            assert!(is_rtk_url(ours, BIND, OWNED), "{ours}");
+        }
+        for foreign in [
+            "http://127.0.0.1:8080",
+            "http://127.0.0.1:8080/v1",
+            "http://127.0.0.1:8080/openai/v1/extra",
+            "http://127.0.0.1:80801/openai/v1",
+            "http://127.0.0.1:4000/openai/v1",
+            "https://127.0.0.1:8080/openai/v1",
+        ] {
+            assert!(!is_rtk_url(foreign, BIND, OWNED), "{foreign}");
+        }
+        assert!(is_rtk_url("http://127.0.0.1:8080/", BIND, &[""]));
+    }
+
+    #[test]
+    fn a_cli_agent_gets_a_toml_quoted_override_when_the_daemon_is_up() {
+        let plan = plan_launch(&cli_agent(unset, logged_in), BIND, no_env, || Ok(()));
         assert_eq!(
-            proxy_url(resolve_agent("vibe").unwrap().redirect, "127.0.0.1:8080").as_deref(),
-            Some(ours)
+            plan.leading,
+            vec!["-c", "openai_base_url=\"http://127.0.0.1:8080/openai/v1\""]
         );
+        assert_eq!(plan.refuse, None);
+        assert!(plan.notices.is_empty(), "{:?}", plan.notices);
+    }
+
+    #[test]
+    fn a_cli_agent_clears_rtks_url_when_the_daemon_is_dead() {
+        let plan = plan_launch(&cli_agent(rtk_route, logged_in), BIND, no_env, || {
+            anyhow::bail!("no binary")
+        });
+        assert_eq!(plan.leading, vec!["-c", "openai_base_url=\"\""]);
+        assert_eq!(plan.refuse, None);
+        assert!(plan.notices[0].contains("no binary"), "{:?}", plan.notices);
+        assert!(
+            plan.notices[1].contains("not running"),
+            "{:?}",
+            plan.notices
+        );
+    }
+
+    #[test]
+    fn a_cli_agent_leaves_the_users_own_server_alone_without_starting_anything() {
+        let plan = plan_launch(
+            &cli_agent(own_server, logged_in),
+            BIND,
+            no_env,
+            must_not_start,
+        );
+        assert!(plan.leading.is_empty(), "{:?}", plan.leading);
+        assert!(
+            plan.notices[0].contains("already sets"),
+            "{:?}",
+            plan.notices
+        );
+    }
+
+    #[test]
+    fn a_cli_agent_with_no_login_launches_unproxied_without_starting_anything() {
+        let plan = plan_launch(&cli_agent(unset, logged_out), BIND, no_env, must_not_start);
+        assert!(plan.leading.is_empty(), "{:?}", plan.leading);
+        assert!(
+            plan.notices[0].contains("not logged in"),
+            "{:?}",
+            plan.notices
+        );
+    }
+
+    #[test]
+    fn a_config_agent_runs_when_routed_and_refuses_when_the_daemon_is_dead() {
+        let up = plan_launch(&config_agent(vibe_route), BIND, no_env, || Ok(()));
+        assert_eq!(up, Launch::default());
+        let dead = plan_launch(&config_agent(vibe_route), BIND, no_env, || {
+            anyhow::bail!("no binary")
+        });
+        assert_eq!(dead.refuse, Some(1));
+        assert!(
+            dead.notices[1].contains("--uninstall"),
+            "{:?}",
+            dead.notices
+        );
+    }
+
+    #[test]
+    fn a_config_agent_not_routed_through_rtk_never_starts_the_daemon() {
+        let unconfigured = plan_launch(&config_agent(unset), BIND, no_env, must_not_start);
+        assert_eq!(unconfigured.refuse, None);
+        assert!(unconfigured.notices[0].contains("unproxied"));
+        let foreign = plan_launch(&config_agent(own_server), BIND, no_env, must_not_start);
+        assert_eq!(foreign.refuse, None);
+        assert!(foreign.notices[0].contains("elsewhere"));
+    }
+
+    #[test]
+    fn an_env_agent_keeps_its_launch_plan() {
+        let up = plan_launch(&env_agent(), BIND, no_env, || Ok(()));
         assert_eq!(
-            proxy_url(resolve_agent("claude").unwrap().redirect, "127.0.0.1:8080").as_deref(),
-            Some("http://127.0.0.1:8080")
+            up.set_env,
+            Some((
+                "ANTHROPIC_BASE_URL".to_string(),
+                "http://127.0.0.1:8080".to_string()
+            ))
         );
+        let foreign = plan_launch(
+            &env_agent(),
+            BIND,
+            |_| Some("https://gw.corp".to_string()),
+            || Ok(()),
+        );
+        assert_eq!(foreign.set_env, None);
+        assert_eq!(foreign.remove_env, None);
+        assert!(foreign.notices[0].contains("already set"));
+        let dead = plan_launch(
+            &env_agent(),
+            BIND,
+            |_| Some("http://127.0.0.1:8080".to_string()),
+            || anyhow::bail!("no binary"),
+        );
+        assert_eq!(dead.remove_env, Some("ANTHROPIC_BASE_URL".to_string()));
+        let absent = plan_launch(&env_agent(), BIND, no_env, || anyhow::bail!("no binary"));
+        assert_eq!(absent.set_env, None);
+        assert_eq!(absent.remove_env, None);
+    }
+
+    #[test]
+    fn the_shipped_routes_are_the_ones_the_daemon_serves() {
+        let Redirect::ConfigFile { path, .. } = resolve_agent("vibe").unwrap().redirect else {
+            panic!("vibe is routed through its config file");
+        };
+        assert_eq!(path, "/mistral/v1");
+        let Redirect::CliOverride { owned, .. } = resolve_agent("codex").unwrap().redirect else {
+            panic!("codex is routed through -c");
+        };
+        assert_eq!(owned, OWNED);
     }
 
     #[cfg(feature = "engine")]

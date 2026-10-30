@@ -51,7 +51,9 @@ use claude::{
     hook_already_present, hook_gaps, remove_settings_entries, run_claude_md_mode, run_default_mode,
     run_hook_only_mode,
 };
-pub(crate) use codex::{openai_base_url as codex_openai_base_url, proxy_path as codex_proxy_path};
+pub(crate) use codex::{
+    CODEX_PROXY_PATHS, openai_base_url as codex_openai_base_url, proxy_path as codex_proxy_path,
+};
 use codex::{run_codex_mode, show_codex_config, uninstall_codex};
 use cursor::{
     cursor_hook_already_present, install_cursor_hooks, remove_cursor_hooks, resolve_cursor_dir,
