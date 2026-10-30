@@ -15,6 +15,7 @@ static CACHED_SALT: OnceLock<String> = OnceLock::new();
 
 const TELEMETRY_URL: Option<&str> = option_env!("RTK_TELEMETRY_URL");
 const TELEMETRY_TOKEN: Option<&str> = option_env!("RTK_TELEMETRY_TOKEN");
+const TELEMETRY_ERASURE_URL: Option<&str> = option_env!("RTK_TELEMETRY_ERASURE_URL");
 const PING_INTERVAL_SECS: u64 = 23 * 3600; // 23 hours
 
 /// The telemetry endpoint compiled into this build, if any.
@@ -26,6 +27,25 @@ const PING_INTERVAL_SECS: u64 = 23 * 3600; // 23 hours
 /// is not configured.
 pub fn endpoint_url() -> Option<&'static str> {
     TELEMETRY_URL.filter(|&u| crate::core::utils::env_is_some(Some(u)))
+}
+
+/// Derives the erasure URL from a telemetry endpoint by stripping any trailing
+/// `/ping` path component so the request routes to `/erasure` (fixing #4754).
+pub fn derive_erasure_url(endpoint: &str) -> String {
+    let trimmed = endpoint.trim_end_matches('/');
+    match trimmed.strip_suffix("/ping") {
+        Some(base) => format!("{}/erasure", base),
+        None => format!("{}/erasure", trimmed),
+    }
+}
+
+/// The telemetry erasure endpoint for this build, if configured.
+pub fn erasure_endpoint_url() -> Option<String> {
+    if let Some(explicit) = TELEMETRY_ERASURE_URL.filter(|&u| crate::core::utils::env_is_some(Some(u))) {
+        return Some(explicit.to_string());
+    }
+
+    endpoint_url().map(derive_erasure_url)
 }
 
 /// Send a telemetry ping if enabled and not already sent today.
@@ -787,5 +807,12 @@ mod tests {
         // Should not panic even if directories don't exist
         let count = count_custom_toml_filters();
         assert!(count < 10000); // sanity check
+    }
+
+    #[test]
+    fn test_derive_erasure_url() {
+        assert_eq!(derive_erasure_url("https://telemetry.rtk-ai.app/ping"), "https://telemetry.rtk-ai.app/erasure");
+        assert_eq!(derive_erasure_url("https://telemetry.rtk-ai.app/ping/"), "https://telemetry.rtk-ai.app/erasure");
+        assert_eq!(derive_erasure_url("https://telemetry.rtk-ai.app"), "https://telemetry.rtk-ai.app/erasure");
     }
 }
