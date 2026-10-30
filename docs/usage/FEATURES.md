@@ -1319,6 +1319,7 @@ rtk verify
 | `pip list/install` | `rtk pip ...` |
 | `go test/build/vet` | `rtk go ...` |
 | `golangci-lint` | `rtk golangci-lint` |
+| `govulncheck` | `rtk govulncheck` |
 | `docker ps/images/logs` | `rtk docker ...` |
 | `kubectl get/logs` | `rtk kubectl ...` |
 | `curl` | `rtk curl` |
