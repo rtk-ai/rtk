@@ -344,9 +344,12 @@ fn git_log_malformed_digit_run_propagates_real_git_error() {
     let (_, rtk_stderr, rtk_code) = rtk_output_in_dir(dir.path(), &["git", "log", "-5x"]);
 
     assert_eq!(rtk_code, raw.status.code());
-    assert!(
-        rtk_stderr.contains("not an integer"),
-        "rtk should surface git's own error verbatim: {rtk_stderr:?}"
+    // Git versions differ (for example, "not a non-negative integer" on 2.43).
+    // Compare with this invocation's control instead of a version-specific phrase.
+    assert_eq!(
+        rtk_stderr.trim(),
+        String::from_utf8_lossy(&raw.stderr).trim(),
+        "rtk should surface git's own error verbatim"
     );
 }
 
