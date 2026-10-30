@@ -1896,22 +1896,30 @@ fn mvn_binary(daemon: bool) -> &'static str {
     }
 }
 
-fn new_mvn_command(args: &[String], daemon: bool) -> Command {
+fn new_mvn_command(args: &[String], daemon: bool) -> Result<Command> {
+    new_mvn_command_with(args, daemon, resolved_command)
+}
+
+fn new_mvn_command_with(
+    args: &[String],
+    daemon: bool,
+    resolve: fn(&str) -> Result<Command>,
+) -> Result<Command> {
     let mut cmd = if daemon {
-        resolved_command("mvnd")
+        resolve("mvnd")?
     } else if cfg!(windows) {
         if Path::new(".\\mvnw.cmd").exists() {
             Command::new(".\\mvnw.cmd")
         } else {
-            resolved_command("mvn")
+            resolve("mvn")?
         }
     } else if Path::new("./mvnw").exists() {
         Command::new("./mvnw")
     } else {
-        resolved_command("mvn")
+        resolve("mvn")?
     };
     cmd.args(args);
-    cmd
+    Ok(cmd)
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────
@@ -1937,28 +1945,28 @@ fn run_tool(args: &[String], daemon: bool, verbose: u8) -> Result<i32> {
             runner::run_passthrough(tool, &osargs, verbose)
         }
         MvnRoute::Quiet => runner::run_filtered(
-            new_mvn_command(args, daemon),
+            new_mvn_command(args, daemon)?,
             tool,
             &args_display,
             |raw: &str| filter_quiet(raw, daemon),
             RunOptions::with_tee("mvn_quiet"),
         ),
         MvnRoute::Filtered(MvnPhase::Test) => runner::run_filtered(
-            new_mvn_command(args, daemon),
+            new_mvn_command(args, daemon)?,
             tool,
             &args_display,
             move |raw: &str| filter_surefire(raw, daemon),
             RunOptions::with_tee("mvn_test"),
         ),
         MvnRoute::Filtered(MvnPhase::Compile) => runner::run_filtered(
-            new_mvn_command(args, daemon),
+            new_mvn_command(args, daemon)?,
             tool,
             &args_display,
             move |raw: &str| filter_compile(raw, daemon),
             RunOptions::with_tee("mvn_compile"),
         ),
         MvnRoute::Filtered(MvnPhase::Package) => runner::run_filtered(
-            new_mvn_command(args, daemon),
+            new_mvn_command(args, daemon)?,
             tool,
             &args_display,
             move |raw: &str| filter_package(raw, daemon),
@@ -2745,7 +2753,9 @@ mod tests {
         let args = s(["test", "-f", "pom.xml"]);
         assert_eq!(route(&args), MvnRoute::Filtered(MvnPhase::Test));
         for daemon in [false, true] {
-            let cmd = new_mvn_command(&args, daemon);
+            // nosemgrep: dynamic-command-execution -- test-only constructor inspects argv and never spawns Maven
+            let cmd = new_mvn_command_with(&args, daemon, |name| Ok(Command::new(name)))
+                .expect("build Maven command");
             let argv: Vec<String> = cmd
                 .get_args()
                 .map(|a| a.to_string_lossy().into_owned())
@@ -2753,6 +2763,23 @@ mod tests {
             assert_eq!(argv, args, "daemon={daemon}");
         }
         assert_eq!(mvn_binary(true), "mvnd");
+    }
+
+    #[test]
+    fn missing_maven_binary_propagates_resolution_error() {
+        let err = new_mvn_command_with(&[], true, |name| {
+            Err(crate::core::utils::CommandNotFound {
+                program: name.to_string(),
+            }
+            .into())
+        })
+        .expect_err("missing Maven daemon must not fall back to a bare command");
+        assert_eq!(
+            err.downcast_ref::<crate::core::utils::CommandNotFound>()
+                .expect("preserve typed command-not-found error")
+                .program,
+            "mvnd"
+        );
     }
 
     // ── Binary selection ─────────────────────────────────────────────────────

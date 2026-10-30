@@ -336,7 +336,7 @@ fn run_pr(args: &[String], verbose: u8) -> Result<i32> {
 }
 
 fn list_prs(args: &[String], _verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("gh");
+    let mut cmd = resolved_command("gh")?;
     cmd.args([
         "pr",
         "list",
@@ -435,7 +435,7 @@ fn view_pr(args: &[String], _verbose: u8) -> Result<i32> {
         }
         return run_passthrough_with_extra("gh", &base, &extra_args);
     }
-    let mut cmd = resolved_command("gh");
+    let mut cmd = resolved_command("gh")?;
     cmd.args(["pr", "view"]);
     if let Some(id) = pr_number_opt.as_deref() {
         cmd.arg(id);
@@ -535,7 +535,7 @@ fn format_pr_view(json: &Value) -> String {
 fn pr_checks(args: &[String], _verbose: u8) -> Result<i32> {
     // `gh pr checks` without an identifier defaults to the PR for the current branch.
     let (pr_number_opt, extra_args) = split_identifier(args, &pr_checks_takes_value);
-    let mut cmd = resolved_command("gh");
+    let mut cmd = resolved_command("gh")?;
     cmd.args(["pr", "checks"]);
     if let Some(id) = pr_number_opt.as_deref() {
         cmd.arg(id);
@@ -656,7 +656,7 @@ fn pr_status(args: &[String], _verbose: u8) -> Result<i32> {
         return run_passthrough("gh", "pr", &passthrough_args);
     }
 
-    let mut cmd = resolved_command("gh");
+    let mut cmd = resolved_command("gh")?;
     cmd.args(["pr", "status", "--json", pr_status_json_fields()]);
     for arg in args {
         cmd.arg(arg);
@@ -740,7 +740,7 @@ fn run_issue(args: &[String], verbose: u8) -> Result<i32> {
 }
 
 fn list_issues(args: &[String], _verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("gh");
+    let mut cmd = resolved_command("gh")?;
     cmd.args(["issue", "list", "--json", "number,title,state,author"]);
     for arg in args {
         cmd.arg(arg);
@@ -798,7 +798,7 @@ fn view_issue(args: &[String], _verbose: u8) -> Result<i32> {
         }
         return run_passthrough_with_extra("gh", &base, &extra_args);
     }
-    let mut cmd = resolved_command("gh");
+    let mut cmd = resolved_command("gh")?;
     cmd.args(["issue", "view"]);
     if let Some(id) = issue_number_opt.as_deref() {
         cmd.arg(id);
@@ -861,7 +861,7 @@ fn run_workflow(args: &[String], verbose: u8) -> Result<i32> {
 }
 
 fn list_runs(args: &[String], _verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("gh");
+    let mut cmd = resolved_command("gh")?;
     cmd.args([
         "run",
         "list",
@@ -918,7 +918,7 @@ fn view_run(args: &[String], _verbose: u8) -> Result<i32> {
         }
         return run_passthrough_with_extra("gh", &base, &extra_args);
     }
-    let mut cmd = resolved_command("gh");
+    let mut cmd = resolved_command("gh")?;
     cmd.args(["run", "view"]);
     if let Some(id) = run_id_opt.as_deref() {
         cmd.arg(id);
@@ -978,7 +978,7 @@ fn run_repo(args: &[String], _verbose: u8) -> Result<i32> {
     if subcommand != "view" {
         return run_passthrough("gh", "repo", args);
     }
-    let mut cmd = resolved_command("gh");
+    let mut cmd = resolved_command("gh")?;
     cmd.arg("repo").arg("view");
     for arg in rest_args {
         cmd.arg(arg);
@@ -1012,7 +1012,7 @@ fn format_repo_view(json: &Value) -> String {
 }
 
 fn pr_create(args: &[String], _verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("gh");
+    let mut cmd = resolved_command("gh")?;
     cmd.args(["pr", "create"]);
     for arg in args {
         cmd.arg(arg);
@@ -1073,7 +1073,7 @@ fn pr_diff(args: &[String], _verbose: u8) -> Result<i32> {
     if no_compact || has_non_diff_format_flag(&gh_args) {
         return run_passthrough_with_extra("gh", &["pr", "diff"], &gh_args);
     }
-    let mut cmd = resolved_command("gh");
+    let mut cmd = resolved_command("gh")?;
     cmd.args(["pr", "diff"]);
     for arg in gh_args.iter() {
         cmd.arg(arg);
@@ -1113,7 +1113,7 @@ fn pr_action(
 ) -> Result<i32> {
     let subcmd = &args[0];
     let pr_num = action_target(&args[1..], takes_value);
-    let mut cmd = resolved_command("gh");
+    let mut cmd = resolved_command("gh")?;
     cmd.arg("pr");
     for arg in args {
         cmd.arg(arg);
