@@ -3904,14 +3904,30 @@ fn run_cli() -> Result<i32> {
                 }
             }
 
-            let mut child = ChildGuard(Some(
-                core::utils::resolved_command(cmd_name.as_ref())
-                    .child_args(&cmd_args)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .context(format!("Failed to execute command: {}", cmd_name))?,
-            ));
+            let spawned = core::utils::resolved_command(cmd_name.as_ref())
+                .child_args(&cmd_args)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn();
+
+            let mut child = ChildGuard(Some(match spawned {
+                Ok(inner) => inner,
+                // ISSUE #4819: a command that cannot be started is an
+                // execution outcome, not an RTK error — `rtk run` reports it
+                // the way a shell does (message on stderr, 127/126 exit), and
+                // so does bypass, whose callers branch on the same codes.
+                Err(error) => {
+                    let error = anyhow::Error::new(error)
+                        .context(format!("Failed to execute command: {}", cmd_name));
+                    match core::shell::spawn_failure(&cmd_name, &error) {
+                        Some(outcome) => {
+                            eprint!("{}", outcome.message);
+                            return Ok(outcome.code);
+                        }
+                        None => return Err(error),
+                    }
+                }
+            }));
 
             // Store child PID for signal handler before anything can fail
             if let Some(ref inner) = child.0 {
