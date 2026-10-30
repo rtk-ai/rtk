@@ -552,6 +552,7 @@ fn should_sample_cleanup(key: &str, rate: u32) -> bool {
 const SUBCOMMAND_ROUTERS: &[&str] = &[
     "artisan",
     "aws",
+    "buf",
     "bun",
     "cargo",
     "deno",
@@ -1905,7 +1906,7 @@ fn categorize_command(rtk_cmd: &str) -> String {
         "npm" | "npx" | "pnpm" | "bun" | "bunx" | "deno" | "vitest" | "tsc" | "lint"
         | "prettier" | "next" | "playwright" | "prisma" => "js",
         "pytest" | "ruff" | "mypy" | "pip" | "sqlfluff" | "uv" => "python",
-        "go" | "golangci-lint" => "go",
+        "go" | "golangci-lint" | "buf" => "go",
         "docker" | "kubectl" => "cloud",
         "rspec" | "rubocop" | "rake" => "ruby",
         "dotnet" => "dotnet",
@@ -2303,6 +2304,7 @@ mod command_label_tests {
                 "rtk git log",
             ),
             ("rtk git status --porcelain", "rtk git status"),
+            ("rtk buf lint --path secret/x", "rtk buf lint"),
             ("rtk git show HEAD:src/core/utils.rs", "rtk git show"),
             (
                 "rtk gh issue comment 2493 --repo rtk-ai/rtk",

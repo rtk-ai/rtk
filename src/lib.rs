@@ -13,7 +13,7 @@ mod parser;
 use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git_cmd, glab_cmd, gt_cmd};
-use cmds::go::{go_cmd, golangci_cmd};
+use cmds::go::{buf_cmd, go_cmd, golangci_cmd};
 use cmds::js::{
     bun_cmd, deno_cmd, lint_cmd, next_cmd, ng_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd,
     prisma_cmd, tsc_cmd, vitest_cmd,
@@ -1022,6 +1022,13 @@ enum Commands {
     Gt {
         #[command(subcommand)]
         command: GtCommands,
+    },
+
+    /// buf (Protobuf) with lint/build/breaking grouped by rule, format -d summarised
+    Buf {
+        /// buf subcommand and arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
     /// golangci-lint wrapper with compact `run` support and passthrough for other invocations
@@ -3647,6 +3654,8 @@ fn run_cli() -> Result<i32> {
             GtCommands::Other(args) => gt_cmd::run_other(&args, cli.verbose)?,
         },
 
+        Commands::Buf { args } => buf_cmd::run(&args, cli.verbose)?,
+
         Commands::GolangciLint { args } => golangci_cmd::run(&args, cli.verbose)?,
 
         Commands::Gradlew { args } => gradlew_cmd::run(&args, cli.verbose)?,
@@ -4110,6 +4119,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Mvn { .. }
             | Commands::Mvnd { .. }
             | Commands::Sbt { .. }
+            | Commands::Buf { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
             | Commands::Bun { .. }
@@ -4702,6 +4712,7 @@ mod tests {
             "pip",
             "go",
             "gt",
+            "buf",
             "golangci-lint",
             "gradlew",
             "mvn",
