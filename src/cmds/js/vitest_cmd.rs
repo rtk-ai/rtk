@@ -32,8 +32,21 @@ struct VitestJsonOutput {
 #[derive(Debug, Deserialize)]
 struct VitestTestFile {
     name: String,
-    #[serde(rename = "assertionResults")]
+    #[serde(rename = "assertionResults", default)]
     assertion_results: Vec<VitestTest>,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    message: String,
+    #[serde(rename = "testExecError", default)]
+    test_exec_error: Option<VitestSuiteError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VitestSuiteError {
+    message: String,
+    #[serde(default)]
+    stack: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,6 +111,40 @@ fn extract_failures_from_json(json: &VitestJsonOutput) -> Vec<TestFailure> {
     let mut failures = Vec::new();
 
     for file in &json.test_results {
+        // A suite can fail to load before it reports any assertions. Preserve
+        // that diagnostic without counting it as a test that never ran. When
+        // assertions did fail, their messages already describe the suite.
+        if !file
+            .assertion_results
+            .iter()
+            .any(|test| test.status == "failed")
+            && (file.status == "failed" || file.test_exec_error.is_some())
+        {
+            let mut messages = Vec::new();
+            if !file.message.trim().is_empty() {
+                messages.push(file.message.as_str());
+            }
+            if let Some(error) = &file.test_exec_error {
+                if !error.message.trim().is_empty() && !messages.contains(&error.message.as_str()) {
+                    messages.push(error.message.as_str());
+                }
+                if let Some(stack) = error.stack.as_deref()
+                    && !stack.trim().is_empty()
+                    && !messages.contains(&stack)
+                {
+                    messages.push(stack);
+                }
+            }
+            if messages.is_empty() {
+                messages.push("Test suite failed before reporting assertions.");
+            }
+            failures.push(TestFailure {
+                test_name: format!("Suite failed: {}", file.name),
+                file_path: file.name.clone(),
+                error_message: messages.join("\n"),
+                stack_trace: None,
+            });
+        }
         for test in &file.assertion_results {
             if test.status == "failed" {
                 let error_message = test.failure_messages.join("\n");
@@ -269,11 +316,15 @@ fn run_framework_test(invocation: TestInvocation, verbose: u8) -> Result<i32> {
     cmd.args(&invocation.args);
 
     let result = exec_capture(&mut cmd).context(format!("Failed to run {}", framework))?;
-    let combined = result.combined();
+    let report = read_vitest_file_report(framework, &result.stdout, invocation.passthrough)?;
+    let combined = match &report {
+        Some(report) => format!("{}\n{}", result.combined(), report),
+        None => result.combined(),
+    };
 
     let filtered = format_test_output(
         framework,
-        &result.stdout,
+        report.as_deref().unwrap_or(&result.stdout),
         &combined,
         invocation.passthrough,
         verbose,
@@ -294,6 +345,30 @@ fn run_framework_test(invocation: TestInvocation, verbose: u8) -> Result<i32> {
         return Ok(result.exit_code);
     }
     Ok(0)
+}
+
+// Vitest 5 writes its JSON reporter to an artifact by default, whereas older
+// releases print JSON. Consume the path reported by this invocation so caller
+// outputFile settings and the artifact itself remain intact on every OS.
+fn read_vitest_file_report(
+    framework: &str,
+    stdout: &str,
+    passthrough_requested: bool,
+) -> Result<Option<String>> {
+    if framework != "vitest" || passthrough_requested {
+        return Ok(None);
+    }
+    let clean = strip_ansi(stdout);
+    let report_path = clean
+        .lines()
+        .filter_map(|line| line.strip_prefix("JSON report written to "))
+        .next_back();
+    report_path
+        .map(|path| {
+            std::fs::read_to_string(path)
+                .with_context(|| format!("Failed to read Vitest JSON report: {}", path))
+        })
+        .transpose()
 }
 
 struct FormattedTestOutput {
@@ -354,7 +429,7 @@ fn format_test_output(
         }
         ParseResult::Passthrough(_) => {
             emit_passthrough_warning(framework, "All parsing tiers failed");
-            format_passthrough_output(stdout)
+            format_passthrough_output(combined)
         }
     }
 }
@@ -414,6 +489,92 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_loss_stderr_only_startup_failure_is_visible() {
+        let raw = "OUTPUT_LOSS_MARKER: Vitest startup failed\n";
+        let filtered = format_test_output("vitest", "", raw, false, 0);
+        assert_eq!(filtered.text, raw);
+    }
+
+    #[test]
+    fn output_loss_unparsed_stdout_and_stderr_are_both_visible() {
+        let stdout = "unknown reporter output\n";
+        let combined = format!("{stdout}OUTPUT_LOSS_MARKER: cannot load config\n");
+        let filtered = format_test_output("vitest", stdout, &combined, false, 0);
+        assert_eq!(filtered.text, combined);
+    }
+
+    #[test]
+    fn output_loss_suite_load_failure_keeps_name_reason_and_test_counts() {
+        let raw = r#"{"numTotalTests":0,"numPassedTests":0,"numFailedTests":0,"numPendingTests":0,"numFailedTestSuites":1,"testResults":[{"name":"broken.test.js","status":"failed","assertionResults":[],"message":"OUTPUT_LOSS_MARKER: Cannot load suite","testExecError":{"message":"Cannot load suite","stack":"at broken.test.js:3:1"}}]}"#;
+        let result = VitestParser::parse(raw).unwrap();
+        assert_eq!(result.total, 0);
+        assert_eq!(
+            result.failed, 0,
+            "suite failures must not fabricate failed tests"
+        );
+        let formatted = result.format(FormatMode::Compact);
+        assert!(
+            formatted.contains("Suite failed: broken.test.js"),
+            "{formatted}"
+        );
+        assert!(
+            formatted.contains("OUTPUT_LOSS_MARKER: Cannot load suite"),
+            "{formatted}"
+        );
+        assert!(formatted.contains("at broken.test.js:3:1"), "{formatted}");
+    }
+
+    #[test]
+    fn output_loss_suite_failure_without_assertion_array_is_visible() {
+        let raw = r#"{"numTotalTests":0,"numPassedTests":0,"numFailedTests":0,"testResults":[{"name":"broken.test.js","status":"failed","testExecError":{"message":"OUTPUT_LOSS_MARKER: Cannot find module"}}]}"#;
+        let result = VitestParser::parse(raw).unwrap();
+        let formatted = result.format(FormatMode::Compact);
+        assert!(
+            formatted.contains("Suite failed: broken.test.js"),
+            "{formatted}"
+        );
+        assert!(
+            formatted.contains("OUTPUT_LOSS_MARKER: Cannot find module"),
+            "{formatted}"
+        );
+    }
+
+    #[test]
+    fn output_loss_passed_suite_message_is_not_a_failure() {
+        let raw = r#"{"numTotalTests":1,"numPassedTests":1,"numFailedTests":0,"testResults":[{"name":"passed.test.js","status":"passed","message":"reporter note","assertionResults":[{"fullName":"adds","status":"passed","failureMessages":[]}]}]}"#;
+        let result = VitestParser::parse(raw).unwrap();
+        assert_eq!(result.passed, 1);
+        assert!(result.failures.is_empty());
+    }
+
+    #[test]
+    fn output_loss_vitest_file_report_is_read_without_changing_the_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report with spaces.json");
+        let json = r#"{"numTotalTests":1,"numPassedTests":1,"numFailedTests":0,"testResults":[]}"#;
+        std::fs::write(&path, json).unwrap();
+        let stdout = format!("JSON report written to {}\n", path.display());
+        let report = read_vitest_file_report("vitest", &stdout, false)
+            .unwrap()
+            .unwrap();
+        let result = VitestParser::parse(&report).unwrap();
+        assert_eq!(result.passed, 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), json);
+        assert!(
+            read_vitest_file_report("vitest", &stdout, true)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            read_vitest_file_report("jest", &stdout, false)
+                .unwrap()
+                .is_none()
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert!(read_vitest_file_report("vitest", &stdout, false).is_err());
+    }
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()

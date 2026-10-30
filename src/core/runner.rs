@@ -1206,6 +1206,11 @@ const DENO_POLICY: BlockPolicy = BlockPolicy {
 };
 
 fn extract_test_summary(output: &str, eco: TestEcosystem) -> String {
+    // No parser means no reliable way to identify a summary or a failure.
+    // Keep the complete report; a last-lines preview can discard its cause.
+    if eco == TestEcosystem::Unknown {
+        return output.to_string();
+    }
     // Test runners colorize even when piped (deno does), so anchor on clean text.
     let cleaned = crate::core::utils::strip_ansi(output);
     let lines: Vec<&str> = cleaned.lines().collect();
@@ -2519,6 +2524,12 @@ mod err_test_runner_tests {
         assert_eq!(TestEcosystem::detect("pytest -x"), TestEcosystem::Pytest);
         assert_eq!(TestEcosystem::detect("npm test"), TestEcosystem::Jest);
         assert_eq!(TestEcosystem::detect("make check"), TestEcosystem::Unknown);
+    }
+
+    #[test]
+    fn output_loss_unknown_runner_keeps_complete_diagnostics() {
+        let raw = "TAP version 13\nnot ok 1 - OUTPUT_LOSS_MARKER node failure\n  error: AssertionError\n  expected: 2\n  actual: 1\n1..1\n# tests 1\n# fail 1\n# duration_ms 4\n";
+        assert_eq!(extract_test_summary(raw, TestEcosystem::Unknown), raw);
     }
 
     #[test]
