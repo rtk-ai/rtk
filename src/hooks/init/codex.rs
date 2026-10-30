@@ -720,6 +720,68 @@ mod proxy_route_tests {
         );
         assert_eq!(onramp.current_target().unwrap(), None);
     }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn the_codex_onramp_path_follows_the_login() {
+        use super::super::proxy_onramp::ProxyOnramp;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let onramp = CodexOnramp {
+            config_path: temp.path().join("config.toml"),
+            hooks_path: temp.path().join("hooks.json"),
+        };
+        crate::core::user_env::with_vars(
+            &[
+                ("CODEX_HOME", temp.path().to_str()),
+                ("OPENAI_API_KEY", None),
+            ],
+            || {
+                fs::write(
+                    temp.path().join(CODEX_AUTH_FILE),
+                    r#"{"auth_mode":"chatgpt","tokens":{"id_token":"x"}}"#,
+                )
+                .unwrap();
+                assert_eq!(onramp.path(), CODEX_CHATGPT_PATH);
+                fs::write(
+                    temp.path().join(CODEX_AUTH_FILE),
+                    r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-1"}"#,
+                )
+                .unwrap();
+                assert_eq!(onramp.path(), CODEX_API_PATH);
+                fs::remove_file(temp.path().join(CODEX_AUTH_FILE)).unwrap();
+                assert_eq!(onramp.path(), CODEX_API_PATH);
+            },
+        );
+    }
+
+    #[test]
+    fn a_dry_run_uninstall_reports_the_route_removal_without_writing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = temp.path().join(CODEX_CONFIG_FILE);
+        let text = format!("model = \"gpt-5\"\n{OPENAI_BASE_URL_KEY} = \"{RTK}\"\n");
+        fs::write(&config, &text).unwrap();
+
+        let removed = uninstall_codex_at(
+            temp.path(),
+            InitContext {
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            removed.iter().any(|l| l.contains(OPENAI_BASE_URL_KEY)),
+            "{removed:?}"
+        );
+        assert_eq!(fs::read_to_string(&config).unwrap(), text);
+
+        uninstall_codex_at(temp.path(), InitContext::default()).unwrap();
+        assert!(
+            !fs::read_to_string(&config)
+                .unwrap()
+                .contains(OPENAI_BASE_URL_KEY)
+        );
+    }
 }
 
 pub(super) fn run_codex_mode(global: bool, ctx: InitContext) -> Result<()> {

@@ -208,6 +208,25 @@ fn spawn_start(addr: &str) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
+pub(crate) fn fake_rtk_daemon() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr").to_string();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut request = [0u8; 1024];
+            let _ = std::io::Read::read(&mut stream, &mut request);
+            let body = r#"{"service":"rtk-proxy"}"#;
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    addr
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::Cell;
@@ -348,6 +367,217 @@ mod tests {
             SystemTime::now() + Duration::from_secs(600),
             five_minutes
         ));
+    }
+
+    fn write_agent_config(home: &Path, relative: &str, text: &str) {
+        let path = home.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).expect("create dir");
+        std::fs::write(path, text).expect("write config");
+    }
+
+    fn set_age(path: &Path, age: Duration) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("open stamp")
+            .set_modified(SystemTime::now() - age)
+            .expect("set mtime");
+    }
+
+    #[test]
+    fn vibe_base_url_is_the_mistral_api_base_when_rtk_owns_it() {
+        let home = crate::core::test_isolation::tempdir();
+        write_agent_config(
+            home.path(),
+            ".vibe/config.toml",
+            "[[providers]]\nname = \"mistral\"\napi_base = \"http://127.0.0.1:8080/mistral/v1\"\n",
+        );
+        crate::core::test_isolation::with_root(home.path(), || {
+            crate::core::user_env::with_vars(&[("RTK_PROXY_BIND", None)], || {
+                assert_eq!(
+                    base_url("vibe"),
+                    Some((
+                        "providers[mistral].api_base".to_string(),
+                        "http://127.0.0.1:8080/mistral/v1".to_string()
+                    ))
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn vibe_base_url_ignores_a_foreign_api_base() {
+        let home = crate::core::test_isolation::tempdir();
+        write_agent_config(
+            home.path(),
+            ".vibe/config.toml",
+            "[[providers]]\nname = \"mistral\"\napi_base = \"https://api.mistral.ai/v1\"\n",
+        );
+        crate::core::test_isolation::with_root(home.path(), || {
+            assert_eq!(base_url("vibe"), None);
+        });
+    }
+
+    #[test]
+    fn a_users_own_loopback_server_is_not_routed_through_rtk() {
+        for own in [
+            "http://127.0.0.1:8080/v1",
+            "http://127.0.0.1:8080",
+            "http://127.0.0.1:4000/v1",
+            "http://localhost:4000/openai/v1",
+        ] {
+            let home = crate::core::test_isolation::tempdir();
+            write_agent_config(
+                home.path(),
+                ".codex/config.toml",
+                &format!("openai_base_url = \"{own}\"\n"),
+            );
+            write_agent_config(
+                home.path(),
+                ".vibe/config.toml",
+                &format!("[[providers]]\nname = \"mistral\"\napi_base = \"{own}\"\n"),
+            );
+            crate::core::test_isolation::with_root(home.path(), || {
+                crate::core::user_env::with_vars(
+                    &[("CODEX_HOME", None), ("RTK_PROXY_BIND", None)],
+                    || {
+                        for agent in ["codex", "vibe"] {
+                            assert_eq!(base_url(agent), None, "{agent}: {own}");
+                            assert!(!routed_through_rtk(agent), "{agent}: {own}");
+                            assert_eq!(
+                                throttled_keepalive(agent, Duration::ZERO),
+                                None,
+                                "{agent}: {own}"
+                            );
+                        }
+                    },
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn codex_base_url_comes_from_the_config_key_not_the_environment() {
+        let home = crate::core::test_isolation::tempdir();
+        write_agent_config(
+            home.path(),
+            ".codex/config.toml",
+            "openai_base_url = \"http://127.0.0.1:8080/openai/v1\"\n",
+        );
+        crate::core::test_isolation::with_root(home.path(), || {
+            crate::core::user_env::with_vars(
+                &[
+                    ("CODEX_HOME", None),
+                    ("RTK_PROXY_BIND", None),
+                    (
+                        "OPENAI_BASE_URL",
+                        Some("http://127.0.0.1:8080/chatgpt/backend-api/codex"),
+                    ),
+                ],
+                || {
+                    assert_eq!(
+                        base_url("codex"),
+                        Some((
+                            "openai_base_url".to_string(),
+                            "http://127.0.0.1:8080/openai/v1".to_string()
+                        ))
+                    );
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn codex_base_url_is_none_without_the_config_key() {
+        let home = crate::core::test_isolation::tempdir();
+        crate::core::test_isolation::with_root(home.path(), || {
+            crate::core::user_env::with_vars(
+                &[
+                    ("CODEX_HOME", None),
+                    ("RTK_PROXY_BIND", None),
+                    ("OPENAI_BASE_URL", Some("http://127.0.0.1:8080/openai/v1")),
+                ],
+                || assert_eq!(base_url("codex"), None),
+            );
+        });
+    }
+
+    #[test]
+    fn the_throttle_boundary_is_inclusive() {
+        let dir = crate::core::test_isolation::tempdir();
+        let stamp = dir.path().join("keepalive.vibe");
+        touch(&stamp);
+        let modified = std::fs::metadata(&stamp).unwrap().modified().unwrap();
+        let interval = Duration::from_secs(300);
+        assert!(stamp_due(&stamp, modified + interval, interval));
+        assert!(!stamp_due(
+            &stamp,
+            modified + interval - Duration::from_secs(1),
+            interval
+        ));
+    }
+
+    #[test]
+    fn a_stamp_from_the_future_is_due() {
+        let dir = crate::core::test_isolation::tempdir();
+        let stamp = dir.path().join("keepalive.vibe");
+        touch(&stamp);
+        let modified = std::fs::metadata(&stamp).unwrap().modified().unwrap();
+        assert!(stamp_due(
+            &stamp,
+            modified - Duration::from_secs(3600),
+            Duration::from_secs(300)
+        ));
+    }
+
+    #[test]
+    fn throttled_keepalive_stamps_when_due_and_stays_quiet_until_the_interval_passes() {
+        let home = crate::core::test_isolation::tempdir();
+        let daemon = fake_rtk_daemon();
+        let url = format!("http://{daemon}/mistral/v1");
+        write_agent_config(
+            home.path(),
+            ".vibe/config.toml",
+            &format!("[[providers]]\nname = \"mistral\"\napi_base = \"{url}\"\n"),
+        );
+        crate::core::test_isolation::with_root(home.path(), || {
+            crate::core::user_env::with_vars(&[("RTK_PROXY_BIND", Some(daemon.as_str()))], || {
+                let stamp = crate::core::user_dirs::config()
+                    .unwrap()
+                    .join("llm-proxy")
+                    .join("keepalive.vibe");
+                let interval = Duration::from_secs(3600);
+                assert!(!stamp.exists());
+
+                assert_eq!(throttled_keepalive("vibe", interval), None);
+                assert!(stamp.is_file(), "a due keep-alive must leave a stamp");
+
+                set_age(&stamp, Duration::from_secs(60));
+                let before = std::fs::metadata(&stamp).unwrap().modified().unwrap();
+                assert_eq!(throttled_keepalive("vibe", interval), None);
+                let after = std::fs::metadata(&stamp).unwrap().modified().unwrap();
+                assert_eq!(before, after, "a fresh stamp must not be rewritten");
+
+                set_age(&stamp, Duration::from_secs(7200));
+                let before = std::fs::metadata(&stamp).unwrap().modified().unwrap();
+                assert_eq!(throttled_keepalive("vibe", interval), None);
+                let after = std::fs::metadata(&stamp).unwrap().modified().unwrap();
+                assert!(after > before, "an expired stamp must be renewed");
+            });
+        });
+    }
+
+    #[test]
+    fn throttled_keepalive_does_nothing_for_an_agent_not_routed_through_rtk() {
+        let home = crate::core::test_isolation::tempdir();
+        crate::core::test_isolation::with_root(home.path(), || {
+            assert_eq!(throttled_keepalive("vibe", Duration::from_secs(300)), None);
+            let stamp = crate::core::user_dirs::config()
+                .unwrap()
+                .join("llm-proxy")
+                .join("keepalive.vibe");
+            assert!(!stamp.exists());
+        });
     }
 
     #[test]

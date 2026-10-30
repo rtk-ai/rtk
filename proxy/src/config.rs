@@ -656,6 +656,39 @@ mod tests {
     }
 
     #[test]
+    fn from_cli_refuses_a_malformed_or_reserved_upstream_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("proxy.toml");
+        std::fs::write(&file, "").unwrap();
+        let file = file.to_str().unwrap();
+        for bad in ["1X", "HEALTH", "ANTHROPIC"] {
+            let var = format!("RTK_PROXY_UPSTREAM_{bad}");
+            temp_env::with_vars(
+                [
+                    ("RTK_PROXY_CONFIG", Some(file)),
+                    (var.as_str(), Some("http://127.0.0.1:9")),
+                ],
+                || {
+                    assert!(
+                        Config::from_cli(empty_cli()).is_err(),
+                        "{bad} must be refused at load"
+                    );
+                },
+            );
+        }
+        temp_env::with_vars(
+            [
+                ("RTK_PROXY_CONFIG", Some(file)),
+                ("RTK_PROXY_UPSTREAM_ACME", Some("http://127.0.0.1:9")),
+            ],
+            || {
+                let c = Config::from_cli(empty_cli()).expect("a well-formed name loads");
+                assert_eq!(c.upstreams["acme"], "http://127.0.0.1:9");
+            },
+        );
+    }
+
+    #[test]
     fn to_file_config_round_trips_every_field() {
         let mut cli = empty_cli();
         cli.bind = Some("127.0.0.1:9999".into());

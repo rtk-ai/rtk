@@ -915,6 +915,46 @@ mod tests {
         assert_eq!(a.len(), 16);
     }
 
+    fn chat_shaped_body_with_a_huge_tool_message() -> serde_json::Value {
+        let big: String = (0..4000).map(|i| format!("line {i} of output\n")).collect();
+        serde_json::json!({
+            "model": "gpt-5-codex",
+            "messages": [{ "role": "tool", "tool_call_id": "c1", "content": big }]
+        })
+    }
+
+    #[test]
+    fn a_responses_request_is_never_compressed() {
+        let body = chat_shaped_body_with_a_huge_tool_message();
+        let mut req = InterceptedRequest::for_pipeline(
+            Provider::OpenaiResponses,
+            "/v1/responses".into(),
+            body.clone(),
+        );
+        assert!(compress_request(&mut req).is_none());
+        assert_eq!(req.body, body);
+
+        let mut chat =
+            InterceptedRequest::for_pipeline(Provider::Openai, "/v1/chat/completions".into(), body);
+        assert!(
+            compress_request(&mut chat).is_some(),
+            "the same body does compress as chat completions"
+        );
+    }
+
+    #[test]
+    fn a_responses_request_never_receives_the_retrieve_tool() {
+        let original = serde_json::json!({ "model": "gpt-5-codex", "input": [] });
+        for provider in [Provider::OpenaiResponses, Provider::Google] {
+            let mut body = original.clone();
+            ensure_retrieve_tool(provider, &mut body);
+            assert_eq!(body, original, "{provider:?}");
+        }
+        let mut chat = original.clone();
+        ensure_retrieve_tool(Provider::Openai, &mut chat);
+        assert_ne!(chat, original, "chat completions does get the tool");
+    }
+
     #[test]
     fn small_block_is_not_compressed() {
         assert!(compress_text("tiny output", "s1").is_none());

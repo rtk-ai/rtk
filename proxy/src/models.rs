@@ -166,6 +166,23 @@ mod tests {
     }
 
     #[test]
+    fn mistral_models_read_cached_prefixes_at_a_tenth() {
+        let r = Registry::parse(DEFAULT_TOML).unwrap();
+        for model in [
+            "devstral-medium-latest",
+            "devstral-small-2507",
+            "codestral-latest",
+            "magistral-medium-latest",
+            "ministral-8b-latest",
+            "pixtral-large-latest",
+            "mistral-large-latest",
+            "open-mixtral-8x7b",
+        ] {
+            assert_eq!(r.cache_read_mult(model), 0.1, "{model}");
+        }
+    }
+
+    #[test]
     fn operator_prices_resolve_with_dated_ids_and_default() {
         let toml = r#"
 [[model]]

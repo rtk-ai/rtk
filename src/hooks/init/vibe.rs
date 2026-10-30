@@ -249,7 +249,7 @@ fn run_vibe_mode_at(
         }
     }
     #[cfg(feature = "engine")]
-    if !dry_run && hook_outcome != VibeHookPatchOutcome::Skipped {
+    if should_offer_onramp(dry_run, hook_outcome) {
         let onramp = VibeOnramp {
             config_path: vibe_dir.join(VIBE_CONFIG_FILE),
         };
@@ -292,6 +292,11 @@ enum VibeHookPatchOutcome {
     Installed,
     AlreadyPresent,
     Skipped,
+}
+
+#[cfg(any(feature = "engine", test))]
+fn should_offer_onramp(dry_run: bool, hook_outcome: VibeHookPatchOutcome) -> bool {
+    !dry_run && hook_outcome != VibeHookPatchOutcome::Skipped
 }
 
 impl VibeHookPatchOutcome {
@@ -994,5 +999,16 @@ mod onramp_report_tests {
     fn a_running_but_unused_daemon_is_called_out_in_project_scope() {
         let lines = project_scope_footer_lines(HookStatus::Ok, false, true).join("\n");
         assert!(lines.contains("nothing routed to it"), "{lines}");
+    }
+
+    #[test]
+    fn the_onramp_is_offered_only_after_a_real_hook_patch() {
+        assert!(should_offer_onramp(false, VibeHookPatchOutcome::Installed));
+        assert!(should_offer_onramp(
+            false,
+            VibeHookPatchOutcome::AlreadyPresent
+        ));
+        assert!(!should_offer_onramp(false, VibeHookPatchOutcome::Skipped));
+        assert!(!should_offer_onramp(true, VibeHookPatchOutcome::Installed));
     }
 }

@@ -1155,4 +1155,49 @@ mod tests {
         acc.feed(b"put_tokens\":55}}\n\n");
         assert_eq!(acc.finish().output, 55);
     }
+
+    fn responses_call_done(index: i64, name: &str, arguments: &str) -> Vec<u8> {
+        format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": index,
+                "item": { "type": "function_call", "name": name, "arguments": arguments }
+            })
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn sse_responses_keeps_every_function_call_in_output_order() {
+        let mut acc = SseAccumulator::new(Provider::OpenaiResponses);
+        acc.feed(&responses_call_done(3, "shell", r#"{"command":"ls"}"#));
+        acc.feed(b"data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"name\":\"not_a_call\"}}\n\n");
+        acc.feed(&responses_call_done(1, "read_file", r#"{"path":"a"}"#));
+        let calls = acc.tool_calls();
+        let names: Vec<&str> = calls.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["read_file", "shell"]);
+        assert_eq!(calls[0].input, serde_json::json!({"path": "a"}));
+        assert_eq!(calls[1].input, serde_json::json!({"command": "ls"}));
+    }
+
+    #[test]
+    fn sse_responses_collects_output_text_deltas() {
+        let mut acc = SseAccumulator::new(Provider::OpenaiResponses);
+        acc.feed(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n");
+        acc.feed(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\n");
+        acc.feed(b"data: {\"type\":\"response.output_text.done\",\"text\":\"ignored\"}\n\n");
+        assert_eq!(acc.text, "Hello");
+    }
+
+    #[test]
+    fn sse_responses_is_complete_only_at_a_terminal_event() {
+        let mut acc = SseAccumulator::new(Provider::OpenaiResponses);
+        acc.feed(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n");
+        assert!(!acc.completed());
+        acc.feed(b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}\n\n");
+        assert!(acc.completed());
+        let u = acc.finish();
+        assert_eq!((u.input, u.output), (10, 4));
+    }
 }

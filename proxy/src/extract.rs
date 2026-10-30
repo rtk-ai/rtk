@@ -670,6 +670,46 @@ mod tests {
     }
 
     #[test]
+    fn responses_tool_calls_are_function_calls_only() {
+        let calls = tool_calls_from_response(
+            &Provider::OpenaiResponses,
+            &json!({ "output": [
+                { "type": "custom_tool_call", "name": "apply_patch", "arguments": "{}" },
+                { "type": "mcp_call", "name": "search", "arguments": "{}" },
+                { "type": "function_call", "name": "shell", "arguments": "{\"command\":[\"ls\"]}" },
+                { "type": "function_call", "name": "read_file", "arguments": "not json" }
+            ]}),
+        );
+        let names: Vec<&str> = calls.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["shell", "read_file"]);
+        assert_eq!(calls[1].input, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn responses_input_never_goes_negative_when_cached_exceeds_it() {
+        let u = usage_from_response(
+            &Provider::OpenaiResponses,
+            &json!({ "usage": {
+                "input_tokens": 100, "output_tokens": 5,
+                "input_tokens_details": { "cached_tokens": 150 }
+            }}),
+        );
+        assert_eq!((u.input, u.output, u.cache_read), (0, 5, 150));
+    }
+
+    #[test]
+    fn detect_client_matches_vibe_in_any_case() {
+        for ua in [
+            "mistral-vibe/1.0",
+            "Mistral-Vibe/1.0",
+            "MISTRAL-VIBE/1.0",
+            "mistral-client-python/MISTRAL-vibe/2",
+        ] {
+            assert_eq!(detect_client(Some(ua)), Some("vibe".to_string()), "{ua}");
+        }
+    }
+
+    #[test]
     fn keywords_extracts_distinctive_terms() {
         let kw = keywords("the production deploy key is zebra-quartz-42!!");
         assert!(kw.contains(&"production".to_string()));

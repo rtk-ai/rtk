@@ -1902,6 +1902,71 @@ mod tests {
         };
         assert!((s.cache_hit_ratio().unwrap() - 0.97).abs() < 1e-9);
     }
+
+    const CACHE_COLUMNS: &str = "id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                provider TEXT,
+                tokens_in INTEGER NOT NULL DEFAULT 0,
+                tokens_out INTEGER NOT NULL DEFAULT 0,
+                tokens_saved INTEGER NOT NULL DEFAULT 0,
+                cost_usd REAL NOT NULL DEFAULT 0,
+                status INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                ccr_retrieve_calls INTEGER NOT NULL DEFAULT 0,
+                ctx_total INTEGER NOT NULL DEFAULT 0,
+                ctx_tool_result INTEGER NOT NULL DEFAULT 0,
+                ctx_tool_use INTEGER NOT NULL DEFAULT 0,
+                ctx_duplicate INTEGER NOT NULL DEFAULT 0,
+                ctx_image INTEGER NOT NULL DEFAULT 0,
+                saved_ingest_filter INTEGER NOT NULL DEFAULT 0,
+                saved_pixel_compress INTEGER NOT NULL DEFAULT 0,
+                saved_ccr INTEGER NOT NULL DEFAULT 0,
+                saved_normalize INTEGER NOT NULL DEFAULT 0";
+
+    #[test]
+    fn the_gain_summary_counts_uncached_input_for_responses_rows_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("p.db");
+        let conn = rusqlite::Connection::open(&db_path).expect("open");
+        conn.execute_batch(&format!(
+            "CREATE TABLE usage_records ({CACHE_COLUMNS}, uncached_input INTEGER NOT NULL DEFAULT 0);
+            INSERT INTO usage_records
+                (ts, provider, status, cache_read_tokens, cache_creation_tokens, uncached_input)
+            VALUES ('2026-01-01T00:00:00Z', 'openai-responses', 200, 600, 0, 300),
+                   ('2026-01-01T00:00:30Z', 'anthropic', 200, 300, 100, 999);"
+        ))
+        .expect("seed db");
+        drop(conn);
+
+        let s = read_gain_summary_at(&db_path).expect("summary");
+        assert_eq!(s.cache_read, 900);
+        assert_eq!(s.cache_created, 100);
+        assert_eq!(s.uncached_input, 300);
+        assert!((s.cache_hit_ratio().unwrap() - 900.0 / 1300.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_gain_summary_keeps_cache_numbers_from_a_database_without_uncached_input() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("p.db");
+        let conn = rusqlite::Connection::open(&db_path).expect("open");
+        conn.execute_batch(&format!(
+            "CREATE TABLE usage_records ({CACHE_COLUMNS});
+            INSERT INTO usage_records
+                (ts, provider, status, cache_read_tokens, cache_creation_tokens)
+            VALUES ('2026-01-01T00:00:00Z', 'anthropic', 200, 300, 100),
+                   ('2026-01-01T00:00:30Z', 'openai-responses', 200, 600, 0);"
+        ))
+        .expect("seed db");
+        drop(conn);
+
+        let s = read_gain_summary_at(&db_path).expect("summary");
+        assert_eq!(s.cache_read, 900);
+        assert_eq!(s.cache_created, 100);
+        assert_eq!(s.uncached_input, 0);
+        assert!((s.cache_hit_ratio().unwrap() - 0.9).abs() < 1e-9);
+    }
 }
 
 #[cfg(test)]

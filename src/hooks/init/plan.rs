@@ -176,6 +176,31 @@ mod tests {
     }
 
     #[test]
+    fn the_keepalive_needs_both_the_profile_flag_and_a_wired_event() {
+        let resolved = resolved("");
+
+        let flag_off = harness::profile("cline").unwrap();
+        assert!(!flag_off.session_start);
+        assert!(flag_off.wiring.unwrap().session_start.is_some());
+        let plan = plan_with_routed(flag_off, &resolved, true);
+        assert_eq!(plan.session_start_event(), None);
+        assert!(plan.skipped.is_empty(), "{:?}", plan.skipped_lines());
+
+        let codex = *harness::profile("codex").unwrap();
+        let unwired: &'static HarnessProfile = Box::leak(Box::new(HarnessProfile {
+            wiring: codex.wiring.map(|wiring| harness::Wiring {
+                session_start: None,
+                ..wiring
+            }),
+            ..codex
+        }));
+        assert!(unwired.session_start);
+        let plan = plan_with_routed(unwired, &resolved, true);
+        assert_eq!(plan.session_start_event(), None);
+        assert!(plan.skipped.is_empty(), "{:?}", plan.skipped_lines());
+    }
+
+    #[test]
     fn posthook_registers_after_tool_only_where_rtk_serves_it() {
         let resolved = resolved("[pipeline]\nextends = \"rtk:posthook\"\n");
         let vibe = plan_with(harness::profile("vibe").unwrap(), &resolved);

@@ -599,6 +599,10 @@ fn antigravity_pipeline(v: &Value) -> Option<Value> {
 /// - Rewrite: emit `{"hook_specific_output": {"tool_input": {"command": "..."}}}`.
 /// - Deny: emit `{"decision": "deny", "reason": "..."}`.
 pub fn run_vibe() -> Result<()> {
+    run_vibe_from(read_stdin_limited)
+}
+
+fn run_vibe_from(read_input: impl FnOnce() -> Result<String>) -> Result<()> {
     #[cfg(feature = "engine")]
     if let Some(message) = crate::hooks::session_start::throttled_keepalive(
         "vibe",
@@ -606,7 +610,7 @@ pub fn run_vibe() -> Result<()> {
     ) {
         let _ = writeln!(io::stderr(), "{message}");
     }
-    let input = read_stdin_limited()?;
+    let input = read_input()?;
     if let Some(output) = run_vibe_inner(&input) {
         let _ = writeln!(io::stdout(), "{output}");
     }
@@ -4174,5 +4178,47 @@ mod tests {
                     .contains("deny")
             );
         }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn the_vibe_hook_keeps_the_daemon_alive_at_most_once_per_interval() {
+        let home = test_isolation::tempdir();
+        let daemon = crate::hooks::session_start::fake_rtk_daemon();
+        let config = home.path().join(".vibe").join("config.toml");
+        std::fs::create_dir_all(config.parent().unwrap()).expect("create dir");
+        std::fs::write(
+            &config,
+            format!(
+                "[[providers]]\nname = \"mistral\"\napi_base = \"http://{daemon}/mistral/v1\"\n"
+            ),
+        )
+        .expect("write config");
+        test_isolation::with_root(home.path(), || {
+            crate::core::user_env::with_vars(&[("RTK_PROXY_BIND", Some(daemon.as_str()))], || {
+                let stamp = crate::core::user_dirs::config()
+                    .unwrap()
+                    .join("llm-proxy")
+                    .join("keepalive.vibe");
+                assert!(!stamp.exists());
+
+                run_vibe_from(|| Ok("{}".to_string())).expect("hook run");
+                assert!(stamp.is_file(), "the hook must run the keep-alive");
+
+                let modified = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+                std::fs::File::options()
+                    .write(true)
+                    .open(&stamp)
+                    .expect("open stamp")
+                    .set_modified(modified)
+                    .expect("set mtime");
+                run_vibe_from(|| Ok("{}".to_string())).expect("hook run");
+                let after = std::fs::metadata(&stamp).unwrap().modified().unwrap();
+                assert_eq!(
+                    after, modified,
+                    "a minute-old stamp must still throttle the keep-alive"
+                );
+            });
+        });
     }
 }

@@ -135,13 +135,3 @@ cache_read_mult = 0.1
 pattern = "pixtral"
 family = "mistral"
 cache_read_mult = 0.1
-
-[[model]]
-pattern = "mixtral"
-family = "mistral"
-cache_read_mult = 0.1
-
-[[model]]
-pattern = "mistral"
-family = "mistral"
-cache_read_mult = 0.1

@@ -809,4 +809,63 @@ mod tests {
             .unwrap();
         assert_eq!(pipe.as_deref(), Some("my-pipe"));
     }
+
+    const OLDEST_USAGE_TABLE: &str = "CREATE TABLE usage_records (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts           TEXT    NOT NULL,
+        provider     TEXT    NOT NULL,
+        model        TEXT    NOT NULL,
+        tokens_in    INTEGER NOT NULL DEFAULT 0,
+        tokens_out   INTEGER NOT NULL DEFAULT 0,
+        tokens_saved INTEGER NOT NULL DEFAULT 0,
+        cost_usd     REAL    NOT NULL DEFAULT 0,
+        status       INTEGER NOT NULL DEFAULT 0,
+        client       TEXT
+    );
+    INSERT INTO usage_records (ts, provider, model, tokens_in, status)
+        VALUES ('2025-01-01T00:00:00Z', 'anthropic', 'claude-opus-5', 7, 200);";
+
+    #[tokio::test]
+    async fn an_old_database_gains_the_upstream_and_uncached_input_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        let path = path.to_str().unwrap();
+        {
+            let old = Connection::open(path).unwrap();
+            old.execute_batch(OLDEST_USAGE_TABLE).unwrap();
+        }
+
+        let s = Store::open(path).unwrap();
+        s.record(UsageRow {
+            ts: "2026-01-01T00:00:00Z".into(),
+            provider: "openai-responses".into(),
+            upstream: Some("chatgpt".into()),
+            uncached_input: 42,
+            model: "gpt-5-codex".into(),
+            status: 200,
+            ..Default::default()
+        })
+        .await;
+        drop(s);
+
+        let check = Connection::open(path).unwrap();
+        let rows: Vec<(String, Option<String>, i64)> = check
+            .prepare("SELECT provider, upstream, uncached_input FROM usage_records ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("anthropic".to_string(), None, 0),
+                (
+                    "openai-responses".to_string(),
+                    Some("chatgpt".to_string()),
+                    42
+                ),
+            ]
+        );
+    }
 }
