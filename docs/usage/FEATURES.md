@@ -1094,7 +1094,7 @@ Unrecognized subcommands are passed through directly or detected as git passthro
 
 RTK records every command execution in a SQLite database:
 
-- **Location:** `~/.local/share/rtk/tracking.db` (Linux), `~/Library/Application Support/rtk/tracking.db` (macOS)
+- **Location:** `~/.local/share/rtk/history.db` (Linux), `~/Library/Application Support/rtk/history.db` (macOS)
 - **Retention:** 90 days, automatic
 - **Metrics:** input/output tokens, bash output reduction percentage, execution time, project
 
