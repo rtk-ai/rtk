@@ -58,6 +58,41 @@ after the fact depends on whether the agent lets a hook replace it — eight do.
 See [Agent Coverage](../resources/agent-coverage.md) for the per-agent table.
 :::
 
+## Hosts without a tool hook
+
+A few hosts expose the shell to plugins rather than a pre-tool hook: an extension can see
+the command an agent is about to run and replace it, but there is no `PreToolUse`-style
+event, and no settings file for `rtk init` to patch. Those hosts can still run RTK — the
+plugin simply *is* the delegate, and calls `rtk rewrite` from its own shell seam:
+
+```
+Agent asks for "git status"
+  -> Host plugin sees the shell command
+  -> Calls rtk rewrite "git status"
+  -> Exit 0 or 3: runs the printed command ("rtk git status")
+  -> Exit 1 or 2: runs the original command
+  -> LLM reads the condensed output
+```
+
+Three rules keep such a delegate honest:
+
+- **Read stdout only on `0` and `3`.** On `1` there is nothing to rewrite; on `2` the
+  host's own permission system owns the decision, so the command runs as written. Any
+  other outcome — rtk missing, a timeout, an unexpected exit code — must fall back to the
+  original command. A delegate that turns a failed lookup into a different command is
+  worse than no delegate.
+- **Accept `3` only if the host already owns approval.** `3` means "RTK rewrote this, but
+  the user should confirm"; a host that applied its own policy to the original command,
+  and treats the rewrite as that same command plus a filter, can run it. A host that shows
+  an approval prompt should keep prompting.
+- **Check that the only change is an inserted `rtk`.** Split both strings on the shell
+  operators (`&&`, `||`, `|`, `;`, `&`), drop the inserted `rtk` tokens, and require the
+  rest to match token for token. It costs the occasional rewrite and guarantees that the
+  command the host reports is the command that ran.
+
+A host-side delegate needs no row in the table above and no `rtk init` flag: RTK never
+sees it, and the contract it uses is the same one the shipped hooks use.
+
 ## Installation by agent
 
 ### Claude Code
