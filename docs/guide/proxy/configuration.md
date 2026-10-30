@@ -56,6 +56,10 @@ A client points its **whole** base URL at the proxy. The first path segment name
 
 Inside a known namespace every sibling path (`/mistral/v1/models`, `/chatgpt/backend-api/codex/…`) is relayed verbatim to that one upstream, with no measurement. A credential relayed to one upstream is never lent to another.
 
+Codex's two routes are the exception to "that one upstream": its login can change after `rtk init` wrote the URL, so the daemon follows the credential. A request carrying `chatgpt-account-id` goes to the `chatgpt` upstream, and one carrying an `sk-` key on the ChatGPT route goes to `openai`, whichever route the config names. A bearer token alone moves nothing, because an `openai` upstream repointed at a gateway may use any token format.
+
+A ChatGPT workspace bound to its own backend (data residency, for example) should not route Codex through the proxy. Codex reaches that backend through its own workspace routing, which it drops for a local base URL, so the requests would go to the `chatgpt` upstream instead.
+
 ## HTTP endpoints
 
 | Route | Purpose |
