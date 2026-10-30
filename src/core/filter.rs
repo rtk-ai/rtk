@@ -52,6 +52,10 @@ pub enum Language {
     Java,
     Ruby,
     Shell,
+    /// Other languages using `//` and `/* */` comments, with `///` and `/**` docs.
+    CStyle,
+    /// CSS has block comments only; `//` is not a comment.
+    Css,
     Data,
     Unknown,
 }
@@ -61,14 +65,17 @@ impl Language {
         match ext.to_lowercase().as_str() {
             "rs" => Language::Rust,
             "py" | "pyw" => Language::Python,
-            "js" | "mjs" | "cjs" => Language::JavaScript,
-            "ts" | "tsx" => Language::TypeScript,
+            "js" | "mjs" | "cjs" | "jsx" => Language::JavaScript,
+            "ts" | "tsx" | "mts" | "cts" => Language::TypeScript,
             "go" => Language::Go,
             "c" | "h" => Language::C,
             "cpp" | "cc" | "cxx" | "hpp" | "hh" => Language::Cpp,
             "java" => Language::Java,
             "rb" => Language::Ruby,
             "sh" | "bash" | "zsh" => Language::Shell,
+            "kt" | "kts" | "swift" | "scala" | "cs" | "dart" | "groovy" | "gradle" | "proto"
+            | "scss" | "less" | "m" | "mm" | "wit" | "wgsl" | "hlsl" | "metal" => Language::CStyle,
+            "css" => Language::Css,
             "json" | "jsonc" | "json5" | "yaml" | "yml" | "toml" | "xml" | "csv" | "tsv"
             | "graphql" | "gql" | "sql" | "md" | "markdown" | "txt" | "env" | "lock" => {
                 Language::Data
@@ -116,6 +123,20 @@ impl Language {
                 line: Some("#"),
                 block_start: None,
                 block_end: None,
+                doc_line: None,
+                doc_block_start: None,
+            },
+            Language::CStyle => CommentPatterns {
+                line: Some("//"),
+                block_start: Some("/*"),
+                block_end: Some("*/"),
+                doc_line: Some("///"),
+                doc_block_start: Some("/**"),
+            },
+            Language::Css => CommentPatterns {
+                line: None,
+                block_start: Some("/*"),
+                block_end: Some("*/"),
                 doc_line: None,
                 doc_block_start: None,
             },
@@ -476,6 +497,53 @@ mod tests {
         assert_eq!(Language::from_extension("csv"), Language::Data);
         assert_eq!(Language::from_extension("md"), Language::Data);
         assert_eq!(Language::from_extension("lock"), Language::Data);
+    }
+
+    // --- C-syntax extensions outside the C family (#4703) ---
+
+    const C_STYLE_EXTENSIONS: &[&str] = &[
+        "kt", "kts", "swift", "scala", "cs", "dart", "groovy", "gradle", "proto", "scss", "less",
+        "m", "mm", "wit", "wgsl", "hlsl", "metal",
+    ];
+
+    #[test]
+    fn test_language_detection_js_ts_variants() {
+        assert_eq!(Language::from_extension("jsx"), Language::JavaScript);
+        assert_eq!(Language::from_extension("mts"), Language::TypeScript);
+        assert_eq!(Language::from_extension("cts"), Language::TypeScript);
+    }
+
+    #[test]
+    fn test_minimal_strips_c_style_comments_per_extension() {
+        let code = "// line comment\n/* block\n   comment */\nkeep_me();";
+        for ext in C_STYLE_EXTENSIONS {
+            let lang = Language::from_extension(ext);
+            assert_ne!(lang, Language::Unknown, ".{ext} is not mapped");
+            let result = MinimalFilter.filter(code, &lang);
+            assert_eq!(result, "keep_me();", ".{ext} kept a comment");
+        }
+    }
+
+    #[test]
+    fn test_minimal_keeps_triple_slash_doc_comments_in_c_style() {
+        let code = "/// Doc for greet.\n// plain\nfunc greet() {}";
+        let result = MinimalFilter.filter(code, &Language::from_extension("swift"));
+        assert!(
+            result.contains("/// Doc for greet."),
+            "doc dropped:\n{result}"
+        );
+        assert!(!result.contains("// plain"), "comment kept:\n{result}");
+    }
+
+    #[test]
+    fn test_minimal_css_strips_block_comments_only() {
+        let css =
+            "/* header */\na::before { content: \"/*\"; }\n// not a css comment\nb { color: red; }";
+        let result = MinimalFilter.filter(css, &Language::from_extension("css"));
+        assert_eq!(
+            result,
+            "a::before { content: \"/*\"; }\n// not a css comment\nb { color: red; }"
+        );
     }
 
     #[test]
