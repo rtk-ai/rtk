@@ -28,7 +28,7 @@ use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
 use cmds::system::{
     ast_grep_cmd, ctest_cmd, deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls,
-    pipe_cmd, read, search, summary, tree, wc_cmd,
+    pipe_cmd, read, search, summary, tree, wc_cmd, xcodebuild_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -638,6 +638,13 @@ enum Commands {
     /// CTest with compact output
     Ctest {
         /// Additional ctest arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Xcode build and test commands with compact output
+    Xcodebuild {
+        /// Additional xcodebuild arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -3355,6 +3362,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Ctest { args } => ctest_cmd::run(&args, cli.verbose)?,
 
+        Commands::Xcodebuild { args } => xcodebuild_cmd::run(&args, cli.verbose)?,
+
         Commands::Prisma { command } => match command {
             PrismaCommands::Generate { args } => {
                 prisma_cmd::run(prisma_cmd::PrismaCommand::Generate, &args, cli.verbose)?
@@ -4077,6 +4086,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Jest { .. }
             | Commands::Vitest { .. }
             | Commands::Ctest { .. }
+            | Commands::Xcodebuild { .. }
             | Commands::Prisma { .. }
             | Commands::Tsc { .. }
             | Commands::Next { .. }
@@ -4719,6 +4729,7 @@ mod tests {
             "bun",
             "bunx",
             "deno",
+            "xcodebuild",
         ];
 
         let unclassified: Vec<String> = Cli::command()
