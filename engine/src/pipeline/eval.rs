@@ -497,12 +497,26 @@ mod tests {
             vec!["grep-group"]
         );
 
+        let mut whole = str_facts(&[("basename", "Cargo.lock"), ("format", "lockfile")]);
+        whole.insert("whole_file".into(), Fact::Bool(true));
         let lockfile = evaluate(
             &resolved,
             Position::hook(Event::AfterTool, Subject::Read),
-            &str_facts(&[("basename", "Cargo.lock"), ("format", "lockfile")]),
+            &whole,
         );
         assert_eq!(lockfile[0].rule.name, "lockfiles");
+
+        let mut partial = whole.clone();
+        partial.insert("whole_file".into(), Fact::Bool(false));
+        let lockfile = evaluate(
+            &resolved,
+            Position::hook(Event::AfterTool, Subject::Read),
+            &partial,
+        );
+        assert!(
+            lockfile.is_empty(),
+            "a partial lockfile read is not summarized"
+        );
 
         let json = evaluate(
             &resolved,

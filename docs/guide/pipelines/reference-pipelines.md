@@ -57,7 +57,7 @@ use  = ["term"]
 
 [[hook.after_tool.read]]
 name = "lockfiles"
-when = { basename_in = ["package-lock.json", "Cargo.lock", "yarn.lock", "pnpm-lock.yaml"] }
+when = { basename_in = ["package-lock.json", "Cargo.lock", "yarn.lock", "pnpm-lock.yaml"], whole_file = true }
 use  = ["lockfile"]
 
 [[hook.after_tool.read]]

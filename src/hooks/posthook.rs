@@ -1631,13 +1631,40 @@ mod tests {
     }
 
     #[test]
+    fn test_read_cargo_lock_partial_passes_through() {
+        let content = include_str!("../../Cargo.lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("Cargo.lock");
+        std::fs::write(&path, content).expect("write lockfile");
+        let lines: Vec<&str> = content.lines().collect();
+        let half = lines.len() / 2;
+        for part in [&lines[..half], &lines[half..]] {
+            assert!(
+                run_posthook(&lockfile_read(&path, &part.join("\n"))).is_none(),
+                "{} of {} lines is not the whole lockfile",
+                part.len(),
+                lines.len()
+            );
+        }
+        let missing = dir.path().join("gone").join("Cargo.lock");
+        assert!(
+            run_posthook(&lockfile_read(&missing, content)).is_none(),
+            "a file that cannot be counted is not taken as whole"
+        );
+        assert!(run_posthook(&lockfile_read(&path, content)).is_some());
+    }
+
+    #[test]
     fn test_read_cargo_lock_summarized_with_note() {
         let content = include_str!("../../Cargo.lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("Cargo.lock");
+        std::fs::write(&path, content).expect("write lockfile");
         let event = serde_json::json!({
             "tool_name": "Read",
-            "tool_input": {"file_path": "/repo/Cargo.lock"},
+            "tool_input": {"file_path": path},
             "tool_response": {"type": "text", "file": {
-                "filePath": "/repo/Cargo.lock",
+                "filePath": path,
                 "content": content,
                 "numLines": content.lines().count(),
                 "startLine": 1,
