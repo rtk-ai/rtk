@@ -2045,6 +2045,15 @@ fn rewrite_command_part(rule: &RtkRule, cmd_part: &str) -> Option<String> {
         }
     }
 
+    // Path/wrapper invocations that matched a rule by pattern but not by rewrite
+    // prefix (e.g. node_modules/.bin/ng). Prepend `rtk`; caller re-attaches redirects.
+    let lookup = crate::core::toml_filter::lookup_command_for_filter(cmd_part);
+    if crate::core::toml_filter::find_matching_filter(&lookup).is_some()
+        || crate::core::toml_filter::find_matching_filter(cmd_part).is_some()
+    {
+        return Some(format!("rtk {}", cmd_part));
+    }
+
     None
 }
 
@@ -6614,6 +6623,64 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("npx svgo", &[]),
             Some("rtk npx svgo".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_toml_filter_bin_path() {
+        assert_eq!(
+            rewrite_command_no_prefixes("/usr/local/bin/make all", &[]),
+            Some("rtk /usr/local/bin/make all".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_classify_ng_test() {
+        assert!(matches!(
+            classify_command("ng test auth --no-watch --browsers=ChromeHeadless"),
+            Classification::Supported {
+                rtk_equivalent: "rtk ng",
+                category: "Tests",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_ng_test() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "ng test auth --no-watch --browsers=ChromeHeadless",
+                &[]
+            ),
+            Some("rtk ng test auth --no-watch --browsers=ChromeHeadless".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_yarn_ng_test() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "yarn ng test auth --no-watch --browsers=ChromeHeadless",
+                &[]
+            ),
+            Some(
+                "rtk yarn ng test auth --no-watch --browsers=ChromeHeadless".to_string()
+            ),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_ng_bin_path() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "node_modules/.bin/ng test auth --no-watch --browsers=ChromeHeadless",
+                &[]
+            ),
+            Some(
+                "rtk node_modules/.bin/ng test auth --no-watch --browsers=ChromeHeadless"
+                    .to_string()
+            ),
         );
     }
 
