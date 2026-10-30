@@ -56,12 +56,21 @@ pub fn run(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
 
     // Route to specialized handlers
     match subcommand {
-        "sts" if !args.is_empty() && args[0] == "get-caller-identity" => run_aws_filtered(
-            &["sts", "get-caller-identity"],
-            &args[1..],
-            verbose,
-            filter_sts_identity,
-        ),
+        "sts" if !args.is_empty() && args[0] == "get-caller-identity" => {
+            if sts_identity_requests_unfiltered_output(&args[1..]) {
+                let aws_args: Vec<std::ffi::OsString> = std::iter::once("sts".into())
+                    .chain(args.iter().cloned().map(Into::into))
+                    .collect();
+                crate::core::runner::run_passthrough("aws", &aws_args, verbose)
+            } else {
+                run_aws_filtered(
+                    &["sts", "get-caller-identity"],
+                    &args[1..],
+                    verbose,
+                    filter_sts_identity,
+                )
+            }
+        }
         "s3" if !args.is_empty() && args[0] == "ls" => run_s3_ls(&args[1..], verbose),
         "ec2" if !args.is_empty() && args[0] == "describe-instances" => run_aws_filtered(
             &["ec2", "describe-instances"],
@@ -198,6 +207,16 @@ pub fn run(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
         ),
         _ => run_generic(subcommand, args, verbose, &full_sub),
     }
+}
+
+/// A projection can return any JSON shape, and an explicit output format must
+/// reach AWS unchanged. Neither belongs in the object-specific STS formatter.
+fn sts_identity_requests_unfiltered_output(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        matches!(arg.as_str(), "--query" | "--output")
+            || arg.starts_with("--query=")
+            || arg.starts_with("--output=")
+    })
 }
 
 /// Returns true for operations that return structured JSON (describe-*, list-*, get-*).
@@ -472,6 +491,9 @@ fn run_s3_transfer(operation: &str, extra_args: &[String], verbose: u8) -> Resul
 
 fn filter_sts_identity(json_str: &str) -> Option<FilterResult> {
     let v: Value = serde_json::from_str(json_str).ok()?;
+    if !v.is_object() {
+        return None;
+    }
     let account = v["Account"].as_str().unwrap_or("?");
     let arn = v["Arn"].as_str().unwrap_or("?");
     Some(FilterResult::new(format!("AWS: {} {}", account, arn)))
@@ -1588,6 +1610,17 @@ mod tests {
     fn test_filter_sts_identity_invalid_json() {
         let result = filter_sts_identity("not json");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_sts_non_object_json_is_not_formatted_as_unknown_identity() {
+        for projection in [
+            r#"["123456789012","arn:aws:iam::123456789012:user/example"]"#,
+            r#""123456789012""#,
+            "null",
+        ] {
+            assert!(filter_sts_identity(projection).is_none(), "{projection}");
+        }
     }
 
     #[test]
