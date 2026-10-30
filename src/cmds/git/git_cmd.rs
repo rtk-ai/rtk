@@ -432,7 +432,11 @@ fn run_diff(
     }
 
     let printed = if !diff_result.stdout.is_empty() {
-        let compacted = compact_diff(&strip_ansi(&diff_result.stdout), max_lines.unwrap_or(500));
+        let compacted = compact_diff(
+            &strip_ansi(&diff_result.stdout),
+            max_lines.unwrap_or(500),
+            "[full diff: rtk git diff --no-compact]",
+        );
         format!("{}\n\nChanges:\n{}", result.stdout.trim(), compacted)
     } else {
         result.stdout.trim().to_string()
@@ -768,7 +772,24 @@ fn run_show(
         if verbose > 0 {
             printed.push_str("\n\nChanges:");
         }
-        let compacted = compact_diff(&strip_ansi(diff_text), max_lines.unwrap_or(500));
+        // The recovery hint must reconstruct the COMMIT, not the working tree: `rtk git
+        // diff` shows unstaged changes, so the hint re-runs the user's own `git show`
+        // shape verbatim, minus RTK's `--no-compact` pseudo-flag, which git rejects.
+        let show_args: Vec<&str> = args
+            .iter()
+            .map(String::as_str)
+            .filter(|a| *a != "--no-compact")
+            .collect();
+        let show_recovery = if show_args.is_empty() {
+            "[full diff: git show]".to_string()
+        } else {
+            format!("[full diff: git show {}]", show_args.join(" "))
+        };
+        let compacted = compact_diff(
+            &strip_ansi(diff_text),
+            max_lines.unwrap_or(500),
+            &show_recovery,
+        );
         printed.push('\n');
         printed.push_str(&compacted);
     }
@@ -1340,7 +1361,11 @@ fn flush_leading_context(
     *total += keep;
 }
 
-pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
+/// Compacts a unified diff for display. `recovery_hint` is the line appended when
+/// content was truncated; it must name a command that actually prints what was cut,
+/// which differs per caller (`git diff` shows the working tree, `git show` a commit,
+/// `git stash show` a stash).
+pub(crate) fn compact_diff(diff: &str, max_lines: usize, recovery_hint: &str) -> String {
     let mut result = Vec::new();
     let mut current_file = String::new();
     let mut added = 0;
@@ -1509,7 +1534,7 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
     }
 
     if was_truncated {
-        result.push("[full diff: rtk git diff --no-compact]".to_string());
+        result.push(recovery_hint.to_string());
     }
 
     result.join("\n")
@@ -3459,7 +3484,7 @@ fn run_stash(
             // itself, but hands the rest to the revision machinery, which does consume a
             // following `--word-diff` as `--author`'s value.
             let filtered = if patch_mode && !emits_word_diff(&tokenize_git_log_args(args)) {
-                compact_diff(&result.stdout, 100)
+                compact_diff(&result.stdout, 100, "[full diff: git stash show -p]")
             } else if patch_mode {
                 result.stdout.clone()
             } else {
@@ -4075,7 +4100,7 @@ mod tests {
 +    println!("hello");
  }
 "#;
-        let result = compact_diff(diff, 100);
+        let result = compact_diff(diff, 100, "[full diff: rtk git diff --no-compact]");
         assert!(result.contains("foo.rs"));
         assert!(result.contains("+"));
     }
@@ -4091,7 +4116,7 @@ mod tests {
                     \x20keep2\n\
                     -DELETED_B\n\
                     +ADDED\n";
-        let result = compact_diff(diff, 100);
+        let result = compact_diff(diff, 100, "[full diff: rtk git diff --no-compact]");
 
         let removed: Vec<&str> = result.lines().filter(|l| l.starts_with('-')).collect();
         let added: Vec<&str> = result.lines().filter(|l| l.starts_with('+')).collect();
@@ -4129,7 +4154,7 @@ mod tests {
                     @@ -1,2 +1,2 @@\n\
                     --- sql comment\n\
                     +++i;\n";
-        let result = compact_diff(diff, 100);
+        let result = compact_diff(diff, 100, "[full diff: rtk git diff --no-compact]");
 
         assert!(
             result.lines().any(|l| l == "--- sql comment"),
@@ -4159,7 +4184,7 @@ mod tests {
         for i in 0..100 {
             diff.push_str(&format!("-del{}\n", i));
         }
-        let result = compact_diff(&diff, 1000);
+        let result = compact_diff(&diff, 1000, "[full diff: rtk git diff --no-compact]");
 
         let ctx = result.lines().filter(|l| l.starts_with(" ctx")).count();
         let dels = result.lines().filter(|l| l.starts_with("-del")).count();
@@ -4201,7 +4226,7 @@ mod tests {
                     ++=======\n\
                     + side\n\
                     ++>>>>>>> side\n";
-        let result = compact_diff(diff, 500);
+        let result = compact_diff(diff, 500, "[full diff: rtk git diff --no-compact]");
 
         assert!(
             !result.lines().any(|l| l.starts_with("+++ b/")),
@@ -4258,7 +4283,7 @@ mod tests {
                     \x20tail2\n\
                     -- \n\
                     2.40.0\n";
-        let result = compact_diff(diff, 500);
+        let result = compact_diff(diff, 500, "[full diff: rtk git diff --no-compact]");
 
         let removed: Vec<&str> = result.lines().filter(|l| l.starts_with('-')).collect();
         assert_eq!(
@@ -4289,7 +4314,7 @@ mod tests {
             diff.push_str(&format!(" ctx{}\n", i));
         }
         diff.push_str("-old\n+new\n");
-        let result = compact_diff(&diff, 500);
+        let result = compact_diff(&diff, 500, "[full diff: rtk git diff --no-compact]");
 
         let ctx: Vec<&str> = result.lines().filter(|l| l.starts_with(" ctx")).collect();
         assert_eq!(
@@ -4437,6 +4462,7 @@ mod tests {
         let out = compact_diff(
             "diff --cc f\n@@@ -1 -1 -1 +0,0 @@@\n--x\n-- \n2.40.0\n",
             100,
+            "[full diff: rtk git diff --no-compact]",
         );
         assert!(out.contains("--x"), "got:\n{}", out);
         assert!(!out.contains("2.40.0"), "got:\n{}", out);
@@ -4450,7 +4476,11 @@ mod tests {
         // One range for two columns: the untracked parent gets `usize::MAX`, so
         // the hunk stays open to the next header rather than closing early and
         // dropping ` -lost`.
-        let out = compact_diff("diff --cc f\n@@@ -1 +1 @@@\n +kept\n -lost\n", 100);
+        let out = compact_diff(
+            "diff --cc f\n@@@ -1 +1 @@@\n +kept\n -lost\n",
+            100,
+            "[full diff: rtk git diff --no-compact]",
+        );
         assert!(out.contains(" +kept"), "got:\n{}", out);
         assert!(out.contains(" -lost"), "got:\n{}", out);
         assert!(out.contains("+1 -1"), "got:\n{}", out);
@@ -4521,6 +4551,7 @@ mod tests {
         let out = compact_diff(
             "diff --git a/f.txt b/f.txt\n@@ -1,3 +1,3 @@\n-old\n+new\nécole ancienne ligne\n",
             100,
+            "[full diff: rtk git diff --no-compact]",
         );
         assert!(out.contains("-old"), "got:\n{}", out);
         assert!(out.contains("+new"), "got:\n{}", out);
@@ -4534,7 +4565,7 @@ mod tests {
         // so the hunk never closed by count and the mbox / signature / prose
         // guard did not apply to combined sections at all.
         let conflict = "diff --cc f.txt\n@@@ -1,1 -1,1 +1,5 @@@\n++<<<<<<<\n +main\n++=======\n+ side\n++>>>>>>>\n-- \ntrailing signature\n";
-        let out = compact_diff(conflict, 100);
+        let out = compact_diff(conflict, 100, "[full diff: rtk git diff --no-compact]");
         assert!(!out.contains("trailing signature"), "got:\n{}", out);
         assert!(!out.contains("-- "), "got:\n{}", out);
         assert!(out.contains("+5 -0"), "got:\n{}", out);
@@ -4548,6 +4579,7 @@ mod tests {
         let out = compact_diff(
             "diff --cc f.txt\n@@@ -1,2 -1,4 +1,2 @@@\n  a\n  b\n -x\n -y\n",
             100,
+            "[full diff: rtk git diff --no-compact]",
         );
         assert!(out.contains(" -x"), "got:\n{}", out);
         assert!(out.contains(" -y"), "got:\n{}", out);
@@ -4561,6 +4593,7 @@ mod tests {
         let out = compact_diff(
             "diff --git a/g.txt b/g.txt\n@@ -1,3 +1,3 @@\n ctx1\n ctx2\n ctx3\n",
             100,
+            "[full diff: rtk git diff --no-compact]",
         );
         assert!(out.contains(" ctx1"), "got:\n{}", out);
         assert!(out.contains(" ctx3"), "got:\n{}", out);
@@ -4588,8 +4621,8 @@ mod tests {
         };
         let count_changes = |out: &str| out.lines().filter(|l| l.starts_with("-del")).count();
 
-        let without = compact_diff(&build(false), 500);
-        let with = compact_diff(&build(true), 500);
+        let without = compact_diff(&build(false), 500, "[full diff: rtk git diff --no-compact]");
+        let with = compact_diff(&build(true), 500, "[full diff: rtk git diff --no-compact]");
         assert_eq!(
             count_changes(&with),
             count_changes(&without),
@@ -4611,7 +4644,7 @@ mod tests {
             }
             diff.push_str(&format!("-del{}\n", f));
         }
-        let result = compact_diff(&diff, 500);
+        let result = compact_diff(&diff, 500, "[full diff: rtk git diff --no-compact]");
 
         let ctx = result.lines().filter(|l| l.starts_with(" ctx")).count();
         assert!(
@@ -4648,7 +4681,7 @@ mod tests {
             diff.push_str(&format!("-del{}\n", i));
             diff.push_str(&format!("+add{}\n", i));
         }
-        let result = compact_diff(&diff, 1000);
+        let result = compact_diff(&diff, 1000, "[full diff: rtk git diff --no-compact]");
 
         assert!(
             result.contains("  ... (30 deletions, 30 additions truncated)"),
@@ -4667,7 +4700,7 @@ mod tests {
 +    println!("hello");
  }
 "#;
-        let result = compact_diff(diff, 100);
+        let result = compact_diff(diff, 100, "[full diff: rtk git diff --no-compact]");
         assert!(
             result.contains("@@ -10,3 +10,4 @@ fn important_context() {"),
             "Expected full hunk header with trailing context, got:\n{}",
@@ -4684,7 +4717,7 @@ mod tests {
         for i in 1..=25 {
             diff.push_str(&format!("+line{}\n", i));
         }
-        let result = compact_diff(&diff, 500);
+        let result = compact_diff(&diff, 500, "[full diff: rtk git diff --no-compact]");
         assert!(
             !result.contains("... (truncated)"),
             "25 lines should not be truncated with max_hunk_lines=30"
@@ -4702,7 +4735,7 @@ mod tests {
                 diff.push_str(&format!("+line{f}_{i}\n"));
             }
         }
-        let result = compact_diff(&diff, 500);
+        let result = compact_diff(&diff, 500, "[full diff: rtk git diff --no-compact]");
         assert!(
             !result.contains("more changes truncated"),
             "5 files × 20 lines should not exceed max_lines=500"
@@ -6797,7 +6830,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
         for i in 0..110 {
             diff.push_str(&format!("+added line {}\n", i));
         }
-        let result = compact_diff(&diff, 500);
+        let result = compact_diff(&diff, 500, "[full diff: rtk git diff --no-compact]");
         assert!(
             result.contains("[full diff: rtk git diff --no-compact]"),
             "Expected recovery hint when hunk is truncated, got:\n{}",
@@ -6815,7 +6848,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
         for i in 0..150 {
             diff.push_str(&format!("+line {}\n", i));
         }
-        let result = compact_diff(&diff, 500);
+        let result = compact_diff(&diff, 500, "[full diff: rtk git diff --no-compact]");
         assert!(
             result.contains("50 additions truncated"),
             "Expected '50 additions truncated' (150 - 100 = 50), got:\n{}",

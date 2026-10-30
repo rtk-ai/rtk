@@ -53,7 +53,7 @@ fn git_log_wrapper(input: &str) -> String {
 }
 
 fn git_diff_wrapper(input: &str) -> String {
-    crate::cmds::git::git_cmd::compact_diff(input, 200)
+    crate::cmds::git::git_cmd::compact_diff(input, 200, "[full diff: rtk git diff --no-compact]")
 }
 
 fn phpstan_wrapper(input: &str) -> String {
