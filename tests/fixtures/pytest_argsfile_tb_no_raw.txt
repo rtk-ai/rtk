@@ -1,0 +1,6 @@
+FFF                                                                      [100%]
+=========================== short test summary info ============================
+FAILED test_failures.py::test_assertion - assert 2 == 3
+FAILED test_failures.py::test_second - assert (1 + 1) == 3
+FAILED test_failures.py::test_error - ValueError: argument-file failure
+3 failed in 0.01s

@@ -5,6 +5,9 @@
 ## Specifics
 
 - `pytest_cmd.rs` uses a state machine text parser (no JSON available from pytest)
+- Pytest invocations containing `@argument-file` use unfiltered passthrough without
+  injecting reporting flags. Pytest expands those files itself, including nested
+  files, so RTK's defaults cannot suppress pytest's failure summary.
 - `ruff_cmd.rs` uses JSON for check mode (`--output-format=json`) and text filtering for format mode
 - `sqlfluff_cmd.rs` injects `--format json` for lint mode and groups violations by rule and file; other subcommands pass through capped
 - Ruff and SQLFluff list identical descriptions once beside a visible top rule.
