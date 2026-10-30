@@ -1411,7 +1411,7 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
 
 /// Transparent wrappers that RULES can also match as a whole string, so an
 /// unfiltered inner command falls through instead of dropping the rewrite.
-const ROUTABLE_WRAPPER_PREFIXES: &[&str] = &["uv run"];
+const ROUTABLE_WRAPPER_PREFIXES: &[&str] = &["uv run", "poetry run"];
 
 /// Shell keywords that wrap a command without changing which one runs. They are
 /// not spawnable, so they must never fall through: `rtk exec foo` cannot run.
