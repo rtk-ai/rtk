@@ -64,6 +64,8 @@ level = "default"           # "default", "high", "full" — see Awareness level
 
 For full details on what is collected, opt-out options, and GDPR rights, see [Telemetry & Privacy](../resources/telemetry.md).
 
+`suppress_hook_warning` does not mute the "Hook outdated" warning. For a script at `~/.claude/hooks/rtk-rewrite.sh`, that warning means the script has no `# rtk-hook-version: N` line in its first 5 lines, or an older `N`. `rtk init -g` replaces the script with `rtk hook claude`. A hand-written hook that should stay in place clears the warning with the current tag instead (`# rtk-hook-version: 4`).
+
 ## Awareness level
 
 `rtk init` writes a short instructions file for your agent (`~/.claude/RTK.md`, `~/.gemini/GEMINI.md`, …).
