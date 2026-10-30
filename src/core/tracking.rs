@@ -382,8 +382,9 @@ const SCHEMA_VERSION: i64 = 2;
 /// 30,000 chars at the bytes/4 estimate — Claude Code's default Bash output
 /// limit (BASH_MAX_OUTPUT_LENGTH), i.e. the most the agent would have
 /// ingested without rtk. Rows above it claim savings against bytes the agent
-/// would never have seen; they stay in the diagnostic listings and are
-/// counted in `GainSummary::oversized_excluded`.
+/// would never have seen; they are left out of the by-command and by-day
+/// breakdowns too, so those reconcile with the headline, and are counted in
+/// `GainSummary::oversized_excluded`.
 pub const HEADLINE_INPUT_CAP_TOKENS: usize = 7_500;
 
 /// Create all tables/indexes, run column migrations, and stamp `user_version` to
@@ -1266,22 +1267,30 @@ impl Tracker {
                     AVG(exec_time_ms)
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND input_tokens <= ?3
              GROUP BY rtk_cmd
              ORDER BY SUM(saved_tokens) DESC
-             LIMIT 10", // added: project filter in WHERE
+             LIMIT 10", // same row set as the headline (oversized rows excluded) so the table reconciles with it
         )?;
 
-        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
-            // added: params
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)? as usize,
-                // SUM(saved_tokens): clamp a net-negative group to 0 (unsigned field).
-                row.get::<_, i64>(2)?.max(0) as usize,
-                row.get::<_, f64>(3)?,
-                row.get::<_, f64>(4)? as u64,
-            ))
-        })?;
+        let rows = stmt.query_map(
+            params![
+                project_exact,
+                project_glob,
+                HEADLINE_INPUT_CAP_TOKENS as i64
+            ],
+            |row| {
+                // added: params
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)? as usize,
+                    // SUM(saved_tokens): clamp a net-negative group to 0 (unsigned field).
+                    row.get::<_, i64>(2)?.max(0) as usize,
+                    row.get::<_, f64>(3)?,
+                    row.get::<_, f64>(4)? as u64,
+                ))
+            },
+        )?;
 
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
@@ -1295,19 +1304,27 @@ impl Tracker {
             "SELECT DATE(timestamp), SUM(saved_tokens)
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND input_tokens <= ?3
              GROUP BY DATE(timestamp)
              ORDER BY DATE(timestamp) DESC
-             LIMIT 30", // added: project filter in WHERE
+             LIMIT 30", // same row set as the headline (oversized rows excluded)
         )?;
 
-        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
-            // added: params
-            // SUM(saved_tokens) per day: clamp a net-negative day to 0 (unsigned field).
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?.max(0) as usize,
-            ))
-        })?;
+        let rows = stmt.query_map(
+            params![
+                project_exact,
+                project_glob,
+                HEADLINE_INPUT_CAP_TOKENS as i64
+            ],
+            |row| {
+                // added: params
+                // SUM(saved_tokens) per day: clamp a net-negative day to 0 (unsigned field).
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?.max(0) as usize,
+                ))
+            },
+        )?;
 
         let mut result: Vec<_> = rows.collect::<Result<Vec<_>, _>>()?;
         result.reverse();
@@ -3022,11 +3039,11 @@ mod tests {
         assert_eq!(test_record.savings_pct, 80.0);
     }
 
-    /// The headline family (summary + period tables) excludes rows whose
-    /// input exceeds what the agent would have ingested; the diagnostic
-    /// listings keep them, and the exclusion is counted so it can be shown.
+    /// Every rate-bearing view (headline, by-command, by-day graph, period
+    /// tables) excludes rows whose input exceeds what the agent would have
+    /// ingested; the exclusion is counted so it can be shown.
     #[test]
-    fn oversized_rows_leave_the_headline_but_stay_diagnosable() {
+    fn oversized_rows_leave_every_gain_aggregate() {
         let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
 
         tracker
@@ -3052,15 +3069,54 @@ mod tests {
         assert_eq!(days.len(), 1);
         assert_eq!(days[0].input_tokens, 1_000, "period tables use the cap too");
 
-        let diagnosable = summary
-            .by_command
-            .iter()
-            .any(|(cmd, _, saved, _, _)| cmd == "rtk cat huge.log" && *saved > 900_000);
         assert!(
-            diagnosable,
-            "the oversized row must stay visible in by_command: {:?}",
+            summary
+                .by_command
+                .iter()
+                .all(|(cmd, _, _, _, _)| cmd != "rtk cat huge.log"),
+            "oversized rows must not inflate by_command: {:?}",
             summary.by_command
         );
+        assert_eq!(summary.by_day.iter().map(|(_, s)| s).sum::<usize>(), 500);
+    }
+
+    /// Regression: `rtk gain` showed a By Command table summing to ~37M saved
+    /// under a 2.3M headline, because the breakdowns kept oversized rows the
+    /// headline drops. The breakdowns must reconcile with the headline: equal
+    /// when no row regresses, never above it otherwise (the headline clamps
+    /// each row at 0, the breakdowns keep the signed group sum).
+    #[test]
+    fn gain_breakdowns_reconcile_with_headline() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+
+        tracker.record("grep a", "rtk grep", 2_000, 400, 5).unwrap();
+        tracker.record("grep b", "rtk grep", 3_000, 600, 5).unwrap();
+        tracker
+            .record("read big", "rtk read", 500_000, 2_000, 5)
+            .unwrap();
+        tracker
+            .record("read small", "rtk read", 1_000, 300, 5)
+            .unwrap();
+
+        let summary = tracker.get_summary().expect("Failed to get summary");
+        assert_eq!(summary.oversized_excluded, 1);
+        assert_eq!(summary.total_saved, 4_000 + 700);
+
+        let by_command_saved: usize = summary.by_command.iter().map(|(_, _, s, _, _)| s).sum();
+        let by_command_count: usize = summary.by_command.iter().map(|(_, n, _, _, _)| n).sum();
+        assert_eq!(by_command_saved, summary.total_saved);
+        assert_eq!(by_command_count, summary.total_commands);
+
+        let by_day_saved: usize = summary.by_day.iter().map(|(_, s)| s).sum();
+        assert_eq!(by_day_saved, summary.total_saved);
+
+        let period_saved: usize = tracker
+            .get_all_days_filtered(None)
+            .unwrap()
+            .iter()
+            .map(|d| d.saved_tokens)
+            .sum();
+        assert_eq!(period_saved, summary.total_saved);
     }
 
     // 4. track_passthrough doesn't dilute stats (input=0, output=0)
@@ -3713,7 +3769,7 @@ mod tests {
 
         // Override project_path by inserting directly via conn
         let saved_small = 10_i64; // 100 in - 90 out = 10 saved → 10%
-        let saved_large = 95_000_i64; // 100_000 in - 5_000 out = 95_000 saved → 95%
+        let saved_large = 6_650_i64; // 7_000 in - 350 out = 6_650 saved → 95%
         tracker
             .conn
             .execute(
@@ -3734,7 +3790,7 @@ mod tests {
                 rusqlite::params![
                     chrono::Utc::now().to_rfc3339(),
                     cmd_name, cmd_name, project,
-                    100_000_i64, 5_000_i64, saved_large, 95.0_f64, 10_i64
+                    7_000_i64, 350_i64, saved_large, 95.0_f64, 10_i64
                 ],
             )
             .expect("Failed to insert large invocation");
@@ -3750,7 +3806,8 @@ mod tests {
 
         let (_name, _count, _saved, rate, _time) = entry;
 
-        // Weighted rate = (10 + 95_000) / (100 + 100_000) * 100.0 ≈ 94.9%
+        // Weighted rate = (10 + 6_650) / (100 + 7_000) * 100.0 ≈ 93.8%
+        // (the large call stays under HEADLINE_INPUT_CAP_TOKENS so by_command keeps it)
         // Unweighted avg would be (10.0 + 95.0) / 2 = 52.5%
         // The gap proves the fix works.
         assert!(
@@ -3762,15 +3819,16 @@ mod tests {
 
     // 15. The weighted rate tracks SUM(saved_tokens), not the mean of per-call percentages
     //
-    // A long-tailed pair under one rtk_cmd: a 1M-token call saving 90% and a 100-token
+    // A long-tailed pair under one rtk_cmd: a 7k-token call saving 90% and a 100-token
     // call saving 10%. The mean of the two percentages is 50%; the weighted rate is
-    // ~89.99% and is the figure consistent with the Saved column in the same row.
+    // ~88.9% and is the figure consistent with the Saved column in the same row.
+    // (The large call stays under HEADLINE_INPUT_CAP_TOKENS so by_command keeps it.)
     #[test]
     fn test_weighted_rate_via_get_by_command() {
         let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
 
         tracker
-            .record("grep huge", "rtk grep", 1_000_000, 100_000, 50)
+            .record("grep huge", "rtk grep", 7_000, 700, 50)
             .expect("record huge");
         tracker
             .record("grep tiny", "rtk grep", 100, 90, 5)
@@ -3784,8 +3842,8 @@ mod tests {
             .expect("rtk grep row not found");
 
         assert_eq!(*count, 2);
-        assert_eq!(*saved, 900_010);
-        let expected = 900_010.0 / 1_000_100.0 * 100.0;
+        assert_eq!(*saved, 6_310);
+        let expected = 6_310.0 / 7_100.0 * 100.0;
         assert!(
             (pct - expected).abs() < 0.01,
             "expected weighted rate ~{expected:.2}, got {pct:.2}"
