@@ -177,22 +177,19 @@ pub(super) fn patch_agents_md(path: &Path, rtk_md_ref: &str, ctx: InitContext) -
             && has_rtk_reference(&content, &[RTK_MD_REF])
             && !has_rtk_reference(&content, &[rtk_md_ref])
         {
-            // Rewrite only the reference line itself, never prose that mentions it.
-            let mut rewritten = content
-                .lines()
+            // Rewrite only the reference line itself, never prose that mentions it,
+            // and keep every line's original ending (CRLF or LF).
+            content = content
+                .split_inclusive('\n')
                 .map(|line| {
-                    if is_rtk_reference_line(line, &[RTK_MD_REF]) {
-                        rtk_md_ref
+                    let body = line.trim_end_matches(['\r', '\n']);
+                    if is_rtk_reference_line(body, &[RTK_MD_REF]) {
+                        format!("{}{}", rtk_md_ref, &line[body.len()..])
                     } else {
-                        line
+                        line.to_string()
                     }
                 })
-                .collect::<Vec<_>>()
-                .join("\n");
-            if content.ends_with('\n') {
-                rewritten.push('\n');
-            }
-            content = rewritten;
+                .collect();
             if dry_run {
                 println!(
                     "[dry-run] would migrate {} to {} in {}",
@@ -556,6 +553,41 @@ mod tests {
             content,
             "# Agents\n\nRead @RTK.md for details.\n\n@/home/u/.codex/RTK.md\n"
         );
+    }
+
+    #[test]
+    fn test_patch_agents_md_migration_preserves_crlf() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        fs::write(
+            &agents_md,
+            "# Agents\r\n\r\nRead @RTK.md for details.\r\n\r\n@RTK.md\r\n",
+        )
+        .unwrap();
+
+        let added =
+            patch_agents_md(&agents_md, "@/home/u/.codex/RTK.md", InitContext::default()).unwrap();
+
+        assert!(added);
+        let content = fs::read_to_string(&agents_md).unwrap();
+        assert_eq!(
+            content,
+            "# Agents\r\n\r\nRead @RTK.md for details.\r\n\r\n@/home/u/.codex/RTK.md\r\n"
+        );
+    }
+
+    #[test]
+    fn test_patch_agents_md_leaves_file_with_both_references_unchanged() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        let original = "# Agents\n\n@RTK.md\n@/home/u/.codex/RTK.md\n";
+        fs::write(&agents_md, original).unwrap();
+
+        let added =
+            patch_agents_md(&agents_md, "@/home/u/.codex/RTK.md", InitContext::default()).unwrap();
+
+        assert!(!added);
+        assert_eq!(fs::read_to_string(&agents_md).unwrap(), original);
     }
 
     #[test]
