@@ -1,0 +1,6 @@
+.                                                                                            [100%]
+======================================== slowest durations =========================================
+0.00s call     test_reports.py::test_pass
+0.00s teardown test_reports.py::test_pass
+0.00s setup    test_reports.py::test_pass
+1 passed in 0.00s
