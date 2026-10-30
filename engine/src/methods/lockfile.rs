@@ -60,16 +60,19 @@ fn detect_and_summarize(input: &str) -> Option<String> {
     if head.trim_start().starts_with('{') && input.contains("\"lockfileVersion\"") {
         return summarize_npm(input);
     }
-    if input.contains("[[package]]") {
-        return Some(render("Cargo.lock", parse_cargo(input)));
+    let (kind, packages) = if input.contains("[[package]]") {
+        ("Cargo.lock", parse_cargo(input))
+    } else if head.contains("lockfileVersion:") {
+        ("pnpm-lock.yaml", parse_pnpm(input))
+    } else if head.contains("yarn lockfile v1") {
+        ("yarn.lock", parse_yarn(input))
+    } else {
+        return None;
+    };
+    if packages.is_empty() {
+        return None;
     }
-    if head.contains("lockfileVersion:") {
-        return Some(render("pnpm-lock.yaml", parse_pnpm(input)));
-    }
-    if head.contains("yarn lockfile v1") {
-        return Some(render("yarn.lock", parse_yarn(input)));
-    }
-    None
+    Some(render(kind, packages))
 }
 
 fn render(kind: &str, mut packages: Vec<String>) -> String {
@@ -298,5 +301,19 @@ mod tests {
     #[test]
     fn test_empty_input() {
         assert_eq!(apply(""), "");
+    }
+
+    #[test]
+    fn test_nothing_parsed_passes_through() {
+        let input = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/lockfile/Cargo.lock.snap"
+        ));
+        let numbered: String = input
+            .lines()
+            .enumerate()
+            .map(|(i, line)| format!("{:>6}\t{line}\n", i + 1))
+            .collect();
+        assert_eq!(apply(&numbered), numbered);
     }
 }
