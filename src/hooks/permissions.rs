@@ -14,6 +14,7 @@ use crate::discover::registry::MAX_MATCHING_PEELS;
 use crate::discover::registry::{MatchingReadings, matching_readings};
 use crate::discover::shell_wrapper::{is_shell_wrapper_candidate, parse_shell_wrapper};
 use serde_json::Value;
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 /// Verdict from checking a command against Claude Code's permission rules.
@@ -381,6 +382,9 @@ fn check_shell_wrapper_permissions(
 /// 3. `~/.claude/settings.json`
 /// 4. `~/.claude/settings.local.json`
 ///
+/// `~/.claude` stands for `$CLAUDE_CONFIG_DIR` when it is set; a relative value
+/// resolves against `$CLAUDE_PROJECT_DIR`, as Claude Code resolves it.
+///
 /// Missing and empty files are skipped. A file that exists but cannot be read
 /// or parsed may hold deny rules that can no longer be applied, so it fails
 /// closed: a warning is printed and every command gets at least `Ask`.
@@ -472,7 +476,32 @@ fn append_bash_rules(rules_value: Option<&Value>, target: &mut Vec<String>) {
 
 /// Return the ordered list of Claude Code settings file paths to check.
 fn get_settings_paths() -> Vec<PathBuf> {
-    get_settings_paths_from(find_project_root(), resolve_claude_dir().ok())
+    let claude_dir = resolve_claude_dir()
+        .ok()
+        .map(|dir| anchor_to_launch_dir(dir, user_dirs::env_path("CLAUDE_PROJECT_DIR")));
+    get_settings_paths_from(find_project_root(), claude_dir)
+}
+
+/// Resolve a relative Claude config dir the way Claude Code does.
+///
+/// Claude Code uses `CLAUDE_CONFIG_DIR` as given, so a relative value (or a
+/// literal `~` no shell expanded) resolves against the directory it was
+/// launched from, and keeps doing so after the agent `cd`s. Each hook process
+/// starts in the agent's current directory instead, so rtk must not resolve the
+/// value against its own working directory. Claude Code passes the launch
+/// directory to hooks as `CLAUDE_PROJECT_DIR` (it is not the git root).
+///
+/// An absolute `dir` is returned unchanged, and so is any `dir` when
+/// `launch_dir` is unset, empty or not absolute: outside a hook, the working
+/// directory is the launch directory.
+fn anchor_to_launch_dir(dir: PathBuf, launch_dir: Option<OsString>) -> PathBuf {
+    if dir.is_absolute() {
+        return dir;
+    }
+    match launch_dir.map(PathBuf::from) {
+        Some(base) if base.is_absolute() => base.join(dir),
+        _ => dir,
+    }
 }
 
 /// Assemble the settings paths for a project root and a resolved Claude config dir.
@@ -823,6 +852,70 @@ mod tests {
                 profile.join(SETTINGS_JSON),
                 profile.join(SETTINGS_LOCAL_JSON),
             ]
+        );
+    }
+
+    #[test]
+    fn test_anchor_to_launch_dir_joins_a_relative_dir_to_the_launch_dir() {
+        let launch = tempfile::tempdir().expect("tempdir");
+
+        for relative in [".claude-work", "~/.claude"] {
+            assert_eq!(
+                anchor_to_launch_dir(
+                    PathBuf::from(relative),
+                    Some(launch.path().as_os_str().to_owned())
+                ),
+                launch.path().join(relative),
+            );
+        }
+    }
+
+    #[test]
+    fn test_anchor_to_launch_dir_keeps_an_absolute_dir() {
+        let launch = tempfile::tempdir().expect("tempdir");
+        let profile = tempfile::tempdir().expect("tempdir");
+
+        assert_eq!(
+            anchor_to_launch_dir(
+                profile.path().to_path_buf(),
+                Some(launch.path().as_os_str().to_owned())
+            ),
+            profile.path(),
+        );
+    }
+
+    #[test]
+    fn test_anchor_to_launch_dir_without_a_usable_launch_dir() {
+        for launch in [None, Some(""), Some("relative/launch")] {
+            assert_eq!(
+                anchor_to_launch_dir(PathBuf::from(".claude-work"), launch.map(OsString::from)),
+                PathBuf::from(".claude-work"),
+            );
+        }
+    }
+
+    // #4676: after the agent `cd`s, the hook runs in another directory, but
+    // Claude Code still reads `<launch dir>/<CLAUDE_CONFIG_DIR>/settings.json`.
+    #[test]
+    fn test_get_settings_paths_resolves_a_relative_config_dir_against_the_project_dir() {
+        let launch = tempfile::tempdir().expect("tempdir");
+        let launch_dir = launch.path().to_str().expect("utf-8 tempdir");
+
+        let paths = user_env::with_vars(
+            &[
+                ("CLAUDE_CONFIG_DIR", Some("~/.claude")),
+                ("CLAUDE_PROJECT_DIR", Some(launch_dir)),
+            ],
+            get_settings_paths,
+        );
+
+        let profile = launch.path().join("~/.claude");
+        assert!(
+            paths.ends_with(&[
+                profile.join(SETTINGS_JSON),
+                profile.join(SETTINGS_LOCAL_JSON)
+            ]),
+            "{paths:?}"
         );
     }
 
