@@ -133,7 +133,8 @@ Configuration (repo Settings → Secrets and variables → Actions):
 | `SIGNPATH_ORGANIZATION_ID` | variable | SignPath organization UUID |
 
 SignPath-side setup: project slug `rtk`, signing policy slug `release-signing`,
-artifact configuration = single `pe-file` named `rtk.exe`, and the GitHub Actions
+artifact configuration = `zip-file` at the root, containing `rtk.exe` (the GitHub
+artifact is a zip), and the GitHub Actions
 trusted build system connected to the project.
 
 If `SIGNPATH_ORGANIZATION_ID` is unset, `sign-windows` is skipped and the release
