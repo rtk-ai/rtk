@@ -12,18 +12,25 @@ moving.
 
 ## Adding an agent to `rtk <agent>`
 
-`rtk claude` starts the daemon if it is not running, points Claude Code at it,
-and hands over the process — on Unix by `exec`, so signals, stdio and the exit
-code behave exactly as if `claude` had been launched directly.
+`rtk claude`, `rtk codex` and `rtk vibe` start the daemon if it is not running,
+point the agent at it through the one channel that agent reads, and hand over
+the process — on Unix by `exec`, so signals, stdio and the exit code behave
+exactly as if the agent had been launched directly.
 
-The table that drives it is `PROXY_AGENTS` in `src/llm_proxy.rs`:
+The table that drives it is `PROXY_AGENTS` in `src/llm_proxy.rs`. Each row
+names the subcommand (which is also the binary it execs), a display label, and
+a `Redirect`, which is how the agent is pointed elsewhere:
 
-```rust
-pub const PROXY_AGENTS: &[ProxyAgent] = &[ProxyAgent {
-    name: "claude",
-    base_url_var: "ANTHROPIC_BASE_URL",
-}];
-```
+| `Redirect` | The agent reads | Launcher | Guided setup |
+|---|---|---|---|
+| `Env { var }` | an environment variable (Claude Code: `ANTHROPIC_BASE_URL`) | sets it for the process | writes it into the agent's settings |
+| `CliOverride { file, key, read, path }` | a config key that a CLI flag can override per run (Codex: `openai_base_url`, `-c`) | passes the override | writes the key |
+| `ConfigFile { file, path, read }` | a config file only (Vibe: the `mistral` provider's `api_base`) | verifies the file and refuses to launch at a dead daemon; never writes | writes the entry |
+
+Agents with no channel at all are listed in `UNPROXYABLE` with the vendor's
+own statement and the date it was checked. `rtk llm-proxy setup` and
+`rtk init` print that reason when such an agent is detected, so the absence is
+visible rather than silent.
 
 **Membership is the contract.** A subcommand exists only where redirection has
 been verified end to end, so `rtk <agent>` resolving is itself the signal that
@@ -34,39 +41,49 @@ absence into a silent no-op.
 
 To add one:
 
-1. **Confirm the agent honours a base-URL environment variable**, and that
-   setting it is sufficient — some agents also require a config-file entry, and
-   some offer no override at all. Both cases are known and neither belongs in
-   the table until the whole path works.
+1. **Find the agent's channel in its own documentation or source**, and
+   confirm it is sufficient on its own. Record it on the agent's harness
+   profile too: `base_url_config` in `engine/src/harness.rs` takes the same
+   three shapes (`Env`, `ConfigKey`, `ProviderTable`), and a test in
+   `src/llm_proxy.rs` fails when the launcher and the profile disagree. An
+   agent with no channel gets `None` there and a row in `UNPROXYABLE`.
 2. **Confirm the dialect is served.** The daemon answers `/v1/messages`
-   (Anthropic) and `/v1/chat/completions` (OpenAI). An agent speaking anything
-   else needs a route before it needs a table row.
-3. **Add the row** — `name` is both the subcommand and the binary `exec`s.
-4. **Extend `only_verified_agents_get_a_subcommand`** in `src/llm_proxy.rs`,
+   (Anthropic), `/v1/chat/completions` (OpenAI chat) and `/v1/responses`
+   (OpenAI Responses), each also under a named upstream's namespace. An agent
+   speaking anything else needs a route before it needs a table row.
+3. **Confirm the upstream exists.** A provider other than Anthropic or OpenAI
+   is a named upstream: add it to `DEFAULT_UPSTREAMS` in `src/config.rs` and
+   its model families to `models.toml`.
+4. **Add the row**, and the on-ramp for `rtk init` when the agent has a
+   persistent channel: implement `ProxyOnramp` in
+   `src/hooks/init/proxy_onramp.rs` for it, and have `--uninstall` remove only
+   what the on-ramp wrote.
+5. **Extend `only_verified_agents_get_a_subcommand`** in `src/llm_proxy.rs`,
    moving the agent out of the must-not-resolve list.
-5. **Check the traffic actually arrives**: run the agent through it and confirm
-   the requests appear.
+6. **Check the traffic actually arrives**: run the agent through it and confirm
+   the request appears.
 
 ```bash
 rtk llm-proxy start
 rtk <agent> "say hello"
-curl -s localhost:8080/stats/requests | head   # the request should be here
+rtk llm-proxy stats            # one request, under the agent's client name
 ```
 
-If step 5 shows nothing, the agent ignored the variable. That is a finding worth
+If step 6 shows nothing, the agent ignored the channel. That is a finding worth
 an issue, not a row in the table.
 
 ## Adding a provider dialect
 
 Serving a dialect and compressing it are separate steps.
-`/v1/chat/completions` is served and measured today; every transform still
-skips it.
+`/v1/chat/completions` and `/v1/responses` are served and measured today;
+every transform still skips them.
 
 1. **`Provider`** (`src/model.rs`) — the variant, and how a request maps to it.
-2. **Route** (`src/server.rs`) — the inbound path.
+2. **Route** (`src/server.rs`) — the inbound path, bare and under a namespace.
 3. **`src/extract.rs`** — content blocks, `usage_from_response`,
-   `tool_calls_from_response`. Measurement works as soon as these do, and that
-   alone is a useful contribution.
+   `tool_calls_from_response`, and the streamed shape in `forward.rs`'s
+   `SseAccumulator`. Measurement works as soon as these do, and that alone is
+   a useful contribution.
 4. **Open each transform's gate.** Every transform checks the provider itself —
    `normalize.rs` and `cache_align.rs` return early for anything but Anthropic.
    Open one only with a measured result behind it: reshaping an unfamiliar

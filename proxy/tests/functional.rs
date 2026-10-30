@@ -20,6 +20,7 @@ fn cfg(upstream: &str, ccr: bool) -> Config {
         bind: "127.0.0.1:0".into(),
         anthropic_upstream: upstream.to_string(),
         openai_upstream: upstream.to_string(),
+        upstreams: Default::default(),
         ccr,
         compression: "off".into(),
         pixel_compress: Default::default(),
@@ -974,4 +975,841 @@ async fn ccr_first_round_transport_failure_falls_back_to_the_relay() {
         "a transport failure must not surface as a panic: {text}"
     );
     assert!(!text.contains("panicked"), "{text}");
+}
+
+#[tokio::test]
+async fn a_named_upstream_owns_its_namespace_and_nothing_else() {
+    let anthropic = MockServer::start().await;
+    let openai = MockServer::start().await;
+    let acme = MockServer::start().await;
+    for s in [&anthropic, &openai, &acme] {
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .mount(s)
+            .await;
+    }
+    let mut c = cfg(&anthropic.uri(), false);
+    c.openai_upstream = openai.uri();
+    c.upstreams.insert("acme".to_string(), acme.uri());
+    let app = build_router(AppState::new(c));
+
+    let send = |method: &'static str, uri: &'static str, auth: Option<&'static str>| {
+        let app = app.clone();
+        async move {
+            let mut builder = axum::http::Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json");
+            if let Some(auth) = auth {
+                builder = builder.header("authorization", auth);
+            }
+            let body = if method == "GET" {
+                axum::body::Body::empty()
+            } else {
+                axum::body::Body::from(r#"{"model":"m","messages":[]}"#)
+            };
+            app.oneshot(builder.body(body).unwrap()).await.unwrap()
+        }
+    };
+
+    let resp = send("POST", "/acme/v1/chat/completions", Some("Bearer acme-key")).await;
+    assert_eq!(resp.status(), 200);
+    let resp = send("POST", "/acme/v1/messages", Some("Bearer acme-key")).await;
+    assert_eq!(resp.status(), 200);
+    let resp = send("GET", "/acme/v1/models?limit=1", Some("Bearer acme-key")).await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "a sibling path inside a known namespace relays"
+    );
+    let resp = send("POST", "/nope/v1/messages", Some("Bearer stray-key")).await;
+    assert_eq!(resp.status(), 404);
+    assert_eq!(body_json(resp).await["error"]["type"], "routing_unknown");
+    let resp = send("POST", "/openai/v1/chat/completions", None).await;
+    assert_eq!(resp.status(), 200);
+    let resp = send("POST", "/v1/messages", Some("x-api-key-free")).await;
+    assert_eq!(resp.status(), 200);
+
+    let acme_seen: Vec<(String, Option<String>)> = acme
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                format!(
+                    "{}{}",
+                    r.url.path(),
+                    r.url.query().map(|q| format!("?{q}")).unwrap_or_default()
+                ),
+                r.headers
+                    .get("authorization")
+                    .map(|v| v.to_str().unwrap().to_string()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        acme_seen,
+        vec![
+            (
+                "/v1/chat/completions".to_string(),
+                Some("Bearer acme-key".to_string())
+            ),
+            (
+                "/v1/messages".to_string(),
+                Some("Bearer acme-key".to_string())
+            ),
+            (
+                "/v1/models?limit=1".to_string(),
+                Some("Bearer acme-key".to_string())
+            ),
+        ],
+        "the namespace is stripped and the query kept"
+    );
+
+    let openai_seen = openai.received_requests().await.unwrap();
+    assert_eq!(openai_seen.len(), 1);
+    assert!(
+        openai_seen[0].headers.get("authorization").is_none(),
+        "a credential relayed to one upstream is never lent to another"
+    );
+    let anthropic_paths: Vec<String> = anthropic
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.url.path().to_string())
+        .collect();
+    assert_eq!(anthropic_paths, vec!["/v1/messages"]);
+}
+
+async fn last_authorization(server: &MockServer) -> Option<String> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .last()
+        .and_then(|r| r.headers.get("authorization"))
+        .map(|v| v.to_str().unwrap().to_string())
+}
+
+#[tokio::test]
+async fn a_remembered_credential_is_lent_only_to_the_upstream_it_came_from() {
+    let anthropic = MockServer::start().await;
+    let acme = MockServer::start().await;
+    let beta = MockServer::start().await;
+    for s in [&anthropic, &acme, &beta] {
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .mount(s)
+            .await;
+    }
+    let mut c = cfg(&anthropic.uri(), false);
+    c.upstreams.insert("acme".to_string(), acme.uri());
+    c.upstreams.insert("beta".to_string(), beta.uri());
+    let app = build_router(AppState::new(c));
+
+    let send = |uri: &'static str, auth: Option<&'static str>| {
+        let app = app.clone();
+        async move {
+            let mut builder = axum::http::Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json");
+            if let Some(auth) = auth {
+                builder = builder.header("authorization", auth);
+            }
+            let resp = app
+                .oneshot(
+                    builder
+                        .body(axum::body::Body::from(r#"{"model":"m","messages":[]}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200, "{uri}");
+        }
+    };
+    send("/acme/v1/chat/completions", None).await;
+    assert_eq!(
+        last_authorization(&acme).await,
+        None,
+        "nothing is remembered yet"
+    );
+
+    send("/acme/v1/chat/completions", Some("Bearer acme-key")).await;
+    send("/acme/v1/chat/completions", None).await;
+    assert_eq!(
+        last_authorization(&acme).await.as_deref(),
+        Some("Bearer acme-key"),
+        "a keyless worker is lent the credential its own upstream saw"
+    );
+
+    send("/beta/v1/chat/completions", None).await;
+    assert_eq!(
+        last_authorization(&beta).await,
+        None,
+        "acme's credential is never lent to another upstream"
+    );
+
+    send("/beta/v1/chat/completions", Some("Bearer beta-key")).await;
+    send("/acme/v1/chat/completions", None).await;
+    assert_eq!(
+        last_authorization(&acme).await.as_deref(),
+        Some("Bearer acme-key"),
+        "a second upstream's key does not displace the first's"
+    );
+    send("/beta/v1/chat/completions", None).await;
+    assert_eq!(
+        last_authorization(&beta).await.as_deref(),
+        Some("Bearer beta-key")
+    );
+
+    send("/acme/v1/chat/completions", Some("Bearer caller-key")).await;
+    assert_eq!(
+        last_authorization(&acme).await.as_deref(),
+        Some("Bearer caller-key"),
+        "a request that brought its own key keeps it"
+    );
+}
+
+#[tokio::test]
+async fn each_dialect_is_recorded_with_its_provider_upstream_and_uncached_input() {
+    let acme = MockServer::start().await;
+    let mistral = MockServer::start().await;
+    let openai = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-haiku-4-5",
+            "content": [{ "type": "text", "text": "ok" }], "stop_reason": "end_turn",
+            "usage": { "input_tokens": 10, "output_tokens": 2 }
+        })))
+        .mount(&acme)
+        .await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "c1", "object": "chat.completion", "model": "devstral-medium-latest",
+            "choices": [{ "index": 0, "message": { "role": "assistant", "content": "ok" }, "finish_reason": "stop" }],
+            "usage": { "prompt_tokens": 120, "completion_tokens": 7, "total_tokens": 127,
+                       "prompt_tokens_details": { "cached_tokens": 100 } }
+        })))
+        .mount(&mistral)
+        .await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "resp_1", "object": "response", "status": "completed", "model": "gpt-5-codex",
+            "output": [],
+            "usage": { "input_tokens": 200, "output_tokens": 12,
+                       "input_tokens_details": { "cached_tokens": 150 } }
+        })))
+        .mount(&openai)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("usage.db");
+    let mut c = cfg(&acme.uri(), false);
+    c.openai_upstream = openai.uri();
+    c.upstreams.insert("acme".to_string(), acme.uri());
+    c.upstreams.insert("mistral".to_string(), mistral.uri());
+    c.db = db.to_str().unwrap().to_string();
+    let app = build_router(AppState::new(c));
+
+    let requests = [
+        (
+            "/acme/v1/messages",
+            r#"{"model":"claude-haiku-4-5","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}"#,
+        ),
+        (
+            "/mistral/v1/chat/completions",
+            r#"{"model":"devstral-medium-latest","messages":[{"role":"user","content":"hi"}]}"#,
+        ),
+        (
+            "/openai/v1/responses",
+            r#"{"model":"gpt-5-codex","instructions":"be brief","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"stream":false}"#,
+        ),
+    ];
+    for (uri, body) in requests {
+        let resp = app
+            .clone()
+            .oneshot(codex_request(
+                "POST",
+                uri,
+                &[
+                    ("content-type", "application/json"),
+                    ("authorization", "Bearer k"),
+                ],
+                body.as_bytes().to_vec(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "{uri}");
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let mut rows: Vec<(String, Option<String>, i64, i64)> = conn
+        .prepare("SELECT provider, upstream, uncached_input, tokens_out FROM usage_records")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    rows.sort();
+    assert_eq!(
+        rows,
+        vec![
+            ("anthropic".to_string(), Some("acme".to_string()), 10, 2),
+            ("openai".to_string(), Some("mistral".to_string()), 20, 7),
+            (
+                "openai-responses".to_string(),
+                Some("openai".to_string()),
+                50,
+                12
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_vibe_request_reaches_mistral_and_is_recorded_under_its_own_name() {
+    let anthropic = MockServer::start().await;
+    let mistral = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(wiremock::matchers::path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "cmpl-1", "object": "chat.completion", "model": "devstral-medium-latest",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 120, "completion_tokens": 7, "total_tokens": 127,
+                      "prompt_tokens_details": {"cached_tokens": 100}}
+        })))
+        .mount(&mistral)
+        .await;
+    let mut c = cfg(&anthropic.uri(), false);
+    c.upstreams.insert("mistral".to_string(), mistral.uri());
+    let state = AppState::new(c);
+    let store = state.store.clone().expect("in-memory store");
+    let app = build_router(state);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/mistral/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer mistral-key")
+                .header("user-agent", "mistral-client-python/Mistral-Vibe/1.2.3")
+                .body(axum::body::Body::from(
+                    r#"{"model":"devstral-medium-latest","messages":[{"role":"user","content":"hi"}],"stream":false}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        body_json(resp).await["choices"][0]["message"]["content"],
+        "ok"
+    );
+
+    let seen = mistral.received_requests().await.unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].url.path(), "/v1/chat/completions");
+    assert_eq!(
+        seen[0]
+            .headers
+            .get("authorization")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "Bearer mistral-key"
+    );
+    assert!(anthropic.received_requests().await.unwrap().is_empty());
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let summary = store.summary().await;
+    assert_eq!(summary["total_requests"], 1);
+    assert_eq!(summary["tokens_out"], 7);
+    let metrics = store.metrics().await;
+    assert!(
+        metrics.by_client.iter().any(|c| c.client == "vibe"),
+        "the client is recorded as vibe: {:?}",
+        metrics.by_client
+    );
+}
+
+#[tokio::test]
+async fn a_streamed_mistral_reply_tallies_its_final_usage_chunk() {
+    let mistral = MockServer::start().await;
+    let sse = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"devstral-medium-latest\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n\
+data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"devstral-medium-latest\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"devstral-medium-latest\",\"choices\":[],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":9,\"total_tokens\":129,\"prompt_tokens_details\":{\"cached_tokens\":64}}}\n\n\
+data: [DONE]\n\n";
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse.as_bytes(), "text/event-stream"))
+        .mount(&mistral)
+        .await;
+    let mut c = cfg(&mistral.uri(), false);
+    c.upstreams.insert("mistral".to_string(), mistral.uri());
+    let state = AppState::new(c);
+    let store = state.store.clone().expect("in-memory store");
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/mistral/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("user-agent", "Mistral-Vibe/1.2.3")
+                .body(axum::body::Body::from(
+                    r#"{"model":"devstral-medium-latest","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let relayed = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&relayed).ends_with("data: [DONE]\n\n"));
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let summary = store.summary().await;
+    assert_eq!(summary["total_requests"], 1);
+    assert_eq!(summary["tokens_out"], 9);
+}
+
+#[tokio::test]
+async fn codex_responses_are_relayed_under_both_login_modes_and_measured() {
+    let openai = MockServer::start().await;
+    let chatgpt = MockServer::start().await;
+    let completed = json!({
+        "id": "resp_1", "object": "response", "status": "completed", "model": "gpt-5-codex",
+        "output": [
+            { "type": "function_call", "call_id": "c1", "name": "shell", "arguments": "{\"command\":[\"ls\"]}" }
+        ],
+        "usage": { "input_tokens": 200, "output_tokens": 12,
+                   "input_tokens_details": { "cached_tokens": 150 },
+                   "output_tokens_details": { "reasoning_tokens": 4 } }
+    });
+    for s in [&openai, &chatgpt] {
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(completed.clone()))
+            .mount(s)
+            .await;
+    }
+    let mut c = cfg(&openai.uri(), false);
+    c.openai_upstream = openai.uri();
+    c.upstreams.insert("chatgpt".to_string(), chatgpt.uri());
+    let state = AppState::new(c);
+    let store = state.store.clone().expect("in-memory store");
+    let app = build_router(state);
+
+    let post = |uri: &'static str, auth: &'static str| {
+        let app = app.clone();
+        async move {
+            app.oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .header("authorization", auth)
+                    .header("user-agent", "codex_cli_rs/0.50.0 (Mac OS 15.0; arm64)")
+                    .body(axum::body::Body::from(
+                        r#"{"model":"gpt-5-codex","instructions":"be brief","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ls"}]}],"tools":[{"type":"function","name":"shell","parameters":{"type":"object"}}],"stream":false,"store":false}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    let resp = post("/openai/v1/responses", "Bearer sk-proj-key").await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(body_json(resp).await["output"][0]["name"], "shell");
+    let resp = post(
+        "/chatgpt/backend-api/codex/responses",
+        "Bearer chatgpt-token",
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let resp = post("/v1/responses", "Bearer sk-proj-key").await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "the bare path still means the openai upstream"
+    );
+
+    let openai_seen = openai.received_requests().await.unwrap();
+    assert_eq!(openai_seen.len(), 2);
+    assert!(openai_seen.iter().all(|r| r.url.path() == "/v1/responses"));
+    let chatgpt_seen = chatgpt.received_requests().await.unwrap();
+    assert_eq!(chatgpt_seen.len(), 1);
+    assert_eq!(chatgpt_seen[0].url.path(), "/backend-api/codex/responses");
+    assert_eq!(
+        chatgpt_seen[0]
+            .headers
+            .get("authorization")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "Bearer chatgpt-token"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let summary = store.summary().await;
+    assert_eq!(summary["total_requests"], 3);
+    assert_eq!(summary["tokens_out"], 36);
+    let metrics = store.metrics().await;
+    assert!(metrics.by_client.iter().any(|c| c.client == "codex"));
+}
+
+#[tokio::test]
+async fn a_streamed_codex_response_tallies_usage_from_response_completed() {
+    let openai = MockServer::start().await;
+    let sse = "event: response.created\n\
+data: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\"}}\n\n\
+event: response.output_text.delta\n\
+data: {\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"output_index\":0,\"delta\":\"ok\"}\n\n\
+event: response.output_item.done\n\
+data: {\"type\":\"response.output_item.done\",\"sequence_number\":2,\"output_index\":1,\"item\":{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"shell\",\"arguments\":\"{}\"}}\n\n\
+event: response.completed\n\
+data: {\"type\":\"response.completed\",\"sequence_number\":3,\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":300,\"output_tokens\":21,\"input_tokens_details\":{\"cached_tokens\":256},\"total_tokens\":321}}}\n\n";
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse.as_bytes(), "text/event-stream"))
+        .mount(&openai)
+        .await;
+    let mut c = cfg(&openai.uri(), false);
+    c.openai_upstream = openai.uri();
+    let state = AppState::new(c);
+    let store = state.store.clone().expect("in-memory store");
+    let app = build_router(state);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/openai/v1/responses")
+                .header("content-type", "application/json")
+                .header("user-agent", "codex_cli_rs/0.50.0")
+                .body(axum::body::Body::from(
+                    r#"{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hi"}],"stream":true}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let relayed = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        &relayed[..],
+        sse.as_bytes(),
+        "the event stream is relayed byte for byte"
+    );
+
+    let upgrade = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/openai/v1/responses")
+                .header("connection", "Upgrade")
+                .header("upgrade", "websocket")
+                .header("sec-websocket-version", "13")
+                .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        upgrade.status(),
+        426,
+        "a websocket upgrade is answered, never relayed as a websocket"
+    );
+    assert!(
+        openai
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.method.as_str() == "POST"),
+        "the upgrade attempt must not reach the upstream as a GET"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let summary = store.summary().await;
+    assert_eq!(summary["total_requests"], 1);
+    assert_eq!(summary["tokens_out"], 21);
+}
+
+const RESPONSES_SSE: &str = "event: response.created\n\
+data: {\"type\":\"response.created\",\"response\":{\"id\":\"r\",\"model\":\"gpt-5-codex\"}}\n\n\
+event: response.completed\n\
+data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"model\":\"gpt-5-codex\",\"usage\":{\"input_tokens\":1200,\"output_tokens\":50,\"input_tokens_details\":{\"cached_tokens\":1000}}}}\n\n";
+
+const RESPONSES_BODY: &str = r#"{"model":"gpt-5-codex","stream":true,"instructions":"be brief","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello there, this is the prompt"}]}]}"#;
+
+async fn sse_upstream() -> MockServer {
+    let s = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(RESPONSES_SSE.as_bytes(), "text/event-stream"),
+        )
+        .mount(&s)
+        .await;
+    s
+}
+
+async fn codex_upstreams() -> (MockServer, MockServer, AppState) {
+    let openai = sse_upstream().await;
+    let chatgpt = sse_upstream().await;
+    let mut c = cfg(&openai.uri(), false);
+    c.openai_upstream = openai.uri();
+    c.upstreams.insert("chatgpt".to_string(), chatgpt.uri());
+    (openai, chatgpt, AppState::new(c))
+}
+
+fn codex_request(
+    method: &str,
+    uri: &str,
+    headers: &[(&str, &str)],
+    body: Vec<u8>,
+) -> axum::http::Request<axum::body::Body> {
+    let mut request = axum::http::Request::builder().method(method).uri(uri);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    request.body(axum::body::Body::from(body)).unwrap()
+}
+
+#[tokio::test]
+async fn a_credential_goes_to_the_service_it_belongs_to_whichever_route_is_configured() {
+    let (openai, chatgpt, state) = codex_upstreams().await;
+    let app = build_router(state);
+    let chatgpt_login: &[(&str, &str)] = &[
+        ("authorization", "Bearer eyJhbGciOi.eyJzdWIi.sig"),
+        ("chatgpt-account-id", "acct-123"),
+    ];
+    let api_key: &[(&str, &str)] = &[("authorization", "Bearer sk-proj-key")];
+
+    let moved_to_chatgpt = [
+        (
+            "POST",
+            "/openai/v1/responses",
+            "/backend-api/codex/responses",
+        ),
+        ("POST", "/v1/responses", "/backend-api/codex/responses"),
+        ("GET", "/openai/v1/models", "/backend-api/codex/models"),
+    ];
+    for (verb, uri, _) in moved_to_chatgpt {
+        let body = RESPONSES_BODY.as_bytes().to_vec();
+        let resp = app
+            .clone()
+            .oneshot(codex_request(verb, uri, chatgpt_login, body))
+            .await
+            .unwrap();
+        assert_ne!(resp.status(), 405, "{uri}");
+    }
+    let seen = chatgpt.received_requests().await.unwrap();
+    assert_eq!(
+        seen.iter().map(|r| r.url.path()).collect::<Vec<_>>(),
+        moved_to_chatgpt.map(|(_, _, path)| path)
+    );
+    assert!(
+        openai.received_requests().await.unwrap().is_empty(),
+        "a ChatGPT token must never reach the OpenAI API"
+    );
+
+    let moved_to_openai = [
+        (
+            "POST",
+            "/chatgpt/backend-api/codex/responses",
+            "/v1/responses",
+        ),
+        ("GET", "/chatgpt/backend-api/codex/models", "/v1/models"),
+    ];
+    for (verb, uri, _) in moved_to_openai {
+        let body = RESPONSES_BODY.as_bytes().to_vec();
+        app.clone()
+            .oneshot(codex_request(verb, uri, api_key, body))
+            .await
+            .unwrap();
+    }
+    let seen = openai.received_requests().await.unwrap();
+    assert_eq!(
+        seen.iter().map(|r| r.url.path()).collect::<Vec<_>>(),
+        moved_to_openai.map(|(_, _, path)| path)
+    );
+    assert_eq!(chatgpt.received_requests().await.unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn a_token_alone_does_not_move_a_request_off_the_openai_upstream() {
+    let (openai, chatgpt, state) = codex_upstreams().await;
+    let app = build_router(state);
+    let gateway_jwt: &[(&str, &str)] = &[("authorization", "Bearer eyJhbGciOi.eyJzdWIi.sig")];
+    app.oneshot(codex_request(
+        "POST",
+        "/openai/v1/responses",
+        gateway_jwt,
+        RESPONSES_BODY.as_bytes().to_vec(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(openai.received_requests().await.unwrap().len(), 1);
+    assert!(chatgpt.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_responses_body_passes_ccr_untouched() {
+    let openai = sse_upstream().await;
+    let mut c = cfg(&openai.uri(), true);
+    c.openai_upstream = openai.uri();
+    let app = build_router(AppState::new(c));
+    let big: String = (0..4000)
+        .map(|i| format!("line {i} of command output\n"))
+        .collect();
+    let input = json!([
+        { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "run it" }] },
+        { "type": "function_call", "call_id": "c1", "name": "shell", "arguments": "{}" },
+        { "type": "function_call_output", "call_id": "c1", "output": big }
+    ]);
+    let sent = json!({
+        "model": "gpt-5-codex", "stream": false, "instructions": "be brief", "input": input
+    });
+
+    let resp = app
+        .oneshot(codex_request(
+            "POST",
+            "/openai/v1/responses",
+            &[
+                ("content-type", "application/json"),
+                ("authorization", "Bearer sk-proj-key"),
+            ],
+            serde_json::to_vec(&sent).unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let seen = openai.received_requests().await.unwrap();
+    assert_eq!(seen.len(), 1);
+    let text = String::from_utf8_lossy(&seen[0].body);
+    assert!(!text.contains(rtk_proxy::pipeline::ccr::CCR_MARKER_TAG));
+    assert!(!text.contains(rtk_proxy::pipeline::ccr::RETRIEVE_TOOL_NAME));
+    let forwarded: Value = serde_json::from_slice(&seen[0].body).unwrap();
+    assert_eq!(forwarded["input"], input);
+    assert!(forwarded.get("tools").is_none());
+}
+
+#[tokio::test]
+async fn a_zstd_responses_body_is_read_forwarded_plain_and_recorded() {
+    let (_openai, chatgpt, state) = codex_upstreams().await;
+    let store = state.store.clone().expect("in-memory store");
+    let app = build_router(state);
+    let compressed = ruzstd::encoding::compress_to_vec(
+        RESPONSES_BODY.as_bytes(),
+        ruzstd::encoding::CompressionLevel::Fastest,
+    );
+    let resp = app
+        .oneshot(codex_request(
+            "POST",
+            "/chatgpt/backend-api/codex/responses",
+            &[
+                ("authorization", "Bearer token"),
+                ("content-encoding", "zstd"),
+                ("content-type", "application/json"),
+            ],
+            compressed,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.headers().get("content-type").unwrap(),
+        "text/event-stream"
+    );
+    resp.into_body().collect().await.unwrap();
+
+    let seen = chatgpt.received_requests().await.unwrap();
+    assert!(!seen[0].headers.contains_key("content-encoding"));
+    let forwarded: Value = serde_json::from_slice(&seen[0].body).unwrap();
+    assert_eq!(forwarded["model"], "gpt-5-codex");
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let summary = store.summary().await;
+    assert_eq!(summary["total_requests"], 1);
+    assert_eq!(summary["tokens_out"], 50);
+    assert!(summary["tokens_in"].as_i64().unwrap() > 0, "{summary}");
+}
+
+#[tokio::test]
+async fn a_body_that_is_not_zstd_after_all_is_forwarded_as_it_came() {
+    let (_openai, chatgpt, state) = codex_upstreams().await;
+    let app = build_router(state);
+    app.oneshot(codex_request(
+        "POST",
+        "/chatgpt/backend-api/codex/responses",
+        &[
+            ("authorization", "Bearer token"),
+            ("content-encoding", "zstd"),
+        ],
+        b"not zstd".to_vec(),
+    ))
+    .await
+    .unwrap();
+    let seen = chatgpt.received_requests().await.unwrap();
+    assert_eq!(seen[0].body, b"not zstd");
+    assert_eq!(seen[0].headers.get("content-encoding").unwrap(), "zstd");
+}
+
+#[tokio::test]
+async fn a_client_hanging_up_at_response_completed_keeps_the_usage_row() {
+    let (_openai, _chatgpt, state) = codex_upstreams().await;
+    let store = state.store.clone().expect("in-memory store");
+    let app = build_router(state);
+    let resp = app
+        .oneshot(codex_request(
+            "POST",
+            "/openai/v1/responses",
+            &[("authorization", "Bearer sk-key")],
+            RESPONSES_BODY.as_bytes().to_vec(),
+        ))
+        .await
+        .unwrap();
+    let mut body = resp.into_body();
+    let first = body.frame().await.unwrap().unwrap();
+    assert!(String::from_utf8_lossy(first.data_ref().unwrap()).contains("response.completed"));
+    drop(body);
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let summary = store.summary().await;
+    assert_eq!(summary["total_requests"], 1);
+    assert_eq!(summary["tokens_out"], 50);
+}
+
+#[tokio::test]
+async fn the_websocket_upgrade_gets_a_426_so_codex_falls_back_at_once() {
+    let (openai, chatgpt, state) = codex_upstreams().await;
+    let app = build_router(state);
+    for uri in [
+        "/v1/responses",
+        "/openai/v1/responses",
+        "/chatgpt/backend-api/codex/responses",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(codex_request(
+                "GET",
+                uri,
+                &[("upgrade", "websocket")],
+                vec![],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 426, "{uri}");
+    }
+    assert!(openai.received_requests().await.unwrap().is_empty());
+    assert!(chatgpt.received_requests().await.unwrap().is_empty());
 }

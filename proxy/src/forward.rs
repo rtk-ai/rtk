@@ -143,6 +143,36 @@ pub fn truncate_text(s: &str, max: usize) -> String {
     format!("{}…", &s[..end])
 }
 
+/// ChatGPT-login Codex sends `content-encoding: zstd` bodies. Unread, they lose
+/// the `stream` flag, the model and the usage row, so they are decoded here and
+/// forwarded plain. A body that does not decode is left exactly as it came.
+pub fn decode_zstd_request(mut headers: HeaderMap, body: Bytes) -> (HeaderMap, Bytes) {
+    let is_zstd = headers
+        .get("content-encoding")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("zstd"));
+    if !is_zstd {
+        return (headers, body);
+    }
+    let Some(decoded) = decode_zstd(&body) else {
+        return (headers, body);
+    };
+    headers.remove("content-encoding");
+    (headers, Bytes::from(decoded))
+}
+
+fn decode_zstd(body: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut source = body;
+    let decoder = ruzstd::decoding::StreamingDecoder::new(&mut source).ok()?;
+    let mut out = Vec::new();
+    decoder
+        .take(crate::server::BODY_LIMIT_BYTES as u64 + 1)
+        .read_to_end(&mut out)
+        .ok()?;
+    (out.len() <= crate::server::BODY_LIMIT_BYTES).then_some(out)
+}
+
 /// Parse the JSON body, run the compression pipeline over it, and report the
 /// bytes to forward + stats fields. A pure passthrough (body unchanged, stats
 /// zeroed) when the body isn't JSON; a no-op rewrite when the pipeline is empty
@@ -298,16 +328,21 @@ pub enum Forwarded {
 /// usage outcome for the stats store. `stream` (the client's `stream: true`)
 /// selects the SSE relay, which counts tokens as the bytes flow; otherwise the
 /// body is buffered and parsed once.
+pub struct UpstreamTarget {
+    pub name: String,
+    pub base: String,
+}
+
 pub async fn relay(
     state: &AppState,
-    base: &str,
+    target: &UpstreamTarget,
     path: &str,
     headers: HeaderMap,
     body: Bytes,
     provider: Provider,
     stream: bool,
 ) -> Forwarded {
-    let url = format!("{}{}", base.trim_end_matches('/'), path);
+    let url = format!("{}{}", target.base.trim_end_matches('/'), path);
     let retries = state.config.upstream_retries;
     let timeout = state.config.upstream_timeout_secs;
     let started = Instant::now();
@@ -328,7 +363,8 @@ pub async fn relay(
         // A local worker that sent no credential borrows the one the agent is
         // already relaying, rather than needing a second copy of it.
         if state.config.relay_borrowing {
-            if let Some((name, value)) = state.relayed_auth.lend_if_missing(provider, &headers) {
+            if let Some((name, value)) = state.relayed_auth.lend_if_missing(&target.name, &headers)
+            {
                 req = req.header(name, value);
             }
         }
@@ -515,6 +551,7 @@ fn stream_relay(resp: reqwest::Response, provider: Provider, started: Instant) -
     let has_ct = headers.get("content-type").is_some();
 
     let (tx, outcome_rx) = oneshot::channel::<UsageOutcome>();
+    let mut tx = Some(tx);
 
     let body_stream = async_stream::stream! {
         let mut acc = SseAccumulator::new(provider);
@@ -537,21 +574,36 @@ fn stream_relay(resp: reqwest::Response, provider: Provider, started: Instant) -
                 }
                 Err(e) => stream_error = Some(e.to_string()),
             }
+            if let Some(tx) = tx.take_if(|_| acc.completed()) {
+                let ttfb_ms = first_byte_at.map(|t| t.duration_since(started).as_millis() as i64);
+                let gen_ms = first_byte_at.map(|t| t.elapsed().as_millis() as i64);
+                let _ = tx.send(stream_outcome(
+                    status_u16,
+                    acc.usage,
+                    acc.tool_calls(),
+                    stream_error.take(),
+                    started.elapsed().as_millis() as i64,
+                    ttfb_ms,
+                    gen_ms,
+                ));
+            }
             yield chunk;
         }
-        let tool_calls = acc.tool_calls();
-        let usage = acc.finish();
-        let ttfb_ms = first_byte_at.map(|t| t.duration_since(started).as_millis() as i64);
-        let gen_ms = first_byte_at.map(|t| t.elapsed().as_millis() as i64);
-        let _ = tx.send(stream_outcome(
-            status_u16,
-            usage,
-            tool_calls,
-            stream_error,
-            started.elapsed().as_millis() as i64,
-            ttfb_ms,
-            gen_ms,
-        ));
+        if let Some(tx) = tx.take() {
+            let tool_calls = acc.tool_calls();
+            let usage = acc.finish();
+            let ttfb_ms = first_byte_at.map(|t| t.duration_since(started).as_millis() as i64);
+            let gen_ms = first_byte_at.map(|t| t.elapsed().as_millis() as i64);
+            let _ = tx.send(stream_outcome(
+                status_u16,
+                usage,
+                tool_calls,
+                stream_error,
+                started.elapsed().as_millis() as i64,
+                ttfb_ms,
+                gen_ms,
+            ));
+        }
     };
 
     let mut builder = copy_resp_headers(Response::builder().status(status), &headers);
@@ -602,6 +654,7 @@ pub struct SseAccumulator {
     text: String,
     /// Streamed tool calls by content-block index: (name, accumulated input JSON).
     tool_buf: std::collections::BTreeMap<i64, (String, String)>,
+    completed: bool,
 }
 
 impl SseAccumulator {
@@ -612,7 +665,15 @@ impl SseAccumulator {
             usage: extract::Usage::default(),
             text: String::new(),
             tool_buf: std::collections::BTreeMap::new(),
+            completed: false,
         }
+    }
+
+    /// The Responses stream reported its terminal event. Codex hangs up on it
+    /// without waiting for the upstream to close, which would drop this stream
+    /// before anything after its last `yield` runs.
+    pub fn completed(&self) -> bool {
+        self.completed
     }
 
     /// The tool calls reconstructed from the stream (`input` parsed from the
@@ -679,6 +740,13 @@ impl SseAccumulator {
         if let Some(usage) = json.get("usage").filter(|u| !u.is_null()) {
             self.merge(usage);
         }
+        if let Some(usage) = json
+            .get("response")
+            .and_then(|r| r.get("usage"))
+            .filter(|u| !u.is_null())
+        {
+            self.merge(usage);
+        }
         // Native Gemini streams usage under `usageMetadata`.
         if let Some(usage) = json.get("usageMetadata").filter(|u| !u.is_null()) {
             self.merge(usage);
@@ -689,6 +757,34 @@ impl SseAccumulator {
 
     /// Reconstruct streamed tool calls across the three dialects.
     fn feed_tool_use(&mut self, json: &serde_json::Value) {
+        if matches!(self.provider, Provider::OpenaiResponses) {
+            if matches!(
+                json.get("type").and_then(|t| t.as_str()),
+                Some("response.completed" | "response.incomplete" | "response.failed")
+            ) {
+                self.completed = true;
+            }
+            if json.get("type").and_then(|t| t.as_str()) == Some("response.output_item.done")
+                && json.pointer("/item/type").and_then(|t| t.as_str()) == Some("function_call")
+            {
+                let index = json
+                    .get("output_index")
+                    .and_then(|i| i.as_i64())
+                    .unwrap_or(self.tool_buf.len() as i64);
+                let name = json
+                    .pointer("/item/name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let arguments = json
+                    .pointer("/item/arguments")
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("null")
+                    .to_string();
+                self.tool_buf.insert(index, (name, arguments));
+            }
+            return;
+        }
         // Native Gemini streams a whole functionCall (name + args) per chunk.
         if matches!(self.provider, Provider::Google) {
             if let Some(parts) = json
@@ -809,6 +905,13 @@ impl SseAccumulator {
                     }
                 }
             }
+            Provider::OpenaiResponses => {
+                if json.get("type").and_then(|t| t.as_str()) == Some("response.output_text.delta") {
+                    if let Some(t) = json.get("delta").and_then(|d| d.as_str()) {
+                        self.text.push_str(t);
+                    }
+                }
+            }
         }
     }
 
@@ -873,6 +976,7 @@ mod tests {
             bind: "127.0.0.1:0".into(),
             anthropic_upstream: "https://api.anthropic.com".into(),
             openai_upstream: "https://api.openai.com".into(),
+            upstreams: Default::default(),
             ccr,
             compression: "off".into(),
             pixel_compress: Default::default(),
@@ -1050,5 +1154,50 @@ mod tests {
         acc.feed(b"data: {\"type\":\"message_delta\",\"usage\":{\"out");
         acc.feed(b"put_tokens\":55}}\n\n");
         assert_eq!(acc.finish().output, 55);
+    }
+
+    fn responses_call_done(index: i64, name: &str, arguments: &str) -> Vec<u8> {
+        format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": index,
+                "item": { "type": "function_call", "name": name, "arguments": arguments }
+            })
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn sse_responses_keeps_every_function_call_in_output_order() {
+        let mut acc = SseAccumulator::new(Provider::OpenaiResponses);
+        acc.feed(&responses_call_done(3, "shell", r#"{"command":"ls"}"#));
+        acc.feed(b"data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"name\":\"not_a_call\"}}\n\n");
+        acc.feed(&responses_call_done(1, "read_file", r#"{"path":"a"}"#));
+        let calls = acc.tool_calls();
+        let names: Vec<&str> = calls.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["read_file", "shell"]);
+        assert_eq!(calls[0].input, serde_json::json!({"path": "a"}));
+        assert_eq!(calls[1].input, serde_json::json!({"command": "ls"}));
+    }
+
+    #[test]
+    fn sse_responses_collects_output_text_deltas() {
+        let mut acc = SseAccumulator::new(Provider::OpenaiResponses);
+        acc.feed(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n");
+        acc.feed(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\n");
+        acc.feed(b"data: {\"type\":\"response.output_text.done\",\"text\":\"ignored\"}\n\n");
+        assert_eq!(acc.text, "Hello");
+    }
+
+    #[test]
+    fn sse_responses_is_complete_only_at_a_terminal_event() {
+        let mut acc = SseAccumulator::new(Provider::OpenaiResponses);
+        acc.feed(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n");
+        assert!(!acc.completed());
+        acc.feed(b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}\n\n");
+        assert!(acc.completed());
+        let u = acc.finish();
+        assert_eq!((u.input, u.output), (10, 4));
     }
 }

@@ -79,6 +79,33 @@ impl Analyzer {
     /// Account one block of text. A block whose exact text was already seen
     /// counts as duplicate (the repeated occurrence is what dedup would
     /// remove).
+    fn note_responses_item(&mut self, item: &serde_json::Value) {
+        match item.get("type").and_then(|t| t.as_str()) {
+            Some("function_call_output") => match item.get("output") {
+                Some(serde_json::Value::String(s)) => self.note(s, Kind::ToolResult),
+                Some(other) => self.note(&other.to_string(), Kind::ToolResult),
+                None => {}
+            },
+            Some("function_call") => {
+                if let Some(arguments) = item.get("arguments").and_then(|a| a.as_str()) {
+                    self.note(arguments, Kind::ToolUseInput);
+                }
+            }
+            _ => match item.get("content") {
+                Some(serde_json::Value::String(s)) => self.note(s, Kind::Other),
+                Some(serde_json::Value::Array(blocks)) => {
+                    for block in blocks {
+                        match block.get("text").and_then(|t| t.as_str()) {
+                            Some(text) => self.note(text, Kind::Other),
+                            None => self.note(&block.to_string(), Kind::Other),
+                        }
+                    }
+                }
+                _ => self.note(&item.to_string(), Kind::Other),
+            },
+        }
+    }
+
     fn note(&mut self, text: &str, kind: Kind) {
         if text.is_empty() {
             return;
@@ -142,6 +169,19 @@ pub fn analyze(body: &serde_json::Value) -> ContextComposition {
         if !tools.is_null() {
             a.comp.total_tokens += est_tokens(&tools.to_string());
         }
+    }
+
+    if let Some(instructions) = body.get("instructions").and_then(|v| v.as_str()) {
+        a.note(instructions, Kind::Other);
+    }
+    match body.get("input") {
+        Some(serde_json::Value::String(s)) => a.note(s, Kind::Other),
+        Some(serde_json::Value::Array(items)) => {
+            for item in items {
+                a.note_responses_item(item);
+            }
+        }
+        _ => {}
     }
 
     if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
@@ -213,6 +253,23 @@ pub fn analyze(body: &serde_json::Value) -> ContextComposition {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_responses_body_counts_its_instructions_and_input() {
+        let empty = analyze(&serde_json::json!({ "model": "gpt-5" })).total_tokens;
+        assert_eq!(empty, 0);
+        let text = "word ".repeat(100);
+        for body in [
+            serde_json::json!({ "instructions": text }),
+            serde_json::json!({ "input": text }),
+            serde_json::json!({ "input": [{ "type": "message", "role": "user", "content": text }] }),
+            serde_json::json!({ "input": [{ "type": "message", "content": [{ "type": "input_text", "text": text }] }] }),
+            serde_json::json!({ "input": [{ "type": "function_call_output", "call_id": "c", "output": text }] }),
+            serde_json::json!({ "input": [{ "type": "function_call", "name": "n", "arguments": text }] }),
+        ] {
+            assert!(analyze(&body).total_tokens > 0, "{body}");
+        }
+    }
+
     use super::*;
     use serde_json::json;
 
