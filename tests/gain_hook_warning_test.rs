@@ -5,7 +5,7 @@
 //! Change: fix-gain-hook-warning (rtk-ai/rtk#4035) — the missing-hook warning
 //! must appear on every text view (default, --daily, --weekly, --monthly,
 //! --all) and on the empty-database report, exactly once per invocation.
-//! JSON/CSV exports stay warning-free; the not-applicable state (no ~/.claude)
+//! JSON/JSONL/CSV exports stay warning-free; the not-applicable state (no ~/.claude)
 //! stays silent.
 #![cfg(unix)]
 
@@ -170,6 +170,33 @@ fn csv_export_is_warning_free() {
         !combined.contains("[warn]"),
         "no warning text in CSV export"
     );
+}
+
+#[test]
+fn jsonl_export_is_warning_free_and_one_object_per_command() {
+    let home = seeded_home();
+    let (stdout, stderr) = gain_split(&["gain", "--history", "--format", "jsonl"], home.path());
+    assert!(
+        !format!("{stdout}{stderr}").contains("[warn]"),
+        "no warning text in JSONL export"
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "one tracked command, one line: {stdout}");
+    let record: serde_json::Value =
+        serde_json::from_str(lines[0]).expect("the line is a JSON object");
+    // `rtk proxy` is the deprecated alias of `rtk bypass`, recorded as such;
+    // the export keeps the label and drops the arguments.
+    assert_eq!(record["command"], "rtk bypass");
+    assert_eq!(record["input_tokens"], 0);
+    assert_eq!(record["oversized"], false);
+}
+
+#[test]
+fn jsonl_export_of_an_empty_database_prints_nothing() {
+    let home = missing_hook_home();
+    let (stdout, stderr) = gain_split(&["gain", "--format", "jsonl"], home.path());
+    assert!(stdout.is_empty(), "no rows, no lines: {stdout}");
+    assert!(!stderr.contains("[warn]"), "export stays warning-free");
 }
 
 #[test]

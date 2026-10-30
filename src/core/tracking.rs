@@ -347,6 +347,46 @@ pub struct MonthStats {
     pub timed_commands: usize,
 }
 
+/// One tracked command, as exported.
+///
+/// Serializable to JSON Lines for export via `rtk gain --format jsonl`.
+///
+/// # JSON Schema
+///
+/// ```json
+/// {
+///   "timestamp": "2026-02-03T10:15:00.123456+00:00",
+///   "command": "rtk git status",
+///   "input_tokens": 420,
+///   "output_tokens": 84,
+///   "saved_tokens": 336,
+///   "savings_pct": 80.0,
+///   "exec_time_ms": 12,
+///   "oversized": false
+/// }
+/// ```
+#[derive(Debug, Serialize)]
+pub struct HistoryRecord {
+    /// RFC 3339 timestamp, exactly as recorded
+    pub timestamp: String,
+    /// Command label without its arguments (e.g., "rtk git status"), the same
+    /// label telemetry reports, so paths and URLs passed as arguments stay out
+    pub command: String,
+    /// Estimated tokens of the raw command output
+    pub input_tokens: usize,
+    /// Estimated tokens of the output RTK emitted
+    pub output_tokens: usize,
+    /// `input_tokens - output_tokens`; negative when RTK's output was larger
+    pub saved_tokens: i64,
+    /// Savings percentage for this command (negative when output grew)
+    pub savings_pct: f64,
+    /// Execution time in milliseconds
+    pub exec_time_ms: u64,
+    /// Input above [`HEADLINE_INPUT_CAP_TOKENS`]: left out of the summary and
+    /// period totals and counted in `GainSummary::oversized_excluded`
+    pub oversized: bool,
+}
+
 /// Type alias for command statistics tuple: (command, count, saved_tokens, weighted_savings_rate, avg_time_ms)
 ///
 /// # Warning
@@ -1609,6 +1649,51 @@ impl Tracker {
         )?;
 
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Visit every retained command, oldest first, optionally scoped to a
+    /// project. Rows are handed over one at a time so an export never holds
+    /// the whole history in memory.
+    pub fn for_each_history_record(
+        &self,
+        project_path: Option<&str>,
+        mut visit: impl FnMut(HistoryRecord) -> Result<()>,
+    ) -> Result<()> {
+        let (project_exact, project_glob) = project_filter_params(project_path);
+        let mut stmt = self.conn.prepare(
+            "SELECT timestamp, rtk_cmd, input_tokens, output_tokens, exec_time_ms
+             FROM commands
+             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+             ORDER BY timestamp ASC, id ASC",
+        )?;
+
+        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
+            let input_tokens = row.get::<_, i64>(2)?.max(0) as usize;
+            let output_tokens = row.get::<_, i64>(3)?.max(0) as usize;
+            // Derived from the sizes rather than read back: rows recorded before
+            // negative savings were stored hold a clamped 0 in both columns.
+            let saved_tokens = input_tokens as i64 - output_tokens as i64;
+            let savings_pct = if input_tokens > 0 {
+                (saved_tokens as f64 / input_tokens as f64) * 100.0
+            } else {
+                0.0
+            };
+            Ok(HistoryRecord {
+                timestamp: row.get(0)?,
+                command: command_label(&row.get::<_, String>(1)?),
+                input_tokens,
+                output_tokens,
+                saved_tokens,
+                savings_pct,
+                exec_time_ms: row.get::<_, Option<i64>>(4)?.unwrap_or(0).max(0) as u64,
+                oversized: input_tokens > HEADLINE_INPUT_CAP_TOKENS,
+            })
+        })?;
+
+        for row in rows {
+            visit(row?)?;
+        }
+        Ok(())
     }
 
     /// Count commands since a given timestamp (for telemetry).
@@ -3061,6 +3146,148 @@ mod tests {
             "the oversized row must stay visible in by_command: {:?}",
             summary.by_command
         );
+    }
+
+    fn insert_row(tracker: &Tracker, timestamp: &str, project: &str, input: i64, output: i64) {
+        insert_stored(tracker, timestamp, project, input, output, input - output);
+    }
+
+    /// A row with the `saved_tokens` it was stored with; `savings_pct` follows it.
+    fn insert_stored(
+        tracker: &Tracker,
+        timestamp: &str,
+        project: &str,
+        input: i64,
+        output: i64,
+        saved: i64,
+    ) {
+        let pct = if input > 0 {
+            saved as f64 * 100.0 / input as f64
+        } else {
+            0.0
+        };
+        tracker
+            .conn
+            .execute(
+                "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path,
+                     input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
+                 VALUES (?1, 'cmd', ?2, ?3, ?4, ?5, ?6, ?7, 9)",
+                params![
+                    timestamp,
+                    format!("rtk cmd {timestamp}"),
+                    project,
+                    input,
+                    output,
+                    saved,
+                    pct
+                ],
+            )
+            .expect("insert row");
+    }
+
+    fn history(tracker: &Tracker, project: Option<&str>) -> Vec<HistoryRecord> {
+        let mut rows = Vec::new();
+        tracker
+            .for_each_history_record(project, |row| {
+                rows.push(row);
+                Ok(())
+            })
+            .expect("history");
+        rows
+    }
+
+    /// One row per tracked command, oldest first, with the raw sizes and the
+    /// honest (signed) saving, flagging the rows the headline leaves out.
+    #[test]
+    fn history_lists_every_row_oldest_first_with_its_sizes() {
+        let tracker = Tracker::new_in_memory().expect("tracker");
+        insert_row(&tracker, "2026-01-02T00:00:00+00:00", "/p", 1_000, 200);
+        insert_row(&tracker, "2026-01-01T00:00:00+00:00", "/p", 100, 150);
+        insert_row(&tracker, "2026-01-03T00:00:00+00:00", "/p", 1_000_000, 10);
+
+        let rows = history(&tracker, None);
+        let stamps: Vec<&str> = rows.iter().map(|r| r.timestamp.as_str()).collect();
+        assert_eq!(
+            stamps,
+            [
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-02T00:00:00+00:00",
+                "2026-01-03T00:00:00+00:00"
+            ]
+        );
+
+        let grew = &rows[0];
+        assert_eq!(grew.command, "rtk cmd", "arguments stay out of the label");
+        assert_eq!((grew.input_tokens, grew.output_tokens), (100, 150));
+        assert_eq!(grew.saved_tokens, -50, "a worsening stays negative");
+        assert_eq!(grew.exec_time_ms, 9);
+        assert!(!grew.oversized);
+
+        assert_eq!(rows[1].saved_tokens, 800);
+        assert!((rows[1].savings_pct - 80.0).abs() < 0.01);
+        assert!(rows[2].oversized);
+    }
+
+    #[test]
+    fn history_flags_exactly_the_rows_the_headline_excludes() {
+        let tracker = Tracker::new_in_memory().expect("tracker");
+        let cap = HEADLINE_INPUT_CAP_TOKENS as i64;
+        insert_row(&tracker, "2026-01-01T00:00:00+00:00", "/p", cap, 0);
+        insert_row(&tracker, "2026-01-02T00:00:00+00:00", "/p", cap + 1, 0);
+        insert_row(&tracker, "2026-01-03T00:00:00+00:00", "/p", 0, 0);
+
+        let rows = history(&tracker, None);
+        let flags: Vec<bool> = rows.iter().map(|r| r.oversized).collect();
+        assert_eq!(flags, [false, true, false], "the cap itself is included");
+
+        let summary = tracker.get_summary().expect("summary");
+        assert_eq!(
+            rows.iter().filter(|r| r.oversized).count(),
+            summary.oversized_excluded
+        );
+    }
+
+    #[test]
+    fn history_honours_the_project_scope() {
+        let tracker = Tracker::new_in_memory().expect("tracker");
+        let sep = std::path::MAIN_SEPARATOR;
+        let inside = format!("{sep}work{sep}app{sep}src");
+        let sibling = format!("{sep}work{sep}app2");
+        insert_row(&tracker, "2026-01-01T00:00:00+00:00", &inside, 10, 5);
+        insert_row(&tracker, "2026-01-02T00:00:00+00:00", &sibling, 10, 5);
+
+        let scope = format!("{sep}work{sep}app");
+        let rows = history(&tracker, Some(&scope));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].timestamp, "2026-01-01T00:00:00+00:00");
+        assert_eq!(history(&tracker, None).len(), 2);
+    }
+
+    /// Rows recorded before negative savings were stored hold a clamped 0;
+    /// the record is derived from the sizes so it never contradicts itself.
+    #[test]
+    fn history_derives_savings_from_sizes_for_clamped_legacy_rows() {
+        let tracker = Tracker::new_in_memory().expect("tracker");
+        insert_stored(&tracker, "2026-01-01T00:00:00+00:00", "/p", 1, 10, 0);
+
+        let rows = history(&tracker, None);
+        assert_eq!(rows[0].saved_tokens, -9);
+        assert!((rows[0].savings_pct + 900.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn history_stops_at_the_first_error_from_the_visitor() {
+        let tracker = Tracker::new_in_memory().expect("tracker");
+        insert_row(&tracker, "2026-01-01T00:00:00+00:00", "/p", 10, 5);
+        insert_row(&tracker, "2026-01-02T00:00:00+00:00", "/p", 10, 5);
+
+        let mut seen = 0;
+        let result = tracker.for_each_history_record(None, |_| {
+            seen += 1;
+            anyhow::bail!("reader went away")
+        });
+        assert!(result.is_err());
+        assert_eq!(seen, 1);
     }
 
     // 4. track_passthrough doesn't dilute stats (input=0, output=0)

@@ -74,6 +74,7 @@ See [Token Savings Analytics](../guide/analytics/gain.md) for the full `rtk gain
 ```bash
 rtk gain --all --format json > savings.json
 rtk gain --all --format csv  > savings.csv
+rtk gain --history --format jsonl > commands.jsonl   # one line per tracked command
 ```
 
 Example JSON entry for one day (illustrative values):
