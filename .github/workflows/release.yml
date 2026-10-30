@@ -204,10 +204,11 @@ jobs:
   sign-windows:
     name: Sign Windows binary (SignPath)
     needs: build
-    if: vars.SIGNPATH_ORGANIZATION_ID != ''
+    # Pre-releases are not signed: every SignPath request needs a manual approval.
+    if: vars.SIGNPATH_ORGANIZATION_ID != '' && !inputs.prerelease
     runs-on: ubuntu-latest
-    # Least-privilege: this job only reads the artifact list and talks to the
-    # SignPath API — it never checks out or writes repo contents.
+    # Least-privilege: this job reads the artifact list and the license files,
+    # and talks to the SignPath API. It never writes repo contents.
     permissions:
       contents: read
       actions: read
@@ -222,13 +223,24 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          artifact_id=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
-            --jq '.artifacts[] | select(.name == "rtk-windows-exe-unsigned") | .id')
+          artifact_id=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?name=rtk-windows-exe-unsigned" \
+            --jq '.artifacts[0].id // empty')
           if [ -z "$artifact_id" ]; then
             echo "::error::rtk-windows-exe-unsigned artifact not found for run ${{ github.run_id }}"
             exit 1
           fi
           echo "id=$artifact_id" >> "$GITHUB_OUTPUT"
+
+      # Checked out before the signing step: a checkout after `signed/` exists
+      # would clean it away.
+      - name: Checkout license files
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            LICENSE
+            engine/LICENSE
+          sparse-checkout-cone-mode: false
 
       - name: Submit signing request
         # Pinned by commit SHA (not the mutable v3 tag) per SignPath repo tag
@@ -247,10 +259,13 @@ jobs:
           wait-for-completion-timeout-in-seconds: "3600"
           output-artifact-directory: signed
 
+      # Same zip contents as the build job: the licenses travel with the binary.
       - name: Repackage signed exe
         run: |
+          cp LICENSE signed/LICENSE
+          cp engine/LICENSE signed/LICENSE-ENGINE
           cd signed
-          7z a ../rtk-x86_64-pc-windows-msvc.zip rtk.exe
+          7z a ../rtk-x86_64-pc-windows-msvc.zip rtk.exe LICENSE LICENSE-ENGINE
 
       - name: Replace Windows artifact with signed zip
         uses: actions/upload-artifact@v7
