@@ -112,8 +112,13 @@ Claude Code's rule sources never reach the hook at all (`--settings`,
 `cd`'d away from), so a rule in one of those becomes a prompt rather than a
 refusal. The user docs say so.
 
+The decision records an actual wrap as `AskFishWrap`, separately from an ordinary
+`AskRewrite`. A command the user already typed as `rtk run --shell fish -c ...`
+keeps its normal permission decision even when rewriting removes a leading line
+continuation; the hook does not infer wrap ownership from the resulting string.
+
 **It is offered only on `rtk hook claude`** (`DenyRules` and
-`claude_hook_deny_rules` in `permissions.rs`), and only when every Claude Code
+`check_claude_hook_command` in `permissions.rs`), and only when every Claude Code
 settings file RTK reads parsed and none of them has a deny rule. Once the
 script reaches a fish, RTK's own view of it stops describing what runs: fish
 starts a command where the bash-shaped segmenter does not look — the condition
@@ -147,6 +152,12 @@ and Claude Code's hook is the only one:
 
 The cost is deliberate and belongs in the user docs: a user with any deny rule
 keeps the behaviour they had before the wrap existed.
+
+The Claude hook and `rtk hook check --agent claude` share one settings scan for
+the verdict and wrap attestation, so a malformed file is not read and warned
+about again for a fish command. Attestation uses the scan's raw deny entries and
+read/parse status only after the wrapper's syntax gates and fish probe pass.
+Other hosts do not enter the wrapper or perform its probes.
 
 **Why it runs before the unattestable gate.** Every other rewrite refuses a
 command the gate could not decompose. The wrap cannot wait for that gate and

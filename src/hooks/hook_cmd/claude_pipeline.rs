@@ -157,7 +157,9 @@ fn shell_gate(v: &Value) -> bool {
             // it does without the feature: a fish script the ordinary rewrite
             // would defer stays deferred, and one it would rewrite swaps.
             match decision::decide_for_agent(cmd, verdict, permissions::DenyRules::Unattested) {
-                HookDecision::AllowRewrite(_) | HookDecision::AskRewrite(_) => {
+                HookDecision::AllowRewrite(_)
+                | HookDecision::AskRewrite(_)
+                | HookDecision::AskFishWrap(_) => {
                     let output = pre_tool_use_rewrite_output(v, &command, None);
                     let _ = writeln!(io::stdout(), "{output}");
                     audit_log("rewrite", cmd, &command);

@@ -87,14 +87,13 @@ pub fn check_command_for_agent(cmd: &str, host: Host, agent: Option<&str>) -> Pe
 /// So the wrap is offered on one host only, Claude Code's own hook: RTK reads
 /// its settings files, and the hook asks explicitly for every wrap it builds, so no
 /// allow rule matching `rtk` can run the script unprompted. See
-/// [`claude_hook_deny_rules`].
+/// [`ClaudeHookPermissions::deny_rules`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DenyRules {
     /// Every settings file RTK reads parsed, and none carries a deny rule.
     NoneConfigured,
-    /// Anything else: a deny rule is present, a file could not be parsed, the
-    /// wrap is off, the command is not provably fish, or this caller is not
-    /// the Claude hook.
+    /// Anything else: a deny rule is present, a file could not be parsed, or
+    /// this caller is not the Claude hook.
     Unattested,
 }
 
@@ -105,7 +104,7 @@ impl DenyRules {
     }
 }
 
-/// What RTK can say about the deny rules in force for `rtk hook claude`.
+/// One Claude settings scan, shared by the verdict and lazy wrap attestation.
 ///
 /// The settings files [`load_permission_rules`] reads are the rules RTK can
 /// see, not all of Claude Code's: `--settings`, `--disallowedTools`, managed
@@ -136,30 +135,37 @@ impl DenyRules {
 /// - `rtk rewrite` reads Claude's rules for delegates that do not prompt on
 ///   exit 3 at all (`hooks/pi/rtk.ts`, `hooks/hermes/rtk-rewrite`), and
 ///   OpenClaw matches its exec checks against the returned string.
-pub(crate) fn claude_hook_deny_rules() -> DenyRules {
-    let mut scan = SettingsScan::default();
-    let _ = load_permission_rules_tracking(&get_settings_paths(), &mut scan);
-    if scan.every_file_read && !scan.any_deny_entry {
-        DenyRules::NoneConfigured
-    } else {
-        DenyRules::Unattested
+pub(crate) struct ClaudeHookPermissions {
+    pub(crate) verdict: PermissionVerdict,
+    scan: SettingsScan,
+}
+
+impl ClaudeHookPermissions {
+    /// Consulted only after the command passes the fish wrapper's gates.
+    pub(crate) fn deny_rules(&self) -> DenyRules {
+        if self.scan.every_file_read && !self.scan.any_deny_entry {
+            DenyRules::NoneConfigured
+        } else {
+            DenyRules::Unattested
+        }
     }
 }
 
-/// [`claude_hook_deny_rules`] where a wrap is possible at all: the wrap is
-/// enabled and `cmd` is provably fish. Anywhere else the answer cannot change
-/// a decision, so the settings are not walked a second time for it.
-///
-/// `rtk hook claude` and `rtk hook check --agent claude` both ask here, so the
-/// two read the settings the same number of times.
-pub(crate) fn claude_hook_deny_rules_for(cmd: &str) -> DenyRules {
-    if crate::core::config::cached_config().hooks.wrap_fish_scripts
-        && crate::discover::fish_script::is_unambiguous_fish(cmd)
-    {
-        claude_hook_deny_rules()
-    } else {
-        DenyRules::Unattested
-    }
+/// Read the Claude hook's rules once, retaining the raw deny-entry and read
+/// status needed if the decision later considers a fish wrap.
+pub(crate) fn check_claude_hook_command(cmd: &str) -> ClaudeHookPermissions {
+    let mut scan = SettingsScan::default();
+    let (deny_rules, ask_rules, allow_rules) =
+        load_permission_rules_tracking(&get_settings_paths(), &mut scan);
+    let (_, transparent_prefixes) = crate::core::config::hook_rewrite_params();
+    let verdict = check_command_with_rules_and_prefixes(
+        cmd,
+        &deny_rules,
+        &ask_rules,
+        &allow_rules,
+        &transparent_prefixes,
+    );
+    ClaudeHookPermissions { verdict, scan }
 }
 
 /// What [`load_permission_rules_tracking`] saw besides the rules themselves.
@@ -397,9 +403,9 @@ fn load_permission_rules_from(paths: &[PathBuf]) -> (Vec<String>, Vec<String>, V
 /// whether any deny entry exists at all.
 ///
 /// Both are the difference between "this user configured no deny rule" and
-/// "RTK saw none" — see [`claude_hook_deny_rules`]. The rules themselves are
-/// unaffected: the fail-closed `ask *` a skipped file contributes is the same
-/// either way.
+/// "RTK saw none" — see [`ClaudeHookPermissions::deny_rules`]. The rules
+/// themselves are unaffected: the fail-closed `ask *` a skipped file
+/// contributes is the same either way.
 fn load_permission_rules_tracking(
     paths: &[PathBuf],
     scan: &mut SettingsScan,
