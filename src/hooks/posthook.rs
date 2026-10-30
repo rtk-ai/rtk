@@ -204,6 +204,13 @@ fn facts_for(
     facts
 }
 
+fn covers_file(source: &str, raw: &str) -> Option<bool> {
+    let path = std::path::Path::new(source);
+    let meta = std::fs::metadata(path).ok()?;
+    let lines = crate::core::pipeline_config::file_line_count(path, &meta)?;
+    Some(lines == raw.lines().count())
+}
+
 struct Applied {
     text: String,
     methods: Vec<&'static str>,
@@ -278,6 +285,16 @@ fn run_selected(
         }
     }
     let position = Position::hook(Event::AfterTool, subject);
+    if subject == Subject::Read
+        && pipeline.rules.get(&position).is_some_and(|rules| {
+            rules
+                .iter()
+                .any(|rule| rule.def.when.contains_key("whole_file"))
+        })
+        && let Some(whole) = covers_file(source, raw)
+    {
+        facts.insert("whole_file".into(), Fact::Bool(whole));
+    }
     crate::core::pipeline_config::insert_call_context(pipeline, position, &mut facts);
     let call = crate::core::pipeline_config::call_state(&facts, None);
     crate::core::classify::insert_classifier_facts(
@@ -1578,6 +1595,39 @@ mod tests {
             .unwrap();
         assert!(content.starts_with("let value_1"));
         assert!(!content.contains('\u{2192}'));
+    }
+
+    fn lockfile_read(path: &std::path::Path, content: &str) -> Value {
+        serde_json::json!({
+            "tool_name": "Read",
+            "tool_input": {"file_path": path},
+            "tool_response": {"type": "text", "file": {
+                "filePath": path,
+                "content": content,
+                "numLines": content.lines().count(),
+                "startLine": 1,
+                "totalLines": content.lines().count()
+            }},
+            "duration_ms": 3
+        })
+    }
+
+    #[test]
+    fn test_whole_file_fact_compares_the_output_with_the_file_on_disk() {
+        let pipeline = pipeline_from(
+            "[pipeline]\nname = \"whole\"\n[[hook.after_tool.read]]\nname = \"whole-reads\"\nwhen = { whole_file = true }\nuse = [\"lockfile\"]\n",
+        );
+        let content = include_str!("../../Cargo.lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("Cargo.lock");
+        std::fs::write(&path, content).expect("write lockfile");
+        let lines: Vec<&str> = content.lines().collect();
+        let part = lines[..lines.len() / 2].join("\n");
+        let run = |event: &Value| run_with(event, &test_config(), &pipeline);
+        assert!(run(&lockfile_read(&path, content)).is_some());
+        assert!(run(&lockfile_read(&path, &part)).is_none());
+        let missing = dir.path().join("gone").join("Cargo.lock");
+        assert!(run(&lockfile_read(&missing, content)).is_none());
     }
 
     #[test]

@@ -28,7 +28,7 @@ A key not listed for the rule's subject and event is refused on a control rule (
 | Subject | `before_tool` and `after_tool` | `after_tool` adds |
 |---|---|---|
 | all | `tool` (the category, or the raw tool name under `mcp`/`any`), `input.*`, `input_missing`, and the [call context](#call-context): `intent` `goal` `recent_calls` | `format` `bytes` `lines` `tokens` `duration_ms` |
-| `read` | `file_path` `extension` `basename` `whole_file` (no `limit`/`offset` given) — and from disk, before the tool runs: `file_exists` `file_bytes` `file_lines` | |
+| `read` | `file_path` `extension` `basename` `whole_file` (before the tool: no `limit`/`offset` given; after: the output has as many lines as the file on disk, unset when the file can't be counted or is over 4 MB) — and from disk, before the tool runs: `file_exists` `file_bytes` `file_lines` | |
 | `write` `edit` | `file_path` `extension` `basename` | |
 | `shell` | `command` `command_starts_with` `command_matches` `is_rtk_command` (the command runs through `rtk` — rewritten, a task, or `rtk recall`) | `exit_code` |
 | `search` | `input.pattern` `input.path` | |

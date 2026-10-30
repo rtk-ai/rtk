@@ -815,7 +815,7 @@ pub fn before_read_decision(path: &std::path::Path, whole_file: bool) -> Option<
     }
 }
 
-fn file_line_count(path: &std::path::Path, meta: &std::fs::Metadata) -> Option<usize> {
+pub(crate) fn file_line_count(path: &std::path::Path, meta: &std::fs::Metadata) -> Option<usize> {
     use std::io::{BufRead, BufReader};
     const LINE_COUNT_CAP: u64 = 4 * 1024 * 1024;
     if !meta.is_file() || meta.len() > LINE_COUNT_CAP {
