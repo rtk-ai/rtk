@@ -9,6 +9,9 @@ pub(super) struct OnrampSpec {
     pub autostart_option: Option<&'static str>,
     pub autostart_done: &'static str,
     pub autostart_persistence: &'static str,
+    pub enable_later: &'static str,
+    pub rerun: &'static str,
+    pub default_target: Option<&'static str>,
 }
 
 pub(super) trait ProxyOnramp {
@@ -33,6 +36,9 @@ pub(super) const CLAUDE_SPEC: OnrampSpec = OnrampSpec {
     ),
     autostart_done: "settings.json: SessionStart hook registered — the proxy starts with each session",
     autostart_persistence: "SessionStart autostart",
+    enable_later: "`rtk init -g` or `rtk llm-proxy start --env`",
+    rerun: "rtk init -g",
+    default_target: None,
 };
 
 pub(super) struct ClaudeOnramp {
@@ -129,7 +135,9 @@ pub(super) fn offer_proxy_onramp(
     }
     let spec = onramp.spec();
     let base_url = format!("http://{}{}", crate::llm_proxy::DEFAULT_BIND, onramp.path());
-    let already = onramp.current_target()?;
+    let already = onramp
+        .current_target()?
+        .filter(|url| Some(url.trim().trim_end_matches('/')) != spec.default_target);
     let aimed_here = already.as_deref() == Some(base_url.as_str());
     let autostart_present = onramp.autostart_present()?;
     if aimed_here && (autostart_present || spec.autostart_option.is_none()) {
@@ -166,7 +174,7 @@ pub(super) fn offer_proxy_onramp(
         let mut line = String::new();
         let n = std::io::stdin().lock().read_line(&mut line)?;
         if n == 0 || !matches!(line.trim().to_lowercase().as_str(), "y" | "yes") {
-            println!("  Skipped — enable later with `rtk init -g` or `rtk llm-proxy start --env`.");
+            println!("  Skipped — enable later with {}.", spec.enable_later);
             return Ok(());
         }
     }
@@ -194,7 +202,10 @@ pub(super) fn offer_proxy_onramp(
     let mut choice_line = String::new();
     let n = std::io::stdin().lock().read_line(&mut choice_line)?;
     if n == 0 {
-        println!("  No answer — nothing changed. Re-run `rtk init -g` to decide later.");
+        println!(
+            "  No answer — nothing changed. Re-run `{}` to decide later.",
+            spec.rerun
+        );
         return Ok(());
     }
     let choice = match choice_line.trim() {
@@ -312,8 +323,10 @@ fn proxy_verification_lines(
         ));
         out.push(match persistence {
             Some(p) => format!("  verify: restart persistence — {p}"),
-            None => "  [warn] nothing restarts the daemon after a reboot — rerun `rtk init -g`"
-                .to_string(),
+            None => format!(
+                "  [warn] nothing restarts the daemon after a reboot — rerun `{}`",
+                spec.rerun
+            ),
         });
         out.push(
             "  Compression: cache-breakpoint alignment — a no-op for clients that set their own, Claude Code included; CCR ships off (`rtk pipeline show rtk:proxy`)"

@@ -120,6 +120,9 @@ const VIBE_SPEC: super::proxy_onramp::OnrampSpec = super::proxy_onramp::OnrampSp
     autostart_option: None,
     autostart_done: "",
     autostart_persistence: "",
+    enable_later: "`rtk init -g --agent vibe`",
+    rerun: "rtk init -g --agent vibe",
+    default_target: Some(MISTRAL_API_BASE_DEFAULT),
 };
 
 #[cfg(feature = "engine")]

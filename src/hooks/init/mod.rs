@@ -757,7 +757,10 @@ pub(super) fn canonicalize_path_for_comparison(path: &Path) -> PathBuf {
 /// Where [`backup_and_atomic_write`] puts the copy it takes before overwriting `path`. Named
 /// so a caller that has to vouch for where it writes can vouch for this one too.
 pub(super) fn backup_path_for(path: &Path) -> PathBuf {
-    path.with_extension("json.bak")
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) => path.with_extension(format!("{ext}.bak")),
+        None => path.with_extension("json.bak"),
+    }
 }
 
 /// What to say on stderr, under `-v`, once [`update_json_file`] has written a file.
@@ -2995,6 +2998,18 @@ level = "high"
 
         let read_error = read_json_file(temp.path()).unwrap_err();
         assert!(format!("{read_error:#}").contains(&temp.path().display().to_string()));
+    }
+
+    #[test]
+    fn a_backup_keeps_the_extension_of_what_it_copies() {
+        assert_eq!(
+            backup_path_for(Path::new("/x/settings.json")),
+            Path::new("/x/settings.json.bak")
+        );
+        assert_eq!(
+            backup_path_for(Path::new("/x/config.toml")),
+            Path::new("/x/config.toml.bak")
+        );
     }
 
     #[test]

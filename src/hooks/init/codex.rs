@@ -989,6 +989,9 @@ const CODEX_SPEC: super::proxy_onramp::OnrampSpec = super::proxy_onramp::OnrampS
     ),
     autostart_done: "hooks.json: SessionStart hook registered — the proxy starts with each session",
     autostart_persistence: "SessionStart autostart",
+    enable_later: "`rtk init -g --codex`",
+    rerun: "rtk init -g --codex",
+    default_target: None,
 };
 
 #[cfg(feature = "engine")]
