@@ -158,6 +158,9 @@ pub struct ProxyGainSummary {
     /// predating these columns, not a cold cache.
     pub cache_read: i64,
     pub cache_created: i64,
+    /// Provider-reported uncached input of Responses rows. That dialect reports
+    /// no cache writes, so reads alone would always read as a 100% hit rate.
+    pub uncached_input: i64,
     /// Mid-session prefix invalidations over the most recent requests: the
     /// previous request in the session read a large cached prefix, this one
     /// read nothing and rewrote one, close enough in time to rule out the
@@ -197,7 +200,7 @@ impl ProxyGainSummary {
     /// A healthy cache stays high; sustained decline means the prefix is
     /// churning.
     pub fn cache_hit_ratio(&self) -> Option<f64> {
-        let denom = self.cache_read + self.cache_created;
+        let denom = self.cache_read + self.cache_created + self.uncached_input;
         (denom > 0).then(|| self.cache_read as f64 / denom as f64)
     }
 
@@ -289,7 +292,12 @@ fn read_gain_summary_at(db: &std::path::Path) -> Option<ProxyGainSummary> {
     // older proxy lacks them and this connection is read-only, so it cannot be
     // migrated here -- fall back to the older column list rather than losing
     // the whole summary over a few missing sums.
-    let totals = |cache: bool| {
+    let totals = |cache: bool, uncached: bool| {
+        let uncached_col = if uncached {
+            ", COALESCE(SUM(CASE WHEN provider = 'openai-responses' THEN uncached_input ELSE 0 END),0)"
+        } else {
+            ", 0"
+        };
         let cache_cols = if cache {
             ", COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_creation_tokens),0), \
                COALESCE(SUM(ccr_retrieve_calls),0), COALESCE(SUM(saved_normalize),0)"
@@ -304,7 +312,7 @@ fn read_gain_summary_at(db: &std::path::Path) -> Option<ProxyGainSummary> {
                  COALESCE(SUM(ctx_duplicate),0), COALESCE(SUM(ctx_image),0), \
                  COALESCE(SUM(saved_ingest_filter),0), COALESCE(SUM(saved_pixel_compress),0), \
                  COALESCE(SUM(saved_ccr),0), \
-                 COALESCE(SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),0){cache_cols} \
+                 COALESCE(SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),0){cache_cols}{uncached_col} \
                  FROM usage_records"
             ),
             [],
@@ -328,6 +336,7 @@ fn read_gain_summary_at(db: &std::path::Path) -> Option<ProxyGainSummary> {
                     cache_fractures: 0,
                     retrieve_calls: r.get(15)?,
                     saved_normalize: r.get(16)?,
+                    uncached_input: r.get(17)?,
                     cost_actual_usd: 0.0,
                     cost_without_usd: 0.0,
                     trimmed_requests: 0,
@@ -341,7 +350,9 @@ fn read_gain_summary_at(db: &std::path::Path) -> Option<ProxyGainSummary> {
         .ok()
     };
 
-    let mut s = totals(true).or_else(|| totals(false))?;
+    let mut s = totals(true, true)
+        .or_else(|| totals(true, false))
+        .or_else(|| totals(false, false))?;
     if s.cache_read + s.cache_created > 0 {
         s.cache_fractures = count_cache_fractures(&conn).unwrap_or(0);
     }
@@ -1870,6 +1881,16 @@ mod tests {
             ..Default::default()
         };
         assert!(s.cache_hit_ratio().is_none());
+    }
+
+    #[test]
+    fn cache_hit_ratio_counts_the_uncached_input_of_responses_rows() {
+        let s = ProxyGainSummary {
+            cache_read: 1000,
+            uncached_input: 200,
+            ..Default::default()
+        };
+        assert!((s.cache_hit_ratio().unwrap() - 1000.0 / 1200.0).abs() < 1e-9);
     }
 
     #[test]

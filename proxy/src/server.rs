@@ -16,6 +16,7 @@
 
 use crate::AppState;
 use crate::config::ANTHROPIC_UPSTREAM_NAME;
+use crate::config::CHATGPT_UPSTREAM_NAME;
 use crate::config::OPENAI_UPSTREAM_NAME;
 use crate::forward::UpstreamTarget;
 use crate::model::Provider;
@@ -44,16 +45,22 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/v1/messages", post(anthropic_messages))
         .route("/v1/chat/completions", post(openai_chat_completions))
-        .route("/v1/responses", post(openai_responses))
+        .route(
+            "/v1/responses",
+            post(openai_responses).get(websocket_not_served),
+        )
         .route("/:upstream/v1/messages", post(anthropic_messages_at))
         .route(
             "/:upstream/v1/chat/completions",
             post(openai_chat_completions_at),
         )
-        .route("/:upstream/v1/responses", post(openai_responses_at))
+        .route(
+            "/:upstream/v1/responses",
+            post(openai_responses_at).get(websocket_not_served),
+        )
         .route(
             "/:upstream/backend-api/codex/responses",
-            post(codex_backend_responses_at),
+            post(codex_backend_responses_at).get(websocket_not_served),
         )
         .route("/health", get(health))
         // Only the reads `rtk-proxy stats` performs: a route with no caller is
@@ -248,6 +255,12 @@ async fn openai_chat_completions(
     .await
 }
 
+/// Codex opens the Responses API over a WebSocket first. A 405 makes it retry
+/// seven times before falling back to HTTP; a 426 makes it fall back at once.
+async fn websocket_not_served() -> Response {
+    StatusCode::UPGRADE_REQUIRED.into_response()
+}
+
 async fn openai_responses(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     intercept(
         s,
@@ -336,10 +349,53 @@ async fn intercept(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let Some(target) = upstream_target(&s, upstream) else {
+    let (upstream, path) = match provider {
+        Provider::OpenaiResponses => route_by_login(upstream, path, &headers),
+        _ => (upstream.to_string(), path.to_string()),
+    };
+    let Some(target) = upstream_target(&s, &upstream) else {
         return routing_unknown(&s, "POST", &format!("/{upstream}{path}"));
     };
-    handle(s, provider, target, path, headers, body).await
+    let (headers, body) = match provider {
+        Provider::OpenaiResponses => crate::forward::decode_zstd_request(headers, body),
+        _ => (headers, body),
+    };
+    handle(s, provider, target, &path, headers, body).await
+}
+
+const OPENAI_API_PREFIX: &str = "/v1/";
+const CHATGPT_BACKEND_PREFIX: &str = "/backend-api/codex/";
+
+/// Codex's login can change after `rtk init` wrote its URL. The request says
+/// which login it carries, so the credential goes to the service it belongs to
+/// whichever of the two routes the config names. Only these two signals move a
+/// request: a bearer token on its own proves nothing, because an `openai`
+/// upstream repointed at a gateway may use any token format.
+pub fn route_by_login(upstream: &str, path: &str, headers: &HeaderMap) -> (String, String) {
+    let chatgpt_login = headers.contains_key("chatgpt-account-id");
+    let api_key = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .is_some_and(|token| token.starts_with("sk-"));
+    let moved = if upstream == OPENAI_UPSTREAM_NAME && chatgpt_login {
+        path.strip_prefix(OPENAI_API_PREFIX).map(|rest| {
+            (
+                CHATGPT_UPSTREAM_NAME.to_string(),
+                format!("{CHATGPT_BACKEND_PREFIX}{rest}"),
+            )
+        })
+    } else if upstream == CHATGPT_UPSTREAM_NAME && api_key && !chatgpt_login {
+        path.strip_prefix(CHATGPT_BACKEND_PREFIX).map(|rest| {
+            (
+                OPENAI_UPSTREAM_NAME.to_string(),
+                format!("{OPENAI_API_PREFIX}{rest}"),
+            )
+        })
+    } else {
+        None
+    };
+    moved.unwrap_or_else(|| (upstream.to_string(), path.to_string()))
 }
 
 fn upstream_target(s: &AppState, name: &str) -> Option<UpstreamTarget> {
@@ -557,6 +613,7 @@ fn record_usage(
         ts: chrono::Utc::now().to_rfc3339(),
         provider: provider.as_str().to_string(),
         upstream: Some(upstream.to_string()),
+        uncached_input: billed_in,
         model: model.to_string(),
         tokens_in,
         tokens_out: outcome.tokens_output,
@@ -617,6 +674,7 @@ async fn passthrough(State(s): State<AppState>, mut req: axum::extract::Request)
     let Some((name, rest)) = passthrough_route(&upstream_names(&s), &path) else {
         return routing_unknown(&s, method.as_str(), &path);
     };
+    let (name, rest) = route_by_login(&name, &rest, req.headers());
     let Some(target) = upstream_target(&s, &name) else {
         return routing_unknown(&s, method.as_str(), &path);
     };

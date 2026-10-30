@@ -1336,10 +1336,10 @@ data: {\"type\":\"response.completed\",\"sequence_number\":3,\"response\":{\"id\
         )
         .await
         .unwrap();
-    assert!(
-        upgrade.status() == 405 || upgrade.status() == 404 || upgrade.status() == 502,
-        "a websocket upgrade is answered, never relayed as a websocket: {}",
-        upgrade.status()
+    assert_eq!(
+        upgrade.status(),
+        426,
+        "a websocket upgrade is answered, never relayed as a websocket"
     );
     assert!(
         openai
@@ -1355,4 +1355,232 @@ data: {\"type\":\"response.completed\",\"sequence_number\":3,\"response\":{\"id\
     let summary = store.summary().await;
     assert_eq!(summary["total_requests"], 1);
     assert_eq!(summary["tokens_out"], 21);
+}
+
+const RESPONSES_SSE: &str = "event: response.created\n\
+data: {\"type\":\"response.created\",\"response\":{\"id\":\"r\",\"model\":\"gpt-5-codex\"}}\n\n\
+event: response.completed\n\
+data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"model\":\"gpt-5-codex\",\"usage\":{\"input_tokens\":1200,\"output_tokens\":50,\"input_tokens_details\":{\"cached_tokens\":1000}}}}\n\n";
+
+const RESPONSES_BODY: &str = r#"{"model":"gpt-5-codex","stream":true,"instructions":"be brief","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello there, this is the prompt"}]}]}"#;
+
+async fn sse_upstream() -> MockServer {
+    let s = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(RESPONSES_SSE.as_bytes(), "text/event-stream"),
+        )
+        .mount(&s)
+        .await;
+    s
+}
+
+async fn codex_upstreams() -> (MockServer, MockServer, AppState) {
+    let openai = sse_upstream().await;
+    let chatgpt = sse_upstream().await;
+    let mut c = cfg(&openai.uri(), false);
+    c.openai_upstream = openai.uri();
+    c.upstreams.insert("chatgpt".to_string(), chatgpt.uri());
+    (openai, chatgpt, AppState::new(c))
+}
+
+fn codex_request(
+    method: &str,
+    uri: &str,
+    headers: &[(&str, &str)],
+    body: Vec<u8>,
+) -> axum::http::Request<axum::body::Body> {
+    let mut request = axum::http::Request::builder().method(method).uri(uri);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    request.body(axum::body::Body::from(body)).unwrap()
+}
+
+#[tokio::test]
+async fn a_credential_goes_to_the_service_it_belongs_to_whichever_route_is_configured() {
+    let (openai, chatgpt, state) = codex_upstreams().await;
+    let app = build_router(state);
+    let chatgpt_login: &[(&str, &str)] = &[
+        ("authorization", "Bearer eyJhbGciOi.eyJzdWIi.sig"),
+        ("chatgpt-account-id", "acct-123"),
+    ];
+    let api_key: &[(&str, &str)] = &[("authorization", "Bearer sk-proj-key")];
+
+    let moved_to_chatgpt = [
+        (
+            "POST",
+            "/openai/v1/responses",
+            "/backend-api/codex/responses",
+        ),
+        ("POST", "/v1/responses", "/backend-api/codex/responses"),
+        ("GET", "/openai/v1/models", "/backend-api/codex/models"),
+    ];
+    for (verb, uri, _) in moved_to_chatgpt {
+        let body = RESPONSES_BODY.as_bytes().to_vec();
+        let resp = app
+            .clone()
+            .oneshot(codex_request(verb, uri, chatgpt_login, body))
+            .await
+            .unwrap();
+        assert_ne!(resp.status(), 405, "{uri}");
+    }
+    let seen = chatgpt.received_requests().await.unwrap();
+    assert_eq!(
+        seen.iter().map(|r| r.url.path()).collect::<Vec<_>>(),
+        moved_to_chatgpt.map(|(_, _, path)| path)
+    );
+    assert!(
+        openai.received_requests().await.unwrap().is_empty(),
+        "a ChatGPT token must never reach the OpenAI API"
+    );
+
+    let moved_to_openai = [
+        (
+            "POST",
+            "/chatgpt/backend-api/codex/responses",
+            "/v1/responses",
+        ),
+        ("GET", "/chatgpt/backend-api/codex/models", "/v1/models"),
+    ];
+    for (verb, uri, _) in moved_to_openai {
+        let body = RESPONSES_BODY.as_bytes().to_vec();
+        app.clone()
+            .oneshot(codex_request(verb, uri, api_key, body))
+            .await
+            .unwrap();
+    }
+    let seen = openai.received_requests().await.unwrap();
+    assert_eq!(
+        seen.iter().map(|r| r.url.path()).collect::<Vec<_>>(),
+        moved_to_openai.map(|(_, _, path)| path)
+    );
+    assert_eq!(chatgpt.received_requests().await.unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn a_token_alone_does_not_move_a_request_off_the_openai_upstream() {
+    let (openai, chatgpt, state) = codex_upstreams().await;
+    let app = build_router(state);
+    let gateway_jwt: &[(&str, &str)] = &[("authorization", "Bearer eyJhbGciOi.eyJzdWIi.sig")];
+    app.oneshot(codex_request(
+        "POST",
+        "/openai/v1/responses",
+        gateway_jwt,
+        RESPONSES_BODY.as_bytes().to_vec(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(openai.received_requests().await.unwrap().len(), 1);
+    assert!(chatgpt.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_zstd_responses_body_is_read_forwarded_plain_and_recorded() {
+    let (_openai, chatgpt, state) = codex_upstreams().await;
+    let store = state.store.clone().expect("in-memory store");
+    let app = build_router(state);
+    let compressed = ruzstd::encoding::compress_to_vec(
+        RESPONSES_BODY.as_bytes(),
+        ruzstd::encoding::CompressionLevel::Fastest,
+    );
+    let resp = app
+        .oneshot(codex_request(
+            "POST",
+            "/chatgpt/backend-api/codex/responses",
+            &[
+                ("authorization", "Bearer token"),
+                ("content-encoding", "zstd"),
+                ("content-type", "application/json"),
+            ],
+            compressed,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.headers().get("content-type").unwrap(),
+        "text/event-stream"
+    );
+    resp.into_body().collect().await.unwrap();
+
+    let seen = chatgpt.received_requests().await.unwrap();
+    assert!(!seen[0].headers.contains_key("content-encoding"));
+    let forwarded: Value = serde_json::from_slice(&seen[0].body).unwrap();
+    assert_eq!(forwarded["model"], "gpt-5-codex");
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let summary = store.summary().await;
+    assert_eq!(summary["total_requests"], 1);
+    assert_eq!(summary["tokens_out"], 50);
+    assert!(summary["tokens_in"].as_i64().unwrap() > 0, "{summary}");
+}
+
+#[tokio::test]
+async fn a_body_that_is_not_zstd_after_all_is_forwarded_as_it_came() {
+    let (_openai, chatgpt, state) = codex_upstreams().await;
+    let app = build_router(state);
+    app.oneshot(codex_request(
+        "POST",
+        "/chatgpt/backend-api/codex/responses",
+        &[
+            ("authorization", "Bearer token"),
+            ("content-encoding", "zstd"),
+        ],
+        b"not zstd".to_vec(),
+    ))
+    .await
+    .unwrap();
+    let seen = chatgpt.received_requests().await.unwrap();
+    assert_eq!(seen[0].body, b"not zstd");
+    assert_eq!(seen[0].headers.get("content-encoding").unwrap(), "zstd");
+}
+
+#[tokio::test]
+async fn a_client_hanging_up_at_response_completed_keeps_the_usage_row() {
+    let (_openai, _chatgpt, state) = codex_upstreams().await;
+    let store = state.store.clone().expect("in-memory store");
+    let app = build_router(state);
+    let resp = app
+        .oneshot(codex_request(
+            "POST",
+            "/openai/v1/responses",
+            &[("authorization", "Bearer sk-key")],
+            RESPONSES_BODY.as_bytes().to_vec(),
+        ))
+        .await
+        .unwrap();
+    let mut body = resp.into_body();
+    let first = body.frame().await.unwrap().unwrap();
+    assert!(String::from_utf8_lossy(first.data_ref().unwrap()).contains("response.completed"));
+    drop(body);
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let summary = store.summary().await;
+    assert_eq!(summary["total_requests"], 1);
+    assert_eq!(summary["tokens_out"], 50);
+}
+
+#[tokio::test]
+async fn the_websocket_upgrade_gets_a_426_so_codex_falls_back_at_once() {
+    let (openai, chatgpt, state) = codex_upstreams().await;
+    let app = build_router(state);
+    for uri in [
+        "/v1/responses",
+        "/openai/v1/responses",
+        "/chatgpt/backend-api/codex/responses",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(codex_request(
+                "GET",
+                uri,
+                &[("upgrade", "websocket")],
+                vec![],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 426, "{uri}");
+    }
+    assert!(openai.received_requests().await.unwrap().is_empty());
+    assert!(chatgpt.received_requests().await.unwrap().is_empty());
 }

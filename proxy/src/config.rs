@@ -22,6 +22,7 @@ const DB_FILE_NAME: &str = "rtk-proxy.db";
 const ICM_DB_FILE_NAME: &str = "rtk-proxy-memory.db";
 const DEFAULT_UPSTREAM_RETRIES: u32 = 2;
 const UPSTREAM_ENV_PREFIX: &str = "RTK_PROXY_UPSTREAM_";
+const UPSTREAM_ENV_SETTINGS: &[&str] = &["TIMEOUT", "RETRIES"];
 pub const ANTHROPIC_UPSTREAM_NAME: &str = "anthropic";
 pub const OPENAI_UPSTREAM_NAME: &str = "openai";
 pub const MISTRAL_UPSTREAM_NAME: &str = "mistral";
@@ -342,6 +343,9 @@ impl Config {
             let Some(name) = key.strip_prefix(UPSTREAM_ENV_PREFIX) else {
                 continue;
             };
+            if UPSTREAM_ENV_SETTINGS.contains(&name) {
+                continue;
+            }
             if !value.trim().is_empty() {
                 upstreams.insert(name.to_ascii_lowercase(), value.trim().to_string());
             }
@@ -596,6 +600,8 @@ mod tests {
                 "https://api.groq.com/openai".to_string(),
             ),
             ("RTK_PROXY_UPSTREAM_BLANK".to_string(), "  ".to_string()),
+            ("RTK_PROXY_UPSTREAM_TIMEOUT".to_string(), "30".to_string()),
+            ("RTK_PROXY_UPSTREAM_RETRIES".to_string(), "1".to_string()),
             ("RTK_PROXY_BIND".to_string(), "127.0.0.1:1".to_string()),
             (
                 "RTK_PROXY_UPSTREAM_MISTRAL".to_string(),
@@ -613,6 +619,8 @@ mod tests {
         );
         assert_eq!(c.upstreams["groq"], "https://api.groq.com/openai");
         assert!(!c.upstreams.contains_key("blank"));
+        assert!(!c.upstreams.contains_key("timeout"));
+        assert!(!c.upstreams.contains_key("retries"));
         assert_eq!(
             c.bind, DEFAULT_BIND,
             "unrelated RTK_PROXY_* variables are not upstreams"
