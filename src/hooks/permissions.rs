@@ -673,6 +673,17 @@ pub(crate) fn extract_bash_pattern(rule: &str) -> &str {
 fn strip_grammar_residue(segment: &str) -> &str {
     let mut rest = segment.trim();
     loop {
+        // A leading `!` is peeled even when glued to the next word (e.g. `!rm` or
+        // `!{` from zsh's `&!` disown operator): no legitimate command begins
+        // with `!`, and leaving it attached lets a command behind `&!cmd` evade
+        // deny rules (#4516).
+        if let Some(tail) = rest.strip_prefix('!') {
+            let next = tail.trim_start();
+            if !next.is_empty() {
+                rest = next;
+                continue;
+            }
+        }
         // Only a standalone word is grammar. `!rm` is history expansion, not
         // negation, and `{foo` is a brace expansion, not a group.
         let stripped = match rest.split_once([' ', '\t']) {
@@ -2073,6 +2084,9 @@ mod tests {
             "bash -c 'git status; ! rm -rf /tmp/example'",
             "bash -c 'git status && { rm -rf /tmp/example; }'",
             "sh -c 'git status; ! rm -rf /tmp/example'",
+            "zsh -c 'git status &! rm -rf /tmp/example'",
+            "zsh -c 'git status &!rm -rf /tmp/example'",
+            "zsh -c 'git status &!{ rm -rf /tmp/example; }'",
         ] {
             assert_eq!(
                 check_command_with_rules(cmd, &deny, &[], &allow),
@@ -2084,6 +2098,14 @@ mod tests {
         // one is unaffected.
         assert_eq!(
             check_command_with_rules("bash -c 'git status; ! cargo test'", &deny, &[], &allow),
+            PermissionVerdict::Ask
+        );
+        assert_eq!(
+            check_command_with_rules("zsh -c 'git status &! cargo test'", &deny, &[], &allow),
+            PermissionVerdict::Ask
+        );
+        assert_eq!(
+            check_command_with_rules("zsh -c 'git status &!cargo test'", &deny, &[], &allow),
             PermissionVerdict::Ask
         );
     }
@@ -2133,6 +2155,11 @@ mod tests {
         for cmd in [
             "git status && { rm -rf / ; }",
             "git status && ! rm -rf /",
+            "git status && !rm -rf /",
+            "git status &! rm -rf /",
+            "git status &!rm -rf /",
+            "git status &!{ rm -rf / ; }",
+            "!rm -rf /",
             "{ rm -rf / ; }",
         ] {
             assert_eq!(
