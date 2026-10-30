@@ -1,5 +1,7 @@
 use anyhow::Result;
+use regex::Regex;
 use std::io::Read;
+use std::sync::LazyLock;
 
 use crate::core::guard::never_worse;
 use crate::core::stream::RAW_CAP;
@@ -8,6 +10,18 @@ use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 const MAX_PIPE_MATCHES: usize = CAP_WARNINGS;
 const MAX_PIPE_FILES: usize = CAP_WARNINGS;
 const MAX_PIPE_DIRS: usize = CAP_LIST;
+
+static GO_TEST_PACKAGE_RESULT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"(?m)^(?:",
+        r"ok[ \t]+\S+[ \t]+(?:[0-9]+(?:\.[0-9]+)?s|\(cached\))",
+        r"(?:[ \t]+coverage:[^\r\n]+)?(?:[ \t]+\[no tests to run\])?",
+        r"|\?[ \t]+\S+[ \t]+\[no test files\]",
+        r"|FAIL[ \t]+\S+[ \t]+(?:[0-9]+(?:\.[0-9]+)?s|\[(?:build|setup) failed\])",
+        r")[ \t]*\r?$",
+    ))
+    .expect("valid Go package result pattern")
+});
 
 pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
     match name {
@@ -203,6 +217,13 @@ pub fn auto_detect_filter(input: &str) -> fn(&str) -> String {
 
     if first_1k.contains(": error:") && first_1k.contains(".py:") {
         return crate::cmds::python::mypy_cmd::filter_mypy_output;
+    }
+
+    // Plain go test diagnostics and package names resemble grep/find output.
+    // A package result can arrive after the initial probe, so inspect the full
+    // bounded input and preserve the report instead of dropping its status.
+    if GO_TEST_PACKAGE_RESULT.is_match(input) {
+        return identity_filter;
     }
 
     // grep/rg: lines matching file:number:content

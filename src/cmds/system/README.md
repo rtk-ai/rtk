@@ -10,6 +10,7 @@
 - `local_llm.rs` (`rtk smart`) uses `core/filter` for heuristic file summarization
 - `format_cmd.rs` is a cross-ecosystem dispatcher: auto-detects and routes to `prettier_cmd` or `ruff_cmd` (black is handled inline, not as a separate module)
 - `summary.rs` executes argv directly before summarizing output. Shell-specific syntax requires `--shell <name> '<script>'`; it never guesses from `$SHELL`.
+- `pipe_cmd.rs` preserves plain Go test reports in auto mode when a package result appears anywhere in the bounded input, so diagnostics and package status are not mistaken for grep/find output. Explicit filter selection and JSON routing retain their existing behavior.
 
 ## Cross-command
 
