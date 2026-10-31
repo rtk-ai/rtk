@@ -340,11 +340,7 @@ fn run_diff(
     // disagree -- re-matching the string dropped a pathspec of the same name past `--`.
     // Any spelling counts, attached value or not: `--no-compact` is RTK's own, so git would
     // only answer `error: invalid option` if a value form leaked through.
-    let no_compact: Vec<usize> = tokens
-        .iter()
-        .filter(|t| t.kind == TokenKind::Long && t.text == "no-compact")
-        .map(|t| t.source_index)
-        .collect();
+    let no_compact = no_compact_indices(&tokens);
     let wants_compact = no_compact.is_empty() && !emits_word_diff(&tokens);
 
     if wants_stat || !wants_compact {
@@ -507,6 +503,9 @@ fn run_show(
     // colon'd pathspec as a `<rev>:<path>` blob and dump it instead of a commit-diff.
     let args = &args_utils::restore_double_dash(args);
     let tracked = with_args("git show", &display_args(args));
+    // Strip RTK's `--no-compact` before any git argv is built. Routing still uses `args`
+    // so a blob stays on the byte-safe path; only the forwarded argv drops the flag.
+    let (no_compact, forwarded) = show_forwards_without_no_compact(args);
 
     // Pick one of three handlers for `git show`. `show_route` decides the blob case
     // FIRST (see its docs): the two branches below are mutually exclusive on `route`,
@@ -545,7 +544,7 @@ fn run_show(
     if route == ShowRoute::StatOrFormat {
         let mut cmd = git_cmd(global_args);
         cmd.arg("show");
-        for arg in args {
+        for arg in &forwarded {
             cmd.arg(arg);
         }
         let result = exec_capture(&mut cmd).context("Failed to run git show")?;
@@ -572,7 +571,7 @@ fn run_show(
     if route == ShowRoute::Blob {
         let mut cmd = git_cmd(global_args);
         cmd.arg("show");
-        for arg in args {
+        for arg in &forwarded {
             cmd.arg(arg);
         }
         // Capture raw bytes: `git show` of an ISO-8859/Latin-1 file (e.g. Oracle
@@ -660,7 +659,8 @@ fn run_show(
         // Everything else passes the raw bytes through, byte-identical to plain git show.
         // Below the budget, `compact_blob_show` returns the text unchanged, so a windowed
         // single-object print stays byte-identical to git there too.
-        let can_window = positionals.len() == 1
+        let can_window = !no_compact
+            && positionals.len() == 1
             && blob_objects.len() == 1
             && !has_content_transform_flag(args)
             && !has_trailing_pathspec(args);
@@ -684,6 +684,35 @@ fn run_show(
 
     // The compacted commit-diff path from here down. `show_route` above already decided the
     // blob and summary cases, so what is left is the one shape RTK renders itself.
+    if no_compact {
+        let mut cmd = git_cmd(global_args);
+        cmd.arg("show");
+        for arg in &forwarded {
+            cmd.arg(arg);
+        }
+        let result = exec_capture(&mut cmd).context("Failed to run git show")?;
+        print!("{}", result.stdout);
+        if !result.success() {
+            if !result.stderr.trim().is_empty() {
+                eprintln!("{}", result.stderr.trim());
+            }
+            timer.track(
+                &tracked,
+                &tracking::passthrough_label(&tracked),
+                &result.stdout,
+                &result.stdout,
+            );
+            return Ok(result.exit_code);
+        }
+        timer.track(
+            &tracked,
+            &tracking::passthrough_label(&tracked),
+            &result.stdout,
+            &result.stdout,
+        );
+        return Ok(0);
+    }
+
     let tokens = tokenize_git_diff_args(args);
 
     // Get raw output for tracking
@@ -771,7 +800,7 @@ fn run_show(
         if verbose > 0 {
             printed.push_str("\n\nChanges:");
         }
-        let compacted = compact_diff(&strip_ansi(diff_text), max_lines.unwrap_or(500));
+        let compacted = compact_show_diff(&strip_ansi(diff_text), max_lines.unwrap_or(500), args);
         printed.push('\n');
         printed.push_str(&compacted);
     }
@@ -1343,7 +1372,54 @@ fn flush_leading_context(
     *total += keep;
 }
 
+/// Source indices of RTK's `--no-compact` pseudo-flag. A `--no-compact` past `--`
+/// is a pathspec (`TokenKind::Positional`), not this flag.
+fn no_compact_indices(tokens: &[Token<'_>]) -> Vec<usize> {
+    tokens
+        .iter()
+        .filter(|t| t.kind == TokenKind::Long && t.text == "no-compact")
+        .map(|t| t.source_index)
+        .collect()
+}
+
+/// Whether `args` asked for `--no-compact`, and the argv to forward to git with
+/// that RTK flag stripped. A `--no-compact` past `--` is left alone.
+fn show_forwards_without_no_compact(args: &[String]) -> (bool, Vec<String>) {
+    let tokens = tokenize_git_diff_args(args);
+    let no_compact = no_compact_indices(&tokens);
+    let forwarded = args
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !no_compact.contains(i))
+        .map(|(_, a)| a.clone())
+        .collect();
+    (!no_compact.is_empty(), forwarded)
+}
+
+/// Recovery hint for a truncated `git show` commit-diff. Names `show` and the
+/// rev so following it fetches that commit, not the worktree (`git diff`).
+fn show_compact_recovery_hint(args: &[String]) -> String {
+    let revs = show_positionals(args);
+    if revs.is_empty() {
+        "[full diff: rtk git show --no-compact]".to_string()
+    } else {
+        format!(
+            "[full diff: rtk git show {} --no-compact]",
+            display_args(&revs)
+        )
+    }
+}
+
+/// Compact a `git show` patch with a recovery hint that names `show`, not `diff`.
+fn compact_show_diff(diff: &str, max_lines: usize, args: &[String]) -> String {
+    compact_diff_with_hint(diff, max_lines, &show_compact_recovery_hint(args))
+}
+
 pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
+    compact_diff_with_hint(diff, max_lines, "[full diff: rtk git diff --no-compact]")
+}
+
+fn compact_diff_with_hint(diff: &str, max_lines: usize, recovery_hint: &str) -> String {
     let mut result = Vec::new();
     let mut current_file = String::new();
     let mut added = 0;
@@ -1512,7 +1588,7 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
     }
 
     if was_truncated {
-        result.push("[full diff: rtk git diff --no-compact]".to_string());
+        result.push(recovery_hint.to_string());
     }
 
     result.join("\n")
@@ -6947,6 +7023,70 @@ no changes added to commit (use "git add" and/or "git commit -a")
             result.contains("[full diff: rtk git diff --no-compact]"),
             "Expected recovery hint when hunk is truncated, got:\n{}",
             result
+        );
+    }
+
+    #[test]
+    fn test_compact_show_diff_recovery_hint_names_show() {
+        // `run_show` calls `compact_show_diff`; deleting that call and using
+        // `compact_diff` would send agents to `git diff --no-compact` (#4817).
+        let mut diff = String::new();
+        diff.push_str("diff --git a/large.rs b/large.rs\n");
+        diff.push_str("--- a/large.rs\n");
+        diff.push_str("+++ b/large.rs\n");
+        diff.push_str("@@ -1,150 +1,150 @@\n");
+        for i in 0..110 {
+            diff.push_str(&format!("+added line {}\n", i));
+        }
+        let result = compact_show_diff(&diff, 500, &show_args(&["HEAD"]));
+        assert!(
+            result.contains("[full diff: rtk git show HEAD --no-compact]"),
+            "Expected show recovery hint when hunk is truncated, got:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("[full diff: rtk git diff --no-compact]"),
+            "Show must not point at git diff --no-compact, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_show_compact_recovery_hint_includes_rev() {
+        assert_eq!(
+            show_compact_recovery_hint(&show_args(&["abc123"])),
+            "[full diff: rtk git show abc123 --no-compact]"
+        );
+        assert_eq!(
+            show_compact_recovery_hint(&[]),
+            "[full diff: rtk git show --no-compact]"
+        );
+        assert_eq!(
+            show_compact_recovery_hint(&show_args(&["HEAD", "--", "src/a.rs"])),
+            "[full diff: rtk git show HEAD --no-compact]"
+        );
+    }
+
+    #[test]
+    fn test_show_forwards_without_no_compact_strips_flag_not_pathspec() {
+        // `run_show` forwards this argv to git. If the flag leaked, git would
+        // exit 129 (`error: invalid option`). If a pathspec were stripped, a
+        // file named `--no-compact` would vanish.
+        assert_eq!(
+            show_forwards_without_no_compact(&show_args(&["HEAD", "--no-compact"])),
+            (true, show_args(&["HEAD"]))
+        );
+        assert_eq!(
+            show_forwards_without_no_compact(&show_args(&["HEAD", "--", "--no-compact"])),
+            (false, show_args(&["HEAD", "--", "--no-compact"]))
+        );
+        assert_eq!(
+            show_forwards_without_no_compact(&show_args(&["--stat", "HEAD", "--no-compact"])),
+            (true, show_args(&["--stat", "HEAD"]))
+        );
+        assert_eq!(
+            show_forwards_without_no_compact(&show_args(&["--no-compact"])),
+            (true, Vec::<String>::new())
         );
     }
 
