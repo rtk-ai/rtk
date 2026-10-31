@@ -1,7 +1,7 @@
 //! Filters pnpm output — dependency trees, install logs, outdated packages.
 
 use crate::core::guard::never_worse;
-use crate::core::stream::exec_capture;
+use crate::core::stream::{CaptureResult, exec_capture};
 use crate::core::tracking;
 use crate::core::truncate::CAP_LIST;
 use crate::core::utils::resolved_command;
@@ -393,7 +393,8 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<i32> {
     let result = exec_capture(&mut cmd).context("Failed to run pnpm list")?;
 
     if !result.success() {
-        eprint!("{}", result.stderr);
+        // With --json, pnpm reports the error as JSON on stdout.
+        print_failure(&result, None);
         return Ok(result.exit_code);
     }
 
@@ -503,7 +504,7 @@ fn run_install(args: &[String], verbose: u8) -> Result<i32> {
     let result = exec_capture(&mut cmd).context("Failed to run pnpm install")?;
 
     if !result.success() {
-        eprint!("{}", result.stderr);
+        print_failure(&result, Some(filter_pnpm_install));
         return Ok(result.exit_code);
     }
 
@@ -516,6 +517,30 @@ fn run_install(args: &[String], verbose: u8) -> Result<i32> {
     timer.track("pnpm install", "rtk pnpm install", &combined, shown);
 
     Ok(0)
+}
+
+/// Print the output of a failed pnpm run.
+///
+/// stderr alone is enough when pnpm wrote there. When it is empty, the reason
+/// is on stdout (pnpm `--json` errors, or a wrapper that refuses the command),
+/// so show stdout, filtered when a filter is given. A filter that keeps nothing
+/// must not hide the failure, so fall back to the raw stdout.
+fn print_failure(result: &CaptureResult, filter: Option<fn(&str) -> String>) {
+    if !result.stderr.trim().is_empty() {
+        eprint!("{}", result.stderr);
+        return;
+    }
+    let shown = match filter {
+        Some(filter) => match filter(&result.stdout) {
+            filtered if filtered == "ok" => result.stdout.clone(),
+            filtered => never_worse(&result.stdout, &filtered).to_string(),
+        },
+        None => result.stdout.clone(),
+    };
+    print!("{}", shown);
+    if !shown.ends_with('\n') && !shown.is_empty() {
+        println!();
+    }
 }
 
 /// Filter pnpm install output - remove progress bars, keep summary
