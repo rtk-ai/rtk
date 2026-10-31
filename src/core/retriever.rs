@@ -185,6 +185,67 @@ fn db_path(cfg: &RetrieverConfig) -> Result<PathBuf> {
     Ok(base.join(RECALL_DB))
 }
 
+/// Erase the configured recall store without creating a missing database.
+pub(crate) fn forget(cfg: &RetrieverConfig) -> Result<()> {
+    let path = db_path(cfg)?;
+    anyhow::ensure!(
+        !path.as_os_str().is_empty(),
+        "Refusing an empty recall database path"
+    );
+    CONN_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if matches!(&*cache, Some((cached, _)) if *cached == path) {
+            // Release our WAL handle before unlinking, including on Windows.
+            cache.take();
+        }
+    });
+    let paths: Vec<_> = ["", "-wal", "-shm", "-journal"]
+        .iter()
+        .map(|suffix| {
+            let mut name = path.as_os_str().to_os_string();
+            name.push(suffix);
+            PathBuf::from(name)
+        })
+        .collect();
+    // A configured path may be shared or accidentally name a directory. Never
+    // recurse, and do not claim erasure after merely unlinking a symlink.
+    for path in &paths {
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.is_file() => {}
+            Ok(_) => anyhow::bail!(
+                "Refusing to delete non-regular recall file: {}",
+                path.display()
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("Inspect {}", path.display())),
+        }
+    }
+    if path.try_exists()? {
+        let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .with_context(|| format!("Open recall store for erasure: {}", path.display()))?;
+        conn.busy_timeout(std::time::Duration::from_millis(250))?;
+        conn.execute_batch("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; ROLLBACK;")
+            .with_context(|| {
+                format!(
+                    "Cannot erase recall store {}; stop other RTK commands and retry",
+                    path.display()
+                )
+            })?;
+        // Windows needs this handle closed before unlink. This is a quiescence
+        // check, not an interprocess erasure barrier: callers must stop writers.
+        drop(conn);
+    }
+    for path in paths {
+        // nosemgrep: filesystem-deletion
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("Delete {}", path.display())),
+        }
+    }
+    Ok(())
+}
+
 fn open(cfg: &RetrieverConfig) -> Result<Connection> {
     let path = db_path(cfg)?;
     if let Some(parent) = path.parent() {
@@ -791,6 +852,111 @@ fn list_entries(conn: &Connection) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_forget_rejects_an_empty_database_path() {
+        let cfg = RetrieverConfig::default();
+        let error =
+            user_env::with_vars(&[("RTK_RECALL_DB", Some(""))], || forget(&cfg)).unwrap_err();
+        assert!(error.to_string().contains("empty recall database path"));
+    }
+
+    #[test]
+    fn test_forget_closes_cached_store_without_recreating_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        store_inner(&cfg, b"private output\n", "cmd", Some(1), 1).unwrap();
+        forget(&cfg).unwrap();
+        assert!(!db_path(&cfg).unwrap().exists());
+        assert!(stats_snapshot_with(&cfg).unwrap().is_empty());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        forget(&cfg).unwrap();
+    }
+
+    #[test]
+    fn test_forget_removes_orphan_sidecars_and_preserves_neighbors() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        let path = db_path(&cfg).unwrap();
+        for suffix in ["-wal", "-shm", "-journal", ".backup"] {
+            std::fs::write(
+                path.with_file_name(format!("recall_test.db{suffix}")),
+                "secret",
+            )
+            .unwrap();
+        }
+        forget(&cfg).unwrap();
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["recall_test.db.backup"]);
+    }
+
+    #[test]
+    fn test_forget_respects_environment_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        let configured = db_path(&cfg).unwrap();
+        let overridden = dir.path().join("override.sqlite");
+        drop(open(&cfg).unwrap());
+        user_env::with_path("RTK_RECALL_DB", Some(&overridden), || {
+            drop(open(&cfg).unwrap());
+            forget(&cfg)
+        })
+        .unwrap();
+        assert!(!overridden.exists());
+        assert!(configured.exists());
+    }
+
+    #[test]
+    fn test_forget_refuses_busy_wal_store_without_unlinking_it() {
+        for transaction in ["BEGIN IMMEDIATE", "BEGIN; SELECT * FROM recall"] {
+            let dir = tempfile::tempdir().unwrap();
+            let cfg = temp_cfg(dir.path());
+            store_inner(&cfg, b"private output", "cmd", Some(1), 1).unwrap();
+            let other = open(&cfg).unwrap();
+            other.execute_batch(transaction).unwrap();
+            let error = forget(&cfg).unwrap_err();
+            assert!(error.to_string().contains("stop other RTK commands"));
+            assert!(db_path(&cfg).unwrap().exists());
+            assert!(dir.path().join("recall_test.db-wal").exists());
+            drop(other);
+            forget(&cfg).unwrap();
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn test_forget_never_removes_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        let path = db_path(&cfg).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("keep"), "unrelated").unwrap();
+        assert!(forget(&cfg).is_err());
+        assert!(path.join("keep").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_forget_rejects_symlinks_without_touching_the_target() {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let dir = tempfile::tempdir().unwrap();
+            let cfg = temp_cfg(dir.path());
+            if !suffix.is_empty() {
+                drop(open(&cfg).unwrap());
+            }
+            let target = dir.path().join("unrelated");
+            std::fs::write(&target, "keep").unwrap();
+            let link = dir.path().join(format!("recall_test.db{suffix}"));
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert!(forget(&cfg).is_err());
+            assert!(db_path(&cfg).unwrap().exists());
+            assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+            assert_eq!(std::fs::read_to_string(target).unwrap(), "keep");
+        }
+    }
 
     fn temp_cfg(dir: &std::path::Path) -> RetrieverConfig {
         RetrieverConfig {
