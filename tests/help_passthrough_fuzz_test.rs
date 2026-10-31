@@ -460,17 +460,14 @@ fn an_arbitrary_commands_flags_are_not_rtks_to_read() {
         );
     }
 
-    // `rtk test` reports the tail of what it ran rather than a copy of it.
+    // An unknown runner has no parser that can identify expendable lines.
+    // Preserve its report and exit code while leaving du's own -h untouched.
     let mine = run_rtk(&["test", "du", "-h", &tree]);
-    assert_ne!(
+    assert_eq!(
         mine.text, raw.text,
-        "rtk test du -h <tree> passed du's output through instead of filtering it"
+        "rtk test du -h <tree> must preserve an unknown runner's complete report"
     );
-    assert!(
-        mine.text.starts_with("OUTPUT (last 5 lines):"),
-        "rtk test du -h <tree> did not produce RTK's own report; got: {}",
-        mine.text.chars().take(120).collect::<String>()
-    );
+    assert_eq!(mine.code, raw.code, "rtk test must preserve du's exit code");
 }
 
 /// `rtk git log` probes git again with the patch letters stripped from the caller's flags,
