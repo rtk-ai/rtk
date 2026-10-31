@@ -121,7 +121,10 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
                 filter_passthrough_output(stdout, is_analyze_graph)
             }
         },
-        runner::RunOptions::stdout_only().clean_outputs(clean_outputs),
+        // Ruff decides whether to read stdin (for example, `check -` or `format -`).
+        runner::RunOptions::stdout_only()
+            .inherit_stdin()
+            .clean_outputs(clean_outputs),
     )
 }
 
