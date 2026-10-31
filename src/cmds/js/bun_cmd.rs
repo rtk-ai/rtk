@@ -165,7 +165,9 @@ pub fn run_pkg(subcmd: &str, args: &[String], verbose: u8) -> Result<i32> {
         "bun",
         display.trim_end(),
         filter_bun_pkg,
-        crate::core::runner::RunOptions::with_tee(&tee_label),
+        // A failed install is shown as bun wrote it, each stream intact: the reason
+        // it failed is the output the user needs.
+        crate::core::runner::RunOptions::with_tee(&tee_label).early_exit_on_failure(),
     )
 }
 
