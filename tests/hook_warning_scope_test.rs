@@ -177,16 +177,24 @@ fn gain_honours_the_suppression_flag() {
 
 #[test]
 fn hook_entry_leaves_startup_warning_for_a_normal_command() {
-    let home = fresh_home();
+    for hook_args in [&["hook", "claude"][..], &["rewrite", "git status"]] {
+        let home = fresh_home();
 
-    // Exercise the real binary entry path. The hook processor may reject empty
-    // stdin, but startup background work runs before dispatch, which is the
-    // behavior this regression protects.
-    run(home.path(), &["hook", "claude"]);
+        // Exercise the real binary entry path. The hook processor may reject empty
+        // stdin, but startup background work runs before dispatch, which is the
+        // behavior this regression protects.
+        let hook_stderr = run(home.path(), hook_args);
+        assert!(
+            !hook_stderr.contains(REMINDER),
+            "rtk {} must not print the daily reminder: {hook_stderr}",
+            hook_args.join(" ")
+        );
 
-    let stderr = run(home.path(), &["ls"]);
-    assert!(
-        stderr.contains(REMINDER),
-        "a hook invocation must not consume the daily startup warning: {stderr}"
-    );
+        let stderr = run(home.path(), &["ls"]);
+        assert!(
+            stderr.contains(REMINDER),
+            "rtk {} must not consume the daily startup warning: {stderr}",
+            hook_args.join(" ")
+        );
+    }
 }
