@@ -7,6 +7,7 @@ use super::constants::PRE_TOOL_USE_KEY;
 use super::decision::{self, HookDecision};
 use super::permissions::{self, PermissionVerdict};
 use super::permissions_opencode;
+use crate::discover::shell_wrapper::is_shell_wrapper_candidate;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::io::{self, Read, Write};
@@ -256,13 +257,36 @@ fn decide_from_verdict(
     decision::decide_for_agent_at(cmd, verdict, deny_rules, cwd)
 }
 
+fn preserve_claude_ask_rule(
+    cmd: &str,
+    verdict: PermissionVerdict,
+    decision: HookDecision,
+) -> HookDecision {
+    // For Claude (and hosts with similar ask-rule semantics), an explicit
+    // ask rule means the host will prompt on the original command. Rewriting
+    // would change the command to `rtk <cmd>`, which no longer matches the
+    // ask pattern. Skip the rewrite and let the host handle the original.
+    // But shell wrappers (e.g., `bash -c "..."`) get Ask from the wrapper
+    // heuristic, not an explicit rule — their inner commands should still
+    // be rewritten if allowed.
+    if verdict == PermissionVerdict::Ask
+        && !is_shell_wrapper_candidate(cmd)
+        && matches!(decision, HookDecision::AskRewrite(_))
+    {
+        HookDecision::Defer
+    } else {
+        decision
+    }
+}
+
 fn decide_hook_action(cmd: &str, host: permissions::Host, cwd: Option<&str>) -> HookDecision {
-    decide_from_verdict(
-        cmd,
-        permissions::check_command_for(cmd, host),
-        permissions::DenyRules::Unattested,
-        cwd,
-    )
+    let verdict = permissions::check_command_for(cmd, host);
+    let decision = decide_from_verdict(cmd, verdict, permissions::DenyRules::Unattested, cwd);
+    if host == permissions::Host::Claude {
+        preserve_claude_ask_rule(cmd, verdict, decision)
+    } else {
+        decision
+    }
 }
 
 /// [`decide_hook_action`] for Claude Code's own hook, the one host whose
@@ -270,12 +294,14 @@ fn decide_hook_action(cmd: &str, host: permissions::Host, cwd: Option<&str>) -> 
 /// shares `Host::Claude` for its verdict but judges the returned command
 /// itself, so it keeps [`decide_hook_action`].
 fn decide_claude_hook_action(cmd: &str, cwd: Option<&str>) -> HookDecision {
-    decide_from_verdict(
+    let verdict = permissions::check_command_for(cmd, permissions::Host::Claude);
+    let decision = decide_from_verdict(
         cmd,
-        permissions::check_command_for(cmd, permissions::Host::Claude),
+        verdict,
         permissions::claude_hook_deny_rules_for(cmd),
         cwd,
-    )
+    );
+    preserve_claude_ask_rule(cmd, verdict, decision)
 }
 
 fn handle_vscode(cmd: &str, input: &Value) -> Result<()> {
@@ -2262,6 +2288,33 @@ mod tests {
             v["hookSpecificOutput"]["updatedInput"]["command"],
             "rtk git status"
         );
+    }
+
+    #[test]
+    fn test_claude_ask_rule_preserved_by_skipping_rewrite() {
+        // When there's an explicit ask rule for a command that would be rewritten,
+        // the hook should skip the rewrite so that the host's ask rule still matches.
+        // See issue #4644: "a rewrite stops the host's ask (Claude) and prompt/forbidden (Codex) rules from matching"
+        use crate::core::test_isolation;
+
+        let tmp = test_isolation::tempdir();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(project.join(".claude")).expect("create .claude dir");
+        std::fs::write(
+            project.join(".claude").join("settings.json"),
+            r#"{"permissions":{"ask":["Bash(git push:*)"]}}"#,
+        )
+        .expect("write settings.json");
+
+        test_isolation::with_root(&tmp.path().join("home"), || {
+            let _entered = test_isolation::enter(&project);
+            // git push origin main should NOT be rewritten because the ask rule
+            // would no longer match the rewritten command (rtk git push ...)
+            assert!(
+                run_claude_inner(&claude_input("git push origin main")).is_none(),
+                "expected no rewrite when ask rule would be lost"
+            );
+        });
     }
 
     // --- Trae handler ---
