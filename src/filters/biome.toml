@@ -1,6 +1,6 @@
 [filters.biome]
 description = "Compact Biome lint/format output — strip blank lines, keep diagnostics"
-match_command = "^biome\\b"
+match_command = "^biome(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

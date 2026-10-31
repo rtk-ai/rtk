@@ -13,7 +13,7 @@
 //! command string as bash (see `lexer::ShellDialect`).
 
 use super::shell_wrapper::is_shell_wrapper_candidate;
-use crate::core::cmdline::lexer::{self, ParsedToken, TokenKind};
+use crate::core::cmdline::lexer::{self, Token, TokenKind};
 
 /// Keywords only fish accepts at command position. One of these, at a command
 /// boundary and with no POSIX marker anywhere, is what makes a script *provably*
@@ -144,9 +144,9 @@ pub(crate) fn is_wrapped(cmd: &str) -> bool {
 /// True for fish's `(cmd)` command substitution, which the shared lexer reads
 /// as a POSIX subshell and therefore does not refuse.
 fn contains_fish_substitution(cmd: &str) -> bool {
-    lexer::tokenize_with_newlines(cmd)
+    lexer::tokenize(cmd)
         .iter()
-        .any(|token| token.kind == TokenKind::Shellism && matches!(token.value.as_str(), "(" | ")"))
+        .any(|token| token.kind == TokenKind::Shellism && matches!(token.value, "(" | ")"))
 }
 
 /// True only when the command contains a fish-only marker at command position and
@@ -165,7 +165,7 @@ pub(crate) fn is_unambiguous_fish(cmd: &str) -> bool {
     if has_unclosed_quote_or_escape(&code) {
         return false;
     }
-    classify_tokens(&lexer::tokenize_with_newlines(&code))
+    classify_tokens(&lexer::tokenize(&code))
 }
 
 /// Drop every unquoted comment — a word-initial `#` through the end of its line
@@ -287,13 +287,15 @@ fn has_unclosed_quote_or_escape(cmd: &str) -> bool {
     quote.is_some() || escaped
 }
 
-fn classify_tokens(tokens: &[ParsedToken]) -> bool {
+fn classify_tokens(tokens: &[Token<'_>]) -> bool {
     let mut command_position = true;
     let mut has_fish_marker = false;
 
     for token in tokens {
         match token.kind {
-            TokenKind::Operator | TokenKind::Pipe(_) => command_position = true,
+            TokenKind::Operator | TokenKind::Pipe(_) | TokenKind::Newline => {
+                command_position = true
+            }
             TokenKind::Shellism if token.value == "&" => command_position = true,
             // Fish has no backtick substitution: a script using one is POSIX,
             // so wrapping it would print the backticks instead of running the
@@ -309,10 +311,10 @@ fn classify_tokens(tokens: &[ParsedToken]) -> bool {
                     return false;
                 }
                 if command_position {
-                    if POSIX_ONLY_KEYWORDS.contains(&token.value.as_str()) {
+                    if POSIX_ONLY_KEYWORDS.contains(&token.value) {
                         return false;
                     }
-                    if FISH_ONLY_KEYWORDS.contains(&token.value.as_str()) {
+                    if FISH_ONLY_KEYWORDS.contains(&token.value) {
                         has_fish_marker = true;
                     }
                     command_position = false;
