@@ -1974,6 +1974,12 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
         return llm_proxy::run_agent(agent, &args[1..]);
     }
 
+    // `mix test` and `mix precommit` have a Rust filter; every other mix task keeps its
+    // TOML filter below, which a `mix` clap subcommand would take away.
+    if let Some(result) = cmds::elixir::mix_cmd::try_run(&args) {
+        return result;
+    }
+
     let raw_command = args.join(" ");
     let tracked_command = core::shell::display_command(&args);
     let error_message = core::utils::strip_ansi(&parse_error.to_string());
