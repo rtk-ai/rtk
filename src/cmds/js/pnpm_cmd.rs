@@ -452,6 +452,17 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
 
     // Parse output using PnpmOutdatedParser
     let parse_result = PnpmOutdatedParser::parse(&result.stdout);
+
+    // pnpm exits 1 both when it found outdated packages and when it failed, and stderr
+    // cannot tell the two apart: pnpm reports its own errors (ERR_PNPM_*) on stdout.
+    // Only the JSON list is a result, so on a failing run anything else is the error:
+    // show it untouched instead of parsing it into a table of bogus packages.
+    if !result.success() && !matches!(parse_result, ParseResult::Full(_)) {
+        print!("{}", result.stdout);
+        eprint!("{}", result.stderr);
+        return Ok(result.exit_code);
+    }
+
     let mode = FormatMode::from_verbosity(verbose);
 
     let filtered = match parse_result {
@@ -483,7 +494,7 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
 
     timer.track("pnpm outdated", "rtk pnpm outdated", &combined, shown);
 
-    Ok(0)
+    Ok(result.exit_code)
 }
 
 fn run_install(args: &[String], verbose: u8) -> Result<i32> {
