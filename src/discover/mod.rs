@@ -392,15 +392,24 @@ pub fn run(
         match Tracker::new() {
             Ok(t) => {
                 let log = t.hook_decisions_since(cutoff).unwrap_or_else(|e| {
-                    eprintln!(
-                        "rtk: warning: failed to read hook_decisions log ({e}). \
-                         Coverage will fall back to the current-state estimate. \
-                         Run `rtk init` if the tracking database looks corrupted."
-                    );
+                    // `rtk init` would fail the same step, and `rtk gain` reports it.
+                    if !crate::core::db::lacks_what_was_not_upgraded(&e) {
+                        eprintln!(
+                            "rtk: warning: failed to read hook_decisions log ({e}). \
+                             Coverage will fall back to the current-state estimate. \
+                             Run `rtk init` if the tracking database looks corrupted."
+                        );
+                    } else if verbose > 0 {
+                        eprintln!("rtk: warning: failed to read hook_decisions log ({e}).");
+                    }
                     HashMap::new()
                 });
                 let measured_since = t.earliest_hook_decision_timestamp().unwrap_or_else(|e| {
-                    eprintln!("rtk: warning: failed to read hook_decisions log timestamp ({e}).");
+                    if !crate::core::db::lacks_what_was_not_upgraded(&e) || verbose > 0 {
+                        eprintln!(
+                            "rtk: warning: failed to read hook_decisions log timestamp ({e})."
+                        );
+                    }
                     None
                 });
                 (log, measured_since)
@@ -411,7 +420,7 @@ pub fn run(
                 // `rtk discover` run doesn't alarm a first-time user.
                 if verbose > 0 {
                     eprintln!(
-                        "rtk: warning: failed to open tracking database ({e}). \
+                        "rtk: warning: failed to open tracking database ({e:#}). \
                          Coverage will fall back to the current-state estimate."
                     );
                 }
