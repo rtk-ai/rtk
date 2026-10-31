@@ -131,7 +131,7 @@ pub(super) fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
     for event_key in [PRE_TOOL_USE_KEY, POST_TOOL_USE_KEY, SESSION_START_KEY] {
         if !remove_hook_entries(root, event_key, HookEntries::Grouped, |hook| {
             is_command_hook(hook, |cmd| {
-                is_claude_hook_command(cmd) || cmd.contains(REWRITE_HOOK_FILE)
+                is_claude_hook_command(cmd) || is_legacy_rewrite_hook(cmd)
             })
         }) {
             continue;
@@ -592,7 +592,7 @@ fn rtk_hook_matchers(root: &serde_json::Value, event_key: &str) -> Vec<String> {
                         .any(|cmd| {
                             cmd == CLAUDE_HOOK_COMMAND
                                 || is_claude_hook_command(cmd)
-                                || cmd.contains(REWRITE_HOOK_FILE)
+                                || is_legacy_rewrite_hook(cmd)
                         })
                 })
                 .map(|entry| {
@@ -628,9 +628,7 @@ pub(super) fn hook_already_present(
         .flatten()
         .any(|hook| {
             is_command_hook(hook, |cmd| {
-                cmd == hook_command
-                    || is_claude_hook_command(cmd)
-                    || cmd.contains(REWRITE_HOOK_FILE)
+                cmd == hook_command || is_claude_hook_command(cmd) || is_legacy_rewrite_hook(cmd)
             })
         })
 }
@@ -886,7 +884,7 @@ fn remove_legacy_settings_entries(ctx: InitContext) -> Result<()> {
 /// Does NOT remove `rtk hook claude` entries — those are the new format.
 pub(super) fn remove_legacy_hook_entries_from_json(root: &mut serde_json::Value) -> bool {
     remove_hook_entries(root, PRE_TOOL_USE_KEY, HookEntries::Grouped, |hook| {
-        is_command_hook(hook, |cmd| cmd.contains(REWRITE_HOOK_FILE))
+        is_command_hook(hook, is_legacy_rewrite_hook)
     })
 }
 
@@ -1059,24 +1057,46 @@ mod tests {
 
     #[test]
     fn test_hook_already_present_different_path() {
-        let json_content = serde_json::json!({
+        for valid_path in [
+            "/home/user/.claude/hooks/rtk-rewrite.sh",
+            "~/.claude/hooks/rtk-rewrite.sh",
+        ] {
+            let json_content = serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [{
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": valid_path
+                        }]
+                    }]
+                }
+            });
+
+            let hook_command = "~/.claude/hooks/rtk-rewrite.sh";
+            // Should match on rtk-rewrite.sh executable filename
+            assert!(
+                hook_already_present(&json_content, PRE_TOOL_USE_KEY, hook_command),
+                "must match on valid path '{valid_path}'"
+            );
+        }
+
+        // Non-invocations mentioning rtk-rewrite.sh must not match
+        let non_invocation = serde_json::json!({
             "hooks": {
                 "PreToolUse": [{
                     "matcher": "Bash",
                     "hooks": [{
                         "type": "command",
-                        "command": "/home/user/.claude/hooks/rtk-rewrite.sh"
+                        "command": "echo rtk-rewrite.sh"
                     }]
                 }]
             }
         });
-
-        let hook_command = "~/.claude/hooks/rtk-rewrite.sh";
-        // Should match on rtk-rewrite.sh substring
-        assert!(hook_already_present(
-            &json_content,
+        assert!(!hook_already_present(
+            &non_invocation,
             PRE_TOOL_USE_KEY,
-            hook_command
+            "~/.claude/hooks/rtk-rewrite.sh"
         ));
     }
 
@@ -2343,6 +2363,145 @@ mod tests {
                     "unreadable hook path must report Outdated"
                 );
             }
+        });
+    }
+
+    #[test]
+    fn test_claude_hooks_reject_user_commands_mentioning_rtk_rewrite() {
+        let non_invocations = [
+            "echo rtk-rewrite.sh",
+            "/custom/rtk-rewrite.sh.backup",
+            "python3 /custom/audit.py --label rtk-rewrite.sh",
+            "audit.sh --mirror ~/.claude/hooks/rtk-rewrite.sh",
+        ];
+
+        for cmd in non_invocations {
+            let json = serde_json::json!({
+                "hooks": {
+                    PRE_TOOL_USE_KEY: [{
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": cmd}]
+                    }]
+                }
+            });
+            assert!(
+                !hook_already_present(&json, PRE_TOOL_USE_KEY, CLAUDE_HOOK_COMMAND),
+                "must not claim '{cmd}' is already present"
+            );
+            assert!(
+                rtk_hook_matchers(&json, PRE_TOOL_USE_KEY).is_empty(),
+                "rtk_hook_matchers must not cover '{cmd}'"
+            );
+
+            let mut json_clone = json.clone();
+            assert!(
+                !remove_hook_from_json(&mut json_clone),
+                "must not remove '{cmd}' during uninstall"
+            );
+            assert_eq!(json_clone, json, "json must remain unchanged for '{cmd}'");
+
+            let mut json_clone2 = json.clone();
+            assert!(
+                !remove_legacy_hook_entries_from_json(&mut json_clone2),
+                "must not strip '{cmd}' during legacy migration"
+            );
+            assert_eq!(json_clone2, json, "json must remain unchanged for '{cmd}'");
+        }
+
+        let valid_invocations = ["~/.claude/hooks/rtk-rewrite.sh", "/path/to/rtk-rewrite.sh"];
+
+        for cmd in valid_invocations {
+            let json = serde_json::json!({
+                "hooks": {
+                    PRE_TOOL_USE_KEY: [{
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": cmd}]
+                    }]
+                }
+            });
+            assert!(
+                hook_already_present(&json, PRE_TOOL_USE_KEY, CLAUDE_HOOK_COMMAND),
+                "must detect '{cmd}' as existing hook"
+            );
+            assert_eq!(
+                rtk_hook_matchers(&json, PRE_TOOL_USE_KEY),
+                vec!["Bash".to_string()],
+                "rtk_hook_matchers must cover '{cmd}'"
+            );
+
+            let mut json_clone = json.clone();
+            assert!(
+                remove_hook_from_json(&mut json_clone),
+                "must remove '{cmd}' during uninstall"
+            );
+
+            let mut json_clone2 = json.clone();
+            assert!(
+                remove_legacy_hook_entries_from_json(&mut json_clone2),
+                "must strip '{cmd}' during legacy migration"
+            );
+        }
+    }
+
+    #[test]
+    fn test_claude_install_and_uninstall_preserves_user_hooks_mentioning_rtk_rewrite() {
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let settings = claude_dir.join(SETTINGS_JSON);
+            let user_hook = "python3 /custom/audit.py --label rtk-rewrite.sh";
+            let seeded = serde_json::json!({
+                "hooks": {
+                    PRE_TOOL_USE_KEY: [{
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": user_hook}]
+                    }]
+                }
+            });
+            fs::write(&settings, serde_json::to_string_pretty(&seeded).unwrap()).unwrap();
+
+            // Install should not skip claiming "already present", but successfully patch
+            let patch_result = patch_settings_json_command(
+                CLAUDE_HOOK_COMMAND,
+                PatchMode::Auto,
+                false,
+                InitContext::default(),
+                HookInstallScope::UserGlobal,
+            )
+            .unwrap();
+            assert_eq!(patch_result, PatchResult::Patched);
+
+            let after_install: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+            let pre_hooks = after_install["hooks"][PRE_TOOL_USE_KEY].as_array().unwrap();
+            let commands: Vec<&str> = pre_hooks
+                .iter()
+                .filter_map(|e| e.get("hooks")?.as_array())
+                .flatten()
+                .filter_map(|h| h.get("command")?.as_str())
+                .collect();
+            assert!(commands.contains(&user_hook));
+            assert!(commands.contains(&CLAUDE_HOOK_COMMAND));
+
+            // Uninstall should remove only RTK hook, leaving user hook
+            assert_eq!(
+                remove_settings_entries(InitContext::default()).unwrap(),
+                SettingsRemoval {
+                    hook: true,
+                    proxy_base_url: false,
+                }
+            );
+
+            let after_uninstall: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+            let remaining_commands: Vec<&str> = after_uninstall["hooks"][PRE_TOOL_USE_KEY]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|e| e.get("hooks")?.as_array())
+                .flatten()
+                .filter_map(|h| h.get("command")?.as_str())
+                .collect();
+            assert_eq!(remaining_commands, vec![user_hook]);
         });
     }
 }
