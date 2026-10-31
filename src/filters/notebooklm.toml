@@ -1,0 +1,23 @@
+[filters.notebooklm]
+description = "Compact notebooklm CLI output — keep source/artifact status lines"
+match_command = "^notebooklm(\\s|$)"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s*(?:⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏)\\s",
+]
+max_lines = 40
+truncate_lines_at = 120
+
+[[tests.notebooklm]]
+name = "short output passes through"
+input = """
+Source added: report.pdf
+Artifact generated: summary.md
+"""
+expected = "Source added: report.pdf\nArtifact generated: summary.md"
+
+[[tests.notebooklm]]
+name = "empty input passes through"
+input = ""
+expected = ""
