@@ -91,9 +91,15 @@ fn check_and_warn() -> Option<()> {
 
     // Touch marker after warning is printed
     let _ = crate::core::utils::create_private_dir(marker.parent()?);
-    let _ = std::fs::write(&marker, b"");
+    let _ = touch_marker(&marker);
 
     Some(())
+}
+
+/// Sets the marker's mtime explicitly: rewriting a 0-byte file with no data
+/// leaves `LastWriteTime` unchanged on NTFS, so the warning would fire forever.
+fn touch_marker(marker: &std::path::Path) -> std::io::Result<()> {
+    std::fs::File::create(marker)?.set_modified(std::time::SystemTime::now())
 }
 
 pub fn parse_hook_version(content: &str) -> u8 {
@@ -190,6 +196,33 @@ mod tests {
         assert!(
             warning_text(HookStatus::Outdated, true).is_some(),
             "suppress_hook_warning must not hide the outdated-hook upgrade prompt"
+        );
+    }
+
+    #[test]
+    fn test_touch_marker_advances_mtime_of_existing_empty_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join(".hook_warn_last");
+        std::fs::write(&marker, b"").expect("create marker");
+        let stale = std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 24 * 3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&marker)
+            .expect("open marker")
+            .set_modified(stale)
+            .expect("backdate marker");
+
+        touch_marker(&marker).expect("touch marker");
+
+        let age = std::fs::metadata(&marker)
+            .and_then(|m| m.modified())
+            .expect("marker mtime")
+            .elapsed()
+            .map(|e| e.as_secs())
+            .unwrap_or(0);
+        assert!(
+            age < WARN_INTERVAL_SECS,
+            "marker mtime not refreshed: {age}s old"
         );
     }
 
