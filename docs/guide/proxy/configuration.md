@@ -17,6 +17,7 @@ Precedence: **CLI flag > environment variable > config file > default**. Every k
 | `ccr` | `RTK_PROXY_CCR` | `true` | Permission only: CCR runs when a rule names it ([Large tool results](./compression.md#large-tool-results-ccr)); `false` keeps it off regardless |
 | `anthropic_upstream` | `RTK_PROXY_ANTHROPIC_UPSTREAM` | `https://api.anthropic.com` | Where `/v1/messages` goes |
 | `openai_upstream` | `RTK_PROXY_OPENAI_UPSTREAM` | `https://api.openai.com` | Where `/v1/chat/completions` goes |
+| `openai_path` | `RTK_PROXY_OPENAI_PATH` | `/v1/chat/completions` | Forward path appended to `openai_upstream`. Override for providers whose OpenAI-compatible endpoint doesn't live under `/v1` (e.g. Z.AI's `/chat/completions`) |
 | `db` | `RTK_PROXY_DB` | `rtk-proxy.db` | Usage store — the database `rtk gain` reads |
 | `relay_borrowing` | `RTK_PROXY_RELAY_BORROWING` | `true` | Lets a pipeline task with no key of its own borrow the credential your agent is already relaying ([Tasks](../pipelines/tasks.md)) |
 
