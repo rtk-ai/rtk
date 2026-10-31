@@ -94,6 +94,7 @@ jobs:
       prerelease: true
     permissions:
       contents: write
+      actions: read
     secrets: inherit
 
   # ═══════════════════════════════════════════════
@@ -129,6 +130,7 @@ jobs:
       tag: ${{ needs.release-please.outputs.tag_name }}
     permissions:
       contents: write
+      actions: read
     secrets: inherit
 
   update-latest-tag:
