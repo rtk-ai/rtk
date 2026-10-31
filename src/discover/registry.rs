@@ -190,6 +190,20 @@ pub fn classify_command(cmd: &str) -> Classification {
         return Classification::Ignored;
     }
 
+    // Shell syntax is not a missing tool. Match whole raw words so quoted or
+    // escaped executable names and tools such as `[custom-tool]` stay visible.
+    // Multiline snippets may contain real tools after the syntax; keep them.
+    let first_word = trimmed.split_whitespace().next().unwrap_or_default();
+    if !trimmed.contains(['\n', '\r'])
+        && (trimmed.starts_with('#')
+            || matches!(
+                first_word,
+                "[" | "[[" | ":" | "then" | "else" | "do" | "elif" | "esac"
+            ))
+    {
+        return Classification::Ignored;
+    }
+
     // Check ignored
     for exact in IGNORED_EXACT {
         if trimmed == *exact {
@@ -2428,6 +2442,64 @@ mod tests {
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         super::rewrite_command(cmd, excluded, &[])
+    }
+
+    #[test]
+    fn test_classify_shell_syntax_is_not_an_unsupported_tool() {
+        for command in [
+            "# Check",
+            "  # Test",
+            "#",
+            "[",
+            "[ -f output.txt ]",
+            "[\t-f output.txt ]",
+            "[[",
+            "[[ -n $result ]]",
+            ":",
+            ": no-op",
+            "then",
+            "else",
+            "do",
+            "elif",
+            "esac",
+            "fi",
+            "done",
+        ] {
+            assert_eq!(
+                classify_command(command),
+                Classification::Ignored,
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_unknown_tools_survive_shell_syntax_filter() {
+        for command in [
+            "custom-tool build",
+            "# Check\ncustom-tool build",
+            "[ -f file ]\ncustom-tool build",
+            "[custom-tool] build",
+            ":custom-tool build",
+            "'#tool' build",
+            "\\#tool build",
+            "then-tool build",
+            "elastic-tool build",
+            "custom-tool '# Check'",
+            "custom-tool '[ -f file ]'",
+        ] {
+            assert!(
+                matches!(
+                    classify_command(command),
+                    Classification::Unsupported { .. }
+                ),
+                "{command:?}"
+            );
+        }
+        assert!(matches!(
+            classify_command("find . -name '#file'"),
+            Classification::Supported { .. }
+        ));
     }
 
     #[test]
