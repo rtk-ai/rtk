@@ -4,7 +4,7 @@
 use super::*;
 use crate::core::user_dirs;
 use crate::hooks::constants::{
-    CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CURSOR_DIR, HOOKS_SUBDIR, POST_TOOL_USE_KEY, PRE_TOOL_USE_KEY,
+    CLAUDE_HOOK_COMMAND, CURSOR_DIR, HOOKS_SUBDIR, POST_TOOL_USE_KEY, PRE_TOOL_USE_KEY,
     REWRITE_HOOK_FILE, SESSION_START_KEY, SETTINGS_JSON,
 };
 
@@ -764,18 +764,16 @@ pub(super) fn run_default_mode(
 }
 
 /// Migrate old hook script to new binary command.
-/// Deletes `~/.claude/hooks/rtk-rewrite.sh` and `.rtk-hook.sha256` if present,
+/// Deletes `rtk-rewrite.sh` and `.rtk-hook.sha256` from the Claude config dir's `hooks/`
+/// (`$CLAUDE_CONFIG_DIR` or `~/.claude`) if present,
 /// and removes the stale settings.json entry so the new `rtk hook claude` entry
 /// can be registered.
 fn migrate_old_hook_script(ctx: InitContext) {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
-    if let Some(home) = user_dirs::home() {
-        let old_hook = home
-            .join(CLAUDE_DIR)
-            .join(HOOKS_SUBDIR)
-            .join(REWRITE_HOOK_FILE);
+    if let Ok(claude_dir) = resolve_claude_dir() {
+        let old_hook = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
         if old_hook.exists() {
             if dry_run {
                 println!(
@@ -800,10 +798,7 @@ fn migrate_old_hook_script(ctx: InitContext) {
             }
         }
         // Remove legacy hash file
-        let hash_file = home
-            .join(CLAUDE_DIR)
-            .join(HOOKS_SUBDIR)
-            .join(".rtk-hook.sha256");
+        let hash_file = claude_dir.join(HOOKS_SUBDIR).join(".rtk-hook.sha256");
         if hash_file.exists() {
             if dry_run {
                 println!(
@@ -815,6 +810,8 @@ fn migrate_old_hook_script(ctx: InitContext) {
                 let _ = std::fs::remove_file(&hash_file);
             }
         }
+    }
+    if let Some(home) = user_dirs::home() {
         // Remove Cursor legacy hook
         let cursor_hook = home.join(CURSOR_DIR).join("hooks").join(REWRITE_HOOK_FILE);
         if cursor_hook.exists() {
@@ -1373,6 +1370,43 @@ mod tests {
         assert_eq!(arr.len(), 1);
         let cmd = arr[0]["hooks"][0]["command"].as_str().unwrap();
         assert_eq!(cmd, "some-other-tool --hook");
+    }
+
+    // #4757: the legacy script under CLAUDE_CONFIG_DIR is what hook_status reads,
+    // so the migration must look there, not in ~/.claude.
+    #[test]
+    fn test_migrate_old_hook_script_honours_claude_config_dir() {
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let hooks = claude_dir.join(HOOKS_SUBDIR);
+            fs::create_dir_all(&hooks).unwrap();
+            let old_hook = hooks.join(REWRITE_HOOK_FILE);
+            fs::write(&old_hook, "#!/bin/bash\n# rtk-hook-version: 4\n").unwrap();
+            let settings = claude_dir.join(SETTINGS_JSON);
+            fs::write(
+                &settings,
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "hooks": { "PreToolUse": [
+                        { "matcher": "Bash", "hooks": [{ "type": "command", "command": CLAUDE_HOOK_COMMAND }] },
+                        { "matcher": "Bash", "hooks": [{ "type": "command", "command": old_hook.display().to_string() }] }
+                    ]}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                hook_status(),
+                crate::hooks::hook_check::HookStatus::Outdated
+            );
+
+            migrate_old_hook_script(InitContext::default());
+
+            assert!(!old_hook.exists(), "legacy script must be removed");
+            let content = fs::read_to_string(&settings).unwrap();
+            assert!(!content.contains(REWRITE_HOOK_FILE), "{content}");
+            assert!(content.contains(CLAUDE_HOOK_COMMAND), "{content}");
+            assert_eq!(hook_status(), crate::hooks::hook_check::HookStatus::Ok);
+        });
     }
 
     // #4604: the proxy on-ramp writes env.ANTHROPIC_BASE_URL; uninstall must
