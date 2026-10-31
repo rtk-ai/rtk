@@ -4,7 +4,7 @@
 
 **Deployed hook artifacts** — the files and agent-specific configuration installed on user machines by `rtk init`. External scripts and plugins are thin delegates to `rtk rewrite`; native processors such as Codex call the same Rust rewrite registry directly. Zero filtering logic is duplicated in this directory.
 
-Contains per-agent hook scripts and configuration files for 13 supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, Oh My Pi, Mistral Vibe, Trae, Google Antigravity). `rtk init` installs them.
+Contains per-agent hook scripts and configuration files for 13 supported agents (Claude Code, Copilot, Cursor, Cline, Devin Desktop, Codex, OpenCode, Hermes, Pi, Oh My Pi, Mistral Vibe, Trae, Google Antigravity). `rtk init` installs them.
 
 Does **not** own: hook installation/uninstallation (that's `src/hooks/init/`), the rewrite pattern registry (that's `discover/registry`), or integrity verification (that's `src/hooks/integrity.rs`).
 
@@ -42,7 +42,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`copilot/`](copilot/README.md)** — Rust binary hook, dual format (VS Code Chat vs Copilot CLI), deny-with-suggestion fallback
 - **[`cursor/`](cursor/README.md)** — Shell hook, Cursor JSON format, empty `{}` response requirement
 - **[`cline/`](cline/README.md)** — Rules file (prompt-level), `.clinerules` project-local installation
-- **[`windsurf/`](windsurf/README.md)** — Rules file (prompt-level), `.windsurfrules` workspace-scoped
+- **[`windsurf/`](windsurf/README.md)** — Devin Desktop (formerly Windsurf) rules file (prompt-level), `.windsurfrules` workspace-scoped
 - **[`codex/`](codex/README.md)** — Rust binary hook (`rtk hook codex`), `PreToolUse.updatedInput`, `.codex/hooks.json` / `$CODEX_HOME/hooks.json`, plus `AGENTS.md` awareness
 - **[`opencode/`](opencode/README.md)** — TypeScript plugin, OpenCode 2.0 and 1.x >= 1.18.29, in-place mutation
 - **[`pi/`](pi/README.md)** — TypeScript extension, `tool_call` event, local `isBashToolCallEvent` guard, in-place mutation, `~/.pi/agent/extensions/`; **shared with Oh My Pi (OMP)** — OMP installs the same file at `.omp/extensions/` via its `legacy-pi-compat` layer
@@ -62,7 +62,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | Google Antigravity | Rust binary (`rtk hook antigravity`) | Transparent rewrite | Yes (`overwrite.CommandLine`) |
 | Gemini CLI | Rust binary (`rtk hook gemini`) | Transparent rewrite | Yes (`hookSpecificOutput`) |
 | Cline / Roo Code | Custom instructions (rules file) | Prompt-level guidance | N/A |
-| Windsurf | Custom instructions (rules file) | Prompt-level guidance | N/A |
+| Devin Desktop (formerly Windsurf) | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Codex CLI | Rust binary (`rtk hook codex`) | Transparent rewrite | Yes (`updatedInput`) |
 | OpenCode | TypeScript plugin (`execute.before` in 2.0, `tool.execute.before` in 1.x >= 1.18.29) | In-place mutation | Yes |
 | Pi | TypeScript extension (`tool_call` event) | In-place mutation | Yes |
@@ -375,7 +375,7 @@ New integrations must follow the [Exit Code Contract](#exit-code-contract) and [
 |------|-----------|-------------|----------|
 | **Full hook** | Shell script or Rust binary, intercepts commands via agent's hook API | High — must track agent API changes | Claude Code, Cursor, Copilot, Gemini, Codex, Antigravity |
 | **Plugin** | TypeScript/JS/Python plugin in agent's plugin system | Medium — agent manages loading | OpenCode, Hermes, Pi, Oh My Pi |
-| **Rules file** | Prompt-level instructions the agent reads | Low — no code to break | Cline, Windsurf |
+| **Rules file** | Prompt-level instructions the agent reads | Low — no code to break | Cline, Devin Desktop |
 
 ### Eligibility
 

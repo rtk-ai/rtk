@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, Mistral Vibe, and Trae
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Devin Desktop, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, Mistral Vibe, and Trae
 sidebar:
   order: 3
 ---
@@ -41,7 +41,7 @@ Agent runs "cargo test"
 | Hermes | Python plugin (`terminal` command mutation) | Yes |
 | Factory Droid | Rust binary (`PreToolUse`, matcher `Execute`) | Yes |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
-| Windsurf | Rules file (prompt-level) | N/A |
+| Devin Desktop (formerly Windsurf) | Rules file (prompt-level) | N/A |
 | Codex CLI | Rust binary (`PreToolUse`) | Yes |
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rust binary (`PreToolUse` plugin) | Yes |
@@ -240,7 +240,14 @@ rtk init --agent cline    # creates .clinerules in current project
 
 Cline reads `.clinerules` as custom instructions. RTK adds guidance telling Cline to prefer `rtk <cmd>` over raw commands.
 
-### Windsurf
+<a id="windsurf"></a>
+
+### Devin Desktop (formerly Windsurf)
+
+[Windsurf is now Devin Desktop](https://devin.ai/blog/windsurf-is-now-devin-desktop).
+RTK still uses the `windsurf` agent identifier and writes `.windsurfrules` in the
+current project. [Devin Desktop continues to read this legacy rules file](https://docs.devin.ai/desktop/devin-desktop-faq#are-my-windsurf-rules-still-supported-what-about-devin-rules).
+The `--global` flag is required by RTK, but the rules file remains project-scoped.
 
 ```bash
 rtk init --global --agent windsurf    # creates .windsurfrules in current project
@@ -326,7 +333,7 @@ Strips only RTK's `[[hooks]]` block and the `~/.vibe/prompts/rtk.md` file. Any o
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Kilo Code) rely on the model following instructions. Full hook integrations (Claude Code, Trae, Cursor, Gemini, Codex, Factory Droid, Antigravity) apply rewrites before execution whenever RTK supports and can safely attest the command. Plugin integrations (OpenCode, Pi, Hermes) use in-place mutation via the agent's extension or plugin API.
+Rules file integrations (Cline, Devin Desktop, Kilo Code) rely on the model following instructions. Full hook integrations (Claude Code, Trae, Cursor, Gemini, Codex, Factory Droid, Antigravity) apply rewrites before execution whenever RTK supports and can safely attest the command. Plugin integrations (OpenCode, Pi, Hermes) use in-place mutation via the agent's extension or plugin API.
 
 ## Windows support
 
