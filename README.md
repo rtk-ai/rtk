@@ -357,6 +357,13 @@ product, is not until the Change Date.
 The `rtk-proxy` daemon (`proxy/`) is **BUSL-1.1** on the same terms and ships as
 its own archive with its licence alongside — `rtk` never links it.
 
+## RTK Pro
+
+Your company is looking to take control back on your AI fleet ?
+RTK Pro provides the control layer for costs, security and governances for all agents.
+
+Check it out : [RTK Pro](https://pro.rtk-ai.app).
+
 ## Disclaimer
 
 See [DISCLAIMER.md](DISCLAIMER.md).

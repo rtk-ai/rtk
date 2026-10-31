@@ -87,7 +87,7 @@ which = "8"
 # sources the static view reads (core::tracking + the llm-proxy's own DB).
 # Opt-in, not on the hot startup path -- doesn't affect the <10ms budget.
 ratatui = "0.29"
-crossterm = "0.28"
+crossterm = "0.29"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

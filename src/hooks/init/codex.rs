@@ -446,7 +446,13 @@ fn lexically_normalized(path: &Path) -> PathBuf {
     normalized
 }
 
-pub(super) fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UninstallCodexOutcome {
+    Clean,
+    HookRefused,
+}
+
+pub(super) fn uninstall_codex(global: bool, ctx: InitContext) -> Result<UninstallCodexOutcome> {
     let InitContext { dry_run, .. } = ctx;
     let mut hook_left_in_place = None;
     let removed = if global {
@@ -483,7 +489,11 @@ pub(super) fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
         codex_uninstall_report(&removed, hook_left_in_place.as_ref(), dry_run)
     );
 
-    Ok(())
+    if hook_left_in_place.is_some() {
+        Ok(UninstallCodexOutcome::HookRefused)
+    } else {
+        Ok(UninstallCodexOutcome::Clean)
+    }
 }
 
 /// Everything `rtk init --codex --uninstall` says it did, as one block.
@@ -2053,8 +2063,9 @@ mod tests {
         .expect("symlink");
 
         let _entered = test_isolation::enter(project.path());
-        uninstall_codex(false, InitContext::default())
+        let outcome = uninstall_codex(false, InitContext::default())
             .expect("uninstall still reports what it did");
+        assert!(matches!(outcome, UninstallCodexOutcome::HookRefused));
 
         assert!(
             !elsewhere.path().join("stolen.json").exists(),
@@ -2205,9 +2216,12 @@ mod tests {
         .expect("RTK.md");
 
         let _entered = test_isolation::enter(project.path());
-        let result = uninstall_codex(false, InitContext::default());
+        let outcome = uninstall_codex(false, InitContext::default());
 
-        result.expect("uninstall still cleans the project");
+        assert!(matches!(
+            outcome.expect("uninstall still cleans the project"),
+            UninstallCodexOutcome::HookRefused
+        ));
         assert_eq!(
             fs::read_to_string(elsewhere.path().join(HOOKS_JSON)).expect("read"),
             registered,
