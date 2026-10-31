@@ -218,19 +218,11 @@ fn run_filtered(original_args: &[String], invocation: &RunInvocation, verbose: u
         );
     }
 
-    let exit_code = runner::run_filtered(
+    let exit_code = runner::run_filtered_with_exit(
         cmd,
         "golangci-lint",
         &display_args(original_args),
-        |stdout| {
-            // v2 outputs JSON on first line + trailing text; v1 outputs just JSON
-            let json_output = if version >= 2 {
-                stdout.lines().next().unwrap_or("")
-            } else {
-                stdout
-            };
-            filter_golangci_json(json_output, version)
-        },
+        |output, exit_code| filter_golangci_run(output, version, exit_code),
         crate::core::runner::RunOptions::stdout_only(),
     )?;
 
@@ -337,6 +329,23 @@ fn format_command(base: &str, args: &[String]) -> String {
     } else {
         format!("{} {}", base, args.join(" "))
     }
+}
+
+fn filter_golangci_run(output: &str, version: u32, exit_code: i32) -> String {
+    if exit_code >= 2 {
+        return output.to_string();
+    }
+
+    // v2 outputs JSON on first line + trailing text; v1 outputs just JSON.
+    let json_output = if version >= 2 {
+        output.lines().next().unwrap_or("")
+    } else {
+        output
+    };
+    if exit_code != 0 && serde_json::from_str::<GolangciOutput>(json_output).is_err() {
+        return output.to_string();
+    }
+    filter_golangci_json(json_output, version)
 }
 
 /// Filter golangci-lint JSON output - group by linter and file
@@ -476,6 +485,18 @@ mod tests {
         let result = filter_golangci_json(output, 1);
         assert!(result.contains("golangci-lint"));
         assert!(result.contains("No issues found"));
+    }
+
+    #[test]
+    fn test_filter_golangci_run_preserves_command_errors() {
+        let output = "Error: no go files to analyze\n";
+        assert_eq!(filter_golangci_run(output, 2, 7), output);
+    }
+
+    #[test]
+    fn test_filter_golangci_run_preserves_non_json_lint_failure() {
+        let output = "Error: no go files to analyze\n";
+        assert_eq!(filter_golangci_run(output, 2, 1), output);
     }
 
     #[test]
