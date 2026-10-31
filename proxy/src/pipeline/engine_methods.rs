@@ -43,10 +43,11 @@ impl EngineMethodsTransform {
         }
     }
 
-    fn chain_for(&self, facts: &Facts) -> Option<(String, Vec<&'static dyn Method>)> {
+    fn chain_for(&self, facts: &Facts) -> Option<(String, Vec<&'static dyn Method>, String)> {
         let decisions = evaluate(&self.resolved, Position::proxy(Subject::ToolResult), facts);
         let mut methods: Vec<&'static dyn Method> = Vec::new();
         let mut key = String::new();
+        let mut rules: Vec<&str> = Vec::new();
         for decision in &decisions {
             if decision.shadow() {
                 continue;
@@ -55,16 +56,20 @@ impl EngineMethodsTransform {
                 DecisionKind::Transform {
                     methods: selected, ..
                 } => {
+                    let ran = methods.len();
                     for method in selected.iter().copied().filter(|m| runs_in_proxy(*m)) {
                         key.push_str(method.name());
                         key.push(',');
                         methods.push(method);
                     }
+                    if methods.len() > ran {
+                        rules.push(&decision.rule.name);
+                    }
                 }
                 DecisionKind::Act(_) => return None,
             }
         }
-        (!methods.is_empty()).then_some((key, methods))
+        (!methods.is_empty()).then(|| (key, methods, rules.join(" + ")))
     }
 
     fn transform(
@@ -74,7 +79,7 @@ impl EngineMethodsTransform {
         text: &str,
         succeeded: bool,
         req: &RequestMeta,
-    ) -> Option<String> {
+    ) -> Option<(String, String)> {
         if text.len() < self.resolved.guards.min_size
             || text.contains(crate::pipeline::TRUNCATION_MARKER_TAG)
         {
@@ -90,10 +95,10 @@ impl EngineMethodsTransform {
             let (shape, _) = rtk_engine::shape::classify(text, &features);
             facts.insert("shape".into(), Fact::Str(shape.as_str().to_string()));
         }
-        let (key, methods) = self.chain_for(&facts)?;
+        let (key, methods, rule) = self.chain_for(&facts)?;
         let id = memo_key(&key, text);
         if let Some(hit) = self.memo.lock().ok().and_then(|m| m.get(&id).cloned()) {
-            return hit;
+            return hit.map(|out| (out, rule));
         }
         let origin = Origin {
             tool: Some(tool_name.to_string()),
@@ -119,7 +124,7 @@ impl EngineMethodsTransform {
             }
             memo.insert(id, out.clone());
         }
-        out
+        out.map(|out| (out, rule))
     }
 }
 
@@ -233,6 +238,7 @@ impl Transform for EngineMethodsTransform {
         let snapshot = RequestMeta::of(req);
         let mut before = 0usize;
         let mut after = 0usize;
+        let mut by_rule: Vec<(String, i64)> = Vec::new();
         let Some(msgs) = req.body.get_mut("messages").and_then(|m| m.as_array_mut()) else {
             return Ok(());
         };
@@ -259,10 +265,18 @@ impl Transform for EngineMethodsTransform {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 let mut rewrite = |text: &mut String| {
-                    if let Some(new) = self.transform(tool, &tool_name, text, succeeded, &snapshot)
+                    if let Some((new, rule)) =
+                        self.transform(tool, &tool_name, text, succeeded, &snapshot)
                     {
-                        before += crate::tokenizer::count(text);
-                        after += crate::tokenizer::count(&new);
+                        let was = crate::tokenizer::count(text);
+                        let now = crate::tokenizer::count(&new);
+                        before += was;
+                        after += now;
+                        let delta = was as i64 - now as i64;
+                        match by_rule.iter_mut().find(|(n, _)| *n == rule) {
+                            Some((_, acc)) => *acc += delta,
+                            None => by_rule.push((rule, delta)),
+                        }
                         *text = new;
                     }
                 };
@@ -281,6 +295,9 @@ impl Transform for EngineMethodsTransform {
                     _ => {}
                 }
             }
+        }
+        for (rule, saved) in by_rule {
+            req.record_rule_saving(&rule, saved);
         }
         let saved = before.saturating_sub(after) as i64;
         if saved > 0 {
@@ -355,6 +372,7 @@ mod tests {
             api_key_hash: None,
             tokens_saved: 0,
             saved_by_stage: Vec::new(),
+            saved_by_rule: Vec::new(),
             routed_from: None,
             request_class: None,
             user_id: None,
@@ -525,5 +543,48 @@ mod tests {
         );
         let (out, _) = run(WEB_MD, "WebFetch", &raw).await;
         assert_eq!(out, raw);
+    }
+
+    async fn run_request(pipeline: &str, tool: &str, output: &str) -> InterceptedRequest {
+        let stage = EngineMethodsTransform::new(resolved_for(pipeline));
+        let mut req = request(tool, output);
+        stage.on_request(&mut req).await.expect("runs");
+        req
+    }
+
+    #[tokio::test]
+    async fn a_saving_is_credited_to_the_rule_that_made_it() {
+        let req = run_request(WEB_MD, "WebFetch", &html_page()).await;
+        let saved = req.saved_by(STAGE);
+        assert!(saved > 0);
+        assert_eq!(req.saved_by_rule, vec![("web-to-md".to_string(), saved)]);
+    }
+
+    #[tokio::test]
+    async fn chained_rules_share_one_entry() {
+        let pipeline = "schema_version = 1\n[[proxy.request.tool_result]]\nname = \"to-md\"\nwhen = { format = \"web\" }\nuse = [\"web-md\"]\ncontinue = true\n[[proxy.request.tool_result]]\nname = \"slim\"\nuse = [\"md-slim\"]\n";
+        let req = run_request(pipeline, "WebFetch", &html_page()).await;
+        let saved = req.saved_by(STAGE);
+        assert!(saved > 0);
+        assert_eq!(req.saved_by_rule, vec![("to-md + slim".to_string(), saved)]);
+    }
+
+    #[tokio::test]
+    async fn an_untouched_result_credits_no_rule() {
+        let raw = "plain terminal output line that is long enough to matter\n".repeat(20);
+        let req = run_request(WEB_MD, "Bash", &raw).await;
+        assert!(req.saved_by_rule.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_memoized_rewrite_is_still_credited() {
+        let stage = EngineMethodsTransform::new(resolved_for(WEB_MD));
+        let raw = html_page();
+        let mut first = request("WebFetch", &raw);
+        stage.on_request(&mut first).await.expect("runs");
+        let mut second = request("WebFetch", &raw);
+        stage.on_request(&mut second).await.expect("runs");
+        assert_eq!(first.saved_by_rule, second.saved_by_rule);
+        assert!(!second.saved_by_rule.is_empty());
     }
 }

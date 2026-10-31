@@ -251,6 +251,14 @@ rtk gain --by-pipeline    # which pipeline
 
 These combine — passing several renders several sections in one report.
 
+At the proxy, what `proxy.request` rules remove is counted under the `rules` method and credited to the rule that rewrote each tool result. Rules chained with `continue = true` run as one chain and share one entry (`first + second`). The default report lists the largest of them under `via rules`, and `--by-rule` lists them all:
+
+```
+Trimmed in flight: 1.7K removed across the 1 req it touched (per-mechanism ratios below)
+  via rules:       1.7K
+    web-pages:     1.7K
+```
+
 ### One pipeline in detail
 
 `--pipeline <NAME>` slices a single pipeline by where its savings actually land: which tool outputs the hooks trimmed, and which methods compressed billed input.

@@ -156,4 +156,5 @@ With the proxy running, a bare `rtk gain` switches to a live dashboard covering 
 rtk gain              # live dashboard (proxy running, interactive terminal)
 rtk gain --text       # force the static view
 rtk gain --text --by-method  # which compression method saved what
+rtk gain --text --by-rule    # which proxy.request rule saved what
 ```
