@@ -493,6 +493,24 @@ fn show_cmd(
     cmd
 }
 
+fn show_recovery_hint(global_args: &[String], args: &[String]) -> String {
+    let mut command = String::from("rtk proxy git ");
+    for arg in global_args {
+        command.push_str(&quote_word(arg));
+        command.push(' ');
+    }
+    command.push_str("show");
+    for arg in args {
+        if arg == "--no-compact" || arg.starts_with("--no-compact=") {
+            continue;
+        }
+        command.push(' ');
+        command.push_str(&quote_word(arg));
+    }
+    format!("[full commit: {command}]")
+}
+
+
 fn run_show(
     args: &[String],
     max_lines: Option<usize>,
@@ -772,6 +790,10 @@ fn run_show(
             printed.push_str("\n\nChanges:");
         }
         let compacted = compact_diff(&strip_ansi(diff_text), max_lines.unwrap_or(500));
+        let compacted = compacted.replace(
+            "[full diff: rtk git diff --no-compact]",
+            &show_recovery_hint(global_args, args),
+        );
         printed.push('\n');
         printed.push_str(&compacted);
     }
@@ -4223,6 +4245,21 @@ mod tests {
         let result = compact_diff(diff, 100);
         assert!(result.contains("foo.rs"));
         assert!(result.contains("+"));
+    }
+
+    #[test]
+    fn test_show_recovery_hint_uses_the_unfiltered_commit_command() {
+        assert_eq!(
+            show_recovery_hint(&[], &["HEAD".to_string()]),
+            "[full commit: rtk proxy git show HEAD]"
+        );
+        assert_eq!(
+            show_recovery_hint(
+                &["-C".to_string(), "/repo".to_string()],
+                &["HEAD".to_string(), "--no-compact".to_string()],
+            ),
+            "[full commit: rtk proxy git -C /repo show HEAD]"
+        );
     }
 
     #[test]
