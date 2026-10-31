@@ -6,6 +6,9 @@
 
 - `pytest_cmd.rs` uses a state machine text parser (no JSON available from pytest)
 - `ruff_cmd.rs` uses JSON for check mode (`--output-format=json`) and text filtering for format mode
+- Ruff check targets are forwarded without adding paths. RTK no longer appends
+  `.` for names containing `=` or following `--`; checks without a target use
+  Ruff's own current-directory default.
 - `sqlfluff_cmd.rs` injects `--format json` for lint mode and groups violations by rule and file; other subcommands pass through capped
 - Ruff and SQLFluff list identical descriptions once beside a visible top rule.
   Locations retain the rule code; differing messages and rules outside the

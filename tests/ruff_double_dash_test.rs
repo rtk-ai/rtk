@@ -1,4 +1,5 @@
-//! `--` handling for `rtk ruff`. clap's `trailing_var_arg` strips a `--` that leads `args`, so
+//! Explicit targets and `--` handling for `rtk ruff`.
+//! clap's `trailing_var_arg` strips a `--` that leads `args`, so
 //! without `restore_double_dash` `rtk ruff -- check` reached `run()` as `["check"]`, was routed
 //! as the `check` subcommand with no path, and linted the whole working directory. ruff itself
 //! answers `ruff -- check` with its usage error, and `ruff check -- check` lints only the file
@@ -76,4 +77,28 @@ fn ruff_check_double_dash_is_forwarded_once() {
 fn ruff_double_dash_after_a_flag_is_forwarded_once() {
     let argv = ruff_argv(&["--isolated", "--", "check"]);
     assert_eq!(argv, vec!["--isolated", "--", "check"]);
+}
+
+// #4752: an equals sign belongs to the path, not necessarily an option assignment.
+#[test]
+fn ruff_equals_path_does_not_add_the_working_directory() {
+    for args in [&["check", "a=b.py"][..], &["a=b.py"][..]] {
+        assert_eq!(
+            ruff_argv(args),
+            vec!["check", "--output-format=json", "a=b.py"],
+            "ruff {args:?} must only receive the requested target"
+        );
+    }
+}
+
+// #4752: everything after the separator is a target, including another `--`.
+#[test]
+fn ruff_targets_after_the_separator_do_not_add_the_working_directory() {
+    for target in ["a=b.py", "-dash.py", "--"] {
+        assert_eq!(
+            ruff_argv(&["check", "--", target]),
+            vec!["check", "--output-format=json", "--", target],
+            "ruff must only receive target {target:?}"
+        );
+    }
 }

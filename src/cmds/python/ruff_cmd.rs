@@ -90,14 +90,6 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         for arg in &args[start_idx..] {
             cmd.arg(arg);
         }
-
-        if args
-            .iter()
-            .skip(start_idx)
-            .all(|a| a.starts_with('-') || a.contains('='))
-        {
-            cmd.arg(".");
-        }
     } else {
         for arg in args {
             cmd.arg(arg);
