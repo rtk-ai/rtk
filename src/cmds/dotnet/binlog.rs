@@ -88,6 +88,13 @@ static TEST_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("valid regex")
 });
+static TEST_RUN_FOR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^\s*Test run for\s+(?P<dll>[^\r\n(]*\.dll)").expect("valid regex")
+});
+static TEST_SUMMARY_DLL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^\s*(?:Passed!|Failed!)\b[^\r\n]*-\s*(?P<dll>[^\r\n]*\.dll)\s*$")
+        .expect("valid regex")
+});
 static FAILED_TEST_HEAD_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^\s*Failed\s+(?P<name>[^\r\n\[]+)\s+\[[^\]\r\n]+\]\s*$").expect("valid regex")
 });
@@ -1046,7 +1053,31 @@ pub fn parse_restore_issues_from_text(text: &str) -> (Vec<BinlogIssue>, Vec<Binl
 }
 
 fn count_projects(text: &str) -> usize {
-    PROJECT_PATH_RE.captures_iter(text).count()
+    // Distinct test projects, not matching lines: a restore warning names the project's .csproj,
+    // so one project mentioned by two warnings used to count as two (#4844). Prefer the
+    // per-project DLL from the `Test run for` / `Passed! - … - dll` lines; SDKs that print
+    // neither still get the DISTINCT .csproj paths.
+    let mut projects: HashSet<&str> = HashSet::new();
+    for captures in TEST_RUN_FOR_RE.captures_iter(text) {
+        if let Some(dll) = captures.name("dll") {
+            projects.insert(dll.as_str());
+        }
+    }
+    for captures in TEST_SUMMARY_DLL_RE.captures_iter(text) {
+        if let Some(dll) = captures.name("dll") {
+            projects.insert(dll.as_str());
+        }
+    }
+    if !projects.is_empty() {
+        return projects.len();
+    }
+    let mut csprojs: HashSet<&str> = HashSet::new();
+    for captures in PROJECT_PATH_RE.captures_iter(text) {
+        if let Some(matched) = captures.get(0) {
+            csprojs.insert(matched.as_str().trim());
+        }
+    }
+    csprojs.len()
 }
 
 fn extract_duration(text: &str) -> Option<String> {
@@ -1344,6 +1375,52 @@ Time Elapsed 00:00:12.34
         assert_eq!(summary.skipped, 7);
         assert_eq!(summary.total, 948);
         assert_eq!(summary.duration_text.as_deref(), Some("00:00:12.34"));
+    }
+
+    #[test]
+    fn test_parse_test_from_text_counts_distinct_projects_despite_warnings() {
+        // Real `dotnet test` shape (.NET 10): two test projects, each named by two restore
+        // warnings (NU1900). The warnings name the .csproj, but each project is ONE project
+        // (#4844) — the count must not grow with every line that mentions the path.
+        let input = r#"
+/work/A.Tests.csproj : warning NU1900: Unable to find package 'Coverlet.Collector'. No sets of versions.
+/work/A.Tests.csproj : warning NU1900: Unable to find package 'Microsoft.NET.Test.Sdk'. No sets of versions.
+  Test run for /work/A.Tests/bin/Debug/A.Tests.dll (.NETCoreApp,Version=v10.0)
+  Passed A.Tests.Tests.SaysHello [1 ms]
+/work/B.Tests.csproj : warning NU1900: Unable to find package 'Coverlet.Collector'. No sets of versions.
+/work/B.Tests.csproj : warning NU1900: Unable to find package 'Microsoft.NET.Test.Sdk'. No sets of versions.
+  Test run for /work/B.Tests/bin/Debug/B.Tests.dll (.NETCoreApp,Version=v10.0)
+  Passed B.Tests.Tests.SaysBye [2 ms]
+Passed! - Failed:     0, Passed:     2, Skipped:     0, Total:     2, Duration: 1 ms - A.Tests.dll
+Passed! - Failed:     0, Passed:     1, Skipped:     0, Total:     1, Duration: 1 ms - B.Tests.dll
+"#;
+
+        let summary = parse_test_from_text(input);
+
+        assert_eq!(summary.passed, 3);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(
+            summary.project_count, 2,
+            "a warning naming a project must not inflate the project count"
+        );
+    }
+
+    #[test]
+    fn test_parse_test_from_text_counts_distinct_csprojs_without_run_lines() {
+        // Older SDKs print neither a `Test run for` line nor a per-project `Passed! - … - dll`
+        // summary. Distinct .csproj paths still count — but a project named twice is one project.
+        let input = r#"
+/work/A.Tests.csproj : warning NU1900: Unable to find package 'Coverlet.Collector'. No sets of versions.
+/work/A.Tests.csproj : warning NU1900: Unable to find package 'Microsoft.NET.Test.Sdk'. No sets of versions.
+/work/B.Tests.csproj : warning NU1900: Unable to find package 'Coverlet.Collector'. No sets of versions.
+"#;
+
+        let summary = parse_test_from_text(input);
+
+        assert_eq!(
+            summary.project_count, 2,
+            "repeat mentions of one project must not inflate the count"
+        );
     }
 
     #[test]
