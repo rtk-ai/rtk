@@ -1,7 +1,8 @@
 //! Filters Ruff linter and formatter output.
 
 use crate::core::arg_tokenizer::{
-    Dialect, Token, TokenKind, ValueSpec, before_dashdash, dashdash_index, tokenize_grammar,
+    Dialect, Token, TokenKind, ValueSpec, before_dashdash, dashdash_index, has_flag, tokenize,
+    tokenize_grammar,
 };
 use crate::core::args_utils;
 use crate::core::config;
@@ -59,12 +60,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     let mut cmd = resolved_command("ruff");
 
-    // Both spellings: injecting a second --output-format makes ruff reject the call.
-    let user_set_output_format = args
-        .iter()
-        .any(|a| a == "--output-format" || a.starts_with("--output-format="));
-
-    let clean_outputs: &[&str] = if is_check && !user_set_output_format {
+    // `[]` is a clean run only when rtk chose the format; a user who asked for JSON gets `[]` back.
+    let clean_outputs: &[&str] = if is_check && check_format(args).inject_json {
         &["[]"]
     } else {
         &[]
@@ -101,16 +98,7 @@ fn filter_ruff_output(args: &[String], stdout: &str) -> String {
     let is_format = matches!(route, RuffRoute::Subcommand { at } if args[at] == "format");
     let trimmed = stdout.trim();
 
-    let user_set_output_format = args
-        .iter()
-        .any(|a| a == "--output-format" || a.starts_with("--output-format="));
-    let user_json_format = args.iter().enumerate().any(|(i, a)| {
-        a == "--output-format=json"
-            || (a == "--output-format" && args.get(i + 1).is_some_and(|n| n == "json"))
-    });
-    let use_json_filter = !user_set_output_format || user_json_format;
-
-    if is_check && use_json_filter && !trimmed.is_empty() {
+    if is_check && check_format(args).use_json_filter && !trimmed.is_empty() {
         filter_ruff_check_json(stdout)
     } else if is_format {
         filter_ruff_format(stdout)
@@ -231,11 +219,45 @@ fn requests_top_level(token: Token<'_>) -> bool {
     )
 }
 
-/// The complete argument vector rtk passes to ruff.
-fn plan_ruff_command(args: &[String]) -> Vec<String> {
+/// How rtk reads `ruff check` output, decided once from the args.
+#[derive(Debug, PartialEq, Eq)]
+struct CheckFormat {
+    /// rtk adds `--output-format=json` because the user chose no format.
+    inject_json: bool,
+    /// Stdout is the diagnostics array `filter_ruff_check_json` reads.
+    use_json_filter: bool,
+}
+
+fn check_format(args: &[String]) -> CheckFormat {
+    // Both spellings: injecting a second --output-format makes ruff reject the call.
     let user_set_output_format = args
         .iter()
         .any(|a| a == "--output-format" || a.starts_with("--output-format="));
+
+    let user_json_format = args.iter().enumerate().any(|(i, a)| {
+        a == "--output-format=json"
+            || (a == "--output-format" && args.get(i + 1).is_some_and(|n| n == "json"))
+    });
+
+    // `--statistics` prints ruff's compact table, or under JSON an array that is not the
+    // diagnostics one `filter_ruff_check_json` reads: either way it passes through as ruff wrote it.
+    let statistics = has_statistics_flag(args);
+
+    CheckFormat {
+        inject_json: !user_set_output_format && !statistics,
+        use_json_filter: (!user_set_output_format || user_json_format) && !statistics,
+    }
+}
+
+/// Structural `tokenize` is enough: ruff rejects a value that looks like a flag (`--cache-dir
+/// --statistics` is "a value is required"), so no value-taking flag can hide this one.
+fn has_statistics_flag(args: &[String]) -> bool {
+    let tokens = tokenize(args);
+    has_flag(&tokens, Dialect::Posix, "statistics")
+}
+
+/// The complete argument vector rtk passes to ruff.
+fn plan_ruff_command(args: &[String]) -> Vec<String> {
     if let RuffRoute::Check { explicit_at } = route_ruff_args(args) {
         let forwarded: Vec<&str> = args
             .iter()
@@ -244,7 +266,7 @@ fn plan_ruff_command(args: &[String]) -> Vec<String> {
             .map(|(_, arg)| arg.as_str())
             .collect();
         let mut plan = vec!["check".to_string()];
-        if !user_set_output_format {
+        if check_format(args).inject_json {
             plan.push("--output-format=json".to_string());
         }
         plan.extend(forwarded.iter().map(|arg| (*arg).to_string()));
@@ -611,9 +633,86 @@ mod tests {
     #[test]
     fn flag_only_implicit_check_routes_to_check() {
         assert_plan(&["--fix"], &["check", "--output-format=json", "--fix", "."]);
-        assert_plan(
-            &["--statistics"],
-            &["check", "--output-format=json", "--statistics", "."],
+        assert_plan(&["--statistics"], &["check", "--statistics", "."]);
+    }
+
+    #[test]
+    fn plain_check_gets_json_injected_and_filtered() {
+        for a in [owned(&["check"]), owned(&["check", "src"]), owned(&["src"])] {
+            assert_eq!(
+                check_format(&a),
+                CheckFormat {
+                    inject_json: true,
+                    use_json_filter: true
+                },
+                "ruff {a:?}"
+            );
+        }
+    }
+
+    /// ruff's `--statistics` table is already compact, and under JSON it is a different
+    /// array from the diagnostics one, so it is neither injected nor run through the filter.
+    #[test]
+    fn statistics_keeps_ruffs_own_format() {
+        for a in [
+            owned(&["check", "--statistics", "src"]),
+            owned(&["src", "--statistics"]),
+            owned(&["check", "--select", "F401", "--statistics"]),
+        ] {
+            assert_eq!(
+                check_format(&a),
+                CheckFormat {
+                    inject_json: false,
+                    use_json_filter: false
+                },
+                "ruff {a:?}"
+            );
+        }
+        // The user's JSON is the statistics array here, which the diagnostics filter cannot read.
+        assert_eq!(
+            check_format(&owned(&["check", "--statistics", "--output-format=json"])),
+            CheckFormat {
+                inject_json: false,
+                use_json_filter: false
+            }
+        );
+    }
+
+    /// What the tokenizer sees as a flag: a path after `--`, or the value of another flag, is not.
+    #[test]
+    fn statistics_is_only_the_flag() {
+        for a in [
+            owned(&["check", "--", "--statistics"]),
+            owned(&["check", "--cache-dir=--statistics"]),
+            owned(&["check", "--statistics-file", "x"]),
+        ] {
+            assert!(check_format(&a).inject_json, "ruff {a:?}");
+        }
+    }
+
+    #[test]
+    fn user_output_format_is_unchanged() {
+        let format = |a: &[&str]| check_format(&owned(a));
+        assert_eq!(
+            format(&["check", "--output-format=json"]),
+            CheckFormat {
+                inject_json: false,
+                use_json_filter: true
+            }
+        );
+        assert_eq!(
+            format(&["check", "--output-format", "json"]),
+            CheckFormat {
+                inject_json: false,
+                use_json_filter: true
+            }
+        );
+        assert_eq!(
+            format(&["check", "--output-format", "concise"]),
+            CheckFormat {
+                inject_json: false,
+                use_json_filter: false
+            }
         );
     }
 
@@ -917,10 +1016,7 @@ Would reformat: tests/test_utils.py
             &["-q", "clean.py"],
             &["check", "--output-format=json", "-q", "clean.py"],
         );
-        assert_plan(
-            &["--statistics"],
-            &["check", "--output-format=json", "--statistics", "."],
-        );
+        assert_plan(&["--statistics"], &["check", "--statistics", "."]);
         assert_plan(&[], &["check", "--output-format=json", "."]);
     }
 
