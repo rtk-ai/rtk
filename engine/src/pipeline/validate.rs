@@ -141,12 +141,12 @@ pub fn validate(resolved: &Resolved, ctx: &ValidateCtx) -> Vec<Diagnostic> {
             }
         }
         if let Some(channel) = &directive.def.channel {
-            if directive.def.enabled && matches!(channel.as_str(), "session_start" | "per_turn") {
+            if directive.def.enabled && channel == "per_turn" {
                 out.push(
                     Diagnostic::new(
                         Code::W019,
                         format!(
-                            "directive channel `{channel}` is not delivered yet — the directive is skipped; use `awareness_file` (the default)"
+                            "directive channel `{channel}` is not delivered yet — the directive is skipped; use `awareness_file` (the default) or `session_start`"
                         ),
                     )
                     .at(directive.origin.clone(), directive.def.line),
@@ -1281,17 +1281,17 @@ use  = ["term"]
 
     #[test]
     fn w019_flags_undelivered_directive_channels() {
-        for channel in ["session_start", "per_turn"] {
-            let text = format!(
+        let text = "[[directive]]\nname = \"d\"\ntext = \"be brief\"\nchannel = \"per_turn\"\n";
+        assert!(codes_in(Scope::User, text).contains(&Code::W019));
+        for channel in ["awareness_file", "session_start"] {
+            let ok = format!(
                 "[[directive]]\nname = \"d\"\ntext = \"be brief\"\nchannel = \"{channel}\"\n"
             );
             assert!(
-                codes_in(Scope::User, &text).contains(&Code::W019),
+                !codes_in(Scope::User, &ok).contains(&Code::W019),
                 "{channel}"
             );
         }
-        let ok = "[[directive]]\nname = \"d\"\ntext = \"be brief\"\nchannel = \"awareness_file\"\n";
-        assert!(!codes_in(Scope::User, ok).contains(&Code::W019));
     }
 
     #[test]

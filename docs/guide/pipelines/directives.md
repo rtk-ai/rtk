@@ -26,7 +26,7 @@ level = "default"
 |---|---|
 | `use` / `text` / `file` | exactly one: a shipped directive, inline text, or a file relative to the pipeline file |
 | `name` | defaults to `use` |
-| `channel` | `awareness_file` (default): RTK's instruction file, present every turn |
+| `channel` | `awareness_file` (default): RTK's instruction file, present every turn. `session_start`: injected once when a session starts, on the agents whose hook has a session-start event (Claude Code, Codex, Cursor, Antigravity — see [Agent Coverage](../resources/agent-coverage.md)); elsewhere the directive is skipped and `rtk init` says so. `per_turn` is reserved and not delivered yet (W019) |
 | `enabled` | |
 | module options | `level` for `rtk-awareness` |
 
