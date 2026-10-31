@@ -111,6 +111,28 @@ impl<V> Schema<'_, V> {
     pub(crate) fn label(&self) -> &'static str {
         self.kind.info().label
     }
+
+    /// The version of the last step: what a fully migrated database is stamped at.
+    fn last_version(&self) -> Option<i64>
+    where
+        V: Version,
+    {
+        self.steps.last().map(|&(version, _)| version.number())
+    }
+
+    /// Why this database lacks part of its schema: it is read-only and was not
+    /// migrated.
+    pub(crate) fn not_upgraded(&self) -> String {
+        format!(
+            "{} database is read-only and was not upgraded",
+            self.label()
+        )
+    }
+
+    /// SQLite's `msg` about a missing table or column, with [`Self::not_upgraded`].
+    pub(crate) fn explain_missing(&self, msg: &str) -> String {
+        format!("{msg} ({})", self.not_upgraded())
+    }
 }
 
 /// Whether to gate schema migrations behind `user_version` (the hot-path
@@ -122,13 +144,29 @@ pub(crate) enum MigrationMode {
     Always,
 }
 
+/// A database as [`open_and_migrate`] or [`open_existing_and_migrate`] left it.
+#[derive(Debug)]
+pub(crate) struct Opened {
+    pub conn: Connection,
+    /// The database is read-only and its stamp is below the schema's last step:
+    /// it was opened as it is, and the steps above its stamp did not run.
+    pub behind: bool,
+}
+
 /// Open (creating if needed) the `schema` database at `path`, apply pragmas, and
-/// run its steps per `mode`.
+/// run its steps per `mode`. A gated open of a read-only database whose steps
+/// cannot run is not an error: the connection is kept at the schema the database
+/// has and `behind` says so. A read-only database is not migrated at all: SQLite
+/// reports one opened read-only, or on a file it cannot write (EACCES, EROFS),
+/// without a write being tried. A refusal that only shows on a step's first write
+/// (a read-only directory) is told by SQLITE_READONLY from the step. The file is
+/// still refused first unless it is this database's, and `Always` mode (`rtk init`)
+/// still fails on a database it cannot migrate.
 pub(crate) fn open_and_migrate<V: Version>(
     path: &Path,
     schema: &Schema<V>,
     mode: MigrationMode,
-) -> Result<Connection> {
+) -> Result<Opened> {
     let label = schema.label();
     // For a brand-new DB, create its directory and pre-create the file ourselves
     // via `open_private` so SQLite derives the -wal/-shm modes from an
@@ -265,7 +303,7 @@ pub(crate) fn open_existing_and_migrate<V: Version>(
     path: &Path,
     schema: &Schema<V>,
     mode: MigrationMode,
-) -> Result<Option<Connection>> {
+) -> Result<Option<Opened>> {
     let label = schema.label();
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_URI
@@ -305,6 +343,8 @@ fn open_existing_and_read(
 /// ours, repairs the owner-only permissions of its directory (when `repair_dir`)
 /// and of the file *before* any write to it (external tampering, a restored
 /// backup), sets WAL, and migrates. `flags` are the ones `conn` was opened with.
+/// A gated open of a read-only database does not migrate it: see
+/// [`open_and_migrate`].
 fn claim<V: Version>(
     mut conn: Connection,
     (tag, stamp): (i32, i64),
@@ -313,7 +353,7 @@ fn claim<V: Version>(
     mode: MigrationMode,
     flags: OpenFlags,
     repair_dir: bool,
-) -> Result<Connection> {
+) -> Result<Opened> {
     let label = schema.label();
     check_owner(&conn, schema, tag, stamp)?;
     if repair_dir {
@@ -339,6 +379,16 @@ fn claim<V: Version>(
         restrict_sidecars(path);
         conn = open_db(path, flags, label)?;
     }
+    let gated = matches!(mode, MigrationMode::GatedByVersion);
+    // What is still read-only here cannot be migrated, and trying would only be a
+    // write that fails: the stamp alone says whether the schema is behind.
+    if gated
+        && conn
+            .is_readonly(rusqlite::DatabaseName::Main)
+            .unwrap_or(false)
+    {
+        return Ok(kept_behind(conn, path, schema, stamp));
+    }
     // WAL for concurrent access (multiple Claude Code instances). It is refused
     // on some filesystems (NFS, read-only), which stays non-fatal. It is cheap on
     // every open: WAL persists in the DB file.
@@ -347,8 +397,73 @@ fn claim<V: Version>(
     // sidecars are repaired once migrating is done, whether or not it worked.
     let migrated = run_steps(&conn, schema, mode, stamp);
     restrict_sidecars(path);
-    migrated?;
-    Ok(conn)
+    match migrated {
+        Ok(()) => Ok(Opened {
+            conn,
+            behind: false,
+        }),
+        // A refusal that only shows on write. The version was read above, so a
+        // READONLY here is a step's write being refused, not an unreadable file.
+        Err(e) if gated && is_read_only(&e) => Ok(Opened { conn, behind: true }),
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether SQLite refused `err` because the database is read-only, in any of
+/// its `SQLITE_READONLY_*` forms.
+fn is_read_only(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .and_then(rusqlite::Error::sqlite_error_code)
+            == Some(rusqlite::ErrorCode::ReadOnly)
+    })
+}
+
+/// Whether `msg` is SQLite's wording for a table or column the database lacks:
+/// "no such table/column" for a SELECT or DELETE, "has no column named" for an
+/// INSERT's column list.
+fn names_missing_object(msg: &str) -> bool {
+    msg.contains("no such table")
+        || msg.contains("no such column")
+        || msg.contains("has no column named")
+}
+
+/// SQLite's code and message when a statement failed on a table or column the
+/// database lacks.
+pub(crate) fn sqlite_missing_object(err: &rusqlite::Error) -> Option<(rusqlite::ffi::Error, &str)> {
+    match err {
+        rusqlite::Error::SqliteFailure(code, Some(msg))
+        | rusqlite::Error::SqlInputError {
+            error: code, msg, ..
+        } if names_missing_object(msg) => Some((*code, msg.as_str())),
+        _ => None,
+    }
+}
+
+/// The message of [`sqlite_missing_object`] for the first cause in `err`'s chain
+/// that has one.
+pub(crate) fn missing_object(err: &anyhow::Error) -> Option<&str> {
+    err.chain().find_map(|cause| {
+        let (_, msg) = sqlite_missing_object(cause.downcast_ref()?)?;
+        Some(msg)
+    })
+}
+
+/// A read-only database that is not migrated: behind when its stamp is below the
+/// schema's last step. The permissions of the `-wal`/`-shm` it left are repaired
+/// as after a migration.
+fn kept_behind<V: Version>(
+    conn: Connection,
+    path: &Path,
+    schema: &Schema<V>,
+    stamp: i64,
+) -> Opened {
+    restrict_sidecars(path);
+    Opened {
+        conn,
+        behind: stamp < schema.last_version().unwrap_or(0),
+    }
 }
 
 /// A read-only connection is worth replacing only when the file can be written.
@@ -430,7 +545,7 @@ fn run_steps<V: Version>(
 ) -> Result<()> {
     let label = schema.label();
     let gated = matches!(mode, MigrationMode::GatedByVersion);
-    let last = schema.steps.last().map(|&(version, _)| version.number());
+    let last = schema.last_version();
     for &(version, migrate) in schema.steps {
         let version_number = version.number();
         // The hot-path gate: on a current database the one read of the tag and the
@@ -706,6 +821,7 @@ mod tests {
     #[derive(Clone, Copy, Debug)]
     enum Versions {
         First = 1,
+        Second = 2,
     }
 
     impl Version for Versions {
@@ -741,10 +857,10 @@ mod tests {
     fn open_ours(creating: bool, path: &Path) -> Result<Connection> {
         let (schema, mode) = (schema(OWNED, true), MigrationMode::GatedByVersion);
         if creating {
-            open_and_migrate(path, &schema, mode)
+            open_and_migrate(path, &schema, mode).map(|opened| opened.conn)
         } else {
             open_existing_and_migrate(path, &schema, mode)
-                .map(|conn| conn.expect("the file is there"))
+                .map(|opened| opened.expect("the file is there").conn)
         }
     }
 
@@ -1394,5 +1510,348 @@ mod tests {
         chmod(&existing, 0o644);
         pre_create(&existing, "tracking").expect("an existing file is not an error");
         assert_eq!(mode_bits(&existing), 0o644);
+    }
+
+    fn create_first_table(conn: &Connection) -> Result<()> {
+        conn.execute("CREATE TABLE IF NOT EXISTS first (x INTEGER)", [])?;
+        Ok(())
+    }
+
+    fn create_second_table(conn: &Connection) -> Result<()> {
+        conn.execute("CREATE TABLE IF NOT EXISTS second (x INTEGER)", [])?;
+        Ok(())
+    }
+
+    const FIRST_STEP: &[(Versions, Migration)] = &[(Versions::First, create_first_table)];
+
+    const TWO_STEPS: &[(Versions, Migration)] = &[
+        (Versions::First, create_first_table),
+        (Versions::Second, create_second_table),
+    ];
+
+    fn read_only_flags() -> OpenFlags {
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+    }
+
+    /// `claim` on a connection that SQLite opened read-only.
+    fn claim_read_only(
+        path: &Path,
+        schema: &Schema<Versions>,
+        mode: MigrationMode,
+    ) -> Result<Opened> {
+        let conn = open_db(path, read_only_flags(), "test")?;
+        let identity = read_identity(&conn, "test")?;
+        claim(conn, identity, path, schema, mode, read_only_flags(), false)
+    }
+
+    /// A database file stamped at the first step only, by a build that knew just it.
+    fn stale_db(dir: &Path) -> PathBuf {
+        let path = dir.join("history.db");
+        let conn = Connection::open(&path).expect("open should succeed");
+        apply_migrations(&conn, &schema(FIRST_STEP, false), MigrationMode::Always)
+            .expect("seeding should succeed");
+        path
+    }
+
+    #[test]
+    fn test_a_stale_read_only_database_is_kept_behind_and_no_step_runs() {
+        let tmp = crate::core::test_isolation::tempdir();
+        let path = stale_db(tmp.path());
+        let steps: &[(Versions, Migration)] = &[
+            (Versions::First, create_first_table),
+            (Versions::Second, testing::failing_step),
+        ];
+
+        // A step that fails before it writes shows whether it ran: its error is not
+        // a read-only refusal, so the open would fail.
+        let opened = claim_read_only(&path, &schema(steps, false), MigrationMode::GatedByVersion)
+            .expect("the step should not run");
+
+        assert!(opened.behind);
+        assert_eq!(testing::user_version(&opened.conn), Versions::First as i64);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_kept_behind_wal_database_has_its_sidecars_restricted() {
+        let tmp = crate::core::test_isolation::tempdir();
+        let path = tmp.path().join("history.db");
+        // The writer stays open, so the WAL database's sidecars exist.
+        let writer = Connection::open(&path).expect("open should succeed");
+        testing::enable_wal(&writer);
+        apply_migrations(&writer, &schema(FIRST_STEP, false), MigrationMode::Always)
+            .expect("seeding should succeed");
+        let sidecars = db_sidecars(&path);
+        for sidecar in &sidecars {
+            chmod(sidecar, 0o644);
+        }
+
+        let conn = open_db(&path, read_only_flags(), "test").expect("open");
+        let opened = kept_behind(
+            conn,
+            &path,
+            &schema(TWO_STEPS, false),
+            Versions::First as i64,
+        );
+
+        assert!(opened.behind);
+        for sidecar in &sidecars {
+            assert_eq!(mode_bits(sidecar), 0o600, "{}", sidecar.display());
+        }
+        drop(writer);
+    }
+
+    #[test]
+    fn test_a_writable_stale_database_is_migrated_not_kept_behind() {
+        let tmp = crate::core::test_isolation::tempdir();
+        let path = stale_db(tmp.path());
+        let opened = open_and_migrate(
+            &path,
+            &schema(TWO_STEPS, false),
+            MigrationMode::GatedByVersion,
+        )
+        .expect("a writable stale database migrates");
+        assert!(!opened.behind);
+        assert_eq!(testing::user_version(&opened.conn), Versions::Second as i64);
+        assert!(table_exists(&opened.conn, "second"));
+    }
+
+    #[test]
+    fn test_a_current_or_newer_read_only_database_is_not_behind() {
+        let tmp = crate::core::test_isolation::tempdir();
+        let path = stale_db(tmp.path());
+        let writer = Connection::open(&path).expect("open should succeed");
+        apply_migrations(&writer, &schema(TWO_STEPS, false), MigrationMode::Always)
+            .expect("seeding should succeed");
+        let behind = |path: &Path| {
+            claim_read_only(
+                path,
+                &schema(TWO_STEPS, false),
+                MigrationMode::GatedByVersion,
+            )
+            .expect("a read-only database opens")
+            .behind
+        };
+        assert!(!behind(&path), "stamped at the last step");
+
+        writer
+            .pragma_update(None, "user_version", Versions::Second as i64 + 1)
+            .expect("stamp should be writable");
+        assert!(!behind(&path), "stamped by a newer build");
+    }
+
+    #[test]
+    fn test_rtk_init_still_fails_on_a_read_only_database() {
+        let tmp = crate::core::test_isolation::tempdir();
+        let path = stale_db(tmp.path());
+        let err = claim_read_only(&path, &schema(TWO_STEPS, false), MigrationMode::Always)
+            .expect_err("an open that must migrate reports the refusal");
+        assert!(is_read_only(&err), "{err:#}");
+    }
+
+    #[test]
+    fn test_a_read_only_file_is_refused_before_it_is_kept_behind() {
+        let tmp = crate::core::test_isolation::tempdir();
+        let open = |path: &Path, owns_untagged_stamps: bool| {
+            claim_read_only(
+                path,
+                &schema(TWO_STEPS, owns_untagged_stamps),
+                MigrationMode::GatedByVersion,
+            )
+        };
+
+        // Another database's file, tagged.
+        let tagged = tmp.path().join("tagged.db");
+        let conn = Connection::open(&tagged).expect("open should succeed");
+        conn.pragma_update(None, "application_id", OTHER_ID)
+            .expect("tag should be writable");
+        conn.pragma_update(None, "user_version", 1)
+            .expect("stamp should be writable");
+        let err = open(&tagged, true).expect_err("a foreign file is refused");
+        assert!(
+            format!("{err:#}").contains("not the tracking one"),
+            "{err:#}"
+        );
+
+        // An untagged file with a stamp only a database that tags nothing writes.
+        let untagged = tmp.path().join("untagged.db");
+        Connection::open(&untagged)
+            .expect("open should succeed")
+            .pragma_update(None, "user_version", 1)
+            .expect("stamp should be writable");
+        let err = open(&untagged, false)
+            .expect_err("an untagged stamp is refused by a database that tags");
+        assert!(
+            format!("{err:#}").contains("is not the tracking database"),
+            "{err:#}"
+        );
+        assert!(
+            open(&untagged, true)
+                .expect("the owner of untagged stamps takes it")
+                .behind,
+            "and keeps it behind"
+        );
+
+        // An untagged, unversioned file is anyone's.
+        let empty = tmp.path().join("empty.db");
+        Connection::open(&empty).expect("open should succeed");
+        assert!(
+            open(&empty, false)
+                .expect("an unversioned file is taken")
+                .behind
+        );
+    }
+
+    #[test]
+    fn test_a_step_failing_for_another_reason_is_still_an_error() {
+        let tmp = crate::core::test_isolation::tempdir();
+        let path = tmp.path().join("history.db");
+        let steps: &[(Versions, Migration)] = &[(Versions::First, testing::failing_step)];
+        let conn = open_db(&path, OpenFlags::default(), "test").expect("open");
+        let identity = read_identity(&conn, "test").expect("identity should be readable");
+        let err = claim(
+            conn,
+            identity,
+            &path,
+            &schema(steps, false),
+            MigrationMode::GatedByVersion,
+            OpenFlags::default(),
+            false,
+        )
+        .expect_err("a failing step is not a read-only refusal");
+        assert!(!is_read_only(&err), "{err:#}");
+        assert!(format!("{err:#}").contains("step failed"), "{err:#}");
+    }
+
+    #[test]
+    fn test_a_refusal_that_only_shows_on_write_keeps_the_connection_behind() {
+        // `query_only` makes SQLite refuse every write with SQLITE_READONLY on a
+        // connection it does not report as read-only.
+        let tmp = crate::core::test_isolation::tempdir();
+        let path = stale_db(tmp.path());
+        let open = |mode| {
+            let conn = open_db(&path, OpenFlags::default(), "test").expect("open");
+            conn.pragma_update(None, "query_only", true)
+                .expect("query_only should be settable");
+            assert!(
+                !conn
+                    .is_readonly(rusqlite::DatabaseName::Main)
+                    .expect("is_readonly")
+            );
+            let identity = read_identity(&conn, "test").expect("identity should be readable");
+            claim(
+                conn,
+                identity,
+                &path,
+                &schema(TWO_STEPS, false),
+                mode,
+                OpenFlags::default(),
+                false,
+            )
+        };
+
+        let opened = open(MigrationMode::GatedByVersion).expect("the connection is kept");
+        assert!(opened.behind);
+        assert_eq!(testing::user_version(&opened.conn), Versions::First as i64);
+
+        let err = open(MigrationMode::Always).expect_err("an open that must migrate fails");
+        assert!(is_read_only(&err), "{err:#}");
+    }
+
+    /// A directory that stops the first read is not a read-only database: it is
+    /// given back to its owner and the steps run.
+    #[cfg(unix)]
+    #[test]
+    fn test_a_locked_directory_does_not_keep_a_database_behind() {
+        let tmp = crate::core::test_isolation::tempdir();
+        let dir = tmp.path().join("locked");
+        std::fs::create_dir(&dir).expect("mkdir");
+        let path = dir.join("history.db");
+        {
+            let conn = Connection::open(&path).expect("open should succeed");
+            testing::enable_wal(&conn);
+            apply_migrations(&conn, &schema(OWNED, false), MigrationMode::Always)
+                .expect("seeding should succeed");
+        }
+        chmod(&dir, 0o555);
+
+        let opened = open_and_migrate(
+            &path,
+            &schema(TWO_STEPS, false),
+            MigrationMode::GatedByVersion,
+        )
+        .expect("the directory should be given back");
+
+        assert!(!opened.behind);
+        assert_eq!(mode_bits(&dir), 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_sqlite_reports_an_unwritable_file_as_read_only() {
+        let tmp = crate::core::test_isolation::tempdir();
+        let path = stale_db(tmp.path());
+        chmod(&path, 0o444);
+        // Root can write a 0444 file, so SQLite opens it read-write.
+        if writable(&path) {
+            return;
+        }
+        let conn = Connection::open(&path).expect("open should succeed");
+        assert!(
+            conn.is_readonly(rusqlite::DatabaseName::Main)
+                .expect("is_readonly")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_file_that_can_be_made_writable_is_migrated_not_kept_behind() {
+        let tmp = crate::core::test_isolation::tempdir();
+        let path = stale_db(tmp.path());
+        chmod(&path, 0o444);
+        let opened = open_and_migrate(
+            &path,
+            &schema(TWO_STEPS, false),
+            MigrationMode::GatedByVersion,
+        )
+        .expect("a restored backup is made writable and migrated");
+        assert!(!opened.behind);
+        assert_eq!(testing::user_version(&opened.conn), Versions::Second as i64);
+    }
+
+    #[test]
+    fn test_another_failure_is_not_read_only() {
+        let cannot_open = anyhow::Error::new(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+            None,
+        ))
+        .context("migration failed");
+        assert!(!is_read_only(&cannot_open));
+        assert!(!is_read_only(&anyhow::anyhow!("step failed")));
+    }
+
+    #[test]
+    fn test_only_a_missing_table_or_column_is_a_missing_object() {
+        let conn = Connection::open_in_memory().expect("open should succeed");
+        conn.execute_batch("CREATE TABLE present (x INTEGER)")
+            .expect("create should succeed");
+        for (sql, message) in [
+            ("SELECT x FROM absent", "no such table: absent"),
+            ("SELECT y FROM present", "no such column: y"),
+            (
+                "INSERT INTO present (y) VALUES (1)",
+                "table present has no column named y",
+            ),
+        ] {
+            let err = anyhow::Error::from(conn.execute(sql, []).expect_err(sql)).context("query");
+            assert_eq!(missing_object(&err), Some(message), "{sql}");
+        }
+
+        let syntax = anyhow::Error::from(conn.execute("NOT SQL", []).expect_err("not sql"));
+        assert_eq!(missing_object(&syntax), None);
+        let other = anyhow::anyhow!("no such table: not from sqlite");
+        assert_eq!(missing_object(&other), None);
     }
 }

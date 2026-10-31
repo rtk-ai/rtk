@@ -2,7 +2,7 @@
 
 use super::constants::RECALL_DB;
 use crate::core::config::Config;
-use crate::core::db::{self, DbKind, Migration, MigrationMode, Schema, Version};
+use crate::core::db::{self, DbKind, Migration, MigrationMode, Opened, Schema, Version};
 use crate::core::user_dirs;
 use crate::core::user_env;
 use anyhow::{Context, Result};
@@ -186,14 +186,14 @@ fn db_path(cfg: &RetrieverConfig) -> Result<PathBuf> {
     Ok(base.join(RECALL_DB))
 }
 
-fn open_path(path: &Path) -> Result<Connection> {
+fn open_path(path: &Path) -> Result<Opened> {
     db::open_and_migrate(path, &SCHEMA, MigrationMode::GatedByVersion)
 }
 
 /// A fresh connection to the store, creating it if needed.
 #[cfg(test)]
 fn open(cfg: &RetrieverConfig) -> Result<Connection> {
-    open_path(&db_path(cfg)?)
+    open_path(&db_path(cfg)?).map(|opened| opened.conn)
 }
 
 /// Which file a path named when its connection was opened, so a store deleted
@@ -220,11 +220,25 @@ fn file_id(path: &Path) -> Option<FileId> {
     }
 }
 
-type CachedConn = Option<(PathBuf, FileId, Connection)>;
+type CachedConn = Option<(PathBuf, FileId, Opened)>;
 
 thread_local! {
     static CONN_CACHE: std::cell::RefCell<CachedConn> =
         const { std::cell::RefCell::new(None) };
+}
+
+/// `f` on the connection. On a store that is behind, the error of a statement
+/// that needs what the store lacks says why.
+fn query<T>(opened: &Opened, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+    f(&opened.conn).map_err(|err| {
+        if opened.behind
+            && let Some(msg) = db::missing_object(&err)
+        {
+            anyhow::anyhow!(SCHEMA.explain_missing(msg))
+        } else {
+            err
+        }
+    })
 }
 
 /// `f` on the per-thread connection to the store at `path`. The cached
@@ -233,20 +247,20 @@ thread_local! {
 /// `open` finds no store.
 fn with_cached<T>(
     path: PathBuf,
-    open: impl FnOnce(&Path) -> Result<Option<Connection>>,
+    open: impl FnOnce(&Path) -> Result<Option<Opened>>,
     f: impl FnOnce(&Connection) -> Result<T>,
 ) -> Result<Option<T>> {
     CONN_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         let before = file_id(&path);
-        if let Some((cached, id, conn)) = cache.as_ref()
+        if let Some((cached, id, opened)) = cache.as_ref()
             && *cached == path
             && before == Some(*id)
         {
-            return f(conn).map(Some);
+            return query(opened, f).map(Some);
         }
         *cache = None;
-        let Some(conn) = open(&path)? else {
+        let Some(opened) = open(&path)? else {
             return Ok(None);
         };
         // The path must still name the file it did before the open: one deleted
@@ -256,10 +270,10 @@ fn with_cached<T>(
         let after = file_id(&path);
         let swapped = before.is_some() && before != after;
         let Some(id) = after.filter(|_| !swapped) else {
-            return f(&conn).map(Some);
+            return query(&opened, f).map(Some);
         };
-        let (_, _, conn) = cache.insert((path, id, conn));
-        f(conn).map(Some)
+        let (_, _, opened) = cache.insert((path, id, opened));
+        query(opened, f).map(Some)
     })
 }
 
@@ -1633,7 +1647,10 @@ mod tests {
 
     /// A connection to a store that exists, as the readers take it.
     fn open_existing(cfg: &RetrieverConfig) -> Result<Option<Connection>> {
-        db::open_existing_and_migrate(&db_path(cfg)?, &SCHEMA, MigrationMode::GatedByVersion)
+        Ok(
+            db::open_existing_and_migrate(&db_path(cfg)?, &SCHEMA, MigrationMode::GatedByVersion)?
+                .map(|opened| opened.conn),
+        )
     }
 
     /// A current store missing a table, which only a step can bring back.
@@ -1931,6 +1948,114 @@ mod tests {
 
         assert!(opened.is_some(), "the connection is still used once");
         assert_eq!(cached_path(), None, "but it is not cached for the new file");
+    }
+
+    /// `path` as a read-only filesystem leaves it: readable, with no step applied.
+    fn behind(path: &Path) -> Opened {
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("the store should open read-only");
+        Opened { conn, behind: true }
+    }
+
+    /// A statement on a column no store has.
+    fn delete_by_missing_column(conn: &Connection) -> Result<()> {
+        conn.execute("DELETE FROM recall WHERE no_such_column = 1", [])?;
+        Ok(())
+    }
+
+    /// What [`delete_by_missing_column`] fails with on a store behind.
+    const MISSING_COLUMN_NOTED: &str =
+        "no such column: no_such_column (recall database is read-only and was not upgraded)";
+
+    #[test]
+    fn test_a_store_behind_serves_what_it_holds() {
+        let dir = crate::core::test_isolation::tempdir();
+        let path = dir.path().join("recall_test.db");
+        seed_unversioned_db(&path);
+
+        let command = with_cached(
+            path.clone(),
+            |p| Ok(Some(behind(p))),
+            |conn| Ok(conn.query_row("SELECT command FROM recall", [], |r| r.get::<_, String>(0))?),
+        )
+        .expect("what the store holds should be read")
+        .expect("the store should be there");
+
+        assert_eq!(command, "vitest");
+    }
+
+    #[test]
+    fn test_a_store_behind_says_why_a_column_is_missing() {
+        let dir = crate::core::test_isolation::tempdir();
+        let path = dir.path().join("recall_test.db");
+        seed_unversioned_db(&path);
+
+        let first = with_cached(
+            path.clone(),
+            |p| Ok(Some(behind(p))),
+            delete_by_missing_column,
+        )
+        .expect_err("the column is missing");
+        // The same connection, now served from the cache.
+        let cached = with_cached(
+            path.clone(),
+            |_| panic!("the connection should be cached"),
+            delete_by_missing_column,
+        )
+        .expect_err("the column is still missing");
+        for err in [first, cached] {
+            assert_eq!(format!("{err:#}"), MISSING_COLUMN_NOTED);
+        }
+    }
+
+    /// A connection used once and not cached: its file went away after the open.
+    #[cfg(unix)]
+    #[test]
+    fn test_a_store_behind_says_why_on_a_connection_that_is_not_cached() {
+        let dir = crate::core::test_isolation::tempdir();
+        let path = dir.path().join("recall_test.db");
+        seed_unversioned_db(&path);
+
+        let err = with_cached(
+            path,
+            |p| {
+                let opened = behind(p);
+                std::fs::remove_file(p).expect("the store should be removed");
+                Ok(Some(opened))
+            },
+            delete_by_missing_column,
+        )
+        .expect_err("the column is missing");
+
+        assert_eq!(format!("{err:#}"), MISSING_COLUMN_NOTED);
+    }
+
+    #[test]
+    fn test_only_a_missing_table_on_a_store_behind_gets_the_note() {
+        let dir = crate::core::test_isolation::tempdir();
+        let path = dir.path().join("recall_test.db");
+        seed_unversioned_db(&path);
+        let missing = |conn: &Connection| -> Result<()> {
+            conn.execute("DELETE FROM no_such_table", [])?;
+            Ok(())
+        };
+
+        let current = Opened {
+            conn: Connection::open(&path).expect("open should succeed"),
+            behind: false,
+        };
+        let err = query(&current, missing).expect_err("the table is missing");
+        assert_eq!(
+            db::missing_object(&err),
+            Some("no such table: no_such_table"),
+            "the error is left as it is"
+        );
+
+        let err = query(&behind(&path), |_| -> Result<()> {
+            anyhow::bail!("the entry is corrupt")
+        })
+        .expect_err("the query fails");
+        assert_eq!(format!("{err:#}"), "the entry is corrupt");
     }
 
     #[test]
