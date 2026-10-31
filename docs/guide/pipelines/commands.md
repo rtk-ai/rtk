@@ -132,6 +132,7 @@ Each entry records timestamp, session, position, tool category, the command as t
 12:04:11  hook.after_tool.shell   cargo test        term-default    term        3,812 → 640   recall 1f3a9c
 12:04:15  hook.before_tool.read   src/Service.java  shunt-large-read route → bulk-read
 12:04:31  hook.after_tool.shell   rtk bulk-read …   —               skipped: is_rtk_command
+12:04:35  hook.after_tool.search  src               grep-group      grep-group  kept as is (no smaller result)
 ```
 
 Enable it while debugging a pipeline, then turn it off — it is the input `rtk pipeline explain --last` reads.
