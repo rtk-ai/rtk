@@ -11,7 +11,7 @@ Owns: `rtk init` installation flows (6 agents via `AgentTarget` enum, now includ
 Does **not** own: the deployed hook scripts themselves (that's `hooks/`), the rewrite pattern registry (that's `discover/`), or command filtering (that's `cmds/`).
 
 Boundary notes:
-- `decision.rs` is the single place RTK decides what a hook should do with a command — deny, defer, rewrite-and-allow, or rewrite-and-ask. All three entry points route through it: the in-process `rtk hook <agent>` hosts (`hook_cmd.rs`), the `rtk rewrite` subprocess path (`rewrite_cmd.rs`), and the `rtk hook check` diagnostic (`main.rs`). Add a gate there, not in a caller.
+- `decision.rs` is the shared permission/rewrite decision — deny, defer, rewrite-and-allow, or rewrite-and-ask. The in-process hooks, `rewrite_cmd.rs`, and `core/hook_check_cmd.rs` use it. The human-facing `hook check` first previews Claude's trusted pipeline using the runtime loader, shell facts, and engine matcher, then follows the permission/rewrite path. Its preview does not write pipeline status or invoke classifiers/tasks; those unresolved outcomes are reported explicitly. Runtime pipeline execution remains in `hook_cmd/claude_pipeline.rs`.
 - `rewrite_cmd.rs` is a thin CLI bridge — it exists to serve hooks (hooks call `rtk rewrite` as a subprocess) and renders `decision.rs`'s verdict as the exit codes those delegates branch on.
 - `trust.rs` gates project-local TOML filter execution. It lives here because the trust workflow is tied to hook-installed filter discovery, not to the core filter engine.
 

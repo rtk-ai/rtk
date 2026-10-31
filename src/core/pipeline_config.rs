@@ -532,6 +532,10 @@ fn file_head(path: &std::path::Path) -> Option<String> {
 }
 
 pub fn before_shell_decision(command: &str) -> ShellHookDecision {
+    before_tool_decision(rtk_engine::block::Subject::Shell, &shell_facts(command))
+}
+
+pub(crate) fn shell_facts(command: &str) -> rtk_engine::pipeline::Facts {
     use rtk_engine::pipeline::{Fact, Facts};
     let mut facts = Facts::new();
     if let Some(purpose) = CALL_PURPOSE.get() {
@@ -543,7 +547,7 @@ pub fn before_shell_decision(command: &str) -> ShellHookDecision {
         "is_rtk_command".into(),
         Fact::Bool(command.split_whitespace().next() == Some("rtk")),
     );
-    before_tool_decision(rtk_engine::block::Subject::Shell, &facts)
+    facts
 }
 
 /// The facts a `before_tool` rule can read for `subject`, built from the tool

@@ -579,7 +579,7 @@ mod hook_check {
         let sb = Sandbox::with_rules(&["git status"], &[], &[]);
 
         let (code, stdout, _) = sb.run(&["hook", "check", "--agent", "claude", "git status"]);
-        assert_eq!((code, stdout.trim()), (1, ""), "claude denies");
+        assert_eq!((code, stdout.trim()), (2, ""), "claude denies");
 
         let (code, stdout, _) = sb.run(&["hook", "check", "--agent", "gemini", "git status"]);
         assert_eq!(
@@ -602,7 +602,7 @@ mod hook_check {
     fn reports_a_deny_rule_separately_from_no_rewrite() {
         let sb = Sandbox::with_rules(&["git status"], &[], &[]);
         let (code, stdout, stderr) = sb.run(&["hook", "check", "git status"]);
-        assert_eq!((code, stdout.trim()), (1, ""));
+        assert_eq!((code, stdout.trim()), (2, ""));
         assert!(
             stderr.contains("Denied by a permission rule"),
             "stderr: {stderr}"
