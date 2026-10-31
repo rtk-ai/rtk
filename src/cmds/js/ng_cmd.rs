@@ -1,6 +1,6 @@
 //! Compacts Angular build table padding without discarding bundles or diagnostics.
 
-use crate::core::arg_tokenizer::{TokenKind, tokenize};
+use crate::core::arg_tokenizer::{Dialect, TokenKind, ValueSpec, tokenize, tokenize_grammar};
 use crate::core::args_utils::restore_double_dash;
 use crate::core::guard::never_worse;
 use crate::core::runner;
@@ -17,7 +17,8 @@ use std::sync::LazyLock;
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let args = restore_double_dash(args);
     if !should_filter(&args)
-        || crate::core::user_dirs::current_dir().map_or(true, |dir| workspace_may_watch(&dir))
+        || crate::core::user_dirs::current_dir()
+            .map_or(true, |dir| workspace_may_watch(&dir, project_arg(&args)))
     {
         return runner::run_passthrough(
             "ng",
@@ -86,7 +87,55 @@ fn should_filter(args: &[String]) -> bool {
         })
 }
 
-fn workspace_may_watch(start: &Path) -> bool {
+// Options of `ng build` that take a value, from `ng build --help` (the `[string]`,
+// `[array]` and `[number]` ones). A boolean option takes none, so `--aot app` keeps `app`.
+const VALUE_OPTIONS: &[&str] = &[
+    "configuration",
+    "allowed-common-js-dependencies",
+    "base-href",
+    "browser",
+    "conditions",
+    "cross-origin",
+    "define",
+    "deploy-url",
+    "external-dependencies",
+    "i18n-duplicate-translation",
+    "i18n-missing-translation",
+    "index",
+    "inline-style-language",
+    "output-hashing",
+    "output-mode",
+    "output-path",
+    "poll",
+    "polyfills",
+    "scripts",
+    "server",
+    "service-worker",
+    "styles",
+    "ts-config",
+    "web-worker-ts-config",
+];
+
+fn build_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    let takes = match kind {
+        TokenKind::Long => VALUE_OPTIONS.contains(&name),
+        TokenKind::Short => name == "c",
+        _ => false,
+    };
+    takes.then(ValueSpec::value)
+}
+
+// ISSUE #4755: the project is the first positional that is not an option value, so
+// `-c development` is not read as a project named `development`.
+fn project_arg(args: &[String]) -> Option<&str> {
+    tokenize_grammar(args, &build_takes_value, Dialect::Posix)
+        .into_iter()
+        .skip(1)
+        .find(|t| t.is_free_positional())
+        .map(|t| t.text)
+}
+
+fn workspace_may_watch(start: &Path, project: Option<&str>) -> bool {
     // Named/default configurations may enable watch without a CLI flag. Avoid
     // duplicating Angular's merge rules: any watch:true opts the workspace out.
     // JSONC/unknown configuration is also passed through rather than guessed.
@@ -96,7 +145,7 @@ fn workspace_may_watch(start: &Path) -> bool {
                 Ok(bytes) => {
                     return serde_json::from_slice::<serde_json::Value>(&bytes)
                         .map_or(true, |value| {
-                            contains_watch(&value) || !known_builders(&value)
+                            contains_watch(&value) || !known_builders(&value, project)
                         });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -109,12 +158,26 @@ fn workspace_may_watch(start: &Path) -> bool {
     true
 }
 
-fn known_builders(value: &serde_json::Value) -> bool {
+// ISSUE #4755: only the project being built must use a finite builder, so a library
+// beside the application does not opt the workspace out. Without a positional or a
+// `defaultProject`, Angular may build several projects: all of them must be known, and an
+// ng-packagr library counts as known there (it ends, and prints no chunk table to touch).
+fn known_builders(value: &serde_json::Value, project: Option<&str>) -> bool {
     let Some(projects) = value.get("projects").and_then(serde_json::Value::as_object) else {
         return false;
     };
-    !projects.is_empty()
-        && projects.values().all(|project| {
+    let target = project.or_else(|| {
+        value
+            .get("defaultProject")
+            .and_then(serde_json::Value::as_str)
+    });
+    let selected: Vec<_> = match target {
+        Some(name) => projects.get(name).into_iter().collect(),
+        None => projects.values().collect(),
+    };
+    let allow_library = target.is_none();
+    !selected.is_empty()
+        && selected.into_iter().all(|project| {
             let builder = project
                 .get("architect")
                 .or_else(|| project.get("targets"))
@@ -129,7 +192,11 @@ fn known_builders(value: &serde_json::Value) -> bool {
                         | "@angular-devkit/build-angular:browser"
                         | "@angular-devkit/build-angular:browser-esbuild"
                 )
-            )
+            ) || (allow_library
+                && matches!(
+                    builder,
+                    Some("@angular/build:ng-packagr" | "@angular-devkit/build-angular:ng-packagr")
+                ))
         })
 }
 
@@ -182,8 +249,13 @@ fn header_columns(line: &str) -> Option<usize> {
     }
 }
 
+// ISSUE #4755: development builds end every row with an empty cell (`| `), one more
+// than the header. Accept exactly that one; `compact_line` drops it.
 fn is_row(line: &str, columns: usize) -> bool {
-    let cells = cells(line);
+    let mut cells = cells(line);
+    if cells.len() == columns + 1 && cells[columns].is_empty() {
+        cells.pop();
+    }
     cells.len() == columns
         && (cells[0].ends_with(".js")
             || cells[0].ends_with(".mjs")
@@ -201,7 +273,11 @@ fn compact_line(line: &str) -> String {
     } else {
         ""
     };
-    format!("{}{ending}", cells(line).join(" | "))
+    let mut cells = cells(line);
+    if cells.last().is_some_and(|cell| cell.is_empty()) {
+        cells.pop();
+    }
+    format!("{}{ending}", cells.join(" | "))
 }
 
 fn filter_build(output: &str) -> String {
@@ -409,5 +485,76 @@ Output location: /workspace/scratch/72640dd8823a/rtk-angular-fixture-work/fixtur
         assert!(filter_build(raw).ends_with(
             "CUSTOM UNKNOWN   | main | 2.00 kB\n  compiler context  | stays | unchanged\n"
         ));
+    }
+
+    // Built from the table shape in issue #4755 (Angular 22.2.4, `-c development`); not a capture.
+    const DEVELOPMENT: &str = "❯ Building...\n✔ Building...\nInitial chunk files | Names         | Raw size\nmain.js             | main          |  1.39 MB | \nstyles.css          | styles        | 95 bytes | \n                    | Initial total |  1.39 MB | \n\nApplication bundle generation complete. [0.9 seconds]\n";
+
+    #[test]
+    fn development_rows_with_a_trailing_empty_cell_are_compacted() {
+        assert_eq!(
+            filter_build(DEVELOPMENT),
+            "Initial chunk files | Names | Raw size\nmain.js | main | 1.39 MB\nstyles.css | styles | 95 bytes\n | Initial total | 1.39 MB\n\nApplication bundle generation complete. [0.9 seconds]\n"
+        );
+        let four = "Initial chunk files | Names | Raw size | Estimated transfer size\nmain.js   | main   | 1 kB | 1 kB | \n";
+        assert_eq!(
+            filter_build(four),
+            "Initial chunk files | Names | Raw size | Estimated transfer size\nmain.js | main | 1 kB | 1 kB\n"
+        );
+        // A second non-empty extra cell is still not a row.
+        let raw = "Initial chunk files | Names | Raw size\nmain.js | main | 1 kB | extra\n";
+        assert_eq!(filter_build(raw), raw);
+    }
+
+    #[test]
+    fn only_the_built_project_needs_a_known_builder() {
+        let workspace: serde_json::Value = serde_json::from_str(
+            r#"{"projects":{
+              "app":{"architect":{"build":{"builder":"@angular/build:application"}}},
+              "mylib":{"architect":{"build":{"builder":"@angular/build:ng-packagr"}}}}}"#,
+        )
+        .expect("workspace json");
+        assert!(known_builders(&workspace, Some("app")));
+        assert!(!known_builders(&workspace, Some("mylib")));
+        assert!(!known_builders(&workspace, Some("missing")));
+        // No project named: every project must be known; the ng-packagr library counts as known.
+        assert!(known_builders(&workspace, None));
+        let custom: serde_json::Value = serde_json::from_str(
+            r#"{"projects":{
+              "app":{"architect":{"build":{"builder":"@angular/build:application"}}},
+              "other":{"architect":{"build":{"builder":"custom:live"}}}}}"#,
+        )
+        .expect("workspace json");
+        assert!(!known_builders(&custom, None));
+        let with_default: serde_json::Value = serde_json::from_str(
+            r#"{"defaultProject":"app","projects":{
+              "app":{"architect":{"build":{"builder":"@angular/build:application"}}},
+              "mylib":{"architect":{"build":{"builder":"@angular/build:ng-packagr"}}}}}"#,
+        )
+        .expect("workspace json");
+        assert!(known_builders(&with_default, None));
+    }
+
+    #[test]
+    fn project_is_the_first_positional_that_is_not_an_option_value() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for (given, expected) in [
+            (vec!["build", "app", "-c", "production"], Some("app")),
+            (vec!["build"], None),
+            (vec!["build", "-c", "development"], None),
+            (
+                vec!["build", "--configuration", "development", "app"],
+                Some("app"),
+            ),
+            (vec!["build", "-c", "development", "app"], Some("app")),
+            (
+                vec!["build", "--configuration=development", "app"],
+                Some("app"),
+            ),
+            (vec!["build", "--output-path", "dist", "app"], Some("app")),
+            (vec!["build", "--aot", "app"], Some("app")),
+        ] {
+            assert_eq!(project_arg(&args(&given)), expected, "{given:?}");
+        }
     }
 }
