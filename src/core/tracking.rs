@@ -1691,7 +1691,11 @@ impl Tracker {
     pub fn top_passthrough(&self, limit: usize) -> Result<Vec<(String, i64)>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {} AS program, COUNT(*) AS cnt FROM commands
-             WHERE input_tokens = 0 AND output_tokens = 0
+             WHERE rtk_cmd LIKE 'rtk:passthrough%'
+                OR rtk_cmd LIKE 'rtk fallback:%'
+                OR rtk_cmd LIKE 'rtk bypass%'
+                OR rtk_cmd LIKE 'rtk proxy%'
+                OR rtk_cmd LIKE '% (passthrough)'
              GROUP BY program",
             first_word_key_sql("original_cmd")
         ))?;
@@ -2515,6 +2519,39 @@ mod command_label_tests {
                 ("curl".to_string(), 300),
                 ("tool0".to_string(), 40),
                 ("tool1".to_string(), 40),
+            ]
+        );
+    }
+
+    #[test]
+    fn top_passthrough_uses_the_label_not_zero_tokens() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        // Filtered commands can also write zero input/output when their raw
+        // output was empty. They must not be reported as missing a filter.
+        tracker
+            .record("grep -r zzzz_nomatch_q7 src", "rtk grep", 0, 0, 1)
+            .expect("record filtered empty");
+        tracker
+            .record("cat empty.txt", "rtk read", 0, 0, 1)
+            .expect("record filtered empty");
+        // A passthrough with output is still a passthrough.
+        tracker
+            .record("echo hi", "rtk bypass echo hi", 0, 5, 1)
+            .expect("record bypass");
+        tracker
+            .record("git tag", "rtk:passthrough git tag", 0, 0, 1)
+            .expect("record passthrough");
+        tracker
+            .record("sleep 2", "rtk fallback: sleep 2", 0, 0, 1)
+            .expect("record fallback");
+
+        let top = tracker.top_passthrough(10).expect("Failed to query");
+        assert_eq!(
+            top,
+            vec![
+                ("echo".to_string(), 1),
+                ("git".to_string(), 1),
+                ("sleep".to_string(), 1),
             ]
         );
     }
