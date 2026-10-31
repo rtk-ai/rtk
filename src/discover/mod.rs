@@ -411,7 +411,7 @@ pub fn run(
                 // `rtk discover` run doesn't alarm a first-time user.
                 if verbose > 0 {
                     eprintln!(
-                        "rtk: warning: failed to open tracking database ({e}). \
+                        "rtk: warning: failed to open tracking database ({e:#}). \
                          Coverage will fall back to the current-state estimate."
                     );
                 }
