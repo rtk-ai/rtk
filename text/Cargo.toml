@@ -1,0 +1,18 @@
+[package]
+name = "rtk-text"
+version = "0.49.0"
+edition = "2024"
+rust-version = "1.91"
+authors = ["RTK AI Labs"]
+description = "Text primitives shared by the rtk CLI and the rtk-engine compression core"
+license = "Apache-2.0"
+homepage = "https://www.rtk-ai.app"
+repository = "https://github.com/rtk-ai/rtk"
+publish = false
+
+[dependencies]
+regex = "1"
+
+[lints.rust]
+unsafe_code = "deny"
+warnings = "deny"

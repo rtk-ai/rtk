@@ -1,0 +1,350 @@
+mod analytics;
+mod cmds;
+mod core;
+mod discover;
+mod hooks;
+mod learn;
+mod parser;
+
+// Re-export command modules for routing
+use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
+use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
+use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
+use cmds::go::{go_cmd, golangci_cmd};
+use cmds::js::{
+    lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd, tsc_cmd,
+    vitest_cmd,
+};
+use cmds::jvm::{gradlew_cmd, mvn_cmd};
+use cmds::php::{ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpunit_cmd, pint_cmd};
+use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, uv_cmd};
+use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
+use cmds::rust::{cargo_cmd, runner};
+use cmds::system::{
+    deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd, read, search,
+    summary, tree, wc_cmd,
+};
+
+use anyhow::{Context, Result};
+use clap::error::ErrorKind;
+use clap::{Parser, Subcommand, ValueEnum};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+
+/// Target agent for hook installation.
+#[derive(Debug, Clone, Copy, PartialEq, ValueEnum)]
+pub enum AgentTarget {
+    /// Claude Code (default)
+    Claude,
+    /// Cursor Agent (editor and CLI)
+    Cursor,
+    /// Windsurf IDE (Cascade)
+    Windsurf,
+    /// Cline / Roo Code (VS Code)
+    Cline,
+    /// Kilo Code
+    Kilocode,
+    /// Google Antigravity
+    Antigravity,
+    /// Pi coding agent
+    Pi,
+    /// Hermes CLI
+    Hermes,
+    /// Factory Droid CLI
+    Droid,
+}
+
+#[derive(Parser)]
+#[command(
+    name = "rtk",
+    version,
+    about = "Rust Token Killer - Minimize LLM token consumption",
+    long_about = "A high-performance CLI proxy designed to filter and summarize system outputs before they reach your LLM context."
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+
+    /// Verbosity level (-v, -vv, -vvv) — only recognized before the subcommand
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    verbose: u8,
+
+    /// Ultra-compact mode: ASCII icons, inline format (Level 2 optimizations)
+    #[arg(long, global = true)]
+    ultra_compact: bool,
+
+    /// Set SKIP_ENV_VALIDATION=1 for child processes (Next.js, tsc, lint, prisma)
+    #[arg(long = "skip-env", global = true)]
+    skip_env: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// List directory contents with token-optimized output (proxy to native ls)
+    Ls {
+        /// Arguments passed to ls (supports all native ls flags like -l, -a, -h, -R)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Directory tree with token-optimized output (proxy to native tree)
+    Tree {
+        /// Arguments passed to tree (supports all native tree flags like -L, -d, -a)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Read file with intelligent filtering
+    Read {
+        /// Files to read (supports multiple, like cat)
+        #[arg(required = true, num_args = 1..)]
+        files: Vec<PathBuf>,
+        /// Filter: none (default, full content), minimal, aggressive
+        #[arg(short, long, default_value = "none")]
+        level: core::filter::FilterLevel,
+        /// Max lines
+        #[arg(short, long, conflicts_with = "tail_lines")]
+        max_lines: Option<usize>,
+        /// Keep only last N lines
+        #[arg(long, conflicts_with = "max_lines")]
+        tail_lines: Option<usize>,
+        /// Show line numbers
+        #[arg(short = 'n', long)]
+        line_numbers: bool,
+    },
+
+    /// Generate 2-line technical summary (heuristic-based)
+    Smart {
+        /// File to analyze
+        file: PathBuf,
+        /// Model: heuristic
+        #[arg(short, long, default_value = "heuristic")]
+        model: String,
+        /// Force model download
+        #[arg(long)]
+        force_download: bool,
+    },
+
+    /// Git commands with compact output
+    Git {
+        /// Change to directory before executing (like git -C <path>, can be repeated)
+        #[arg(short = 'C', action = clap::ArgAction::Append)]
+        directory: Vec<String>,
+
+        /// Git configuration override (like git -c key=value, can be repeated)
+        #[arg(short = 'c', action = clap::ArgAction::Append)]
+        config_override: Vec<String>,
+
+        /// Set the path to the .git directory
+        #[arg(long = "git-dir")]
+        git_dir: Option<String>,
+
+        /// Set the path to the working tree
+        #[arg(long = "work-tree")]
+        work_tree: Option<String>,
+
+        /// Disable pager (like git --no-pager)
+        #[arg(long = "no-pager")]
+        no_pager: bool,
+
+        /// Skip optional locks (like git --no-optional-locks)
+        #[arg(long = "no-optional-locks")]
+        no_optional_locks: bool,
+
+        /// Treat repository as bare (like git --bare)
+        #[arg(long)]
+        bare: bool,
+
+        /// Treat pathspecs literally (like git --literal-pathspecs)
+        #[arg(long = "literal-pathspecs")]
+        literal_pathspecs: bool,
+
+        #[command(subcommand)]
+        command: GitCommands,
+    },
+
+    /// GitHub CLI (gh) commands with token-optimized output
+    Gh {
+        /// Subcommand: pr, issue, run, repo
+        subcommand: String,
+        /// Additional arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// GitLab CLI (glab) commands with token-optimized output
+    Glab {
+        /// Target repository (owner/repo), passed as glab -R flag
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+        /// Target group, passed as glab -g flag
+        #[arg(short = 'g', long = "group")]
+        group: Option<String>,
+        /// Subcommand: mr, issue, ci, pipeline, api
+        subcommand: String,
+        /// Additional arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// AWS CLI with compact output (force JSON, compress)
+    Aws {
+        /// AWS service subcommand (e.g., sts, s3, ec2, ecs, rds, cloudformation)
+        subcommand: String,
+        /// Additional arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// PostgreSQL client with compact output (strip borders, compress tables)
+    #[command(disable_help_flag = true)]
+    Psql {
+        /// psql arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// pnpm commands with ultra-compact output
+    Pnpm {
+        /// pnpm filter arguments (can be repeated: --filter @app1 --filter @app2)
+        #[arg(long, short = 'F')]
+        filter: Vec<String>,
+
+        #[command(subcommand)]
+        command: PnpmCommands,
+    },
+
+    /// Run command and show only errors/warnings
+    Err {
+        /// Command to run
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+
+    /// Run tests and show only failures
+    Test {
+        /// Test command (e.g. cargo test)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+
+    /// Show JSON (compact values by default, or keys-only with --keys-only)
+    Json {
+        /// JSON file
+        file: PathBuf,
+        /// Max depth
+        #[arg(short, long, default_value = "5")]
+        depth: usize,
+        /// Show keys only (strip all values, show structure)
+        #[arg(long)]
+        keys_only: bool,
+    },
+
+    /// Summarize project dependencies
+    Deps {
+        /// Project path
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+
+    /// Show environment variables (filtered)
+    Env {
+        /// Filter by name (e.g. PATH, AWS)
+        #[arg(short, long)]
+        filter: Option<String>,
+    },
+
+    /// Find files with compact tree output (accepts native find flags like -name, -type)
+    Find {
+        /// All find arguments (supports both RTK and native find syntax)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Ultra-condensed diff (only changed lines)
+    Diff {
+        /// First file or - for stdin (unified diff)
+        file1: PathBuf,
+        /// Second file (optional if stdin)
+        file2: Option<PathBuf>,
+    },
+
+    /// Filter and deduplicate log output
+    Log {
+        /// Log file (omit for stdin)
+        file: Option<PathBuf>,
+    },
+
+    /// .NET commands with compact output (build/test/restore/format)
+    Dotnet {
+        #[command(subcommand)]
+        command: DotnetCommands,
+    },
+
+    /// Docker commands with compact output
+    Docker {
+        #[command(subcommand)]
+        command: DockerCommands,
+    },
+
+    /// Kubectl commands with compact output
+    Kubectl {
+        #[command(subcommand)]
+        command: KubectlCommands,
+    },
+
+    /// OpenShift CLI (oc) commands with compact output
+    Oc {
+        #[command(subcommand)]
+        command: OcCommands,
+    },
+
+    /// Run command and show heuristic summary
+    Summary {
+        /// Command to run and summarize
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+
+    /// Compact grep - strips whitespace, truncates, groups by file
+    Grep {
+        /// Max line length
+        #[arg(short = 'l', long, default_value = "80")]
+        max_len: usize,
+        /// Max results to show
+        #[arg(short, long, default_value = "200")]
+        max: usize,
+        /// Show only match context (not full line)
+        #[arg(long)]
+        context_only: bool,
+        /// Filter by file type (e.g., ts, py, rust)
+        #[arg(short = 't', long)]
+        file_type: Option<String>,
+        /// Pattern, path, and any grep/rg flags (e.g. -v, -i, -A 3, --glob, --version)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra_args: Vec<String>,
+    },
+
+    /// Compact ripgrep - runs rg natively, same output filter as grep
+    Rg {
+        /// Pattern, path, and any rg flags (e.g. -v, -i, -t rust, --glob)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra_args: Vec<String>,
+    },
+
+    /// Initialize rtk instructions for assistant CLI usage
+    Init {
+        /// Add to global assistant config directory instead of local project file
+        #[arg(short, long)]
+        global: bool,
+
+        /// Install OpenCode plugin (in addition to Claude Code)
+        #[arg(long)]
+        opencode: bool,
+
+        /// Initialize for Gemini CLI instead of Claude Code
+        #[arg(long)]
+        gemini: bool,
+
+        /// Target agent to install hooks for (default: claude)
+        #[arg(long, value_enum)]

@@ -3,8 +3,12 @@
     ".": {
       "release-type": "rust",
       "package-name": "rtk",
-      "bump-minor-pre-major": true,
-      "bump-patch-for-minor-pre-major": true
+      "include-component-in-tag": false,
+      "bump-minor-pre-major": false,
+      "bump-patch-for-minor-pre-major": false,
+      "extra-files": [
+        { "type": "toml", "path": "proxy/Cargo.toml", "jsonpath": "$.package.version" }
+      ]
     }
   }
 }

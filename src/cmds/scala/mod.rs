@@ -1,1 +1,1 @@
-automod::dir!(pub "src/cmds/scala");
+pub mod sbt_cmd;

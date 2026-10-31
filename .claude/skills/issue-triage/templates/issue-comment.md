@@ -94,7 +94,7 @@ After review, this request falls outside RTK's current design goals.
 
 ### Alternatives
 
-{If applicable: what the user can do instead. E.g., "For this use case, `rtk proxy <cmd>` gives you raw output while still tracking usage metrics."}
+{If applicable: what the user can do instead. E.g., "For this use case, `rtk bypass <cmd>` gives you raw output while still tracking usage metrics."}
 
 If the use case evolves or the scope changes in a future version, feel free to reopen with updated context.
 

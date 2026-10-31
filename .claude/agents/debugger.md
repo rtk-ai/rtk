@@ -97,7 +97,7 @@ docker run --rm -v $(pwd):/rtk -w /rtk rust:latest cargo test --test shell_escap
 | Filter crashes | Regex panic on malformed input | Add test with empty/malformed fixture |
 | Performance regression | Regex recompiled at runtime | Check flamegraph for `Regex::new()` calls |
 | Shell escaping error | Platform-specific quoting | Test on macOS + Linux + Windows |
-| Token savings <60% | Weak condensation logic | Review filter algorithm, compare fixtures |
+| Token savings <20% | Weak condensation logic | Review filter algorithm, compare fixtures |
 | Test failure | Fixture outdated or test assertion wrong | Update fixture from real command output |
 
 **Example hypothesis testing**:
@@ -214,7 +214,7 @@ Command::new(cmd).args(args).spawn();
 - [ ] All tests pass (`cargo test --all`)
 - [ ] Performance benchmarks pass (`hyperfine` <10ms)
 - [ ] Cross-platform tests pass (macOS + Linux)
-- [ ] Token savings verified (≥60% in tests)
+- [ ] Token savings verified (≥20% in tests)
 - [ ] Code formatted (`cargo fmt --all --check`)
 - [ ] Clippy clean (`cargo clippy --all-targets`)
 

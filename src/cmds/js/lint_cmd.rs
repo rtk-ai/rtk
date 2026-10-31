@@ -1,11 +1,12 @@
 //! Filters ESLint and Biome linter output, grouping violations by rule.
 
+use crate::cmds::python::sqlfluff_cmd;
 use crate::core::config;
+use crate::core::shell::{display_args, quote_program, with_args};
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::{CAP_ERRORS, CAP_WARNINGS};
-use crate::core::utils::{resolved_command, tool_exec, truncate, MissingTool};
-use crate::cmds::python::sqlfluff_cmd;
+use crate::core::utils::{MissingTool, resolved_command, tool_exec, truncate};
 use crate::mypy_cmd;
 use crate::ruff_cmd;
 use anyhow::{Context, Result};
@@ -76,7 +77,10 @@ fn strip_pm_prefix(args: &[String]) -> usize {
 /// The package runner named at the front of the args, if any. `bunx eslint`
 /// and `pnpm exec eslint` both name one; a bare `exec` does not.
 fn named_runner(args: &[String], skip: usize) -> Option<&str> {
-    args[..skip].iter().map(String::as_str).find(|a| *a != "exec")
+    args[..skip]
+        .iter()
+        .map(String::as_str)
+        .find(|a| *a != "exec")
 }
 
 /// Detect the linter name from args (after stripping PM prefixes).
@@ -110,7 +114,8 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
     // sqlfluff owns its own argv and its own rendering: routing, format-flag
     // detection and failure handling live in `sqlfluff_cmd::plan` so this entry
     // point and `rtk sqlfluff ...` cannot drift apart.
-    let sqlfluff = (linter == "sqlfluff").then(|| sqlfluff_cmd::plan(&effective_args[1..]));
+    let sqlfluff =
+        (linter == "sqlfluff").then(|| sqlfluff_cmd::plan_for_lint(&effective_args[1..]));
 
     // Python linter use resolved_command() directly (they're on PATH via pip/pipx)
     // JS linters use package_manager_exec (npx/pnpm exec)
@@ -230,16 +235,11 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
     let hint = crate::core::tee::tee_and_hint(&raw, "lint", result.exit_code);
     let shown = crate::core::runner::emit_guarded(&filtered, hint.as_deref(), &raw);
 
-    timer.track(
-        &format!("{} {}", linter, effective_args[start_idx..].join(" ")),
-        &format!(
-            "rtk lint {} {}",
-            linter,
-            effective_args[start_idx..].join(" ")
-        ),
-        &raw,
-        &shown,
+    let tracked = with_args(
+        &quote_program(linter),
+        &display_args(&effective_args[start_idx..]),
     );
+    timer.track(&tracked, &format!("rtk lint {tracked}"), &raw, &shown);
 
     if !result.success() {
         return Ok(result.exit_code);
@@ -422,7 +422,6 @@ fn filter_pylint_json(output: &str) -> String {
         result.push('\n');
     }
 
-
     // Show top symbols (rules)
     let mut symbol_counts: Vec<_> = by_symbol.iter().collect();
     symbol_counts.sort_by(|a, b| b.1.cmp(a.1));
@@ -458,7 +457,10 @@ fn filter_pylint_json(output: &str) -> String {
     }
 
     if file_counts.len() > MAX_FILES {
-        result.push_str(&format!("\n… +{} more files\n", file_counts.len() - MAX_FILES));
+        result.push_str(&format!(
+            "\n… +{} more files\n",
+            file_counts.len() - MAX_FILES
+        ));
         let all_file_lines = file_counts
             .iter()
             .map(|(file, count)| format!("{} ({} issues)", compact_path(file), count))
@@ -741,11 +743,17 @@ mod tests {
 
     #[test]
     fn test_named_runner_recovers_the_stripped_prefix() {
-        let args: Vec<String> = ["bunx", "eslint", "."].iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = ["bunx", "eslint", "."]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let skip = strip_pm_prefix(&args);
         assert_eq!(named_runner(&args, skip), Some("bunx"));
 
-        let args: Vec<String> = ["pnpm", "exec", "eslint"].iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = ["pnpm", "exec", "eslint"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let skip = strip_pm_prefix(&args);
         assert_eq!(named_runner(&args, skip), Some("pnpm"));
 
@@ -754,4 +762,3 @@ mod tests {
         assert_eq!(named_runner(&args, skip), None);
     }
 }
-

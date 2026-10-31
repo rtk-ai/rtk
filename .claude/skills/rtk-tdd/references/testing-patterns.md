@@ -28,7 +28,7 @@ Prioritized by testability (pure functions first, I/O-heavy last).
 | `find_cmd.rs` | Directory grouping logic | Filesystem-dependent |
 | `wget_cmd.rs` | `compact_url`, `format_size`, `truncate_line`, `extract_filename_from_output` | Some pure helpers worth testing |
 | `gain.rs` | Display formatting | Depends on tracking DB |
-| `init.rs` | CLAUDE.md generation | File I/O |
+| `hooks/init/` | CLAUDE.md generation | File I/O |
 | `main.rs` | CLI routing | Covered by smoke tests |
 
 ## RTK Test Patterns
@@ -52,7 +52,7 @@ more noise
 }
 ```
 
-Used in: `git.rs`, `grep_cmd.rs`, `lint_cmd.rs`, `tsc_cmd.rs`, `vitest_cmd.rs`, `pnpm_cmd.rs`, `next_cmd.rs`, `prettier_cmd.rs`, `playwright_cmd.rs`, `prisma_cmd.rs`
+Used in: `git_cmd.rs`, `grep_cmd.rs`, `lint_cmd.rs`, `tsc_cmd.rs`, `vitest_cmd.rs`, `pnpm_cmd.rs`, `next_cmd.rs`, `prettier_cmd.rs`, `playwright_cmd.rs`, `prisma_cmd.rs`
 
 ### Pattern 2: Pure Computation
 

@@ -32,7 +32,7 @@ Think in terms of filter families, not individual commands. Every new `*_cmd.rs`
 ```
 src/main.rs
 ├── Commands enum (clap derive)
-│   ├── Git(GitArgs)      → cmds/git/git.rs
+│   ├── Git(GitArgs)      → cmds/git/git_cmd.rs
 │   ├── Cargo(CargoArgs)  → cmds/rust/runner.rs
 │   ├── Gh(GhArgs)        → cmds/git/gh_cmd.rs
 │   ├── Grep(GrepArgs)    → cmds/system/grep_cmd.rs
@@ -181,5 +181,5 @@ Before adding code to a module, check `utils.rs`:
 **Will not:**
 - Implement the full filter logic (→ rust-rtk agent)
 - Write the actual regex patterns (→ implementation detail)
-- Make decisions about token savings targets (→ fixed at ≥60%)
+- Make decisions about token savings targets (→ fixed at ≥20%)
 - Override the <10ms startup constraint (→ non-negotiable)

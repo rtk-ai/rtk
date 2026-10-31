@@ -2,7 +2,7 @@
 
 use crate::core::guard::never_worse;
 use crate::core::tracking;
-use crate::core::truncate::{reduced, CAP_WARNINGS};
+use crate::core::truncate::{CAP_WARNINGS, reduced};
 use anyhow::Result;
 use regex::Regex;
 use std::collections::HashMap;
@@ -34,12 +34,7 @@ pub fn run_file(file: &Path, verbose: u8) -> Result<()> {
     let result = analyze_logs(&content);
     let shown = never_worse(&content, &result);
     println!("{}", shown);
-    timer.track(
-        &format!("cat {}", file.display()),
-        "rtk log",
-        &content,
-        shown,
-    );
+    timer.track(&super::read::cat_label(file), "rtk log", &content, shown);
     Ok(())
 }
 
@@ -261,8 +256,14 @@ mod tests {
                     2024-01-01 10:00:03 SEVERE: data corruption detected\n\
                     2024-01-01 10:00:04 notice: config reloaded\n";
         let result = analyze_logs(logs);
-        assert!(result.contains("ERRORS"), "critical/alert/emerg/severe should count as errors");
-        assert!(result.contains("WARNINGS"), "notice should count as warning");
+        assert!(
+            result.contains("ERRORS"),
+            "critical/alert/emerg/severe should count as errors"
+        );
+        assert!(
+            result.contains("WARNINGS"),
+            "notice should count as warning"
+        );
     }
 
     #[test]

@@ -13,7 +13,7 @@ jobs:
       github.event.pull_request.base.ref == 'master' &&
       github.event.pull_request.head.ref != 'develop'
     steps:
-      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         id: app-token
         with:
           client-id: ${{ secrets.APP_CLIENT_ID }}
@@ -21,7 +21,7 @@ jobs:
           permission-pull-requests: write
 
       - name: Add wrong-base label and comment
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |

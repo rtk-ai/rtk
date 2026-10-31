@@ -7,109 +7,99 @@ sidebar:
 
 # Telemetry & Privacy
 
-RTK collects anonymous, aggregate usage metrics once per day to help improve the product. Telemetry is **disabled by default** and requires explicit consent during `rtk init` or `rtk telemetry enable`.
+Telemetry is **off by default**. RTK sends nothing until you give explicit consent, either at the `rtk init` prompt (`[y/N]`, default no) or with `rtk telemetry enable`. Once enabled, RTK sends anonymous, aggregate usage metrics at most once per day.
 
 ## Data Collector
 
 **Entity**: `RTK AI Labs`
 **Contact**: contact@rtk-ai.app
 
-## Why we collect telemetry
-
-Without telemetry, we have no visibility into:
-
-- Which commands are used most and need the best filters
-- Which filters are underperforming and need improvement
-- Which ecosystems to prioritize for new filter development
-- How much bash output RTK removes before it reaches the model
-- Whether users stay engaged over time or churn after trying RTK
-
-This data directly drives our roadmap. For example, if telemetry shows that 40% of users run Python commands but only 10% of our filters cover Python, we know where to invest next.
-
 ## How it works
 
-1. **Once per day** (23-hour interval), RTK sends a single HTTPS POST to our telemetry endpoint
+1. **Once per day** (23-hour interval), RTK sends a single HTTPS POST to the telemetry endpoint
 2. The ping runs in a **background thread** and never blocks the CLI (2-second timeout)
 3. A marker file prevents duplicate pings within the interval
 4. If the server is unreachable, the ping is silently dropped — no retries, no queue
 
 ## What is collected
 
+Example values below are illustrative.
+
 ### Identity (anonymous)
 
-| Field | Example | Purpose |
-|-------|---------|---------|
-| `device_hash` | `a3f8c9...` (64 hex chars) | Count unique installations. SHA-256 of a per-device random salt stored locally (`~/.local/share/rtk/.device_salt`). Not reversible. No hostname or username included. |
+| Field | Example | Description |
+|-------|---------|-------------|
+| `device_hash` | `a3f8c9...` (64 hex chars) | SHA-256 of a per-device random salt stored locally (`~/.local/share/rtk/.device_salt`). Not reversible. No hostname or username included. |
 
 ### Environment
 
-| Field | Example | Purpose |
-|-------|---------|---------|
-| `version` | `0.34.1` | Track adoption of new versions |
-| `os` | `macos` | Know which platforms to support and test |
-| `arch` | `aarch64` | Prioritize ARM vs x86 builds |
-| `install_method` | `homebrew` | Understand distribution channels (homebrew/cargo/script/nix) |
+| Field | Example | Description |
+|-------|---------|-------------|
+| `version` | `1.0.0` | RTK version |
+| `os` | `macos` | Operating system |
+| `arch` | `aarch64` | CPU architecture |
+| `install_method` | `homebrew` | How RTK was installed (homebrew/cargo/script/nix) |
 
 ### Usage volume
 
-| Field | Example | Purpose |
-|-------|---------|---------|
-| `commands_24h` | `142` | Daily activity level |
-| `commands_total` | `32888` | Lifetime usage — segment light vs heavy users |
-| `top_commands` | `["git", "cargo", "ls"]` | Most popular tools (names only, max 5) |
-| `tokens_saved_24h` | `450000` | Daily value delivered |
-| `tokens_saved_total` | `96500000` | Lifetime value delivered |
-| `savings_pct` | `72.5` | Overall effectiveness |
+| Field | Example | Description |
+|-------|---------|-------------|
+| `commands_24h` | `100` | Commands run in the last 24 hours |
+| `commands_total` | `10000` | Commands run since install |
+| `top_commands` | `["git", "cargo", "ls"]` | Most used tools (names only, max 5) |
+| `tokens_saved_24h` | `100000` | Estimated tokens saved in the last 24 hours |
+| `tokens_saved_total` | `10000000` | Estimated tokens saved since install |
+| `savings_pct` | `70.0` | Overall bash output reduction |
 
-### Quality (filter improvement)
+### Filter quality
 
-| Field | Example | Purpose |
-|-------|---------|---------|
-| `passthrough_top` | `["git:15", "npm:8"]` | Top 5 commands with 0% bash output reduction — these need filters |
-| `parse_failures_24h` | `3` | Filter fragility — high count means filters are breaking |
-| `low_savings_commands` | `["rtk <cmd>:25%"]` | Commands averaging <30% bash output reduction — filters to improve. The example is a placeholder, not a measured value |
-| `avg_savings_per_command` | `68.5` | Unweighted average (vs global which is volume-biased) |
+| Field | Example | Description |
+|-------|---------|-------------|
+| `passthrough_top` | `["git:10", "npm:5"]` | Top 5 commands with 0% bash output reduction |
+| `parse_failures_24h` | `0` | Filter parse failures in the last 24 hours |
+| `low_savings_commands` | `["rtk <cmd>:25%"]` | Commands with a weighted bash output reduction below 30% (net-negative ones included). The rate is `SUM(saved)/SUM(input)` over every call of the command, the same figure as the `rtk gain` By Command table. Exact 0% is reported in `passthrough_top` instead |
+| `avg_savings_per_command` | `70.0` | Unweighted average of per-command reduction rates across distinct command names; commands that never had any input are skipped |
 
 ### Ecosystem distribution
 
-| Field | Example | Purpose |
-|-------|---------|---------|
-| `ecosystem_mix` | `{"git": 45, "cargo": 20, "js": 15}` | Category percentages — where to invest filter development |
+| Field | Example | Description |
+|-------|---------|-------------|
+| `ecosystem_mix` | `{"git": 50, "cargo": 20, "js": 10}` | Share of commands per tool category, in percent |
 
-### Retention (engagement)
+### Activity
 
-| Field | Example | Purpose |
-|-------|---------|---------|
-| `first_seen_days` | `45` | Installation age in days |
-| `active_days_30d` | `22` | Days with at least 1 command in last 30 days — measures stickiness |
+| Field | Example | Description |
+|-------|---------|-------------|
+| `first_seen_days` | `30` | Installation age in days |
+| `active_days_30d` | `20` | Days with at least 1 command in the last 30 days |
 
 ### Economics
 
-| Field | Example | Purpose |
-|-------|---------|---------|
-| `tokens_saved_30d` | `12000000` | 30-day token savings for trend analysis |
-| `estimated_savings_usd_30d` | — | A USD value derived from the estimated tokens saved and a fixed internal constant. It is not a measured cost and does not reflect any provider's pricing |
+| Field | Example | Description |
+|-------|---------|-------------|
+| `tokens_saved_30d` | `1000000` | Estimated tokens saved in the last 30 days |
+| `estimated_savings_usd_30d` | — | A USD value derived from the estimated tokens saved and a fixed per-token rate. It is not a measured cost and does not reflect any provider's pricing |
 
-### Adoption
+### Integration
 
-| Field | Example | Purpose |
-|-------|---------|---------|
+| Field | Example | Description |
+|-------|---------|-------------|
 | `hook_type` | `claude` | Which AI agent hook is installed (claude/gemini/codex/cursor/none) |
-| `custom_toml_filters` | `3` | Number of user-created TOML filter files — DSL adoption |
+| `custom_toml_filters` | `1` | Number of user-created TOML filter files |
 
-### Configuration (user maturity)
+### Configuration
 
-| Field | Example | Purpose |
-|-------|---------|---------|
-| `has_config_toml` | `true` | Whether user has customized RTK config |
-| `exclude_commands_count` | `2` | Commands excluded from rewriting — high count may indicate frustration |
-| `projects_count` | `5` | Distinct project paths — multi-project = power user |
+| Field | Example | Description |
+|-------|---------|-------------|
+| `has_config_toml` | `true` | Whether a `config.toml` exists |
+| `exclude_commands_count` | `2` | Number of entries in `hooks.exclude_commands` |
+| `projects_count` | `5` | Number of distinct project paths |
 
-### Feature adoption
+### Feature usage
 
-| Field | Example | Purpose |
-|-------|---------|---------|
-| `meta_usage` | `{"gain": 5, "discover": 2}` | Which RTK features are actually used |
+| Field | Example | Description |
+|-------|---------|-------------|
+| `meta_usage` | `{"gain": 5, "discover": 2}` | How often RTK's own commands are run |
 
 ## What is NOT collected
 
@@ -165,4 +155,4 @@ Under the EU General Data Protection Regulation, you have the right to:
 - All communications use HTTPS (TLS)
 - Data is used exclusively for RTK product improvement
 - No data is sold or shared with third parties
-- Aggregate statistics may be published (e.g. "70% of RTK users are on macOS")
+- Aggregate statistics may be published

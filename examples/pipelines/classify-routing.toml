@@ -1,0 +1,70 @@
+# classify-routing — route tool output by what it MEANS, not what it matches
+#
+# A [classifier.*] asks a typed question about a block of tool output and
+# turns the answer into facts a rule can condition on. This example binds
+# TypeSafe's Jev (https://docs.typesafe.ai) as the upstream: a System One
+# model that returns a label + confidence instead of generated text, so the
+# answer is cheap, fast, and directly testable in `when = { ... }`.
+#
+# What this pipeline does: shell output classified as a failing test run is
+# routed to a cheap digest task (the agent sees the digest, not the wall of
+# output); everything else flows through the normal rtk:posthook chains.
+#
+# Auth: the upstream reads $TYPESAFE_API_KEY from your environment. Adopting
+# this pipeline without it is safe — classification silently yields no fact,
+# rules never fire, output passes through — and `rtk pipeline validate`
+# prints the exact export you are missing.
+#
+# Cost: classification adds one inference call per matching event, memoized
+# per content.
+#
+# Wire format: https://docs.typesafe.ai
+
+schema_version = 1
+
+[pipeline]
+name    = "classify-routing"
+extends = "rtk:posthook"
+
+[upstream.jev]
+provider    = "typesafe"
+model       = "jev-latest"
+base_url    = "https://api.typesafe.ai/v1/systemone"
+api_key_env = "TYPESAFE_API_KEY"
+timeout_secs = 8
+
+[upstream.flash]
+provider    = "google"
+model       = "gemini-2.5-flash"
+api_key_env = "GEMINI_API_KEY"
+
+[classifier.intent]
+upstream       = "jev"
+question       = "choice"
+instructions   = "What kind of tool output is this?"
+input_chars    = 2000
+min_confidence = 0.8
+
+[classifier.intent.labels]
+test_failure    = "Failing test output: assertions, FAILED markers, stack traces"
+build_log       = "Compiler or build progress output without test results"
+dependency_dump = "Package manager listings, lockfiles, dependency trees"
+prose           = "Documentation or natural-language text"
+
+[task.digest-failures]
+kind     = "digest"
+upstream = "flash"
+
+# Big failing test runs go to the digest worker; the classifier decides,
+# the size floor keeps small output inline either way.
+[[hook.after_tool.shell]]
+name   = "route-test-failures"
+when   = { "class.intent" = "test_failure", tokens_gt = 1500 }
+action = "route"
+task   = "digest-failures"
+
+# Dependency dumps are pure noise past the first screen — cap them hard.
+[[hook.after_tool.shell]]
+name = "cap-dependency-dumps"
+when = { "class.intent" = "dependency_dump", lines_gt = 40 }
+use  = ["term"]

@@ -10,7 +10,7 @@ In no event shall the authors or copyright holders be liable for any claim, dama
 
 ## Precompiled Binaries
 
-Precompiled binaries are provided solely for convenience and are covered by the same license as the source code (Apache License 2.0). They are provided without warranties or conditions of any kind. You are responsible for verifying the integrity and suitability of any binary before use. Always verify checksums when available.
+Precompiled binaries are provided solely for convenience and are covered by the licenses of the code they contain: the `rtk` CLI sources are Apache License 2.0, and the binary also links the `rtk-engine` crate, licensed BUSL-1.1 (its text ships alongside as LICENSE-ENGINE). They are provided without warranties or conditions of any kind. You are responsible for verifying the integrity and suitability of any binary before use. Always verify checksums when available.
 
 ## Third-Party Dependencies
 
@@ -22,8 +22,8 @@ This software interacts with your development environment, file system, and exte
 
 ## Telemetry
 
-This software collects anonymous, aggregate usage metrics by default and can be disabled at any time. No personally identifiable information, source code, file paths, command arguments, or secrets are collected. See the README for full details and opt-out instructions.
+Telemetry is off by default. If you opt in (at the `rtk init` prompt or with `rtk telemetry enable`), this software sends anonymous, aggregate usage metrics, and you can disable it at any time with `rtk telemetry disable`. No personally identifiable information, source code, file paths, command arguments, or secrets are collected. See [Telemetry & Privacy](docs/guide/resources/telemetry.md) for full details.
 
 ---
 
-See [LICENSE](LICENSE) for the full terms of the Apache License 2.0 under which this software is distributed.
+See [LICENSE](LICENSE) for the Apache License 2.0 terms, and [engine/LICENSE](engine/LICENSE) / [proxy/LICENSE](proxy/LICENSE) for the BUSL-1.1 terms covering the engine and daemon.

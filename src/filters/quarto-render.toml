@@ -1,6 +1,6 @@
 [filters.quarto-render]
 description = "Compact quarto render output"
-match_command = "^quarto\\s+render"
+match_command = "^quarto\\s+render(\\s|$|[;|&()<>])"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

@@ -74,6 +74,8 @@ rtk gain --reset --yes    # skip prompt (CI/scripts)
 
 ## Output Examples
 
+All values below are illustrative.
+
 ### Daily Breakdown
 
 ```
@@ -81,17 +83,17 @@ rtk gain --reset --yes    # skip prompt (CI/scripts)
 ════════════════════════════════════════════════════════════════
 Date            Cmds      Input     Output      Saved   Save%
 ────────────────────────────────────────────────────────────────
-2026-01-28        89     380.9K      26.7K     355.8K   93.4%
-2026-01-29       102     894.5K      32.4K     863.7K   96.6%
-2026-01-30         5        749         55        694   92.7%
+2026-01-01       100     500.0K     100.0K     400.0K   80.0%
+2026-01-02       100     500.0K     100.0K     400.0K   80.0%
+2026-01-03       100     500.0K     100.0K     400.0K   80.0%
 ────────────────────────────────────────────────────────────────
-TOTAL            196       1.3M      59.2K       1.2M   95.6%
+TOTAL            300       1.5M     300.0K       1.2M   80.0%
 ```
 
 **Metrics explained:**
 - **Cmds**: Number of rtk commands executed
 - **Input**: Estimated tokens from raw command output
-- **Output**: Actual tokens after rtk filtering
+- **Output**: Estimated tokens after rtk filtering
 - **Saved**: Input - Output (tokens prevented from reaching LLM)
 - **Save%**: Percentage reduction (Saved / Input × 100)
 
@@ -102,9 +104,9 @@ TOTAL            196       1.3M      59.2K       1.2M   95.6%
 ════════════════════════════════════════════════════════════════════════
 Week                      Cmds      Input     Output      Saved   Save%
 ────────────────────────────────────────────────────────────────────────
-01-26 → 02-01              196       1.3M      59.2K       1.2M   95.6%
+12-28 → 01-03              300       1.5M     300.0K       1.2M   80.0%
 ────────────────────────────────────────────────────────────────────────
-TOTAL                      196       1.3M      59.2K       1.2M   95.6%
+TOTAL                      300       1.5M     300.0K       1.2M   80.0%
 ```
 
 **Week definition**: Sunday to Saturday (ISO week starting Sunday at 00:00)
@@ -116,9 +118,9 @@ TOTAL                      196       1.3M      59.2K       1.2M   95.6%
 ════════════════════════════════════════════════════════════════
 Month         Cmds      Input     Output      Saved   Save%
 ────────────────────────────────────────────────────────────────
-2026-01        196       1.3M      59.2K       1.2M   95.6%
+2026-01        300       1.5M     300.0K       1.2M   80.0%
 ────────────────────────────────────────────────────────────────
-TOTAL          196       1.3M      59.2K       1.2M   95.6%
+TOTAL          300       1.5M     300.0K       1.2M   80.0%
 ```
 
 **Month format**: YYYY-MM (calendar month)
@@ -128,20 +130,20 @@ TOTAL          196       1.3M      59.2K       1.2M   95.6%
 ```json
 {
   "summary": {
-    "total_commands": 196,
-    "total_input": 1276098,
-    "total_output": 59244,
-    "total_saved": 1220217,
-    "avg_savings_pct": 95.62
+    "total_commands": 300,
+    "total_input": 1500000,
+    "total_output": 300000,
+    "total_saved": 1200000,
+    "avg_savings_pct": 80.0
   },
   "daily": [
     {
-      "date": "2026-01-28",
-      "commands": 89,
-      "input_tokens": 380894,
-      "output_tokens": 26744,
-      "saved_tokens": 355779,
-      "savings_pct": 93.41
+      "date": "2026-01-01",
+      "commands": 100,
+      "input_tokens": 500000,
+      "output_tokens": 100000,
+      "saved_tokens": 400000,
+      "savings_pct": 80.0
     }
   ],
   "weekly": [...],
@@ -160,16 +162,16 @@ TOTAL          196       1.3M      59.2K       1.2M   95.6%
 ```csv
 # Daily Data
 date,commands,input_tokens,output_tokens,saved_tokens,savings_pct
-2026-01-28,89,380894,26744,355779,93.41
-2026-01-29,102,894455,32445,863744,96.57
+2026-01-01,100,500000,100000,400000,80.0
+2026-01-02,100,500000,100000,400000,80.0
 
 # Weekly Data
 week_start,week_end,commands,input_tokens,output_tokens,saved_tokens,savings_pct
-2026-01-26,2026-02-01,196,1276098,59244,1220217,95.62
+2025-12-28,2026-01-03,300,1500000,300000,1200000,80.0
 
 # Monthly Data
 month,commands,input_tokens,output_tokens,saved_tokens,savings_pct
-2026-01,196,1276098,59244,1220217,95.62
+2026-01,300,1500000,300000,1200000,80.0
 ```
 
 **Use cases:**
@@ -261,7 +263,7 @@ EOF
 
 ### Token Estimation
 
-`rtk gain` estimates tokens as `bytes / 4` (`src/core/tracking.rs:1284`). RTK ships no real tokenizer by design: embedding one would cost startup time and would require a tokenizer per model, or a per-session model lookup, which RTK does not implement. The same estimator is applied to raw and filtered output, so the percentage is reliable; the absolute token counts are approximate and will not match your provider's billing.
+`rtk gain` estimates tokens as `bytes / 4`; RTK ships no tokenizer. The same estimator is applied to raw and filtered output, so the percentage is reliable; the absolute token counts are approximate and will not match your provider's billing.
 
 ### Savings Calculation
 
@@ -273,18 +275,6 @@ Savings %       = (Saved / Input) × 100
 ```
 
 `Savings %` is a bash output byte ratio. Those bytes are one contributor to input tokens, and input tokens are only part of a bill that also counts output tokens.
-
-### Typical Savings by Command
-
-| Command | Bash output reduction | Mechanism |
-|---------|----------------------|-----------|
-| `rtk git status` | 77-93% | Compact stat format |
-| `rtk eslint` | 84% | Group by rule |
-| `rtk jest` | 94-99% | Show failures only |
-| `rtk vitest` | 94-99% | Show failures only |
-| `rtk find` | 75% | Tree format |
-| `rtk pnpm list` | 70-90% | Compact dependencies |
-| `rtk grep` | 70% | Truncate + group |
 
 ## Database Management
 
@@ -318,7 +308,7 @@ sqlite3 ~/.local/share/rtk/history.db \
 cp ~/.local/share/rtk/history.db ~/backups/rtk-history-$(date +%Y%m%d).db
 
 # Restore
-cp ~/backups/rtk-history-20260128.db ~/.local/share/rtk/history.db
+cp ~/backups/rtk-history-YYYYMMDD.db ~/.local/share/rtk/history.db
 
 # Export for migration
 sqlite3 ~/.local/share/rtk/history.db .dump > rtk-backup.sql
@@ -352,7 +342,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - name: Install rtk
-        run: cargo install --path .
+        run: cargo install --git https://github.com/rtk-ai/rtk rtk
       - name: Generate report
         run: |
           rtk gain --weekly --format json > stats/week-$(date +%Y-%W).json
@@ -406,10 +396,6 @@ rtk git status
 ```bash
 # Check for pipe errors
 rtk gain --format json 2>&1 | tee /tmp/rtk-debug.log | jq .
-
-# Use release build to avoid warnings
-cargo build --release
-./target/release/rtk gain --format json
 ```
 
 ### Incorrect statistics
@@ -441,6 +427,6 @@ print(f'rtk estimate: {len(text) // 4}')
 
 ## See Also
 
-- [README.md](../README.md) - Full rtk documentation
-- [CLAUDE.md](../CLAUDE.md) - Claude Code integration guide
-- [ARCHITECTURE.md](../contributing/ARCHITECTURE.md) - Technical architecture
+- [README.md](../../README.md) - Full rtk documentation
+- [Token Savings Analytics](../guide/analytics/gain.md) - The full `rtk gain` surface
+- [How RTK Savings Work](../guide/resources/savings-explained.md) - What the numbers measure

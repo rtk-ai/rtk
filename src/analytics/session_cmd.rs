@@ -3,7 +3,7 @@
 use crate::core::utils::format_tokens;
 use crate::discover::is_already_rtk;
 use crate::discover::provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
-use crate::discover::registry::{classify_command, split_command_chain, Classification};
+use crate::discover::registry::{Classification, classify_command, split_command_chain};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
@@ -28,8 +28,8 @@ impl SessionSummary {
 
 /// Count RTK-covered commands from extracted commands.
 /// A command is "covered" if it either:
-/// - is an explicit rtk invocation, excluding `rtk proxy` (see `is_already_rtk` —
-///   proxy deliberately runs the raw command unfiltered, so it must not count as
+/// - is an explicit rtk invocation, excluding `rtk bypass` (see `is_already_rtk` —
+///   bypass deliberately runs the raw command unfiltered, so it must not count as
 ///   adopted usage), or
 /// - would be rewritten by the hook (classify_command returns Supported)
 ///
@@ -277,17 +277,17 @@ mod tests {
     }
 
     #[test]
-    fn test_count_rtk_proxy_not_counted_as_adopted() {
-        // `rtk proxy <cmd>` deliberately runs the raw command unfiltered — it must
+    fn test_count_rtk_bypass_not_counted_as_adopted() {
+        // `rtk bypass <cmd>` deliberately runs the raw command unfiltered — it must
         // not count as adopted rtk usage, or the session report would flatter
         // itself via its own escape hatch (mirrors discover::is_already_rtk).
         let cmds = vec![
-            make_cmd("rtk proxy git log -20", Some(2000)),
+            make_cmd("rtk bypass git log -20", Some(2000)),
             make_cmd("rtk git status", Some(200)),
         ];
         let (total, rtk, _) = count_rtk_commands(&cmds);
         assert_eq!(total, 2);
-        assert_eq!(rtk, 1, "only the explicit non-proxy rtk invocation counts");
+        assert_eq!(rtk, 1, "only the explicit non-bypass rtk invocation counts");
     }
 
     #[test]

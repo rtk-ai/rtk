@@ -1,1 +1,3 @@
-automod::dir!(pub "src/cmds/ruby");
+pub mod rake_cmd;
+pub mod rspec_cmd;
+pub mod rubocop_cmd;

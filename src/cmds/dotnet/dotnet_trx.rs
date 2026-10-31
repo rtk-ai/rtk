@@ -2,8 +2,8 @@
 
 use crate::binlog::{FailedTest, TestSummary};
 use chrono::{DateTime, FixedOffset};
-use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use quick_xml::events::{BytesStart, Event};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -387,6 +387,18 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    /// Force a file's mtime instead of relying on write ordering: filesystem
+    /// mtime granularity (1 s on some CI filesystems, 2 s on FAT) can make two
+    /// files written microseconds apart indistinguishable.
+    fn set_mtime(path: &Path, time: SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("open for mtime")
+            .set_modified(time)
+            .expect("set mtime");
+    }
+
     #[test]
     fn test_parse_trx_content_extracts_passed_counts() {
         let trx = r#"<?xml version="1.0" encoding="utf-8"?>
@@ -496,8 +508,9 @@ mod tests {
         let old_trx = testresults_dir.join("old.trx");
         let new_trx = testresults_dir.join("new.trx");
         std::fs::write(&old_trx, "old").expect("write old");
-        std::thread::sleep(Duration::from_millis(5));
+        set_mtime(&old_trx, SystemTime::now() - Duration::from_secs(10));
         std::fs::write(&new_trx, "new").expect("write new");
+        set_mtime(&new_trx, SystemTime::now() + Duration::from_secs(10));
 
         let found = find_recent_trx_in_dir(&testresults_dir).expect("should find newest trx");
         assert_eq!(found, new_trx);
@@ -556,17 +569,17 @@ mod tests {
 
         let trx_old = r#"<?xml version="1.0" encoding="utf-8"?>
 <TestRun><ResultSummary><Counters total="2" executed="2" passed="2" failed="0" /></ResultSummary></TestRun>"#;
-        std::fs::write(trx_dir.join("old.trx"), trx_old).expect("write old trx");
+        let old_path = trx_dir.join("old.trx");
+        std::fs::write(&old_path, trx_old).expect("write old trx");
+        set_mtime(&old_path, SystemTime::now() - Duration::from_secs(10));
 
-        std::thread::sleep(Duration::from_millis(10));
-
-        let since = SystemTime::now()
-            .checked_sub(Duration::from_millis(10))
-            .expect("threshold overflow");
+        let since = SystemTime::now();
 
         let trx_new = r#"<?xml version="1.0" encoding="utf-8"?>
 <TestRun><ResultSummary><Counters total="3" executed="3" passed="2" failed="1" /></ResultSummary></TestRun>"#;
-        std::fs::write(trx_dir.join("new.trx"), trx_new).expect("write new trx");
+        let new_path = trx_dir.join("new.trx");
+        std::fs::write(&new_path, trx_new).expect("write new trx");
+        set_mtime(&new_path, SystemTime::now() + Duration::from_secs(10));
 
         let summary = parse_trx_files_in_dir_since(&trx_dir, Some(since)).expect("merged summary");
         assert_eq!(summary.total, 3);

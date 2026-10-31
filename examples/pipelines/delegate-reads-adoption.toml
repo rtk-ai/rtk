@@ -1,0 +1,24 @@
+# Delegated reads (rtk:delegate-reads): a Read of a big whole file is refused and
+# the agent is told to run `rtk bulk-read` instead, which asks a cheap model
+# the agent's own question about the file — only the answer enters the
+# context. You supply the model: the tasks inherit their kind from
+# rtk:delegate-reads and bind to the upstream declared here.
+schema_version = 1
+
+[pipeline]
+extends = "rtk:delegate-reads"
+
+[upstream.flash]
+provider    = "google"
+model       = "gemini-2.5-flash"
+api_key_env = "GEMINI_API_KEY"
+
+[task.bulk-read]
+upstream = "flash"
+
+[task.code-write]
+upstream = "flash"
+
+# Tune the shunt threshold the same way as everything else:
+# [override.shunt-large-read]
+# when.file_lines_gt = 500

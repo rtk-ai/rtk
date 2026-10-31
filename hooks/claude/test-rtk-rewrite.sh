@@ -422,6 +422,43 @@ fi
 
 echo ""
 
+# ---- SECTION: inherited RTK_REWRITE_HOST must not relax this hook ----
+# This hook turns exit 0 into an explicit allow, and RTK_REWRITE_HOST is the
+# channel that turns RTK's default ask into exit 0. An inherited value (a shell
+# rc, .envrc, or CI env) must therefore be scrubbed before the hook calls
+# `rtk rewrite`.
+if command -v rtk &>/dev/null; then
+  echo "--- Inherited host name (RTK_REWRITE_HOST) ---"
+  HOST_TMP=$(mktemp -d)
+  mkdir -p "$HOST_TMP/home/.config" "$HOST_TMP/claude" "$HOST_TMP/cache" "$HOST_TMP/project/.claude"
+  printf '{"permissions":{}}' >"$HOST_TMP/claude/settings.json"
+  host_input=$(jq -n --arg cmd "git status" '{"tool_name":"Bash","tool_input":{"command":$cmd}}')
+  host_output=$(
+    cd "$HOST_TMP/project" &&
+      echo "$host_input" |
+      HOME="$HOST_TMP/home" \
+        CLAUDE_CONFIG_DIR="$HOST_TMP/claude" \
+        XDG_CONFIG_HOME="$HOST_TMP/home/.config" \
+        XDG_CACHE_HOME="$HOST_TMP/cache" \
+        RTK_REWRITE_HOST=openclaw \
+        bash "$HOOK" 2>/dev/null
+  ) || true
+  TOTAL=$((TOTAL + 1))
+  host_decision=$(echo "$host_output" | jq -r '.hookSpecificOutput.permissionDecision // empty' 2>/dev/null)
+  host_cmd=$(echo "$host_output" | jq -r '.hookSpecificOutput.updatedInput.command // empty' 2>/dev/null)
+  if [ "$host_cmd" = "rtk git status" ] && [ "$host_decision" != "allow" ]; then
+    printf "  ${GREEN}PASS${RESET} host: inherited RTK_REWRITE_HOST does not auto-allow\n"
+    PASS=$((PASS + 1))
+  else
+    printf "  ${RED}FAIL${RESET} host: inherited RTK_REWRITE_HOST auto-allowed a rewrite\n"
+    printf "       expected: rtk git status with no permissionDecision\n"
+    printf "       actual:   %s (decision: %s)\n" "$host_cmd" "${host_decision:-none}"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$HOST_TMP"
+  echo ""
+fi
+
 # ---- SUMMARY ----
 echo "============================================"
 if [ $FAIL -eq 0 ]; then

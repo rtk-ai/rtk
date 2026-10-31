@@ -1,0 +1,20 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________________________________ test_p ____________________________________
+
+    def test_p():
+        E = {'b': 2}
+        Ex = 1
+>       assert E == {'b': 5}, 'state drifted'
+E       AssertionError: state drifted
+E       assert {'b': 2} == {'b': 5}
+E         
+E         Differing items:
+E         {'b': 2} != {'b': 5}
+E         Use -v to get more diff
+
+E          = {'b': 2}
+Ex         = 1
+
+test_le.py:4: AssertionError
+1 failed in 0.02s

@@ -1,0 +1,10 @@
+# Everything you inherit has a name; [override.<name>] patches one field and
+# keeps the rest. Here the oversize-read shunt fires at 500 lines instead of
+# 350 — the other `when` keys of the inherited rule are untouched.
+schema_version = 1
+
+[pipeline]
+extends = ["rtk:posthook", "rtk:delegate-reads"]
+
+[override.shunt-large-read]
+when.file_lines_gt = 500

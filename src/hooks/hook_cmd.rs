@@ -4,14 +4,20 @@
 //! corrupts the JSON protocol (Claude Code bug #4669 silently disables the hook).
 
 use super::constants::PRE_TOOL_USE_KEY;
+use super::decision::{self, HookDecision};
 use super::permissions::{self, PermissionVerdict};
+use super::permissions_opencode;
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::{self, Read, Write};
 
 use crate::core::tracking::HookOutcome;
+use crate::core::user_dirs;
+use crate::core::user_env;
 use crate::core::utils::strip_leading_bom;
-use crate::discover::registry::{has_heredoc, rewrite_command};
+
+#[cfg(feature = "engine")]
+mod claude_pipeline;
 
 const STDIN_CAP: usize = 1_048_576; // 1 MiB
 
@@ -79,7 +85,7 @@ pub fn run_copilot() -> Result<()> {
     };
 
     match detect_format(&v) {
-        HookFormat::VsCode { command } => handle_vscode(&command),
+        HookFormat::VsCode { command } => handle_vscode(&command, &v),
         HookFormat::CopilotCli { command, args } => {
             for path in heal_legacy_copilot_configs() {
                 audit_log("self_heal", &path.display().to_string(), "");
@@ -103,16 +109,14 @@ fn detect_format(v: &Value) -> HookFormat {
         if matches!(
             tool_name,
             "runTerminalCommand" | "run_in_terminal" | "Bash" | "bash"
-        ) {
-            if let Some(cmd) = v
-                .pointer("/tool_input/command")
-                .and_then(|c| c.as_str())
-                .filter(|c| !c.is_empty())
-            {
-                return HookFormat::VsCode {
-                    command: cmd.to_string(),
-                };
-            }
+        ) && let Some(cmd) = v
+            .pointer("/tool_input/command")
+            .and_then(|c| c.as_str())
+            .filter(|c| !c.is_empty())
+        {
+            return HookFormat::VsCode {
+                command: cmd.to_string(),
+            };
         }
         return HookFormat::PassThrough;
     }
@@ -124,27 +128,24 @@ fn detect_format(v: &Value) -> HookFormat {
     // registers this schema itself, like JetBrains/IntelliJ's Copilot plugin
     // (toolName "run_in_terminal").
     if let Some(tool_name) = v.get("toolName").and_then(|t| t.as_str()) {
-        if matches!(tool_name, "bash" | "powershell" | "run_in_terminal") {
-            if let Some(tool_args_str) = v.get("toolArgs").and_then(|t| t.as_str()) {
-                if let Ok(tool_args) = serde_json::from_str::<Value>(tool_args_str) {
-                    if let Some(cmd) = tool_args
-                        .get("command")
-                        .and_then(|c| c.as_str())
-                        .filter(|c| !c.is_empty())
-                    {
-                        return if tool_name == "run_in_terminal" {
-                            HookFormat::CopilotIde {
-                                command: cmd.to_string(),
-                            }
-                        } else {
-                            HookFormat::CopilotCli {
-                                command: cmd.to_string(),
-                                args: tool_args,
-                            }
-                        };
-                    }
+        if matches!(tool_name, "bash" | "powershell" | "run_in_terminal")
+            && let Some(tool_args_str) = v.get("toolArgs").and_then(|t| t.as_str())
+            && let Ok(tool_args) = serde_json::from_str::<Value>(tool_args_str)
+            && let Some(cmd) = tool_args
+                .get("command")
+                .and_then(|c| c.as_str())
+                .filter(|c| !c.is_empty())
+        {
+            return if tool_name == "run_in_terminal" {
+                HookFormat::CopilotIde {
+                    command: cmd.to_string(),
                 }
-            }
+            } else {
+                HookFormat::CopilotCli {
+                    command: cmd.to_string(),
+                    args: tool_args,
+                }
+            };
         }
         return HookFormat::PassThrough;
     }
@@ -233,56 +234,63 @@ fn heal_legacy_hook_file(path: &std::path::Path) -> bool {
         .is_ok()
 }
 
-fn get_rewritten(cmd: &str) -> Option<String> {
-    if has_heredoc(cmd) {
-        return None;
-    }
-
-    let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
-
-    let rewritten = rewrite_command(cmd, &excluded, &transparent_prefixes)?;
-
-    if rewritten == cmd {
-        return None;
-    }
-
-    Some(rewritten)
-}
-
-enum HookDecision {
-    AllowRewrite(String),
-    AskRewrite(String),
-    Defer,
-    Deny,
-}
-
-fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
+/// The decision every hook applies -- [`decision::decide_for_agent_at`] -- plus
+/// the recall bookkeeping the hook path performs for any command it does not
+/// deny. `cwd` is the payload's working directory when the host reports one
+/// (only the Claude Code hook does; see #3864).
+///
+/// `deny_rules` says whether RTK can show that nothing in a wrapped script
+/// could escape a deny rule. Only Claude Code's own hook can
+/// ([`decide_claude_hook_action`]); every other caller passes
+/// [`permissions::DenyRules::Unattested`] and therefore never wraps.
+fn decide_from_verdict(
+    cmd: &str,
+    verdict: PermissionVerdict,
+    deny_rules: permissions::DenyRules,
+    cwd: Option<&str>,
+) -> HookDecision {
     if verdict == PermissionVerdict::Deny {
         return HookDecision::Deny;
     }
-    if crate::discover::lexer::contains_unattestable_construct(cmd) {
-        return HookDecision::Defer;
-    }
-    match get_rewritten(cmd) {
-        Some(r) if verdict == PermissionVerdict::Allow => HookDecision::AllowRewrite(r),
-        Some(r) => HookDecision::AskRewrite(r),
-        None => HookDecision::Defer,
-    }
+    crate::hooks::rewrite_cmd::track_tee_read(cmd);
+    decision::decide_for_agent_at(cmd, verdict, deny_rules, cwd)
 }
 
-fn decide_hook_action(cmd: &str, host: permissions::Host) -> HookDecision {
-    decide_from_verdict(cmd, permissions::check_command_for(cmd, host))
+fn decide_hook_action(cmd: &str, host: permissions::Host, cwd: Option<&str>) -> HookDecision {
+    decide_from_verdict(
+        cmd,
+        permissions::check_command_for(cmd, host),
+        permissions::DenyRules::Unattested,
+        cwd,
+    )
 }
 
-fn handle_vscode(cmd: &str) -> Result<()> {
-    if let Some(output) = vscode_response(cmd) {
+/// [`decide_hook_action`] for Claude Code's own hook, the one host whose
+/// settings RTK reads and whose hook asks explicitly for a wrap. Copilot
+/// shares `Host::Claude` for its verdict but judges the returned command
+/// itself, so it keeps [`decide_hook_action`].
+fn decide_claude_hook_action(cmd: &str, cwd: Option<&str>) -> HookDecision {
+    decide_from_verdict(
+        cmd,
+        permissions::check_command_for(cmd, permissions::Host::Claude),
+        permissions::claude_hook_deny_rules_for(cmd),
+        cwd,
+    )
+}
+
+fn handle_vscode(cmd: &str, input: &Value) -> Result<()> {
+    if let Some(output) = vscode_response(cmd, input) {
         let _ = writeln!(io::stdout(), "{output}");
     }
     Ok(())
 }
 
-fn vscode_response(cmd: &str) -> Option<Value> {
-    vscode_response_from_decision(decide_hook_action(cmd, permissions::Host::Claude), cmd)
+fn vscode_response(cmd: &str, input: &Value) -> Option<Value> {
+    vscode_response_from_decision(
+        decide_hook_action(cmd, permissions::Host::Claude, None),
+        cmd,
+        input,
+    )
 }
 
 /// Build the VS Code Copilot Chat / Copilot CLI (PascalCase compat) hook response.
@@ -293,7 +301,11 @@ fn vscode_response(cmd: &str) -> Option<Value> {
 /// the host's own native prompt/allowlist flow in control — see #3037, where
 /// asserting `"ask"` here made Copilot CLI 1.0.66+ force a blocking dialog with
 /// no "remember" option on every rewritten command.
-fn vscode_response_from_decision(decision: HookDecision, cmd: &str) -> Option<Value> {
+fn vscode_response_from_decision(
+    decision: HookDecision,
+    cmd: &str,
+    input: &Value,
+) -> Option<Value> {
     let (rewritten, allow) = match decision {
         HookDecision::Deny => {
             audit_log("deny", cmd, "");
@@ -306,15 +318,11 @@ fn vscode_response_from_decision(decision: HookDecision, cmd: &str) -> Option<Va
 
     audit_log("rewrite", cmd, &rewritten);
 
-    let mut hook_output = json!({
-        "hookEventName": PRE_TOOL_USE_KEY,
-        "permissionDecisionReason": "RTK auto-rewrite",
-        "updatedInput": { "command": rewritten }
-    });
-    if allow {
-        hook_output["permissionDecision"] = json!("allow");
-    }
-    Some(json!({ "hookSpecificOutput": hook_output }))
+    Some(pre_tool_use_rewrite_output(
+        input,
+        &rewritten,
+        allow.then_some("allow"),
+    ))
 }
 
 fn handle_copilot_cli(cmd: &str, args: &Value) -> Result<()> {
@@ -325,9 +333,10 @@ fn handle_copilot_cli(cmd: &str, args: &Value) -> Result<()> {
 }
 
 fn handle_copilot_ide(cmd: &str) -> Result<()> {
-    if let Some(response) =
-        copilot_ide_response_from_decision(decide_hook_action(cmd, permissions::Host::Claude), cmd)
-    {
+    if let Some(response) = copilot_ide_response_from_decision(
+        decide_hook_action(cmd, permissions::Host::Claude, None),
+        cmd,
+    ) {
         let _ = writeln!(io::stdout(), "{response}");
     }
     Ok(())
@@ -355,7 +364,7 @@ fn copilot_ide_response_from_decision(decision: HookDecision, cmd: &str) -> Opti
 fn copilot_cli_response(cmd: &str, args: &Value) -> Option<Value> {
     copilot_cli_response_from_decision(
         args,
-        decide_hook_action(cmd, permissions::Host::Claude),
+        decide_hook_action(cmd, permissions::Host::Claude, None),
         cmd,
     )
 }
@@ -409,7 +418,7 @@ pub fn run_gemini() -> Result<()> {
 /// duplicate test copy.
 fn run_gemini_inner(input: &str) -> serde_json::Result<String> {
     run_gemini_inner_impl(input, |cmd| {
-        decide_hook_action(cmd, permissions::Host::Gemini)
+        decide_hook_action(cmd, permissions::Host::Gemini, None)
     })
 }
 
@@ -428,6 +437,8 @@ fn run_gemini_inner_with_rules(
         decide_from_verdict(
             cmd,
             permissions::check_command_with_rules(cmd, deny, ask, allow),
+            permissions::DenyRules::Unattested,
+            None,
         )
     })
 }
@@ -468,11 +479,80 @@ fn run_gemini_inner_impl(
     })
 }
 
+// ── Google Antigravity hook ───────────────────────────────────
+
+/// Run the Google Antigravity PreToolUse hook.
+///
+/// Antigravity PreToolUse hook contract:
+/// - stdin: JSON with `toolCall: { name: "run_command", args: { CommandLine: "..." } }`
+/// - Passthrough: emit `{"decision": "allow"}`
+/// - Rewrite: emit `{"decision": "allow", "reason": "...", "overwrite": { "CommandLine": "..." }}`
+/// - Deny: emit `{"decision": "deny", "reason": "..."}`
+///
+/// Fail-open design: invalid JSON, non-command tools, or unparseable payloads
+/// emit `{"decision": "allow"}` so RTK never blocks agent operations.
+pub fn run_antigravity() -> Result<()> {
+    let input = read_stdin_limited()?;
+    let output = run_antigravity_inner(&input);
+    let _ = writeln!(io::stdout(), "{output}");
+    Ok(())
+}
+
+fn run_antigravity_inner(input: &str) -> Value {
+    let input = strip_leading_bom(input).trim();
+    if input.is_empty() {
+        return json!({ "decision": "allow" });
+    }
+
+    let parsed: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(_) => return json!({ "decision": "allow" }),
+    };
+
+    let tool_name = parsed
+        .pointer("/toolCall/name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if tool_name != "run_command" {
+        return json!({ "decision": "allow" });
+    }
+
+    let cmd = parsed
+        .pointer("/toolCall/args/CommandLine")
+        .or_else(|| parsed.pointer("/toolCall/args/command"))
+        .or_else(|| parsed.pointer("/toolCall/args/cmd"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if cmd.is_empty() {
+        return json!({ "decision": "allow" });
+    }
+
+    match decide_hook_action(cmd, permissions::Host::Antigravity, None) {
+        HookDecision::Deny => json!({
+            "decision": "deny",
+            "reason": "Blocked by RTK permission rule"
+        }),
+        HookDecision::AllowRewrite(ref rewritten) | HookDecision::AskRewrite(ref rewritten) => {
+            audit_log("rewrite", cmd, rewritten);
+            json!({
+                "decision": "allow",
+                "reason": "Rewritten by rtk for token optimization.",
+                "overwrite": {
+                    "CommandLine": rewritten
+                }
+            })
+        }
+        HookDecision::Defer => json!({ "decision": "allow" }),
+    }
+}
+
 // ── Vibe hook ─────────────────────────────────────────────────
 
 /// Run the Mistral Vibe CLI pre_tool hook.
 ///
-/// Vibe hook contract (https://docs.mistral.ai/vibe/code/cli/hooks):
+/// Vibe hook contract (<https://docs.mistral.ai/vibe/code/cli/hooks>):
 /// - stdin: JSON with `tool_name`, `tool_input`, `hook_event_name`, etc.
 /// - Passthrough: exit 0 with empty stdout.
 /// - Rewrite: emit `{"hook_specific_output": {"tool_input": {"command": "..."}}}`.
@@ -496,7 +576,8 @@ fn run_vibe_inner(input: &str) -> Option<String> {
     };
 
     let tool_name = json.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
-    if tool_name != "bash" {
+    // Vibe's Unified Harness namespaces the shell tool as `file_system.bash`.
+    if !matches!(tool_name, "bash" | "file_system.bash") {
         return None;
     }
 
@@ -508,7 +589,7 @@ fn run_vibe_inner(input: &str) -> Option<String> {
         return None;
     }
 
-    match decide_hook_action(cmd, permissions::Host::Vibe) {
+    match decide_hook_action(cmd, permissions::Host::Vibe, None) {
         HookDecision::Deny => {
             audit_log("deny", cmd, "");
             Some(r#"{"decision":"deny","reason":"Blocked by RTK permission rule"}"#.to_string())
@@ -543,7 +624,7 @@ fn gemini_json(decision: &str, rewrite: Option<&str>) -> String {
 
 /// Best-effort audit log when RTK_HOOK_AUDIT=1.
 fn audit_log(action: &str, original: &str, rewritten: &str) {
-    if std::env::var("RTK_HOOK_AUDIT").as_deref() != Ok("1") {
+    if user_env::var("RTK_HOOK_AUDIT").as_deref() != Some("1") {
         return;
     }
     let _ = audit_log_inner(action, original, rewritten);
@@ -558,7 +639,7 @@ fn sanitize_log_field(s: &str) -> String {
 }
 
 fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> {
-    let home = dirs::home_dir()?;
+    let home = user_dirs::home()?;
     let dir = home.join(".local").join("share").join("rtk");
     crate::core::utils::create_private_dir(&dir).ok()?;
     let path = dir.join("hook-audit.log");
@@ -591,9 +672,32 @@ enum PayloadAction {
     },
     Skip {
         decision: HookOutcome,
+        reason: &'static str,
         cmd: String,
     },
     Ignore,
+}
+
+fn pre_tool_use_rewrite_output(
+    v: &Value,
+    rewritten: &str,
+    permission_decision: Option<&str>,
+) -> Value {
+    let mut updated_input = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
+    if let Some(obj) = updated_input.as_object_mut() {
+        obj.insert("command".into(), Value::String(rewritten.to_string()));
+    }
+
+    let mut hook_output = json!({
+        "hookEventName": PRE_TOOL_USE_KEY,
+        "permissionDecisionReason": "RTK auto-rewrite",
+        "updatedInput": updated_input
+    });
+    if let Some(decision) = permission_decision {
+        hook_output["permissionDecision"] = Value::String(decision.to_string());
+    }
+
+    json!({ "hookSpecificOutput": hook_output })
 }
 
 fn process_claude_payload(v: &Value) -> PayloadAction {
@@ -606,7 +710,8 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
         None => return PayloadAction::Ignore,
     };
 
-    process_claude_payload_from_decision(v, cmd, decide_hook_action(cmd, permissions::Host::Claude))
+    let cwd = v.get("cwd").and_then(Value::as_str);
+    process_claude_payload_from_decision(v, cmd, decide_claude_hook_action(cmd, cwd))
 }
 
 /// Pure core of `process_claude_payload`, taking the hook decision directly so the
@@ -622,49 +727,53 @@ fn process_claude_payload_from_decision(
         HookDecision::Deny => {
             return PayloadAction::Skip {
                 decision: HookOutcome::Deny,
+                reason: "skip:deny_rule",
                 cmd: cmd.to_string(),
-            }
+            };
         }
         HookDecision::Defer => {
             return PayloadAction::Skip {
                 decision: HookOutcome::Defer,
+                reason: "skip:defer",
                 cmd: cmd.to_string(),
-            }
+            };
         }
         HookDecision::AllowRewrite(r) => (r, true),
         HookDecision::AskRewrite(r) => (r, false),
     };
 
-    let updated_input = {
-        let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
-        if let Some(obj) = ti.as_object_mut() {
-            obj.insert("command".into(), Value::String(rewritten.clone()));
-        }
-        ti
+    // A wrap carries its ask explicitly. Without a `permissionDecision`,
+    // Claude Code runs its own permission check on what RTK returned — and
+    // what it sees is one `rtk run --shell fish -c '…'` command, not the
+    // script's own. An allow rule matching `rtk` would run the whole script
+    // unprompted, and a rule RTK cannot read (`--settings`,
+    // `--disallowedTools`, managed settings, a project the agent has moved
+    // away from) could no longer match anything inside it. Asking is the only
+    // outcome that does not depend on rules this hook cannot see.
+    //
+    // Only a wrap RTK built qualifies. None exists with the flag off, so the
+    // hook then answers exactly as it does without the feature. With it on,
+    // `try_wrap` never wraps a command whose first word is `rtk`, so a command
+    // that already starts in the wrap form is one the agent typed: the rules
+    // only rewrote around it, and it keeps its ordinary decision.
+    let permission_decision = if crate::core::config::cached_config().hooks.wrap_fish_scripts
+        && crate::discover::fish_script::is_wrapped(&rewritten)
+        && !crate::discover::fish_script::is_wrapped(cmd.trim_start())
+    {
+        Some("ask")
+    } else {
+        allow.then_some("allow")
     };
-
-    let mut hook_output = json!({
-        "hookEventName": PRE_TOOL_USE_KEY,
-        "permissionDecisionReason": "RTK auto-rewrite",
-        "updatedInput": updated_input
-    });
-
-    if allow {
-        hook_output
-            .as_object_mut()
-            .unwrap()
-            .insert("permissionDecision".into(), json!("allow"));
-    }
 
     PayloadAction::Rewrite {
         cmd: cmd.to_string(),
+        output: pre_tool_use_rewrite_output(v, &rewritten, permission_decision),
         rewritten,
         decision: if allow {
             HookOutcome::Allow
         } else {
             HookOutcome::Ask
         },
-        output: json!({ "hookSpecificOutput": hook_output }),
     }
 }
 
@@ -713,7 +822,12 @@ fn log_hook_decision(v: &Value, cmd: &str, decision: HookOutcome, rewritten: Opt
 
 /// Run the Claude Code PreToolUse hook natively.
 pub fn run_claude() -> Result<()> {
+    #[cfg(feature = "engine")]
+    let input = claude_pipeline::read_payload()?;
+    #[cfg(not(feature = "engine"))]
     let input = read_stdin_limited()?;
+    #[cfg(feature = "engine")]
+    let raw_len = input.len();
 
     let input = strip_leading_bom(&input).trim();
     if input.is_empty() {
@@ -727,6 +841,11 @@ pub fn run_claude() -> Result<()> {
             return Ok(());
         }
     };
+
+    #[cfg(feature = "engine")]
+    if claude_pipeline::handle(&v, raw_len)? {
+        return Ok(());
+    }
 
     match process_claude_payload(&v) {
         PayloadAction::Rewrite {
@@ -748,22 +867,20 @@ pub fn run_claude() -> Result<()> {
             audit_log("rewrite", &cmd, &rewritten);
             log_hook_decision(&v, &cmd, decision, Some(&rewritten));
         }
-        PayloadAction::Skip { decision, cmd } => {
+        PayloadAction::Skip {
+            decision,
+            cmd,
+            reason,
+        } => {
             // `rtk hook audit`'s skip-breakdown groups by a "skip:<reason>" prefix
-            // (see hook_audit_cmd.rs) — Skip is only ever reached via Deny/Defer,
-            // so map those to the reasons it expects rather than the bare
-            // HookOutcome::Display used for the Rewrite/tracking-DB paths.
+            // (see hook_audit_cmd.rs). Carry the reason separately from the
+            // decision so distinct defer causes remain diagnosable.
             //
             // Skip has no stdout response to write (Claude Code falls through to
             // its own native handling), but log_hook_decision is still deferred to
             // last for the same reason as the Rewrite arm above: it must never be
             // what a Bash tool call is waiting on.
-            let audit_action = match decision {
-                HookOutcome::Deny => "skip:deny_rule",
-                HookOutcome::Defer => "skip:defer",
-                HookOutcome::Allow | HookOutcome::Ask => "skip",
-            };
-            audit_log(audit_action, &cmd, "");
+            audit_log(reason, &cmd, "");
             log_hook_decision(&v, &cmd, decision, None);
         }
         PayloadAction::Ignore => {}
@@ -777,6 +894,222 @@ fn run_claude_inner(input: &str) -> Option<String> {
     let input = strip_leading_bom(input);
     let v: Value = serde_json::from_str(input).ok()?;
     match process_claude_payload(&v) {
+        PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+        _ => None,
+    }
+}
+
+// ── Trae native hook ───────────────────────────────────────────
+
+struct TraeRewrite {
+    original: String,
+    rewritten: String,
+    output: Value,
+}
+
+fn process_trae_payload(v: &Value) -> Option<TraeRewrite> {
+    if v.get("tool_name").and_then(Value::as_str) != Some("RunCommand") {
+        return None;
+    }
+
+    let command = v
+        .pointer("/tool_input/command")
+        .and_then(Value::as_str)
+        .filter(|command| !command.is_empty())?;
+    let rewritten = match decide_hook_action(command, permissions::Host::Trae, None) {
+        HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten) => rewritten,
+        HookDecision::Deny | HookDecision::Defer => return None,
+    };
+
+    let mut updated_input = v.get("tool_input")?.clone();
+    updated_input
+        .as_object_mut()?
+        .insert("command".into(), Value::String(rewritten.clone()));
+
+    Some(TraeRewrite {
+        original: command.to_string(),
+        rewritten,
+        output: json!({
+            "hookSpecificOutput": {
+                "hookEventName": PRE_TOOL_USE_KEY,
+                "updatedInput": updated_input
+            }
+        }),
+    })
+}
+
+/// Run the Trae PreToolUse hook natively.
+///
+/// Trae owns the command permission decision. RTK only returns an updated input
+/// when it can safely rewrite a `RunCommand` command.
+pub fn run_trae() -> Result<()> {
+    let input = read_stdin_limited()?;
+    let input = strip_leading_bom(&input).trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    if let Some(rewrite) = process_trae_payload(&v) {
+        audit_log("rewrite", &rewrite.original, &rewrite.rewritten);
+        let _ = writeln!(io::stdout(), "{}", rewrite.output);
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_trae_inner(input: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(input).ok()?;
+    process_trae_payload(&v).map(|rewrite| rewrite.output.to_string())
+}
+
+// ── Codex CLI native hook ─────────────────────────────────────
+
+fn is_supported_codex_permission_mode(v: &Value) -> bool {
+    matches!(
+        v.get("permission_mode").and_then(Value::as_str),
+        Some("default" | "acceptEdits" | "plan" | "dontAsk" | "bypassPermissions")
+    )
+}
+
+fn process_codex_payload(v: &Value) -> PayloadAction {
+    if v.get("hook_event_name").and_then(Value::as_str) != Some(PRE_TOOL_USE_KEY)
+        || !matches!(
+            v.get("tool_name").and_then(Value::as_str),
+            Some("Bash" | "bash")
+        )
+    {
+        return PayloadAction::Ignore;
+    }
+
+    let cmd = match v
+        .pointer("/tool_input/command")
+        .and_then(Value::as_str)
+        .filter(|cmd| !cmd.is_empty())
+    {
+        Some(cmd) => cmd,
+        None => return PayloadAction::Ignore,
+    };
+
+    // Codex deliberately includes this field in every hook event. Fail open
+    // for missing or future modes instead of assuming their approval semantics.
+    if !is_supported_codex_permission_mode(v) {
+        return PayloadAction::Skip {
+            decision: HookOutcome::Defer,
+            reason: "skip:unsupported_permission_mode",
+            cmd: cmd.to_string(),
+        };
+    }
+
+    if crate::discover::lexer::contains_unattestable_construct(cmd) {
+        return PayloadAction::Skip {
+            decision: HookOutcome::Defer,
+            reason: "skip:defer",
+            cmd: cmd.to_string(),
+        };
+    }
+
+    process_codex_payload_from_decision(
+        v,
+        cmd,
+        decide_hook_action(cmd, permissions::Host::Codex, None),
+    )
+}
+
+fn process_codex_payload_from_decision(
+    v: &Value,
+    cmd: &str,
+    decision: HookDecision,
+) -> PayloadAction {
+    let (rewritten, outcome) = match decision {
+        HookDecision::AllowRewrite(rewritten) => (rewritten, HookOutcome::Allow),
+        HookDecision::AskRewrite(rewritten) => (rewritten, HookOutcome::Ask),
+        HookDecision::Deny => {
+            return PayloadAction::Skip {
+                decision: HookOutcome::Deny,
+                reason: "skip:deny_rule",
+                cmd: cmd.to_string(),
+            };
+        }
+        HookDecision::Defer => {
+            return PayloadAction::Skip {
+                decision: HookOutcome::Defer,
+                reason: "skip:no_rewrite",
+                cmd: cmd.to_string(),
+            };
+        }
+    };
+
+    // Both AllowRewrite and AskRewrite require protocol-level allow: Codex
+    // cannot accept updatedInput with ask or an omitted permissionDecision.
+    // The internal outcome remains Ask for Default, not an RTK auto-approval.
+    // Its runtime applies the replacement before native approval and sandbox
+    // checks, so this is a protocol-level allow rather than RTK approving the
+    // command. Those checks inspect the rewritten argv, however, and Codex's
+    // safe/dangerous-command classifiers do not currently unwrap `rtk`. This
+    // can add prompts for known-safe commands and obscure classifier signals
+    // for wrapped mutating commands such as git push. Keep the passthrough gates
+    // above conservative and revisit this boundary whenever coverage expands.
+    PayloadAction::Rewrite {
+        cmd: cmd.to_string(),
+        output: pre_tool_use_rewrite_output(v, &rewritten, Some("allow")),
+        decision: outcome,
+        rewritten,
+    }
+}
+
+/// Run the Codex CLI PreToolUse hook natively.
+pub fn run_codex() -> Result<()> {
+    let input = match read_stdin_limited() {
+        Ok(input) => input,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to read JSON input: {e}");
+            return Ok(());
+        }
+    };
+    let input = strip_leading_bom(&input).trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    match process_codex_payload(&v) {
+        PayloadAction::Rewrite {
+            cmd,
+            rewritten,
+            output,
+            ..
+        } => {
+            audit_log("rewrite", &cmd, &rewritten);
+            let _ = writeln!(io::stdout(), "{output}");
+        }
+        PayloadAction::Skip { cmd, reason, .. } => audit_log(reason, &cmd, ""),
+        PayloadAction::Ignore => {}
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_codex_inner(input: &str) -> Option<String> {
+    let input = strip_leading_bom(input).trim();
+    let v: Value = serde_json::from_str(input).ok()?;
+    match process_codex_payload(&v) {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
         _ => None,
     }
@@ -814,7 +1147,7 @@ pub fn run_cursor() -> Result<()> {
         }
     };
 
-    let output = match decide_hook_action(&cmd, permissions::Host::Cursor) {
+    let output = match decide_hook_action(&cmd, permissions::Host::Cursor, None) {
         HookDecision::AllowRewrite(rewritten) => {
             audit_log("rewrite", &cmd, &rewritten);
             cursor_allow(&rewritten)
@@ -880,7 +1213,7 @@ fn run_cursor_inner_with_rules(
     };
 
     let verdict = permissions::check_command_with_rules(&cmd, deny_rules, ask_rules, allow_rules);
-    match decide_from_verdict(&cmd, verdict) {
+    match decide_from_verdict(&cmd, verdict, permissions::DenyRules::Unattested, None) {
         HookDecision::AllowRewrite(rewritten) => cursor_allow(&rewritten),
         HookDecision::AskRewrite(rewritten) => cursor_ask(&rewritten),
         _ => "{}".to_string(),
@@ -896,7 +1229,11 @@ fn run_cursor_inner_with_rules(
 
 fn process_droid_payload(v: &Value) -> Option<Value> {
     let cmd = droid_execute_command(v)?;
-    droid_response_from_decision(v, cmd, decide_hook_action(cmd, permissions::Host::Droid))
+    droid_response_from_decision(
+        v,
+        cmd,
+        decide_hook_action(cmd, permissions::Host::Droid, None),
+    )
 }
 
 /// Extract the shell command when the payload targets Droid's Execute tool.
@@ -933,21 +1270,69 @@ fn droid_response_from_decision(v: &Value, cmd: &str, decision: HookDecision) ->
 
     audit_log("rewrite", cmd, &rewritten);
 
-    let updated_input = {
-        let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
-        if let Some(obj) = ti.as_object_mut() {
-            obj.insert("command".into(), Value::String(rewritten));
+    Some(pre_tool_use_rewrite_output(v, &rewritten, None))
+}
+
+/// Answer OpenCode's plugin: the rewrite as JSON, or `{}` to leave the
+/// command untouched.
+pub fn run_opencode(cmd: &str, agent: Option<&str>) -> Result<()> {
+    let _ = writeln!(io::stdout(), "{}", opencode_answer_for(cmd, agent));
+    Ok(())
+}
+
+/// [`opencode_answer`] against the rules OpenCode resolves for `agent`.
+fn opencode_answer_for(cmd: &str, agent: Option<&str>) -> Value {
+    // Two rule sources rtk cannot judge, and a rewrite judged without them
+    // would silence an ask: an agent markdown file whose frontmatter declares
+    // permission rules, and a legacy key only one OpenCode generation applies.
+    // Answer `{}` and let OpenCode apply its own rules.
+    if permissions_opencode::agent_rules_unreadable(agent) {
+        return json!({});
+    }
+    let Some(rules) = permissions_opencode::load_judgeable_opencode_rules(agent) else {
+        return json!({});
+    };
+    opencode_answer(cmd, &rules)
+}
+
+/// Decide what the plugin should do with `cmd` under OpenCode's own rules.
+///
+/// OpenCode evaluates whatever command the plugin hands back against the
+/// user's permission rules itself, and from 1.1.4 on plugins cannot
+/// influence that verdict: there is no `permission.ask` plugin hook (1.0.142
+/// had one). So the one thing RTK must guarantee is that the rewrite never
+/// changes what those rules decide: whenever the verdict for `rtk <cmd>`
+/// differs from the verdict for `cmd` as typed, RTK steps aside and returns
+/// `{}`, trading token savings on that command for the user's own policy
+/// (#4195). An allow stays an allow, an ask stays a prompt, and a deny stays
+/// denied — RTK never blocks, lifts or silences anything.
+fn opencode_answer(cmd: &str, rules: &[permissions_opencode::Rule]) -> Value {
+    if cmd.trim().is_empty() {
+        return json!({});
+    }
+    let before = permissions_opencode::check_command_with_opencode_rules(cmd, rules);
+    // OpenCode re-evaluates its own patterns against whatever RTK returns, so
+    // the rule set read here is advisory rather than enforced — hence
+    // `Unattested`, and no fish script is wrapped for this host.
+    let rewritten = match decide_from_verdict(cmd, before, permissions::DenyRules::Unattested, None)
+    {
+        // OpenCode denies the typed command itself; a rewrite could only
+        // un-match the deny rule.
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            return json!({});
         }
-        ti
+        HookDecision::Defer => return json!({}),
+        HookDecision::AllowRewrite(r) | HookDecision::AskRewrite(r) => r,
     };
 
-    Some(json!({
-        "hookSpecificOutput": {
-            "hookEventName": PRE_TOOL_USE_KEY,
-            "permissionDecisionReason": "RTK auto-rewrite",
-            "updatedInput": updated_input
-        }
-    }))
+    let after = permissions_opencode::check_command_with_opencode_rules(&rewritten, rules);
+    if before != after {
+        return json!({});
+    }
+
+    audit_log("rewrite", cmd, &rewritten);
+    json!({ "command": rewritten })
 }
 
 /// Run the Factory Droid PreToolUse hook natively.
@@ -999,12 +1384,19 @@ fn run_droid_inner_with_rules(
     let v: Value = droid_payload(input).ok().flatten()?;
     let cmd = droid_execute_command(&v)?;
     let verdict = permissions::check_command_with_rules(cmd, deny_rules, ask_rules, allow_rules);
-    droid_response_from_decision(&v, cmd, decide_from_verdict(cmd, verdict)).map(|o| o.to_string())
+    droid_response_from_decision(
+        &v,
+        cmd,
+        decide_from_verdict(cmd, verdict, permissions::DenyRules::Unattested, None),
+    )
+    .map(|o| o.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::test_isolation;
+    use crate::hooks::permissions::PermissionVerdict;
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         crate::discover::registry::rewrite_command(cmd, excluded, &[])
@@ -1118,36 +1510,39 @@ mod tests {
         assert!(matches!(detect_format(&json!({})), HookFormat::PassThrough));
     }
 
-    #[test]
-    fn test_get_rewritten_supported() {
-        assert!(get_rewritten("git status").is_some());
-    }
-
-    #[test]
-    fn test_get_rewritten_unsupported() {
-        assert!(get_rewritten("htop").is_none());
-    }
-
-    #[test]
-    fn test_get_rewritten_already_rtk() {
-        assert!(get_rewritten("rtk git status").is_none());
-    }
-
-    #[test]
-    fn test_get_rewritten_heredoc() {
-        assert!(get_rewritten("cat <<'EOF'\nhello\nEOF").is_none());
-    }
-
     // --- VS Code Copilot Chat / Copilot CLI (PascalCase) handler ---
     // Serves both VS Code Copilot Chat's PreToolUse hook and Copilot CLI's
     // PascalCase-compat entry (#3037): the same `rtk hook copilot` call
     // answers both from one JSON schema.
 
     #[test]
+    fn test_vscode_rewrite_preserves_tool_input_fields() {
+        let input = json!({
+            "tool_name": "run_in_terminal",
+            "tool_input": {
+                "command": "git status",
+                "timeout": 1234,
+                "description": "Inspect working tree",
+                "metadata": {"nested": [true, null]}
+            }
+        });
+        for decision in [
+            HookDecision::AllowRewrite("rtk git status".into()),
+            HookDecision::AskRewrite("rtk git status".into()),
+        ] {
+            let response = vscode_response_from_decision(decision, "git status", &input).unwrap();
+            let mut expected = input["tool_input"].clone();
+            expected["command"] = json!("rtk git status");
+            assert_eq!(response["hookSpecificOutput"]["updatedInput"], expected);
+        }
+    }
+
+    #[test]
     fn test_vscode_allow_rewrite_sets_permission_allow() {
         let r = vscode_response_from_decision(
             HookDecision::AllowRewrite("rtk git status".into()),
             "git status",
+            &vscode_input("Bash", "git status"),
         )
         .unwrap();
         assert_eq!(r["hookSpecificOutput"]["permissionDecision"], "allow");
@@ -1167,6 +1562,7 @@ mod tests {
         let r = vscode_response_from_decision(
             HookDecision::AskRewrite("rtk cargo test".into()),
             "cargo test",
+            &vscode_input("Bash", "cargo test"),
         )
         .unwrap();
         assert!(
@@ -1185,12 +1581,26 @@ mod tests {
 
     #[test]
     fn test_vscode_deny_returns_none() {
-        assert!(vscode_response_from_decision(HookDecision::Deny, "cargo test").is_none());
+        assert!(
+            vscode_response_from_decision(
+                HookDecision::Deny,
+                "cargo test",
+                &vscode_input("Bash", "cargo test")
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn test_vscode_defer_returns_none() {
-        assert!(vscode_response_from_decision(HookDecision::Defer, "cargo test").is_none());
+        assert!(
+            vscode_response_from_decision(
+                HookDecision::Defer,
+                "cargo test",
+                &vscode_input("Bash", "cargo test")
+            )
+            .is_none()
+        );
     }
 
     // --- Copilot CLI handler: transparent rewrite via modifiedArgs ---
@@ -1232,24 +1642,28 @@ mod tests {
 
     #[test]
     fn test_copilot_cli_deny_returns_none() {
-        assert!(copilot_cli_response_from_decision(
-            &cli_args("cargo test"),
-            HookDecision::Deny,
-            "cargo test",
-        )
-        .is_none());
+        assert!(
+            copilot_cli_response_from_decision(
+                &cli_args("cargo test"),
+                HookDecision::Deny,
+                "cargo test",
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn test_copilot_cli_defer_returns_none() {
         // Defer covers both "no rewrite available" and the unattestable-construct gate.
         // The hook must emit NO modifiedArgs for CVE bypass forms — no laundering.
-        assert!(copilot_cli_response_from_decision(
-            &cli_args("git status & rm -rf /tmp/x"),
-            HookDecision::Defer,
-            "git status & rm -rf /tmp/x",
-        )
-        .is_none());
+        assert!(
+            copilot_cli_response_from_decision(
+                &cli_args("git status & rm -rf /tmp/x"),
+                HookDecision::Defer,
+                "git status & rm -rf /tmp/x",
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1260,10 +1674,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(response["permissionDecision"], "deny");
-        assert!(response["permissionDecisionReason"]
-            .as_str()
-            .unwrap()
-            .contains("rtk git status"));
+        assert!(
+            response["permissionDecisionReason"]
+                .as_str()
+                .unwrap()
+                .contains("rtk git status")
+        );
         assert!(response.get("modifiedArgs").is_none());
     }
 
@@ -1277,10 +1693,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(response["permissionDecision"], "deny");
-        assert!(response["permissionDecisionReason"]
-            .as_str()
-            .unwrap()
-            .contains("rtk git status"));
+        assert!(
+            response["permissionDecisionReason"]
+                .as_str()
+                .unwrap()
+                .contains("rtk git status")
+        );
         assert!(response.get("modifiedArgs").is_none());
     }
 
@@ -1357,7 +1775,11 @@ mod tests {
             &[],
             &["Bash(git:*)".to_string()],
         );
-        copilot_cli_response_from_decision(&cli_args(cmd), decide_from_verdict(cmd, verdict), cmd)
+        copilot_cli_response_from_decision(
+            &cli_args(cmd),
+            decide_from_verdict(cmd, verdict, permissions::DenyRules::NoneConfigured, None),
+            cmd,
+        )
     }
 
     #[test]
@@ -1469,6 +1891,25 @@ mod tests {
         assert_eq!(rewrite_command_no_prefixes("cat <<EOF", &[]), None);
     }
 
+    /// #3864: the Claude hook feeds the payload cwd into the decision, so a
+    /// git command from inside a managed worktree is left to Claude Code.
+    #[test]
+    fn test_claude_payload_cwd_in_worktree_skips_git_rewrite() {
+        let v = claude_payload_with_ids(
+            "git status",
+            "sess-1",
+            "toolu_01ABC",
+            "/repo/.claude/worktrees/feat-x",
+        );
+        assert!(matches!(
+            process_claude_payload(&v),
+            PayloadAction::Skip {
+                decision: HookOutcome::Defer,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn test_gemini_hook_excluded_commands() {
         let excluded = vec!["curl".to_string()];
@@ -1488,6 +1929,32 @@ mod tests {
             rewrite_command_no_prefixes("RUST_LOG=debug cargo test", &[]),
             Some("RUST_LOG=debug rtk cargo test".into())
         );
+    }
+
+    #[test]
+    fn test_pre_tool_use_rewrite_output_merges_input_and_optional_decision() {
+        let input = json!({
+            "tool_input": {
+                "command": "git status",
+                "timeout": 30_000,
+                "description": "Inspect the working tree"
+            }
+        });
+
+        let ask = pre_tool_use_rewrite_output(&input, "rtk git status", None);
+        let ask_hook = &ask["hookSpecificOutput"];
+        assert_eq!(ask_hook["hookEventName"], PRE_TOOL_USE_KEY);
+        assert_eq!(ask_hook["permissionDecisionReason"], "RTK auto-rewrite");
+        assert!(ask_hook.get("permissionDecision").is_none());
+        assert_eq!(ask_hook["updatedInput"]["command"], "rtk git status");
+        assert_eq!(ask_hook["updatedInput"]["timeout"], 30_000);
+        assert_eq!(
+            ask_hook["updatedInput"]["description"],
+            "Inspect the working tree"
+        );
+
+        let allow = pre_tool_use_rewrite_output(&input, "rtk git status", Some("allow"));
+        assert_eq!(allow["hookSpecificOutput"]["permissionDecision"], "allow");
     }
 
     // --- Claude handler ---
@@ -1797,6 +2264,267 @@ mod tests {
         );
     }
 
+    // --- Trae handler ---
+
+    fn trae_input(cmd: &str) -> String {
+        json!({
+            "tool_name": "RunCommand",
+            "tool_input": {
+                "command": cmd,
+                "description": "Check repository status",
+                "timeout": 30000
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_trae_rewrite_preserves_tool_input_without_permission_override() {
+        let result = run_trae_inner(&trae_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let hook = &v["hookSpecificOutput"];
+
+        assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
+        assert_eq!(hook["updatedInput"]["command"], "rtk git status");
+        assert_eq!(
+            hook["updatedInput"]["description"],
+            "Check repository status"
+        );
+        assert_eq!(hook["updatedInput"]["timeout"], 30000);
+        assert!(hook.get("permissionDecision").is_none());
+        assert!(hook.get("permissionDecisionReason").is_none());
+    }
+
+    #[test]
+    fn test_trae_skips_non_run_command_and_unsafe_commands() {
+        let non_terminal = json!({
+            "tool_name": "ReadFile",
+            "tool_input": { "command": "git status" }
+        })
+        .to_string();
+        assert!(run_trae_inner(&non_terminal).is_none());
+        assert!(run_trae_inner(&trae_input("htop")).is_none());
+        assert!(run_trae_inner(&trae_input("cat <<EOF\nhello\nEOF")).is_none());
+        assert!(run_trae_inner(&trae_input("rtk git status")).is_none());
+        assert!(run_trae_inner("not valid json {{{").is_none());
+    }
+
+    // --- Codex handler ---
+
+    fn codex_input_with_permission_mode(cmd: &str, permission_mode: Option<&str>) -> String {
+        let mut input = json!({
+            "session_id": "session-1",
+            "turn_id": "turn-1",
+            "hook_event_name": PRE_TOOL_USE_KEY,
+            "tool_name": "Bash",
+            "tool_use_id": "tool-1",
+            "tool_input": { "command": cmd }
+        });
+        if let Some(permission_mode) = permission_mode {
+            input["permission_mode"] = json!(permission_mode);
+        }
+        input.to_string()
+    }
+
+    // Normal Codex payloads include `default`; missing permission_mode is
+    // covered deliberately by the dedicated fail-open test below.
+    fn codex_input(cmd: &str) -> String {
+        codex_input_with_permission_mode(cmd, Some("default"))
+    }
+
+    #[test]
+    fn test_codex_rewrite_uses_required_allow_shape() {
+        let result = run_codex_inner(&codex_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let hook = &v["hookSpecificOutput"];
+
+        assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
+        assert_eq!(hook["permissionDecision"], "allow");
+        assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
+        assert_eq!(hook["updatedInput"]["command"], "rtk git status");
+    }
+
+    #[test]
+    fn test_codex_shared_decision_preserves_host_approval_and_deny() {
+        let input = json!({"tool_input": {"command": "git status", "timeout": 30000}});
+        for (verdict, expected) in [
+            (PermissionVerdict::Default, HookOutcome::Ask),
+            (PermissionVerdict::Ask, HookOutcome::Ask),
+            (PermissionVerdict::Allow, HookOutcome::Allow),
+        ] {
+            let decision = super::super::decision::decide_with_params(
+                "git status",
+                verdict,
+                &[],
+                &[],
+                permissions::DenyRules::NoneConfigured,
+            );
+            let PayloadAction::Rewrite {
+                output, decision, ..
+            } = process_codex_payload_from_decision(&input, "git status", decision)
+            else {
+                panic!("expected rewrite")
+            };
+            assert_eq!(decision, expected);
+            assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "allow");
+            assert_eq!(
+                output["hookSpecificOutput"]["updatedInput"]["timeout"],
+                30000
+            );
+            assert_eq!(
+                output["hookSpecificOutput"]["updatedInput"]["command"],
+                "rtk git status"
+            );
+        }
+        let denied = super::super::decision::decide_with_params(
+            "git status",
+            PermissionVerdict::Deny,
+            &[],
+            &[],
+            permissions::DenyRules::NoneConfigured,
+        );
+        assert!(matches!(
+            process_codex_payload_from_decision(&input, "git status", denied),
+            PayloadAction::Skip {
+                decision: HookOutcome::Deny,
+                reason: "skip:deny_rule",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_codex_skip_reasons_remain_distinct() {
+        for (command, mode, expected) in [
+            ("git status", None, "skip:unsupported_permission_mode"),
+            (
+                "git status",
+                Some("futureMode"),
+                "skip:unsupported_permission_mode",
+            ),
+            ("git status $(whoami)", Some("default"), "skip:defer"),
+            ("htop", Some("default"), "skip:no_rewrite"),
+        ] {
+            let input: Value =
+                serde_json::from_str(&codex_input_with_permission_mode(command, mode)).unwrap();
+            let PayloadAction::Skip { reason, .. } = process_codex_payload(&input) else {
+                panic!("expected skip for {command}")
+            };
+            assert_eq!(reason, expected);
+        }
+    }
+
+    #[test]
+    fn test_codex_rewrites_all_documented_permission_modes() {
+        for permission_mode in [
+            "default",
+            "acceptEdits",
+            "plan",
+            "dontAsk",
+            "bypassPermissions",
+        ] {
+            assert!(
+                run_codex_inner(&codex_input_with_permission_mode(
+                    "git status",
+                    Some(permission_mode)
+                ))
+                .is_some(),
+                "documented permission mode should rewrite: {permission_mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_codex_unknown_or_missing_permission_mode_passes_through() {
+        assert!(run_codex_inner(&codex_input_with_permission_mode("git status", None)).is_none());
+        assert!(
+            run_codex_inner(&codex_input_with_permission_mode(
+                "git status",
+                Some("futureMode")
+            ))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn test_codex_rewrites_commands_that_still_need_native_approval() {
+        let result = run_codex_inner(&codex_input("cargo test")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(
+            v.pointer("/hookSpecificOutput/updatedInput/command"),
+            Some(&json!("rtk cargo test"))
+        );
+    }
+
+    #[test]
+    fn test_codex_rewrite_preserves_tool_input_fields() {
+        let input = json!({
+            "hook_event_name": PRE_TOOL_USE_KEY,
+            "tool_name": "Bash",
+            "permission_mode": "default",
+            "tool_input": {
+                "command": "git status --short",
+                "timeout": 30_000,
+                "description": "Inspect the working tree"
+            }
+        })
+        .to_string();
+        let result = run_codex_inner(&input).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let updated = &v["hookSpecificOutput"]["updatedInput"];
+
+        assert_eq!(updated["command"], "rtk git status --short");
+        assert_eq!(updated["timeout"], 30_000);
+        assert_eq!(updated["description"], "Inspect the working tree");
+    }
+
+    #[test]
+    fn test_codex_ignores_other_events_and_tools() {
+        let other_event = json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": { "command": "git status" }
+        })
+        .to_string();
+        let other_tool = json!({
+            "hook_event_name": PRE_TOOL_USE_KEY,
+            "tool_name": "apply_patch",
+            "tool_input": { "command": "git status" }
+        })
+        .to_string();
+
+        assert!(run_codex_inner(&other_event).is_none());
+        assert!(run_codex_inner(&other_tool).is_none());
+    }
+
+    #[test]
+    fn test_codex_passthrough_for_unsupported_or_unattestable_commands() {
+        assert!(run_codex_inner(&codex_input("rtk git status")).is_none());
+        assert!(run_codex_inner(&codex_input("htop")).is_none());
+        assert!(run_codex_inner(&codex_input("rm -rf /tmp/rtk-safety-test")).is_none());
+        assert!(run_codex_inner(&codex_input("sudo rm -rf /tmp/rtk-safety-test")).is_none());
+        assert!(run_codex_inner(&codex_input("git status > /tmp/status")).is_none());
+        assert!(run_codex_inner(&codex_input("git status $(touch /tmp/x)")).is_none());
+    }
+
+    #[test]
+    fn test_codex_rewrites_compound_command_directly() {
+        let result = run_codex_inner(&codex_input("git add . && cargo test")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(
+            v.pointer("/hookSpecificOutput/updatedInput/command"),
+            Some(&json!("rtk git add . && rtk cargo test"))
+        );
+    }
+
+    #[test]
+    fn test_codex_malformed_json_and_empty_command_pass_through() {
+        assert!(run_codex_inner("not valid json {{{").is_none());
+        assert!(run_codex_inner(&codex_input("")).is_none());
+    }
+
     // --- Cursor handler ---
 
     fn cursor_input(cmd: &str) -> String {
@@ -1936,30 +2664,36 @@ mod tests {
 
     // --- Audit logging ---
 
+    /// Where `audit_log` writes under a test's own root.
+    fn audit_log_under(root: &std::path::Path) -> std::path::PathBuf {
+        root.join(".local")
+            .join("share")
+            .join("rtk")
+            .join("hook-audit.log")
+    }
+
     #[test]
     fn test_audit_log_silent_when_disabled() {
-        std::env::remove_var("RTK_HOOK_AUDIT");
-        audit_log("test", "git status", "rtk git status");
+        let root = test_isolation::tempdir();
+        test_isolation::with_root(root.path(), || {
+            user_env::with_vars(&[("RTK_HOOK_AUDIT", None)], || {
+                audit_log("test", "git status", "rtk git status");
+            });
+        });
+        assert!(!audit_log_under(root.path()).exists());
     }
 
     #[test]
     fn test_audit_log_format_four_fields() {
-        let tmp = std::env::temp_dir().join("rtk-test-audit");
-        let _ = std::fs::create_dir_all(&tmp);
-        let log_path = tmp.join("hook-audit.log");
-        let _ = std::fs::remove_file(&log_path);
+        let root = test_isolation::tempdir();
+        test_isolation::with_root(root.path(), || {
+            user_env::with_vars(&[("RTK_HOOK_AUDIT", Some("1"))], || {
+                audit_log("rewrite", "git status", "rtk git status");
+            });
+        });
 
-        {
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path)
-                .unwrap();
-            let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S");
-            writeln!(file, "{} | rewrite | git status | rtk git status", ts).unwrap();
-        }
-
-        let content = std::fs::read_to_string(&log_path).unwrap();
+        let content =
+            std::fs::read_to_string(audit_log_under(root.path())).expect("audit log written");
         let parts: Vec<&str> = content.trim().split(" | ").collect();
         assert_eq!(
             parts.len(),
@@ -1970,8 +2704,6 @@ mod tests {
         assert_eq!(parts[1], "rewrite");
         assert_eq!(parts[2], "git status");
         assert_eq!(parts[3], "rtk git status");
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // --- Adversarial tests ---
@@ -2007,6 +2739,178 @@ mod tests {
         let _ = run_claude_inner(&input);
     }
 
+    // --- OpenCode: the answer the plugin acts on ---
+    //
+    // OpenCode judges whatever command runs against the user's own rules;
+    // plugins cannot change that verdict. So the invariant pinned here is:
+    // a rewrite is returned only when it leaves the verdict untouched.
+
+    mod opencode_answer {
+        use super::super::opencode_answer;
+        use crate::hooks::permissions_opencode::{Action, Rule};
+        use serde_json::json;
+
+        fn rule(pattern: &str, action: Action) -> Rule {
+            Rule {
+                permission: "bash".to_string(),
+                pattern: pattern.to_string(),
+                action,
+            }
+        }
+
+        #[test]
+        fn an_empty_command_gets_no_answer() {
+            assert_eq!(opencode_answer("   ", &[]), json!({}));
+        }
+
+        #[test]
+        fn an_already_prefixed_command_gets_no_answer() {
+            assert_eq!(opencode_answer("rtk git status", &[]), json!({}));
+        }
+
+        #[test]
+        fn with_no_rules_the_rewrite_happens() {
+            assert_eq!(
+                opencode_answer("git status", &[]),
+                json!({ "command": "rtk git status" })
+            );
+        }
+
+        #[test]
+        fn a_uniform_policy_keeps_the_rewrite() {
+            // allow or ask on everything: the rtk form gets the same verdict,
+            // so the rewrite costs the user nothing.
+            for action in [Action::Allow, Action::Ask] {
+                let rules = [rule("*", action)];
+                assert_eq!(
+                    opencode_answer("ls -la", &rules),
+                    json!({ "command": "rtk ls -la" }),
+                    "action: {action:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn the_4195_allow_survives_because_the_rewrite_is_skipped() {
+            // {"*": "deny", "git status": "allow"} — the typed command is
+            // allowed, its rtk form would be denied. RTK steps aside so
+            // OpenCode runs the typed `git status` under the user's rule.
+            let rules = [rule("*", Action::Deny), rule("git status", Action::Allow)];
+            assert_eq!(opencode_answer("git status", &rules), json!({}));
+        }
+
+        #[test]
+        fn the_reporters_npx_allow_survives_too() {
+            let rules = [
+                rule("*", Action::Deny),
+                rule("npx ts-node*task-cli*", Action::Allow),
+            ];
+            assert_eq!(
+                opencode_answer("npx ts-node src/task-cli.ts list", &rules),
+                json!({})
+            );
+        }
+
+        #[test]
+        fn an_ask_rule_still_prompts_because_the_rewrite_is_skipped() {
+            // {"git push *": "ask"} — the rtk form matches no rule, so a
+            // rewrite would turn the user's prompt into a silent run.
+            let rules = [rule("git push *", Action::Ask)];
+            assert_eq!(opencode_answer("git push origin main", &rules), json!({}));
+        }
+
+        #[test]
+        fn a_denied_command_is_left_for_opencode_to_deny() {
+            // {"*": "allow", "git push *": "deny"} — rewriting would un-match
+            // the deny rule; saying nothing keeps OpenCode's own deny intact.
+            let rules = [rule("*", Action::Allow), rule("git push *", Action::Deny)];
+            assert_eq!(opencode_answer("git push --force", &rules), json!({}));
+        }
+
+        #[test]
+        fn the_agent_flag_reaches_the_rule_lookup() {
+            use crate::core::test_isolation;
+
+            let tmp = test_isolation::tempdir();
+            let project = tmp.path().join("project");
+            std::fs::create_dir_all(&project).expect("create project dir");
+            std::fs::write(
+                project.join("opencode.json"),
+                r#"{ "agent": { "staged-review": { "permission": { "bash": "deny" } } } }"#,
+            )
+            .expect("write project config");
+
+            test_isolation::with_root(&tmp.path().join("home"), || {
+                let _entered = test_isolation::enter(&project);
+                assert_eq!(
+                    super::super::opencode_answer_for("git status", Some("staged-review")),
+                    json!({}),
+                    "the agent's deny-all must reach the verdict"
+                );
+                assert_eq!(
+                    super::super::opencode_answer_for("git status", None),
+                    json!({ "command": "rtk git status" }),
+                    "without the agent, no rule applies and the rewrite stands"
+                );
+            });
+        }
+
+        #[test]
+        fn a_legacy_key_only_2x_applies_stops_the_rewrite() {
+            use crate::core::test_isolation;
+
+            // 1.x ignores `shell`, 2.x applies it: judged as an allow, the
+            // rewrite would silence the `ls *` ask on 1.x.
+            let tmp = test_isolation::tempdir();
+            let project = tmp.path().join("project");
+            std::fs::create_dir_all(&project).expect("create project");
+            std::fs::write(
+                project.join("opencode.json"),
+                r#"{ "permission": { "bash": { "ls *": "ask" }, "shell": "allow" } }"#,
+            )
+            .expect("write config");
+
+            test_isolation::with_root(&tmp.path().join("home"), || {
+                let _entered = test_isolation::enter(&project);
+                assert_eq!(super::super::opencode_answer_for("ls -la", None), json!({}));
+            });
+        }
+
+        #[test]
+        fn a_markdown_agents_rules_stop_the_rewrite_entirely() {
+            use crate::core::test_isolation;
+
+            let tmp = test_isolation::tempdir();
+            let project = tmp.path().join("project");
+            let agents = project.join(".opencode").join("agents");
+            std::fs::create_dir_all(&agents).expect("create agents dir");
+            std::fs::write(
+                agents.join("rtkprobe.md"),
+                "---\ndescription: probes\npermissions:\n  - action: shell\n    resource: ls *\n    effect: ask\n---\nbody\n",
+            )
+            .expect("write agent file");
+            std::fs::write(
+                project.join(".opencode").join("agents").join("plainer.md"),
+                "---\ndescription: no rules here\nmodel: anthropic/claude\n---\nbody\n",
+            )
+            .expect("write plainer agent file");
+
+            test_isolation::with_root(&tmp.path().join("home"), || {
+                let _entered = test_isolation::enter(&project);
+                assert_eq!(
+                    super::super::opencode_answer_for("ls -la", Some("rtkprobe")),
+                    json!({}),
+                    "rules rtk cannot read means no rewrite at all"
+                );
+                assert_eq!(
+                    super::super::opencode_answer_for("ls -la", Some("plainer")),
+                    json!({ "command": "rtk ls -la" }),
+                    "an agent file with no rules key keeps the rewrite"
+                );
+            });
+        }
+    }
+
     #[test]
     fn test_cursor_deny_blocks_rewrite() {
         use super::permissions::check_command_with_rules;
@@ -2025,11 +2929,6 @@ mod tests {
             check_command_with_rules("cargo test", &deny, &[], &[]),
             PermissionVerdict::Deny
         );
-        // Denied commands must not be rewritten — Gemini handler checks deny before rewrite
-        assert!(
-            get_rewritten("cargo test").is_some(),
-            "cargo test should be rewritable when not denied"
-        );
     }
 
     // --- Shared decision flow (all hosts route through this) ---
@@ -2041,7 +2940,7 @@ mod tests {
         allow: &[String],
     ) -> HookDecision {
         let verdict = permissions::check_command_with_rules(cmd, deny, ask, allow);
-        decide_from_verdict(cmd, verdict)
+        decide_from_verdict(cmd, verdict, permissions::DenyRules::Unattested, None)
     }
 
     fn all_allowed() -> Vec<String> {
@@ -2103,6 +3002,29 @@ mod tests {
     }
 
     #[test]
+    fn test_decide_leaves_folded_ls_tree_to_git_where_its_lines_are_read() {
+        assert!(matches!(
+            decide_with_rules("git ls-tree -r --name-only HEAD", &[], &[], &all_allowed()),
+            HookDecision::AllowRewrite(ref r) if r == "rtk git ls-tree -r --name-only HEAD"
+        ));
+        for cmd in [
+            "git ls-tree -r --name-only HEAD > files.txt",
+            "git ls-tree -r --name-only HEAD | head -5",
+            "git ls-tree -r --name-only HEAD | cat",
+            "for f in $(git ls-tree -r --name-only HEAD); do echo \"$f\"; done",
+            "git ls-tree -r --name-only HEAD | while read f; do echo \"$f\"; done",
+        ] {
+            assert!(
+                matches!(
+                    decide_with_rules(cmd, &[], &[], &all_allowed()),
+                    HookDecision::Defer
+                ),
+                "{cmd}"
+            );
+        }
+    }
+
+    #[test]
     fn test_decide_allow_for_fd_dup_redirect() {
         assert!(matches!(
             decide_with_rules("git status 2>&1", &[], &[], &all_allowed()),
@@ -2131,12 +3053,11 @@ mod tests {
         // and the tool call is blocked.
         //
         // Uses run_gemini_inner_with_rules (explicit allow-all rules) rather
-        // than run_gemini_inner: the latter's decide_hook_action reads the
-        // REAL ~/.gemini/settings.json (and project .gemini/settings.json),
-        // making the decision assertion depend on whatever is on the
-        // machine running the test. Both share the same parse/strip/render
-        // core (run_gemini_inner_impl) that production run_gemini uses, so
-        // this still exercises the real BOM-stripping path.
+        // than run_gemini_inner, so the decision assertion rests on the rules
+        // it states rather than on whichever settings files resolve. Both
+        // share the same parse/strip/render core (run_gemini_inner_impl) that
+        // production run_gemini uses, so this still exercises the real
+        // BOM-stripping path.
         let payload = json!({
             "tool_name": "run_shell_command",
             "tool_input": { "command": "git status" }
@@ -2469,6 +3390,32 @@ mod tests {
     }
 
     #[test]
+    fn test_vibe_rewrites_namespaced_bash_command() {
+        // Vibe's Unified Harness sends the bash tool as `file_system.bash`.
+        let input = vibe_input("file_system.bash", "git status");
+        let out = run_vibe_inner(&input).expect("rewrite expected for namespaced bash");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v["hook_specific_output"]["tool_input"]["command"],
+            "rtk git status"
+        );
+    }
+
+    #[test]
+    fn test_vibe_ignores_namespaced_non_bash_tool() {
+        let input = vibe_input("file_system.read_file", "git status");
+        assert!(run_vibe_inner(&input).is_none());
+    }
+
+    #[test]
+    fn test_vibe_ignores_other_namespace_bash_tool() {
+        // Only Vibe's own `file_system.bash` is the shell tool; a plugin's
+        // `myplugin.bash` must not be rewritten.
+        let input = vibe_input("myplugin.bash", "git status");
+        assert!(run_vibe_inner(&input).is_none());
+    }
+
+    #[test]
     fn test_vibe_strips_utf8_bom() {
         // Sixth hook stdin entry point, and the last one that did not strip.
         // Windows hosts may prepend a UTF-8 BOM (confirmed for Cursor);
@@ -2513,5 +3460,215 @@ mod tests {
     fn test_vibe_substitution_defers() {
         let input = vibe_input("bash", "echo $(rm -rf /)");
         assert!(run_vibe_inner(&input).is_none());
+    }
+
+    fn antigravity_input(cmd: &str) -> String {
+        json!({
+            "toolCall": {
+                "name": "run_command",
+                "args": {
+                    "CommandLine": cmd
+                }
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_antigravity_rewrite_git_status() {
+        let v = run_antigravity_inner(&antigravity_input("git status"));
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(v["overwrite"]["CommandLine"], "rtk git status");
+    }
+
+    #[test]
+    fn test_antigravity_passthrough_non_rewritable() {
+        let v = run_antigravity_inner(&antigravity_input("htop"));
+        assert_eq!(v["decision"], "allow");
+        assert!(v.get("overwrite").is_none());
+    }
+
+    #[test]
+    fn test_antigravity_non_command_tool_passthrough() {
+        let input = json!({
+            "toolCall": {
+                "name": "view_file",
+                "args": { "AbsolutePath": "/tmp/test.rs" }
+            }
+        })
+        .to_string();
+        let v = run_antigravity_inner(&input);
+        assert_eq!(v["decision"], "allow");
+        assert!(v.get("overwrite").is_none());
+    }
+
+    #[test]
+    fn test_antigravity_empty_and_corrupt_input_passthrough() {
+        assert_eq!(run_antigravity_inner("")["decision"], "allow");
+        assert_eq!(run_antigravity_inner("   ")["decision"], "allow");
+        assert_eq!(run_antigravity_inner("{not-json}")["decision"], "allow");
+    }
+
+    #[test]
+    fn test_antigravity_leading_bom_and_whitespace_trimmed() {
+        let raw = format!("\u{FEFF}   {}   ", antigravity_input("git status"));
+        let v = run_antigravity_inner(&raw);
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(v["overwrite"]["CommandLine"], "rtk git status");
+    }
+
+    #[test]
+    fn test_antigravity_complex_quoted_command_preserved() {
+        let cmd = "git log --format='%h %s' --all --decorate";
+        let v = run_antigravity_inner(&antigravity_input(cmd));
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(
+            v["overwrite"]["CommandLine"],
+            "rtk git log --format='%h %s' --all --decorate"
+        );
+    }
+
+    #[test]
+    fn test_copilot_cli_shell_wrapper_rewrites_without_auto_allow() {
+        let command = "bash -c 'git status; cargo test'";
+        let verdict = permissions::check_command_with_rules(command, &[], &[], &["*".to_string()]);
+        let response = copilot_cli_response_from_decision(
+            &cli_args(command),
+            decide_from_verdict(
+                command,
+                verdict,
+                permissions::DenyRules::NoneConfigured,
+                None,
+            ),
+            command,
+        )
+        .expect("wrapper rewrite expected");
+        assert_eq!(
+            response["modifiedArgs"]["command"],
+            "bash -c 'rtk git status; rtk cargo test'"
+        );
+        assert!(response.get("permissionDecision").is_none());
+    }
+
+    #[test]
+    fn test_claude_shell_wrapper_rewrites_without_auto_allow() {
+        let result = run_claude_inner(&claude_input(r#"bash -c "head foo && grep -R bar .""#))
+            .expect("wrapper rewrite expected");
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let output = &v["hookSpecificOutput"];
+        assert_eq!(
+            output["updatedInput"]["command"],
+            r#"bash -c "rtk read foo --head-lines 10 && rtk grep -R bar .""#
+        );
+        assert!(output.get("permissionDecision").is_none());
+    }
+
+    #[test]
+    fn test_cursor_shell_wrapper_rewrites_without_auto_allow() {
+        let result = run_cursor_allowed(&cursor_input(r#"bash -c "git status && cargo test""#));
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["permission"], "ask");
+        assert_eq!(
+            v["updated_input"]["command"],
+            r#"bash -c "rtk git status && rtk cargo test""#
+        );
+    }
+
+    #[test]
+    fn test_antigravity_fallback_command_args_keys() {
+        let input = json!({
+            "toolCall": {
+                "name": "run_command",
+                "args": { "command": "git status" }
+            }
+        })
+        .to_string();
+        let v = run_antigravity_inner(&input);
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(v["overwrite"]["CommandLine"], "rtk git status");
+    }
+
+    #[test]
+    fn test_antigravity_pre_prefixed_command_defers() {
+        let v = run_antigravity_inner(&antigravity_input("rtk git status"));
+        assert_eq!(v["decision"], "allow");
+        assert!(
+            v.get("overwrite").is_none(),
+            "already prefixed command must not be rewritten again"
+        );
+    }
+
+    #[test]
+    fn test_antigravity_shell_redirection_and_subshells_defer() {
+        for cmd in [
+            "git status $(whoami)",
+            "git status `whoami`",
+            "git status > /tmp/out.txt",
+            "git status < /tmp/in.txt",
+        ] {
+            let v = run_antigravity_inner(&antigravity_input(cmd));
+            assert_eq!(v["decision"], "allow");
+            assert!(
+                v.get("overwrite").is_none(),
+                "unattestable shell construct must defer without overwrite for {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_decide_asks_for_allowed_shell_wrapper_rewrite() {
+        match decide_with_rules(
+            r#"bash -c "head foo && grep -R bar .""#,
+            &[],
+            &[],
+            &all_allowed(),
+        ) {
+            HookDecision::AskRewrite(rewritten) => {
+                assert_eq!(
+                    rewritten,
+                    r#"bash -c "rtk read foo --head-lines 10 && rtk grep -R bar .""#
+                )
+            }
+            _ => panic!("supported shell wrapper must rewrite with confirmation"),
+        }
+    }
+
+    #[test]
+    fn test_antigravity_unknown_binary_passthrough() {
+        let v = run_antigravity_inner(&antigravity_input("definitely-not-a-real-binary --foo"));
+        assert_eq!(v["decision"], "allow");
+        assert!(v.get("overwrite").is_none());
+    }
+
+    #[test]
+    fn test_gemini_shell_wrapper_asks_user_with_rewrite() {
+        let v: Value = serde_json::from_str(&gemini_render(
+            r#"zsh -c "git status && cargo test""#,
+            &[],
+            &[],
+            &all_allowed(),
+        ))
+        .unwrap();
+        assert_eq!(v["decision"], "ask_user");
+        assert_eq!(
+            v["hookSpecificOutput"]["tool_input"]["command"],
+            r#"zsh -c "rtk git status && rtk cargo test""#
+        );
+    }
+
+    #[test]
+    fn test_droid_shell_wrapper_rewrites_without_permission_decision() {
+        let input = droid_input("Execute", "bash -c 'git status; cargo test'");
+        let out = run_droid_inner(&input).expect("rewrite expected");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v.pointer("/hookSpecificOutput/updatedInput/command")
+                .and_then(Value::as_str),
+            Some("bash -c 'rtk git status; rtk cargo test'")
+        );
+        assert!(
+            v.pointer("/hookSpecificOutput/permissionDecision")
+                .is_none()
+        );
     }
 }

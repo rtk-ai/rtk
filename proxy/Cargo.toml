@@ -1,0 +1,86 @@
+# Its own workspace root, on purpose. `proxy/` is deliberately NOT a member of
+# the root workspace: two binary-bearing packages break `cargo install --git`,
+# the command every README prints. The cost is a second lockfile, which means
+# the rusqlite pin below is held by hand in both -- see the note there.
+[workspace]
+
+[package]
+name = "rtk-proxy"
+version = "0.49.0"
+edition = "2021"
+rust-version = "1.91"
+authors = ["RTK AI Labs"]
+# Business Source License 1.1 — source-available, converting to Apache-2.0 on
+# the Change Date. See ./LICENSE. This is deliberately NOT the Apache-2.0 of
+# the `rtk` CLI in the parent directory: the two are separate crates, and the
+# CLI never links this one (it spawns the binary and reads its SQLite DB).
+license = "BUSL-1.1"
+description = "rtk-proxy: a local LLM proxy that compresses context with CCR (Compress-Cache-Retrieve) before forwarding it to the provider."
+homepage = "https://www.rtk-ai.app"
+repository = "https://github.com/rtk-ai/rtk"
+readme = "README.md"
+# Source-available, not OSI-open-source: crates.io is not a distribution
+# channel for this crate. It ships as a binary alongside `rtk`.
+publish = false
+
+[lib]
+name = "rtk_proxy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rtk-proxy"
+path = "src/main.rs"
+
+[dependencies]
+rtk-engine = { path = "../engine" }
+once_cell = "1"
+tiktoken-rs = "0.12.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+base64 = "0.22.1"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+font8x8 = "0.3"
+sha2 = "0.10"
+toml = "1.1.2"
+anyhow = "1"
+tracing = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+utoipa = { version = "5", features = ["chrono"] }
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors", "catch-panic"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+bytes = "1"
+futures = "0.3"
+# Ergonomic async streams for the on-the-fly SSE usage tally in `forward::relay`.
+async-stream = "0.3"
+clap = { version = "4", features = ["derive", "env"] }
+thiserror = "2"
+async-trait = "0.1"
+regex = "1"
+# The usage store. Pinned to what icm-store links (both bundle libsqlite3-sys,
+# and two versions of a `links = "sqlite3"` crate cannot coexist in one
+# dependency graph) -- which is also why the root `rtk` crate tracks this pin.
+rusqlite = { version = "0.34", features = ["bundled"] }
+# User-level config/log dir resolution for `rtk-proxy service` (launchd /
+# systemd --user / Task Scheduler). Same version pin as the root rtk crate.
+dirs = "5"
+# Permanent memory (ICM) — CCR's cache backend. FTS-only (no fastembed/ONNX),
+# sqlite backend only: this is a single-node local daemon, so there is no
+# postgres/multi-pod need here. Apache-2.0.
+icm-core = { git = "https://github.com/rtk-ai/icm", rev = "831e915b", default-features = false }
+icm-store = { git = "https://github.com/rtk-ai/icm", rev = "831e915b", default-features = false, features = ["backend-sqlite"] }
+
+[dev-dependencies]
+wiremock = "0.6"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tempfile = "3"
+temp-env = "0.3"
+
+[lints.rust]
+unsafe_code = "deny"
+warnings = "deny"

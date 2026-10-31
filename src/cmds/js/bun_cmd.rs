@@ -1,5 +1,6 @@
 //! Filters bun output — install logs, package lists, and pm commands.
 
+use crate::core::shell::display_args;
 use crate::core::utils::{join_or_ok, resolved_command, strip_ansi, truncate};
 use anyhow::Result;
 use serde::Deserialize;
@@ -157,7 +158,7 @@ pub fn run_pkg(subcmd: &str, args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: bun {} {}", subcmd, args.join(" "));
     }
 
-    let display = format!("{} {}", subcmd, args.join(" "));
+    let display = format!("{} {}", subcmd, display_args(args));
     let tee_label = format!("bun_{}", subcmd);
     crate::core::runner::run_filtered(
         cmd,
@@ -182,7 +183,7 @@ pub fn run_pm_ls(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: bun pm ls {}", args.join(" "));
     }
 
-    let display = format!("pm ls {}", args.join(" "));
+    let display = format!("pm ls {}", display_args(args));
     crate::core::runner::run_filtered(
         cmd,
         "bun",
@@ -218,7 +219,7 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
 
     let mut cmd = resolved_command("bun");
     cmd.arg("test").args(args);
-    let display = format!("test {}", args.join(" "));
+    let display = format!("test {}", display_args(args));
     crate::core::runner::run_test_cmd(
         cmd,
         "bun",
@@ -226,6 +227,7 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
         "bun_test",
         crate::core::runner::TestEcosystem::Bun,
         verbose,
+        false,
     )
 }
 
@@ -311,7 +313,8 @@ error: PackageNotFound - "nonexistent-pkg" not found in registry
 
     #[test]
     fn test_filter_bun_install_handles_remove() {
-        let output = "bun remove v1.2.20 (6ad208bc)\n- express@4.18.2\n1 package removed [7.00ms]\n";
+        let output =
+            "bun remove v1.2.20 (6ad208bc)\n- express@4.18.2\n1 package removed [7.00ms]\n";
         let result = filter_bun_pkg(output);
         assert!(!result.contains("bun remove v1.2.20"));
         assert!(result.contains("- express@4.18.2"));
@@ -370,7 +373,10 @@ error: PackageNotFound - "nonexistent-pkg" not found in registry
         let raw = include_str!("../../../tests/fixtures/bun_pm_ls_all_raw.txt");
         let out = filter_bun_pm_ls(raw);
         assert!(out.starts_with("68 deps"), "{out}");
-        assert!(!out.contains('\u{251c}'), "tree glyphs must be stripped: {out}");
+        assert!(
+            !out.contains('\u{251c}'),
+            "tree glyphs must be stripped: {out}"
+        );
 
         let json = r#"{"express": {"version": "4.18.2"}}"#;
         let out = filter_bun_pm_ls(json);
@@ -383,7 +389,8 @@ error: PackageNotFound - "nonexistent-pkg" not found in registry
 
     #[test]
     fn test_filter_bun_pm_ls_text_strips_ansi() {
-        let raw = "\x1b[31merror: No package.json was found\x1b[0m\n\x1b[2mnote: Run bun init\x1b[0m";
+        let raw =
+            "\x1b[31merror: No package.json was found\x1b[0m\n\x1b[2mnote: Run bun init\x1b[0m";
         let out = filter_bun_pm_ls_text(raw);
         assert!(!out.contains('\x1b'), "{out:?}");
         assert!(out.contains("No package.json"), "{out}");

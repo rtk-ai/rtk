@@ -1,0 +1,27 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "transcript_path": "/home/user/.claude/projects/example-project/00000000-0000-0000-0000-000000000000.jsonl",
+  "cwd": "/home/user/project",
+  "prompt_id": "00000000-0000-0000-0000-000000000000",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Glob",
+  "tool_input": {
+    "pattern": "*.json"
+  },
+  "tool_response": {
+    "filenames": [
+      "data_flat.json",
+      "data_nested.json",
+      "data_huge.json",
+      ".claude/settings.json"
+    ],
+    "durationMs": 6,
+    "numFiles": 4,
+    "truncated": false,
+    "totalMatches": 4,
+    "countIsComplete": true
+  },
+  "tool_use_id": "toolu_01KA2rKqyKRzVcATyfsq4JZB",
+  "duration_ms": 7
+}

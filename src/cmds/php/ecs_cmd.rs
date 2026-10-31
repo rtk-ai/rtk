@@ -2,6 +2,7 @@
 
 use super::utils::{php_tool_command, strip_ansi_and_controls};
 use crate::core::runner;
+use crate::core::shell::display_args;
 use anyhow::Result;
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
@@ -17,7 +18,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "ecs",
-        &args.join(" "),
+        &display_args(args),
         filter_ecs_output,
         runner::RunOptions::default(),
     )

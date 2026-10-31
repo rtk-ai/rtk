@@ -63,7 +63,7 @@ git diff "$BASE_BRANCH"...HEAD --stat
 | `src/main.rs`                  | Command routing + Commands enum            |
 | `src/core/tracking.rs`         | SQLite patterns + DB path config           |
 | `src/core/config.rs`           | Configuration system                       |
-| `src/hooks/init.rs`            | Init patterns + hook installation          |
+| `src/hooks/init/`              | Init patterns + hook installation          |
 | `.github/workflows/`           | CI/CD multi-platform build targets         |
 | `tests/` ou `fixtures/`        | Testing Strategy (CLAUDE.md)               |
 | `Cargo.toml`                   | Dependencies + build optimizations         |
@@ -84,7 +84,7 @@ git diff "$BASE_BRANCH"...HEAD --stat
 **Tests**:
 - `#[cfg(test)] mod tests` embarqué dans chaque module
 - Fixtures réelles dans `tests/fixtures/<cmd>_raw.txt`
-- `count_tokens()` pour vérifier savings ≥60%
+- `count_tokens()` pour vérifier savings ≥20%
 - `assert_snapshot!` (insta) pour output format
 
 **Module**:
@@ -93,7 +93,7 @@ git diff "$BASE_BRANCH"...HEAD --stat
 - `strip_ansi()` depuis `utils.rs` — pas re-implémenté
 
 **Filtres**:
-- Token savings ≥60% obligatoire (release blocker)
+- Token savings ≥20% obligatoire (release blocker)
 - Fallback: si filter échoue → raw command exécutée
 - Pas d'output ASCII art, pas de verbose metadata inutile
 
@@ -105,7 +105,7 @@ git diff "$BASE_BRANCH"...HEAD --stat
 - Pattern regex fixe recompilé dans une fonction
 - `?` sans `.context()` — erreur sans description
 - Dépendance async ajoutée (tokio, async-std, futures)
-- Token savings <60% pour un nouveau filtre
+- Token savings <20% pour un nouveau filtre
 - Pas de fallback vers commande brute sur échec de filtre
 - `panic!()` en production (hors tests)
 - Exit code non propagé sur commande sous-jacente

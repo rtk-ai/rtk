@@ -7,6 +7,9 @@
 - `pytest_cmd.rs` uses a state machine text parser (no JSON available from pytest)
 - `ruff_cmd.rs` uses JSON for check mode (`--output-format=json`) and text filtering for format mode
 - `sqlfluff_cmd.rs` injects `--format json` for lint mode and groups violations by rule and file; other subcommands pass through capped
+- Ruff and SQLFluff list identical descriptions once beside a visible top rule.
+  Locations retain the rule code; differing messages and rules outside the
+  summary cap keep their descriptions beside each location.
 - `pip_cmd.rs` auto-detects `uv` as a pip alternative and routes accordingly
 - `uv_cmd.rs` preserves `uv run` environment semantics: the program's own output passes through on success (bounded, with a tee hint), diagnostics are extracted on failure
 - `python -m pytest` and `python3 -m mypy` are rewritten by the hook registry to `rtk pytest` / `rtk mypy`

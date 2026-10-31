@@ -1,0 +1,75 @@
+# judge-before-tool — a System-1 judge decides, before a tool runs, whether a
+# cheaper model can handle the call.
+#
+# Before a whole-file Read over 300 lines, a heavy build/test/package command
+# (npm, pnpm, yarn, cargo, go, pytest, make), or a web fetch, the judge
+# answers one question: does the agent need only a short answer a smaller
+# model could extract, or the exact content? When the judge scores that at
+# 0.8 or above, the call is routed to a Haiku worker (`bulk-read` for reads,
+# `digest` for commands and fetches) instead of entering the agent's context.
+#
+# ── PREREQUISITE: a System-1 endpoint (pick one) ──────────────────────────
+#
+# A. Laya, local, exposed on loopback in the systemone wire format — see
+#    laya-route.toml for the setup — then: export RTK_LAYA_TOKEN=local
+#    (rtk requires a declared credential per classifier upstream; a local
+#    service ignores it).
+#
+# B. TypeSafe Jev, hosted: swap the judge upstream below for
+#    classify-routing.toml's (base_url https://api.typesafe.ai/v1/systemone,
+#    api_key_env TYPESAFE_API_KEY).
+#
+# Workers bill your Anthropic account: with the rtk llm-proxy running they
+# borrow the credential your agent already relays, else ANTHROPIC_API_KEY.
+#
+# Fail-open: endpoint down, token unset, timeout, or an unsure answer inserts
+# no fact, no rule matches, and the tool runs normally.
+
+schema_version = 1
+
+[pipeline]
+name    = "judge-before-tool"
+extends = "rtk:posthook"
+
+[upstream.judge]
+provider     = "laya"
+model        = "laya"
+base_url     = "http://127.0.0.1:41733/v1/systemone"
+api_key_env  = "RTK_LAYA_TOKEN"
+timeout_secs = 4
+
+[upstream.haiku]
+provider = "anthropic"
+model    = "claude-haiku-4-5"
+
+[classifier.skim]
+upstream     = "judge"
+question     = "noul"
+instructions = "The agent is about to run this tool call. Use its intent, the user goal and its recent calls. Answer true if what it needs from the call is a short answer a smaller model could extract (a summary, a yes/no, a few facts), false if it needs the exact content (to edit a file, copy code, or read every line)."
+input_chars  = 1500
+
+[task.bulk-read]
+kind     = "summarize"
+upstream = "haiku"
+
+[task.digest]
+kind     = "digest"
+upstream = "haiku"
+
+[[hook.before_tool.read]]
+name   = "judge-big-reads"
+when   = { file_lines_gt = 300, whole_file = true, "noul.skim_gte" = 0.8 }
+action = "route"
+task   = "bulk-read"
+
+[[hook.before_tool.shell]]
+name   = "judge-heavy-commands"
+when   = { command_matches = "^(npm|pnpm|yarn|cargo|go|pytest|make)\\b", "noul.skim_gte" = 0.8 }
+action = "route"
+task   = "digest"
+
+[[hook.before_tool.web]]
+name   = "judge-doc-fetches"
+when   = { "noul.skim_gte" = 0.8 }
+action = "route"
+task   = "digest"

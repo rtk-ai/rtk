@@ -1,0 +1,23 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "transcript_path": "/home/user/.claude/projects/example-project/00000000-0000-0000-0000-000000000000.jsonl",
+  "cwd": "/home/user/project",
+  "prompt_id": "00000000-0000-0000-0000-000000000000",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "WebFetch",
+  "tool_input": {
+    "url": "https://example.com",
+    "prompt": "summarize"
+  },
+  "tool_response": {
+    "bytes": 559,
+    "code": 200,
+    "codeText": "OK",
+    "result": "# Summary\n\nThis webpage introduces the Example Domain, which is designated for use in documentation and educational materials without requiring permission. The site explicitly cautions against using this domain for operational purposes. Users seeking additional information can access more details through the provided link to IANA's documentation on example domains.",
+    "durationMs": 2089,
+    "url": "https://example.com"
+  },
+  "tool_use_id": "toolu_01ERASCxHs253QcSDKG16dZK",
+  "duration_ms": 2089
+}
