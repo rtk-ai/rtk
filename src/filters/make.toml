@@ -6,7 +6,8 @@ strip_lines_matching = [
   "^\\s*$",
   "^Nothing to be done",
 ]
-max_lines = 50
+# make stops at the first failure, so the error and `make: ***` are at the end of the output.
+tail_lines = 50
 on_empty = "make: ok"
 
 [[tests.make]]
