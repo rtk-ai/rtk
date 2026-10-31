@@ -2591,7 +2591,41 @@ fn run_cli() -> Result<i32> {
                     )
                 };
                 if let Err(e) = result {
-                    eprintln!("cat: {}: {}", file.display(), e.root_cause());
+                    // GNU semantics (issue #4818): `tail -n 0` never opens the
+                    // file, so a missing file is not an error there.
+                    let tail_zero_only = tail_lines == Some(0) && head_lines.is_none();
+                    let not_found = e
+                        .root_cause()
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|io_err| io_err.kind() == std::io::ErrorKind::NotFound);
+                    if tail_zero_only && not_found {
+                        continue;
+                    }
+                    // Name the tool the user actually ran (`head`/`tail` when
+                    // the read came from a rewritten window), not always `cat`.
+                    let prog = if head_lines.is_some() && tail_lines.is_none() {
+                        "head"
+                    } else if tail_lines.is_some() && head_lines.is_none() {
+                        "tail"
+                    } else {
+                        "cat"
+                    };
+                    // Strip the Rust `(os error N)` suffix; native tools do
+                    // not print it.
+                    let mut cause = e.root_cause().to_string();
+                    if let Some(idx) = cause.rfind(" (os error ") {
+                        cause.truncate(idx);
+                    }
+                    if prog == "cat" {
+                        eprintln!("cat: {}: {}", file.display(), cause);
+                    } else {
+                        eprintln!(
+                            "{}: cannot open '{}' for reading: {}",
+                            prog,
+                            file.display(),
+                            cause
+                        );
+                    }
                     had_error = true;
                 }
             }
