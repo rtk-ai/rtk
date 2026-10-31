@@ -3904,14 +3904,38 @@ fn run_cli() -> Result<i32> {
                 }
             }
 
-            let mut child = ChildGuard(Some(
-                core::utils::resolved_command(cmd_name.as_ref())
-                    .child_args(&cmd_args)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .context(format!("Failed to execute command: {}", cmd_name))?,
-            ));
+            // `resolved_command` falls back to a bare `Command::new`, whose
+            // spawn error is not a reliable missing-vs-unexecutable signal on
+            // every platform (an empty PATH can report EACCES for a missing
+            // name). Resolve first so the shell-compatible code is exact.
+            if core::utils::resolve_binary(cmd_name.as_ref()).is_err() {
+                let exists = std::path::Path::new(&cmd_name).exists();
+                let code = if exists { 126 } else { 127 };
+                eprintln!("rtk: command not found: {}", cmd_name);
+                return Ok(code);
+            }
+
+            let child = core::utils::resolved_command(cmd_name.as_ref())
+                .child_args(&cmd_args)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn();
+            let mut child = match child {
+                Ok(child) => ChildGuard(Some(child)),
+                Err(error) => {
+                    // Match the shell: a missing binary is 127, and a binary
+                    // that exists but cannot be executed (including a
+                    // directory) is 126. Exit 1 would make `$? -eq 127`
+                    // install-the-tool logic see an ordinary failure.
+                    let code = match error.kind() {
+                        std::io::ErrorKind::NotFound => 127,
+                        std::io::ErrorKind::PermissionDenied => 126,
+                        _ => 1,
+                    };
+                    eprintln!("rtk: Failed to execute command: {}: {}", cmd_name, error);
+                    return Ok(code);
+                }
+            };
 
             // Store child PID for signal handler before anything can fail
             if let Some(ref inner) = child.0 {
