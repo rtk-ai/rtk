@@ -189,7 +189,9 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
                         current_failure.clear();
                     }
                     current_failure.push(trimmed.to_string());
-                } else if !trimmed.is_empty() && !trimmed.starts_with("===") {
+                } else if !trimmed.starts_with("===")
+                    && (!trimmed.is_empty() || !current_failure.is_empty())
+                {
                     current_failure.push(line.trim_end().to_string());
                 }
             }
@@ -341,28 +343,44 @@ fn build_pytest_summary(
             .position(|l| is_captured_section(l))
             .unwrap_or(body.len());
         let traceback = &body[..traceback_end];
-        let frame = |l: &&str| !is_error_line(l) && frame_file(l).is_some();
-        let location = traceback.iter().rposition(frame);
+        let error_lines = error_line_flags(traceback);
+        let frame = |(at, line): (usize, &&str)| !error_lines[at] && frame_file(line).is_some();
+        let location = traceback.iter().enumerate().rposition(frame);
         let location_file = location.and_then(|at| frame_file(traceback[at]));
         let anchor = traceback
             .iter()
+            .enumerate()
             .position(frame)
             .filter(|&at| !collecting && frame_file(traceback[at]) != location_file);
-        let error_total = traceback.iter().filter(|l| is_error_line(l)).count();
-        let error_shown = error_total.min(MAX_ERROR_LINES);
+        let error_total = error_lines.iter().filter(|&&is_error| is_error).count();
+        let content_total = traceback
+            .iter()
+            .zip(&error_lines)
+            .filter(|(line, is_error)| **is_error && **line != "E")
+            .count();
+        let error_shown = content_total.min(MAX_ERROR_LINES);
         let error_head = error_shown / 2;
-        let error_tail_start = error_total - (error_shown - error_head);
+        let error_tail_start = content_total - (error_shown - error_head);
+        let hidden = error_total - error_shown;
+        let mut elision = (hidden > 0).then(|| {
+            let noun = if hidden == 1 { "line" } else { "lines" };
+            format!("     … +{hidden} more E {noun}\n")
+        });
         let mut context_left = MAX_TRACEBACK_LINES.saturating_sub(
             error_shown + usize::from(location.is_some()) + usize::from(anchor.is_some()),
         );
         let mut error_index = 0;
         for (index, line) in body.iter().enumerate() {
-            let show = if index < traceback_end && is_error_line(line) {
+            let show = if error_lines.get(index) == Some(&true) {
+                // Blank diagnostics count as hidden without displacing useful content.
+                if *line == "E" {
+                    continue;
+                }
                 error_index += 1;
-                if error_index == error_head + 1 && error_tail_start > error_head {
-                    let hidden = error_tail_start - error_head;
-                    let noun = if hidden == 1 { "line" } else { "lines" };
-                    result.push_str(&format!("     … +{hidden} more E {noun}\n"));
+                if error_index == error_head + 1
+                    && let Some(hint) = elision.take()
+                {
+                    result.push_str(&hint);
                 }
                 error_index <= error_head || error_index > error_tail_start
             } else if Some(index) == location || Some(index) == anchor {
@@ -385,6 +403,9 @@ fn build_pytest_summary(
                 result.push_str(&format!("     {}\n", truncate(line.trim(), 100)));
             }
         }
+        if let Some(hint) = elision {
+            result.push_str(&hint);
+        }
 
         if i < failures.len() - 1 {
             result.push('\n');
@@ -405,9 +426,18 @@ fn build_pytest_summary(
     result.trim().to_string()
 }
 
-fn is_error_line(line: &str) -> bool {
-    line.strip_prefix("E ")
-        .is_some_and(|rest| !rest.trim_start().starts_with("= "))
+fn error_line_flags(lines: &[&str]) -> Vec<bool> {
+    let mut in_error = false;
+    lines
+        .iter()
+        .map(|line| {
+            // Locals use a ten-column name followed by " = ", after a blank line.
+            // An indented diff can have the same prefix within an E-line run.
+            let local = line.starts_with("E          = ");
+            in_error = (*line == "E" || line.starts_with("E ")) && (in_error || !local);
+            in_error
+        })
+        .collect()
 }
 
 fn is_block_header(line: &str) -> bool {
@@ -1039,7 +1069,7 @@ Failures:
      test_deep.py:2: in check
      E   AssertionError: bad status
      E   assert {'code': 500, 'body': 'err'} == {'code': 200, 'body': 'ok'}
-     … +2 more E lines
+     … +3 more E lines
      E     {'body': 'err'} != {'body': 'ok'}
      E     Use -v to get more diff"#
         );
@@ -1058,7 +1088,7 @@ Failures:
      test_cases.py:2: in test_dict
      E   AssertionError: assert {'a': 1, 'b': 2} == {'a': 1, 'b': 3}
      E     Omitting 1 identical items, use -vv to show
-     … +1 more E line
+     … +2 more E lines
      E     {'b': 2} != {'b': 3}
      E     Use -v to get more diff"#
         );
@@ -1076,7 +1106,7 @@ Failures:
 1. [FAIL] test_p
      E       AssertionError: state drifted
      E       assert {'b': 2} == {'b': 5}
-     … +1 more E line
+     … +2 more E lines
      E         {'b': 2} != {'b': 5}
      E         Use -v to get more diff
      test_long.py:4: AssertionError
@@ -1101,6 +1131,7 @@ Failures:
      test_warn.py:9: in test_total
      E   AssertionError: totals differ
      E   assert [0, 1, 2, 3, 4] == [1, 2, 3, 4, 5]
+     … +1 more E line
      E     At index 0 diff: 0 != 1
      E     Use -v to get more diff"#
         );
@@ -1134,6 +1165,7 @@ Failures:
 1. [FAIL] test_lint
      test_lint.py:6: in test_lint
      E   AssertionError: assert ['foo.py:3: E...ine too long'] == []
+     … +1 more E line
      E     Left contains one more item: 'foo.py:3: E501 line too long'
      E     Use -v to get more diff"#
         );
@@ -1201,6 +1233,7 @@ Failures:
      mylib/checks.py:3: in assert_frame_equal
      E   AssertionError: DataFrame are different
      E   DataFrame shape mismatch
+     … +1 more E line
      E   [left]:  (3, 2)
      E   [right]: (3, 4)"#
         );
@@ -1234,7 +1267,7 @@ Failures:
 1. [FAIL] test_p
      E       AssertionError: state drifted
      E       assert {'b': 2} == {'b': 5}
-     … +1 more E line
+     … +2 more E lines
      E         {'b': 2} != {'b': 5}
      E         Use -v to get more diff
      test_le.py:4: AssertionError"#
@@ -1254,7 +1287,7 @@ Failures:
      test_rst.py:2: in test_rst
      E   AssertionError: assert '=====\nbody a\n' == '=====\nbody b\n'
      E       =====
-     … +2 more E lines
+     … +3 more E lines
      E     + body a
      E     ?      ^"#
         );
@@ -1289,7 +1322,7 @@ Failures:
      test_td.py:7: in test_td
      E   AssertionError: assert {'a': 1, 'b': 2} == {'a': 1, 'b': 3}
      E     Omitting 1 identical items, use -vv to show
-     … +1 more E line
+     … +2 more E lines
      E     {'b': 2} != {'b': 3}
      E     Use -v to get more diff"#
         );
@@ -1364,7 +1397,7 @@ Failures:
 1. [FAIL] test_q
      E       AssertionError: list drifted
      E       assert [1, 2] == [3]
-     … +1 more E line
+     … +2 more E lines
      E         Left contains one more item: 2
      E         Use -v to get more diff
      test_ep.py:4: AssertionError"#
@@ -1449,7 +1482,7 @@ Failures:
      test_lm.py:5: in test_first
      E   AssertionError: first test message
      E   assert {'a': 1, 'b': 2} == {'a': 1, 'b': 3}
-     … +2 more E lines
+     … +3 more E lines
      E     {'b': 2} != {'b': 3}
      E     Use -v to get more diff
 
@@ -1587,7 +1620,7 @@ Failures:
      test_du5.py:7: in test_dunder
      E   AssertionError: dunder fail
      E   assert {'a': 1} == {'a': 2}
-     … +1 more E line
+     … +2 more E lines
      E     {'a': 1} != {'a': 2}
      E     Use -v to get more diff
 
@@ -1629,7 +1662,7 @@ Failures:
      bob's dir/test_sp.py:2: in test_sp
      E   AssertionError: spaced dir
      E   assert {'a': 1} == {'a': 2}
-     … +1 more E line
+     … +2 more E lines
      E     {'a': 1} != {'a': 2}
      E     Use -v to get more diff"#
         );
