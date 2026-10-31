@@ -18,3 +18,12 @@
 
 - `ruff_cmd` is called by `cmds/js/lint_cmd` and `cmds/system/format_cmd` for Python projects
 - `mypy_cmd` is called by `cmds/js/lint_cmd` when detecting Python type checking
+
+## Pytest line tracebacks
+
+With `--tb=line`, each traceback location is one failure even though pytest does
+not print its usual test-name headers. RTK requests failure names in the short
+summary and pairs them only when report counts, file names, and ordering agree.
+Captured output is excluded from displayed traceback details. The ten-failure
+limit counts each failure once; the recovery hint retains the remaining reports.
+Ambiguous or incomplete location/name mappings preserve the original report.
