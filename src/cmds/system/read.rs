@@ -230,11 +230,25 @@ pub(crate) fn cat_label(file: &Path) -> String {
 }
 
 fn format_with_line_numbers(content: &str) -> String {
-    let lines: Vec<&str> = content.lines().collect();
+    if content.is_empty() {
+        return String::new();
+    }
+    // `str::lines` drops both the `\r` of a CRLF line and the final-newline
+    // distinction, so `cat -n` and `rtk read -n` disagreed on content. Split
+    // on `\n` only, keep the ending, and strip `\r` just for the gutter.
+    let lines: Vec<&str> = content.split_inclusive('\n').collect();
     let width = lines.len().to_string().len();
     let mut out = String::new();
-    for (i, line) in lines.iter().enumerate() {
-        out.push_str(&format!("{:>width$} │ {}\n", i + 1, line, width = width));
+    for (i, raw) in lines.iter().enumerate() {
+        let (line, ending) = match raw.strip_suffix('\n') {
+            Some(without_lf) => match without_lf.strip_suffix('\r') {
+                Some(without_crlf) => (without_crlf, "\r\n"),
+                None => (without_lf, "\n"),
+            },
+            None => (*raw, ""),
+        };
+        out.push_str(&format!("{:>width$} │ {}", i + 1, line, width = width));
+        out.push_str(ending);
     }
     out
 }
@@ -571,6 +585,13 @@ fn main() {{
 
         assert!(matches!(baseline, Cow::Borrowed(_)));
         assert_eq!(baseline, raw);
+    }
+
+    #[test]
+    fn test_format_with_line_numbers_preserves_crlf_and_missing_final_newline() {
+        assert_eq!(format_with_line_numbers("a\r\nb"), "1 │ a\r\n2 │ b");
+        assert_eq!(format_with_line_numbers("a\n"), "1 │ a\n");
+        assert_eq!(format_with_line_numbers(""), "");
     }
 
     #[test]
