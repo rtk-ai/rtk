@@ -74,6 +74,38 @@ pub fn check_command_for_agent(cmd: &str, host: Host, agent: Option<&str>) -> Pe
     )
 }
 
+/// Whether one of the user's `ask` rules is what makes this command ask, as
+/// opposed to a construct RTK cannot attest (a shell wrapper, a substitution).
+#[cfg(feature = "engine")]
+pub(crate) fn ask_rule_applies(cmd: &str, host: Host) -> bool {
+    let (deny_rules, ask_rules, allow_rules) = load_rules_for(host);
+    let (_, prefixes) = crate::core::config::hook_rewrite_params();
+    ask_rule_decides(cmd, &deny_rules, &ask_rules, &allow_rules, &prefixes)
+}
+
+/// Whether an allow rule names this command as written.
+#[cfg(feature = "engine")]
+pub(crate) fn allow_rule_matches(cmd: &str, host: Host) -> bool {
+    let (_, _, allow_rules) = load_rules_for(host);
+    allow_rules
+        .iter()
+        .any(|pattern| command_matches_pattern(cmd, pattern))
+}
+
+#[cfg(feature = "engine")]
+fn ask_rule_decides(
+    cmd: &str,
+    deny_rules: &[String],
+    ask_rules: &[String],
+    allow_rules: &[String],
+    prefixes: &[String],
+) -> bool {
+    let verdict = |asks: &[String]| {
+        check_command_with_rules_and_prefixes(cmd, deny_rules, asks, allow_rules, prefixes)
+    };
+    verdict(ask_rules) == PermissionVerdict::Ask && verdict(&[]) != PermissionVerdict::Ask
+}
+
 /// Whether RTK can show that nothing it is about to wrap could escape a deny
 /// rule.
 ///
@@ -1417,6 +1449,19 @@ mod tests {
                 "an ask rule naming a middle layer did not fire: {cmd}"
             );
         }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn test_ask_rule_decides_only_when_the_rule_is_the_reason() {
+        let ask = vec!["./deploy.sh:*".to_string()];
+        let decides = |cmd: &str| ask_rule_decides(cmd, &[], &ask, &[], &[]);
+        assert!(decides("./deploy.sh"));
+        assert!(decides("echo a && ./deploy.sh"));
+        assert!(!decides("./other.sh"));
+        assert!(!decides("bash -c 'ls'"));
+        assert!(!decides("bash -c './deploy.sh'"));
+        assert!(!decides("./other.sh $(cat flags)"));
     }
 
     /// Deny and ask read past a wrapper whose own allow rule matches the

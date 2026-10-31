@@ -232,7 +232,7 @@ mode   = "swap"
 
 With `swap` and `answer` there is no agent writing the question, so RTK asks one. With [`context = true`](./tasks.md#tasks) on the task, it is built from what the agent is doing — the user's request, the agent's current step and its recent calls. Without it, a generic question asks for what matters, keeping exact names, numbers and error lines.
 
-- **`swap`** needs nothing from the hook: the agent's own call runs the task, and the command keeps its exit code. If the worker fails, the command's own output is shown. Agents that cannot replace a command show the swapped command as a suggestion instead.
+- **`swap`** needs nothing from the hook: the agent's own call runs the task, and the command keeps its exit code. If the worker fails, the command's own output is shown. The agent checks its permission rules against the swapped command, not the original, so RTK leaves a command with no filter as typed when an `ask` rule covers it or an allow rule on `rtk` would let it through, and an `ask` rule on a filtered command still asks. RTK cannot read rules passed on the agent's command line, such as `--disallowedTools`, and those do not match a swapped command. Agents that cannot replace a command show the swapped command as a suggestion instead.
 - **`answer`** waits for the worker inside the hook, bounded by the upstream's `timeout_secs` — set it low. If anything fails (no key, timeout, empty answer), the original call runs as if the rule had not matched. After an answered read the agent can still read exact lines with `offset` and `limit`, since a ranged read is not `whole_file`.
 - Any other combination is refused (E005): `swap` is for commands only, and `answer` on a shell command is what `swap` does without blocking the hook.
 

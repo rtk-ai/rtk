@@ -152,22 +152,63 @@ fn shell_gate(v: &Value) -> bool {
         ShellHookDecision::Swap { command, rule } => {
             let verdict = permissions::check_command_for(cmd, permissions::Host::Claude);
             let (excluded, transparent) = crate::core::config::hook_rewrite_params();
-            if !swappable(
-                cmd,
-                verdict,
-                decision::decide_for_agent(cmd, verdict, permissions::DenyRules::Unattested),
-                &excluded,
-                &transparent,
-            ) {
+            let rewrite =
+                decision::decide_for_agent(cmd, verdict, permissions::DenyRules::Unattested);
+            let unfiltered = matches!(rewrite, HookDecision::Defer);
+            let rtk_allowed = permissions::allow_rule_matches(&command, permissions::Host::Claude);
+            if !keeps_the_agents_check(verdict, unfiltered, rtk_allowed)
+                || !swappable(cmd, verdict, rewrite, &excluded, &transparent)
+            {
                 return false;
             }
-            let output = pre_tool_use_rewrite_output(v, &command, None);
+            let ask_rule = matches!(verdict, permissions::PermissionVerdict::Ask)
+                && permissions::ask_rule_applies(cmd, permissions::Host::Claude);
+            let decision = swap_decision(verdict, ask_rule, unfiltered);
+            let output = swap_output(v, &command, &rule, decision);
             let _ = writeln!(io::stdout(), "{output}");
             audit_log("rewrite", cmd, &command);
             log(v, "shell", cmd, &rule, "swap");
             true
         }
     }
+}
+
+fn keeps_the_agents_check(
+    verdict: permissions::PermissionVerdict,
+    unfiltered: bool,
+    rtk_allowed: bool,
+) -> bool {
+    use permissions::PermissionVerdict;
+    !unfiltered
+        || match verdict {
+            PermissionVerdict::Allow => true,
+            PermissionVerdict::Ask => false,
+            _ => !rtk_allowed,
+        }
+}
+
+fn swap_decision(
+    verdict: permissions::PermissionVerdict,
+    ask_rule: bool,
+    unfiltered: bool,
+) -> Option<&'static str> {
+    if ask_rule {
+        Some("ask")
+    } else if unfiltered && matches!(verdict, permissions::PermissionVerdict::Allow) {
+        Some("allow")
+    } else {
+        None
+    }
+}
+
+fn swap_output(v: &Value, command: &str, rule: &str, decision: Option<&str>) -> Value {
+    let mut output = pre_tool_use_rewrite_output(v, command, decision);
+    if decision == Some("ask") {
+        output["hookSpecificOutput"]["permissionDecisionReason"] = Value::String(format!(
+            "RTK pipeline rule `{rule}` runs this command through a worker task, and it needs approval"
+        ));
+    }
+    output
 }
 
 fn swappable(
@@ -266,6 +307,72 @@ mod tests {
     fn an_ask_rule_swaps_like_any_other() {
         assert!(decide("./run-suite.sh", PermissionVerdict::Ask, &[]));
         assert!(decide("git log -3", PermissionVerdict::Ask, &[]));
+    }
+
+    #[test]
+    fn an_ask_rule_still_asks_before_a_swap_runs() {
+        let input = json!({ "tool_input": { "command": "./run-suite.sh" } });
+        let asked = swap_output(&input, "rtk t -- x", "sw", Some("ask"));
+        let hook = &asked["hookSpecificOutput"];
+        assert_eq!(hook["permissionDecision"], "ask");
+        assert_eq!(hook["updatedInput"]["command"], "rtk t -- x");
+        assert!(
+            hook["permissionDecisionReason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("`sw`"))
+        );
+    }
+
+    #[test]
+    fn a_swap_with_no_decision_leaves_the_check_to_the_agent() {
+        let input = json!({ "tool_input": { "command": "./run-suite.sh" } });
+        let output = swap_output(&input, "rtk t -- x", "sw", None);
+        let hook = &output["hookSpecificOutput"];
+        assert!(hook.get("permissionDecision").is_none());
+        assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
+        assert_eq!(hook["updatedInput"]["command"], "rtk t -- x");
+    }
+
+    #[test]
+    fn an_unfiltered_command_stays_as_typed_when_the_swap_would_hide_it_from_a_rule() {
+        use PermissionVerdict::{Allow, Ask, Default};
+        assert!(!keeps_the_agents_check(Ask, true, false));
+        assert!(!keeps_the_agents_check(Default, true, true));
+        assert!(keeps_the_agents_check(Default, true, false));
+        assert!(keeps_the_agents_check(Allow, true, true));
+    }
+
+    #[test]
+    fn a_filtered_command_swaps_as_before_whatever_the_rules() {
+        use PermissionVerdict::{Allow, Ask, Default};
+        for verdict in [Allow, Ask, Default] {
+            assert!(keeps_the_agents_check(verdict, false, true));
+        }
+    }
+
+    #[test]
+    fn an_ask_rule_on_a_filtered_command_asks() {
+        assert_eq!(
+            swap_decision(PermissionVerdict::Ask, true, false),
+            Some("ask")
+        );
+    }
+
+    #[test]
+    fn an_allow_rule_on_an_unfiltered_command_still_allows_its_swap() {
+        assert_eq!(
+            swap_decision(PermissionVerdict::Allow, false, true),
+            Some("allow")
+        );
+    }
+
+    #[test]
+    fn otherwise_the_agent_checks_the_swap_itself() {
+        use PermissionVerdict::{Allow, Ask, Default};
+        assert_eq!(swap_decision(Default, false, true), None);
+        assert_eq!(swap_decision(Default, false, false), None);
+        assert_eq!(swap_decision(Allow, false, false), None);
+        assert_eq!(swap_decision(Ask, false, false), None);
     }
 
     #[test]
