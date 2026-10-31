@@ -44,4 +44,7 @@ pub const RTK_META_COMMANDS: &[&str] = &[
     // program called `err` instead of reporting the flag error (#4125 review).
     "err",
     "summary",
+    // `read` is rtk's own file reader, not a wrapper: the only `read` on PATH is
+    // a shell builtin stub, so falling through ran that with rtk's argv.
+    "read",
 ];
