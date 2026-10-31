@@ -64,6 +64,125 @@ pub fn from_json_str<'a, T: serde::Deserialize<'a>>(s: &'a str) -> serde_json::R
     serde_json::from_str(strip_leading_bom(s))
 }
 
+/// `from_json_str` for JSONC: JSON plus `//` and `/* */` comments and trailing
+/// commas, which is what a `.jsonc` config file is allowed to contain.
+///
+/// Comments are removed, not skipped over, so the result parses as plain JSON.
+/// A `//` or `/*` inside a string literal is content and survives, and a `\"`
+/// does not end the string.
+///
+/// `DeserializeOwned` rather than `Deserialize<'a>` because the parse target is
+/// the rebuilt string, which borrows from nothing the caller passed in.
+pub fn from_jsonc_str<T: serde::de::DeserializeOwned>(s: &str) -> serde_json::Result<T> {
+    let stripped = strip_json_comments(strip_leading_bom(s).as_bytes());
+    serde_json::from_str(strip_trailing_commas(&stripped).as_str())
+}
+
+/// Drop JSONC comments, returning the remaining bytes.
+fn strip_json_comments(src: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(src.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0;
+
+    while i < src.len() {
+        let c = src[i];
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if c == b'"' {
+            in_string = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+
+        if c == b'/' && i + 1 < src.len() {
+            match src[i + 1] {
+                b'/' => {
+                    while i < src.len() && src[i] != b'\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                b'*' => {
+                    i += 2;
+                    while i + 1 < src.len() && !(src[i] == b'*' && src[i + 1] == b'/') {
+                        i += 1;
+                    }
+                    i = (i + 2).min(src.len());
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
+        out.push(c);
+        i += 1;
+    }
+
+    out
+}
+
+/// Drop a comma that is followed only by whitespace and then `}` or `]`.
+fn strip_trailing_commas(src: &[u8]) -> String {
+    let mut out: Vec<u8> = Vec::with_capacity(src.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut pending: Option<usize> = None;
+
+    for &c in src {
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            b'"' => {
+                in_string = true;
+                pending = None;
+                out.push(c);
+            }
+            b',' => {
+                out.push(c);
+                pending = Some(out.len() - 1);
+            }
+            b'}' | b']' => {
+                if let Some(at) =
+                    pending.filter(|&at| out[at + 1..].iter().all(u8::is_ascii_whitespace))
+                {
+                    out.remove(at);
+                }
+                pending = None;
+                out.push(c);
+            }
+            b' ' | b'\t' | b'\r' | b'\n' => out.push(c),
+            _ => {
+                pending = None;
+                out.push(c);
+            }
+        }
+    }
+
+    String::from_utf8(out).unwrap_or_default()
+}
+
 /// Executes a command and returns cleaned stdout/stderr.
 ///
 /// # Arguments
