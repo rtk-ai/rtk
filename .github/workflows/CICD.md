@@ -138,3 +138,38 @@ Trigger: workflow_dispatch
      Homebrew       badge only
      latest tag
 ```
+
+## MacPorts release updates
+
+The stable release workflow can open update PRs against
+`macports/macports-ports` after publishing the release assets. To enable it:
+
+1. Create a fork of `macports/macports-ports` for the release bot.
+2. Set the repository variable `MACPORTS_FORK` to `owner/fork-name`.
+3. Set the repository secret `MACPORTS_TOKEN` to a bot token that can push to
+   that fork and open pull requests against `macports/macports-ports`.
+   A classic PAT needs the `public_repo` scope for these public repositories.
+
+The job is disabled when `MACPORTS_FORK` is unset. It skips prereleases and
+waits until `sysutils/rtk/Portfile` exists in the public MacPorts repository.
+The initial port submission is tracked in
+[macports/macports-ports#36079](https://github.com/macports/macports-ports/pull/36079).
+
+The updater downloads the GitHub source archive for the exact release tag,
+checks the source package version, and calculates the archive checksums and
+size. It updates `github.setup` and regenerates `cargo.crates` from that
+archive's `Cargo.lock`, including crate checksums for offline builds. It
+preserves other port metadata, rejects downgrades, changed checksums for an
+existing version, and non-registry dependencies, and fails if the port layout
+changes. Reruns reuse the same per-version PR branch.
+MacPorts reviewers still decide whether to merge each update. A submission
+failure does not block the release or advancement of the `latest` tag.
+
+Test the updater without publishing a PR (Python 3.11 or newer):
+
+```sh
+python3 -m unittest discover -s scripts/tests -p test_update_macports.py
+python3 scripts/update-macports.py --tag v1.2.0 \
+  --portfile /path/to/macports-ports/sysutils/rtk/Portfile \
+  --source /path/to/rtk-source.tar.gz
+```
