@@ -157,7 +157,14 @@ fn shell_gate(v: &Value) -> bool {
             let unfiltered = matches!(rewrite, HookDecision::Defer);
             let rtk_allowed = permissions::allow_rule_matches(&command, permissions::Host::Claude);
             if !keeps_the_agents_check(verdict, unfiltered, rtk_allowed)
-                || !swappable(cmd, verdict, rewrite, &excluded, &transparent)
+                || !swappable(
+                    cmd,
+                    verdict,
+                    rewrite,
+                    &excluded,
+                    &transparent,
+                    crate::core::utils::tool_exists,
+                )
             {
                 return false;
             }
@@ -217,9 +224,13 @@ fn swappable(
     rewrite: HookDecision,
     excluded: &[String],
     transparent: &[String],
+    program_exists: impl Fn(&str) -> bool,
 ) -> bool {
     use crate::discover::registry;
     use permissions::PermissionVerdict;
+    if changes_directory(cmd) {
+        return false;
+    }
     match rewrite {
         HookDecision::AllowRewrite(_) | HookDecision::AskRewrite(_) => true,
         HookDecision::Deny => false,
@@ -235,8 +246,36 @@ fn swappable(
                 && !cmd.contains("$((")
                 && !registry::chain_mentions_excluded(cmd, excluded)
                 && registry::rewrite_command(cmd, &[], transparent).is_none()
+                && sh_can_run(cmd, program_exists)
         }
     }
+}
+
+fn changes_directory(cmd: &str) -> bool {
+    crate::discover::lexer::split_on_operators(cmd, false)
+        .iter()
+        .any(|segment| {
+            segment
+                .split_whitespace()
+                .any(|word| matches!(word, "cd" | "pushd" | "popd"))
+        })
+}
+
+fn sh_can_run(cmd: &str, program_exists: impl Fn(&str) -> bool) -> bool {
+    crate::discover::lexer::split_on_operators(cmd, false)
+        .iter()
+        .all(|segment| {
+            segment
+                .split_whitespace()
+                .find(|word| !is_assignment(word))
+                .is_some_and(|program| program.contains('/') || program_exists(program))
+        })
+}
+
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        !name.is_empty() && name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
+    })
 }
 
 fn stop(v: &Value, cmd: &str, message: &str, rule: &str, action: &str) -> bool {
@@ -282,7 +321,7 @@ mod tests {
             permissions::DenyRules::Unattested,
         );
         let rewrite = decision::suppress_identity(cmd, rewrite);
-        swappable(cmd, verdict, rewrite, excluded, &[])
+        swappable(cmd, verdict, rewrite, excluded, &[], |_| true)
     }
 
     #[test]
@@ -307,6 +346,68 @@ mod tests {
     fn an_ask_rule_swaps_like_any_other() {
         assert!(decide("./run-suite.sh", PermissionVerdict::Ask, &[]));
         assert!(decide("git log -3", PermissionVerdict::Ask, &[]));
+    }
+
+    #[test]
+    fn a_command_that_moves_the_shell_is_not_swapped() {
+        for cmd in [
+            "cd sub && ./run-suite.sh",
+            "cd sub && git status",
+            "./run-suite.sh; cd sub",
+            "pushd sub && ./run-suite.sh",
+            "popd || ./run-suite.sh",
+            "./run-suite.sh | tee out; cd sub",
+        ] {
+            assert!(!decide(cmd, PermissionVerdict::Allow, &[]), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn what_a_child_sh_cannot_run_is_not_swapped() {
+        let only_git = |program: &str| program == "git";
+        for cmd in [
+            "mydeploy",
+            "mydeploy --fast",
+            "./run-suite.sh && mydeploy",
+            "./run-suite.sh | mydeploy",
+            "FOO=1 mydeploy",
+            "[[ -f x ]] && ./run-suite.sh",
+            "if true; then ./run-suite.sh; fi",
+            "FOO=1",
+            "=x git status",
+            "a-b=1 git status",
+        ] {
+            assert!(!sh_can_run(cmd, only_git), "{cmd}");
+        }
+        for cmd in [
+            "git status",
+            "./run-suite.sh --fast",
+            "bin/run-suite",
+            "FOO=1 ./run-suite.sh",
+            "FOO=1 BAR=2 git status",
+            "git status | ./run-suite.sh",
+        ] {
+            assert!(sh_can_run(cmd, only_git), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn a_program_missing_from_path_stays_out_of_the_swap_only_when_unfiltered() {
+        let swap = |cmd: &str| {
+            let rewrite = decision::suppress_identity(
+                cmd,
+                decision::decide_with_params(
+                    cmd,
+                    PermissionVerdict::Allow,
+                    &[],
+                    &[],
+                    permissions::DenyRules::Unattested,
+                ),
+            );
+            swappable(cmd, PermissionVerdict::Allow, rewrite, &[], &[], |_| false)
+        };
+        assert!(!swap("mydeploy"));
+        assert!(swap("git log -3"));
     }
 
     #[test]
