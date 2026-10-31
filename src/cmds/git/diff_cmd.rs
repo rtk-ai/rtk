@@ -119,7 +119,17 @@ enum FileComparison {
     InvisibleDifference(String),
     /// A line-level comparison ran. Either it produced a change list, or it
     /// refused to build one and said why in `DiffResult::unaligned`.
-    Lines(DiffResult),
+    Lines {
+        diff: DiffResult,
+        /// The note for what `lines()` hid from a change list that does exist:
+        /// a line ending that differs on a line the list leaves out as
+        /// unchanged, or a final newline only one file has. Without it the
+        /// listing is read as describing every byte, and says line 1 is the
+        /// same in both files when it is not. Already formatted, indent and
+        /// newline included; `None` when the listing is the whole story, and
+        /// always `None` for a refusal, which lists nothing to be misread.
+        hidden: Option<String>,
+    },
 }
 
 fn compare_files(content1: &str, content2: &str) -> FileComparison {
@@ -145,7 +155,16 @@ fn compare_files(content1: &str, content2: &str) -> FileComparison {
         ));
     }
 
-    FileComparison::Lines(diff)
+    // The same two things `lines()` normalizes away are just as invisible
+    // beside a change list as without one, and there they are worse: the list
+    // reads as complete. Only a list that was built can be misread this way.
+    let hidden = if diff.unaligned.is_none() {
+        describe_hidden_differences(content1, content2, &diff, (lines1.len(), lines2.len()))
+    } else {
+        None
+    };
+
+    FileComparison::Lines { diff, hidden }
 }
 
 /// What `diff` itself would have printed, or the empty string when there is no
@@ -155,9 +174,21 @@ fn compare_files(content1: &str, content2: &str) -> FileComparison {
 /// make `diff` print nothing, an invisible difference has no lines to list, and
 /// a refused listing has no changes to format — for those three the baseline
 /// and the guard both fall back to the dump of both files.
+///
+/// The note for differences hidden beside the change list is carried here as
+/// well as by the render. The guard picks between the two, and a note on the
+/// render alone is dropped exactly when the render is the larger of them, which
+/// on a small diff is most of the time. Carried by both it costs neither side
+/// anything against the other. It stands in for what `diff` prints for such
+/// bytes — a `\ No newline at end of file` marker, the CRLF lines listed as
+/// changed — which the line vectors this fallback is built from cannot express.
 fn classic_fallback(comparison: &FileComparison) -> String {
     match comparison {
-        FileComparison::Lines(diff) if diff.unaligned.is_none() => format_classic_diff(diff),
+        FileComparison::Lines { diff, hidden } if diff.unaligned.is_none() => {
+            let mut classic = format_classic_diff(diff);
+            classic.push_str(hidden.as_deref().unwrap_or_default());
+            classic
+        }
         _ => String::new(),
     }
 }
@@ -201,20 +232,20 @@ fn select_file_diff_output<'a>(
         FileComparison::InvisibleDifference(_) => rendered,
         // No change list means no classic diff, so the refusal is measured
         // against the dump it is refusing to replace.
-        FileComparison::Lines(diff) if diff.unaligned.is_some() => {
+        FileComparison::Lines { diff, .. } if diff.unaligned.is_some() => {
             never_worse(both_files, rendered)
         }
-        FileComparison::Lines(_) => never_worse(fallback, rendered),
+        FileComparison::Lines { .. } => never_worse(fallback, rendered),
     }
 }
 
 /// Renders the condensed file comparison and returns it with the
 /// diff-convention exit code (0 = identical, 1 = differences found).
 fn render_diff(file1: &Path, file2: &Path, comparison: &FileComparison) -> (String, i32) {
-    let diff = match comparison {
+    let (diff, hidden) = match comparison {
         FileComparison::Identical => return (IDENTICAL_FILES_MESSAGE.to_string(), 0),
         FileComparison::InvisibleDifference(cause) => return (format!("{cause}\n"), 1),
-        FileComparison::Lines(diff) => diff,
+        FileComparison::Lines { diff, hidden } => (diff, hidden),
     };
 
     match &diff.unaligned {
@@ -322,6 +353,11 @@ fn render_diff(file1: &Path, file2: &Path, comparison: &FileComparison) -> (Stri
         rtk.push_str(&legend);
     }
     rtk.push_str(&listing);
+    // Last, so the listing stays the block anchored greps and readers expect,
+    // and the note reads as a remark on it. Indented like the lines above it.
+    if let Some(note) = hidden {
+        rtk.push_str(note);
+    }
     (rtk, 1)
 }
 
@@ -441,8 +477,6 @@ fn crlf_line_numbers(content: &str) -> Vec<usize> {
 fn describe_invisible_difference(content1: &str, content2: &str) -> String {
     let crlf1 = crlf_line_numbers(content1);
     let crlf2 = crlf_line_numbers(content2);
-    let nl1 = content1.ends_with('\n');
-    let nl2 = content2.ends_with('\n');
 
     let mut notes: Vec<String> = Vec::new();
     if crlf1.len() != crlf2.len() {
@@ -466,13 +500,7 @@ fn describe_invisible_difference(content1: &str, content2: &str) -> String {
             line
         ));
     }
-    if nl1 != nl2 {
-        notes.push(format!(
-            "trailing newline: {} vs {}",
-            if nl1 { "present" } else { "absent" },
-            if nl2 { "present" } else { "absent" }
-        ));
-    }
+    notes.extend(trailing_newline_note(content1, content2));
     if notes.is_empty() {
         // Defensive: `lines()` normalizes only the `\r` before a newline and
         // the final newline, so one of the checks above should have fired.
@@ -488,6 +516,113 @@ fn describe_invisible_difference(content1: &str, content2: &str) -> String {
         "files differ only in whitespace or line endings ({})",
         notes.join("; ")
     )
+}
+
+/// The final-newline half of an invisible difference: `Some` when exactly one
+/// of the files ends in a newline.
+///
+/// Shared by both reports. It reads the bytes, never the line vectors, so it
+/// holds whether or not a change list exists beside it.
+fn trailing_newline_note(content1: &str, content2: &str) -> Option<String> {
+    let nl1 = content1.ends_with('\n');
+    let nl2 = content2.ends_with('\n');
+    let presence = |present: bool| if present { "present" } else { "absent" };
+    (nl1 != nl2).then(|| format!("trailing newline: {} vs {}", presence(nl1), presence(nl2)))
+}
+
+/// 1-based line numbers `(in file 1, in file 2)` of every pair of lines the
+/// change list leaves out because they match.
+///
+/// The hunks are the only lines that differ, and everything between them is
+/// matched in order, so the k-th unmatched-by-any-hunk line of file 1 pairs
+/// with the k-th of file 2. A hunk's start is the line its run sits before,
+/// including for an empty side, so each gap ends exactly at the next start.
+/// `len1` and `len2` are the files' line counts, which close the final gap.
+fn unchanged_line_pairs(
+    diff: &DiffResult,
+    len1: usize,
+    len2: usize,
+) -> impl Iterator<Item = (usize, usize)> {
+    let mut next1 = 1usize;
+    let mut next2 = 1usize;
+    let mut gaps = Vec::with_capacity(diff.hunks.len() + 1);
+    for hunk in &diff.hunks {
+        gaps.push((next1..hunk.start1, next2..hunk.start2));
+        next1 = hunk.start1 + hunk.old.len();
+        next2 = hunk.start2 + hunk.new.len();
+    }
+    gaps.push((next1..len1 + 1, next2..len2 + 1));
+    gaps.into_iter().flat_map(|(gap1, gap2)| gap1.zip(gap2))
+}
+
+/// The line-ending half of a hidden difference: `Some` when a line the change
+/// list leaves out as unchanged ends differently in the two files.
+///
+/// Compared line by line along the alignment, not by `crlf_line_numbers` as a
+/// whole. With a change list the files no longer line up by number, so an
+/// inserted line shifts every CRLF below it and two files that are CRLF
+/// throughout would report different counts and positions for ending in the
+/// same way. Changed lines are not compared: the listing already shows that
+/// they differ, and a reader takes nothing about their terminators from it.
+fn unchanged_line_endings_note(
+    content1: &str,
+    content2: &str,
+    diff: &DiffResult,
+    (len1, len2): (usize, usize),
+) -> Option<String> {
+    let crlf1 = crlf_line_numbers(content1);
+    let crlf2 = crlf_line_numbers(content2);
+    if crlf1.is_empty() && crlf2.is_empty() {
+        // Every terminator is a bare LF on both sides, so there is nothing to
+        // compare. This is the common case, and it skips the walk below.
+        return None;
+    }
+
+    // Both lists are ascending by construction.
+    let ends_in_crlf = |crlf: &[usize], line: usize| crlf.binary_search(&line).is_ok();
+    let mut differing = unchanged_line_pairs(diff, len1, len2)
+        .filter(|&(line1, line2)| ends_in_crlf(&crlf1, line1) != ends_in_crlf(&crlf2, line2));
+    let (first, _) = differing.next()?;
+    let count = 1 + differing.count();
+
+    Some(format!(
+        "line endings differ on {} unchanged {}, first at line {} of file 1",
+        count,
+        if count == 1 { "line" } else { "lines" },
+        first
+    ))
+}
+
+/// Describe what `lines()` hid from a change list that was built, as the
+/// indented note rendered under it, or `None` when it hid nothing.
+///
+/// The counterpart of [`describe_invisible_difference`] for the case where the
+/// bytes differ and so do some lines. That report states the cause because
+/// there is no listing; this one adds to a listing that would otherwise be
+/// taken for the whole difference. The two checks are the same pair, the
+/// terminators and the final newline, because they are all `lines()` drops.
+fn describe_hidden_differences(
+    content1: &str,
+    content2: &str,
+    diff: &DiffResult,
+    line_counts: (usize, usize),
+) -> Option<String> {
+    let mut notes: Vec<String> = Vec::new();
+    notes.extend(unchanged_line_endings_note(
+        content1,
+        content2,
+        diff,
+        line_counts,
+    ));
+    notes.extend(trailing_newline_note(content1, content2));
+    if notes.is_empty() {
+        return None;
+    }
+
+    // Indented and parenthesized like the legend, so it cannot be mistaken for
+    // a listed line by anything anchoring on `+`, `-` or `~`. Deliberately
+    // avoids the word "identical", as the invisible-difference report does.
+    Some(format!("   ({})\n", notes.join("; ")))
 }
 
 /// Run diff from stdin (piped command output)
@@ -2890,7 +3025,7 @@ mod tests {
     /// produced instead.
     fn changes_of(content1: &str, content2: &str) -> DiffResult {
         match compare_files(content1, content2) {
-            FileComparison::Lines(diff) => diff,
+            FileComparison::Lines { diff, .. } => diff,
             FileComparison::Identical => panic!("expected a change list, files were identical"),
             FileComparison::InvisibleDifference(cause) => {
                 panic!("expected a change list, got an invisible difference: {cause}")
@@ -4746,6 +4881,188 @@ mod tests {
         assert!(!out.contains("identical"), "got: {}", out);
         assert_eq!(code, 1, "must exit 1 so a `diff` gate fails");
         assert!(out.contains("0 CRLF vs 24 CRLF"), "got: {}", out);
+    }
+
+    // --- differences hidden beside a change list (issue #3901) ---
+
+    /// The note `compare_files` attached to a change list, or `None` when it
+    /// attached none. Panics when no change list was built.
+    fn hidden_of(content1: &str, content2: &str) -> Option<String> {
+        match compare_files(content1, content2) {
+            FileComparison::Lines { hidden, .. } => hidden,
+            FileComparison::Identical => panic!("expected a change list, files were identical"),
+            FileComparison::InvisibleDifference(cause) => {
+                panic!("expected a change list, got an invisible difference: {cause}")
+            }
+        }
+    }
+
+    #[test]
+    fn test_hidden_line_endings_are_counted_across_the_unchanged_lines() {
+        // The partial-CRLF shape of the original report, plus one edited line
+        // far from the CRLF run: 24 unchanged lines differ by terminator, the
+        // first being line 51.
+        let before: String = (0..200)
+            .map(|i| format!("line {} content here\n", i))
+            .collect();
+        let after: String = (0..200)
+            .map(|i| {
+                let text = if i == 150 {
+                    "line 150 content edited".to_string()
+                } else {
+                    format!("line {} content here", i)
+                };
+                if (50..74).contains(&i) {
+                    format!("{text}\r\n")
+                } else {
+                    format!("{text}\n")
+                }
+            })
+            .collect();
+
+        assert_eq!(
+            hidden_of(&before, &after).as_deref(),
+            Some("   (line endings differ on 24 unchanged lines, first at line 51 of file 1)\n")
+        );
+
+        let (out, code) = render_file_diff(Path::new("a.txt"), Path::new("b.txt"), &before, &after);
+        assert_eq!(code, 1);
+        let last = out.lines().last().expect("render is not empty");
+        assert!(
+            last.starts_with("   ("),
+            "the note closes the render:\n{out}"
+        );
+        assert!(
+            out.lines().filter(|l| l.starts_with('~')).count() == 1,
+            "the listing itself is unchanged:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_hidden_trailing_newline_does_not_need_an_unchanged_last_line() {
+        // The last line is the changed one, so no unchanged line carries the
+        // difference, and the listing still cannot say that file 2 stops
+        // without a newline.
+        assert_eq!(
+            hidden_of("alpha\nlet x = 1;\n", "alpha\nlet x = 2;").as_deref(),
+            Some("   (trailing newline: present vs absent)\n")
+        );
+        assert_eq!(
+            hidden_of("alpha\nlet x = 1;", "alpha\nlet x = 2;\n").as_deref(),
+            Some("   (trailing newline: absent vs present)\n")
+        );
+    }
+
+    #[test]
+    fn test_hidden_note_is_absent_when_the_bytes_agree_beside_the_change() {
+        // LF throughout, a final newline on both sides: the listing is all
+        // there is to say.
+        assert_eq!(hidden_of("a: 1\nb: 2\n", "a: 1\nb: 3\n"), None);
+        // CRLF throughout and a final newline on both sides is equally
+        // nothing to report.
+        assert_eq!(hidden_of("a: 1\r\nb: 2\r\n", "a: 1\r\nb: 3\r\n"), None);
+        // Neither file ends in a newline: that agrees too.
+        assert_eq!(hidden_of("a: 1\nb: 2", "a: 1\nb: 3"), None);
+    }
+
+    #[test]
+    fn test_hidden_line_endings_follow_the_alignment_not_the_line_number() {
+        // Both files are CRLF on every line. The inserted or removed line
+        // moves each CRLF below it and changes the totals, which is no
+        // difference in how any line ends.
+        assert_eq!(hidden_of("a\r\nb\r\n", "a\r\nx\r\nb\r\n"), None);
+        assert_eq!(hidden_of("x\r\na\r\nb\r\n", "a\r\nb\r\n"), None);
+        // `b` ends in CRLF in both, at line 2 and then at line 3.
+        assert_eq!(hidden_of("a\nb\r\n", "x\na\nb\r\n"), None);
+
+        // `a` ends in LF in file 1 and CRLF in file 2, past the same insertion,
+        // and is named by its number in file 1.
+        assert_eq!(
+            hidden_of("a\nb\n", "x\na\r\nb\n").as_deref(),
+            Some("   (line endings differ on 1 unchanged line, first at line 1 of file 1)\n")
+        );
+    }
+
+    #[test]
+    fn test_hidden_line_endings_leave_the_changed_lines_to_the_listing() {
+        // Line 2 is the line that changed, and it also ends differently. The
+        // listing already says line 2 differs; the note speaks only for the
+        // lines the listing omits, and line 1 ends the same in both.
+        assert_eq!(hidden_of("a\nbeta\n", "a\ngamma\r\n"), None);
+    }
+
+    #[test]
+    fn test_unchanged_line_pairs_skip_every_hunk() {
+        let lines1 = ["a", "b", "c", "d"];
+        let lines2 = ["a", "x", "c", "d", "e"];
+        let diff = compute_diff(&lines1, &lines2);
+        assert_eq!(diff.hunks.len(), 2, "one rewrite, one append");
+        assert_eq!(
+            unchanged_line_pairs(&diff, lines1.len(), lines2.len()).collect::<Vec<_>>(),
+            vec![(1, 1), (3, 3), (4, 4)]
+        );
+
+        // A leading removal leaves its start at line 1 on both sides, with an
+        // empty side that must not be read as a line.
+        let lines1 = ["x", "a"];
+        let lines2 = ["a"];
+        let diff = compute_diff(&lines1, &lines2);
+        assert_eq!(
+            unchanged_line_pairs(&diff, lines1.len(), lines2.len()).collect::<Vec<_>>(),
+            vec![(2, 1)]
+        );
+    }
+
+    #[test]
+    fn test_hidden_note_survives_the_never_worse_guard() {
+        // The issue's files. The condensed render is a `-`, a `+` and a legend,
+        // larger than classic `diff`, so the guard hands back the classic
+        // form. A note carried by the render alone would be dropped here.
+        let content1 = "alpha\nbeta\n";
+        let content2 = "alpha\r\ngamma";
+        let comparison = compare_files(content1, content2);
+        let fallback = classic_fallback(&comparison);
+        let both_files = format!("{}\n---\n{}", content1, content2);
+        let (rendered, code) = render_diff(Path::new("a"), Path::new("b"), &comparison);
+        let shown = select_file_diff_output(&comparison, &fallback, &both_files, &rendered);
+
+        let note = "   (line endings differ on 1 unchanged line, first at line 1 of file 1; trailing newline: present vs absent)\n";
+        assert_eq!(code, 1);
+        assert_eq!(
+            fallback,
+            format!("2c2\n< beta\n---\n> gamma\n{note}"),
+            "the classic form carries the note"
+        );
+        assert!(
+            rendered.len() > fallback.len(),
+            "fixture must make classic the smaller output"
+        );
+        assert_eq!(shown, fallback);
+        assert!(
+            tracking::estimate_tokens(shown) <= tracking::estimate_tokens(&fallback),
+            "the guard still bounds the output by the fallback it was handed"
+        );
+    }
+
+    #[test]
+    fn test_hidden_note_is_not_added_to_a_refusal() {
+        // 5,001 lines against none is over the listing cap, so there is no
+        // listing to misread and `use rtk bypass diff` is the answer. The
+        // files differ in line endings and final newline all the same.
+        let many: String = "x\r\n".repeat(POSITIONAL_CHANGE_CAP + 1);
+        let comparison = compare_files("", &many);
+        match &comparison {
+            FileComparison::Lines { diff, hidden } => {
+                assert!(diff.unaligned.is_some(), "fixture must be refused");
+                assert_eq!(hidden, &None);
+            }
+            _ => panic!("expected a refused change list"),
+        }
+        assert_eq!(classic_fallback(&comparison), "");
+        let (out, code) = render_diff(Path::new("a"), Path::new("b"), &comparison);
+        assert_eq!(code, 1);
+        assert!(out.contains("too many to list"), "got:\n{out}");
+        assert!(!out.contains("   ("), "got:\n{out}");
     }
 
     #[test]
