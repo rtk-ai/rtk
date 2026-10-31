@@ -3,8 +3,8 @@
 use super::*;
 use crate::core::user_dirs;
 use crate::hooks::constants::{
-    COPILOT_HOME_ENV, COPILOT_HOOK_FILE, COPILOT_INSTRUCTIONS_FILE, COPILOT_USER_DIR, GITHUB_DIR,
-    HOOKS_SUBDIR,
+    COPILOT_HOME_ENV, COPILOT_HOOK_FILE, COPILOT_INSTRUCTIONS_FILE, COPILOT_USER_DIR,
+    COPILOT_VSCODE_INSTRUCTIONS_FILE, COPILOT_VSCODE_INSTRUCTIONS_SUBDIR, GITHUB_DIR, HOOKS_SUBDIR,
 };
 
 // Copilot integration
@@ -60,6 +60,11 @@ rtk bypass <cmd>      # Run raw (no filtering) but track usage
 ```
 <!-- /rtk-instructions -->
 "#;
+
+// Front matter for the RTK-owned VS Code instructions file. Without
+// `applyTo: "**"`, VS Code Copilot Chat registers the file but never attaches
+// it to a request.
+const COPILOT_VSCODE_FRONT_MATTER: &str = "---\napplyTo: \"**\"\n---\n";
 
 /// Entry point for `rtk init --copilot`.
 ///
@@ -221,6 +226,21 @@ fn run_copilot_global_at(copilot_dir: &Path, ctx: InitContext) -> Result<()> {
         ctx,
     )?;
 
+    // VS Code Copilot Chat does not read ~/.copilot/copilot-instructions.md,
+    // so it gets its own RTK-owned file in ~/.copilot/instructions/.
+    let vscode_dir = copilot_dir.join(COPILOT_VSCODE_INSTRUCTIONS_SUBDIR);
+    if !dry_run {
+        fs::create_dir_all(&vscode_dir)
+            .with_context(|| format!("Failed to create {} directory", vscode_dir.display()))?;
+    }
+    let vscode_path = vscode_dir.join(COPILOT_VSCODE_INSTRUCTIONS_FILE);
+    write_if_changed(
+        &vscode_path,
+        &format!("{}{}", COPILOT_VSCODE_FRONT_MATTER, COPILOT_INSTRUCTIONS),
+        "VS Code Copilot instructions",
+        ctx,
+    )?;
+
     let hook_path = hooks_dir.join(COPILOT_HOOK_FILE);
     write_if_changed(
         &hook_path,
@@ -235,8 +255,9 @@ fn run_copilot_global_at(copilot_dir: &Path, ctx: InitContext) -> Result<()> {
         println!("\nGitHub Copilot global integration installed (user-scoped).\n");
         println!("  Hook config:    {}", hook_path.display());
         println!("  Instructions:   {}", instructions_path.display());
-        println!("\n  Applies to all Copilot CLI sessions on this machine.");
-        println!("  Restart your Copilot CLI session to activate.\n");
+        println!("                  {} (VS Code)", vscode_path.display());
+        println!("\n  Applies to VS Code Copilot Chat and Copilot CLI sessions on this machine.");
+        println!("  Restart your IDE or Copilot CLI session to activate.\n");
     }
 
     Ok(())
@@ -260,7 +281,7 @@ pub fn uninstall_copilot_global(ctx: InitContext) -> Result<()> {
             println!("  - {}", item);
         }
         if !dry_run {
-            println!("\nRestart your Copilot CLI session to apply changes.");
+            println!("\nRestart your IDE or Copilot CLI session to apply changes.");
         }
     }
 
@@ -287,6 +308,24 @@ fn uninstall_copilot_global_at(copilot_dir: &Path, ctx: InitContext) -> Result<V
                 .with_context(|| format!("Failed to remove hook: {}", hook_path.display()))?;
         }
         removed.push(format!("Hook config: {}", hook_path.display()));
+    }
+
+    let vscode_path = copilot_dir
+        .join(COPILOT_VSCODE_INSTRUCTIONS_SUBDIR)
+        .join(COPILOT_VSCODE_INSTRUCTIONS_FILE);
+    if vscode_path.exists() {
+        if dry_run {
+            println!(
+                "[dry-run] would remove VS Code instructions: {}",
+                vscode_path.display()
+            );
+        } else {
+            // nosemgrep: filesystem-deletion -- Copilot global uninstall removes only the RTK-owned instructions file.
+            fs::remove_file(&vscode_path).with_context(|| {
+                format!("Failed to remove instructions: {}", vscode_path.display())
+            })?;
+        }
+        removed.push(format!("VS Code instructions: {}", vscode_path.display()));
     }
 
     let instructions_path = copilot_dir.join(COPILOT_INSTRUCTIONS_FILE);
@@ -701,6 +740,34 @@ mod tests {
     }
 
     #[test]
+    fn test_copilot_global_install_writes_vscode_instructions() {
+        // VS Code Copilot Chat ignores ~/.copilot/copilot-instructions.md; it
+        // loads ~/.copilot/instructions/*.instructions.md, and only applies a
+        // file to every request when its front matter says `applyTo: "**"`.
+        let temp = TempDir::new().unwrap();
+        run_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+        let path = temp.path().join("instructions").join("rtk.instructions.md");
+        let content = fs::read_to_string(&path).expect("VS Code instructions file must be written");
+        assert!(
+            content.starts_with("---\napplyTo: \"**\"\n---\n"),
+            "front matter must come first: {content}"
+        );
+        assert!(content.contains("rtk cargo test"));
+    }
+
+    #[test]
+    fn test_copilot_global_uninstall_removes_vscode_instructions() {
+        let temp = TempDir::new().unwrap();
+        run_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+        let path = temp.path().join("instructions").join("rtk.instructions.md");
+        assert!(path.exists());
+
+        let removed = uninstall_copilot_global_at(temp.path(), InitContext::default()).unwrap();
+        assert!(!path.exists());
+        assert!(removed.iter().any(|r| r.contains("rtk.instructions.md")));
+    }
+
+    #[test]
     fn test_copilot_global_install_preserves_existing_user_instructions() {
         let temp = TempDir::new().unwrap();
         let instructions = temp.path().join(COPILOT_INSTRUCTIONS_FILE);
@@ -789,6 +856,7 @@ mod tests {
         };
         run_copilot_global_at(temp.path(), ctx).unwrap();
         assert!(!temp.path().join("hooks").join("rtk-rewrite.json").exists());
+        assert!(!temp.path().join("instructions").exists());
     }
 
     #[test]
