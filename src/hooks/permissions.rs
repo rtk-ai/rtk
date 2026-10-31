@@ -5,6 +5,7 @@ use super::constants::{
 use super::init::resolve_claude_dir;
 use crate::core::user_dirs;
 use crate::core::user_env;
+use crate::core::utils::strip_leading_bom;
 use crate::discover::lexer::{
     is_word_boundary_whitespace, split_for_permissions, split_for_wrappers,
 };
@@ -414,7 +415,14 @@ fn load_permission_rules_tracking(
             // A file that is not there denies nothing. One that is there and
             // could not be read — permissions, or bytes that are not UTF-8 —
             // may hold anything.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                continue;
+            }
             Err(e) => {
                 eprintln!(
                     "[rtk] warning: failed to read permissions from {}: {}",
@@ -426,10 +434,11 @@ fn load_permission_rules_tracking(
                 continue;
             }
         };
+        let content = strip_leading_bom(&content);
         if content.trim().is_empty() {
             continue;
         }
-        let Ok(json) = crate::core::utils::from_json_str::<Value>(&content) else {
+        let Ok(json) = crate::core::utils::from_json_str::<Value>(content) else {
             eprintln!(
                 "[rtk] warning: failed to parse permissions from {}",
                 path.display()
@@ -989,6 +998,80 @@ mod tests {
         let (deny, ask, allow) =
             load_permission_rules_from(&[tmp.path().join("settings.json"), empty]);
         assert!(deny.is_empty() && ask.is_empty() && allow.is_empty());
+    }
+
+    #[test]
+    fn test_bom_only_settings_file_adds_no_rules() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bom_empty = tmp.path().join("settings.local.json");
+        std::fs::write(&bom_empty, b"\xEF\xBB\xBF").expect("write settings");
+        let (deny, ask, allow) = load_permission_rules_from(&[bom_empty]);
+        assert!(deny.is_empty() && ask.is_empty() && allow.is_empty());
+
+        let bom_whitespace = tmp.path().join("settings.json");
+        std::fs::write(&bom_whitespace, b"\xEF\xBB\xBF   \r\n").expect("write settings");
+        let (deny, ask, allow) = load_permission_rules_from(&[bom_whitespace]);
+        assert!(deny.is_empty() && ask.is_empty() && allow.is_empty());
+    }
+
+    #[test]
+    fn test_not_a_directory_settings_file_adds_no_rules() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file_path = tmp.path().join("not_a_dir");
+        std::fs::write(&file_path, "regular file content").expect("write file");
+        let settings_path = file_path.join("settings.json");
+        let (deny, ask, allow) = load_permission_rules_from(&[settings_path]);
+        assert!(deny.is_empty() && ask.is_empty() && allow.is_empty());
+    }
+
+    /// `claude_hook_deny_rules` permits the fish wrap only when the scan saw
+    /// every file and no deny entry. A path under a regular file, or a file
+    /// holding nothing but a BOM and whitespace, hides no rule and must keep
+    /// the scan attested; a file RTK could not read or parse must not.
+    #[test]
+    fn test_files_holding_no_rules_leave_the_settings_scan_attested() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = |name: &str| {
+            let dir = tmp.path().join(name);
+            std::fs::create_dir(&dir).expect("create dir");
+            dir
+        };
+        let scan_of = |path: &std::path::Path| {
+            let mut scan = SettingsScan::default();
+            let rules = load_permission_rules_tracking(&[path.to_path_buf()], &mut scan);
+            (rules, scan)
+        };
+
+        let not_a_dir = tmp.path().join(".claude");
+        std::fs::write(&not_a_dir, "regular file content").expect("write file");
+        let bom = dir("bom").join("settings.local.json");
+        std::fs::write(&bom, b"\xEF\xBB\xBF").expect("write settings");
+        let bom_whitespace = dir("bom_whitespace").join("settings.local.json");
+        std::fs::write(&bom_whitespace, b"\xEF\xBB\xBF  \r\n").expect("write settings");
+        for path in [not_a_dir.join("settings.json"), bom, bom_whitespace] {
+            let (_, scan) = scan_of(&path);
+            assert!(scan.every_file_read, "{} marked unread", path.display());
+        }
+
+        let unparseable = dir("unparseable").join("settings.json");
+        std::fs::write(&unparseable, b"\xEF\xBB\xBF{").expect("write settings");
+        let unreadable = dir("unreadable").join("settings.json");
+        std::fs::create_dir(&unreadable).expect("create dir");
+        for path in [unparseable, unreadable] {
+            let (_, scan) = scan_of(&path);
+            assert!(!scan.every_file_read, "{} marked read", path.display());
+        }
+
+        let bom_deny = dir("bom_deny").join("settings.json");
+        std::fs::write(
+            &bom_deny,
+            b"\xEF\xBB\xBF{\"permissions\":{\"deny\":[\"Bash(rm *)\"]}}",
+        )
+        .expect("write settings");
+        let ((deny, _, _), scan) = scan_of(&bom_deny);
+        assert_eq!(deny, ["rm *"], "a BOM before rules dropped them");
+        assert!(scan.every_file_read, "a BOM before rules marked unread");
+        assert!(scan.any_deny_entry, "a BOM before rules hid the deny");
     }
 
     #[test]
