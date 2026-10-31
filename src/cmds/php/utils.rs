@@ -4,7 +4,11 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::LazyLock;
 
-static ANSI_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").unwrap());
+// A full CSI sequence: parameter bytes (including the `?` of private modes such
+// as Laravel Prompts' cursor hide/show `ESC[?25l` / `ESC[?25h`), intermediate
+// bytes, then one final byte anywhere in `@`..`~`. Matching only digits, `;`
+// and a letter left `[?25l` behind once CONTROL_RE dropped the lone ESC.
+static ANSI_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\[[0-?]*[ -/]*[@-~]").unwrap());
 static CONTROL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]").unwrap());
 
@@ -58,4 +62,29 @@ pub fn detect_php_test_runner() -> PhpTestRunner {
     }
 
     PhpTestRunner::Unknown
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strip_ansi_and_controls_removes_private_mode_sequences() {
+        let input = "\x1b[?25l\x1b[32mINFO\x1b[0m  Running migrations.\x1b[?25h";
+        assert_eq!(strip_ansi_and_controls(input), "INFO  Running migrations.");
+    }
+
+    #[test]
+    fn test_strip_ansi_and_controls_removes_non_letter_final_bytes() {
+        // ESC[2~ (Insert) and ESC[1@ (insert character) end in `~` and `@`.
+        assert_eq!(strip_ansi_and_controls("a\x1b[2~b\x1b[1@c"), "abc");
+    }
+
+    #[test]
+    fn test_strip_ansi_and_controls_keeps_plain_brackets() {
+        assert_eq!(
+            strip_ansi_and_controls("[OK] done [1/3]"),
+            "[OK] done [1/3]"
+        );
+    }
 }
