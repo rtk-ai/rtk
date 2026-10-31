@@ -1,6 +1,6 @@
 //! Shared command execution skeleton for filter modules.
 
-use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
+use crate::core::arg_tokenizer::{self, Dialect, Flag, Grammar, TokenKind, ValueSpec};
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::borrow::Cow;
@@ -445,10 +445,22 @@ fn last_lines_offset(text: &str, n: usize) -> Option<(usize, usize)> {
         .map(|(index, _)| (index + 1, skipped))
 }
 
+/// The flags whose value can be spelled like a usage request: `cargo install --version`
+/// names the version to install, and git's message and file flags take any text.
+const CARGO_INSTALL_FLAGS: &[Flag] = &[Flag::long("version").takes(ValueSpec::value())];
+const GIT_VALUE_FLAGS: &[Flag] = &[
+    Flag::pair("m", "message").takes(ValueSpec::value()),
+    Flag::pair("F", "file").takes(ValueSpec::value()),
+];
+const POSIX_BARE: Grammar = Grammar::new(Dialect::Posix, &[]);
+const MSBUILD_BARE: Grammar = Grammar::new(Dialect::Msbuild, &[]);
+const CARGO_INSTALL: Grammar = Grammar::new(Dialect::Posix, &[CARGO_INSTALL_FLAGS]);
+const GIT: Grammar = Grammar::new(Dialect::Posix, &[GIT_VALUE_FLAGS]);
+
 /// How one tool spells a request for its own usage.
 struct HelpSpelling {
     short_h: bool,
-    dialect: Dialect,
+    grammar: &'static Grammar,
     past_boundary: bool,
     whole_arg: &'static [&'static str],
 }
@@ -456,10 +468,11 @@ struct HelpSpelling {
 fn help_spelling(stem: &str, first: Option<&str>) -> HelpSpelling {
     HelpSpelling {
         short_h: !matches!(stem, "psql" | "ls" | "tree" | "grep"),
-        dialect: if stem == "dotnet" {
-            Dialect::Msbuild
-        } else {
-            Dialect::Posix
+        grammar: match (stem, first) {
+            ("dotnet", _) => &MSBUILD_BARE,
+            ("cargo", Some("install")) => &CARGO_INSTALL,
+            ("git", _) => &GIT,
+            _ => &POSIX_BARE,
         },
         past_boundary: stem == "npx"
             || matches!(
@@ -476,26 +489,8 @@ fn help_spelling(stem: &str, first: Option<&str>) -> HelpSpelling {
 fn asks_for_usage(stem: &str, args: &[String]) -> bool {
     let first = args.first().map(String::as_str);
     let spelling = help_spelling(stem, first);
-    let takes_value = |kind: TokenKind, name: &str| {
-        let cargo_install_version = stem == "cargo"
-            && first == Some("install")
-            && kind == TokenKind::Long
-            && name == "version";
-        let git_message = stem == "git"
-            && match kind {
-                TokenKind::Short => matches!(name, "m" | "F"),
-                TokenKind::Long => matches!(name, "message" | "file"),
-                _ => false,
-            };
-        (cargo_install_version || git_message).then(ValueSpec::value)
-    };
-    let tokens = arg_tokenizer::tokenize_grammar(args, &takes_value, spelling.dialect);
-    if names_usage(
-        arg_tokenizer::before_dashdash(&tokens),
-        args,
-        &spelling,
-        &takes_value,
-    ) {
+    let tokens = arg_tokenizer::tokenize_grammar(args, spelling.grammar);
+    if names_usage(arg_tokenizer::before_dashdash(&tokens), args, &spelling) {
         return true;
     }
     if !spelling.past_boundary {
@@ -509,18 +504,16 @@ fn asks_for_usage(stem: &str, args: &[String]) -> bool {
         return false;
     };
     let forwarded = &args[boundary + 1..];
-    let no_values = |_: TokenKind, _: &str| None::<ValueSpec>;
-    let inner = arg_tokenizer::tokenize_grammar(forwarded, &no_values, Dialect::Posix);
+    let inner = arg_tokenizer::tokenize_grammar(forwarded, &POSIX_BARE);
     names_usage(
         arg_tokenizer::before_dashdash(&inner),
         forwarded,
         &HelpSpelling {
             short_h: true,
-            dialect: Dialect::Posix,
+            grammar: &POSIX_BARE,
             past_boundary: false,
             whole_arg: &[],
         },
-        &no_values,
     )
 }
 
@@ -528,7 +521,6 @@ fn names_usage(
     tokens: &[arg_tokenizer::Token<'_>],
     args: &[String],
     spelling: &HelpSpelling,
-    takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
 ) -> bool {
     tokens.iter().any(|t| {
         let arg = args.get(t.source_index).map(String::as_str);
@@ -540,7 +532,7 @@ fn names_usage(
                 (matches!(t.text, "help" | "version" | "?") || (spelling.short_h && t.text == "h"))
                     && t.linked.is_none()
                     // `--version=1.2.3` on a flag that carries a value names a version too.
-                    && (t.attached.is_none() || takes_value(t.kind, t.text).is_none())
+                    && (t.attached.is_none() || t.value_spec().is_none())
             }
             TokenKind::Short => spelling.short_h && t.text == "h" && arg == Some("-h"),
             _ => false,
@@ -1829,6 +1821,28 @@ mod requests_help_tests {
         assert!(!asks("cargo", &["build", "--", "--help"]));
         assert!(!asks("grep", &["--", "--help", "f.txt"]));
         assert!(!asks("git", &["log", "--", "--help"]));
+    }
+
+    #[test]
+    fn help_grammars_match_their_tables() {
+        use crate::core::arg_tokenizer::assert_takes_value_table;
+        assert_takes_value_table(&POSIX_BARE, &[]);
+        assert_takes_value_table(&MSBUILD_BARE, &[]);
+        assert_takes_value_table(
+            &CARGO_INSTALL,
+            &[(TokenKind::Long, &["version"], Some(ValueSpec::value()))],
+        );
+        assert_takes_value_table(
+            &GIT,
+            &[
+                (TokenKind::Short, &["m", "F"], Some(ValueSpec::value())),
+                (
+                    TokenKind::Long,
+                    &["message", "file"],
+                    Some(ValueSpec::value()),
+                ),
+            ],
+        );
     }
 
     /// A flag that carries a value is naming something, not asking for usage.
