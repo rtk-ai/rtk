@@ -1919,7 +1919,10 @@ where
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     use crate::core::utils::ChildArgExt;
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    let Some(args) = fallback_command_args(&raw_args) else {
+        parse_error.exit();
+    };
 
     // No args → show Clap's error (user ran just "rtk" with bad syntax)
     if args.is_empty() {
@@ -2113,6 +2116,29 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
             }
         }
     }
+}
+
+fn fallback_command_args(args: &[String]) -> Option<Vec<String>> {
+    let mut command_index = 0;
+    while let Some(arg) = args.get(command_index) {
+        let is_verbosity_flag = arg.len() > 1
+            && arg.starts_with('-')
+            && arg[1..].chars().all(|character| character == 'v');
+        if is_verbosity_flag
+            || matches!(arg.as_str(), "--verbose" | "--ultra-compact" | "--skip-env")
+        {
+            command_index += 1;
+        } else {
+            break;
+        }
+    }
+
+    let command = args.get(command_index)?;
+    if command.starts_with('-') {
+        return None;
+    }
+
+    Some(args[command_index..].to_vec())
 }
 
 #[derive(Debug, Subcommand)]
@@ -5738,6 +5764,27 @@ mod tests {
                 _ => panic!("expected Angular command"),
             }
         }
+    }
+
+    #[test]
+    fn test_fallback_skips_supported_global_flags_before_command() {
+        let args = [
+            "--ultra-compact".to_string(),
+            "--skip-env".to_string(),
+            "-vv".to_string(),
+            "echo".to_string(),
+            "--help".to_string(),
+        ];
+        assert_eq!(
+            fallback_command_args(&args),
+            Some(vec!["echo".to_string(), "--help".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_fallback_rejects_unrecognized_leading_flag() {
+        let args = ["-u".to_string(), "echo".to_string(), "hi".to_string()];
+        assert_eq!(fallback_command_args(&args), None);
     }
 
     #[test]
