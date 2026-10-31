@@ -120,7 +120,6 @@ export default async function (pi: ExtensionAPI) {
       const cmd = event.input.command
       if (typeof cmd !== "string" || cmd.trim() === "") return
 
-      if (cmd.startsWith("rtk ")) return
       if (process.env.RTK_DISABLED === "1") return
 
       // Delegate to RTK.
