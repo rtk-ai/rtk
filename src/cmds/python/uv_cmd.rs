@@ -93,25 +93,30 @@ fn filter_uv_run_output(output: &str, stdout: &str, stderr: &str, exit_code: i32
         return filter_successful_run(stdout, stderr);
     }
 
-    // On failure the streams are scanned merged: a Python traceback interleaves
-    // stdout and stderr, and splitting it would break frame ordering.
-    let clean = strip_ansi(output);
+    // The program's stdout can contain partial results even when stderr reports
+    // a failure. Keep it separate from diagnostic extraction so it survives.
+    let clean = strip_ansi(if stdout.is_empty() { output } else { stderr });
     let extracted = extract_diagnostics(&clean);
-    if !extracted.is_empty() {
-        return extracted;
+    let diagnostics = if !extracted.is_empty() {
+        extracted
+    } else {
+        let tail: Vec<String> = clean
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| truncate(line, 200))
+            .collect();
+
+        let skip = tail.len().saturating_sub(MAX_FALLBACK_TAIL_LINES);
+        tail[skip..].join("\n")
+    };
+    let payload = program_output(stdout, TEE_SLUG_STDOUT);
+
+    match (payload.is_empty(), diagnostics.is_empty()) {
+        (true, _) => diagnostics,
+        (false, true) => payload,
+        (false, false) => format!("{payload}\n{diagnostics}"),
     }
-
-    let tail: Vec<String> = clean
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(|line| truncate(line, 200))
-        .collect();
-
-    // The exit code already carries the failure; restating it would only add
-    // tokens, so the command's own message is returned untouched.
-    let skip = tail.len().saturating_sub(MAX_FALLBACK_TAIL_LINES);
-    tail[skip..].join("\n")
 }
 
 /// Expects ANSI-stripped input.
@@ -222,26 +227,34 @@ fn program_output(text: &str, tee_slug: &str) -> String {
 
 fn collect_traceback_block(lines: &[&str], start_idx: usize) -> (Vec<String>, usize) {
     let mut block = vec![lines[start_idx].trim().to_string()];
-    let mut frames = Vec::new();
+    let mut frames: Vec<Vec<String>> = Vec::new();
     let mut tail = Vec::new();
+    let mut in_frame = false;
     let mut idx = start_idx + 1;
 
     while idx < lines.len() {
-        let trimmed = lines[idx].trim();
+        let line = lines[idx];
+        let trimmed = line.trim();
         if trimmed.is_empty() {
             break;
         }
 
         if PYTHON_FRAME_RE.is_match(trimmed) {
-            frames.push(truncate(trimmed, 160));
+            frames.push(vec![line.to_string()]);
+            in_frame = true;
+        } else if in_frame && (line.starts_with(' ') || line.starts_with('\t')) {
+            if let Some(frame) = frames.last_mut() {
+                frame.push(line.to_string());
+            }
         } else {
-            tail.push(truncate(trimmed, 200));
+            in_frame = false;
+            tail.push(truncate(line, 200));
         }
 
         idx += 1;
     }
 
-    block.extend(frames.iter().take(MAX_TRACEBACK_FRAMES).cloned());
+    block.extend(frames.iter().take(MAX_TRACEBACK_FRAMES).flatten().cloned());
     if frames.len() > MAX_TRACEBACK_FRAMES {
         block.push(format!(
             "... +{} more frames",
@@ -498,7 +511,19 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_uv_run_truncates_python_tracebacks() {
+    fn test_filter_uv_run_keeps_traceback_frame_context() {
+        let file = format!(r"C:\projects\{}\script.py", "nested_directory\\".repeat(20));
+        let stderr = format!(
+            "Traceback (most recent call last):\n  File \"{file}\", line 2, in <module>\n    run()\n  File \"{file}\", line 7, in run\n    1 / 0\n    ~~^~~\nZeroDivisionError: division by zero\n"
+        );
+
+        let result = filter_uv_run_output(&stderr, "", &stderr, 1);
+
+        assert_eq!(result, stderr.trim_end());
+    }
+
+    #[test]
+    fn test_filter_uv_run_preserves_python_tracebacks() {
         let output = r#"
 Traceback (most recent call last):
   File "/tmp/project/main.py", line 10, in <module>
@@ -516,7 +541,7 @@ RuntimeError: kaboom
         assert!(result.contains("Traceback (most recent call last):"));
         assert!(result.contains(r#"File "/tmp/project/main.py", line 10, in <module>"#));
         assert!(result.contains("RuntimeError: kaboom"));
-        assert!(!result.contains("run()"));
+        assert!(result.contains("    run()"));
     }
 
     #[test]
