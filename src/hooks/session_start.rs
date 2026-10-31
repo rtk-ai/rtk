@@ -87,15 +87,33 @@ fn probe(addr: &str, timeout: Duration) -> bool {
 }
 
 fn spawn_start(addr: &str) -> anyhow::Result<()> {
-    let exe = std::env::current_exe().context("resolve the rtk binary path")?;
-    std::process::Command::new(exe)
-        .args(["llm-proxy", "start", "--bind", addr])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .context("spawn `rtk llm-proxy start`")?;
-    Ok(())
+    spawn_start_if_available(addr, crate::llm_proxy::binary_available(), |bind| {
+        let exe = std::env::current_exe().context("resolve the rtk binary path")?;
+        std::process::Command::new(exe)
+            .args(["llm-proxy", "start", "--bind", bind])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .context("spawn `rtk llm-proxy start`")?;
+        Ok(())
+    })
+}
+
+/// `Command::new(current_exe()).spawn()` succeeds as long as `rtk` itself
+/// exists, even when `rtk-proxy` is missing and the child `rtk llm-proxy start`
+/// exits immediately with stderr redirected to null. Check for `rtk-proxy`
+/// before spawning so a missing binary surfaces through the `Err` arm instead
+/// of waiting 700ms and claiming the proxy was launched.
+fn spawn_start_if_available(
+    addr: &str,
+    binary_available: bool,
+    spawn: impl FnOnce(&str) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    if !binary_available {
+        anyhow::bail!("rtk-proxy is not installed");
+    }
+    spawn(addr)
 }
 
 #[cfg(test)]
@@ -200,6 +218,38 @@ mod tests {
         assert!(msg.contains("could not be started"), "{msg}");
         assert!(msg.contains("rtk llm-proxy start"), "{msg}");
         assert!(msg.contains("binary missing"), "{msg}");
+    }
+
+    #[test]
+    fn missing_binary_reports_could_not_be_started_without_spawning() {
+        let out = ensure_proxy_impl(
+            "http://127.0.0.1:8080",
+            |_| false,
+            |addr| {
+                spawn_start_if_available(addr, false, |_| {
+                    panic!("must not spawn `rtk llm-proxy start` when rtk-proxy is missing")
+                })
+            },
+            Duration::ZERO,
+        );
+        let msg = out.expect("a missing binary must be reported");
+        assert!(msg.contains("could not be started"), "{msg}");
+        assert!(msg.contains("rtk-proxy is not installed"), "{msg}");
+        assert!(
+            msg.contains("remove env.ANTHROPIC_BASE_URL from settings.json"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn present_binary_delegates_to_spawn() {
+        let spawned_on = std::cell::RefCell::new(String::new());
+        spawn_start_if_available("127.0.0.1:8080", true, |addr| {
+            *spawned_on.borrow_mut() = addr.to_string();
+            Ok(())
+        })
+        .expect("spawn must succeed when binary is present");
+        assert_eq!(spawned_on.into_inner(), "127.0.0.1:8080");
     }
 }
 
