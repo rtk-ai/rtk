@@ -29,7 +29,7 @@ Errors stop that file from loading; the other files stay active (W025 names the 
 | E002 | unknown key on a rule, directive, task, upstream or override |
 | E003 | condition not available at this event (`file_lines` after the tool) |
 | E004 | condition not available for this subject (`command` on `read`) — **control rules only**; on a transform rule this is W015 |
-| E005 | action not legal at this position (`rewrite` outside `before_tool.shell`, `deny` after a tool, `route` before an edit), or a [route `mode`](./writing-pipelines.md#route-modes) it cannot use (`swap` outside `shell`, `answer` outside `read`/`search`/`web`, `mode` without `route`) |
+| E005 | action not legal at this position (`rewrite` outside `before_tool.shell`, `deny` after a tool, `route` before an edit), or a [route `mode`](./writing-pipelines.md#route-modes) it cannot use (`swap` outside `shell`, `answer` outside `read`/`search`/`web`, `mode` without `route`), or an `emit` it cannot use (`note` before a tool or on an `action` rule, a target other than `output`/`note`) |
 | E006 | a rule has both `use` and `action`, or neither |
 | E007 | unknown method, chain or directive — for methods, **control rules only**; on a transform rule this is W014 |
 | E008 | chain type mismatch (`["toon", "cap"]`) or a terminal method not last |

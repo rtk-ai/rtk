@@ -14,8 +14,8 @@ pub use conditions::{
 };
 pub use diag::{Code, Diagnostic, Severity, did_you_mean, has_errors};
 pub use eval::{
-    Action, Decision, DecisionKind, evaluate, interpolate, resolve_chain, route_message,
-    rule_matches,
+    Action, Decision, DecisionKind, evaluate, evaluate_where, interpolate, resolve_chain,
+    route_message, rule_matches,
 };
 pub use position::{Position, SiteKind};
 pub use resolve::{Guards, Resolved, ResolvedDirective, ResolvedRule, Scope, SourceFile, resolve};
