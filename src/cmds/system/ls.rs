@@ -183,6 +183,9 @@ fn shows_dotfiles(tokens: &[Token<'_>]) -> bool {
 struct LsPlan {
     show_all: bool,
     show_long: bool,
+    /// `-d`/`--directory` with path operands: every row is an entry the user named, so none of
+    /// them is noise RTK should hide.
+    lists_operands: bool,
     child_args: Vec<String>,
 }
 
@@ -215,9 +218,15 @@ fn plan_for(args: &[String], flavor: Flavor) -> LsPlan {
             }
     });
 
+    let lists_operands = tokens
+        .iter()
+        .any(|t| is_short_in(t, &['d']) || long_name(t) == Some("directory"))
+        && tokens.iter().any(|t| t.is_free_positional());
+
     LsPlan {
         show_all,
         show_long,
+        lists_operands,
         child_args: build_child_args(&tokens, flavor),
     }
 }
@@ -303,8 +312,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let LsPlan {
         show_all,
         show_long,
+        lists_operands,
         child_args,
     } = plan(args);
+    // Noise filtering only applies to entries ls discovered inside a directory, never to
+    // operands the user asked for by name.
+    let show_all = show_all || lists_operands;
 
     let mut cmd = resolved_command("ls");
     cmd.env("LC_ALL", "C");
@@ -754,6 +767,24 @@ mod tests {
             &args.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
             flavor,
         )
+    }
+
+    #[test]
+    fn test_plan_directory_flag_with_operands_lists_operands() {
+        assert!(plan_of(&["-d", "src", ".venv"]).lists_operands);
+        assert!(plan_of(&["-ld", "src", ".venv"]).lists_operands);
+        assert!(plan_of(&["--directory", "node_modules"]).lists_operands);
+        assert!(plan_bsd(&["-d", "target"]).lists_operands);
+    }
+
+    #[test]
+    fn test_plan_directory_discovery_does_not_list_operands() {
+        assert!(!plan_of(&["workspace"]).lists_operands);
+        assert!(!plan_of(&["-d"]).lists_operands);
+        assert!(!plan_of(&["--", "-d", "src"]).lists_operands);
+        assert!(!plan_of(&["--ignore", "-d", "project"]).lists_operands);
+        assert!(!plan_of(&["-I", "-d", "src"]).lists_operands);
+        assert!(!plan_bsd(&["-D", "-d", "src"]).lists_operands);
     }
 
     #[test]
