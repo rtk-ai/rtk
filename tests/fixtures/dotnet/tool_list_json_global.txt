@@ -1,0 +1,1 @@
+{"version":1,"data":[{"packageId":"csharp-ls","version":"0.28.0","commands":["csharp-ls"]},{"packageId":"dotnet-outdated-tool","version":"4.8.1","commands":["dotnet-outdated"]}]}

@@ -1,6 +1,8 @@
 //! Utility functions for argument handling, particularly for restoring "--" escape
 //! arguments that clap consumes during parsing.
 
+use std::ffi::{OsStr, OsString};
+
 /// Restores `--` tokens that clap consumed when using `trailing_var_arg = true`.
 ///
 /// Returns `parsed_args` unchanged when `raw_args` has the same or fewer `--` tokens
@@ -8,6 +10,12 @@
 /// their original positions by returning the user-args suffix of `raw_args` verbatim.
 pub fn restore_double_dash(parsed_args: &[String]) -> Vec<String> {
     let raw_args: Vec<String> = std::env::args().collect();
+    restore_double_dash_with_raw(parsed_args, &raw_args)
+}
+
+/// Restores consumed `--` tokens without converting native arguments to UTF-8.
+pub fn restore_double_dash_os(parsed_args: &[OsString]) -> Vec<OsString> {
+    let raw_args: Vec<OsString> = std::env::args_os().collect();
     restore_double_dash_with_raw(parsed_args, &raw_args)
 }
 
@@ -22,9 +30,18 @@ pub fn restore_double_dash(parsed_args: &[String]) -> Vec<String> {
 ///
 /// Returning `raw_args[user_region_start..]` restores all stripped `--` tokens at
 /// their original positions without any value-based matching.
-pub fn restore_double_dash_with_raw(parsed_args: &[String], raw_args: &[String]) -> Vec<String> {
-    let raw_dash_count = raw_args.iter().filter(|a| a.as_str() == "--").count();
-    let parsed_dash_count = parsed_args.iter().filter(|a| a.as_str() == "--").count();
+pub fn restore_double_dash_with_raw<T: AsRef<OsStr> + Clone>(
+    parsed_args: &[T],
+    raw_args: &[T],
+) -> Vec<T> {
+    let raw_dash_count = raw_args
+        .iter()
+        .filter(|a| a.as_ref() == OsStr::new("--"))
+        .count();
+    let parsed_dash_count = parsed_args
+        .iter()
+        .filter(|a| a.as_ref() == OsStr::new("--"))
+        .count();
 
     if raw_dash_count <= parsed_dash_count {
         return parsed_args.to_vec();
@@ -49,6 +66,37 @@ mod tests {
         let parsed: Vec<String> = parsed.iter().map(|s| s.to_string()).collect();
         let raw: Vec<String> = raw.iter().map(|s| s.to_string()).collect();
         restore_double_dash_with_raw(parsed.as_slice(), raw.as_slice())
+    }
+
+    #[test]
+    fn test_native_args_restore_consecutive_separators() {
+        let raw: Vec<OsString> = ["rtk", "dotnet", "tool", "--", "--", "list"]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        let parsed = vec![OsString::from("list")];
+        assert_eq!(restore_double_dash_with_raw(&parsed, &raw), raw[3..]);
+        assert_eq!(
+            restore_double_dash_with_raw(&raw[3..], &raw),
+            raw[3..],
+            "already preserved separators must not be duplicated"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_native_args_restore_separator_before_non_utf8_path() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = OsString::from_vec(b"/workspace/tools-\xff".to_vec());
+        let raw = vec![
+            OsString::from("rtk"),
+            OsString::from("dotnet"),
+            OsString::from("tool"),
+            OsString::from("--"),
+            path.clone(),
+        ];
+        assert_eq!(restore_double_dash_with_raw(&[path], &raw), raw[3..]);
     }
 
     // ============ Single "--" swallowed ============
