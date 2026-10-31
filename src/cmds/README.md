@@ -2,7 +2,7 @@
 
 ## Scope
 
-**Command execution and output filtering.** Every module here calls an external CLI tool (`Command::new("some_tool")`), transforms its stdout/stderr to reduce the bytes the agent reads, and records the reduction via `core/tracking`.
+**Command execution and output filtering.** Every module here calls an external CLI tool (`resolved_command("some_tool")`), transforms its stdout/stderr to reduce the bytes the agent reads, and records the reduction via `core/tracking`.
 
 Owns: all command-specific filter logic, organized by ecosystem (git, rust, js, python, go, dotnet, cloud, system). Cross-ecosystem routing (e.g., `lint_cmd` detecting Python and delegating to `ruff_cmd`) is an intra-component concern.
 
@@ -37,7 +37,7 @@ Each subdirectory has its own README with file descriptions, parsing strategies,
 
 ## Execution Flow
 
-The shared wrappers in [`core/runner.rs`](../core/runner.rs) encapsulate the execution skeleton. Modules build the `Command` (custom arg logic), then delegate to a runner entry point. All runners handle tracking, tee recovery, and exit code propagation automatically.
+The shared wrappers in [`core/runner.rs`](../core/runner.rs) encapsulate the execution skeleton. Modules build the `ChildCommand` (custom arg logic), then delegate to a runner entry point. All runners handle tracking, tee recovery, and exit code propagation automatically.
 
 ```
  run_streaming()       Filter applied              tee_and_hint()
@@ -289,7 +289,7 @@ Adding a new filter or command requires changes in multiple places. For TOML-vs-
 
 1. **Create module** in `src/cmds/<ecosystem>/mycmd_cmd.rs`:
    - Write the `filter_mycmd()` function (pure: `&str -> String`, no side effects)
-   - Write `pub fn run(...) -> Result<i32>` using `runner::run_filtered()` — build the `Command`, choose `RunOptions`, delegate
+   - Write `pub fn run(...) -> Result<i32>` using `runner::run_filtered()` — build the `ChildCommand` with `resolved_command()` (`tool_exec`/`package_manager_exec` for JS tools, `ruby_exec` for Ruby), choose `RunOptions`, delegate
    - Use `RunOptions::stdout_only()` when the filter parses structured stdout (JSON, NDJSON) — stderr would corrupt parsing
    - Use `RunOptions::default()` when filtering combined text output
    - Add `.tee("label")` when the filter parses structured output (enables raw output recovery on failure)

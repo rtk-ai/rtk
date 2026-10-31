@@ -175,7 +175,7 @@ Fixtures go in `tests/fixtures/` and should be captured from real command output
 
 RTK executes shell commands on behalf of the user, so security is a first-class concern.
 
-**Command execution.** All commands go through argument arrays via `Command::new().args()` — never through shell string concatenation. This prevents injection. Always use `resolved_command()` from `src/core/utils.rs` instead of a raw `Command::new()`.
+**Command execution.** All commands go through argument arrays via `resolved_command().args()`, or the helpers built on it (`tool_exec`, `package_manager_exec`, `ruby_exec`) — never through shell string concatenation. This prevents injection. `resolved_command()` (in `src/core/utils.rs`) returns a `ChildCommand`, which finds Windows `.cmd`/`.bat` shims and encodes each argument for MSYS/Cygwin children; clippy denies a raw `std::process::Command::new()` in the `rtk` library outside tests.
 
 **Hook integrity.** RTK verifies hook files via SHA-256 hashes before operational commands. If a hook has been tampered with, RTK exits with code 1. See [`src/hooks/integrity.rs`](../../src/hooks/integrity.rs).
 

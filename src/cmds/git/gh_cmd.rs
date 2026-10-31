@@ -5,6 +5,7 @@
 
 use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
 use crate::core::args_utils;
+use crate::core::child_command::ChildCommand;
 use crate::core::runner::{self, RunOptions};
 use crate::core::shell::quote_word;
 use crate::core::truncate::CAP_LIST;
@@ -13,7 +14,6 @@ use crate::git_cmd;
 use anyhow::Result;
 use regex::Regex;
 use serde_json::Value;
-use std::process::Command;
 use std::sync::LazyLock;
 
 static HTML_COMMENT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<!--.*?-->").unwrap());
@@ -244,7 +244,7 @@ fn escapes_a_bare_positional(args: &[String], escaped: &[arg_tokenizer::Token<'_
         .is_some_and(|t| t.kind == TokenKind::Positional)
 }
 
-fn run_gh_json<F>(cmd: Command, label: &str, filter_fn: F) -> Result<i32>
+fn run_gh_json<F>(cmd: ChildCommand, label: &str, filter_fn: F) -> Result<i32>
 where
     F: Fn(&Value) -> String,
 {

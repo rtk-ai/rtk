@@ -4,6 +4,7 @@
 //! nothing, reviews nothing, and never holds a token — everything goes
 //! through the user's own `gh`.
 
+use crate::core::child_command::ChildCommand;
 use crate::core::pipeline_config;
 use anyhow::{Context, Result};
 use rtk_engine::pipeline::has_errors;
@@ -118,7 +119,7 @@ fn resolve_sha(src: &GithubSource) -> Option<String> {
     {
         return Some(sha.to_string());
     }
-    let out = std::process::Command::new("gh")
+    let out = ChildCommand::new("gh")
         .args(["api", &api, "--jq", ".sha"])
         .output()
         .ok()?;
@@ -493,7 +494,7 @@ pub(crate) fn prompt(question: &str) -> Result<String> {
 }
 
 fn gh(args: &[String]) -> Result<String> {
-    let out = std::process::Command::new("gh")
+    let out = ChildCommand::new("gh")
         .args(args)
         .output()
         .context("run gh")?;

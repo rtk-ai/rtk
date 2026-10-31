@@ -84,7 +84,7 @@ git::run(args, verbose)
 
 Phase 3: EXECUTE
 ────────────────
-std::process::Command::new("git")
+resolved_command("git")
     .args(["log", "--oneline", "-5"])
     .output()?
 
@@ -579,13 +579,15 @@ Example (lint_cmd.rs):
 let is_pnpm = Path::new("pnpm-lock.yaml").exists();
 let is_yarn = Path::new("yarn.lock").exists();
 
-let mut cmd = if is_pnpm {
-    Command::new("pnpm").arg("exec").arg("--").arg("eslint")
+let (runner, prefix): (&str, &[&str]) = if is_pnpm {
+    ("pnpm", &["exec", "--"])
 } else if is_yarn {
-    Command::new("yarn").arg("exec").arg("--").arg("eslint")
+    ("yarn", &["exec", "--"])
 } else {
-    Command::new("npx").arg("--no-install").arg("--").arg("eslint")
+    ("npx", &["--no-install", "--"])
 };
+let mut cmd = resolved_command(runner);
+cmd.args(prefix).arg("eslint");
 
 Affects: lint, tsc, next, prettier, playwright, prisma, vitest, pnpm
 ```
@@ -769,7 +771,7 @@ git::run(args: &[String], verbose: u8) → Result<()>
   ↓ .context("Failed to execute git")
 git::execute_git_command() → Result<String>
   ↓ .context("Git process error")
-Command::new("git").output()?
+resolved_command("git").output()?
   ↓ Error occurs
 anyhow::Error
   ↓ Bubble up through ?
@@ -789,7 +791,7 @@ std::process::exit(1)
 
 Standard Pattern (git_cmd.rs):
 
-let output = Command::new("git").args(args).output()?;
+let output = resolved_command("git").args(args).output()?;
 
 if !output.status.success() {
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -875,13 +877,15 @@ let is_pnpm = Path::new("pnpm-lock.yaml").exists();
 let is_yarn = Path::new("yarn.lock").exists();
 
 // Build command
-let mut cmd = if is_pnpm {
-    Command::new("pnpm").arg("exec").arg("--").arg("eslint")
+let (runner, prefix): (&str, &[&str]) = if is_pnpm {
+    ("pnpm", &["exec", "--"])
 } else if is_yarn {
-    Command::new("yarn").arg("exec").arg("--").arg("eslint")
+    ("yarn", &["exec", "--"])
 } else {
-    Command::new("npx").arg("--no-install").arg("--").arg("eslint")
+    ("npx", &["--no-install", "--"])
 };
+let mut cmd = resolved_command(runner);
+cmd.args(prefix).arg("eslint");
 ```
 
 #### 2. Verbosity Guards
