@@ -96,6 +96,13 @@ static GIT_GLOBAL_OPT: LazyLock<Regex> = LazyLock::new(|| {
 static PNPM_GLOBAL_OPT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(?:(?:-r|--recursive|-w|--workspace-root|--filter(?:=\S+|\s+\S+)|-F(?:=\S+|\s+\S+))\s+)+").unwrap()
 });
+// Subcommands in the `rtk pnpm` rule that are really npm-script aliases, not
+// pnpm's own subcommands. A BARE `pnpm lint` delegates the script to the
+// package manager (#3289), but a flag-first `pnpm -r lint` runs that script
+// across every workspace package — something `rtk pnpm` cannot honestly filter.
+// Excluding these from the global-opt strip adoption below keeps the #3275
+// invariant: never report a Supported saving the hook can't deliver.
+const PNPM_SCRIPT_ALIAS_SUBCMDS: &[&str] = &["lint"];
 // Issue #1362: each capture expects a SINGLE file argument (`\S+$`). Multi-file
 // invocations like `head -3 a b c` fail to match so the segment is passed through
 // to the native `head`/`tail` binary — which already handles multi-file with
@@ -222,18 +229,22 @@ pub fn classify_command(cmd: &str) -> Classification {
     // Strip pnpm global options (-r, --filter, -w) before the subcommand so
     // `pnpm -r install` classifies like `pnpm install` — but only adopt the
     // stripped form when it routes to the `rtk pnpm` rule itself. For the tool
-    // rules reachable via `pnpm exec`/`pnpm run` (`pnpm -r exec vitest`,
-    // `pnpm -r lint`, …) the rewrite matches the original flag-first text and
-    // never fires, so classifying the stripped form there would report a
-    // Supported saving the hook can't deliver — misleading `rtk discover` and
-    // `rtk session`, which count `Supported` as covered. See #3275.
+    // rules reachable via `pnpm exec`/`pnpm run` (`pnpm -r exec vitest`, …) the
+    // rewrite matches the original flag-first text and never fires, so
+    // classifying the stripped form there would report a Supported saving the
+    // hook can't deliver — misleading `rtk discover` and `rtk session`, which
+    // count `Supported` as covered. The same applies to script aliases in the
+    // pnpm rule (`pnpm -r lint`): a bare `pnpm lint` delegates to the package
+    // manager, but the flag-first form must stay Unsupported. See #3275 / #3289.
     let cmd_pnpm_stripped = strip_pnpm_global_opts(&cmd_normalized);
-    let cmd_normalized =
-        if cmd_pnpm_stripped != cmd_normalized && matches_pnpm_rule(&cmd_pnpm_stripped) {
-            cmd_pnpm_stripped
-        } else {
-            cmd_normalized
-        };
+    let cmd_normalized = if cmd_pnpm_stripped != cmd_normalized
+        && matches_pnpm_rule(&cmd_pnpm_stripped)
+        && !pnpm_subcmd_is_script_alias(&cmd_pnpm_stripped)
+    {
+        cmd_pnpm_stripped
+    } else {
+        cmd_normalized
+    };
     let cmd_clean = cmd_normalized.as_str();
 
     // Exclude cat/head/tail with redirect operators — these are writes, not reads (#315)
@@ -487,6 +498,17 @@ fn matches_pnpm_rule(cmd: &str) -> bool {
         .into_iter()
         .next_back()
         .is_some_and(|idx| RULES[idx].rtk_cmd == "rtk pnpm")
+}
+
+/// True when the stripped pnpm form's subcommand is only a script alias in the
+/// `rtk pnpm` rule (e.g. `pnpm lint`), not a real pnpm subcommand. Flag-first
+/// forms of these (`pnpm -r lint`) must not adopt the global-opt-stripped
+/// classification, so they stay Unsupported like on develop. See #3275 / #3289.
+fn pnpm_subcmd_is_script_alias(stripped: &str) -> bool {
+    stripped
+        .split_whitespace()
+        .nth(1)
+        .is_some_and(|sub| PNPM_SCRIPT_ALIAS_SUBCMDS.contains(&sub))
 }
 
 /// Strip golangci-lint global options before the `run` subcommand.
@@ -6431,16 +6453,12 @@ mod tests {
             "npm exec eslint",
             "npm rum biome",
             "npm rum eslint",
-            "npm rum lint",
             "npm run biome",
             "npm run eslint",
-            "npm run lint",
             "npm run-script biome",
             "npm run-script eslint",
-            "npm run-script lint",
             "npm urn biome",
             "npm urn eslint",
-            "npm urn lint",
             "npm x biome",
             "npm x eslint",
             "pnpm dlx biome",
@@ -6449,10 +6467,8 @@ mod tests {
             "pnpm exec eslint",
             "pnpm run biome",
             "pnpm run eslint",
-            "pnpm run lint",
             "pnpm run-script biome",
             "pnpm run-script eslint",
-            "pnpm run-script lint",
             "npm biome",
             "npm eslint",
             "npm lint",
@@ -6461,7 +6477,6 @@ mod tests {
             "npx lint",
             "pnpm biome",
             "pnpm eslint",
-            "pnpm lint",
             "pnpx biome",
             "pnpx eslint",
             "pnpx lint",
@@ -6491,16 +6506,12 @@ mod tests {
             "npm exec eslint",
             "npm rum biome",
             "npm rum eslint",
-            "npm rum lint",
             "npm run biome",
             "npm run eslint",
-            "npm run lint",
             "npm run-script biome",
             "npm run-script eslint",
-            "npm run-script lint",
             "npm urn biome",
             "npm urn eslint",
-            "npm urn lint",
             "npm x biome",
             "npm x eslint",
             "pnpm dlx biome",
@@ -6509,10 +6520,8 @@ mod tests {
             "pnpm exec eslint",
             "pnpm run biome",
             "pnpm run eslint",
-            "pnpm run lint",
             "pnpm run-script biome",
             "pnpm run-script eslint",
-            "pnpm run-script lint",
             "npm biome",
             "npm eslint",
             "npm lint",
@@ -6521,7 +6530,6 @@ mod tests {
             "npx lint",
             "pnpm biome",
             "pnpm eslint",
-            "pnpm lint",
             "pnpx biome",
             "pnpx eslint",
             "pnpx lint",
@@ -6533,6 +6541,26 @@ mod tests {
             assert_eq!(
                 rewrite_command_no_prefixes(command, &[]),
                 Some("rtk lint".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_lint_scripts_delegate_to_package_manager() {
+        let commands = vec![
+            ("npm run lint", "rtk npm run lint"),
+            ("npm run-script lint", "rtk npm run-script lint"),
+            ("pnpm run lint", "rtk pnpm run lint"),
+            ("pnpm run-script lint", "rtk pnpm run-script lint"),
+            ("pnpm lint", "rtk pnpm lint"),
+        ];
+
+        for (command, expected) in commands {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected.into()),
                 "Failed for command: {}",
                 command
             );
