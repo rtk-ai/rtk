@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>rtk</id>
+    <version>0.0.0</version>
+    <title>RTK (Rust Token Killer)</title>
+    <authors>Patrick Szymkowiak</authors>
+    <owners>rtk-ai</owners>
+    <projectUrl>https://www.rtk-ai.app</projectUrl>
+    <licenseUrl>https://github.com/rtk-ai/rtk/blob/master/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <projectSourceUrl>https://github.com/rtk-ai/rtk</projectSourceUrl>
+    <docsUrl>https://www.rtk-ai.app/guide/getting-started/installation</docsUrl>
+    <bugTrackerUrl>https://github.com/rtk-ai/rtk/issues</bugTrackerUrl>
+    <tags>rtk cli llm token filter productivity ai cursor claude</tags>
+    <summary>CLI proxy that compresses command output for AI coding agents (60-90% token savings).</summary>
+    <description><![CDATA[
+RTK (Rust Token Killer) filters and compresses CLI output before it reaches your LLM context.
+
+**After install**
+- Verify: `rtk --version` and `rtk gain`
+- Claude Code: `rtk init -g`
+- Cursor: `rtk init -g --agent cursor`
+
+**Windows notes**
+- Run RTK from Command Prompt, PowerShell, or Windows Terminal (not by double-clicking rtk.exe).
+- Filters work on native Windows (`rtk cargo test`, `rtk git status`).
+- For the fullest hook experience (especially with WSL-based workflows), see https://www.rtk-ai.app/guide/getting-started/installation
+
+**Name collision**: Another crate named `rtk` (Rust Type Kit) exists. If `rtk gain` fails, you may have the wrong package.
+
+Source: pre-built binary from https://github.com/rtk-ai/rtk/releases
+    ]]></description>
+    <releaseNotes>https://github.com/rtk-ai/rtk/releases</releaseNotes>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>
