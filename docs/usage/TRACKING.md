@@ -47,6 +47,56 @@ summary, the daily/weekly/monthly breakdowns, and the JSON/CSV exports): only co
 input (`input_tokens > 0`) are timed. A passthrough row filtered nothing, and its duration is the
 wrapped process's lifetime — for an interactive TUI such as `rtk claude`, the whole session.
 
+## Invocation and retrieval accounting
+
+`rtk gain --format json` includes an additive `output_accounting` object.
+`rtk gain --history --format json` also exports the latest 100 `commands` and
+100 `recall_events` (the totals cover all retained rows, not only those pages).
+`--project` scopes both sets by the working directory of each event.
+
+- `invocation_id` is a fresh opaque identifier for an RTK process. A process
+  may record multiple command rows, so the command row's `id` remains its key.
+- Native Claude hooks carry an opaque `hook_event_id` in a hidden, leading
+  `--hook-event-id` option for proven simple RTK rewrites. The option is not
+  global: an operand with that spelling is not consumed by RTK. A command's
+  hook event joins directly to `hook_decisions.event_id`, exposing the recorded
+  `session_id` and `tool_use_id` without time-window matching.
+- Compound commands, wrappers, other hook integrations and old history can
+  have null hook IDs. Missing associations are never inferred from command text
+  or timestamps. Permission decisions are still made on the original command.
+- Every payload store gets an independent immutable `capture_id` in
+  `recall.db`'s `recall_captures` table. Content deduplication does not deduplicate
+  capture events. This metadata is capped at 1,000 rows and pruned when its
+  payload disappears; it does not contain another copy of the raw output.
+- Every measured `rtk recall` emission gets a fresh event ID. Partial selections,
+  `--grep`, empty matches and repeated reads count separately. `emitted_bytes`
+  measures the stdout bytes written; `output_tokens` uses RTK's byte-based
+  estimator on those bytes. Failed lookups are not successful reads, and failed
+  writes only count bytes accepted before the error.
+- Legacy hash references do not identify a specific capture. Their
+  `source_invocation_id` and `source_capture_id` remain null even if there is
+  only one currently retained matching capture. Pruning older records must not
+  turn an ambiguous reference into an apparently certain one.
+
+`observed_net_saved_tokens = initial_input_tokens - initial_output_tokens -
+retrieved_output_tokens` is signed and can be negative. It combines recorded
+command output and retrieval events by **each event's own date and project**;
+recalling an old capture today charges today's retrieval output. It is not
+source-capture-date accounting, a complete agent-context measurement, a model
+bill, or evidence of better task success or latency. Existing summary fields
+continue to describe initial command output only.
+
+`measurement_complete` is deliberately false: historical reads, external tee
+file reads, stderr, and tracking failures are not measured here. Use
+`unattributed_recall_events` and `commands_without_invocation_id` to assess
+coverage rather than treating missing data as zero cost. Existing
+`rtk gain --recalls` remains a distinct unique-content recall metric.
+
+Tracking schema migrations are additive and leave old associations null.
+Command and retrieval history uses the existing 90-day retention window and
+`rtk gain --reset` clears both. IDs are local database/export metadata and are
+not added to telemetry.
+
 ## Privacy
 
 - The tracking database is **local only** and never leaves your machine.
