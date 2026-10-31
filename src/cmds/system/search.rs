@@ -473,7 +473,9 @@ struct SearchStreamFilter {
     show_file: bool,
     show_line: bool,
     max_results: usize,
+    command_slug: String,
     shown: usize,
+    total_matches: usize,
     cap_reported: bool,
 }
 
@@ -486,15 +488,12 @@ impl StreamFilter for SearchStreamFilter {
             return Some(format!("{line}\n"));
         };
 
+        // Count every match in the live stream, not in the bounded raw capture
+        // (run_streaming retains at most RAW_CAP bytes for on_exit).
+        self.total_matches = self.total_matches.saturating_add(1);
         if self.shown >= self.max_results {
-            if self.cap_reported {
-                return None;
-            }
             self.cap_reported = true;
-            return Some(format!(
-                "[rtk] output capped at {} results\n",
-                self.max_results
-            ));
+            return None;
         }
 
         self.shown += 1;
@@ -503,6 +502,43 @@ impl StreamFilter for SearchStreamFilter {
 
     fn flush(&mut self) -> String {
         String::new()
+    }
+
+    fn on_exit(&mut self, _exit_code: i32, raw: &str) -> Option<String> {
+        if !self.cap_reported {
+            return None;
+        }
+
+        let matches = raw
+            .lines()
+            .filter_map(|line| format_match_line(line, self.show_file, self.show_line))
+            .collect::<String>();
+        // RAW_CAP can truncate the captured output while feed_line continues
+        // receiving matches. Never offer a recall link to an incomplete store.
+        let capture_complete = matches.lines().count() == self.total_matches;
+        let hint = if capture_complete {
+            crate::core::tee::force_tee_tail_hint(
+                &matches,
+                &self.command_slug,
+                self.max_results + 1,
+            )
+        } else {
+            None
+        };
+
+        let mut summary = format!(
+            "[rtk] capped: showing {} of {}",
+            self.shown, self.total_matches
+        );
+        if !capture_complete {
+            summary.push_str(" [capture truncated; full recall unavailable]");
+        }
+        if let Some(hint) = hint {
+            summary.push(' ');
+            summary.push_str(&hint);
+        }
+        summary.push('\n');
+        Some(summary)
     }
 }
 
@@ -530,7 +566,9 @@ fn run_streaming_search(
             .unwrap_or_else(|| wants_show_file(paths, detected_flags.recursive)),
         show_line: detected_flags.show_line,
         max_results,
+        command_slug: real_cmd.to_string(),
         shown: 0,
+        total_matches: 0,
         cap_reported: false,
     };
     let mut cmd = engine_command(engine, extra_args, patterns, paths, true);
@@ -1218,7 +1256,9 @@ mod tests {
             show_file: false,
             show_line: true,
             max_results: 10,
+            command_slug: "grep match".to_string(),
             shown: 0,
+            total_matches: 0,
             cap_reported: false,
         };
 
@@ -1233,28 +1273,171 @@ mod tests {
     }
 
     #[test]
-    fn streaming_search_reports_the_cap_once() {
+    fn streaming_search_reports_recoverable_cap_summary() {
         let mut filter = SearchStreamFilter {
             show_file: false,
             show_line: true,
             max_results: 1,
+            command_slug: "grep match".to_string(),
             shown: 0,
+            total_matches: 0,
             cap_reported: false,
         };
 
-        assert_eq!(
-            filter.feed_line(concat!("(standard input)\0", "1:first")),
-            Some("1:first\n".to_string())
+        crate::core::user_env::with_vars(&[("RTK_RECALL", Some("0"))], || {
+            assert_eq!(
+                filter.feed_line(concat!("(standard input)\0", "1:first")),
+                Some("1:first\n".to_string())
+            );
+            assert_eq!(
+                filter.feed_line(concat!("(standard input)\0", "2:second")),
+                None
+            );
+            assert_eq!(
+                filter.feed_line(concat!("(standard input)\0", "3:third")),
+                None
+            );
+            assert_eq!(filter.feed_line("--"), None);
+            assert_eq!(
+                filter.on_exit(
+                    0,
+                    concat!(
+                        "(standard input)\0",
+                        "1:first\n",
+                        "(standard input)\0",
+                        "2:second\n",
+                        "(standard input)\0",
+                        "3:third\n"
+                    )
+                ),
+                Some("[rtk] capped: showing 1 of 3\n".to_string())
+            );
+        });
+    }
+
+    #[test]
+    fn streaming_search_reports_full_match_count_when_raw_capture_is_truncated() {
+        // run_streaming continues feeding lines after its 10 MiB raw capture
+        // stops retaining bytes. A partial recall link would be misleading.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let recall_db = temp_dir.path().join("recall.db");
+        let recall_db_env = recall_db.to_str().unwrap();
+
+        crate::core::user_env::with_vars(
+            &[
+                ("RTK_RECALL_DB", Some(recall_db_env)),
+                ("RTK_RECALL", None),
+                ("RTK_TEE", None),
+            ],
+            || {
+                let mut filter = SearchStreamFilter {
+                    show_file: false,
+                    show_line: true,
+                    max_results: 1,
+                    command_slug: "grep match".to_string(),
+                    shown: 0,
+                    total_matches: 0,
+                    cap_reported: false,
+                };
+                for (index, value) in ["first", "second", "third"].iter().enumerate() {
+                    let line = format!("(standard input)\0{}:{value}", index + 1);
+                    let _ = filter.feed_line(&line);
+                }
+                assert_eq!(
+                    filter.on_exit(0, concat!("(standard input)\0", "1:first\n")),
+                    Some(
+                        "[rtk] capped: showing 1 of 3 [capture truncated; full recall unavailable]\n"
+                            .to_string()
+                    )
+                );
+                assert!(
+                    !recall_db.exists(),
+                    "must not archive a partial search as complete"
+                );
+            },
         );
-        assert_eq!(
-            filter.feed_line(concat!("(standard input)\0", "2:second")),
-            Some("[rtk] output capped at 1 results\n".to_string())
+    }
+
+    #[test]
+    fn streaming_search_archives_hidden_matches_for_recall() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let recall_db = temp_dir.path().join("recall.db");
+        let recall_db_env = recall_db.to_str().unwrap();
+
+        crate::core::user_env::with_vars(
+            &[
+                ("RTK_RECALL_DB", Some(recall_db_env)),
+                ("RTK_RECALL", None),
+                ("RTK_TEE", None),
+            ],
+            || {
+                let mut filter = SearchStreamFilter {
+                    show_file: false,
+                    show_line: true,
+                    max_results: 1,
+                    command_slug: "grep match".to_string(),
+                    shown: 0,
+                    total_matches: 0,
+                    cap_reported: false,
+                };
+                assert_eq!(
+                    filter.feed_line(concat!("(standard input)\0", "1:first")),
+                    Some("1:first\n".to_string())
+                );
+                assert_eq!(
+                    filter.feed_line(concat!("(standard input)\0", "2:second")),
+                    None
+                );
+                assert_eq!(
+                    filter.feed_line(concat!("(standard input)\0", "3:third")),
+                    None
+                );
+
+                let summary = filter
+                    .on_exit(
+                        0,
+                        concat!(
+                            "(standard input)\0",
+                            "1:first\n",
+                            "(standard input)\0",
+                            "2:second\n",
+                            "(standard input)\0",
+                            "3:third\n"
+                        ),
+                    )
+                    .expect("capped search should report a summary");
+                let connection = rusqlite::Connection::open(&recall_db).unwrap();
+                let (hash, command, total_lines, shown_upto, blob_bytes): (
+                    String,
+                    String,
+                    i64,
+                    i64,
+                    i64,
+                ) = connection
+                    .query_row(
+                        "SELECT hash, command, total_lines, shown_upto, length(blob) FROM recall",
+                        [],
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                            ))
+                        },
+                    )
+                    .unwrap();
+
+                assert!(summary.contains("capped: showing 1 of 3"));
+                let recall_hint = format!("[+2 hidden: rtk recall {hash}]");
+                assert!(summary.contains(recall_hint.as_str()));
+                assert_eq!(command, "grep match");
+                assert_eq!(total_lines, 3);
+                assert_eq!(shown_upto, 2);
+                assert!(blob_bytes > 0);
+            },
         );
-        assert_eq!(
-            filter.feed_line(concat!("(standard input)\0", "3:third")),
-            None
-        );
-        assert_eq!(filter.feed_line("--"), None);
     }
 
     #[test]
