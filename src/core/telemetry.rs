@@ -8,7 +8,7 @@ use crate::hooks::init::resolve_claude_dir;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as FmtWrite;
 use std::io::Write as IoWrite;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 static CACHED_SALT: OnceLock<String> = OnceLock::new();
@@ -58,26 +58,20 @@ pub fn maybe_ping() {
         return;
     }
 
-    // Check last ping time
     let marker = telemetry_marker_path();
-    if let Ok(metadata) = std::fs::metadata(&marker)
-        && let Ok(modified) = metadata.modified()
-        && let Ok(elapsed) = modified.elapsed()
-        && elapsed.as_secs() < PING_INTERVAL_SECS
-    {
+    if !ping_due(&marker) {
         return;
     }
 
-    // Touch marker file immediately (before sending) to avoid double-ping
-    touch_marker(&marker);
-
-    // Spawn thread so we never block the CLI
-    std::thread::spawn(|| {
-        let _ = send_ping();
+    // Spawn thread so we never block the CLI. The thread claims the marker,
+    // not this one: process exit kills it, often before it connects, and a
+    // marker written here would then skip the day's ping without sending it.
+    std::thread::spawn(move || {
+        let _ = send_ping(&marker);
     });
 }
 
-fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
+fn send_ping(marker: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let url = endpoint_url().ok_or("no telemetry URL")?;
     let device_hash = generate_device_hash();
     let version = env!("CARGO_PKG_VERSION").to_string();
@@ -159,6 +153,10 @@ fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(token) = TELEMETRY_TOKEN {
         req = req.set("X-RTK-Token", token);
+    }
+
+    if !claim_ping(marker) {
+        return Ok(());
     }
 
     // 2 second timeout — if server is down, we move on
@@ -555,7 +553,27 @@ pub fn telemetry_marker_path() -> PathBuf {
     data_dir.join(".telemetry_last_ping")
 }
 
-fn touch_marker(path: &PathBuf) {
+fn ping_due(marker: &Path) -> bool {
+    let fresh = std::fs::metadata(marker)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|elapsed| elapsed.as_secs() < PING_INTERVAL_SECS);
+    !fresh
+}
+
+/// Marks today's ping as sent, unless another process already did so after
+/// `maybe_ping` checked. Called right before the request goes out, so the
+/// marker only records a send that was actually attempted.
+fn claim_ping(marker: &Path) -> bool {
+    if !ping_due(marker) {
+        return false;
+    }
+    touch_marker(marker);
+    true
+}
+
+fn touch_marker(path: &Path) {
     let _ = std::fs::write(path, b"");
 }
 
@@ -664,6 +682,47 @@ mod tests {
     fn test_marker_path_exists() {
         let path = telemetry_marker_path();
         assert!(path.to_string_lossy().contains("rtk"));
+    }
+
+    #[test]
+    fn checking_whether_a_ping_is_due_does_not_spend_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join(".telemetry_last_ping");
+
+        assert!(ping_due(&marker));
+        assert!(
+            !marker.exists(),
+            "a command that exits before the send thread runs must leave the day's ping for the next one"
+        );
+    }
+
+    #[test]
+    fn claiming_a_ping_writes_the_marker_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join(".telemetry_last_ping");
+
+        assert!(claim_ping(&marker));
+        assert!(marker.exists());
+        assert!(!ping_due(&marker));
+        assert!(
+            !claim_ping(&marker),
+            "a second process must not send the same day's ping"
+        );
+    }
+
+    #[test]
+    fn a_marker_older_than_the_interval_is_due_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join(".telemetry_last_ping");
+        let file = std::fs::File::create(&marker).expect("create marker");
+        let stale =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(PING_INTERVAL_SECS + 60);
+        file.set_modified(stale).expect("backdate marker");
+        drop(file);
+
+        assert!(ping_due(&marker));
+        assert!(claim_ping(&marker));
+        assert!(!ping_due(&marker));
     }
 
     #[test]
