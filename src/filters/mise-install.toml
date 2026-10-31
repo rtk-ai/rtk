@@ -1,0 +1,27 @@
+[filters.mise-install]
+description = "Compact mise install/upgrade output — strip download and install status lines"
+match_command = "^mise\\s+(install|upgrade)\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^mise\\s+(trust|install|upgrade).*✓",
+  "^mise\\s+Installing\\s",
+  "^mise\\s+Downloading\\s",
+  "^mise\\s+Extracting\\s",
+  "^mise\\s+\\w+@[\\d.]+ installed",
+]
+truncate_lines_at = 150
+max_lines = 50
+on_empty = "mise: ok"
+# A failed install (a missing version, a policy refusal) is shown as mise printed it.
+raw_on_failure = true
+
+[[tests.mise-install]]
+name = "strips install noise"
+input = "mise Installing node@20.0.0\nmise Downloading node@20.0.0\nmise Extracting node@20.0.0\nmise node@20.0.0 installed\n"
+expected = "mise: ok"
+
+[[tests.mise-install]]
+name = "keeps lines it does not recognise"
+input = "mise Installing python@3.12.0\nmise WARN python@3.12.0 has no prebuilt binary, compiling from source\nmise python@3.12.0 installed"
+expected = "mise WARN python@3.12.0 has no prebuilt binary, compiling from source"
