@@ -110,7 +110,7 @@ fn filter_uv_run_output(output: &str, stdout: &str, stderr: &str, exit_code: i32
         let skip = tail.len().saturating_sub(MAX_FALLBACK_TAIL_LINES);
         tail[skip..].join("\n")
     };
-    let payload = program_output(stdout, TEE_SLUG_STDOUT);
+    let payload = filter_failed_stdout(stdout);
 
     match (payload.is_empty(), diagnostics.is_empty()) {
         (true, _) => diagnostics,
@@ -123,6 +123,7 @@ fn filter_uv_run_output(output: &str, stdout: &str, stderr: &str, exit_code: i32
 fn extract_diagnostics(clean: &str) -> String {
     let lines: Vec<&str> = clean.lines().collect();
     let mut selected: Vec<String> = Vec::new();
+    let mut traceback_was_cut = false;
     let mut i = 0;
 
     while i < lines.len() {
@@ -135,9 +136,10 @@ fn extract_diagnostics(clean: &str) -> String {
         }
 
         if is_traceback_start(trimmed) {
-            let (block, next_idx) = collect_traceback_block(&lines, i);
+            let (block, next_idx, was_cut) = collect_traceback_block(&lines, i);
             selected.extend(block);
             selected.push(String::new());
+            traceback_was_cut |= was_cut;
             i = next_idx;
             continue;
         }
@@ -153,7 +155,12 @@ fn extract_diagnostics(clean: &str) -> String {
         i += 1;
     }
 
-    selected.join("\n").trim().to_string()
+    let mut out = selected.join("\n").trim().to_string();
+    if traceback_was_cut && let Some(hint) = crate::core::tee::force_tee_hint(clean, "uv-traceback")
+    {
+        out.push_str(&format!("\n{hint}"));
+    }
+    out
 }
 
 fn filter_successful_run(stdout: &str, stderr: &str) -> String {
@@ -225,11 +232,69 @@ fn program_output(text: &str, tee_slug: &str) -> String {
     out
 }
 
-fn collect_traceback_block(lines: &[&str], start_idx: usize) -> (Vec<String>, usize) {
+fn filter_failed_stdout(text: &str) -> String {
+    if !text.contains("Traceback ") {
+        return program_output(text, TEE_SLUG_STDOUT);
+    }
+
+    let clean = strip_ansi(text);
+    let lines: Vec<&str> = clean.lines().collect();
+    let Some(last_content) = lines.iter().rposition(|line| !line.trim().is_empty()) else {
+        return String::new();
+    };
+    let lines = &lines[..=last_content];
+    let mut chunks = Vec::new();
+    let mut ordinary_lines = Vec::new();
+    let mut was_cut = false;
+    let mut idx = 0;
+
+    while idx < lines.len() {
+        if is_traceback_start(lines[idx].trim()) {
+            // A caught exception can be followed by more ordinary stdout.
+            let end = lines[idx + 1..]
+                .iter()
+                .position(|line| {
+                    line.trim().is_empty() || (!line.starts_with(' ') && !line.starts_with('\t'))
+                })
+                .map_or(lines.len(), |offset| idx + offset + 2);
+            let (block, next_idx, traceback_was_cut) = collect_traceback_block(&lines[..end], idx);
+            chunks.push(block);
+            was_cut |= traceback_was_cut;
+            idx = next_idx;
+        } else {
+            let line = truncate(lines[idx], MAX_PROGRAM_LINE_CHARS);
+            was_cut |= line != lines[idx];
+            ordinary_lines.push(chunks.len());
+            chunks.push(vec![line]);
+            idx += 1;
+        }
+    }
+
+    // Count ordinary output separately so the head/tail window cannot split a frame.
+    if ordinary_lines.len() > CAP_INVENTORY {
+        let head = CAP_INVENTORY / 2;
+        let tail = CAP_INVENTORY - head;
+        let omitted = ordinary_lines.len() - CAP_INVENTORY;
+        for &index in &ordinary_lines[head..ordinary_lines.len() - tail] {
+            chunks[index].clear();
+        }
+        chunks[ordinary_lines[head]].push(format!("... ({omitted} lines omitted)"));
+        was_cut = true;
+    }
+
+    let mut out = chunks.into_iter().flatten().collect::<Vec<_>>().join("\n");
+    if was_cut && let Some(hint) = crate::core::tee::force_tee_hint(&clean, TEE_SLUG_STDOUT) {
+        out.push_str(&format!("\n{hint}"));
+    }
+    out
+}
+
+fn collect_traceback_block(lines: &[&str], start_idx: usize) -> (Vec<String>, usize, bool) {
     let mut block = vec![lines[start_idx].trim().to_string()];
     let mut frames: Vec<Vec<String>> = Vec::new();
     let mut tail = Vec::new();
     let mut in_frame = false;
+    let mut was_cut = false;
     let mut idx = start_idx + 1;
 
     while idx < lines.len() {
@@ -248,7 +313,9 @@ fn collect_traceback_block(lines: &[&str], start_idx: usize) -> (Vec<String>, us
             }
         } else {
             in_frame = false;
-            tail.push(truncate(line, 200));
+            let shortened = truncate(line, 200);
+            was_cut |= shortened != line;
+            tail.push(shortened);
         }
 
         idx += 1;
@@ -260,12 +327,10 @@ fn collect_traceback_block(lines: &[&str], start_idx: usize) -> (Vec<String>, us
             "... +{} more frames",
             frames.len() - MAX_TRACEBACK_FRAMES
         ));
-        let full_traceback = lines[start_idx..idx].join("\n");
-        if let Some(hint) = crate::core::tee::force_tee_hint(&full_traceback, "uv-traceback") {
-            block.push(format!("  {hint}"));
-        }
+        was_cut = true;
     }
 
+    was_cut |= tail.len() > 2;
     let tail_lines = tail
         .into_iter()
         .rev()
@@ -276,7 +341,7 @@ fn collect_traceback_block(lines: &[&str], start_idx: usize) -> (Vec<String>, us
         .collect::<Vec<_>>();
     block.extend(tail_lines);
 
-    (dedupe_preserving_order(block), idx)
+    (dedupe_preserving_order(block), idx, was_cut)
 }
 
 fn collect_error_block(lines: &[&str], start_idx: usize) -> (Vec<String>, usize) {
@@ -520,6 +585,50 @@ mod tests {
         let result = filter_uv_run_output(&stderr, "", &stderr, 1);
 
         assert_eq!(result, stderr.trim_end());
+    }
+
+    #[test]
+    fn test_filter_uv_run_preserves_stdout_tracebacks_after_progress() {
+        let file = format!(r"C:\projects\{}script.py", "nested_directory\\".repeat(80));
+        let mut stdout: String = (0..120).map(|i| format!("progress: {i}\n")).collect();
+        stdout.push_str("Traceback (most recent call last):\n");
+        for i in 0..(MAX_TRACEBACK_FRAMES + 2) {
+            stdout.push_str(&format!(
+                "  File \"{file}\", line {i}, in call_{i}\n    call_next_{i}()\n    ~~~~~^~~~~~\n"
+            ));
+        }
+        stdout.push_str("RuntimeError: stopped\n");
+
+        let result = filter_uv_run_output(&stdout, &stdout, "", 3);
+
+        assert!(
+            result.contains(&format!(
+                "  File \"{file}\", line 0, in call_0\n    call_next_0()\n    ~~~~~^~~~~~"
+            )),
+            "{result}"
+        );
+        let last = MAX_TRACEBACK_FRAMES - 1;
+        assert!(result.contains(&format!("  File \"{file}\", line {last}, in call_{last}\n    call_next_{last}()\n    ~~~~~^~~~~~")), "{result}");
+        assert!(result.contains("... +2 more frames"), "{result}");
+        assert!(result.contains("RuntimeError: stopped"), "{result}");
+        assert!(result.contains("progress: 0\n"), "{result}");
+        assert!(result.contains("progress: 119\n"), "{result}");
+        assert_eq!(result.matches("progress: ").count(), CAP_INVENTORY);
+    }
+
+    #[test]
+    fn test_filter_uv_run_keeps_stdout_after_a_caught_traceback() {
+        for exception in ["MyFault: failure", "KeyboardInterrupt"] {
+            let stdout = format!(
+                "Traceback (most recent call last):\n  File \"script.py\", line 2, in run\n    fail()\n{exception}\nfirst report\nsecond report\nthird report\n"
+            );
+            let result = filter_uv_run_output(&stdout, &stdout, "", 3);
+
+            assert!(result.contains(exception), "{result}");
+            assert!(result.contains("first report"), "{result}");
+            assert!(result.contains("second report"), "{result}");
+            assert!(result.contains("third report"), "{result}");
+        }
     }
 
     #[test]
