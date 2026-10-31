@@ -47,3 +47,23 @@ handling decisions (`start`, `output`, `skip`, `pause`, `cont`, `bench`).
 
 This does not change the runner or claim a partial stream proves a complete run;
 existing incomplete-stream summary semantics remain outside this fix (#4693).
+
+## Round 2 regression captures
+
+`build_failure.jsonl` was captured with official Go 1.27.3 on Linux using
+`go test -json ./broken` (exit 1), in module `example.com/rtk-round2` with
+`go 1.27` and `broken/b.go` containing exactly:
+
+```go
+package broken
+
+func Fail() { var _ = missing }
+```
+
+Its complete summary and both package-less captures have whole-output assertions:
+recognized lifecycle/frame/build records must not leak into a raw JSON suffix.
+
+`quoted.diff` is a unified diff of `failure.jsonl` against a copy with the first
+`"Elapsed":0` replaced by `"Elapsed":0.001`. It is not a producer stream: all
+context, hunk headers and changed records must survive auto-detection verbatim,
+as must the Markdown example in the CLI regression test.

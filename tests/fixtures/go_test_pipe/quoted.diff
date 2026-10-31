@@ -1,0 +1,12 @@
+diff --git a/failure.jsonl b/failure.jsonl
+--- a/failure.jsonl
++++ b/failure.jsonl
+@@ -2,7 +2,7 @@
+ {"Time":"2026-10-21T08:56:11.443038536-07:00","Action":"run","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestPass"}
+ {"Time":"2026-10-21T08:56:11.443114281-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestPass","Output":"=== RUN   TestPass\n","OutputType":"frame"}
+ {"Time":"2026-10-21T08:56:11.443140891-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestPass","Output":"--- PASS: TestPass (0.00s)\n","OutputType":"frame"}
+-{"Time":"2026-10-21T08:56:11.443145638-07:00","Action":"pass","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestPass","Elapsed":0}
++{"Time":"2026-10-21T08:56:11.443145638-07:00","Action":"pass","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestPass","Elapsed":0.001}
+ {"Time":"2026-10-21T08:56:11.443152118-07:00","Action":"run","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestFail"}
+ {"Time":"2026-10-21T08:56:11.443154041-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestFail","Output":"=== RUN   TestFail\n","OutputType":"frame"}
+ {"Time":"2026-10-21T08:56:11.443156344-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestFail","Output":"    capture_test.go:26: expected 1, got 2\n","OutputType":"error"}

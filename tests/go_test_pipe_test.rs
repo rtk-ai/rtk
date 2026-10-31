@@ -169,15 +169,14 @@ fn captured_package_less_test2json_with_and_without_timestamps_is_summarized() {
     ] {
         assert!(!input.contains(r#""Package""#));
         for auto in [false, true] {
-            let shown = pipe_mode(input, auto);
-            assert_ne!(shown, input);
             assert_eq!(
-                shown.lines().next(),
-                Some("Go test: 3 passed, 1 failed, 1 skipped in 1 packages")
-            );
-            assert!(
-                shown.contains("capture_test.go:26: expected 1, got 2"),
-                "{shown}"
+                pipe_mode(input, auto),
+                concat!(
+                    "Go test: 3 passed, 1 failed, 1 skipped in 1 packages\n",
+                    "\nunknown (3 passed, 1 failed)\n",
+                    "  [FAIL] TestFail\n",
+                    "     capture_test.go:26: expected 1, got 2",
+                )
             );
         }
     }
@@ -261,11 +260,19 @@ fn unknown_actions_and_non_event_bytes_survive_without_disabling_events() {
     let future = "{\"Action\":\"future-action\",\"Package\":\"example.com/rtk-pipe-fixture/cases\",\"Detail\":\"keep me\"}\r\n";
     let before = "  setup diagnostic: 日本語  \r\n";
     let tail = "  {\"truncated\": ";
+    let input = format!("{before}{CORE}{future}{tail}");
+    // Explicit filtering can reduce events in arbitrary mixed input. Auto-detect
+    // cannot distinguish such a preamble from prose quoting a test stream.
+    assert_eq!(
+        pipe(&input),
+        format!("{CORE_SUMMARY}\n{before}{future}{tail}")
+    );
+    assert_eq!(pipe_mode(&input, true), input);
+    // Once a stream is identified, unknown records still survive in both modes.
     for auto in [false, true] {
-        let input = format!("{before}{CORE}{future}{tail}");
         assert_eq!(
-            pipe_mode(&input, auto),
-            format!("{CORE_SUMMARY}\n{before}{future}{tail}")
+            pipe_mode(&format!("{CORE}{future}{tail}"), auto),
+            format!("{CORE_SUMMARY}\n{future}{tail}")
         );
     }
 }
@@ -363,5 +370,39 @@ fn metadata_only_logs_with_unrelated_fields_stay_verbatim() {
                 format!("{CORE_SUMMARY}\n{record}")
             );
         }
+    }
+}
+
+#[test]
+fn auto_detection_preserves_a_diff_quoting_go_events() {
+    let input = include_str!("fixtures/go_test_pipe/quoted.diff");
+    assert_eq!(pipe_mode(input, true), input);
+}
+
+#[test]
+fn auto_detection_preserves_markdown_quoting_go_events() {
+    let input = concat!(
+        "# Investigating a flaky test\n\n",
+        "Keep this example and its diagnostic intact:\n\n```json\n",
+        "{\"Action\":\"run\",\"Package\":\"example.com/proj\",\"Test\":\"TestFlaky\"}\n",
+        "{\"Action\":\"output\",\"Package\":\"example.com/proj\",\"Test\":\"TestFlaky\",\"Output\":\"    flaky_test.go:12: got 3, want 4\\n\"}\n",
+        "{\"Action\":\"pass\",\"Package\":\"example.com/proj\",\"Test\":\"TestFlaky\"}\n",
+        "```\n\nThis is documentation, not a test run.\n",
+    );
+    assert_eq!(pipe_mode(input, true), input);
+}
+
+#[test]
+fn captured_build_failure_has_an_exact_summary_without_raw_json() {
+    let input = include_str!("fixtures/go_test_pipe/build_failure.jsonl");
+    for auto in [false, true] {
+        assert_eq!(
+            pipe_mode(input, auto),
+            concat!(
+                "Go test: 0 passed, 1 failed in 1 packages\n",
+                "\nbroken [build failed]\n",
+                "  broken/b.go:3:23: undefined: missing",
+            )
+        );
     }
 }

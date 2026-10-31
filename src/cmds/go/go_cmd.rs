@@ -361,12 +361,24 @@ fn pipe_event_line(index: usize, line: &str) -> &str {
     }
 }
 
-/// Find test-event evidence without requiring every line to be a known event.
+/// Auto-detect only a leading Go stream, not events quoted inside other text.
+/// Cold-cache downloads may precede events; arbitrary prose, Markdown fences and
+/// diff headers must instead keep the whole input on the lossless fallback path.
 /// Build events alone are not a test report and must retain their diagnostics.
 pub(crate) fn is_go_test_json(input: &str) -> bool {
-    input.lines().enumerate().any(|(index, line)| {
-        pipe_event(pipe_event_line(index, line)).is_some_and(|event| pipe_test_evidence(&event))
-    })
+    for (index, line) in input.lines().enumerate() {
+        let line = pipe_event_line(index, line);
+        if line.is_empty() || line.starts_with("go: downloading ") {
+            continue;
+        }
+        let Some(event) = pipe_event(line) else {
+            return false;
+        };
+        if pipe_test_evidence(&event) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Reduce piped test events while retaining unrelated or unrecognized records.
@@ -937,6 +949,29 @@ fn compact_package_name(package: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_detection_requires_leading_stream_evidence() {
+        let event = r#"{"Action":"pass","Package":"example.com/proj","Test":"TestOK"}"#;
+        for prefix in [
+            "",
+            "\u{feff}",
+            " \r\n",
+            "go: downloading example.com/dep v1.0.0\n",
+        ] {
+            assert!(is_go_test_json(&format!("{prefix}{event}")));
+        }
+        for prefix in [
+            "diff --git a/report b/report\n ",
+            "```json\n",
+            "# Notes\n\n",
+            "Diagnostic example:\n",
+        ] {
+            assert!(!is_go_test_json(&format!("{prefix}{event}")));
+        }
+        assert!(!is_go_test_json("go: downloading example.com/dep v1.0.0\n"));
+        assert!(!is_go_test_json(r#"{"Action":"start"}"#));
+    }
 
     #[test]
     fn test_filter_go_test_all_pass() {
