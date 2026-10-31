@@ -56,6 +56,12 @@ pub fn run(
         return Ok(());
     }
 
+    // `tail -n 0` never opens the file, so a missing path is not an error.
+    // `head -n 0` does open it, so only the tail form short-circuits.
+    if tail_lines == Some(0) {
+        return Ok(());
+    }
+
     // Read file content
     let bytes =
         fs::read(file).with_context(|| format!("Failed to read file: {}", file.display()))?;
@@ -571,6 +577,13 @@ fn main() {{
 
         assert!(matches!(baseline, Cow::Borrowed(_)));
         assert_eq!(baseline, raw);
+    }
+
+    #[test]
+    fn test_format_with_line_numbers_preserves_crlf_and_missing_final_newline() {
+        assert_eq!(format_with_line_numbers("a\r\nb"), "1 │ a\r\n2 │ b");
+        assert_eq!(format_with_line_numbers("a\n"), "1 │ a\n");
+        assert_eq!(format_with_line_numbers(""), "");
     }
 
     #[test]
