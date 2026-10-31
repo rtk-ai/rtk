@@ -3904,14 +3904,26 @@ fn run_cli() -> Result<i32> {
                 }
             }
 
-            let mut child = ChildGuard(Some(
-                core::utils::resolved_command(cmd_name.as_ref())
-                    .child_args(&cmd_args)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .context(format!("Failed to execute command: {}", cmd_name))?,
-            ));
+            let spawned = core::utils::resolved_command(cmd_name.as_ref())
+                .child_args(&cmd_args)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn();
+            let mut child = match spawned {
+                Ok(inner) => ChildGuard(Some(inner)),
+                Err(e) => {
+                    // Mirror the shell: 127 when the command does not exist,
+                    // 126 when it exists but cannot be executed (permission
+                    // denied, or a directory), 1 for anything else.
+                    let code = match e.kind() {
+                        std::io::ErrorKind::NotFound => 127,
+                        std::io::ErrorKind::PermissionDenied => 126,
+                        _ => 1,
+                    };
+                    eprintln!("rtk: Failed to execute command: {}: {}", cmd_name, e);
+                    std::process::exit(code);
+                }
+            };
 
             // Store child PID for signal handler before anything can fail
             if let Some(ref inner) = child.0 {
