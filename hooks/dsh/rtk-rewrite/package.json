@@ -1,0 +1,14 @@
+{
+  "name": "rtk-rewrite",
+  "version": "0.1.0",
+  "description": "Route DSH shell commands through rtk's rewrite engine before execution.",
+  "type": "module",
+  "main": "lib/index.js",
+  "license": "Apache-2.0",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": { "optional": true }
+  }
+}
