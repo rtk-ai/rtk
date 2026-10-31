@@ -230,11 +230,11 @@ pub(crate) fn cat_label(file: &Path) -> String {
 }
 
 fn format_with_line_numbers(content: &str) -> String {
-    let lines: Vec<&str> = content.lines().collect();
+    let lines: Vec<&str> = content.split_inclusive('\n').collect();
     let width = lines.len().to_string().len();
     let mut out = String::new();
     for (i, line) in lines.iter().enumerate() {
-        out.push_str(&format!("{:>width$} │ {}\n", i + 1, line, width = width));
+        out.push_str(&format!("{:>width$} │ {}", i + 1, line, width = width));
     }
     out
 }

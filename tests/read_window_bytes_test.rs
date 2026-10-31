@@ -175,3 +175,55 @@ fn rewritten_head_spellings_match_native_on_non_utf8_files() {
         assert_eq!(actual.stdout, native.stdout, "{command}");
     }
 }
+
+#[test]
+fn numbered_reads_preserve_line_terminators() {
+    let dir = common::tempdir();
+    let file = dir.path().join("numbered.txt");
+    for (input, expected) in [
+        ("a\r\nb\r\nc", "1 │ a\r\n2 │ b\r\n3 │ c"),
+        ("a\nb", "1 │ a\n2 │ b"),
+        ("a\r\nb\n\r\nc\r", "1 │ a\r\n2 │ b\n3 │ \r\n4 │ c\r"),
+        ("a\r\n", "1 │ a\r\n"),
+        ("\n\n", "1 │ \n2 │ \n"),
+        ("é\r\n東", "1 │ é\r\n2 │ 東"),
+        ("", ""),
+    ] {
+        fs::write(&file, input).expect("write numbered input");
+        let from_file = common::rtk_command()
+            .arg("read")
+            .arg(&file)
+            .arg("--line-numbers")
+            .output()
+            .expect("read numbered file");
+        let from_stdin = read_stdin(input.as_bytes(), &["--line-numbers"]);
+        for output in [from_file, from_stdin] {
+            assert!(output.status.success(), "{input:?}: {:?}", output.stderr);
+            assert_eq!(output.stdout, expected.as_bytes(), "{input:?}");
+        }
+    }
+}
+
+#[test]
+fn numbered_windows_preserve_line_terminators() {
+    let input = b"a\r\nb\r\nc";
+    let dir = common::tempdir();
+    let file = dir.path().join("window.txt");
+    fs::write(&file, input).expect("write window input");
+    for (flag, expected) in [
+        ("--head-lines", "1 │ a\r\n2 │ b\r\n"),
+        ("--tail-lines", "1 │ b\r\n2 │ c"),
+    ] {
+        let from_file = common::rtk_command()
+            .arg("read")
+            .arg(&file)
+            .args([flag, "2", "--line-numbers"])
+            .output()
+            .expect("read numbered file window");
+        let from_stdin = read_stdin(input, &[flag, "2", "--line-numbers"]);
+        for output in [from_file, from_stdin] {
+            assert!(output.status.success(), "{flag}: {:?}", output.stderr);
+            assert_eq!(output.stdout, expected.as_bytes(), "{flag}");
+        }
+    }
+}
