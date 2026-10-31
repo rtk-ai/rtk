@@ -1,5 +1,5 @@
 use super::constants::{CONFIG_DIR, OPENCODE_SUBDIR};
-use super::permissions::PermissionVerdict;
+use super::permissions::{JsonRead, PermissionVerdict, read_json};
 use crate::core::user_dirs;
 use crate::discover::lexer::{contains_unattestable_construct, split_for_permissions};
 use serde_json::Value;
@@ -118,10 +118,13 @@ pub(crate) fn check_command_with_opencode_rules(cmd: &str, rules: &[Rule]) -> Pe
     PermissionVerdict::Default
 }
 
-/// The rules OpenCode resolves for `agent`, or `None` when a legacy key means a
-/// different rule to 1.x than to 2.x (see [`legacy_keys_depend_on_the_generation`]).
+/// The rules OpenCode resolves for `agent`, or `None` when RTK cannot know
+/// them: a config it cannot read or parse (a comment in a `.jsonc`, say) may
+/// hold an ask the rewrite would silence, and a legacy key can mean a
+/// different rule to 1.x than to 2.x (see
+/// [`legacy_keys_depend_on_the_generation`]).
 pub(crate) fn load_judgeable_opencode_rules(agent: Option<&str>) -> Option<Vec<Rule>> {
-    let configs = opencode_configs();
+    let configs = opencode_configs()?;
     (!legacy_keys_depend_on_the_generation(&configs, agent))
         .then(|| rules_from_configs(&configs, agent))
 }
@@ -281,22 +284,31 @@ fn append_rules(permission: &Value, rules: &mut Vec<Rule>) {
     }
 }
 
-fn opencode_configs() -> Vec<Value> {
-    let mut configs = Vec::new();
+/// The configs RTK reads for OpenCode — `OPENCODE_CONFIG` or the global one,
+/// then the nearest project's, each the first of [`CONFIG_NAMES`] present —
+/// or `None` when one of them is a file RTK cannot read or parse.
+fn opencode_configs() -> Option<Vec<Value>> {
+    let mut found = Vec::new();
 
     if let Some(path) = user_dirs::env_path("OPENCODE_CONFIG") {
-        if let Some(v) = read_config(Path::new(&path)) {
-            configs.push(v);
-        }
+        found.push(read_json(Path::new(&path)));
     } else if let Some(dir) = global_opencode_dir() {
-        configs.extend(read_first_config(&dir));
+        found.push(read_first_config(&dir));
     }
 
     if let Some(root) = project_root_with_config() {
-        configs.extend(read_first_config(&root));
+        found.push(read_first_config(&root));
     }
 
-    configs
+    let mut configs = Vec::new();
+    for read in found {
+        match read {
+            JsonRead::Parsed(config) => configs.push(config),
+            JsonRead::Missing => {}
+            JsonRead::Error => return None,
+        }
+    }
+    Some(configs)
 }
 
 fn global_opencode_dir() -> Option<PathBuf> {
@@ -384,24 +396,13 @@ fn project_root_with_config() -> Option<PathBuf> {
 
 const CONFIG_NAMES: [&str; 2] = ["opencode.json", "opencode.jsonc"];
 
-fn read_first_config(dir: &Path) -> Option<Value> {
+/// The first config `dir` holds, in [`CONFIG_NAMES`] order.
+fn read_first_config(dir: &Path) -> JsonRead {
     CONFIG_NAMES
         .iter()
-        .find_map(|name| read_config(&dir.join(name)))
-}
-
-fn read_config(path: &Path) -> Option<Value> {
-    let content = std::fs::read_to_string(path).ok()?;
-    match crate::core::utils::from_json_str::<Value>(&content) {
-        Ok(v) => Some(v),
-        Err(_) => {
-            eprintln!(
-                "[rtk] warning: failed to parse permissions from {}",
-                path.display()
-            );
-            None
-        }
-    }
+        .map(|name| read_json(&dir.join(name)))
+        .find(|read| !matches!(read, JsonRead::Missing))
+        .unwrap_or(JsonRead::Missing)
 }
 
 /// A `bash` rule, for tests.
@@ -768,7 +769,10 @@ mod tests {
             write_json(&project.join("opencode.json"), config);
             test_isolation::with_root(&tmp.path().join("home"), || {
                 let _entered = test_isolation::enter(&project);
-                legacy_keys_depend_on_the_generation(&opencode_configs(), agent)
+                legacy_keys_depend_on_the_generation(
+                    &opencode_configs().expect("configs rtk can read"),
+                    agent,
+                )
             })
         };
         assert!(flagged(
@@ -990,6 +994,37 @@ mod tests {
             let _entered = test_isolation::enter(&project);
             let rules = load_judgeable_opencode_rules(None).expect("rules rtk can judge");
             assert_eq!(rules, vec![rule("git *", Action::Allow)]);
+        });
+    }
+
+    /// OpenCode reads comments in its config and RTK does not, so a commented
+    /// config may hold an ask a rewrite would silence: RTK judges no rewrite
+    /// under it, rather than reading on as if the file were not there.
+    #[test]
+    fn a_config_rtk_cannot_parse_leaves_no_rules_to_judge() {
+        let tmp = test_isolation::tempdir();
+        let project = tmp.path().join("project");
+        write_json(
+            &project.join("opencode.jsonc"),
+            "{\n  // ask before any push\n  \"permission\": { \"bash\": { \"git push *\": \"ask\" } }\n}",
+        );
+
+        test_isolation::with_root(&tmp.path().join("home"), || {
+            let _entered = test_isolation::enter(&project);
+            assert_eq!(load_judgeable_opencode_rules(None), None);
+        });
+
+        // Control: the same config without the comment is read.
+        write_json(
+            &project.join("opencode.jsonc"),
+            r#"{ "permission": { "bash": { "git push *": "ask" } } }"#,
+        );
+        test_isolation::with_root(&tmp.path().join("home"), || {
+            let _entered = test_isolation::enter(&project);
+            assert_eq!(
+                load_judgeable_opencode_rules(None),
+                Some(vec![rule("git push *", Action::Ask)])
+            );
         });
     }
 
