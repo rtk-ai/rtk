@@ -82,6 +82,8 @@ The question is only asked when the daemon can actually run: the `rtk-proxy` bin
 
 It does **not** do the redirection — that is the `settings.json` entry above. The hook is a *keep-alive*: when a session whose `ANTHROPIC_BASE_URL` points at a loopback address finds nothing listening there, it runs `rtk llm-proxy start`.
 
+If another local gateway already listens at that address, the hook leaves it alone and stays silent, even if its `/health` response does not identify as RTK. After starting a daemon, the hook still verifies the RTK identity before reporting that it started successfully.
+
 It reports through `systemMessage`, which is user-visible and never enters model context — RTK spends no tokens configuring itself. Every failure path stays silent rather than disrupting the session.
 
 This route only exists on harnesses that *have* a SessionStart hook, which is why the next one matters.

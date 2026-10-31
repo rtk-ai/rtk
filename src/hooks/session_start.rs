@@ -8,6 +8,7 @@
 //! returns silence rather than disrupting the session.
 
 use std::io::Write;
+use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -26,6 +27,7 @@ pub fn ensure_proxy() -> Option<String> {
     ensure_proxy_impl(
         &url,
         |addr| probe(addr, Duration::from_millis(150)),
+        |addr| is_listening(addr, Duration::from_millis(150)),
         spawn_start,
         Duration::from_millis(700),
     )
@@ -34,11 +36,14 @@ pub fn ensure_proxy() -> Option<String> {
 fn ensure_proxy_impl(
     url: &str,
     probe: impl Fn(&str) -> bool,
+    is_listening: impl Fn(&str) -> bool,
     spawn: impl FnOnce(&str) -> anyhow::Result<()>,
     wait: Duration,
 ) -> Option<String> {
     let addr = loopback_hostport(url)?;
-    if probe(&addr) {
+    // A different gateway owns its port too: a failed identity check does
+    // not mean the address is available for an RTK daemon to bind.
+    if probe(&addr) || is_listening(&addr) {
         return None;
     }
     match spawn(&addr) {
@@ -86,6 +91,12 @@ fn probe(addr: &str, timeout: Duration) -> bool {
     crate::llm_proxy::is_rtk_proxy_at(addr, timeout)
 }
 
+fn is_listening(addr: &str, timeout: Duration) -> bool {
+    addr.parse()
+        .ok()
+        .is_some_and(|addr| TcpStream::connect_timeout(&addr, timeout).is_ok())
+}
+
 fn spawn_start(addr: &str) -> anyhow::Result<()> {
     let exe = std::env::current_exe().context("resolve the rtk binary path")?;
     std::process::Command::new(exe)
@@ -127,6 +138,7 @@ mod tests {
         let out = ensure_proxy_impl(
             "https://api.anthropic.com",
             |_| panic!("must not probe a remote url"),
+            |_| panic!("must not connect to a remote url"),
             |_| panic!("must not spawn for a remote url"),
             Duration::ZERO,
         );
@@ -138,10 +150,58 @@ mod tests {
         let out = ensure_proxy_impl(
             "http://127.0.0.1:8080",
             |_| true,
+            |_| panic!("the health response already confirms a listener"),
             |_| panic!("must not spawn when the daemon answers"),
             Duration::ZERO,
         );
         assert_eq!(out, None);
+    }
+
+    #[test]
+    fn occupied_port_is_silent_even_without_an_rtk_health_response() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind gateway");
+        let addr = listener.local_addr().expect("gateway address");
+        let out = ensure_proxy_impl(
+            &format!("http://{addr}"),
+            |addr| probe(addr, Duration::from_millis(150)),
+            |addr| is_listening(addr, Duration::from_millis(150)),
+            |_| panic!("must not start a proxy on an occupied port"),
+            Duration::ZERO,
+        );
+        assert_eq!(out, None);
+    }
+
+    #[test]
+    fn non_rtk_http_server_is_silent_and_never_spawned() {
+        for status in ["200 OK", "401 Unauthorized", "404 Not Found"] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind gateway");
+            let addr = listener.local_addr().expect("gateway address");
+            let server = listener.try_clone().expect("clone gateway listener");
+            let responder = std::thread::spawn(move || {
+                use std::io::Read;
+
+                let (mut stream, _) = server.accept().expect("accept health check");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("bound request read");
+                let read = stream.read(&mut [0; 1024]).expect("read health check");
+                assert!(read > 0, "health check request must not be empty");
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+                )
+                .expect("answer health check");
+            });
+            let out = ensure_proxy_impl(
+                &format!("http://{addr}"),
+                |addr| probe(addr, Duration::from_secs(2)),
+                |addr| is_listening(addr, Duration::from_secs(2)),
+                |_| panic!("must not start a proxy over a gateway returning {status}"),
+                Duration::ZERO,
+            );
+            responder.join().expect("gateway responder");
+            assert_eq!(out, None, "gateway returning {status}");
+        }
     }
 
     #[test]
@@ -153,6 +213,7 @@ mod tests {
                 calls.set(calls.get() + 1);
                 calls.get() > 1
             },
+            |_| false,
             |_| Ok(()),
             Duration::from_millis(200),
         );
@@ -166,6 +227,7 @@ mod tests {
         let spawned_on = std::cell::RefCell::new(String::new());
         ensure_proxy_impl(
             "http://localhost:8580/v1",
+            |_| false,
             |_| false,
             |addr| {
                 *spawned_on.borrow_mut() = addr.to_string();
@@ -181,6 +243,7 @@ mod tests {
         let out = ensure_proxy_impl(
             "http://127.0.0.1:8080",
             |_| false,
+            |_| false,
             |_| Ok(()),
             Duration::ZERO,
         );
@@ -192,6 +255,7 @@ mod tests {
     fn failed_spawn_names_the_fix() {
         let out = ensure_proxy_impl(
             "http://127.0.0.1:8080",
+            |_| false,
             |_| false,
             |_| anyhow::bail!("binary missing"),
             Duration::ZERO,
