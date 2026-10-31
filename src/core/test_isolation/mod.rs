@@ -16,6 +16,29 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
 
+/// Run `f` with the process umask set to `mask`, and put the old one back
+/// after. The umask belongs to the whole process, so every test that changes it
+/// goes through here: two of them interleaving would otherwise leave it at
+/// whichever was restored last.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub fn with_umask<R>(mask: u32, f: impl FnOnce() -> R) -> R {
+    static UMASK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    struct Restore(libc::mode_t);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            // nosemgrep: unsafe-block
+            unsafe { libc::umask(self.0) };
+        }
+    }
+    let _lock = UMASK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // nosemgrep: unsafe-block
+    let _restore = Restore(unsafe { libc::umask(mask as libc::mode_t) });
+    f()
+}
+
 /// This thread's stand-in for the user's directories: the directory a test
 /// gave [`with_root`], or else `home` in the process's scratch directory.
 ///
@@ -763,4 +786,32 @@ fn entered_restores_after_a_panic() {
         before,
         "a panic must not leave the thread in the test directory"
     );
+}
+
+/// Two tests that change the umask at once must not see each other's.
+#[test]
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn with_umask_serialises_its_callers() {
+    fn current_umask() -> u32 {
+        // nosemgrep: unsafe-block
+        let seen = unsafe { libc::umask(0) };
+        // nosemgrep: unsafe-block
+        unsafe { libc::umask(seen) };
+        seen as u32
+    }
+    let seen: Vec<u32> = [0o022, 0o000]
+        .map(|mask| {
+            std::thread::spawn(move || {
+                with_umask(mask, || {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    current_umask()
+                })
+            })
+        })
+        .into_iter()
+        .map(|handle| handle.join().expect("the caller should not panic"))
+        .collect();
+
+    assert_eq!(seen, [0o022, 0o000], "each caller sees its own umask");
 }
