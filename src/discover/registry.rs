@@ -2096,6 +2096,22 @@ fn rewrite_command_part(rule: &RtkRule, cmd_part: &str) -> Option<String> {
         }
     }
 
+    // #1627: BSD ls metadata flags exist to show file flags, xattrs, or ACLs;
+    // `rtk ls` has no columns for them, so leave these invocations native.
+    if rule.rtk_cmd == "rtk ls" {
+        let words = shell_split(cmd_part);
+        if words.iter().skip(1).any(|arg| {
+            arg == "-O"
+                || arg == "-@"
+                || arg == "-e"
+                || (arg.starts_with('-')
+                    && !arg.starts_with("--")
+                    && arg.chars().skip(1).any(|c| matches!(c, 'O' | '@' | 'e')))
+        }) {
+            return None;
+        }
+    }
+
     // For the Composer-resolved php tools, normalize the leading invocation
     // (php wrapper + ini flags, ./, vendor/bin, composer bin-dir) exactly as
     // classify_command does, so a small canonical prefix list matches every
@@ -3943,6 +3959,22 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("cat src/main.rs", &[]),
             Some("rtk read src/main.rs".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_ls_metadata_flags_stay_native() {
+        for cmd in [
+            "ls -O src/",
+            "ls -@ src/",
+            "ls -e src/",
+            "ls -lO src/",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes("ls -la src/", &[]),
+            Some("rtk ls -la src/".into())
         );
     }
 
