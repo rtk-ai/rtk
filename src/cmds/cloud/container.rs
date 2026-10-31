@@ -23,12 +23,14 @@ pub enum ContainerCmd {
     KubectlLogs,
 }
 
-pub fn run(cmd: ContainerCmd, args: &[String], verbose: u8) -> Result<i32> {
+/// `global` holds the docker options typed before the subcommand (`-H`, `--context`),
+/// already in docker's spelling, and is ignored by the kubectl variants.
+pub fn run(cmd: ContainerCmd, global: &[String], args: &[String], verbose: u8) -> Result<i32> {
     match cmd {
-        ContainerCmd::DockerPs => docker_ps(verbose),
-        ContainerCmd::DockerPsAll => docker_ps_all(verbose),
-        ContainerCmd::DockerImages => docker_images(verbose),
-        ContainerCmd::DockerLogs => docker_logs(args, verbose),
+        ContainerCmd::DockerPs => docker_ps(global, verbose),
+        ContainerCmd::DockerPsAll => docker_ps_all(global, verbose),
+        ContainerCmd::DockerImages => docker_images(global, verbose),
+        ContainerCmd::DockerLogs => docker_logs(global, args, verbose),
         ContainerCmd::KubectlPods => k8s_pods("kubectl", args, verbose),
         ContainerCmd::KubectlServices => k8s_services("kubectl", args, verbose),
         ContainerCmd::KubectlLogs => k8s_logs("kubectl", args, verbose),
@@ -56,11 +58,46 @@ where
     )
 }
 
-fn docker_ps(_verbose: u8) -> Result<i32> {
+/// `docker` with the global options the user typed before the subcommand.
+fn docker_cmd(global: &[String]) -> Command {
+    let mut cmd = resolved_command("docker");
+    cmd.args(global);
+    cmd
+}
+
+/// Docker's spelling of `rtk docker -H <host> --context <name>`, in the order docker takes them.
+pub fn docker_global_args(host: Option<&str>, context: Option<&str>) -> Vec<String> {
+    let mut global = Vec::new();
+    for (flag, value) in [("--host", host), ("--context", context)] {
+        if let Some(value) = value {
+            global.extend([flag.to_string(), value.to_string()]);
+        }
+    }
+    global
+}
+
+/// Everything docker takes before a compose subcommand: the docker options, `compose`, then
+/// the compose options (`-f` keeps its order, since compose merges files in sequence).
+pub fn compose_global_args(
+    docker_global: &[String],
+    files: &[String],
+    project_name: Option<&str>,
+) -> Vec<String> {
+    let mut global = docker_global.to_vec();
+    global.push("compose".to_string());
+    for file in files {
+        global.extend(["--file".to_string(), file.clone()]);
+    }
+    if let Some(name) = project_name {
+        global.extend(["--project-name".to_string(), name.to_string()]);
+    }
+    global
+}
+
+fn docker_ps(global: &[String], _verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let base =
-        exec_capture(resolved_command("docker").args(["ps"])).context("Failed to run docker ps")?;
+    let base = exec_capture(docker_cmd(global).args(["ps"])).context("Failed to run docker ps")?;
     if !base.success() {
         eprint!("{}", base.stderr);
         print!("{}", base.stdout);
@@ -69,7 +106,7 @@ fn docker_ps(_verbose: u8) -> Result<i32> {
     }
     let raw = base.stdout;
 
-    let stdout = match exec_capture(resolved_command("docker").args([
+    let stdout = match exec_capture(docker_cmd(global).args([
         "ps",
         "--format",
         "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}",
@@ -112,10 +149,10 @@ fn docker_ps(_verbose: u8) -> Result<i32> {
     Ok(0)
 }
 
-fn docker_ps_all(_verbose: u8) -> Result<i32> {
+fn docker_ps_all(global: &[String], _verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let base = exec_capture(resolved_command("docker").args(["ps", "-a"]))
+    let base = exec_capture(docker_cmd(global).args(["ps", "-a"]))
         .context("Failed to run docker ps -a")?;
     if !base.success() {
         eprint!("{}", base.stderr);
@@ -130,7 +167,7 @@ fn docker_ps_all(_verbose: u8) -> Result<i32> {
     }
     let raw = base.stdout;
 
-    let stdout = match exec_capture(resolved_command("docker").args([
+    let stdout = match exec_capture(docker_cmd(global).args([
         "ps",
         "-a",
         "--format",
@@ -237,11 +274,11 @@ fn format_container_line_from_parts(parts: &[&str], with_ports: bool) -> Option<
     ))
 }
 
-fn docker_images(_verbose: u8) -> Result<i32> {
+fn docker_images(global: &[String], _verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let base = exec_capture(resolved_command("docker").args(["images"]))
-        .context("Failed to run docker images")?;
+    let base =
+        exec_capture(docker_cmd(global).args(["images"])).context("Failed to run docker images")?;
     if !base.success() {
         eprint!("{}", base.stderr);
         print!("{}", base.stdout);
@@ -255,7 +292,7 @@ fn docker_images(_verbose: u8) -> Result<i32> {
     }
     let raw = base.stdout;
 
-    let stdout = match exec_capture(resolved_command("docker").args([
+    let stdout = match exec_capture(docker_cmd(global).args([
         "images",
         "--format",
         "{{.Repository}}:{{.Tag}}\t{{.Size}}",
@@ -336,7 +373,7 @@ fn docker_images(_verbose: u8) -> Result<i32> {
     Ok(0)
 }
 
-fn docker_logs(args: &[String], _verbose: u8) -> Result<i32> {
+fn docker_logs(global: &[String], args: &[String], _verbose: u8) -> Result<i32> {
     let container = args.first().map(|s| s.as_str()).unwrap_or("");
     if container.is_empty() {
         println!("Usage: rtk docker logs <container>");
@@ -344,7 +381,7 @@ fn docker_logs(args: &[String], _verbose: u8) -> Result<i32> {
     }
 
     let argv = ["logs", "--tail", "100", container];
-    let mut cmd = resolved_command("docker");
+    let mut cmd = docker_cmd(global);
     cmd.args(argv);
 
     let label = display_args(&argv);
@@ -697,19 +734,29 @@ fn compact_ports(ports: &str) -> String {
     }
 }
 
-pub fn run_docker_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
-    crate::core::runner::run_passthrough("docker", args, verbose)
+pub fn run_docker_passthrough(global: &[String], args: &[OsString], verbose: u8) -> Result<i32> {
+    crate::core::runner::run_passthrough("docker", &prefixed(global, args), verbose)
 }
 
-/// Run `docker compose ps` (or `docker compose ps -a`) with compact output
-pub fn run_compose_ps(all: bool, verbose: u8) -> Result<i32> {
+/// `global` followed by `args`, as the argv docker receives.
+fn prefixed(global: &[String], args: &[OsString]) -> Vec<OsString> {
+    global
+        .iter()
+        .map(OsString::from)
+        .chain(args.iter().cloned())
+        .collect()
+}
+
+/// Run `docker compose ps` (or `docker compose ps -a`) with compact output.
+/// `global` is everything docker takes before the compose subcommand (see `compose_global_args`).
+pub fn run_compose_ps(global: &[String], all: bool, verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let mut raw_args: Vec<&str> = vec!["compose", "ps"];
+    let mut raw_args: Vec<&str> = vec!["ps"];
     if all {
         raw_args.push("-a");
     }
-    let raw_result = exec_capture(resolved_command("docker").args(&raw_args))
+    let raw_result = exec_capture(docker_cmd(global).args(&raw_args))
         .context("Failed to run docker compose ps")?;
 
     if !raw_result.success() {
@@ -718,12 +765,12 @@ pub fn run_compose_ps(all: bool, verbose: u8) -> Result<i32> {
     }
     let raw = raw_result.stdout;
 
-    let mut format_args: Vec<&str> = vec!["compose", "ps"];
+    let mut format_args: Vec<&str> = vec!["ps"];
     if all {
         format_args.push("-a");
     }
     format_args.extend(["--format", "{{.Name}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"]);
-    let result = exec_capture(resolved_command("docker").args(&format_args))
+    let result = exec_capture(docker_cmd(global).args(&format_args))
         .context("Failed to run docker compose ps --format")?;
 
     if !result.success() {
@@ -753,14 +800,19 @@ pub fn run_compose_ps(all: bool, verbose: u8) -> Result<i32> {
     Ok(0)
 }
 
-pub fn run_compose_logs(service: Option<&str>, tail: u32, verbose: u8) -> Result<i32> {
+pub fn run_compose_logs(
+    global: &[String],
+    service: Option<&str>,
+    tail: u32,
+    verbose: u8,
+) -> Result<i32> {
     let tail_str = tail.to_string();
     let argv: Vec<&str> = ["compose", "logs", "--tail", &tail_str]
         .into_iter()
         .chain(service)
         .collect();
-    let mut cmd = resolved_command("docker");
-    cmd.args(&argv);
+    let mut cmd = docker_cmd(global);
+    cmd.args(&argv[1..]);
 
     runner::run_filtered(
         cmd,
@@ -776,10 +828,10 @@ pub fn run_compose_logs(service: Option<&str>, tail: u32, verbose: u8) -> Result
     )
 }
 
-pub fn run_compose_build(service: Option<&str>, verbose: u8) -> Result<i32> {
+pub fn run_compose_build(global: &[String], service: Option<&str>, verbose: u8) -> Result<i32> {
     let argv: Vec<&str> = ["compose", "build"].into_iter().chain(service).collect();
-    let mut cmd = resolved_command("docker");
-    cmd.args(&argv);
+    let mut cmd = docker_cmd(global);
+    cmd.args(&argv[1..]);
 
     runner::run_filtered(
         cmd,
@@ -795,10 +847,8 @@ pub fn run_compose_build(service: Option<&str>, verbose: u8) -> Result<i32> {
     )
 }
 
-pub fn run_compose_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
-    let mut combined = vec![OsString::from("compose")];
-    combined.extend_from_slice(args);
-    crate::core::runner::run_passthrough("docker", &combined, verbose)
+pub fn run_compose_passthrough(global: &[String], args: &[OsString], verbose: u8) -> Result<i32> {
+    crate::core::runner::run_passthrough("docker", &prefixed(global, args), verbose)
 }
 
 pub fn run_kubectl_get(args: &[String], verbose: u8) -> Result<i32> {
@@ -969,6 +1019,50 @@ api-1  | Connected to database";
         assert!(
             !out.is_empty(),
             "should produce output even for empty input"
+        );
+    }
+
+    // ── docker global options (#4758) ──────
+
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_docker_global_args() {
+        assert!(docker_global_args(None, None).is_empty());
+        assert_eq!(
+            docker_global_args(Some("tcp://h:2375"), Some("c")),
+            strings(&["--host", "tcp://h:2375", "--context", "c"])
+        );
+    }
+
+    #[test]
+    fn test_compose_global_args_keep_file_order() {
+        let docker = docker_global_args(None, Some("c"));
+        assert_eq!(
+            compose_global_args(&docker, &strings(&["b.yml", "a.yml"]), Some("p")),
+            strings(&[
+                "--context",
+                "c",
+                "compose",
+                "--file",
+                "b.yml",
+                "--file",
+                "a.yml",
+                "--project-name",
+                "p"
+            ])
+        );
+        assert_eq!(compose_global_args(&[], &[], None), strings(&["compose"]));
+    }
+
+    #[test]
+    fn test_prefixed_puts_global_before_args() {
+        let args = [OsString::from("ps"), OsString::from("-q")];
+        assert_eq!(
+            prefixed(&strings(&["--context", "c"]), &args),
+            ["--context", "c", "ps", "-q"].map(OsString::from)
         );
     }
 

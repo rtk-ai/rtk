@@ -5624,6 +5624,70 @@ mod tests {
         );
     }
 
+    // #4758: a value-taking global option before the subcommand must not hide it.
+    // `rtk docker` takes the same options (`Commands::Docker`, `DockerCommands::Compose`)
+    // and forwards them to docker, so the original text is re-emitted behind `rtk docker`.
+    #[test]
+    fn test_rewrite_docker_global_options_before_subcommand() {
+        for (cmd, expected) in [
+            (
+                "docker compose -f x.yml ps",
+                "rtk docker compose -f x.yml ps",
+            ),
+            (
+                "docker compose --file=x.yml ps -a",
+                "rtk docker compose --file=x.yml ps -a",
+            ),
+            (
+                "docker compose -p p logs --tail 5 web",
+                "rtk docker compose -p p logs --tail 5 web",
+            ),
+            (
+                "docker compose --project-name p ps",
+                "rtk docker compose --project-name p ps",
+            ),
+            (
+                "docker compose --project-name=p -f a.yml -f b.yml build",
+                "rtk docker compose --project-name=p -f a.yml -f b.yml build",
+            ),
+            ("docker -H tcp://h:2375 ps", "rtk docker -H tcp://h:2375 ps"),
+            (
+                "docker --host=tcp://h:2375 images",
+                "rtk docker --host=tcp://h:2375 images",
+            ),
+            ("docker --context c ps", "rtk docker --context c ps"),
+            (
+                "docker --context=c logs web",
+                "rtk docker --context=c logs web",
+            ),
+            (
+                "docker --context c compose -f x.yml ps",
+                "rtk docker --context c compose -f x.yml ps",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "{cmd}"
+            );
+        }
+    }
+
+    // The options only unlock the subcommands the rule already routes.
+    #[test]
+    fn test_rewrite_docker_global_options_unsupported_subcommand_skipped() {
+        for cmd in [
+            "docker compose -f x.yml up -d",
+            "docker compose -p p down",
+            "docker --context c compose up",
+            "docker -H tcp://h:2375 inspect web",
+            "docker --context c",
+            "docker -H",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+    }
+
     // --- AWS / psql (PR #216) ---
 
     #[test]

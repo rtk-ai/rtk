@@ -408,6 +408,14 @@ enum Commands {
 
     /// Docker commands with compact output
     Docker {
+        /// Daemon to connect to (like docker -H)
+        #[arg(short = 'H', long = "host")]
+        host: Option<String>,
+
+        /// Docker context to use (like docker --context)
+        #[arg(long)]
+        context: Option<String>,
+
         #[command(subcommand)]
         command: DockerCommands,
     },
@@ -1452,6 +1460,14 @@ enum DockerCommands {
     Logs { container: String },
     /// Docker Compose commands with compact output
     Compose {
+        /// Compose file (like docker compose -f, can be repeated)
+        #[arg(short = 'f', long = "file", action = clap::ArgAction::Append)]
+        file: Vec<String>,
+
+        /// Compose project name (like docker compose -p)
+        #[arg(short = 'p', long = "project-name")]
+        project_name: Option<String>,
+
         #[command(subcommand)]
         command: ComposeCommands,
     },
@@ -2897,35 +2913,63 @@ fn run_cli() -> Result<i32> {
             DotnetCommands::Other(args) => dotnet_cmd::run_passthrough(&args, cli.verbose)?,
         },
 
-        Commands::Docker { command } => match command {
-            DockerCommands::Ps { all } => {
-                let cmd = if all {
-                    container::ContainerCmd::DockerPsAll
-                } else {
-                    container::ContainerCmd::DockerPs
-                };
-                container::run(cmd, &[], cli.verbose)?
-            }
-            DockerCommands::Images => {
-                container::run(container::ContainerCmd::DockerImages, &[], cli.verbose)?
-            }
-            DockerCommands::Logs { container: c } => {
-                container::run(container::ContainerCmd::DockerLogs, &[c], cli.verbose)?
-            }
-            DockerCommands::Compose { command: compose } => match compose {
-                ComposeCommands::Ps { all } => container::run_compose_ps(all, cli.verbose)?,
-                ComposeCommands::Logs { service, tail } => {
-                    container::run_compose_logs(service.as_deref(), tail, cli.verbose)?
+        Commands::Docker {
+            host,
+            context,
+            command,
+        } => {
+            let global = container::docker_global_args(host.as_deref(), context.as_deref());
+            match command {
+                DockerCommands::Ps { all } => {
+                    let cmd = if all {
+                        container::ContainerCmd::DockerPsAll
+                    } else {
+                        container::ContainerCmd::DockerPs
+                    };
+                    container::run(cmd, &global, &[], cli.verbose)?
                 }
-                ComposeCommands::Build { service } => {
-                    container::run_compose_build(service.as_deref(), cli.verbose)?
+                DockerCommands::Images => container::run(
+                    container::ContainerCmd::DockerImages,
+                    &global,
+                    &[],
+                    cli.verbose,
+                )?,
+                DockerCommands::Logs { container: c } => container::run(
+                    container::ContainerCmd::DockerLogs,
+                    &global,
+                    &[c],
+                    cli.verbose,
+                )?,
+                DockerCommands::Compose {
+                    file,
+                    project_name,
+                    command: compose,
+                } => {
+                    let global =
+                        container::compose_global_args(&global, &file, project_name.as_deref());
+                    match compose {
+                        ComposeCommands::Ps { all } => {
+                            container::run_compose_ps(&global, all, cli.verbose)?
+                        }
+                        ComposeCommands::Logs { service, tail } => container::run_compose_logs(
+                            &global,
+                            service.as_deref(),
+                            tail,
+                            cli.verbose,
+                        )?,
+                        ComposeCommands::Build { service } => {
+                            container::run_compose_build(&global, service.as_deref(), cli.verbose)?
+                        }
+                        ComposeCommands::Other(args) => {
+                            container::run_compose_passthrough(&global, &args, cli.verbose)?
+                        }
+                    }
                 }
-                ComposeCommands::Other(args) => {
-                    container::run_compose_passthrough(&args, cli.verbose)?
+                DockerCommands::Other(args) => {
+                    container::run_docker_passthrough(&global, &args, cli.verbose)?
                 }
-            },
-            DockerCommands::Other(args) => container::run_docker_passthrough(&args, cli.verbose)?,
-        },
+            }
+        }
 
         Commands::Kubectl { command } => match command {
             KubectlCommands::Get { args } => container::run_kubectl_get(&args, cli.verbose)?,
@@ -2934,9 +2978,12 @@ fn run_cli() -> Result<i32> {
                 all,
                 extra,
             } => match build_k8s_namespace_args("pods", namespace, all, extra) {
-                K8sAlias::Filtered(args) => {
-                    container::run(container::ContainerCmd::KubectlPods, &args, cli.verbose)?
-                }
+                K8sAlias::Filtered(args) => container::run(
+                    container::ContainerCmd::KubectlPods,
+                    &[],
+                    &args,
+                    cli.verbose,
+                )?,
                 K8sAlias::Raw(argv) => {
                     core::runner::run_passthrough("kubectl", &argv, cli.verbose)?
                 }
@@ -2946,16 +2993,24 @@ fn run_cli() -> Result<i32> {
                 all,
                 extra,
             } => match build_k8s_namespace_args("services", namespace, all, extra) {
-                K8sAlias::Filtered(args) => {
-                    container::run(container::ContainerCmd::KubectlServices, &args, cli.verbose)?
-                }
+                K8sAlias::Filtered(args) => container::run(
+                    container::ContainerCmd::KubectlServices,
+                    &[],
+                    &args,
+                    cli.verbose,
+                )?,
                 K8sAlias::Raw(argv) => {
                     core::runner::run_passthrough("kubectl", &argv, cli.verbose)?
                 }
             },
             KubectlCommands::Logs { pod, container: c } => {
                 let args = build_k8s_logs_args(pod, c);
-                container::run(container::ContainerCmd::KubectlLogs, &args, cli.verbose)?
+                container::run(
+                    container::ContainerCmd::KubectlLogs,
+                    &[],
+                    &args,
+                    cli.verbose,
+                )?
             }
             KubectlCommands::Other(args) => container::run_kubectl_passthrough(&args, cli.verbose)?,
         },
@@ -4338,6 +4393,33 @@ mod tests {
     fn test_try_parse_valid_git_status() {
         let result = try_parse_cli_from(["rtk", "git", "status"]);
         assert!(result.is_ok(), "git status should parse successfully");
+    }
+
+    // #4758: the options the docker rewrite rule lets through must parse here, or the
+    // rewritten command would fall back to raw execution instead of being filtered.
+    #[test]
+    fn test_try_parse_docker_global_options() {
+        for argv in [
+            &["docker", "-H", "tcp://h:2375", "ps"][..],
+            &["docker", "--host=tcp://h:2375", "images"],
+            &["docker", "--context", "c", "logs", "web"],
+            &["docker", "--context=c", "compose", "-f", "x.yml", "ps"],
+            &[
+                "docker",
+                "compose",
+                "--file=a.yml",
+                "-f",
+                "b.yml",
+                "-p",
+                "p",
+                "ps",
+            ],
+            &["docker", "compose", "--project-name=p", "logs", "web"],
+            &["docker", "compose", "-p", "p", "build"],
+        ] {
+            let full = std::iter::once("rtk").chain(argv.iter().copied());
+            assert!(try_parse_cli_from(full).is_ok(), "{argv:?}");
+        }
     }
 
     #[test]
