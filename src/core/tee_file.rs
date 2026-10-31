@@ -188,7 +188,7 @@ pub(crate) fn write_named_tee_file(
     Some(filepath)
 }
 
-fn display_path(path: &Path) -> String {
+pub(crate) fn display_path(path: &Path) -> String {
     if let Some(home) = user_dirs::home()
         && let Ok(relative) = path.strip_prefix(&home)
     {

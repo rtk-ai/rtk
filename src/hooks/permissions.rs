@@ -432,7 +432,7 @@ fn load_permission_rules_tracking(
         let Ok(json) = crate::core::utils::from_json_str::<Value>(&content) else {
             eprintln!(
                 "[rtk] warning: failed to parse permissions from {}",
-                path.display()
+                crate::core::tee_file::display_path(path)
             );
             ask_rules.push("*".to_string());
             scan.every_file_read = false;
@@ -470,6 +470,65 @@ fn append_bash_rules(rules_value: Option<&Value>, target: &mut Vec<String>) {
     }
 }
 
+/// Print a warning for each `Bash(...)` allow rule that grants every `rtk …` command.
+///
+/// `Bash(rtk:*)` reads as "rtk's own commands" but also auto-allows every command
+/// RTK filters, including ones the user never allowed on its own.
+pub fn warn_broad_rtk_allow_rules() {
+    let mut seen_paths: Vec<PathBuf> = Vec::new();
+    for path in get_settings_paths() {
+        // A cwd without `.claude/` above it makes the project root and the
+        // Claude dir the same, so the same file would be warned about twice.
+        if seen_paths.contains(&path) {
+            continue;
+        }
+        seen_paths.push(path.clone());
+        let Some(json) = read_json(&path) else {
+            continue;
+        };
+        let Some(allow) = json.pointer("/permissions/allow").and_then(Value::as_array) else {
+            continue;
+        };
+        let display = crate::core::tee_file::display_path(&path);
+        let mut warned: Vec<&str> = Vec::new();
+        for rule in allow.iter().filter_map(Value::as_str) {
+            if !is_broad_rtk_allow_rule(rule) || warned.contains(&rule) {
+                continue;
+            }
+            warned.push(rule);
+            eprintln!(
+                "[rtk] warning: {rule} in {display} allows every command rtk filters, \
+                 including `rtk git push`."
+            );
+            eprintln!(
+                "               Deny and ask rules for those tools still apply. \
+                 Consider narrower rules such as Bash(rtk git status:*)."
+            );
+        }
+    }
+}
+
+/// A rule is broad when Claude Code would apply it to every `rtk …` command.
+///
+/// Asks the real matcher rather than re-deriving wildcard semantics: a
+/// wildcard-free pattern is a word-boundary prefix, so `Bash(rtk)` grants
+/// `rtk git push`, and `Bash(rtk*:*)` falls through to glob matching. Probing
+/// three unrelated subcommands keeps `Bash(rtk git:*)` and `Bash(rtk git push)`
+/// narrow.
+fn is_broad_rtk_allow_rule(rule: &str) -> bool {
+    let Some(pattern) = rule.strip_prefix("Bash(").and_then(|r| r.strip_suffix(')')) else {
+        return false;
+    };
+    // `Bash(*)` and `Bash(**)` are not about rtk; narrowing the advice to an
+    // rtk rule would misdescribe what the user allowed.
+    if pattern.trim().chars().all(|c| c == '*') {
+        return false;
+    }
+    ["rtk gain", "rtk git push", "rtk cargo test"]
+        .iter()
+        .all(|cmd| command_matches_pattern(cmd, pattern))
+}
+
 /// Return the ordered list of Claude Code settings file paths to check.
 fn get_settings_paths() -> Vec<PathBuf> {
     get_settings_paths_from(find_project_root(), resolve_claude_dir().ok())
@@ -498,12 +557,17 @@ fn get_settings_paths_from(
 
 fn read_json(path: &std::path::Path) -> Option<Value> {
     let content = std::fs::read_to_string(path).ok()?;
+    // An existing but empty file is not a parse failure; `load_permission_rules`
+    // skips it the same way.
+    if content.trim().is_empty() {
+        return None;
+    }
     match crate::core::utils::from_json_str::<Value>(&content) {
         Ok(v) => Some(v),
         Err(_) => {
             eprintln!(
                 "[rtk] warning: failed to parse permissions from {}",
-                path.display()
+                crate::core::tee_file::display_path(path)
             );
             None
         }
@@ -1027,6 +1091,45 @@ mod tests {
     fn test_wildcard_all() {
         assert!(command_matches_pattern("anything at all", "*"));
         assert!(command_matches_pattern("", "*"));
+    }
+
+    #[test]
+    fn test_broad_rtk_allow_rules_are_detected() {
+        for rule in [
+            "Bash(rtk:*)",
+            "Bash(rtk *)",
+            "Bash(rtk\t*)",
+            "Bash(rtk  *)",
+            "Bash(rtk*)",
+            // No wildcard is a word-boundary prefix, so this grants every subcommand.
+            "Bash(rtk)",
+            "Bash(rtk )",
+            "Bash(*rtk*)",
+            "Bash( rtk:*)",
+            "Bash(rtk*:*)",
+        ] {
+            assert!(is_broad_rtk_allow_rule(rule), "{rule} should be broad");
+        }
+    }
+
+    #[test]
+    fn test_narrow_rtk_allow_rules_are_not_flagged() {
+        for rule in [
+            "Bash(rtk git status:*)",
+            "Bash(rtk git:*)",
+            "Bash(rtk git push)",
+            "Bash(rtk gain)",
+            // Only matches the literal bare word, never `rtk gain`.
+            "Bash(*rtk)",
+            "Bash(:rtk)",
+            "Bash(git:*)",
+            "Bash(*)",
+            "Bash(**)",
+            "Read(rtk:*)",
+            "rtk:*",
+        ] {
+            assert!(!is_broad_rtk_allow_rule(rule), "{rule} should be narrow");
+        }
     }
 
     #[test]

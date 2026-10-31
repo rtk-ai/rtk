@@ -3126,6 +3126,12 @@ fn run_cli() -> Result<i32> {
                 };
                 hooks::init::finalize_filter_trust(global, dry_run, filter_trust)?;
             }
+            // At the end of the arm, so the per-agent modes that return from the
+            // branches above warn too. `--show` and uninstall change nothing the
+            // rule affects, and `--dry-run` writes nothing.
+            if !dry_run && !show && !uninstall {
+                hooks::permissions::warn_broad_rtk_allow_rules();
+            }
             0
         }
 
@@ -4024,6 +4030,7 @@ fn run_cli() -> Result<i32> {
             } else {
                 // Default or --require-all: always run integrity check first
                 hooks::integrity::run_verify(cli.verbose)?;
+                hooks::permissions::warn_broad_rtk_allow_rules();
                 hooks::verify_cmd::run(None, require_all)?;
             }
             0
