@@ -422,7 +422,8 @@ fn hidden_hint(truncated: &[String], filtered: &[String]) -> Option<String> {
 
 /// Format bytes into human-readable size
 fn human_size(bytes: u64) -> String {
-    if bytes >= 1_048_576 {
+    // 1_048_575 bytes is 1023.999K, which would print as "1024.0K": show it as 1.0M.
+    if bytes >= 1_048_576 || format!("{:.1}", bytes as f64 / 1024.0) == "1024.0" {
         format!("{:.1}M", bytes as f64 / 1_048_576.0)
     } else if bytes >= 1024 {
         format!("{:.1}K", bytes as f64 / 1024.0)
@@ -1058,6 +1059,9 @@ mod tests {
         assert_eq!(human_size(1234), "1.2K");
         assert_eq!(human_size(1_048_576), "1.0M");
         assert_eq!(human_size(2_500_000), "2.4M");
+        // 1_048_575 bytes is 1023.999K, which rounds to 1024.0K: show it as 1.0M.
+        assert_eq!(human_size(1_048_524), "1023.9K");
+        assert_eq!(human_size(1_048_575), "1.0M");
     }
 
     #[test]
