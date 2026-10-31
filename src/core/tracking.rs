@@ -97,7 +97,80 @@ use super::constants::{DEFAULT_HISTORY_DAYS, HISTORY_DB};
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub struct Tracker {
+    conn: Db,
+}
+
+/// What a query error says when the database lacks a schema object because it
+/// is read-only and was not migrated.
+const READ_ONLY_NOT_UPGRADED: &str = "tracking database is read-only and was not upgraded";
+
+/// The tracking connection, plus whether its schema is behind this build's
+/// because a read-only database was not migrated on open.
+///
+/// `prepare`, `execute`, `execute_batch` and `query_row` are where a missing
+/// table or column surfaces; on a database that is behind they append
+/// `READ_ONLY_NOT_UPGRADED` to that error and change nothing else. There is no
+/// `Deref` to `Connection`, so any other connection method fails to compile
+/// instead of skipping the note; `conn` is the raw connection where one is needed.
+struct Db {
     conn: Connection,
+    behind: bool,
+}
+
+impl Db {
+    fn annotate(&self, err: rusqlite::Error) -> rusqlite::Error {
+        if !self.behind {
+            return err;
+        }
+        // "no such table/column" is SQLite's wording for a SELECT or DELETE, and
+        // "has no column named" for an INSERT's column list.
+        let missing = |msg: &str| {
+            msg.contains("no such table")
+                || msg.contains("no such column")
+                || msg.contains("has no column named")
+        };
+        match err {
+            rusqlite::Error::SqliteFailure(code, Some(msg))
+            | rusqlite::Error::SqlInputError {
+                error: code, msg, ..
+            } if missing(&msg) => rusqlite::Error::SqliteFailure(
+                code,
+                Some(format!("{msg} ({READ_ONLY_NOT_UPGRADED})")),
+            ),
+            other => other,
+        }
+    }
+
+    fn prepare(&self, sql: &str) -> rusqlite::Result<rusqlite::Statement<'_>> {
+        self.conn.prepare(sql).map_err(|e| self.annotate(e))
+    }
+
+    fn execute<P: rusqlite::Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
+        self.conn.execute(sql, params).map_err(|e| self.annotate(e))
+    }
+
+    fn execute_batch(&self, sql: &str) -> rusqlite::Result<()> {
+        self.conn.execute_batch(sql).map_err(|e| self.annotate(e))
+    }
+
+    fn query_row<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
+    where
+        P: rusqlite::Params,
+        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    {
+        self.conn
+            .query_row(sql, params, f)
+            .map_err(|e| self.annotate(e))
+    }
+}
+
+impl From<db::Opened> for Db {
+    fn from(opened: db::Opened) -> Self {
+        Db {
+            conn: opened.conn,
+            behind: opened.behind,
+        }
+    }
 }
 
 /// Individual command record from tracking history.
@@ -770,7 +843,9 @@ impl Tracker {
     /// - Cannot determine database path
     /// - Cannot create parent directories
     /// - Cannot open/create SQLite database
-    /// - Schema creation/migration fails
+    /// - Schema creation/migration fails for any reason other than the database
+    ///   being read-only; a read-only database opens as it is, and queries that need
+    ///   the schema it lacks fail saying so
     ///
     /// # Examples
     ///
@@ -796,7 +871,12 @@ impl Tracker {
     pub fn new_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("Failed to open in-memory DB")?;
         run_schema_migrations(&conn, MigrationMode::Always)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn: Db {
+                conn,
+                behind: false,
+            },
+        })
     }
 
     /// Record a command execution with token counts and timing.
@@ -829,6 +909,11 @@ impl Tracker {
         output_tokens: usize,
         exec_time_ms: u64,
     ) -> Result<()> {
+        // A database that could not be upgraded is read-only, so this write
+        // would fail; callers treat it as best-effort and must not be told.
+        if self.conn.behind {
+            return Ok(());
+        }
         // Signed, so a command that emitted MORE than the wrapped command records the
         // truth (a negative saving / negative pct) instead of `saturating_sub` clamping
         // to 0 and reporting a fake "0% — did nothing". SQLite INTEGER/REAL both hold
@@ -880,6 +965,11 @@ impl Tracker {
     #[cfg(feature = "engine")]
     /// Record a classifier answer; repeated content classifies once.
     pub fn classifier_cache_put(&self, key: &str, answer: &str) -> Result<()> {
+        // A database that could not be upgraded is read-only, so this write
+        // would fail; callers treat it as best-effort and must not be told.
+        if self.conn.behind {
+            return Ok(());
+        }
         self.conn.execute(
             "INSERT OR REPLACE INTO classifier_cache (key, answer, ts) VALUES (?1, ?2, ?3)",
             params![key, answer, Utc::now().to_rfc3339()],
@@ -896,6 +986,11 @@ impl Tracker {
         tokens_in: usize,
         tokens_out: usize,
     ) -> Result<()> {
+        // A database that could not be upgraded is read-only, so this write
+        // would fail; callers treat it as best-effort and must not be told.
+        if self.conn.behind {
+            return Ok(());
+        }
         let day = Utc::now().format("%Y-%m-%d").to_string();
         self.conn
             .execute(
@@ -977,6 +1072,10 @@ impl Tracker {
 
     /// Delete all tracked data (commands + parse_failures + hook_decisions), resetting all stats to zero.
     pub fn reset_all(&self) -> Result<()> {
+        // An explicit request, so it reports the refusal rather than skipping.
+        if self.conn.behind {
+            anyhow::bail!(READ_ONLY_NOT_UPGRADED);
+        }
         self.conn
             .execute_batch(
                 "BEGIN;
@@ -998,6 +1097,11 @@ impl Tracker {
         error_message: &str,
         fallback_succeeded: bool,
     ) -> Result<()> {
+        // A database that could not be upgraded is read-only, so this write
+        // would fail; callers treat it as best-effort and must not be told.
+        if self.conn.behind {
+            return Ok(());
+        }
         self.conn.execute(
             "INSERT INTO parse_failures (timestamp, raw_command, error_message, fallback_succeeded)
              VALUES (?1, ?2, ?3, ?4)",
@@ -1035,6 +1139,11 @@ impl Tracker {
         rewritten_cmd: Option<&str>,
         rtk_version: &str,
     ) -> Result<()> {
+        // A database that could not be upgraded is read-only, so this write
+        // would fail; callers treat it as best-effort and must not be told.
+        if self.conn.behind {
+            return Ok(());
+        }
         self.conn.execute(
             "INSERT INTO hook_decisions (timestamp, session_id, tool_use_id, project_path, raw_cmd, decision, rewritten_cmd, rtk_version)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -2002,8 +2111,8 @@ pub(crate) fn get_db_path() -> Result<PathBuf> {
 /// Open (creating if needed) the tracking DB, apply pragmas, and run schema
 /// migrations per `mode`. Shared by `Tracker::new()` (hot path, gated) and
 /// `ensure_schema_fresh` (`rtk init`, unconditional).
-fn open_and_prepare(mode: MigrationMode) -> Result<Connection> {
-    db::open_and_migrate(&get_db_path()?, &SCHEMA, mode)
+fn open_and_prepare(mode: MigrationMode) -> Result<Db> {
+    db::open_and_migrate_or_stay_behind(&get_db_path()?, &SCHEMA, mode).map(Db::from)
 }
 
 /// Unconditionally re-run schema migrations, bypassing the `user_version` gate
@@ -3216,9 +3325,9 @@ mod tests {
         let db_path = tmp.path().join("history.db");
         user_env::with_path("RTK_DB_PATH", Some(&db_path), || {
             let tracker = Tracker::new().expect("first open should run migrations");
-            assert_eq!(user_version(&tracker.conn), SCHEMA_VERSION);
+            assert_eq!(user_version(&tracker.conn.conn), SCHEMA_VERSION);
             assert_eq!(
-                application_id(&tracker.conn),
+                application_id(&tracker.conn.conn),
                 DbKind::Tracking.application_id()
             );
             drop(tracker);
@@ -3272,7 +3381,7 @@ mod tests {
     /// Opens `db_path` the way every `rtk <cmd>` does, through the gated path.
     fn upgrade_through_tracker(db_path: &std::path::Path) -> Connection {
         user_env::with_path("RTK_DB_PATH", Some(db_path), || {
-            Tracker::new().expect("upgrade should succeed").conn
+            Tracker::new().expect("upgrade should succeed").conn.conn
         })
     }
 
@@ -3375,7 +3484,7 @@ mod tests {
                 tracker
                     .record("git status", "rtk git status", 100, 20, 5)
                     .expect("the first write should succeed");
-                assert_eq!(user_version(&tracker.conn), SCHEMA_VERSION);
+                assert_eq!(user_version(&tracker.conn.conn), SCHEMA_VERSION);
             });
         }
     }
@@ -4410,5 +4519,239 @@ mod tests {
             assert_eq!(total_time_ms, 600, "{period}: total exec time");
             assert_eq!(avg_time_ms, 200, "{period}: avg exec time");
         }
+    }
+
+    /// A database at `to`, closed, and a read-only connection to it: SQLite
+    /// refuses every write on it with SQLITE_READONLY.
+    fn read_only_db_at(dir: &std::path::Path, to: SchemaVersion) -> Connection {
+        let db_path = dir.join("history.db");
+        seed_schema(
+            &Connection::open(&db_path).expect("open should succeed"),
+            to,
+        );
+        Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("read-only open should succeed")
+    }
+
+    fn behind_db(conn: Connection) -> Db {
+        Db { conn, behind: true }
+    }
+
+    #[test]
+    fn test_opened_database_keeps_its_behind_flag() {
+        let tmp = test_isolation::tempdir();
+        for behind in [true, false] {
+            let conn = read_only_db_at(tmp.path(), SchemaVersion::Initial);
+            assert_eq!(Db::from(db::Opened { conn, behind }).behind, behind);
+        }
+    }
+
+    #[test]
+    fn test_behind_db_names_the_cause_of_a_missing_table() {
+        let tmp = test_isolation::tempdir();
+        let tracker = Tracker {
+            conn: behind_db(read_only_db_at(tmp.path(), SchemaVersion::Initial)),
+        };
+        let err = tracker
+            .attribution("pipeline", 30)
+            .expect_err("engine_attribution does not exist");
+        assert_eq!(
+            err.to_string(),
+            "no such table: engine_attribution (tracking database is read-only and was not upgraded)"
+        );
+    }
+
+    #[test]
+    fn test_behind_db_annotates_a_missing_column() {
+        let tmp = test_isolation::tempdir();
+        let db_path = tmp.path().join("history.db");
+        Connection::open(&db_path)
+            .expect("open should succeed")
+            .execute_batch("CREATE TABLE commands (id INTEGER PRIMARY KEY, timestamp TEXT);")
+            .expect("old schema should seed");
+        let conn =
+            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .expect("read-only open should succeed");
+        let db = behind_db(conn);
+        let err = db
+            .prepare("SELECT project_path FROM commands")
+            .map(|_| ())
+            .expect_err("project_path does not exist");
+        assert_eq!(
+            err.to_string(),
+            "no such column: project_path (tracking database is read-only and was not upgraded)"
+        );
+        let err = db
+            .execute("INSERT INTO commands (project_path) VALUES ('x')", [])
+            .expect_err("project_path does not exist");
+        assert!(err.to_string().contains(READ_ONLY_NOT_UPGRADED), "{err}");
+    }
+
+    #[test]
+    fn test_behind_db_leaves_other_errors_alone() {
+        let tmp = test_isolation::tempdir();
+        let db = behind_db(read_only_db_at(tmp.path(), SchemaVersion::Initial));
+        let err = db
+            .execute("INSERT INTO commands (id) VALUES (1)", [])
+            .expect_err("the write is refused");
+        assert!(!err.to_string().contains(READ_ONLY_NOT_UPGRADED), "{err}");
+    }
+
+    #[test]
+    fn test_current_tracker_does_not_annotate() {
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+        tracker
+            .conn
+            .execute_batch("DROP TABLE engine_attribution")
+            .expect("drop should succeed");
+        let err = tracker
+            .conn
+            .execute("DELETE FROM engine_attribution", [])
+            .expect_err("the table is gone");
+        assert!(!err.to_string().contains(READ_ONLY_NOT_UPGRADED), "{err}");
+    }
+
+    #[test]
+    fn test_behind_db_names_the_cause_for_execute_batch_too() {
+        let tmp = test_isolation::tempdir();
+        let db = behind_db(read_only_db_at(tmp.path(), SchemaVersion::Initial));
+        let err = db
+            .execute_batch("DELETE FROM engine_attribution")
+            .expect_err("engine_attribution does not exist");
+        assert_eq!(
+            err.to_string(),
+            "no such table: engine_attribution (tracking database is read-only and was not upgraded)"
+        );
+    }
+
+    #[test]
+    fn test_annotate_handles_a_plain_sqlite_failure() {
+        // The bundled SQLite reports a prepare-time error as a `SqlInputError`,
+        // so this form is only reached by building it.
+        let missing = || {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                Some("no such table: x".to_string()),
+            )
+        };
+        let conn = || Connection::open_in_memory().expect("open should succeed");
+
+        let behind = Db {
+            conn: conn(),
+            behind: true,
+        };
+        assert_eq!(
+            behind.annotate(missing()).to_string(),
+            "no such table: x (tracking database is read-only and was not upgraded)"
+        );
+
+        let current = Db {
+            conn: conn(),
+            behind: false,
+        };
+        assert_eq!(current.annotate(missing()).to_string(), "no such table: x");
+    }
+
+    #[test]
+    fn test_behind_db_names_the_cause_for_query_row_too() {
+        let tmp = test_isolation::tempdir();
+        let db = behind_db(read_only_db_at(tmp.path(), SchemaVersion::Initial));
+        let err = db
+            .query_row("SELECT COUNT(*) FROM engine_attribution", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect_err("engine_attribution does not exist");
+        assert_eq!(
+            err.to_string(),
+            "no such table: engine_attribution (tracking database is read-only and was not upgraded)"
+        );
+    }
+
+    fn row_counts(db: &Db) -> Vec<i64> {
+        [
+            "commands",
+            "parse_failures",
+            "hook_decisions",
+            "engine_attribution",
+            "classifier_cache",
+        ]
+        .iter()
+        .map(|table| {
+            db.conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("count should be readable")
+        })
+        .collect()
+    }
+
+    /// A writable, fully migrated database flagged behind: a write that ran
+    /// would leave a row.
+    fn writable_behind_tracker() -> Tracker {
+        let conn = Connection::open_in_memory().expect("open should succeed");
+        run_schema_migrations(&conn, MigrationMode::Always).expect("migrate");
+        Tracker {
+            conn: behind_db(conn),
+        }
+    }
+
+    #[test]
+    fn test_behind_tracker_skips_best_effort_writes() {
+        let tracker = writable_behind_tracker();
+
+        tracker
+            .record("git status", "rtk git status", 100, 20, 5)
+            .expect("record skips");
+        tracker
+            .record_parse_failure("x", "y", false)
+            .expect("parse failure skips");
+        tracker
+            .record_hook_decision("s", "t", "/p", "git status", HookOutcome::Allow, None, "v")
+            .expect("hook decision skips");
+
+        assert_eq!(row_counts(&tracker.conn), vec![0; 5]);
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn test_behind_tracker_skips_engine_writes() {
+        let tracker = writable_behind_tracker();
+
+        tracker
+            .record_attribution("hook", "rule", "r", 1, 1)
+            .expect("attribution skips");
+        tracker
+            .classifier_cache_put("k", "a")
+            .expect("cache put skips");
+
+        assert_eq!(row_counts(&tracker.conn), vec![0; 5]);
+    }
+
+    #[test]
+    fn test_behind_tracker_reset_reports_the_refusal() {
+        let err = writable_behind_tracker()
+            .reset_all()
+            .expect_err("reset on a read-only database fails");
+        assert_eq!(err.to_string(), READ_ONLY_NOT_UPGRADED);
+    }
+
+    #[test]
+    fn test_current_tracker_still_records() {
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+        tracker
+            .record("git status", "rtk git status", 100, 20, 5)
+            .expect("record");
+        assert_eq!(row_counts(&tracker.conn)[0], 1);
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn test_current_tracker_still_records_attribution() {
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+        tracker
+            .record_attribution("hook", "rule", "r", 1, 1)
+            .expect("attribution");
+        assert_eq!(row_counts(&tracker.conn)[3], 1);
     }
 }
