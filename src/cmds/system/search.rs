@@ -11,6 +11,7 @@ use crate::core::stream::{
     exec_capture_unguarded,
 };
 use crate::core::tracking;
+use crate::core::truncate::CAP_LIST;
 use crate::core::utils::{ChildArgExt, resolved_command, strip_ansi};
 use crate::core::{args_utils, config};
 use anyhow::{Context, Result};
@@ -593,9 +594,7 @@ fn passthrough<T: AsRef<str>>(
         Some(folded) => print!("{}", folded),
         None => print!("{}", cleaned),
     }
-    if !result.stderr.is_empty() {
-        eprint!("{}", result.stderr);
-    }
+    emit_stderr(engine, &result.stderr);
 
     match &folded {
         // Real sizes, so the fold shows up in `rtk gain`.
@@ -675,6 +674,67 @@ fn fold_path_prefix(raw: &str) -> Option<String> {
         out.push('\n');
     }
     Some(out)
+}
+
+/// grep run without `-r` over a glob that includes directories writes one
+/// `grep: <dir>: Is a directory` line per directory. Folds them into one line that keeps
+/// the signal (these were not searched) and drops the repetition. The message text is
+/// localized, so a line is recognised by shape -- `<prog>: <path>: <msg>` -- and by
+/// `<path>` being a directory on disk, never by its wording. Other lines keep their order;
+/// the folded line takes the place of the first directory error.
+fn fold_dir_errors(stderr: &str) -> String {
+    let is_dir_error = |line: &str| -> Option<String> {
+        let (prog, rest) = line.split_once(": ")?;
+        if !prog.ends_with("grep") {
+            return None;
+        }
+        let (path, _msg) = rest.rsplit_once(": ")?;
+        std::path::Path::new(path)
+            .is_dir()
+            .then(|| path.to_string())
+    };
+
+    let mut dirs = Vec::new();
+    let mut out = Vec::new();
+    let mut slot = None;
+    for line in stderr.lines() {
+        match is_dir_error(line) {
+            Some(dir) => {
+                slot.get_or_insert(out.len());
+                dirs.push(dir);
+            }
+            None => out.push(line.to_string()),
+        }
+    }
+    let Some(slot) = slot else {
+        return stderr.to_string();
+    };
+
+    let shown = &dirs[..dirs.len().min(CAP_LIST)];
+    let mut folded = format!(
+        "grep: {} {} not searched (no -r): {}",
+        dirs.len(),
+        if dirs.len() == 1 { "dir" } else { "dirs" },
+        shown.join(", ")
+    );
+    if dirs.len() > CAP_LIST {
+        folded.push_str(&format!(", … +{} more", dirs.len() - CAP_LIST));
+    }
+    out.insert(slot, folded);
+    let mut joined = out.join("\n");
+    joined.push('\n');
+    joined
+}
+
+/// Surfaces a captured run's stderr, folding grep's per-directory errors.
+fn emit_stderr(engine: Engine, stderr: &str) {
+    if stderr.is_empty() {
+        return;
+    }
+    match engine {
+        Engine::Grep => eprint!("{}", fold_dir_errors(stderr)),
+        Engine::Rg => eprint!("{}", stderr),
+    }
 }
 
 pub fn run(
@@ -777,9 +837,7 @@ pub fn run(
         return passthrough(&timer, engine, args, &real_cmd, false, false);
     }
 
-    if !result.stderr.is_empty() {
-        eprint!("{}", result.stderr);
-    }
+    emit_stderr(engine, &result.stderr);
 
     if result.stdout.trim().is_empty() {
         timer.track(&real_cmd, &rtk_label, &raw_output, "");
@@ -1196,6 +1254,52 @@ fn compact_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fold_dir_errors_collapses_by_shape_in_any_locale() {
+        let tmp = crate::core::test_isolation::tempdir();
+        let a = tmp.path().join("calendar-mirror");
+        let b = tmp.path().join("n8n");
+        std::fs::create_dir(&a).expect("mkdir a");
+        std::fs::create_dir(&b).expect("mkdir b");
+        let (a, b) = (a.display(), b.display());
+        let stderr = format!(
+            "/usr/bin/grep: {a}: Is a directory\n\
+grep: missing.txt: No such file or directory\n\
+grep: {b}: Es un directorio\n"
+        );
+        assert_eq!(
+            fold_dir_errors(&stderr),
+            format!(
+                "grep: 2 dirs not searched (no -r): {a}, {b}\n\
+grep: missing.txt: No such file or directory\n"
+            )
+        );
+    }
+
+    #[test]
+    fn fold_dir_errors_leaves_other_stderr_untouched() {
+        let stderr = "grep: missing.txt: No such file or directory\ngrep: warning: stray \\\n";
+        assert_eq!(fold_dir_errors(stderr), stderr);
+    }
+
+    #[test]
+    fn fold_dir_errors_caps_the_list() {
+        let tmp = crate::core::test_isolation::tempdir();
+        let mut stderr = String::new();
+        for i in 0..CAP_LIST + 3 {
+            let d = tmp.path().join(format!("d{i:02}"));
+            std::fs::create_dir(&d).expect("mkdir");
+            stderr.push_str(&format!("grep: {}: Is a directory\n", d.display()));
+        }
+        let folded = fold_dir_errors(&stderr);
+        assert_eq!(folded.lines().count(), 1, "got: {folded}");
+        assert!(
+            folded.starts_with(&format!("grep: {} dirs not searched", CAP_LIST + 3)),
+            "got: {folded}"
+        );
+        assert!(folded.ends_with(", … +3 more\n"), "got: {folded}");
+    }
 
     #[test]
     fn test_clean_line() {
