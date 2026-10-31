@@ -4,7 +4,7 @@ use super::constants::{
 };
 use super::init::resolve_claude_dir;
 use super::permissions_opencode::{
-    Rule, agent_rules_unreadable, check_command_with_opencode_rules, load_judgeable_opencode_rules,
+    Rule, check_command_with_opencode_rules, load_judgeable_opencode_rules,
 };
 use crate::core::user_dirs;
 use crate::core::user_env;
@@ -96,16 +96,6 @@ impl Rules {
     fn buckets((deny, ask, allow): (Vec<String>, Vec<String>, Vec<String>)) -> Self {
         Self::Buckets { deny, ask, allow }
     }
-
-    /// OpenCode's rules for `agent`, or [`Rules::Unjudgeable`] when an agent
-    /// markdown file declares rules or a legacy key applies on only one
-    /// OpenCode generation.
-    fn opencode(agent: Option<&str>) -> Self {
-        if agent_rules_unreadable(agent) {
-            return Self::Unjudgeable;
-        }
-        load_judgeable_opencode_rules(agent).map_or(Self::Unjudgeable, Self::Ordered)
-    }
 }
 
 impl HostRules {
@@ -124,7 +114,9 @@ impl HostRules {
             Host::Codex | Host::Trae | Host::Vibe | Host::Antigravity => {
                 Rules::buckets(Default::default())
             }
-            Host::OpenCode => Rules::opencode(agent),
+            Host::OpenCode => {
+                load_judgeable_opencode_rules(agent).map_or(Rules::Unjudgeable, Rules::Ordered)
+            }
         };
         Self::new(rules, judges_final_command(host))
     }
@@ -587,42 +579,14 @@ fn load_permission_rules_tracking(
     let mut allow_rules = Vec::new();
 
     for path in paths {
-        let content = match std::fs::read_to_string(path) {
-            Ok(content) => content,
-            // A file that is not there denies nothing. One that is there and
-            // could not be read — permissions, or bytes that are not UTF-8 —
-            // may hold anything.
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                continue;
-            }
-            Err(e) => {
-                eprintln!(
-                    "[rtk] warning: failed to read permissions from {}: {}",
-                    path.display(),
-                    e
-                );
+        let json = match read_json(path) {
+            JsonRead::Parsed(json) => json,
+            JsonRead::Missing => continue,
+            JsonRead::Error => {
                 ask_rules.push("*".to_string());
                 scan.every_file_read = false;
                 continue;
             }
-        };
-        let content = strip_leading_bom(&content);
-        if content.trim().is_empty() {
-            continue;
-        }
-        let Ok(json) = crate::core::utils::from_json_str::<Value>(content) else {
-            eprintln!(
-                "[rtk] warning: failed to parse permissions from {}",
-                path.display()
-            );
-            ask_rules.push("*".to_string());
-            scan.every_file_read = false;
-            continue;
         };
         let Some(permissions) = json.get("permissions") else {
             continue;
@@ -682,16 +646,32 @@ fn get_settings_paths_from(
     paths
 }
 
-enum JsonRead {
+/// What a host's settings file holds, as far as its permission rules go.
+pub(super) enum JsonRead {
+    /// Nothing: no file, or one holding only a BOM and whitespace.
     Missing,
     Parsed(Value),
+    /// A file RTK could not read or parse, which may hold rules it can no
+    /// longer apply. What that costs is each host's to say.
     Error,
 }
 
-fn read_json(path: &std::path::Path) -> JsonRead {
+/// Read one settings file, for every host: the one place that decides
+/// whether a file holds nothing, rules, or something RTK cannot read.
+pub(super) fn read_json(path: &std::path::Path) -> JsonRead {
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return JsonRead::Missing,
+        // A file that is not there denies nothing. One that is there and
+        // could not be read — permissions, or bytes that are not UTF-8 —
+        // may hold anything.
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return JsonRead::Missing;
+        }
         Err(e) => {
             eprintln!(
                 "[rtk] warning: failed to read permissions from {}: {}",
@@ -701,10 +681,11 @@ fn read_json(path: &std::path::Path) -> JsonRead {
             return JsonRead::Error;
         }
     };
+    let content = strip_leading_bom(&content);
     if content.trim().is_empty() {
         return JsonRead::Missing;
     }
-    match crate::core::utils::from_json_str::<Value>(&content) {
+    match crate::core::utils::from_json_str::<Value>(content) {
         Ok(v) => JsonRead::Parsed(v),
         Err(_) => {
             eprintln!(
@@ -765,38 +746,43 @@ fn load_cursor_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
 // folderTrust is off by default (folder trusted); when on, a folder is trusted
 // only via GEMINI_CLI_TRUST_WORKSPACE here (dialog-only trust is treated as
 // untrusted → global, which is safe: never more permissive than the host).
-fn gemini_settings() -> Option<Value> {
+// A file RTK cannot read or parse is an error: it may hold a confirmation the
+// other file's allow would skip. An unreadable global one also leaves whether
+// folder trust is on unknown, so only GEMINI_CLI_TRUST_WORKSPACE can trust the
+// folder then.
+fn gemini_settings() -> JsonRead {
     let global = global_config(GEMINI_DIR, SETTINGS_JSON);
-    let global_value = match &global {
-        JsonRead::Parsed(value) => Some(value),
-        JsonRead::Missing | JsonRead::Error => None,
-    };
     let trusted = user_env::var("GEMINI_CLI_TRUST_WORKSPACE").as_deref() == Some("true")
-        || !global_value
-            .and_then(|j| {
-                j.pointer("/security/folderTrust/enabled")
-                    .and_then(Value::as_bool)
-            })
-            .unwrap_or(false);
-    if trusted
-        && let Some(root) = find_project_root()
-        && let JsonRead::Parsed(v) = read_json(&root.join(GEMINI_DIR).join(SETTINGS_JSON))
-    {
-        return Some(v);
+        || match &global {
+            JsonRead::Parsed(settings) => !settings
+                .pointer("/security/folderTrust/enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            JsonRead::Missing => true,
+            JsonRead::Error => false,
+        };
+    if trusted && let Some(root) = find_project_root() {
+        match read_json(&root.join(GEMINI_DIR).join(SETTINGS_JSON)) {
+            JsonRead::Missing => {}
+            project => return project,
+        }
     }
-    match global {
-        JsonRead::Parsed(value) => Some(value),
-        JsonRead::Missing | JsonRead::Error => None,
-    }
+    global
 }
 
 fn load_gemini_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut ask = Vec::new();
     let mut allow = Vec::new();
     let shells = ["run_shell_command(", "ShellTool("];
-    if let Some(tools) = gemini_settings().as_ref().and_then(|j| j.get("tools")) {
-        append_wrapped_rules(tools.get("allowed"), &shells, &mut allow);
-        append_wrapped_rules(tools.get("confirmationRequired"), &shells, &mut ask);
+    match gemini_settings() {
+        JsonRead::Parsed(settings) => {
+            if let Some(tools) = settings.get("tools") {
+                append_wrapped_rules(tools.get("allowed"), &shells, &mut allow);
+                append_wrapped_rules(tools.get("confirmationRequired"), &shells, &mut ask);
+            }
+        }
+        JsonRead::Missing => {}
+        JsonRead::Error => ask.push("*".to_string()),
     }
     (Vec::new(), ask, allow)
 }
@@ -1136,6 +1122,166 @@ mod tests {
         });
     }
 
+    /// Every host reads its settings files through [`read_json`]: a host
+    /// directory that is a regular file, or a file holding only a BOM and
+    /// whitespace, judges every command as no file at all does, and a BOM
+    /// before real JSON applies its rules. What a file RTK cannot parse costs
+    /// stays each host's own.
+    #[test]
+    fn every_host_reads_its_settings_file_the_same_way() {
+        use crate::core::test_isolation;
+
+        const BOM: &str = "\u{feff}";
+        let hosts = [
+            (
+                Host::Claude,
+                ".claude",
+                "settings.json",
+                r#"{"permissions":{"deny":["Bash(rm:*)"]}}"#,
+                PermissionVerdict::Deny,
+                PermissionVerdict::Ask,
+            ),
+            (
+                Host::Cursor,
+                ".cursor",
+                "cli-config.json",
+                r#"{"permissions":{"deny":["Shell(rm)"]}}"#,
+                PermissionVerdict::Deny,
+                PermissionVerdict::Deny,
+            ),
+            (
+                Host::Gemini,
+                ".gemini",
+                "settings.json",
+                r#"{"tools":{"confirmationRequired":["run_shell_command(rm)"]}}"#,
+                PermissionVerdict::Ask,
+                PermissionVerdict::Ask,
+            ),
+            (
+                Host::Droid,
+                ".factory",
+                "settings.json",
+                r#"{"commandDenylist":["rm -rf"]}"#,
+                PermissionVerdict::Deny,
+                PermissionVerdict::Deny,
+            ),
+            (
+                Host::OpenCode,
+                ".config/opencode",
+                "opencode.json",
+                r#"{"permission":{"bash":{"rm *":"deny"}}}"#,
+                PermissionVerdict::Deny,
+                // Rules RTK cannot judge: it neither rewrites nor decides.
+                PermissionVerdict::Defer,
+            ),
+        ];
+        for (host, dir, file, rules, verdict, unparseable) in hosts {
+            // The verdicts of `rm -rf x`, which the rules name, and of `ls`.
+            let judge = |write: &dyn Fn(&std::path::Path)| {
+                let tmp = test_isolation::tempdir();
+                let (home, project) = (tmp.path().join("home"), tmp.path().join("project"));
+                std::fs::create_dir_all(home.join(dir).parent().expect("host dir has a parent"))
+                    .expect("create home");
+                std::fs::create_dir_all(&project).expect("create project dir");
+                write(&home);
+                test_isolation::with_root(&home, || {
+                    let _entered = test_isolation::enter(&project);
+                    let rules = HostRules::load(host, None);
+                    (rules.verdict("rm -rf x"), rules.verdict("ls"))
+                })
+            };
+            let file_holding = |body: String| {
+                move |home: &std::path::Path| {
+                    std::fs::create_dir_all(home.join(dir)).expect("create host dir");
+                    std::fs::write(home.join(dir).join(file), &body).expect("write settings");
+                }
+            };
+
+            let nothing = judge(&|_| {});
+            let not_a_dir = |home: &std::path::Path| {
+                std::fs::write(home.join(dir), "regular file").expect("write file");
+            };
+            for (case, verdicts) in [
+                (
+                    "a regular file in place of the directory",
+                    judge(&not_a_dir),
+                ),
+                ("a BOM", judge(&file_holding(BOM.to_string()))),
+                (
+                    "a BOM and whitespace",
+                    judge(&file_holding(format!("{BOM}  \r\n"))),
+                ),
+            ] {
+                assert_eq!(verdicts, nothing, "{host:?}: {case} holds no rule");
+            }
+            let ruled = judge(&file_holding(format!("{BOM}{rules}")));
+            assert_eq!(
+                ruled,
+                (verdict, nothing.1),
+                "{host:?}: a BOM before real JSON applies its rules"
+            );
+            assert_ne!(
+                ruled, nothing,
+                "{host:?}: control, the rule changes a verdict"
+            );
+            let (_, ls) = judge(&file_holding(format!("{BOM}{{")));
+            assert_eq!(ls, unparseable, "{host:?}: a file RTK cannot parse");
+        }
+    }
+
+    /// A trusted project's Gemini settings RTK cannot parse may hold a
+    /// confirmation the global allow would skip: every command asks rather
+    /// than falling back to the global file.
+    #[test]
+    fn gemini_asks_for_every_command_under_a_project_file_it_cannot_parse() {
+        use crate::core::test_isolation;
+
+        let tmp = test_isolation::tempdir();
+        let (home, project) = (tmp.path().join("home"), tmp.path().join("project"));
+        std::fs::create_dir_all(home.join(".gemini")).expect("create .gemini");
+        std::fs::write(
+            home.join(".gemini").join("settings.json"),
+            r#"{"tools":{"allowed":["run_shell_command(git)"]}}"#,
+        )
+        .expect("write global settings");
+        // The marker the project lookup stops at.
+        std::fs::create_dir_all(project.join(".claude")).expect("create .claude");
+        std::fs::create_dir_all(project.join(".gemini")).expect("create project .gemini");
+        let verdict = |project_settings: &str| {
+            std::fs::write(
+                project.join(".gemini").join("settings.json"),
+                project_settings,
+            )
+            .expect("write project settings");
+            test_isolation::with_root(&home, || {
+                let _entered = test_isolation::enter(&project);
+                HostRules::load(Host::Gemini, None).verdict("git status")
+            })
+        };
+        assert_eq!(
+            verdict("{}"),
+            PermissionVerdict::Default,
+            "control: a project file replaces the global one"
+        );
+        assert_eq!(
+            verdict("{\n  // confirm git\n  \"tools\": {}\n}"),
+            PermissionVerdict::Ask
+        );
+
+        // A global file RTK cannot parse hides whether folder trust is on, so
+        // every command asks, unless GEMINI_CLI_TRUST_WORKSPACE trusts the
+        // folder: then the project file applies on its own.
+        std::fs::write(home.join(".gemini").join("settings.json"), "{")
+            .expect("break global settings");
+        let project_allows = r#"{"tools":{"allowed":["run_shell_command(git)"]}}"#;
+        assert_eq!(verdict(project_allows), PermissionVerdict::Ask);
+        let trusted = crate::core::user_env::with_vars(
+            &[("GEMINI_CLI_TRUST_WORKSPACE", Some("true"))],
+            || verdict(project_allows),
+        );
+        assert_eq!(trusted, PermissionVerdict::Allow);
+    }
+
     #[test]
     fn test_get_settings_paths_uses_the_resolved_claude_dir() {
         let project = PathBuf::from("/workspace/project");
@@ -1304,7 +1450,7 @@ mod tests {
         assert!(deny.is_empty() && ask.is_empty() && allow.is_empty());
     }
 
-    /// `HostRules::claude_hook` permits the fish wrap only when the scan saw
+    /// [`HostRules::claude_hook`] permits the fish wrap only when the scan saw
     /// every file and no deny entry. A path under a regular file, or a file
     /// holding nothing but a BOM and whitespace, hides no rule and must keep
     /// the scan attested; a file RTK could not read or parse must not.
