@@ -75,6 +75,8 @@ Bash output is **one contributor to input tokens**, alongside your prompt, the s
 
 The token counts RTK reports are estimated as `bytes / 4` — RTK ships no tokenizer, so the **percentages are reliable but the absolute token numbers are approximate**.
 
+Independent measurements can differ from RTK's bash-output percentage. A [JetBrains benchmark](https://blog.jetbrains.com/ai/2026/07/rtk-claude-code-token-savings/) measured +7.6% cost at low reasoning effort and roughly 0% at high effort on agentic tasks, because extra API turns can outweigh the saved bash output. RTK optimizes the bytes it controls, not the end-to-end bill; use `rtk gain` on your own workload before relying on a savings figure.
+
 > Full explanation: [How RTK Savings Work](docs/guide/resources/savings-explained.md)
 ## Installation
 
