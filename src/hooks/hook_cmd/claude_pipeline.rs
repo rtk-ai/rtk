@@ -489,6 +489,7 @@ mod tests {
             "./run-suite.sh $(cat flags)",
             "./run-suite.sh `cat flags`",
             "cat <<EOF\nx\nEOF",
+            "./run-suite.sh <<EOF",
             "echo $((1 + 2))",
             "./run-suite.sh \\\n --fast",
             "./a.sh\n./b.sh",
@@ -528,6 +529,16 @@ mod tests {
         ));
         assert!(!decide(
             "cd x && curl -s a",
+            PermissionVerdict::Allow,
+            &excluded
+        ));
+        assert!(!decide(
+            "python3 -c 1 | curl -s a",
+            PermissionVerdict::Allow,
+            &excluded
+        ));
+        assert!(!decide(
+            "python3 -c 1 && curl -s a",
             PermissionVerdict::Allow,
             &excluded
         ));

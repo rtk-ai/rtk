@@ -1701,7 +1701,7 @@ fn rewrite_shell_wrapper(
 #[cfg(feature = "engine")]
 pub(crate) fn chain_mentions_excluded(cmd: &str, excluded: &[String]) -> bool {
     let compiled = compile_exclude_patterns(excluded);
-    split_command_chain(cmd)
+    split_on_operators(cmd, false)
         .iter()
         .any(|segment| is_excluded(segment.trim(), &compiled))
 }
