@@ -782,8 +782,8 @@ pub fn rewrite_command(
 /// itself is the right entry point for a one-off check (real hook invocations,
 /// `rtk rewrite`, tests); this exists for `rtk discover`'s estimate-coverage
 /// fallback, which calls this once per historical command scanned (the same
-/// compile-once-per-run pattern this PR already applies to permission rules —
-/// see `discover::PermissionRules` — and hook-install status).
+/// compile-once-per-run pattern `discover::CoverageContext` applies to
+/// permission rules and hook-install status).
 pub(crate) fn rewrite_command_precompiled(
     cmd: &str,
     compiled: &[ExcludePattern],

@@ -118,17 +118,6 @@ pub(crate) fn check_command_with_opencode_rules(cmd: &str, rules: &[Rule]) -> Pe
     PermissionVerdict::Default
 }
 
-/// Every config's rules, in the order OpenCode resolves them.
-///
-/// Two passes, not one loop over both: OpenCode applies the root rules of
-/// *every* file first, and only then the agent rules of every file. Reading
-/// them per file let a project root allow outrank a global agent ask, which is
-/// the opposite of what OpenCode does — and an out-ranked ask is an ask the
-/// rewrite would silence.
-pub(crate) fn load_opencode_rules(agent: Option<&str>) -> Vec<Rule> {
-    rules_from_configs(&opencode_configs(), agent)
-}
-
 /// The rules OpenCode resolves for `agent`, or `None` when a legacy key means a
 /// different rule to 1.x than to 2.x (see [`legacy_keys_depend_on_the_generation`]).
 pub(crate) fn load_judgeable_opencode_rules(agent: Option<&str>) -> Option<Vec<Rule>> {
@@ -137,6 +126,13 @@ pub(crate) fn load_judgeable_opencode_rules(agent: Option<&str>) -> Option<Vec<R
         .then(|| rules_from_configs(&configs, agent))
 }
 
+/// Every config's rules, in the order OpenCode resolves them.
+///
+/// Two passes, not one loop over both: OpenCode applies the root rules of
+/// *every* file first, and only then the agent rules of every file. Reading
+/// them per file let a project root allow outrank a global agent ask, which is
+/// the opposite of what OpenCode does — and an out-ranked ask is an ask the
+/// rewrite would silence.
 fn rules_from_configs(configs: &[Value], agent: Option<&str>) -> Vec<Rule> {
     let mut rules = Vec::new();
     for config in configs {
@@ -408,17 +404,20 @@ fn read_config(path: &Path) -> Option<Value> {
     }
 }
 
+/// A `bash` rule, for tests.
+#[cfg(test)]
+pub(crate) fn bash_rule(pattern: &str, action: Action) -> Rule {
+    Rule {
+        permission: "bash".to_string(),
+        pattern: pattern.to_string(),
+        action,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::bash_rule as rule;
     use super::*;
-
-    fn rule(pattern: &str, action: Action) -> Rule {
-        Rule {
-            permission: "bash".to_string(),
-            pattern: pattern.to_string(),
-            action,
-        }
-    }
 
     #[test]
     fn trailing_space_star_also_matches_the_bare_command() {
@@ -629,7 +628,7 @@ mod tests {
 
         test_isolation::with_root(&tmp.path().join("home"), || {
             let _entered = test_isolation::enter(&sub);
-            let rules = load_opencode_rules(None);
+            let rules = load_judgeable_opencode_rules(None).expect("rules rtk can judge");
             assert_eq!(rules, vec![rule("*", Action::Deny)]);
         });
     }
@@ -653,7 +652,7 @@ mod tests {
 
         test_isolation::with_root(&home, || {
             let _entered = test_isolation::enter(&project);
-            let rules = load_opencode_rules(None);
+            let rules = load_judgeable_opencode_rules(None).expect("rules rtk can judge");
             assert_eq!(
                 rules,
                 vec![rule("git *", Action::Deny), rule("git *", Action::Allow)],
@@ -689,7 +688,7 @@ mod tests {
 
         test_isolation::with_root(&home, || {
             let _entered = test_isolation::enter(&project);
-            let rules = load_opencode_rules(Some("build"));
+            let rules = load_judgeable_opencode_rules(Some("build")).expect("rules rtk can judge");
             assert_eq!(
                 rules,
                 vec![rule("*", Action::Allow), rule("ls *", Action::Ask),],
@@ -941,7 +940,7 @@ mod tests {
 
         test_isolation::with_root(&home, || {
             user_env::with_path("OPENCODE_CONFIG", Some(&pointed), || {
-                let rules = load_opencode_rules(None);
+                let rules = load_judgeable_opencode_rules(None).expect("rules rtk can judge");
                 assert_eq!(
                     rules,
                     vec![rule("git *", Action::Ask)],
@@ -969,7 +968,7 @@ mod tests {
 
         test_isolation::with_root(&tmp.path().join("home"), || {
             let _entered = test_isolation::enter(&sub);
-            let rules = load_opencode_rules(None);
+            let rules = load_judgeable_opencode_rules(None).expect("rules rtk can judge");
             assert_eq!(rules, vec![rule("*", Action::Allow)]);
         });
     }
@@ -989,17 +988,16 @@ mod tests {
 
         test_isolation::with_root(&tmp.path().join("home"), || {
             let _entered = test_isolation::enter(&project);
-            let rules = load_opencode_rules(None);
+            let rules = load_judgeable_opencode_rules(None).expect("rules rtk can judge");
             assert_eq!(rules, vec![rule("git *", Action::Allow)]);
         });
     }
 
-    /// `check_command_for_agent` must route `Host::OpenCode` through this
-    /// module's rules, not another host's (empty) rule source, where every
-    /// verdict would collapse to `Default`.
+    /// `Host::OpenCode` loads this module's rules, not another host's (empty)
+    /// rule source, where every verdict would collapse to `Default`.
     #[test]
-    fn check_command_for_agent_consults_opencode_rules() {
-        use crate::hooks::permissions::{Host, check_command_for_agent};
+    fn opencode_host_rules_are_opencodes_own() {
+        use crate::hooks::permissions::{Host, HostRules};
 
         let tmp = test_isolation::tempdir();
         let project = tmp.path().join("project");
@@ -1011,7 +1009,7 @@ mod tests {
         test_isolation::with_root(&tmp.path().join("home"), || {
             let _entered = test_isolation::enter(&project);
             assert_eq!(
-                check_command_for_agent("git status", Host::OpenCode, None),
+                HostRules::load(Host::OpenCode, None).verdict("git status"),
                 PermissionVerdict::Deny
             );
         });
@@ -1109,7 +1107,7 @@ mod tests {
 
         test_isolation::with_root(&tmp.path().join("home"), || {
             let _entered = test_isolation::enter(&project);
-            let rules = load_opencode_rules(None);
+            let rules = load_judgeable_opencode_rules(None).expect("rules rtk can judge");
             assert_eq!(
                 rules,
                 vec![rule("git *", Action::Allow), rule("git *", Action::Deny)],
@@ -1136,13 +1134,16 @@ mod tests {
 
         test_isolation::with_root(&tmp.path().join("home"), || {
             let _entered = test_isolation::enter(&project);
-            let rules = load_opencode_rules(Some("build"));
+            let rules = load_judgeable_opencode_rules(Some("build")).expect("rules rtk can judge");
             assert_eq!(
                 rules,
                 vec![rule("git *", Action::Deny), rule("git *", Action::Allow)],
                 "the agent block appends after root, matching OpenCode's resolution"
             );
-            assert_eq!(load_opencode_rules(None), vec![rule("git *", Action::Deny)]);
+            assert_eq!(
+                load_judgeable_opencode_rules(None).expect("rules rtk can judge"),
+                vec![rule("git *", Action::Deny)]
+            );
         });
     }
 
@@ -1162,14 +1163,15 @@ mod tests {
 
         test_isolation::with_root(&tmp.path().join("home"), || {
             let _entered = test_isolation::enter(&project);
-            let rules = load_opencode_rules(Some("staged-review"));
+            let rules =
+                load_judgeable_opencode_rules(Some("staged-review")).expect("rules rtk can judge");
             assert_eq!(
                 rules,
                 vec![rule("git *", Action::Deny), rule("git *", Action::Allow)],
                 "the agent block appends after root, matching OpenCode's resolution"
             );
 
-            let without_agent = load_opencode_rules(None);
+            let without_agent = load_judgeable_opencode_rules(None).expect("rules rtk can judge");
             assert_eq!(without_agent, vec![rule("git *", Action::Deny)]);
         });
     }
