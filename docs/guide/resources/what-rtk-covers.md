@@ -7,7 +7,7 @@ sidebar:
 
 # What RTK Optimizes
 
-Once RTK is installed with a hook, these commands are automatically intercepted and filtered. You run them normally — the hook rewrites them transparently before execution.
+The table below lists the filters RTK ships. Whether a specific command is rewritten depends on the hook rules installed for your agent: verify a command with `rtk rewrite "<command>"` (exit 3 means rewritten, exit 1 means left alone). Commands with no matching rule run through passthrough.
 
 :::note
 RTK reduces **bash output bytes** — the only thing it controls. Those bytes are one contributor to input tokens, and input tokens are only part of a bill that also counts output tokens. See [How RTK Savings Work](./savings-explained.md).
@@ -149,7 +149,7 @@ rtk -vvv git status
 
 ## Commands that are not rewritten
 
-If a command isn't in the list above, RTK runs it through passthrough — the output reaches the LLM unchanged. You can explicitly track unsupported commands:
+If no installed rule matches a command, RTK runs it through passthrough — the output reaches the LLM unchanged. You can explicitly track unsupported commands:
 
 ```bash
 rtk bypass make install    # runs make install, tracks usage, no filtering
