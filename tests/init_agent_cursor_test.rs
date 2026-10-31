@@ -107,7 +107,21 @@ fn explicit_claude_agent_dry_run_still_installs_claude() {
 #[test]
 fn agent_cursor_with_opencode_dry_run_installs_both_without_claude() {
     let home = tempfile::tempdir().unwrap();
-    let stdout = dry_run(home.path(), &["-g", "--agent", "cursor", "--opencode"]);
+    // Dry-run reads `opencode --version`. An empty PATH keeps a developer
+    // binary — old, or hung — from changing what this preview asserts.
+    let bin = home.path().join("empty-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let out = rtk(home.path())
+        .env("PATH", &bin)
+        .args(["init", "-g", "--agent", "cursor", "--opencode", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "cursor + opencode dry-run failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         !stdout.contains("/.claude/"),
         "cursor + opencode init must not touch .claude:\n{stdout}"
