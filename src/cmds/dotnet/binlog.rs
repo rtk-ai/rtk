@@ -100,7 +100,7 @@ static RESTORE_DIAGNOSTIC_RE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("valid regex")
 });
 static PROJECT_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^\s*([A-Za-z]:)?[^\r\n]*\.csproj(?:\s|$)").expect("valid regex")
+    Regex::new(r"(?m)^\s*(?P<path>(?:[A-Za-z]:)?[^\r\n]*\.csproj)(?:\s|$)").expect("valid regex")
 });
 static PRINTABLE_RUN_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[\x20-\x7E]{5,}").expect("valid regex"));
@@ -1046,7 +1046,12 @@ pub fn parse_restore_issues_from_text(text: &str) -> (Vec<BinlogIssue>, Vec<Binl
 }
 
 fn count_projects(text: &str) -> usize {
-    PROJECT_PATH_RE.captures_iter(text).count()
+    PROJECT_PATH_RE
+        .captures_iter(text)
+        .filter_map(|captures| captures.name("path"))
+        .map(|path| path.as_str().split_whitespace().last().unwrap_or(""))
+        .collect::<HashSet<_>>()
+        .len()
 }
 
 fn extract_duration(text: &str) -> Option<String> {
@@ -1347,6 +1352,42 @@ Time Elapsed 00:00:12.34
     }
 
     #[test]
+    fn test_parse_test_from_text_counts_distinct_projects_across_warning_lines() {
+        let input = r#"
+/private/tmp/App/App.csproj : warning NU1900: Error occurred while getting package vulnerability data
+/private/tmp/App/App.csproj : warning NU1900: Another vulnerability data warning for the same project
+/private/tmp/App.Tests/App.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data
+/private/tmp/App.Tests/App.Tests.csproj : warning NU1900: Another vulnerability data warning for the same project
+Test run for /private/tmp/App/bin/Debug/net10.0/App.dll (.NETCoreApp,Version=v10.0)
+A total of 1 test files matched the specified pattern.
+Passed!  - Failed:     0, Passed:    10, Skipped:     0, Total:    10, Duration: 1 s - App.dll (net10.0)
+Test run for /private/tmp/App.Tests/bin/Debug/net10.0/App.Tests.dll (.NETCoreApp,Version=v10.0)
+A total of 1 test files matched the specified pattern.
+Failed!  - Failed:     1, Passed:     5, Skipped:     0, Total:     6, Duration: 1 s - App.Tests.dll (net10.0)
+"#;
+
+        let summary = parse_test_from_text(input);
+        assert_eq!(summary.project_count, 2);
+        assert_eq!(summary.passed, 15);
+        assert_eq!(summary.failed, 1);
+    }
+
+    #[test]
+    fn test_parse_test_from_text_dedups_restored_and_bracketed_warning_lines() {
+        let input = r#"
+  Restored /repo/A/A.csproj (1.2s)
+  Restored /repo/A.Tests/App.Tests.csproj (0.4s)
+/repo/A/A.csproj : warning NU1900: Error occurred while getting package vulnerability data [/repo/A/A.csproj]
+/repo/A/A.csproj : warning NU1900: Another vulnerability data warning for the same project [/repo/A/A.csproj]
+/repo/A.Tests/App.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data [/repo/A.Tests/App.Tests.csproj]
+/repo/A.Tests/App.Tests.csproj : warning NU1900: Another vulnerability data warning for the same project [/repo/A.Tests/App.Tests.csproj]
+"#;
+
+        let summary = parse_test_from_text(input);
+        assert_eq!(summary.project_count, 2);
+    }
+
+    #[test]
     fn test_parse_test_from_text_prefers_test_summary_duration_and_counts() {
         let input = r#"
 Failed!  - Failed:     1, Passed:   940, Skipped:     7, Total:   948, Duration: 1 s
@@ -1579,6 +1620,24 @@ Time Elapsed 00:00:00.12
 
         let summary = parse_build_from_text(input);
         assert_eq!(summary.project_count, 1);
+        assert!(summary.succeeded);
+    }
+
+    #[test]
+    fn test_parse_build_from_text_counts_distinct_projects_across_warning_lines() {
+        let input = r#"
+/private/tmp/App/App.csproj : warning NU1900: Error occurred while getting package vulnerability data
+/private/tmp/App/App.csproj : warning NU1900: Another vulnerability data warning for the same project
+/private/tmp/App.Tests/App.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data
+/private/tmp/App.Tests/App.Tests.csproj : warning NU1900: Another vulnerability data warning for the same project
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+"#;
+
+        let summary = parse_build_from_text(input);
+        assert_eq!(summary.project_count, 2);
         assert!(summary.succeeded);
     }
 
