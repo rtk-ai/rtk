@@ -481,20 +481,19 @@ fn native_walk(
     case_insensitive: bool,
     ambient_ignores: bool,
 ) -> (Vec<String>, Vec<String>) {
-    // When the pattern targets dotfiles (e.g. -name ".claude.json"), we must walk hidden
-    // entries; otherwise skip them to keep results tidy (#1101).
+    // When the pattern targets dotfiles (e.g. -name ".claude.json" or ".env"),
+    // walk hidden entries and skip git exclusions. Dotfiles are commonly
+    // gitignored, and native `find` still returns them (#1101, #3291).
     let search_hidden = pattern.starts_with('.');
+    let respect_git = !search_hidden;
 
     let mut builder = WalkBuilder::new(path);
     builder
-        .hidden(!search_hidden) // skip hidden files/dirs unless pattern targets dotfiles
-        .git_ignore(true) // respect .gitignore
-        // Rules from outside the tree walked: the global gitignore, and ignore
-        // files in the directories above it. A test turns them off, so the
-        // developer's own do not decide what it finds.
-        .git_global(ambient_ignores)
+        .hidden(!search_hidden)
+        .git_ignore(respect_git)
+        .git_global(ambient_ignores && respect_git)
         .parents(ambient_ignores)
-        .git_exclude(true);
+        .git_exclude(respect_git);
     if let Some(depth) = max_depth {
         builder.max_depth(Some(depth));
     }
@@ -1219,6 +1218,29 @@ mod tests {
     }
 
     #[test]
+    fn find_dotfile_pattern_includes_gitignored_files() {
+        let temp = test_isolation::tempdir();
+        // `ignore` only applies .gitignore inside a git repository.
+        std::fs::create_dir(temp.path().join(".git")).unwrap();
+        std::fs::write(temp.path().join(".gitignore"), ".env\nignored.txt\n").unwrap();
+        std::fs::write(temp.path().join(".env"), "SECRET=test-only\n").unwrap();
+        std::fs::write(temp.path().join("ignored.txt"), "x\n").unwrap();
+        let root = temp.path().to_string_lossy().into_owned();
+
+        let (dotfile_search, _) = native_walk(&root, ".env", None, false, false, false);
+        assert!(
+            dotfile_search.iter().any(|n| n == ".env"),
+            "dotfile search must include files excluded by .gitignore, got {dotfile_search:?}"
+        );
+
+        let (ordinary_search, _) = native_walk(&root, "*", None, false, false, false);
+        assert!(
+            !ordinary_search.iter().any(|n| n == "ignored.txt"),
+            "ordinary search must continue to respect .gitignore, got {ordinary_search:?}"
+        );
+    }
+
+    #[test]
     fn find_regular_pattern_skips_hidden() {
         // Non-dot pattern should not error (hidden dirs remain skipped)
         let result = run("find", "*.rs", "src", 5, true, None, "f", false, 0);
@@ -1571,7 +1593,12 @@ mod tests {
 
         let (files, filtered) = native_walk(&root_s, ".gitignore", None, false, false, false);
         assert_eq!(files, vec![".gitignore".to_string()]);
-        assert_eq!(filtered, vec!["build/".to_string()]);
+        // A dotfile pattern disables git exclusions, so ignored paths are walked
+        // instead of being disclosed as filtered.
+        assert!(
+            !filtered.iter().any(|p| p == "secret.txt" || p == "build/"),
+            "{filtered:?}"
+        );
     }
 
     #[test]
