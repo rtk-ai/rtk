@@ -1,0 +1,41 @@
+name: Update Rust
+description: >
+  Update the runner image's stable Rust to the latest release and add targets.
+  The GitHub-hosted images ship stable Rust with rustfmt and clippy, but they
+  are rebuilt weekly and can trail a Rust release by several days.
+
+inputs:
+  targets:
+    description: Targets to install besides the host's, separated by spaces.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: rustup toolchain install stable
+      shell: bash
+      env:
+        TARGETS: ${{ inputs.targets }}
+      run: |
+        args=(--profile minimal --no-self-update -c rustfmt -c clippy)
+        read -ra extra_targets <<< "$TARGETS"
+        for t in "${extra_targets[@]}"; do args+=(-t "$t"); done
+        log=$(mktemp)
+        # While the release server publishes a new toolchain, checksums
+        # mismatch for a few minutes; any other failure is final.
+        for attempt in 1 2 3 4 5; do
+          rustup toolchain install stable "${args[@]}" 2>&1 | tee "$log" && break
+          status=$?
+          if [[ $attempt == 5 ]] || ! grep -Fq 'checksum failed for ' "$log" \
+              || ! grep -Fq 'this is likely due to an ongoing update of the official release server' "$log"; then
+            exit "$status"
+          fi
+          echo "Retrying rustup toolchain install in 30 seconds (retry $attempt of 4)" >&2
+          sleep 30
+        done
+        rustup default stable
+        # A throwaway runner never reuses an incremental build.
+        if [[ -z ${CARGO_INCREMENTAL+set} ]]; then
+          echo CARGO_INCREMENTAL=0 >> "$GITHUB_ENV"
+        fi
