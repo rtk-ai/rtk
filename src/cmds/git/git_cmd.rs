@@ -820,9 +820,28 @@ fn emits_word_diff(tokens: &[Token]) -> bool {
     word_diff
 }
 
-/// `rev:path` names a blob. The caller filters to free positionals first, so a flag's own
-/// value (`--pretty=format:...`) never reaches here.
+/// An argument that could name a blob object: `<rev>:<path>`, bare object ID (40- or 64-character
+/// hex SHA, or abbreviated 7..=64 hex digits), or peeling syntax `<rev>^{blob}`.
+///
+/// This is a cheap, pure pre-filter: the caller subsequently verifies candidates with
+/// `probe_is_blob` (`git cat-file -t <arg> == "blob"`).
 fn is_blob_show_arg(arg: &str) -> bool {
+    if arg.starts_with('-') {
+        return false;
+    }
+
+    // Peeling syntax explicitly targeting a blob (e.g. `HEAD^{blob}`, `tag^{blob}`).
+    if arg.ends_with("^{blob}") {
+        return true;
+    }
+
+    // Bare hex object ID: 40-char SHA-1, 64-char SHA-256, or abbreviated prefix (7..=64 hex).
+    // If it turns out to be a commit or tree hash, `probe_is_blob` rejects it (~1ms probe)
+    // and execution falls back to the commit-diff route.
+    if (7..=SHA256_NAME_LEN).contains(&arg.len()) && arg.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return true;
+    }
+
     // Detect `rev:path` style arguments while ignoring flags like `--pretty=format:...`.
     // `:/text` is a commit-message search, not a blob, so it is excluded. `:path` and
     // `:N:path` (index / merge-stage blobs) start with `:` but ARE blobs, so only the
@@ -833,8 +852,7 @@ fn is_blob_show_arg(arg: &str) -> bool {
     // ever appear as pathspecs, so exclude them too. An option value with a colon
     // (`git show -S 'a:b' HEAD`) is handled by `show_positionals`, which skips a
     // flag's operand via git's argument grammar, so it never reaches here as a blob.
-    !arg.starts_with('-')
-        && !arg.starts_with(":/")
+    !arg.starts_with(":/")
         && !arg.starts_with(":(")
         && !arg.starts_with(":!")
         && !arg.starts_with(":^")
@@ -5534,6 +5552,22 @@ mod tests {
         // A colons-only token is not a blob object.
         assert!(!is_blob_show_arg(":"));
         assert!(!is_blob_show_arg("::"));
+
+        // Bare hex object IDs (40-char SHA-1, 64-char SHA-256, abbreviated 7..=64 hex).
+        assert!(is_blob_show_arg("44624a8bcb26332b298c2078d0f68675aa1ed269"));
+        assert!(is_blob_show_arg(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ));
+        assert!(is_blob_show_arg("44624a8"));
+        assert!(!is_blob_show_arg("44624a")); // < 7 chars
+        assert!(!is_blob_show_arg("main"));
+        assert!(!is_blob_show_arg("HEAD~1"));
+
+        // Peeling syntax targeting a blob.
+        assert!(is_blob_show_arg("HEAD^{blob}"));
+        assert!(is_blob_show_arg("v1.0^{blob}"));
+        assert!(!is_blob_show_arg("HEAD^{commit}"));
+        assert!(!is_blob_show_arg("HEAD^{tree}"));
     }
 
     /// Helper: build an args slice from string literals.
@@ -5643,6 +5677,18 @@ mod tests {
         assert_eq!(show_route(&show_args(&["HEAD"])), ShowRoute::CommitDiff);
         assert_eq!(
             show_route(&show_args(&["HEAD:src/main.rs"])),
+            ShowRoute::Blob
+        );
+        assert_eq!(
+            show_route(&show_args(&["44624a8bcb26332b298c2078d0f68675aa1ed269"])),
+            ShowRoute::Blob
+        );
+        assert_eq!(show_route(&show_args(&["HEAD^{blob}"])), ShowRoute::Blob);
+        assert_eq!(
+            show_route(&show_args(&[
+                "--stat",
+                "44624a8bcb26332b298c2078d0f68675aa1ed269"
+            ])),
             ShowRoute::Blob
         );
     }
