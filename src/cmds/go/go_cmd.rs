@@ -1,5 +1,6 @@
 //! Filters Go command output — test results, build errors, vet warnings.
 
+use crate::core::arg_tokenizer::{self, TokenKind};
 use crate::core::guard::never_worse;
 use crate::core::runner;
 use crate::core::shell::{display_args, quote_word};
@@ -243,6 +244,14 @@ fn match_go_tool(args: &[OsString]) -> Option<(GoTool, &[OsString])> {
 /// Run `go tool golangci-lint` and filter its output via the golangci JSON filter.
 /// Reusing parts of golangci_cmd.
 fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
+    let first_arg = args.first().map(|arg| arg.to_string_lossy());
+    let tokens = arg_tokenizer::tokenize(first_arg.as_slice());
+    let args = match tokens.first() {
+        Some(token) if token.kind == TokenKind::Positional && token.text == "run" => {
+            &args[token.source_index + 1..]
+        }
+        _ => args,
+    };
     let timer = tracking::TimedExecution::start();
 
     let version = detect_go_tool_golangci_version();
