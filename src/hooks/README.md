@@ -82,9 +82,12 @@ second command-parsing boundary. RTK checks deny rules against both the outer
 wrapper and the parsed inner segments, including a wrapper behind a prefix the
 rewrite strips (`env bash -c '…'`, `timeout 5 sh -c '…'`, a configured
 `transparent_prefixes` entry — `registry::shell_wrapper_positions`). A shell
-name that is merely an argument (`grep -rn bash -c src`) is not a wrapper. A
-deny rule matching an inner segment yields `Defer`: RTK neither rewrites nor
-decides, so the host sees the command exactly as typed.
+name that is merely an argument (`grep -rn bash -c src`) is not a wrapper. The
+inner script is segmented with the operators of the shell the wrapper names: in
+`zsh -c`, `&!` is one operator, so the command glued behind it (`&!rm`,
+`&!{ rm …; }`) is a segment of its own, while bash, sh and fish read `!rm` as a
+command of that name. A deny rule matching an inner segment yields `Defer`: RTK
+neither rewrites nor decides, so the host sees the command exactly as typed.
 A wrapper at the start of a segment is never auto-allowed: its strongest RTK
 verdict is `Ask`. A wrapper behind a prefix is only checked for deny rules and
 otherwise keeps the outer command's verdict, as on master. Ask-capable hosts

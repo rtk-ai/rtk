@@ -696,6 +696,10 @@ pub(crate) struct Policy {
     group_boundaries: bool,
     redirects: RedirectPolicy,
     stop_at_pipe: bool,
+    /// The shell that reads the input. Bash for a host's command string; a
+    /// quoted `<shell> -c '…'` script is read with the shell its wrapper
+    /// names, which in zsh makes `&!` one operator.
+    dialect: ShellDialect,
 }
 
 impl Policy {
@@ -705,6 +709,7 @@ impl Policy {
         group_boundaries: true,
         redirects: RedirectPolicy::Excise,
         stop_at_pipe: false,
+        dialect: ShellDialect::Posix,
     };
 
     /// The permission gate's look for a quoted shell wrapper: its boundaries,
@@ -721,6 +726,7 @@ impl Policy {
         group_boundaries: false,
         redirects: RedirectPolicy::Keep,
         stop_at_pipe: false,
+        dialect: ShellDialect::Posix,
     };
 
     pub(crate) const fn stopping_at_pipe(self, stop_at_pipe: bool) -> Self {
@@ -728,6 +734,11 @@ impl Policy {
             stop_at_pipe,
             ..self
         }
+    }
+
+    /// This policy, for input that `dialect` reads.
+    pub(crate) const fn in_dialect(self, dialect: ShellDialect) -> Self {
+        Self { dialect, ..self }
     }
 }
 
@@ -775,7 +786,18 @@ pub(crate) fn segment(cmd: &str, policy: Policy) -> Vec<Segment<'_>> {
         let is_boundary = match tok.kind {
             TokenKind::Operator | TokenKind::Pipe(_) => true,
             TokenKind::Shellism => {
-                policy.group_boundaries && matches!(tok.value.as_str(), "&" | "(" | ")")
+                policy.group_boundaries
+                    && (matches!(tok.value.as_str(), "&" | "(" | ")")
+                        // zsh reads `&!` as one operator, background and
+                        // disown, so the `!` glued to a `&` ends the segment
+                        // with it instead of negating what follows: the command
+                        // after it starts a segment of its own. Anywhere else,
+                        // and in every other shell, `!rm` names a command `!rm`.
+                        // The `|` of `&|` is a boundary already.
+                        || (policy.dialect == ShellDialect::Zsh
+                            && i.checked_sub(1)
+                                .and_then(|prev| tokens.get(prev))
+                                .is_some_and(|prev| closes_disown_pair(prev, tok))))
             }
             _ => false,
         };
@@ -856,6 +878,18 @@ pub(crate) fn segment(cmd: &str, policy: Policy) -> Vec<Segment<'_>> {
 /// Callers must still gate on [`contains_unattestable_construct`] first.
 pub fn split_for_permissions(cmd: &str) -> Vec<&str> {
     segment(cmd, Policy::PERMISSIONS)
+        .into_iter()
+        .map(|s| s.text)
+        .collect()
+}
+
+/// [`split_for_permissions`] for a script whose shell is known: the quoted
+/// script of a `<shell> -c '…'` wrapper, segmented with the operators of the
+/// shell the wrapper names. In zsh `&!` is one operator, so `git status &!rm`
+/// runs `rm` as a command of its own; bash reads the same text as `&` and a
+/// command named `!rm`.
+pub(crate) fn split_for_permissions_in(cmd: &str, dialect: ShellDialect) -> Vec<&str> {
+    segment(cmd, Policy::PERMISSIONS.in_dialect(dialect))
         .into_iter()
         .map(|s| s.text)
         .collect()
@@ -1858,6 +1892,97 @@ mod tests {
         }
     }
 
+    /// The gate's segments for a zsh script: `&!` is one operator there, so
+    /// the command glued behind it is a segment of its own, without the `!`.
+    /// Bash reads the same text as a background `&` and a command named
+    /// `!rm`, and so does zsh wherever the `!` is not glued to a `&`.
+    #[test]
+    fn test_split_for_permissions_in_reads_the_zsh_disown_pair() {
+        // (script, zsh segments, bash segments)
+        let rows: &[(&str, &[&str], &[&str])] = &[
+            (
+                "git status &!rm -rf /tmp/x",
+                &["git status", "rm -rf /tmp/x"],
+                &["git status", "!rm -rf /tmp/x"],
+            ),
+            (
+                "git status &! rm -rf /tmp/x",
+                &["git status", "rm -rf /tmp/x"],
+                &["git status", "! rm -rf /tmp/x"],
+            ),
+            (
+                "git status &!{ rm -rf /tmp/x; }",
+                &["git status", "{ rm -rf /tmp/x", "}"],
+                &["git status", "!{ rm -rf /tmp/x", "}"],
+            ),
+            // One `!` closes the pair; the next one is the command's own.
+            (
+                "git status &!!rm -rf /tmp/x",
+                &["git status", "!rm -rf /tmp/x"],
+                &["git status", "!!rm -rf /tmp/x"],
+            ),
+            ("git status &!", &["git status"], &["git status", "!"]),
+            // The `|` of `&|` is a boundary in every dialect.
+            (
+                "git status &|rm -rf /tmp/x",
+                &["git status", "rm -rf /tmp/x"],
+                &["git status", "rm -rf /tmp/x"],
+            ),
+            // Only a `!` or a `|` closes a pair: a brace group behind a plain
+            // `&` keeps its `{`, which the gate strips as grammar.
+            (
+                "git status &{ rm -rf /tmp/x; }",
+                &["git status", "{ rm -rf /tmp/x", "}"],
+                &["git status", "{ rm -rf /tmp/x", "}"],
+            ),
+            // No pair: the `!` is not glued to a `&` that ends a command.
+            (
+                "git status & !rm -rf /tmp/x",
+                &["git status", "!rm -rf /tmp/x"],
+                &["git status", "!rm -rf /tmp/x"],
+            ),
+            (
+                "git status;!rm -rf /tmp/x",
+                &["git status", "!rm -rf /tmp/x"],
+                &["git status", "!rm -rf /tmp/x"],
+            ),
+            (
+                "git status &&!rm -rf /tmp/x",
+                &["git status", "!rm -rf /tmp/x"],
+                &["git status", "!rm -rf /tmp/x"],
+            ),
+            ("!rm -rf /tmp/x", &["!rm -rf /tmp/x"], &["!rm -rf /tmp/x"]),
+            // zsh's clobbering `>&!` is a redirect, not a pair.
+            ("git status >&! out", &["git status"], &["git status"]),
+        ];
+        for (script, zsh, bash) in rows {
+            assert_eq!(
+                split_for_permissions_in(script, ShellDialect::Zsh),
+                *zsh,
+                "zsh: {script:?}"
+            );
+            for dialect in [ShellDialect::Posix, ShellDialect::Fish] {
+                assert_eq!(
+                    split_for_permissions_in(script, dialect),
+                    *bash,
+                    "{dialect:?}: {script:?}"
+                );
+            }
+            assert_eq!(split_for_permissions(script), *bash, "{script:?}");
+        }
+
+        // The `!` ends a segment together with its `&`, so where a `&` ends
+        // none, as in classification, neither does the `!` glued to it.
+        let classify: Vec<&str> = segment(
+            "git status &!rm -rf /tmp/x",
+            Policy::CLASSIFY.in_dialect(ShellDialect::Zsh),
+        )
+        .into_iter()
+        .map(|s| s.text)
+        .collect();
+        assert_eq!(classify, ["git status &!rm -rf /tmp/x"]);
+    }
+
     #[test]
     fn test_fish_dialect_attests_a_portable_script() {
         assert!(!contains_unattestable_construct_in(
@@ -2047,9 +2172,15 @@ mod tests {
             "(ls; cargo build)",
             "2>&1 ls | grep x",
             "ls\r\nls -la",
+            "ls &!rm -rf /",
+            "ls&!{ rm -rf /; }",
         ] {
             let trimmed = cmd.trim();
-            for policy in [Policy::PERMISSIONS, Policy::CLASSIFY] {
+            for policy in [
+                Policy::PERMISSIONS,
+                Policy::PERMISSIONS.in_dialect(ShellDialect::Zsh),
+                Policy::CLASSIFY,
+            ] {
                 for seg in segment(cmd, policy) {
                     assert_eq!(
                         &trimmed[seg.start..seg.end],
