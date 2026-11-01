@@ -137,13 +137,14 @@ shadow   = false
 | `use` / `action` | exactly one | `use` is a chain of [methods](./methods.md); `action` is control flow (below) |
 | `task` · `upstream` · `message` | with `route` / `deny` | see [Actions](#actions) |
 | `mode` | no | `route` before a tool only: `suggest` (default) · `swap` · `answer` — see [Route modes](#route-modes) |
+| `emit` | no | transforms after a tool only: `output` (default) replaces the tool's output with the chain's result; `note` hands the result to the agent as added context (`additionalContext`) and leaves the output as it was. See [Notes after a tool](#notes-after-a-tool) |
 | `continue` | no | default `false` — first match wins; `true` keeps evaluating later rules |
 | `enabled` | no | default `true`; a disabled rule is skipped but still shown by `rtk pipeline show` |
 | `shadow` | no | transforms only; decide and record, emit nothing — see [Shadow mode](./commands.md#shadow-mode) |
 
 ### Order
 
-Within one `[[site.event.subject]]` list: the project's rules first, then yours, then inherited rules — within a scope, files in load order, then declaration order. **First match wins** unless `continue = true`. The `any` list is evaluated only after the specific subject's list matched nothing.
+Within one `[[site.event.subject]]` list: the project's rules first, then yours, then inherited rules — within a scope, files in load order, then declaration order. **First match wins** unless `continue = true`. The `any` list is evaluated only after the specific subject's list matched nothing. After a tool, [note rules](#notes-after-a-tool) and output rules are two separate lists that follow these rules each on their own.
 
 `rtk pipeline validate` warns when a rule can never fire — for instance a rule after one with no `when` and no `continue` in the same list (W001).
 
@@ -158,8 +159,8 @@ What a rule may do depends on its position:
 | `hook.before_tool.write` | — | `deny` (warned: the body is already generated; a deny only buys a retry) · `passthrough` · `route` | `task` with route |
 | `hook.before_tool.edit` | — | `deny` · `passthrough` | |
 | `hook.before_tool.{search,web,subagent,mcp,any}` | — | `deny` · `passthrough` · `route` | `task` with route |
-| `hook.after_tool.{shell,search,web,mcp,subagent,any}` | transform chain | `passthrough` · `route` | `task` with route |
-| `hook.after_tool.read` | transform chain | `passthrough` · `route` (W021: breaks a later Edit) | `task` with route |
+| `hook.after_tool.{shell,search,web,mcp,subagent,any}` | transform chain, or a [note](#notes-after-a-tool) | `passthrough` · `route` | `task` with route; `emit = "note"` on a chain |
+| `hook.after_tool.read` | transform chain, or a [note](#notes-after-a-tool) | `passthrough` · `route` (W021: breaks a later Edit) | `task` with route; `emit = "note"` on a chain |
 | `hook.after_tool.{write,edit}` | — (no output to extract, W013) | `passthrough` | |
 | `proxy.request.{tool_result,tool_use,assistant,any}` | transform chain — cache-stable methods only | — | |
 | `proxy.request.cache` | `["cache-align"]` | — | |
@@ -243,6 +244,26 @@ On any subject with extractable output the output already exists, so there is no
 This is the one rule that makes a provider call on the hook path — bound it with the upstream's `timeout_secs` (default 30 s; set it lower for the hook path). Every failure — no upstream, refused, timed out, empty answer — passes the original output through untouched.
 
 `route` after a `read` is allowed but warned (W021): a later `Edit` needs the exact bytes, so keep it to files the agent only reads. After `write` and `edit` there is no output to replace (W013).
+
+### Notes after a tool
+
+A transform rule with `emit = "note"` does not touch the tool's output. Its chain runs on the raw result, and what the chain returns is handed to the agent as added context (`additionalContext`), next to the output it reads anyway:
+
+```toml
+[[hook.after_tool.shell]]
+name = "explain-failures"
+when = { is_rtk_command = false }
+use  = ["ansi", "my-hint"]      # my-hint: a plugin method that returns a short hint
+emit = "note"
+```
+
+- Note rules and output rules are evaluated as two separate lists. A note rule never stops the output rules, whatever its `continue`, and it does not hold back the `any` output rules for its subject; `continue` only chains note rules among themselves.
+- No size guard applies: a single failing line is enough for a note, while the output rules still skip results under `min_size`.
+- A note that is empty, or repeats the result unchanged, is not sent. A `shadow` note rule is logged, not sent.
+- The note pass costs nothing when no note rule is active for the subject (or under `any`): no facts are built, so no transcript read and no classifier call.
+- Only Claude Code receives notes today; it is the only agent whose `after_tool` hook RTK installs (see [Agent Coverage](../resources/agent-coverage.md#what-this-means-per-pipeline-position)).
+
+A file that uses `emit` is refused whole by an rtk release that predates it — see [Plugins](./plugins.md#requirements-and-notes) if you ship one.
 
 ## Overrides
 

@@ -146,5 +146,9 @@ loaded. `rtk pipeline validate` shows which rules are affected.
   tool's input is already a condition via the `input.*` prefix
   (`when."input.subagent_type" = "Explore"`), and AI-driven conditions are
   classifiers.
+- A pipeline file shipped with a plugin may use keys a user's older rtk does
+  not know, such as `emit = "note"`. That rtk refuses the whole file (E002,
+  then W025), and whatever it `extends` is dropped with it. Put such rules in
+  a file of their own, or state the minimum rtk version the plugin needs.
 - A project-local `.rtk/plugins/` is trust-gated like every other project file;
   review with `rtk trust` before it is built.
