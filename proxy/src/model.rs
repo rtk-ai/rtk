@@ -59,6 +59,7 @@ pub struct InterceptedRequest {
     /// which lever did the work. This is the extension point: a downstream
     /// stage attributes its own savings without any change here.
     pub saved_by_stage: Vec<(&'static str, i64)>,
+    pub saved_by_rule: Vec<(String, i64)>,
     /// Original model when complexity-routing downgraded it (else `None`).
     pub routed_from: Option<String>,
     /// What kind of request this is, when the client says so.
@@ -110,6 +111,16 @@ impl InterceptedRequest {
         match self.saved_by_stage.iter_mut().find(|(n, _)| *n == name) {
             Some((_, acc)) => *acc += removed,
             None => self.saved_by_stage.push((name, removed)),
+        }
+    }
+
+    pub fn record_rule_saving(&mut self, rule: &str, removed: i64) {
+        if removed <= 0 {
+            return;
+        }
+        match self.saved_by_rule.iter_mut().find(|(n, _)| n == rule) {
+            Some((_, acc)) => *acc += removed,
+            None => self.saved_by_rule.push((rule.to_string(), removed)),
         }
     }
 
@@ -170,6 +181,7 @@ impl InterceptedRequest {
             api_key_hash: None,
             tokens_saved: 0,
             saved_by_stage: Vec::new(),
+            saved_by_rule: Vec::new(),
             routed_from: None,
             request_class: None,
             user_id: None,

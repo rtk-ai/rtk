@@ -77,6 +77,8 @@ pub struct UsageRow {
     pub saved_pixel_compress: i64,
     pub saved_ccr: i64,
     pub saved_normalize: i64,
+    pub saved_engine_methods: i64,
+    pub saved_rules: Option<String>,
 }
 
 #[derive(Clone)]
@@ -115,7 +117,9 @@ CREATE TABLE IF NOT EXISTS usage_records (
     session TEXT,
     pipeline TEXT,
     routed_from TEXT,
-    cost_without REAL NOT NULL DEFAULT 0
+    cost_without REAL NOT NULL DEFAULT 0,
+    saved_engine_methods INTEGER NOT NULL DEFAULT 0,
+    saved_rules TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_usage_ts    ON usage_records(ts);
 CREATE INDEX IF NOT EXISTS idx_usage_model ON usage_records(model);
@@ -171,6 +175,8 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE usage_records ADD COLUMN saved_normalize INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE usage_records ADD COLUMN routed_from TEXT",
     "ALTER TABLE usage_records ADD COLUMN cost_without REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE usage_records ADD COLUMN saved_engine_methods INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE usage_records ADD COLUMN saved_rules TEXT",
 ];
 
 impl Store {
@@ -240,8 +246,8 @@ impl Store {
                     path,
                     compression_level, ctx_total, ctx_tool_result, ctx_tool_use, ctx_duplicate, ctx_image,
                     saved_ingest_filter, saved_pixel_compress, saved_ccr, saved_normalize, project, session, pipeline,
-                    routed_from, cost_without)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)",
+                    routed_from, cost_without, saved_engine_methods, saved_rules)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31)",
                 params![
                     row.ts, row.provider, row.model, row.tokens_in, row.tokens_out,
                     row.tokens_saved, row.cost_usd, row.status, row.client,
@@ -251,7 +257,7 @@ impl Store {
                     row.ctx_total, row.ctx_tool_result, row.ctx_tool_use, row.ctx_duplicate, row.ctx_image,
                     row.saved_ingest_filter, row.saved_pixel_compress, row.saved_ccr,
                     row.saved_normalize, row.project, row.session, row.pipeline,
-                    row.routed_from, row.cost_without
+                    row.routed_from, row.cost_without, row.saved_engine_methods, row.saved_rules
                 ],
             )?;
             Ok(())
@@ -322,7 +328,7 @@ impl Store {
                         COALESCE(sum(ctx_tool_use),0), COALESCE(sum(ctx_duplicate),0),
                         COALESCE(sum(ctx_image),0), COALESCE(sum(saved_ingest_filter),0),
                         COALESCE(sum(saved_pixel_compress),0), COALESCE(sum(saved_ccr),0),
-                        COALESCE(sum(saved_normalize),0)
+                        COALESCE(sum(saved_normalize),0), COALESCE(sum(saved_engine_methods),0)
                  FROM usage_records",
                 [],
                 |r| {
@@ -336,6 +342,7 @@ impl Store {
                         "saved_pixel_compress": r.get::<_, i64>(6)?,
                         "saved_ccr":            r.get::<_, i64>(7)?,
                         "saved_normalize":      r.get::<_, i64>(8)?,
+                        "saved_engine_methods": r.get::<_, i64>(9)?,
                     }))
                 },
             )
@@ -700,26 +707,68 @@ mod tests {
             provider: "anthropic".into(),
             model: "claude-opus-5".into(),
             status: 200,
-            tokens_saved: 100,
+            tokens_saved: 150,
             saved_ingest_filter: 10,
             saved_pixel_compress: 20,
             saved_ccr: 30,
             saved_normalize: 40,
+            saved_engine_methods: 50,
             ..Default::default()
         })
         .await;
 
         let ctx = s.context_summary().await;
         assert_eq!(ctx["saved_normalize"], 40);
+        assert_eq!(ctx["saved_engine_methods"], 50);
         let breakdown = ctx["saved_ingest_filter"].as_i64().unwrap()
             + ctx["saved_pixel_compress"].as_i64().unwrap()
             + ctx["saved_ccr"].as_i64().unwrap()
-            + ctx["saved_normalize"].as_i64().unwrap();
+            + ctx["saved_normalize"].as_i64().unwrap()
+            + ctx["saved_engine_methods"].as_i64().unwrap();
         assert_eq!(
             breakdown,
             s.summary().await["tokens_saved"].as_i64().unwrap(),
             "per-method breakdown must reconcile with tokens_saved"
         );
+    }
+
+    #[tokio::test]
+    async fn an_older_db_gains_the_rule_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE usage_records (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, \
+                 provider TEXT NOT NULL, model TEXT NOT NULL, tokens_in INTEGER NOT NULL DEFAULT 0, \
+                 tokens_out INTEGER NOT NULL DEFAULT 0, tokens_saved INTEGER NOT NULL DEFAULT 0, \
+                 cost_usd REAL NOT NULL DEFAULT 0, status INTEGER NOT NULL DEFAULT 0, client TEXT);",
+            )
+            .unwrap();
+        let s = Store::open(path.to_str().unwrap()).unwrap();
+        s.record(UsageRow {
+            ts: "2026-01-01T00:00:00Z".into(),
+            provider: "anthropic".into(),
+            model: "claude-haiku-4-5".into(),
+            status: 200,
+            tokens_saved: 1720,
+            saved_engine_methods: 1720,
+            saved_rules: Some(r#"{"web-pages":1720}"#.into()),
+            ..Default::default()
+        })
+        .await;
+        let (methods, rules): (i64, Option<String>) = s
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT saved_engine_methods, saved_rules FROM usage_records",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(methods, 1720);
+        assert_eq!(rules.as_deref(), Some(r#"{"web-pages":1720}"#));
     }
 
     #[tokio::test]
