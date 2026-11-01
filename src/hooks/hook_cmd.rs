@@ -1017,11 +1017,22 @@ fn process_codex_payload(v: &Value) -> PayloadAction {
         };
     }
 
-    process_codex_payload_from_decision(
-        v,
-        cmd,
-        decide_hook_action(cmd, permissions::Host::Codex, None),
-    )
+    let decision = decide_hook_action(cmd, permissions::Host::Codex, None);
+    if let HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten) = &decision
+        && (v.get("cwd").is_some_and(|cwd| !cwd.is_string())
+            || !super::permissions_codex::preserves_rules(
+                v.get("cwd").and_then(Value::as_str),
+                cmd,
+                rewritten,
+            ))
+    {
+        return PayloadAction::Skip {
+            decision: HookOutcome::Defer,
+            reason: "skip:codex_rules",
+            cmd: cmd.to_string(),
+        };
+    }
+    process_codex_payload_from_decision(v, cmd, decision)
 }
 
 fn process_codex_payload_from_decision(
@@ -2342,6 +2353,146 @@ mod tests {
         assert_eq!(hook["permissionDecision"], "allow");
         assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
         assert_eq!(hook["updatedInput"]["command"], "rtk git status");
+    }
+
+    #[test]
+    fn codex_rules_parity_fixture_matrix() {
+        use crate::core::{test_isolation, user_env};
+        let cases = [
+            ("no_rules", "", true),
+            (
+                "allow_allow",
+                r#"prefix_rule(pattern=[["git", "rtk"]], decision="allow")"#,
+                true,
+            ),
+            (
+                "allow_none",
+                r#"prefix_rule(pattern=["git", "status"], decision="allow")"#,
+                false,
+            ),
+            (
+                "forbidden",
+                r#"prefix_rule(pattern=["git"], decision="forbidden")"#,
+                false,
+            ),
+            (
+                "both_forbidden",
+                r#"prefix_rule(pattern=[["git", "rtk"]], decision="forbidden")"#,
+                false,
+            ),
+            (
+                "replacement_forbidden",
+                r#"prefix_rule(pattern=["rtk"], decision="forbidden")"#,
+                false,
+            ),
+            (
+                "prompt_prompt",
+                r#"prefix_rule(pattern=[["git", "rtk"]], decision="prompt")"#,
+                false,
+            ),
+            (
+                "prompt_none",
+                r#"prefix_rule(pattern=["git"], decision="prompt")"#,
+                false,
+            ),
+            ("unknown_syntax", "for tool in [\"git\"]: pass", false),
+        ];
+        for (name, source, rewrite) in cases {
+            let temp = test_isolation::tempdir();
+            test_isolation::with_root(temp.path(), || {
+                let cwd = temp.path().join("project");
+                std::fs::create_dir_all(&cwd).expect("project");
+                let _entered = test_isolation::enter(&cwd);
+                let home = temp.path().join("codex");
+                let rules = home.join("rules");
+                std::fs::create_dir_all(&rules).expect("rules");
+                if !source.is_empty() {
+                    std::fs::write(rules.join("test.rules"), source).expect("rule");
+                }
+                user_env::with_path("CODEX_HOME", Some(&home), || {
+                    assert_eq!(
+                        run_codex_inner(&codex_input("git status")).is_some(),
+                        rewrite && (source.is_empty() || !cfg!(any(target_os = "macos", windows))),
+                        "{name}"
+                    );
+                });
+            });
+        }
+    }
+
+    #[test]
+    fn codex_rules_parity_defers_project_and_unreadable_rules() {
+        use crate::core::{test_isolation, user_env};
+        let temp = test_isolation::tempdir();
+        test_isolation::with_root(temp.path(), || {
+            let cwd = temp.path().join("project");
+            std::fs::create_dir_all(&cwd).expect("project");
+            let _entered = test_isolation::enter(&cwd);
+            let home = temp.path().join("codex");
+            user_env::with_path("CODEX_HOME", Some(&home), || {
+                assert!(run_codex_inner(&codex_input("git status")).is_some());
+                let project_rules = cwd.join(".codex/rules");
+                std::fs::create_dir_all(&project_rules).expect("project rules");
+                std::fs::write(
+                    project_rules.join("p.rules"),
+                    "prefix_rule(pattern=['git'])",
+                )
+                .expect("project rule");
+                assert!(run_codex_inner(&codex_input("git status")).is_none());
+                std::fs::remove_dir_all(cwd.join(".codex")).expect("remove fixture");
+                std::fs::create_dir_all(home.join("rules")).expect("user rules");
+                std::fs::write(home.join("rules/bad.rules"), [0xff]).expect("invalid UTF-8");
+                assert!(run_codex_inner(&codex_input("git status")).is_none());
+            });
+        });
+    }
+
+    #[test]
+    fn codex_rules_parity_strictest_across_files_and_each_segment() {
+        use crate::core::{test_isolation, user_env};
+        let temp = test_isolation::tempdir();
+        test_isolation::with_root(temp.path(), || {
+            let cwd = temp.path().join("project");
+            std::fs::create_dir_all(&cwd).expect("project");
+            let _entered = test_isolation::enter(&cwd);
+            let home = temp.path().join("codex");
+            let rules = home.join("rules");
+            std::fs::create_dir_all(&rules).expect("rules");
+            std::fs::write(
+                rules.join("a.rules"),
+                r#"prefix_rule(pattern=[["git", "rtk"]])"#,
+            )
+            .expect("allow");
+            user_env::with_path("CODEX_HOME", Some(&home), || {
+                std::fs::write(
+                    rules.join("b.rules"),
+                    r#"prefix_rule(pattern=["git"], decision="forbidden")"#,
+                )
+                .expect("forbidden");
+                assert!(run_codex_inner(&codex_input("git status")).is_none());
+                std::fs::write(
+                    rules.join("b.rules"),
+                    r#"prefix_rule(pattern=["git"], decision="prompt")"#,
+                )
+                .expect("prompt");
+                assert!(run_codex_inner(&codex_input("git status")).is_none());
+                std::fs::write(
+                    rules.join("b.rules"),
+                    r#"prefix_rule(pattern=[["git", "rtk"]], decision="prompt")"#,
+                )
+                .expect("both prompt");
+                assert!(run_codex_inner(&codex_input("git status")).is_none());
+                std::fs::write(
+                    rules.join("a.rules"),
+                    r#"prefix_rule(pattern=["git", "status"], decision="prompt")
+                    prefix_rule(pattern=["rtk", "git", "status"], decision="prompt")
+                    prefix_rule(pattern=["git", "diff"], decision="allow")"#,
+                )
+                .expect("compound");
+                std::fs::remove_file(rules.join("b.rules")).expect("remove prompt fixture");
+                assert!(run_codex_inner(&codex_input("git status && git diff")).is_none());
+            });
+        });
     }
 
     #[test]

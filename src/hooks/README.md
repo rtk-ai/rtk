@@ -137,7 +137,9 @@ and Claude Code's hook is the only one:
   `AgentPath::ClaudeHook`;
 - OpenCode re-evaluates its own patterns against the string RTK returns, with
   the rule set resolved per agent at run time;
-- Codex, Trae, Vibe and Antigravity have no RTK-side rule source at all;
+- Codex compares a conservative literal user-rule subset before/after rewriting,
+  but does not attest the full trusted policy stack;
+- Trae, Vibe and Antigravity have no RTK-side rule source at all;
 - `rtk rewrite` reads Claude's rules, but the delegates that shell out to it
   apply exit 3 without prompting (`hooks/pi/rtk.ts`,
   `hooks/hermes/rtk-rewrite`) and OpenClaw matches its own exec checks against
@@ -206,7 +208,7 @@ rewrite`, since it is inherited by every child process. See `decision.rs`'s
 | Cursor (rtk hook cursor) | Ready | `permission: "ask",` — users will be prompted when Cursor enforces the permission; in the meantime, allow |
 | Gemini CLI (rtk hook gemini) | No (allow/deny only) | allow (limitation — no ask mode in Gemini) |
 | Copilot CLI (rtk hook copilot) | No updatedInput | deny-with-suggestion (unchanged) |
-| Codex (`rtk hook codex`) | Native approval runs after rewrite | Emit required protocol `allow` with `updatedInput`; Codex then evaluates the rewritten command normally |
+| Codex (`rtk hook codex`) | Native approval runs after rewrite | Compare literal user-rule decisions per segment, defer on changes/unknown layers, then emit required protocol `allow` with `updatedInput`; Codex retains native approval |
 | Trae (`rtk hook trae`) | Host-owned approval | Return only `updatedInput`; omit `permissionDecision` |
 | Mistral Vibe (rtk hook vibe) | No native ask surface | passthrough — Vibe's own approval prompt fires on the rewritten command |
 | OpenClaw (`openclaw/index.ts` → `rtk rewrite`) | Host-owned approval (`RTK_REWRITE_HOST=openclaw`) | Rewrite with no RTK prompt when no rule matched; an explicit `Ask` still exits 3 and the plugin prompts. OpenClaw's `tools.exec.mode`/`security`/`ask` decide. A `Deny` still exits 2 and the plugin blocks the call |
@@ -214,6 +216,7 @@ rewrite`, since it is inherited by every child process. See `decision.rs`'s
 
 ### Implementation
 
+- `permissions_codex.rs` — literal user prefix-rule comparison; unknown syntax/layers defer (see [coverage limits](../../hooks/README.md#codex-cli-rust-binary))
 - `permissions.rs` — loads deny/ask/allow rules, evaluates precedence, returns `PermissionVerdict`
 - `rewrite_cmd.rs` — maps verdict to exit code (consumed by shell hook)
 - `hook_cmd.rs` — maps decisions to each agent's JSON protocol, including Codex `updatedInput`
