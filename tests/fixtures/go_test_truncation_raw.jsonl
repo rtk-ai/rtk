@@ -1,0 +1,22 @@
+{"Time":"2026-10-22T09:02:34.371808561-03:00","Action":"start","Package":"example.com/stream/ok"}
+{"Time":"2026-10-22T09:02:34.376358749-03:00","Action":"run","Package":"example.com/stream/ok","Test":"TestPass"}
+{"Time":"2026-10-22T09:02:34.376378589-03:00","Action":"output","Package":"example.com/stream/ok","Test":"TestPass","Output":"=== RUN   TestPass\n"}
+{"Time":"2026-10-22T09:02:34.376414943-03:00","Action":"output","Package":"example.com/stream/ok","Test":"TestPass","Output":"--- PASS: TestPass (0.00s)\n"}
+{"Time":"2026-10-22T09:02:34.376417767-03:00","Action":"pass","Package":"example.com/stream/ok","Test":"TestPass","Elapsed":0}
+{"Time":"2026-10-22T09:02:34.376421082-03:00","Action":"run","Package":"example.com/stream/ok","Test":"TestSkip"}
+{"Time":"2026-10-22T09:02:34.376423095-03:00","Action":"output","Package":"example.com/stream/ok","Test":"TestSkip","Output":"=== RUN   TestSkip\n"}
+{"Time":"2026-10-22T09:02:34.376424867-03:00","Action":"output","Package":"example.com/stream/ok","Test":"TestSkip","Output":"    ok_test.go:6: not available\n"}
+{"Time":"2026-10-22T09:02:34.376427752-03:00","Action":"output","Package":"example.com/stream/ok","Test":"TestSkip","Output":"--- SKIP: TestSkip (0.00s)\n"}
+{"Time":"2026-10-22T09:02:34.376429875-03:00","Action":"skip","Package":"example.com/stream/ok","Test":"TestSkip","Elapsed":0}
+{"Time":"2026-10-22T09:02:34.376431908-03:00","Action":"output","Package":"example.com/stream/ok","Output":"PASS\n"}
+{"Time":"2026-10-22T09:02:34.376603217-03:00","Action":"output","Package":"example.com/stream/ok","Output":"ok  \texample.com/stream/ok\t0.005s\n"}
+{"Time":"2026-10-22T09:02:34.37661869-03:00","Action":"pass","Package":"example.com/stream/ok","Elapsed":0.005}
+{"Time":"2026-10-22T09:02:34.516250914-03:00","Action":"start","Package":"example.com/stream/zz"}
+{"Time":"2026-10-22T09:02:34.519426736-03:00","Action":"run","Package":"example.com/stream/zz","Test":"TestX"}
+{"Time":"2026-10-22T09:02:34.519440737-03:00","Action":"output","Package":"example.com/stream/zz","Test":"TestX","Output":"=== RUN   TestX\n"}
+{"Time":"2026-10-22T09:02:34.519470741-03:00","Action":"output","Package":"example.com/stream/zz","Test":"TestX","Output":"    z_test.go:6: expected 1, got 2\n"}
+{"Time":"2026-10-22T09:02:34.519478873-03:00","Action":"output","Package":"example.com/stream/zz","Test":"TestX","Output":"--- FAIL: TestX (0.00s)\n"}
+{"Time":"2026-10-22T09:02:34.519482909-03:00","Action":"fail","Package":"example.com/stream/zz","Test":"TestX","Elapsed":0}
+{"Time":"2026-10-22T09:02:34.519488598-03:00","Action":"output","Package":"example.com/stream/zz","Output":"FAIL\n"}
+{"Time":"2026-10-22T09:02:34.519838186-03:00","Action":"output","Package":"example.com/stream/zz","Output":"FAIL\texample.com/stream/zz\t0.004s\n"}
+{"Time":"2026-10-22T09:02:34.519850724-03:00","Action":"fail","Package":"example.com/stream/zz","Elapsed":0.004}

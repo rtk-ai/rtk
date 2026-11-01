@@ -36,6 +36,7 @@ struct GoTestEvent {
 
 #[derive(Debug, Default)]
 struct PackageResult {
+    complete: bool,
     pass: usize,
     fail: usize,
     skip: usize,
@@ -322,7 +323,7 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
 
         let event: GoTestEvent = match serde_json::from_str(trimmed) {
             Ok(e) => e,
-            Err(_) => continue, // Skip non-JSON lines
+            Err(_) => return output.to_string(),
         };
 
         // Handle build-output/build-fail events (use ImportPath, no Package)
@@ -349,6 +350,8 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
 
         let package = event.package.unwrap_or_else(|| "unknown".to_string());
         let pkg_result = packages.entry(package.clone()).or_default();
+        pkg_result.complete =
+            event.test.is_none() && matches!(event.action.as_str(), "pass" | "fail" | "skip");
 
         match event.action.as_str() {
             "pass" if event.test.is_some() => {
@@ -405,6 +408,12 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
             }
             _ => {} // run, pause, cont, etc.
         }
+    }
+
+    // A missing package result can hide failures whose terminal events were cut off.
+    // Preserve the stream instead of presenting partial results as a completed run.
+    if packages.values().any(|package| !package.complete) {
+        return output.to_string();
     }
 
     // Build summary
@@ -803,6 +812,81 @@ fn compact_package_name(package: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TRUNCATION_FIXTURE: &str =
+        include_str!("../../../tests/fixtures/go_test_truncation_raw.jsonl");
+
+    #[test]
+    fn test_filter_go_test_incomplete_stream_is_preserved() {
+        // Real `go test -json -p 1 -count=1 ./...` output from Go 1.26.10.
+        // Stop before a test result, before a package result, or mid-record.
+        for marker in [
+            "\"Action\":\"run\",\"Package\":\"example.com/stream/ok\",\"Test\":\"TestPass\"",
+            "\"Action\":\"pass\",\"Package\":\"example.com/stream/ok\",\"Elapsed\"",
+            "\"Action\":\"fail\",\"Package\":\"example.com/stream/zz\",\"Test\":\"TestX\"",
+            "\"Action\":\"fail\",\"Package\":\"example.com/stream/zz\",\"Elapsed\"",
+        ] {
+            let cut = TRUNCATION_FIXTURE
+                .split_inclusive('\n')
+                .take_while(|line| !line.contains(marker))
+                .collect::<String>();
+            assert!(!cut.is_empty());
+            assert_eq!(filter_go_test_json(&cut), cut, "cut before {marker}");
+
+            let partial_record = format!("{cut}{{\"Time\":\"2026-");
+            assert_eq!(filter_go_test_json(&partial_record), partial_record);
+        }
+    }
+
+    #[test]
+    fn test_filter_go_test_complete_stream_still_compresses() {
+        let result = filter_go_test_json(TRUNCATION_FIXTURE);
+        assert!(result.starts_with("Go test: 1 passed, 1 failed, 1 skipped in 2 packages"));
+        assert!(result.contains("[FAIL] TestX"));
+        assert!(result.contains("z_test.go:6: expected 1, got 2"));
+        assert!(result.len() * 5 <= TRUNCATION_FIXTURE.len() * 4);
+
+        let passing_package = TRUNCATION_FIXTURE
+            .split_inclusive('\n')
+            .take_while(|line| !line.contains("example.com/stream/zz"))
+            .collect::<String>();
+        assert_eq!(
+            filter_go_test_json(&passing_package),
+            "Go test: 1 passed in 1 packages"
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_complete_package_cannot_hide_unfinished_package() {
+        let passing_package = TRUNCATION_FIXTURE
+            .split_inclusive('\n')
+            .take_while(|line| !line.contains("example.com/stream/zz"))
+            .collect::<String>();
+        let unfinished_package = TRUNCATION_FIXTURE
+            .lines()
+            .find(|line| {
+                line.contains("\"Action\":\"start\",\"Package\":\"example.com/stream/zz\"")
+            })
+            .expect("second package start");
+
+        let interleaved = format!("{unfinished_package}\n{passing_package}");
+        assert_eq!(filter_go_test_json(&interleaved), interleaved);
+
+        let partial_next_package = format!("{passing_package}{{\"Action\":\"start\",\"Package\":");
+        assert_eq!(
+            filter_go_test_json(&partial_next_package),
+            partial_next_package
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_skipped_package_is_complete() {
+        // Captured from `go test -json ./empty` with Go 1.26.10.
+        let output = r#"{"Action":"start","Package":"example.com/stream/empty"}
+{"Action":"output","Package":"example.com/stream/empty","Output":"?   \texample.com/stream/empty\t[no test files]\n"}
+{"Action":"skip","Package":"example.com/stream/empty","Elapsed":0}"#;
+        assert_eq!(filter_go_test_json(output), "Go test: No tests found");
+    }
 
     #[test]
     fn test_filter_go_test_all_pass() {
