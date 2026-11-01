@@ -139,6 +139,7 @@ fn process_with_config(event: &Value, config: &Config, pipeline: &Resolved) -> O
     };
 
     let composed = filter_and_compose(
+        event,
         config,
         pipeline,
         subject,
@@ -220,6 +221,7 @@ fn log_entry_for(
     applied: &Applied,
     before: usize,
     after: usize,
+    outcome: Option<String>,
 ) -> pipeline_log::LogEntry {
     pipeline_log::LogEntry {
         ts: pipeline_log::now_ts(),
@@ -238,6 +240,7 @@ fn log_entry_for(
         tokens_after: Some(after),
         shadow: applied.shadow,
         recovery: None,
+        outcome,
     }
 }
 
@@ -248,13 +251,25 @@ fn queue_log(
     applied: &Applied,
     before: usize,
     after: usize,
+    outcome: Option<String>,
 ) {
     if !pipeline_log::enabled() {
         return;
     }
     pipeline_log::queue(log_entry_for(
-        subject, command, source, applied, before, after,
+        subject, command, source, applied, before, after, outcome,
     ));
+}
+
+fn partial_read_info(event: &Value) -> Option<(u64, u64)> {
+    let file = event.pointer("/tool_response/file")?;
+    let num_lines = file.get("numLines").and_then(|v| v.as_u64())?;
+    let total_lines = file.get("totalLines").and_then(|v| v.as_u64())?;
+    if num_lines < total_lines {
+        Some((num_lines, total_lines))
+    } else {
+        None
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -478,6 +493,7 @@ fn record_recovery(command: &str) {
 /// `None` = no matching rule, chain was a no-op, not smaller, or shadow.
 #[allow(clippy::too_many_arguments)]
 fn filter_and_compose(
+    event: &Value,
     config: &Config,
     pipeline: &Resolved,
     subject: Subject,
@@ -501,6 +517,20 @@ fn filter_and_compose(
 
     if filtered == raw {
         // No-op chain: skip the recall store entirely.
+        let outcome = if let Some((num, total)) = partial_read_info(event) {
+            format!("kept as is (partial read, {num} of {total} lines)")
+        } else {
+            "kept as is (no change)".to_string()
+        };
+        queue_log(
+            subject,
+            None,
+            source,
+            &applied,
+            estimate_tokens(raw),
+            estimate_tokens(raw),
+            Some(outcome),
+        );
         track(tool_name, format.as_str(), source, raw, raw, duration_ms);
         return None;
     }
@@ -515,6 +545,15 @@ fn filter_and_compose(
     };
 
     if estimate_tokens(&composed) > estimate_tokens(raw) {
+        queue_log(
+            subject,
+            None,
+            source,
+            &applied,
+            estimate_tokens(raw),
+            estimate_tokens(raw),
+            Some("kept as is (no smaller result)".to_string()),
+        );
         track(tool_name, format.as_str(), source, raw, raw, duration_ms);
         return None;
     }
@@ -526,6 +565,7 @@ fn filter_and_compose(
         &applied,
         estimate_tokens(raw),
         estimate_tokens(&composed),
+        None,
     );
     if applied.shadow {
         track(tool_name, format.as_str(), source, raw, raw, duration_ms);
@@ -596,10 +636,29 @@ fn process_websearch(
     }
 
     if !changed || shadow {
-        if let Some(applied) = &last_applied
-            && shadow
-        {
-            attribute(applied, &raw_concat, &filtered_concat);
+        if let Some(applied) = &last_applied {
+            if shadow {
+                attribute(applied, &raw_concat, &filtered_concat);
+                queue_log(
+                    Subject::Web,
+                    None,
+                    source,
+                    applied,
+                    estimate_tokens(&raw_concat),
+                    estimate_tokens(&filtered_concat),
+                    None,
+                );
+            } else {
+                queue_log(
+                    Subject::Web,
+                    None,
+                    source,
+                    applied,
+                    estimate_tokens(&raw_concat),
+                    estimate_tokens(&raw_concat),
+                    Some("kept as is (no change)".to_string()),
+                );
+            }
         }
         track(
             "WebSearch",
@@ -628,6 +687,17 @@ fn process_websearch(
     }
 
     if estimate_tokens(&filtered_concat) > estimate_tokens(&raw_concat) {
+        if let Some(applied) = &last_applied {
+            queue_log(
+                Subject::Web,
+                None,
+                source,
+                applied,
+                estimate_tokens(&raw_concat),
+                estimate_tokens(&raw_concat),
+                Some("kept as is (no smaller result)".to_string()),
+            );
+        }
         track(
             "WebSearch",
             "web",
@@ -651,6 +721,7 @@ fn process_websearch(
             applied,
             estimate_tokens(&raw_concat),
             estimate_tokens(&filtered_concat),
+            None,
         );
     }
     track(
@@ -769,16 +840,29 @@ fn process_shell(
     let raw_combined = combine_streams(stdout, stderr);
 
     if (filtered_stdout == stdout && filtered_stderr == stderr) || shadow {
-        if shadow && let Some(applied) = &applied_stdout {
-            attribute(applied, &raw_combined, &filtered_stdout);
-            queue_log(
-                Subject::Shell,
-                Some(command),
-                "",
-                applied,
-                estimate_tokens(&raw_combined),
-                estimate_tokens(&filtered_stdout),
-            );
+        if let Some(applied) = &applied_stdout {
+            if shadow {
+                attribute(applied, &raw_combined, &filtered_stdout);
+                queue_log(
+                    Subject::Shell,
+                    Some(command),
+                    "",
+                    applied,
+                    estimate_tokens(&raw_combined),
+                    estimate_tokens(&filtered_stdout),
+                    None,
+                );
+            } else {
+                queue_log(
+                    Subject::Shell,
+                    Some(command),
+                    "",
+                    applied,
+                    estimate_tokens(&raw_combined),
+                    estimate_tokens(&raw_combined),
+                    Some("kept as is (no change)".to_string()),
+                );
+            }
         }
         track(
             "Bash",
@@ -800,6 +884,17 @@ fn process_shell(
 
     let emitted_combined = combine_streams(&composed_stdout, &filtered_stderr);
     if estimate_tokens(&emitted_combined) > estimate_tokens(&raw_combined) {
+        if let Some(applied) = &applied_stdout {
+            queue_log(
+                Subject::Shell,
+                Some(command),
+                "",
+                applied,
+                estimate_tokens(&raw_combined),
+                estimate_tokens(&raw_combined),
+                Some("kept as is (no smaller result)".to_string()),
+            );
+        }
         track(
             "Bash",
             "term",
@@ -825,6 +920,7 @@ fn process_shell(
             applied,
             estimate_tokens(&raw_combined),
             estimate_tokens(&emitted_combined),
+            None,
         );
     }
     track(
@@ -1761,6 +1857,7 @@ mod tests {
             &applied,
             estimate_tokens(&applied.text),
             10,
+            None,
         );
         let line = serde_json::to_string(&entry).expect("serializes");
         assert!(
@@ -1769,6 +1866,101 @@ mod tests {
         );
         assert!(line.contains("term-default"));
         assert!(line.contains("cargo test"));
+    }
+
+    #[test]
+    fn test_pipeline_log_records_decision_when_output_grows() {
+        let _ = pipeline_log::set_enabled(true);
+        let mut content = String::new();
+        for i in 0..40 {
+            content.push_str(&format!("src/file_{i}.rs:10:fn handler_3() {{}}\n"));
+            content.push_str(&format!("src/file_{i}.rs:20:fn handler_3() {{}}\n"));
+        }
+        let event = serde_json::json!({
+            "hookEventName": "PostToolUse",
+            "tool_name": "Grep",
+            "tool_input": {
+                "path": "src",
+                "output_mode": "content"
+            },
+            "tool_response": {
+                "mode": "content",
+                "content": content
+            }
+        });
+        assert!(run_posthook(&event).is_none());
+        pipeline_log::flush();
+        let entries = pipeline_log::read_last(10, Some("grep-group"));
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.rule, "grep-group");
+        assert_eq!(
+            entry.outcome.as_deref(),
+            Some("kept as is (no smaller result)")
+        );
+        let rendered = pipeline_log::render(entry);
+        assert!(rendered.contains("kept as is (no smaller result)"));
+    }
+
+    #[test]
+    fn test_pipeline_log_records_decision_when_partial_lockfile_read() {
+        let _ = pipeline_log::set_enabled(true);
+        let event = serde_json::json!({
+            "hookEventName": "PostToolUse",
+            "tool_name": "Read",
+            "tool_input": {
+                "file_path": "package-lock.json"
+            },
+            "tool_response": {
+                "file": {
+                    "filePath": "package-lock.json",
+                    "content": "{\n  \"name\": \"my-app\",\n  \"lockfileVersion\": 3,\n".repeat(20),
+                    "numLines": 757,
+                    "startLine": 1,
+                    "totalLines": 966
+                }
+            }
+        });
+        assert!(run_posthook(&event).is_none());
+        pipeline_log::flush();
+        let entries = pipeline_log::read_last(10, Some("lockfiles"));
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.rule, "lockfiles");
+        assert_eq!(
+            entry.outcome.as_deref(),
+            Some("kept as is (partial read, 757 of 966 lines)")
+        );
+        let rendered = pipeline_log::render(entry);
+        assert!(rendered.contains("kept as is (partial read, 757 of 966 lines)"));
+    }
+
+    #[test]
+    fn test_pipeline_log_records_decision_when_shell_output_unchanged() {
+        let _ = pipeline_log::set_enabled(true);
+        let stdout = (0..15)
+            .map(|i| format!("running job task {i} with distinct description\n"))
+            .collect::<String>();
+        let event = serde_json::json!({
+            "hookEventName": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": "cargo test"
+            },
+            "tool_response": {
+                "stdout": stdout,
+                "stderr": ""
+            }
+        });
+        assert!(run_posthook(&event).is_none());
+        pipeline_log::flush();
+        let entries = pipeline_log::read_last(10, Some("term-default"));
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.rule, "term-default");
+        assert_eq!(entry.outcome.as_deref(), Some("kept as is (no change)"));
+        let rendered = pipeline_log::render(entry);
+        assert!(rendered.contains("kept as is (no change)"));
     }
 
     #[test]

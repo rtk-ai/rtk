@@ -1978,7 +1978,9 @@ pub fn run_explain_last() -> Result<i32> {
                 entry.rule,
                 entry.methods.join(", ")
             );
-            if let (Some(before), Some(after)) = (entry.tokens_before, entry.tokens_after) {
+            if let Some(outcome) = &entry.outcome {
+                println!("outcome: {outcome}");
+            } else if let (Some(before), Some(after)) = (entry.tokens_before, entry.tokens_after) {
                 let savings = if before > 0 {
                     100.0 - (after as f64 / before as f64 * 100.0)
                 } else {
