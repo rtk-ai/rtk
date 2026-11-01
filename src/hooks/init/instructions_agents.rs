@@ -3,24 +3,6 @@
 use super::*;
 use crate::core::user_dirs;
 
-/// Agents without a command hook must prefix `rtk` themselves, which only the `full` level
-/// teaches, so they always receive `RTK_AWARENESS_FULL`. This prints the one-line note that
-/// tells the user why their configured `awareness.level` was not applied.
-fn print_instructions_agents_awareness_note(agent: &str, ctx: InitContext) {
-    let prefix = if ctx.dry_run { "[dry-run] " } else { "  " };
-    let ignored = if ctx.awareness == AwarenessLevel::Full {
-        String::new()
-    } else {
-        format!(
-            " (config awareness.level = \"{}\" does not apply here)",
-            ctx.awareness
-        )
-    };
-    println!(
-        "{prefix}Awareness: full — {agent} has no command hook, so the agent is told to prefix rtk itself{ignored}"
-    );
-}
-
 // Cline / Roo Code support
 
 pub(super) fn run_cline_mode(ctx: InitContext) -> Result<()> {
