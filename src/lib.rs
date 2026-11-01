@@ -3701,8 +3701,7 @@ fn run_cli() -> Result<i32> {
                 };
                 match path.decide(&raw) {
                     HookDecision::AllowRewrite(rewritten)
-                    | HookDecision::AskRewrite(rewritten)
-                    | HookDecision::AskFishWrap(rewritten) => {
+                    | HookDecision::AskRewrite(rewritten, _) => {
                         println!("{}", rewritten);
                         0
                     }

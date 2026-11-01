@@ -4,7 +4,7 @@
 //! corrupts the JSON protocol (Claude Code bug #4669 silently disables the hook).
 
 use super::constants::PRE_TOOL_USE_KEY;
-use super::decision::{self, HookDecision};
+use super::decision::{self, AskOwner, HookDecision};
 use super::permissions::{self, PermissionVerdict};
 use super::permissions_opencode;
 use anyhow::{Context, Result};
@@ -313,7 +313,7 @@ fn vscode_response_from_decision(
         }
         HookDecision::Defer => return None,
         HookDecision::AllowRewrite(r) => (r, true),
-        HookDecision::AskRewrite(r) | HookDecision::AskFishWrap(r) => (r, false),
+        HookDecision::AskRewrite(r, _) => (r, false),
     };
 
     audit_log("rewrite", cmd, &rewritten);
@@ -349,9 +349,7 @@ fn copilot_ide_response_from_decision(decision: HookDecision, cmd: &str) -> Opti
             audit_log("deny", cmd, "");
             "Blocked by RTK permission rule".to_string()
         }
-        HookDecision::AllowRewrite(rewritten)
-        | HookDecision::AskRewrite(rewritten)
-        | HookDecision::AskFishWrap(rewritten) => {
+        HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten, _) => {
             audit_log("rewrite", cmd, &rewritten);
             format!("RTK token optimization: re-run this command as `{rewritten}` instead.")
         }
@@ -383,7 +381,7 @@ fn copilot_cli_response_from_decision(
         }
         HookDecision::Defer => return None,
         HookDecision::AllowRewrite(r) => (r, true),
-        HookDecision::AskRewrite(r) | HookDecision::AskFishWrap(r) => (r, false),
+        HookDecision::AskRewrite(r, _) => (r, false),
     };
 
     audit_log("rewrite", cmd, &rewritten);
@@ -473,7 +471,7 @@ fn run_gemini_inner_impl(
             audit_log("rewrite", cmd, rewritten);
             gemini_json("allow", Some(rewritten))
         }
-        HookDecision::AskRewrite(ref rewritten) | HookDecision::AskFishWrap(ref rewritten) => {
+        HookDecision::AskRewrite(ref rewritten, _) => {
             audit_log("ask", cmd, rewritten);
             gemini_json("ask_user", Some(rewritten))
         }
@@ -536,9 +534,7 @@ fn run_antigravity_inner(input: &str) -> Value {
             "decision": "deny",
             "reason": "Blocked by RTK permission rule"
         }),
-        HookDecision::AllowRewrite(ref rewritten)
-        | HookDecision::AskRewrite(ref rewritten)
-        | HookDecision::AskFishWrap(ref rewritten) => {
+        HookDecision::AllowRewrite(ref rewritten) | HookDecision::AskRewrite(ref rewritten, _) => {
             audit_log("rewrite", cmd, rewritten);
             json!({
                 "decision": "allow",
@@ -598,9 +594,7 @@ fn run_vibe_inner(input: &str) -> Option<String> {
             audit_log("deny", cmd, "");
             Some(r#"{"decision":"deny","reason":"Blocked by RTK permission rule"}"#.to_string())
         }
-        HookDecision::AllowRewrite(ref rewritten)
-        | HookDecision::AskRewrite(ref rewritten)
-        | HookDecision::AskFishWrap(ref rewritten) => {
+        HookDecision::AllowRewrite(ref rewritten) | HookDecision::AskRewrite(ref rewritten, _) => {
             audit_log("rewrite", cmd, rewritten);
             Some(vibe_rewrite_json(rewritten))
         }
@@ -745,11 +739,10 @@ fn process_claude_payload_from_decision(
             };
         }
         HookDecision::AllowRewrite(r) => (r, Some("allow"), HookOutcome::Allow),
-        HookDecision::AskRewrite(r) => (r, None, HookOutcome::Ask),
-        // The host sees one `rtk run` command, not the script inside it.
-        // Only a wrap RTK actually built must override that native check;
-        // a user-typed command keeps its ordinary decision after rewriting.
-        HookDecision::AskFishWrap(r) => (r, Some("ask"), HookOutcome::Ask),
+        HookDecision::AskRewrite(r, AskOwner::Host) => (r, None, HookOutcome::Ask),
+        // The host would judge the command RTK built, not the parts inside it
+        // (a fish wrap is one `rtk run` command), so the hook asks itself.
+        HookDecision::AskRewrite(r, AskOwner::Hook) => (r, Some("ask"), HookOutcome::Ask),
     };
 
     PayloadAction::Rewrite {
@@ -900,9 +893,7 @@ fn process_trae_payload(v: &Value) -> Option<TraeRewrite> {
         .and_then(Value::as_str)
         .filter(|command| !command.is_empty())?;
     let rewritten = match decide_hook_action(command, permissions::Host::Trae, None) {
-        HookDecision::AllowRewrite(rewritten)
-        | HookDecision::AskRewrite(rewritten)
-        | HookDecision::AskFishWrap(rewritten) => rewritten,
+        HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten, _) => rewritten,
         HookDecision::Deny | HookDecision::Defer => return None,
     };
 
@@ -1016,9 +1007,7 @@ fn process_codex_payload_from_decision(
 ) -> PayloadAction {
     let (rewritten, outcome) = match decision {
         HookDecision::AllowRewrite(rewritten) => (rewritten, HookOutcome::Allow),
-        HookDecision::AskRewrite(rewritten) | HookDecision::AskFishWrap(rewritten) => {
-            (rewritten, HookOutcome::Ask)
-        }
+        HookDecision::AskRewrite(rewritten, _) => (rewritten, HookOutcome::Ask),
         HookDecision::Deny => {
             return PayloadAction::Skip {
                 decision: HookOutcome::Deny,
@@ -1139,7 +1128,7 @@ pub fn run_cursor() -> Result<()> {
             audit_log("rewrite", &cmd, &rewritten);
             cursor_allow(&rewritten)
         }
-        HookDecision::AskRewrite(rewritten) | HookDecision::AskFishWrap(rewritten) => {
+        HookDecision::AskRewrite(rewritten, _) => {
             audit_log("ask", &cmd, &rewritten);
             cursor_ask(&rewritten)
         }
@@ -1202,9 +1191,7 @@ fn run_cursor_inner_with_rules(
     let verdict = permissions::check_command_with_rules(&cmd, deny_rules, ask_rules, allow_rules);
     match decide_from_verdict(&cmd, verdict, permissions::DenyRules::Unattested, None) {
         HookDecision::AllowRewrite(rewritten) => cursor_allow(&rewritten),
-        HookDecision::AskRewrite(rewritten) | HookDecision::AskFishWrap(rewritten) => {
-            cursor_ask(&rewritten)
-        }
+        HookDecision::AskRewrite(rewritten, _) => cursor_ask(&rewritten),
         _ => "{}".to_string(),
     }
 }
@@ -1254,9 +1241,7 @@ fn droid_response_from_decision(v: &Value, cmd: &str, decision: HookDecision) ->
             return None;
         }
         HookDecision::Defer => return None,
-        HookDecision::AllowRewrite(r)
-        | HookDecision::AskRewrite(r)
-        | HookDecision::AskFishWrap(r) => r,
+        HookDecision::AllowRewrite(r) | HookDecision::AskRewrite(r, _) => r,
     };
 
     audit_log("rewrite", cmd, &rewritten);
@@ -1314,9 +1299,7 @@ fn opencode_answer(cmd: &str, rules: &[permissions_opencode::Rule]) -> Value {
             return json!({});
         }
         HookDecision::Defer => return json!({}),
-        HookDecision::AllowRewrite(r)
-        | HookDecision::AskRewrite(r)
-        | HookDecision::AskFishWrap(r) => r,
+        HookDecision::AllowRewrite(r) | HookDecision::AskRewrite(r, _) => r,
     };
 
     let after = permissions_opencode::check_command_with_opencode_rules(&rewritten, rules);
@@ -1521,7 +1504,7 @@ mod tests {
         });
         for decision in [
             HookDecision::AllowRewrite("rtk git status".into()),
-            HookDecision::AskRewrite("rtk git status".into()),
+            HookDecision::AskRewrite("rtk git status".into(), AskOwner::Host),
         ] {
             let response = vscode_response_from_decision(decision, "git status", &input).unwrap();
             let mut expected = input["tool_input"].clone();
@@ -1553,7 +1536,7 @@ mod tests {
         // Copilot CLI 1.0.66+ treats it as authoritative and forces a blocking
         // dialog with no "remember" option on every rewritten command.
         let r = vscode_response_from_decision(
-            HookDecision::AskRewrite("rtk cargo test".into()),
+            HookDecision::AskRewrite("rtk cargo test".into(), AskOwner::Host),
             "cargo test",
             &vscode_input("Bash", "cargo test"),
         )
@@ -1610,7 +1593,7 @@ mod tests {
         // Copilot CLI 1.0.66+ forced-prompt bug from #3037.
         let r = copilot_cli_response_from_decision(
             &cli_args("cargo test"),
-            HookDecision::AskRewrite("rtk cargo test".into()),
+            HookDecision::AskRewrite("rtk cargo test".into(), AskOwner::Host),
             "cargo test",
         )
         .unwrap();
@@ -1662,7 +1645,7 @@ mod tests {
     #[test]
     fn test_copilot_ide_rewrite_returns_deny_with_suggestion() {
         let response = copilot_ide_response_from_decision(
-            HookDecision::AskRewrite("rtk git status".into()),
+            HookDecision::AskRewrite("rtk git status".into(), AskOwner::Host),
             "git status",
         )
         .unwrap();
@@ -1750,7 +1733,7 @@ mod tests {
         });
         let r = copilot_cli_response_from_decision(
             &args,
-            HookDecision::AskRewrite("rtk cargo install ripgrep".into()),
+            HookDecision::AskRewrite("rtk cargo install ripgrep".into(), AskOwner::Host),
             "cargo install ripgrep",
         )
         .unwrap();
@@ -2066,7 +2049,7 @@ mod tests {
         match process_claude_payload_from_decision(
             &v,
             "git status",
-            HookDecision::AskRewrite("rtk git status".to_string()),
+            HookDecision::AskRewrite("rtk git status".to_string(), AskOwner::Host),
         ) {
             PayloadAction::Rewrite { decision, .. } => assert_eq!(decision, HookOutcome::Ask),
             other => {
@@ -2084,8 +2067,14 @@ mod tests {
         let wrapped = "rtk run --shell fish -c 'test -d src; and git status'";
         let v = claude_input_value(cmd);
         for (decision, expected) in [
-            (HookDecision::AskFishWrap(wrapped.to_string()), Some("ask")),
-            (HookDecision::AskRewrite(wrapped.to_string()), None),
+            (
+                HookDecision::AskRewrite(wrapped.to_string(), AskOwner::Hook),
+                Some("ask"),
+            ),
+            (
+                HookDecision::AskRewrite(wrapped.to_string(), AskOwner::Host),
+                None,
+            ),
         ] {
             match process_claude_payload_from_decision(&v, cmd, decision) {
                 PayloadAction::Rewrite {
@@ -2991,7 +2980,7 @@ mod tests {
     fn test_decide_ask_for_default_verdict() {
         assert!(matches!(
             decide_with_rules("git status", &[], &[], &[]),
-            HookDecision::AskRewrite(_)
+            HookDecision::AskRewrite(_, AskOwner::Host)
         ));
     }
 
@@ -3049,9 +3038,7 @@ mod tests {
                 r#"{"decision":"deny","reason":"Blocked by RTK permission rule"}"#.to_string()
             }
             HookDecision::AllowRewrite(r) => gemini_json("allow", Some(&r)),
-            HookDecision::AskRewrite(r) | HookDecision::AskFishWrap(r) => {
-                gemini_json("ask_user", Some(&r))
-            }
+            HookDecision::AskRewrite(r, _) => gemini_json("ask_user", Some(&r)),
             HookDecision::Defer => gemini_json("ask_user", None),
         }
     }
@@ -3634,7 +3621,7 @@ mod tests {
             &[],
             &all_allowed(),
         ) {
-            HookDecision::AskRewrite(rewritten) => {
+            HookDecision::AskRewrite(rewritten, AskOwner::Host) => {
                 assert_eq!(
                     rewritten,
                     r#"bash -c "rtk read foo --head-lines 10 && rtk grep -R bar .""#
