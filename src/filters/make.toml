@@ -6,7 +6,8 @@ strip_lines_matching = [
   "^\\s*$",
   "^Nothing to be done",
 ]
-max_lines = 50
+head_lines = 20
+tail_lines = 30
 on_empty = "make: ok"
 
 [[tests.make]]
@@ -30,6 +31,117 @@ gcc -O2 bar.c
 expected = """
 gcc -O2 foo.c
 gcc -O2 bar.c
+"""
+
+[[tests.make]]
+name = "preserves tail for long composite output"
+input = """
+make[1]: Entering directory '/home/user'
+step_1
+step_2
+step_3
+step_4
+step_5
+step_6
+step_7
+step_8
+step_9
+step_10
+step_11
+step_12
+step_13
+step_14
+step_15
+step_16
+step_17
+step_18
+step_19
+step_20
+step_21
+step_22
+step_23
+step_24
+step_25
+step_26
+step_27
+step_28
+step_29
+step_30
+step_31
+step_32
+step_33
+step_34
+step_35
+step_36
+step_37
+step_38
+step_39
+step_40
+step_41
+step_42
+step_43
+step_44
+step_45
+step_46
+step_47
+step_48
+step_49
+step_50
+step_51
+make[1]: Leaving directory '/home/user'
+"""
+expected = """
+step_1
+step_2
+step_3
+step_4
+step_5
+step_6
+step_7
+step_8
+step_9
+step_10
+step_11
+step_12
+step_13
+step_14
+step_15
+step_16
+step_17
+step_18
+step_19
+step_20
+... (1 lines omitted)
+step_22
+step_23
+step_24
+step_25
+step_26
+step_27
+step_28
+step_29
+step_30
+step_31
+step_32
+step_33
+step_34
+step_35
+step_36
+step_37
+step_38
+step_39
+step_40
+step_41
+step_42
+step_43
+step_44
+step_45
+step_46
+step_47
+step_48
+step_49
+step_50
+step_51
 """
 
 [[tests.make]]
