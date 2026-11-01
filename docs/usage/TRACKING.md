@@ -43,9 +43,13 @@ The same database also holds filter parse failures and hook rewrite decisions, w
 
 Commands RTK passes through without filtering are tracked at 0% reduction. They still count toward
 `commands` and the token totals, but they are left out of `total_time_ms` and `avg_time_ms` (in the
-summary, the daily/weekly/monthly breakdowns, and the JSON/CSV exports): only commands with captured
-input (`input_tokens > 0`) are timed. A passthrough row filtered nothing, and its duration is the
-wrapped process's lifetime — for an interactive TUI such as `rtk claude`, the whole session.
+summary, the daily/weekly/monthly breakdowns, and the JSON/CSV exports). Timing classification uses
+the stored label: canonical passthrough, fallback, bypass, proxy, and the unambiguous legacy
+`rtk ... (passthrough)` labels are untimed, while ordinary filtered labels remain timed even when the
+filter emits zero output. Ordinary-label passthrough rows written by v0.52.0 through v1.1.0, including
+`rtk curl ...` and `rtk git show ...`, remain timed because they cannot be classified after the fact.
+A passthrough row's duration is the wrapped process's lifetime, which can be the whole session for an
+interactive TUI such as `rtk claude`.
 
 ## Privacy
 
