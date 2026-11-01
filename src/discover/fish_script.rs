@@ -151,7 +151,7 @@ fn contains_fish_substitution(cmd: &str) -> bool {
 
 /// True only when the command contains a fish-only marker at command position and
 /// nothing a POSIX shell would need to parse it (see module docs for the lists).
-pub(crate) fn is_unambiguous_fish(cmd: &str) -> bool {
+fn is_unambiguous_fish(cmd: &str) -> bool {
     if cmd.contains('\0') {
         return false;
     }

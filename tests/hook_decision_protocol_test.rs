@@ -925,3 +925,250 @@ mod rewrite_host_scoping {
         assert!(!denied.recorded_a_recall());
     }
 }
+
+mod opencode_tests {
+    use super::common;
+    use serde_json::{Value, json};
+    use std::process::Output;
+    use tempfile::TempDir;
+
+    const COMMANDS: [&str; 6] = [
+        "kubectl get pods",
+        "oc get pods",
+        "npm run build",
+        "gcloud compute instances list",
+        "git status",
+        "aws sts get-caller-identity",
+    ];
+
+    fn configured_home(policy: Value) -> TempDir {
+        let config = json!({ "permission": { "bash": policy } }).to_string();
+        common::hook::isolated_home(&[("opencode.json", &config)])
+    }
+
+    fn assert_hook_and_check(
+        home: &TempDir,
+        command: &str,
+        rewritten: Option<&str>,
+    ) -> (Output, Output) {
+        let hook = common::rtk_command()
+            .args(["hook", "opencode", "--", command])
+            .current_dir(home.path())
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path())
+            .output()
+            .expect("run OpenCode hook");
+        assert_eq!(
+            hook.status.code(),
+            Some(0),
+            "hook failed for {command}: {}",
+            String::from_utf8_lossy(&hook.stderr)
+        );
+        let expected = match rewritten {
+            Some(command) => json!({ "command": command }),
+            None => json!({}),
+        };
+        assert_eq!(
+            hook.stdout.as_slice(),
+            format!("{expected}\n").as_bytes(),
+            "hook response for {command}: {}",
+            String::from_utf8_lossy(&hook.stderr)
+        );
+
+        let check = common::hook::hook_check("opencode", command, home);
+        assert_eq!(
+            check.status.code(),
+            Some(if rewritten.is_some() { 0 } else { 1 }),
+            "hook check failed for {command}: {}",
+            String::from_utf8_lossy(&check.stderr)
+        );
+        match rewritten {
+            Some(command) => assert_eq!(
+                check.stdout.as_slice(),
+                format!("{command}\n").as_bytes(),
+                "hook check rewrite"
+            ),
+            None => assert!(
+                check.stdout.is_empty(),
+                "hook check must not print a rewrite"
+            ),
+        }
+        (hook, check)
+    }
+
+    #[test]
+    fn rtk_allow_rules_rewrite_issue_commands_through_both_entry_points() {
+        for policy in [
+            json!({ "rtk *": "allow" }),
+            json!({
+                "rtk kubectl *": "allow",
+                "rtk oc *": "allow",
+                "rtk npm *": "allow",
+                "rtk gcloud *": "allow",
+                "rtk git *": "allow",
+                "rtk aws *": "allow",
+            }),
+            // Author's confirmed real setup on 5 machines (#4638)
+            json!({ "rtk *": "allow", "git *": "allow", "aws *": "allow" }),
+        ] {
+            let home = configured_home(policy);
+            for command in COMMANDS {
+                assert_hook_and_check(&home, command, Some(&format!("rtk {command}")));
+            }
+        }
+    }
+
+    #[test]
+    fn bare_allow_rules_keep_rewrites_under_the_hosts_default_allow() {
+        let home = configured_home(json!({
+            "kubectl *": "allow",
+            "oc *": "allow",
+            "npm *": "allow",
+            "gcloud *": "allow",
+            "git *": "allow",
+            "aws *": "allow",
+        }));
+        for command in COMMANDS {
+            assert_hook_and_check(&home, command, Some(&format!("rtk {command}")));
+        }
+    }
+
+    #[test]
+    fn explicit_ask_and_deny_on_either_form_keep_the_command_as_typed() {
+        for action in ["ask", "deny"] {
+            for policy in [
+                json!({ "rtk *": "allow", "npm *": action }),
+                json!({ "*": action, "rtk *": "allow" }),
+                json!({ "npm *": "allow", "rtk npm *": action }),
+            ] {
+                let home = configured_home(policy);
+                assert_hook_and_check(&home, "npm run build", None);
+            }
+        }
+    }
+
+    #[test]
+    fn compound_commands_keep_each_segments_explicit_restrictions() {
+        let command = "kubectl get pods && npm run build";
+        let rewritten = "rtk kubectl get pods && rtk npm run build";
+        for policy in [json!({ "rtk *": "allow" }), json!({ "kubectl *": "allow" })] {
+            let home = configured_home(policy);
+            assert_hook_and_check(&home, command, Some(rewritten));
+        }
+        for action in ["ask", "deny"] {
+            let home = configured_home(json!({ "rtk *": "allow", "npm *": action }));
+            assert_hook_and_check(&home, command, None);
+        }
+    }
+
+    #[test]
+    fn identity_and_unattestable_commands_still_get_no_rewrite() {
+        let home = configured_home(json!({ "rtk *": "allow" }));
+        for command in [
+            "rtk git status",
+            "git status $(date)",
+            "git status > ignored.txt",
+            "cat <<EOF\nhello\nEOF",
+        ] {
+            assert_hook_and_check(&home, command, None);
+        }
+        assert!(!home.path().join("ignored.txt").exists());
+    }
+
+    #[test]
+    fn rewrite_cli_remains_isolated_from_hook_default_allow() {
+        let home = configured_home(json!({ "rtk *": "allow" }));
+        let out = common::rtk_command()
+            .args(["rewrite", "--", "kubectl get pods"])
+            .current_dir(home.path())
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path())
+            .env("RTK_REWRITE_HOST", "opencode")
+            .output()
+            .expect("spawn rtk rewrite");
+        assert_eq!(
+            out.status.code(),
+            Some(3),
+            "rtk rewrite must exit 3 (AskRewrite) on default commands: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // --- False Positives Elimination Tests ---
+
+    #[test]
+    fn coexisting_json_and_jsonc_continues_reading_json_first() {
+        let home = common::hook::isolated_home(&[
+            (
+                "opencode.json",
+                r#"{ "permission": { "bash": { "rtk *": "allow" } } }"#,
+            ),
+            (
+                "opencode.jsonc",
+                r#"{ "permission": { "bash": { "npm *": "ask" } } }"#,
+            ),
+        ]);
+        assert_hook_and_check(&home, "kubectl get pods", Some("rtk kubectl get pods"));
+    }
+
+    #[test]
+    fn unmodeled_env_and_opencode_dir_do_not_block_rewrites() {
+        let home = configured_home(json!({ "rtk *": "allow" }));
+        // .opencode directory presence
+        std::fs::create_dir_all(home.path().join(".opencode")).expect("mkdir .opencode");
+
+        let hook = common::rtk_command()
+            .args(["hook", "opencode", "--", "kubectl get pods"])
+            .current_dir(home.path())
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path())
+            .env("OPENCODE_DISABLE_PROJECT_CONFIG", "0")
+            .output()
+            .expect("run hook");
+        assert_eq!(hook.status.code(), Some(0));
+        assert_eq!(
+            hook.stdout.as_slice(),
+            b"{\"command\":\"rtk kubectl get pods\"}\n"
+        );
+    }
+
+    #[test]
+    fn corrupted_or_unreadable_config_fails_closed() {
+        let valid = json!({ "permission": { "bash": { "rtk *": "allow" } } }).to_string();
+        for global in [true, false] {
+            let malformed = if global {
+                ".config/opencode/opencode.json"
+            } else {
+                "opencode.json"
+            };
+            let other = if global {
+                "opencode.json"
+            } else {
+                ".config/opencode/opencode.json"
+            };
+            let home =
+                common::hook::isolated_home(&[(malformed, "{\"permission\": "), (other, &valid)]);
+            let (hook, check) = assert_hook_and_check(&home, "kubectl get pods", None);
+            let path = home.path().join(malformed).display().to_string();
+            for output in [hook, check] {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(
+                    stderr.contains("failed to parse permissions") && stderr.contains(&path),
+                    "missing parse warning for {path}: {stderr}"
+                );
+            }
+        }
+
+        // Unreadable directory at opencode.json path
+        let home = common::hook::isolated_home(&[]);
+        std::fs::create_dir(home.path().join("opencode.json")).expect("mkdir opencode.json");
+        let (hook, check) = assert_hook_and_check(&home, "kubectl get pods", None);
+        for output in [hook, check] {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("failed to read permissions"),
+                "missing read warning: {stderr}"
+            );
+        }
+    }
+}

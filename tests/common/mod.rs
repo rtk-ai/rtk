@@ -11,6 +11,8 @@
 #[path = "../../src/core/test_isolation/scratch.rs"]
 mod scratch;
 
+pub mod hook;
+
 use std::process::Command;
 
 /// Build a `Command` for the rtk binary, isolated by [`isolate_rtk`]. Use it in
