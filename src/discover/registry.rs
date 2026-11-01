@@ -256,6 +256,22 @@ pub fn classify_command(cmd: &str) -> Classification {
         }
     }
 
+    // head/tail only reach `rtk read` through the line-range rewrite; any other
+    // form (`tail -c`, `tail -f`, bare `tail FILE`, several files) runs natively,
+    // so counting it as a Supported saving overstates what the hook delivers (#4781).
+    if cmd_clean.starts_with("head ") || cmd_clean.starts_with("tail ") {
+        let (cmd_part, _) = strip_trailing_redirects(cmd_clean);
+        if rewrite_line_range(cmd_part).is_none() {
+            return Classification::Unsupported {
+                base_command: cmd_clean
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("tail")
+                    .to_string(),
+            };
+        }
+    }
+
     // Fast check with RegexSet — take the last (most specific) match
     let matches: Vec<usize> = REGEX_SET.matches(cmd_clean).into_iter().collect();
     if let Some(&idx) = matches.last() {
@@ -3233,6 +3249,45 @@ mod tests {
                 panic!("{} should NOT be classified as Supported", cmd)
             }
             // Unsupported or Ignored is fine
+        }
+    }
+
+    #[test]
+    fn test_classify_head_tail_without_rewrite_not_supported() {
+        // The hook only rewrites the line-range forms of head/tail. Every other
+        // form runs natively, so reporting it as a missed `rtk read` saving
+        // overstates what `rtk discover` can deliver (#4781).
+        let native_only = [
+            "tail -c 500 README.md",
+            "tail --bytes=500 README.md",
+            "head -c 500 README.md",
+            "tail -f app.log",
+            "tail README.md",
+            "tail -n 5 a.log b.log",
+        ];
+        for cmd in &native_only {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+            if let Classification::Supported { .. } = classify_command(cmd) {
+                panic!(
+                    "{} is not rewritten, so it should NOT be classified as Supported",
+                    cmd
+                )
+            }
+        }
+
+        let rewritten = [
+            "tail -n 20 README.md",
+            "tail -20 README.md",
+            "head README.md",
+            "head -n 5 README.md 2>&1",
+        ];
+        for cmd in &rewritten {
+            assert!(rewrite_command_no_prefixes(cmd, &[]).is_some(), "{cmd}");
+            assert!(
+                matches!(classify_command(cmd), Classification::Supported { .. }),
+                "{} is rewritten, so it should be classified as Supported",
+                cmd
+            );
         }
     }
 
