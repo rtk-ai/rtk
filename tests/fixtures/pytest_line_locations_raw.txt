@@ -1,0 +1,10 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+E   assert 1 == 2
+/home/user/project/test_locations.py:2: assert 1 == 2
+E   AssertionError: unrelated.py:99: this stays in the message
+/home/user/project/test_locations.py:5: AssertionError: unrelated.py:99: this stays in the message
+=========================== short test summary info ============================
+FAILED test_locations.py::test_plain - assert 1 == 2
+FAILED test_locations.py::test_message - AssertionError: unrelated.py:99: thi...
+2 failed in 0.01s
