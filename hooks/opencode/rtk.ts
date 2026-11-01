@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process"
 import { existsSync, statSync } from "node:fs"
+import { homedir } from "node:os"
 import { delimiter, join } from "node:path"
 
 // RTK OpenCode plugin — rewrites commands to use rtk for token savings.
@@ -21,23 +22,28 @@ import { delimiter, join } from "node:path"
 type Answer = { command?: string }
 
 let cachedRtkPath: string | null = null
+let cachedRtkOnPath: boolean = false
 let probedBin: { bin: string; capable: boolean } | null = null
 
 export function _resetCachedRtkPath(): void {
   cachedRtkPath = null
+  cachedRtkOnPath = false
   probedBin = null
 }
 
+export function isRtkOnPath(): boolean {
+  if (!cachedRtkPath) resolveRtkPath()
+  return cachedRtkOnPath
+}
+
 /**
- * Resolves the rtk binary from the system PATH.
+ * Resolves the rtk binary.
  *
- * PATH only, deliberately. OpenCode's bash/shell tool runs commands with
- * OpenCode's own PATH and never sources `.profile`, `.bashrc` or
- * `.bash_profile`, so an rtk found outside PATH cannot be spawned as a bare
- * `rtk …` — the tool comes back `rtk: command not found`. Finding one anyway
- * is worse than not rewriting (#4462 carries that case). A directory on PATH
- * named `rtk` is skipped rather than frozen as the answer: it disables the
- * plugin for the whole session.
+ * Checks system PATH first. If not found on PATH (common when OpenCode is
+ * launched from a desktop GUI like the macOS Dock or Linux desktop entry
+ * where shell profiles are not sourced), probes candidate install locations:
+ * RTK_BIN, ~/.cargo/bin, Homebrew (/opt/homebrew/bin), /usr/local/bin,
+ * and Windows local app data / program files (#4462).
  *
  * Windows still probes PATHEXT, which is the #1993 fix: `which` does not exist
  * there.
@@ -45,20 +51,54 @@ export function _resetCachedRtkPath(): void {
 export function resolveRtkPath(): string | null {
   if (cachedRtkPath && existsSync(cachedRtkPath)) return cachedRtkPath
 
-  const dirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean)
   const exts = process.platform === "win32"
     ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";")
     : [""]
 
+  // 1. Try system PATH
+  const dirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean)
   for (const dir of dirs) {
     for (const ext of exts) {
       const fullPath = join(dir, `rtk${ext}`)
       if (existsSync(fullPath) && !statSync(fullPath).isDirectory()) {
+        cachedRtkOnPath = true
         return (cachedRtkPath = fullPath)
       }
     }
   }
 
+  // 2. Candidate paths outside system PATH (#4462)
+  if (process.env.RTK_BIN) {
+    if (existsSync(process.env.RTK_BIN) && !statSync(process.env.RTK_BIN).isDirectory()) {
+      cachedRtkOnPath = false
+      return (cachedRtkPath = process.env.RTK_BIN)
+    }
+  }
+
+  const candidateDirs: string[] = [
+    join(homedir(), ".cargo", "bin"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+  ]
+
+  if (process.platform === "win32") {
+    if (process.env.LOCALAPPDATA) candidateDirs.push(join(process.env.LOCALAPPDATA, "cargo", "bin"))
+    if (process.env.ProgramFiles) candidateDirs.push(join(process.env.ProgramFiles, "rtk"))
+    if (process.env["ProgramFiles(x86)"]) candidateDirs.push(join(process.env["ProgramFiles(x86)"], "rtk"))
+  }
+
+  for (const dir of candidateDirs) {
+    for (const ext of exts) {
+      const fullPath = join(dir, `rtk${ext}`)
+      if (existsSync(fullPath) && !statSync(fullPath).isDirectory()) {
+        cachedRtkOnPath = false
+        return (cachedRtkPath = fullPath)
+      }
+    }
+  }
+
+  cachedRtkOnPath = false
   return (cachedRtkPath = null)
 }
 
@@ -159,7 +199,22 @@ export async function tryRewriteCommand(
   if (!rtkBin) return null
 
   try {
-    return await runHookOpencode(rtkBin, command, agent)
+    let rewritten = await runHookOpencode(rtkBin, command, agent)
+    if (!rewritten) return null
+
+    // If rtk was found outside OpenCode's PATH (e.g. ~/.cargo/bin on macOS GUI launch),
+    // a bare `rtk …` would fail in the spawned shell with `rtk: command not found` (#4462).
+    // Carry the resolved binary path so the rewritten command can execute cleanly.
+    if (!cachedRtkOnPath) {
+      const quoted = rtkBin.includes(" ") ? `"${rtkBin}"` : rtkBin
+      if (rewritten === "rtk") {
+        rewritten = quoted
+      } else if (rewritten.startsWith("rtk ")) {
+        rewritten = `${quoted} ${rewritten.slice(4)}`
+      }
+    }
+
+    return rewritten
   } catch {
     return null
   }
@@ -177,7 +232,7 @@ async function handleToolHook(tool: unknown, container: any, agent?: string) {
 async function ensureRtkUsable(): Promise<boolean> {
   const rtkBin = resolveRtkPath()
   if (!rtkBin) {
-    console.warn("[rtk] no rtk on OpenCode's PATH — plugin disabled")
+    console.warn("[rtk] rtk binary not found (checked PATH, RTK_BIN, ~/.cargo/bin, Homebrew) — plugin disabled")
     return false
   }
   if (!(await probeRtkHookOpencode(rtkBin))) {
