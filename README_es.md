@@ -105,7 +105,7 @@ cargo install --git https://github.com/rtk-ai/rtk rtk --no-default-features
 ### Verificacion
 
 ```bash
-rtk --version   # Debe mostrar "rtk 0.27.x"
+rtk --version   # Cualquier versión actual
 rtk gain        # Debe mostrar estadisticas de ahorro
 ```
 
