@@ -1,0 +1,39 @@
+[filters.system-profiler]
+description = "Compact macOS system_profiler diagnostics output"
+match_command = '^system_profiler\b'
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+  '^\s*Bus:',
+  '^\s*Type: GPU',
+  '^\s*Vendor:',
+  '^\s*Metal Support:',
+  '^\s*Display Type:',
+  '^\s*Mirror:',
+  '^\s*Online:',
+  '^\s*Automatically Adjust Brightness:',
+  '^\s*Connection Type:'
+]
+truncate_lines_at = 140
+max_lines = 20
+
+[[tests.system-profiler]]
+name = "system_profiler displays compact"
+input = """
+Graphics/Displays:
+
+    Apple M2:
+      Chipset Model: Apple M2
+      Type: GPU
+      Bus: Built-In
+      Total Number of Cores: 10
+      Vendor: Apple (0x106b)
+      Metal Support: Metal 4
+      Displays:
+        Color LCD:
+          Resolution: 2560 x 1600 Retina
+          Main Display: Yes
+          Mirror: Off
+          Online: Yes
+"""
+expected = "Graphics/Displays:\n    Apple M2:\n      Chipset Model: Apple M2\n      Total Number of Cores: 10\n      Displays:\n        Color LCD:\n          Resolution: 2560 x 1600 Retina\n          Main Display: Yes"
