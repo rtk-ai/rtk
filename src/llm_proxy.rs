@@ -588,7 +588,29 @@ pub fn daemon_bind() -> String {
         .unwrap_or_else(|| DEFAULT_BIND.to_string())
 }
 
+/// Whether the user pointed at a daemon of their own. `RTK_PROXY_BIND` is the
+/// variable the daemon itself reads, so setting it says "mine answers there"
+/// even when the binary sits outside the places [`binary_available`] looks.
+fn bind_moved_by_user() -> bool {
+    crate::core::user_env::var("RTK_PROXY_BIND")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// Whether a reachability probe is worth an outbound HTTP request: a daemon of
+/// ours must plausibly answer there. With no daemon binary installed and the
+/// user having moved no bind, nothing of ours can, and the probe would land on
+/// whatever unrelated local service listens on the default port (#4821).
+#[cfg(feature = "engine")]
+fn probe_worth_making() -> bool {
+    bind_moved_by_user() || binary_available()
+}
+
 pub fn is_reachable() -> bool {
+    #[cfg(feature = "engine")]
+    if !probe_worth_making() {
+        return false;
+    }
     health_check_with_timeout(&daemon_bind(), Duration::from_millis(150))
 }
 
@@ -1270,6 +1292,52 @@ mod no_data_hint_tests {
         } else {
             assert!(hint.contains("llm-proxy start"), "{hint}");
         }
+    }
+
+    /// The gate's two halves: no binary anywhere and no user bind means no
+    /// probe; naming a bind means probe. `which::which` reads the inherited
+    /// PATH, so a developer who ships rtk-proxy on theirs opts out of the
+    /// first assertion rather than breaking it.
+    #[test]
+    fn no_binary_and_no_bind_means_no_probe() {
+        if which::which(PROXY_BIN).is_ok() {
+            eprintln!("skipping: rtk-proxy is on this machine's PATH");
+            return;
+        }
+        let exe_dir = std::env::current_exe()
+            .expect("current exe")
+            .parent()
+            .expect("exe dir")
+            .to_path_buf();
+        if exe_dir.join(PROXY_BIN).is_file() {
+            eprintln!("skipping: rtk-proxy sits next to the test binary");
+            return;
+        }
+        crate::core::user_env::with_vars(&[("RTK_PROXY_BIND", None)], || {
+            assert!(!probe_worth_making(), "nothing of ours can answer");
+        });
+    }
+
+    #[test]
+    fn a_user_bind_means_probe_even_without_a_binary() {
+        if which::which(PROXY_BIN).is_ok() {
+            eprintln!("skipping: rtk-proxy is on this machine's PATH");
+            return;
+        }
+        crate::core::user_env::with_vars(&[("RTK_PROXY_BIND", Some("127.0.0.1:9411"))], || {
+            assert!(probe_worth_making());
+        });
+    }
+
+    #[test]
+    fn an_empty_bind_is_not_a_user_bind() {
+        if which::which(PROXY_BIN).is_ok() {
+            eprintln!("skipping: rtk-proxy is on this machine's PATH");
+            return;
+        }
+        crate::core::user_env::with_vars(&[("RTK_PROXY_BIND", Some("  "))], || {
+            assert!(!probe_worth_making());
+        });
     }
 
     #[test]
