@@ -162,15 +162,33 @@ pub fn decode_zstd_request(mut headers: HeaderMap, body: Bytes) -> (HeaderMap, B
 }
 
 fn decode_zstd(body: &[u8]) -> Option<Vec<u8>> {
+    use ruzstd::decoding::errors::{FrameDecoderError, ReadFrameHeaderError};
     use std::io::Read;
+    let limit = crate::server::BODY_LIMIT_BYTES;
     let mut source = body;
-    let decoder = ruzstd::decoding::StreamingDecoder::new(&mut source).ok()?;
     let mut out = Vec::new();
-    decoder
-        .take(crate::server::BODY_LIMIT_BYTES as u64 + 1)
-        .read_to_end(&mut out)
-        .ok()?;
-    (out.len() <= crate::server::BODY_LIMIT_BYTES).then_some(out)
+    let mut frame_decoder = ruzstd::decoding::FrameDecoder::new();
+    // The decoder reads one frame, so a body of several is decoded frame by
+    // frame, all of them spending one size budget. Anything it cannot decode
+    // leaves the body as it came: forwarding part of it would hand the
+    // upstream a truncated one.
+    while !source.is_empty() && out.len() <= limit {
+        match ruzstd::decoding::StreamingDecoder::new_with_decoder(&mut source, &mut frame_decoder)
+        {
+            Ok(decoder) => {
+                decoder
+                    .take((limit + 1 - out.len()) as u64)
+                    .read_to_end(&mut out)
+                    .ok()?;
+            }
+            Err(FrameDecoderError::ReadFrameHeaderError(ReadFrameHeaderError::SkipFrame {
+                length,
+                ..
+            })) => source = source.get(length as usize..)?,
+            Err(_) => return None,
+        }
+    }
+    (!out.is_empty() && out.len() <= limit).then_some(out)
 }
 
 /// Parse the JSON body, run the compression pipeline over it, and report the
@@ -1199,5 +1217,101 @@ mod tests {
         assert!(acc.completed());
         let u = acc.finish();
         assert_eq!((u.input, u.output), (10, 4));
+    }
+
+    fn zstd_frame(bytes: &[u8]) -> Vec<u8> {
+        ruzstd::encoding::compress_to_vec(bytes, ruzstd::encoding::CompressionLevel::Fastest)
+    }
+
+    fn zstd_headers(encoding: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-encoding", encoding.parse().unwrap());
+        headers
+    }
+
+    const REQUEST: &[u8] = br#"{"model":"gpt-5-codex","stream":true,"input":"hello there"}"#;
+
+    fn skippable_frame(payload: &[u8]) -> Vec<u8> {
+        let mut frame = 0x184D2A50u32.to_le_bytes().to_vec();
+        frame.extend((payload.len() as u32).to_le_bytes());
+        frame.extend(payload);
+        frame
+    }
+
+    /// A zstd frame of `len` zero bytes written as run-length blocks, so a body
+    /// far past the size limit stays a few kilobytes.
+    fn zstd_frame_of_zeros(len: usize) -> Vec<u8> {
+        const BLOCK: usize = 128 * 1024;
+        // Magic, a descriptor with no checksum, dictionary or declared size,
+        // and a 128 KiB window (the largest block it allows).
+        let mut frame = vec![0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x38];
+        let mut left = len;
+        while left > 0 {
+            let size = left.min(BLOCK);
+            left -= size;
+            let last = u32::from(left == 0);
+            let header = ((size as u32) << 3) | (1 << 1) | last;
+            frame.extend_from_slice(&header.to_le_bytes()[..3]);
+            frame.push(0);
+        }
+        frame
+    }
+
+    fn forwarded_zstd(body: &[u8]) -> (HeaderMap, Bytes) {
+        decode_zstd_request(zstd_headers("zstd"), Bytes::copy_from_slice(body))
+    }
+
+    #[test]
+    fn every_frame_of_a_zstd_body_is_decoded() {
+        let (first, second) = REQUEST.split_at(30);
+        let mut body = zstd_frame(first);
+        body.extend(zstd_frame(second));
+
+        let (headers, forwarded) = forwarded_zstd(&body);
+        assert!(!headers.contains_key("content-encoding"));
+        assert_eq!(forwarded, REQUEST);
+    }
+
+    #[test]
+    fn skippable_frames_around_a_zstd_frame_are_skipped() {
+        let mut body = skippable_frame(b"metadata");
+        body.extend(zstd_frame(REQUEST));
+        body.extend(skippable_frame(b"more metadata"));
+
+        let (headers, forwarded) = forwarded_zstd(&body);
+        assert!(!headers.contains_key("content-encoding"));
+        assert_eq!(forwarded, REQUEST);
+    }
+
+    #[test]
+    fn a_zstd_frame_with_no_content_is_forwarded_as_it_came() {
+        let body = zstd_frame(b"");
+        let (headers, forwarded) = forwarded_zstd(&body);
+        assert_eq!(headers.get("content-encoding").unwrap(), "zstd");
+        assert_eq!(forwarded, body);
+    }
+
+    #[test]
+    fn a_zstd_body_with_garbage_after_its_frame_is_forwarded_as_it_came() {
+        let mut body = zstd_frame(REQUEST);
+        body.extend(b"not a frame");
+
+        let (headers, forwarded) = forwarded_zstd(&body);
+        assert_eq!(headers.get("content-encoding").unwrap(), "zstd");
+        assert_eq!(forwarded, body);
+    }
+
+    #[test]
+    fn a_zstd_body_that_inflates_past_the_body_limit_is_forwarded_as_it_came() {
+        let (headers, forwarded) = forwarded_zstd(&zstd_frame_of_zeros(300_000));
+        assert!(!headers.contains_key("content-encoding"));
+        assert_eq!(forwarded, vec![0u8; 300_000]);
+
+        // One byte past the limit and no more: the decoder finishes the frame
+        // cleanly, so only the size check can refuse it.
+        let body = zstd_frame_of_zeros(crate::server::BODY_LIMIT_BYTES + 1);
+        let (headers, forwarded) = forwarded_zstd(&body);
+        assert_eq!(headers.get("content-encoding").unwrap(), "zstd");
+        assert_eq!(forwarded, body);
     }
 }
