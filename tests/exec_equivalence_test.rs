@@ -36,14 +36,15 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// `echo` is a shell builtin, so a stub by that name is never reached — the
 /// outer command of a substitution has to be one bash looks up on `PATH`, which
 /// is what `sink` is for.
 const STUBS: &[&str] = &[
-    "git", "cargo", "ls", "grep", "rm", "tail", "cat", "diff", "tee", "sink",
+    "git", "cargo", "ls", "grep", "rm", "tail", "cat", "diff", "tee", "sink", "pytest", "php",
+    "gh", "psql", "pnpm",
 ];
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
@@ -106,6 +107,19 @@ impl Oracle {
             );
         }
 
+        // `uv run` records its arguments like every stub, then runs the rest of
+        // its words as the command they name; any other subcommand only records.
+        write_stub(
+            &bin.join("uv"),
+            "#!/bin/bash\n\
+             printf '%s\\t%s\\t%s\\n' \"uv\" \"$PWD\" \" $*\" >> \"$RTK_ORACLE_LOG\"\n\
+             if [ \"$1\" = run ]; then\n\
+             \x20 shift\n\
+             \x20 exec \"$@\"\n\
+             fi\n\
+             echo \"uv-out\"\n",
+        );
+
         // The real `rtk` runs the command and reshapes its output. This does the
         // same in miniature and records nothing of itself, so a rewrite at a
         // command position is invisible to the comparison while one that reaches
@@ -151,6 +165,34 @@ impl Oracle {
             .lines()
             .map(str::to_owned)
             .collect()
+    }
+
+    /// `rtk rewrite cmd` against a home holding `config` (both the Linux and the
+    /// macOS config directory), as `None` when the line is left as written.
+    fn rewrite_with(&self, cmd: &str, config: &str) -> Option<String> {
+        let home = self
+            .root
+            .join(format!("home-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed)));
+        for dir in [
+            home.join(".config").join("rtk"),
+            home.join("Library").join("Application Support").join("rtk"),
+        ] {
+            fs::create_dir_all(&dir).expect("config dir");
+            fs::write(dir.join("config.toml"), config).expect("config");
+        }
+        let out = common::rtk_command()
+            .args(["rewrite", cmd])
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_DATA_HOME", home.join(".local").join("share"))
+            .env("RTK_DB_PATH", home.join("rtk.db"))
+            .env("RTK_TELEMETRY_DISABLED", "1")
+            .env("RTK_DISABLE_TRACKING", "1")
+            .stdin(Stdio::null())
+            .output()
+            .expect("run rtk rewrite");
+        let rewritten = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!rewritten.is_empty()).then_some(rewritten)
     }
 
     fn rewrite(&self, cmd: &str) -> String {
@@ -290,4 +332,141 @@ fn the_oracle_is_quiet_when_nothing_really_changed() {
         oracle.trace("rtk git status && rtk cargo build"),
         "wrapping a command is what a rewrite is for"
     );
+}
+
+/// Whether every wrapper program `cmd` names is available on this host: the
+/// stubs stand in for the wrapped programs, never for the wrappers.
+fn wrappers_available(cmd: &str) -> bool {
+    ["timeout", "nice", "nohup", "env"]
+        .iter()
+        .filter(|w| cmd.split_whitespace().any(|word| word == **w))
+        .all(|w| {
+            Command::new("bash")
+                .args(["-c", &format!("command -v {w}")])
+                .stdin(Stdio::null())
+                .output()
+                .is_ok_and(|o| o.status.success())
+        })
+}
+
+/// Each row is `(input, config, expected rewrite)`. The rewrite is asserted
+/// exactly, and the rewritten line must run what the raw one ran. A row
+/// expected to be left as written compares the raw line with itself, so only
+/// the expectation is checked there; a row that is rewritten must have run
+/// something a stub recorded.
+#[test]
+fn a_rewrite_is_the_expected_one_and_runs_the_same_programs() {
+    let Some(oracle) = Oracle::new() else {
+        return;
+    };
+    let pytest = "[hooks]\nexclude_commands = [\"pytest\"]\n";
+    let psql = "[hooks]\nexclude_commands = [\"psql\"]\n";
+    let rows: &[(&str, &str, Option<&str>)] = &[
+        ("FOO=1 git status", "", Some("FOO=1 rtk git status")),
+        ("env -u A git status", "", None),
+        (
+            "timeout -s KILL 5 cargo test",
+            "",
+            Some("timeout -s KILL 5 rtk cargo test"),
+        ),
+        ("nice -5 pytest", "", Some("nice -5 rtk pytest")),
+        ("command git status", "", Some("command rtk git status")),
+        ("RTK_DISABLED=1 cargo test", "", None),
+        (
+            "NODE_ENV=test git status",
+            "",
+            Some("NODE_ENV=test rtk git status"),
+        ),
+        (
+            "timeout -vk 5 300 cargo test",
+            "",
+            Some("timeout -vk 5 300 rtk cargo test"),
+        ),
+        (
+            "timeout 5 env A=1 git status",
+            "",
+            Some("timeout 5 env A=1 rtk git status"),
+        ),
+        (
+            "PRISMA_USER_CONSENT=\"yes\" pnpm install",
+            "",
+            Some("PRISMA_USER_CONSENT=\"yes\" rtk pnpm install"),
+        ),
+        ("PGPASSWORD=x psql -h localhost", psql, None),
+        (
+            "timeout 300 cargo test",
+            "",
+            Some("timeout 300 rtk cargo test"),
+        ),
+        ("nice -n 10 ls -la", "", Some("nice -n 10 rtk ls -la")),
+        ("nohup cargo build", "", Some("nohup rtk cargo build")),
+        ("nohup git status", "", Some("nohup rtk git status")),
+        (
+            "time git log --oneline -5",
+            "",
+            Some("time rtk git log --oneline -5"),
+        ),
+        (
+            "timeout 30 gh run view 123 --log-failed",
+            "",
+            Some("timeout 30 rtk gh run view 123 --log-failed"),
+        ),
+        (
+            "timeout 60 php artisan tinker",
+            "",
+            Some("timeout 60 rtk php artisan tinker"),
+        ),
+        ("timeout 5 A=1 git status", "", None),
+        ("nice +5 git status", "", None),
+        ("timeout 300 -s KILL git status", "", None),
+        ("timeout 300 -- cargo test", "", None),
+        ("time -f %e git status", "", None),
+        (
+            "timeout 5$UNIT git status",
+            "",
+            Some("timeout 5$UNIT rtk git status"),
+        ),
+        (
+            "XRTK_DISABLED=1 git status",
+            "",
+            Some("XRTK_DISABLED=1 rtk git status"),
+        ),
+        ("uv run RTK_DISABLED=1 git status", "", None),
+        ("uv run timeout 5 pytest", pytest, None),
+        (
+            "if true; then git status; fi",
+            "",
+            Some("if true; then rtk git status; fi"),
+        ),
+        (
+            "for x in a; do git status; done",
+            "",
+            Some("for x in a; do rtk git status; done"),
+        ),
+        (
+            "while false; do git status; done; git status",
+            "",
+            Some("while false; do rtk git status; done; rtk git status"),
+        ),
+    ];
+    for (cmd, config, expected) in rows {
+        if !wrappers_available(cmd) {
+            continue;
+        }
+        let rewritten = oracle.rewrite_with(cmd, config);
+        assert_eq!(rewritten.as_deref(), *expected, "rewrite of {cmd:?}");
+        let raw = oracle.trace(cmd);
+        if expected.is_some() {
+            assert!(
+                !raw.is_empty(),
+                "{cmd:?} ran nothing a stub recorded, so comparing it proves nothing"
+            );
+        }
+        let rewritten = rewritten.unwrap_or_else(|| (*cmd).to_string());
+        assert_eq!(
+            raw,
+            oracle.trace(&rewritten),
+            "rewriting {cmd:?} to {rewritten:?} changed what ran"
+        );
+    }
 }

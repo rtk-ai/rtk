@@ -8,21 +8,14 @@
 //! parses as one command with one quoted argument. Anything ambiguous is left
 //! alone and takes the decision path it always did.
 //!
-//! The classification is this module's own: it does not ask the shared lexer to
+//! The script is read with [`fish::read`], the one reading of fish RTK has,
+//! which the `fish -c` wrapper check shares. It does not ask the shared lexer to
 //! treat fish keywords as unattestable, because that lexer reads the host's
 //! command string as bash (see `lexer::ShellDialect`).
 
 use super::shell_wrapper::is_shell_wrapper_candidate;
-use crate::core::cmdline::lexer::{self, Token, TokenKind};
-
-/// Keywords only fish accepts at command position. One of these, at a command
-/// boundary and with no POSIX marker anywhere, is what makes a script *provably*
-/// fish rather than merely fish-compatible.
-const FISH_ONLY_KEYWORDS: &[&str] = &["end", "begin", "switch", "and", "or", "not"];
-
-/// Keywords only POSIX shells accept at command position — their presence vetoes
-/// fish classification.
-const POSIX_ONLY_KEYWORDS: &[&str] = &["then", "fi", "do", "done", "esac", "elif"];
+use crate::core::cmdline::fish::{self, Reading};
+use crate::core::cmdline::lexer::{self, TokenKind};
 
 /// Wrap `cmd` for explicit fish execution when it is unambiguously a fish script.
 ///
@@ -75,7 +68,8 @@ fn try_wrap_with_probes(
     if script.split_whitespace().next() == Some("rtk") || is_shell_wrapper_candidate(script) {
         return None;
     }
-    if !is_unambiguous_fish(script) {
+    let (code, reading) = read_script(script)?;
+    if !is_provably_fish(reading) {
         return None;
     }
     // The wrap is the one rewrite RTK emits for a script it did not decompose,
@@ -90,8 +84,7 @@ fn try_wrap_with_probes(
     // everything after it into one argument, so a gate reading the raw script
     // sees no redirect and no substitution at all while the classifier, reading
     // the stripped code, sees clean fish.
-    let code = strip_comments(script)?;
-    if lexer::contains_unattestable_construct(&code) || contains_fish_substitution(&code) {
+    if lexer::contains_unattestable_construct(&code) || reading.substitution {
         return None;
     }
     // `&|` pipes stdout and stderr in fish, and `&` opens the same kind of
@@ -141,35 +134,40 @@ pub(crate) fn is_wrapped(cmd: &str) -> bool {
     cmd.starts_with("rtk run --shell fish -c '")
 }
 
-/// True for fish's `(cmd)` command substitution, which the shared lexer reads
-/// as a POSIX subshell and therefore does not refuse.
-fn contains_fish_substitution(cmd: &str) -> bool {
-    lexer::tokenize(cmd)
-        .iter()
-        .any(|token| token.kind == TokenKind::Shellism && matches!(token.value, "(" | ")"))
+/// True only when the command contains a fish-only marker at command position and
+/// nothing only a POSIX shell would parse ([`fish::read`] holds both lists).
+pub(crate) fn is_unambiguous_fish(cmd: &str) -> bool {
+    read_script(cmd).is_some_and(|(_, reading)| is_provably_fish(reading))
 }
 
-/// True only when the command contains a fish-only marker at command position and
-/// nothing a POSIX shell would need to parse it (see module docs for the lists).
-pub(crate) fn is_unambiguous_fish(cmd: &str) -> bool {
+/// A keyword only fish reserves, and no syntax only bash has: a script that
+/// is fish rather than merely fish-compatible.
+fn is_provably_fish(reading: Reading) -> bool {
+    reading.fish_only && !reading.bash_only
+}
+
+/// `cmd` without its comments, and how fish reads that code. `None` where the
+/// script cannot be classified.
+fn read_script(cmd: &str) -> Option<(String, Reading)> {
     if cmd.contains('\0') {
-        return false;
+        return None;
     }
     // A trailing comment is prose, not code: `echo $((1+2))  # x; and y` is a
     // POSIX command whose comment happens to contain a separator and an English
     // `and`. The span is dropped before anything is classified — and where the
     // two shells disagree about where it starts, nothing is classified at all.
-    let Some(code) = strip_comments(cmd) else {
-        return false;
-    };
-    if has_unclosed_quote_or_escape(&code) {
-        return false;
+    let code = strip_comments(cmd)?;
+    // A script RTK cannot finish lexing is never classified: the marker it
+    // would key on might be inside the unterminated string.
+    if !lexer::lexes_into_whole_words(&code) {
+        return None;
     }
-    classify_tokens(&lexer::tokenize(&code))
+    let reading = fish::read(&lexer::tokenize(&code));
+    Some((code, reading))
 }
 
-/// Drop every unquoted comment — a word-initial `#` through the end of its line
-/// — or report that the two shells do not agree where the comment starts.
+/// Leave out every comment, where bash reads one ([`lexer::comments`]), or
+/// report that the two shells do not agree where the comment starts.
 ///
 /// `&` is the one boundary character they read differently. Since fish 3.0 it
 /// is job control only at the end of a job, so a `#` glued to it continues the
@@ -185,146 +183,22 @@ pub(crate) fn is_unambiguous_fish(cmd: &str) -> bool {
 /// scanner refuses instead, and the script keeps the host's own behaviour.
 fn strip_comments(cmd: &str) -> Option<String> {
     let mut code = String::with_capacity(cmd.len());
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut at_word_start = true;
-    let mut in_comment = false;
-    // Unquoted, unescaped `&` immediately before the character being read: one
-    // is job control, two are the `and` operator, and an escaped or quoted `&`
-    // is an ordinary character that resets the run.
-    let mut ampersands = 0usize;
-
-    for character in cmd.chars() {
-        if in_comment {
-            if character == '\n' {
-                in_comment = false;
-                at_word_start = true;
-                // The run belonged to the line the comment closed.
-                ampersands = 0;
-                code.push(character);
-            }
-            continue;
+    let mut kept_from = 0;
+    for comment in lexer::comments(cmd) {
+        code.push_str(&cmd[kept_from..comment.start]);
+        kept_from = comment.end;
+        // `&&#` is an operator followed by a comment in both shells; a lone
+        // `&#` is where they diverge. The code kept so far holds no comment
+        // text, so its quoting is read as bash reads it.
+        if lexer::tokenize(&code)
+            .last()
+            .is_some_and(|token| token.kind == TokenKind::Shellism && token.value == "&")
+        {
+            return None;
         }
-        if escaped {
-            escaped = false;
-            at_word_start = false;
-            ampersands = 0;
-            code.push(character);
-            continue;
-        }
-        match character {
-            '\\' if quote != Some('\'') => {
-                escaped = true;
-                at_word_start = false;
-                ampersands = 0;
-            }
-            '#' if quote.is_none() && at_word_start => {
-                // `&&#` is an operator followed by a comment in both shells;
-                // a lone `&#` is where they diverge.
-                if ampersands == 1 {
-                    return None;
-                }
-                in_comment = true;
-                continue;
-            }
-            '\'' | '"' => {
-                quote = match quote {
-                    Some(open) if open == character => None,
-                    None => Some(character),
-                    open => open,
-                };
-                at_word_start = false;
-                ampersands = 0;
-            }
-            '&' if quote.is_none() => {
-                at_word_start = true;
-                ampersands += 1;
-            }
-            // A word also starts after an unquoted operator: both bash and fish
-            // read `cmd;# note` as a command and a comment.
-            ' ' | '\t' | '\n' | ';' | '|' if quote.is_none() => {
-                at_word_start = true;
-                ampersands = 0;
-            }
-            _ => {
-                at_word_start = false;
-                ampersands = 0;
-            }
-        }
-        code.push(character);
     }
-
+    code.push_str(&cmd[kept_from..]);
     Some(code)
-}
-
-/// True while a quote or an escape is still open at the end of `cmd`.
-///
-/// A script RTK cannot finish lexing is never classified: the marker it would
-/// key on might be inside the unterminated string. Local to this module — the
-/// shared gate has no such check, and wrapping is the only caller.
-fn has_unclosed_quote_or_escape(cmd: &str) -> bool {
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-
-    for character in cmd.chars() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if character == '\\' && quote != Some('\'') {
-            escaped = true;
-            continue;
-        }
-        if matches!(character, '\'' | '"') {
-            match quote {
-                Some(open) if open == character => quote = None,
-                None => quote = Some(character),
-                _ => {}
-            }
-        }
-    }
-
-    quote.is_some() || escaped
-}
-
-fn classify_tokens(tokens: &[Token<'_>]) -> bool {
-    let mut command_position = true;
-    let mut has_fish_marker = false;
-
-    for token in tokens {
-        match token.kind {
-            TokenKind::Operator | TokenKind::Pipe(_) | TokenKind::Newline => {
-                command_position = true
-            }
-            TokenKind::Shellism if token.value == "&" => command_position = true,
-            // Fish has no backtick substitution: a script using one is POSIX,
-            // so wrapping it would print the backticks instead of running the
-            // command. The lexer emits an unquoted backtick as its own
-            // shellism, quoted ones stay inside their Arg.
-            TokenKind::Shellism if token.value == "`" => return false,
-            // Heredocs (`<<`, `<<-`, `<<<` all tokenize with a `<<` prefix) do not
-            // exist in fish — the script must be POSIX or malformed.
-            TokenKind::Redirect if token.value.starts_with("<<") => return false,
-            TokenKind::Arg => {
-                // `[[ … ]]` is bash/zsh-only wherever it appears.
-                if token.value == "[[" {
-                    return false;
-                }
-                if command_position {
-                    if POSIX_ONLY_KEYWORDS.contains(&token.value) {
-                        return false;
-                    }
-                    if FISH_ONLY_KEYWORDS.contains(&token.value) {
-                        has_fish_marker = true;
-                    }
-                    command_position = false;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    has_fish_marker
 }
 
 /// Escape for single-quoted embedding: `'` → `'\''`. The idiom evaluates back to
