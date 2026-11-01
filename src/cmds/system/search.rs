@@ -408,7 +408,7 @@ impl Engine {
     /// `-I` skips binary noise (-a overrides).
     fn parse_flags(self) -> &'static [&'static str] {
         match self {
-            Engine::Grep => &["-n", "-H", "-I", "--null"],
+            Engine::Grep => &["-n", "-H", "--null"],
             Engine::Rg => &["-n", "--with-filename", "--null"],
         }
     }
@@ -2169,6 +2169,33 @@ mod tests {
         assert!(!detected(&[]).show_line);
         let entries = vec![(42usize, true, "hit".to_string())];
         assert_eq!(match_block("f.txt", &entries), "f.txt:42:hit\n");
+    }
+
+    // #3432: a match inside a binary file must keep grep's exit 0. `-I` made grep exit 1
+    // ("no match") with empty output. Without it, GNU grep < 3.5 prints "Binary file ...
+    // matches" on stdout (unparsed, so the call goes to the verbatim passthrough) and
+    // grep >= 3.5 prints "...: binary file matches" on stderr, which rtk forwards.
+    #[test]
+    fn test_grep_binary_match_keeps_exit_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("creds.bin");
+        std::fs::write(&bin, b"AKIA_SECRET\0binary\n").unwrap();
+        let paths = vec![bin.to_string_lossy().into_owned()];
+        let patterns = vec!["AKIA".to_string()];
+        let Ok(result) = engine_capture(Engine::Grep, &Vec::<String>::new(), &patterns, &paths)
+        else {
+            return; // grep not installed
+        };
+        assert_eq!(
+            result.exit_code, 0,
+            "binary match must not read as no-match"
+        );
+        // The notice's stream and wording depend on the grep version and locale, so check
+        // only that it reached one of the two streams.
+        assert!(
+            !(result.stdout.trim().is_empty() && result.stderr.trim().is_empty()),
+            "grep's binary-match notice must not be swallowed"
+        );
     }
 
     // Verify line numbers are always enabled in the engine invocation (parse_flags).
