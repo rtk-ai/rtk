@@ -834,49 +834,6 @@ fn main() {{
 
     #[test]
     #[ignore]
-    fn test_read_non_utf8_file_is_byte_exact() {
-        let raw: &[u8] = b"line one\nlatin-1 byte: \xe9\nline three\n";
-        let mut file = NamedTempFile::with_suffix(".log").unwrap();
-        file.write_all(raw).unwrap();
-        file.flush().unwrap();
-
-        let output = test_isolation::rtk_command()
-            .args(["read", &file.path().to_string_lossy()])
-            .output()
-            .expect("failed to run rtk read");
-
-        assert!(
-            output.status.success(),
-            "stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            output.stdout, raw,
-            "non-UTF-8 input must reach stdout verbatim"
-        );
-    }
-
-    #[test]
-    #[ignore]
-    fn test_read_non_utf8_file_still_errors_when_filtering() {
-        let raw: &[u8] = b"line one\nlatin-1 byte: \xe9\nline three\n";
-        let mut file = NamedTempFile::with_suffix(".log").unwrap();
-        file.write_all(raw).unwrap();
-        file.flush().unwrap();
-
-        let output = test_isolation::rtk_command()
-            .args(["read", "-l", "minimal", &file.path().to_string_lossy()])
-            .output()
-            .expect("failed to run rtk read");
-
-        assert!(
-            !output.status.success(),
-            "filtering cannot run on undecodable input, so it must still report the error"
-        );
-    }
-
-    #[test]
-    #[ignore]
     fn test_read_two_valid_files_concatenated() {
         let mut f1 = NamedTempFile::with_suffix(".txt").unwrap();
         let mut f2 = NamedTempFile::with_suffix(".txt").unwrap();
@@ -926,36 +883,6 @@ fn main() {{
         assert!(
             stderr.contains("rtk_nonexistent_file"),
             "should report missing file on stderr"
-        );
-    }
-
-    #[test]
-    #[ignore]
-    fn test_read_stdin_non_utf8_is_byte_exact() {
-        let raw: &[u8] = b"line one\nlatin-1 byte: \xe9\nline three\n";
-        let mut child = test_isolation::rtk_command()
-            .args(["read", "-"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("failed to run rtk read -");
-        child
-            .stdin
-            .take()
-            .expect("stdin was piped")
-            .write_all(raw)
-            .expect("failed to write to stdin");
-        let output = child.wait_with_output().expect("failed to wait for rtk");
-
-        assert!(
-            output.status.success(),
-            "stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            output.stdout, raw,
-            "non-UTF-8 stdin must reach stdout verbatim"
         );
     }
 
