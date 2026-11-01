@@ -1,0 +1,32 @@
+
+==================================== ERRORS ====================================
+_________________________ ERROR collecting test_syn.py _________________________
+.venv/lib/python3.13/site-packages/_pytest/python.py:508: in importtestmodule
+    mod = import_path(
+.venv/lib/python3.13/site-packages/_pytest/pathlib.py:596: in import_path
+    importlib.import_module(module_name)
+/usr/lib/python3.13/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+<frozen importlib._bootstrap>:1395: in _gcd_import
+    ???
+<frozen importlib._bootstrap>:1360: in _find_and_load
+    ???
+<frozen importlib._bootstrap>:1331: in _find_and_load_unlocked
+    ???
+<frozen importlib._bootstrap>:935: in _load_unlocked
+    ???
+.venv/lib/python3.13/site-packages/_pytest/assertion/rewrite.py:179: in exec_module
+    source_stat, co = _rewrite_test(fn, self.config)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.venv/lib/python3.13/site-packages/_pytest/assertion/rewrite.py:348: in _rewrite_test
+    tree = ast.parse(source, filename=strfn)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.13/ast.py:50: in parse
+    return compile(source, filename, mode, flags,
+E     File "/home/user/project/test_syn.py", line 1
+E       def test_x(:
+E                  ^
+E   SyntaxError: invalid syntax
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 0.08s

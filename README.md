@@ -228,6 +228,22 @@ rtk bypass <cmd>       # run one command unfiltered, still tracked
 
 > Every command and its filter: **[What RTK Optimizes](https://www.rtk-ai.app/guide/resources/what-rtk-covers)**
 
+## Escape hatches
+
+`rtk` filters command output by default. When a result looks wrong, bypass the filter for one command to see the raw output and tell a filter bug apart from the real thing:
+
+```bash
+rtk bypass git log --oneline -20        # full git log, no truncation
+rtk bypass npm install express          # raw npm output, no filtering
+rtk bypass curl https://api.example.com/data
+```
+
+- **What it does**: runs one command unfiltered and still tracks it — bypassed commands appear in `rtk gain --history` with 0% bash output reduction.
+- **When to use it**: an output looks off and you need to know whether the filter or the command produced it, when debugging a filter, or for an edge case a filter mishandles.
+- `rtk proxy <cmd>` is a deprecated alias of `rtk bypass <cmd>`.
+
+> **Not the same thing as `rtk llm-proxy`.** `rtk bypass` runs one local command unfiltered. `rtk llm-proxy` manages the `rtk-proxy` daemon, which compresses your agent's provider-API traffic — see [RTK Proxy](#rtk-proxy-optional).
+
 ## Measure It
 
 ```bash
@@ -356,6 +372,13 @@ product, is not until the Change Date.
 
 The `rtk-proxy` daemon (`proxy/`) is **BUSL-1.1** on the same terms and ships as
 its own archive with its licence alongside — `rtk` never links it.
+
+## RTK Pro
+
+Your company is looking to take control back on your AI fleet ?
+RTK Pro provides the control layer for costs, security and governances for all agents.
+
+Check it out : [RTK Pro](https://pro.rtk-ai.app).
 
 ## Disclaimer
 
