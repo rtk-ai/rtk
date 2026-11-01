@@ -367,10 +367,15 @@ pub fn run_from_args(args: &[String], verbose: u8) -> Result<i32> {
     }
 }
 
+fn normalize_separators(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
 fn group_by_dir(files: &[String]) -> HashMap<String, Vec<String>> {
     let mut by_dir: HashMap<String, Vec<String>> = HashMap::new();
     for file in files {
-        let p = Path::new(file);
+        let normalized = normalize_separators(file);
+        let p = Path::new(&normalized);
         let dir = p
             .parent()
             .map(|d| d.to_string_lossy().to_string())
@@ -379,7 +384,7 @@ fn group_by_dir(files: &[String]) -> HashMap<String, Vec<String>> {
         let filename = p
             .file_name()
             .map(|f| f.to_string_lossy().to_string())
-            .unwrap_or_else(|| file.clone());
+            .unwrap_or_else(|| normalized.clone());
         by_dir.entry(dir).or_default().push(filename);
     }
     by_dir
@@ -1314,6 +1319,16 @@ mod tests {
         let files: Vec<String> = args(&["zebra.txt", "logs/a.txt", "alpha.txt"]);
         let ordered = display_ordered(&files);
         assert_eq!(ordered, args(&["zebra.txt", "alpha.txt", "logs/a.txt"]));
+    }
+
+    #[test]
+    fn display_ordered_normalizes_windows_separators() {
+        let files: Vec<String> = args(&["a\\f1.txt", "a\\b\\f2.txt", "a\\b\\c\\f3.txt"]);
+        let ordered = display_ordered(&files);
+        assert_eq!(
+            ordered,
+            args(&["a/f1.txt", "a/b/f2.txt", "a/b/c/f3.txt"])
+        );
     }
 
     #[test]
