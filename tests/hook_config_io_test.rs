@@ -326,3 +326,165 @@ fn droid_settings_honor_all_scopes_and_step_aside_on_failures() {
         fs::write(&settings, content).expect("restore valid Droid settings");
     }
 }
+
+mod opencode_global_permissions {
+    use super::*;
+    use std::path::Path;
+
+    const ASK: &str = r#"{"permission":{"bash":{"ls *":"ask"}}}"#;
+
+    fn write(path: &Path, content: &str) {
+        fs::create_dir_all(path.parent().expect("fixture parent")).expect("fixture directory");
+        fs::write(path, content).expect("write OpenCode fixture");
+    }
+
+    fn sandbox() -> HookSandbox {
+        let sandbox = HookSandbox::new();
+        // Keep the OpenCode project search inside the sandbox, including when
+        // a nearer config.json belongs to another application.
+        write(&sandbox._root.path().join("opencode.json"), "{}");
+        sandbox
+    }
+
+    fn answer(sandbox: &HookSandbox, xdg: Option<&Path>, agent: Option<&str>) -> Value {
+        let mut command = common::rtk_command();
+        command
+            .args(["hook", "opencode"])
+            .current_dir(&sandbox.project)
+            .env("HOME", &sandbox.home);
+        if let Some(xdg) = xdg {
+            command.env("XDG_CONFIG_HOME", xdg);
+        } else {
+            command.env_remove("XDG_CONFIG_HOME");
+        }
+        if let Some(agent) = agent {
+            command.args(["--agent", agent]);
+        }
+        let output = command
+            .args(["--", "ls", "-la"])
+            .output()
+            .expect("run OpenCode hook");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "OpenCode hook failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "unexpected stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("OpenCode hook JSON")
+    }
+
+    #[test]
+    fn xdg_global_asks_preserve_the_original_command() {
+        for file in ["opencode.json", "config.json"] {
+            let sandbox = sandbox();
+            let xdg = sandbox._root.path().join("xdg");
+            write(&xdg.join("opencode").join(file), ASK);
+            assert_eq!(
+                answer(&sandbox, Some(&xdg), None),
+                serde_json::json!({}),
+                "ask from XDG {file} must survive the rewrite"
+            );
+        }
+    }
+
+    // Windows resolves HOME through the shell API, which cannot be redirected
+    // by the child's environment. The XDG cases above remain platform-neutral.
+    #[cfg(unix)]
+    #[test]
+    fn home_global_asks_work_with_xdg_unset_or_empty() {
+        for xdg in [None, Some(Path::new(""))] {
+            for file in ["opencode.json", "config.json"] {
+                let sandbox = sandbox();
+                write(&sandbox.home.join(".config/opencode").join(file), ASK);
+                assert_eq!(
+                    answer(&sandbox, xdg, None),
+                    serde_json::json!({}),
+                    "HOME {file}, XDG={xdg:?}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_selected_xdg_root_never_falls_back_to_home() {
+        for create_xdg in [false, true] {
+            let sandbox = sandbox();
+            let xdg = sandbox._root.path().join("xdg");
+            write(&sandbox.home.join(".config/opencode/opencode.json"), ASK);
+            if create_xdg {
+                fs::create_dir_all(xdg.join("opencode")).expect("empty XDG directory");
+            }
+            assert_eq!(
+                answer(&sandbox, Some(&xdg), None),
+                serde_json::json!({"command": "rtk ls -la"}),
+                "HOME must not supply rules when XDG has no config"
+            );
+        }
+    }
+
+    #[test]
+    fn later_global_files_do_not_hide_an_earlier_ask() {
+        for (first, second) in [
+            ("config.json", "opencode.json"),
+            ("opencode.json", "opencode.jsonc"),
+        ] {
+            let sandbox = sandbox();
+            let xdg = sandbox._root.path().join("xdg");
+            write(&xdg.join("opencode").join(first), ASK);
+            write(&xdg.join("opencode").join(second), "{}");
+            assert_eq!(
+                answer(&sandbox, Some(&xdg), None),
+                serde_json::json!({}),
+                "empty {second} must preserve the ask in {first}"
+            );
+        }
+    }
+
+    #[test]
+    fn global_jsonc_asks_are_loaded_alongside_json() {
+        let sandbox = sandbox();
+        let xdg = sandbox._root.path().join("xdg");
+        write(&xdg.join("opencode/opencode.json"), "{}");
+        write(&xdg.join("opencode/opencode.jsonc"), ASK);
+        assert_eq!(answer(&sandbox, Some(&xdg), None), serde_json::json!({}));
+    }
+
+    #[test]
+    fn a_generic_project_config_json_does_not_supply_opencode_rules() {
+        let sandbox = sandbox();
+        let xdg = sandbox._root.path().join("xdg");
+        write(&sandbox.project.join("config.json"), ASK);
+        assert_eq!(
+            answer(&sandbox, Some(&xdg), None),
+            serde_json::json!({"command": "rtk ls -la"})
+        );
+    }
+
+    #[test]
+    fn xdg_markdown_agents_with_rules_preserve_the_original_command() {
+        for directory in ["agents", "agent"] {
+            for frontmatter in [
+                "permission:\n  bash:\n    \"ls *\": ask\n",
+                "permissions:\n  - action: shell\n    resource: ls *\n    effect: ask\n",
+            ] {
+                let sandbox = sandbox();
+                let xdg = sandbox._root.path().join("xdg");
+                write(
+                    &xdg.join("opencode").join(directory).join("probe.md"),
+                    &format!("---\n{frontmatter}---\nPrompt\n"),
+                );
+                assert_eq!(
+                    answer(&sandbox, Some(&xdg), Some("probe")),
+                    serde_json::json!({}),
+                    "agent from XDG {directory}/ must keep its rules"
+                );
+            }
+        }
+    }
+}
