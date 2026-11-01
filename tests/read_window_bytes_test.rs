@@ -111,17 +111,28 @@ fn read_windows_still_apply_text_filtering_and_line_numbers() {
         ),
         (
             ["--head-lines", "1", "--line-numbers"].as_slice(),
-            "1 │ // comment\n",
+            "1\t// comment\n",
         ),
         (
             ["--tail-lines", "1", "--line-numbers"].as_slice(),
-            "1 │ fn gamma() {}\n",
+            "1\tfn gamma() {}\n",
         ),
     ] {
         let output = read_stdin(input, args);
         assert!(output.status.success(), "{args:?}: {:?}", output.stderr);
         assert_eq!(output.stdout, expected.as_bytes(), "{args:?}");
     }
+}
+
+#[test]
+fn read_line_numbers_align_multi_digit_widths_with_a_tab() {
+    let input = b"a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\n";
+    let output = read_stdin(input, &["--line-numbers"]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(
+        output.stdout,
+        b" 1\ta\n 2\tb\n 3\tc\n 4\td\n 5\te\n 6\tf\n 7\tg\n 8\th\n 9\ti\n10\tj\n11\tk\n12\tl\n"
+    );
 }
 
 #[cfg(unix)]

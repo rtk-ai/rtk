@@ -115,7 +115,7 @@ fn map_legacy_tee(
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct HooksConfig {
     /// Commands to exclude from auto-rewrite (e.g. ["curl", "playwright"]).
     /// Survives `rtk init -g` re-runs since config.toml is user-owned.
@@ -149,6 +149,20 @@ pub struct HooksConfig {
     /// Does not mute the "Hook outdated" upgrade prompt.
     #[serde(default)]
     pub suppress_hook_warning: bool,
+
+    /// Rewrite unambiguously-fish scripts (`if … end` blocks, `; and` chains)
+    /// to `rtk run --shell fish -c '<script>'` on Claude Code's own hook, so a
+    /// host that evaluates command strings with a POSIX layer does not fail on
+    /// fish-only syntax before RTK runs.
+    ///
+    /// Off by default, because the wrap changes what the host's own permission
+    /// check can see: the script arrives as one `rtk run` command, so a rule
+    /// RTK cannot read — `--settings`, `--disallowedTools`, managed settings,
+    /// or a project directory the agent has moved away from — no longer
+    /// matches the script's own commands. Every wrap is therefore emitted as
+    /// an explicit ask. See `src/hooks/README.md`.
+    #[serde(default)]
+    pub wrap_fish_scripts: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -599,6 +613,30 @@ exclude_commands = ["curl", "gh"]
         assert!(config.hooks.exclude_commands.is_empty());
         assert!(!config.hooks.suppress_hook_warning);
         assert!(config.hooks.transparent_prefixes.is_empty());
+        assert!(!config.hooks.wrap_fish_scripts);
+    }
+
+    /// Opt-in: the wrap hands the script to the host as one `rtk run` command,
+    /// which its own permission check reads instead of the script's commands.
+    /// A config that does not name the field must not get that.
+    #[test]
+    fn test_hooks_config_wrap_fish_scripts_missing_defaults_false() {
+        let toml = r#"
+[hooks]
+exclude_commands = ["curl"]
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(!config.hooks.wrap_fish_scripts);
+    }
+
+    #[test]
+    fn test_hooks_config_wrap_fish_scripts_opt_in() {
+        let toml = r#"
+[hooks]
+wrap_fish_scripts = true
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(config.hooks.wrap_fish_scripts);
     }
 
     #[test]

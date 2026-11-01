@@ -236,9 +236,9 @@ pub struct GainSummary {
     pub total_saved: usize,
     /// Average savings percentage across all commands
     pub avg_savings_pct: f64,
-    /// Total execution time across all commands (milliseconds)
+    /// Total execution time of the timed commands (milliseconds); see [`DayStats::timed_commands`]
     pub total_time_ms: u64,
-    /// Average execution time per command (milliseconds)
+    /// Average execution time per timed command (milliseconds)
     pub avg_time_ms: u64,
     /// Top 10 commands by tokens saved: (cmd, count, saved, weighted_rate, avg_time_ms)
     pub by_command: Vec<(String, usize, usize, f64, u64)>,
@@ -280,21 +280,27 @@ pub struct DayStats {
     pub saved_tokens: usize,
     /// Savings percentage for this day
     pub savings_pct: f64,
-    /// Total execution time for this day (milliseconds)
+    /// Total execution time of this day's timed commands (milliseconds)
     pub total_time_ms: u64,
-    /// Average execution time per command (milliseconds)
+    /// Average execution time per timed command (milliseconds)
     pub avg_time_ms: u64,
+    /// Commands whose execution time counts toward `total_time_ms`: those with captured
+    /// input. A zero-input row (passthrough, fallback) filtered nothing, and its duration is
+    /// the wrapped process's lifetime — a whole interactive TUI session for `rtk claude`
+    /// (#4003) — so it would swamp the aggregate. Not exported: CSV/JSON keep their schema.
+    #[serde(skip)]
+    pub timed_commands: usize,
 }
 
 /// Weekly statistics for token savings and execution metrics.
 ///
 /// Serializable to JSON for export via `rtk gain --weekly --format json`.
-/// Weeks start on Sunday (SQLite default).
+/// Weeks run from Monday through Sunday.
 #[derive(Debug, Serialize)]
 pub struct WeekStats {
-    /// Week start date (YYYY-MM-DD)
+    /// Monday's date (YYYY-MM-DD)
     pub week_start: String,
-    /// Week end date (YYYY-MM-DD)
+    /// Sunday's date (YYYY-MM-DD)
     pub week_end: String,
     /// Number of commands executed this week
     pub commands: usize,
@@ -306,10 +312,13 @@ pub struct WeekStats {
     pub saved_tokens: usize,
     /// Savings percentage for this week
     pub savings_pct: f64,
-    /// Total execution time for this week (milliseconds)
+    /// Total execution time of this week's timed commands (milliseconds)
     pub total_time_ms: u64,
-    /// Average execution time per command (milliseconds)
+    /// Average execution time per timed command (milliseconds)
     pub avg_time_ms: u64,
+    /// Commands whose execution time counts toward `total_time_ms`; see [`DayStats::timed_commands`]
+    #[serde(skip)]
+    pub timed_commands: usize,
 }
 
 /// Monthly statistics for token savings and execution metrics.
@@ -329,10 +338,13 @@ pub struct MonthStats {
     pub saved_tokens: usize,
     /// Savings percentage for this month
     pub savings_pct: f64,
-    /// Total execution time for this month (milliseconds)
+    /// Total execution time of this month's timed commands (milliseconds)
     pub total_time_ms: u64,
-    /// Average execution time per command (milliseconds)
+    /// Average execution time per timed command (milliseconds)
     pub avg_time_ms: u64,
+    /// Commands whose execution time counts toward `total_time_ms`; see [`DayStats::timed_commands`]
+    #[serde(skip)]
+    pub timed_commands: usize,
 }
 
 /// Type alias for command statistics tuple: (command, count, saved_tokens, weighted_savings_rate, avg_time_ms)
@@ -346,6 +358,15 @@ pub struct MonthStats {
 /// instead. `saved_tokens` is signed, so the rate can be negative where the 3rd field, being
 /// unsigned, is clamped to 0.
 type CommandStats = (String, usize, usize, f64, u64);
+
+/// Mean execution time over the timed commands only (see [`DayStats::timed_commands`]).
+pub fn average_time_ms(total_time_ms: u64, timed_commands: usize) -> u64 {
+    if timed_commands > 0 {
+        total_time_ms / timed_commands as u64
+    } else {
+        0
+    }
+}
 
 /// Current tracking-DB schema version, stored in the SQLite `user_version` pragma.
 ///
@@ -547,6 +568,7 @@ const SUBCOMMAND_ROUTERS: &[&str] = &[
     "kubectl",
     "mvn",
     "next",
+    "ng",
     "npm",
     "php",
     "pip",
@@ -1172,6 +1194,7 @@ impl Tracker {
         let mut total_saved = 0usize;
         let mut total_time_ms = 0u64;
         let mut oversized_excluded = 0usize;
+        let mut timed_commands = 0usize;
 
         let mut stmt = self.conn.prepare(
             "SELECT input_tokens, output_tokens, saved_tokens, exec_time_ms
@@ -1201,7 +1224,10 @@ impl Tracker {
             total_input += input;
             total_output += output;
             total_saved += saved;
-            total_time_ms += time_ms;
+            if input > 0 {
+                total_time_ms += time_ms;
+                timed_commands += 1;
+            }
         }
 
         let avg_savings_pct = if total_input > 0 {
@@ -1210,11 +1236,7 @@ impl Tracker {
             0.0
         };
 
-        let avg_time_ms = if total_commands > 0 {
-            total_time_ms / total_commands as u64
-        } else {
-            0
-        };
+        let avg_time_ms = average_time_ms(total_time_ms, timed_commands);
 
         let by_command = self.get_by_command(project_path)?; // added: pass project filter
         let by_day = self.get_by_day(project_path)?; // added: pass project filter
@@ -1324,7 +1346,8 @@ impl Tracker {
                 SUM(input_tokens) as input,
                 SUM(output_tokens) as output,
                 SUM(saved_tokens) as saved,
-                SUM(exec_time_ms) as total_time
+                SUM(CASE WHEN input_tokens > 0 THEN exec_time_ms ELSE 0 END) as total_time,
+                SUM(CASE WHEN input_tokens > 0 THEN 1 ELSE 0 END) as timed_commands
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
                AND input_tokens <= ?3
@@ -1344,15 +1367,11 @@ impl Tracker {
                 let saved = row.get::<_, i64>(4)?.max(0) as usize; // clamp net-negative group
                 let commands = row.get::<_, i64>(1)? as usize;
                 let total_time = row.get::<_, i64>(5)? as u64;
+                let timed_commands = row.get::<_, i64>(6)? as usize;
                 let savings_pct = if input > 0 {
                     (saved as f64 / input as f64) * 100.0
                 } else {
                     0.0
-                };
-                let avg_time_ms = if commands > 0 {
-                    total_time / commands as u64
-                } else {
-                    0
                 };
 
                 Ok(DayStats {
@@ -1363,7 +1382,8 @@ impl Tracker {
                     saved_tokens: saved,
                     savings_pct,
                     total_time_ms: total_time,
-                    avg_time_ms,
+                    avg_time_ms: average_time_ms(total_time, timed_commands),
+                    timed_commands,
                 })
             },
         )?;
@@ -1376,7 +1396,7 @@ impl Tracker {
     /// Get weekly statistics grouped by week.
     ///
     /// Returns one [`WeekStats`] per week with aggregated metrics.
-    /// Weeks start on Sunday (SQLite default). Results ordered chronologically.
+    /// Weeks run from Monday through Sunday. Results ordered chronologically.
     ///
     /// # Examples
     ///
@@ -1406,7 +1426,8 @@ impl Tracker {
                 SUM(input_tokens) as input,
                 SUM(output_tokens) as output,
                 SUM(saved_tokens) as saved,
-                SUM(exec_time_ms) as total_time
+                SUM(CASE WHEN input_tokens > 0 THEN exec_time_ms ELSE 0 END) as total_time,
+                SUM(CASE WHEN input_tokens > 0 THEN 1 ELSE 0 END) as timed_commands
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
                AND input_tokens <= ?3
@@ -1426,15 +1447,11 @@ impl Tracker {
                 let saved = row.get::<_, i64>(5)?.max(0) as usize; // clamp net-negative group
                 let commands = row.get::<_, i64>(2)? as usize;
                 let total_time = row.get::<_, i64>(6)? as u64;
+                let timed_commands = row.get::<_, i64>(7)? as usize;
                 let savings_pct = if input > 0 {
                     (saved as f64 / input as f64) * 100.0
                 } else {
                     0.0
-                };
-                let avg_time_ms = if commands > 0 {
-                    total_time / commands as u64
-                } else {
-                    0
                 };
 
                 Ok(WeekStats {
@@ -1446,7 +1463,8 @@ impl Tracker {
                     saved_tokens: saved,
                     savings_pct,
                     total_time_ms: total_time,
-                    avg_time_ms,
+                    avg_time_ms: average_time_ms(total_time, timed_commands),
+                    timed_commands,
                 })
             },
         )?;
@@ -1488,7 +1506,8 @@ impl Tracker {
                 SUM(input_tokens) as input,
                 SUM(output_tokens) as output,
                 SUM(saved_tokens) as saved,
-                SUM(exec_time_ms) as total_time
+                SUM(CASE WHEN input_tokens > 0 THEN exec_time_ms ELSE 0 END) as total_time,
+                SUM(CASE WHEN input_tokens > 0 THEN 1 ELSE 0 END) as timed_commands
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
                AND input_tokens <= ?3
@@ -1508,15 +1527,11 @@ impl Tracker {
                 let saved = row.get::<_, i64>(4)?.max(0) as usize; // clamp net-negative group
                 let commands = row.get::<_, i64>(1)? as usize;
                 let total_time = row.get::<_, i64>(5)? as u64;
+                let timed_commands = row.get::<_, i64>(6)? as usize;
                 let savings_pct = if input > 0 {
                     (saved as f64 / input as f64) * 100.0
                 } else {
                     0.0
-                };
-                let avg_time_ms = if commands > 0 {
-                    total_time / commands as u64
-                } else {
-                    0
                 };
 
                 Ok(MonthStats {
@@ -1527,7 +1542,8 @@ impl Tracker {
                     saved_tokens: saved,
                     savings_pct,
                     total_time_ms: total_time,
-                    avg_time_ms,
+                    avg_time_ms: average_time_ms(total_time, timed_commands),
+                    timed_commands,
                 })
             },
         )?;
@@ -2186,7 +2202,9 @@ impl TimedExecution {
     ///
     /// For commands that stream output or run interactively where output
     /// cannot be captured. Records execution time but sets tokens to 0
-    /// (does not dilute savings statistics).
+    /// (does not dilute savings statistics). The zero input also keeps the
+    /// row out of the `rtk gain` exec-time aggregates, since its duration is
+    /// the wrapped process's lifetime, not filtering work.
     ///
     /// # Arguments
     ///
@@ -2291,6 +2309,7 @@ mod command_label_tests {
                 "rtk gh issue",
             ),
             ("rtk cargo test --all", "rtk cargo test"),
+            ("rtk ng build app", "rtk ng build"),
             ("rtk docker compose up", "rtk docker compose"),
             // A wrapper script and its bare name are the same tool.
             ("rtk ./gradlew build", "rtk gradlew build"),
@@ -2638,6 +2657,285 @@ mod command_label_tests {
 mod tests {
     use super::*;
     use crate::core::test_isolation;
+
+    // Fixed timestamps bypass record(), which uses the wall clock and prunes old
+    // rows. The in-memory tracker still creates the real production schema.
+    fn insert_weekly_command(
+        tracker: &Tracker,
+        timestamp: &str,
+        project_path: &str,
+        rtk_cmd: &str,
+        input: i64,
+        output: i64,
+        exec_time_ms: i64,
+    ) {
+        let saved = input - output;
+        let savings_pct = if input > 0 {
+            saved as f64 / input as f64 * 100.0
+        } else {
+            0.0
+        };
+        tracker
+            .conn
+            .execute(
+                "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path,
+                 input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
+                 VALUES (?1, 'fixture command', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    timestamp,
+                    rtk_cmd,
+                    project_path,
+                    input,
+                    output,
+                    saved,
+                    savings_pct,
+                    exec_time_ms
+                ],
+            )
+            .expect("Failed to insert weekly command fixture");
+    }
+
+    #[test]
+    fn test_get_by_week_groups_all_weekdays_monday_through_sunday() {
+        for dates in [
+            [
+                "2026-09-28",
+                "2026-09-29",
+                "2026-09-30",
+                "2026-10-01",
+                "2026-10-02",
+                "2026-10-03",
+                "2026-10-04",
+            ],
+            // ISO week 2020-W53 crosses the calendar-year boundary.
+            [
+                "2020-12-28",
+                "2020-12-29",
+                "2020-12-30",
+                "2020-12-31",
+                "2021-01-01",
+                "2021-01-02",
+                "2021-01-03",
+            ],
+            // The leap day belongs to the same Monday-to-Sunday week.
+            [
+                "2024-02-26",
+                "2024-02-27",
+                "2024-02-28",
+                "2024-02-29",
+                "2024-03-01",
+                "2024-03-02",
+                "2024-03-03",
+            ],
+        ] {
+            let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+            for date in dates {
+                insert_weekly_command(
+                    &tracker,
+                    &format!("{date}T12:00:00Z"),
+                    "",
+                    "rtk git status",
+                    100,
+                    25,
+                    10,
+                );
+            }
+
+            let weeks = tracker.get_by_week().expect("Failed to get weeks");
+            assert_eq!(
+                weeks.len(),
+                1,
+                "All seven dates must share a week: {dates:?}"
+            );
+            let week = &weeks[0];
+            assert_eq!(week.week_start, dates[0]);
+            assert_eq!(week.week_end, dates[6]);
+            assert_eq!(week.commands, 7);
+            assert_eq!(week.input_tokens, 700);
+            assert_eq!(week.output_tokens, 175);
+            assert_eq!(week.saved_tokens, 525);
+        }
+    }
+
+    #[test]
+    fn test_get_by_week_sunday_monday_boundaries_are_chronological() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        // Deliberately insert out of order, one second either side of both
+        // boundaries of the week beginning 2026-09-28.
+        for (timestamp, input) in [
+            ("2026-10-05T00:00:00Z", 40),
+            ("2026-09-28T00:00:00Z", 20),
+            ("2026-10-04T23:59:59Z", 30),
+            ("2026-09-27T23:59:59Z", 10),
+        ] {
+            insert_weekly_command(&tracker, timestamp, "", "rtk git status", input, 1, input);
+        }
+
+        let weeks = tracker.get_by_week().expect("Failed to get weeks");
+        let actual: Vec<_> = weeks
+            .iter()
+            .map(|week| {
+                (
+                    week.week_start.as_str(),
+                    week.week_end.as_str(),
+                    week.commands,
+                    week.input_tokens,
+                    week.total_time_ms,
+                )
+            })
+            .collect();
+        assert_eq!(
+            actual,
+            vec![
+                ("2026-09-21", "2026-09-27", 1, 10, 10),
+                ("2026-09-28", "2026-10-04", 2, 50, 50),
+                ("2026-10-05", "2026-10-11", 1, 40, 40),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_get_by_week_aggregates_weighted_savings_and_execution_time() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        for (timestamp, command, input, output, time) in [
+            ("2026-09-28T09:00:00Z", "rtk git status", 900, 90, 101),
+            ("2026-10-02T12:00:00Z", "rtk ls", 100, 90, 202),
+            ("2026-10-04T23:59:59Z", "rtk proxy true", 0, 0, 8),
+        ] {
+            insert_weekly_command(&tracker, timestamp, "", command, input, output, time);
+        }
+
+        let weeks = tracker.get_by_week().expect("Failed to get weeks");
+        assert_eq!(weeks.len(), 1);
+        let week = &weeks[0];
+        assert_eq!(week.commands, 3);
+        assert_eq!(week.input_tokens, 1000);
+        assert_eq!(week.output_tokens, 180);
+        assert_eq!(week.saved_tokens, 820);
+        // A mean of the individual rates (90%, 10%, 0%) would be incorrect.
+        assert!((week.savings_pct - 82.0).abs() < 1e-9);
+        assert_eq!(week.total_time_ms, 303);
+        assert_eq!(week.avg_time_ms, 151);
+        assert_eq!(week.timed_commands, 2);
+    }
+
+    #[test]
+    fn test_get_by_week_zero_input_has_zero_savings_rate() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        for (timestamp, time) in [("2026-09-28T00:00:00Z", 7), ("2026-10-04T23:59:59Z", 12)] {
+            insert_weekly_command(&tracker, timestamp, "", "rtk proxy true", 0, 0, time);
+        }
+
+        let weeks = tracker.get_by_week().expect("Failed to get weeks");
+        assert_eq!(weeks.len(), 1);
+        let week = &weeks[0];
+        assert_eq!(week.commands, 2);
+        assert_eq!(week.input_tokens, 0);
+        assert_eq!(week.output_tokens, 0);
+        assert_eq!(week.saved_tokens, 0);
+        assert_eq!(week.savings_pct, 0.0);
+        assert_eq!(week.total_time_ms, 0);
+        assert_eq!(week.avg_time_ms, 0);
+        assert_eq!(week.timed_commands, 0);
+    }
+
+    #[test]
+    fn test_get_by_week_project_filter_includes_exact_and_child_not_sibling() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        let project = PathBuf::from("projects").join("demo");
+        let child = project.join("child");
+        let sibling = PathBuf::from("projects").join("demo-sibling");
+        let unrelated = PathBuf::from("elsewhere");
+        for (path, input, output, time) in [
+            (&project, 100, 20, 10),
+            (&child, 200, 50, 20),
+            (&sibling, 400, 0, 40),
+            (&unrelated, 800, 0, 80),
+        ] {
+            insert_weekly_command(
+                &tracker,
+                "2026-09-28T12:00:00Z",
+                &path.to_string_lossy(),
+                "rtk git status",
+                input,
+                output,
+                time,
+            );
+        }
+
+        let weeks = tracker
+            .get_by_week_filtered(Some(&project.to_string_lossy()))
+            .expect("Failed to get project weeks");
+        assert_eq!(weeks.len(), 1);
+        let week = &weeks[0];
+        assert_eq!(week.week_start, "2026-09-28");
+        assert_eq!(week.week_end, "2026-10-04");
+        assert_eq!(week.commands, 2);
+        assert_eq!(week.input_tokens, 300);
+        assert_eq!(week.output_tokens, 70);
+        assert_eq!(week.saved_tokens, 230);
+        assert!((week.savings_pct - 230.0 / 300.0 * 100.0).abs() < 1e-9);
+        assert_eq!(week.total_time_ms, 30);
+        assert_eq!(week.avg_time_ms, 15);
+        assert_eq!(
+            tracker.get_by_week().expect("Failed to get all weeks")[0].commands,
+            4
+        );
+        assert!(
+            tracker
+                .get_by_week_filtered(Some("missing-project"))
+                .expect("Failed to query missing project")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn monday_week_join_preserves_input_eligibility_boundary() {
+        let tracker = Tracker::new_in_memory().unwrap();
+        insert_weekly_command(
+            &tracker,
+            "2026-09-28T12:00:00Z",
+            "",
+            "rtk eligible",
+            7500,
+            1500,
+            5,
+        );
+        insert_weekly_command(
+            &tracker,
+            "2026-10-04T23:59:59Z",
+            "",
+            "rtk oversized",
+            7501,
+            0,
+            20,
+        );
+        let weeks = tracker.get_by_week().unwrap();
+        assert_eq!(weeks.len(), 1);
+        assert_eq!(weeks[0].week_start, "2026-09-28");
+        assert_eq!(weeks[0].week_end, "2026-10-04");
+        assert_eq!(weeks[0].commands, 1);
+        assert_eq!(weeks[0].input_tokens, 7500);
+        assert_eq!(weeks[0].saved_tokens, 6000);
+        assert_eq!(weeks[0].total_time_ms, 5);
+    }
+
+    #[test]
+    fn test_get_by_week_empty_database() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        assert!(
+            tracker
+                .get_by_week()
+                .expect("Failed to get weeks")
+                .is_empty()
+        );
+        assert!(
+            tracker
+                .get_by_week_filtered(Some("project"))
+                .expect("Failed to get project weeks")
+                .is_empty()
+        );
+    }
 
     // 1. estimate_tokens — verify ~4 chars/token ratio
     #[test]
@@ -3649,5 +3947,71 @@ mod tests {
             "expected ({ls_rate:.1} + 24 - 50) / 3 = {expected:.1}%, got {avg:.1}% \
              (an unweighted inner AVG(savings_pct) would give (19 + 12.5 - 50) / 3 = -6.2%)"
         );
+    }
+
+    /// Three filtered commands (100 + 200 + 300 ms) plus one `rtk claude` TUI session
+    /// left open for 11 hours, recorded through the passthrough path with no input (#4003).
+    fn tracker_with_interactive_session() -> Tracker {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        for (ms, input) in [(100, 1_000), (200, 2_000), (300, 3_000)] {
+            tracker
+                .record("git status", "rtk git status", input, input / 4, ms)
+                .expect("record filtered command");
+        }
+        tracker
+            .record("claude", "rtk fallback: claude", 0, 0, 11 * 3_600_000)
+            .expect("record interactive session");
+        tracker
+    }
+
+    // 20. A zero-input row did no filtering, so its wall-clock lifetime must not reach the
+    // exec-time aggregate or its average. Commands and savings still count every row.
+    #[test]
+    fn test_summary_exec_time_excludes_zero_input_rows() {
+        let summary = tracker_with_interactive_session()
+            .get_summary()
+            .expect("Failed to get summary");
+
+        assert_eq!(summary.total_time_ms, 600);
+        assert_eq!(summary.avg_time_ms, 200);
+        assert_eq!(summary.total_commands, 4);
+        assert_eq!(summary.total_input, 6_000);
+        assert_eq!(summary.total_saved, 4_500);
+    }
+
+    // 21. The daily / weekly / monthly breakdowns (text, JSON and CSV) apply the same rule.
+    #[test]
+    fn test_period_exec_time_excludes_zero_input_rows() {
+        let tracker = tracker_with_interactive_session();
+
+        let days = tracker.get_all_days().expect("get_all_days");
+        let weeks = tracker.get_by_week().expect("get_by_week");
+        let months = tracker.get_by_month().expect("get_by_month");
+        assert_eq!((days.len(), weeks.len(), months.len()), (1, 1, 1));
+
+        for (period, commands, total_time_ms, avg_time_ms) in [
+            (
+                "day",
+                days[0].commands,
+                days[0].total_time_ms,
+                days[0].avg_time_ms,
+            ),
+            (
+                "week",
+                weeks[0].commands,
+                weeks[0].total_time_ms,
+                weeks[0].avg_time_ms,
+            ),
+            (
+                "month",
+                months[0].commands,
+                months[0].total_time_ms,
+                months[0].avg_time_ms,
+            ),
+        ] {
+            assert_eq!(commands, 4, "{period}: every row still counts as a command");
+            assert_eq!(total_time_ms, 600, "{period}: total exec time");
+            assert_eq!(avg_time_ms, 200, "{period}: avg exec time");
+        }
     }
 }

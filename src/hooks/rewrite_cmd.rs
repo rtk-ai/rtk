@@ -1,7 +1,7 @@
 //! Translates a raw shell command into its RTK-optimized equivalent.
 
 use super::decision::{self, HookDecision};
-use super::permissions::check_command;
+use super::permissions;
 use crate::core::user_dirs;
 use std::io::Write;
 
@@ -84,7 +84,8 @@ pub(crate) fn track_tee_read(cmd: &str) {
 /// *default* ask (no ask rule, allow rules short of every command) as exit 0
 /// for it and nothing else. An explicit `ask` rule the user wrote still renders
 /// as exit 3, so the host can keep prompting for the command the user asked
-/// about, and [`decision::ApprovalOwner::apply`] cannot transform a
+/// about. `rtk rewrite` never wraps a fish script, so no wrap passes through
+/// here at all. [`decision::ApprovalOwner::apply`] cannot transform a
 /// [`HookDecision::Deny`]: an explicit deny still reaches this function as
 /// `Deny` and still renders as exit 2, for every delegate, named or not.
 pub fn run(cmd: &str) -> anyhow::Result<()> {
@@ -93,9 +94,17 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
     // rules. The in-process `rtk hook <agent>` path is host-parameterized
     // instead (`permissions::Host`). What a delegate may say about itself is
     // only who owns approval, never whose rules apply.
-    let verdict = check_command(cmd);
-    let decided =
-        decision::ApprovalOwner::from_env().apply(decision::decide(cmd, verdict), verdict);
+    //
+    // A fish script is never wrapped here. Those rules are read, but they are
+    // not what decides: the delegates apply exit 3 without prompting
+    // (`hooks/pi/rtk.ts`, `hooks/hermes/rtk-rewrite`), and OpenClaw matches
+    // its own exec checks against the returned string — so a wrap would put
+    // the script's commands past a gate RTK does not own.
+    let verdict = permissions::check_command(cmd);
+    let decided = decision::ApprovalOwner::from_env().apply(
+        decision::decide(cmd, verdict, permissions::DenyRules::Unattested),
+        verdict,
+    );
     if !matches!(decided, HookDecision::Deny) {
         track_tee_read(cmd);
     }

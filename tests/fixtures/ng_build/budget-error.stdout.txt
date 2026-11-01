@@ -1,0 +1,10 @@
+❯ Building...
+✔ Building...
+Initial chunk files | Names         |  Raw size | Estimated transfer size
+main-VYJRYTPO.js    | main          | 190.01 kB |                51.90 kB
+styles-3IO2SMMH.css | styles        |  61 bytes |                61 bytes
+
+                    | Initial total | 190.07 kB |                51.96 kB
+
+Application bundle generation failed. [1.494 seconds] - 2026-10-02T20:02:00.071Z
+

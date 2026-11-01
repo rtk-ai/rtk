@@ -22,6 +22,14 @@ RTK reduces **bash output bytes** — the only thing it controls. Those bytes ar
 | `git diff` | Context reduced, headers stripped |
 | `git show` | Same as diff |
 | `git stash list` | Compact one-line per entry |
+| `git ls-tree --name-only` / `--name-status` | Consecutive paths grouped by directory; other formats pass through unchanged |
+
+For `ls-tree`, read `src/ lib.rs main.rs` as `src/lib.rs` and `src/main.rs`.
+`./` means no directory part in Git's output; omit that prefix to rebuild the
+original paths. Paths with spaces or Git C-quoting stand alone in
+double quotes; Git's escapes are preserved. Listings that would not shrink pass
+through unchanged. The hook keeps Git's original lines when you pipe a foldable
+listing into `head`, `tail`, or `cat`.
 
 ## GitHub CLI
 
@@ -44,7 +52,6 @@ RTK reduces **bash output bytes** — the only thing it controls. Those bytes ar
 | Command | What changes |
 |---------|--------------|
 | `cargo test` | Failures only, passed tests suppressed |
-| `cargo nextest` | Same as test |
 | `cargo build` | Errors and warnings only |
 | `cargo check` | Errors and warnings only |
 | `cargo clippy` | Lint warnings grouped by file |
@@ -60,6 +67,7 @@ RTK reduces **bash output bytes** — the only thing it controls. Those bytes ar
 | `pnpm list` | Compact dependency tree |
 | `pnpm outdated` | Package + current + latest only |
 | `next build` | Route summary + errors only |
+| `ng build` | Compact Angular build tables; every bundle and diagnostic retained |
 | `prisma migrate` | Migration status only |
 | `playwright test` | Failures + trace links only |
 
@@ -93,8 +101,7 @@ RTK reduces **bash output bytes** — the only thing it controls. Those bytes ar
 | Command | What changes |
 |---------|--------------|
 | `dotnet build` | Errors and warnings only |
-| `dotnet test` | Failures only |
-| `dotnet format` | Changed files only |
+| `dotnet restore` | Restore summary, errors and warnings kept |
 
 ## Docker / Kubernetes
 
@@ -103,7 +110,6 @@ RTK reduces **bash output bytes** — the only thing it controls. Those bytes ar
 | `docker ps` | Essential columns (name, image, status, port) |
 | `docker images` | Name + tag + size only |
 | `docker logs` | Deduplicated, last N lines |
-| `docker compose up` | Service status, errors highlighted |
 | `kubectl get pods` | Name + status + restarts only |
 | `kubectl logs` | Deduplicated entries |
 

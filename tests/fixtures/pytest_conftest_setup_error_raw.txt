@@ -1,0 +1,12 @@
+E                                                                        [100%]
+==================================== ERRORS ====================================
+________________________ ERROR at setup of test_uses_db ________________________
+conftest.py:7: in db
+    return connect()
+           ^^^^^^^^^
+mylib/db.py:2: in connect
+    raise ConnectionError("db down\nretry in 5s\nhost: db.internal")
+E   ConnectionError: db down
+E   retry in 5s
+E   host: db.internal
+1 error in 0.01s

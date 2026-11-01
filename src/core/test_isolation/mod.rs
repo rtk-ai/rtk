@@ -431,10 +431,18 @@ fn call_text<'a>(code: &'a str, head: regex::Match<'_>) -> (&'a str, &'a str) {
 
 /// The environment reads that stay direct, as written, each with its reason.
 /// Each covers one read: a second identical call in the same file is refused.
-const DIRECT_READS: [(&str, &str); 8] = [
+const DIRECT_READS: [(&str, &str); 10] = [
     // Builds the `PATH` a Windows test hands a child, extending the one it runs
     // under so the child still finds its tools.
     ("src/core/utils.rs", r#"var_os("PATH")"#),
+    // The same, for the Windows test that runs itself again with a `.cmd`
+    // wrapper's directory in front of its `PATH`.
+    ("src/core/task_cmd.rs", r#"var_os("PATH")"#),
+    // Tells that re-run apart from the test that spawned it. The parent sets
+    // it on the child's command, and the child is the test binary itself, so
+    // the process environment is the only place it arrives: `user_env` holds
+    // what the calling thread set, and nothing more, in a test build.
+    ("src/core/task_cmd.rs", "var_os(WRAPPER_DIR)"),
     // Only `rtk hook audit` reaches it, and no test runs that in-process.
     // `user_dirs::home` would move it to the Windows profile folder, which is
     // #1681's question, not this scan's.

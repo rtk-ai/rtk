@@ -5,6 +5,7 @@ use super::constants::{
 use super::init::resolve_claude_dir;
 use crate::core::user_dirs;
 use crate::core::user_env;
+use crate::core::utils::strip_leading_bom;
 use crate::discover::lexer::{
     is_word_boundary_whitespace, split_for_permissions, split_for_wrappers,
 };
@@ -74,11 +75,119 @@ pub fn check_command_for_agent(cmd: &str, host: Host, agent: Option<&str>) -> Pe
     )
 }
 
+/// Whether RTK can show that nothing it is about to wrap could escape a deny
+/// rule.
+///
+/// The fish wrap hands a script to a *different* shell, where RTK's own
+/// segmenters cannot say which commands run — fish starts one in places bash
+/// has no grammar for, and resolves words at run time. It also puts *every*
+/// command of the script inside one quoted argument, which is what makes it
+/// different from an ordinary rewrite: a host's own rule on a command RTK
+/// never rewrites still fires today, and would not fire on the wrapped form.
+///
+/// So the wrap is offered on one host only, Claude Code's own hook: RTK reads
+/// its settings files, and the hook asks explicitly for every wrap it builds, so no
+/// allow rule matching `rtk` can run the script unprompted. See
+/// [`claude_hook_deny_rules`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DenyRules {
+    /// Every settings file RTK reads parsed, and none carries a deny rule.
+    NoneConfigured,
+    /// Anything else: a deny rule is present, a file could not be parsed, the
+    /// wrap is off, the command is not provably fish, or this caller is not
+    /// the Claude hook.
+    Unattested,
+}
+
+impl DenyRules {
+    /// True only for [`DenyRules::NoneConfigured`].
+    pub(crate) fn permit_wrap(self) -> bool {
+        self == Self::NoneConfigured
+    }
+}
+
+/// What RTK can say about the deny rules in force for `rtk hook claude`.
+///
+/// The settings files [`load_permission_rules`] reads are the rules RTK can
+/// see, not all of Claude Code's: `--settings`, `--disallowedTools`, managed
+/// settings and the project the agent has `cd`'d away from never reach the
+/// hook, which is why every wrap is also an explicit ask. Within what RTK can
+/// see, an empty deny list is evidence only when RTK read and parsed every
+/// one of those files. A file it had to skip may name the rule that matters.
+///
+/// "No deny rule" means no entry under `permissions.deny` at all, not "no
+/// entry this gate understands": `Bash` on its own denies every Bash call,
+/// and `append_bash_rules` keeps only the `Bash(…)` forms, so counting the
+/// extracted patterns would read a configured user as an unconfigured one.
+///
+/// No other caller gets this answer, and the reasons differ per host rather
+/// than being one oversight:
+///
+/// - Gemini's loader reads `tools.allowed` and `tools.confirmationRequired`
+///   only, and never produces a deny rule, so its exclude lists are invisible
+///   here;
+/// - Droid's built-in defaults are deliberately not mirrored, so an empty
+///   `commandDenylist` says nothing about what Droid refuses;
+/// - Cursor's loader reads the global `cli-config.json`, while the host also
+///   applies its project config;
+/// - Copilot resolves to [`Host::Claude`] for its verdict, but judges the
+///   returned command with its own allowlist flow;
+/// - OpenCode re-evaluates its own patterns against the string RTK hands back;
+/// - Codex, Trae, Vibe and Antigravity have no RTK-side rule source at all;
+/// - `rtk rewrite` reads Claude's rules for delegates that do not prompt on
+///   exit 3 at all (`hooks/pi/rtk.ts`, `hooks/hermes/rtk-rewrite`), and
+///   OpenClaw matches its exec checks against the returned string.
+pub(crate) fn claude_hook_deny_rules() -> DenyRules {
+    let mut scan = SettingsScan::default();
+    let _ = load_permission_rules_tracking(&get_settings_paths(), &mut scan);
+    if scan.every_file_read && !scan.any_deny_entry {
+        DenyRules::NoneConfigured
+    } else {
+        DenyRules::Unattested
+    }
+}
+
+/// [`claude_hook_deny_rules`] where a wrap is possible at all: the wrap is
+/// enabled and `cmd` is provably fish. Anywhere else the answer cannot change
+/// a decision, so the settings are not walked a second time for it.
+///
+/// `rtk hook claude` and `rtk hook check --agent claude` both ask here, so the
+/// two read the settings the same number of times.
+pub(crate) fn claude_hook_deny_rules_for(cmd: &str) -> DenyRules {
+    if crate::core::config::cached_config().hooks.wrap_fish_scripts
+        && crate::discover::fish_script::is_unambiguous_fish(cmd)
+    {
+        claude_hook_deny_rules()
+    } else {
+        DenyRules::Unattested
+    }
+}
+
+/// What [`load_permission_rules_tracking`] saw besides the rules themselves.
+struct SettingsScan {
+    /// Every settings file that exists was opened, decoded and parsed.
+    every_file_read: bool,
+    /// At least one entry appears under `permissions.deny`, whatever its tool.
+    any_deny_entry: bool,
+}
+
+impl Default for SettingsScan {
+    fn default() -> Self {
+        Self {
+            every_file_read: true,
+            any_deny_entry: false,
+        }
+    }
+}
+
 /// Load `host`'s deny/ask/allow Bash rules from disk, doing the settings-file I/O
-/// exactly once. Exposed so a caller that checks many commands against the same
-/// host in a loop (e.g. `rtk discover` scanning thousands of transcript commands)
-/// can load once up front and reuse `check_command_with_rules` per command instead
-/// of going through `check_command_for` and re-reading every settings file from
+/// exactly once.
+///
+/// Every caller reads its rules through here and keeps them: a verdict needs
+/// all three, and a caller that checks many commands against the same host in
+/// a loop (e.g.
+/// `rtk discover` scanning thousands of transcript commands) reuses them per
+/// command instead of re-reading every settings file from
 /// disk on every single call.
 pub(crate) fn load_rules_for(host: Host) -> (Vec<String>, Vec<String>, Vec<String>) {
     match host {
@@ -273,27 +382,79 @@ fn check_shell_wrapper_permissions(
 /// 3. `~/.claude/settings.json`
 /// 4. `~/.claude/settings.local.json`
 ///
-/// Missing files and malformed JSON are silently skipped.
+/// Missing and empty files are skipped. A file that exists but cannot be read
+/// or parsed may hold deny rules that can no longer be applied, so it fails
+/// closed: a warning is printed and every command gets at least `Ask`.
 fn load_permission_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
+    load_permission_rules_from(&get_settings_paths())
+}
+
+fn load_permission_rules_from(paths: &[PathBuf]) -> (Vec<String>, Vec<String>, Vec<String>) {
+    load_permission_rules_tracking(paths, &mut SettingsScan::default())
+}
+
+/// [`load_permission_rules_from`], recording in `scan` what the walk saw
+/// besides the rules it extracts: a file it could not read or parse, and
+/// whether any deny entry exists at all.
+///
+/// Both are the difference between "this user configured no deny rule" and
+/// "RTK saw none" — see [`claude_hook_deny_rules`]. The rules themselves are
+/// unaffected: the fail-closed `ask *` a skipped file contributes is the same
+/// either way.
+fn load_permission_rules_tracking(
+    paths: &[PathBuf],
+    scan: &mut SettingsScan,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut deny_rules = Vec::new();
     let mut ask_rules = Vec::new();
     let mut allow_rules = Vec::new();
 
-    for path in get_settings_paths() {
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
+    for path in paths {
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            // A file that is not there denies nothing. One that is there and
+            // could not be read — permissions, or bytes that are not UTF-8 —
+            // may hold anything.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                continue;
+            }
+            Err(e) => {
+                eprintln!(
+                    "[rtk] warning: failed to read permissions from {}: {}",
+                    path.display(),
+                    e
+                );
+                ask_rules.push("*".to_string());
+                scan.every_file_read = false;
+                continue;
+            }
         };
-        let Ok(json) = crate::core::utils::from_json_str::<Value>(&content) else {
+        let content = strip_leading_bom(&content);
+        if content.trim().is_empty() {
+            continue;
+        }
+        let Ok(json) = crate::core::utils::from_json_str::<Value>(content) else {
             eprintln!(
                 "[rtk] warning: failed to parse permissions from {}",
                 path.display()
             );
+            ask_rules.push("*".to_string());
+            scan.every_file_read = false;
             continue;
         };
         let Some(permissions) = json.get("permissions") else {
             continue;
         };
 
+        scan.any_deny_entry |= permissions
+            .get("deny")
+            .and_then(Value::as_array)
+            .is_some_and(|rules| !rules.is_empty());
         append_bash_rules(permissions.get("deny"), &mut deny_rules);
         append_bash_rules(permissions.get("ask"), &mut ask_rules);
         append_bash_rules(permissions.get("allow"), &mut allow_rules);
@@ -344,16 +505,36 @@ fn get_settings_paths_from(
     paths
 }
 
-fn read_json(path: &std::path::Path) -> Option<Value> {
-    let content = std::fs::read_to_string(path).ok()?;
+enum JsonRead {
+    Missing,
+    Parsed(Value),
+    Error,
+}
+
+fn read_json(path: &std::path::Path) -> JsonRead {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return JsonRead::Missing,
+        Err(e) => {
+            eprintln!(
+                "[rtk] warning: failed to read permissions from {}: {}",
+                path.display(),
+                e
+            );
+            return JsonRead::Error;
+        }
+    };
+    if content.trim().is_empty() {
+        return JsonRead::Missing;
+    }
     match crate::core::utils::from_json_str::<Value>(&content) {
-        Ok(v) => Some(v),
+        Ok(v) => JsonRead::Parsed(v),
         Err(_) => {
             eprintln!(
                 "[rtk] warning: failed to parse permissions from {}",
                 path.display()
             );
-            None
+            JsonRead::Error
         }
     }
 }
@@ -380,19 +561,25 @@ fn append_wrapped_rules(rules_value: Option<&Value>, prefixes: &[&str], target: 
 // Global config only. RTK auto-allows only the globally-trusted subset; anything
 // else defers to the host, which applies its own project config and folder-trust.
 // This keeps RTK's allow set a subset of the host's — never more permissive.
-fn global_config(dir: &str, file: &str) -> Option<Value> {
-    read_json(&user_dirs::home()?.join(dir).join(file))
+fn global_config(dir: &str, file: &str) -> JsonRead {
+    let Some(home) = user_dirs::home() else {
+        return JsonRead::Missing;
+    };
+    read_json(&home.join(dir).join(file))
 }
 
 fn load_cursor_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut deny = Vec::new();
     let mut allow = Vec::new();
-    if let Some(perms) = global_config(CURSOR_DIR, "cli-config.json")
-        .as_ref()
-        .and_then(|j| j.get("permissions"))
-    {
-        append_wrapped_rules(perms.get("deny"), &["Shell("], &mut deny);
-        append_wrapped_rules(perms.get("allow"), &["Shell("], &mut allow);
+    match global_config(CURSOR_DIR, "cli-config.json") {
+        JsonRead::Error => deny.push("*".to_string()),
+        JsonRead::Parsed(json) => {
+            if let Some(perms) = json.get("permissions") {
+                append_wrapped_rules(perms.get("deny"), &["Shell("], &mut deny);
+                append_wrapped_rules(perms.get("allow"), &["Shell("], &mut allow);
+            }
+        }
+        JsonRead::Missing => {}
     }
     (deny, Vec::new(), allow)
 }
@@ -403,9 +590,12 @@ fn load_cursor_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
 // untrusted → global, which is safe: never more permissive than the host).
 fn gemini_settings() -> Option<Value> {
     let global = global_config(GEMINI_DIR, SETTINGS_JSON);
+    let global_value = match &global {
+        JsonRead::Parsed(value) => Some(value),
+        JsonRead::Missing | JsonRead::Error => None,
+    };
     let trusted = user_env::var("GEMINI_CLI_TRUST_WORKSPACE").as_deref() == Some("true")
-        || !global
-            .as_ref()
+        || !global_value
             .and_then(|j| {
                 j.pointer("/security/folderTrust/enabled")
                     .and_then(Value::as_bool)
@@ -413,11 +603,14 @@ fn gemini_settings() -> Option<Value> {
             .unwrap_or(false);
     if trusted
         && let Some(root) = find_project_root()
-        && let Some(v) = read_json(&root.join(GEMINI_DIR).join(SETTINGS_JSON))
+        && let JsonRead::Parsed(v) = read_json(&root.join(GEMINI_DIR).join(SETTINGS_JSON))
     {
         return Some(v);
     }
-    global
+    match global {
+        JsonRead::Parsed(value) => Some(value),
+        JsonRead::Missing | JsonRead::Error => None,
+    }
 }
 
 fn load_gemini_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
@@ -434,7 +627,7 @@ fn load_gemini_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
 // All four Droid settings scopes: user (honoring $FACTORY_HOME_OVERRIDE) and
 // project `.factory/`, each with settings.json + settings.local.json
 // (docs.factory.ai/cli/configuration/settings). Missing files are skipped.
-fn droid_settings_scopes() -> Vec<Value> {
+fn droid_settings_scopes() -> (Vec<Value>, bool) {
     let mut dirs_to_read = Vec::new();
     if let Some(home) = user_dirs::env_path(DROID_HOME_ENV)
         .filter(|value| !value.is_empty())
@@ -448,14 +641,17 @@ fn droid_settings_scopes() -> Vec<Value> {
     }
 
     let mut scopes = Vec::new();
+    let mut failed = false;
     for dir in dirs_to_read {
         for file in [DROID_SETTINGS_FILE, SETTINGS_LOCAL_JSON] {
-            if let Some(v) = read_json(&dir.join(file)) {
-                scopes.push(v);
+            match read_json(&dir.join(file)) {
+                JsonRead::Parsed(value) => scopes.push(value),
+                JsonRead::Missing => {}
+                JsonRead::Error => failed = true,
             }
         }
     }
-    scopes
+    (scopes, failed)
 }
 
 /// Deny-only: `commandDenylist`/`commandBlocklist` → deny, so RTK steps aside
@@ -465,7 +661,11 @@ fn droid_settings_scopes() -> Vec<Value> {
 /// No allow rules: RTK never asserts a decision for a command it renames to
 /// `rtk …`, and Droid's built-in defaults are not mirrored (they would drift).
 fn load_droid_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
-    droid_rules_from_settings(&droid_settings_scopes())
+    let (scopes, failed) = droid_settings_scopes();
+    if failed {
+        return (vec!["*".to_string()], Vec::new(), Vec::new());
+    }
+    droid_rules_from_settings(&scopes)
 }
 
 pub(crate) fn droid_rules_from_settings(
@@ -535,31 +735,34 @@ fn strip_grammar_residue(segment: &str) -> &str {
     }
 }
 
+/// One space between words, line continuations elided.
+///
+/// Shares the lexer's word-boundary definition rather than
+/// `str::split_whitespace()`, so a bare `\r` in a command never collapses into
+/// a space.
+///
+/// A line continuation goes first: bash elides `\<newline>` entirely and joins
+/// the words either side, so splitting on the newline alone would leave a
+/// stray `\` in front of the command that no pattern matches. Only the LF
+/// form: against CRLF the backslash escapes the `\r` and the `\n` still
+/// terminates the command, in bash and in the lexer alike, so the words either
+/// side are already separate segments.
+fn normalize_command_text(text: &str) -> String {
+    text.replace("\\\n", "")
+        .split(is_word_boundary_whitespace)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Pattern forms:
 /// - `*` → matches everything
 /// - `prefix:*` or `prefix *` (trailing `*`, no other wildcards) → prefix match with word boundary
 /// - `* suffix`, `pre * suf` → glob matching where `*` matches any sequence of characters
 /// - `pattern` → exact match or prefix match (cmd must equal pattern or start with `{pattern} `)
 pub(crate) fn command_matches_pattern(cmd: &str, pattern: &str) -> bool {
-    // Shares the lexer's word-boundary definition rather than
-    // str::split_whitespace(), so a bare `\r` in `cmd` never collapses into a space.
-    //
-    // A line continuation is removed first: bash elides `\<newline>` entirely
-    // and joins the words either side, so splitting on the newline alone would
-    // leave a stray `\` in front of the command that no pattern matches.
-    //
-    // Only the LF form: against CRLF the backslash escapes the `\r` and the
-    // `\n` still terminates the command, in bash and in the lexer alike, so
-    // the words either side are already separate segments.
-    let normalize = |s: &str| {
-        s.replace("\\\n", "")
-            .split(is_word_boundary_whitespace)
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-    let cmd_norm = normalize(cmd);
-    let pattern_norm = normalize(pattern);
+    let cmd_norm = normalize_command_text(cmd);
+    let pattern_norm = normalize_command_text(pattern);
     let cmd = cmd_norm.as_str();
     let pattern = pattern_norm.as_str();
 
@@ -684,6 +887,191 @@ mod tests {
                 project.join(CLAUDE_DIR).join(SETTINGS_LOCAL_JSON),
             ]
         );
+    }
+
+    fn rules_from_files(files: &[(&str, Option<&str>)]) -> (Vec<String>, Vec<String>, Vec<String>) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths: Vec<PathBuf> = files
+            .iter()
+            .map(|(name, content)| {
+                let path = tmp.path().join(name);
+                match content {
+                    Some(content) => std::fs::write(&path, content).expect("write settings"),
+                    // A directory in place of the file: it exists but cannot be read.
+                    None => std::fs::create_dir(&path).expect("mkdir settings"),
+                }
+                path
+            })
+            .collect();
+        load_permission_rules_from(&paths)
+    }
+
+    #[test]
+    fn test_valid_settings_file_rules_apply() {
+        let (deny, ask, allow) = rules_from_files(&[(
+            "settings.json",
+            Some(r#"{"permissions":{"deny":["Bash(git push *)"]}}"#),
+        )]);
+        assert_eq!(
+            check_command_with_rules("git push origin main", &deny, &ask, &allow),
+            PermissionVerdict::Deny
+        );
+        assert_eq!(
+            check_command_with_rules("git status", &deny, &ask, &allow),
+            PermissionVerdict::Default
+        );
+    }
+
+    #[test]
+    fn test_unparseable_settings_file_fails_closed_to_ask() {
+        let (deny, ask, allow) = rules_from_files(&[
+            (
+                "settings.json",
+                Some(r#"{"permissions":{"deny":["Bash(git push *)"],}}"#),
+            ),
+            (
+                "settings.local.json",
+                Some(r#"{"permissions":{"allow":["Bash(git status)"]}}"#),
+            ),
+        ]);
+        assert_eq!(
+            check_command_with_rules("git push origin main", &deny, &ask, &allow),
+            PermissionVerdict::Ask
+        );
+        assert_eq!(
+            check_command_with_rules("git status", &deny, &ask, &allow),
+            PermissionVerdict::Ask
+        );
+    }
+
+    #[test]
+    fn test_unreadable_settings_file_fails_closed_to_ask() {
+        let (deny, ask, allow) = rules_from_files(&[("settings.json", None)]);
+        assert_eq!(
+            check_command_with_rules("git push origin main", &deny, &ask, &allow),
+            PermissionVerdict::Ask
+        );
+    }
+
+    #[test]
+    fn test_unreadable_settings_file_keeps_other_files_deny_rules() {
+        let (deny, ask, allow) = rules_from_files(&[
+            ("settings.json", None),
+            (
+                "settings.local.json",
+                Some(r#"{"permissions":{"deny":["Bash(rm *)"]}}"#),
+            ),
+        ]);
+        assert_eq!(
+            check_command_with_rules("rm -rf build", &deny, &ask, &allow),
+            PermissionVerdict::Deny
+        );
+    }
+
+    #[test]
+    fn test_unparseable_settings_file_keeps_other_files_deny_rules() {
+        let (deny, ask, allow) = rules_from_files(&[
+            (
+                "settings.json",
+                Some(r#"{"permissions":{"deny":["Bash(git push *)"],}}"#),
+            ),
+            (
+                "settings.local.json",
+                Some(r#"{"permissions":{"deny":["Bash(rm *)"]}}"#),
+            ),
+        ]);
+        assert_eq!(
+            check_command_with_rules("rm -rf build", &deny, &ask, &allow),
+            PermissionVerdict::Deny
+        );
+        assert_eq!(
+            check_command_with_rules("git push origin main", &deny, &ask, &allow),
+            PermissionVerdict::Ask
+        );
+    }
+
+    #[test]
+    fn test_missing_and_empty_settings_files_add_no_rules() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let empty = tmp.path().join("settings.local.json");
+        std::fs::write(&empty, "  \n").expect("write settings");
+        let (deny, ask, allow) =
+            load_permission_rules_from(&[tmp.path().join("settings.json"), empty]);
+        assert!(deny.is_empty() && ask.is_empty() && allow.is_empty());
+    }
+
+    #[test]
+    fn test_bom_only_settings_file_adds_no_rules() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bom_empty = tmp.path().join("settings.local.json");
+        std::fs::write(&bom_empty, b"\xEF\xBB\xBF").expect("write settings");
+        let (deny, ask, allow) = load_permission_rules_from(&[bom_empty]);
+        assert!(deny.is_empty() && ask.is_empty() && allow.is_empty());
+
+        let bom_whitespace = tmp.path().join("settings.json");
+        std::fs::write(&bom_whitespace, b"\xEF\xBB\xBF   \r\n").expect("write settings");
+        let (deny, ask, allow) = load_permission_rules_from(&[bom_whitespace]);
+        assert!(deny.is_empty() && ask.is_empty() && allow.is_empty());
+    }
+
+    #[test]
+    fn test_not_a_directory_settings_file_adds_no_rules() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file_path = tmp.path().join("not_a_dir");
+        std::fs::write(&file_path, "regular file content").expect("write file");
+        let settings_path = file_path.join("settings.json");
+        let (deny, ask, allow) = load_permission_rules_from(&[settings_path]);
+        assert!(deny.is_empty() && ask.is_empty() && allow.is_empty());
+    }
+
+    /// `claude_hook_deny_rules` permits the fish wrap only when the scan saw
+    /// every file and no deny entry. A path under a regular file, or a file
+    /// holding nothing but a BOM and whitespace, hides no rule and must keep
+    /// the scan attested; a file RTK could not read or parse must not.
+    #[test]
+    fn test_files_holding_no_rules_leave_the_settings_scan_attested() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = |name: &str| {
+            let dir = tmp.path().join(name);
+            std::fs::create_dir(&dir).expect("create dir");
+            dir
+        };
+        let scan_of = |path: &std::path::Path| {
+            let mut scan = SettingsScan::default();
+            let rules = load_permission_rules_tracking(&[path.to_path_buf()], &mut scan);
+            (rules, scan)
+        };
+
+        let not_a_dir = tmp.path().join(".claude");
+        std::fs::write(&not_a_dir, "regular file content").expect("write file");
+        let bom = dir("bom").join("settings.local.json");
+        std::fs::write(&bom, b"\xEF\xBB\xBF").expect("write settings");
+        let bom_whitespace = dir("bom_whitespace").join("settings.local.json");
+        std::fs::write(&bom_whitespace, b"\xEF\xBB\xBF  \r\n").expect("write settings");
+        for path in [not_a_dir.join("settings.json"), bom, bom_whitespace] {
+            let (_, scan) = scan_of(&path);
+            assert!(scan.every_file_read, "{} marked unread", path.display());
+        }
+
+        let unparseable = dir("unparseable").join("settings.json");
+        std::fs::write(&unparseable, b"\xEF\xBB\xBF{").expect("write settings");
+        let unreadable = dir("unreadable").join("settings.json");
+        std::fs::create_dir(&unreadable).expect("create dir");
+        for path in [unparseable, unreadable] {
+            let (_, scan) = scan_of(&path);
+            assert!(!scan.every_file_read, "{} marked read", path.display());
+        }
+
+        let bom_deny = dir("bom_deny").join("settings.json");
+        std::fs::write(
+            &bom_deny,
+            b"\xEF\xBB\xBF{\"permissions\":{\"deny\":[\"Bash(rm *)\"]}}",
+        )
+        .expect("write settings");
+        let ((deny, _, _), scan) = scan_of(&bom_deny);
+        assert_eq!(deny, ["rm *"], "a BOM before rules dropped them");
+        assert!(scan.every_file_read, "a BOM before rules marked unread");
+        assert!(scan.any_deny_entry, "a BOM before rules hid the deny");
     }
 
     #[test]

@@ -1,0 +1,24 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+____________________________________ test_p ____________________________________
+
+    def test_p():
+        E = {"b": 2}
+        E = dict(E)
+>       assert E == {"b": 5}, "state drifted"
+E       AssertionError: state drifted
+E       assert {'b': 2} == {'b': 5}
+E         
+E         Differing items:
+E         {'b': 2} != {'b': 5}
+E         Use -v to get more diff
+
+test_long.py:4: AssertionError
+__________________________________ test_raise __________________________________
+
+    def test_raise():
+>       raise ValueError("boom")
+E       ValueError: boom
+
+test_long.py:8: ValueError
+2 failed in 0.01s

@@ -246,6 +246,20 @@ fn remove_cursor_hooks_at(cursor_dir: &Path, ctx: InitContext) -> Result<Vec<Str
     Ok(removed)
 }
 
+/// Returns true if Cursor RTK hook is configured in hooks.json.
+pub fn is_configured() -> bool {
+    let Ok(cursor_dir) = resolve_cursor_dir() else {
+        return false;
+    };
+    let hooks_json = cursor_dir.join(HOOKS_JSON);
+    if let Ok(content) = fs::read_to_string(&hooks_json)
+        && let Ok(root) = from_json_str::<serde_json::Value>(&content)
+    {
+        return cursor_hook_already_present(&root);
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

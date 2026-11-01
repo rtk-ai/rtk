@@ -41,7 +41,11 @@ For each command RTK runs, the database records:
 
 The same database also holds filter parse failures and hook rewrite decisions, which feed `rtk gain` and `rtk session`.
 
-Commands RTK passes through without filtering are tracked at 0% reduction.
+Commands RTK passes through without filtering are tracked at 0% reduction. They still count toward
+`commands` and the token totals, but they are left out of `total_time_ms` and `avg_time_ms` (in the
+summary, the daily/weekly/monthly breakdowns, and the JSON/CSV exports): only commands with captured
+input (`input_tokens > 0`) are timed. A passthrough row filtered nothing, and its duration is the
+wrapped process's lifetime — for an interactive TUI such as `rtk claude`, the whole session.
 
 ## Privacy
 
