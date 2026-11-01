@@ -21,6 +21,20 @@ fn print_instructions_agents_awareness_note(agent: &str, ctx: InitContext) {
     );
 }
 
+/// Whether a rules file already holds the block rtk writes into it. Matches only
+/// headings and markers rtk itself emits — the current awareness heading, the
+/// `# RTK - Rust Token Killer (<agent>)` heading of earlier versions, or the
+/// `<!-- rtk-instructions` marker — so an unrelated "RTK Query" or `src/rtk/`
+/// in a user's rules file does not make the install a silent no-op.
+fn rtk_rules_present(existing: &str) -> bool {
+    let heading = RTK_AWARENESS_FULL.lines().next().unwrap_or_default().trim();
+    existing.contains(RTK_BLOCK_START)
+        || existing.lines().map(str::trim).any(|line| {
+            (!heading.is_empty() && line == heading)
+                || line.starts_with("# RTK - Rust Token Killer")
+        })
+}
+
 // Cline / Roo Code support
 
 pub(super) fn run_cline_mode(ctx: InitContext) -> Result<()> {
@@ -31,7 +45,7 @@ pub(super) fn run_cline_mode(ctx: InitContext) -> Result<()> {
     let rules_path = PathBuf::from(".clinerules");
 
     let existing = fs::read_to_string(&rules_path).unwrap_or_default();
-    if existing.contains("RTK") || existing.contains("rtk") {
+    if rtk_rules_present(&existing) {
         if !dry_run {
             println!("\nRTK already configured for Cline in this project.\n");
             println!("  Rules: .clinerules (already present)");
@@ -79,7 +93,7 @@ pub(super) fn run_windsurf_mode(ctx: InitContext) -> Result<()> {
     let rules_path = PathBuf::from(".windsurfrules");
 
     let existing = fs::read_to_string(&rules_path).unwrap_or_default();
-    if existing.contains("RTK") || existing.contains("rtk") {
+    if rtk_rules_present(&existing) {
         if !dry_run {
             println!("\nRTK already configured for Windsurf in this project.\n");
             println!("  Rules: .windsurfrules (already present)");
@@ -133,7 +147,7 @@ fn run_kilocode_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
     let rules_path = target_dir.join("rtk-rules.md");
 
     let existing = fs::read_to_string(&rules_path).unwrap_or_default();
-    if existing.contains("RTK") || existing.contains("rtk") {
+    if rtk_rules_present(&existing) {
         if !dry_run {
             println!("\nRTK already configured for Kilo Code in this project.\n");
             println!("  Rules: .kilocode/rules/rtk-rules.md (already present)");
@@ -242,6 +256,48 @@ mod tests {
         run_kilocode_mode_at(temp.path(), InitContext::default()).unwrap();
         let second = fs::read_to_string(&path).unwrap();
         assert_eq!(first, second, "Idempotent: content should not change");
+    }
+
+    #[test]
+    fn test_kilocode_mode_installs_when_rules_mention_unrelated_rtk() {
+        // "RTK Query" (Redux Toolkit) must not be mistaken for an existing install.
+        let temp = TempDir::new().unwrap();
+        let rules_dir = temp.path().join(".kilocode/rules");
+        fs::create_dir_all(&rules_dir).unwrap();
+        let rules_path = rules_dir.join("rtk-rules.md");
+        fs::write(
+            &rules_path,
+            "Prefer RTK Query for data fetching; see src/rtk/.\n",
+        )
+        .unwrap();
+
+        run_kilocode_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        let content = fs::read_to_string(&rules_path).unwrap();
+        assert!(content.starts_with("Prefer RTK Query for data fetching"));
+        assert!(content.ends_with(RTK_AWARENESS_FULL));
+    }
+
+    #[test]
+    fn test_rtk_rules_present_matches_only_rtk_written_content() {
+        assert!(rtk_rules_present(RTK_AWARENESS_FULL));
+        assert!(rtk_rules_present(&format!(
+            "My rules\n\n{RTK_AWARENESS_FULL}"
+        )));
+        assert!(rtk_rules_present(&rtk_block(RTK_AWARENESS_FULL)));
+        // Headings written by earlier rtk versions
+        assert!(rtk_rules_present(
+            "# RTK - Rust Token Killer (Cline)\n\n**Usage**: ..."
+        ));
+
+        assert!(!rtk_rules_present(""));
+        assert!(!rtk_rules_present(
+            "Prefer RTK Query for data fetching; do not add axios."
+        ));
+        assert!(!rtk_rules_present(
+            "# RTK Query conventions\nuse rtk-query hooks"
+        ));
+        assert!(!rtk_rules_present("Store slices live in src/store/rtk/"));
     }
 
     #[test]
