@@ -29,7 +29,7 @@ fn is_rtk_binary(binary: &str) -> bool {
     matches!(binary_name, "rtk" | "rtk.exe")
 }
 
-fn is_rtk_hook_command(command: &str, agent: &str) -> bool {
+pub(crate) fn is_rtk_hook_command(command: &str, agent: &str) -> bool {
     let parts = crate::discover::lexer::shell_split(command);
     let [parsed_binary, hook, target] = parts.as_slice() else {
         return false;
@@ -40,6 +40,10 @@ fn is_rtk_hook_command(command: &str, agent: &str) -> bool {
 
 pub fn is_claude_hook_command(command: &str) -> bool {
     is_rtk_hook_command(command, "claude")
+}
+
+pub fn is_cursor_hook_command(command: &str) -> bool {
+    is_rtk_hook_command(command, "cursor")
 }
 
 #[cfg(feature = "engine")]
@@ -76,5 +80,21 @@ mod tests {
         assert!(!is_claude_hook_command("not-rtk hook claude"));
         assert!(!is_claude_hook_command("/opt/homebrew/bin/rtk hook cursor"));
         assert!(!is_claude_hook_command("echo rtk hook claude"));
+    }
+
+    #[test]
+    fn cursor_hook_command_matches_bare_and_absolute_rtk() {
+        assert!(is_cursor_hook_command("rtk hook cursor"));
+        assert!(is_cursor_hook_command("/opt/homebrew/bin/rtk hook cursor"));
+        assert!(is_cursor_hook_command(
+            "\"C:\\Program Files\\rtk\\rtk.exe\" hook cursor"
+        ));
+    }
+
+    #[test]
+    fn cursor_hook_command_rejects_other_commands() {
+        assert!(!is_cursor_hook_command("not-rtk hook cursor"));
+        assert!(!is_cursor_hook_command("/opt/homebrew/bin/rtk hook claude"));
+        assert!(!is_cursor_hook_command("echo rtk hook cursor"));
     }
 }

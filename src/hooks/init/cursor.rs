@@ -121,7 +121,7 @@ pub(super) fn cursor_hook_already_present(root: &serde_json::Value) -> bool {
 
 fn is_cursor_hook_entry(hook: &serde_json::Value) -> bool {
     is_command_hook(hook, |cmd| {
-        cmd.contains(REWRITE_HOOK_FILE) || cmd == CURSOR_HOOK_COMMAND
+        cmd.contains(REWRITE_HOOK_FILE) || crate::hooks::is_cursor_hook_command(cmd)
     })
 }
 
@@ -313,6 +313,43 @@ mod tests {
             }
         });
         assert!(cursor_hook_already_present(&json_content));
+    }
+
+    #[test]
+    fn test_cursor_hook_already_present_absolute_rtk_path() {
+        let json_content = serde_json::json!({
+            "version": 1,
+            "hooks": {
+                "preToolUse": [{
+                    "command": "/opt/homebrew/bin/rtk hook cursor",
+                    "matcher": "Shell"
+                }]
+            }
+        });
+        assert!(cursor_hook_already_present(&json_content));
+    }
+
+    #[test]
+    fn test_remove_cursor_hook_from_json_absolute_rtk_path() {
+        let mut json_content = serde_json::json!({
+            "version": 1,
+            "hooks": {
+                "preToolUse": [
+                    { "command": "./hooks/other.sh", "matcher": "Shell" },
+                    {
+                        "command": "/opt/homebrew/bin/rtk hook cursor",
+                        "matcher": "Shell"
+                    }
+                ]
+            }
+        });
+
+        let removed = remove_cursor_hook_from_json(&mut json_content);
+        assert!(removed);
+
+        let hooks = json_content["hooks"]["preToolUse"].as_array().unwrap();
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0]["command"], "./hooks/other.sh");
     }
 
     #[test]
