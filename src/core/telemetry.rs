@@ -347,6 +347,7 @@ fn recall_mode_label() -> &'static str {
 const RECALL_FAMILIES: &[&str] = &[
     "artisan",
     "aws",
+    "buf",
     "cargo",
     "compose",
     "curl",

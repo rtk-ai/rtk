@@ -166,7 +166,7 @@ Database: ~/.local/share/rtk/history.db
   GIT (cmds/git/)          status, diff, log, gh, gt
   JS/TS (cmds/js/)         lint, tsc, next, prettier, playwright, prisma, vitest, pnpm
   PYTHON (cmds/python/)    ruff, pytest, mypy, pip
-  GO (cmds/go/)            go test/build/vet, golangci-lint
+  GO (cmds/go/)            go test/build/vet, golangci-lint, buf
   RUBY (cmds/ruby/)        rake, rspec, rubocop
   DOTNET (cmds/dotnet/)    dotnet build/test, binlog
   CLOUD (cmds/cloud/)      aws, docker/kubectl, curl, wget, psql
@@ -190,7 +190,7 @@ Database: ~/.local/share/rtk/history.db
 - **Git Commands**: 7 operations (status, diff, log, add, commit, push, branch/checkout)
 - **JS/TS Tooling**: 8 modules (modern frontend/fullstack development)
 - **Python Tooling**: 3 modules (ruff, pytest, pip)
-- **Go Tooling**: 2 modules (go test/build/vet, golangci-lint)
+- **Go Tooling**: 3 modules (go test/build/vet, golangci-lint, buf)
 
 ---
 
@@ -352,9 +352,11 @@ Commands::Pip { args }                 Build { args },
                                        Vet { args }
                                      }
 ├─ ruff_cmd.rs                       Commands::GolangciLint { args }
-├─ pytest_cmd.rs                     │
+├─ pytest_cmd.rs                     Commands::Buf { args }
+                                     │
 └─ pip_cmd.rs                        ├─ go_cmd.rs (sub-enum router)
-                                     └─ golangci_cmd.rs
+                                     ├─ golangci_cmd.rs
+                                     └─ buf_cmd.rs
 
 Mirrors: lint, prettier              Mirrors: git, cargo
 ```
@@ -455,6 +457,17 @@ golangci_cmd.rs   JSON PARSING          JSON API          85%
     }
     → Group by linter rule, count violations
     → Format: "errcheck: 12 issues, gosec: 5 issues"
+
+buf_cmd.rs        JSON PARSING          NDJSON            75-90%
+
+  buf lint/build/breaking --error-format=json (injected):
+    {"path": "a.proto", "start_line": 6, "type": "COMPILE", "message": "..."}
+    → Group by rule; COMPILE by message with identifiers masked
+    → Format: "COMPILE imported file does not exist (3x, root cause?)"
+              "COMPILE cannot find `…` in this scope (412x)"
+
+  buf format -d:   unified diff → "path (+a -r)" per file, full diff in recall
+  buf generate:    failure only → plugin panic cut after its first frame, Failure: line kept
 ```
 
 #### Sub-Enum Pattern (go_cmd.rs)
@@ -470,6 +483,7 @@ Uses `Commands::Go { #[command(subcommand)] command: GoCommand }` in main.rs, wi
 - Third-party tool (not core Go toolchain)
 - Different output format (JSON API vs text)
 - Distinct use case (comprehensive linting vs single-tool diagnostics)
+- buf is standalone for the same reasons; `rtk go tool buf` routes into it
 
 ### Ruby Module Architecture
 

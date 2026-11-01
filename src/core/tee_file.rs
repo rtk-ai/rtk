@@ -3,6 +3,7 @@
 
 use crate::core::config::Config;
 use crate::core::retriever::RetrieverConfig;
+use crate::core::tee::{FULL_OUTPUT_HINT, SEE_REMAINING_HINT};
 use crate::core::user_dirs;
 use crate::core::user_env;
 use std::path::{Path, PathBuf};
@@ -262,7 +263,7 @@ fn write(cfg: &RetrieverConfig, content: &str, slug: &str) -> Option<PathBuf> {
 }
 
 pub(crate) fn format_hint(path: &Path) -> String {
-    format!("[full output: {}]", display_shell_path(path))
+    format!("{FULL_OUTPUT_HINT}{}]", display_shell_path(path))
 }
 
 pub fn tee_and_hint(cfg: &RetrieverConfig, raw: &str, slug: &str) -> Option<String> {
@@ -272,7 +273,7 @@ pub fn tee_and_hint(cfg: &RetrieverConfig, raw: &str, slug: &str) -> Option<Stri
 
 pub fn force_tee_hint(cfg: &RetrieverConfig, content: &str, slug: &str) -> Option<String> {
     let path = write(cfg, content, slug)?;
-    Some(format!("[full output: {}]", display_shell_path(&path)))
+    Some(format_hint(&path))
 }
 
 pub fn force_tee_tail_hint(
@@ -283,7 +284,7 @@ pub fn force_tee_tail_hint(
 ) -> Option<String> {
     let path = write(cfg, content, slug)?;
     Some(format!(
-        "[see remaining: tail -n +{} {}]",
+        "{SEE_REMAINING_HINT}tail -n +{} {}]",
         line_offset,
         display_shell_path(&path)
     ))
