@@ -1,7 +1,5 @@
-//! `rtk ruff` passes subcommands it has no filter for through its passthrough cap,
-//! except `analyze graph`, whose JSON is only useful whole. These run the real `run()`
-//! path against a stub ruff that replays output captured with ruff 0.16.6: the graph of
-//! a 300-module package (`ruff analyze graph big`) and `ruff rule E501`.
+//! Complete Ruff documents bypass captured filtering. Replays graph/rule fixtures,
+//! checks exact argv and line endings, and exercises both streams above 10 MiB.
 
 #![cfg(unix)]
 
@@ -58,7 +56,7 @@ fn context(out: &Output) -> String {
 #[test]
 fn analyze_graph_json_reaches_the_caller_whole() {
     let dir = common::tempdir();
-    // `other_passthrough_subcommands_keep_the_cap` shows the cap is below RULE_E501's length.
+    // Both fixtures exceed the old passthrough cap.
     assert!(GRAPH.len() > RULE_E501.len());
     fake_ruff(dir.path(), &["analyze", "graph", "big"], GRAPH);
 
@@ -71,20 +69,61 @@ fn analyze_graph_json_reaches_the_caller_whole() {
 }
 
 #[test]
-fn other_passthrough_subcommands_keep_the_cap() {
+fn rule_documentation_reaches_the_caller_whole() {
     let dir = common::tempdir();
     fake_ruff(dir.path(), &["rule", "E501"], RULE_E501);
-
     let out = rtk_ruff(dir.path(), &["rule", "E501"]);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let shown = stdout.trim_end();
-
     assert_eq!(out.status.code(), Some(0), "{}", context(&out));
-    assert!(
-        shown.ends_with("...") && RULE_E501.starts_with(shown.trim_end_matches("...")),
-        "rule output must be a capped prefix of ruff's, got {} of {} bytes; {}",
-        shown.len(),
-        RULE_E501.len(),
-        context(&out)
+    assert_eq!(out.stdout, RULE_E501.as_bytes(), "{}", context(&out));
+}
+
+#[test]
+fn selected_formats_reach_real_stdout_without_an_extra_newline() {
+    let raw = format!("[{}]\n\n", " ".repeat(4096));
+    for args in [
+        vec!["check", "--output-format", "sarif", "big"],
+        vec!["check", "--output-format=json", "big"],
+        vec!["format", "--check", "--output-format=json-lines", "big"],
+        vec!["rule", "--all", "--output-format=json"],
+    ] {
+        let dir = common::tempdir();
+        fake_ruff(dir.path(), &args, &raw);
+        let out = rtk_ruff(dir.path(), &args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {}", context(&out));
+        assert_eq!(out.stdout, raw.as_bytes(), "{args:?}");
+    }
+}
+
+#[test]
+fn documents_beyond_capture_limit_keep_both_streams_and_exit_status() {
+    let dir = common::tempdir();
+    let raw = format!("[\"{}\"]", "x".repeat(11 * 1024 * 1024));
+    fs::write(dir.path().join("captured"), &raw).unwrap();
+    let path = dir.path().join("ruff");
+    fs::write(&path, "#!/bin/sh\ncat \"$(dirname \"$0\")/captured\"\nprintf 'diagnostic without newline' >&2\nexit 1\n").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    let out = rtk_ruff(dir.path(), &["check", "--output-format=json", "big"]);
+    assert_eq!(out.status.code(), Some(1), "{}", context(&out));
+    assert_eq!(out.stdout, raw.as_bytes());
+    assert_eq!(out.stderr, b"diagnostic without newline");
+}
+
+#[test]
+fn shell_completion_is_a_complete_document() {
+    let script = format!(
+        "# generated completion\r\n{}\r\n",
+        "completion() { :; }\r\n".repeat(300)
     );
+    for args in [
+        vec!["generate-shell-completion", "bash"],
+        vec!["--isolated", "generate-shell-completion", "bash"],
+        vec!["--config", "ruff.toml", "generate-shell-completion", "bash"],
+    ] {
+        let dir = common::tempdir();
+        fake_ruff(dir.path(), &args, &script);
+        let out = rtk_ruff(dir.path(), &args);
+        assert_eq!(out.status.code(), Some(0), "{}", context(&out));
+        assert_eq!(out.stdout, script.as_bytes(), "args: {args:?}");
+        assert!(out.stderr.is_empty());
+    }
 }
