@@ -86,6 +86,75 @@ fn read_windows_preserve_binary_boundaries_for_files_and_stdin() {
 }
 
 #[test]
+fn plain_reads_pass_non_utf8_bytes_through_for_files_and_stdin() {
+    let dir = tempfile::tempdir().expect("create test directory");
+    let file = dir.path().join("latin1.log");
+    for input in [
+        b"line one\nlatin-1 byte: \xe9\nline three\n".as_slice(),
+        b"\xff\r\nvalid\n\0\xfe".as_slice(),
+    ] {
+        fs::write(&file, input).expect("write non-UTF-8 file");
+        let from_file = common::rtk_command()
+            .arg("read")
+            .arg(&file)
+            .output()
+            .expect("run rtk read");
+        let from_stdin = read_stdin(input, &[]);
+        for output in [from_file, from_stdin] {
+            assert!(output.status.success(), "{:?}", output.stderr);
+            assert_eq!(output.stdout, input);
+        }
+    }
+}
+
+#[test]
+fn text_options_still_report_non_utf8_input() {
+    let dir = tempfile::tempdir().expect("create test directory");
+    let file = dir.path().join("latin1.log");
+    let input = b"line one\nlatin-1 byte: \xe9\nline three\n";
+    fs::write(&file, input).expect("write non-UTF-8 file");
+    let valid_file = dir.path().join("valid.log");
+    let valid = b"line one\nascii\nline three\n";
+    fs::write(&valid_file, valid).expect("write valid file");
+    for args in [
+        ["-l", "minimal"].as_slice(),
+        ["--level", "aggressive"].as_slice(),
+        ["--line-numbers"].as_slice(),
+        ["--max-lines", "2"].as_slice(),
+    ] {
+        let from_file = common::rtk_command()
+            .arg("read")
+            .arg(&file)
+            .args(args)
+            .output()
+            .expect("run rtk read");
+        let from_stdin = read_stdin(input, args);
+        for (source, output) in [
+            (file.display().to_string(), from_file),
+            ("-".into(), from_stdin),
+        ] {
+            assert_eq!(output.status.code(), Some(1), "{args:?} on {source}");
+            assert!(output.stdout.is_empty(), "{args:?}: {:?}", output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains(&format!("cat: {source}: ")),
+                "{args:?}: {stderr}"
+            );
+        }
+        // The same options accept valid input, so the failure above is the decode.
+        let from_valid_file = common::rtk_command()
+            .arg("read")
+            .arg(&valid_file)
+            .args(args)
+            .output()
+            .expect("run rtk read");
+        for output in [from_valid_file, read_stdin(valid, args)] {
+            assert!(output.status.success(), "{args:?}: {:?}", output.stderr);
+        }
+    }
+}
+
+#[test]
 fn read_windows_accept_invalid_bytes_outside_the_selected_window() {
     for (input, flag) in [
         (b"valid\n\xff\n".as_slice(), "--head-lines"),
