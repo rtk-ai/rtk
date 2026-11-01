@@ -315,8 +315,9 @@ fn replay_at(path: Result<PathBuf>, cfg: &RetrieverConfig) -> Result<()> {
 /// variant names the schema change it introduced.
 ///
 /// A new schema change is a new variant directly above `Next` with the next
-/// value, its step appended to `MIGRATIONS`, and a test upgrading a database
-/// stamped at the previous variant. Released values never change. The rules
+/// value, its step appended to `MIGRATIONS`, `SNAPSHOT` updated to the schema
+/// the step leaves, and a test upgrading a database stamped at the previous
+/// variant. Released values never change. The rules
 /// every step follows are on `db::Schema::steps`.
 #[derive(Clone, Copy, Debug)]
 enum RecallSchema {
@@ -342,7 +343,7 @@ impl Version for RecallSchema {
 /// One step per `RecallSchema`, in order: step `i` brings a database to
 /// version `i + 1`. A released step never changes the schema it produces: the
 /// gated path never runs it again on a database stamped at its version, so a
-/// schema change is always a new step.
+/// schema change is always a new step, and an update of `SNAPSHOT`.
 const MIGRATIONS: &[(RecallSchema, Migration)] = &[
     (RecallSchema::Initial, migrate_initial),
     (RecallSchema::Recalled, migrate_recalled),
@@ -361,11 +362,45 @@ const _: () = {
     assert!((SCHEMA.kind as usize) < DbKind::Next as usize);
 };
 
+/// The schema `MIGRATIONS` produce, for a database with nothing in it yet. Every
+/// schema change updates its step and this snapshot, in the column order the
+/// steps leave (`ALTER TABLE ... ADD COLUMN` appends): the
+/// `test_snapshot_matches_the_steps` test fails otherwise.
+const SNAPSHOT: &str = "
+    CREATE TABLE recall (
+        hash        TEXT PRIMARY KEY,
+        command     TEXT NOT NULL,
+        cwd         TEXT,
+        exit_code   INTEGER,
+        created_at  INTEGER NOT NULL,
+        total_lines INTEGER NOT NULL,
+        shown_upto  INTEGER NOT NULL,
+        byte_size   INTEGER NOT NULL,
+        truncated   INTEGER NOT NULL,
+        codec       TEXT NOT NULL,
+        blob        BLOB NOT NULL,
+        recalled    INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE tee_reads (
+        path TEXT PRIMARY KEY
+    );
+    CREATE INDEX idx_recall_command ON recall(command, created_at DESC);
+    CREATE INDEX idx_recall_created ON recall(created_at);
+    CREATE TABLE recall_stats (
+        slug     TEXT NOT NULL,
+        mode     TEXT NOT NULL,
+        elisions INTEGER NOT NULL DEFAULT 0,
+        recalls  INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (slug, mode)
+    );
+";
+
 /// No recall stamp was ever released, so an untagged file with a stamp is a
 /// tracking database.
 const SCHEMA: Schema<RecallSchema> = Schema {
     kind: DbKind::Recall,
     owns_untagged_stamps: false,
+    snapshot: SNAPSHOT,
     steps: MIGRATIONS,
 };
 
@@ -944,7 +979,9 @@ fn list_entries(conn: &Connection) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::db::testing::{application_id, user_version};
+    use crate::core::db::testing::{
+        application_id, assert_snapshot_matches_steps, failing_step, user_version,
+    };
     use crate::core::tracking;
 
     fn temp_cfg(dir: &std::path::Path) -> RetrieverConfig {
@@ -1684,6 +1721,46 @@ mod tests {
             assert!(db::table_exists(&conn, table), "{table} should exist");
         }
         assert!(db::column_exists(&conn, "recall", "recalled").expect("columns are readable"));
+    }
+
+    #[test]
+    fn test_a_new_recall_store_is_created_from_its_snapshot() {
+        let dir = crate::core::test_isolation::tempdir();
+        let empty = dir.path().join("empty.db");
+        std::fs::write(&empty, b"").expect("file should be written");
+        for (path, mode) in [
+            (dir.path().join("new.db"), MigrationMode::GatedByVersion),
+            (dir.path().join("init.db"), MigrationMode::Always),
+            (empty, MigrationMode::GatedByVersion),
+        ] {
+            // Every step fails: a store that opens was created without running one.
+            let steps: Vec<(RecallSchema, Migration)> = MIGRATIONS
+                .iter()
+                .map(|&(version, _)| (version, failing_step as Migration))
+                .collect();
+            let conn = db::open_and_migrate(
+                &path,
+                &Schema {
+                    steps: &steps,
+                    ..SCHEMA
+                },
+                mode,
+            )
+            .expect("a database with no schema object is created without running a step");
+
+            assert_eq!(user_version(&conn), SCHEMA_VERSION, "{}", path.display());
+            assert_eq!(application_id(&conn), DbKind::Recall.application_id());
+            for table in ["recall", "tee_reads", "recall_stats"] {
+                assert!(db::table_exists(&conn, table), "{table} should exist");
+            }
+            assert!(db::column_exists(&conn, "recall", "recalled").expect("columns are readable"));
+        }
+    }
+
+    /// A step added without updating `SNAPSHOT` fails here.
+    #[test]
+    fn test_snapshot_matches_the_steps() {
+        assert_snapshot_matches_steps(&SCHEMA);
     }
 
     #[test]

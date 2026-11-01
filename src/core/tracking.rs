@@ -373,8 +373,9 @@ pub fn average_time_ms(total_time_ms: u64, timed_commands: usize) -> u64 {
 /// variant names the schema change it introduced.
 ///
 /// A new schema change is a new variant directly above `Next` with the next
-/// value, its step appended to `MIGRATIONS`, and a test upgrading a database
-/// stamped at the previous variant. Released values never change. The rules
+/// value, its step appended to `MIGRATIONS`, `SNAPSHOT` updated to the schema
+/// the step leaves, and a test upgrading a database stamped at the previous
+/// variant. Released values never change. The rules
 /// every step follows are on `db::Schema::steps`.
 #[derive(Clone, Copy, Debug)]
 enum SchemaVersion {
@@ -411,7 +412,7 @@ pub const HEADLINE_INPUT_CAP_TOKENS: usize = 7_500;
 /// One step per `SchemaVersion`, in order: step `i` brings a database to
 /// version `i + 1`. A released step never changes the schema it produces: the
 /// gated path never runs it again on a database stamped at its version, so a
-/// schema change is always a new step.
+/// schema change is always a new step, and an update of `SNAPSHOT`.
 const MIGRATIONS: &[(SchemaVersion, Migration)] = &[
     (SchemaVersion::Initial, migrate_initial),
     (SchemaVersion::EngineTables, migrate_engine_tables),
@@ -431,11 +432,69 @@ const _: () = {
     assert!((SCHEMA.kind as usize) < DbKind::Next as usize);
 };
 
+/// The schema `MIGRATIONS` produce, for a database with nothing in it yet. Every
+/// schema change updates its step and this snapshot, in the column order the
+/// steps leave (`ALTER TABLE ... ADD COLUMN` appends): the
+/// `test_snapshot_matches_the_steps` test fails otherwise.
+const SNAPSHOT: &str = "
+    CREATE TABLE commands (
+        id INTEGER PRIMARY KEY,
+        timestamp TEXT NOT NULL,
+        original_cmd TEXT NOT NULL,
+        rtk_cmd TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL,
+        saved_tokens INTEGER NOT NULL,
+        savings_pct REAL NOT NULL,
+        exec_time_ms INTEGER DEFAULT 0,
+        project_path TEXT DEFAULT ''
+    );
+    CREATE INDEX idx_timestamp ON commands(timestamp);
+    CREATE INDEX idx_project_path_timestamp ON commands(project_path, timestamp);
+    CREATE TABLE parse_failures (
+        id INTEGER PRIMARY KEY,
+        timestamp TEXT NOT NULL,
+        raw_command TEXT NOT NULL,
+        error_message TEXT NOT NULL,
+        fallback_succeeded INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX idx_pf_timestamp ON parse_failures(timestamp);
+    CREATE TABLE hook_decisions (
+        id INTEGER PRIMARY KEY,
+        timestamp TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        tool_use_id TEXT NOT NULL,
+        project_path TEXT DEFAULT '',
+        raw_cmd TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        rewritten_cmd TEXT,
+        rtk_version TEXT NOT NULL
+    );
+    CREATE INDEX idx_hook_decisions_tool_use_id ON hook_decisions(tool_use_id);
+    CREATE INDEX idx_hook_decisions_timestamp ON hook_decisions(timestamp);
+    CREATE TABLE classifier_cache (
+        key TEXT PRIMARY KEY,
+        answer TEXT NOT NULL,
+        ts TEXT NOT NULL
+    );
+    CREATE TABLE engine_attribution (
+        day TEXT NOT NULL,
+        site TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        name TEXT NOT NULL,
+        calls INTEGER NOT NULL DEFAULT 0,
+        tokens_in INTEGER NOT NULL DEFAULT 0,
+        tokens_out INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (day, site, kind, name)
+    );
+";
+
 /// Releases before `DbKind::Tracking.application_id()` never tagged their files, so an untagged
 /// file is accepted at any stamp.
 const SCHEMA: Schema<SchemaVersion> = Schema {
     kind: DbKind::Tracking,
     owns_untagged_stamps: true,
+    snapshot: SNAPSHOT,
     steps: MIGRATIONS,
 };
 
@@ -2610,7 +2669,8 @@ mod command_label_tests {
 mod tests {
     use super::*;
     use crate::core::db::testing::{
-        application_id, enable_wal, failing_step, spawn_waiter, user_version,
+        application_id, assert_snapshot_matches_steps, enable_wal, failing_step, replay_steps,
+        spawn_waiter, user_version,
     };
     use crate::core::db::{schema_object_exists, table_exists};
     use crate::core::test_isolation;
@@ -3232,6 +3292,57 @@ mod tests {
         });
     }
 
+    /// The real schema with every step failing: a database that opens through it
+    /// was created by the snapshot, since no step ran.
+    fn schema_with_failing_steps(
+        steps: &mut Vec<(SchemaVersion, Migration)>,
+    ) -> Schema<'_, SchemaVersion> {
+        steps.extend(
+            MIGRATIONS
+                .iter()
+                .map(|&(version, _)| (version, failing_step as Migration)),
+        );
+        Schema { steps, ..SCHEMA }
+    }
+
+    #[test]
+    fn test_a_new_tracking_database_is_created_from_its_snapshot() {
+        let tmp = test_isolation::tempdir();
+        let new = tmp.path().join("new.db");
+        let empty = tmp.path().join("empty.db");
+        std::fs::write(&empty, b"").expect("file should be written");
+        for (path, mode) in [
+            (new.clone(), MigrationMode::GatedByVersion),
+            (tmp.path().join("init.db"), MigrationMode::Always),
+            (empty, MigrationMode::GatedByVersion),
+        ] {
+            let mut steps = Vec::new();
+            let schema = schema_with_failing_steps(&mut steps);
+            let conn = db::open_and_migrate(&path, &schema, mode)
+                .expect("a database with no schema object is created without running a step");
+
+            assert_eq!(user_version(&conn), SCHEMA_VERSION, "{}", path.display());
+            assert_eq!(application_id(&conn), DbKind::Tracking.application_id());
+            for table in [
+                "commands",
+                "parse_failures",
+                "hook_decisions",
+                "classifier_cache",
+                "engine_attribution",
+            ] {
+                assert!(table_exists(&conn, table), "{table} should be created");
+            }
+        }
+    }
+
+    /// The snapshot is what a fresh database is made of, so it is what every
+    /// step added after it must also produce: a step added without updating
+    /// `SNAPSHOT` fails here.
+    #[test]
+    fn test_snapshot_matches_the_steps() {
+        assert_snapshot_matches_steps(&SCHEMA);
+    }
+
     // 8c. Re-running every step (what ensure_schema_fresh()/MigrationMode::Always
     // does) recreates a table dropped out-of-band, even though user_version is
     // already at SCHEMA_VERSION: the self-heal `rtk init` provides.
@@ -3255,12 +3366,14 @@ mod tests {
             .expect("hook_decisions table should exist and accept writes again");
     }
 
+    /// Applies `steps` alone, never the snapshot: a database as an older build
+    /// left it, or a step under test, whatever `SNAPSHOT` would have created.
     fn apply_migrations(
         conn: &Connection,
         mode: MigrationMode,
         steps: &[(SchemaVersion, Migration)],
     ) -> Result<()> {
-        db::apply_migrations(conn, &Schema { steps, ..SCHEMA }, mode)
+        replay_steps(conn, &Schema { steps, ..SCHEMA }, mode)
     }
 
     /// A database as a build whose newest schema version is `to` leaves it.
