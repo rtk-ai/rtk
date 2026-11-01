@@ -591,6 +591,9 @@ fn warn_hook_issues() {
                 "{}",
                 "[warn] Hook outdated — run `rtk init -g` to update".yellow()
             );
+            if let Some(hint) = hook_check::outdated_hint() {
+                eprintln!("{}", hint);
+            }
             eprintln!();
         }
         hook_check::HookStatus::Missing | hook_check::HookStatus::Ok => {}

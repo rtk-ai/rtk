@@ -1003,6 +1003,29 @@ pub fn hook_status() -> crate::hooks::hook_check::HookStatus {
     }
 }
 
+/// Second line for the "Hook outdated" warning when the cause is a legacy
+/// script whose `# rtk-hook-version:` tag is missing or below the current
+/// version, with no binary hook registered. `rtk init -g` replaces that script,
+/// so a hand-written hook would lose its own logic; the tag alone clears the
+/// warning. Returns `None` for every other cause of `Outdated`.
+pub fn untagged_script_hint() -> Option<String> {
+    let claude_dir = resolve_claude_dir().ok()?;
+    if binary_hook_registered(&claude_dir) {
+        return None;
+    }
+    let hook_path = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+    let content = fs::read_to_string(&hook_path).ok()?;
+    let current = crate::hooks::hook_check::CURRENT_HOOK_VERSION;
+    if crate::hooks::hook_check::parse_hook_version(&content) >= current {
+        return None;
+    }
+    Some(format!(
+        "`rtk init -g` replaces {}. A custom hook only needs `# rtk-hook-version: {}` in its first 5 lines.",
+        hook_path.display(),
+        current
+    ))
+}
+
 /// Check if the native binary command is registered in settings.json
 fn binary_hook_registered(claude_dir: &Path) -> bool {
     let settings_path = claude_dir.join(SETTINGS_JSON);
@@ -2198,6 +2221,63 @@ mod tests {
                 crate::hooks::hook_check::HookStatus::Missing,
                 "settings.json pointing at deleted rtk-rewrite.sh must report Missing"
             );
+        });
+    }
+
+    #[test]
+    fn test_untagged_script_hint_names_the_tag_for_a_legacy_script() {
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let hooks_dir = claude_dir.join(HOOKS_SUBDIR);
+            fs::create_dir_all(&hooks_dir).expect("create hooks dir");
+            let script = hooks_dir.join(REWRITE_HOOK_FILE);
+            fs::write(&script, "#!/bin/bash\n# custom hook, no tag\n").expect("write script");
+
+            let hint = untagged_script_hint().expect("untagged legacy script must get a hint");
+            assert!(
+                hint.contains(&format!(
+                    "# rtk-hook-version: {}",
+                    crate::hooks::hook_check::CURRENT_HOOK_VERSION
+                )),
+                "hint must name the current tag: {hint}"
+            );
+            assert!(
+                hint.contains("rtk init -g` replaces"),
+                "hint must say init replaces the script: {hint}"
+            );
+
+            fs::write(
+                &script,
+                format!(
+                    "#!/bin/bash\n# rtk-hook-version: {}\n",
+                    crate::hooks::hook_check::CURRENT_HOOK_VERSION
+                ),
+            )
+            .expect("tag script");
+            assert_eq!(
+                untagged_script_hint(),
+                None,
+                "a tagged script needs no hint"
+            );
+        });
+    }
+
+    #[test]
+    fn test_untagged_script_hint_is_silent_when_binary_hook_registered() {
+        // Leftover script next to `rtk hook claude`: `rtk init -g` is the right
+        // advice and the tag would not clear the warning, so no hint.
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let hooks_dir = claude_dir.join(HOOKS_SUBDIR);
+            fs::create_dir_all(&hooks_dir).expect("create hooks dir");
+            fs::write(hooks_dir.join(REWRITE_HOOK_FILE), "#!/bin/bash\n").expect("write script");
+            fs::write(
+                claude_dir.join(SETTINGS_JSON),
+                r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]}]}}"#,
+            )
+            .expect("write settings");
+
+            assert_eq!(untagged_script_hint(), None);
         });
     }
 
