@@ -7,7 +7,8 @@ use crate::core::user_dirs;
 use crate::core::user_env;
 use crate::core::utils::strip_leading_bom;
 use crate::discover::lexer::{
-    is_word_boundary_whitespace, split_for_permissions, split_for_wrappers,
+    is_word_boundary_whitespace, split_for_permissions, split_for_permissions_in,
+    split_for_wrappers,
 };
 use crate::discover::registry;
 #[cfg(test)]
@@ -349,7 +350,10 @@ fn check_shell_wrapper_permissions(
             // Both spellings, exactly as the outer loop above: a segment can open
             // with grammar that is not part of the command (`! rm …`, `{ rm …`),
             // and a rule naming the command has to reach it there too.
-            let inner_denied = split_for_permissions(script).iter().any(|inner_segment| {
+            // Segmented with the operators of the shell the wrapper names, so
+            // the command behind zsh's `&!` is a segment of its own.
+            let inner_segments = split_for_permissions_in(script, wrapper.dialect());
+            let inner_denied = inner_segments.iter().any(|inner_segment| {
                 let inner_segment = inner_segment.trim();
                 let readings = registry::shell_wrapper_positions(
                     strip_grammar_residue(inner_segment),
@@ -2204,6 +2208,62 @@ mod tests {
             check_command_with_rules("bash -c 'git status; ! cargo test'", &deny, &[], &allow),
             PermissionVerdict::Ask
         );
+    }
+
+    /// zsh reads `&!` as one operator, background and disown, so the command
+    /// glued behind it runs as a command of its own and has to meet the deny
+    /// rules (#4516). Only there: bash, sh and fish read `&!rm` as `&` and a
+    /// command named `!rm`, and so does zsh wherever the `!` is not glued to
+    /// a `&`. None of those runs `rm`, so none of them changes verdict.
+    #[test]
+    fn test_shell_wrapper_inner_deny_reads_the_zsh_disown_pair() {
+        let deny = vec!["rm:*".to_string()];
+        let allow = vec!["*".to_string()];
+        let verdict = |cmd: &str| check_command_with_rules(cmd, &deny, &[], &allow);
+
+        // zsh runs `rm` behind each of these.
+        for cmd in [
+            "zsh -c 'git status &!rm -rf /tmp/example'",
+            "zsh -c 'git status &!{ rm -rf /tmp/example; }'",
+            "zsh -c 'git status &|rm -rf /tmp/example'",
+            "zsh -c 'git status &! rm -rf /tmp/example'",
+            "zsh -c 'git status &! ! rm -rf /tmp/example'",
+        ] {
+            assert_eq!(verdict(cmd), PermissionVerdict::Defer, "{cmd:?}");
+        }
+
+        // No shell runs `rm` behind these, so the wrapper keeps its Ask.
+        for cmd in [
+            "bash -c 'git status &!rm -rf /tmp/example'",
+            "sh -c 'git status &!rm -rf /tmp/example'",
+            "fish -c 'git status &!rm -rf /tmp/example'",
+            "bash -c 'git status &!{ rm -rf /tmp/example; }'",
+            "sh -c 'git status; !rm -rf /tmp/example'",
+            "zsh -c 'git status; !rm -rf /tmp/example'",
+            "zsh -c 'git status;!rm -rf /tmp/example'",
+            "zsh -c 'git status &&!rm -rf /tmp/example'",
+            "zsh -c 'git status & !rm -rf /tmp/example'",
+            "zsh -c 'git status &!!rm -rf /tmp/example'",
+            "zsh -c 'git status &! !rm -rf /tmp/example'",
+            "zsh -c '!rm -rf /tmp/example'",
+        ] {
+            assert_eq!(verdict(cmd), PermissionVerdict::Ask, "{cmd:?}");
+        }
+
+        // The pair names no command, so an allowed one behind it keeps the Ask
+        // every wrapper gets.
+        for cmd in [
+            "zsh -c 'git status &!cargo test'",
+            "zsh -c 'git status &! cargo test'",
+        ] {
+            assert_eq!(verdict(cmd), PermissionVerdict::Ask, "{cmd:?}");
+        }
+
+        // The top-level line is read as bash, where `!rm` is a command of that
+        // name wherever it stands.
+        for cmd in ["!rm -rf /tmp/example", "git status && !rm -rf /tmp/example"] {
+            assert_eq!(verdict(cmd), PermissionVerdict::Allow, "{cmd:?}");
+        }
     }
 
     /// Stepping over a leading redirect widens the allow side too: the command
