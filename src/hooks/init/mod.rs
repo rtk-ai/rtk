@@ -3013,6 +3013,14 @@ level = "high"
     }
 
     #[test]
+    fn an_extensionless_file_is_backed_up_as_its_name_plus_json_bak() {
+        assert_eq!(
+            backup_path_for(Path::new("/x/config")),
+            Path::new("/x/config.json.bak")
+        );
+    }
+
+    #[test]
     fn test_backup_and_atomic_write_preserves_previous_content() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("hooks.json");

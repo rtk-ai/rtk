@@ -776,7 +776,8 @@ async fn health() -> Response {
 
 #[cfg(test)]
 mod routing_tests {
-    use super::passthrough_route;
+    use super::{passthrough_route, route_by_login};
+    use axum::http::HeaderMap;
 
     fn names() -> Vec<String> {
         ["anthropic", "openai", "mistral"]
@@ -825,5 +826,65 @@ mod routing_tests {
         ] {
             assert_eq!(passthrough_route(&names(), path), None, "{path}");
         }
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                value.parse().unwrap(),
+            );
+        }
+        map
+    }
+
+    const CHATGPT_LOGIN: (&str, &str) = ("chatgpt-account-id", "acct-123");
+    const JWT: (&str, &str) = ("authorization", "Bearer eyJhbGciOi.eyJzdWIi.sig");
+    const API_KEY: (&str, &str) = ("authorization", "Bearer sk-proj-key");
+
+    fn routed(upstream: &str, path: &str, pairs: &[(&str, &str)]) -> (String, String) {
+        route_by_login(upstream, path, &headers(pairs))
+    }
+
+    #[test]
+    fn an_account_id_outweighs_an_api_key_on_the_chatgpt_route() {
+        assert_eq!(
+            routed(
+                "chatgpt",
+                "/backend-api/codex/responses",
+                &[CHATGPT_LOGIN, API_KEY]
+            ),
+            ("chatgpt".into(), "/backend-api/codex/responses".into())
+        );
+        // The same pair on the openai route is a ChatGPT login.
+        assert_eq!(
+            routed("openai", "/v1/responses", &[CHATGPT_LOGIN, API_KEY]),
+            ("chatgpt".into(), "/backend-api/codex/responses".into())
+        );
+    }
+
+    #[test]
+    fn a_path_outside_the_expected_prefix_is_not_moved() {
+        assert_eq!(
+            routed("openai", "/responses", &[CHATGPT_LOGIN, JWT]),
+            ("openai".into(), "/responses".into())
+        );
+        assert_eq!(
+            routed("chatgpt", "/v1/responses", &[API_KEY]),
+            ("chatgpt".into(), "/v1/responses".into())
+        );
+    }
+
+    #[test]
+    fn only_the_openai_and_chatgpt_upstreams_follow_the_login() {
+        assert_eq!(
+            routed("mistral", "/v1/responses", &[CHATGPT_LOGIN, JWT]),
+            ("mistral".into(), "/v1/responses".into())
+        );
+        assert_eq!(
+            routed("mistral", "/backend-api/codex/responses", &[API_KEY]),
+            ("mistral".into(), "/backend-api/codex/responses".into())
+        );
     }
 }

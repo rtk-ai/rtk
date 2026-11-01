@@ -1219,6 +1219,97 @@ mod tests {
         assert_eq!((u.input, u.output), (10, 4));
     }
 
+    #[test]
+    fn a_response_is_complete_at_any_of_its_three_terminal_events() {
+        for event in [
+            "response.completed",
+            "response.incomplete",
+            "response.failed",
+        ] {
+            let mut acc = SseAccumulator::new(Provider::OpenaiResponses);
+            acc.feed(
+                format!("event: {event}\ndata: {{\"type\":\"{event}\",\"response\":{{}}}}\n\n")
+                    .as_bytes(),
+            );
+            assert!(acc.completed(), "{event}");
+        }
+    }
+
+    #[test]
+    fn the_end_of_one_output_text_is_not_the_end_of_the_response() {
+        let mut acc = SseAccumulator::new(Provider::OpenaiResponses);
+        for event in [
+            r#"{"type":"response.created","response":{"id":"resp_1"}}"#,
+            r#"{"type":"response.output_text.delta","delta":"Done."}"#,
+            r#"{"type":"response.output_text.done","text":"Done."}"#,
+            r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}"#,
+        ] {
+            acc.feed(format!("data: {event}\n\n").as_bytes());
+            assert!(!acc.completed(), "{event}");
+        }
+    }
+
+    const CODEX_STREAM: &str = concat!(
+        "event: response.created\n",
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5-codex\"}}\n\n",
+        "event: response.output_text.delta\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Listing\"}\n\n",
+        "event: response.output_text.done\n",
+        "data: {\"type\":\"response.output_text.done\",\"text\":\"Listing\"}\n\n",
+        "event: response.output_item.done\n",
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"name\":\"shell\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}\n\n",
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":1200,\"output_tokens\":50}}}\n\n",
+    );
+
+    /// A reqwest response whose body yields `chunks` in order, standing in for
+    /// an upstream that is still connected.
+    fn upstream_response(chunks: Vec<Result<Bytes, std::io::Error>>) -> reqwest::Response {
+        let body = reqwest::Body::wrap_stream(futures::stream::iter(chunks));
+        reqwest::Response::from(axum::http::Response::new(body))
+    }
+
+    /// The body of a relayed stream and the receiver of its outcome.
+    fn relayed(
+        chunks: Vec<Result<Bytes, std::io::Error>>,
+    ) -> (Body, oneshot::Receiver<UsageOutcome>) {
+        let Forwarded::Streaming {
+            response,
+            outcome_rx,
+        } = stream_relay(
+            upstream_response(chunks),
+            Provider::OpenaiResponses,
+            Instant::now(),
+        )
+        else {
+            panic!("a streamed relay");
+        };
+        (response.into_body(), outcome_rx)
+    }
+
+    #[tokio::test]
+    async fn the_early_outcome_carries_the_tool_calls_seen() {
+        use http_body_util::BodyExt;
+        let (mut body, mut outcome_rx) = relayed(vec![
+            Ok(Bytes::from(CODEX_STREAM)),
+            Ok(Bytes::from_static(b": keep-alive\n\n")),
+        ]);
+        // The first frame holds the terminal event, and the upstream has not
+        // closed: the outcome is already there.
+        let _ = body.frame().await;
+        let outcome = outcome_rx
+            .try_recv()
+            .expect("the outcome is sent at the terminal event, before the stream closes");
+        assert_eq!(outcome.status, 200);
+        assert_eq!(outcome.tokens_output, 50);
+        assert_eq!(outcome.tool_calls.len(), 1);
+        assert_eq!(outcome.tool_calls[0].name, "shell");
+        assert_eq!(
+            outcome.tool_calls[0].input,
+            serde_json::json!({ "command": "ls" })
+        );
+    }
+
     fn zstd_frame(bytes: &[u8]) -> Vec<u8> {
         ruzstd::encoding::compress_to_vec(bytes, ruzstd::encoding::CompressionLevel::Fastest)
     }
@@ -1259,6 +1350,16 @@ mod tests {
 
     fn forwarded_zstd(body: &[u8]) -> (HeaderMap, Bytes) {
         decode_zstd_request(zstd_headers("zstd"), Bytes::copy_from_slice(body))
+    }
+
+    #[test]
+    fn the_encoding_name_is_matched_without_case_or_padding() {
+        for encoding in ["ZSTD", " zstd ", "Zstd"] {
+            let (headers, forwarded) =
+                decode_zstd_request(zstd_headers(encoding), Bytes::from(zstd_frame(REQUEST)));
+            assert!(!headers.contains_key("content-encoding"), "{encoding:?}");
+            assert_eq!(forwarded, REQUEST, "{encoding:?}");
+        }
     }
 
     #[test]

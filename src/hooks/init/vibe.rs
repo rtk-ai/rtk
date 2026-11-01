@@ -936,6 +936,13 @@ mod proxy_provider_tests {
         assert!(restored.contains("api_key_env_var = \"MY_MISTRAL_KEY\""));
         assert!(restored.contains("api_base = \"https://api.mistral.ai/v1\""));
 
+        let other_backend = format!(
+            "[[providers]]\nname = \"mistral\"\napi_base = \"{RTK}\"\napi_key_env_var = \"{MISTRAL_API_KEY_ENV}\"\nbackend = \"generic\"\n"
+        );
+        let restored = remove_rtk_mistral_provider(&other_backend, RTK).unwrap();
+        assert!(restored.contains("backend = \"generic\""));
+        assert!(restored.contains("api_base = \"https://api.mistral.ai/v1\""));
+
         let foreign = "[[providers]]\nname = \"mistral\"\napi_base = \"https://gateway.corp/v1\"\n";
         assert_eq!(remove_rtk_mistral_provider(foreign, RTK), None);
         assert_eq!(remove_rtk_mistral_provider("", RTK), None);

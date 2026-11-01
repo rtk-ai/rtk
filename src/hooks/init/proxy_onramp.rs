@@ -118,6 +118,12 @@ enum Persistence {
     Manual,
 }
 
+/// Where the agent already points, unless that is the vendor's own default: only
+/// something else is a proxy or gateway worth warning about replacing.
+fn foreign_target(current: Option<String>, spec: &OnrampSpec) -> Option<String> {
+    current.filter(|url| Some(url.trim().trim_end_matches('/')) != spec.default_target)
+}
+
 pub(super) fn offer_proxy_onramp(
     onramp: &dyn ProxyOnramp,
     patch_mode: PatchMode,
@@ -135,9 +141,7 @@ pub(super) fn offer_proxy_onramp(
     }
     let spec = onramp.spec();
     let base_url = format!("http://{}{}", crate::llm_proxy::DEFAULT_BIND, onramp.path());
-    let already = onramp
-        .current_target()?
-        .filter(|url| Some(url.trim().trim_end_matches('/')) != spec.default_target);
+    let already = foreign_target(onramp.current_target()?, spec);
     let aimed_here = already.as_deref() == Some(base_url.as_str());
     let autostart_present = onramp.autostart_present()?;
     if aimed_here && (autostart_present || spec.autostart_option.is_none()) {
@@ -389,6 +393,26 @@ mod tests {
     use super::*;
 
     const BASE: &str = "http://127.0.0.1:8080";
+
+    #[test]
+    fn the_vendors_own_default_is_not_a_foreign_target() {
+        let vendor = OnrampSpec {
+            default_target: Some("https://api.mistral.ai/v1"),
+            ..CLAUDE_SPEC
+        };
+        for current in ["https://api.mistral.ai/v1", " https://api.mistral.ai/v1/ "] {
+            assert_eq!(foreign_target(Some(current.to_string()), &vendor), None);
+        }
+        assert_eq!(
+            foreign_target(Some("https://gateway.corp/v1".to_string()), &vendor).as_deref(),
+            Some("https://gateway.corp/v1")
+        );
+        assert_eq!(foreign_target(None, &vendor), None);
+        assert_eq!(
+            foreign_target(Some("https://api.anthropic.com".to_string()), &CLAUDE_SPEC).as_deref(),
+            Some("https://api.anthropic.com")
+        );
+    }
 
     #[test]
     fn a_daemon_nothing_points_at_is_not_configured() {

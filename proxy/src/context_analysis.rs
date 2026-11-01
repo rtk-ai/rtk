@@ -76,9 +76,7 @@ impl Analyzer {
         }
     }
 
-    /// Account one block of text. A block whose exact text was already seen
-    /// counts as duplicate (the repeated occurrence is what dedup would
-    /// remove).
+    /// Account one item of a Responses `input` array.
     fn note_responses_item(&mut self, item: &serde_json::Value) {
         match item.get("type").and_then(|t| t.as_str()) {
             Some("function_call_output") => match item.get("output") {
@@ -106,6 +104,9 @@ impl Analyzer {
         }
     }
 
+    /// Account one block of text. A block whose exact text was already seen
+    /// counts as duplicate (the repeated occurrence is what dedup would
+    /// remove).
     fn note(&mut self, text: &str, kind: Kind) {
         if text.is_empty() {
             return;
@@ -360,5 +361,65 @@ mod tests {
         let c = analyze(&body);
         assert_eq!(c.image_tokens, IMAGE_TOKEN_EST);
         assert!(c.total_tokens >= IMAGE_TOKEN_EST);
+    }
+
+    /// `est_tokens` of the JSON form: what a block or item with no plain text
+    /// is counted as.
+    fn json_tokens(value: &serde_json::Value) -> i64 {
+        est_tokens(&value.to_string())
+    }
+
+    #[test]
+    fn a_responses_text_block_counts_its_text_not_its_json() {
+        let body = json!({ "input": [{
+            "type": "message", "role": "user",
+            "content": [{ "type": "input_text", "text": "abcdefgh" }]
+        }] });
+        assert_eq!(analyze(&body).total_tokens, 2);
+    }
+
+    #[test]
+    fn a_responses_block_without_text_counts_as_its_json() {
+        let block = json!({ "type": "input_image", "image_url": "https://x/y.png" });
+        let body = json!({ "input": [{
+            "type": "message", "role": "user", "content": [block.clone()]
+        }] });
+        assert_eq!(analyze(&body).total_tokens, json_tokens(&block));
+    }
+
+    #[test]
+    fn a_responses_item_without_content_counts_as_its_json() {
+        let item = json!({ "type": "reasoning", "id": "rs_1", "summary": [] });
+        let c = analyze(&json!({ "input": [item.clone()] }));
+        assert_eq!(c.total_tokens, json_tokens(&item));
+        assert_eq!((c.tool_result_tokens, c.tool_use_input_tokens), (0, 0));
+    }
+
+    #[test]
+    fn a_function_call_output_is_a_tool_result_whatever_its_shape() {
+        let text = analyze(&json!({ "input": [
+            { "type": "function_call_output", "call_id": "c1", "output": "abcdefgh" }
+        ] }));
+        assert_eq!((text.tool_result_tokens, text.total_tokens), (2, 2));
+
+        let output = json!([{ "type": "input_text", "text": "abcdefgh" }]);
+        let structured = analyze(&json!({ "input": [
+            { "type": "function_call_output", "call_id": "c1", "output": output.clone() }
+        ] }));
+        assert_eq!(structured.tool_result_tokens, json_tokens(&output));
+        assert_eq!(structured.total_tokens, json_tokens(&output));
+    }
+
+    #[test]
+    fn function_call_arguments_are_tool_use_input() {
+        let c = analyze(&json!({ "input": [
+            { "type": "function_call", "call_id": "c1", "name": "shell",
+              "arguments": "{\"command\":[\"ls\"]}" }
+        ] }));
+        assert_eq!(
+            c.tool_use_input_tokens,
+            est_tokens("{\"command\":[\"ls\"]}")
+        );
+        assert_eq!(c.tool_result_tokens, 0);
     }
 }

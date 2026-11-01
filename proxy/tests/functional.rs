@@ -1663,6 +1663,87 @@ async fn a_token_alone_does_not_move_a_request_off_the_openai_upstream() {
 }
 
 #[tokio::test]
+async fn a_chatgpt_login_moves_only_a_responses_request() {
+    let (openai, chatgpt, state) = codex_upstreams().await;
+    let app = build_router(state);
+    let chatgpt_login = [
+        ("authorization", "Bearer eyJhbGciOi.eyJzdWIi.sig"),
+        ("chatgpt-account-id", "acct-123"),
+        ("content-type", "application/json"),
+    ];
+    let chat = br#"{"model":"gpt-5","messages":[{"role":"user","content":"hi"}]}"#;
+    let messages = br#"{"model":"claude-haiku-4-5","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}"#;
+    for (uri, body) in [
+        ("/v1/chat/completions", chat.to_vec()),
+        ("/openai/v1/chat/completions", chat.to_vec()),
+        ("/openai/v1/messages", messages.to_vec()),
+    ] {
+        app.clone()
+            .oneshot(codex_request("POST", uri, &chatgpt_login, body))
+            .await
+            .unwrap();
+    }
+    let seen = openai.received_requests().await.unwrap();
+    assert_eq!(
+        seen.iter().map(|r| r.url.path()).collect::<Vec<_>>(),
+        [
+            "/v1/chat/completions",
+            "/v1/chat/completions",
+            "/v1/messages"
+        ]
+    );
+    assert!(chatgpt.received_requests().await.unwrap().is_empty());
+
+    // The same login on a Responses request does move.
+    app.oneshot(codex_request(
+        "POST",
+        "/openai/v1/responses",
+        &chatgpt_login,
+        RESPONSES_BODY.as_bytes().to_vec(),
+    ))
+    .await
+    .unwrap();
+    let moved = chatgpt.received_requests().await.unwrap();
+    assert_eq!(moved.len(), 1);
+    assert_eq!(moved[0].url.path(), "/backend-api/codex/responses");
+    assert_eq!(openai.received_requests().await.unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn a_zstd_body_is_decoded_only_on_the_responses_route() {
+    let (openai, _chatgpt, state) = codex_upstreams().await;
+    let app = build_router(state);
+    let zstd = |bytes: &[u8]| {
+        ruzstd::encoding::compress_to_vec(bytes, ruzstd::encoding::CompressionLevel::Fastest)
+    };
+    let chat = br#"{"model":"gpt-5","messages":[{"role":"user","content":"hi"}]}"#;
+    let compressed_chat = zstd(&chat[..]);
+    for (uri, body) in [
+        ("/openai/v1/responses", zstd(RESPONSES_BODY.as_bytes())),
+        ("/openai/v1/chat/completions", compressed_chat.clone()),
+    ] {
+        app.clone()
+            .oneshot(codex_request(
+                "POST",
+                uri,
+                &[
+                    ("authorization", "Bearer sk-proj-key"),
+                    ("content-encoding", "zstd"),
+                    ("content-type", "application/json"),
+                ],
+                body,
+            ))
+            .await
+            .unwrap();
+    }
+    let seen = openai.received_requests().await.unwrap();
+    assert_eq!(seen[0].body, RESPONSES_BODY.as_bytes());
+    assert!(!seen[0].headers.contains_key("content-encoding"));
+    assert_eq!(seen[1].body, compressed_chat);
+    assert_eq!(seen[1].headers.get("content-encoding").unwrap(), "zstd");
+}
+
+#[tokio::test]
 async fn a_responses_body_passes_ccr_untouched() {
     let openai = sse_upstream().await;
     let mut c = cfg(&openai.uri(), true);

@@ -950,6 +950,12 @@ pub fn run_agent(agent: &ProxyAgent, args: &[String]) -> Result<i32> {
         |var| std::env::var(var).ok(),
         || ensure_running(&bind).map(|_| ()),
     );
+    launch(agent, args, plan)
+}
+
+/// Say what the plan has to say, then either refuse with its exit code or hand
+/// the process over to the agent.
+fn launch(agent: &ProxyAgent, args: &[String], plan: Launch) -> Result<i32> {
     for notice in &plan.notices {
         eprintln!("{notice}");
     }
@@ -1508,6 +1514,21 @@ mod tests {
             "{:?}",
             dead.notices
         );
+    }
+
+    #[test]
+    fn a_refused_launch_returns_its_exit_code_instead_of_starting_the_agent() {
+        // The name resolves to nothing, so a launch that went ahead would fail
+        // with an exec error rather than start a real agent.
+        let agent = ProxyAgent {
+            name: "rtk-test-agent-that-does-not-exist",
+            ..config_agent(vibe_route)
+        };
+        let plan = Launch {
+            refuse: Some(3),
+            ..Launch::default()
+        };
+        assert_eq!(launch(&agent, &[], plan).unwrap(), 3);
     }
 
     #[test]

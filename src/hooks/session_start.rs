@@ -457,6 +457,29 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_is_routed_by_rtks_url_not_a_remote_or_unset_one() {
+        for (url, routed) in [
+            (Some("http://127.0.0.1:8080"), true),
+            (Some("https://gw.corp"), false),
+            (None, false),
+        ] {
+            crate::core::user_env::with_vars(&[(VAR, url)], || {
+                assert_eq!(routed_through_rtk("claude-code"), routed, "{url:?}");
+            });
+        }
+    }
+
+    #[test]
+    fn the_default_port_is_rtks_even_when_the_daemon_listens_elsewhere() {
+        let paths = crate::hooks::init::CODEX_PROXY_PATHS;
+        crate::core::user_env::with_vars(&[("RTK_PROXY_BIND", Some("127.0.0.1:9191"))], || {
+            assert!(rtk_owned("http://127.0.0.1:8080/openai/v1", paths));
+            assert!(rtk_owned("http://127.0.0.1:9191/openai/v1", paths));
+            assert!(!rtk_owned("http://127.0.0.1:7000/openai/v1", paths));
+        });
+    }
+
+    #[test]
     fn codex_base_url_comes_from_the_config_key_not_the_environment() {
         let home = crate::core::test_isolation::tempdir();
         write_agent_config(
