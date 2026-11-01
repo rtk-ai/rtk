@@ -422,6 +422,20 @@ section "wc"
 bench "wc" "wc Cargo.toml src/main.rs" "$RTK wc Cargo.toml src/main.rs"
 
 # ===================
+# rust / tree / diff (pre-release coverage)
+# ===================
+section "rust"
+bench "cargo check" "cargo check 2>&1" "$RTK cargo check"
+bench "cargo build" "cargo build 2>&1" "$RTK cargo build"
+bench "cargo clippy" "cargo clippy 2>&1" "$RTK cargo clippy"
+
+section "tree"
+bench "tree src/" "tree -L 2 src/ 2>/dev/null || find src -maxdepth 2" "$RTK tree src/"
+
+section "diff"
+bench "diff same" "diff -u Cargo.toml Cargo.toml" "$RTK diff Cargo.toml Cargo.toml"
+
+# ===================
 # curl / wget — fully offline. mockhttp.org was both a network dependency and
 # non-deterministic (its /json output is random), which made the benchmark flaky.
 # Serve fixed fixtures locally instead. The JSON is pretty-printed on purpose so
