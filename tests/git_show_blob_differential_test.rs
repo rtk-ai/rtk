@@ -681,3 +681,85 @@ fn cluster_flag_before_blob_windows_and_recovers_byte_exact() {
         "head + `tail -n +{n}` must reconstruct the blob byte-for-byte"
     );
 }
+
+/// Bare blob SHA (issue #4823): `rtk git show <blob-sha>` must be byte-for-byte identical
+/// to `git show <blob-sha>`.
+/// - Non-UTF-8 Latin-1 bytes must not be corrupted by lossy console decoding or U+FFFD;
+/// - Small blobs must not have an extra trailing newline appended;
+/// - Abbreviated hex SHAs (e.g. 7 chars) must also route to the byte-exact blob handler;
+/// - Peeling syntax (e.g. `<rev>^{blob}`) must be recognized and byte-exact;
+/// - Flags like `--stat` on a bare blob SHA must not divert to lossy decoding.
+#[test]
+fn bare_blob_sha_and_peeling_byte_exact() {
+    let repo = setup_repo();
+    let (path, home) = (repo.path.as_path(), repo.home.as_path());
+
+    // 1. Non-UTF-8 Latin-1 blob
+    let latin1_sha = String::from_utf8(git(path, home, &["rev-parse", "HEAD:latin1.pck"]).stdout)
+        .expect("sha is ascii")
+        .trim()
+        .to_string();
+
+    let git_latin1 = git(path, home, &["show", &latin1_sha]);
+    let rtk_latin1 = rtk_show(path, home, &[&latin1_sha]);
+    assert!(git_latin1.status.success());
+    assert!(rtk_latin1.status.success());
+    assert_eq!(
+        rtk_latin1.stdout, git_latin1.stdout,
+        "rtk git show <latin1-blob-sha> must match git show byte-for-byte"
+    );
+
+    // Sibling route: --stat with bare blob SHA
+    let git_stat = git(path, home, &["show", "--stat", &latin1_sha]);
+    let rtk_stat = rtk_show(path, home, &["--stat", &latin1_sha]);
+    assert_eq!(
+        rtk_stat.stdout, git_stat.stdout,
+        "rtk git show --stat <blob-sha> must match git show byte-for-byte"
+    );
+
+    // 2. Small blob without trailing newline (verify no extra newline is appended)
+    std::fs::write(path.join("no_newline.txt"), b"caf\xe9 end").expect("write no_newline");
+    git_ok(path, home, &["add", "no_newline.txt"]);
+    git_ok(path, home, &["commit", "-q", "-m", "no-newline"]);
+    let no_newline_sha =
+        String::from_utf8(git(path, home, &["rev-parse", "HEAD:no_newline.txt"]).stdout)
+            .expect("sha is ascii")
+            .trim()
+            .to_string();
+
+    let git_no_nl = git(path, home, &["show", &no_newline_sha]);
+    let rtk_no_nl = rtk_show(path, home, &[&no_newline_sha]);
+    assert_eq!(
+        rtk_no_nl.stdout, git_no_nl.stdout,
+        "rtk git show <sha> without trailing newline must not gain a newline"
+    );
+    assert!(
+        !rtk_no_nl.stdout.ends_with(b"\n"),
+        "must not end with newline"
+    );
+
+    // 3. Abbreviated blob SHA (e.g. 7 hex digits)
+    let short_sha = &latin1_sha[..7];
+    let git_short = git(path, home, &["show", short_sha]);
+    let rtk_short = rtk_show(path, home, &[short_sha]);
+    assert_eq!(
+        rtk_short.stdout, git_short.stdout,
+        "rtk git show <abbrev-sha> must match git show byte-for-byte"
+    );
+
+    // 4. Peeling syntax: <rev>^{blob} (annotated tag peeled to blob)
+    git_ok(
+        path,
+        home,
+        &["tag", "-a", "-m", "tag-blob", "tag_blob", &no_newline_sha],
+    );
+    let git_peeled = git(path, home, &["show", "tag_blob^{blob}"]);
+    let rtk_peeled = rtk_show(path, home, &["tag_blob^{blob}"]);
+    assert!(git_peeled.status.success());
+    assert!(rtk_peeled.status.success());
+    assert_eq!(
+        rtk_peeled.stdout, git_peeled.stdout,
+        "rtk git show <rev>^{{blob}} must match git show byte-for-byte"
+    );
+    assert_eq!(rtk_peeled.stdout, b"caf\xe9 end");
+}
