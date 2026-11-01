@@ -1906,7 +1906,7 @@ fn categorize_command(rtk_cmd: &str) -> String {
         | "prettier" | "next" | "playwright" | "prisma" => "js",
         "pytest" | "ruff" | "mypy" | "pip" | "sqlfluff" | "uv" => "python",
         "go" | "golangci-lint" => "go",
-        "docker" | "kubectl" => "cloud",
+        "docker" | "kubectl" | "psql" | "mysql" => "cloud",
         "rspec" | "rubocop" | "rake" => "ruby",
         "dotnet" => "dotnet",
         "ctest" => "cpp",
@@ -4012,6 +4012,13 @@ mod tests {
             assert_eq!(commands, 4, "{period}: every row still counts as a command");
             assert_eq!(total_time_ms, 600, "{period}: total exec time");
             assert_eq!(avg_time_ms, 200, "{period}: avg exec time");
+        }
+    }
+
+    #[test]
+    fn test_categorize_psql_and_mysql_as_cloud() {
+        for cmd in ["rtk psql -l", "rtk mysql -e 'SELECT 1'"] {
+            assert_eq!(categorize_command(cmd), "cloud", "{cmd}");
         }
     }
 }
