@@ -371,6 +371,22 @@ mod tests {
     }
 
     #[test]
+    fn test_go_test_wrapper_benchmark_json() {
+        let input = r#"{"Action":"start","Package":"example.com/benchrepro"}
+{"Action":"output","Package":"example.com/benchrepro","Output":"BenchmarkX-12    \t"}
+{"Action":"output","Package":"example.com/benchrepro","Output":"      10\t      1679 ns/op\n"}"#;
+
+        let result = go_test_wrapper(input);
+
+        assert!(
+            !result.contains("No tests found"),
+            "benchmark JSON must not be reported as empty: {result}"
+        );
+        assert!(result.contains("BenchmarkX-12"), "got: {result}");
+        assert!(result.contains("1679 ns/op"), "got: {result}");
+    }
+
+    #[test]
     fn test_resolve_filter_ctest() {
         assert!(resolve_filter("ctest").is_some());
     }
