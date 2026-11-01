@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, Mistral Vibe, and Trae
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, Mistral Vibe, Muse Code, and Trae
 sidebar:
   order: 3
 ---
@@ -45,6 +45,7 @@ Agent runs "cargo test"
 | Codex CLI | Rust binary (`PreToolUse`) | Yes |
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rust binary (`PreToolUse` plugin) | Yes |
+| Muse Code | Rust binary (`PreToolUse` Agent Plugins bundle) | Measured :ask-me settings; rewrites only when no persisted rule touches either command |
 | Mistral Vibe | Rust binary (`pre_tool`) | Yes |
 
 Agents that rewrite transparently receive the awareness file selected by `awareness.level` in
@@ -357,3 +358,20 @@ Or exclude commands permanently in `~/.config/rtk/config.toml`:
 [hooks]
 exclude_commands = ["git rebase", "git cherry-pick"]
 ```
+
+### Muse Code
+
+Run `rtk init --agent muse` (project) or `rtk init -g --agent muse` (user), then
+review the generated bundle and run the printed `muse plugins install` and
+`muse plugins approve rtk` commands. RTK never runs Muse or changes its trust.
+`--show` reports the bundle and enabled installation; `--uninstall` removes the
+generated files and prints the Muse removal command.
+
+This integration requires a configured `:ask-me` default and rewrites only when
+no persisted rule touches either the original or rewritten command, regardless
+of scope or effect. Unknown policies and complex syntax with rules defer.
+Measured under `--approval-mode untrusted`, both with Muse's no-named-profile
+fallback and explicit `:ask-me` (`permissions.schema_version: 1`). Other profiles,
+`on-request` and session overrides are unmeasured. No awareness rules are installed.
+See the [hook documentation](https://github.com/rtk-ai/rtk/blob/develop/hooks/README.md#muse-code)
+for qualification limits and the Muse Code 1.4.14 hook protocol.

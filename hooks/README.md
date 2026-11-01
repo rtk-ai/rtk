@@ -392,3 +392,66 @@ RTK supports AI coding assistants that developers actually use day-to-day. To ad
 ### Maintenance
 
 If an agent's API changes and the hook breaks, the integration should be updated promptly. If the agent becomes unmaintained or the hook can't be fixed, the integration may be deprecated with a release note.
+
+## Muse Code
+
+`rtk init --agent muse` generates `.rtk/muse-plugin`; `-g` generates
+`plugins/muse` under RTK's configuration directory. The Agent Plugins 1.0.0 bundle
+contains `.claude-plugin/plugin.json` and `hooks/hooks.json` (PreToolUse/Bash,
+`rtk hook muse`, timeout 10 seconds). Init prints the installation and approval
+commands; RTK never runs Muse or grants trust:
+
+```sh
+rtk init -g --agent muse
+# Run the printed muse plugins install <bundle> --scope user command, then:
+muse plugins approve rtk
+rtk init -g --agent muse --show
+rtk hook check --agent muse git status
+```
+
+The hook accepts fixture `Bash` and native `bash` tool names, preserves tool-input
+metadata and emits only Claude-shaped `updatedInput`.
+It never emits an allow decision or installs permission rules. Muse Code 1.4.14
+rejects `permissionDecisionReason` without `permissionDecision`; `rtk hook claude`
+is therefore not a substitute.
+
+The hook requires schema-1 settings with `permissions.default_profile: ":ask-me"`.
+Approval-policy semantics were measured under Muse's no-named-profile fallback
+and under an explicit `:ask-me` profile (`permissions.schema_version: 1`), using
+Muse Code 1.4.14 and `--approval-mode untrusted`. Both settings shapes are
+accepted. Other profiles, `on-request` and session profile overrides are
+unmeasured and defer where detectable. Schema-2 policies accept only argv-prefix
+rules (`argv_prefix`, `workspace_root`) and global exact-raw rules (`command`),
+with `allow`, `prompt`, or `deny` effects and a required string `durability`.
+Malformed/unreadable policies, unknown fields and rule kinds defer.
+
+RTK steps aside whenever any persisted Muse rule names either the original or
+the rewritten command; it never arbitrates scope or effect. Prefix rules are
+checked against each plain-word stage, regardless of workspace root. Exact-raw
+rules are checked against both raw and trimmed whole commands and every stage.
+Stages use `&&`, `||`, `;`, `|`, or newline separators. Missing policies and empty
+rules preserve normal rewriting. With rules present, quotes, expansion,
+assignments, globs, redirects, wrappers, executable paths and other complex
+syntax defer. Carriage returns always defer. RTK never writes allow rules.
+
+Native runs with the corrected renderer showed Muse executing the rewritten
+command with no policy, and passing through when a matching prefix or exact-raw
+allow existed. Native root-level proof confirmed hook cwd equals the session
+workspace in the tested invocation; it does not establish that for every tool
+invocation. The native fixture/runtime tool-name difference is covered by a
+captured-envelope regression test.
+
+Detection reads Muse's installed-plugin registry and copied hook, without spawning
+Muse. It reports enabled installation, not capability approval. `--uninstall`
+removes only RTK's generated bundle files and prints `muse plugins remove rtk`;
+Muse's installed copy and trust remain under Muse's control. No awareness rules
+are installed because their consumption has not been qualified.
+
+Qualification limits: the configured default does not attest to an in-session
+permission-profile override. Muse 1.4.14's fixture hook subprocess strips XDG
+variables, retaining HOME; the hook reads `$HOME/.config/muse`. Custom XDG roots
+can therefore resolve differently inside a hook. `rtk hook check --agent muse`
+treats policy as unknown and passes through when `XDG_CONFIG_HOME` differs from
+`$HOME/.config`. Custom XDG use needs native qualification before activation. Enabled
+installation and fixture execution do not establish runtime capability trust:
+the fixture runner can execute an unapproved hook.
