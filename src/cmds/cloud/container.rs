@@ -1,5 +1,6 @@
 //! Filters Docker and kubectl output into compact summaries.
 
+use crate::core::arg_tokenizer::{Dialect, TokenKind, ValueSpec, tokenize_grammar};
 use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
 use crate::core::shell::display_args;
@@ -833,12 +834,24 @@ fn k8s_get_target(args: &[String]) -> Option<(&'static str, &[String])> {
 }
 
 fn k8s_get_requests_raw_output(args: &[String]) -> bool {
-    args.iter().any(|arg| {
-        matches!(
-            arg.as_str(),
-            "-o" | "--output" | "-w" | "--watch" | "--show-labels" | "--show-kind"
-        ) || arg.starts_with("-o")
-            || arg.starts_with("--output=")
+    let takes_value = |kind: TokenKind, name: &str| match (kind, name) {
+        (TokenKind::Short, "n" | "l")
+        | (
+            TokenKind::Long,
+            "namespace" | "context" | "kubeconfig" | "as" | "selector" | "field-selector",
+        ) => Some(ValueSpec::value().claiming_dash_dash()),
+        _ => None,
+    };
+    let tokens = tokenize_grammar(args, &takes_value, Dialect::Posix);
+    tokens.iter().any(|token| match token.kind {
+        // Named get returns a Pod/Service, not the List the compact filter expects.
+        TokenKind::Positional => token.is_free_positional(),
+        TokenKind::DashDash => false,
+        TokenKind::Short if token.text == "A" => false,
+        TokenKind::Long if token.text == "all-namespaces" => false,
+        // Preserve native output/diagnostics for output flags, unknown options,
+        // and missing values rather than guessing their argument grammar.
+        kind => takes_value(kind, token.text).is_none() || token.value(&tokens).is_none(),
     })
 }
 
@@ -1020,6 +1033,74 @@ api-1  | Connected to database";
                 Some(("services", &args[1..])),
                 "failed for {resource}"
             );
+        }
+    }
+
+    // #4613: named get returns a Pod/Service JSON object rather than a List.
+    // Never run that result through the list-only `items` formatter.
+    #[test]
+    fn test_k8s_get_named_pod_and_service_pass_through() {
+        for (resource, name) in [
+            ("pods", "web-5dc4d46d9f-hsrcf"),
+            ("po", "web-5dc4d46d9f-hsrcf"),
+            ("services", "api"),
+            ("svc", "api"),
+        ] {
+            let args = vec![resource.to_string(), name.to_string()];
+            assert_eq!(k8s_get_target(&args), None, "{resource} {name}");
+        }
+    }
+
+    #[test]
+    fn test_k8s_named_get_with_namespace_or_context_passes_through() {
+        for args in [
+            vec!["pods", "-n", "production", "web"],
+            vec!["pods", "--namespace", "production", "web"],
+            vec!["services", "--context", "prod", "api"],
+            vec!["pods", "-nproduction", "web"],
+            vec!["pods", "--namespace=production", "web"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            assert_eq!(k8s_get_target(&args), None, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn test_k8s_list_with_option_values_still_filters() {
+        for args in [
+            vec!["pods", "-n", "default"],
+            vec!["services", "--context", "prod"],
+            vec!["pods", "-l", "app=api"],
+            vec!["pods", "--field-selector", "status.phase=Running"],
+            vec!["pods", "--namespace=default"],
+            vec!["pods", "-A"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            assert!(k8s_get_target(&args).is_some(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn test_k8s_list_flag_clusters_and_flag_like_values_still_filter() {
+        for args in [
+            vec!["pods", "-An", "default"],
+            vec!["pods", "--context", "-o"],
+            vec!["pods", "--namespace", "--"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            assert!(k8s_get_target(&args).is_some(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn test_k8s_get_unknown_or_incomplete_options_pass_through() {
+        for args in [
+            vec!["pods", "--new-option=value"],
+            vec!["pods", "-n"],
+            vec!["pods", "--context"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            assert_eq!(k8s_get_target(&args), None, "{args:?}");
         }
     }
 
