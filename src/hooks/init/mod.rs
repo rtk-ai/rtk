@@ -45,6 +45,7 @@ use claude::{
     hook_already_present, hook_gaps, remove_settings_entries, run_claude_md_mode, run_default_mode,
     run_hook_only_mode,
 };
+pub use codex::UninstallCodexOutcome;
 use codex::{run_codex_mode, show_codex_config, uninstall_codex};
 use cursor::{
     cursor_hook_already_present, install_cursor_hooks, remove_cursor_hooks, resolve_cursor_dir,
@@ -472,34 +473,60 @@ pub fn run(
             anyhow::bail!("Windsurf support is global-only. Use: rtk init -g --agent windsurf");
         }
 
-        if install_windsurf {
-            run_windsurf_mode(ctx)?;
-        } else if install_cline {
-            run_cline_mode(ctx)?;
-        } else {
-            // Mode selection (Claude Code / OpenCode)
-            match (install_claude, install_opencode, claude_md, hook_only) {
-                (false, true, _, _) => run_opencode_only_mode(ctx)?,
-                (true, opencode, true, _) => run_claude_md_mode(global, opencode, ctx)?,
-                (true, opencode, false, true) => {
-                    run_hook_only_mode(global, patch_mode, opencode, ctx)?
-                }
-                (true, opencode, false, false) => {
-                    run_default_mode(global, patch_mode, opencode, ctx)?
-                }
-                (false, false, _, _) => {
-                    if !install_cursor {
-                        anyhow::bail!(
-                            "at least one of install_claude or install_opencode must be true"
-                        )
+        // The OpenCode plugin is an independent target: install it before any
+        // agent so a Claude/Cursor failure cannot leave it missing, and vice
+        // versa. Its error is reported after the agent's.
+        let opencode_result = install_opencode.then(|| run_opencode_only_mode(ctx));
+        let opencode_plugin = opencode_result
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .and_then(|path| path.as_deref());
+
+        let agent_result = (|| -> Result<()> {
+            if install_windsurf {
+                run_windsurf_mode(ctx)?;
+            } else if install_cline {
+                run_cline_mode(ctx)?;
+            } else {
+                // Mode selection (Claude Code / OpenCode)
+                match (install_claude, install_opencode, claude_md, hook_only) {
+                    // The plugin was installed above, independently.
+                    (false, true, _, _) => {}
+                    (true, _, true, _) => run_claude_md_mode(global, ctx)?,
+                    (true, _, false, true) => {
+                        run_hook_only_mode(global, patch_mode, opencode_plugin, ctx)?
+                    }
+                    (true, _, false, false) => {
+                        run_default_mode(global, patch_mode, opencode_plugin, ctx)?
+                    }
+                    (false, false, _, _) => {
+                        if !install_cursor {
+                            anyhow::bail!(
+                                "at least one of install_claude or install_opencode must be true"
+                            )
+                        }
                     }
                 }
-            }
 
-            // Cursor hooks: on their own, or next to the OpenCode plugin with --opencode
-            if install_cursor {
-                install_cursor_hooks(ctx)?;
+                // Cursor hooks: on their own, or next to the OpenCode plugin with --opencode
+                if install_cursor {
+                    install_cursor_hooks(ctx)?;
+                }
             }
+            Ok(())
+        })();
+
+        match (opencode_result, agent_result) {
+            (Some(Err(opencode_error)), Err(agent_error)) => {
+                return Err(anyhow::anyhow!(
+                    "OpenCode install failed: {opencode_error:#}\nAgent install failed: {agent_error:#}"
+                ));
+            }
+            (Some(Err(error)), Ok(())) => {
+                return Err(error.context("OpenCode install failed"));
+            }
+            (_, Err(error)) => return Err(error),
+            _ => {}
         }
     }
 
@@ -1396,7 +1423,7 @@ pub fn uninstall(
     pi: bool,
     omp: bool,
     ctx: InitContext,
-) -> Result<()> {
+) -> Result<i32> {
     uninstall_with_patch_mode(global, gemini, codex, cursor, pi, omp, PatchMode::Ask, ctx)
 }
 
@@ -1412,16 +1439,20 @@ pub fn uninstall_with_patch_mode(
     omp: bool,
     patch_mode: PatchMode,
     ctx: InitContext,
-) -> Result<()> {
+) -> Result<i32> {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
     if codex {
-        uninstall_codex(global, ctx)?;
+        let outcome = uninstall_codex(global, ctx)?;
         if dry_run {
             print_dry_run_footer();
         }
-        return Ok(());
+        let code = match outcome {
+            UninstallCodexOutcome::Clean => 0,
+            UninstallCodexOutcome::HookRefused => 2,
+        };
+        return Ok(code);
     }
 
     if cursor {
@@ -1448,17 +1479,17 @@ pub fn uninstall_with_patch_mode(
         if dry_run {
             print_dry_run_footer();
         }
-        return Ok(());
+        return Ok(0);
     }
 
     if pi {
         uninstall_pi_with_patch_mode(global, patch_mode, ctx)?;
-        return Ok(());
+        return Ok(0);
     }
 
     if omp {
         uninstall_omp_with_patch_mode(global, patch_mode, ctx)?;
-        return Ok(());
+        return Ok(0);
     }
 
     if !global {
@@ -1493,7 +1524,7 @@ pub fn uninstall_with_patch_mode(
         if dry_run {
             print_dry_run_footer();
         }
-        return Ok(());
+        return Ok(0);
     }
 
     // 1. Remove legacy hook file (if exists from old installation)
@@ -1646,7 +1677,7 @@ pub fn uninstall_with_patch_mode(
         print_dry_run_footer();
     }
 
-    Ok(())
+    Ok(0)
 }
 
 /// Clean up consecutive blank lines (collapse 3+ to 2)

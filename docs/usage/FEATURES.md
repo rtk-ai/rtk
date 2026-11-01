@@ -305,6 +305,34 @@ All git subcommands are supported. Unrecognized commands are passed directly to 
 
 ---
 
+### `rtk git ls-tree` -- Paths grouped by directory
+
+```bash
+rtk git ls-tree -r --name-only HEAD
+```
+
+With `--name-only` or `--name-status`, consecutive paths sharing a directory fold
+onto one line, preserving Git's order:
+
+```text
+./ Cargo.toml README.md
+"my file.txt"
+src/cmds/ alpha.rs beta.rs gamma.rs
+src/ lib.rs main.rs
+```
+
+To rebuild Git's original paths, prepend the directory to each name on its line,
+treating `./` as an empty prefix: the path has no directory part in Git's output.
+A path containing spaces stands alone in double quotes. Git's C-quoted paths
+also stand alone, with their escapes preserved.
+
+The default mode/type/object listing, `-l`, `-z`, custom formats, unknown options,
+failed commands, and listings that would not shrink pass through unchanged.
+The hook leaves foldable commands unrewritten before consumers such as `head`,
+`tail`, and `cat`, including when Git global options precede `ls-tree`.
+
+---
+
 ### `rtk git status` -- Compact status
 
 ```bash
@@ -1300,7 +1328,7 @@ rtk verify
 | `git status/diff/log/add/commit/push/pull` | `rtk git ...` |
 | `gh pr/issue/run` | `rtk gh ...` |
 | `cargo test/build/clippy/check` | `rtk cargo ...` |
-| `cat/head/tail <file>` | `rtk read <file>` |
+| `cat/head <file>`, `tail -n <N> <file>` | `rtk read <file>` |
 | `rg/grep <pattern>` | `rtk grep <pattern>` |
 | `ast-grep run -p <pattern>` | `rtk ast-grep run -p <pattern>` |
 | `ls` | `rtk ls` |
