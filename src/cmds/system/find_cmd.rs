@@ -1525,7 +1525,9 @@ mod tests {
     #[test]
     fn run_from_args_propagates_find_exit_status() {
         let argv = ["/definitely/missing/xyz", "-mtime", "+0"];
-        let expected = std::process::Command::new("find")
+        // Match run_compress's PATH lookup: on Windows, a bare Command can select
+        // System32's unrelated find.exe instead of Git's find.
+        let expected = crate::core::utils::resolved_command("find")
             .args(argv)
             .output()
             .map(|o| o.status.code().unwrap_or(1))
