@@ -1,0 +1,9 @@
+{
+  "name": "rtk-muse",
+  "version": "0.1.0",
+  "description": "RTK for Muse Code: the PreToolUse/Bash hook that runs 'rtk hook muse' (Claude-shape events; the token savings; the parity-verified rewrites)",
+  "author": {
+    "name": "apex-ghost-family (automated draft, disclosed)"
+  },
+  "hooks": "./hooks/hooks.json"
+}
