@@ -1,7 +1,8 @@
 //! SQLite plumbing shared by rtk's databases (tracking, recall): the private
 //! open, owner-only permissions on the database and its sidecars, and the
-//! versioned migration engine. Each database keeps its own versions enum and
-//! its own steps; this module applies them.
+//! versioned migration engine. Each database keeps its own versions enum, its
+//! own steps and its own snapshot of the latest schema; this module applies
+//! them: the snapshot to a new database, the steps to an existing one.
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags, params};
@@ -98,11 +99,23 @@ pub(crate) struct Schema<'a, V> {
     /// this database's. True for a database whose releases never tagged their
     /// files: another database's untagged file can only carry a zero stamp.
     pub owns_untagged_stamps: bool,
-    /// One step per version, in order. A new schema change is a new step, and a
-    /// released step never changes the schema it produces: a gated open never
-    /// runs it again on a database stamped at its version. Every step must stay
-    /// idempotent: `rtk init` replays all of them, in order, on a database at
-    /// any version, including one stamped by a newer build.
+    /// The SQL that creates the database at the schema its last step produces:
+    /// every table and index, no `IF NOT EXISTS`, no transaction control. A
+    /// database with no schema object at all is created from it in one
+    /// transaction instead of replaying the steps. Its columns come in the order
+    /// the steps leave them, since `ALTER TABLE ... ADD COLUMN` appends.
+    ///
+    /// A schema change updates its step and this snapshot together. The
+    /// snapshot-equivalence test of each database builds one database from the
+    /// snapshot and one through every step, and fails, naming what differs, when
+    /// the two disagree.
+    pub snapshot: &'a str,
+    /// One step per version, in order. A new schema change is a new step (and an
+    /// update of [`Schema::snapshot`]), and a released step never changes the
+    /// schema it produces: a gated open never runs it again on a database stamped
+    /// at its version. Every step must stay idempotent: `rtk init` replays all of
+    /// them, in order, on a database at any version, including one stamped by a
+    /// newer build.
     pub steps: &'a [(V, Migration)],
 }
 
@@ -341,6 +354,71 @@ pub(crate) fn apply_migrations<V: Version>(
     run_steps(conn, schema, mode, stamp)
 }
 
+/// Brings the database to the schema's last version: from its snapshot when the
+/// file holds no schema object yet, otherwise by [`apply_steps`].
+///
+/// The snapshot is tried here, below the callers that read the file's identity,
+/// so every way in (`claim` for a file this process opens, and a connection a
+/// caller opens itself) gets it, and the migration rules stay in one place. It
+/// is tried only when the stamp the caller read is 0: any other stamp means the
+/// file has a history, which the steps continue. The decision is made again
+/// under the lock, so two processes creating the same file at once create it
+/// once, and the second finds it current.
+///
+/// `seen` is the file's `user_version`, read and checked by the caller.
+fn run_steps<V: Version>(
+    conn: &Connection,
+    schema: &Schema<V>,
+    mode: MigrationMode,
+    seen: i64,
+) -> Result<()> {
+    if seen == 0 && create_from_snapshot(conn, schema)? {
+        return Ok(());
+    }
+    apply_steps(conn, schema, mode, seen)
+}
+
+/// Creates the database from the schema's snapshot, stamped at the last step's
+/// version and tagged, in one `IMMEDIATE` transaction, and says whether it did.
+/// It does only when, under the lock, the stamp is 0 and `sqlite_master` is empty:
+/// a legacy unversioned or partial database, or one another process has since
+/// created, is left to the steps.
+fn create_from_snapshot<V: Version>(conn: &Connection, schema: &Schema<V>) -> Result<bool> {
+    let label = schema.label();
+    let Some(&(latest, _)) = schema.steps.last() else {
+        return Ok(false);
+    };
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .with_context(|| format!("Failed to start creating the {label} DB"))?;
+    let (tag, stamp) = read_identity(&tx, label)?;
+    check_owner(&tx, schema, tag, stamp)?;
+    let has_schema_objects: bool = tx
+        .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master)", [], |row| {
+            row.get(0)
+        })
+        .with_context(|| format!("Failed to inspect the {label} DB schema"))?;
+    if stamp != 0 || has_schema_objects {
+        tx.rollback()
+            .with_context(|| format!("Failed to release the {label} DB lock"))?;
+        return Ok(false);
+    }
+    tx.execute_batch(schema.snapshot)
+        .with_context(|| format!("Failed to create the {label} DB from its snapshot"))?;
+    // As for a step: a transaction SQLite rolled back on its own must not be stamped.
+    if tx.is_autocommit() {
+        anyhow::bail!("Creating the {label} DB was rolled back by SQLite");
+    }
+    tx.pragma_update(None, "user_version", latest.number())
+        .with_context(|| format!("Failed to stamp the {label} DB at {latest:?}"))?;
+    if tag != schema.kind.application_id() {
+        tx.pragma_update(None, "application_id", schema.kind.application_id())
+            .with_context(|| format!("Failed to tag the {label} DB"))?;
+    }
+    tx.commit()
+        .with_context(|| format!("Failed to commit the creation of the {label} DB"))?;
+    Ok(true)
+}
+
 /// Apply the schema's steps in order, each in its own `IMMEDIATE` transaction
 /// that reads `user_version` and raises it to the step's version, so a failed
 /// step leaves the database at the previous version and the next open resumes
@@ -361,7 +439,7 @@ pub(crate) fn apply_migrations<V: Version>(
 /// The rules every step follows are on [`Schema::steps`].
 ///
 /// `seen` is the file's `user_version`, read and checked by the caller.
-fn run_steps<V: Version>(
+fn apply_steps<V: Version>(
     conn: &Connection,
     schema: &Schema<V>,
     mode: MigrationMode,
@@ -546,6 +624,163 @@ pub(crate) mod testing {
         identity(conn).0
     }
 
+    /// What [`apply_migrations`] does for a database with a history: the steps
+    /// from the file's stamp, never its snapshot. For tests that build a database
+    /// as an older build left it, or that pin what a step does.
+    pub(crate) fn replay_steps<V: Version>(
+        conn: &Connection,
+        schema: &Schema<V>,
+        mode: MigrationMode,
+    ) -> Result<()> {
+        let (tag, stamp) = read_identity(conn, schema.label())?;
+        check_owner(conn, schema, tag, stamp)?;
+        apply_steps(conn, schema, mode, stamp)
+    }
+
+    /// Everything about a database's structure that the snapshot and the steps
+    /// must agree on, one line each: its schema objects, the columns of each
+    /// table (position, name, type, `NOT NULL`, default, primary-key position),
+    /// the indexes of each table (uniqueness, origin, columns in order with their
+    /// direction), and its tag and stamp. `sqlite_master.sql` is left out: `ALTER
+    /// TABLE` rewrites it, so the same schema reads differently.
+    fn describe(conn: &Connection) -> Vec<String> {
+        fn collect<T>(
+            conn: &Connection,
+            sql: &str,
+            params: impl rusqlite::Params,
+            line: impl FnMut(&rusqlite::Row) -> rusqlite::Result<T>,
+        ) -> Vec<T> {
+            conn.prepare(sql)
+                .expect("the structure query should prepare")
+                .query_map(params, line)
+                .expect("the structure query should run")
+                .collect::<std::result::Result<_, _>>()
+                .expect("the structure rows should decode")
+        }
+
+        let (tag, stamp) = identity(conn);
+        let mut lines = vec![format!("application_id {tag:#x}, user_version {stamp}")];
+        let objects = collect(
+            conn,
+            "SELECT type, name, tbl_name FROM sqlite_master
+             WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY type, name",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        );
+        for (kind, name, table) in &objects {
+            lines.push(format!("{kind} {name} on {table}"));
+            if kind != "table" {
+                continue;
+            }
+            lines.extend(collect(
+                conn,
+                "SELECT cid, name, type, \"notnull\", dflt_value, pk
+                 FROM pragma_table_info(?1) ORDER BY cid",
+                [name],
+                |row| {
+                    Ok(format!(
+                        "column {name}.{}: position {}, type {:?}, not null {}, default {:?}, primary key {}",
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                },
+            ));
+            let indexes = collect(
+                conn,
+                "SELECT name, \"unique\", origin, partial FROM pragma_index_list(?1) ORDER BY name",
+                [name],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            );
+            for (index, unique, origin, partial) in indexes {
+                let columns = collect(
+                    conn,
+                    "SELECT name, desc FROM pragma_index_xinfo(?1) WHERE key = 1 ORDER BY seqno",
+                    [&index],
+                    |row| {
+                        let column = row.get::<_, Option<String>>(0)?;
+                        let descending = row.get::<_, i64>(1)? == 1;
+                        Ok(format!(
+                            "{}{}",
+                            column.unwrap_or_else(|| "<expression>".to_string()),
+                            if descending { " DESC" } else { "" }
+                        ))
+                    },
+                );
+                lines.push(format!(
+                    "index {index} on {name}: unique {unique}, origin {origin}, partial {partial}, columns ({})",
+                    columns.join(", ")
+                ));
+            }
+        }
+        lines
+    }
+
+    /// What differs between the database `schema.snapshot` creates and the one
+    /// its steps build from nothing, one entry per differing line. Empty when
+    /// they agree.
+    pub(crate) fn snapshot_differences<V: Version>(schema: &Schema<V>) -> Vec<String> {
+        let from_snapshot = Connection::open_in_memory().expect("open should succeed");
+        let created = create_from_snapshot(&from_snapshot, schema)
+            .expect("the snapshot should create a database");
+        assert!(created, "an empty database is created from the snapshot");
+        let from_steps = Connection::open_in_memory().expect("open should succeed");
+        replay_steps(&from_steps, schema, MigrationMode::GatedByVersion)
+            .expect("the steps should build a database from nothing");
+
+        differences_between(&from_snapshot, &from_steps)
+    }
+
+    /// The lines on which the structure, tag and stamp of two databases differ.
+    pub(crate) fn differences_between(
+        from_snapshot: &Connection,
+        from_steps: &Connection,
+    ) -> Vec<String> {
+        let snapshot_lines = describe(from_snapshot);
+        let step_lines = describe(from_steps);
+        let mut differences = Vec::new();
+        for line in &step_lines {
+            if !snapshot_lines.contains(line) {
+                differences.push(format!("only the steps produce: {line}"));
+            }
+        }
+        for line in &snapshot_lines {
+            if !step_lines.contains(line) {
+                differences.push(format!("only the snapshot produces: {line}"));
+            }
+        }
+        differences
+    }
+
+    /// Fails, naming what differs, unless the snapshot and the steps of `schema`
+    /// produce the same database: every database's snapshot-equivalence test.
+    pub(crate) fn assert_snapshot_matches_steps<V: Version>(schema: &Schema<V>) {
+        let differences = snapshot_differences(schema);
+        assert!(
+            differences.is_empty(),
+            "the {} snapshot and its steps produce different databases; a schema change \
+             updates its step and its snapshot together:\n{}",
+            schema.label(),
+            differences.join("\n")
+        );
+    }
+
     /// A step that always fails.
     pub(crate) fn failing_step(_conn: &Connection) -> Result<()> {
         anyhow::bail!("step failed")
@@ -626,6 +861,7 @@ mod tests {
     #[derive(Clone, Copy, Debug)]
     enum Versions {
         First = 1,
+        Second = 2,
     }
 
     impl Version for Versions {
@@ -646,11 +882,13 @@ mod tests {
     }
 
     const OWNED: &[(Versions, Migration)] = &[(Versions::First, create_owned_table)];
+    const OWNED_SNAPSHOT: &str = "CREATE TABLE owned (x INTEGER);";
 
     fn schema(steps: &[(Versions, Migration)], owns_untagged_stamps: bool) -> Schema<'_, Versions> {
         Schema {
             kind: DbKind::Tracking,
             owns_untagged_stamps,
+            snapshot: OWNED_SNAPSHOT,
             steps,
         }
     }
@@ -675,7 +913,7 @@ mod tests {
         }
         let conn = Connection::open_in_memory().expect("open should succeed");
 
-        let err = apply_migrations(
+        let err = testing::replay_steps(
             &conn,
             &schema(&[(Versions::First, rolled_back_step as Migration)], false),
             MigrationMode::GatedByVersion,
@@ -786,6 +1024,7 @@ mod tests {
         let recall = Schema {
             kind: DbKind::Recall,
             owns_untagged_stamps: false,
+            snapshot: OWNED_SNAPSHOT,
             steps: OWNED,
         };
 
@@ -860,7 +1099,13 @@ mod tests {
     /// tag is read again under the lock, in either mode.
     #[test]
     fn test_the_tag_is_read_again_under_the_lock() {
-        for mode in [MigrationMode::GatedByVersion, MigrationMode::Always] {
+        // Both ways to bring an empty file up: its snapshot and its steps.
+        for (mode, from_snapshot) in [
+            (MigrationMode::GatedByVersion, true),
+            (MigrationMode::GatedByVersion, false),
+            (MigrationMode::Always, true),
+            (MigrationMode::Always, false),
+        ] {
             let tmp = crate::core::test_isolation::tempdir();
             let path = tmp.path().join("shared.db");
             let tagger = Connection::open(&path).expect("open should succeed");
@@ -870,7 +1115,11 @@ mod tests {
                 .expect("lock should succeed");
 
             let migrator = testing::spawn_waiter(&path, move |conn| {
-                apply_migrations(conn, &schema(OWNED, false), mode)
+                if from_snapshot {
+                    apply_migrations(conn, &schema(OWNED, false), mode)
+                } else {
+                    testing::replay_steps(conn, &schema(OWNED, false), mode)
+                }
             });
             migrator.wait_until_blocked();
             tagger
@@ -1056,6 +1305,505 @@ mod tests {
             format!("{err:#}").contains("belongs to another application"),
             "{err:#}"
         );
+    }
+
+    /// A schema whose snapshot and steps leave different traces, so a test sees
+    /// which one built a database: the steps create `from_steps` (first step) and
+    /// give it a column (second step), the snapshot creates `from_snapshot` and a
+    /// one-row `snapshot_runs`.
+    fn create_from_steps(conn: &Connection) -> Result<()> {
+        conn.execute("CREATE TABLE from_steps (x INTEGER)", [])?;
+        Ok(())
+    }
+
+    fn extend_from_steps(conn: &Connection) -> Result<()> {
+        conn.execute("ALTER TABLE from_steps ADD COLUMN y TEXT", [])?;
+        Ok(())
+    }
+
+    const TWO_STEPS: &[(Versions, Migration)] = &[
+        (Versions::First, create_from_steps),
+        (Versions::Second, extend_from_steps),
+    ];
+    const COUNTING_SNAPSHOT: &str = "
+        CREATE TABLE from_snapshot (x INTEGER, y TEXT);
+        CREATE TABLE snapshot_runs (n INTEGER);
+        INSERT INTO snapshot_runs VALUES (1);
+    ";
+
+    fn counting_schema() -> Schema<'static, Versions> {
+        Schema {
+            kind: DbKind::Tracking,
+            owns_untagged_stamps: true,
+            snapshot: COUNTING_SNAPSHOT,
+            steps: TWO_STEPS,
+        }
+    }
+
+    /// Whether the database was built by the snapshot, by the steps, or neither.
+    fn built_by(conn: &Connection) -> (bool, bool) {
+        (
+            table_exists(conn, "from_snapshot"),
+            table_exists(conn, "from_steps"),
+        )
+    }
+
+    fn snapshot_runs(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM snapshot_runs", [], |row| row.get(0))
+            .expect("the snapshot's table should be readable")
+    }
+
+    fn current_identity() -> (i32, i64) {
+        (TEST_ID, Versions::Second as i64)
+    }
+
+    #[test]
+    fn test_a_new_database_is_created_from_the_snapshot_not_the_steps() {
+        for mode in [MigrationMode::GatedByVersion, MigrationMode::Always] {
+            let tmp = crate::core::test_isolation::tempdir();
+            let path = tmp.path().join("new.db");
+
+            let conn = open_and_migrate(&path, &counting_schema(), mode)
+                .expect("a new database should open");
+
+            assert_eq!(built_by(&conn), (true, false));
+            assert_eq!(snapshot_runs(&conn), 1);
+            assert_eq!(
+                identity(&conn),
+                current_identity(),
+                "stamped at the last step's version, and tagged"
+            );
+        }
+    }
+
+    #[test]
+    fn test_an_empty_existing_file_takes_the_snapshot() {
+        let tmp = crate::core::test_isolation::tempdir();
+        let zero_bytes = tmp.path().join("empty.db");
+        std::fs::write(&zero_bytes, b"").expect("file should be written");
+        let wal_only = tmp.path().join("wal.db");
+        testing::enable_wal(&Connection::open(&wal_only).expect("open should succeed"));
+        let tagged = tmp.path().join("tagged.db");
+        Connection::open(&tagged)
+            .expect("open should succeed")
+            .pragma_update(None, "application_id", TEST_ID)
+            .expect("tag should be set");
+
+        for path in [zero_bytes, wal_only, tagged] {
+            let conn =
+                open_existing_and_migrate(&path, &counting_schema(), MigrationMode::GatedByVersion)
+                    .expect("an empty file should open")
+                    .expect("the file exists");
+
+            assert_eq!(built_by(&conn), (true, false), "{}", path.display());
+            assert_eq!(identity(&conn), current_identity(), "{}", path.display());
+        }
+    }
+
+    #[test]
+    fn test_a_database_with_tables_and_no_stamp_takes_the_steps() {
+        for mode in [MigrationMode::GatedByVersion, MigrationMode::Always] {
+            let tmp = crate::core::test_isolation::tempdir();
+            let path = tmp.path().join("legacy.db");
+            Connection::open(&path)
+                .expect("open should succeed")
+                .execute_batch("CREATE TABLE legacy (x INTEGER); INSERT INTO legacy VALUES (7);")
+                .expect("legacy file should be written");
+
+            // `CREATE TABLE from_steps` has nothing in the way: the steps run
+            // from nothing, and the snapshot never does.
+            let conn = open_and_migrate(&path, &counting_schema(), mode)
+                .expect("a legacy database should open");
+
+            assert_eq!(built_by(&conn), (false, true));
+            assert!(table_exists(&conn, "legacy"));
+            assert_eq!(identity(&conn), current_identity());
+        }
+    }
+
+    #[test]
+    fn test_a_database_at_an_intermediate_stamp_takes_the_steps_above_it() {
+        let tmp = crate::core::test_isolation::tempdir();
+        let path = tmp.path().join("old.db");
+        Connection::open(&path)
+            .expect("open should succeed")
+            .execute_batch(&format!(
+                "PRAGMA application_id = {TEST_ID};
+                 PRAGMA user_version = {};
+                 CREATE TABLE from_steps (x INTEGER);",
+                Versions::First as i64
+            ))
+            .expect("an older build's file should be written");
+
+        let conn = open_and_migrate(&path, &counting_schema(), MigrationMode::GatedByVersion)
+            .expect("an older database should open");
+
+        assert_eq!(built_by(&conn), (false, true));
+        assert!(
+            column_exists(&conn, "from_steps", "y").expect("columns are readable"),
+            "the second step ran"
+        );
+        assert_eq!(identity(&conn), current_identity());
+    }
+
+    /// A stamp above 0 means the file has a history, even where it holds no table.
+    #[test]
+    fn test_a_stamped_file_without_tables_does_not_take_the_snapshot() {
+        let tmp = crate::core::test_isolation::tempdir();
+        let path = tmp.path().join("stamped.db");
+        Connection::open(&path)
+            .expect("open should succeed")
+            .pragma_update(None, "user_version", Versions::Second as i64)
+            .expect("stamp should be set");
+
+        let conn = open_and_migrate(&path, &counting_schema(), MigrationMode::GatedByVersion)
+            .expect("the file should open");
+
+        assert_eq!(built_by(&conn), (false, false), "no snapshot, no step");
+        assert_eq!(identity(&conn), (0, Versions::Second as i64));
+    }
+
+    /// A stamp another process writes while this one waits for the lock, on a
+    /// file that still has no table: the file has a history now, and is not
+    /// created from the snapshot.
+    #[test]
+    fn test_a_stamp_written_while_waiting_for_the_lock_rules_out_the_snapshot() {
+        let tmp = crate::core::test_isolation::tempdir();
+        let path = tmp.path().join("shared.db");
+        let other = Connection::open(&path).expect("open should succeed");
+        testing::enable_wal(&other);
+        other
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("lock should succeed");
+
+        let opener = testing::spawn_waiter(&path, |conn| {
+            apply_migrations(conn, &counting_schema(), MigrationMode::GatedByVersion)
+        });
+        opener.wait_until_blocked();
+        other
+            .execute_batch(&format!(
+                "PRAGMA user_version = {}; COMMIT;",
+                Versions::Second as i64
+            ))
+            .expect("the stamp should be written");
+        opener
+            .join()
+            .expect("the opener should find a stamped file");
+
+        assert_eq!(built_by(&other), (false, false));
+    }
+
+    /// The tag and the stamp are compared too, whatever the structure says.
+    #[test]
+    fn test_the_equivalence_check_compares_the_tag_and_the_stamp() {
+        let database = |tag: i32, stamp: i64| {
+            let conn = Connection::open_in_memory().expect("open should succeed");
+            conn.execute_batch(&format!(
+                "CREATE TABLE t (a INTEGER);
+                 PRAGMA application_id = {tag};
+                 PRAGMA user_version = {stamp};"
+            ))
+            .expect("database should be written");
+            conn
+        };
+
+        assert!(
+            testing::differences_between(&database(TEST_ID, 2), &database(TEST_ID, 2)).is_empty()
+        );
+        let stamps = testing::differences_between(&database(TEST_ID, 2), &database(TEST_ID, 1));
+        assert!(
+            stamps.iter().any(|line| line.contains("user_version 2")) && stamps.len() == 2,
+            "{stamps:#?}"
+        );
+        let tags = testing::differences_between(&database(TEST_ID, 2), &database(OTHER_ID, 2));
+        assert!(
+            tags.iter()
+                .any(|line| line.contains("application_id 0x52544b01"))
+                && tags.len() == 2,
+            "{tags:#?}"
+        );
+    }
+
+    #[test]
+    fn test_init_replays_the_steps_on_a_database_with_tables_and_not_on_an_empty_one() {
+        let tmp = crate::core::test_isolation::tempdir();
+        let empty = tmp.path().join("empty.db");
+        std::fs::write(&empty, b"").expect("file should be written");
+        let conn = open_existing_and_migrate(&empty, &counting_schema(), MigrationMode::Always)
+            .expect("an empty file should open")
+            .expect("the file exists");
+        assert_eq!(
+            built_by(&conn),
+            (true, false),
+            "an empty file takes the snapshot"
+        );
+        assert_eq!(identity(&conn), current_identity());
+
+        // The database is no longer empty, so init replays the steps on it.
+        let replayed = open_existing_and_migrate(&empty, &counting_schema(), MigrationMode::Always)
+            .expect("the steps should run on a database with tables")
+            .expect("the file exists");
+        assert_eq!(built_by(&replayed), (true, true), "the steps ran on top");
+        assert_eq!(
+            snapshot_runs(&replayed),
+            1,
+            "the snapshot did not run again"
+        );
+    }
+
+    /// The other process creates the database while this one waits for the
+    /// lock: this one finds it current and creates nothing.
+    #[test]
+    fn test_a_second_creator_finds_the_database_the_first_created() {
+        let tmp = crate::core::test_isolation::tempdir();
+        let path = tmp.path().join("shared.db");
+        let first = Connection::open(&path).expect("open should succeed");
+        testing::enable_wal(&first);
+        first
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("lock should succeed");
+
+        let second = testing::spawn_waiter(&path, |conn| {
+            apply_migrations(conn, &counting_schema(), MigrationMode::GatedByVersion)
+        });
+        second.wait_until_blocked();
+        first
+            .execute_batch(&format!(
+                "{COUNTING_SNAPSHOT}
+                 PRAGMA application_id = {TEST_ID};
+                 PRAGMA user_version = {};
+                 COMMIT;",
+                Versions::Second as i64
+            ))
+            .expect("the first creator should commit");
+        second
+            .join()
+            .expect("the second opener should find the database current");
+
+        assert_eq!(built_by(&first), (true, false), "no step ran in the second");
+        assert_eq!(snapshot_runs(&first), 1);
+        assert_eq!(identity(&first), current_identity());
+    }
+
+    /// Two real openers racing on a path nobody has created: whatever the
+    /// interleaving, both succeed and the snapshot ran once.
+    #[test]
+    fn test_two_openers_racing_on_a_new_path_create_it_once() {
+        use std::sync::{Arc, Barrier};
+
+        for _ in 0..20 {
+            let tmp = crate::core::test_isolation::tempdir();
+            let path = tmp.path().join("raced.db");
+            let start = Arc::new(Barrier::new(2));
+            let openers: Vec<_> = (0..2)
+                .map(|_| {
+                    let (path, start) = (path.clone(), Arc::clone(&start));
+                    std::thread::spawn(move || {
+                        start.wait();
+                        open_and_migrate(&path, &counting_schema(), MigrationMode::GatedByVersion)
+                            .map(|_| ())
+                    })
+                })
+                .collect();
+            for opener in openers {
+                opener
+                    .join()
+                    .expect("an opener should not panic")
+                    .expect("both openers should succeed");
+            }
+
+            let conn = Connection::open(&path).expect("open should succeed");
+            assert_eq!(built_by(&conn), (true, false));
+            assert_eq!(snapshot_runs(&conn), 1);
+            assert_eq!(identity(&conn), current_identity());
+        }
+    }
+
+    #[test]
+    fn test_a_failing_snapshot_leaves_the_database_empty_and_unstamped() {
+        let conn = Connection::open_in_memory().expect("open should succeed");
+        let broken = Schema {
+            snapshot: "CREATE TABLE from_snapshot (x INTEGER); CREATE TABLE (",
+            ..counting_schema()
+        };
+
+        let err = apply_migrations(&conn, &broken, MigrationMode::GatedByVersion)
+            .expect_err("a broken snapshot should fail");
+
+        assert!(
+            format!("{err:#}").contains("Failed to create the tracking DB from its snapshot"),
+            "{err:#}"
+        );
+        assert_eq!(identity(&conn), (0, 0));
+        assert_eq!(
+            built_by(&conn),
+            (false, false),
+            "its first statement is rolled back"
+        );
+    }
+
+    #[test]
+    fn test_a_snapshot_rolled_back_by_sqlite_is_not_stamped() {
+        let conn = Connection::open_in_memory().expect("open should succeed");
+        let rolled_back = Schema {
+            snapshot: "CREATE TABLE from_snapshot (x INTEGER); ROLLBACK;",
+            ..counting_schema()
+        };
+
+        let err = apply_migrations(&conn, &rolled_back, MigrationMode::GatedByVersion)
+            .expect_err("a rolled-back snapshot should fail");
+
+        assert!(format!("{err:#}").contains("rolled back"), "{err:#}");
+        assert_eq!(identity(&conn), (0, 0));
+    }
+
+    #[test]
+    fn test_a_schema_without_steps_never_uses_its_snapshot() {
+        let conn = Connection::open_in_memory().expect("open should succeed");
+        let stepless = Schema {
+            steps: &[],
+            ..counting_schema()
+        };
+
+        apply_migrations(&conn, &stepless, MigrationMode::GatedByVersion)
+            .expect("nothing to apply");
+
+        assert_eq!(built_by(&conn), (false, false));
+        assert_eq!(identity(&conn), (0, 0));
+    }
+
+    /// A snapshot and steps that agree: the equivalence check finds nothing.
+    const AGREEING_STEPS: &[(Versions, Migration)] = &[
+        (Versions::First, |conn| {
+            conn.execute_batch(
+                "CREATE TABLE t (a INTEGER NOT NULL, b TEXT DEFAULT '', PRIMARY KEY (a));
+                 CREATE INDEX idx_b_a ON t(b, a DESC);",
+            )?;
+            Ok(())
+        }),
+        (Versions::Second, |conn| {
+            conn.execute_batch(
+                "ALTER TABLE t ADD COLUMN c INTEGER DEFAULT 0;
+                 CREATE UNIQUE INDEX idx_c ON t(c);",
+            )?;
+            Ok(())
+        }),
+    ];
+    const AGREEING_SNAPSHOT: &str = "
+        CREATE TABLE t (a INTEGER NOT NULL, b TEXT DEFAULT '', c INTEGER DEFAULT 0, PRIMARY KEY (a));
+        CREATE INDEX idx_b_a ON t(b, a DESC);
+        CREATE UNIQUE INDEX idx_c ON t(c);
+    ";
+
+    fn equivalence_schema(snapshot: &'static str) -> Schema<'static, Versions> {
+        Schema {
+            snapshot,
+            steps: AGREEING_STEPS,
+            ..counting_schema()
+        }
+    }
+
+    #[test]
+    fn test_the_equivalence_check_accepts_a_snapshot_that_matches_its_steps() {
+        assert_eq!(
+            testing::snapshot_differences(&equivalence_schema(AGREEING_SNAPSHOT)),
+            Vec::<String>::new()
+        );
+        testing::assert_snapshot_matches_steps(&equivalence_schema(AGREEING_SNAPSHOT));
+    }
+
+    /// Each way a snapshot can drift from its steps is found, and named.
+    #[test]
+    fn test_the_equivalence_check_names_what_differs() {
+        let cases = [
+            (
+                "a missing column",
+                "CREATE TABLE t (a INTEGER NOT NULL, b TEXT DEFAULT '', PRIMARY KEY (a));
+                 CREATE INDEX idx_b_a ON t(b, a DESC);
+                 CREATE UNIQUE INDEX idx_c ON t(a);",
+                "column t.c",
+            ),
+            (
+                "columns in another order",
+                "CREATE TABLE t (a INTEGER NOT NULL, c INTEGER DEFAULT 0, b TEXT DEFAULT '', PRIMARY KEY (a));
+                 CREATE INDEX idx_b_a ON t(b, a DESC);
+                 CREATE UNIQUE INDEX idx_c ON t(c);",
+                "column t.c: position 1",
+            ),
+            (
+                "a different type",
+                "CREATE TABLE t (a INTEGER NOT NULL, b TEXT DEFAULT '', c TEXT DEFAULT 0, PRIMARY KEY (a));
+                 CREATE INDEX idx_b_a ON t(b, a DESC);
+                 CREATE UNIQUE INDEX idx_c ON t(c);",
+                "type \"INTEGER\"",
+            ),
+            (
+                "a different default",
+                "CREATE TABLE t (a INTEGER NOT NULL, b TEXT DEFAULT 'x', c INTEGER DEFAULT 0, PRIMARY KEY (a));
+                 CREATE INDEX idx_b_a ON t(b, a DESC);
+                 CREATE UNIQUE INDEX idx_c ON t(c);",
+                "default Some(\"''\")",
+            ),
+            (
+                "a missing NOT NULL",
+                "CREATE TABLE t (a INTEGER, b TEXT DEFAULT '', c INTEGER DEFAULT 0, PRIMARY KEY (a));
+                 CREATE INDEX idx_b_a ON t(b, a DESC);
+                 CREATE UNIQUE INDEX idx_c ON t(c);",
+                "not null 1",
+            ),
+            (
+                "a missing index",
+                "CREATE TABLE t (a INTEGER NOT NULL, b TEXT DEFAULT '', c INTEGER DEFAULT 0, PRIMARY KEY (a));
+                 CREATE UNIQUE INDEX idx_c ON t(c);",
+                "index idx_b_a",
+            ),
+            (
+                "an index that is not unique",
+                "CREATE TABLE t (a INTEGER NOT NULL, b TEXT DEFAULT '', c INTEGER DEFAULT 0, PRIMARY KEY (a));
+                 CREATE INDEX idx_b_a ON t(b, a DESC);
+                 CREATE INDEX idx_c ON t(c);",
+                "unique 1",
+            ),
+            (
+                "index columns in another order",
+                "CREATE TABLE t (a INTEGER NOT NULL, b TEXT DEFAULT '', c INTEGER DEFAULT 0, PRIMARY KEY (a));
+                 CREATE INDEX idx_b_a ON t(a DESC, b);
+                 CREATE UNIQUE INDEX idx_c ON t(c);",
+                "columns (b, a DESC)",
+            ),
+            (
+                "an index direction",
+                "CREATE TABLE t (a INTEGER NOT NULL, b TEXT DEFAULT '', c INTEGER DEFAULT 0, PRIMARY KEY (a));
+                 CREATE INDEX idx_b_a ON t(b, a);
+                 CREATE UNIQUE INDEX idx_c ON t(c);",
+                "columns (b, a DESC)",
+            ),
+            (
+                "an extra table",
+                "CREATE TABLE t (a INTEGER NOT NULL, b TEXT DEFAULT '', c INTEGER DEFAULT 0, PRIMARY KEY (a));
+                 CREATE INDEX idx_b_a ON t(b, a DESC);
+                 CREATE UNIQUE INDEX idx_c ON t(c);
+                 CREATE TABLE extra (x INTEGER);",
+                "table extra",
+            ),
+        ];
+        for (what, snapshot, expected) in cases {
+            let differences = testing::snapshot_differences(&equivalence_schema(snapshot));
+            assert!(
+                differences.iter().any(|line| line.contains(expected)),
+                "{what}: a difference naming `{expected}` is expected, got {differences:#?}"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "a schema change updates its step and its snapshot together")]
+    fn test_a_snapshot_that_drifted_fails_the_equivalence_assertion_with_the_rule() {
+        testing::assert_snapshot_matches_steps(&equivalence_schema(
+            "CREATE TABLE t (a INTEGER NOT NULL, b TEXT DEFAULT '', PRIMARY KEY (a));
+             CREATE INDEX idx_b_a ON t(b, a DESC);
+             CREATE UNIQUE INDEX idx_c ON t(a);",
+        ));
     }
 
     #[cfg(unix)]
