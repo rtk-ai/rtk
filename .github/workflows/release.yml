@@ -559,6 +559,99 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
+  macports:
+    name: Submit MacPorts update
+    needs: [release]
+    if: ${{ !inputs.prerelease && vars.MACPORTS_FORK != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # Submission failures must not prevent cd.yml from advancing 'latest'.
+    continue-on-error: true
+    concurrency:
+      group: macports-release-update
+      cancel-in-progress: false
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+    steps:
+      - name: Validate configuration and stable tag
+        id: version
+        env:
+          MACPORTS_TOKEN: ${{ secrets.MACPORTS_TOKEN }}
+        run: |
+          if [ -z "$MACPORTS_TOKEN" ]; then
+            echo "::error::MACPORTS_FORK is configured but MACPORTS_TOKEN is missing"
+            exit 1
+          fi
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::MacPorts updates require a stable vMAJOR.MINOR.PATCH tag"
+            exit 1
+          fi
+          echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout release scripts
+        uses: actions/checkout@v7
+        with:
+          path: rtk-source
+          persist-credentials: false
+
+      - name: Checkout current MacPorts port
+        uses: actions/checkout@v7
+        with:
+          repository: macports/macports-ports
+          ref: master
+          path: macports-repo
+          sparse-checkout: sysutils/rtk
+          persist-credentials: false
+
+      - name: Check that the initial port has been accepted
+        id: port
+        run: |
+          if [ -f macports-repo/sysutils/rtk/Portfile ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "RTK is not in the MacPorts index yet; skipping update submission." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Download tagged source archive
+        if: steps.port.outputs.available == 'true'
+        run: |
+          curl --fail --location --retry 3 \
+            "https://github.com/rtk-ai/rtk/archive/refs/tags/$RELEASE_TAG.tar.gz" \
+            --output release-source.tar.gz
+
+      - name: Check source metadata and update the Portfile
+        if: steps.port.outputs.available == 'true'
+        run: |
+          python3 rtk-source/scripts/update-macports.py \
+            --tag "$RELEASE_TAG" \
+            --portfile macports-repo/sysutils/rtk/Portfile \
+            --source release-source.tar.gz
+
+      - name: Open or update MacPorts pull request
+        if: steps.port.outputs.available == 'true'
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8
+        with:
+          token: ${{ secrets.MACPORTS_TOKEN }}
+          path: macports-repo
+          push-to-fork: ${{ vars.MACPORTS_FORK }}
+          base: master
+          branch: rtk-update-${{ steps.version.outputs.version }}
+          add-paths: sysutils/rtk/Portfile
+          commit-message: 'rtk: update to ${{ steps.version.outputs.version }}'
+          title: 'rtk: update to ${{ steps.version.outputs.version }}'
+          body: |
+            Update RTK to ${{ env.RELEASE_TAG }}.
+
+            Release: https://github.com/rtk-ai/rtk/releases/tag/${{ env.RELEASE_TAG }}
+
+            SHA-256, RIPEMD-160, and size were calculated from the tagged GitHub
+            source archive. The source package version matches the release tag;
+            cargo.crates was regenerated from its Cargo.lock for offline builds.
+            Existing Portfile metadata is preserved; revision is reset for the
+            new version. Installation tests have not been run by this job.
+
   winget:
     name: Update winget manifest
     needs: [release]
