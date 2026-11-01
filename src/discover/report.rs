@@ -123,9 +123,9 @@ pub struct DiscoverReport {
     /// number in this report is an estimate.
     ///
     /// NOT an install date: `hook_decisions` rows are pruned by the same
-    /// `DEFAULT_HISTORY_DAYS` retention window as the rest of the tracking DB
+    /// `tracking.history_days` retention window as the rest of the tracking DB
     /// (`Tracker::cleanup_hook_decisions`), so this date is a rolling boundary —
-    /// on a machine with months of real usage it still reads as "~90 days ago",
+    /// on a long-running install it settles near "now minus `tracking.history_days`",
     /// not the date logging actually began.
     pub measured_since: Option<String>,
     pub since_days: u64,
