@@ -151,6 +151,29 @@ To install the Claude Code hook (registered in `~/.claude/settings.json`, applie
 rtk init --global
 ```
 
+## Shell Completion
+
+Enable tab-completion for `rtk` subcommands:
+
+```bash
+# bash — current shell, or add the source line to ~/.bashrc
+source <(rtk completions bash)
+
+# zsh — current shell, or add the source line to ~/.zshrc
+source <(rtk completions zsh)
+
+# fish — current shell, or copy the script to ~/.config/fish/completions/rtk.fish
+rtk completions fish | source
+
+# powershell — add this line to your $PROFILE
+rtk completions powershell | Out-String | Invoke-Expression
+
+# elvish — copy the script to ~/.config/elvish/lib/rtk-completions.elv and eval it
+rtk completions elvish
+```
+
+Supported shells: `bash`, `zsh`, `fish`, `powershell`, `elvish`.
+
 ## Uninstall
 
 ```bash
