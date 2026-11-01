@@ -90,6 +90,30 @@ pub fn home() -> Option<PathBuf> {
     }
 }
 
+/// Codex's system policy namespace. Tests must not inspect the host's policy.
+/// Native managed-policy stores on macOS and Windows are not file-only;
+/// callers defer there rather than infer their absence from a directory.
+pub(crate) fn codex_system_config_dir() -> PathBuf {
+    #[cfg(all(not(test), not(windows)))]
+    {
+        PathBuf::from("/etc/codex")
+    }
+    #[cfg(all(not(test), windows))]
+    {
+        PathBuf::from(
+            env_path("ProgramData")
+                .filter(|p| !p.is_empty())
+                .unwrap_or_else(|| OsString::from(r"C:\ProgramData")),
+        )
+        .join("OpenAI")
+        .join("Codex")
+    }
+    #[cfg(test)]
+    {
+        test_isolation::root().join("system-codex")
+    }
+}
+
 /// [`data`], falling back to rtk's own directory under `root` where the
 /// platform gives no answer. For callers that carry on without one rather
 /// than failing.
