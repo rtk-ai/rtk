@@ -3085,6 +3085,7 @@ mod tests {
                 "rtk tree",
                 "rtk trunk",
                 "rtk wc",
+                "rtk xcodebuild",
                 "rtk yamllint",
             ]
         );
