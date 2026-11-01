@@ -33,7 +33,7 @@ pub async fn execute(
     match req.provider {
         Provider::Anthropic => run_anthropic(state, base, headers, req, memory).await,
         Provider::Openai => run_openai(state, base, headers, req, memory).await,
-        Provider::Google => {
+        Provider::Google | Provider::OpenaiResponses => {
             unreachable!("ccr is only dispatched for anthropic/openai (see server::handle)")
         }
     }

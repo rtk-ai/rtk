@@ -8,7 +8,8 @@
 //! returns silence rather than disrupting the session.
 
 use std::io::Write;
-use std::time::{Duration, Instant};
+use std::path::Path;
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
 use rtk_engine::harness::{Channel, HarnessProfile};
@@ -24,23 +25,66 @@ pub(super) fn run() {
 
 pub(crate) fn response_for(agent: &str) -> Option<String> {
     let profile = rtk_engine::harness::profile(agent)?;
-    let keepalive = base_url(agent).and_then(|(var, url)| ensure_proxy_at(var, &url));
+    let keepalive = base_url(agent).and_then(|(setting, url)| ensure_proxy_at(&setting, &url));
+    if let Some(message) = keepalive.as_deref().filter(|_| agent != "claude-code") {
+        let _ = writeln!(std::io::stderr(), "{message}");
+    }
     let context = crate::core::pipeline_config::session_start_text(
         &crate::core::pipeline_config::load().resolved,
     );
     encode(profile, keepalive.as_deref(), context.as_deref()).map(|v| v.to_string())
 }
 
-fn base_url(agent: &str) -> Option<(&'static str, String)> {
+fn base_url(agent: &str) -> Option<(String, String)> {
     match agent {
-        "claude-code" => {
-            crate::core::user_env::var("ANTHROPIC_BASE_URL").map(|url| ("ANTHROPIC_BASE_URL", url))
-        }
-        "codex" => {
-            crate::core::user_env::var("OPENAI_BASE_URL").map(|url| ("OPENAI_BASE_URL", url))
-        }
+        "claude-code" => crate::core::user_env::var("ANTHROPIC_BASE_URL")
+            .map(|url| ("ANTHROPIC_BASE_URL".to_string(), url)),
+        "codex" => crate::hooks::init::codex_openai_base_url()
+            .filter(|url| rtk_owned(url, crate::hooks::init::CODEX_PROXY_PATHS))
+            .map(|url| ("openai_base_url".to_string(), url)),
+        "vibe" => crate::hooks::init::vibe_mistral_api_base()
+            .filter(|url| rtk_owned(url, &[crate::hooks::init::VIBE_PROXY_PATH]))
+            .map(|url| ("providers[mistral].api_base".to_string(), url)),
         _ => None,
     }
+}
+
+fn rtk_owned(url: &str, paths: &[&str]) -> bool {
+    crate::llm_proxy::is_rtk_url(url, crate::llm_proxy::DEFAULT_BIND, paths)
+        || crate::llm_proxy::is_rtk_url(url, &crate::llm_proxy::daemon_bind(), paths)
+}
+
+pub(crate) fn routed_through_rtk(agent: &str) -> bool {
+    base_url(agent).is_some_and(|(_, url)| loopback_hostport(&url).is_some())
+}
+
+pub(crate) fn throttled_keepalive(agent: &str, interval: Duration) -> Option<String> {
+    let (setting, url) = base_url(agent)?;
+    let stamp = crate::core::user_dirs::config()?
+        .join("llm-proxy")
+        .join(format!("keepalive.{agent}"));
+    if !stamp_due(&stamp, SystemTime::now(), interval) {
+        return None;
+    }
+    touch(&stamp);
+    ensure_proxy_at(&setting, &url)
+}
+
+fn stamp_due(stamp: &Path, now: SystemTime, interval: Duration) -> bool {
+    match std::fs::metadata(stamp).and_then(|m| m.modified()) {
+        Ok(modified) => now
+            .duration_since(modified)
+            .map(|age| age >= interval)
+            .unwrap_or(true),
+        Err(_) => true,
+    }
+}
+
+fn touch(stamp: &Path) {
+    if let Some(dir) = stamp.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(stamp, b"");
 }
 
 pub(crate) fn encode(
@@ -64,12 +108,19 @@ pub(crate) fn encode(
             }
             Some(payload)
         }
-        ("codex", _, Some(context)) => Some(json!({
-            "hookSpecificOutput": {
-                "hookEventName": crate::hooks::constants::SESSION_START_KEY,
-                "additionalContext": context,
-            }
-        })),
+        ("codex", keepalive, context) => {
+            let text = [keepalive, context]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            Some(json!({
+                "hookSpecificOutput": {
+                    "hookEventName": crate::hooks::constants::SESSION_START_KEY,
+                    "additionalContext": text,
+                }
+            }))
+        }
         ("cursor", _, Some(context)) => Some(json!({ "additional_context": context })),
         ("antigravity", _, Some(context)) => Some(json!({
             "injectSteps": [{ "systemMessage": context }]
@@ -154,6 +205,25 @@ fn spawn_start(addr: &str) -> anyhow::Result<()> {
         .spawn()
         .context("spawn `rtk llm-proxy start`")?;
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn fake_rtk_daemon() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr").to_string();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut request = [0u8; 1024];
+            let _ = std::io::Read::read(&mut stream, &mut request);
+            let body = r#"{"service":"rtk-proxy"}"#;
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    addr
 }
 
 #[cfg(test)]
@@ -269,17 +339,268 @@ mod tests {
     }
 
     #[test]
-    fn spawn_failure_names_the_variable() {
+    fn spawn_failure_names_the_setting() {
         let out = ensure_proxy_impl(
-            "OPENAI_BASE_URL",
+            "openai_base_url",
             "http://127.0.0.1:8080",
             |_| false,
             |_| Err(anyhow::anyhow!("no binary")),
             Duration::ZERO,
         );
         let message = out.unwrap();
-        assert!(message.contains("OPENAI_BASE_URL points at"));
+        assert!(message.contains("openai_base_url points at"));
         assert!(message.contains("no binary"));
+    }
+
+    #[test]
+    fn the_throttle_fires_on_a_missing_or_old_stamp_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stamp = dir.path().join("llm-proxy").join("keepalive.vibe");
+        let five_minutes = Duration::from_secs(300);
+        assert!(stamp_due(&stamp, SystemTime::now(), five_minutes));
+        touch(&stamp);
+        assert!(stamp.is_file());
+        assert!(!stamp_due(&stamp, SystemTime::now(), five_minutes));
+        assert!(stamp_due(&stamp, SystemTime::now(), Duration::ZERO));
+        assert!(stamp_due(
+            &stamp,
+            SystemTime::now() + Duration::from_secs(600),
+            five_minutes
+        ));
+    }
+
+    fn write_agent_config(home: &Path, relative: &str, text: &str) {
+        let path = home.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).expect("create dir");
+        std::fs::write(path, text).expect("write config");
+    }
+
+    fn set_age(path: &Path, age: Duration) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("open stamp")
+            .set_modified(SystemTime::now() - age)
+            .expect("set mtime");
+    }
+
+    #[test]
+    fn vibe_base_url_is_the_mistral_api_base_when_rtk_owns_it() {
+        let home = crate::core::test_isolation::tempdir();
+        write_agent_config(
+            home.path(),
+            ".vibe/config.toml",
+            "[[providers]]\nname = \"mistral\"\napi_base = \"http://127.0.0.1:8080/mistral/v1\"\n",
+        );
+        crate::core::test_isolation::with_root(home.path(), || {
+            crate::core::user_env::with_vars(&[("RTK_PROXY_BIND", None)], || {
+                assert_eq!(
+                    base_url("vibe"),
+                    Some((
+                        "providers[mistral].api_base".to_string(),
+                        "http://127.0.0.1:8080/mistral/v1".to_string()
+                    ))
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn vibe_base_url_ignores_a_foreign_api_base() {
+        let home = crate::core::test_isolation::tempdir();
+        write_agent_config(
+            home.path(),
+            ".vibe/config.toml",
+            "[[providers]]\nname = \"mistral\"\napi_base = \"https://api.mistral.ai/v1\"\n",
+        );
+        crate::core::test_isolation::with_root(home.path(), || {
+            assert_eq!(base_url("vibe"), None);
+        });
+    }
+
+    #[test]
+    fn a_users_own_loopback_server_is_not_routed_through_rtk() {
+        for own in [
+            "http://127.0.0.1:8080/v1",
+            "http://127.0.0.1:8080",
+            "http://127.0.0.1:4000/v1",
+            "http://localhost:4000/openai/v1",
+        ] {
+            let home = crate::core::test_isolation::tempdir();
+            write_agent_config(
+                home.path(),
+                ".codex/config.toml",
+                &format!("openai_base_url = \"{own}\"\n"),
+            );
+            write_agent_config(
+                home.path(),
+                ".vibe/config.toml",
+                &format!("[[providers]]\nname = \"mistral\"\napi_base = \"{own}\"\n"),
+            );
+            crate::core::test_isolation::with_root(home.path(), || {
+                crate::core::user_env::with_vars(
+                    &[("CODEX_HOME", None), ("RTK_PROXY_BIND", None)],
+                    || {
+                        for agent in ["codex", "vibe"] {
+                            assert_eq!(base_url(agent), None, "{agent}: {own}");
+                            assert!(!routed_through_rtk(agent), "{agent}: {own}");
+                            assert_eq!(
+                                throttled_keepalive(agent, Duration::ZERO),
+                                None,
+                                "{agent}: {own}"
+                            );
+                        }
+                    },
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn claude_code_is_routed_by_rtks_url_not_a_remote_or_unset_one() {
+        for (url, routed) in [
+            (Some("http://127.0.0.1:8080"), true),
+            (Some("https://gw.corp"), false),
+            (None, false),
+        ] {
+            crate::core::user_env::with_vars(&[(VAR, url)], || {
+                assert_eq!(routed_through_rtk("claude-code"), routed, "{url:?}");
+            });
+        }
+    }
+
+    #[test]
+    fn the_default_port_is_rtks_even_when_the_daemon_listens_elsewhere() {
+        let paths = crate::hooks::init::CODEX_PROXY_PATHS;
+        crate::core::user_env::with_vars(&[("RTK_PROXY_BIND", Some("127.0.0.1:9191"))], || {
+            assert!(rtk_owned("http://127.0.0.1:8080/openai/v1", paths));
+            assert!(rtk_owned("http://127.0.0.1:9191/openai/v1", paths));
+            assert!(!rtk_owned("http://127.0.0.1:7000/openai/v1", paths));
+        });
+    }
+
+    #[test]
+    fn codex_base_url_comes_from_the_config_key_not_the_environment() {
+        let home = crate::core::test_isolation::tempdir();
+        write_agent_config(
+            home.path(),
+            ".codex/config.toml",
+            "openai_base_url = \"http://127.0.0.1:8080/openai/v1\"\n",
+        );
+        crate::core::test_isolation::with_root(home.path(), || {
+            crate::core::user_env::with_vars(
+                &[
+                    ("CODEX_HOME", None),
+                    ("RTK_PROXY_BIND", None),
+                    (
+                        "OPENAI_BASE_URL",
+                        Some("http://127.0.0.1:8080/chatgpt/backend-api/codex"),
+                    ),
+                ],
+                || {
+                    assert_eq!(
+                        base_url("codex"),
+                        Some((
+                            "openai_base_url".to_string(),
+                            "http://127.0.0.1:8080/openai/v1".to_string()
+                        ))
+                    );
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn codex_base_url_is_none_without_the_config_key() {
+        let home = crate::core::test_isolation::tempdir();
+        crate::core::test_isolation::with_root(home.path(), || {
+            crate::core::user_env::with_vars(
+                &[
+                    ("CODEX_HOME", None),
+                    ("RTK_PROXY_BIND", None),
+                    ("OPENAI_BASE_URL", Some("http://127.0.0.1:8080/openai/v1")),
+                ],
+                || assert_eq!(base_url("codex"), None),
+            );
+        });
+    }
+
+    #[test]
+    fn the_throttle_boundary_is_inclusive() {
+        let dir = crate::core::test_isolation::tempdir();
+        let stamp = dir.path().join("keepalive.vibe");
+        touch(&stamp);
+        let modified = std::fs::metadata(&stamp).unwrap().modified().unwrap();
+        let interval = Duration::from_secs(300);
+        assert!(stamp_due(&stamp, modified + interval, interval));
+        assert!(!stamp_due(
+            &stamp,
+            modified + interval - Duration::from_secs(1),
+            interval
+        ));
+    }
+
+    #[test]
+    fn a_stamp_from_the_future_is_due() {
+        let dir = crate::core::test_isolation::tempdir();
+        let stamp = dir.path().join("keepalive.vibe");
+        touch(&stamp);
+        let modified = std::fs::metadata(&stamp).unwrap().modified().unwrap();
+        assert!(stamp_due(
+            &stamp,
+            modified - Duration::from_secs(3600),
+            Duration::from_secs(300)
+        ));
+    }
+
+    #[test]
+    fn throttled_keepalive_stamps_when_due_and_stays_quiet_until_the_interval_passes() {
+        let home = crate::core::test_isolation::tempdir();
+        let daemon = fake_rtk_daemon();
+        let url = format!("http://{daemon}/mistral/v1");
+        write_agent_config(
+            home.path(),
+            ".vibe/config.toml",
+            &format!("[[providers]]\nname = \"mistral\"\napi_base = \"{url}\"\n"),
+        );
+        crate::core::test_isolation::with_root(home.path(), || {
+            crate::core::user_env::with_vars(&[("RTK_PROXY_BIND", Some(daemon.as_str()))], || {
+                let stamp = crate::core::user_dirs::config()
+                    .unwrap()
+                    .join("llm-proxy")
+                    .join("keepalive.vibe");
+                let interval = Duration::from_secs(3600);
+                assert!(!stamp.exists());
+
+                assert_eq!(throttled_keepalive("vibe", interval), None);
+                assert!(stamp.is_file(), "a due keep-alive must leave a stamp");
+
+                set_age(&stamp, Duration::from_secs(60));
+                let before = std::fs::metadata(&stamp).unwrap().modified().unwrap();
+                assert_eq!(throttled_keepalive("vibe", interval), None);
+                let after = std::fs::metadata(&stamp).unwrap().modified().unwrap();
+                assert_eq!(before, after, "a fresh stamp must not be rewritten");
+
+                set_age(&stamp, Duration::from_secs(7200));
+                let before = std::fs::metadata(&stamp).unwrap().modified().unwrap();
+                assert_eq!(throttled_keepalive("vibe", interval), None);
+                let after = std::fs::metadata(&stamp).unwrap().modified().unwrap();
+                assert!(after > before, "an expired stamp must be renewed");
+            });
+        });
+    }
+
+    #[test]
+    fn throttled_keepalive_does_nothing_for_an_agent_not_routed_through_rtk() {
+        let home = crate::core::test_isolation::tempdir();
+        crate::core::test_isolation::with_root(home.path(), || {
+            assert_eq!(throttled_keepalive("vibe", Duration::from_secs(300)), None);
+            let stamp = crate::core::user_dirs::config()
+                .unwrap()
+                .join("llm-proxy")
+                .join("keepalive.vibe");
+            assert!(!stamp.exists());
+        });
     }
 
     #[test]
@@ -299,7 +620,13 @@ mod tests {
         let codex = encode(profile("codex"), None, Some("be terse")).unwrap();
         assert_eq!(codex["hookSpecificOutput"]["hookEventName"], "SessionStart");
         assert_eq!(codex["hookSpecificOutput"]["additionalContext"], "be terse");
-        assert_eq!(encode(profile("codex"), Some("started"), None), None);
+        let codex = encode(profile("codex"), Some("started"), None).unwrap();
+        assert_eq!(codex["hookSpecificOutput"]["additionalContext"], "started");
+        let codex = encode(profile("codex"), Some("started"), Some("be terse")).unwrap();
+        assert_eq!(
+            codex["hookSpecificOutput"]["additionalContext"],
+            "started\n\nbe terse"
+        );
 
         assert_eq!(
             encode(profile("cursor"), None, Some("be terse")).unwrap(),

@@ -420,6 +420,9 @@ fn run_antigravity_mode_with_workspace(
         );
         print_legacy_install_action(&legacy_action, false);
         println!("  Restart Antigravity to load the plugin. Test with: git status");
+        if let Some(line) = crate::llm_proxy::proxy_unavailable_line("antigravity") {
+            println!("  {line}");
+        }
         println!(
             "\n  Note: Antigravity checks permissions after hooks rewrite a command.\n  \
              If you use command allowlists, ensure `rtk` commands are permitted,\n  \
