@@ -30,6 +30,19 @@ fn is_rtk_binary(binary: &str) -> bool {
 }
 
 fn is_rtk_hook_command(command: &str, agent: &str) -> bool {
+    // Strip only shell boundary whitespace; CR stays visible to preserve rejection.
+    let command = command.trim_matches(|character| matches!(character, ' ' | '\t' | '\n'));
+    let tokens = crate::discover::lexer::tokenize_with_newlines(command);
+    if tokens.iter().any(|token| match token.kind {
+        crate::discover::lexer::TokenKind::Operator
+        | crate::discover::lexer::TokenKind::Pipe(_)
+        | crate::discover::lexer::TokenKind::Redirect => true,
+        crate::discover::lexer::TokenKind::Shellism => token.value == "&",
+        _ => false,
+    }) {
+        return false;
+    }
+
     let parts = crate::discover::lexer::shell_split(command);
     let [parsed_binary, hook, target] = parts.as_slice() else {
         return false;
