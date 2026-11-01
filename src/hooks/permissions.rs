@@ -592,7 +592,8 @@ fn gemini_settings() -> Option<Value> {
     let global = global_config(GEMINI_DIR, SETTINGS_JSON);
     let global_value = match &global {
         JsonRead::Parsed(value) => Some(value),
-        JsonRead::Missing | JsonRead::Error => None,
+        JsonRead::Missing => None,
+        JsonRead::Error => return None,
     };
     let trusted = user_env::var("GEMINI_CLI_TRUST_WORKSPACE").as_deref() == Some("true")
         || !global_value
