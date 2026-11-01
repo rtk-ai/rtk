@@ -2084,18 +2084,6 @@ fn rewrite_command_part(rule: &RtkRule, cmd_part: &str) -> Option<String> {
         return Some(rewritten);
     }
 
-    // #196: gh with --json/--jq/--template produces structured output that
-    // rtk gh would corrupt — skip rewrite so the caller gets raw JSON.
-    if rule.rtk_cmd == "rtk gh" {
-        let args_lower = cmd_part.to_lowercase();
-        if args_lower.contains("--json")
-            || args_lower.contains("--jq")
-            || args_lower.contains("--template")
-        {
-            return None;
-        }
-    }
-
     // For the Composer-resolved php tools, normalize the leading invocation
     // (php wrapper + ini flags, ./, vendor/bin, composer bin-dir) exactly as
     // classify_command does, so a small canonical prefix list matches every
@@ -6346,8 +6334,10 @@ mod tests {
                 Some("rtk git status ${PKG}2>/dev/null"),
             ),
             ("git status 2>&1", Some("rtk git status 2>&1")),
-            // gh's structured-output flags still skip the rewrite with a redirect.
-            ("gh pr list --json number 2>&1", None),
+            (
+                "gh pr list --json number 2>&1",
+                Some("rtk gh pr list --json number 2>&1"),
+            ),
             (
                 "vendor/bin/phpunit tests 2>&1",
                 Some("rtk phpunit tests 2>&1"),
@@ -7549,37 +7539,47 @@ mod tests {
         }
     }
 
-    // --- #196: gh --json/--jq/--template passthrough ---
+    // --- #196 / #4067: gh --json/--jq/--template is rewritten and passed
+    // through byte-for-byte by `rtk gh`, which never reshapes a caller-chosen
+    // output format (see `gh_cmd::wants_raw_output`). ---
 
     #[test]
-    fn test_rewrite_gh_json_skipped() {
+    fn test_rewrite_gh_json_is_rewritten() {
         assert_eq!(
             rewrite_command_no_prefixes("gh pr list --json number,title", &[]),
-            None
+            Some("rtk gh pr list --json number,title".into())
         );
     }
 
     #[test]
-    fn test_rewrite_gh_jq_skipped() {
+    fn test_rewrite_gh_pr_view_json_is_rewritten() {
+        assert_eq!(
+            rewrite_command_no_prefixes("gh pr view 123 --json reviews", &[]),
+            Some("rtk gh pr view 123 --json reviews".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gh_jq_is_rewritten() {
         assert_eq!(
             rewrite_command_no_prefixes("gh pr list --json number --jq '.[].number'", &[]),
-            None
+            Some("rtk gh pr list --json number --jq '.[].number'".into())
         );
     }
 
     #[test]
-    fn test_rewrite_gh_template_skipped() {
+    fn test_rewrite_gh_template_is_rewritten() {
         assert_eq!(
             rewrite_command_no_prefixes("gh pr view 42 --template '{{.title}}'", &[]),
-            None
+            Some("rtk gh pr view 42 --template '{{.title}}'".into())
         );
     }
 
     #[test]
-    fn test_rewrite_gh_api_json_skipped() {
+    fn test_rewrite_gh_api_json_is_rewritten() {
         assert_eq!(
             rewrite_command_no_prefixes("gh api repos/owner/repo --jq '.name'", &[]),
-            None
+            Some("rtk gh api repos/owner/repo --jq '.name'".into())
         );
     }
 
