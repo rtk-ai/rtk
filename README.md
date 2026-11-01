@@ -93,6 +93,17 @@ rtk gain        # must show the savings dashboard, not "command not found"
 
 > Cargo, pre-built binaries, native Windows, WSL, and uninstall: **[Installation guide](https://www.rtk-ai.app/guide/getting-started/installation)**
 
+## Updating RTK
+
+Use the same package manager that installed it:
+
+```bash
+brew upgrade rtk                 # macOS / Linux (Homebrew)
+winget upgrade rtk-ai.rtk        # Windows
+```
+
+For the install script, re-run the same command from the installation section. After upgrading, re-run the agent setup (`rtk init -g` for global hooks, or the project-scoped command for that agent) so the hook files match the new binary. `rtk --version` and `rtk gain` confirm the update.
+
 ## What You Install
 
 RTK ships as three downloads. The two `rtk` editions install a binary with the **same name** — hooks, scripts and agent config work unchanged across both — so they cannot be installed together. Uninstall one before installing the other.
