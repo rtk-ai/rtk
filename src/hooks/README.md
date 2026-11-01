@@ -112,10 +112,12 @@ Claude Code's rule sources never reach the hook at all (`--settings`,
 `cd`'d away from), so a rule in one of those becomes a prompt rather than a
 refusal. The user docs say so.
 
-The decision records an actual wrap as `AskFishWrap`, separately from an ordinary
-`AskRewrite`. A command the user already typed as `rtk run --shell fish -c ...`
-keeps its normal permission decision even when rewriting removes a leading line
-continuation; the hook does not infer wrap ownership from the resulting string.
+The decision records a wrap it built as `AskFishWrap`, separately from an
+ordinary `AskRewrite`, and only that carries the explicit ask. A command the
+user typed as `rtk run --shell fish -c ...` that the rules only rewrote around
+keeps its normal permission decision, also when the rewrite drops a leading
+line continuation; the hook does not infer wrap ownership from the resulting
+string.
 
 **It is offered only on `rtk hook claude`** (`DenyRules` and
 `check_claude_hook_command` in `permissions.rs`), and only when every Claude Code

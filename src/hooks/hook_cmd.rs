@@ -2075,6 +2075,45 @@ mod tests {
         }
     }
 
+    /// A wrap RTK built asks explicitly, since the host would only judge the
+    /// `rtk run` command, and is logged as an ask. The same text as an
+    /// ordinary ask leaves the decision to the host.
+    #[test]
+    fn test_process_claude_payload_decision_fish_wrap_asks_explicitly() {
+        let cmd = "test -d src; and git status";
+        let wrapped = "rtk run --shell fish -c 'test -d src; and git status'";
+        let v = claude_input_value(cmd);
+        for (decision, expected) in [
+            (HookDecision::AskFishWrap(wrapped.to_string()), Some("ask")),
+            (HookDecision::AskRewrite(wrapped.to_string()), None),
+        ] {
+            match process_claude_payload_from_decision(&v, cmd, decision) {
+                PayloadAction::Rewrite {
+                    decision,
+                    output,
+                    rewritten,
+                    ..
+                } => {
+                    assert_eq!(decision, HookOutcome::Ask, "{expected:?}");
+                    assert_eq!(rewritten, wrapped);
+                    assert_eq!(
+                        output
+                            .pointer("/hookSpecificOutput/updatedInput/command")
+                            .and_then(Value::as_str),
+                        Some(wrapped)
+                    );
+                    assert_eq!(
+                        output
+                            .pointer("/hookSpecificOutput/permissionDecision")
+                            .and_then(Value::as_str),
+                        expected
+                    );
+                }
+                other => panic!("expected Rewrite, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn test_process_claude_payload_decision_deny() {
         let v = claude_input_value("rm -rf /");
