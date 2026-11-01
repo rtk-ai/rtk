@@ -122,6 +122,16 @@ rtk init -g
 | `rtk init -g` | Hook mode | Hook mode |
 | `rtk gain` / analytics | Full | Full |
 
+## Chocolatey (Windows)
+
+```powershell
+choco install rtk
+rtk --version
+rtk init -g --agent cursor   # optional: register Cursor hook
+```
+
+Package source: `packaging/chocolatey/` in the repository. Pushed to [Chocolatey Community](https://community.chocolatey.org/) on stable release when `CHOCOLATEY_API_KEY` is configured.
+
 ## Verify installation
 
 ```bash
