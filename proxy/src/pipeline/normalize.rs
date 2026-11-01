@@ -341,19 +341,25 @@ impl NormalizeTransform {
 
 /// Which tool produced each `tool_use_id` in this request, so a `tool_result`
 /// can be routed to the Read-specific transform.
-fn tool_by_id(body: &serde_json::Value) -> std::collections::HashMap<String, String> {
+/// The Read/NotebookRead exemption: a Read result is the model's view of bytes
+/// on disk — rewriting it can make a later Edit's `old_string` miss, and the
+/// failed edit costs more than the compression saved.
+pub(crate) fn is_read_tool(name: Option<&str>) -> bool {
+    matches!(name, Some("Read") | Some("NotebookRead"))
+}
+
+/// Map `tool_use` id → tool name from the Anthropic-shaped history.
+fn tool_by_id(messages: &[serde_json::Value]) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
-    if let Some(msgs) = body.get("messages").and_then(|m| m.as_array()) {
-        for m in msgs {
-            if let Some(blocks) = m.get("content").and_then(|c| c.as_array()) {
-                for b in blocks {
-                    if b.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                        if let (Some(id), Some(name)) = (
-                            b.get("id").and_then(|v| v.as_str()),
-                            b.get("name").and_then(|v| v.as_str()),
-                        ) {
-                            map.insert(id.to_string(), name.to_string());
-                        }
+    for m in messages {
+        if let Some(blocks) = m.get("content").and_then(|c| c.as_array()) {
+            for b in blocks {
+                if b.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                    if let (Some(id), Some(name)) = (
+                        b.get("id").and_then(|v| v.as_str()),
+                        b.get("name").and_then(|v| v.as_str()),
+                    ) {
+                        map.insert(id.to_string(), name.to_string());
                     }
                 }
             }
@@ -364,7 +370,7 @@ fn tool_by_id(body: &serde_json::Value) -> std::collections::HashMap<String, Str
 
 /// Rewrite a `tool_result`'s content in place, string or block form.
 /// Returns characters removed.
-fn normalise_tool_result(block: &mut serde_json::Value, is_read: bool) -> i64 {
+pub(crate) fn normalise_tool_result(block: &mut serde_json::Value, is_read: bool) -> i64 {
     let mut removed = 0i64;
     match block.get_mut("content") {
         Some(serde_json::Value::String(s)) => {
@@ -406,58 +412,34 @@ impl Transform for NormalizeTransform {
     }
 
     async fn on_request(&self, req: &mut InterceptedRequest) -> AppResult<()> {
-        // Anthropic dialect only: the OpenAI path stores tool output in a
-        // different shape.
-        if !matches!(req.provider, Provider::Anthropic) {
+        // Dialect dispatch: the walk shape differs (Anthropic `content[]`
+        // blocks vs OpenAI `role: "tool"` messages); the rewrite functions are
+        // shared verbatim across dialects.
+        let run: fn(&mut [serde_json::Value]) -> Stats = match req.provider {
+            Provider::Anthropic => run_anthropic,
+            Provider::Openai => crate::pipeline::normalize_openai::run,
+            _ => return Ok(()),
+        };
+        let Some(msgs) = req.body.get_mut("messages").and_then(|m| m.as_array_mut()) else {
             return Ok(());
-        }
-        let tools = tool_by_id(&req.body);
-        let mut chars_removed = 0i64;
-        let mut blocks = 0u64;
-        let mut before = 0usize;
-        let mut after = 0usize;
-        if let Some(msgs) = req.body.get_mut("messages").and_then(|m| m.as_array_mut()) {
-            for m in msgs.iter_mut() {
-                let Some(content) = m.get_mut("content").and_then(|c| c.as_array_mut()) else {
-                    continue;
-                };
-                for b in content.iter_mut() {
-                    if b.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
-                        continue;
-                    }
-                    let is_read = b
-                        .get("tool_use_id")
-                        .and_then(|v| v.as_str())
-                        .and_then(|id| tools.get(id))
-                        .map(|t| t == "Read" || t == "NotebookRead")
-                        .unwrap_or(false);
-                    let pre = block_chars(b);
-                    let removed = normalise_tool_result(b, is_read);
-                    if removed > 0 {
-                        blocks += 1;
-                        chars_removed += removed;
-                        before += pre;
-                        after += block_chars(b);
-                    }
-                }
-            }
-        }
-        if chars_removed > 0 {
-            self.blocks.fetch_add(blocks, Ordering::Relaxed);
+        };
+        let stats = run(msgs);
+        if stats.chars_removed > 0 {
+            self.blocks.fetch_add(stats.blocks, Ordering::Relaxed);
             self.chars_removed
-                .fetch_add(chars_removed as u64, Ordering::Relaxed);
+                .fetch_add(stats.chars_removed as u64, Ordering::Relaxed);
             // Report the saving in TOKENS, which is what the bill is in.
             // Counted on the concatenated before/after text rather than
             // scaled from characters, because the transforms remove
             // short high-frequency substrings whose token cost is not
             // proportional to their length.
-            let saved = (before.saturating_sub(after)) as i64;
+            let saved = (stats.before.saturating_sub(stats.after)) as i64;
             req.record_saving(STAGE, saved);
             tracing::info!(
-                blocks,
-                chars_removed,
+                blocks = stats.blocks,
+                chars_removed = stats.chars_removed,
                 tokens_saved = saved,
-                tokens_before = before,
+                tokens_before = stats.before,
                 "normalize: category-A normalisation applied"
             );
         }
@@ -465,7 +447,48 @@ impl Transform for NormalizeTransform {
     }
 }
 
-fn block_chars(block: &serde_json::Value) -> usize {
+/// Per-request accounting for one normalize pass.
+#[derive(Default)]
+pub(crate) struct Stats {
+    pub blocks: u64,
+    pub chars_removed: i64,
+    pub before: usize,
+    pub after: usize,
+}
+
+/// Anthropic walk: `content[]` blocks with `type: "tool_result"`, in history
+/// order. The rewrite functions are shared with the OpenAI dialect (see
+/// `normalize_openai`).
+fn run_anthropic(messages: &mut [serde_json::Value]) -> Stats {
+    let tools = tool_by_id(messages);
+    let mut stats = Stats::default();
+    for m in messages.iter_mut() {
+        let Some(content) = m.get_mut("content").and_then(|c| c.as_array_mut()) else {
+            continue;
+        };
+        for b in content.iter_mut() {
+            if b.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+                continue;
+            }
+            let is_read = is_read_tool(
+                b.get("tool_use_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|id| tools.get(id).map(|t| t.as_str())),
+            );
+            let pre = block_chars(b);
+            let removed = normalise_tool_result(b, is_read);
+            if removed > 0 {
+                stats.blocks += 1;
+                stats.chars_removed += removed;
+                stats.before += pre;
+                stats.after += block_chars(b);
+            }
+        }
+    }
+    stats
+}
+
+pub(crate) fn block_chars(block: &serde_json::Value) -> usize {
     match block.get("content") {
         Some(serde_json::Value::String(s)) => crate::tokenizer::count(s),
         Some(serde_json::Value::Array(parts)) => parts

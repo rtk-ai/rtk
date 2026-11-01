@@ -7,7 +7,7 @@ use http_body_util::BodyExt;
 use rtk_proxy::{AppState, config::Config, server::build_router};
 use serde_json::{Value, json};
 use tower::ServiceExt; // oneshot
-use wiremock::matchers::method;
+use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// `ccr` arms the one compressing stage; both stores are in-memory so each
@@ -20,6 +20,7 @@ fn cfg(upstream: &str, ccr: bool) -> Config {
         bind: "127.0.0.1:0".into(),
         anthropic_upstream: upstream.to_string(),
         openai_upstream: upstream.to_string(),
+        openai_path: "/v1/chat/completions".to_string(),
         ccr,
         compression: "off".into(),
         pixel_compress: Default::default(),
@@ -62,6 +63,52 @@ fn big_tool_result_request() -> Vec<u8> {
 async fn body_json(resp: axum::response::Response) -> Value {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn openai_path_override_forwards_to_the_configured_endpoint() {
+    let up = MockServer::start().await;
+    let ok = json!({
+        "id":"c","object":"chat.completion","created":1,"model":"m",
+        "choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+        "usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}
+    });
+    // Providers like Z.AI host their OpenAI-compatible endpoint outside /v1;
+    // only the configured path answers, the historical one 404s.
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ok))
+        .mount(&up)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+        .mount(&up)
+        .await;
+
+    let mut c = cfg(&up.uri(), false);
+    c.openai_path = "/chat/completions".into();
+    let app = build_router(AppState::new(c));
+    let resp = app
+        .oneshot(
+            axum::http::Request::builder().method("POST").uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer dummy")
+                .body(axum::body::Body::from(
+                    r#"{"model":"m","max_tokens":5,"messages":[
+                        {"role":"user","content":"roda"},
+                        {"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Bash","arguments":"{}"}}]},
+                        {"role":"tool","tool_call_id":"call_1","content":"build output line"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "the provider's real endpoint answered");
+
+    let recv = up.received_requests().await.unwrap();
+    assert_eq!(recv.len(), 1, "exactly one forward, to the configured path");
+    assert_eq!(recv[0].url.path(), "/chat/completions");
 }
 
 #[tokio::test]
