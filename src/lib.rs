@@ -2125,7 +2125,9 @@ fn fallback_command_args(args: &[String]) -> Option<Vec<String>> {
             !cluster.is_empty()
                 && !cluster.starts_with('-')
                 && cluster.chars().all(|short| {
-                    root_flags.iter().any(|flag| flag.get_short() == Some(short))
+                    root_flags
+                        .iter()
+                        .any(|flag| flag.get_short() == Some(short))
                 })
         });
         if long_flag || short_flags {

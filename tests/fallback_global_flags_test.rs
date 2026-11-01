@@ -45,10 +45,7 @@ fn run_stub(args: &[&str], child_exit: i32) -> (Output, bool) {
 
 #[test]
 fn fallback_dispatch_strips_only_leading_rtk_flags() {
-    let (output, ran) = run_stub(
-        &["-v", "--skip-env", "rtk-fallback-probe", "-v", "x"],
-        0,
-    );
+    let (output, ran) = run_stub(&["-v", "--skip-env", "rtk-fallback-probe", "-v", "x"], 0);
     assert!(ran, "stub not invoked: {output:?}");
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "-v\nx\n");
@@ -68,6 +65,9 @@ fn fallback_dispatch_rejects_removed_flag_without_running_child() {
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("unexpected argument '--ultra-compact'"), "{stderr}");
+    assert!(
+        stderr.contains("unexpected argument '--ultra-compact'"),
+        "{stderr}"
+    );
     assert!(stderr.contains("Usage: rtk"), "{stderr}");
 }
