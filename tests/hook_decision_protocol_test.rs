@@ -69,6 +69,19 @@ impl Sandbox {
         Self::with_rules(&[], &[], &[])
     }
 
+    /// Write rtk's own `config.toml` where `dirs::config_dir()` resolves it
+    /// under this sandbox's HOME and XDG_CONFIG_HOME on Linux and macOS.
+    #[cfg(unix)]
+    fn write_config(&self, contents: &str) {
+        for dir in [
+            self.home.join(".config/rtk"),
+            self.home.join("Library/Application Support/rtk"),
+        ] {
+            std::fs::create_dir_all(&dir).expect("mkdir rtk config");
+            std::fs::write(dir.join("config.toml"), contents).expect("write rtk config");
+        }
+    }
+
     fn run(&self, args: &[&str]) -> (i32, String, String) {
         self.run_with_env(args, &[])
     }
@@ -518,6 +531,29 @@ mod hook_check {
             assert_eq!(sb.hook_claude_rewrite(cmd), None, "hook claude on: {cmd}");
             assert_eq!(sb.rewrite(cmd).0, 1, "rtk rewrite on: {cmd}");
         }
+    }
+
+    /// Claude Code's hook reads a shell wrapper behind a configured
+    /// transparent prefix the way the rewrite reaches it: a script holding a
+    /// denied command is left alone (a defer) by the hook and by `hook check`,
+    /// while an allowed one is rewritten through the prefix.
+    #[cfg(unix)]
+    #[test]
+    fn claude_hook_defers_a_denied_script_behind_a_configured_transparent_prefix() {
+        let sb = Sandbox::with_rules(&["git push:*"], &[], &["*"]);
+        sb.write_config("[hooks]\ntransparent_prefixes = [\"mywrap\"]\n");
+
+        // The control: the prefix is read, or nothing below is reached.
+        assert_eq!(
+            sb.hook_claude_rewrite("mywrap bash -c 'git status'")
+                .as_deref(),
+            Some("mywrap bash -c 'rtk git status'")
+        );
+
+        let denied = "mywrap bash -c 'git push'";
+        assert_eq!(sb.hook_claude_rewrite(denied), None, "rtk hook claude");
+        let (code, stdout, _) = sb.run(&["hook", "check", "--agent", "claude", denied]);
+        assert_eq!((code, stdout.trim()), (1, ""), "rtk hook check");
     }
 
     /// An already-RTK-prefixed command rewrites to itself, and no agent applies

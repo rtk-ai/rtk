@@ -114,7 +114,7 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
             let _ = std::io::stdout().flush();
             Ok(())
         }
-        HookDecision::AskRewrite(rewritten) => {
+        HookDecision::AskRewrite(rewritten) | HookDecision::AskFishWrap(rewritten) => {
             print!("{}", rewritten);
             let _ = std::io::stdout().flush();
             std::process::exit(3);
