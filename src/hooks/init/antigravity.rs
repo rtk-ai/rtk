@@ -277,10 +277,19 @@ fn print_legacy_install_action(action: &Option<LegacyRulesAction>, dry_run: bool
     }
 }
 
+fn global_config_dir() -> Result<PathBuf> {
+    resolve_config_dir(
+        user_dirs::env_path("GEMINI_HOME"),
+        user_dirs::home(),
+        ".gemini",
+        "Cannot determine Antigravity config directory. Set $GEMINI_HOME or $HOME.",
+    )
+    .map(|root| root.join("config"))
+}
+
 pub fn run_antigravity_mode(global: bool, ctx: InitContext) -> Result<()> {
     if global {
-        let home = user_dirs::home().context("Could not determine user home directory")?;
-        let base_dir = home.join(".gemini/config");
+        let base_dir = global_config_dir()?;
         let cwd = user_dirs::current_dir().ok();
         run_antigravity_mode_with_workspace(&base_dir, true, cwd.as_deref(), ctx)
     } else {
@@ -386,9 +395,7 @@ fn run_antigravity_mode_with_workspace(
 
 pub fn uninstall_antigravity_mode(global: bool, ctx: InitContext) -> Result<()> {
     let base_dir = if global {
-        user_dirs::home()
-            .context("Could not determine user home directory")?
-            .join(".gemini/config")
+        global_config_dir()?
     } else {
         user_dirs::current_dir().context("Failed to read current directory")?
     };
@@ -488,8 +495,8 @@ pub fn is_configured() -> bool {
         }
     }
     // 2. Global plugin
-    if let Some(home) = user_dirs::home() {
-        let global = home.join(".gemini/config/plugins/rtk");
+    if let Ok(config_dir) = global_config_dir() {
+        let global = config_dir.join("plugins/rtk");
         if global.join("plugin.json").is_file() || global.join("hooks.json").is_file() {
             return true;
         }
@@ -501,6 +508,55 @@ pub fn is_configured() -> bool {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn gemini_home_install_detection_and_uninstall() {
+        use crate::core::{test_isolation, user_env};
+        let temp = test_isolation::tempdir();
+        let home = temp.path().join("home");
+        let relocated = temp.path().join("relocated");
+        test_isolation::with_root(&home, || {
+            user_env::with_path("GEMINI_HOME", Some(&relocated), || {
+                assert!(!is_configured());
+                run_antigravity_mode(true, InitContext::default()).expect("install");
+                let plugin = relocated.join("config/plugins/rtk");
+                for file in ["plugin.json", "hooks.json", "rules/AGENTS.md"] {
+                    assert!(plugin.join(file).is_file(), "missing {file}");
+                }
+                assert!(!home.join(".gemini").exists());
+                assert!(is_configured());
+                assert!(crate::hooks::hook_check::is_any_agent_configured());
+                uninstall_antigravity_mode(true, InitContext::default()).expect("uninstall");
+                assert!(!plugin.exists());
+                assert!(!is_configured());
+            });
+        });
+    }
+
+    #[test]
+    fn gemini_home_empty_uses_default_and_local_ignores_override() {
+        use crate::core::{test_isolation, user_env};
+        let temp = test_isolation::tempdir();
+        test_isolation::with_root(temp.path(), || {
+            user_env::with_vars(&[("GEMINI_HOME", Some(""))], || {
+                run_antigravity_mode(true, InitContext::default()).expect("default install");
+                assert!(
+                    temp.path()
+                        .join(".gemini/config/plugins/rtk/plugin.json")
+                        .is_file()
+                );
+                uninstall_antigravity_mode(true, InitContext::default())
+                    .expect("default uninstall");
+            });
+            let relocated = temp.path().join("relocated");
+            user_env::with_path("GEMINI_HOME", Some(&relocated), || {
+                run_antigravity_mode(false, InitContext::default()).expect("local install");
+                assert!(!relocated.exists());
+                assert!(is_configured());
+                uninstall_antigravity_mode(false, InitContext::default()).expect("local uninstall");
+            });
+        });
+    }
 
     #[test]
     fn test_antigravity_mode_creates_plugin_files_local() {
