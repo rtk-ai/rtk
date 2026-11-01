@@ -3,12 +3,12 @@ use super::constants::{
     SETTINGS_JSON, SETTINGS_LOCAL_JSON,
 };
 use super::init::resolve_claude_dir;
+use crate::core::cmdline::lexer::{
+    is_word_boundary_whitespace, split_for_permissions, split_for_wrappers,
+};
 use crate::core::user_dirs;
 use crate::core::user_env;
 use crate::core::utils::strip_leading_bom;
-use crate::discover::lexer::{
-    is_word_boundary_whitespace, split_for_permissions, split_for_wrappers,
-};
 use crate::discover::registry;
 #[cfg(test)]
 use crate::discover::registry::MAX_MATCHING_PEELS;
@@ -273,7 +273,7 @@ pub(crate) fn check_command_with_rules_and_prefixes(
     }
 
     // Can't decompose substitution / file-target redirects — never auto-allow.
-    if crate::discover::lexer::contains_unattestable_construct(cmd) {
+    if crate::core::cmdline::lexer::contains_unattestable_construct(cmd) {
         return PermissionVerdict::Ask;
     }
 

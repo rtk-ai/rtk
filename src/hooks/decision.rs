@@ -235,7 +235,7 @@ pub(crate) fn decide_with_wrap(
         return HookDecision::AskRewrite(crate::discover::fish_script::wrap(script));
     }
 
-    if crate::discover::lexer::contains_unattestable_construct(cmd) {
+    if crate::core::cmdline::lexer::contains_unattestable_construct(cmd) {
         return HookDecision::Defer;
     }
 
