@@ -48,44 +48,20 @@ pub enum Granularity {
 
 // ── Internal Types for JSON Deserialization ──
 
+/// ccusage wraps its rows in a granularity-named array (`daily`/`weekly`/
+/// `monthly`) and has renamed the record key across releases (`date`/`week`/
+/// `month` before 20.x, `period` since). Accept every spelling so a rename
+/// doesn't take `rtk cc-economics` down with it.
 #[derive(Debug, Deserialize)]
-struct DailyResponse {
-    daily: Vec<DailyEntry>,
+struct PeriodResponse {
+    #[serde(alias = "daily", alias = "weekly", alias = "monthly")]
+    periods: Vec<PeriodEntry>,
 }
 
 #[derive(Debug, Deserialize)]
-struct DailyEntry {
-    // Older ccusage emits "date"; current ccusage emits "period". Accept both.
-    #[serde(alias = "period")]
-    date: String,
-    #[serde(flatten)]
-    metrics: CcusageMetrics,
-}
-
-#[derive(Debug, Deserialize)]
-struct WeeklyResponse {
-    weekly: Vec<WeeklyEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WeeklyEntry {
-    // Older ccusage emits "week"; current ccusage emits "period". Accept both.
-    #[serde(alias = "period")]
-    week: String, // Calendar week start; legacy ccusage defaults to Sunday.
-    #[serde(flatten)]
-    metrics: CcusageMetrics,
-}
-
-#[derive(Debug, Deserialize)]
-struct MonthlyResponse {
-    monthly: Vec<MonthlyEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MonthlyEntry {
-    // Older ccusage emits "month"; current ccusage emits "period". Accept both.
-    #[serde(alias = "period")]
-    month: String,
+struct PeriodEntry {
+    #[serde(alias = "date", alias = "week", alias = "month")]
+    period: String,
     #[serde(flatten)]
     metrics: CcusageMetrics,
 }
@@ -137,13 +113,7 @@ pub fn fetch(granularity: Granularity) -> Result<Option<Vec<CcusagePeriod>>> {
         }
     };
 
-    let subcommand = match granularity {
-        Granularity::Daily => "daily",
-        Granularity::Weekly => "weekly",
-        Granularity::Monthly => "monthly",
-    };
-
-    cmd.arg(subcommand)
+    cmd.arg(subcommand(granularity))
         .arg("--json")
         .arg("--since")
         .arg("20250101"); // 90 days back approx
@@ -167,8 +137,25 @@ pub fn fetch(granularity: Granularity) -> Result<Option<Vec<CcusagePeriod>>> {
             return Ok(None);
         }
 
-        let mut periods = parse_json(&result.stdout, granularity)
-            .context("Failed to parse ccusage JSON output")?;
+        // Schema drift must not kill the whole report: warn and degrade like a
+        // missing ccusage does, instead of aborting `rtk cc-economics`.
+        // Syntactically malformed JSON still errors immediately.
+        let mut periods = match parse_json(&result.stdout, granularity) {
+            Ok(periods) => periods,
+            Err(e) => {
+                if serde_json::from_str::<serde_json::Value>(&result.stdout).is_err() {
+                    return Err(e).context("Failed to parse ccusage JSON output");
+                }
+                eprintln!(
+                    "[warn] ccusage {} output not understood: {e:#}",
+                    subcommand(granularity)
+                );
+                eprintln!(
+                    "[warn] cost data skipped. Update ccusage/rtk, or report the schema change."
+                );
+                return Ok(None);
+            }
+        };
 
         if matches!(granularity, Granularity::Weekly) {
             if !canonicalize_weekly_keys(&mut periods)? {
@@ -256,45 +243,30 @@ fn aggregate_weekly_periods(periods: Vec<CcusagePeriod>) -> Result<Vec<CcusagePe
         .collect())
 }
 
-fn parse_json(json: &str, granularity: Granularity) -> Result<Vec<CcusagePeriod>> {
+fn subcommand(granularity: Granularity) -> &'static str {
     match granularity {
-        Granularity::Daily => {
-            let resp: DailyResponse =
-                serde_json::from_str(json).context("Invalid JSON structure for daily data")?;
-            Ok(resp
-                .daily
-                .into_iter()
-                .map(|e| CcusagePeriod {
-                    key: e.date,
-                    metrics: e.metrics,
-                })
-                .collect())
-        }
-        Granularity::Weekly => {
-            let resp: WeeklyResponse =
-                serde_json::from_str(json).context("Invalid JSON structure for weekly data")?;
-            Ok(resp
-                .weekly
-                .into_iter()
-                .map(|e| CcusagePeriod {
-                    key: e.week,
-                    metrics: e.metrics,
-                })
-                .collect())
-        }
-        Granularity::Monthly => {
-            let resp: MonthlyResponse =
-                serde_json::from_str(json).context("Invalid JSON structure for monthly data")?;
-            Ok(resp
-                .monthly
-                .into_iter()
-                .map(|e| CcusagePeriod {
-                    key: e.month,
-                    metrics: e.metrics,
-                })
-                .collect())
-        }
+        Granularity::Daily => "daily",
+        Granularity::Weekly => "weekly",
+        Granularity::Monthly => "monthly",
     }
+}
+
+fn parse_json(json: &str, granularity: Granularity) -> Result<Vec<CcusagePeriod>> {
+    let resp: PeriodResponse = serde_json::from_str(json).with_context(|| {
+        format!(
+            "Invalid JSON structure for {} data",
+            subcommand(granularity)
+        )
+    })?;
+
+    Ok(resp
+        .periods
+        .into_iter()
+        .map(|e| CcusagePeriod {
+            key: e.period,
+            metrics: e.metrics,
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -670,6 +642,21 @@ mod tests {
         let periods = result.unwrap();
         assert_eq!(periods.len(), 1);
         assert_eq!(periods[0].key, "2026-01-20");
+    }
+
+    #[test]
+    fn test_parse_monthly_ccusage_20_0_20() {
+        // Real `ccusage monthly --json` output (20.0.20): "period" key plus
+        // agent/metadata/modelBreakdowns fields rtk doesn't care about.
+        let json = include_str!("../../tests/fixtures/ccusage_monthly_20_0_20_raw.json");
+
+        let periods = parse_json(json, Granularity::Monthly).expect("20.0.20 schema must parse");
+
+        assert_eq!(periods.len(), 1);
+        assert_eq!(periods[0].key, "2026-08");
+        assert_eq!(periods[0].metrics.input_tokens, 3600572);
+        assert_eq!(periods[0].metrics.cache_read_tokens, 2114796815);
+        assert_eq!(periods[0].metrics.total_cost, 1292.65595422);
     }
 
     #[test]
