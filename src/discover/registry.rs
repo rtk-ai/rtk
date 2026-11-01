@@ -746,6 +746,19 @@ pub(crate) fn collapse_line_continuations(s: &str) -> std::borrow::Cow<'_, str> 
     LINE_CONTINUATION_RE.replace_all(s, " ")
 }
 
+/// [`rewrite_command_precompiled`] from raw settings, for a test that states
+/// the `exclude_commands` and `transparent_prefixes` it means.
+#[cfg(test)]
+pub(crate) fn rewrite_command(
+    cmd: &str,
+    excluded: &[String],
+    transparent_prefixes: &[String],
+) -> Option<String> {
+    let compiled = compile_exclude_patterns(excluded);
+    let normalized_prefixes = normalize_transparent_prefixes(transparent_prefixes);
+    rewrite_command_precompiled(cmd, &compiled, &normalized_prefixes)
+}
+
 /// Returns `None` if the command is unsupported or ignored (hook should pass through).
 ///
 /// Handles compound commands (`&&`, `||`, `;`, `;;`, `;&`, `;;&`) by rewriting each segment independently.
@@ -765,25 +778,11 @@ pub(crate) fn collapse_line_continuations(s: &str) -> std::borrow::Cow<'_, str> 
 /// starts with `"foo bar "` (or strictly equals `"foo bar"`), not anything
 /// else. Matching is literal, not pattern-based: configure the exact concrete
 /// prefix you use.
-pub fn rewrite_command(
-    cmd: &str,
-    excluded: &[String],
-    transparent_prefixes: &[String],
-) -> Option<String> {
-    let compiled = compile_exclude_patterns(excluded);
-    let normalized_prefixes = normalize_transparent_prefixes(transparent_prefixes);
-    rewrite_command_precompiled(cmd, &compiled, &normalized_prefixes)
-}
-
-/// Core of `rewrite_command`, taking already-compiled exclude patterns and
-/// already-normalized transparent prefixes so a caller checking many commands
-/// against the same config in a loop can compile once and reuse — instead of
-/// recompiling `exclude_commands` regexes on every single call. `rewrite_command`
-/// itself is the right entry point for a one-off check (real hook invocations,
-/// `rtk rewrite`, tests); this exists for `rtk discover`'s estimate-coverage
-/// fallback, which calls this once per historical command scanned (the same
-/// compile-once-per-run pattern this PR already applies to permission rules —
-/// see `discover::PermissionRules` — and hook-install status).
+///
+/// `compiled` and `normalized_prefixes` are `exclude_commands` and
+/// `transparent_prefixes` compiled once ([`compile_exclude_patterns`],
+/// [`normalize_transparent_prefixes`]): the hooks and `rtk discover` hold them
+/// in their `HostRules`, read from the config beside the permission rules.
 pub(crate) fn rewrite_command_precompiled(
     cmd: &str,
     compiled: &[ExcludePattern],
@@ -1643,6 +1642,7 @@ fn git_ls_tree_folds(cmd: &str) -> bool {
     crate::cmds::git::git_cmd::ls_tree_folds(&words[1..])
 }
 
+#[derive(Clone)]
 pub(crate) enum ExcludePattern {
     Regex(Regex),
     Prefix(String),

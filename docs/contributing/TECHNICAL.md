@@ -101,7 +101,7 @@ All rewrite logic lives in Rust (`src/discover/registry.rs`). Hooks are thin del
 The rewrite pipeline is how RTK intercepts and rewrites commands. The call chain is:
 
 ```
-hook shell → rewrite_cmd.rs → rewrite_command() → rewrite_compound() → rewrite_segment() → classify_command()
+hook shell → rewrite_cmd.rs → rewrite_command_precompiled() → rewrite_compound() → rewrite_segment() → classify_command()
 ```
 
 Traced step by step for `cargo fmt --all && cargo test 2>&1 | tail -20`:
@@ -115,12 +115,15 @@ LLM Agent: "cargo fmt --all && cargo test 2>&1 | tail -20"
   |
   v
 rewrite_cmd::run(cmd)                              [src/hooks/rewrite_cmd.rs]
-  |  1. Load config → hooks.exclude_commands
-  |  2. permissions::check_command(cmd) → Deny → exit(2)
-  |  3. decision::decide — `rtk rewrite` never wraps a fish script
+  |  1. HostRules::load — Claude Code's rules, with hooks.exclude_commands
+  |     and hooks.transparent_prefixes compiled once beside them
+  |  2. decision::AgentPath::ViaRewrite(..).answer(cmd), the answer
+  |     `rtk hook check` gives for these agents → Deny → exit(2)
+  |  3. inside it, decision::decide_with_params — `rtk rewrite` never wraps a fish script
   |     (permissions::DenyRules::Unattested: the delegates that call it do
   |     not prompt on exit 3, and OpenClaw matches its own exec checks
-  |     against the returned string); registry::rewrite_command(cmd, excluded)
+  |     against the returned string);
+  |     registry::rewrite_command_precompiled(cmd, exclude_patterns, prefixes)
   |     → None → exit(1)          (no RTK equivalent, passthrough)
   |     → Some + Allow → print, exit(0)
   |     → Some + Ask   → print, exit(3)
@@ -133,7 +136,7 @@ rewrite_cmd::run(cmd)                              [src/hooks/rewrite_cmd.rs]
   |     so this never relaxes a deny or drops an explicit ask.
   |
   v
-rewrite_command(cmd, excluded)                     [src/discover/registry.rs]
+rewrite_command_precompiled(cmd, ..)               [src/discover/registry.rs]
   |  Early exits:
   |  - Empty → None
   |  - Contains "<<" or "$((" (heredoc/arithmetic) → None
@@ -223,7 +226,7 @@ Key design decisions:
 - **Conservative shell-wrapper recursion**: Only exact quoted `sh|bash|zsh|fish -c` wrappers enter one level of inner rewriting. The parser hands back byte ranges instead of a decoded script, so the wrapper's own bytes are never re-quoted, and it reports the shell it matched so the script is attested under that shell's grammar rather than under bash's.
 - **Pipe semantics**: Producers and intermediate stages of `|` remain raw. Only an argument-safe final stage whose rule has `pipeline_final_safe` may be rewritten; initially this is limited to ordinary `grep` and `rg` invocations. Search pattern-file forms (`-f`/`--file`) defer because they can consume pipeline stdin as configuration. `|&` is recognized separately and its complete pipeline stays raw.
 - **Double env prefix handling**: `classify_command()` strips env prefixes to match the underlying command against rules. `rewrite_segment()` extracts the same prefix separately to re-prepend it to the rewritten command.
-- **Fallback contract**: If any segment fails to match, it stays raw. `rewrite_command()` returns `None` only when zero segments were rewritten.
+- **Fallback contract**: If any segment fails to match, it stays raw. `rewrite_command_precompiled()` returns `None` only when zero segments were rewritten.
 
 ### 3.3 CLI Parsing and Routing
 

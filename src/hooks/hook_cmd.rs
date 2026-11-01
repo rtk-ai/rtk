@@ -6,7 +6,6 @@
 use super::constants::PRE_TOOL_USE_KEY;
 use super::decision::{self, HookDecision};
 use super::permissions::{self, PermissionVerdict};
-use super::permissions_opencode;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::io::{self, Read, Write};
@@ -234,48 +233,39 @@ fn heal_legacy_hook_file(path: &std::path::Path) -> bool {
         .is_ok()
 }
 
-/// The decision every hook applies -- [`decision::decide_for_agent_at`] -- plus
-/// the recall bookkeeping the hook path performs for any command it does not
-/// deny. `cwd` is the payload's working directory when the host reports one
-/// (only the Claude Code hook does; see #3864).
-///
-/// `deny_rules` says whether RTK can show that nothing in a wrapped script
-/// could escape a deny rule. Only Claude Code's own hook can
-/// ([`decide_claude_hook_action`]); every other caller passes
-/// [`permissions::DenyRules::Unattested`] and therefore never wraps.
-fn decide_from_verdict(
+/// The decision every hook applies -- [`decision::decide_for_host`] -- plus
+/// the recall bookkeeping: a read of a tee file is counted for any command
+/// the hook does not deny. `cwd` is the payload's working directory when the
+/// host reports one (only the Claude Code hook does; see #3864).
+fn decide_with_host_rules(
     cmd: &str,
-    verdict: PermissionVerdict,
-    deny_rules: permissions::DenyRules,
+    rules: &permissions::HostRules,
     cwd: Option<&str>,
 ) -> HookDecision {
-    if verdict == PermissionVerdict::Deny {
-        return HookDecision::Deny;
+    let (verdict, decision) = decision::decide_for_host(cmd, rules, cwd);
+    if verdict != PermissionVerdict::Deny {
+        crate::hooks::rewrite_cmd::track_tee_read(cmd);
     }
-    crate::hooks::rewrite_cmd::track_tee_read(cmd);
-    decision::decide_for_agent_at(cmd, verdict, deny_rules, cwd)
+    decision
 }
 
 fn decide_hook_action(cmd: &str, host: permissions::Host, cwd: Option<&str>) -> HookDecision {
-    decide_from_verdict(
-        cmd,
-        permissions::check_command_for(cmd, host),
-        permissions::DenyRules::Unattested,
-        cwd,
-    )
+    decide_with_host_rules(cmd, &permissions::HostRules::load(host, None), cwd)
 }
 
-/// [`decide_hook_action`] for Claude Code's own hook, the one host whose
-/// settings RTK reads and whose hook asks explicitly for a wrap. Copilot
-/// shares `Host::Claude` for its verdict but judges the returned command
-/// itself, so it keeps [`decide_hook_action`].
-fn decide_claude_hook_action(cmd: &str, cwd: Option<&str>) -> HookDecision {
-    decide_from_verdict(
-        cmd,
-        permissions::check_command_for(cmd, permissions::Host::Claude),
-        permissions::claude_hook_deny_rules_for(cmd),
-        cwd,
-    )
+/// Claude Code's rules for one `rtk hook claude` run, as
+/// [`permissions::HostRules::claude_hook`] reads them: on first use and at
+/// most once, shared by the pipeline gate and the hook's own decision, and
+/// not at all for an event that judges no command.
+///
+/// They are the only rules under which a fish script may be wrapped: Claude
+/// Code's own hook asks explicitly for every wrap it builds. Copilot shares
+/// `Host::Claude` for its rules but judges the returned command itself, so it
+/// keeps [`decide_hook_action`], which never wraps.
+type ClaudeHookRules = std::cell::LazyCell<permissions::HostRules>;
+
+fn claude_hook_rules() -> ClaudeHookRules {
+    ClaudeHookRules::new(permissions::HostRules::claude_hook)
 }
 
 fn handle_vscode(cmd: &str, input: &Value) -> Result<()> {
@@ -434,10 +424,9 @@ fn run_gemini_inner_with_rules(
     allow: &[String],
 ) -> serde_json::Result<String> {
     run_gemini_inner_impl(input, |cmd| {
-        decide_from_verdict(
+        decide_with_host_rules(
             cmd,
-            permissions::check_command_with_rules(cmd, deny, ask, allow),
-            permissions::DenyRules::Unattested,
+            &permissions::HostRules::lists(permissions::Host::Gemini, deny, ask, allow),
             None,
         )
     })
@@ -700,7 +689,7 @@ fn pre_tool_use_rewrite_output(
     json!({ "hookSpecificOutput": hook_output })
 }
 
-fn process_claude_payload(v: &Value) -> PayloadAction {
+fn process_claude_payload(v: &Value, rules: &ClaudeHookRules) -> PayloadAction {
     let cmd = match v
         .pointer("/tool_input/command")
         .and_then(|c| c.as_str())
@@ -711,7 +700,7 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
     };
 
     let cwd = v.get("cwd").and_then(Value::as_str);
-    process_claude_payload_from_decision(v, cmd, decide_claude_hook_action(cmd, cwd))
+    process_claude_payload_from_decision(v, cmd, decide_with_host_rules(cmd, rules, cwd))
 }
 
 /// Pure core of `process_claude_payload`, taking the hook decision directly so the
@@ -842,12 +831,13 @@ pub fn run_claude() -> Result<()> {
         }
     };
 
+    let rules = claude_hook_rules();
     #[cfg(feature = "engine")]
-    if claude_pipeline::handle(&v, raw_len)? {
+    if claude_pipeline::handle(&v, raw_len, &rules)? {
         return Ok(());
     }
 
-    match process_claude_payload(&v) {
+    match process_claude_payload(&v, &rules) {
         PayloadAction::Rewrite {
             cmd,
             rewritten,
@@ -893,7 +883,7 @@ pub fn run_claude() -> Result<()> {
 fn run_claude_inner(input: &str) -> Option<String> {
     let input = strip_leading_bom(input);
     let v: Value = serde_json::from_str(input).ok()?;
-    match process_claude_payload(&v) {
+    match process_claude_payload(&v, &claude_hook_rules()) {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
         _ => None,
     }
@@ -1212,8 +1202,13 @@ fn run_cursor_inner_with_rules(
         None => return "{}".to_string(),
     };
 
-    let verdict = permissions::check_command_with_rules(&cmd, deny_rules, ask_rules, allow_rules);
-    match decide_from_verdict(&cmd, verdict, permissions::DenyRules::Unattested, None) {
+    let rules = permissions::HostRules::lists(
+        permissions::Host::Cursor,
+        deny_rules,
+        ask_rules,
+        allow_rules,
+    );
+    match decide_with_host_rules(&cmd, &rules, None) {
         HookDecision::AllowRewrite(rewritten) => cursor_allow(&rewritten),
         HookDecision::AskRewrite(rewritten) => cursor_ask(&rewritten),
         _ => "{}".to_string(),
@@ -1282,16 +1277,7 @@ pub fn run_opencode(cmd: &str, agent: Option<&str>) -> Result<()> {
 
 /// [`opencode_answer`] against the rules OpenCode resolves for `agent`.
 fn opencode_answer_for(cmd: &str, agent: Option<&str>) -> Value {
-    // Two rule sources rtk cannot judge, and a rewrite judged without them
-    // would silence an ask: an agent markdown file whose frontmatter declares
-    // permission rules, and a legacy key only one OpenCode generation applies.
-    // Answer `{}` and let OpenCode apply its own rules.
-    if permissions_opencode::agent_rules_unreadable(agent) {
-        return json!({});
-    }
-    let Some(rules) = permissions_opencode::load_judgeable_opencode_rules(agent) else {
-        return json!({});
-    };
+    let rules = permissions::HostRules::load(permissions::Host::OpenCode, agent);
     opencode_answer(cmd, &rules)
 }
 
@@ -1306,16 +1292,15 @@ fn opencode_answer_for(cmd: &str, agent: Option<&str>) -> Value {
 /// `{}`, trading token savings on that command for the user's own policy
 /// (#4195). An allow stays an allow, an ask stays a prompt, and a deny stays
 /// denied — RTK never blocks, lifts or silences anything.
-fn opencode_answer(cmd: &str, rules: &[permissions_opencode::Rule]) -> Value {
-    if cmd.trim().is_empty() {
-        return json!({});
-    }
-    let before = permissions_opencode::check_command_with_opencode_rules(cmd, rules);
+///
+/// The comparison itself is [`decision::decide_for_host`]'s, which makes it
+/// for every host that `permissions::judges_final_command` says re-judges the
+/// command its hook hands back, OpenCode among them.
+fn opencode_answer(cmd: &str, rules: &permissions::HostRules) -> Value {
     // OpenCode re-evaluates its own patterns against whatever RTK returns, so
-    // the rule set read here is advisory rather than enforced — hence
-    // `Unattested`, and no fish script is wrapped for this host.
-    let rewritten = match decide_from_verdict(cmd, before, permissions::DenyRules::Unattested, None)
-    {
+    // the rule set read here is advisory rather than enforced: these rules
+    // attest nothing, and no fish script is wrapped for this host.
+    let rewritten = match decide_with_host_rules(cmd, rules, None) {
         // OpenCode denies the typed command itself; a rewrite could only
         // un-match the deny rule.
         HookDecision::Deny => {
@@ -1325,11 +1310,6 @@ fn opencode_answer(cmd: &str, rules: &[permissions_opencode::Rule]) -> Value {
         HookDecision::Defer => return json!({}),
         HookDecision::AllowRewrite(r) | HookDecision::AskRewrite(r) => r,
     };
-
-    let after = permissions_opencode::check_command_with_opencode_rules(&rewritten, rules);
-    if before != after {
-        return json!({});
-    }
 
     audit_log("rewrite", cmd, &rewritten);
     json!({ "command": rewritten })
@@ -1383,13 +1363,10 @@ fn run_droid_inner_with_rules(
 ) -> Option<String> {
     let v: Value = droid_payload(input).ok().flatten()?;
     let cmd = droid_execute_command(&v)?;
-    let verdict = permissions::check_command_with_rules(cmd, deny_rules, ask_rules, allow_rules);
-    droid_response_from_decision(
-        &v,
-        cmd,
-        decide_from_verdict(cmd, verdict, permissions::DenyRules::Unattested, None),
-    )
-    .map(|o| o.to_string())
+    let rules =
+        permissions::HostRules::lists(permissions::Host::Droid, deny_rules, ask_rules, allow_rules);
+    droid_response_from_decision(&v, cmd, decide_with_host_rules(cmd, &rules, None))
+        .map(|o| o.to_string())
 }
 
 #[cfg(test)]
@@ -1769,15 +1746,15 @@ mod tests {
     }
 
     fn end_to_end(cmd: &str) -> Option<Value> {
-        let verdict = crate::hooks::permissions::check_command_with_rules(
-            cmd,
+        let rules = permissions::HostRules::lists(
+            permissions::Host::Claude,
             &[],
             &[],
             &["Bash(git:*)".to_string()],
         );
         copilot_cli_response_from_decision(
             &cli_args(cmd),
-            decide_from_verdict(cmd, verdict, permissions::DenyRules::NoneConfigured, None),
+            decide_with_host_rules(cmd, &rules, None),
             cmd,
         )
     }
@@ -1902,7 +1879,7 @@ mod tests {
             "/repo/.claude/worktrees/feat-x",
         );
         assert!(matches!(
-            process_claude_payload(&v),
+            process_claude_payload(&v, &claude_hook_rules()),
             PayloadAction::Skip {
                 decision: HookOutcome::Defer,
                 ..
@@ -2746,16 +2723,12 @@ mod tests {
     // a rewrite is returned only when it leaves the verdict untouched.
 
     mod opencode_answer {
-        use super::super::opencode_answer;
-        use crate::hooks::permissions_opencode::{Action, Rule};
-        use serde_json::json;
+        use crate::hooks::permissions::HostRules;
+        use crate::hooks::permissions_opencode::{Action, Rule, bash_rule as rule};
+        use serde_json::{Value, json};
 
-        fn rule(pattern: &str, action: Action) -> Rule {
-            Rule {
-                permission: "bash".to_string(),
-                pattern: pattern.to_string(),
-                action,
-            }
+        fn opencode_answer(cmd: &str, rules: &[Rule]) -> Value {
+            super::super::opencode_answer(cmd, &HostRules::opencode(rules.to_vec()))
         }
 
         #[test]
@@ -2873,6 +2846,13 @@ mod tests {
             test_isolation::with_root(&tmp.path().join("home"), || {
                 let _entered = test_isolation::enter(&project);
                 assert_eq!(super::super::opencode_answer_for("ls -la", None), json!({}));
+                // `rtk hook check --agent opencode` gives the plugin's answer.
+                let opencode = crate::hooks::decision::AgentPath::from_agent("opencode")
+                    .expect("opencode is mapped");
+                assert_eq!(
+                    opencode.decide("ls -la"),
+                    crate::hooks::decision::HookDecision::Defer
+                );
             });
         }
 
@@ -2909,6 +2889,124 @@ mod tests {
                 );
             });
         }
+
+        /// OpenCode's rules read from disk drop a rewrite that would change the
+        /// verdict, as the rules a test builds do.
+        #[test]
+        fn rules_read_from_disk_drop_a_verdict_changing_rewrite() {
+            use crate::core::test_isolation;
+
+            let tmp = test_isolation::tempdir();
+            let project = tmp.path().join("project");
+            std::fs::create_dir_all(&project).expect("create project dir");
+            std::fs::write(
+                project.join("opencode.json"),
+                r#"{ "permission": { "bash": { "*": "deny", "git status": "allow" } } }"#,
+            )
+            .expect("write project config");
+
+            test_isolation::with_root(&tmp.path().join("home"), || {
+                let _entered = test_isolation::enter(&project);
+                assert_eq!(
+                    super::super::opencode_answer_for("git status", None),
+                    json!({})
+                );
+                // The control: rules read the same way, under which the
+                // rewrite keeps the verdict, keep the rewrite.
+                std::fs::write(
+                    project.join("opencode.json"),
+                    r#"{ "permission": { "bash": { "*": "allow" } } }"#,
+                )
+                .expect("write project config");
+                assert_eq!(
+                    super::super::opencode_answer_for("git status", None),
+                    json!({ "command": "rtk git status" })
+                );
+            });
+        }
+
+        /// `rtk hook check --agent opencode` gives the plugin's answer: a
+        /// rewrite exactly when the plugin returns one, and the same one.
+        #[test]
+        fn hook_check_gives_the_plugins_answer() {
+            use crate::core::test_isolation;
+            use crate::hooks::decision::{AgentPath, HookDecision};
+
+            let tmp = test_isolation::tempdir();
+            let project = tmp.path().join("project");
+            std::fs::create_dir_all(&project).expect("create project dir");
+            let opencode = AgentPath::from_agent("opencode").expect("opencode is mapped");
+            let policies = [
+                r#"{}"#,
+                r#"{ "*": "deny", "git status": "allow" }"#,
+                r#"{ "git push *": "ask" }"#,
+                r#"{ "*": "allow", "git push *": "deny" }"#,
+                r#"{ "*": "ask" }"#,
+                r#"{ "rtk *": "ask" }"#,
+                r#"{ "git status": "allow" }"#,
+            ];
+            let commands = [
+                "git status",
+                "git push origin main",
+                "ls -la",
+                "head -n 5 a.txt",
+                "rtk git status",
+                "echo $(date)",
+            ];
+
+            test_isolation::with_root(&tmp.path().join("home"), || {
+                let _entered = test_isolation::enter(&project);
+                for policy in policies {
+                    std::fs::write(
+                        project.join("opencode.json"),
+                        format!(r#"{{ "permission": {{ "bash": {policy} }} }}"#),
+                    )
+                    .expect("write project config");
+                    for cmd in commands {
+                        let plugin = super::super::opencode_answer_for(cmd, None);
+                        let check = match opencode.decide(cmd) {
+                            HookDecision::AllowRewrite(r) | HookDecision::AskRewrite(r) => {
+                                json!({ "command": r })
+                            }
+                            HookDecision::Deny | HookDecision::Defer => json!({}),
+                        };
+                        assert_eq!(check, plugin, "policy {policy}, command {cmd}");
+                        let skipped = matches!(
+                            (policy, cmd),
+                            (r#"{ "*": "deny", "git status": "allow" }"#, "git status")
+                                | (r#"{ "git push *": "ask" }"#, "git push origin main")
+                                | (r#"{ "rtk *": "ask" }"#, "git status")
+                                | (r#"{ "rtk *": "ask" }"#, "git push origin main")
+                                | (r#"{ "rtk *": "ask" }"#, "ls -la")
+                                | (r#"{ "rtk *": "ask" }"#, "head -n 5 a.txt")
+                                | (r#"{ "git status": "allow" }"#, "git status")
+                        );
+                        // `{}` for reasons the skip has nothing to do with:
+                        // a command rtk never rewrites, or one the policy denies.
+                        let never_rewritten = matches!(cmd, "rtk git status" | "echo $(date)");
+                        let denied = matches!(
+                            (policy, cmd),
+                            (r#"{ "*": "deny", "git status": "allow" }"#, c) if c != "git status"
+                        ) || (policy, cmd)
+                            == (
+                                r#"{ "*": "allow", "git push *": "deny" }"#,
+                                "git push origin main",
+                            );
+                        if skipped || never_rewritten || denied {
+                            assert_eq!(plugin, json!({}), "policy {policy}, command {cmd}");
+                        } else {
+                            assert!(
+                                plugin["command"].is_string(),
+                                "policy {policy}, command {cmd}: expected a rewrite, got {plugin}"
+                            );
+                        }
+                        if (policy, cmd) == (r#"{}"#, "ls -la") {
+                            assert_eq!(plugin, json!({ "command": "rtk ls -la" }));
+                        }
+                    }
+                }
+            });
+        }
     }
 
     #[test]
@@ -2939,8 +3037,11 @@ mod tests {
         ask: &[String],
         allow: &[String],
     ) -> HookDecision {
-        let verdict = permissions::check_command_with_rules(cmd, deny, ask, allow);
-        decide_from_verdict(cmd, verdict, permissions::DenyRules::Unattested, None)
+        decide_with_host_rules(
+            cmd,
+            &permissions::HostRules::lists(permissions::Host::Claude, deny, ask, allow),
+            None,
+        )
     }
 
     fn all_allowed() -> Vec<String> {
@@ -3531,15 +3632,11 @@ mod tests {
     #[test]
     fn test_copilot_cli_shell_wrapper_rewrites_without_auto_allow() {
         let command = "bash -c 'git status; cargo test'";
-        let verdict = permissions::check_command_with_rules(command, &[], &[], &["*".to_string()]);
+        let rules =
+            permissions::HostRules::lists(permissions::Host::Claude, &[], &[], &["*".to_string()]);
         let response = copilot_cli_response_from_decision(
             &cli_args(command),
-            decide_from_verdict(
-                command,
-                verdict,
-                permissions::DenyRules::NoneConfigured,
-                None,
-            ),
+            decide_with_host_rules(command, &rules, None),
             command,
         )
         .expect("wrapper rewrite expected");

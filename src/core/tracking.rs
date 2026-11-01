@@ -1957,7 +1957,7 @@ pub(crate) fn get_db_path() -> Result<PathBuf> {
     // Priority 2: Configuration file, through `config::cached_config` rather
     // than a fresh `Config::load()`. This runs inside `Tracker::new()`, which
     // `log_hook_decision` calls on every PreToolUse hook invocation after
-    // `hook_rewrite_params()` has already read the config, so without the
+    // `HostRules` has already read the config, so without the
     // cache each Bash tool call would read and parse it twice. (A test build
     // loads afresh every time; see `cached_config`.)
     if let Some(db_path) = crate::core::config::cached_config()
