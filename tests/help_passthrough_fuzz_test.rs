@@ -133,11 +133,9 @@ const CASES: &[Case] = &[
         tool: "wc",
         native_args: &["--help"],
     },
-    Case {
-        rtk_args: &["find", "--help"],
-        tool: "find",
-        native_args: &["--help"],
-    },
+    // `find` is not here: `rtk find --help` answers itself now. Forwarding the
+    // flag reached `/usr/bin/find: illegal option -- -` on BSD, so find prints
+    // its own usage instead (`tests/find_help_and_filtered_notice.rs`).
     Case {
         rtk_args: &["rg", "--help"],
         tool: "rg",
