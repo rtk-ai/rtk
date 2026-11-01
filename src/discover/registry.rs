@@ -3756,6 +3756,19 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_mix_test_and_precommit() {
+        assert_eq!(
+            rewrite_command_no_prefixes("mix test test/my_app_test.exs --seed 1", &[]),
+            Some("rtk mix test test/my_app_test.exs --seed 1".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("MIX_ENV=test mix precommit", &[]),
+            Some("MIX_ENV=test rtk mix precommit".into())
+        );
+        assert_eq!(rewrite_command_no_prefixes("mix deps.get", &[]), None);
+    }
+
+    #[test]
     fn test_rewrite_compound_and() {
         assert_eq!(
             rewrite_command_no_prefixes("git add . && cargo test", &[]),
