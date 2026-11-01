@@ -427,9 +427,10 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?prisma(?:\s|$|[;|&()<>])",
+        pattern: r"^((bunx|p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?prisma(?:\s|$|[;|&()<>])",
         rtk_cmd: "rtk prisma",
         rewrite_prefixes: &[
+            "bunx prisma",
             "npm exec prisma",
             "npm prisma",
             "npm rum prisma",
@@ -1133,6 +1134,17 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["liquibase"],
         category: "Infra",
         savings_pct: 65.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        // `bunx` has its own generic rule earlier in the table; `classify_command`
+        // takes the last matching rule, so this more specific form must come
+        // after it to route `bunx prisma` to the Prisma filter.
+        pattern: r"^bunx\s+prisma(?:\s|$|[;|&()<>])",
+        rtk_cmd: "rtk prisma",
+        rewrite_prefixes: &["bunx prisma"],
+        category: "Build",
+        savings_pct: 88.0,
         ..RtkRule::DEFAULT
     },
 ];
