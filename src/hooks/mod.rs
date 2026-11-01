@@ -42,6 +42,16 @@ pub fn is_claude_hook_command(command: &str) -> bool {
     is_rtk_hook_command(command, "claude")
 }
 
+pub fn is_legacy_rewrite_hook(command: &str) -> bool {
+    let parts = crate::discover::lexer::shell_split(command);
+    let Some(first_word) = parts.first() else {
+        return false;
+    };
+
+    let filename = first_word.rsplit(['/', '\\']).next().unwrap_or(first_word);
+    filename == constants::REWRITE_HOOK_FILE
+}
+
 #[cfg(feature = "engine")]
 static HOOK_AGENT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 
@@ -76,5 +86,32 @@ mod tests {
         assert!(!is_claude_hook_command("not-rtk hook claude"));
         assert!(!is_claude_hook_command("/opt/homebrew/bin/rtk hook cursor"));
         assert!(!is_claude_hook_command("echo rtk hook claude"));
+    }
+
+    #[test]
+    fn legacy_rewrite_hook_matches_direct_invocations() {
+        assert!(is_legacy_rewrite_hook("rtk-rewrite.sh"));
+        assert!(is_legacy_rewrite_hook("~/.claude/hooks/rtk-rewrite.sh"));
+        assert!(is_legacy_rewrite_hook("/path/to/rtk-rewrite.sh"));
+        assert!(is_legacy_rewrite_hook("\"/path/to/rtk-rewrite.sh\""));
+        assert!(is_legacy_rewrite_hook(
+            "'C:\\Users\\test\\.claude\\hooks\\rtk-rewrite.sh'"
+        ));
+        assert!(is_legacy_rewrite_hook(
+            "C:/Users/test/.claude/hooks/rtk-rewrite.sh"
+        ));
+    }
+
+    #[test]
+    fn legacy_rewrite_hook_rejects_non_invocations() {
+        assert!(!is_legacy_rewrite_hook("echo rtk-rewrite.sh"));
+        assert!(!is_legacy_rewrite_hook("/custom/rtk-rewrite.sh.backup"));
+        assert!(!is_legacy_rewrite_hook(
+            "python3 /custom/audit.py --label rtk-rewrite.sh"
+        ));
+        assert!(!is_legacy_rewrite_hook(
+            "audit.sh --mirror ~/.claude/hooks/rtk-rewrite.sh"
+        ));
+        assert!(!is_legacy_rewrite_hook(""));
     }
 }

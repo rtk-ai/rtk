@@ -121,7 +121,7 @@ pub(super) fn cursor_hook_already_present(root: &serde_json::Value) -> bool {
 
 fn is_cursor_hook_entry(hook: &serde_json::Value) -> bool {
     is_command_hook(hook, |cmd| {
-        cmd.contains(REWRITE_HOOK_FILE) || cmd == CURSOR_HOOK_COMMAND
+        is_legacy_rewrite_hook(cmd) || cmd == CURSOR_HOOK_COMMAND
     })
 }
 
@@ -175,7 +175,7 @@ fn remove_legacy_cursor_hooks_json_entries(path: &Path, ctx: InitContext) -> Res
 /// Does NOT remove `rtk hook cursor` entries — those are the new format.
 pub(super) fn remove_legacy_cursor_hook_entries_from_json(root: &mut serde_json::Value) -> bool {
     remove_hook_entries(root, "preToolUse", HookEntries::Flat, |hook| {
-        is_command_hook(hook, |cmd| cmd.contains(REWRITE_HOOK_FILE))
+        is_command_hook(hook, is_legacy_rewrite_hook)
     })
 }
 
@@ -522,5 +522,126 @@ mod tests {
         let err = remove_cursor_hooks_at(&cursor_dir, InitContext::default()).unwrap_err();
 
         assert!(format!("{err:#}").contains(&hooks_json.display().to_string()));
+    }
+
+    #[test]
+    fn test_cursor_hooks_reject_user_commands_mentioning_rtk_rewrite() {
+        let non_invocations = [
+            "echo rtk-rewrite.sh",
+            "/custom/rtk-rewrite.sh.backup",
+            "python3 /custom/audit.py --label rtk-rewrite.sh",
+            "audit.sh --mirror ~/.claude/hooks/rtk-rewrite.sh",
+        ];
+
+        for cmd in non_invocations {
+            let json = serde_json::json!({
+                "version": 1,
+                "hooks": {
+                    "preToolUse": [{
+                        "command": cmd,
+                        "matcher": "Shell"
+                    }]
+                }
+            });
+            assert!(
+                !cursor_hook_already_present(&json),
+                "must not claim '{cmd}' is already present"
+            );
+
+            let mut json_clone = json.clone();
+            assert!(
+                !remove_cursor_hook_from_json(&mut json_clone),
+                "must not remove '{cmd}' during uninstall"
+            );
+            assert_eq!(json_clone, json, "json must remain unchanged for '{cmd}'");
+
+            let mut json_clone2 = json.clone();
+            assert!(
+                !remove_legacy_cursor_hook_entries_from_json(&mut json_clone2),
+                "must not strip '{cmd}' during legacy migration"
+            );
+            assert_eq!(json_clone2, json, "json must remain unchanged for '{cmd}'");
+        }
+
+        let valid_invocations = ["~/.claude/hooks/rtk-rewrite.sh", "/path/to/rtk-rewrite.sh"];
+
+        for cmd in valid_invocations {
+            let json = serde_json::json!({
+                "version": 1,
+                "hooks": {
+                    "preToolUse": [{
+                        "command": cmd,
+                        "matcher": "Shell"
+                    }]
+                }
+            });
+            assert!(
+                cursor_hook_already_present(&json),
+                "must detect '{cmd}' as existing hook"
+            );
+
+            let mut json_clone = json.clone();
+            assert!(
+                remove_cursor_hook_from_json(&mut json_clone),
+                "must remove '{cmd}' during uninstall"
+            );
+
+            let mut json_clone2 = json.clone();
+            assert!(
+                remove_legacy_cursor_hook_entries_from_json(&mut json_clone2),
+                "must strip '{cmd}' during legacy migration"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cursor_install_and_uninstall_preserves_user_hooks_mentioning_rtk_rewrite() {
+        let temp = TempDir::new().unwrap();
+        let cursor_dir = temp.path().join(CURSOR_DIR);
+        let hooks_json = cursor_dir.join(HOOKS_JSON);
+        let user_cmd = "python3 /custom/audit.py --label rtk-rewrite.sh";
+        fs::create_dir_all(&cursor_dir).unwrap();
+        fs::write(
+            &hooks_json,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": 1,
+                "hooks": {
+                    "preToolUse": [{
+                        "command": user_cmd,
+                        "matcher": "Shell"
+                    }]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        // Patch / install must succeed and not skip claiming "already present"
+        assert!(patch_cursor_hooks_json(&hooks_json, InitContext::default()).unwrap());
+
+        let after_patch: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&hooks_json).unwrap()).unwrap();
+        let commands: Vec<&str> = after_patch["hooks"]["preToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|h| h.get("command")?.as_str())
+            .collect();
+        assert!(commands.contains(&user_cmd));
+        assert!(commands.contains(&CURSOR_HOOK_COMMAND));
+
+        // Uninstall must remove CURSOR_HOOK_COMMAND, leaving user_cmd intact
+        let removed = remove_cursor_hooks_at(&cursor_dir, InitContext::default()).unwrap();
+        assert_eq!(removed, vec!["Cursor hooks.json: removed RTK entry"]);
+
+        let after_uninstall: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&hooks_json).unwrap()).unwrap();
+        let remaining_commands: Vec<&str> = after_uninstall["hooks"]["preToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|h| h.get("command")?.as_str())
+            .collect();
+        assert_eq!(remaining_commands, vec![user_cmd]);
     }
 }
