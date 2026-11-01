@@ -639,8 +639,11 @@ pub fn run(
     let default_view_requested =
         !daily && !weekly && !monthly && !all && !history && !graph && !quota && format == "text";
     let stdout_is_tty = std::io::stdout().is_terminal();
-    let auto_watch =
-        !text && default_view_requested && stdout_is_tty && crate::llm_proxy::is_reachable();
+    let auto_watch = !text
+        && default_view_requested
+        && stdout_is_tty
+        && should_probe_proxy(proxy_binary_available())
+        && crate::llm_proxy::is_reachable();
 
     match watch_dispatch(watch, auto_watch, stdout_is_tty) {
         WatchDispatch::Tui => return super::gain_tui::run(project_scope.as_deref()),
@@ -703,7 +706,7 @@ pub fn run(
         // started it and expects numbers. Say what is actually missing. Printed
         // only when it is running, so this costs nothing for anyone who does
         // not use the proxy.
-        if crate::llm_proxy::is_reachable() {
+        if should_probe_proxy(proxy_binary_available()) && crate::llm_proxy::is_reachable() {
             println!("LLM proxy: {}", crate::llm_proxy::no_data_hint());
         }
         println!();
@@ -1820,6 +1823,21 @@ fn watch_dispatch(watch: bool, auto_watch: bool, stdout_is_tty: bool) -> WatchDi
     }
 }
 
+#[cfg(feature = "engine")]
+fn proxy_binary_available() -> bool {
+    crate::llm_proxy::binary_available()
+}
+
+#[cfg(not(feature = "engine"))]
+fn proxy_binary_available() -> bool {
+    false
+}
+
+fn should_probe_proxy(binary_available: bool) -> bool {
+    binary_available
+        || crate::core::user_env::var("RTK_PROXY_BIND").is_some_and(|bind| !bind.trim().is_empty())
+}
+
 pub(crate) fn share_cta_available() -> bool {
     cfg!(feature = "engine")
 }
@@ -1913,6 +1931,45 @@ mod tests {
             watch_dispatch(false, false, false),
             WatchDispatch::Text
         ));
+    }
+
+    #[test]
+    fn proxy_probe_gate_allows_an_available_binary() {
+        crate::core::user_env::with_vars(&[("RTK_PROXY_BIND", None)], || {
+            assert!(should_probe_proxy(true));
+        });
+    }
+
+    #[test]
+    fn proxy_probe_gate_skips_when_binary_and_explicit_bind_are_absent() {
+        crate::core::user_env::with_vars(&[("RTK_PROXY_BIND", None)], || {
+            assert!(!should_probe_proxy(false));
+        });
+    }
+
+    #[test]
+    fn proxy_probe_gate_allows_an_explicit_bind_without_a_binary() {
+        crate::core::user_env::with_vars(&[("RTK_PROXY_BIND", Some("127.0.0.1:8580"))], || {
+            assert!(should_probe_proxy(false))
+        });
+    }
+
+    #[test]
+    fn proxy_probe_gate_ignores_whitespace_only_bind_without_a_binary() {
+        crate::core::user_env::with_vars(&[("RTK_PROXY_BIND", Some(" \t "))], || {
+            assert!(!should_probe_proxy(false));
+        });
+    }
+
+    #[cfg(not(feature = "engine"))]
+    #[test]
+    fn proxy_probe_gate_without_engine_only_allows_an_explicit_bind() {
+        crate::core::user_env::with_vars(&[("RTK_PROXY_BIND", None)], || {
+            assert!(!should_probe_proxy(proxy_binary_available()));
+        });
+        crate::core::user_env::with_vars(&[("RTK_PROXY_BIND", Some("127.0.0.1:8580"))], || {
+            assert!(should_probe_proxy(proxy_binary_available()))
+        });
     }
 
     #[test]
