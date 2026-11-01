@@ -1,28 +1,60 @@
 [filters.spring-boot]
-description = "Compact Spring Boot output — strip banner and verbose startup logs, keep key events. Matches gradle bootRun, and java -jar only when the jar filename itself contains \"spring\" (mvn spring-boot:run is routed to RTK's dedicated Maven filter and never reaches this one). Jars using the Maven/Gradle default <artifactId>-<version>.jar name, and jars under a path containing spaces, are deliberately left to full passthrough rather than risk misclassifying an unrelated tool."
+description = "Strip recognizable Spring Boot banner lines without discarding application output or diagnostics. Matches gradle bootRun and java -jar when the jar filename contains spring; the filename is only a heuristic, so unknown output is preserved. Maven uses RTK's dedicated Maven filter."
 match_command = "^(mvn\\s+spring-boot:run|java\\s+-jar\\s+(?:\\S*[/\\\\])?[^/\\\\\\s]*(?i:spring)[^/\\\\\\s]*\\.jar|gradle\\s+.*bootRun)"
 strip_ansi = true
-keep_lines_matching = [
-  "Started\\s.*\\sin\\s",
-  "Tomcat started on port",
-  "ERROR",
-  "WARN",
-  "Exception",
-  "Caused by:",
-  "Application run failed",
-  "BUILD\\s",
-  "Tests run:",
-  "FAILURE",
-  "listening on port",
+# A keep-list also deletes batch reports and unrelated jars whose names contain
+# spring (#3771). Remove only known decoration, never arbitrary INFO messages.
+# Do not head-cap: the application result or root cause may be the final line.
+strip_lines_matching = [
+  "^\\s*\\.   ____          _\\s*$",
+  "^\\s*/\\\\\\\\ / ___'_ __ _ _\\(_\\)_ __\\s*$",
+  "^\\s*\\( \\( \\)\\\\___ \\| '_ \\| '_\\| \\| '_ \\\\\\s*$",
+  "^\\s*\\\\/  ___\\)\\| \\|_\\)\\| \\| \\| \\| \\| \\|\\| \\)\\s*$",
+  "^\\s*'  \\|____\\| \\.__\\|_\\| \\|_\\|_\\| \\|_\\\\__\\|\\s*$",
+  "^\\s*:: Spring Boot ::\\s*(?:\\(v[^\\r\\n)]*\\))?\\s*$",
 ]
-max_lines = 30
 
 [[tests.spring-boot]]
-name = "keeps startup summary and errors"
+name = "strips the banner but preserves startup messages"
 input = "  .   ____          _ \n /\\\\ / ___'_ __ _ _(_)_ __  \n( ( )\\___ | '_ | '_| | '_ \\ \n \\/  ___)| |_)| | | | | || )\n  '  |____| .__|_| |_|_| |_\\__|\n  :: Spring Boot ::  (v3.2.0)\n2024-01-01 INFO Initializing Spring\n2024-01-01 INFO Bean 'dataSource' created\n2024-01-01 INFO Tomcat started on port 8080\n2024-01-01 INFO Started MyApp in 3.2 seconds"
-expected = "2024-01-01 INFO Tomcat started on port 8080\n2024-01-01 INFO Started MyApp in 3.2 seconds"
+expected = "2024-01-01 INFO Initializing Spring\n2024-01-01 INFO Bean 'dataSource' created\n2024-01-01 INFO Tomcat started on port 8080\n2024-01-01 INFO Started MyApp in 3.2 seconds"
 
 [[tests.spring-boot]]
-name = "preserves errors"
+name = "preserves complete diagnostics"
 input = "  :: Spring Boot ::  (v3.2.0)\n2024-01-01 INFO Initializing Spring\n2024-01-01 ERROR Application run failed\nCaused by: java.lang.NullPointerException"
-expected = "2024-01-01 ERROR Application run failed\nCaused by: java.lang.NullPointerException"
+expected = "2024-01-01 INFO Initializing Spring\n2024-01-01 ERROR Application run failed\nCaused by: java.lang.NullPointerException"
+
+[[tests.spring-boot]]
+name = "preserves batch results after startup"
+input = "2024-01-01 INFO Started BatchApp in 2.1 seconds\nReconciliation report:\naccounts scanned : 41822\nmismatches : 3\nids: 90412, 90855, 91003\nBatch complete."
+expected = "2024-01-01 INFO Started BatchApp in 2.1 seconds\nReconciliation report:\naccounts scanned : 41822\nmismatches : 3\nids: 90412, 90855, 91003\nBatch complete."
+
+[[tests.spring-boot]]
+name = "preserves unrelated CLI output"
+input = "Generating from spec.yaml\nWrote 12 files to ./out\n  model/User.java\n  model/Order.java\n  api/DefaultApi.java\nSummary: 12 created, 0 skipped\nDone in 1.4s"
+expected = "Generating from spec.yaml\nWrote 12 files to ./out\n  model/User.java\n  model/Order.java\n  api/DefaultApi.java\nSummary: 12 created, 0 skipped\nDone in 1.4s"
+
+[[tests.spring-boot]]
+name = "preserves stack frames and the root cause"
+input = "2024-01-01 ERROR Application run failed\njava.lang.IllegalStateException: failed\n    at demo.Application.main(Application.java:21)\nCaused by: java.io.IOException: missing config\n    at demo.Config.load(Config.java:10)\n    ... 12 more"
+expected = "2024-01-01 ERROR Application run failed\njava.lang.IllegalStateException: failed\n    at demo.Application.main(Application.java:21)\nCaused by: java.io.IOException: missing config\n    at demo.Config.load(Config.java:10)\n    ... 12 more"
+
+[[tests.spring-boot]]
+name = "preserves application results after thirty lines"
+input = "2024-01-01 INFO Application item 1\n2024-01-01 INFO Application item 2\n2024-01-01 INFO Application item 3\n2024-01-01 INFO Application item 4\n2024-01-01 INFO Application item 5\n2024-01-01 INFO Application item 6\n2024-01-01 INFO Application item 7\n2024-01-01 INFO Application item 8\n2024-01-01 INFO Application item 9\n2024-01-01 INFO Application item 10\n2024-01-01 INFO Application item 11\n2024-01-01 INFO Application item 12\n2024-01-01 INFO Application item 13\n2024-01-01 INFO Application item 14\n2024-01-01 INFO Application item 15\n2024-01-01 INFO Application item 16\n2024-01-01 INFO Application item 17\n2024-01-01 INFO Application item 18\n2024-01-01 INFO Application item 19\n2024-01-01 INFO Application item 20\n2024-01-01 INFO Application item 21\n2024-01-01 INFO Application item 22\n2024-01-01 INFO Application item 23\n2024-01-01 INFO Application item 24\n2024-01-01 INFO Application item 25\n2024-01-01 INFO Application item 26\n2024-01-01 INFO Application item 27\n2024-01-01 INFO Application item 28\n2024-01-01 INFO Application item 29\n2024-01-01 INFO Application item 30\n2024-01-01 INFO Application item 31\n2024-01-01 INFO Application item 32\n2024-01-01 INFO Application item 33\n2024-01-01 INFO Application item 34\n2024-01-01 INFO Application item 35\nFinal result: mismatches = 3"
+expected = "2024-01-01 INFO Application item 1\n2024-01-01 INFO Application item 2\n2024-01-01 INFO Application item 3\n2024-01-01 INFO Application item 4\n2024-01-01 INFO Application item 5\n2024-01-01 INFO Application item 6\n2024-01-01 INFO Application item 7\n2024-01-01 INFO Application item 8\n2024-01-01 INFO Application item 9\n2024-01-01 INFO Application item 10\n2024-01-01 INFO Application item 11\n2024-01-01 INFO Application item 12\n2024-01-01 INFO Application item 13\n2024-01-01 INFO Application item 14\n2024-01-01 INFO Application item 15\n2024-01-01 INFO Application item 16\n2024-01-01 INFO Application item 17\n2024-01-01 INFO Application item 18\n2024-01-01 INFO Application item 19\n2024-01-01 INFO Application item 20\n2024-01-01 INFO Application item 21\n2024-01-01 INFO Application item 22\n2024-01-01 INFO Application item 23\n2024-01-01 INFO Application item 24\n2024-01-01 INFO Application item 25\n2024-01-01 INFO Application item 26\n2024-01-01 INFO Application item 27\n2024-01-01 INFO Application item 28\n2024-01-01 INFO Application item 29\n2024-01-01 INFO Application item 30\n2024-01-01 INFO Application item 31\n2024-01-01 INFO Application item 32\n2024-01-01 INFO Application item 33\n2024-01-01 INFO Application item 34\n2024-01-01 INFO Application item 35\nFinal result: mismatches = 3"
+
+[[tests.spring-boot]]
+name = "does not strip incidental banner text or business INFO"
+input = "Custom banner: Spring Boot :: report\nINFO Account 812 failed reconciliation\n  :: Spring Boot :: is a literal in this report"
+expected = "Custom banner: Spring Boot :: report\nINFO Account 812 failed reconciliation\n  :: Spring Boot :: is a literal in this report"
+
+[[tests.spring-boot]]
+name = "empty output stays empty"
+input = ""
+expected = ""
+
+[[tests.spring-boot]]
+name = "removes versioned branding after ANSI stripping"
+input = "\u001b[32m  :: Spring Boot ::  (v4.0.0)\u001b[0m\nreport complete"
+expected = "report complete"
