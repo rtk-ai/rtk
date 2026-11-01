@@ -247,7 +247,7 @@ RTK has two filter systems:
 
 Each filter module follows the same pattern:
 1. Start a timer (`TimedExecution::start()`)
-2. Execute the underlying command (`std::process::Command`)
+2. Execute the underlying command (`ChildCommand`, via `resolved_command()`)
 3. Apply filtering (strip boilerplate, group errors, truncate)
 4. On filter error, fall back to raw output
 5. Track token savings to SQLite

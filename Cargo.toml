@@ -20,6 +20,17 @@
 [workspace]
 members = [".", "text", "engine", "plugin"]
 
+[workspace.lints.rust]
+unsafe_code = "deny"
+warnings = "deny"
+
+[workspace.lints.clippy]
+# clippy.toml names the method; the level is what decides who the ban binds.
+# Allow here, so a crate added to this workspace inherits it and does not have
+# to know the rule exists. `rtk` opts back in, in `src/lib.rs`, outside test
+# builds — tests, integration tests included, stay allowed.
+disallowed_methods = "allow"
+
 [package]
 name = "rtk"
 version = "0.49.0"
@@ -163,6 +174,5 @@ assets = [
     { source = "LICENSE", dest = "/usr/share/doc/rtk/LICENSE", mode = "644", doc = true },
 ]
 
-[lints.rust]
-unsafe_code = "deny"
-warnings = "deny"
+[lints]
+workspace = true

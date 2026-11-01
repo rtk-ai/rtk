@@ -7,7 +7,7 @@ use crate::core::runner;
 use crate::core::shell::display_args;
 use crate::core::stream;
 use crate::core::tracking::TimedExecution;
-use crate::core::utils::{ChildArgExt, resolved_command, strip_ansi};
+use crate::core::utils::{resolved_command, strip_ansi};
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::io::Write;
@@ -41,7 +41,7 @@ fn run_build(args: &[String], verbose: u8) -> Result<i32> {
     }
     let timer = TimedExecution::start();
     let mut cmd = resolved_command("ng");
-    cmd.child_args(args);
+    cmd.args(args);
     // Angular warnings are stderr, even on success. The shared stdout-only runner's
     // stderr cap would hide budget diagnostics, so keep that stream in full here.
     let result = stream::exec_capture_stdin_with_relay(&mut cmd).context("Failed to run ng")?;

@@ -7,6 +7,7 @@
 //! context, so RTK spends no tokens configuring itself. Every failure path
 //! returns silence rather than disrupting the session.
 
+use crate::core::child_command::ChildCommand;
 use std::io::Write;
 use std::time::{Duration, Instant};
 
@@ -88,7 +89,8 @@ fn probe(addr: &str, timeout: Duration) -> bool {
 
 fn spawn_start(addr: &str) -> anyhow::Result<()> {
     let exe = std::env::current_exe().context("resolve the rtk binary path")?;
-    std::process::Command::new(exe)
+    // nosemgrep: dynamic-command-execution -- exe is rtk's own path from current_exe
+    ChildCommand::new(exe)
         .args(["llm-proxy", "start", "--bind", addr])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

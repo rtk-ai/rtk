@@ -181,7 +181,7 @@ pub fn project_root(marker: &str) -> Option<PathBuf> {
     #[cfg(not(test))]
     {
         // Fallback: git (spawns a subprocess, slower but handles monorepo layouts).
-        let mut cmd = std::process::Command::new("git");
+        let mut cmd = crate::core::child_command::ChildCommand::new("git");
         cmd.args(["rev-parse", "--show-toplevel"]);
         let result = crate::core::stream::exec_capture(&mut cmd).ok()?;
         result

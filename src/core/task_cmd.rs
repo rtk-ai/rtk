@@ -8,7 +8,7 @@
 use crate::core::pipeline_config;
 use crate::core::shell::{Launch, shell_command};
 use crate::core::tracking::{Tracker, estimate_tokens};
-use crate::core::utils::{ChildArgExt, resolved_command};
+use crate::core::utils::resolved_command;
 use anyhow::{Context, Result, bail};
 use rtk_engine::pipeline::{TaskDef, UpstreamDef};
 use rtk_engine::task::{CorpusFile, TaskIntent, TaskOutcome, WorkerRequest, find_kind};
@@ -153,7 +153,7 @@ fn run_for_output(command: &[String]) -> Result<(CorpusFile, i32)> {
         .split_first()
         .context("`--` needs a command after it")?;
     let mut cmd = resolved_command(program);
-    cmd.child_args(rest);
+    cmd.args(rest);
     let output = cmd
         .output()
         .with_context(|| format!("Failed to run {program}"))?;
