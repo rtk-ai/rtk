@@ -1,0 +1,33 @@
+Microsoft (R) Build Engine version 17.8.5+b5c6332e2 for .NET Framework
+Copyright (C) Microsoft Corporation. All rights reserved.
+
+Build started 1/15/2026 9:00:00 AM.
+Project "C:\src\MyProject.sln" on node 1 (Build target(s)).
+Project "C:\src\MyProject.sln" (1) is building "C:\src\MyProject\MyProject.vcxproj" (2) on node 1 (Build target(s)).
+PrepareForBuild:
+  Creating directory "obj\Win32\Debug\".
+  Creating directory "C:\src\MyProject\Debug\".
+InitializeBuildStatus:
+  Creating "obj\Win32\Debug\MyProject.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+ClCompile:
+  C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.38.33130\bin\HostX64\x86\CL.exe /c /Z7 /nologo /W3 /WX- /diagnostics:column /sdl /Od main.cpp util.cpp parser.cpp
+  main.cpp
+  util.cpp
+  parser.cpp
+C:\src\MyProject\src\util.cpp(33): warning C4244: 'argument': conversion from 'int64_t' to 'int', possible loss of data [C:\src\MyProject\MyProject.vcxproj]
+Link:
+  C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.38.33130\bin\HostX64\x86\link.exe /OUT:"Debug\MyProject.dll" /NOLOGO /DLL main.obj util.obj parser.obj
+  Creating library Debug\MyProject.lib and object Debug\MyProject.exp
+  Generating code
+  Finished generating code
+  MyProject.vcxproj -> C:\src\MyProject\Debug\MyProject.dll
+FinalizeBuildStatus:
+  Deleting file "obj\Win32\Debug\MyProject.tlog\unsuccessfulbuild".
+Done Building Project "C:\src\MyProject\MyProject.vcxproj" (default targets).
+Done Building Project "C:\src\MyProject.sln" (default targets).
+
+Build succeeded.
+    1 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:14.32
