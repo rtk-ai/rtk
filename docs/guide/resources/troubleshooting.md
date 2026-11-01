@@ -62,6 +62,29 @@ rtk gain    # should now show token savings stats
    cat ~/.claude/settings.json | grep rtk
    ```
 
+## Check a pipeline's hook decision
+
+Run the diagnostic in the same project directory as the hook:
+
+```bash
+rtk hook check --agent claude "git status"
+```
+
+Earlier versions checked permissions and rewrite rules but omitted pipeline rules, so a pipeline denial or passthrough could still be printed as a rewrite. The Claude diagnostic now checks the same trusted pipeline files and command facts before the permission/rewrite gate. It names the selected pipeline rule and its origin on stderr; a resulting rewrite is printed on stdout. Untrusted or invalid pipeline files retain the hook's fallback behavior, with diagnostics explaining why they were not applied.
+
+| Exit | Diagnostic outcome |
+|------|--------------------|
+| `0` | A rewrite or pipeline swap is printed. The actual host hook still owns permission enforcement. |
+| `1` | Passthrough or no rewrite. |
+| `2` | A pipeline stop, permission denial, or invalid agent. |
+| `3` | Runtime classifier results are needed to determine the outcome. |
+
+Permission denials previously shared exit `1` with no-match results; scripts can now distinguish them using exit `2`.
+
+The diagnostic uses the command, working directory, and configuration. It does not replay a session or supply a tool description, call classifiers, execute commands/tasks, or update pipeline status. A classifier-dependent pipeline therefore reports an indeterminate result instead of treating missing runtime data as false. A `mode = "swap"` rule previews the same replacement as the native hook and retains its permission gate. Invalid rules still go through the existing validation and fallback; for example, `mode = "answer"` is supported for read/search/web, not shell.
+
+Pipeline preview follows the currently supported hook scope: Claude Code with the engine enabled. Other `--agent` values keep their own permission/rewrite behavior. `rtk rewrite` also keeps its existing permission-oriented protocol and does not evaluate pipeline rules.
+
 ## RTK not found after `cargo install`
 
 **Symptom:**

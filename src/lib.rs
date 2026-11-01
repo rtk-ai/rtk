@@ -1079,9 +1079,8 @@ enum Commands {
     /// rewrite such as `$(...)` or a file redirect, or a deny rule matched
     /// inside a shell wrapper's script): run the command unchanged.
     ///
-    /// 2 - a deny matched (checked before anything else). Nothing printed: a
-    /// deny rule, defer to the agent's own deny. A message printed: an rtk
-    /// pipeline rule denied or routed the command, block it with that message.
+    /// 2 - a deny matched (checked before anything else). Nothing printed:
+    /// defer to the agent's own deny.
     ///
     /// 3 - rewrite printed, an ask rule matched or allow rules do not cover
     /// every command, including when there are no rules at all: use the
@@ -1089,6 +1088,9 @@ enum Commands {
     ///
     /// Compare the rewrite with the original: a command already in RTK form can
     /// come back as itself under 0 or 3.
+    ///
+    /// Pipeline rules are evaluated by `rtk hook claude`, not this command.
+    /// Use `rtk hook check --agent claude` to preview their command decisions.
     ///
     /// Exit 3 is still a rewrite, so `REWRITTEN=$(rtk rewrite "$CMD") || exit 0` drops it.
     ///
@@ -1301,7 +1303,10 @@ enum HookCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Check how a command would be rewritten by the hook engine (dry-run)
+    /// Check the target hook's command decision without executing commands or tasks
+    ///
+    /// Exit codes: 0 = rewrite, 1 = passthrough or no rewrite, 2 = deny or invalid agent,
+    /// 3 = runtime data required. Claude's trusted pipeline rules are checked first.
     Check {
         /// Target agent
         #[arg(long, default_value = "claude")]
@@ -3702,35 +3707,7 @@ fn run_cli() -> Result<i32> {
                 0
             }
             HookCommands::Check { agent, command } => {
-                // Answers the same question the hooks answer, through the same
-                // decision (`hooks::decision`) — not just "does a rewrite rule
-                // match?". Checking the rule alone reported a rewrite for
-                // command substitutions, file redirects and heredocs that both
-                // hook paths refuse to touch, which is the opposite of what a
-                // diagnostic is for.
-                use crate::hooks::decision::{AgentPath, HookDecision};
-                let raw = command.join(" ");
-                // Answer for the agent that was asked about. Agents differ both
-                // in whose permission rules their hook reads and in how it
-                // decides -- see `AgentPath` -- so one hard-coded answer would
-                // misdescribe the very hook being diagnosed.
-                let Some(path) = AgentPath::from_agent(&agent) else {
-                    return Ok(2);
-                };
-                match path.decide(&raw) {
-                    HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten) => {
-                        println!("{}", rewritten);
-                        0
-                    }
-                    HookDecision::Deny => {
-                        eprintln!("Denied by a permission rule: {}", raw);
-                        1
-                    }
-                    HookDecision::Defer => {
-                        eprintln!("No rewrite for: {}", raw);
-                        1
-                    }
-                }
+                core::hook_check_cmd::run(&agent, &command.join(" "))
             }
         },
 
