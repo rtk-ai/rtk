@@ -7,7 +7,7 @@ use crate::core::runner;
 use crate::core::shell::display_args;
 use crate::core::stream::exec_capture_unguarded;
 use crate::core::truncate::CAP_WARNINGS;
-use crate::core::utils::{resolved_command, truncate};
+use crate::core::utils::{PathLabels, compact_from_first_dir, resolved_command, truncate};
 use anyhow::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -382,6 +382,9 @@ pub(crate) fn filter_golangci_json(output: &str, version: u32) -> String {
     let mut file_counts: Vec<_> = by_file.iter().collect();
     file_counts.sort_by(|a, b| b.1.cmp(a.1));
 
+    // One label per file for the whole report; two files never share a label.
+    let labels = PathLabels::new(by_file.keys().copied(), compact_path);
+
     // Build output
     let mut result = String::new();
     result.push_str(&format!(
@@ -405,7 +408,7 @@ pub(crate) fn filter_golangci_json(output: &str, version: u32) -> String {
     const MAX_GOLANGCI_FILES: usize = CAP_WARNINGS;
     result.push_str("Top files:\n");
     for (file, count) in file_counts.iter().take(MAX_GOLANGCI_FILES) {
-        let short_path = compact_path(file);
+        let short_path = labels.label(file);
         result.push_str(&format!("  {} ({} issues)\n", short_path, count));
 
         // Show top 3 linters in this file
@@ -448,21 +451,10 @@ pub(crate) fn filter_golangci_json(output: &str, version: u32) -> String {
     result.trim().to_string()
 }
 
-/// Compact file path (remove common prefixes)
+/// Compact file path: from the first `pkg`, `cmd` or `internal` directory, else the file
+/// name. Different files can share the result, so reports label paths through [`PathLabels`].
 fn compact_path(path: &str) -> String {
-    let path = path.replace('\\', "/");
-
-    if let Some(pos) = path.rfind("/pkg/") {
-        format!("pkg/{}", &path[pos + 5..])
-    } else if let Some(pos) = path.rfind("/cmd/") {
-        format!("cmd/{}", &path[pos + 5..])
-    } else if let Some(pos) = path.rfind("/internal/") {
-        format!("internal/{}", &path[pos + 10..])
-    } else if let Some(pos) = path.rfind('/') {
-        path[pos + 1..].to_string()
-    } else {
-        path
-    }
+    compact_from_first_dir(path, &["pkg", "cmd", "internal"])
 }
 
 #[cfg(test)]
@@ -507,6 +499,36 @@ mod tests {
         assert!(result.contains("gosimple"));
         assert!(result.contains("main.go"));
         assert!(result.contains("utils.go"));
+    }
+
+    #[test]
+    fn same_named_files_in_different_directories_keep_distinct_labels() {
+        // golangci-lint prints paths relative to the working directory, so these never
+        // matched a well-known directory and both printed as `main.go`.
+        let issue = |path: &str| {
+            serde_json::json!({
+                "FromLinter": "errcheck", "Text": "Error return value not checked",
+                "Pos": {"Filename": path, "Line": 7, "Column": 2},
+            })
+        };
+        let input = serde_json::to_string(&serde_json::json!({
+            "Issues": [issue("cmd/api/main.go"), issue("cmd/worker/main.go"), issue("/repo/pkg/h/server.go")],
+        }))
+        .expect("fixture JSON");
+        let out = filter_golangci_json(&input, 1);
+        assert!(out.contains("  cmd/api/main.go (1 issues)\n"), "{out}");
+        assert!(out.contains("  cmd/worker/main.go (1 issues)\n"), "{out}");
+        // A path that is unique keeps the compact form it always had.
+        assert!(out.contains("  pkg/h/server.go (1 issues)\n"), "{out}");
+    }
+
+    #[test]
+    fn compact_path_keeps_the_first_well_known_directory() {
+        assert_eq!(
+            compact_path("/repo/pkg/app/internal/x.go"),
+            "pkg/app/internal/x.go"
+        );
+        assert_eq!(compact_path("/repo/cmd/a/pkg/x.go"), "cmd/a/pkg/x.go");
     }
 
     #[test]
