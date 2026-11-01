@@ -1919,12 +1919,10 @@ where
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     use crate::core::utils::ChildArgExt;
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
-
-    // No args → show Clap's error (user ran just "rtk" with bad syntax)
-    if args.is_empty() {
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    let Some(args) = fallback_command_args(&raw_args) else {
         parse_error.exit();
-    }
+    };
 
     // RTK meta-commands should never fall back to raw execution.
     // e.g. `rtk gain --badtypo` should show Clap's error, not try to run `gain` from $PATH.
@@ -2113,6 +2111,44 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
             }
         }
     }
+}
+
+fn fallback_command_args(args: &[String]) -> Option<Vec<String>> {
+    // Derive the valueless root options from the same clap command used to parse Cli.
+    // A removed flag must never silently turn a filtered command into raw passthrough.
+    let command = rtk_command();
+    let root_flags: Vec<_> = command
+        .get_arguments()
+        .filter(|arg| arg.get_index().is_none() && !arg.get_action().takes_values())
+        .collect();
+
+    let mut command_index = 0;
+    while let Some(arg) = args.get(command_index) {
+        let long_flag = arg
+            .strip_prefix("--")
+            .is_some_and(|name| root_flags.iter().any(|flag| flag.get_long() == Some(name)));
+        let short_flags = arg.strip_prefix('-').is_some_and(|cluster| {
+            !cluster.is_empty()
+                && !cluster.starts_with('-')
+                && cluster.chars().all(|short| {
+                    root_flags
+                        .iter()
+                        .any(|flag| flag.get_short() == Some(short))
+                })
+        });
+        if long_flag || short_flags {
+            command_index += 1;
+        } else {
+            break;
+        }
+    }
+
+    let command = args.get(command_index)?;
+    if command.starts_with('-') {
+        return None;
+    }
+
+    Some(args[command_index..].to_vec())
 }
 
 #[derive(Debug, Subcommand)]
@@ -5737,6 +5773,36 @@ mod tests {
                 Commands::Ng { args } => assert_eq!(args, flags),
                 _ => panic!("expected Angular command"),
             }
+        }
+    }
+
+    #[test]
+    fn test_fallback_skips_supported_global_flags_before_command() {
+        for flags in [
+            vec!["-v"],
+            vec!["--verbose"],
+            vec!["-vv"],
+            vec!["-v", "-v"],
+            vec!["--skip-env"],
+            vec!["-vvv", "--skip-env"],
+        ] {
+            let args: Vec<String> = flags
+                .into_iter()
+                .chain(["echo", "--help"])
+                .map(str::to_string)
+                .collect();
+            assert_eq!(
+                fallback_command_args(&args),
+                Some(vec!["echo".to_string(), "--help".to_string()])
+            );
+        }
+    }
+
+    #[test]
+    fn test_fallback_rejects_unrecognized_leading_flag() {
+        for flag in ["-u", "-vx", "-", "--ultra-compact", "--verbose=1"] {
+            let args = [flag.to_string(), "echo".to_string(), "hi".to_string()];
+            assert_eq!(fallback_command_args(&args), None, "accepted {flag}");
         }
     }
 
