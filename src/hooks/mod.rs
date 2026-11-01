@@ -13,6 +13,7 @@ pub mod hook_cmd;
 pub mod init;
 pub mod integrity;
 pub mod permissions;
+pub mod permissions_muse;
 pub mod permissions_opencode;
 #[deny(clippy::print_stdout, clippy::print_stderr)]
 #[cfg(feature = "engine")]

@@ -403,6 +403,7 @@ impl AgentPath {
             // `copilot` reads Claude Code's settings rather than a Copilot file
             // (see `hook_cmd`'s `vscode_response` and `copilot_cli_response`).
             "antigravity" => Some(Self::InProcess(Host::Antigravity)),
+            "muse" => Some(Self::InProcess(Host::Muse)),
             "cline" | "kilocode" | "kimi" | "windsurf" => Some(Self::RulesOnly),
             "claude" => Some(Self::ClaudeHook),
             "copilot" => Some(Self::InProcess(Host::Claude)),
@@ -427,6 +428,7 @@ impl AgentPath {
     /// The `--agent` values [`AgentPath::lookup`] accepts.
     const AGENTS: &'static [&'static str] = &[
         "antigravity",
+        "muse",
         "claude",
         "cline",
         "codex",

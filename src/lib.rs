@@ -54,6 +54,8 @@ pub enum AgentTarget {
     Kilocode,
     /// Google Antigravity
     Antigravity,
+    /// Muse Code (Agent Plugins bundle; explicit Muse install/approval required)
+    Muse,
     /// Kimi AI
     Kimi,
     /// Pi coding agent
@@ -1289,6 +1291,8 @@ enum HookCommands {
     Droid,
     /// Process Google Antigravity PreToolUse hook (reads JSON from stdin)
     Antigravity,
+    /// Process Muse Code PreToolUse hook (reads JSON from stdin)
+    Muse,
     /// Process Mistral Vibe CLI pre_tool hook (reads JSON from stdin)
     Vibe,
     /// Answer for OpenCode's plugin: the rewrite as JSON, or `{}` when
@@ -2380,6 +2384,9 @@ where
     } else if agent == Some(AgentTarget::Trae) {
         hooks::init::uninstall_trae_mode(global, ctx)?;
         Ok(0)
+    } else if agent == Some(AgentTarget::Muse) {
+        hooks::init::uninstall_muse(global, ctx)?;
+        Ok(0)
     } else if agent == Some(AgentTarget::Antigravity) {
         hooks::init::uninstall_antigravity_mode(global, ctx)?;
         Ok(0)
@@ -3042,7 +3049,9 @@ fn run_cli() -> Result<i32> {
             } else {
                 hooks::init::PatchMode::Ask
             };
-            if show {
+            if show && agent == Some(AgentTarget::Muse) {
+                hooks::init::show_muse_config(global)?;
+            } else if show {
                 hooks::init::show_config(codex, agent == Some(AgentTarget::Omp))?;
             } else if uninstall && copilot {
                 if global {
@@ -3080,6 +3089,8 @@ fn run_cli() -> Result<i32> {
                     anyhow::bail!("Kilo Code is project-scoped. Use: rtk init --agent kilocode");
                 }
                 hooks::init::run_kilocode_mode(ctx)?;
+            } else if agent == Some(AgentTarget::Muse) {
+                hooks::init::run_muse_mode(global, ctx)?;
             } else if agent == Some(AgentTarget::Antigravity) {
                 hooks::init::run_antigravity_mode(global, ctx)?;
             } else if agent == Some(AgentTarget::Kimi) {
@@ -3693,6 +3704,10 @@ fn run_cli() -> Result<i32> {
                 hooks::hook_cmd::run_antigravity()?;
                 0
             }
+            HookCommands::Muse => {
+                hooks::hook_cmd::run_muse()?;
+                0
+            }
             HookCommands::Vibe => {
                 hooks::hook_cmd::run_vibe()?;
                 0
@@ -3719,6 +3734,20 @@ fn run_cli() -> Result<i32> {
                 };
                 match path.decide(&raw) {
                     HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten) => {
+                        let cwd = crate::core::user_dirs::current_dir().ok();
+                        if matches!(path, AgentPath::InProcess(hooks::permissions::Host::Muse))
+                            && !hooks::permissions_muse::preserves_policy(
+                                &raw,
+                                &rewritten,
+                                cwd.as_deref().and_then(|p| p.to_str()),
+                            )
+                        {
+                            eprintln!(
+                                "Muse policy is unknown or touches either command; passing through: {}",
+                                raw
+                            );
+                            return Ok(1);
+                        }
                         println!("{}", rewritten);
                         0
                     }

@@ -21,6 +21,7 @@ pub enum HookStatus {
 /// Every agent owns its own probe inside `src/hooks/init/<agent>.rs`.
 const AGENT_PROBES: &[fn() -> bool] = &[
     super::init::antigravity::is_configured,
+    super::init::muse::is_configured,
     super::init::cursor::is_configured,
     super::init::gemini::is_configured,
     super::init::opencode::is_configured,

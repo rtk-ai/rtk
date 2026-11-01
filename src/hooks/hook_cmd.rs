@@ -479,6 +479,39 @@ fn run_gemini_inner_impl(
     })
 }
 
+// ── Muse Code hook ────────────────────────────────────────────
+
+/// Muse accepts Claude-shaped updatedInput, but rejects a decision reason
+/// without a decision. Never assert approval: the native host owns it.
+pub fn run_muse() -> Result<()> {
+    let input = read_stdin_limited()?;
+    let Some(output) = muse_response(&input) else {
+        return Ok(());
+    };
+    writeln!(io::stdout(), "{output}").context("Failed to write Muse hook response")
+}
+
+fn muse_response(input: &str) -> Option<Value> {
+    let parsed: Value = serde_json::from_str(strip_leading_bom(input).trim()).ok()?;
+    if !matches!(parsed.get("tool_name")?.as_str()?, "Bash" | "bash") {
+        return None;
+    }
+    let mut updated = parsed.get("tool_input")?.as_object()?.clone();
+    let cmd = updated.get("command")?.as_str()?;
+    let cwd = parsed.get("cwd").and_then(Value::as_str);
+    let rewritten = match decide_hook_action(cmd, permissions::Host::Muse, cwd) {
+        HookDecision::AllowRewrite(command) | HookDecision::AskRewrite(command) => command,
+        HookDecision::Defer | HookDecision::Deny => return None,
+    };
+    if !super::permissions_muse::preserves_policy(cmd, &rewritten, cwd) {
+        return None;
+    }
+    updated.insert("command".to_string(), Value::String(rewritten));
+    Some(json!({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "updatedInput": updated
+    }}))
+}
+
 // ── Google Antigravity hook ───────────────────────────────────
 
 /// Run the Google Antigravity PreToolUse hook.
