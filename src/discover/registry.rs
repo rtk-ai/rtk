@@ -3842,6 +3842,20 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_toml_task_ignores_hyphenated_commands() {
+        assert_eq!(
+            rewrite_command_no_prefixes("task build", &[]),
+            Some("rtk task build".into())
+        );
+        assert_eq!(rewrite_command_no_prefixes("task-start foo", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("./scripts/task-start foo", &[]),
+            None
+        );
+        assert_eq!(rewrite_command_no_prefixes("task-runner --list", &[]), None);
+    }
+
+    #[test]
     fn test_rewrite_toml_absolute_path() {
         assert_eq!(
             rewrite_command_no_prefixes("/usr/bin/jj log", &[]),
