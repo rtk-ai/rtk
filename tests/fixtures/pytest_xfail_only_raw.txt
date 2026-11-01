@@ -1,0 +1,9 @@
+x                                                                                            [100%]
+============================================ XFAILURES =============================================
+_____________________________________________ test_xf ______________________________________________
+test_reports.py:10: in test_xf
+    raise ValueError("EXPECTED_XFAIL_DETAIL")
+E   ValueError: EXPECTED_XFAIL_DETAIL
+===================================== short test summary info ======================================
+XFAIL test_reports.py::test_xf - known issue
+1 xfailed in 0.02s
