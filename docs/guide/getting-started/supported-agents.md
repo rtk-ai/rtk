@@ -281,7 +281,7 @@ Kilo Code reads `.kilocode/rules/` as custom instructions. RTK adds guidance tel
 
 ```bash
 rtk init --agent antigravity          # workspace-scoped (<repo>/.agents/plugins/rtk/)
-rtk init -g --agent antigravity       # machine-scoped (~/.gemini/config/plugins/rtk/)
+rtk init -g --agent antigravity       # machine-scoped (~/.gemini/config/plugins/rtk/) (respects `$GEMINI_HOME`)
 ```
 
 Installs an Antigravity plugin bundle: `hooks.json` maps `PreToolUse` on `run_command` to the native `rtk hook antigravity` binary, and `rules/AGENTS.md` carries the awareness file selected by `awareness.level`. Before any command executes, RTK rewrites the tool call arguments in place using `overwrite.CommandLine`.
