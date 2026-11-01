@@ -1662,13 +1662,20 @@ fn a_stored_multi_line_cut_asks_git_whether_the_history_goes_on() {
 fn a_oneline_run_a_flag_adds_lines_to_keeps_out_the_commit_past_the_cap() {
     // A run with lines that are not a commit's cannot be cut at its commits, so nothing of a
     // commit past the fifty may reach what recall stores, and the stored cut asks git whether
-    // the history goes on. `--stat-count` puts a stat under each commit and is known from the
+    // the history goes on. `--notes` puts a commit's notes under it and is known from the
     // arguments, so git is asked for fifty straight away. A flag RTK does not know of, played
     // here by a `git` that prints a line of its own under each one, shows only in the run,
     // so the fifty-one asked for are set aside and git is asked again for fifty. Newest
     // first, so at `--skip=9` the fifty fetched are 50 down to 1 and commit 0 is the one past
-    // them.
+    // them. Every commit has a note, which `--oneline` prints only when asked.
     let repo = repo_with(60);
+    for back in 0..60 {
+        git_ok(
+            &repo.path,
+            &repo.home,
+            &["notes", "add", "-m", "noted", &format!("HEAD~{back}")],
+        );
+    }
     let real = real_git();
     let adds_lines = format!(
         "case \" $* \" in\n  *\" --oneline \"*) {real} \"$@\" | awk '{{ print; print \"    added\" }}' ;;\n  *) exec {real} \"$@\" ;;\nesac",
@@ -1676,7 +1683,7 @@ fn a_oneline_run_a_flag_adds_lines_to_keeps_out_the_commit_past_the_cap() {
     );
     let plain = format!("exec {} \"$@\"", real.display());
     for (flags, git, owed_walks) in [
-        (&["--stat-count=1"][..], plain.as_str(), 2),
+        (&["--notes"][..], plain.as_str(), 2),
         (&[][..], adds_lines.as_str(), 3),
     ] {
         for (skip, owed) in [("--skip=9", true), ("--skip=10", false)] {
@@ -2372,42 +2379,19 @@ fn the_raw_fallback_shows_the_walk_the_notice_describes() {
 }
 
 #[test]
-fn the_raw_fallback_keeps_what_git_printed_after_the_last_commit_shown() {
-    // The summary of `-X` follows the marker of the commit it belongs to, and the fallback
-    // prints the raw walk: the last commit shown keeps its summary, as it does when git is
-    // asked for ten commits and nothing more.
+fn a_dirstat_walk_is_gits_own_capped_at_ten() {
+    // `-X` is `--dirstat`, a summary RTK's compact format cannot carry: the walk is git's own,
+    // ten commits of it, with the notice for the rest.
     let repo = repo_committing(
         15,
         |i| vec![format!("d{}/f.txt", i % 3)],
         |i| vec![format!("commit {i}"), "one\ntwo\nthree\nfour".to_string()],
     );
     let flag = "-X";
-    let direct = git_stdout(
-        &repo,
-        &[
-            "log",
-            "-10",
-            "--no-merges",
-            "--pretty=format:%h %s (%ar) <%an>%n%b%n---END---",
-            flag,
-        ],
-    );
+    let direct = git_stdout(&repo, &["log", "-10", flag]);
     let out = rtk_log(&repo.path, &repo.home, &[flag]);
     assert!(out.status.success(), "rtk git log {flag} failed");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(stdout.matches("---END---").count(), 10, "{stdout:?}");
-    let after_last = |walk: &str| {
-        walk.rsplit("---END---")
-            .next()
-            .unwrap_or_default()
-            .to_string()
-    };
-    assert!(!after_last(&direct).trim().is_empty(), "{direct:?}");
-    assert_eq!(
-        after_last(&stdout),
-        format!("{}\n", after_last(&direct)),
-        "{stdout:?}"
-    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), direct);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains(NOTICE), "{stderr:?}");
 }
@@ -2595,14 +2579,13 @@ fn repo_rewriting_f_txt(commits: usize, content: impl Fn(usize) -> String) -> Re
 }
 
 #[test]
-fn the_character_that_opens_a_commit_in_a_files_content_is_not_a_commit() {
-    // `-L` prints the lines of the file after every commit, and a line may hold anything. Ten
-    // commits are the cap exactly and eleven are more, whatever those lines contain and
-    // wherever in a line the control character stands. `-L` puts a space ahead of a context
-    // line and a minus ahead of a removed one, which are also what `--graph` draws, so a line
-    // that starts with it is the case a bare character could not tell from a commit. The
-    // history is longer than the range, so the last commit of the range is a change with a
-    // patch of its own, printed after its marker.
+fn a_line_log_is_gits_own_whatever_its_lines_hold() {
+    // `-L` prints the lines of the file after every commit with the patch of the range, which
+    // RTK's compact format cannot carry, so the walk is git's own byte for byte, whatever those
+    // lines contain and wherever in a line the character RTK opens a commit with stands. `-L`
+    // puts a space ahead of a context line and a minus ahead of a removed one, which are also
+    // what `--graph` draws. A range is printed whole, as git prints it; a walk without one is
+    // ten commits, with the notice.
     type Content = fn(usize) -> String;
     let shapes: [(&str, Content); 3] = [
         // Mid-line, in the lines that change.
@@ -2614,9 +2597,26 @@ fn the_character_that_opens_a_commit_in_a_files_content_is_not_a_commit() {
     ];
     for (shape, content) in shapes {
         let repo = repo_rewriting_f_txt(13, content);
-        for (range, owed) in [("HEAD~10..HEAD", false), ("HEAD~11..HEAD", true)] {
-            let out = rtk_log(&repo.path, &repo.home, &["-L1,2:f.txt", range]);
+        for (range, owed) in [
+            ("HEAD~10..HEAD", false),
+            ("HEAD~11..HEAD", false),
+            ("", true),
+        ] {
+            let mut args = vec!["-L1,2:f.txt"];
+            let mut git_args = vec!["log", "-L1,2:f.txt"];
+            if range.is_empty() {
+                git_args.push("-10");
+            } else {
+                args.push(range);
+                git_args.push(range);
+            }
+            let out = rtk_log(&repo.path, &repo.home, &args);
             assert!(out.status.success(), "{shape}: rtk git log -L failed");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                git_stdout(&repo, &git_args),
+                "{shape}, {range}"
+            );
             let stderr = String::from_utf8_lossy(&out.stderr);
             assert_eq!(
                 stderr.contains(NOTICE),
