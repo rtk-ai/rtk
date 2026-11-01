@@ -51,7 +51,7 @@ fn fallback_dispatch_strips_only_leading_rtk_flags() {
     );
     assert!(ran, "stub not invoked: {output:?}");
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "-v\\nx\\n");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "-v\nx\n");
 }
 
 #[test]
