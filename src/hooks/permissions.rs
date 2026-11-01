@@ -82,7 +82,8 @@ enum Rules {
         allow: Vec<String>,
         transparent_prefixes: Vec<String>,
     },
-    /// One ordered list in which the last matching rule wins.
+    /// OpenCode's readable ordered rules: last match wins, with the 1.x
+    /// host's built-in allow preceding the user's rules.
     Ordered(Vec<Rule>),
     /// Rules rtk cannot read the way the host does, so it cannot tell whether
     /// a rewrite keeps their verdict: the host decides alone.
@@ -107,7 +108,8 @@ impl Rules {
     }
 
     /// OpenCode's rules for `agent`, or [`Rules::Unjudgeable`] when an agent
-    /// markdown file declares rules or a legacy key applies on only one
+    /// markdown file declares rules, a source cannot be read or parsed, the
+    /// policy layout is not modeled, or a legacy key applies on only one
     /// OpenCode generation.
     fn opencode(agent: Option<&str>) -> Self {
         if agent_rules_unreadable(agent) {
@@ -235,7 +237,13 @@ impl HostRules {
                 allow,
                 transparent_prefixes,
             } => check_command_with_rules_and_prefixes(cmd, deny, ask, allow, transparent_prefixes),
-            Rules::Ordered(rules) => check_command_with_opencode_rules(cmd, rules),
+            Rules::Ordered(rules) => match check_command_with_opencode_rules(cmd, rules) {
+                // OpenCode 1.x puts `* -> allow` before the user's rules.
+                // Only readable, modeled sources construct Ordered; an
+                // opaque source remains Unjudgeable and cannot borrow it.
+                PermissionVerdict::Default => PermissionVerdict::Allow,
+                verdict => verdict,
+            },
             Rules::Unjudgeable | Rules::Nothing => PermissionVerdict::Default,
         }
     }
@@ -930,6 +938,35 @@ fn split_compound_command(cmd: &str) -> Vec<&str> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn opencode_1x_defaults_are_host_specific() {
+        assert_eq!(
+            check_command_with_opencode_rules("git status", &[]),
+            PermissionVerdict::Default
+        );
+        assert_eq!(
+            HostRules::opencode(Vec::new()).verdict("git status"),
+            PermissionVerdict::Allow
+        );
+        assert_eq!(
+            HostRules::lists(Host::Claude, &[], &[], &[]).verdict("git status"),
+            PermissionVerdict::Default
+        );
+        let opaque = HostRules::of(Host::OpenCode, Rules::Unjudgeable);
+        assert!(!opaque.readable());
+        assert_eq!(opaque.verdict("git status"), PermissionVerdict::Default);
+    }
+
+    #[test]
+    fn opencode_1x_default_does_not_allow_unattestable_commands() {
+        let rules = HostRules::opencode(Vec::new());
+        assert_eq!(rules.verdict("git status $(date)"), PermissionVerdict::Ask);
+        assert_eq!(
+            super::super::decision::decide_for_host("git status $(date)", &rules, None).1,
+            super::super::decision::HookDecision::Defer
+        );
+    }
+
     /// A deny rule in a shell wrapper's script behind a configured transparent
     /// prefix defers the command: the rewrite would reach that script.
     #[test]
@@ -1025,6 +1062,7 @@ mod tests {
                 for cmd in commands {
                     let expected = match rule {
                         Some((ruled, verdict)) if ruled == cmd => verdict,
+                        _ if host == Host::OpenCode => PermissionVerdict::Allow,
                         _ => PermissionVerdict::Default,
                     };
                     assert_eq!(rules.verdict(cmd), expected, "host {host:?}, command {cmd}");

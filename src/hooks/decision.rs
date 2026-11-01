@@ -1095,6 +1095,47 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn opencode_1x_compares_effective_verdicts_for_every_transition() {
+        use Action::{Allow, Ask, Deny};
+
+        let allow = || HookDecision::AllowRewrite("rtk git status".into());
+        let ask = || HookDecision::AskRewrite("rtk git status".into());
+        let cases = [
+            (None, Some(Allow), allow()),
+            (None, None, allow()),
+            (None, Some(Ask), HookDecision::Defer),
+            (None, Some(Deny), HookDecision::Defer),
+            (Some(Allow), None, allow()),
+            (Some(Allow), Some(Allow), allow()),
+            (Some(Allow), Some(Ask), HookDecision::Defer),
+            (Some(Allow), Some(Deny), HookDecision::Defer),
+            (Some(Ask), None, HookDecision::Defer),
+            (Some(Ask), Some(Allow), HookDecision::Defer),
+            (Some(Ask), Some(Ask), ask()),
+            (Some(Ask), Some(Deny), HookDecision::Defer),
+            (Some(Deny), None, HookDecision::Deny),
+            (Some(Deny), Some(Allow), HookDecision::Deny),
+            (Some(Deny), Some(Ask), HookDecision::Deny),
+            (Some(Deny), Some(Deny), HookDecision::Deny),
+        ];
+        for (before, after, expected) in cases {
+            let mut rules = Vec::new();
+            if let Some(action) = before {
+                rules.push(bash_rule("git status", action));
+            }
+            if let Some(action) = after {
+                rules.push(bash_rule("rtk git status", action));
+            }
+            let rules = HostRules::opencode(rules);
+            assert_eq!(
+                decide_for_host("git status", &rules, None).1,
+                expected,
+                "before: {before:?}, after: {after:?}"
+            );
+        }
+    }
+
     /// A host that judges the command its hook hands back keeps a rewrite only
     /// when its rules give the rewrite the typed command's verdict.
     #[test]

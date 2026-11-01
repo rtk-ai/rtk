@@ -1295,7 +1295,8 @@ fn opencode_answer_for(cmd: &str, agent: Option<&str>) -> Value {
 ///
 /// The comparison itself is [`decision::decide_for_host`]'s, which makes it
 /// for every host that `permissions::judges_final_command` says re-judges the
-/// command its hook hands back, OpenCode among them.
+/// command its hook hands back, OpenCode among them. `HostRules` includes
+/// OpenCode 1.x's default allow only when its rule sources are readable.
 fn opencode_answer(cmd: &str, rules: &permissions::HostRules) -> Value {
     // OpenCode re-evaluates its own patterns against whatever RTK returns, so
     // the rule set read here is advisory rather than enforced: these rules
@@ -2764,6 +2765,64 @@ mod tests {
         }
 
         #[test]
+        fn opencode_1x_rtk_only_and_selective_rules_rewrite_issue_commands() {
+            for rules in [
+                vec![rule("rtk *", Action::Allow)],
+                vec![
+                    rule("rtk *", Action::Allow),
+                    rule("git *", Action::Allow),
+                    rule("aws *", Action::Allow),
+                ],
+            ] {
+                for cmd in [
+                    "kubectl get pods",
+                    "oc get pods",
+                    "npm run build",
+                    "gcloud compute instances list",
+                    "git status",
+                    "aws sts get-caller-identity",
+                ] {
+                    assert_eq!(
+                        opencode_answer(cmd, &rules),
+                        json!({ "command": format!("rtk {cmd}") }),
+                        "command: {cmd}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn opencode_1x_specific_rtk_and_bare_allow_rules_keep_rewrites() {
+            for (cmd, bare, rewritten) in [
+                ("kubectl get pods", "kubectl *", "rtk kubectl *"),
+                ("oc get pods", "oc *", "rtk oc *"),
+                ("npm run build", "npm *", "rtk npm *"),
+            ] {
+                for pattern in [bare, rewritten] {
+                    assert_eq!(
+                        opencode_answer(cmd, &[rule(pattern, Action::Allow)]),
+                        json!({ "command": format!("rtk {cmd}") }),
+                        "pattern: {pattern}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn opencode_1x_explicit_restrictions_still_control_the_rewrite() {
+            for (cmd, pattern) in [
+                ("kubectl get pods", "kubectl *"),
+                ("oc get pods", "oc *"),
+                ("npm run build", "npm *"),
+            ] {
+                for action in [Action::Ask, Action::Deny] {
+                    let rules = [rule(pattern, action), rule("rtk *", Action::Allow)];
+                    assert_eq!(opencode_answer(cmd, &rules), json!({}), "{cmd}: {action:?}");
+                }
+            }
+        }
+
+        #[test]
         fn the_4195_allow_survives_because_the_rewrite_is_skipped() {
             // {"*": "deny", "git status": "allow"} — the typed command is
             // allowed, its rtk form would be denied. RTK steps aside so
@@ -2979,7 +3038,6 @@ mod tests {
                                 | (r#"{ "rtk *": "ask" }"#, "git push origin main")
                                 | (r#"{ "rtk *": "ask" }"#, "ls -la")
                                 | (r#"{ "rtk *": "ask" }"#, "head -n 5 a.txt")
-                                | (r#"{ "git status": "allow" }"#, "git status")
                         );
                         // `{}` for reasons the skip has nothing to do with:
                         // a command rtk never rewrites, or one the policy denies.
@@ -3002,6 +3060,9 @@ mod tests {
                         }
                         if (policy, cmd) == (r#"{}"#, "ls -la") {
                             assert_eq!(plugin, json!({ "command": "rtk ls -la" }));
+                        }
+                        if (policy, cmd) == (r#"{ "git status": "allow" }"#, "git status") {
+                            assert_eq!(plugin, json!({ "command": "rtk git status" }));
                         }
                     }
                 }

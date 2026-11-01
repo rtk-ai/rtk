@@ -2,6 +2,7 @@ use super::constants::{CONFIG_DIR, OPENCODE_SUBDIR};
 use super::permissions::PermissionVerdict;
 use crate::core::user_dirs;
 use crate::discover::lexer::{contains_unattestable_construct, split_for_permissions};
+use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -118,10 +119,11 @@ pub(crate) fn check_command_with_opencode_rules(cmd: &str, rules: &[Rule]) -> Pe
     PermissionVerdict::Default
 }
 
-/// The rules OpenCode resolves for `agent`, or `None` when a legacy key means a
-/// different rule to 1.x than to 2.x (see [`legacy_keys_depend_on_the_generation`]).
+/// The rules OpenCode resolves for `agent`, or `None` when a configured source
+/// cannot be read or parsed, or a legacy key means a different rule to 1.x than
+/// to 2.x (see [`legacy_keys_depend_on_the_generation`]).
 pub(crate) fn load_judgeable_opencode_rules(agent: Option<&str>) -> Option<Vec<Rule>> {
-    let configs = opencode_configs();
+    let configs = opencode_configs().ok()?;
     (!legacy_keys_depend_on_the_generation(&configs, agent))
         .then(|| rules_from_configs(&configs, agent))
 }
@@ -281,22 +283,20 @@ fn append_rules(permission: &Value, rules: &mut Vec<Rule>) {
     }
 }
 
-fn opencode_configs() -> Vec<Value> {
+fn opencode_configs() -> Result<Vec<Value>> {
     let mut configs = Vec::new();
 
     if let Some(path) = user_dirs::env_path("OPENCODE_CONFIG") {
-        if let Some(v) = read_config(Path::new(&path)) {
-            configs.push(v);
-        }
+        configs.push(read_config(Path::new(&path))?);
     } else if let Some(dir) = global_opencode_dir() {
-        configs.extend(read_first_config(&dir));
+        configs.extend(read_first_config(&dir)?);
     }
 
-    if let Some(root) = project_root_with_config() {
-        configs.extend(read_first_config(&root));
+    if let Some(root) = project_root_with_config()? {
+        configs.extend(read_first_config(&root)?);
     }
 
-    configs
+    Ok(configs)
 }
 
 fn global_opencode_dir() -> Option<PathBuf> {
@@ -333,16 +333,20 @@ fn agent_markdown_declares_rules(agent: &str) -> bool {
                 .iter()
                 .map(move |sub| root.join(sub).join(name))
         })
-        .any(|file| {
-            std::fs::read_to_string(file).is_ok_and(|body| frontmatter_declares_rules(&body))
+        .any(|file| match permissions_path_exists(&file) {
+            Ok(false) => false,
+            Err(_) => true,
+            Ok(true) => read_permissions_file(&file)
+                .map(|body| frontmatter_declares_rules(&body))
+                .unwrap_or(true),
         })
 }
 
 /// Could the active agent be carrying rules rtk cannot see?
 ///
-/// True when an agent markdown file exists and declares a `permission:` or
-/// `permissions:` key. The rules themselves are not parsed; the caller answers
-/// `{}`, which is the safe direction.
+/// True when an agent markdown file exists and cannot be read or declares a
+/// `permission:` or `permissions:` key. The rules themselves are not parsed;
+/// the caller answers `{}`, which is the safe direction.
 pub(crate) fn agent_rules_unreadable(agent: Option<&str>) -> bool {
     agent.is_some_and(agent_markdown_declares_rules)
 }
@@ -375,33 +379,81 @@ const AGENT_SUBDIRS: [&str; 2] = ["agents", "agent"];
 /// one under `~/.config`.
 const PROJECT_OPENCODE_SUBDIR: &str = ".opencode";
 
-fn project_root_with_config() -> Option<PathBuf> {
-    let start = user_dirs::current_dir().ok()?;
-    user_dirs::ancestors(&start)
-        .find(|dir| CONFIG_NAMES.iter().any(|name| dir.join(name).is_file()))
-        .map(Path::to_path_buf)
+fn project_root_with_config() -> Result<Option<PathBuf>> {
+    let start =
+        user_dirs::current_dir().context("Failed to locate OpenCode project permissions")?;
+    for dir in user_dirs::ancestors(&start) {
+        for name in CONFIG_NAMES {
+            if permissions_path_exists(&dir.join(name))? {
+                return Ok(Some(dir.to_path_buf()));
+            }
+        }
+    }
+    Ok(None)
 }
 
 const CONFIG_NAMES: [&str; 2] = ["opencode.json", "opencode.jsonc"];
 
-fn read_first_config(dir: &Path) -> Option<Value> {
-    CONFIG_NAMES
-        .iter()
-        .find_map(|name| read_config(&dir.join(name)))
+fn read_first_config(dir: &Path) -> Result<Option<Value>> {
+    for name in CONFIG_NAMES {
+        let path = dir.join(name);
+        if permissions_path_exists(&path)? {
+            let config = read_config(&path)?;
+            return Ok(Some(config));
+        }
+    }
+    Ok(None)
 }
 
-fn read_config(path: &Path) -> Option<Value> {
-    let content = std::fs::read_to_string(path).ok()?;
-    match crate::core::utils::from_json_str::<Value>(&content) {
-        Ok(v) => Some(v),
-        Err(_) => {
+/// Only a missing optional path is absence. A directory, dangling symlink or
+/// inaccessible parent can hold rules we cannot judge and must not be skipped.
+fn permissions_path_exists(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => {
+            eprintln!(
+                "[rtk] warning: failed to read permissions from {}: {}",
+                path.display(),
+                error
+            );
+            Err(error)
+                .with_context(|| format!("Failed to inspect permissions at {}", path.display()))
+        }
+    }
+}
+
+fn read_permissions_file(path: &Path) -> Result<String> {
+    std::fs::metadata(path)
+        .and_then(|metadata| {
+            if !metadata.is_file() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "permission source is not a regular file",
+                ));
+            }
+            std::fs::read_to_string(path)
+        })
+        .inspect_err(|error| {
+            eprintln!(
+                "[rtk] warning: failed to read permissions from {}: {}",
+                path.display(),
+                error
+            );
+        })
+        .with_context(|| format!("Failed to read permissions from {}", path.display()))
+}
+
+fn read_config(path: &Path) -> Result<Value> {
+    let content = read_permissions_file(path)?;
+    crate::core::utils::from_json_str::<Value>(&content)
+        .inspect_err(|_| {
             eprintln!(
                 "[rtk] warning: failed to parse permissions from {}",
                 path.display()
             );
-            None
-        }
-    }
+        })
+        .with_context(|| format!("Failed to parse permissions from {}", path.display()))
 }
 
 /// A `bash` rule, for tests.
@@ -616,6 +668,249 @@ mod tests {
     }
 
     #[test]
+    fn a_single_readable_config_still_loads_from_each_modeled_source() {
+        for source in ["global", "project", "explicit"] {
+            for name in CONFIG_NAMES {
+                let tmp = test_isolation::tempdir();
+                let home = tmp.path().join("home");
+                let project = tmp.path().join("project");
+                std::fs::create_dir_all(&project).expect("create project");
+                let path = match source {
+                    "global" => home.join(CONFIG_DIR).join(OPENCODE_SUBDIR).join(name),
+                    "project" => project.join(name),
+                    _ => tmp.path().join("explicit").join(name),
+                };
+                write_json(
+                    &path,
+                    r#"{ "permission": { "bash": { "rtk *": "allow" } } }"#,
+                );
+
+                test_isolation::with_root(&home, || {
+                    let _entered = test_isolation::enter(&project);
+                    let selected = (source == "explicit").then_some(&path);
+                    user_env::with_path("OPENCODE_CONFIG", selected, || {
+                        assert_eq!(
+                            load_judgeable_opencode_rules(None),
+                            Some(vec![rule("rtk *", Action::Allow)]),
+                            "{source} {name} is a supported single source"
+                        );
+                    });
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn missing_optional_configs_leave_the_rules_judgeable() {
+        let tmp = test_isolation::tempdir();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).expect("create project");
+
+        test_isolation::with_root(&tmp.path().join("home"), || {
+            let _entered = test_isolation::enter(&project);
+            assert_eq!(load_judgeable_opencode_rules(None), Some(vec![]));
+        });
+    }
+
+    #[test]
+    fn an_explicitly_selected_missing_config_is_not_judgeable() {
+        let tmp = test_isolation::tempdir();
+        let project = tmp.path().join("project");
+        write_json(
+            &project.join("opencode.json"),
+            r#"{ "permission": { "bash": { "rtk *": "allow" } } }"#,
+        );
+        let missing = tmp.path().join("missing.json");
+
+        test_isolation::with_root(&tmp.path().join("home"), || {
+            let _entered = test_isolation::enter(&project);
+            user_env::with_path("OPENCODE_CONFIG", Some(&missing), || {
+                assert!(load_judgeable_opencode_rules(None).is_none());
+            });
+        });
+    }
+
+    #[test]
+    fn unreadable_configs_never_leave_a_partial_judgeable_policy() {
+        let invalid: [(&str, Option<&[u8]>); 4] = [
+            ("opencode.json", Some(b"{ invalid JSON")),
+            ("opencode.jsonc", Some(b"// JSONC is not parsed here\n{}")),
+            ("opencode.json", Some(b"\xff")),
+            ("opencode.json", None),
+        ];
+        for source in ["global", "project", "explicit"] {
+            for (name, content) in invalid {
+                let tmp = test_isolation::tempdir();
+                let home = tmp.path().join("home");
+                let project = tmp.path().join("project");
+                let global = home.join(CONFIG_DIR).join(OPENCODE_SUBDIR);
+                let path = match source {
+                    "global" => global.join(name),
+                    "project" => project.join(name),
+                    _ => tmp.path().join("explicit").join(name),
+                };
+                let allow = r#"{ "permission": { "bash": { "rtk *": "allow" } } }"#;
+                if source != "project" {
+                    write_json(&project.join("opencode.json"), allow);
+                }
+                if source == "project" {
+                    write_json(&global.join("opencode.json"), allow);
+                }
+                std::fs::create_dir_all(path.parent().expect("config parent"))
+                    .expect("create config parent");
+                if let Some(bytes) = content {
+                    std::fs::write(&path, bytes).expect("write invalid config");
+                } else {
+                    // A directory at the file path fails reads on every platform,
+                    // including privileged test runs where chmod is ineffective.
+                    std::fs::create_dir(&path).expect("create unreadable config");
+                }
+
+                test_isolation::with_root(&home, || {
+                    let _entered = test_isolation::enter(&project);
+                    let selected = (source == "explicit").then_some(&path);
+                    user_env::with_path("OPENCODE_CONFIG", selected, || {
+                        assert!(
+                            load_judgeable_opencode_rules(None).is_none(),
+                            "{source} {name} must not be ignored"
+                        );
+                    });
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn an_invalid_primary_config_does_not_fall_through_to_jsonc() {
+        for source in ["global", "project"] {
+            let tmp = test_isolation::tempdir();
+            let home = tmp.path().join("home");
+            let project = tmp.path().join("project");
+            std::fs::create_dir_all(&project).expect("create project");
+            let dir = if source == "global" {
+                home.join(CONFIG_DIR).join(OPENCODE_SUBDIR)
+            } else {
+                project.clone()
+            };
+            write_json(&dir.join("opencode.json"), "{ invalid JSON");
+            write_json(
+                &dir.join("opencode.jsonc"),
+                r#"{ "permission": { "bash": { "rtk *": "allow" } } }"#,
+            );
+
+            test_isolation::with_root(&home, || {
+                let _entered = test_isolation::enter(&project);
+                assert!(
+                    load_judgeable_opencode_rules(None).is_none(),
+                    "{source} opencode.json must not fall through to opencode.jsonc"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn an_invalid_config_in_either_scope_prevents_judging_the_other() {
+        for invalid_source in ["global", "project"] {
+            let tmp = test_isolation::tempdir();
+            let home = tmp.path().join("home");
+            let project = tmp.path().join("project");
+            std::fs::create_dir_all(&project).expect("create project");
+            let global_dir = home.join(CONFIG_DIR).join(OPENCODE_SUBDIR);
+            let valid = r#"{ "permission": { "bash": { "rtk *": "allow" } } }"#;
+            let invalid = "{ invalid JSON";
+
+            write_json(
+                &global_dir.join("opencode.json"),
+                if invalid_source == "global" {
+                    invalid
+                } else {
+                    valid
+                },
+            );
+            write_json(
+                &project.join("opencode.json"),
+                if invalid_source == "project" {
+                    invalid
+                } else {
+                    valid
+                },
+            );
+
+            test_isolation::with_root(&home, || {
+                let _entered = test_isolation::enter(&project);
+                assert!(
+                    load_judgeable_opencode_rules(None).is_none(),
+                    "invalid {invalid_source} must prevent judging the other scope"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn an_unreadable_nearer_project_config_is_not_skipped() {
+        let tmp = test_isolation::tempdir();
+        let outer = tmp.path().join("outer");
+        let inner = outer.join("inner");
+        let nested = inner.join("sub");
+        std::fs::create_dir_all(&nested).expect("create nested project");
+        write_json(
+            &outer.join("opencode.json"),
+            r#"{ "permission": { "bash": { "rtk *": "allow" } } }"#,
+        );
+        std::fs::create_dir(inner.join("opencode.json")).expect("create unreadable nearer config");
+
+        test_isolation::with_root(&tmp.path().join("home"), || {
+            let _entered = test_isolation::enter(&nested);
+            assert!(load_judgeable_opencode_rules(None).is_none());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_invalid_config_parent_is_not_treated_as_absence() {
+        let tmp = test_isolation::tempdir();
+        let home = tmp.path().join("home");
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(home.join(CONFIG_DIR)).expect("create home config dir");
+        std::fs::write(
+            home.join(CONFIG_DIR).join(OPENCODE_SUBDIR),
+            "not a directory",
+        )
+        .expect("create invalid config parent");
+        write_json(
+            &project.join("opencode.json"),
+            r#"{ "permission": { "bash": { "rtk *": "allow" } } }"#,
+        );
+
+        test_isolation::with_root(&home, || {
+            let _entered = test_isolation::enter(&project);
+            assert!(load_judgeable_opencode_rules(None).is_none());
+        });
+    }
+
+    #[test]
+    fn unreadable_markdown_agents_are_opaque() {
+        for content in [Some(b"\xff".as_slice()), None] {
+            let tmp = test_isolation::tempdir();
+            let project = tmp.path().join("project");
+            let agents = project.join(PROJECT_OPENCODE_SUBDIR).join("agents");
+            std::fs::create_dir_all(&agents).expect("create agents dir");
+            let path = agents.join("unreadable.md");
+            if let Some(bytes) = content {
+                std::fs::write(&path, bytes).expect("write invalid UTF-8 agent");
+            } else {
+                std::fs::create_dir(&path).expect("create unreadable agent");
+            }
+
+            test_isolation::with_root(&tmp.path().join("home"), || {
+                let _entered = test_isolation::enter(&project);
+                assert!(agent_rules_unreadable(Some("unreadable")));
+                assert!(!agent_rules_unreadable(Some("missing")));
+            });
+        }
+    }
+
+    #[test]
     fn a_project_config_is_found_from_a_subdirectory() {
         let tmp = test_isolation::tempdir();
         let root = tmp.path().join("project");
@@ -768,7 +1063,10 @@ mod tests {
             write_json(&project.join("opencode.json"), config);
             test_isolation::with_root(&tmp.path().join("home"), || {
                 let _entered = test_isolation::enter(&project);
-                legacy_keys_depend_on_the_generation(&opencode_configs(), agent)
+                legacy_keys_depend_on_the_generation(
+                    &opencode_configs().expect("readable configs"),
+                    agent,
+                )
             })
         };
         assert!(flagged(
