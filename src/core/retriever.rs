@@ -2,6 +2,7 @@
 
 use super::constants::RECALL_DB;
 use crate::core::config::Config;
+use crate::core::db::{self, DbKind, Migration, MigrationMode, Schema, Version};
 use crate::core::user_dirs;
 use crate::core::user_env;
 use anyhow::{Context, Result};
@@ -11,7 +12,7 @@ use flate2::write::GzEncoder;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_MAX_ENTRY_BYTES: usize = 10 * 1024 * 1024;
@@ -185,50 +186,190 @@ fn db_path(cfg: &RetrieverConfig) -> Result<PathBuf> {
     Ok(base.join(RECALL_DB))
 }
 
-fn open(cfg: &RetrieverConfig) -> Result<Connection> {
-    let path = db_path(cfg)?;
-    if let Some(parent) = path.parent() {
-        let _ = crate::core::utils::create_private_dir(parent);
-    }
-    crate::core::utils::open_private(std::fs::OpenOptions::new().write(true).create(true), &path)
-        .with_context(|| format!("pre-create private recall DB: {}", path.display()))?;
-    let conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
-    // best-effort: NFS / read-only filesystems may reject WAL
-    let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
-    init_schema(&conn)?;
-    Ok(conn)
+fn open_path(path: &Path) -> Result<Connection> {
+    db::open_and_migrate(path, &SCHEMA, MigrationMode::GatedByVersion)
 }
 
+/// A fresh connection to the store, creating it if needed.
+#[cfg(test)]
+fn open(cfg: &RetrieverConfig) -> Result<Connection> {
+    open_path(&db_path(cfg)?)
+}
+
+/// Which file a path named when its connection was opened, so a store deleted
+/// and recreated at the same path is not served through the old, unlinked file.
+/// Elsewhere than unix it is only whether the file exists: SQLite opens files
+/// without `FILE_SHARE_DELETE` there, so a file with a connection to it can be
+/// neither deleted nor replaced.
+#[cfg(unix)]
+type FileId = (u64, u64);
+#[cfg(not(unix))]
+type FileId = ();
+
+fn file_id(path: &Path) -> Option<FileId> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path)
+            .ok()
+            .map(|meta| (meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        path.exists().then_some(())
+    }
+}
+
+type CachedConn = Option<(PathBuf, FileId, Connection)>;
+
 thread_local! {
-    static CONN_CACHE: std::cell::RefCell<Option<(PathBuf, Connection)>> =
+    static CONN_CACHE: std::cell::RefCell<CachedConn> =
         const { std::cell::RefCell::new(None) };
 }
 
-fn with_open<T>(cfg: &RetrieverConfig, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-    let path = db_path(cfg)?;
+/// `f` on the per-thread connection to the store at `path`. The cached
+/// connection is served only while the path still names the file it was opened
+/// on (one `stat`); otherwise the cache is cleared and `open` runs. `None` when
+/// `open` finds no store.
+fn with_cached<T>(
+    path: PathBuf,
+    open: impl FnOnce(&Path) -> Result<Option<Connection>>,
+    f: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<Option<T>> {
     CONN_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        let reuse = matches!(&*cache, Some((p, _)) if *p == path && path.exists());
-        if !reuse {
-            *cache = Some((path.clone(), open(cfg)?));
+        let before = file_id(&path);
+        if let Some((cached, id, conn)) = cache.as_ref()
+            && *cached == path
+            && before == Some(*id)
+        {
+            return f(conn).map(Some);
         }
-        let (_, conn) = cache.as_ref().expect("cache populated above");
-        f(conn)
+        *cache = None;
+        let Some(conn) = open(&path)? else {
+            return Ok(None);
+        };
+        // The path must still name the file it did before the open: one deleted
+        // and recreated in between leaves this connection on the old file, which
+        // is then used once and never cached. A file this open created has no
+        // earlier id.
+        let after = file_id(&path);
+        let swapped = before.is_some() && before != after;
+        let Some(id) = after.filter(|_| !swapped) else {
+            return f(&conn).map(Some);
+        };
+        let (_, _, conn) = cache.insert((path, id, conn));
+        f(conn).map(Some)
     })
 }
 
-fn open_existing(cfg: &RetrieverConfig) -> Result<Option<Connection>> {
-    let path = db_path(cfg)?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    let conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
-    let _ = conn.execute_batch("PRAGMA busy_timeout=5000;");
-    init_schema(&conn)?;
-    Ok(Some(conn))
+fn with_open<T>(cfg: &RetrieverConfig, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+    with_cached(db_path(cfg)?, |path| open_path(path).map(Some), f)?
+        .ok_or_else(|| anyhow::anyhow!("the recall store did not open"))
 }
 
-fn init_schema(conn: &Connection) -> Result<()> {
+/// `f` on the per-thread connection to the store, or `None` when there is no
+/// store: unlike `with_open`, it never creates one. Every reader and the tee
+/// paths, which run once per command, go through it.
+fn with_existing<T>(
+    cfg: &RetrieverConfig,
+    f: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<Option<T>> {
+    with_cached(
+        db_path(cfg)?,
+        |path| db::open_existing_and_migrate(path, &SCHEMA, MigrationMode::GatedByVersion),
+        f,
+    )
+}
+
+/// Re-applies every step to a store that exists, for `rtk init`: the gated
+/// path skips steps the stamp covers, so a table dropped by hand comes back
+/// only here. A store that does not exist is not created, and there is none
+/// where the platform gives no data directory. Does nothing while recall is
+/// disabled (`RTK_RECALL=0`, `RTK_TEE=0` or `retriever.mode = "disabled"`). A
+/// configuration that cannot be loaded is an error and the store is left alone:
+/// its defaults would turn a disabled recall back on.
+pub fn ensure_schema_fresh() -> Result<()> {
+    let config = Config::load()
+        .context("Failed to load the configuration, so the recall store is left alone")?;
+    ensure_schema_fresh_with(&config.retriever)
+}
+
+fn ensure_schema_fresh_with(cfg: &RetrieverConfig) -> Result<()> {
+    replay_at(db_path(cfg), cfg)
+}
+
+/// [`ensure_schema_fresh_with`] for the store's path, or the reason there is none.
+fn replay_at(path: Result<PathBuf>, cfg: &RetrieverConfig) -> Result<()> {
+    if recovery_disabled_by_env() || cfg.mode == RecoveryMode::Disabled {
+        return Ok(());
+    }
+    // `db_path` fails only for want of a data directory, so no store exists.
+    let Ok(path) = path else {
+        return Ok(());
+    };
+    db::open_existing_and_migrate(&path, &SCHEMA, MigrationMode::Always).map(|_| ())
+}
+
+/// Recall-DB schema versions, stored in the SQLite `user_version` pragma. Each
+/// variant names the schema change it introduced.
+///
+/// A new schema change is a new variant directly above `Next` with the next
+/// value, its step appended to `MIGRATIONS`, and a test upgrading a database
+/// stamped at the previous variant. Released values never change. The rules
+/// every step follows are on `db::Schema::steps`.
+#[derive(Clone, Copy, Debug)]
+enum RecallSchema {
+    /// `recall`, `tee_reads` and `recall_stats`, with their indexes. A new
+    /// database gets `recall.recalled` here.
+    Initial = 1,
+    /// `recall.recalled`, for databases created before the column existed.
+    Recalled = 2,
+    // New schema changes go directly above this line.
+    Next,
+}
+
+/// Current recall-DB schema version: the newest `RecallSchema` variant, the
+/// stamp of a fully migrated database.
+const SCHEMA_VERSION: i64 = RecallSchema::Next as i64 - 1;
+
+impl Version for RecallSchema {
+    fn number(self) -> i64 {
+        self as i64
+    }
+}
+
+/// One step per `RecallSchema`, in order: step `i` brings a database to
+/// version `i + 1`. A released step never changes the schema it produces: the
+/// gated path never runs it again on a database stamped at its version, so a
+/// schema change is always a new step.
+const MIGRATIONS: &[(RecallSchema, Migration)] = &[
+    (RecallSchema::Initial, migrate_initial),
+    (RecallSchema::Recalled, migrate_recalled),
+];
+
+const _: () = {
+    let mut i = 0;
+    while i < MIGRATIONS.len() {
+        assert!(
+            MIGRATIONS[i].0 as i64 == i as i64 + 1,
+            "MIGRATIONS must list every RecallSchema once, in order"
+        );
+        i += 1;
+    }
+    assert!(MIGRATIONS.len() as i64 == SCHEMA_VERSION);
+    assert!((SCHEMA.kind as usize) < DbKind::Next as usize);
+};
+
+/// No recall stamp was ever released, so an untagged file with a stamp is a
+/// tracking database.
+const SCHEMA: Schema<RecallSchema> = Schema {
+    kind: DbKind::Recall,
+    owns_untagged_stamps: false,
+    steps: MIGRATIONS,
+};
+
+fn migrate_initial(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS recall (
             hash        TEXT PRIMARY KEY,
@@ -257,12 +398,11 @@ fn init_schema(conn: &Connection) -> Result<()> {
             PRIMARY KEY (slug, mode)
         );",
     )
-    .context("init recall schema")?;
-    let _ = conn.execute(
-        "ALTER TABLE recall ADD COLUMN recalled INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    Ok(())
+    .context("Failed to create the recall tables")
+}
+
+fn migrate_recalled(conn: &Connection) -> Result<()> {
+    db::add_column_if_missing(conn, "recall", "recalled", "INTEGER NOT NULL DEFAULT 0")
 }
 
 fn stat_family(slug: &str) -> &str {
@@ -316,9 +456,10 @@ pub struct RecallStat {
 }
 
 fn stats_snapshot_with(cfg: &RetrieverConfig) -> Result<Vec<RecallStat>> {
-    let Some(conn) = open_existing(cfg)? else {
-        return Ok(Vec::new());
-    };
+    with_existing(cfg, stats_snapshot_on).map(Option::unwrap_or_default)
+}
+
+fn stats_snapshot_on(conn: &Connection) -> Result<Vec<RecallStat>> {
     let mut stmt = conn.prepare("SELECT slug, mode, elisions, recalls FROM recall_stats")?;
     let rows = stmt.query_map([], |r| {
         Ok((
@@ -365,18 +506,21 @@ pub fn reset_stats() -> Result<()> {
 }
 
 fn reset_stats_with(cfg: &RetrieverConfig) -> Result<()> {
-    let Some(conn) = open_existing(cfg)? else {
-        return Ok(());
-    };
-    conn.execute_batch(
-        "BEGIN;
-         DELETE FROM recall_stats;
-         DELETE FROM tee_reads;
-         UPDATE recall SET recalled = 0;
-         COMMIT;",
-    )
-    .context("reset recall stats")?;
-    Ok(())
+    // A transaction that rolls back on drop: the connection outlives this call.
+    with_existing(cfg, |conn| {
+        let tx = conn
+            .unchecked_transaction()
+            .context("Failed to start the recall stats reset")?;
+        tx.execute_batch(
+            "DELETE FROM recall_stats;
+             DELETE FROM tee_reads;
+             UPDATE recall SET recalled = 0;",
+        )
+        .context("Failed to clear recall stats")?;
+        tx.commit()
+            .context("Failed to commit the recall stats reset")
+    })
+    .map(|_| ())
 }
 
 pub fn record_tee_elision(cfg: &RetrieverConfig, slug: &str) {
@@ -385,9 +529,10 @@ pub fn record_tee_elision(cfg: &RetrieverConfig, slug: &str) {
     }
     // Never create the store from the tee path: choosing tee must leave no
     // sqlite artifact behind. Stats are recorded only into an existing store.
-    if let Ok(Some(conn)) = open_existing(cfg) {
-        bump_stat(&conn, slug, "tee", "elisions");
-    }
+    let _ = with_existing(cfg, |conn| {
+        bump_stat(conn, slug, "tee", "elisions");
+        Ok(())
+    });
 }
 
 fn mark_recalled(conn: &Connection, hash: &str, command: &str) {
@@ -429,9 +574,10 @@ fn record_tee_recall_with(cfg: &RetrieverConfig, slug: &str, path: &str) {
     if recovery_disabled_by_env() || cfg.mode == RecoveryMode::Disabled {
         return;
     }
-    if let Ok(Some(conn)) = open_existing(cfg) {
-        record_tee_recall_on(&conn, slug, path);
-    }
+    let _ = with_existing(cfg, |conn| {
+        record_tee_recall_on(conn, slug, path);
+        Ok(())
+    });
 }
 
 pub fn record_tee_recall(slug: &str, path: &str) {
@@ -640,10 +786,15 @@ fn decode(row: &Row) -> Result<Vec<u8>> {
 #[cfg(test)]
 pub(crate) fn recalled_content(hash: &str) -> Option<String> {
     let cfg = Config::load().unwrap_or_default().retriever;
-    let conn = open_existing(&cfg).ok().flatten()?;
-    let row = load_by_hash(&conn, hash).ok().flatten()?;
-    let full = decode(&row).ok()?;
-    String::from_utf8(slice_from_line(&full, row.shown_upto).to_vec()).ok()
+    with_existing(&cfg, |conn| {
+        let row = load_by_hash(conn, hash)?.context("no matching entry")?;
+        let full = decode(&row)?;
+        Ok(String::from_utf8(
+            slice_from_line(&full, row.shown_upto).to_vec(),
+        )?)
+    })
+    .ok()
+    .flatten()
 }
 
 pub struct RecallArgs<'a> {
@@ -661,24 +812,26 @@ pub fn run_recall(args: RecallArgs) -> Result<i32> {
         return Ok(2);
     }
     let cfg = Config::load().unwrap_or_default().retriever;
-    let conn = match open_existing(&cfg) {
-        Ok(Some(c)) => c,
+    match with_existing(&cfg, |conn| Ok(recall_from(conn, &args))) {
+        Ok(Some(code)) => code,
         Ok(None) => {
             if args.list {
                 println!("(no recall entries)");
                 return Ok(0);
             }
             eprintln!("rtk recall: no matching entry (try `rtk recall --list`)");
-            return Ok(1);
+            Ok(1)
         }
         Err(e) => {
-            eprintln!("rtk recall: store unavailable: {e}");
-            return Ok(1);
+            eprintln!("rtk recall: store unavailable: {e:#}");
+            Ok(1)
         }
-    };
+    }
+}
 
+fn recall_from(conn: &Connection, args: &RecallArgs) -> Result<i32> {
     if args.list {
-        return list_entries(&conn);
+        return list_entries(conn);
     }
 
     // `args.list` returned above and the usage guard rejected a missing hash,
@@ -686,10 +839,10 @@ pub fn run_recall(args: RecallArgs) -> Result<i32> {
     let Some(hash) = args.hash.as_ref() else {
         return Ok(2);
     };
-    let row = match load_by_hash(&conn, hash) {
+    let row = match load_by_hash(conn, hash) {
         Ok(row) => row,
         Err(e) => {
-            eprintln!("rtk recall: {e}");
+            eprintln!("rtk recall: {e:#}");
             return Ok(1);
         }
     };
@@ -729,7 +882,7 @@ pub fn run_recall(args: RecallArgs) -> Result<i32> {
     }
     let stdout = std::io::stdout();
     let _ = stdout.lock().write_all(&out);
-    mark_recalled(&conn, &row.hash, &row.command);
+    mark_recalled(conn, &row.hash, &row.command);
 
     if row.truncated {
         eprintln!(
@@ -791,6 +944,8 @@ fn list_entries(conn: &Connection) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::db::testing::{application_id, user_version};
+    use crate::core::tracking;
 
     fn temp_cfg(dir: &std::path::Path) -> RetrieverConfig {
         RetrieverConfig {
@@ -1471,6 +1626,690 @@ mod tests {
             .find(|s| s.slug == "vitest" && s.mode == "sqlite")
             .expect("row");
         assert_eq!(s.recalls, 1, "recalled column must be added to old DBs");
+    }
+
+    /// The path the per-thread connection is cached for.
+    fn cached_path() -> Option<PathBuf> {
+        CONN_CACHE.with(|cache| cache.borrow().as_ref().map(|(path, _, _)| path.clone()))
+    }
+
+    /// A connection to a store that exists, as the readers take it.
+    fn open_existing(cfg: &RetrieverConfig) -> Result<Option<Connection>> {
+        db::open_existing_and_migrate(&db_path(cfg)?, &SCHEMA, MigrationMode::GatedByVersion)
+    }
+
+    /// A recall database as every release before `RecallSchema` left it: the
+    /// tables without `recall.recalled`, `user_version` 0, and one stored row.
+    fn seed_unversioned_db(path: &std::path::Path) {
+        Connection::open(path)
+            .expect("open should succeed")
+            .execute_batch(
+                "CREATE TABLE recall (
+                    hash        TEXT PRIMARY KEY,
+                    command     TEXT NOT NULL,
+                    cwd         TEXT,
+                    exit_code   INTEGER,
+                    created_at  INTEGER NOT NULL,
+                    total_lines INTEGER NOT NULL,
+                    shown_upto  INTEGER NOT NULL,
+                    byte_size   INTEGER NOT NULL,
+                    truncated   INTEGER NOT NULL,
+                    codec       TEXT NOT NULL,
+                    blob        BLOB NOT NULL
+                );
+                CREATE TABLE tee_reads (path TEXT PRIMARY KEY);
+                CREATE INDEX idx_recall_command ON recall(command, created_at DESC);
+                CREATE INDEX idx_recall_created ON recall(created_at);
+                CREATE TABLE recall_stats (
+                    slug     TEXT NOT NULL,
+                    mode     TEXT NOT NULL,
+                    elisions INTEGER NOT NULL DEFAULT 0,
+                    recalls  INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (slug, mode)
+                );
+                INSERT INTO recall (hash, command, created_at, total_lines, shown_upto, byte_size, truncated, codec, blob)
+                VALUES ('abc', 'vitest', 1, 2, 2, 4, 0, 'raw', x'780a790a');",
+            )
+            .expect("unversioned schema should seed");
+    }
+
+    #[test]
+    fn test_fresh_recall_db_is_stamped_current_with_all_tables() {
+        let dir = crate::core::test_isolation::tempdir();
+        let conn = open(&temp_cfg(dir.path())).expect("a new store should open");
+
+        assert_eq!(user_version(&conn), SCHEMA_VERSION);
+        assert_eq!(application_id(&conn), DbKind::Recall.application_id());
+        for table in ["recall", "tee_reads", "recall_stats"] {
+            assert!(db::table_exists(&conn, table), "{table} should exist");
+        }
+        assert!(db::column_exists(&conn, "recall", "recalled").expect("columns are readable"));
+    }
+
+    #[test]
+    fn test_unversioned_recall_db_upgrades_and_keeps_its_row() {
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+        let path = db_path(&cfg).expect("path resolves");
+        seed_unversioned_db(&path);
+
+        let conn = open_existing(&cfg)
+            .expect("the upgrade should succeed")
+            .expect("an existing database opens");
+        assert_eq!(user_version(&conn), SCHEMA_VERSION);
+        assert_eq!(
+            application_id(&conn),
+            DbKind::Recall.application_id(),
+            "the upgrade tags it"
+        );
+        let (command, recalled): (String, i64) = conn
+            .query_row("SELECT command, recalled FROM recall", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .expect("the stored row should survive with the new column");
+        assert_eq!((command.as_str(), recalled), ("vitest", 0));
+    }
+
+    #[test]
+    fn test_migrate_recalled_reports_a_refused_alter() {
+        let dir = crate::core::test_isolation::tempdir();
+        let path = dir.path().join("recall_test.db");
+        seed_unversioned_db(&path);
+
+        let conn = Connection::open(&path).expect("open should succeed");
+        conn.execute_batch("PRAGMA query_only = ON;")
+            .expect("pragma should be set");
+        let err = migrate_recalled(&conn).expect_err("the refused ALTER should fail the step");
+        assert!(
+            format!("{err:#}").contains("add column recall.recalled"),
+            "error should name the statement: {err:#}"
+        );
+    }
+
+    #[test]
+    fn test_failed_recalled_step_keeps_the_previous_stamp_and_is_retried() {
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+        let path = db_path(&cfg).expect("path resolves");
+        seed_unversioned_db(&path);
+        let conn = Connection::open(&path).expect("open should succeed");
+        db::apply_migrations(
+            &conn,
+            &Schema {
+                steps: &MIGRATIONS[..1],
+                ..SCHEMA
+            },
+            MigrationMode::GatedByVersion,
+        )
+        .expect("the Initial step should apply");
+        // A view cannot take a new column, so the Recalled step fails.
+        conn.execute_batch("DROP TABLE recall; CREATE VIEW recall AS SELECT 'abc' AS hash;")
+            .expect("view should replace the table");
+
+        let err = open_existing(&cfg).expect_err("the failing step should fail the open");
+        assert!(
+            format!("{err:#}").contains("Migration Recalled of the recall DB failed"),
+            "error should name the failed step: {err:#}"
+        );
+        assert_eq!(user_version(&conn), RecallSchema::Initial as i64);
+
+        conn.execute_batch("DROP VIEW recall; CREATE TABLE recall (hash TEXT PRIMARY KEY);")
+            .expect("table should replace the view");
+        let reopened = open_existing(&cfg)
+            .expect("the retry should succeed")
+            .expect("database exists");
+        assert!(db::column_exists(&reopened, "recall", "recalled").expect("columns are readable"));
+        assert_eq!(user_version(&reopened), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_current_recall_db_is_not_migrated_again() {
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+        let conn = open(&cfg).expect("a new store should open");
+        conn.execute("DROP TABLE tee_reads", [])
+            .expect("drop should succeed");
+        drop(conn);
+
+        let conn = open_existing(&cfg)
+            .expect("reopen should succeed")
+            .expect("database exists");
+        assert!(
+            !db::table_exists(&conn, "tee_reads"),
+            "a stamped database applies no step again"
+        );
+    }
+
+    #[test]
+    fn test_open_existing_never_creates_a_missing_db() {
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+
+        assert!(
+            open_existing(&cfg)
+                .expect("a missing store is not an error")
+                .is_none()
+        );
+        assert!(!db_path(&cfg).expect("path resolves").exists());
+    }
+
+    #[test]
+    fn test_tee_paths_use_the_cached_connection_and_never_create_the_store() {
+        let cached_for = |path: &std::path::Path| cached_path().as_deref() == Some(path);
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+        let path = db_path(&cfg).expect("path resolves");
+
+        record_tee_elision(&cfg, "vitest");
+        record_tee_recall_with(&cfg, "vitest", "/tmp/vitest.log");
+        assert!(!path.exists(), "the tee path must not create the store");
+        assert!(!cached_for(&path));
+
+        drop(open(&cfg).expect("a new store should open"));
+        record_tee_elision(&cfg, "vitest");
+        assert!(
+            cached_for(&path),
+            "an elision should use the cached connection"
+        );
+        CONN_CACHE.with(|cache| *cache.borrow_mut() = None);
+        record_tee_recall_with(&cfg, "vitest", "/tmp/vitest.log");
+        assert!(
+            cached_for(&path),
+            "a tee read should use the cached connection"
+        );
+
+        let stats = stats_snapshot_with(&cfg).expect("snapshot should succeed");
+        let tee = stats
+            .iter()
+            .find(|s| s.slug == "vitest" && s.mode == "tee")
+            .expect("the tee calls should be counted");
+        assert_eq!((tee.elisions, tee.recalls), (1, 1));
+    }
+
+    /// The recall and tracking schemas on one file: `Tracker::new` and
+    /// `ensure_schema_fresh` run under `RTK_DB_PATH`.
+    fn tracker_error(path: &std::path::Path) -> anyhow::Error {
+        user_env::with_path("RTK_DB_PATH", Some(path), || {
+            match (
+                tracking::Tracker::new().map(|_| ()),
+                tracking::ensure_schema_fresh(),
+            ) {
+                (Err(gated), Err(always)) => {
+                    assert_eq!(format!("{gated:#}"), format!("{always:#}"));
+                    gated
+                }
+                (gated, always) => panic!("both modes should refuse: {gated:?} {always:?}"),
+            }
+        })
+    }
+
+    #[test]
+    fn test_the_cache_does_not_serve_another_path() {
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+        let other = RetrieverConfig {
+            database_path: Some(dir.path().join("other.db")),
+            ..RetrieverConfig::default()
+        };
+        with_open(&cfg, |_| Ok(())).expect("a new store should open");
+        drop(open(&other).expect("a second store should open"));
+
+        let served = with_existing(&other, |conn| Ok(conn.path().map(str::to_owned)))
+            .expect("the second store should open")
+            .expect("the second store exists");
+        // SQLite reports the path with symlinks resolved (`/var` is `/private/var`
+        // on macOS), so both sides are.
+        let canonical = |path: &std::path::Path| {
+            std::fs::canonicalize(path).expect("the store's path should resolve")
+        };
+        assert_eq!(
+            canonical(std::path::Path::new(
+                served.as_deref().expect("the connection has a path")
+            )),
+            canonical(&db_path(&other).expect("path resolves")),
+            "another path does not get this path's connection"
+        );
+        assert_eq!(cached_path(), Some(db_path(&other).expect("path resolves")));
+    }
+
+    /// Windows cannot delete a file SQLite has open, so a connection can never
+    /// outlive its file there and the cache has nothing to guard against.
+    #[test]
+    #[cfg(unix)]
+    fn test_the_cache_does_not_serve_a_removed_store() {
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+        with_open(&cfg, |_| Ok(())).expect("a new store should open");
+        std::fs::remove_file(db_path(&cfg).expect("path resolves"))
+            .expect("the store should be removed");
+
+        assert!(
+            with_existing(&cfg, |_| Ok(()))
+                .expect("a missing store is not an error")
+                .is_none(),
+            "a removed store is not served from the cache"
+        );
+        assert_eq!(cached_path(), None, "the stale connection is dropped");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_the_cache_does_not_serve_a_store_deleted_and_recreated() {
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+        let path = db_path(&cfg).expect("path resolves");
+        with_open(&cfg, |_| Ok(())).expect("a new store should open");
+        std::fs::remove_file(&path).expect("the store should be removed");
+        // A new file at the same path, with a row the old, unlinked one lacks.
+        let fresh = open(&cfg).expect("a new store should open");
+        bump_stat(&fresh, "vitest", "tee", "elisions");
+
+        let rows = with_existing(&cfg, |conn| {
+            Ok(
+                conn.query_row("SELECT COUNT(*) FROM recall_stats", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+            )
+        })
+        .expect("the recreated store should open")
+        .expect("the recreated store exists");
+        assert_eq!(rows, 1, "the connection is to the new file");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_a_store_replaced_while_it_opens_is_used_once_and_not_cached() {
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+        let path = db_path(&cfg).expect("path resolves");
+        drop(open(&cfg).expect("a new store should open"));
+
+        // The store is deleted and recreated after the open, before the cache
+        // looks at the path again.
+        let opened = with_cached(
+            path.clone(),
+            |p| {
+                let conn =
+                    db::open_existing_and_migrate(p, &SCHEMA, MigrationMode::GatedByVersion)?;
+                std::fs::remove_file(p).expect("the store should be removed");
+                drop(open_path(p)?);
+                Ok(conn)
+            },
+            |_| Ok(()),
+        )
+        .expect("the open should succeed");
+
+        assert!(opened.is_some(), "the connection is still used once");
+        assert_eq!(cached_path(), None, "but it is not cached for the new file");
+    }
+
+    #[test]
+    fn test_init_leaves_the_store_alone_without_a_data_directory() {
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+
+        replay_at(
+            Err(anyhow::anyhow!("no local data directory available")),
+            &cfg,
+        )
+        .expect("no data directory means no store, not a failure");
+    }
+
+    #[test]
+    fn test_init_leaves_the_store_alone_when_the_configuration_cannot_be_loaded() {
+        use crate::core::user_dirs;
+
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+        let path = db_path(&cfg).expect("path resolves");
+        let conn = open(&cfg).expect("a new store should open");
+        conn.execute("DROP TABLE tee_reads", [])
+            .expect("drop should succeed");
+        drop(conn);
+        // A broken configuration, which `Config::load` rejects and a default
+        // would have read as "recall enabled". The user directories are this
+        // test's own, so the file is seen by no other test.
+        let outcome = crate::core::test_isolation::with_root(dir.path(), || {
+            let config_dir = user_dirs::config().expect("a test build has a config dir");
+            std::fs::create_dir_all(&config_dir).expect("config dir should be created");
+            std::fs::write(
+                config_dir.join("config.toml"),
+                "[retriever\nmode = \"disabled\"\n",
+            )
+            .expect("config should be written");
+            user_env::with_path("RTK_RECALL_DB", Some(&path), ensure_schema_fresh)
+        });
+
+        let err = outcome.expect_err("an unreadable configuration is reported");
+        assert!(
+            format!("{err:#}").contains("Failed to load the configuration"),
+            "{err:#}"
+        );
+        let conn = Connection::open(&path).expect("open should succeed");
+        assert!(
+            !db::table_exists(&conn, "tee_reads"),
+            "the store is left alone"
+        );
+    }
+
+    #[test]
+    fn test_init_does_nothing_while_recall_is_disabled() {
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+        let path = db_path(&cfg).expect("path resolves");
+        let conn = open(&cfg).expect("a new store should open");
+        conn.execute("DROP TABLE tee_reads", [])
+            .expect("drop should succeed");
+        drop(conn);
+        let table_back = || {
+            let conn = Connection::open(&path).expect("open should succeed");
+            db::table_exists(&conn, "tee_reads")
+        };
+
+        let disabled = RetrieverConfig {
+            mode: RecoveryMode::Disabled,
+            ..temp_cfg(dir.path())
+        };
+        ensure_schema_fresh_with(&disabled).expect("a disabled replay is a no-op");
+        assert!(!table_back(), "retriever.mode = disabled");
+        for variable in ["RTK_RECALL", "RTK_TEE"] {
+            user_env::with_vars(&[(variable, Some("0"))], || {
+                ensure_schema_fresh_with(&cfg).expect("a disabled replay is a no-op");
+            });
+            assert!(!table_back(), "{variable}=0");
+        }
+
+        ensure_schema_fresh_with(&cfg).expect("an enabled replay works");
+        assert!(table_back());
+    }
+
+    #[test]
+    fn test_readers_share_the_cached_connection_and_never_create_the_store() {
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+        let path = db_path(&cfg).expect("path resolves");
+        let cached = |path: &std::path::Path| cached_path().as_deref() == Some(path);
+
+        assert!(
+            stats_snapshot_with(&cfg)
+                .expect("a missing store has no stats")
+                .is_empty()
+        );
+        reset_stats_with(&cfg).expect("a missing store has nothing to reset");
+        assert!(!path.exists() && !cached(&path));
+
+        drop(open(&cfg).expect("a new store should open"));
+        stats_snapshot_with(&cfg).expect("snapshot should succeed");
+        assert!(cached(&path), "a reader should use the cached connection");
+    }
+
+    #[test]
+    fn test_failed_reset_leaves_the_cached_connection_usable() {
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+        let conn = open(&cfg).expect("a new store should open");
+        conn.execute("DROP TABLE tee_reads", [])
+            .expect("drop should succeed");
+        drop(conn);
+
+        let err = reset_stats_with(&cfg).expect_err("the reset needs tee_reads");
+        assert!(
+            format!("{err:#}").contains("Failed to clear recall stats"),
+            "{err:#}"
+        );
+        let idle = with_existing(&cfg, |conn| Ok(conn.is_autocommit()))
+            .expect("the store should open")
+            .expect("the store exists");
+        assert!(idle, "a failed reset must not leave a transaction open");
+        assert!(
+            stats_snapshot_with(&cfg).is_ok(),
+            "readers still work after the failed reset"
+        );
+    }
+
+    #[test]
+    fn test_tracking_refuses_a_recall_file_and_writes_nothing() {
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+        drop(open(&cfg).expect("a new store should open"));
+        let path = db_path(&cfg).expect("path resolves");
+
+        let err = tracker_error(&path);
+        assert!(
+            format!("{err:#}").contains(
+                "is the rtk recall database, not the tracking one; set RTK_DB_PATH or [tracking] database_path to another file"
+            ),
+            "error should name the database: {err:#}"
+        );
+        let conn = Connection::open(&path).expect("open should succeed");
+        assert_eq!(application_id(&conn), DbKind::Recall.application_id());
+        assert_eq!(user_version(&conn), SCHEMA_VERSION);
+        assert!(!db::table_exists(&conn, "commands"));
+    }
+
+    #[test]
+    fn test_recall_refuses_a_tracking_file_and_writes_nothing() {
+        let dir = crate::core::test_isolation::tempdir();
+        let path = dir.path().join("history.db");
+        user_env::with_path("RTK_DB_PATH", Some(&path), || {
+            tracking::Tracker::new().expect("a new tracking database should open");
+        });
+        let cfg = RetrieverConfig {
+            database_path: Some(path.clone()),
+            ..RetrieverConfig::default()
+        };
+        let before = {
+            let conn = Connection::open(&path).expect("open should succeed");
+            (application_id(&conn), user_version(&conn))
+        };
+
+        let refusals = [
+            open(&cfg).map(|_| ()),
+            with_existing(&cfg, |_| Ok(())).map(|_| ()),
+            Connection::open(&path)
+                .map_err(anyhow::Error::from)
+                .and_then(|conn| db::apply_migrations(&conn, &SCHEMA, MigrationMode::Always)),
+        ];
+        for refusal in refusals {
+            let err = refusal.expect_err("a tracking file is not a recall store");
+            assert!(
+                format!("{err:#}").contains(
+                "is the rtk tracking database, not the recall one; set RTK_RECALL_DB or [retriever] database_path to another file"
+            ),
+                "error should name the database: {err:#}"
+            );
+        }
+        let conn = Connection::open(&path).expect("open should succeed");
+        assert_eq!((application_id(&conn), user_version(&conn)), before);
+        assert!(!db::table_exists(&conn, "recall"));
+    }
+
+    #[test]
+    fn test_recall_refuses_an_untagged_file_with_a_stamp() {
+        let dir = crate::core::test_isolation::tempdir();
+        let path = dir.path().join("history.db");
+        user_env::with_path("RTK_DB_PATH", Some(&path), || {
+            tracking::Tracker::new().expect("a new tracking database should open");
+        });
+        // A tracking database from a release that tagged nothing.
+        Connection::open(&path)
+            .expect("open should succeed")
+            .pragma_update(None, "application_id", 0)
+            .expect("tag should be cleared");
+        let cfg = RetrieverConfig {
+            database_path: Some(path.clone()),
+            ..RetrieverConfig::default()
+        };
+
+        let err = open(&cfg).expect_err("a legacy tracking file is not a recall store");
+        assert!(
+            format!("{err:#}").contains(
+                "is not the recall database (it is an older rtk database or another application's file); set RTK_RECALL_DB or [retriever] database_path to another file"
+            ),
+            "error should name the database: {err:#}"
+        );
+        let conn = Connection::open(&path).expect("open should succeed");
+        assert_eq!(application_id(&conn), 0);
+        assert!(!db::table_exists(&conn, "recall"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_open_restricts_the_database_and_its_sidecars() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Both openers meet a file that exists; a store nobody has created is
+        // covered by the umask test below.
+        for via_open_existing in [false, true] {
+            let dir = crate::core::test_isolation::tempdir();
+            let cfg = temp_cfg(dir.path());
+            let path = db_path(&cfg).expect("path resolves");
+            // Held open so the sidecars outlive it.
+            let holder = Connection::open(&path).expect("open should succeed");
+            db::testing::enable_wal(&holder);
+            holder
+                .execute("CREATE TABLE held (x INTEGER)", [])
+                .expect("table should be created");
+            let files: Vec<_> = std::iter::once(path.clone())
+                .chain(db::db_sidecars(&path))
+                .collect();
+            for file in &files {
+                std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o644))
+                    .expect("chmod should succeed");
+            }
+
+            if via_open_existing {
+                open_existing(&cfg)
+                    .expect("the open should succeed")
+                    .expect("the store exists");
+            } else {
+                open(&cfg).expect("the open should succeed");
+            }
+            for file in &files {
+                let mode = std::fs::metadata(file)
+                    .expect("file should exist")
+                    .permissions()
+                    .mode()
+                    & 0o777;
+                assert_eq!(
+                    mode,
+                    0o600,
+                    "expected 0600 on {} (open_existing: {via_open_existing})",
+                    file.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_a_new_store_and_its_sidecars_are_owner_only_under_umask_022() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+        let path = db_path(&cfg).expect("path resolves");
+        assert!(!path.exists(), "this is a store nobody has created");
+
+        // Kept open: the `-wal`/`-shm` this connection created exist only while it does.
+        let opened = crate::core::test_isolation::with_umask(0o022, || open(&cfg));
+
+        let _conn = opened.expect("a new store should open");
+        let files: Vec<_> = std::iter::once(path.clone())
+            .chain(db::db_sidecars(&path))
+            .collect();
+        for file in &files {
+            let mode = std::fs::metadata(file)
+                .expect("file should exist while the connection is open")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "expected 0600 on {}", file.display());
+        }
+    }
+
+    /// The existing-store opener on a store restored as `0444`: current, and
+    /// unversioned (so it has steps to run).
+    #[test]
+    #[cfg(unix)]
+    fn test_a_read_only_store_is_made_writable_and_written() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for unversioned in [false, true] {
+            let dir = crate::core::test_isolation::tempdir();
+            let cfg = temp_cfg(dir.path());
+            let path = db_path(&cfg).expect("path resolves");
+            if unversioned {
+                seed_unversioned_db(&path);
+            } else {
+                drop(open(&cfg).expect("a new store should open"));
+            }
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444))
+                .expect("chmod should succeed");
+            if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
+                eprintln!(
+                    "skipped (unversioned: {unversioned}): a 0444 store stays writable for this user (root)"
+                );
+                continue;
+            }
+
+            let written = with_existing(&cfg, |conn| {
+                conn.execute("INSERT INTO tee_reads (path) VALUES ('/tmp/x.log')", [])?;
+                Ok(user_version(conn))
+            })
+            .expect("a read-only store should open writable")
+            .expect("the store exists");
+            assert_eq!(written, SCHEMA_VERSION, "unversioned: {unversioned}");
+            CONN_CACHE.with(|cache| *cache.borrow_mut() = None);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_opening_an_existing_store_leaves_its_directory_alone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+        drop(open(&cfg).expect("a new store should open"));
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod should succeed");
+
+        open_existing(&cfg)
+            .expect("the open should succeed")
+            .expect("the store exists");
+        let mode = std::fs::metadata(dir.path())
+            .expect("directory should exist")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "opening an existing store with open_existing leaves its directory alone"
+        );
+    }
+
+    #[test]
+    fn test_init_replays_the_steps_on_an_existing_store_only() {
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+        let path = db_path(&cfg).expect("path resolves");
+
+        ensure_schema_fresh_with(&cfg).expect("a missing store is not an error");
+        assert!(!path.exists(), "rtk init must not create the store");
+
+        let conn = open(&cfg).expect("a new store should open");
+        conn.execute("DROP TABLE tee_reads", [])
+            .expect("drop should succeed");
+        drop(conn);
+        ensure_schema_fresh_with(&cfg).expect("the replay should succeed");
+
+        let conn = Connection::open(&path).expect("open should succeed");
+        assert!(
+            db::table_exists(&conn, "tee_reads"),
+            "the replay recreates a dropped table"
+        );
+        assert_eq!(user_version(&conn), SCHEMA_VERSION);
     }
 
     #[test]

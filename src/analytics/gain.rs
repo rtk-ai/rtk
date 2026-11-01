@@ -107,11 +107,18 @@ pub fn run_reset(yes: bool) -> Result<bool> {
     tracker
         .reset_all()
         .context("Failed to reset token savings")?;
-    crate::core::retriever::reset_stats().context("Failed to reset recall stats")?;
-    println!(
-        "{}",
-        styled("Token savings and recall stats reset to zero.", true)
-    );
+    // The tracking history is already gone: an unusable recall store (another
+    // database's file, a locked or failed migration, read-only) is reported, not
+    // fatal.
+    let recall_reset = crate::core::retriever::reset_stats();
+    let message = match &recall_reset {
+        Ok(()) => "Token savings and recall stats reset to zero.",
+        Err(e) => {
+            eprintln!("rtk: recall stats were not reset: {e:#}");
+            "Token savings reset to zero."
+        }
+    };
+    println!("{}", styled(message, true));
     Ok(true)
 }
 
@@ -1388,12 +1395,18 @@ fn show_recall_stats() -> Result<()> {
         RecoveryMode::Tee => "tee",
         RecoveryMode::Disabled => "disabled",
     };
-    let stats = crate::core::retriever::stats_snapshot()?;
-
     println!("{}", styled("RTK Recall Efficiency", true));
     println!("{}", "═".repeat(60));
     println!("Mode: {mode_label}");
     println!();
+
+    let stats = match crate::core::retriever::stats_snapshot() {
+        Ok(stats) => stats,
+        Err(e) => {
+            println!("Recall store unavailable: {e:#}");
+            return Ok(());
+        }
+    };
 
     if stats.is_empty() {
         println!("No recall activity recorded yet.");
