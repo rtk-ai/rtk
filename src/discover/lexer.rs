@@ -588,25 +588,25 @@ pub(crate) fn opens_disown_pair(cmd: &str) -> bool {
 }
 
 fn disown_pair(tokens: &[ParsedToken]) -> bool {
-    // Byte just past a `&` token, so the pair is spotted by adjacency.
-    let mut ampersand_end = None;
-    for token in tokens {
-        let glued = ampersand_end == Some(token.offset);
-        let pairs = match &token.kind {
-            TokenKind::Pipe(_) => true,
-            TokenKind::Shellism => token.value == "!",
-            TokenKind::Arg => token.value.starts_with('!'),
-            _ => false,
-        };
-        if glued && pairs {
-            return true;
-        }
-        ampersand_end = match &token.kind {
-            TokenKind::Shellism if token.value == "&" => Some(token.offset + token.value.len()),
-            _ => None,
-        };
-    }
-    false
+    tokens
+        .windows(2)
+        .any(|pair| closes_disown_pair(&pair[0], &pair[1]))
+}
+
+/// True when `token` closes the pair `prev` opens: `prev` is a `&`, and
+/// `token` is the `|` or `!` glued to it.
+fn closes_disown_pair(prev: &ParsedToken, token: &ParsedToken) -> bool {
+    let pairs = match &token.kind {
+        TokenKind::Pipe(_) => true,
+        TokenKind::Shellism => token.value == "!",
+        TokenKind::Arg => token.value.starts_with('!'),
+        _ => false,
+    };
+    // Spotted by adjacency: the `&` ends on the byte where `token` starts.
+    pairs
+        && prev.kind == TokenKind::Shellism
+        && prev.value == "&"
+        && prev.offset + prev.value.len() == token.offset
 }
 
 /// Quote-aware: bash runs backtick/`$(...)` unquoted and inside double quotes,
