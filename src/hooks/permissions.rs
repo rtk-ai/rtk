@@ -4,7 +4,7 @@ use super::constants::{
 };
 use super::init::resolve_claude_dir;
 use crate::core::cmdline::lexer::{
-    is_word_boundary_whitespace, split_for_permissions, split_for_wrappers,
+    join_continuations, split_for_permissions, split_for_wrappers, squeeze_blanks,
 };
 use crate::core::user_dirs;
 use crate::core::user_env;
@@ -28,7 +28,9 @@ pub enum PermissionVerdict {
     Ask,
     /// No rule matched — default to ask (matches Claude Code's least-privilege default).
     Default,
-    /// A deny rule matched inside a shell wrapper's script — RTK neither rewrites nor decides.
+    /// A deny rule matched inside a shell wrapper's script, or the line holds a
+    /// continuation bash may join otherwise than RTK would — RTK neither
+    /// rewrites nor decides.
     Defer,
 }
 
@@ -226,6 +228,13 @@ pub(crate) fn check_command_with_rules_and_prefixes(
     allow_rules: &[String],
     transparent_prefixes: &[String],
 ) -> PermissionVerdict {
+    // The line as bash runs it, its continuations joined: the text the
+    // rewrite emits, so what is checked is what runs. Where bash may read a
+    // continuation otherwise, the host decides.
+    let Some(cmd) = join_continuations(cmd) else {
+        return PermissionVerdict::Defer;
+    };
+    let cmd = cmd.as_ref();
     let segments = split_compound_command(cmd);
     // Each segment read every way a deny or ask rule may name it, once: as
     // written, then without the grammar a split leaves behind (`{`, `!`,
@@ -264,8 +273,7 @@ pub(crate) fn check_command_with_rules_and_prefixes(
     }
 
     let transparent_prefixes = registry::normalize_transparent_prefixes(transparent_prefixes);
-    let joined = registry::collapse_line_continuations(cmd);
-    let wrapper_segments = split_for_wrappers(&joined);
+    let wrapper_segments = split_for_wrappers(cmd);
     if let Some(verdict) =
         check_shell_wrapper_permissions(&wrapper_segments, deny_rules, &transparent_prefixes)
     {
@@ -346,10 +354,15 @@ fn check_shell_wrapper_permissions(
             let Some(script) = wrapper.script(position) else {
                 continue;
             };
+            // The shell the wrapper starts joins the continuations a single-
+            // quoted script carries, which the line around it kept as written.
+            let Some(script) = join_continuations(script) else {
+                return Some(PermissionVerdict::Defer);
+            };
             // Both spellings, exactly as the outer loop above: a segment can open
             // with grammar that is not part of the command (`! rm …`, `{ rm …`),
             // and a rule naming the command has to reach it there too.
-            let inner_denied = split_for_permissions(script).iter().any(|inner_segment| {
+            let inner_denied = split_for_permissions(&script).iter().any(|inner_segment| {
                 let inner_segment = inner_segment.trim();
                 let readings = registry::shell_wrapper_positions(
                     strip_grammar_residue(inner_segment),
@@ -735,34 +748,16 @@ fn strip_grammar_residue(segment: &str) -> &str {
     }
 }
 
-/// One space between words, line continuations elided.
-///
-/// Shares the lexer's word-boundary definition rather than
-/// `str::split_whitespace()`, so a bare `\r` in a command never collapses into
-/// a space.
-///
-/// A line continuation goes first: bash elides `\<newline>` entirely and joins
-/// the words either side, so splitting on the newline alone would leave a
-/// stray `\` in front of the command that no pattern matches. Only the LF
-/// form: against CRLF the backslash escapes the `\r` and the `\n` still
-/// terminates the command, in bash and in the lexer alike, so the words either
-/// side are already separate segments.
-fn normalize_command_text(text: &str) -> String {
-    text.replace("\\\n", "")
-        .split(is_word_boundary_whitespace)
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 /// Pattern forms:
 /// - `*` → matches everything
 /// - `prefix:*` or `prefix *` (trailing `*`, no other wildcards) → prefix match with word boundary
 /// - `* suffix`, `pre * suf` → glob matching where `*` matches any sequence of characters
 /// - `pattern` → exact match or prefix match (cmd must equal pattern or start with `{pattern} `)
 pub(crate) fn command_matches_pattern(cmd: &str, pattern: &str) -> bool {
-    let cmd_norm = normalize_command_text(cmd);
-    let pattern_norm = normalize_command_text(pattern);
+    // One space between words, as the lexer finds them: a bare `\r` is a
+    // word byte, never a space.
+    let cmd_norm = squeeze_blanks(cmd);
+    let pattern_norm = squeeze_blanks(pattern);
     let cmd = cmd_norm.as_str();
     let pattern = pattern_norm.as_str();
 
@@ -2481,6 +2476,25 @@ mod tests {
             ),
             PermissionVerdict::Ask
         );
+    }
+
+    #[test]
+    fn test_the_gate_reads_the_line_the_rewrite_emits() {
+        // Bash joins `$\⏎(` into `$(`, and so does the rewrite it emits: the
+        // substitution is read where it runs.
+        let allow = vec!["Bash(ls *)".to_string()];
+        assert_eq!(
+            check_command_with_rules("ls \"$\\\n(rm Y)\"", &[], &[], &allow),
+            PermissionVerdict::Ask
+        );
+        // Where bash may join otherwise than RTK would, the host decides.
+        for cmd in ["ls #c\\\nrm Y", "ls -l \"$[$'$\\\n(rm -rf Y)']\""] {
+            assert_eq!(
+                check_command_with_rules(cmd, &[], &[], &allow),
+                PermissionVerdict::Defer,
+                "{cmd:?}"
+            );
+        }
     }
 
     #[test]

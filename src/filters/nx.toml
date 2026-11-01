@@ -1,6 +1,6 @@
 [filters.nx]
 description = "Compact Nx monorepo output — strip task graph noise, keep results"
-match_command = "^(pnpm\\s+)?nx\\b"
+match_command = "^(pnpm[ \\t\\n]+)?nx(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",
