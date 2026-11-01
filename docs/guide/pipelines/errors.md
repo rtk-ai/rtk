@@ -65,7 +65,7 @@ Errors stop that file from loading; the other files stay active (W025 names the 
 | W016 | method skipped under `proxy.request` — it needs a recall copy the daemon cannot store, or sits at a part the daemon does not transform; the file still loads |
 | W017 | `proxy.request` rule in a project file — the daemon reads only user pipelines; move it |
 | W018 | `shadow` on a `proxy.request` rule — not recorded; the rule is skipped |
-| W019 | directive `channel` other than `awareness_file` — the directive is skipped |
+| W019 | directive `channel = "per_turn"` is not delivered yet — the directive is skipped |
 | W021 | `route` after a `read` — the summary replaces the bytes a later Edit needs |
 | W022 | slow method after a tool — every matching call waits for it |
 | W023 | the routed task's kind cannot take this call (see [Routing before a tool](./writing-pipelines.md#routing-before-a-tool)) |

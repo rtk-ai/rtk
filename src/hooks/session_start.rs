@@ -11,20 +11,77 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use rtk_engine::harness::{Channel, HarnessProfile};
+use serde_json::{Value, json};
 
 pub(super) fn run() {
-    if let Some(message) = ensure_proxy() {
-        let payload = serde_json::json!({ "systemMessage": message });
+    if let Some(payload) = response_for("claude-code") {
         let mut out = std::io::stdout();
         let _ = writeln!(out, "{payload}");
         let _ = out.flush();
     }
 }
 
-pub fn ensure_proxy() -> Option<String> {
-    let url = crate::core::user_env::var("ANTHROPIC_BASE_URL")?;
+pub(crate) fn response_for(agent: &str) -> Option<String> {
+    let profile = rtk_engine::harness::profile(agent)?;
+    let keepalive = base_url(agent).and_then(|(var, url)| ensure_proxy_at(var, &url));
+    let context = crate::core::pipeline_config::session_start_text(
+        &crate::core::pipeline_config::load().resolved,
+    );
+    encode(profile, keepalive.as_deref(), context.as_deref()).map(|v| v.to_string())
+}
+
+fn base_url(agent: &str) -> Option<(&'static str, String)> {
+    match agent {
+        "claude-code" => {
+            crate::core::user_env::var("ANTHROPIC_BASE_URL").map(|url| ("ANTHROPIC_BASE_URL", url))
+        }
+        "codex" => {
+            crate::core::user_env::var("OPENAI_BASE_URL").map(|url| ("OPENAI_BASE_URL", url))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn encode(
+    profile: &HarnessProfile,
+    keepalive: Option<&str>,
+    context: Option<&str>,
+) -> Option<Value> {
+    let context = context.filter(|_| profile.directive_channels.contains(&Channel::SessionStart));
+    match (profile.id, keepalive, context) {
+        (_, None, None) => None,
+        ("claude-code", message, context) => {
+            let mut payload = json!({});
+            if let Some(message) = message {
+                payload["systemMessage"] = json!(message);
+            }
+            if let Some(context) = context {
+                payload["hookSpecificOutput"] = json!({
+                    "hookEventName": crate::hooks::constants::SESSION_START_KEY,
+                    "additionalContext": context,
+                });
+            }
+            Some(payload)
+        }
+        ("codex", _, Some(context)) => Some(json!({
+            "hookSpecificOutput": {
+                "hookEventName": crate::hooks::constants::SESSION_START_KEY,
+                "additionalContext": context,
+            }
+        })),
+        ("cursor", _, Some(context)) => Some(json!({ "additional_context": context })),
+        ("antigravity", _, Some(context)) => Some(json!({
+            "injectSteps": [{ "systemMessage": context }]
+        })),
+        _ => None,
+    }
+}
+
+fn ensure_proxy_at(var: &str, url: &str) -> Option<String> {
     ensure_proxy_impl(
-        &url,
+        var,
+        url,
         |addr| probe(addr, Duration::from_millis(150)),
         spawn_start,
         Duration::from_millis(700),
@@ -32,6 +89,7 @@ pub fn ensure_proxy() -> Option<String> {
 }
 
 fn ensure_proxy_impl(
+    var: &str,
     url: &str,
     probe: impl Fn(&str) -> bool,
     spawn: impl FnOnce(&str) -> anyhow::Result<()>,
@@ -60,7 +118,7 @@ fn ensure_proxy_impl(
             ))
         }
         Err(e) => Some(format!(
-            "rtk: ANTHROPIC_BASE_URL points at {url} but the RTK proxy is not running and could not be started ({e}) — run `rtk llm-proxy start`, or remove env.ANTHROPIC_BASE_URL from settings.json"
+            "rtk: {var} points at {url} but the RTK proxy is not running and could not be started ({e}) — run `rtk llm-proxy start`, or remove {var} from the agent's settings"
         )),
     }
 }
@@ -103,6 +161,8 @@ mod tests {
     use super::*;
     use std::cell::Cell;
 
+    const VAR: &str = "ANTHROPIC_BASE_URL";
+
     #[test]
     fn only_loopback_urls_are_ours() {
         assert_eq!(
@@ -125,6 +185,7 @@ mod tests {
     #[test]
     fn remote_url_is_silent() {
         let out = ensure_proxy_impl(
+            VAR,
             "https://api.anthropic.com",
             |_| panic!("must not probe a remote url"),
             |_| panic!("must not spawn for a remote url"),
@@ -136,6 +197,7 @@ mod tests {
     #[test]
     fn running_daemon_is_silent_and_never_spawned() {
         let out = ensure_proxy_impl(
+            VAR,
             "http://127.0.0.1:8080",
             |_| true,
             |_| panic!("must not spawn when the daemon answers"),
@@ -148,6 +210,7 @@ mod tests {
     fn dead_daemon_is_started_and_reported() {
         let calls = Cell::new(0usize);
         let out = ensure_proxy_impl(
+            VAR,
             "http://127.0.0.1:8080",
             |_| {
                 calls.set(calls.get() + 1);
@@ -165,6 +228,7 @@ mod tests {
     fn dead_daemon_is_started_on_the_port_the_session_uses() {
         let spawned_on = std::cell::RefCell::new(String::new());
         ensure_proxy_impl(
+            VAR,
             "http://localhost:8580/v1",
             |_| false,
             |addr| {
@@ -179,6 +243,7 @@ mod tests {
     #[test]
     fn slow_bind_is_reported_honestly() {
         let out = ensure_proxy_impl(
+            VAR,
             "http://127.0.0.1:8080",
             |_| false,
             |_| Ok(()),
@@ -191,6 +256,7 @@ mod tests {
     #[test]
     fn failed_spawn_names_the_fix() {
         let out = ensure_proxy_impl(
+            VAR,
             "http://127.0.0.1:8080",
             |_| false,
             |_| anyhow::bail!("binary missing"),
@@ -200,6 +266,51 @@ mod tests {
         assert!(msg.contains("could not be started"), "{msg}");
         assert!(msg.contains("rtk llm-proxy start"), "{msg}");
         assert!(msg.contains("binary missing"), "{msg}");
+    }
+
+    #[test]
+    fn spawn_failure_names_the_variable() {
+        let out = ensure_proxy_impl(
+            "OPENAI_BASE_URL",
+            "http://127.0.0.1:8080",
+            |_| false,
+            |_| Err(anyhow::anyhow!("no binary")),
+            Duration::ZERO,
+        );
+        let message = out.unwrap();
+        assert!(message.contains("OPENAI_BASE_URL points at"));
+        assert!(message.contains("no binary"));
+    }
+
+    #[test]
+    fn each_agent_receives_session_context_in_its_own_shape() {
+        let profile = |id: &str| rtk_engine::harness::profile(id).unwrap();
+        let claude = encode(profile("claude-code"), Some("started"), Some("be terse")).unwrap();
+        assert_eq!(claude["systemMessage"], "started");
+        assert_eq!(
+            claude["hookSpecificOutput"]["additionalContext"],
+            "be terse"
+        );
+        assert_eq!(
+            encode(profile("claude-code"), Some("started"), None).unwrap(),
+            json!({ "systemMessage": "started" })
+        );
+
+        let codex = encode(profile("codex"), None, Some("be terse")).unwrap();
+        assert_eq!(codex["hookSpecificOutput"]["hookEventName"], "SessionStart");
+        assert_eq!(codex["hookSpecificOutput"]["additionalContext"], "be terse");
+        assert_eq!(encode(profile("codex"), Some("started"), None), None);
+
+        assert_eq!(
+            encode(profile("cursor"), None, Some("be terse")).unwrap(),
+            json!({ "additional_context": "be terse" })
+        );
+        assert_eq!(
+            encode(profile("antigravity"), None, Some("be terse")).unwrap(),
+            json!({ "injectSteps": [{ "systemMessage": "be terse" }] })
+        );
+        assert_eq!(encode(profile("vibe"), None, Some("be terse")), None);
+        assert_eq!(encode(profile("cursor"), None, None), None);
     }
 }
 

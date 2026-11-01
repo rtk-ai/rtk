@@ -43,16 +43,18 @@ pub fn is_claude_hook_command(command: &str) -> bool {
 }
 
 #[cfg(feature = "engine")]
-static HOOK_AGENT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+thread_local! {
+    static HOOK_AGENT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
 
 #[cfg(feature = "engine")]
-pub(crate) fn set_hook_agent(agent: &str) {
-    let _ = HOOK_AGENT.set(Some(agent.to_string()));
+pub(crate) fn set_hook_agent(agent: &'static str) {
+    HOOK_AGENT.with(|slot| slot.set(Some(agent)));
 }
 
 #[cfg(feature = "engine")]
 pub(crate) fn hook_agent() -> Option<String> {
-    HOOK_AGENT.get().cloned().flatten()
+    HOOK_AGENT.with(|slot| slot.get().map(str::to_string))
 }
 
 #[cfg(test)]

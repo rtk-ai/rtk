@@ -9,7 +9,9 @@ sidebar:
 
 RTK saves tokens by intercepting what your coding agent reads and sends. In v1.0 what it does is a **pipeline**: a file that says *when* RTK acts, *on what*, and *what it does*. Every built-in behaviour is written in that same grammar, so you can read it (`rtk pipeline show rtk:default`), change one line of it, or replace it.
 
-The file is agent-agnostic. You write `shell`, `read`, `before_tool`; RTK translates to Claude Code, Cursor, Gemini CLI or whatever you set up with `rtk init`. A pipeline written on one machine works on another.
+The file is agent-agnostic. You write `shell`, `read`, `before_tool`; RTK translates to each agent's own hook names, tool names and argument names when `rtk init` registers the hooks and when `rtk hook <agent>` runs them. A pipeline written on one machine works on another.
+
+How much of it runs depends on the agent. Today the hooks of **Claude Code, Codex, Cursor, Antigravity and Mistral Vibe** evaluate every `hook.before_tool` rule — deny, route, judges, read gating — and Claude Code and Mistral Vibe also run `hook.after_tool` chains; on every other agent the hook is RTK's command rewrite alone. [Agent Coverage](../resources/agent-coverage.md) is the per-agent table, generated from the engine so it cannot drift, and `rtk init --agent <id>` prints the positions of your pipeline that the agent cannot serve.
 
 :::note[Full edition only]
 The pipeline engine is absent from the Apache-2.0 edition. See [Editions and Licensing](../resources/editions.md).
