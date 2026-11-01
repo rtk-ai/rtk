@@ -696,7 +696,13 @@ pub fn run(
     // nothing to show. The JSON and CSV exports return earlier and stay clean.
     warn_hook_issues();
 
-    if summary.total_commands == 0 && proxy_summary.is_none() {
+    // `total_commands` counts only the rows that made it under the headline
+    // input cap (`HEADLINE_INPUT_CAP_TOKENS`); every row above it is counted
+    // in `oversized_excluded` instead. So a tracker whose rows are all
+    // oversized has rows but no headline rows, and asking only about
+    // `total_commands` would call that an empty database. The empty state is
+    // for a tracker with no rows at all.
+    if summary.total_commands == 0 && summary.oversized_excluded == 0 && proxy_summary.is_none() {
         println!("No tracking data yet.");
         println!("Run some rtk commands to start tracking savings.");
         // A reachable daemon with no rows is the confusing case: the user has
@@ -943,7 +949,16 @@ pub fn run(
 
         if !summary.by_command.is_empty() {
             // added: styled section header
-            println!("{}", styled("By Command", true));
+            // The per-command table is not capped, so when rows were excluded
+            // from the headline it counts more commands (and savings) than the
+            // summary above it. Say so, rather than leave two figures on one
+            // page with no explanation.
+            let by_command_header = if summary.oversized_excluded > 0 {
+                "By Command (unfiltered)"
+            } else {
+                "By Command"
+            };
+            println!("{}", styled(by_command_header, true));
 
             // added: dynamic column widths for clean alignment
             let cmd_width = 24usize;
