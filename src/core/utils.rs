@@ -748,6 +748,43 @@ pub fn shorten_arn(arn: &str) -> &str {
     }
 }
 
+/// Display form of a file path a linter reported: relative to the working
+/// directory when it lies under it, otherwise unchanged.
+///
+/// Linters' JSON output carries absolute paths where their text output prints
+/// them relative to the working directory. Shortening further (to a basename,
+/// or from the last `/src/`) makes same-named files in different directories
+/// print identically, so the reader cannot tell which one to open.
+pub fn display_path(path: &str) -> String {
+    let cwd = user_dirs::current_dir().ok();
+    display_path_in(path, cwd.as_deref())
+}
+
+fn display_path_in(path: &str, cwd: Option<&std::path::Path>) -> String {
+    let path = path.replace('\\', "/");
+    let Some(cwd) = cwd else {
+        return path;
+    };
+    // macOS reports `/var/...` for a working directory a tool may resolve to
+    // `/private/var/...`, so try both spellings.
+    let canonical = fs::canonicalize(cwd).ok();
+    for dir in std::iter::once(cwd).chain(canonical.as_deref()) {
+        let dir = dir.to_string_lossy().replace('\\', "/");
+        let dir = dir.trim_end_matches('/');
+        if dir.is_empty() {
+            continue;
+        }
+        if let Some(rest) = path
+            .strip_prefix(dir)
+            .and_then(|rest| rest.strip_prefix('/'))
+            && !rest.is_empty()
+        {
+            return rest.to_string();
+        }
+    }
+    path
+}
+
 /// Convert bytes to human-readable format (KB, MB, GB, TB).
 /// Used for S3 object sizes.
 pub fn human_bytes(bytes: u64) -> String {
@@ -1471,6 +1508,42 @@ mod tests {
     fn test_shorten_arn_fallback() {
         // Non-ARN string - return as-is
         assert_eq!(shorten_arn("simple-name"), "simple-name");
+    }
+
+    // ===== display_path tests =====
+
+    #[test]
+    fn test_display_path_strips_working_dir() {
+        let cwd = std::path::Path::new("/repo");
+        assert_eq!(
+            display_path_in("/repo/pkg_a/__init__.py", Some(cwd)),
+            "pkg_a/__init__.py"
+        );
+        assert_eq!(
+            display_path_in("/repo/src/app/src/x.py", Some(cwd)),
+            "src/app/src/x.py"
+        );
+    }
+
+    #[test]
+    fn test_display_path_keeps_paths_outside_working_dir() {
+        let cwd = std::path::Path::new("/repo");
+        assert_eq!(
+            display_path_in("/repository/x.py", Some(cwd)),
+            "/repository/x.py"
+        );
+        assert_eq!(display_path_in("/other/x.py", Some(cwd)), "/other/x.py");
+        assert_eq!(display_path_in("/other/x.py", None), "/other/x.py");
+    }
+
+    #[test]
+    fn test_display_path_keeps_relative_paths() {
+        let cwd = std::path::Path::new("/repo");
+        assert_eq!(
+            display_path_in("pkg_b/__init__.py", Some(cwd)),
+            "pkg_b/__init__.py"
+        );
+        assert_eq!(display_path_in("pkg\\mod\\x.py", Some(cwd)), "pkg/mod/x.py");
     }
 
     #[test]

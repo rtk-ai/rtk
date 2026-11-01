@@ -8,7 +8,7 @@ use crate::core::config;
 use crate::core::runner;
 use crate::core::shell::display_args;
 use crate::core::truncate::CAP_WARNINGS;
-use crate::core::utils::{resolved_command, truncate};
+use crate::core::utils::{display_path, resolved_command, truncate};
 use anyhow::Result;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -347,7 +347,7 @@ pub fn filter_ruff_check_json(output: &str) -> String {
     // Show top files
     result.push_str("Top files:\n");
     for (file, count) in file_counts.iter().take(MAX_RUFF_FILES) {
-        let short_path = compact_path(file);
+        let short_path = display_path(file);
         result.push_str(&format!("  {} ({} issues)\n", short_path, count));
 
         // Show top 3 rules in this file
@@ -377,7 +377,7 @@ pub fn filter_ruff_check_json(output: &str) -> String {
         .map(|diag| {
             format!(
                 "  {}:{}:{} {} {}\n",
-                compact_path(&diag.filename),
+                display_path(&diag.filename),
                 diag.location.row,
                 diag.location.column,
                 diag.code,
@@ -395,7 +395,7 @@ pub fn filter_ruff_check_json(output: &str) -> String {
         if described_rules.contains(diag.code.as_str()) {
             result.push_str(&format!(
                 "  {}:{}:{} {}\n",
-                compact_path(&diag.filename),
+                display_path(&diag.filename),
                 diag.location.row,
                 diag.location.column,
                 diag.code,
@@ -494,7 +494,7 @@ pub fn filter_ruff_format(output: &str) -> String {
                 .take(MAX_RUFF_FORMAT_FILES)
                 .enumerate()
             {
-                result.push_str(&format!("{}. {}\n", i + 1, compact_path(file)));
+                result.push_str(&format!("{}. {}\n", i + 1, display_path(file)));
             }
 
             if files_to_format.len() > MAX_RUFF_FORMAT_FILES {
@@ -516,23 +516,6 @@ pub fn filter_ruff_format(output: &str) -> String {
     }
 
     result.trim().to_string()
-}
-
-/// Compact file path (remove common prefixes)
-fn compact_path(path: &str) -> String {
-    let path = path.replace('\\', "/");
-
-    if let Some(pos) = path.rfind("/src/") {
-        format!("src/{}", &path[pos + 5..])
-    } else if let Some(pos) = path.rfind("/lib/") {
-        format!("lib/{}", &path[pos + 5..])
-    } else if let Some(pos) = path.rfind("/tests/") {
-        format!("tests/{}", &path[pos + 7..])
-    } else if let Some(pos) = path.rfind('/') {
-        path[pos + 1..].to_string()
-    } else {
-        path
-    }
 }
 
 #[cfg(test)]
@@ -752,9 +735,9 @@ mod tests {
         let input = include_str!("../../../tests/fixtures/ruff_check_tied_raw.json");
         let expected_rules = "Top rules:\n  F401 (6x)\n  CPY001 (3x): Missing copyright notice at top of file\n  D100 (3x): Missing docstring in public module\n  E401 (3x): Multiple imports on one line\n  I001 (3x): Import block is un-sorted or un-formatted\n";
         let expected_files = "Top files:\n\
-            \x20 src/alpha.py (6 issues)\n    F401 (2)\n    CPY001 (1)\n    D100 (1)\n\
-            \x20 src/beta.py (6 issues)\n    F401 (2)\n    CPY001 (1)\n    D100 (1)\n\
-            \x20 src/gamma.py (6 issues)\n    F401 (2)\n    CPY001 (1)\n    D100 (1)\n";
+            \x20 /fixture/src/alpha.py (6 issues)\n    F401 (2)\n    CPY001 (1)\n    D100 (1)\n\
+            \x20 /fixture/src/beta.py (6 issues)\n    F401 (2)\n    CPY001 (1)\n    D100 (1)\n\
+            \x20 /fixture/src/gamma.py (6 issues)\n    F401 (2)\n    CPY001 (1)\n    D100 (1)\n";
         // Each run hashes its maps differently; a count-only sort would pass
         // one run by luck but not ten.
         for _ in 0..10 {
@@ -777,8 +760,14 @@ mod tests {
             "{out}"
         );
         assert!(!out.contains("imported but unused"), "{out}");
-        assert!(out.contains("  src/pkg_a/mod.py:1:8 F401\n"), "{out}");
-        assert!(out.contains("  src/pkg_b/mod.py:1:8 F401\n"), "{out}");
+        assert!(
+            out.contains("  /fixture/src/pkg_a/mod.py:1:8 F401\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("  /fixture/src/pkg_b/mod.py:1:8 F401\n"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -875,17 +864,22 @@ Would reformat: tests/test_utils.py
     }
 
     #[test]
-    fn test_compact_path() {
-        assert_eq!(
-            compact_path("/Users/foo/project/src/main.py"),
-            "src/main.py"
+    fn same_named_files_in_different_directories_stay_distinct() {
+        let input = r#"[
+            {"code":"F401","message":"`concurrent.futures.process` imported but unused","location":{"row":1,"column":8},"filename":"pkg_a/__init__.py","fix":null},
+            {"code":"F401","message":"`concurrent.futures.process` imported but unused","location":{"row":1,"column":8},"filename":"pkg_b/__init__.py","fix":null},
+            {"code":"F401","message":"`os` imported but unused","location":{"row":1,"column":8},"filename":"/repo/src/app/src/x.py","fix":null}
+        ]"#;
+        let out = filter_ruff_check_json(input);
+        let (summary, detail) = out.split_once("Violations:\n").expect("detail section");
+        assert!(summary.contains("  pkg_a/__init__.py (1 issues)"), "{out}");
+        assert!(summary.contains("  pkg_b/__init__.py (1 issues)"), "{out}");
+        assert!(detail.contains("  pkg_a/__init__.py:1:8 F401"), "{out}");
+        assert!(detail.contains("  pkg_b/__init__.py:1:8 F401"), "{out}");
+        assert!(
+            detail.contains("  /repo/src/app/src/x.py:1:8 F401"),
+            "{out}"
         );
-        assert_eq!(compact_path("/home/user/app/lib/utils.py"), "lib/utils.py");
-        assert_eq!(
-            compact_path("C:\\Users\\foo\\project\\tests\\test.py"),
-            "tests/test.py"
-        );
-        assert_eq!(compact_path("relative/file.py"), "file.py");
     }
 
     fn owned(args: &[&str]) -> Vec<String> {

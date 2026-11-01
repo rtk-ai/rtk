@@ -6,7 +6,7 @@ use crate::core::shell::{display_args, quote_program, with_args};
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::{CAP_ERRORS, CAP_WARNINGS};
-use crate::core::utils::{MissingTool, resolved_command, tool_exec, truncate};
+use crate::core::utils::{MissingTool, display_path, resolved_command, tool_exec, truncate};
 use crate::mypy_cmd;
 use crate::ruff_cmd;
 use anyhow::{Context, Result};
@@ -314,7 +314,7 @@ fn filter_eslint_json(output: &str) -> String {
     const MAX_FILES: usize = CAP_WARNINGS;
     result.push_str("Top files:\n");
     for (file_result, count) in by_file.iter().take(MAX_FILES) {
-        let short_path = compact_path(&file_result.file_path);
+        let short_path = display_path(&file_result.file_path);
         result.push_str(&format!("  {} ({} issues)\n", short_path, count));
 
         let mut file_rules: HashMap<String, usize> = HashMap::new();
@@ -334,7 +334,7 @@ fn filter_eslint_json(output: &str) -> String {
         result.push_str(&format!("\n… +{} more files\n", by_file.len() - MAX_FILES));
         let all_file_lines = by_file
             .iter()
-            .map(|(r, count)| format!("{} ({} issues)", compact_path(&r.file_path), count))
+            .map(|(r, count)| format!("{} ({} issues)", display_path(&r.file_path), count))
             .collect::<Vec<_>>()
             .join("\n");
         if let Some(hint) =
@@ -438,7 +438,7 @@ fn filter_pylint_json(output: &str) -> String {
     const MAX_FILES: usize = CAP_WARNINGS;
     result.push_str("Top files:\n");
     for (file, count) in file_counts.iter().take(MAX_FILES) {
-        let short_path = compact_path(file);
+        let short_path = display_path(file);
         result.push_str(&format!("  {} ({} issues)\n", short_path, count));
 
         // Show top 3 rules in this file
@@ -463,7 +463,7 @@ fn filter_pylint_json(output: &str) -> String {
         ));
         let all_file_lines = file_counts
             .iter()
-            .map(|(file, count)| format!("{} ({} issues)", compact_path(file), count))
+            .map(|(file, count)| format!("{} ({} issues)", display_path(file), count))
             .collect::<Vec<_>>()
             .join("\n");
         if let Some(hint) =
@@ -519,22 +519,6 @@ fn filter_generic_lint(output: &str) -> String {
     result.trim().to_string()
 }
 
-/// Compact file path (remove common prefixes)
-fn compact_path(path: &str) -> String {
-    // Remove common prefixes like /Users/..., /home/..., C:\
-    let path = path.replace('\\', "/");
-
-    if let Some(pos) = path.rfind("/src/") {
-        format!("src/{}", &path[pos + 5..])
-    } else if let Some(pos) = path.rfind("/lib/") {
-        format!("lib/{}", &path[pos + 5..])
-    } else if let Some(pos) = path.rfind('/') {
-        path[pos + 1..].to_string()
-    } else {
-        path
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,16 +571,17 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_path() {
-        assert_eq!(
-            compact_path("/Users/foo/project/src/utils.ts"),
-            "src/utils.ts"
-        );
-        assert_eq!(
-            compact_path("C:\\Users\\project\\src\\api.ts"),
-            "src/api.ts"
-        );
-        assert_eq!(compact_path("simple.ts"), "simple.ts");
+    fn test_eslint_same_named_files_stay_distinct() {
+        let json = r#"[
+            {"filePath": "pkg_a/index.ts", "messages": [{"ruleId": "prefer-const", "severity": 1, "message": "Use const", "line": 1, "column": 1}], "errorCount": 0, "warningCount": 1},
+            {"filePath": "pkg_b/index.ts", "messages": [{"ruleId": "prefer-const", "severity": 1, "message": "Use const", "line": 2, "column": 1}], "errorCount": 0, "warningCount": 1},
+            {"filePath": "/repo/src/app/src/x.ts", "messages": [{"ruleId": "prefer-const", "severity": 1, "message": "Use const", "line": 3, "column": 1}], "errorCount": 0, "warningCount": 1}
+        ]"#;
+
+        let result = filter_eslint_json(json);
+        assert!(result.contains("pkg_a/index.ts"), "{result}");
+        assert!(result.contains("pkg_b/index.ts"), "{result}");
+        assert!(result.contains("/repo/src/app/src/x.ts"), "{result}");
     }
 
     #[test]
