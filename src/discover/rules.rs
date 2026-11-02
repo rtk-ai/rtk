@@ -1135,6 +1135,16 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 65.0,
         ..RtkRule::DEFAULT
     },
+    RtkRule {
+        // `fnm` is the Node version manager used to bootstrap the JS toolchain;
+        // `rtk fnm` preserves `env` verbatim and compacts the rest (#1538).
+        pattern: r"^fnm(?:\s|$)",
+        rtk_cmd: "rtk fnm",
+        rewrite_prefixes: &["fnm"],
+        category: "PackageManager",
+        savings_pct: 60.0,
+        ..RtkRule::DEFAULT
+    },
 ];
 
 pub const IGNORED_PREFIXES: &[&str] = &[

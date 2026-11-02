@@ -6659,6 +6659,23 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_fnm() {
+        for (command, expected) in [
+            ("fnm use 20", "rtk fnm use 20"),
+            ("fnm env", "rtk fnm env"),
+            ("fnm install --lts", "rtk fnm install --lts"),
+            ("fnm", "rtk fnm"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected.into()),
+                "Failed for command: {command}"
+            );
+        }
+        assert_eq!(rewrite_command_no_prefixes("fnmx use 20", &[]), None);
+    }
+
+    #[test]
     fn test_rewrite_pnpm_command() {
         let commands = vec![
             "exec",
