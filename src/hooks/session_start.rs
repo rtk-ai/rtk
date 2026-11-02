@@ -84,7 +84,7 @@ fn touch(stamp: &Path) {
     if let Some(dir) = stamp.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(stamp, b"");
+    let _ = std::fs::File::create(stamp).and_then(|file| file.set_modified(SystemTime::now()));
 }
 
 pub(crate) fn encode(
