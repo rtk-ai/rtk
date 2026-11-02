@@ -53,6 +53,27 @@ agent asks for "git status"
 
 A person approving a command then sees the command the agent asked for, not the rewritten one, and allow or deny patterns written for `git ...` keep matching. If your transcript shows the executed command, show the rewritten form there so the substitution stays visible.
 
+## Rewrites that are more than a prefix
+
+The exit-code contract says nothing about the shape of the rewritten command. Most rewrites only insert `rtk` in front of a command segment (`git log -n 3` becomes `rtk git log -n 3`, `FOO=1 git status` becomes `FOO=1 rtk git status`, `cd x && git status` becomes `cd x && rtk git status`), but some rules rename the command or reorder its arguments. On rtk 1.1.0:
+
+| Command | `rtk rewrite` output |
+|---------|----------------------|
+| `cat foo.txt` | `rtk read foo.txt` |
+| `head -n 5 foo.txt` | `rtk read foo.txt --head-lines 5` |
+| `python -m pytest -x` | `rtk pytest -x` |
+| `npm run lint` | `rtk lint` |
+| `yadm status` | `rtk git status` |
+
+If your transcript shows the rewritten command, nothing more is needed. If your audit log or permission prompt records only the command the agent asked for and what runs must match it token for token, accept only rewrites that are pure insertions and run the original command otherwise:
+
+- split both strings on whitespace and shell operators (`&&`, `||`, `|`, `;`, `&`), keeping each quoted span, quotes included, as one token;
+- walk the rewritten tokens against the original left to right, preferring a literal match, so an argument that is itself `rtk` (`git log --grep rtk`) counts as data, not as an inserted prefix;
+- every unmatched rewritten token must be exactly `rtk`;
+- the walk must consume the original exactly, with no token dropped, added or requoted.
+
+The cost is that commands like the ones above run unfiltered. [ismoss/dsh-rtk](https://github.com/ismoss/dsh-rtk) is an external example of this check (`isPrefixInsertion` in `lib/index.js`, negative cases in `test/invariant.test.mjs`).
+
 ## Fail open
 
 The command must always run, with or without rtk. Run the original command unchanged when:
