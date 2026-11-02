@@ -906,7 +906,7 @@ fn report_pipeline_health() {
 }
 
 /// The base URL the global settings point Claude Code at, if any.
-fn proxy_env_target() -> Option<String> {
+pub(super) fn proxy_env_target() -> Option<String> {
     let dir = resolve_claude_dir().ok()?;
     let content = fs::read_to_string(dir.join(SETTINGS_JSON)).ok()?;
     let root: serde_json::Value = from_json_str(strip_leading_bom(&content)).ok()?;

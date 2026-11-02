@@ -95,7 +95,9 @@ Codex's namespace follows its login mode at the time of the init. `rtk codex` pi
 
 #### What the keep-alive actually does
 
-It does **not** do the redirection — that is the config entry above. The keep-alive checks whether the agent's channel points at a loopback address with nothing listening there, and if so runs `rtk llm-proxy start`:
+It does **not** do the redirection — that is the config entry above. The keep-alive checks whether the agent's channel points at a loopback address with nothing listening there, and if so runs `rtk llm-proxy start`. For a `localhost` URL it checks both `127.0.0.1` and `[::1]`.
+
+If a listener at that address does not identify as RTK at `/health`, the keep-alive never starts a daemon over it. It warns when RTK was set up for that address, because the listener could be another service taking the requests or a hung RTK daemon, and the keep-alive cannot tell which: for Claude Code, when `env.ANTHROPIC_BASE_URL` in `settings.json` or `RTK_PROXY_BIND` names it; for Codex and Vibe, always, since their channel only counts when it holds RTK's own route. Otherwise it treats the listener as your own gateway and stays silent. After starting a daemon, it still verifies the RTK identity before reporting that it started successfully. A problem is at most a warning; the keep-alive never disrupts the session.
 
 | Agent | When it runs | How it reports |
 |---|---|---|
