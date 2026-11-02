@@ -704,6 +704,14 @@ fn resolve_atomic_target(path: &Path) -> PathBuf {
 /// mode `fs::write` would create it with.
 pub(super) fn atomic_write(path: &Path, content: &str) -> Result<()> {
     let target = resolve_atomic_target(path);
+    let access = FileAccess::for_replaced(&target)
+        .with_context(|| format!("Failed to read who can access {}", target.display()))?;
+    write_via_temp(&target, content.as_bytes(), access.as_ref())
+}
+
+/// Write `content` to a temp file beside `target`, give it `access` (a new file's
+/// mode when there is none), and rename it over `target`.
+fn write_via_temp(target: &Path, content: &[u8], access: Option<&FileAccess>) -> Result<()> {
     let parent = target.parent().with_context(|| {
         format!(
             "Cannot write to {}: path has no parent directory",
@@ -711,8 +719,6 @@ pub(super) fn atomic_write(path: &Path, content: &str) -> Result<()> {
         )
     })?;
 
-    let access = FileAccess::for_replaced(&target)
-        .with_context(|| format!("Failed to read who can access {}", target.display()))?;
     // Create temp file in same directory (ensures same filesystem for atomic rename).
     // Not with tempfile's own Windows file, marked temporary: clearing that mark
     // reopens the file by name, which the replaced file's DACL may not allow.
@@ -732,13 +738,8 @@ pub(super) fn atomic_write(path: &Path, content: &str) -> Result<()> {
     let mut temp_file =
         temp_file.with_context(|| format!("Failed to create temp file in {}", parent.display()))?;
 
-    let access_context = || {
-        format!(
-            "Failed to give the new {} the access of the old one",
-            target.display()
-        )
-    };
-    if let Some(access) = &access {
+    let access_context = || format!("Failed to give {} its access", target.display());
+    if let Some(access) = access {
         access
             .before_write(temp_file.path(), temp_file.as_file())
             .with_context(access_context)?;
@@ -746,10 +747,10 @@ pub(super) fn atomic_write(path: &Path, content: &str) -> Result<()> {
 
     // Write content
     temp_file
-        .write_all(content.as_bytes())
+        .write_all(content)
         .with_context(|| format!("Failed to write {} bytes to temp file", content.len()))?;
 
-    if let Some(access) = &access {
+    if let Some(access) = access {
         access
             .after_write(temp_file.as_file())
             .with_context(access_context)?;
@@ -760,7 +761,7 @@ pub(super) fn atomic_write(path: &Path, content: &str) -> Result<()> {
     // immutable flags). tempfile's persist would first clear its temporary mark.
     let (file, mut temp_path) = temp_file.into_parts();
     drop(file);
-    fs::rename(&temp_path, &target)
+    fs::rename(&temp_path, target)
         .with_context(|| format!("Failed to atomically replace {}", target.display()))?;
     temp_path.disable_cleanup(true);
 
@@ -819,8 +820,7 @@ pub(super) fn canonicalize_path_for_comparison(path: &Path) -> PathBuf {
     }
 }
 
-/// Where [`backup_and_atomic_write`] puts the copy it takes before overwriting `path`. Named
-/// so a caller that has to vouch for where it writes can vouch for this one too.
+/// Where [`backup_and_atomic_write`] puts the copy it takes before overwriting `path`.
 pub(super) fn backup_path_for(path: &Path) -> PathBuf {
     path.with_extension("json.bak")
 }
@@ -872,7 +872,7 @@ pub(super) fn update_json_file(
 fn backup_and_atomic_write(path: &Path, content: &str) -> Result<Option<PathBuf>> {
     let backup_path = if path.exists() {
         let backup_path = backup_path_for(path);
-        fs::copy(path, &backup_path).with_context(|| {
+        replace_backup(path, &backup_path).with_context(|| {
             format!(
                 "Failed to backup {} to {}",
                 path.display(),
@@ -887,6 +887,33 @@ fn backup_and_atomic_write(path: &Path, content: &str) -> Result<Option<PathBuf>
     atomic_write(path, content)
         .with_context(|| format!("Failed to update JSON file: {}", path.display()))?;
     Ok(backup_path)
+}
+
+/// Back `path` up to `backup_path` the way [`atomic_write`] writes a file: a new
+/// file with `path`'s access (mode, group and ACL or DACL, and owner where the
+/// process may set it), renamed into place, so a refused copy leaves an earlier
+/// backup as it was and a read-only one is replaced. A symlink there is replaced
+/// rather than followed, so a planted link never sends the copy elsewhere, except
+/// a link to `/dev/null`, which keeps no backups and is left as it is. Any other
+/// backup path that is no regular file is refused.
+fn replace_backup(path: &Path, backup_path: &Path) -> Result<()> {
+    match fs::symlink_metadata(backup_path) {
+        Ok(meta)
+            if meta.file_type().is_symlink()
+                && fs::canonicalize(backup_path).is_ok_and(|to| to == Path::new("/dev/null")) =>
+        {
+            return Ok(());
+        }
+        Ok(meta) if !meta.is_file() && !meta.file_type().is_symlink() => {
+            anyhow::bail!("The backup path is no regular file");
+        }
+        _ => {}
+    }
+    let content = fs::read(path).context("Failed to read the file to back up")?;
+    let access = FileAccess::for_replaced(path)
+        .context("Failed to read who can access the file to back up")?
+        .context("The file to back up is gone")?;
+    write_via_temp(backup_path, &content, Some(&access))
 }
 
 /// Prompt user for confirmation.
@@ -2371,6 +2398,21 @@ pub(super) fn with_missing_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, 
     });
 }
 
+/// Write `content` to `path` and make it read-only. False, with a notice, when a
+/// read-only file can still be opened for writing here (as root), so the caller skips.
+#[cfg(all(test, unix))]
+pub(super) fn seed_read_only(path: &Path, content: &str) -> bool {
+    fs::write(path, content).expect("seed file");
+    let mut permissions = fs::metadata(path).expect("stat seed").permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(path, permissions).expect("make seed read-only");
+    let refused = fs::OpenOptions::new().write(true).open(path).is_err();
+    if !refused {
+        eprintln!("skipping: a read-only file is writable here (running as root?)");
+    }
+    refused
+}
+
 /// The permission bits of `path`, setuid, setgid and sticky included.
 #[cfg(all(test, unix))]
 pub(super) fn mode_of(path: &Path) -> u32 {
@@ -3608,7 +3650,9 @@ level = "high"
             "the move must not give the file open's entries: {before}"
         );
 
-        atomic_write(&path, "{\"rtk\":true}").expect("rewrite file");
+        let backup = backup_and_atomic_write(&path, "{\"rtk\":true}")
+            .expect("back up and rewrite file")
+            .expect("an existing file is backed up");
 
         assert_eq!(
             fs::read_to_string(&path).expect("read file"),
@@ -3618,6 +3662,11 @@ level = "high"
             windows_dacl(&path),
             before,
             "the replaced file must not gain open's entries"
+        );
+        assert_eq!(
+            windows_dacl(&backup),
+            before,
+            "the backup must not gain open's entries"
         );
     }
 
@@ -4065,5 +4114,408 @@ level = "high"
 
         assert!(format!("{err:#}").contains("backup"));
         assert_eq!(fs::read_to_string(path).unwrap(), "old");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_backup_and_atomic_write_replaces_read_only_backup() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("hooks.json");
+        let backup = backup_path_for(&path);
+        fs::write(&path, "current").expect("seed file");
+        if !seed_read_only(&backup, "older") {
+            return;
+        }
+
+        backup_and_atomic_write(&path, "new").expect("replace the read-only backup");
+
+        assert_eq!(fs::read_to_string(&path).expect("read file"), "new");
+        assert_eq!(fs::read_to_string(&backup).expect("read backup"), "current");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_backup_leaves_its_other_names_alone() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("hooks.json");
+        let archived = temp.path().join("archived.json");
+        fs::write(&path, "current").expect("seed file");
+        if !seed_read_only(&archived, "archived") {
+            return;
+        }
+        fs::hard_link(&archived, backup_path_for(&path)).expect("link the backup");
+
+        backup_and_atomic_write(&path, "new").expect("back up and rewrite");
+
+        assert_eq!(
+            fs::read_to_string(&archived).expect("read archived file"),
+            "archived"
+        );
+        assert_eq!(
+            fs::read_to_string(backup_path_for(&path)).expect("read backup"),
+            "current"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_backup_of_an_unreadable_file_leaves_the_earlier_one() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("hooks.json");
+        let backup = backup_path_for(&path);
+        if !seed_with_mode(&path, b"unreadable", 0o200) || !seed_read_only(&backup, "older") {
+            return;
+        }
+        let read_only = mode_of(&backup);
+
+        backup_and_atomic_write(&path, "new").expect_err("the file cannot be read");
+
+        assert_eq!(mode_of(&backup), read_only, "the backup is left as it was");
+        assert_eq!(fs::read_to_string(&backup).expect("read backup"), "older");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_backup_keeps_the_files_group() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("settings.json");
+        let backup = backup_path_for(&path);
+        if !seed_with_mode(&path, b"current", 0o640) {
+            return;
+        }
+        let Some(gid) = supplementary_gid() else {
+            eprintln!("skipping: the process belongs to no supplementary group");
+            return;
+        };
+        if let Err(error) = std::os::unix::fs::chown(&path, None, Some(gid)) {
+            eprintln!("skipping: cannot give the seed group {gid}: {error}");
+            return;
+        }
+
+        backup_and_atomic_write(&path, "new").expect("back up and rewrite");
+
+        assert_eq!(fs::read_to_string(&backup).expect("read backup"), "current");
+        assert_eq!(fs::metadata(&backup).expect("stat backup").gid(), gid);
+        assert_eq!(mode_of(&backup), 0o640);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_a_backup_keeps_the_files_acl() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("settings.json");
+        fs::write(&path, "{}").expect("seed file");
+        let uid = std::os::unix::fs::MetadataExt::uid(&fs::metadata(&path).expect("stat seed"));
+        if !posix_acl::set(&path, posix_acl::ACCESS, &posix_acl::user_reads(uid)) {
+            return;
+        }
+
+        backup_and_atomic_write(&path, "{\"rtk\":true}").expect("back up and rewrite");
+
+        let backup = backup_path_for(&path);
+        assert!(posix_acl::access(&path).is_some());
+        assert_eq!(posix_acl::access(&backup), posix_acl::access(&path));
+        assert_eq!(mode_of(&backup), 0o640);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_a_new_backup_drops_the_acl_its_directory_hands_down() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().expect("create temp dir");
+        let dir = temp.path().join("shared");
+        fs::create_dir(&dir).expect("create dir");
+        let uid = std::os::unix::fs::MetadataExt::uid(&fs::metadata(&dir).expect("stat dir"));
+        if !posix_acl::set(&dir, posix_acl::DEFAULT, &posix_acl::user_inherits(uid)) {
+            return;
+        }
+        let path = dir.join("settings.json");
+        fs::write(&path, "{}").expect("seed file");
+        posix_acl::remove_access(&path);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).expect("chmod seed");
+
+        backup_and_atomic_write(&path, "{\"rtk\":true}").expect("back up and rewrite");
+
+        let backup = backup_path_for(&path);
+        assert_eq!(
+            posix_acl::access(&backup),
+            None,
+            "no ACL from the directory"
+        );
+        assert_eq!(mode_of(&backup), 0o640);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_an_existing_backup_wider_than_the_file_is_narrowed() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("settings.json");
+        let backup = backup_path_for(&path);
+        if !seed_with_mode(&path, b"current", 0o600) || !seed_with_mode(&backup, b"older", 0o644) {
+            return;
+        }
+
+        backup_and_atomic_write(&path, "new").expect("back up and rewrite");
+
+        assert_eq!(fs::read_to_string(&backup).expect("read backup"), "current");
+        assert_eq!(
+            mode_of(&backup),
+            0o600,
+            "the backup is no wider than the file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_backup_link_to_dev_null_is_kept() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("settings.json");
+        fs::write(&path, "current").expect("seed file");
+        symlink("/dev/null", backup_path_for(&path)).expect("link the backup to /dev/null");
+        let null_mode = mode_of(Path::new("/dev/null"));
+
+        backup_and_atomic_write(&path, "new").expect("back up into /dev/null");
+
+        assert_eq!(fs::read_to_string(&path).expect("read file"), "new");
+        assert_eq!(mode_of(Path::new("/dev/null")), null_mode);
+        let link = fs::symlink_metadata(backup_path_for(&path)).expect("lstat backup");
+        assert!(
+            link.file_type().is_symlink(),
+            "the /dev/null link must stay"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_backup_that_is_the_file_itself_never_empties_it() {
+        use std::os::unix::fs::symlink;
+
+        for shared in ["hard link", "symlinked file"] {
+            let temp = TempDir::new().expect("create temp dir");
+            let path = temp.path().join("hooks.json");
+            let backup = backup_path_for(&path);
+            fs::write(&backup, "current").expect("seed backup");
+            if shared == "hard link" {
+                fs::hard_link(&backup, &path).expect("link the file to its backup");
+            } else {
+                symlink(&backup, &path).expect("link the file to its backup");
+            }
+
+            backup_and_atomic_write(&path, "new").expect("back up and rewrite");
+
+            assert_eq!(
+                fs::read_to_string(&path).expect("read file"),
+                "new",
+                "{shared}: the file is rewritten, never emptied"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_backup_link_to_no_regular_file_is_replaced_unopened() {
+        use std::os::unix::fs::{FileTypeExt, symlink};
+
+        let temp = TempDir::new().expect("create temp dir");
+        let fifo = temp.path().join("fifo");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .is_ok_and(|status| status.success());
+        let dir = temp.path().join("dir");
+        fs::create_dir(&dir).expect("create dir");
+        let mut targets = vec![dir.clone()];
+        if made {
+            targets.push(fifo.clone());
+        } else {
+            eprintln!("skipping the FIFO case: mkfifo failed");
+        }
+        for target in targets {
+            let path = temp.path().join("hooks.json");
+            let backup = backup_path_for(&path);
+            fs::write(&path, "current").expect("seed file");
+            let _ = fs::remove_file(&backup);
+            symlink(&target, &backup).expect("link the backup");
+
+            backup_and_atomic_write(&path, "new").expect("back up and rewrite");
+
+            let meta = fs::symlink_metadata(&backup).expect("lstat backup");
+            assert!(meta.is_file(), "{}: the link is replaced", target.display());
+            assert_eq!(fs::read_to_string(&backup).expect("read backup"), "current");
+        }
+        assert!(dir.is_dir());
+        if made {
+            assert!(
+                fs::metadata(&fifo)
+                    .expect("stat fifo")
+                    .file_type()
+                    .is_fifo()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_dangling_backup_link_is_replaced() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("hooks.json");
+        let backup = backup_path_for(&path);
+        let missing = temp.path().join("dotfiles").join("hooks.json.bak");
+        fs::write(&path, "current").expect("seed file");
+        symlink(&missing, &backup).expect("link the backup");
+
+        backup_and_atomic_write(&path, "new").expect("back up and rewrite");
+
+        assert!(
+            fs::symlink_metadata(&backup)
+                .expect("lstat backup")
+                .is_file()
+        );
+        assert_eq!(fs::read_to_string(&backup).expect("read backup"), "current");
+        assert!(!missing.exists(), "the link's target is not created");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_fifo_backup_is_not_waited_on() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("hooks.json");
+        fs::write(&path, "current").expect("seed file");
+        let made = std::process::Command::new("mkfifo")
+            .arg(backup_path_for(&path))
+            .status()
+            .is_ok_and(|status| status.success());
+        if !made {
+            eprintln!("skipping: mkfifo failed");
+            return;
+        }
+        let (done, finished) = std::sync::mpsc::channel();
+        let written = path.clone();
+        std::thread::spawn(move || {
+            let _ = done.send(backup_and_atomic_write(&written, "new").is_err());
+        });
+
+        let refused = finished
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a FIFO backup must not block rtk init");
+        assert!(refused, "a FIFO with no reader is no backup");
+        assert_eq!(fs::read_to_string(&path).expect("read file"), "current");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_file_root_left_world_readable_is_backed_up() {
+        use std::os::unix::fs::MetadataExt;
+
+        // A file anyone may read, in a group RTK's user is not in, as one an
+        // earlier `sudo rtk init` leaves: its group carries no access of its own.
+        let source = Path::new("/etc/passwd");
+        let Ok(meta) = fs::metadata(source) else {
+            eprintln!("skipping: no /etc/passwd");
+            return;
+        };
+        let groups = std::process::Command::new("id")
+            .arg("-G")
+            .output()
+            .ok()
+            .map(|out| String::from_utf8_lossy(&out.stdout).into_owned());
+        let member = groups.is_none_or(|groups| {
+            groups
+                .split_whitespace()
+                .any(|gid| gid == meta.gid().to_string())
+        });
+        let mode = meta.mode() & 0o777;
+        if member || crate::core::file_access::group_carries_access(mode, false) {
+            eprintln!("skipping: /etc/passwd's group is RTK's, or gets other access than others");
+            return;
+        }
+        let temp = TempDir::new().expect("create temp dir");
+        let backup = temp.path().join("passwd.bak");
+        fs::write(&backup, "older").expect("seed backup");
+
+        replace_backup(source, &backup).expect("back up a world-readable file");
+
+        assert_eq!(
+            fs::read(&backup).expect("read backup"),
+            fs::read(source).expect("read source")
+        );
+        assert_eq!(mode_of(&backup), mode);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_refused_backup_keeps_the_earlier_one() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("settings.json");
+        fs::write(&path, "current").expect("seed file");
+        let dir = temp.path().join("backups");
+        fs::create_dir(&dir).expect("create backup dir");
+        let backup = dir.join("settings.json.bak");
+        fs::write(&backup, "older").expect("seed backup");
+        // No new file can be made next to the backup; the backup itself stays
+        // writable, so only a write into it could replace its content.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).expect("lock dir");
+        let writable = fs::File::create(dir.join("probe")).is_ok();
+        let result = (!writable).then(|| replace_backup(&path, &backup));
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("unlock dir");
+        let Some(result) = result else {
+            eprintln!("skipping: a read-only directory is writable here (running as root?)");
+            return;
+        };
+
+        result.expect_err("no temp file can be made");
+        assert_eq!(fs::read_to_string(&backup).expect("read backup"), "older");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_a_backup_keeps_the_files_dacl() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("settings.json");
+        fs::write(&path, "{}").expect("seed file");
+        icacls(&path, &["/grant", "*S-1-5-32-546:(R)"]);
+        icacls(&path, &["/inheritance:d"]);
+        let before = windows_dacl(&path);
+
+        backup_and_atomic_write(&path, "{\"rtk\":true}").expect("back up and rewrite");
+
+        assert_eq!(windows_dacl(&backup_path_for(&path)), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_symlinked_backup_is_replaced_not_followed() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("hooks.json");
+        let elsewhere = temp.path().join("elsewhere");
+        fs::write(&path, "current").expect("seed file");
+        fs::write(&elsewhere, "not a backup").expect("seed the link's target");
+        symlink(&elsewhere, backup_path_for(&path)).expect("link the backup");
+
+        backup_and_atomic_write(&path, "new").expect("back up and rewrite");
+
+        assert_eq!(
+            fs::read_to_string(&elsewhere).expect("read target"),
+            "not a backup"
+        );
+        let backup = backup_path_for(&path);
+        assert!(
+            fs::symlink_metadata(&backup)
+                .expect("lstat backup")
+                .is_file()
+        );
+        assert_eq!(fs::read_to_string(&backup).expect("read backup"), "current");
+        assert_eq!(fs::read_to_string(&path).expect("read file"), "new");
     }
 }
