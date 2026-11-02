@@ -11,13 +11,13 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use tempfile::NamedTempFile;
 
 use crate::core::utils::{from_json_str, strip_leading_bom};
 
 use super::integrity;
 use super::is_claude_hook_command;
 use crate::core::config::AwarenessLevel;
+use crate::core::file_access::FileAccess;
 #[cfg(test)]
 use crate::core::test_isolation;
 use crate::core::user_dirs;
@@ -583,8 +583,8 @@ pub(super) fn write_if_changed(
     write_if_changed_internal(path, content, name, ctx, false)
 }
 
-/// Variant used for protected RTK files. A file that cannot be decoded is
-/// still replaceable after the caller's policy allows it (for example,
+/// Variant used for protected RTK files. A file that cannot be read or decoded
+/// is still replaceable after the caller's policy allows it (for example,
 /// `--auto-patch`), so a read error is treated like differing content instead
 /// of preventing recovery.
 pub(super) fn write_if_changed_allow_read_error(
@@ -690,6 +690,13 @@ fn resolve_atomic_target(path: &Path) -> PathBuf {
 /// Atomic write using tempfile + rename
 /// Prevents corruption on crash/interrupt
 /// Follows symlinks so the link itself is preserved.
+/// An existing file keeps who can reach it (see [`FileAccess`]): on Unix, when
+/// RTK and its owner can read it, its rwx bits, group and ACL (Linux, macOS);
+/// on Windows its DACL; its owner where the process may set it. It stays as it
+/// was when the group, ACL or DACL cannot be copied, and a refused chmod never
+/// leaves it wider.
+/// On Unix any other existing file is left owner-only, and a new file gets the
+/// mode `fs::write` would create it with.
 pub(super) fn atomic_write(path: &Path, content: &str) -> Result<()> {
     let target = resolve_atomic_target(path);
     let parent = target.parent().with_context(|| {
@@ -699,22 +706,58 @@ pub(super) fn atomic_write(path: &Path, content: &str) -> Result<()> {
         )
     })?;
 
-    // Create temp file in same directory (ensures same filesystem for atomic rename)
-    let mut temp_file = NamedTempFile::new_in(parent)
-        .with_context(|| format!("Failed to create temp file in {}", parent.display()))?;
+    let access = FileAccess::for_replaced(&target)
+        .with_context(|| format!("Failed to read who can access {}", target.display()))?;
+    // Create temp file in same directory (ensures same filesystem for atomic rename).
+    // Not with tempfile's own Windows file, marked temporary: clearing that mark
+    // reopens the file by name, which the replaced file's DACL may not allow.
+    let builder = &mut tempfile::Builder::new();
+    #[cfg(unix)]
+    builder.permissions(FileAccess::temp_permissions(access.is_some()));
+    #[cfg(unix)]
+    let temp_file = builder.tempfile_in(parent);
+    #[cfg(not(unix))]
+    let temp_file = builder.make_in(parent, |path| {
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(path)
+    });
+    let mut temp_file =
+        temp_file.with_context(|| format!("Failed to create temp file in {}", parent.display()))?;
+
+    let access_context = || {
+        format!(
+            "Failed to give the new {} the access of the old one",
+            target.display()
+        )
+    };
+    if let Some(access) = &access {
+        access
+            .before_write(temp_file.path(), temp_file.as_file())
+            .with_context(access_context)?;
+    }
 
     // Write content
     temp_file
         .write_all(content.as_bytes())
         .with_context(|| format!("Failed to write {} bytes to temp file", content.len()))?;
 
-    // Atomic rename
-    temp_file.persist(&target).with_context(|| {
-        format!(
-            "Failed to atomically replace {} (disk full?)",
-            target.display()
-        )
-    })?;
+    if let Some(access) = &access {
+        access
+            .after_write(temp_file.as_file())
+            .with_context(access_context)?;
+    }
+
+    // Atomic rename, as the OS renames: allowed by the directory, refused for a
+    // file the OS marks as not to be replaced (Windows read-only attribute,
+    // immutable flags). tempfile's persist would first clear its temporary mark.
+    let (file, mut temp_path) = temp_file.into_parts();
+    drop(file);
+    fs::rename(&temp_path, &target)
+        .with_context(|| format!("Failed to atomically replace {}", target.display()))?;
+    temp_path.disable_cleanup(true);
 
     Ok(())
 }
@@ -2323,6 +2366,27 @@ pub(super) fn with_missing_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, 
     });
 }
 
+/// The permission bits of `path`, setuid, setgid and sticky included.
+#[cfg(all(test, unix))]
+pub(super) fn mode_of(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).expect("stat file").permissions().mode() & 0o7777
+}
+
+/// Write `content` to `path` with `mode`. False, with a notice, when the
+/// filesystem does not keep the mode, so the caller skips.
+#[cfg(all(test, unix))]
+pub(super) fn seed_with_mode(path: &Path, content: &[u8], mode: u32) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::write(path, content).expect("seed file");
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("chmod seed");
+    let kept = mode_of(path) == mode;
+    if !kept {
+        eprintln!("skipping: this filesystem does not keep mode {mode:o}");
+    }
+    kept
+}
+
 #[cfg(test)]
 mod tests {
     use crate::hooks::constants::POST_TOOL_USE_KEY;
@@ -2777,6 +2841,656 @@ level = "high"
         assert!(file_path.exists());
         let written = fs::read_to_string(&file_path).unwrap();
         assert_eq!(written, content);
+    }
+
+    /// The mode `fs::write` gives a new file in `dir` under the current umask,
+    /// which a default ACL on `dir` can change.
+    #[cfg(unix)]
+    fn new_file_mode_in(dir: &Path) -> u32 {
+        let probe = dir.join("mode-probe");
+        fs::write(&probe, "").expect("create probe");
+        let mode = mode_of(&probe);
+        fs::remove_file(&probe).expect("remove probe");
+        mode
+    }
+
+    // The keep-mode tests pick a umask under which neither a new file nor a temp
+    // file created with the kept mode would come out with the expected mode.
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_keeps_existing_mode() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("rules.md");
+        if !seed_with_mode(&path, b"user content\n", 0o640) {
+            return;
+        }
+
+        test_isolation::with_umask(0o077, || atomic_write(&path, "user content\nrtk block\n"))
+            .expect("rewrite file");
+
+        assert_eq!(mode_of(&path), 0o640, "rewrite must keep the file's mode");
+        assert_eq!(
+            fs::read_to_string(&path).expect("read rewritten file"),
+            "user content\nrtk block\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_keeps_mode_of_symlink_target() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("create temp dir");
+        let target_path = temp.path().join("real-settings.json");
+        let link_path = temp.path().join("settings.json");
+        if !seed_with_mode(&target_path, b"{}", 0o640) {
+            return;
+        }
+        symlink(&target_path, &link_path).expect("create symlink");
+
+        test_isolation::with_umask(0o077, || atomic_write(&link_path, "{\"hooks\":{}}"))
+            .expect("rewrite through symlink");
+
+        let link = fs::symlink_metadata(&link_path).expect("lstat link");
+        assert!(link.file_type().is_symlink(), "symlink must survive");
+        assert_eq!(
+            fs::read_to_string(&target_path).expect("read target"),
+            "{\"hooks\":{}}"
+        );
+        assert_eq!(
+            mode_of(&target_path),
+            0o640,
+            "rewrite must keep the target's mode"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_keeps_read_only_mode() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("AGENTS.md");
+        if !seed_with_mode(&path, b"old", 0o444) {
+            return;
+        }
+
+        test_isolation::with_umask(0o077, || atomic_write(&path, "new")).expect("rewrite file");
+
+        assert_eq!(
+            fs::read_to_string(&path).expect("read rewritten file"),
+            "new"
+        );
+        assert_eq!(
+            mode_of(&path),
+            0o444,
+            "rewrite must keep the file read-only"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_does_not_widen_owner_only_file() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("settings.json");
+        if !seed_with_mode(&path, b"{}", 0o600) {
+            return;
+        }
+
+        test_isolation::with_umask(0o000, || atomic_write(&path, "{\"hooks\":{}}"))
+            .expect("rewrite file");
+
+        assert_eq!(
+            mode_of(&path),
+            0o600,
+            "rewrite must keep the file owner-only"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_leaves_an_owner_unreadable_file_owner_only() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("plugin.json");
+        if !seed_with_mode(&path, b"{}", 0o200) {
+            return;
+        }
+
+        test_isolation::with_umask(0o022, || atomic_write(&path, "{\"rtk\":true}"))
+            .expect("rewrite file");
+
+        assert_eq!(
+            mode_of(&path),
+            0o600,
+            "a file its owner could not read is no wider afterwards"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("read rewritten file"),
+            "{\"rtk\":true}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_read_error_rewrite_keeps_a_readable_mode() {
+        let temp = TempDir::new().expect("create temp dir");
+        let undecodable = temp.path().join("undecodable.ts");
+        let denied = temp.path().join("denied.ts");
+        if !seed_with_mode(&undecodable, &[0xff, 0xfe, 0xfd], 0o640)
+            || !seed_with_mode(&denied, b"old", 0o200)
+        {
+            return;
+        }
+        let (new_mode, results) = test_isolation::with_umask(0o000, || {
+            let rewrite = |path: &Path| {
+                write_if_changed_allow_read_error(
+                    path,
+                    "new",
+                    "Pi extension",
+                    InitContext::default(),
+                )
+            };
+            (
+                new_file_mode_in(temp.path()),
+                [rewrite(&undecodable), rewrite(&denied)],
+            )
+        });
+        for result in results {
+            assert!(result.expect("replace unreadable file"));
+        }
+
+        for path in [&undecodable, &denied] {
+            assert_eq!(
+                fs::read_to_string(path).expect("read rewritten file"),
+                "new"
+            );
+        }
+        // A check proves nothing where a new file would come out the same.
+        if new_mode == 0o640 {
+            eprintln!("skipping the kept-mode check: a new file here is 0640 too");
+        } else {
+            assert_eq!(
+                mode_of(&undecodable),
+                0o640,
+                "an undecodable file RTK can read keeps its mode"
+            );
+        }
+        if new_mode == 0o600 {
+            eprintln!("skipping the owner-only check: a new file here is 0600 too");
+        } else {
+            assert_eq!(
+                mode_of(&denied),
+                0o600,
+                "an unreadable file is left owner-only"
+            );
+        }
+    }
+
+    // Linux only: BSD refuses the sticky bit on a regular file.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_atomic_write_drops_special_mode_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("hook.sh");
+        fs::write(&path, "old").expect("seed file");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o5755)).expect("chmod 5755");
+        // Some sandboxed filesystems drop setuid from an unprivileged chmod;
+        // the sticky bit still holds there.
+        if mode_of(&path) & 0o7000 == 0 {
+            eprintln!("skipping: this filesystem drops special bits from chmod");
+            return;
+        }
+
+        test_isolation::with_umask(0o077, || atomic_write(&path, "new")).expect("rewrite file");
+
+        assert_eq!(
+            mode_of(&path),
+            0o755,
+            "special bits must not survive a rewrite"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_replaces_symlink_loop() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("create temp dir");
+        let a = temp.path().join("a.json");
+        let b = temp.path().join("b.json");
+        symlink(&b, &a).expect("link a -> b");
+        symlink(&a, &b).expect("link b -> a");
+
+        let (expected, written) = test_isolation::with_umask(0o022, || {
+            (new_file_mode_in(temp.path()), atomic_write(&a, "{}"))
+        });
+        written.expect("replace the looping link");
+
+        assert!(fs::symlink_metadata(&a).expect("lstat a.json").is_file());
+        let b_meta = fs::symlink_metadata(&b).expect("lstat b.json");
+        assert!(b_meta.file_type().is_symlink(), "b.json must stay a link");
+
+        assert_eq!(fs::read_to_string(&a).expect("read a.json"), "{}");
+        assert_eq!(
+            mode_of(&a),
+            expected,
+            "an unstat-able path gets a new file's mode"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_new_file_follows_umask() {
+        let temp = TempDir::new().expect("create temp dir");
+        let shared = temp.path().join("shared.json");
+        let private = temp.path().join("private.json");
+
+        for (mask, path) in [(0o022, &shared), (0o077, &private)] {
+            let (expected, written) = test_isolation::with_umask(mask, || {
+                (new_file_mode_in(temp.path()), atomic_write(path, "{}"))
+            });
+            written.expect("create file");
+            assert_eq!(mode_of(path), expected, "umask {mask:o}");
+        }
+    }
+
+    /// A group the process belongs to besides its primary one, if any.
+    #[cfg(unix)]
+    fn supplementary_gid() -> Option<u32> {
+        let id = test_isolation::id;
+        let primary: u32 = id("-g")?.trim().parse().ok()?;
+        id("-G")?
+            .split_whitespace()
+            .filter_map(|gid| gid.parse().ok())
+            .find(|&gid| gid != primary)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_keeps_the_owning_group() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("AGENTS.md");
+        if !seed_with_mode(&path, b"old", 0o640) {
+            return;
+        }
+        let Some(gid) = supplementary_gid() else {
+            eprintln!("skipping: the process belongs to no supplementary group");
+            return;
+        };
+        if let Err(error) = std::os::unix::fs::chown(&path, None, Some(gid)) {
+            eprintln!("skipping: cannot give the seed group {gid}: {error}");
+            return;
+        }
+
+        atomic_write(&path, "new").expect("rewrite file");
+
+        let meta = fs::metadata(&path).expect("stat rewritten file");
+        assert_eq!(meta.gid(), gid, "the replaced file's group must stay");
+        assert_eq!(mode_of(&path), 0o640);
+        assert_eq!(fs::read_to_string(&path).expect("read file"), "new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_as_root_gives_the_file_back_to_its_owner() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("settings.json");
+        if !seed_with_mode(&path, b"old", 0o640) {
+            return;
+        }
+        // A user's file as `sudo rtk init` finds it: an owner and group that are
+        // not the process's.
+        if std::os::unix::fs::chown(&path, Some(4242), Some(4243)).is_err() {
+            eprintln!("skipping: only root may give a file away");
+            return;
+        }
+
+        atomic_write(&path, "new").expect("rewrite file");
+
+        let meta = fs::metadata(&path).expect("stat rewritten file");
+        assert_eq!(
+            (meta.uid(), meta.gid()),
+            (4242, 4243),
+            "owner and group stay"
+        );
+        assert_eq!(mode_of(&path), 0o640);
+        assert_eq!(fs::read_to_string(&path).expect("read file"), "new");
+    }
+
+    /// Raw POSIX ACL xattrs, set and read without `setfacl`, which a runner
+    /// may not have.
+    #[cfg(target_os = "linux")]
+    mod posix_acl {
+        use crate::core::file_access::acl_wire::*;
+        use std::ffi::{CStr, CString};
+        use std::os::unix::ffi::OsStrExt;
+        use std::path::Path;
+
+        pub(super) use crate::core::file_access::acl_wire::ACCESS_ACL as ACCESS;
+        pub const DEFAULT: &CStr = c"system.posix_acl_default";
+        const UNDEFINED_ID: u32 = u32::MAX;
+
+        /// rw for the owner, r for the named user `uid` and the group, nothing for
+        /// others. `uid` is one the process's user namespace maps, which an
+        /// arbitrary id need not be.
+        pub fn user_reads(uid: u32) -> Vec<u8> {
+            encode(&[
+                (USER_OBJ, 6, UNDEFINED_ID),
+                (USER, 4, uid),
+                (GROUP_OBJ, 4, UNDEFINED_ID),
+                (MASK, 4, UNDEFINED_ID),
+                (OTHER, 0, UNDEFINED_ID),
+            ])
+        }
+
+        /// A default ACL handing the named user `uid` rw on every new file.
+        pub fn user_inherits(uid: u32) -> Vec<u8> {
+            encode(&[
+                (USER_OBJ, 7, UNDEFINED_ID),
+                (USER, 6, uid),
+                (GROUP_OBJ, 5, UNDEFINED_ID),
+                (MASK, 7, UNDEFINED_ID),
+                (OTHER, 5, UNDEFINED_ID),
+            ])
+        }
+
+        fn c_path(path: &Path) -> CString {
+            CString::new(path.as_os_str().as_bytes()).expect("path without NUL")
+        }
+
+        /// False when the filesystem has no ACLs, so the caller skips.
+        pub fn set(path: &Path, name: &CStr, acl: &[u8]) -> bool {
+            let path = c_path(path);
+            #[allow(unsafe_code)]
+            // nosemgrep: unsafe-block — test helper, `acl` is a live slice
+            let result = unsafe {
+                libc::setxattr(
+                    path.as_ptr(),
+                    name.as_ptr(),
+                    acl.as_ptr().cast(),
+                    acl.len(),
+                    0,
+                )
+            };
+            if result == 0 {
+                return true;
+            }
+            let error = std::io::Error::last_os_error();
+            eprintln!("skipping: ACLs cannot be set here: {error}");
+            false
+        }
+
+        pub fn remove_access(path: &Path) {
+            let path = c_path(path);
+            #[allow(unsafe_code)]
+            // nosemgrep: unsafe-block — test helper on a NUL-terminated path
+            unsafe {
+                libc::removexattr(path.as_ptr(), ACCESS.as_ptr());
+            }
+        }
+
+        pub fn access(path: &Path) -> Option<Vec<u8>> {
+            read_acl(path).expect("read access ACL")
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_atomic_write_keeps_the_access_acl() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("settings.json");
+        fs::write(&path, "{}").expect("seed file");
+        let uid = std::os::unix::fs::MetadataExt::uid(&fs::metadata(&path).expect("stat seed"));
+        if !posix_acl::set(&path, posix_acl::ACCESS, &posix_acl::user_reads(uid)) {
+            return;
+        }
+        let before = posix_acl::access(&path);
+
+        atomic_write(&path, "{\"rtk\":true}").expect("rewrite file");
+
+        assert!(before.is_some());
+        assert_eq!(
+            posix_acl::access(&path),
+            before,
+            "the replaced file's ACL must stay"
+        );
+        assert_eq!(mode_of(&path), 0o640);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_atomic_write_drops_an_acl_the_directory_hands_down() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().expect("create temp dir");
+        let dir = temp.path().join("shared");
+        fs::create_dir(&dir).expect("create dir");
+        let uid = std::os::unix::fs::MetadataExt::uid(&fs::metadata(&dir).expect("stat dir"));
+        if !posix_acl::set(&dir, posix_acl::DEFAULT, &posix_acl::user_inherits(uid)) {
+            return;
+        }
+        let path = dir.join("settings.json");
+        fs::write(&path, "{}").expect("seed file");
+        posix_acl::remove_access(&path);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).expect("chmod seed");
+        assert_eq!(posix_acl::access(&path), None);
+
+        atomic_write(&path, "{\"rtk\":true}").expect("rewrite file");
+
+        assert_eq!(
+            posix_acl::access(&path),
+            None,
+            "a file without an ACL must not gain the directory's"
+        );
+        assert_eq!(mode_of(&path), 0o640);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_an_owner_unreadable_file_drops_the_acl_the_directory_hands_down() {
+        let temp = TempDir::new().expect("create temp dir");
+        let dir = temp.path().join("shared");
+        fs::create_dir(&dir).expect("create dir");
+        let uid = std::os::unix::fs::MetadataExt::uid(&fs::metadata(&dir).expect("stat dir"));
+        if !posix_acl::set(&dir, posix_acl::DEFAULT, &posix_acl::user_inherits(uid)) {
+            return;
+        }
+        let path = dir.join("plugin.json");
+        fs::write(&path, "{}").expect("seed file");
+        posix_acl::remove_access(&path);
+        if !seed_with_mode(&path, b"{}", 0o200) {
+            return;
+        }
+
+        atomic_write(&path, "{\"rtk\":true}").expect("rewrite file");
+
+        assert_eq!(posix_acl::access(&path), None, "no ACL from the directory");
+        assert_eq!(mode_of(&path), 0o600);
+    }
+
+    /// The ACL entries `ls -le` lists for `path`, one per line.
+    #[cfg(target_os = "macos")]
+    fn macos_acl(path: &Path) -> Vec<String> {
+        let out = std::process::Command::new("ls")
+            .arg("-led")
+            .arg(path)
+            .output()
+            .expect("run ls -le");
+        assert!(out.status.success(), "ls -le failed");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .skip(1)
+            .map(|line| line.trim().to_string())
+            .collect()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn macos_chmod(args: &[&str], path: &Path) {
+        let status = std::process::Command::new("chmod")
+            .args(args)
+            .arg(path)
+            .status()
+            .expect("run chmod");
+        assert!(status.success(), "chmod {args:?} failed");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_atomic_write_keeps_the_acl() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("settings.json");
+        fs::write(&path, "{}").expect("seed file");
+        macos_chmod(&["+a", "user:nobody allow read"], &path);
+        let before = macos_acl(&path);
+        assert!(!before.is_empty(), "the seed must carry an ACL");
+
+        atomic_write(&path, "{\"rtk\":true}").expect("rewrite file");
+
+        assert_eq!(
+            macos_acl(&path),
+            before,
+            "the replaced file's ACL must stay"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_atomic_write_drops_an_acl_the_directory_hands_down() {
+        let temp = TempDir::new().expect("create temp dir");
+        let dir = temp.path().join("shared");
+        fs::create_dir(&dir).expect("create dir");
+        macos_chmod(&["+a", "user:nobody allow read,file_inherit"], &dir);
+        let path = dir.join("settings.json");
+        fs::write(&path, "{}").expect("seed file");
+        macos_chmod(&["-N"], &path);
+        assert!(macos_acl(&path).is_empty());
+
+        atomic_write(&path, "{\"rtk\":true}").expect("rewrite file");
+
+        assert!(
+            macos_acl(&path).is_empty(),
+            "a file without an ACL must not gain the directory's"
+        );
+    }
+
+    /// The DACL of `path` in SDDL, as `icacls /save` writes it.
+    #[cfg(windows)]
+    fn windows_dacl(path: &Path) -> String {
+        let saved = path.with_extension("acl");
+        let status = std::process::Command::new("icacls")
+            .arg(path)
+            .arg("/save")
+            .arg(&saved)
+            .arg("/Q")
+            .status()
+            .expect("run icacls /save");
+        assert!(status.success(), "icacls /save failed");
+        let bytes = fs::read(&saved).expect("read saved ACL");
+        fs::remove_file(&saved).expect("remove saved ACL");
+        let units: Vec<u16> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
+            .collect();
+        String::from_utf16_lossy(&units)
+            .lines()
+            .nth(1)
+            .expect("an SDDL line")
+            .trim()
+            .to_string()
+    }
+
+    #[cfg(windows)]
+    fn icacls(path: &Path, args: &[&str]) {
+        let status = std::process::Command::new("icacls")
+            .arg(path)
+            .args(args)
+            .arg("/Q")
+            .status()
+            .expect("run icacls");
+        assert!(status.success(), "icacls {args:?} failed");
+    }
+
+    /// A DACL that lets the user only read the file does not stop its directory
+    /// from replacing it, as with a 0444 file on Unix.
+    #[cfg(windows)]
+    #[test]
+    fn test_atomic_write_replaces_a_file_whose_dacl_is_read_only() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("settings.json");
+        fs::write(&path, "{}").expect("seed file");
+        // Read only, for whoever owns the file (RTK's user), by the OWNER RIGHTS SID so
+        // no user name is needed; nothing else is granted.
+        icacls(&path, &["/inheritance:r", "/grant:r", "*S-1-3-4:(R)"]);
+        let before = windows_dacl(&path);
+
+        atomic_write(&path, "{\"rtk\":true}").expect("rewrite file");
+
+        assert_eq!(
+            fs::read_to_string(&path).expect("read file"),
+            "{\"rtk\":true}"
+        );
+        assert_eq!(windows_dacl(&path), before, "the read-only DACL must stay");
+    }
+
+    /// Windows refuses to replace a file with the read-only attribute, and so does
+    /// RTK, leaving it as it was.
+    #[cfg(windows)]
+    #[test]
+    fn test_atomic_write_leaves_a_read_only_attribute_file_alone() {
+        let temp = TempDir::new().expect("create temp dir");
+        let path = temp.path().join("settings.json");
+        fs::write(&path, "{}").expect("seed file");
+        let mut permissions = fs::metadata(&path).expect("stat").permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions).expect("set read-only");
+
+        atomic_write(&path, "{\"rtk\":true}").expect_err("a read-only file is not replaced");
+
+        assert_eq!(fs::read_to_string(&path).expect("read file"), "{}");
+        assert_eq!(
+            fs::read_dir(temp.path()).expect("list dir").count(),
+            1,
+            "no temp file is left behind"
+        );
+        let mut permissions = fs::metadata(&path).expect("stat").permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        fs::set_permissions(&path, permissions).expect("clear read-only for cleanup");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_atomic_write_keeps_the_dacl() {
+        for protected in [false, true] {
+            let temp = TempDir::new().expect("create temp dir");
+            let path = temp.path().join("settings.json");
+            fs::write(&path, "{}").expect("seed file");
+            // Read access for the built-in Guests group, by SID so the name's
+            // language does not matter.
+            icacls(&path, &["/grant", "*S-1-5-32-546:(R)"]);
+            if protected {
+                icacls(&path, &["/inheritance:d"]);
+            }
+            let before = windows_dacl(&path);
+            assert!(
+                before.contains(";BG)"),
+                "the seed must grant Guests: {before}"
+            );
+
+            atomic_write(&path, "{\"rtk\":true}").expect("rewrite file");
+
+            assert_eq!(
+                windows_dacl(&path),
+                before,
+                "protected={protected}: the replaced file's DACL must stay"
+            );
+        }
     }
 
     #[cfg(unix)]
