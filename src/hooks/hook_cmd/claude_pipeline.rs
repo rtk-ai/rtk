@@ -238,7 +238,7 @@ fn swappable(
         return false;
     }
     match rewrite {
-        HookDecision::AllowRewrite(_) | HookDecision::AskRewrite(..) => true,
+        HookDecision::Rewrite { .. } => true,
         HookDecision::Deny => false,
         HookDecision::Defer => {
             matches!(
