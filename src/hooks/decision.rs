@@ -40,39 +40,55 @@ use std::sync::LazyLock;
 /// What a hook should do with a command.
 ///
 /// `rewrite_cmd` renders these as the exit codes its delegates branch on
-/// (`AllowRewrite` → 0, `AskRewrite` → 3, `Deny` → 2, `Defer` → 1); the
-/// in-process hosts render them as their own JSON response shapes.
+/// (a rewrite RTK allows → 0, any other rewrite → 3, `Deny` → 2, `Defer` → 1);
+/// the in-process hosts render them as their own JSON response shapes.
 #[derive(Debug, PartialEq)]
 pub(crate) enum HookDecision {
-    /// Rewrite, and the host may auto-allow it — an explicit user allow rule matched.
-    AllowRewrite(String),
-    /// Rewrite, without an allow from RTK; [`AskOwner`] says whether the host's
-    /// own permission check decides or the hook asks itself.
-    AskRewrite(String, AskOwner),
+    /// Hand `command` back in place of the typed one; [`Approval`] says who
+    /// approves it.
+    Rewrite { command: String, approval: Approval },
     /// Say nothing; let the host handle the command untouched.
     Defer,
     /// A deny rule matched — stay out of the way of the host's native deny.
     Deny,
 }
 
-/// Whether an [`HookDecision::AskRewrite`] may be left to the host's own
-/// permission rules, or the hook has to ask itself.
+/// Who approves a [`HookDecision::Rewrite`].
 ///
-/// Each host renders an ask its own way. Only the Claude hook's path can be
-/// handed a [`AskOwner::Hook`] ask today (`rtk hook check --agent claude`
-/// prints it like any rewrite), and `rtk hook claude` is the host response that
-/// tells the two apart: no `permissionDecision` for [`AskOwner::Host`], `"ask"`
-/// for [`AskOwner::Hook`].
+/// Each host renders these its own way, and most cannot tell [`Approval::Ask`]
+/// from [`Approval::Host`]: only the Claude hook's path is ever handed an
+/// [`Approval::Ask`] today (`rtk hook check --agent claude` prints it like any
+/// rewrite), and `rtk hook claude` is the host response that tells the two
+/// apart: no `permissionDecision` for [`Approval::Host`], `"ask"` for
+/// [`Approval::Ask`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AskOwner {
-    /// The host's rules may judge the rewritten command as they would any
-    /// other: it says what runs.
+pub(crate) enum Approval {
+    /// RTK allows it: an explicit user allow rule matched, and the host may
+    /// run it unprompted.
+    Allow,
+    /// RTK asks itself. The rewritten command hides its parts from the host's
+    /// rules (the fish wrap is one `rtk run` command), so no rule of the host
+    /// may allow it unprompted, no delegate relaxes it, and a rewrite that
+    /// changed nothing keeps its ask.
+    Ask,
+    /// Left to whoever judges next: the host's own permission check, which may
+    /// judge the rewritten command as it would any other, since it says what
+    /// runs. A delegate that gates the command itself relaxes it
+    /// ([`ApprovalOwner::apply`]).
     Host,
-    /// The rewritten command hides its parts from the host's rules (the fish
-    /// wrap is one `rtk run` command), so no rule of the host may allow it
-    /// unprompted, no delegate relaxes it, and a rewrite that changed nothing
-    /// keeps its ask.
-    Hook,
+}
+
+impl Approval {
+    /// Whether the host may run the rewrite unprompted. Only `rtk hook claude`
+    /// can receive an [`Approval::Ask`], since only its rules permit a fish
+    /// wrap, and only its renderer tells it from [`Approval::Host`]; every
+    /// other renderer, and `rtk rewrite`'s exit code, asks this alone.
+    pub(crate) fn is_allow(self) -> bool {
+        match self {
+            Self::Allow => true,
+            Self::Ask | Self::Host => false,
+        }
+    }
 }
 
 /// The environment variable a delegate sets to say which agent it speaks for.
@@ -100,8 +116,8 @@ pub(crate) const REWRITE_HOST_ENV: &str = "RTK_REWRITE_HOST";
 /// on a runtime that never opted into them (#3908).
 ///
 /// This only ever relaxes the *default* ask. It is applied by
-/// [`ApprovalOwner::apply`], which matches on a [`HookDecision::AskRewrite`]
-/// carrying [`PermissionVerdict::Default`] alone. A `Default` verdict means no
+/// [`ApprovalOwner::apply`], which matches on an [`Approval::Host`] rewrite
+/// under a [`PermissionVerdict::Default`] verdict alone. A `Default` verdict means no
 /// rule matched, so RTK is imposing another agent's settings on a runtime that
 /// never opted into them — that is the prompt #3908 is about. An explicit
 /// [`PermissionVerdict::Ask`] is the user's own instruction and is left for the
@@ -145,7 +161,7 @@ impl ApprovalOwner {
     /// the user's own instruction and is left for the host to honour; every
     /// other decision passes through by construction.
     ///
-    /// Only an ask the host owns relaxes. An [`AskOwner::Hook`] ask is never
+    /// Only an [`Approval::Host`] rewrite relaxes. An [`Approval::Ask`] is never
     /// promoted, though none reaches a delegate today: the delegate paths are
     /// [`DenyRules::Unattested`], so they never wrap.
     pub(crate) fn apply(self, decision: HookDecision, verdict: PermissionVerdict) -> HookDecision {
@@ -153,8 +169,14 @@ impl ApprovalOwner {
             (
                 Self::Delegate,
                 PermissionVerdict::Default,
-                HookDecision::AskRewrite(rewritten, AskOwner::Host),
-            ) => HookDecision::AllowRewrite(rewritten),
+                HookDecision::Rewrite {
+                    command,
+                    approval: Approval::Host,
+                },
+            ) => HookDecision::Rewrite {
+                command,
+                approval: Approval::Allow,
+            },
             (_, _, other) => other,
         }
     }
@@ -192,8 +214,8 @@ impl ApprovalOwner {
 ///    catches the forms this gate lets past (see #3980).
 /// 4. **Otherwise rewrite if a rule matches**, and auto-allow only on an
 ///    explicit `Allow`. Every other verdict — including `Default`, where no
-///    rule matched at all — yields `AskRewrite`. `Default` must never reach
-///    `AllowRewrite`: that would auto-approve every rewritable command on a
+///    rule matched at all — yields an [`Approval::Host`] rewrite. `Default`
+///    must never reach [`Approval::Allow`]: that would auto-approve every rewritable command on a
 ///    machine with no permission rules configured (#1155).
 ///
 /// An identity rewrite (`cmd` was already RTK-prefixed) is reported here as a
@@ -262,10 +284,10 @@ pub(crate) fn decide_with_wrap(
     if deny_rules.permit_wrap() && wrap_fish(cmd).is_some() {
         let rewritten = rewrite_command_precompiled(cmd, excluded, transparent_prefixes);
         let script = rewritten.as_deref().unwrap_or(cmd);
-        return HookDecision::AskRewrite(
-            crate::discover::fish_script::wrap(script),
-            AskOwner::Hook,
-        );
+        return HookDecision::Rewrite {
+            command: crate::discover::fish_script::wrap(script),
+            approval: Approval::Ask,
+        };
     }
 
     if crate::discover::lexer::contains_unattestable_construct(cmd) {
@@ -273,10 +295,14 @@ pub(crate) fn decide_with_wrap(
     }
 
     match rewrite_command_precompiled(cmd, excluded, transparent_prefixes) {
-        Some(rewritten) if verdict == PermissionVerdict::Allow => {
-            HookDecision::AllowRewrite(rewritten)
-        }
-        Some(rewritten) => HookDecision::AskRewrite(rewritten, AskOwner::Host),
+        Some(rewritten) if verdict == PermissionVerdict::Allow => HookDecision::Rewrite {
+            command: rewritten,
+            approval: Approval::Allow,
+        },
+        Some(rewritten) => HookDecision::Rewrite {
+            command: rewritten,
+            approval: Approval::Host,
+        },
         None => HookDecision::Defer,
     }
 }
@@ -398,9 +424,9 @@ fn keep_host_verdict(
     rules: &HostRules,
 ) -> HookDecision {
     match decision {
-        HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten, _)
-            if rules.judges_final_command() && rules.verdict(&rewritten) != verdict =>
-        {
+        HookDecision::Rewrite {
+            command: rewritten, ..
+        } if rules.judges_final_command() && rules.verdict(&rewritten) != verdict => {
             HookDecision::Defer
         }
         decision => decision,
@@ -436,12 +462,10 @@ fn keep_host_verdict(
 /// pins the difference.
 pub(crate) fn suppress_identity(cmd: &str, decision: HookDecision) -> HookDecision {
     match decision {
-        HookDecision::AllowRewrite(ref rewritten)
-        | HookDecision::AskRewrite(ref rewritten, AskOwner::Host)
-            if rewritten == cmd =>
-        {
-            HookDecision::Defer
-        }
+        HookDecision::Rewrite {
+            command: ref rewritten,
+            approval: Approval::Allow | Approval::Host,
+        } if rewritten == cmd => HookDecision::Defer,
         other => other,
     }
 }
@@ -638,7 +662,10 @@ mod tests {
                 let _entered = crate::core::test_isolation::enter(&repo);
                 assert_eq!(
                     claude.decide("git status"),
-                    HookDecision::AskRewrite("rtk git status".into(), AskOwner::Host)
+                    HookDecision::Rewrite {
+                        command: "rtk git status".into(),
+                        approval: Approval::Host
+                    }
                 );
             }
             let _entered = crate::core::test_isolation::enter(&worktree);
@@ -677,7 +704,10 @@ mod tests {
                 DenyRules::Unattested,
                 wt
             ),
-            HookDecision::AllowRewrite("git status && rtk cargo build".into())
+            HookDecision::Rewrite {
+                command: "git status && rtk cargo build".into(),
+                approval: Approval::Allow
+            }
         );
         assert_eq!(
             decide_for_agent_at(
@@ -697,7 +727,10 @@ mod tests {
                 DenyRules::Unattested,
                 Some("/repo")
             ),
-            HookDecision::AllowRewrite("rtk git status".into())
+            HookDecision::Rewrite {
+                command: "rtk git status".into(),
+                approval: Approval::Allow
+            }
         );
     }
 
@@ -725,7 +758,10 @@ mod tests {
             decide(unruled, &rules),
             (
                 PermissionVerdict::Default,
-                HookDecision::AskRewrite("mywrap rtk git status".into(), AskOwner::Host)
+                HookDecision::Rewrite {
+                    command: "mywrap rtk git status".into(),
+                    approval: Approval::Host
+                }
             )
         );
     }
@@ -739,7 +775,10 @@ mod tests {
         let decide = |cmd: &str, rules: &HostRules, cwd| decide_for_host(cmd, rules, cwd).1;
         assert_eq!(
             decide("cargo test", &rules, None),
-            HookDecision::AskRewrite("rtk cargo test".into(), AskOwner::Host),
+            HookDecision::Rewrite {
+                command: "rtk cargo test".into(),
+                approval: Approval::Host
+            },
             "control: nothing excluded"
         );
 
@@ -750,7 +789,10 @@ mod tests {
         assert_eq!(decide("git status", &rules, worktree), HookDecision::Defer);
         assert_eq!(
             decide("ls -la", &rules, worktree),
-            HookDecision::AskRewrite("rtk ls -la".into(), AskOwner::Host)
+            HookDecision::Rewrite {
+                command: "rtk ls -la".into(),
+                approval: Approval::Host
+            }
         );
     }
 
@@ -797,7 +839,10 @@ mod tests {
                     DenyRules::Unattested,
                     wt
                 ),
-                HookDecision::AllowRewrite("rtk ls -la".into())
+                HookDecision::Rewrite {
+                    command: "rtk ls -la".into(),
+                    approval: Approval::Allow
+                }
             );
         });
     }
@@ -814,7 +859,10 @@ mod tests {
                 &[],
                 DenyRules::NoneConfigured
             ),
-            HookDecision::AskRewrite(_, AskOwner::Host)
+            HookDecision::Rewrite {
+                approval: Approval::Host,
+                ..
+            }
         ));
     }
 
@@ -828,7 +876,10 @@ mod tests {
                 &[],
                 DenyRules::NoneConfigured
             ),
-            HookDecision::AllowRewrite(_)
+            HookDecision::Rewrite {
+                approval: Approval::Allow,
+                ..
+            }
         ));
     }
 
@@ -880,7 +931,10 @@ mod tests {
                 &[],
                 DenyRules::Unattested
             ),
-            HookDecision::AskRewrite(_, AskOwner::Host)
+            HookDecision::Rewrite {
+                approval: Approval::Host,
+                ..
+            }
         ));
     }
 
@@ -920,7 +974,10 @@ mod tests {
                 &[],
                 DenyRules::NoneConfigured
             ),
-            HookDecision::AskRewrite(_, AskOwner::Host)
+            HookDecision::Rewrite {
+                approval: Approval::Host,
+                ..
+            }
         ));
     }
 
@@ -953,13 +1010,16 @@ mod tests {
         );
         assert_eq!(
             decided,
-            HookDecision::AskRewrite(cmd.to_string(), AskOwner::Host)
+            HookDecision::Rewrite {
+                command: cmd.to_string(),
+                approval: Approval::Host
+            }
         );
         assert_eq!(suppress_identity(cmd, decided), HookDecision::Defer);
     }
 
     mod fish_wrap {
-        use super::super::{AskOwner, HookDecision, decide_with_wrap};
+        use super::super::{Approval, HookDecision, decide_with_wrap};
         use crate::hooks::permissions::{DenyRules, PermissionVerdict};
 
         /// Real classification and assembly, with the environment gates pinned
@@ -985,10 +1045,10 @@ mod tests {
                     DenyRules::NoneConfigured,
                     wrap_stub
                 ),
-                HookDecision::AskRewrite(
-                    "rtk run --shell fish -c 'test -d src; and git status'".to_string(),
-                    AskOwner::Hook
-                )
+                HookDecision::Rewrite {
+                    command: "rtk run --shell fish -c 'test -d src; and git status'".to_string(),
+                    approval: Approval::Ask
+                }
             );
         }
 
@@ -1006,10 +1066,11 @@ mod tests {
                     DenyRules::NoneConfigured,
                     wrap_stub
                 ),
-                HookDecision::AskRewrite(
-                    "rtk run --shell fish -c 'rtk git diff HEAD~3 HEAD; and true'".to_string(),
-                    AskOwner::Hook
-                )
+                HookDecision::Rewrite {
+                    command: "rtk run --shell fish -c 'rtk git diff HEAD~3 HEAD; and true'"
+                        .to_string(),
+                    approval: Approval::Ask
+                }
             );
         }
 
@@ -1064,10 +1125,10 @@ mod tests {
                     DenyRules::NoneConfigured,
                     wrap_stub
                 ),
-                HookDecision::AskRewrite(
-                    "rtk run --shell fish -c 'test -d src; and git status'".to_string(),
-                    AskOwner::Hook
-                )
+                HookDecision::Rewrite {
+                    command: "rtk run --shell fish -c 'test -d src; and git status'".to_string(),
+                    approval: Approval::Ask
+                }
             );
         }
 
@@ -1085,10 +1146,10 @@ mod tests {
                     DenyRules::NoneConfigured,
                     wrap_stub
                 ),
-                HookDecision::AskRewrite(
-                    "rtk run --shell fish -c 'git diff HEAD~3 HEAD; and true'".to_string(),
-                    AskOwner::Hook
-                )
+                HookDecision::Rewrite {
+                    command: "rtk run --shell fish -c 'git diff HEAD~3 HEAD; and true'".to_string(),
+                    approval: Approval::Ask
+                }
             );
         }
 
@@ -1106,7 +1167,10 @@ mod tests {
                     DenyRules::NoneConfigured,
                     wrap_stub
                 ),
-                HookDecision::AskRewrite(_, AskOwner::Hook)
+                HookDecision::Rewrite {
+                    approval: Approval::Ask,
+                    ..
+                }
             ));
         }
 
@@ -1154,7 +1218,7 @@ mod tests {
                     DenyRules::NoneConfigured,
                     wrap_stub
                 ),
-                HookDecision::AskRewrite(rewritten, AskOwner::Host) if rewritten.starts_with("rtk git status")
+                HookDecision::Rewrite { command: rewritten, approval: Approval::Host } if rewritten.starts_with("rtk git status")
             ));
         }
     }
@@ -1171,7 +1235,10 @@ mod tests {
         );
         assert_eq!(
             suppress_identity("git status", decided),
-            HookDecision::AllowRewrite("rtk git status".to_string())
+            HookDecision::Rewrite {
+                command: "rtk git status".to_string(),
+                approval: Approval::Allow
+            }
         );
     }
 
@@ -1197,14 +1264,23 @@ mod tests {
         assert_eq!(
             suppress_identity(
                 cmd,
-                HookDecision::AskRewrite(cmd.to_string(), AskOwner::Hook)
+                HookDecision::Rewrite {
+                    command: cmd.to_string(),
+                    approval: Approval::Ask
+                }
             ),
-            HookDecision::AskRewrite(cmd.to_string(), AskOwner::Hook)
+            HookDecision::Rewrite {
+                command: cmd.to_string(),
+                approval: Approval::Ask
+            }
         );
         assert_eq!(
             suppress_identity(
                 cmd,
-                HookDecision::AskRewrite(cmd.to_string(), AskOwner::Host)
+                HookDecision::Rewrite {
+                    command: cmd.to_string(),
+                    approval: Approval::Host
+                }
             ),
             HookDecision::Defer
         );
@@ -1256,7 +1332,10 @@ mod tests {
     /// when its rules give the rewrite the typed command's verdict.
     #[test]
     fn a_host_judging_the_final_command_keeps_only_a_same_verdict_rewrite() {
-        let rewrite = || HookDecision::AllowRewrite("rtk git status".to_string());
+        let rewrite = || HookDecision::Rewrite {
+            command: "rtk git status".to_string(),
+            approval: Approval::Allow,
+        };
         let narrow = HostRules::opencode(vec![
             bash_rule("*", Action::Deny),
             bash_rule("git status", Action::Allow),
@@ -1277,7 +1356,10 @@ mod tests {
     /// it. The exact allow matches `git status` but not `rtk git status`.
     #[test]
     fn a_host_not_judging_the_final_command_keeps_its_rewrite() {
-        let rewrite = || HookDecision::AllowRewrite("rtk git status".to_string());
+        let rewrite = || HookDecision::Rewrite {
+            command: "rtk git status".to_string(),
+            approval: Approval::Allow,
+        };
         let allow = ["git status".to_string()];
         for host in [
             Host::Claude,
@@ -1344,7 +1426,7 @@ mod tests {
             let claude = AgentPath::lookup("claude").expect("claude is mapped");
             assert!(matches!(
                 claude.decide("git status"),
-                HookDecision::AllowRewrite(r) if r == "rtk git status"
+                HookDecision::Rewrite { command: r, approval: Approval::Allow } if r == "rtk git status"
             ));
         });
     }
@@ -1446,7 +1528,7 @@ mod tests {
     }
 
     /// The load-bearing property of [`ApprovalOwner`]: it relaxes the
-    /// *default* ask and touches nothing else. A deny reaching `AllowRewrite`
+    /// *default* ask and touches nothing else. A deny reaching [`Approval::Allow`]
     /// would auto-apply a command the user forbade, so it is asserted directly
     /// rather than left to the exit-code layer. An explicit ask is a rule the
     /// user wrote and must survive.
@@ -1456,24 +1538,42 @@ mod tests {
         let wrapped = || "rtk run --shell fish -c 'rtk git status; and true'".to_string();
         assert_eq!(
             ApprovalOwner::Delegate.apply(
-                HookDecision::AskRewrite(rewritten(), AskOwner::Host),
+                HookDecision::Rewrite {
+                    command: rewritten(),
+                    approval: Approval::Host
+                },
                 PermissionVerdict::Default
             ),
-            HookDecision::AllowRewrite(rewritten())
+            HookDecision::Rewrite {
+                command: rewritten(),
+                approval: Approval::Allow
+            }
         );
         assert_eq!(
             ApprovalOwner::Delegate.apply(
-                HookDecision::AskRewrite(wrapped(), AskOwner::Hook),
+                HookDecision::Rewrite {
+                    command: wrapped(),
+                    approval: Approval::Ask
+                },
                 PermissionVerdict::Default
             ),
-            HookDecision::AskRewrite(wrapped(), AskOwner::Hook)
+            HookDecision::Rewrite {
+                command: wrapped(),
+                approval: Approval::Ask
+            }
         );
         assert_eq!(
             ApprovalOwner::Delegate.apply(
-                HookDecision::AskRewrite(rewritten(), AskOwner::Host),
+                HookDecision::Rewrite {
+                    command: rewritten(),
+                    approval: Approval::Host
+                },
                 PermissionVerdict::Ask
             ),
-            HookDecision::AskRewrite(rewritten(), AskOwner::Host)
+            HookDecision::Rewrite {
+                command: rewritten(),
+                approval: Approval::Host
+            }
         );
         assert_eq!(
             ApprovalOwner::Delegate.apply(HookDecision::Deny, PermissionVerdict::Default),
@@ -1485,10 +1585,16 @@ mod tests {
         );
         assert_eq!(
             ApprovalOwner::Delegate.apply(
-                HookDecision::AllowRewrite(rewritten()),
+                HookDecision::Rewrite {
+                    command: rewritten(),
+                    approval: Approval::Allow
+                },
                 PermissionVerdict::Allow
             ),
-            HookDecision::AllowRewrite(rewritten())
+            HookDecision::Rewrite {
+                command: rewritten(),
+                approval: Approval::Allow
+            }
         );
     }
 
@@ -1499,18 +1605,26 @@ mod tests {
         for (verdict, decision) in [
             (
                 PermissionVerdict::Ask,
-                HookDecision::AskRewrite("rtk git status".to_string(), AskOwner::Host),
+                HookDecision::Rewrite {
+                    command: "rtk git status".to_string(),
+                    approval: Approval::Host,
+                },
             ),
             (
                 PermissionVerdict::Allow,
-                HookDecision::AllowRewrite("rtk git status".to_string()),
+                HookDecision::Rewrite {
+                    command: "rtk git status".to_string(),
+                    approval: Approval::Allow,
+                },
             ),
             (PermissionVerdict::Deny, HookDecision::Deny),
             (PermissionVerdict::Default, HookDecision::Defer),
         ] {
             let expected = match &decision {
-                HookDecision::AskRewrite(r, owner) => HookDecision::AskRewrite(r.clone(), *owner),
-                HookDecision::AllowRewrite(r) => HookDecision::AllowRewrite(r.clone()),
+                HookDecision::Rewrite { command, approval } => HookDecision::Rewrite {
+                    command: command.clone(),
+                    approval: *approval,
+                },
                 HookDecision::Deny => HookDecision::Deny,
                 HookDecision::Defer => HookDecision::Defer,
             };

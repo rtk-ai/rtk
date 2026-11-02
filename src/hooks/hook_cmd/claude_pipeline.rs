@@ -238,7 +238,7 @@ fn swappable(
         return false;
     }
     match rewrite {
-        HookDecision::AllowRewrite(_) | HookDecision::AskRewrite(..) => {
+        HookDecision::Rewrite { .. } => {
             !registry::chain_mentions_excluded(cmd, excluded) && !runs_rtk(cmd)
         }
         HookDecision::Deny => false,

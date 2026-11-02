@@ -107,15 +107,14 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
         track_tee_read(cmd);
     }
     match decided {
-        HookDecision::AllowRewrite(rewritten) => {
-            print!("{}", rewritten);
+        HookDecision::Rewrite { command, approval } => {
+            print!("{}", command);
             let _ = std::io::stdout().flush();
-            Ok(())
-        }
-        HookDecision::AskRewrite(rewritten, _) => {
-            print!("{}", rewritten);
-            let _ = std::io::stdout().flush();
-            std::process::exit(3);
+            if approval.is_allow() {
+                Ok(())
+            } else {
+                std::process::exit(3)
+            }
         }
         HookDecision::Deny => std::process::exit(2),
         HookDecision::Defer => std::process::exit(1),
