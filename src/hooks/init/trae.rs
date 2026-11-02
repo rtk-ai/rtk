@@ -385,6 +385,10 @@ mod tests {
     #[test]
     fn trae_hook_command_matches_windows_rtk_and_rejects_other_commands() {
         assert!(is_trae_hook_command("rtk.exe hook trae"));
+        // Windows file names are case-insensitive: `RTK.EXE` is `rtk.exe`.
+        assert!(is_trae_hook_command(
+            r#""C:\Program Files\RTK.EXE" hook trae"#
+        ));
         assert!(is_trae_hook_command(
             r#""C:\Program Files\rtk.exe" hook trae"#
         ));

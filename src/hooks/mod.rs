@@ -26,7 +26,9 @@ pub mod verify_cmd;
 
 fn is_rtk_binary(binary: &str) -> bool {
     let binary_name = binary.rsplit(['/', '\\']).next().unwrap_or(binary);
-    matches!(binary_name, "rtk" | "rtk.exe")
+    binary_name == "rtk"
+        || binary_name.eq_ignore_ascii_case("rtk.exe")
+        || (cfg!(windows) && binary_name.eq_ignore_ascii_case("rtk"))
 }
 
 fn is_rtk_hook_command(command: &str, agent: &str) -> bool {
@@ -69,6 +71,26 @@ mod tests {
         assert!(is_claude_hook_command(
             "/Users/jane/My\\ Apps/rtk hook claude"
         ));
+    }
+
+    #[test]
+    fn claude_hook_command_matches_case_insensitive_windows_binary() {
+        for command in [
+            "C:/tools/rtk.exe hook claude",
+            "C:/tools/RTK.EXE hook claude",
+            "C:/tools/Rtk.exe hook claude",
+            "C:/tools/rtk.EXE hook claude",
+            "C:/tools/RTK.exe hook claude",
+            r#""C:\tools\RTK.EXE" hook claude"#,
+            "RTK.EXE hook claude",
+        ] {
+            assert!(is_claude_hook_command(command), "{command}");
+        }
+        // Invariant: hook verb and agent name stay strictly case-sensitive
+        assert!(!is_claude_hook_command("C:/tools/RTK.EXE HOOK claude"));
+        assert!(!is_claude_hook_command("C:/tools/RTK.EXE hook CLAUDE"));
+        assert!(!is_claude_hook_command("C:/tools/RTK.EXE hook cursor"));
+        assert!(!is_claude_hook_command("C:/tools/not-rtk.exe hook claude"));
     }
 
     #[test]
