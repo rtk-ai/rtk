@@ -18,6 +18,15 @@ const MISTRAL_PROVIDER: &str = "mistral";
 const MISTRAL_API_BASE_DEFAULT: &str = "https://api.mistral.ai/v1";
 const MISTRAL_API_KEY_ENV: &str = "MISTRAL_API_KEY";
 const RTK_PROVIDER_KEYS: &[&str] = &["name", "api_base", "api_key_env_var", "backend"];
+/// Provider table of headers Vibe adds to every request, the main chat turn
+/// included.
+const EXTRA_HEADERS: &str = "extra_headers";
+/// Header the daemon labels the client by. Vibe's main chat turn sends the
+/// Mistral SDK's default User-Agent, the same as any other program using that
+/// SDK, so the User-Agent alone cannot name it.
+const RTK_CLIENT_HEADER: &str = "x-rtk-client";
+#[cfg(any(feature = "engine", test))]
+const RTK_CLIENT_LABEL: &str = "vibe";
 
 pub(crate) fn mistral_api_base() -> Option<String> {
     let path = resolve_vibe_dir().ok()?.join(VIBE_CONFIG_FILE);
@@ -65,6 +74,7 @@ fn set_mistral_api_base(text: &str, url: &str) -> Result<String> {
         Some(idx) => {
             if let Some(table) = providers.get_mut(idx) {
                 table["api_base"] = toml_edit::value(url);
+                mark_rtk_client(table)?;
             }
         }
         None => {
@@ -73,10 +83,41 @@ fn set_mistral_api_base(text: &str, url: &str) -> Result<String> {
             table["api_base"] = toml_edit::value(url);
             table["api_key_env_var"] = toml_edit::value(MISTRAL_API_KEY_ENV);
             table["backend"] = toml_edit::value(MISTRAL_PROVIDER);
+            mark_rtk_client(&mut table)?;
             providers.push(table);
         }
     }
     Ok(doc.to_string())
+}
+
+/// Add `x-rtk-client = "vibe"` to the provider's `extra_headers`, keeping any
+/// header the user already set there.
+#[cfg(any(feature = "engine", test))]
+fn mark_rtk_client(table: &mut toml_edit::Table) -> Result<()> {
+    if !table.contains_key(EXTRA_HEADERS) {
+        table[EXTRA_HEADERS] = toml_edit::value(toml_edit::InlineTable::new());
+    }
+    table[EXTRA_HEADERS]
+        .as_table_like_mut()
+        .context("`extra_headers` of the mistral provider in config.toml is not a table")?
+        .insert(RTK_CLIENT_HEADER, toml_edit::value(RTK_CLIENT_LABEL));
+    Ok(())
+}
+
+/// Undo [`mark_rtk_client`]: drop only rtk's header, and the `extra_headers`
+/// table when nothing else is left in it. Once the provider no longer points
+/// at the daemon, an `x-rtk-` header would go to Mistral as is.
+fn unmark_rtk_client(table: &mut toml_edit::Table) {
+    let Some(headers) = table
+        .get_mut(EXTRA_HEADERS)
+        .and_then(toml_edit::Item::as_table_like_mut)
+    else {
+        return;
+    };
+    let now_empty = headers.remove(RTK_CLIENT_HEADER).is_some() && headers.is_empty();
+    if now_empty {
+        table.remove(EXTRA_HEADERS);
+    }
 }
 
 fn remove_rtk_mistral_provider(text: &str, rtk_url: &str) -> Option<String> {
@@ -86,11 +127,12 @@ fn remove_rtk_mistral_provider(text: &str, rtk_url: &str) -> Option<String> {
         .and_then(toml_edit::Item::as_array_of_tables_mut)?;
     let idx = providers.iter().position(is_mistral)?;
     let ours_only = {
-        let table = providers.get(idx)?;
+        let table = providers.get_mut(idx)?;
         let api_base = table.get("api_base").and_then(toml_edit::Item::as_str)?;
         if api_base.trim().trim_end_matches('/') != rtk_url.trim_end_matches('/') {
             return None;
         }
+        unmark_rtk_client(table);
         let value = |key: &str| table.get(key).and_then(toml_edit::Item::as_str);
         table
             .iter()
@@ -157,16 +199,19 @@ impl super::proxy_onramp::ProxyOnramp for VibeOnramp {
 
     fn manual_line(&self, base_url: &str) -> String {
         format!(
-            "[[providers]]\n    name = \"{MISTRAL_PROVIDER}\"\n    api_base = \"{base_url}\"\n    api_key_env_var = \"{MISTRAL_API_KEY_ENV}\"\n    backend = \"{MISTRAL_PROVIDER}\""
+            "[[providers]]\n    name = \"{MISTRAL_PROVIDER}\"\n    api_base = \"{base_url}\"\n    api_key_env_var = \"{MISTRAL_API_KEY_ENV}\"\n    backend = \"{MISTRAL_PROVIDER}\"\n    extra_headers = {{ {RTK_CLIENT_HEADER} = \"{RTK_CLIENT_LABEL}\" }}"
         )
     }
 
     fn write(&self, base_url: &str, _autostart: bool) -> Result<Vec<String>> {
         let updated = set_mistral_api_base(&self.text()?, base_url)?;
         let backup = backup_and_atomic_write(&self.config_path, &updated)?;
-        let mut lines = vec![format!(
-            "  config.toml: providers[mistral].api_base = {base_url}"
-        )];
+        let mut lines = vec![
+            format!("  config.toml: providers[mistral].api_base = {base_url}"),
+            format!(
+                "  config.toml: providers[mistral].extra_headers.{RTK_CLIENT_HEADER} = {RTK_CLIENT_LABEL}"
+            ),
+        ];
         if let Some(path) = backup {
             lines.push(format!("  Backup: {}", path.display()));
         }
@@ -894,10 +939,64 @@ mod proxy_provider_tests {
         let created = set_mistral_api_base("", RTK).unwrap();
         assert_eq!(
             created,
-            "[[providers]]\nname = \"mistral\"\napi_base = \"http://127.0.0.1:8080/mistral/v1\"\napi_key_env_var = \"MISTRAL_API_KEY\"\nbackend = \"mistral\"\n"
+            "[[providers]]\nname = \"mistral\"\napi_base = \"http://127.0.0.1:8080/mistral/v1\"\napi_key_env_var = \"MISTRAL_API_KEY\"\nbackend = \"mistral\"\nextra_headers = { x-rtk-client = \"vibe\" }\n"
         );
         let again = set_mistral_api_base(&created, RTK).unwrap();
         assert_eq!(again, created);
+    }
+
+    /// Vibe's main chat turn sends the Mistral SDK's default User-Agent, so the
+    /// daemon can only label it by the header the provider adds (#4925).
+    #[test]
+    fn the_client_header_joins_the_users_own_extra_headers_once() {
+        let inline = "[[providers]]\nname = \"mistral\"\napi_base = \"https://api.mistral.ai/v1\"\nextra_headers = { X-Team = \"infra\" }\n";
+        let subtable = "[[providers]]\nname = \"mistral\"\napi_base = \"https://api.mistral.ai/v1\"\n\n[providers.extra_headers]\nX-Team = \"infra\"\n";
+        for text in [inline, subtable] {
+            let updated = set_mistral_api_base(text, RTK).unwrap();
+            let parsed: toml::Value = toml::from_str(&updated).expect("valid toml");
+            let headers = parsed["providers"][0]["extra_headers"]
+                .as_table()
+                .expect("extra_headers table");
+            assert_eq!(headers.len(), 2, "{updated}");
+            assert_eq!(headers["X-Team"].as_str(), Some("infra"), "{updated}");
+            assert_eq!(headers["x-rtk-client"].as_str(), Some("vibe"), "{updated}");
+
+            let again = set_mistral_api_base(&updated, RTK).unwrap();
+            assert_eq!(again, updated, "a re-run leaves the file byte-identical");
+        }
+    }
+
+    #[test]
+    fn extra_headers_that_are_not_a_table_are_refused_not_replaced() {
+        let text = "[[providers]]\nname = \"mistral\"\napi_base = \"https://api.mistral.ai/v1\"\nextra_headers = \"X-Team: infra\"\n";
+        let err = set_mistral_api_base(text, RTK).unwrap_err();
+        assert!(err.to_string().contains("extra_headers"), "{err}");
+    }
+
+    #[test]
+    fn uninstall_removes_only_the_client_header_rtk_added() {
+        let text = "[[providers]]\nname = \"mistral\"\napi_base = \"https://api.mistral.ai/v1\"\nextra_headers = { X-Team = \"infra\" }\n";
+        let installed = set_mistral_api_base(text, RTK).unwrap();
+        let restored = remove_rtk_mistral_provider(&installed, RTK).unwrap();
+        assert!(!restored.contains("x-rtk-client"), "{restored}");
+        let parsed: toml::Value = toml::from_str(&restored).expect("valid toml");
+        let provider = &parsed["providers"][0];
+        assert_eq!(
+            provider["api_base"].as_str(),
+            Some(MISTRAL_API_BASE_DEFAULT)
+        );
+        let headers = provider["extra_headers"].as_table().expect("user headers");
+        assert_eq!(headers.len(), 1, "{restored}");
+        assert_eq!(headers["X-Team"].as_str(), Some("infra"), "{restored}");
+    }
+
+    #[test]
+    fn uninstall_drops_an_extra_headers_table_that_held_only_rtks_header() {
+        let text = "[[providers]]\nname = \"mistral\"\napi_base = \"https://api.mistral.ai/v1\"\ntemperature = 0.2\n";
+        let installed = set_mistral_api_base(text, RTK).unwrap();
+        assert!(installed.contains("x-rtk-client"), "{installed}");
+        let restored = remove_rtk_mistral_provider(&installed, RTK).unwrap();
+        assert_eq!(restored, text);
     }
 
     #[test]
@@ -966,7 +1065,21 @@ mod proxy_provider_tests {
             lines[0].contains("providers[mistral].api_base = http://127.0.0.1:8080/mistral/v1"),
             "{lines:?}"
         );
+        assert!(
+            lines[1].contains("extra_headers.x-rtk-client = vibe"),
+            "{lines:?}"
+        );
+        assert!(
+            fs::read_to_string(&config_path)
+                .unwrap()
+                .contains("x-rtk-client = \"vibe\"")
+        );
         assert_eq!(onramp.current_target().unwrap().as_deref(), Some(RTK));
+        assert!(
+            onramp
+                .manual_line(RTK)
+                .contains("extra_headers = { x-rtk-client = \"vibe\" }")
+        );
         assert!(onramp.manual_line(RTK).starts_with("[[providers]]\n"));
         assert!(
             onramp
