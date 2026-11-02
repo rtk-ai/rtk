@@ -263,7 +263,7 @@ Project-scoped install also refuses, without writing anything, when `.codex/hook
 
 `AGENTS.md` and `RTK.md` are not restricted this way, and git stores symlinks, so a repository you clone can ship either as a link pointing outside the clone.
 
-A symlinked `AGENTS.md` is followed and left in place: install appends its `@RTK.md` line to whatever the link names, wherever that is, and the file it rewrites ends up owned by you and readable only by you. That line is inert text, unlike `.codex/hooks.json`, which registers a hook that runs shell commands.
+A symlinked `AGENTS.md` is followed and left in place: install appends its `@RTK.md` line to whatever the link names, wherever that is, and the file it rewrites keeps who may read and write it, except that it becomes yours if someone else owned it. That line is inert text, unlike `.codex/hooks.json`, which registers a hook that runs shell commands.
 
 A symlinked `RTK.md` depends on what it points at. If the target is not one RTK wrote, the link itself is moved to `RTK.md.bak` and a fresh file takes its place, so nothing outside is touched. If the target is one RTK wrote — a shared or global `RTK.md`, say — install follows the link and rewrites that file in full.
 

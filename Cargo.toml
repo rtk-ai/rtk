@@ -95,8 +95,11 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
-    "Win32_System_Console",
+    "Win32_Foundation",
     "Win32_Globalization",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Console",
 ] }
 
 # musl's built-in malloc makes ~1,700 mmap/munmap calls and ~8,000 extra page
