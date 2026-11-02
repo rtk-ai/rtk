@@ -240,7 +240,7 @@ fn swappable(
                 PermissionVerdict::Allow | PermissionVerdict::Ask | PermissionVerdict::Default
             ) && !crate::discover::lexer::contains_unattestable_construct(cmd)
                 && !crate::discover::fish_script::is_unambiguous_fish(cmd)
-                && cmd.split_whitespace().next() != Some("rtk")
+                && !runs_rtk(cmd)
                 && !cmd.contains(['\n', '\r', '\\'])
                 && !registry::has_heredoc(cmd)
                 && !cmd.contains("$((")
@@ -249,6 +249,17 @@ fn swappable(
                 && sh_can_run(cmd, program_exists)
         }
     }
+}
+
+fn runs_rtk(cmd: &str) -> bool {
+    cmd.split(|c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '\'' | '"' | '`' | '(' | ')' | '{' | '}' | ';' | '|' | '&'
+            )
+    })
+    .any(|word| word == "rtk" || word.ends_with("/rtk"))
 }
 
 fn changes_directory(cmd: &str) -> bool {
@@ -587,5 +598,26 @@ mod tests {
             &excluded
         ));
         assert!(decide("xargs git status", PermissionVerdict::Default, &[]));
+    }
+
+    #[test]
+    fn an_rtk_command_anywhere_in_the_line_is_not_swapped() {
+        for cmd in [
+            "rtk bypass ./run-suite.sh | ./lint.sh",
+            "rtk frobnicate && ./run-suite.sh",
+            "./lint.sh && rtk bypass ./run-suite.sh",
+            "./lint.sh | rtk bypass cat",
+            "./lint.sh;rtk bypass cat",
+            "time rtk bypass ./run-suite.sh",
+            "X=1 rtk bypass ./run-suite.sh",
+            "/usr/local/bin/rtk bypass ./run-suite.sh",
+        ] {
+            assert!(!decide(cmd, PermissionVerdict::Default, &[]), "{cmd}");
+        }
+        assert!(decide(
+            "./lint.sh && ./run-suite.sh",
+            PermissionVerdict::Default,
+            &[]
+        ));
     }
 }
