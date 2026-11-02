@@ -249,14 +249,50 @@ fn patch_gemini_settings(
 
 /// Remove Gemini artifacts during uninstall
 pub(super) fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
+    match resolve_gemini_dir() {
+        Ok(gemini_dir) => uninstall_gemini_in(&gemini_dir, ctx),
+        Err(_) => Ok(Vec::new()),
+    }
+}
+
+fn uninstall_gemini_in(gemini_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
     let mut removed = Vec::new();
-    let gemini_dir = match resolve_gemini_dir() {
-        Ok(d) => d,
-        Err(_) => return Ok(removed),
-    };
+
+    // Parse settings.json before deleting anything: bailing on a parse
+    // failure after the hook script is gone would leave a BeforeTool entry
+    // pointing at a deleted file.
+    let settings_path = gemini_dir.join(SETTINGS_JSON);
+    let mut patched_settings = None;
+    if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path)
+            .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+        if !strip_leading_bom(&content).trim().is_empty() {
+            let mut settings: serde_json::Value = from_json_str(&content).with_context(|| {
+                format!(
+                    "Failed to parse {} as JSON; fix or remove the RTK BeforeTool entry manually",
+                    settings_path.display()
+                )
+            })?;
+            let bt_pointer = format!("/hooks/{}", BEFORE_TOOL_KEY);
+            if let Some(arr) = settings
+                .pointer_mut(&bt_pointer)
+                .and_then(|v| v.as_array_mut())
+            {
+                let before = arr.len();
+                arr.retain(|h| {
+                    !h.pointer("/hooks/0/command")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|c| c.contains("rtk"))
+                });
+                if arr.len() < before {
+                    patched_settings = Some(settings);
+                }
+            }
+        }
+    }
 
     // Remove hook
     let hook_path = gemini_dir.join(HOOKS_SUBDIR).join(GEMINI_HOOK_FILE);
@@ -288,35 +324,21 @@ pub(super) fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
     }
 
     // Remove hook from settings.json
-    let settings_path = gemini_dir.join(SETTINGS_JSON);
-    if settings_path.exists() {
-        let content = fs::read_to_string(&settings_path)?;
-        if let Ok(mut settings) = from_json_str::<serde_json::Value>(&content) {
-            let bt_pointer = format!("/hooks/{}", BEFORE_TOOL_KEY);
-            if let Some(arr) = settings
-                .pointer_mut(&bt_pointer)
-                .and_then(|v| v.as_array_mut())
-            {
-                let before = arr.len();
-                arr.retain(|h| {
-                    !h.pointer("/hooks/0/command")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|c| c.contains("rtk"))
-                });
-                if arr.len() < before {
-                    if dry_run {
-                        println!(
-                            "[dry-run] would remove RTK hook from Gemini settings.json: {}",
-                            settings_path.display()
-                        );
-                    } else {
-                        let new_content = serde_json::to_string_pretty(&settings)?;
-                        fs::write(&settings_path, new_content)?;
-                    }
-                    removed.push("Gemini settings.json: removed RTK hook entry".to_string());
-                }
-            }
+    if let Some(settings) = patched_settings {
+        if dry_run {
+            println!(
+                "[dry-run] would remove RTK hook from Gemini settings.json: {}",
+                settings_path.display()
+            );
+        } else {
+            let backup_path = settings_path.with_extension("json.bak");
+            fs::copy(&settings_path, &backup_path)
+                .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
+            let new_content = serde_json::to_string_pretty(&settings)
+                .context("Failed to serialize settings.json")?;
+            atomic_write(&settings_path, &new_content)?;
         }
+        removed.push("Gemini settings.json: removed RTK hook entry".to_string());
     }
 
     if verbose > 0 && !removed.is_empty() {
@@ -391,6 +413,62 @@ mod tests {
         assert_eq!(
             content, original,
             "settings.json must not be overwritten when parsing fails"
+        );
+    }
+    #[test]
+    fn test_uninstall_gemini_malformed_settings_errors_before_removing_hook() {
+        let tmp = TempDir::new().unwrap();
+        let gemini_dir = tmp.path().join(".gemini");
+        let hook_path = gemini_dir.join(HOOKS_SUBDIR).join(GEMINI_HOOK_FILE);
+        fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
+        fs::write(&hook_path, GEMINI_HOOK_SCRIPT).unwrap();
+        let settings_path = gemini_dir.join(SETTINGS_JSON);
+        let original = format!(
+            "{{\"hooks\": {{\"BeforeTool\": [{{\"matcher\": \"run_shell_command\", \"hooks\": [{{\"type\": \"command\", \"command\": \"{}\"}}]}}]}},}}",
+            hook_path.display()
+        ); // trailing comma
+        fs::write(&settings_path, &original).unwrap();
+
+        let err = uninstall_gemini_in(&gemini_dir, InitContext::default())
+            .expect_err("unparsable settings.json must fail the uninstall");
+
+        assert!(err.to_string().contains("Failed to parse"), "{err:#}");
+        assert!(
+            hook_path.exists(),
+            "hook script must stay so settings.json is not left pointing at a deleted file"
+        );
+        assert_eq!(fs::read_to_string(&settings_path).unwrap(), original);
+    }
+
+    #[test]
+    fn test_uninstall_gemini_removes_entry_with_backup() {
+        let tmp = TempDir::new().unwrap();
+        let gemini_dir = tmp.path().join(".gemini");
+        let hook_path = gemini_dir.join(HOOKS_SUBDIR).join(GEMINI_HOOK_FILE);
+        fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
+        fs::write(&hook_path, GEMINI_HOOK_SCRIPT).unwrap();
+        let settings_path = gemini_dir.join(SETTINGS_JSON);
+        let original = serde_json::json!({
+            "model": "foo",
+            "hooks": {"BeforeTool": [{
+                "matcher": "run_shell_command",
+                "hooks": [{"type": "command", "command": hook_path.to_string_lossy()}]
+            }]}
+        })
+        .to_string();
+        fs::write(&settings_path, &original).unwrap();
+
+        let removed = uninstall_gemini_in(&gemini_dir, InitContext::default()).unwrap();
+
+        assert_eq!(removed.len(), 2, "{removed:?}");
+        assert!(!hook_path.exists());
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        assert_eq!(settings["model"], "foo");
+        assert_eq!(settings["hooks"]["BeforeTool"], serde_json::json!([]));
+        assert_eq!(
+            fs::read_to_string(settings_path.with_extension("json.bak")).unwrap(),
+            original
         );
     }
 }
