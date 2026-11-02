@@ -4,6 +4,7 @@
 //! reads the result back; both `rtk sqlfluff ...` and `rtk lint sqlfluff ...`
 //! go through it so the two entry points cannot drift apart.
 
+use crate::core::arg_tokenizer::{self, TokenKind};
 use crate::core::config;
 use crate::core::runner;
 use crate::core::shell::display_args;
@@ -70,14 +71,53 @@ pub struct Invocation {
     expect_json: bool,
 }
 
+const SQLFLUFF_SUBCOMMANDS: &[&str] = &[
+    "dialects", "fix", "format", "lint", "parse", "render", "rules", "version",
+];
+
+fn first_sqlfluff_subcommand(args: &[String]) -> Option<&str> {
+    let tokens = arg_tokenizer::tokenize(args);
+    arg_tokenizer::before_dashdash(&tokens)
+        .first()
+        .filter(|token| token.kind == TokenKind::Positional)
+        .and_then(|token| {
+            SQLFLUFF_SUBCOMMANDS
+                .iter()
+                .copied()
+                .find(|command| *command == token.text)
+        })
+}
+
+fn is_top_level_control(args: &[String]) -> bool {
+    let tokens = arg_tokenizer::tokenize(args);
+    arg_tokenizer::before_dashdash(&tokens)
+        .first()
+        .is_some_and(|token| {
+            (token.kind == TokenKind::Long && matches!(token.text, "help" | "version"))
+                || (token.kind == TokenKind::Short && token.text == "h")
+        })
+}
+
 /// Build the sqlfluff invocation for a user-supplied argv (tool name excluded).
 pub fn plan(args: &[String]) -> Invocation {
-    // Route to the lint filter only for explicit lint invocations (or a bare
-    // call, which we make explicit). sqlfluff's other subcommands - and any
-    // unknown bareword, be it a typo or a future subcommand - pass through
-    // untouched so sqlfluff errors on its own input instead of rtk silently
-    // reinterpreting it as `lint <path>`.
-    let is_lint = args.is_empty() || args[0] == "lint";
+    plan_inner(args, false)
+}
+
+/// Build the invocation for `rtk lint sqlfluff ...`.
+///
+/// The generic lint command supplies the linter name separately, so an
+/// unrecognised first positional is a lint path or option value. Known
+/// SQLFluff subcommands still pass through unchanged, preserving the direct
+/// command's meaning for `parse`, `fix`, and the other native commands.
+pub fn plan_for_lint(args: &[String]) -> Invocation {
+    plan_inner(args, true)
+}
+
+fn plan_inner(args: &[String], generic_lint: bool) -> Invocation {
+    let subcommand = first_sqlfluff_subcommand(args);
+    let is_lint = args.is_empty()
+        || subcommand == Some("lint")
+        || (generic_lint && subcommand.is_none() && !is_top_level_control(args));
 
     // Both spellings: injecting a second --format makes sqlfluff reject the call.
     let user_set_format = args.iter().any(|a| {
@@ -103,7 +143,7 @@ pub fn plan(args: &[String]) -> Invocation {
             out.push("json".to_string());
         }
         // Skip "lint" if the user spelled it out; we already pushed it.
-        let start = usize::from(args.first().is_some_and(|a| a == "lint"));
+        let start = usize::from(subcommand == Some("lint"));
         out.extend_from_slice(&args[start..]);
         // No path default: sqlfluff lints the current directory when given no
         // paths, and guessing whether a bareword is a path or a flag value
@@ -542,7 +582,7 @@ mod tests {
         // `rtk lint sqlfluff lint ...` reaches the same plan, so both entry
         // points must produce byte-identical output for identical input.
         let direct = plan(&["lint".to_string(), "models/".to_string()]);
-        let via_lint = plan(&["lint".to_string(), "models/".to_string()]);
+        let via_lint = plan_for_lint(&["models/".to_string()]);
         assert_eq!(direct.args, via_lint.args);
         assert_eq!(direct.render(V4_JSON, 1), via_lint.render(V4_JSON, 1));
         assert!(direct.render(V4_JSON, 1).contains("LT09"));
@@ -716,6 +756,64 @@ mod tests {
         assert_eq!(p.args, ["parse", "models/x.sql"]);
         assert!(!p.expect_json);
         assert_eq!(p.render("plain parse tree", 0), "plain parse tree");
+    }
+
+    #[test]
+    fn test_plan_for_lint_classifies_paths_commands_and_controls() {
+        // These argv forms follow Click's top-level SQLFluff grammar: a bare
+        // path is lint input, while known commands and top-level controls keep
+        // their native meaning. Values after options and after `--` are data.
+        let cases: &[(&str, &[&str], &[&str], bool)] = &[
+            (
+                "bare path",
+                &["file.sql"],
+                &["lint", "--format", "json", "file.sql"],
+                true,
+            ),
+            (
+                "explicit lint",
+                &["lint", "file.sql"],
+                &["lint", "--format", "json", "file.sql"],
+                true,
+            ),
+            (
+                "known native command",
+                &["parse", "file.sql"],
+                &["parse", "file.sql"],
+                false,
+            ),
+            (
+                "double dash path named parse",
+                &["--", "parse", "file.sql"],
+                &["lint", "--format", "json", "--", "parse", "file.sql"],
+                true,
+            ),
+            (
+                "option value named parse",
+                &["--dialect", "parse", "file.sql"],
+                &["lint", "--format", "json", "--dialect", "parse", "file.sql"],
+                true,
+            ),
+            (
+                "long option named like a subcommand",
+                &["--format", "human", "file.sql"],
+                &["lint", "--format", "human", "file.sql"],
+                false,
+            ),
+            ("short help", &["-h"], &["-h"], false),
+            ("long help", &["--help"], &["--help"], false),
+            ("version", &["--version"], &["--version"], false),
+        ];
+
+        for (name, input, expected_args, expect_json) in cases {
+            let input = input
+                .iter()
+                .map(|arg| (*arg).to_string())
+                .collect::<Vec<_>>();
+            let planned = plan_for_lint(&input);
+            assert_eq!(&planned.args, expected_args, "{name}");
+            assert_eq!(planned.expect_json, *expect_json, "{name}");
+        }
     }
 
     // ── happy path ──────────────────────────────────────────────────────────
