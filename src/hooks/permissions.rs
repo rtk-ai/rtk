@@ -588,14 +588,27 @@ fn load_cursor_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
 // folderTrust is off by default (folder trusted); when on, a folder is trusted
 // only via GEMINI_CLI_TRUST_WORKSPACE here (dialog-only trust is treated as
 // untrusted → global, which is safe: never more permissive than the host).
+// An unreadable or unparseable global file hides whether folderTrust is on, so
+// it yields no rules at all rather than letting the project file's apply.
 fn gemini_settings() -> Option<Value> {
-    let global = global_config(GEMINI_DIR, SETTINGS_JSON);
+    gemini_settings_from(
+        global_config(GEMINI_DIR, SETTINGS_JSON),
+        user_env::var("GEMINI_CLI_TRUST_WORKSPACE").as_deref() == Some("true"),
+        find_project_root,
+    )
+}
+
+fn gemini_settings_from(
+    global: JsonRead,
+    trusted_by_env: bool,
+    project_root: impl FnOnce() -> Option<PathBuf>,
+) -> Option<Value> {
     let global_value = match &global {
         JsonRead::Parsed(value) => Some(value),
         JsonRead::Missing => None,
         JsonRead::Error => return None,
     };
-    let trusted = user_env::var("GEMINI_CLI_TRUST_WORKSPACE").as_deref() == Some("true")
+    let trusted = trusted_by_env
         || !global_value
             .and_then(|j| {
                 j.pointer("/security/folderTrust/enabled")
@@ -603,7 +616,7 @@ fn gemini_settings() -> Option<Value> {
             })
             .unwrap_or(false);
     if trusted
-        && let Some(root) = find_project_root()
+        && let Some(root) = project_root()
         && let JsonRead::Parsed(v) = read_json(&root.join(GEMINI_DIR).join(SETTINGS_JSON))
     {
         return Some(v);
@@ -2060,6 +2073,89 @@ mod tests {
         let mut out = Vec::new();
         append_wrapped_rules(Some(&v), &["run_shell_command(", "ShellTool("], &mut out);
         assert_eq!(out, vec!["git", "npm test", "*"]);
+    }
+
+    enum GeminiGlobal<'a> {
+        Absent,
+        /// A directory in place of the file: it exists but cannot be read.
+        Unreadable,
+        Content(&'a str),
+    }
+
+    /// The verdict for `git push origin main` under Gemini settings built from
+    /// `global` and a project file that allows `git push`.
+    fn gemini_git_push_verdict(global: GeminiGlobal, trusted_by_env: bool) -> PermissionVerdict {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let global_path = tmp.path().join("global-settings.json");
+        match global {
+            GeminiGlobal::Absent => {}
+            GeminiGlobal::Unreadable => {
+                std::fs::create_dir(&global_path).expect("mkdir global settings")
+            }
+            GeminiGlobal::Content(content) => {
+                std::fs::write(&global_path, content).expect("write global settings")
+            }
+        }
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(project.join(GEMINI_DIR)).expect("mkdir project .gemini");
+        std::fs::write(
+            project.join(GEMINI_DIR).join(SETTINGS_JSON),
+            r#"{"tools":{"allowed":["run_shell_command(git push)"]}}"#,
+        )
+        .expect("write project settings");
+
+        let settings =
+            gemini_settings_from(read_json(&global_path), trusted_by_env, || Some(project));
+        let mut allow = Vec::new();
+        if let Some(tools) = settings.as_ref().and_then(|j| j.get("tools")) {
+            append_wrapped_rules(
+                tools.get("allowed"),
+                &["run_shell_command(", "ShellTool("],
+                &mut allow,
+            );
+        }
+        check_command_with_rules("git push origin main", &[], &[], &allow)
+    }
+
+    #[test]
+    fn test_gemini_unusable_global_settings_never_trust_the_project() {
+        let folder_trust_on = r#"{"security":{"folderTrust":{"enabled":true}}}"#;
+        let trailing_comma = r#"{"security":{"folderTrust":{"enabled":true},}}"#;
+
+        // Folder trust on and no trust env: the project file is not used.
+        assert_eq!(
+            gemini_git_push_verdict(GeminiGlobal::Content(folder_trust_on), false),
+            PermissionVerdict::Default
+        );
+        // Unparseable or unreadable global file: folder trust is unknown, so
+        // the project file's allow must not apply, even with the trust env.
+        for trusted_by_env in [false, true] {
+            assert_eq!(
+                gemini_git_push_verdict(GeminiGlobal::Content(trailing_comma), trusted_by_env),
+                PermissionVerdict::Default,
+                "malformed global settings, trust env {trusted_by_env}"
+            );
+            assert_eq!(
+                gemini_git_push_verdict(GeminiGlobal::Unreadable, trusted_by_env),
+                PermissionVerdict::Default,
+                "unreadable global settings, trust env {trusted_by_env}"
+            );
+        }
+        // Missing or empty global file: folder trust is off by default, so the
+        // project file applies, as Gemini itself does.
+        assert_eq!(
+            gemini_git_push_verdict(GeminiGlobal::Absent, false),
+            PermissionVerdict::Allow
+        );
+        assert_eq!(
+            gemini_git_push_verdict(GeminiGlobal::Content("\n"), false),
+            PermissionVerdict::Allow
+        );
+        // Explicit trust env with a readable global file: the project applies.
+        assert_eq!(
+            gemini_git_push_verdict(GeminiGlobal::Content(folder_trust_on), true),
+            PermissionVerdict::Allow
+        );
     }
 
     #[test]
