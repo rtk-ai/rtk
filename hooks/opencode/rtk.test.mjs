@@ -1,6 +1,6 @@
 import test, { after, before } from "node:test"
 import assert from "node:assert/strict"
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { delimiter, join } from "node:path"
 import RtkOpenCodePlugin, {
@@ -11,18 +11,29 @@ import RtkOpenCodePlugin, {
   _resetCachedRtkPath,
 } from "./rtk.ts"
 
-// The plugin resolves rtk off PATH and runs it, so the tests need a real rtk
-// to find. node is copied in under the name `rtk`, and because the plugin
-// spawns `[<rtk>, "hook", "opencode", …]` — node reading argv[2] as the script
-// to run — the mock script is named `hook` and the tests chdir into the mock
-// directory so it is found there instead of over whatever sits in the repo.
+// The plugin resolves rtk off PATH or candidate directories and runs it, so
+// the tests need a real rtk to find. Node is symlinked/copied in under the name
+// `rtk`, and because the plugin spawns `[<rtk>, "hook", "opencode", …]` — node
+// reading argv[2] as the script to run — the mock script is named `hook` and the
+// tests chdir into the mock directory so it is found there instead of over
+// whatever sits in the repo.
 // Everything below then exercises the shipped code path: PATH discovery, the
 // `hook opencode --help` probe, argv construction, and the registered hooks.
 const BIN = process.platform === "win32" ? "rtk.EXE" : "rtk"
 let mockDir = ""
 let emptyDir = ""
 let savedPath = ""
+let savedHome = ""
+let savedUserProfile = ""
 let savedCwd = ""
+
+function installMockBin(dest) {
+  try {
+    symlinkSync(process.execPath, dest)
+  } catch {
+    copyFileSync(process.execPath, dest)
+  }
+}
 
 const MOCK = `
 const fs = require("fs")
@@ -42,6 +53,10 @@ if (process.env.MOCK_ECHO) {
   console.log(JSON.stringify({ command: JSON.stringify(process.argv.slice(2)) }))
 } else if (command === "ls -la") {
   console.log(JSON.stringify({ command: "rtk ls -la" }))
+} else if (command === "cd sub && ls -la") {
+  console.log(JSON.stringify({ command: "cd sub && rtk ls -la" }))
+} else if (command === "ls -la && git status") {
+  console.log(JSON.stringify({ command: "rtk ls -la && rtk git status" }))
 } else if (command === "unchanged") {
   // what the Rust side answers when the rewrite would change the verdict
   console.log("{}")
@@ -73,17 +88,25 @@ const v1Input = { tool: "bash", sessionID: "ses_1", callID: "call_1" }
 const v1Output = (command) => ({ args: { command, description: "list files" } })
 
 async function captureSetup() {
-  const names = []
-  let hook = null
+  const toolHooks = []
+  const shellHooks = []
+  let toolHook = null
+  let shellHook = null
   await RtkOpenCodePlugin.setup({
     tool: {
       hook(name, callback) {
-        names.push(name)
-        if (name === "execute.before") hook = callback
+        toolHooks.push(name)
+        if (name === "execute.before") toolHook = callback
+      },
+    },
+    shell: {
+      hook(name, callback) {
+        shellHooks.push(name)
+        if (name === "create.before") shellHook = callback
       },
     },
   })
-  return { names, hook }
+  return { names: toolHooks, hook: toolHook, toolHooks, shellHooks, shellHook }
 }
 
 async function captureServer() {
@@ -94,33 +117,47 @@ async function captureServer() {
 before(() => {
   savedCwd = process.cwd()
   savedPath = process.env.PATH ?? ""
+  savedHome = process.env.HOME ?? ""
+  savedUserProfile = process.env.USERPROFILE ?? ""
   mockDir = mkdtempSync(join(tmpdir(), "rtk-opencode-mock-"))
   emptyDir = mkdtempSync(join(tmpdir(), "rtk-opencode-empty-"))
   writeFileSync(join(mockDir, "package.json"), '{"type":"commonjs"}')
   writeFileSync(join(mockDir, "hook"), MOCK)
-  copyFileSync(process.execPath, mockBin())
+  installMockBin(mockBin())
   process.chdir(mockDir)
   process.env.PATH = `${mockDir}${delimiter}${savedPath}`
+  process.env.HOME = emptyDir
+  process.env.USERPROFILE = emptyDir
+  delete process.env.RTK_BIN
   _resetCachedRtkPath()
 })
 
 after(() => {
   process.chdir(savedCwd)
   process.env.PATH = savedPath
+  process.env.HOME = savedHome
+  process.env.USERPROFILE = savedUserProfile
   delete process.env.MOCK_ECHO
   delete process.env.MOCK_NO_SUB
   delete process.env.MOCK_PROBE_LOG
   delete process.env.RTK_DISABLED
+  delete process.env.RTK_BIN
   _resetCachedRtkPath()
   rmSync(mockDir, { recursive: true, force: true })
   rmSync(emptyDir, { recursive: true, force: true })
 })
 
-test("2.0.22: execute.before mutates event.input.command", async () => {
+test("2.0.22: execute.before mutates event.input.command and create.before appends rtk dir to PATH", async () => {
   assert.equal(RtkOpenCodePlugin.id, "rtk")
-  const { names, hook } = await captureSetup()
+  const { names, hook, shellHooks, shellHook } = await captureSetup()
   assert.deepEqual(names, ["execute.before"])
   assert.equal(typeof hook, "function")
+  assert.deepEqual(shellHooks, ["create.before"])
+  assert.equal(typeof shellHook, "function")
+
+  const shellEvent = { env: { PATH: "/usr/bin" } }
+  shellHook(shellEvent)
+  assert.equal(shellEvent.env.PATH, `/usr/bin${delimiter}${mockDir}`)
 
   const rewritten = v2Event("ls -la")
   await hook(rewritten)
@@ -132,10 +169,16 @@ test("2.0.22: execute.before mutates event.input.command", async () => {
   assert.equal(kept.input.command, "unchanged")
 })
 
-test("1.18.34: tool.execute.before mutates output.args.command", async () => {
+test("1.18.34: tool.execute.before mutates output.args.command and shell.env appends rtk dir to PATH", async () => {
   const { names, hooks } = await captureServer()
-  assert.deepEqual(names, ["tool.execute.before"])
+  assert.ok(names.includes("tool.execute.before"))
+  assert.ok(names.includes("shell.env"))
   assert.equal(typeof hooks["tool.execute.before"], "function")
+  assert.equal(typeof hooks["shell.env"], "function")
+
+  const shellOut = { env: { PATH: "/usr/bin" } }
+  hooks["shell.env"]({}, shellOut)
+  assert.equal(shellOut.env.PATH, `/usr/bin${delimiter}${mockDir}`)
 
   const rewritten = v1Output("ls -la")
   await hooks["tool.execute.before"](v1Input, rewritten)
@@ -173,14 +216,16 @@ test("an rtk without `hook opencode` registers nothing", async () => {
   const realWarn = console.warn
   console.warn = (message) => warnings.push(String(message))
   try {
-    // (a) nothing named rtk on PATH. OpenCode's shell tool runs with OpenCode's
-    // PATH, so an rtk found elsewhere cannot be spawned as a bare `rtk …` —
-    // reporting one would rewrite commands that come back `command not found`
-    // (#4462).
+    // (a) nothing named rtk on PATH, RTK_BIN, or candidate directories.
+    // Isolated HOME ensures developer's ~/.cargo/bin is not picked up.
     process.env.PATH = emptyDir
+    process.env.HOME = emptyDir
+    process.env.USERPROFILE = emptyDir
+    delete process.env.RTK_BIN
     _resetCachedRtkPath()
     assert.equal(resolveRtkPath(), null)
     assert.deepEqual(await captureSetup().then((c) => c.names), [])
+    assert.deepEqual(await captureSetup().then((c) => c.shellHooks), [])
     assert.deepEqual((await captureServer()).names, [])
 
     // (b) an rtk too old for the subcommand: `hook opencode --help` exits 2.
@@ -190,6 +235,7 @@ test("an rtk without `hook opencode` registers nothing", async () => {
     assert.equal(resolveRtkPath(), mockBin())
     assert.equal(await probeRtkHookOpencode(mockBin()), false)
     assert.deepEqual(await captureSetup().then((c) => c.names), [])
+    assert.deepEqual(await captureSetup().then((c) => c.shellHooks), [])
     assert.deepEqual((await captureServer()).names, [])
     assert.match(warnings.join("\n"), /no .*hook opencode. *subcommand/)
   } finally {
@@ -284,4 +330,100 @@ test("runHookOpencode fails open on anything unusable", async () => {
   assert.equal(await runHookOpencode(mockBin(), "empty"), null)
   assert.equal(await runHookOpencode(mockBin(), "fail"), null)
   assert.equal(await runHookOpencode(mockBin(), "sleep", undefined, 100), null)
+})
+
+test("candidate probing and shell PATH injection for rtk outside PATH (#4462)", async () => {
+  const customHome = mkdtempSync(join(tmpdir(), "rtk-opencode-home-"))
+  const cargoBinDir = join(customHome, ".cargo", "bin")
+  mkdirSync(cargoBinDir, { recursive: true })
+  writeFileSync(join(cargoBinDir, "package.json"), '{"type":"commonjs"}')
+  writeFileSync(join(cargoBinDir, "hook"), MOCK)
+  const cargoRtk = join(cargoBinDir, BIN)
+  installMockBin(cargoRtk)
+
+  const customDir = mkdtempSync(join(tmpdir(), "rtk-opencode-custom-"))
+  writeFileSync(join(customDir, "package.json"), '{"type":"commonjs"}')
+  writeFileSync(join(customDir, "hook"), MOCK)
+  const envRtk = join(customDir, BIN)
+  installMockBin(envRtk)
+
+  try {
+    // 1. rtk only in $HOME/.cargo/bin (PATH empty):
+    // Bare command, chained command, and directory cd all come back as rtk output
+    process.env.PATH = emptyDir
+    process.env.HOME = customHome
+    process.env.USERPROFILE = customHome
+    delete process.env.RTK_BIN
+    _resetCachedRtkPath()
+
+    assert.equal(resolveRtkPath(), cargoRtk)
+    assert.equal(await tryRewriteCommand("shell", "ls -la"), "rtk ls -la")
+    assert.equal(await tryRewriteCommand("shell", "ls -la && git status"), "rtk ls -la && rtk git status")
+    assert.equal(await tryRewriteCommand("shell", "cd sub && ls -la"), "cd sub && rtk ls -la")
+
+    // The shell hooks append the resolved directory to the shell's PATH
+    const v2Shell = { env: { PATH: "/bin" } }
+    const { shellHook } = await captureSetup()
+    shellHook(v2Shell)
+    assert.equal(v2Shell.env.PATH, `/bin${delimiter}${cargoBinDir}`)
+
+    const v1Shell = { env: { PATH: "/bin" } }
+    const { hooks } = await captureServer()
+    hooks["shell.env"]({}, v1Shell)
+    assert.equal(v1Shell.env.PATH, `/bin${delimiter}${cargoBinDir}`)
+
+    // 2. rtk only at RTK_BIN:
+    process.env.PATH = emptyDir
+    process.env.HOME = emptyDir
+    process.env.USERPROFILE = emptyDir
+    process.env.RTK_BIN = envRtk
+    _resetCachedRtkPath()
+
+    assert.equal(resolveRtkPath(), envRtk)
+    assert.equal(await tryRewriteCommand("shell", "ls -la"), "rtk ls -la")
+    assert.equal(await tryRewriteCommand("shell", "ls -la && git status"), "rtk ls -la && rtk git status")
+
+    const envShell = { env: { PATH: "/usr/bin" } }
+    const { shellHook: envShellHook } = await captureSetup()
+    envShellHook(envShell)
+    assert.equal(envShell.env.PATH, `/usr/bin${delimiter}${customDir}`)
+
+    // 3. RTK_BIN takes precedence over PATH
+    process.env.PATH = mockDir
+    _resetCachedRtkPath()
+    assert.equal(resolveRtkPath(), envRtk)
+
+    // 4. rtk on PATH:
+    delete process.env.RTK_BIN
+    _resetCachedRtkPath()
+    assert.equal(resolveRtkPath(), mockBin())
+    assert.equal(await tryRewriteCommand("shell", "ls -la"), "rtk ls -la")
+
+    // If directory already in PATH, appendRtkDirToPath does not duplicate it
+    const alreadyOnPath = { env: { PATH: `/bin${delimiter}${mockDir}` } }
+    const { shellHook: pathShellHook } = await captureSetup()
+    pathShellHook(alreadyOnPath)
+    assert.equal(alreadyOnPath.env.PATH, `/bin${delimiter}${mockDir}`)
+
+    // 5. A directory at RTK_BIN is skipped
+    const decoyDir = mkdtempSync(join(tmpdir(), "rtk-opencode-dir-"))
+    process.env.RTK_BIN = decoyDir
+    _resetCachedRtkPath()
+    assert.equal(resolveRtkPath(), mockBin())
+    rmSync(decoyDir, { recursive: true, force: true })
+
+    // 6. Permission preservation: rewritten string matches "rtk *" glob
+    // OpenCode matches full command string; by returning "rtk ls -la" without absolute path prefix,
+    // OpenCode's permissions rules for "rtk *" evaluate consistently whether rtk was on PATH or in candidate dir (#4195, #4462)
+    const cmd = await tryRewriteCommand("shell", "ls -la")
+    assert.ok(cmd.startsWith("rtk "))
+  } finally {
+    process.env.PATH = `${mockDir}${delimiter}${savedPath}`
+    process.env.HOME = emptyDir
+    process.env.USERPROFILE = emptyDir
+    delete process.env.RTK_BIN
+    _resetCachedRtkPath()
+    rmSync(customHome, { recursive: true, force: true })
+    rmSync(customDir, { recursive: true, force: true })
+  }
 })
