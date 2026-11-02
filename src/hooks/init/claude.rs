@@ -1,7 +1,6 @@
 //! Claude Code: the default `rtk init` flow -- settings.json hook registration, RTK.md and
 //! CLAUDE.md patching, legacy-hook migration -- plus the `--claude-md` injection mode.
 
-use super::opencode::{ensure_opencode_plugin_installed, prepare_opencode_plugin_path};
 use super::*;
 use crate::core::user_dirs;
 use crate::hooks::constants::{
@@ -10,20 +9,11 @@ use crate::hooks::constants::{
 };
 
 /// Legacy mode (--claude-md): inject the full RTK_INSTRUCTIONS block into CLAUDE.md.
-pub(super) fn run_claude_md_mode(
-    global: bool,
-    install_opencode: bool,
-    ctx: InitContext,
-) -> Result<()> {
-    run_claude_md_mode_with(global, install_opencode, RTK_INSTRUCTIONS, ctx)
+pub(super) fn run_claude_md_mode(global: bool, ctx: InitContext) -> Result<()> {
+    run_claude_md_mode_with(global, RTK_INSTRUCTIONS, ctx)
 }
 
-fn run_claude_md_mode_with(
-    global: bool,
-    install_opencode: bool,
-    block: &str,
-    ctx: InitContext,
-) -> Result<()> {
+fn run_claude_md_mode_with(global: bool, block: &str, ctx: InitContext) -> Result<()> {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
@@ -51,18 +41,6 @@ fn run_claude_md_mode_with(
     };
 
     let action = write_rtk_block(&path, block, "rtk instructions", recovery_cmd, ctx)?;
-
-    // Runs before the Unchanged return so that re-running restores a deleted plugin.
-    if global && install_opencode {
-        let opencode_plugin_path = prepare_opencode_plugin_path()?;
-        let installed = ensure_opencode_plugin_installed(&opencode_plugin_path, ctx)?;
-        if !dry_run && installed {
-            println!(
-                "[ok] OpenCode plugin installed: {}",
-                opencode_plugin_path.display()
-            );
-        }
-    }
 
     if matches!(action, RtkBlockUpsert::Unchanged) {
         return Ok(());
@@ -664,7 +642,7 @@ pub(super) fn hook_already_present(
 pub(super) fn run_default_mode(
     global: bool,
     patch_mode: PatchMode,
-    install_opencode: bool,
+    opencode_plugin: Option<&Path>,
     ctx: InitContext,
 ) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
@@ -672,12 +650,7 @@ pub(super) fn run_default_mode(
         // Local init: inject the awareness block into CLAUDE.md + generate
         // project-local filters template. The legacy full-instruction block
         // stays behind the explicit --claude-md opt-in.
-        run_claude_md_mode_with(
-            false,
-            install_opencode,
-            &rtk_block(&instructions_body(ctx.awareness)),
-            ctx,
-        )?;
+        run_claude_md_mode_with(false, &rtk_block(&instructions_body(ctx.awareness)), ctx)?;
         generate_project_filters_template(ctx)?;
         if !dry_run {
             print_project_scope_footer();
@@ -698,13 +671,6 @@ pub(super) fn run_default_mode(
         println!("[dry-run] awareness level: {}", ctx.awareness);
     }
 
-    let opencode_plugin_path = if install_opencode {
-        let path = prepare_opencode_plugin_path()?;
-        ensure_opencode_plugin_installed(&path, ctx)?.then_some(path)
-    } else {
-        None
-    };
-
     // 3. Patch CLAUDE.md (add @RTK.md, migrate if needed)
     let migrated = patch_claude_md(&claude_md_path, ctx)?;
 
@@ -717,7 +683,7 @@ pub(super) fn run_default_mode(
             rtk_md_path.display(),
             ctx.awareness
         );
-        if let Some(path) = &opencode_plugin_path {
+        if let Some(path) = opencode_plugin {
             println!("  OpenCode:  {}", path.display());
         }
         println!("  CLAUDE.md: @RTK.md reference added");
@@ -737,7 +703,7 @@ pub(super) fn run_default_mode(
     let patch_result = patch_settings_json_command(
         CLAUDE_HOOK_COMMAND,
         patch_mode,
-        opencode_plugin_path.is_some(),
+        opencode_plugin.is_some(),
         ctx,
         HookInstallScope::UserGlobal,
     )?;
@@ -759,7 +725,7 @@ pub(super) fn run_default_mode(
             }
             PatchResult::AlreadyPresent => {
                 println!("\n  settings.json: hook already present");
-                if opencode_plugin_path.is_some() {
+                if opencode_plugin.is_some() {
                     println!("  Restart Claude Code and OpenCode. Test with: git status");
                 } else {
                     println!("  Restart Claude Code. Test with: git status");
@@ -934,7 +900,7 @@ pub(super) fn remove_legacy_hook_entries_from_json(root: &mut serde_json::Value)
 pub(super) fn run_hook_only_mode(
     global: bool,
     patch_mode: PatchMode,
-    install_opencode: bool,
+    opencode_plugin: Option<&Path>,
     ctx: InitContext,
 ) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
@@ -947,17 +913,10 @@ pub(super) fn run_hook_only_mode(
     // Migrate old hook script if present
     migrate_old_hook_script(ctx);
 
-    let opencode_plugin_path = if install_opencode {
-        let path = prepare_opencode_plugin_path()?;
-        ensure_opencode_plugin_installed(&path, ctx)?.then_some(path)
-    } else {
-        None
-    };
-
     if !dry_run {
         println!("\nRTK hook registered (hook-only mode).\n");
         println!("  Command: {}", CLAUDE_HOOK_COMMAND);
-        if let Some(path) = &opencode_plugin_path {
+        if let Some(path) = opencode_plugin {
             println!("  OpenCode: {}", path.display());
         }
         println!(
@@ -969,7 +928,7 @@ pub(super) fn run_hook_only_mode(
     let patch_result = patch_settings_json_command(
         CLAUDE_HOOK_COMMAND,
         patch_mode,
-        opencode_plugin_path.is_some(),
+        opencode_plugin.is_some(),
         ctx,
         HookInstallScope::UserGlobal,
     )?;
@@ -991,7 +950,7 @@ pub(super) fn run_hook_only_mode(
             }
             PatchResult::AlreadyPresent => {
                 println!("\n  settings.json: hook already present");
-                if opencode_plugin_path.is_some() {
+                if opencode_plugin.is_some() {
                     println!("  Restart Claude Code and OpenCode. Test with: git status");
                 } else {
                     println!("  Restart Claude Code. Test with: git status");
@@ -1506,7 +1465,7 @@ mod tests {
     fn test_global_default_mode_creates_artifacts() {
         let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
-            run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+            run_default_mode(true, PatchMode::Auto, None, InitContext::default()).unwrap();
 
             assert!(claude_dir.join(RTK_MD).exists(), "RTK.md must be created");
             assert!(
@@ -1621,7 +1580,7 @@ mod tests {
     fn test_global_default_mode_creates_missing_claude_dir() {
         let tmp = test_isolation::tempdir();
         with_missing_claude_dir_override(&tmp, |claude_dir| {
-            run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+            run_default_mode(true, PatchMode::Auto, None, InitContext::default()).unwrap();
 
             assert!(
                 claude_dir.exists(),
@@ -1635,33 +1594,6 @@ mod tests {
             assert!(
                 claude_dir.join(SETTINGS_JSON).exists(),
                 "settings.json must be created"
-            );
-        });
-    }
-
-    /// `--opencode` is installed after RTK.md. A missing Claude dir must not
-    /// abort before that install.
-    #[test]
-    fn test_global_opencode_installs_when_claude_dir_missing() {
-        use crate::hooks::constants::{OPENCODE_PLUGIN_FILE, PLUGIN_SUBDIR};
-
-        let tmp = test_isolation::tempdir();
-        with_missing_claude_dir_override(&tmp, |claude_dir| {
-            run_default_mode(true, PatchMode::Auto, true, InitContext::default()).unwrap();
-
-            assert!(claude_dir.join(RTK_MD).exists(), "RTK.md must be created");
-            let plugin = super::super::opencode::resolve_opencode_dir()
-                .expect("opencode dir resolves in a test build")
-                .join(PLUGIN_SUBDIR)
-                .join(OPENCODE_PLUGIN_FILE);
-            assert!(
-                plugin.starts_with(tmp.path()),
-                "the plugin must land in this test's own directory, not {}",
-                plugin.display()
-            );
-            assert!(
-                plugin.exists(),
-                "OpenCode plugin must be installed when ~/.claude was missing"
             );
         });
     }
@@ -1879,7 +1811,7 @@ mod tests {
     fn test_global_uninstall_removes_artifacts() {
         let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
-            run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+            run_default_mode(true, PatchMode::Auto, None, InitContext::default()).unwrap();
             uninstall(
                 true,
                 false,
@@ -1913,8 +1845,8 @@ mod tests {
             Some(tmp.path().join("rtk-config")),
             || {
                 with_claude_dir_override(&tmp, |claude_dir| {
-                    run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
-                    run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+                    run_default_mode(true, PatchMode::Auto, None, InitContext::default()).unwrap();
+                    run_default_mode(true, PatchMode::Auto, None, InitContext::default()).unwrap();
 
                     let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
                     let count = settings.matches(CLAUDE_HOOK_COMMAND).count();
@@ -1932,7 +1864,7 @@ mod tests {
         let tmp = test_isolation::tempdir();
         let _entered = test_isolation::enter(tmp.path());
 
-        let result = run_default_mode(false, PatchMode::Auto, false, InitContext::default());
+        let result = run_default_mode(false, PatchMode::Auto, None, InitContext::default());
 
         result.unwrap();
         assert!(
@@ -1949,7 +1881,7 @@ mod tests {
     fn test_global_hook_only_mode_creates_settings() {
         let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
-            run_hook_only_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+            run_hook_only_mode(true, PatchMode::Auto, None, InitContext::default()).unwrap();
 
             assert!(
                 !claude_dir.join(RTK_MD).exists(),
@@ -1967,7 +1899,7 @@ mod tests {
     fn test_global_hook_only_mode_creates_missing_claude_dir() {
         let tmp = test_isolation::tempdir();
         with_missing_claude_dir_override(&tmp, |claude_dir| {
-            run_hook_only_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+            run_hook_only_mode(true, PatchMode::Auto, None, InitContext::default()).unwrap();
 
             assert!(
                 claude_dir.exists(),
@@ -1993,7 +1925,7 @@ mod tests {
                 dry_run: true,
                 ..Default::default()
             };
-            run_default_mode(true, PatchMode::Auto, false, dry).unwrap();
+            run_default_mode(true, PatchMode::Auto, None, dry).unwrap();
 
             assert!(
                 !claude_dir.join(RTK_MD).exists(),
@@ -2018,7 +1950,7 @@ mod tests {
                 dry_run: true,
                 ..Default::default()
             };
-            run_default_mode(true, PatchMode::Auto, false, dry).unwrap();
+            run_default_mode(true, PatchMode::Auto, None, dry).unwrap();
 
             assert!(
                 !claude_dir.exists(),
@@ -2032,7 +1964,7 @@ mod tests {
         let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             // Stage a real install first
-            run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+            run_default_mode(true, PatchMode::Auto, None, InitContext::default()).unwrap();
             assert!(claude_dir.join(RTK_MD).exists());
             assert!(claude_dir.join(SETTINGS_JSON).exists());
 
@@ -2169,14 +2101,14 @@ mod tests {
     fn test_upgrade_from_claude_md_to_hook_mode() {
         let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
-            run_claude_md_mode(true, false, InitContext::default()).unwrap();
+            run_claude_md_mode(true, InitContext::default()).unwrap();
             let claude_md_content = fs::read_to_string(claude_dir.join(CLAUDE_MD)).unwrap();
             assert!(
                 claude_md_content.contains(RTK_BLOCK_START),
                 "pre-condition: old block must exist"
             );
 
-            run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+            run_default_mode(true, PatchMode::Auto, None, InitContext::default()).unwrap();
 
             assert!(claude_dir.join(RTK_MD).exists(), "RTK.md must be created");
             let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
@@ -2212,7 +2144,7 @@ mod tests {
             );
             fs::write(&claude_md, &malformed).unwrap();
 
-            let result = run_claude_md_mode(true, false, InitContext::default());
+            let result = run_claude_md_mode(true, InitContext::default());
 
             assert!(
                 result.is_err(),

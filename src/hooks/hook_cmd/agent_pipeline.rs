@@ -250,7 +250,7 @@ fn shell_gate(call: &ToolCall) -> Gate {
                     rule,
                     ask: false,
                 },
-                HookDecision::AskRewrite(_) => Gate::Swap {
+                HookDecision::AskRewrite(_, _) => Gate::Swap {
                     command,
                     rule,
                     ask: true,

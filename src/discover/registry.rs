@@ -1073,9 +1073,10 @@ fn rewrite_multiline_block(
         match rewrite_single(line, excluded, transparent_prefixes) {
             Some(rewritten) if rewritten != line => {
                 any_changed = true;
-                let indent = &seg[..seg.len() - seg.trim_start().len()];
+                let indent = &unit[..unit.len() - unit.trim_start().len()];
                 result.push_str(indent);
                 result.push_str(&rewritten);
+                result.push_str(&unit[indent.len() + line.len()..]);
             }
             _ => result.push_str(unit),
         }
@@ -1205,11 +1206,13 @@ fn rewrite_pipeline_final_stage(
         shell_wrapper_depth,
     )
     .map(|rewritten| {
-        format!(
-            "{} {}",
-            cmd[segment_start..final_stage_start].trim(),
-            rewritten
-        )
+        // The earlier stages and the `|` between them are the author's text,
+        // not this rewrite's to respace. The gap after the `|` sits inside the
+        // final stage's own range, which the rewrite returns trimmed.
+        let head = &cmd[segment_start..final_stage_start];
+        let stage = &cmd[final_stage_start..analysis.end_offset];
+        let lead = &stage[..stage.len() - stage.trim_start().len()];
+        format!("{}{}{}", head.trim_start(), lead, rewritten)
     })
 }
 
@@ -1237,11 +1240,12 @@ fn rewrite_pipeline_producer(
         shell_wrapper_depth,
     )
     .map(|rewritten| {
-        format!(
-            "{} {}",
-            rewritten,
-            cmd[first_pipe_offset..analysis.end_offset].trim()
-        )
+        // The gap between the producer and the `|` sits in neither piece:
+        // the rewrite is trimmed and the tail starts at the pipe itself.
+        let producer = &cmd[segment_start..first_pipe_offset];
+        let gap = &producer[producer.trim_end().len()..];
+        let tail = &cmd[first_pipe_offset..analysis.end_offset];
+        format!("{}{}{}", rewritten, gap, tail.trim_end())
     })
 }
 
@@ -1250,6 +1254,33 @@ fn rewrite_pipeline_producer(
 /// table on [`crate::discover::lexer::split_for_permissions`]. Deliberately
 /// less conservative than that gate: standalone `(`/`)` isn't a segment
 /// boundary, and redirects are preserved verbatim rather than truncated.
+/// Rewrite the command occupying `cmd[start..end]`, keeping the whitespace
+/// that surrounds it inside that range.
+///
+/// The rewrite replaces a command, not the text around it. Emitting the gaps
+/// from the source rather than rebuilding them is what keeps `echo 1;;esac`
+/// and `a  &&  b` intact: an operator's own spacing is nobody's to normalise.
+fn emit_segment(
+    out: &mut String,
+    cmd: &str,
+    start: usize,
+    end: usize,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+    shell_wrapper_depth: usize,
+) -> bool {
+    let raw = &cmd[start..end];
+    let trimmed = raw.trim();
+    let lead = raw.len() - raw.trim_start().len();
+
+    out.push_str(&raw[..lead]);
+    let rewritten = rewrite_segment(trimmed, excluded, transparent_prefixes, shell_wrapper_depth)
+        .unwrap_or_else(|| trimmed.to_string());
+    out.push_str(&rewritten);
+    out.push_str(&raw[lead + trimmed.len()..]);
+    rewritten != trimmed
+}
+
 fn rewrite_compound(
     cmd: &str,
     excluded: &[ExcludePattern],
@@ -1277,33 +1308,26 @@ fn rewrite_compound(
         }
         match tok.kind {
             TokenKind::Operator => {
-                let seg = cmd[seg_start..tok.offset].trim();
-                let rewritten =
-                    rewrite_segment(seg, excluded, transparent_prefixes, shell_wrapper_depth)
-                        .unwrap_or_else(|| seg.to_string());
-                if rewritten != seg {
-                    any_changed = true;
-                }
-                result.push_str(&rewritten);
-                if tok.value.starts_with(';') {
-                    result.push_str(&tok.value);
-                    let after = tok.offset + tok.value.len();
-                    if after < cmd.len() {
-                        result.push(' ');
-                    }
-                } else {
-                    result.push(' ');
-                    result.push_str(&tok.value);
-                    result.push(' ');
-                }
+                any_changed |= emit_segment(
+                    &mut result,
+                    cmd,
+                    seg_start,
+                    tok.offset,
+                    excluded,
+                    transparent_prefixes,
+                    shell_wrapper_depth,
+                );
                 seg_start = tok.offset + tok.value.len();
-                while seg_start < cmd.len() && cmd.as_bytes().get(seg_start) == Some(&b' ') {
-                    seg_start += 1;
-                }
+                result.push_str(&cmd[tok.offset..seg_start]);
             }
             TokenKind::Pipe(_) => {
                 let analysis = analyze_pipeline(cmd, &tokens, seg_start, tok.offset);
-                let pipeline = cmd[seg_start..analysis.end_offset].trim();
+                // The pipeline rewriters work on trimmed text, so the gap on
+                // either side is emitted here rather than rebuilt by them.
+                let raw_pipeline = &cmd[seg_start..analysis.end_offset];
+                let lead = raw_pipeline.len() - raw_pipeline.trim_start().len();
+                let pipeline = raw_pipeline.trim();
+                result.push_str(&raw_pipeline[..lead]);
                 let rewritten_pipeline = rewrite_pipeline_final_stage(
                     cmd,
                     seg_start,
@@ -1330,6 +1354,7 @@ fn rewrite_compound(
                 } else {
                     result.push_str(pipeline);
                 }
+                result.push_str(&raw_pipeline[lead + pipeline.len()..]);
 
                 match analysis.next_clause_offset {
                     Some(next_clause_offset) => {
@@ -1342,31 +1367,31 @@ fn rewrite_compound(
                 }
             }
             TokenKind::Shellism if tok.value == "&" => {
-                let seg = cmd[seg_start..tok.offset].trim();
-                let rewritten =
-                    rewrite_segment(seg, excluded, transparent_prefixes, shell_wrapper_depth)
-                        .unwrap_or_else(|| seg.to_string());
-                if rewritten != seg {
-                    any_changed = true;
-                }
-                result.push_str(&rewritten);
-                result.push_str(" & ");
+                any_changed |= emit_segment(
+                    &mut result,
+                    cmd,
+                    seg_start,
+                    tok.offset,
+                    excluded,
+                    transparent_prefixes,
+                    shell_wrapper_depth,
+                );
                 seg_start = tok.offset + tok.value.len();
-                while seg_start < cmd.len() && cmd.as_bytes().get(seg_start) == Some(&b' ') {
-                    seg_start += 1;
-                }
+                result.push_str(&cmd[tok.offset..seg_start]);
             }
             _ => {}
         }
     }
 
-    let seg = cmd[seg_start..].trim();
-    let rewritten = rewrite_segment(seg, excluded, transparent_prefixes, shell_wrapper_depth)
-        .unwrap_or_else(|| seg.to_string());
-    if rewritten != seg {
-        any_changed = true;
-    }
-    result.push_str(&rewritten);
+    any_changed |= emit_segment(
+        &mut result,
+        cmd,
+        seg_start,
+        cmd.len(),
+        excluded,
+        transparent_prefixes,
+        shell_wrapper_depth,
+    );
 
     if any_changed { Some(result) } else { None }
 }
@@ -1591,14 +1616,31 @@ fn pipeline_command_is_safe(rtk_cmd: &str, cmd: &str) -> bool {
 
 /// A folded file list (`-l`/`-L`/`--files`) carries its shared prefix in a header line, so a
 /// display consumer that keeps only some lines (`tail`) would return tails with no prefix.
+/// A folded `git ls-tree` path list puts many paths on one line, so `head -5` or `cat` would
+/// no longer see git's lines either.
 fn producer_output_is_line_faithful(rtk_cmd: &str, cmd: &str) -> bool {
     let engine = match rtk_cmd {
         "rtk grep" => Engine::Grep,
         "rtk rg" => Engine::Rg,
+        "rtk git" => return !git_ls_tree_folds(cmd),
         _ => return true,
     };
     let args: Vec<String> = shell_split(cmd).into_iter().skip(1).collect();
     !is_bare_file_list(engine, &args)
+}
+
+/// True when `cmd` is a `git ls-tree` whose arguments rtk folds, using the classifier's
+/// git global-option pattern.
+fn git_ls_tree_folds(cmd: &str) -> bool {
+    let Some((_, args)) = cmd.split_once(char::is_whitespace) else {
+        return false;
+    };
+    let normalized = GIT_GLOBAL_OPT.replace(args.trim_start(), "");
+    let words = shell_split(&normalized);
+    if words.first().map(String::as_str) != Some("ls-tree") {
+        return false;
+    }
+    crate::cmds::git::git_cmd::ls_tree_folds(&words[1..])
 }
 
 pub(crate) enum ExcludePattern {
@@ -1702,6 +1744,36 @@ fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
     excluded.iter().any(|pat| match pat {
         ExcludePattern::Regex(re) => re.is_match(cmd),
         ExcludePattern::Prefix(prefix) => cmd.starts_with(prefix.as_str()),
+    })
+}
+
+/// Whether `cmd` is a quoted shell wrapper whose script runs a command the
+/// user opted out of, through an `RTK_DISABLED=` prefix or `exclude_commands`.
+/// A routable wrapper must not fall through to its own filter then, since that
+/// filter would see the opted-out command's output anyway. Nested quoted
+/// shells are inspected too, up to `MAX_PREFIX_DEPTH`. Refs: #4704.
+fn shell_wrapper_script_opts_out(cmd: &str, excluded: &[ExcludePattern], depth: usize) -> bool {
+    if depth >= MAX_PREFIX_DEPTH {
+        return false;
+    }
+    let Some(wrapper) = parse_shell_wrapper(cmd) else {
+        return false;
+    };
+    let Some(script) = wrapper.script(cmd) else {
+        return false;
+    };
+    split_on_operators(script, false).into_iter().any(|seg| {
+        let mut seg = seg;
+        loop {
+            let (env_prefix, rest) = strip_disabled_prefix(seg);
+            if env_prefix.contains("RTK_DISABLED=") || is_excluded(rest, excluded) {
+                return true;
+            }
+            match strip_process_wrapper_prefix(rest) {
+                Some((_, inner)) => seg = inner,
+                None => return shell_wrapper_script_opts_out(rest, excluded, depth + 1),
+            }
+        }
     })
 }
 
@@ -1835,7 +1907,12 @@ fn rewrite_segment_inner(
                 depth + 1,
                 shell_wrapper_depth,
             ) {
-                return Some(format!("{} {}", prefix, rewritten));
+                return Some(format!(
+                    "{}{}{}",
+                    prefix,
+                    prefix_gap(trimmed, prefix, rest),
+                    rewritten
+                ));
             }
             // #2768: falling through re-tests the full prefixed string, which is
             // only valid when the wrapper is itself a routable command.
@@ -1845,7 +1922,9 @@ fn rewrite_segment_inner(
             // The inner command may have been dropped because it is excluded.
             // Re-testing the wrapped form would route it through the wrapper's
             // own filter, defeating the exclusion.
-            if is_excluded(ENV_PREFIX.replace(rest, "").trim(), excluded) {
+            if is_excluded(ENV_PREFIX.replace(rest, "").trim(), excluded)
+                || shell_wrapper_script_opts_out(rest, excluded, 0)
+            {
                 return None;
             }
             break;
@@ -1862,7 +1941,14 @@ fn rewrite_segment_inner(
             depth + 1,
             shell_wrapper_depth,
         )
-        .map(|rewritten| format!("{} {}", prefix, rewritten));
+        .map(|rewritten| {
+            format!(
+                "{}{}{}",
+                prefix,
+                prefix_gap(trimmed, prefix, rest),
+                rewritten
+            )
+        });
     }
 
     // User-configured wrapper prefixes (e.g. `docker exec mycontainer`). These
@@ -1880,7 +1966,14 @@ fn rewrite_segment_inner(
                 depth + 1,
                 shell_wrapper_depth,
             )
-            .map(|rewritten| format!("{} {}", prefix, rewritten));
+            .map(|rewritten| {
+                format!(
+                    "{}{}{}",
+                    prefix,
+                    prefix_gap(trimmed, prefix, rest),
+                    rewritten
+                )
+            });
         }
     }
 
@@ -2305,6 +2398,15 @@ fn takes_attached_value(wrapper: &ProcessWrapper, arg: &str) -> bool {
 
 /// Strip a command prefix with word-boundary check.
 /// Returns the remainder of the command after the prefix, or `None` if no match.
+/// The whitespace `strip_word_prefix` skipped between `prefix` and `rest`.
+///
+/// It trims the remainder so the inner command can be matched, and rejoining
+/// with a single space would respace text the author wrote: `uv run  ls` is
+/// one gap, not one space.
+fn prefix_gap<'a>(cmd: &'a str, prefix: &str, rest: &str) -> &'a str {
+    &cmd[prefix.len()..cmd.len() - rest.len()]
+}
+
 fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
     if cmd == prefix {
         Some("")
@@ -2739,7 +2841,7 @@ mod tests {
         fn test_cross_line_and_list_joins_and_rewrites() {
             assert_eq!(
                 rewrite_command_no_prefixes("git status &&\ngit log -3", &[]),
-                Some("rtk git status && rtk git log -3".into())
+                Some("rtk git status &&\nrtk git log -3".into())
             );
         }
 
@@ -2747,7 +2849,7 @@ mod tests {
         fn test_cross_line_pipeline_joins_and_rewrites() {
             assert_eq!(
                 rewrite_command_no_prefixes("git log |\ngrep feat", &[]),
-                Some("git log | rtk grep feat".into())
+                Some("git log |\nrtk grep feat".into())
             );
             assert_eq!(
                 rewrite_command_no_prefixes("cargo test |&\ngrep FAILED", &[]),
@@ -2767,7 +2869,7 @@ mod tests {
         fn test_mixed_independent_and_continued_lines() {
             assert_eq!(
                 rewrite_command_no_prefixes("grep -rn foo src\ngit status &&\ngit log -3", &[]),
-                Some("rtk grep -rn foo src\nrtk git status && rtk git log -3".into())
+                Some("rtk grep -rn foo src\nrtk git status &&\nrtk git log -3".into())
             );
         }
 
@@ -2775,7 +2877,7 @@ mod tests {
         fn test_blank_line_inside_continuation_joins() {
             assert_eq!(
                 rewrite_command_no_prefixes("git status &&\n\ngit log -3", &[]),
-                Some("rtk git status && rtk git log -3".into())
+                Some("rtk git status &&\n\nrtk git log -3".into())
             );
         }
 
@@ -2811,7 +2913,7 @@ mod tests {
         fn test_balanced_conditional_line_still_rewrites() {
             assert_eq!(
                 rewrite_command_no_prefixes("[[ -x foo ]] &&\ngit status", &[]),
-                Some("[[ -x foo ]] && rtk git status".into())
+                Some("[[ -x foo ]] &&\nrtk git status".into())
             );
         }
 
@@ -3260,7 +3362,7 @@ mod tests {
         // Verify that every GitCommand subcommand has a matching pattern
         for subcmd in [
             "status", "log", "diff", "show", "add", "commit", "push", "pull", "branch", "fetch",
-            "stash", "worktree",
+            "stash", "worktree", "ls-tree",
         ] {
             let cmd = format!("git {subcmd}");
             match classify_command(&cmd) {
@@ -4221,6 +4323,104 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_git_ls_tree_folds_only_where_nothing_reads_its_lines() {
+        for (cmd, expected) in [
+            (
+                "git ls-tree -r --name-only HEAD",
+                Some("rtk git ls-tree -r --name-only HEAD"),
+            ),
+            (
+                "git ls-tree HEAD | head -3",
+                Some("rtk git ls-tree HEAD | head -3"),
+            ),
+            (
+                "git ls-tree -r -z --name-only HEAD | cat",
+                Some("rtk git ls-tree -r -z --name-only HEAD | cat"),
+            ),
+            ("git ls-tree -r --name-only HEAD | head -5", None),
+            ("git ls-tree -r --name-only HEAD | cat", None),
+            ("git ls-tree --name-status HEAD | tail -2", None),
+            ("git -C src ls-tree -r --name-only HEAD | head -5", None),
+            ("yadm -C src ls-tree -r --name-only HEAD | head -5", None),
+            (
+                "yadm -c core.quotePath=false ls-tree -r --name-only HEAD | cat",
+                None,
+            ),
+            (
+                "git  -C src ls-tree -r -z --name-only HEAD | head -5",
+                Some("rtk git -C src ls-tree -r -z --name-only HEAD | head -5"),
+            ),
+            ("git  -C src ls-tree -r --name-only HEAD | head -5", None),
+            (
+                "git  -c core.quotePath=false ls-tree -r --name-only HEAD | cat",
+                None,
+            ),
+            (
+                "git show --name-only HEAD | head -5",
+                Some("rtk git show --name-only HEAD | head -5"),
+            ),
+            (
+                "git diff --name-status HEAD~3 | cat",
+                Some("rtk git diff --name-status HEAD~3 | cat"),
+            ),
+            ("git\tls-tree -r --name-only HEAD | cat", None),
+            (
+                "git ls-tree -r --name-only HEAD | while read f; do echo \"$f\"; done",
+                None,
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                expected,
+                "{cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_git_ls_tree_globals_preserve_pipeline_lines() {
+        for globals in [
+            "-c core.quotePath=false",
+            "-C src",
+            "--git-dir=.git",
+            "--git-dir .git",
+            "--work-tree=.",
+            "--work-tree .",
+            "--no-pager",
+            "--no-optional-locks",
+            "--bare",
+            "--literal-pathspecs",
+            "--no-pager -c core.quotePath=false",
+        ] {
+            for format in ["--name-only", "--name-status"] {
+                let cmd = format!("git {globals} ls-tree -r {format} HEAD");
+                assert_eq!(
+                    rewrite_command_no_prefixes(&cmd, &[]),
+                    Some(format!("rtk {cmd}")),
+                    "{cmd}"
+                );
+                for consumer in ["head -5", "tail -2", "cat"] {
+                    let piped = format!("{cmd} | {consumer}");
+                    assert_eq!(rewrite_command_no_prefixes(&piped, &[]), None, "{piped}");
+                    let raw = format!("git {globals} ls-tree -r -z {format} HEAD | {consumer}");
+                    assert_eq!(
+                        rewrite_command_no_prefixes(&raw, &[]),
+                        Some(format!("rtk {raw}")),
+                        "{raw}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_git_ls_tree_declares_measured_savings() {
+        let (status, savings) = status_and_savings("git ls-tree -r --name-only HEAD");
+        assert_eq!(status, RtkStatus::Existing);
+        assert_eq!(savings, 37.0);
+    }
+
+    #[test]
     fn test_rewrite_multi_pipe_all_safe_consumers() {
         assert_eq!(
             rewrite_command_no_prefixes("git log | head -20 | tail -5", &[]),
@@ -4754,6 +4954,70 @@ mod tests {
     }
 
     #[test]
+    fn test_routable_wrapper_honours_opt_outs_inside_shell_script() {
+        // #4704: a quoted script that holds an excluded command or an
+        // `RTK_DISABLED=` prefix must not be routed whole through `rtk uv run`.
+        let excluded = vec!["pytest".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run bash -c 'pytest'", &excluded),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run bash -c 'timeout 5 pytest -q'", &excluded),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run bash -c 'RTK_DISABLED=1 git status'", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run sh -c \"FOO=1 RTK_DISABLED=1 git status\"", &[]),
+            None
+        );
+        // The exclusion is matched past an env prefix.
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run bash -c 'FOO=1 pytest'", &excluded),
+            None
+        );
+        // Every segment of the script is read, not only the first, and past a
+        // pipe in an earlier segment.
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run bash -c 'echo hi; pytest'", &excluded),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run bash -c 'echo hi | head -1; pytest'", &excluded),
+            None
+        );
+        // The script's other commands are still rewritten in place.
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run bash -c 'pytest && git status'", &excluded),
+            Some("uv run bash -c 'pytest && rtk git status'".into())
+        );
+        // A nested quoted shell is inspected too.
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run bash -c 'bash -c \"pytest\"'", &excluded),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "uv run bash -c 'bash -c \"RTK_DISABLED=1 git status\"'",
+                &[]
+            ),
+            None
+        );
+        // A script with nothing opted out keeps the existing fall-through.
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run bash -c 'pytest'", &[]),
+            Some("uv run bash -c 'rtk pytest'".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run bash -c 'python script.py'", &excluded),
+            Some("rtk uv run bash -c 'python script.py'".into())
+        );
+    }
+
+    #[test]
     fn test_head_tail_rewrite_when_not_excluded() {
         assert_eq!(
             rewrite_command_no_prefixes("head -20 src/main.rs", &["cat".to_string()]),
@@ -4853,12 +5117,118 @@ mod tests {
     fn test_rewrite_head_operand_after_operator_split() {
         assert_eq!(
             rewrite_command_no_prefixes("head -n 1 f;rm", &[]),
-            Some("rtk read f --head-lines 1; rm".into())
+            Some("rtk read f --head-lines 1;rm".into())
         );
         assert_eq!(
             rewrite_command_no_prefixes("head -n 1 a&b", &[]),
-            Some("rtk read a --head-lines 1 & b".into())
+            Some("rtk read a --head-lines 1&b".into())
         );
+    }
+
+    /// The rewrite replaces commands, so everything that is not a command must
+    /// come through untouched. Removing each inserted `rtk ` has to give back
+    /// the input exactly — no operator respaced, no newline collapsed, no
+    /// separator invented.
+    ///
+    /// Stated as a property because what it catches is spacing, and nobody
+    /// writes a case for the spacing they did not think of.
+    #[test]
+    fn test_rewrite_changes_commands_and_nothing_else() {
+        const COMMANDS: &[&str] = &["ls", "ls -la", "cargo build", "echo hi", "nosuchtool x"];
+        const GAPS: &[&str] = &["", " ", "  ", "\t"];
+        const JOINERS: &[&str] = &[
+            " && ", "&&", "  &&  ", " || ", "||", "; ", ";", "  ;  ", " & ", "&", " | ", "|",
+            " ;; ", ";;", ";&", ";;&", "\n", " \n ", "\n\n", "\t&&\t",
+        ];
+
+        let mut corpus: Vec<String> = Vec::new();
+        for left in COMMANDS {
+            for joiner in JOINERS {
+                for right in COMMANDS {
+                    corpus.push(format!("{left}{joiner}{right}"));
+                }
+            }
+        }
+        // Derived from the tables the production code reads, not listed by
+        // hand: a wrapper or consumer added later is covered without anyone
+        // remembering to add it here. Every one of these rejoins text around
+        // a command, and every one of them collapsed the gap at some point.
+        let mut groups: Vec<(&str, Vec<String>)> = Vec::new();
+
+        let mut wrapped = Vec::new();
+        let wrappers = ROUTABLE_WRAPPER_PREFIXES
+            .iter()
+            .copied()
+            .chain(SHELL_KEYWORD_PREFIXES.iter().copied())
+            .chain(PROCESS_WRAPPERS.iter().map(|w| w.name));
+        for wrapper in wrappers {
+            // `timeout`/`time` take a duration before the command they wrap.
+            let operand = if PROCESS_WRAPPERS.iter().any(|w| w.name == wrapper) {
+                "5 "
+            } else {
+                ""
+            };
+            for gap in GAPS {
+                wrapped.push(format!("{wrapper} {operand}{gap}ls -la"));
+                wrapped.push(format!("{wrapper} {operand}{gap}ls -la && ls"));
+            }
+        }
+        groups.push(("wrapper prefixes", wrapped));
+
+        let mut piped = Vec::new();
+        for consumer in SAFE_PIPE_CONSUMERS {
+            for gap in GAPS {
+                for pipe_gap in GAPS {
+                    piped.push(format!("ls -la{gap}|{pipe_gap}{} -3", consumer.name));
+                }
+            }
+        }
+        groups.push(("safe pipe consumers", piped));
+
+        // A `case` arm's terminator may sit flush against `esac`. The
+        // terminator is one operator and `esac` the word after it, so the gap
+        // between them — including no gap at all — is text the emitter has
+        // to leave exactly as written, or `;;esac` comes back as `;; esac`.
+        let mut cased = Vec::new();
+        for terminator in [";;", ";&", ";;&"] {
+            for gap in GAPS {
+                cased.push(format!("case x in x) echo 1{terminator}{gap}esac; ls -la"));
+                cased.push(format!("ls -la; case x in x) echo 1{terminator}{gap}esac"));
+            }
+        }
+        groups.push(("case terminators against esac", cased));
+
+        for (label, group) in &groups {
+            let rewritten = group
+                .iter()
+                .filter(|c| rewrite_command_no_prefixes(c, &[]).is_some())
+                .count();
+            // A group that stops rewriting asserts nothing. That is how the
+            // pipe cases sat here proving nothing while a real bug lived
+            // behind them.
+            assert!(
+                rewritten * 2 >= group.len(),
+                "{label}: only {rewritten} of {} inputs rewrite, so this group \
+                 no longer exercises the emitter",
+                group.len()
+            );
+            corpus.extend(group.iter().cloned());
+        }
+
+        for cmd in &corpus {
+            let Some(out) = rewrite_command_no_prefixes(cmd, &[]) else {
+                continue;
+            };
+            // The whole command is trimmed on the way in, which is separate
+            // from what the emitter owns: the text between one command and
+            // the next.
+            let restored = out.replace("rtk ", "");
+            assert_eq!(
+                restored,
+                cmd.trim().replace("rtk ", ""),
+                "rewrite altered text outside a command\n  in:  {cmd:?}\n  out: {out:?}"
+            );
+        }
     }
 
     /// A trailing redirect is stripped before the operand is judged, so `a>b`
