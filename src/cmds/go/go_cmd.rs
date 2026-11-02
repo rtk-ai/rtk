@@ -580,15 +580,9 @@ fn append_go_benchmark_output(pkg_result: &mut PackageResult, output_text: &str)
 
 fn add_go_benchmark_output_line(pkg_result: &mut PackageResult, line: &str) {
     let line = line.trim();
-    if !is_go_benchmark_result_line(line) {
-        return;
-    }
-
-    if !pkg_result
-        .benchmark_output
-        .iter()
-        .any(|existing| existing == line)
-    {
+    // No dedup: `-count=N` legitimately repeats a benchmark, and identical
+    // result lines are still separate samples (benchstat needs every one).
+    if is_go_benchmark_result_line(line) {
         pkg_result.benchmark_output.push(line.to_string());
     }
 }
@@ -1026,6 +1020,48 @@ mod tests {
         );
         assert!(result.contains("BenchmarkMem-12"), "got: {result}");
         assert!(result.contains("0.3058 ns/op"), "got: {result}");
+    }
+
+    #[test]
+    fn test_filter_go_test_bench_vfalse_with_b_log_issue_4862() {
+        // Issue #4862 repro shape: `go test -json -v=false -bench .` with a
+        // benchmark that calls b.Log; the log block follows the result line.
+        let output = r#"{"Action":"start","Package":"example.com/benchok"}
+{"Action":"output","Package":"example.com/benchok","Output":"goos: linux\n"}
+{"Action":"output","Package":"example.com/benchok","Output":"BenchmarkX-24    \t"}
+{"Action":"output","Package":"example.com/benchok","Output":"      10\t      1389 ns/op\n"}
+{"Action":"bench","Package":"example.com/benchok","Test":"BenchmarkX"}
+{"Action":"output","Package":"example.com/benchok","Test":"BenchmarkX","Output":"--- BENCH: BenchmarkX-24\n"}
+{"Action":"output","Package":"example.com/benchok","Test":"BenchmarkX","Output":"    bench_test.go:12: hello from b.Log\n"}
+{"Action":"output","Package":"example.com/benchok","Output":"PASS\n"}
+{"Action":"output","Package":"example.com/benchok","Output":"ok  \texample.com/benchok\t0.012s\n"}
+{"Action":"pass","Package":"example.com/benchok","Elapsed":0.012}"#;
+
+        let result = filter_go_test_json(output);
+
+        assert!(!result.contains("No tests found"), "got: {result}");
+        assert!(result.contains("BenchmarkX-24"), "got: {result}");
+        assert!(result.contains("1389 ns/op"), "got: {result}");
+        assert!(!result.contains("hello from b.Log"), "got: {result}");
+        assert!(!result.contains("--- BENCH"), "got: {result}");
+    }
+
+    #[test]
+    fn test_filter_go_test_bench_count_keeps_identical_samples() {
+        // `-count=2` in quiet mode: two runs can print byte-identical results.
+        let output = r#"{"Action":"output","Package":"example.com/benchrepro","Output":"BenchmarkMem-12    \t"}
+{"Action":"output","Package":"example.com/benchrepro","Output":"1000000000\t         0.3058 ns/op\n"}
+{"Action":"output","Package":"example.com/benchrepro","Output":"BenchmarkMem-12    \t"}
+{"Action":"output","Package":"example.com/benchrepro","Output":"1000000000\t         0.3058 ns/op\n"}
+{"Action":"pass","Package":"example.com/benchrepro","Elapsed":0.9}"#;
+
+        let result = filter_go_test_json(output);
+
+        assert_eq!(
+            result.matches("BenchmarkMem-12").count(),
+            2,
+            "every -count sample must be kept: {result}"
+        );
     }
 
     #[test]
