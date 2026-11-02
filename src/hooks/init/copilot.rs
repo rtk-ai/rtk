@@ -331,9 +331,10 @@ mod tests {
 
     #[test]
     fn test_copilot_instructions_exclude_shell_builtins_from_prefix_rule() {
-        assert!(COPILOT_INSTRUCTIONS.contains("Prefix external programs with `rtk`"));
-        assert!(COPILOT_INSTRUCTIONS.contains("Do not prefix shell builtins or keywords"));
-        assert!(!COPILOT_INSTRUCTIONS.contains("Always prefix shell commands with `rtk`"));
+        crate::hooks::init::tests::assert_prefix_rule_spares_builtins(
+            "copilot",
+            COPILOT_INSTRUCTIONS,
+        );
     }
 
     #[test]

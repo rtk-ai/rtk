@@ -2486,26 +2486,58 @@ level = "high"
         assert!(RTK_AWARENESS_FULL.contains(ACTIVATION));
     }
 
-    #[test]
-    fn test_agent_guidance_excludes_shell_builtins_from_prefix_rule() {
-        for (name, content) in [
-            ("awareness-full", RTK_AWARENESS_FULL),
-            ("legacy", RTK_INSTRUCTIONS),
+    /// The prefix rule every payload that teaches it must carry: scoped to external programs,
+    /// naming the same builtins and RTK-shadowed names, and without the old promise that the
+    /// prefix is safe on anything. Shared with the Copilot payload's test so the three stay in
+    /// sync.
+    pub(super) fn assert_prefix_rule_spares_builtins(name: &str, content: &str) {
+        assert!(
+            content.contains("Prefix external programs with `rtk`"),
+            "{name} must scope the prefix rule to external programs"
+        );
+        let start = content
+            .find("Do not prefix shell builtins or keywords")
+            .unwrap_or_else(|| panic!("{name} must exclude shell builtins from the prefix rule"));
+        let paragraph = &content[start..];
+        let paragraph = &paragraph[..paragraph.find("\n\n").unwrap_or_else(|| {
+            panic!("{name}: the exclusion paragraph must end with a blank line")
+        })];
+        // The list itself is the first sentence; `env` is named in it or in the next one.
+        let list = &paragraph[..paragraph.find('.').unwrap_or(paragraph.len())];
+        for builtin in [
+            "test", "[", "read", "cd", "echo", "export", "eval", "source", "printf",
         ] {
             assert!(
-                content.contains("Prefix external programs with `rtk`"),
-                "{name} must scope the prefix rule to external programs"
-            );
-            assert!(
-                content.contains("Do not prefix shell builtins or keywords"),
-                "{name} must exclude shell builtins from the prefix rule"
-            );
-            assert!(
-                !content.contains("Always prefix shell commands with `rtk`")
-                    && !content.contains("Prefix every shell command with `rtk`"),
-                "{name} must not promise that every shell command is safe to prefix"
+                list.contains(&format!("`{builtin}`")),
+                "{name} must list `{builtin}` among the commands left unprefixed"
             );
         }
+        assert!(
+            paragraph.contains("`env`"),
+            "{name} must name `env` in the paragraph that leaves commands unprefixed"
+        );
+        let words = content
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        for promise in [
+            "always prefix shell commands with `rtk`",
+            "always prefix commands with `rtk`",
+            "prefix every shell command with `rtk`",
+            "always safe",
+        ] {
+            assert!(
+                !words.contains(promise),
+                "{name} must not promise that every shell command is safe to prefix: {promise:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_agent_guidance_excludes_shell_builtins_from_prefix_rule() {
+        assert_prefix_rule_spares_builtins("awareness-full", RTK_AWARENESS_FULL);
+        assert_prefix_rule_spares_builtins("legacy", RTK_INSTRUCTIONS);
     }
 
     #[test]
