@@ -84,9 +84,10 @@ There is no PID file and no signal handling: `stop`, `status`, `stats` and `conf
 
 ## Attribution headers
 
-Both optional, both consumed by the proxy and never forwarded upstream:
+All optional, all consumed by the proxy and never forwarded upstream:
 
 | Header | Effect |
 |---|---|
 | `x-rtk-session` | Tags the usage row with a session. Without it, rows share one `default` session. |
 | `x-rtk-project` | Tags the usage row, so savings can be attributed per codebase. |
+| `x-rtk-client` | Names the client the usage row is recorded under, ahead of the guess from `User-Agent`. Trimmed and lowercased; a value that is empty, longer than 32 characters, or holds anything but ASCII letters, digits, `-` and `_` is ignored. `rtk init -g --agent vibe` sets it to `vibe`, because Vibe's main chat turn sends the Mistral SDK's default `User-Agent`. |

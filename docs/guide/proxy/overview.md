@@ -63,9 +63,11 @@ Two independent ways in. `rtk init` configures your agent once and persists it; 
 |---|---|---|
 | Claude Code | `ANTHROPIC_BASE_URL` (env, or `env` in `~/.claude/settings.json`) | `http://127.0.0.1:8080` |
 | Codex | `openai_base_url` in `~/.codex/config.toml`, or `-c openai_base_url=…` for one run | `http://127.0.0.1:8080/openai/v1` with an API-key login, `http://127.0.0.1:8080/chatgpt/backend-api/codex` with a ChatGPT login |
-| Mistral Vibe | the `[[providers]]` entry named `mistral` in `~/.vibe/config.toml` | `api_base = "http://127.0.0.1:8080/mistral/v1"` |
+| Mistral Vibe | the `[[providers]]` entry named `mistral` in `~/.vibe/config.toml` | `api_base = "http://127.0.0.1:8080/mistral/v1"`, plus `x-rtk-client = "vibe"` in its `extra_headers` |
 
 Codex has no environment variable for its base URL, and Vibe has none for its provider table, so neither can be routed by `--env`; the launcher and the guided setup use the channel each agent actually reads.
+
+The daemon records each request under a client name, from the `x-rtk-client` header when one is sent and from the `User-Agent` otherwise. Vibe needs the header: its main chat turn sends the Mistral SDK's default `User-Agent`, the same as any other program using that SDK, so `rtk init -g --agent vibe` adds `x-rtk-client = "vibe"` to the provider's `extra_headers`, next to any headers you already set there. The daemon strips the header before forwarding.
 
 ### `rtk init -g` — the guided setup
 
@@ -89,7 +91,7 @@ Declining leaves everything alone: *"Skipped — enable later with `rtk init -g`
 
 If you already have the channel set but nothing restarting the daemon, re-running the same init asks only the persistence question.
 
-The question is only asked when the daemon can actually run: the `rtk-proxy` binary is installed (next to `rtk` or on `PATH`) or an rtk-proxy already answers on `127.0.0.1:8080`. Otherwise init says the proxy was not offered and leaves the config alone. `--uninstall` removes what this flow wrote, when it still points at the RTK daemon: Claude Code's `env.ANTHROPIC_BASE_URL`, Codex's `openai_base_url`, Vibe's `mistral` provider entry (a customised entry gets its default `api_base` back instead). A base URL aimed anywhere else is kept.
+The question is only asked when the daemon can actually run: the `rtk-proxy` binary is installed (next to `rtk` or on `PATH`) or an rtk-proxy already answers on `127.0.0.1:8080`. Otherwise init says the proxy was not offered and leaves the config alone. `--uninstall` removes what this flow wrote, when it still points at the RTK daemon: Claude Code's `env.ANTHROPIC_BASE_URL`, Codex's `openai_base_url`, Vibe's `mistral` provider entry (a customised entry gets its default `api_base` back instead, and loses only the `x-rtk-client` header from its `extra_headers`). A base URL aimed anywhere else is kept.
 
 Codex's namespace follows its login mode at the time of the init. `rtk codex` picks the right namespace at every launch, so if you switch between an API key and a ChatGPT login, either launch with `rtk codex` or re-run `rtk init -g --codex`.
 
