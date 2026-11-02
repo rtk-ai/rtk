@@ -762,4 +762,60 @@ fn bare_blob_sha_and_peeling_byte_exact() {
         "rtk git show <rev>^{{blob}} must match git show byte-for-byte"
     );
     assert_eq!(rtk_peeled.stdout, b"caf\xe9 end");
+
+    // 5. The other peels that land on a blob: `<tag>^{}` and `<blob>^{object}`.
+    let peel_object = format!("{no_newline_sha}^{{object}}");
+    for arg in ["tag_blob^{}", peel_object.as_str()] {
+        let native = git(path, home, &["show", arg]);
+        let rtk = rtk_show(path, home, &[arg]);
+        assert!(native.status.success(), "git show {arg} must succeed");
+        assert_eq!(
+            rtk.stdout, native.stdout,
+            "rtk git show {arg} must match git show byte-for-byte"
+        );
+    }
+
+    // 6. git resolves abbreviations shorter than 7 digits (down to 4): `--short=4` yields the
+    //    shortest unambiguous one in this repo.
+    let shortest =
+        String::from_utf8(git(path, home, &["rev-parse", "--short=4", &no_newline_sha]).stdout)
+            .expect("sha is ascii")
+            .trim()
+            .to_string();
+    let git_shortest = git(path, home, &["show", &shortest]);
+    let rtk_shortest = rtk_show(path, home, &[&shortest]);
+    assert!(git_shortest.status.success());
+    assert_eq!(
+        rtk_shortest.stdout, git_shortest.stdout,
+        "rtk git show <{shortest}> must match git show byte-for-byte"
+    );
+}
+
+/// A bare hex id that names a COMMIT must keep rtk's compacted commit-diff: the blob probe
+/// rejects it, so recognising bare ids as blob candidates does not turn every
+/// `git show <sha>` into a raw passthrough.
+#[test]
+fn bare_commit_sha_keeps_compact_commit_view() {
+    let repo = setup_repo();
+    let (path, home) = (repo.path.as_path(), repo.home.as_path());
+    let sha = String::from_utf8(git(path, home, &["rev-parse", "HEAD"]).stdout)
+        .expect("sha is ascii")
+        .trim()
+        .to_string();
+
+    for arg in [sha.as_str(), &sha[..7]] {
+        let native = git(path, home, &["show", arg]);
+        let rtk = rtk_show(path, home, &[arg]);
+        assert!(rtk.status.success(), "rtk git show {arg} must succeed");
+        assert_ne!(
+            rtk.stdout, native.stdout,
+            "rtk git show <commit {arg}> must be compacted, not passed through"
+        );
+        // The compact view opens with rtk's one-line `%h %s` summary, not git's header.
+        let out = String::from_utf8_lossy(&rtk.stdout);
+        assert!(
+            out.starts_with(&format!("{} second", &sha[..7])),
+            "expected rtk's one-line summary, got: {out}"
+        );
+    }
 }
