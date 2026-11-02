@@ -528,14 +528,260 @@ fn codex_uninstall_report(
 
 fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
     let absolute_rtk_md_ref = codex_rtk_md_ref(codex_dir);
-    uninstall_codex_with_paths(
+    let mut removed = uninstall_codex_with_paths(
         &codex_dir.join(AGENTS_MD),
         &codex_dir.join(RTK_MD),
         RtkMdScope::CodexHome,
         Some(&codex_dir.join(HOOKS_JSON)),
         &[RTK_MD_REF, absolute_rtk_md_ref.as_str()],
         ctx,
-    )
+    )?;
+    let config_path = codex_dir.join(CODEX_CONFIG_FILE);
+    if config_path.exists() {
+        let content = fs::read_to_string(&config_path)
+            .with_context(|| format!("Failed to read {}", config_path.display()))?;
+        if let Some(new_content) =
+            remove_rtk_openai_base_url(&content, crate::llm_proxy::DEFAULT_BIND)
+        {
+            if ctx.dry_run {
+                println!(
+                    "[dry-run] would stop routing Codex through the RTK proxy: {}",
+                    config_path.display()
+                );
+            } else {
+                atomic_write(&config_path, &new_content)
+                    .with_context(|| format!("Failed to write {}", config_path.display()))?;
+            }
+            removed.push(format!(
+                "config.toml: removed {OPENAI_BASE_URL_KEY} (RTK proxy)"
+            ));
+        }
+    }
+    Ok(removed)
+}
+
+#[cfg(test)]
+mod proxy_route_tests {
+    use super::*;
+
+    const RTK: &str = "http://127.0.0.1:8080/openai/v1";
+
+    #[test]
+    fn the_base_url_is_the_config_key_not_an_env_var() {
+        assert_eq!(
+            openai_base_url_in(
+                "model = \"gpt-5\"\nopenai_base_url = \"http://127.0.0.1:8080/openai/v1\"\n"
+            ),
+            Some(RTK.to_string())
+        );
+        assert_eq!(openai_base_url_in("model = \"gpt-5\"\n"), None);
+        assert_eq!(openai_base_url_in("openai_base_url = \"  \"\n"), None);
+        assert_eq!(openai_base_url_in("not = toml = at all"), None);
+        assert_eq!(
+            openai_base_url_in("[model_providers.openai]\nbase_url = \"http://127.0.0.1:1\"\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn the_namespace_follows_the_login_mode() {
+        assert_eq!(
+            proxy_path_for(
+                Some(r#"{"auth_mode":"chatgpt","tokens":{"id_token":"x"}}"#),
+                false
+            ),
+            Some(CODEX_CHATGPT_PATH)
+        );
+        assert_eq!(
+            proxy_path_for(
+                Some(r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-1"}"#),
+                false
+            ),
+            Some(CODEX_API_PATH)
+        );
+        assert_eq!(
+            proxy_path_for(Some(r#"{"tokens":{"access_token":"t"}}"#), false),
+            Some(CODEX_CHATGPT_PATH),
+            "tokens without an explicit mode mean a ChatGPT login"
+        );
+        assert_eq!(
+            proxy_path_for(Some(r#"{"OPENAI_API_KEY":"sk-1"}"#), false),
+            Some(CODEX_API_PATH)
+        );
+        assert_eq!(
+            proxy_path_for(Some(r#"{"OPENAI_API_KEY":null}"#), false),
+            None
+        );
+        assert_eq!(proxy_path_for(Some("not json"), false), None);
+        assert_eq!(proxy_path_for(None, false), None);
+        assert_eq!(proxy_path_for(None, true), Some(CODEX_API_PATH));
+    }
+
+    #[test]
+    fn the_config_key_is_set_once_and_removed_only_when_it_is_ours() {
+        let written =
+            set_openai_base_url("model = \"gpt-5\"\n\n[features]\nhooks = true\n", RTK).unwrap();
+        assert_eq!(
+            written,
+            "model = \"gpt-5\"\nopenai_base_url = \"http://127.0.0.1:8080/openai/v1\"\n\n[features]\nhooks = true\n"
+        );
+        assert_eq!(set_openai_base_url(&written, RTK).unwrap(), written);
+        assert_eq!(
+            remove_rtk_openai_base_url(&written, "127.0.0.1:8080").as_deref(),
+            Some("model = \"gpt-5\"\n\n[features]\nhooks = true\n")
+        );
+        let chatgpt =
+            set_openai_base_url("", "http://127.0.0.1:8080/chatgpt/backend-api/codex").unwrap();
+        assert_eq!(
+            remove_rtk_openai_base_url(&chatgpt, "127.0.0.1:8080").as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            remove_rtk_openai_base_url(
+                "openai_base_url = \"https://gateway.corp/v1\"\n",
+                "127.0.0.1:8080"
+            ),
+            None
+        );
+        assert_eq!(
+            remove_rtk_openai_base_url("model = \"gpt-5\"\n", "127.0.0.1:8080"),
+            None
+        );
+        for own in ["http://127.0.0.1:8080/v1", "http://127.0.0.1:8080"] {
+            assert_eq!(
+                remove_rtk_openai_base_url(
+                    &format!("openai_base_url = \"{own}\"\n"),
+                    "127.0.0.1:8080"
+                ),
+                None,
+                "{own} is the user's server on the daemon's port"
+            );
+        }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn the_codex_onramp_writes_the_key_and_registers_session_start_once() {
+        use super::super::proxy_onramp::ProxyOnramp;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let hooks_path = temp.path().join("hooks.json");
+        fs::write(
+            &hooks_path,
+            format!("{{\"hooks\":{{\"PreToolUse\":[{{\"matcher\":\"Bash\",\"hooks\":[{{\"type\":\"command\",\"command\":\"{CODEX_HOOK_COMMAND}\"}}]}}]}}}}"),
+        )
+        .unwrap();
+        let onramp = CodexOnramp {
+            config_path: temp.path().join("config.toml"),
+            hooks_path: hooks_path.clone(),
+        };
+        assert_eq!(onramp.current_target().unwrap(), None);
+        assert!(!onramp.autostart_present().unwrap());
+        let lines = onramp.write(RTK, true).unwrap();
+        assert!(
+            lines[0].contains("openai_base_url = http://127.0.0.1:8080/openai/v1"),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("SessionStart hook registered")),
+            "{lines:?}"
+        );
+        assert_eq!(onramp.current_target().unwrap().as_deref(), Some(RTK));
+        assert!(onramp.autostart_present().unwrap());
+        onramp.write(RTK, true).unwrap();
+        let root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+        assert_eq!(
+            root.pointer("/hooks/SessionStart")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            root.pointer("/hooks/PreToolUse")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            onramp.manual_line(RTK),
+            "openai_base_url = \"http://127.0.0.1:8080/openai/v1\""
+        );
+
+        let removed = uninstall_codex_at(temp.path(), InitContext::default()).unwrap();
+        assert!(
+            removed.iter().any(|l| l.contains("openai_base_url")),
+            "{removed:?}"
+        );
+        assert_eq!(onramp.current_target().unwrap(), None);
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn the_codex_onramp_path_follows_the_login() {
+        use super::super::proxy_onramp::ProxyOnramp;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let onramp = CodexOnramp {
+            config_path: temp.path().join("config.toml"),
+            hooks_path: temp.path().join("hooks.json"),
+        };
+        crate::core::user_env::with_vars(
+            &[
+                ("CODEX_HOME", temp.path().to_str()),
+                ("OPENAI_API_KEY", None),
+            ],
+            || {
+                fs::write(
+                    temp.path().join(CODEX_AUTH_FILE),
+                    r#"{"auth_mode":"chatgpt","tokens":{"id_token":"x"}}"#,
+                )
+                .unwrap();
+                assert_eq!(onramp.path(), CODEX_CHATGPT_PATH);
+                fs::write(
+                    temp.path().join(CODEX_AUTH_FILE),
+                    r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-1"}"#,
+                )
+                .unwrap();
+                assert_eq!(onramp.path(), CODEX_API_PATH);
+                fs::remove_file(temp.path().join(CODEX_AUTH_FILE)).unwrap();
+                assert_eq!(onramp.path(), CODEX_API_PATH);
+            },
+        );
+    }
+
+    #[test]
+    fn a_dry_run_uninstall_reports_the_route_removal_without_writing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = temp.path().join(CODEX_CONFIG_FILE);
+        let text = format!("model = \"gpt-5\"\n{OPENAI_BASE_URL_KEY} = \"{RTK}\"\n");
+        fs::write(&config, &text).unwrap();
+
+        let removed = uninstall_codex_at(
+            temp.path(),
+            InitContext {
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            removed.iter().any(|l| l.contains(OPENAI_BASE_URL_KEY)),
+            "{removed:?}"
+        );
+        assert_eq!(fs::read_to_string(&config).unwrap(), text);
+
+        uninstall_codex_at(temp.path(), InitContext::default()).unwrap();
+        assert!(
+            !fs::read_to_string(&config)
+                .unwrap()
+                .contains(OPENAI_BASE_URL_KEY)
+        );
+    }
 }
 
 pub(super) fn run_codex_mode(global: bool, ctx: InitContext) -> Result<()> {
@@ -704,10 +950,191 @@ pub(super) fn run_codex_mode_with_paths(
         }
     }
 
+    #[cfg(feature = "engine")]
+    if global && !dry_run {
+        let onramp = CodexOnramp {
+            config_path: hooks_json_path
+                .parent()
+                .map(|dir| dir.join(CODEX_CONFIG_FILE))
+                .context("hooks.json path missing parent directory")?,
+            hooks_path: hooks_json_path.clone(),
+        };
+        if let Err(e) = super::proxy_onramp::offer_proxy_onramp(&onramp, PatchMode::Ask, ctx) {
+            eprintln!("  [warn] proxy on-ramp skipped: {e}");
+        }
+    }
+
     Ok(())
 }
 
-fn resolve_codex_dir() -> Result<PathBuf> {
+pub(crate) const CODEX_API_PATH: &str = "/openai/v1";
+pub(crate) const CODEX_CHATGPT_PATH: &str = "/chatgpt/backend-api/codex";
+pub(crate) const CODEX_PROXY_PATHS: &[&str] = &[CODEX_API_PATH, CODEX_CHATGPT_PATH];
+const CODEX_CONFIG_FILE: &str = "config.toml";
+const CODEX_AUTH_FILE: &str = "auth.json";
+const OPENAI_BASE_URL_KEY: &str = "openai_base_url";
+
+pub(crate) fn openai_base_url() -> Option<String> {
+    let dir = resolve_codex_dir().ok()?;
+    let text = fs::read_to_string(dir.join(CODEX_CONFIG_FILE)).ok()?;
+    openai_base_url_in(&text)
+}
+
+fn openai_base_url_in(config: &str) -> Option<String> {
+    let value: toml::Value = config.parse().ok()?;
+    value
+        .get(OPENAI_BASE_URL_KEY)?
+        .as_str()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_string)
+}
+
+pub(crate) fn proxy_path() -> Option<&'static str> {
+    let dir = resolve_codex_dir().ok()?;
+    let auth = fs::read_to_string(dir.join(CODEX_AUTH_FILE)).ok();
+    proxy_path_for(
+        auth.as_deref(),
+        crate::core::user_env::var("OPENAI_API_KEY").is_some_and(|key| !key.trim().is_empty()),
+    )
+}
+
+fn proxy_path_for(auth_json: Option<&str>, api_key_in_env: bool) -> Option<&'static str> {
+    if let Some(auth) =
+        auth_json.and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+    {
+        match auth.get("auth_mode").and_then(|mode| mode.as_str()) {
+            Some("chatgpt") => return Some(CODEX_CHATGPT_PATH),
+            Some("apikey") => return Some(CODEX_API_PATH),
+            _ => {}
+        }
+        if auth.get("tokens").is_some_and(|tokens| tokens.is_object()) {
+            return Some(CODEX_CHATGPT_PATH);
+        }
+        if auth
+            .get("OPENAI_API_KEY")
+            .and_then(|key| key.as_str())
+            .is_some_and(|key| !key.trim().is_empty())
+        {
+            return Some(CODEX_API_PATH);
+        }
+    }
+    api_key_in_env.then_some(CODEX_API_PATH)
+}
+
+#[cfg(any(feature = "engine", test))]
+fn set_openai_base_url(text: &str, url: &str) -> Result<String> {
+    let mut doc: toml_edit::DocumentMut = text.parse().context("parse Codex config.toml")?;
+    doc[OPENAI_BASE_URL_KEY] = toml_edit::value(url);
+    Ok(doc.to_string())
+}
+
+fn remove_rtk_openai_base_url(text: &str, bind: &str) -> Option<String> {
+    let mut doc: toml_edit::DocumentMut = text.parse().ok()?;
+    let current = doc.get(OPENAI_BASE_URL_KEY)?.as_str()?;
+    if !crate::llm_proxy::is_rtk_url(current, bind, CODEX_PROXY_PATHS) {
+        return None;
+    }
+    doc.remove(OPENAI_BASE_URL_KEY);
+    Some(doc.to_string())
+}
+
+#[cfg(feature = "engine")]
+const CODEX_SPEC: super::proxy_onramp::OnrampSpec = super::proxy_onramp::OnrampSpec {
+    label: "Codex",
+    config: "config.toml",
+    key: "openai_base_url",
+    path: CODEX_API_PATH,
+    manual_option: "Neither — print the config line; config.toml is not touched",
+    autostart_option: Some(
+        "SessionStart hook — start it automatically when a Codex session begins (recommended)",
+    ),
+    autostart_done: "hooks.json: SessionStart hook registered — the proxy starts with each session",
+    autostart_persistence: "SessionStart autostart",
+    enable_later: "`rtk init -g --codex`",
+    rerun: "rtk init -g --codex",
+    default_target: None,
+};
+
+#[cfg(feature = "engine")]
+struct CodexOnramp {
+    config_path: PathBuf,
+    hooks_path: PathBuf,
+}
+
+#[cfg(feature = "engine")]
+impl CodexOnramp {
+    fn text(&self) -> Result<String> {
+        if !self.config_path.exists() {
+            return Ok(String::new());
+        }
+        fs::read_to_string(&self.config_path)
+            .with_context(|| format!("Failed to read {}", self.config_path.display()))
+    }
+}
+
+#[cfg(feature = "engine")]
+impl super::proxy_onramp::ProxyOnramp for CodexOnramp {
+    fn spec(&self) -> &'static super::proxy_onramp::OnrampSpec {
+        &CODEX_SPEC
+    }
+
+    fn path(&self) -> &'static str {
+        proxy_path().unwrap_or(CODEX_API_PATH)
+    }
+
+    fn current_target(&self) -> Result<Option<String>> {
+        Ok(openai_base_url_in(&self.text()?))
+    }
+
+    fn autostart_present(&self) -> Result<bool> {
+        Ok(read_json_file(&self.hooks_path)?.is_some_and(|root| {
+            grouped_hook_present(
+                &root,
+                crate::hooks::constants::SESSION_START_KEY,
+                is_codex_hook_command,
+            )
+        }))
+    }
+
+    fn manual_line(&self, base_url: &str) -> String {
+        format!("{OPENAI_BASE_URL_KEY} = \"{base_url}\"")
+    }
+
+    fn write(&self, base_url: &str, autostart: bool) -> Result<Vec<String>> {
+        let updated = set_openai_base_url(&self.text()?, base_url)?;
+        let backup = backup_and_atomic_write(&self.config_path, &updated)?;
+        let mut lines = vec![format!("  config.toml: {OPENAI_BASE_URL_KEY} = {base_url}")];
+        if let Some(path) = backup {
+            lines.push(format!("  Backup: {}", path.display()));
+        }
+        if autostart {
+            let mut root =
+                read_json_file(&self.hooks_path)?.unwrap_or_else(|| serde_json::json!({}));
+            if !grouped_hook_present(
+                &root,
+                crate::hooks::constants::SESSION_START_KEY,
+                is_codex_hook_command,
+            ) {
+                insert_grouped_hook(
+                    &mut root,
+                    crate::hooks::constants::SESSION_START_KEY,
+                    None,
+                    CODEX_HOOK_COMMAND,
+                )?;
+                if let Some(parent) = self.hooks_path.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("Failed to create {}", parent.display()))?;
+                }
+                backup_and_atomic_write(&self.hooks_path, &serde_json::to_string_pretty(&root)?)?;
+            }
+            lines.push(format!("  {}", CODEX_SPEC.autostart_done));
+        }
+        Ok(lines)
+    }
+}
+
+pub(crate) fn resolve_codex_dir() -> Result<PathBuf> {
     resolve_codex_dir_from(
         user_dirs::env_path("CODEX_HOME").map(PathBuf::from),
         user_dirs::home(),

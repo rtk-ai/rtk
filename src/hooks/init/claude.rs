@@ -784,7 +784,10 @@ pub(super) fn run_default_mode(
     ) {
         #[cfg(feature = "engine")]
         {
-            if let Err(e) = offer_proxy_onramp(&claude_dir.join(SETTINGS_JSON), patch_mode, ctx) {
+            let onramp = super::proxy_onramp::ClaudeOnramp {
+                settings_path: claude_dir.join(SETTINGS_JSON),
+            };
+            if let Err(e) = super::proxy_onramp::offer_proxy_onramp(&onramp, patch_mode, ctx) {
                 eprintln!("  [warn] proxy on-ramp skipped: {e}");
             }
             if let Err(e) = offer_delegation_onramp(patch_mode, ctx) {

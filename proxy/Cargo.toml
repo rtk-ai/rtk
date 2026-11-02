@@ -54,6 +54,7 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors", "catch-panic"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 bytes = "1"
+ruzstd = "0.8"
 futures = "0.3"
 # Ergonomic async streams for the on-the-fly SSE usage tally in `forward::relay`.
 async-stream = "0.3"

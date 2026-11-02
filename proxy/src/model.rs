@@ -13,6 +13,8 @@ pub enum Provider {
     Anthropic,
     /// OpenAI Chat Completions API (`/v1/chat/completions`) — OpenCode and others.
     Openai,
+    #[serde(rename = "openai-responses")]
+    OpenaiResponses,
     /// Google Gemini API (`generateContent`) — reached only via cross-provider
     /// translation (there is no native Gemini inbound handler for the offload
     /// direction; a Gemini client is served on a mapped path).
@@ -24,6 +26,7 @@ impl Provider {
         match self {
             Provider::Anthropic => "anthropic",
             Provider::Openai => "openai",
+            Provider::OpenaiResponses => "openai-responses",
             Provider::Google => "google",
         }
     }
@@ -399,5 +402,19 @@ mod tests {
             &axum::http::HeaderMap::new(),
         );
         assert_eq!(req.client, None);
+    }
+
+    #[test]
+    fn a_provider_serialises_as_the_name_the_usage_store_records() {
+        for provider in [
+            Provider::Anthropic,
+            Provider::Openai,
+            Provider::OpenaiResponses,
+            Provider::Google,
+        ] {
+            let json = serde_json::to_string(&provider).unwrap();
+            assert_eq!(json, format!("\"{}\"", provider.as_str()));
+            assert_eq!(serde_json::from_str::<Provider>(&json).unwrap(), provider);
+        }
     }
 }
