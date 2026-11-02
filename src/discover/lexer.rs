@@ -495,9 +495,10 @@ pub(crate) enum ShellDialect {
 
 /// True for constructs the permission gate can't decompose, so they must never
 /// be auto-allowed: command/process substitution, quoting the lexer reads
-/// differently from bash, or a real file-target redirect (fd-dup like `2>&1`
-/// and `/dev/null` are exempt). Separators and subshells are handled by
-/// [`split_for_permissions`], not flagged here.
+/// differently from bash, a heredoc or herestring whatever its delimiter, or a
+/// real file-target redirect (fd-dup like `2>&1` and `/dev/null` are exempt).
+/// Separators and subshells are handled by [`split_for_permissions`], not
+/// flagged here.
 pub fn contains_unattestable_construct(cmd: &str) -> bool {
     contains_unattestable_construct_in(cmd, ShellDialect::Posix)
 }
@@ -659,10 +660,14 @@ pub(crate) fn redirect_takes_operand(value: &str) -> bool {
 
 // A redirect that takes an operand names a file unless that operand is
 // `/dev/null`; a bare `>&` before a word is `>word 2>&1` — a file target too.
+// A heredoc or herestring also returns true, whatever its delimiter: its body
+// is inline data that no caller can attest.
 pub(crate) fn redirect_has_file_target(tokens: &[ParsedToken], i: usize) -> bool {
     let value = &tokens[i].value;
-    // Heredocs (`<<` and `<<-`) have a delimiter, not a file target.
-    // They are always unattestable because the body is inline data.
+    // A heredoc operator arrives as `<<` with any fd digits folded in front
+    // (`3<<`); the `-` of `<<-` stays in the next word, and a herestring `<<<`
+    // arrives as `<<` then `<`. Its operand is a delimiter, so a delimiter
+    // spelled `/dev/null` must not reach the exemption below.
     if value
         .trim_start_matches(|ch: char| ch.is_ascii_digit())
         .starts_with("<<")
