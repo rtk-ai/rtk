@@ -2173,6 +2173,37 @@ mod tests {
         assert!(binary_hook_registered(tmp.path()));
     }
 
+    /// `C:/tools/RTK.EXE hook claude` runs rtk: the status probe behind
+    /// `rtk gain` sees it, `rtk init -g` adds no second entry next to it, and
+    /// uninstall removes it (#4898).
+    #[test]
+    fn test_upper_case_rtk_exe_hook_is_rtks_own() {
+        let settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{ "type": "command", "command": "C:/tools/RTK.EXE hook claude" }]
+                }]
+            }
+        });
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fs::write(tmp.path().join(SETTINGS_JSON), settings.to_string()).expect("write settings");
+        assert!(binary_hook_registered(tmp.path()));
+
+        let mut root = settings;
+        assert!(hook_already_present(
+            &root,
+            PRE_TOOL_USE_KEY,
+            CLAUDE_HOOK_COMMAND
+        ));
+        assert!(remove_hook_from_json(&mut root));
+        assert!(!hook_already_present(
+            &root,
+            PRE_TOOL_USE_KEY,
+            CLAUDE_HOOK_COMMAND
+        ));
+    }
+
     #[test]
     fn test_hook_status_dangling_script_in_settings_is_missing() {
         let tmp = test_isolation::tempdir();
