@@ -2335,6 +2335,33 @@ mod tests {
         serde_json::json!([{ "matcher": matcher, "hooks": [{ "type": "command", "command": "rtk hook claude" }] }])
     }
 
+    /// A SessionStart entry that names the rtk binary in any case is RTK's
+    /// own: Windows file names are case-insensitive, so `RTK.EXE` is
+    /// `rtk.exe` (#4898).
+    #[test]
+    #[cfg(feature = "engine")]
+    fn session_start_entry_present_matches_a_case_insensitive_rtk_binary() {
+        let entry = |command: &str| serde_json::json!([{ "hooks": [{ "type": "command", "command": command }] }]);
+        for command in [
+            "rtk hook claude",
+            "C:/tools/rtk.exe hook claude",
+            "C:/tools/RTK.EXE hook claude",
+            "C:/tools/Rtk.exe hook claude",
+            r#""C:\tools\RTK.EXE" hook claude"#,
+        ] {
+            let root = settings_with(serde_json::json!({
+                crate::hooks::constants::SESSION_START_KEY: entry(command)
+            }));
+            assert!(session_start_entry_present(&root), "{command}");
+        }
+
+        // The subcommand words stay exact.
+        let root = settings_with(serde_json::json!({
+            crate::hooks::constants::SESSION_START_KEY: entry("C:/tools/RTK.EXE hook cursor")
+        }));
+        assert!(!session_start_entry_present(&root));
+    }
+
     #[test]
     fn hook_gaps_names_tools_the_installed_matcher_misses() {
         let root = settings_with(serde_json::json!({ "PreToolUse": rtk_entry("Bash") }));
