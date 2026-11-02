@@ -531,6 +531,10 @@ mod tests {
             "/custom/rtk-rewrite.sh.backup",
             "python3 /custom/audit.py --label rtk-rewrite.sh",
             "audit.sh --mirror ~/.claude/hooks/rtk-rewrite.sh",
+            "~/.claude/hooks/rtk-rewrite.sh && logger -t audit done",
+            "~/.claude/hooks/rtk-rewrite.sh | tee -a /tmp/audit.log",
+            "~/.claude/hooks/rtk-rewrite.sh --flag",
+            "/custom/my-rtk-rewrite.sh",
         ];
 
         for cmd in non_invocations {
@@ -563,7 +567,11 @@ mod tests {
             assert_eq!(json_clone2, json, "json must remain unchanged for '{cmd}'");
         }
 
-        let valid_invocations = ["~/.claude/hooks/rtk-rewrite.sh", "/path/to/rtk-rewrite.sh"];
+        let valid_invocations = [
+            "~/.claude/hooks/rtk-rewrite.sh",
+            "/path/to/rtk-rewrite.sh",
+            "./hooks/rtk-rewrite.sh",
+        ];
 
         for cmd in valid_invocations {
             let json = serde_json::json!({
@@ -596,11 +604,11 @@ mod tests {
 
     #[test]
     fn test_cursor_install_and_uninstall_preserves_user_hooks_mentioning_rtk_rewrite() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("create temp dir");
         let cursor_dir = temp.path().join(CURSOR_DIR);
         let hooks_json = cursor_dir.join(HOOKS_JSON);
         let user_cmd = "python3 /custom/audit.py --label rtk-rewrite.sh";
-        fs::create_dir_all(&cursor_dir).unwrap();
+        fs::create_dir_all(&cursor_dir).expect("create cursor dir");
         fs::write(
             &hooks_json,
             serde_json::to_string_pretty(&serde_json::json!({
@@ -612,18 +620,22 @@ mod tests {
                     }]
                 }
             }))
-            .unwrap(),
+            .expect("serialize hooks.json"),
         )
-        .unwrap();
+        .expect("write hooks.json");
 
         // Patch / install must succeed and not skip claiming "already present"
-        assert!(patch_cursor_hooks_json(&hooks_json, InitContext::default()).unwrap());
+        assert!(
+            patch_cursor_hooks_json(&hooks_json, InitContext::default())
+                .expect("patch cursor hooks")
+        );
 
         let after_patch: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&hooks_json).unwrap()).unwrap();
+            serde_json::from_str(&fs::read_to_string(&hooks_json).expect("read hooks.json"))
+                .expect("parse hooks.json");
         let commands: Vec<&str> = after_patch["hooks"]["preToolUse"]
             .as_array()
-            .unwrap()
+            .expect("preToolUse array")
             .iter()
             .filter_map(|h| h.get("command")?.as_str())
             .collect();
@@ -631,14 +643,16 @@ mod tests {
         assert!(commands.contains(&CURSOR_HOOK_COMMAND));
 
         // Uninstall must remove CURSOR_HOOK_COMMAND, leaving user_cmd intact
-        let removed = remove_cursor_hooks_at(&cursor_dir, InitContext::default()).unwrap();
+        let removed = remove_cursor_hooks_at(&cursor_dir, InitContext::default())
+            .expect("remove cursor hooks");
         assert_eq!(removed, vec!["Cursor hooks.json: removed RTK entry"]);
 
         let after_uninstall: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&hooks_json).unwrap()).unwrap();
+            serde_json::from_str(&fs::read_to_string(&hooks_json).expect("read hooks.json"))
+                .expect("parse hooks.json");
         let remaining_commands: Vec<&str> = after_uninstall["hooks"]["preToolUse"]
             .as_array()
-            .unwrap()
+            .expect("preToolUse array")
             .iter()
             .filter_map(|h| h.get("command")?.as_str())
             .collect();

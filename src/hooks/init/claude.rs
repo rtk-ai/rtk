@@ -2441,6 +2441,10 @@ mod tests {
             "/custom/rtk-rewrite.sh.backup",
             "python3 /custom/audit.py --label rtk-rewrite.sh",
             "audit.sh --mirror ~/.claude/hooks/rtk-rewrite.sh",
+            "~/.claude/hooks/rtk-rewrite.sh && logger -t audit done",
+            "~/.claude/hooks/rtk-rewrite.sh | tee -a /tmp/audit.log",
+            "~/.claude/hooks/rtk-rewrite.sh --flag",
+            "/custom/my-rtk-rewrite.sh",
         ];
 
         for cmd in non_invocations {
@@ -2476,7 +2480,11 @@ mod tests {
             assert_eq!(json_clone2, json, "json must remain unchanged for '{cmd}'");
         }
 
-        let valid_invocations = ["~/.claude/hooks/rtk-rewrite.sh", "/path/to/rtk-rewrite.sh"];
+        let valid_invocations = [
+            "~/.claude/hooks/rtk-rewrite.sh",
+            "/path/to/rtk-rewrite.sh",
+            "./hooks/rtk-rewrite.sh",
+        ];
 
         for cmd in valid_invocations {
             let json = serde_json::json!({
@@ -2525,7 +2533,11 @@ mod tests {
                     }]
                 }
             });
-            fs::write(&settings, serde_json::to_string_pretty(&seeded).unwrap()).unwrap();
+            fs::write(
+                &settings,
+                serde_json::to_string_pretty(&seeded).expect("serialize settings"),
+            )
+            .expect("write settings");
 
             // Install should not skip claiming "already present", but successfully patch
             let patch_result = patch_settings_json_command(
@@ -2535,12 +2547,15 @@ mod tests {
                 InitContext::default(),
                 HookInstallScope::UserGlobal,
             )
-            .unwrap();
+            .expect("patch settings");
             assert_eq!(patch_result, PatchResult::Patched);
 
             let after_install: serde_json::Value =
-                serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
-            let pre_hooks = after_install["hooks"][PRE_TOOL_USE_KEY].as_array().unwrap();
+                serde_json::from_str(&fs::read_to_string(&settings).expect("read settings"))
+                    .expect("parse settings");
+            let pre_hooks = after_install["hooks"][PRE_TOOL_USE_KEY]
+                .as_array()
+                .expect("pre hooks array");
             let commands: Vec<&str> = pre_hooks
                 .iter()
                 .filter_map(|e| e.get("hooks")?.as_array())
@@ -2552,7 +2567,7 @@ mod tests {
 
             // Uninstall should remove only RTK hook, leaving user hook
             assert_eq!(
-                remove_settings_entries(InitContext::default()).unwrap(),
+                remove_settings_entries(InitContext::default()).expect("remove settings"),
                 SettingsRemoval {
                     hook: true,
                     proxy_base_url: false,
@@ -2560,10 +2575,11 @@ mod tests {
             );
 
             let after_uninstall: serde_json::Value =
-                serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+                serde_json::from_str(&fs::read_to_string(&settings).expect("read settings"))
+                    .expect("parse settings");
             let remaining_commands: Vec<&str> = after_uninstall["hooks"][PRE_TOOL_USE_KEY]
                 .as_array()
-                .unwrap()
+                .expect("pre hooks array")
                 .iter()
                 .filter_map(|e| e.get("hooks")?.as_array())
                 .flatten()

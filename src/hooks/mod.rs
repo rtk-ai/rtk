@@ -44,11 +44,11 @@ pub fn is_claude_hook_command(command: &str) -> bool {
 
 pub fn is_legacy_rewrite_hook(command: &str) -> bool {
     let parts = crate::discover::lexer::shell_split(command);
-    let Some(first_word) = parts.first() else {
+    let [word] = parts.as_slice() else {
         return false;
     };
 
-    let filename = first_word.rsplit(['/', '\\']).next().unwrap_or(first_word);
+    let filename = word.rsplit(['/', '\\']).next().unwrap_or(word);
     filename == constants::REWRITE_HOOK_FILE
 }
 
@@ -93,6 +93,7 @@ mod tests {
         assert!(is_legacy_rewrite_hook("rtk-rewrite.sh"));
         assert!(is_legacy_rewrite_hook("~/.claude/hooks/rtk-rewrite.sh"));
         assert!(is_legacy_rewrite_hook("/path/to/rtk-rewrite.sh"));
+        assert!(is_legacy_rewrite_hook("./hooks/rtk-rewrite.sh"));
         assert!(is_legacy_rewrite_hook("\"/path/to/rtk-rewrite.sh\""));
         assert!(is_legacy_rewrite_hook(
             "'C:\\Users\\test\\.claude\\hooks\\rtk-rewrite.sh'"
@@ -112,6 +113,16 @@ mod tests {
         assert!(!is_legacy_rewrite_hook(
             "audit.sh --mirror ~/.claude/hooks/rtk-rewrite.sh"
         ));
+        assert!(!is_legacy_rewrite_hook(
+            "~/.claude/hooks/rtk-rewrite.sh && logger -t audit done"
+        ));
+        assert!(!is_legacy_rewrite_hook(
+            "~/.claude/hooks/rtk-rewrite.sh | tee -a /tmp/audit.log"
+        ));
+        assert!(!is_legacy_rewrite_hook(
+            "~/.claude/hooks/rtk-rewrite.sh --flag"
+        ));
+        assert!(!is_legacy_rewrite_hook("/custom/my-rtk-rewrite.sh"));
         assert!(!is_legacy_rewrite_hook(""));
     }
 }
