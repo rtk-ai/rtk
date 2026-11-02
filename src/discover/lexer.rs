@@ -660,7 +660,16 @@ pub(crate) fn redirect_takes_operand(value: &str) -> bool {
 // A redirect that takes an operand names a file unless that operand is
 // `/dev/null`; a bare `>&` before a word is `>word 2>&1` — a file target too.
 pub(crate) fn redirect_has_file_target(tokens: &[ParsedToken], i: usize) -> bool {
-    if !redirect_takes_operand(&tokens[i].value) {
+    let value = &tokens[i].value;
+    // Heredocs (`<<` and `<<-`) have a delimiter, not a file target.
+    // They are always unattestable because the body is inline data.
+    if value
+        .trim_start_matches(|ch: char| ch.is_ascii_digit())
+        .starts_with("<<")
+    {
+        return true;
+    }
+    if !redirect_takes_operand(value) {
         return false;
     }
     match tokens.get(i + 1) {
@@ -1933,6 +1942,19 @@ mod tests {
         assert!(!contains_unattestable_construct("cmd > /dev/null"));
         assert!(!contains_unattestable_construct("cmd &> /dev/null"));
         assert!(!contains_unattestable_construct("cmd >& /dev/null"));
+    }
+
+    #[test]
+    fn test_bugfix_issue_3980_heredoc_devnull_not_exempt() {
+        // Heredocs with /dev/null as delimiter should be unattestable
+        // because /dev/null is the delimiter, not a file target
+        assert!(contains_unattestable_construct("git status << /dev/null"));
+        assert!(contains_unattestable_construct("git status <</dev/null"));
+        assert!(contains_unattestable_construct("git status <<-EOF"));
+        assert!(contains_unattestable_construct("git status <<- /dev/null"));
+        assert!(contains_unattestable_construct("git status 3<< /dev/null"));
+        assert!(contains_unattestable_construct("git status 3<</dev/null"));
+        assert!(contains_unattestable_construct("git status 3<<- /dev/null"));
     }
 
     #[test]
