@@ -1338,6 +1338,73 @@ async fn a_vibe_request_reaches_mistral_and_is_recorded_under_its_own_name() {
     );
 }
 
+/// Vibe's main chat turn carries the Mistral SDK's default User-Agent, the same
+/// as any other SDK program; `rtk init -g --agent vibe` adds `x-rtk-client` to
+/// the provider so the daemon can still record it as vibe (#4925).
+#[tokio::test]
+async fn the_client_header_names_a_request_the_user_agent_cannot() {
+    let mistral = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "cmpl-1", "object": "chat.completion", "model": "devstral-medium-latest",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15}
+        })))
+        .mount(&mistral)
+        .await;
+    let mut c = cfg(&mistral.uri(), false);
+    c.upstreams.insert("mistral".to_string(), mistral.uri());
+    let state = AppState::new(c);
+    let store = state.store.clone().expect("in-memory store");
+    let app = build_router(state);
+
+    for client_header in [Some("vibe"), None] {
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/mistral/v1/chat/completions")
+            .header("content-type", "application/json")
+            .header("user-agent", "mistral-client-python/3.5.0");
+        if let Some(value) = client_header {
+            req = req.header("x-rtk-client", value);
+        }
+        let resp = app
+            .clone()
+            .oneshot(
+                req.body(axum::body::Body::from(
+                    r#"{"model":"devstral-medium-latest","messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    let seen = mistral.received_requests().await.unwrap();
+    assert_eq!(seen.len(), 2);
+    assert!(
+        seen.iter().all(|r| r.headers.get("x-rtk-client").is_none()),
+        "the label is proxy-internal and never reaches the upstream"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let mut clients: Vec<(String, i64)> = store
+        .metrics()
+        .await
+        .by_client
+        .iter()
+        .map(|c| (c.client.clone(), c.requests))
+        .collect();
+    clients.sort();
+    assert_eq!(
+        clients,
+        vec![
+            ("mistral-client-python".to_string(), 1),
+            ("vibe".to_string(), 1)
+        ]
+    );
+}
+
 #[tokio::test]
 async fn a_streamed_mistral_reply_tallies_its_final_usage_chunk() {
     let mistral = MockServer::start().await;
