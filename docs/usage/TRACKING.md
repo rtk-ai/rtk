@@ -46,8 +46,10 @@ Commands RTK passes through without filtering are tracked at 0% reduction. They 
 summary, the daily/weekly/monthly breakdowns, and the JSON/CSV exports). Timing classification uses
 the stored label: canonical passthrough, fallback, bypass, proxy, and the unambiguous legacy
 `rtk ... (passthrough)` labels are untimed, while ordinary filtered labels remain timed even when the
-filter emits zero output. Ordinary-label passthrough rows written by v0.52.0 through v1.1.0, including
-`rtk curl ...` and `rtk git show ...`, remain timed because they cannot be classified after the fact.
+filter emits zero output. Releases up to v1.1.0 stored two passthroughs under an ordinary label,
+`rtk curl ...` for a binary response and `rtk git show ...` for raw blob bytes. Those rows cannot be
+told apart from filtered runs, so they count as timed, including the ones v1.1.0 left out because
+they had no captured output.
 A passthrough row's duration is the wrapped process's lifetime, which can be the whole session for an
 interactive TUI such as `rtk claude`.
 

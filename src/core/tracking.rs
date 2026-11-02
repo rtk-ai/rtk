@@ -284,11 +284,12 @@ pub struct DayStats {
     pub total_time_ms: u64,
     /// Average execution time per timed command (milliseconds)
     pub avg_time_ms: u64,
-    /// Commands whose execution time counts toward `total_time_ms`: ordinary and canonical
-    /// filtered labels, including filters that produced zero output. Canonical passthrough,
-    /// fallback, bypass and proxy labels are untimed because their duration is the wrapped
-    /// process's lifetime, which can be a whole interactive TUI session (#4003). Not exported:
-    /// CSV/JSON keep their schema.
+    /// Commands whose execution time counts toward `total_time_ms`, as `is_timed_command`
+    /// decides from the stored label: filtered commands count, including filters that produced
+    /// zero output. Rows labelled passthrough (`rtk:passthrough …` or the legacy
+    /// `rtk … (passthrough)`), fallback, bypass or proxy do not, because their duration is the
+    /// wrapped process's lifetime, which can be a whole interactive TUI session (#4003).
+    /// Not exported: CSV/JSON keep their schema.
     #[serde(skip)]
     pub timed_commands: usize,
 }
@@ -361,8 +362,8 @@ pub struct MonthStats {
 type CommandStats = (String, usize, usize, f64, u64);
 
 /// Whether a stored row's elapsed time belongs to a filtered command run or to the lifetime of
-/// an unfiltered child process. Ordinary `rtk <command>` labels remain timed because a zero-input
-/// row can be a real filter that produced no output.
+/// an unfiltered child process. A filtered `rtk <command>` label is timed even with zero input,
+/// since a real filter can produce no output.
 pub(crate) fn is_timed_command(rtk_cmd: &str) -> bool {
     !(is_legacy_passthrough_command(rtk_cmd)
         || rtk_cmd == "rtk:passthrough"
@@ -374,8 +375,8 @@ pub(crate) fn is_timed_command(rtk_cmd: &str) -> bool {
         || rtk_cmd.starts_with("rtk proxy "))
 }
 
-/// Labels written by v0.51.0 appended a lowercase passthrough suffix.
-/// Similar text in an argument or with different casing remains timed.
+/// Releases up to v0.51.0 labelled passthrough rows `rtk <command> (passthrough)`. Similar text
+/// inside a label or with different casing is timed.
 fn is_legacy_passthrough_command(rtk_cmd: &str) -> bool {
     rtk_cmd.starts_with("rtk ") && rtk_cmd.ends_with(" (passthrough)")
 }
