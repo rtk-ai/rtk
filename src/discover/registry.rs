@@ -8,8 +8,8 @@ use std::sync::LazyLock;
 
 use super::lexer::{
     ParsedToken, PipeKind, QuoteScan, TokenKind, ansi_c_quote_defeats_lexer, coalesce_words,
-    contains_unattestable_construct_in, is_crlf_at, redirect_has_file_target, shell_split,
-    split_on_operators, tokenize, tokenize_with_newlines,
+    contains_unattestable_construct_in, is_crlf_at, is_heredoc_redirect, redirect_has_file_target,
+    shell_split, split_on_operators, tokenize, tokenize_with_newlines,
 };
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 use super::shell_wrapper::parse_shell_wrapper;
@@ -355,7 +355,7 @@ fn extract_base_command(cmd: &str) -> &str {
 pub fn has_heredoc(cmd: &str) -> bool {
     tokenize(cmd)
         .iter()
-        .any(|t| t.kind == TokenKind::Redirect && t.value.starts_with("<<"))
+        .any(|t| t.kind == TokenKind::Redirect && is_heredoc_redirect(&t.value))
 }
 
 pub fn split_command_chain(cmd: &str) -> Vec<&str> {
@@ -3431,6 +3431,19 @@ mod tests {
     fn test_split_heredoc_no_split() {
         let cmd = "cat <<'EOF'\nhello && world\nEOF";
         assert_eq!(split_command_chain(cmd), vec![cmd]);
+    }
+
+    #[test]
+    fn test_split_fd_prefixed_heredoc_no_split() {
+        for cmd in [
+            "cat 3<<EOF\ngit status && rm x\nEOF",
+            "cat 0<<-'EOF'\ngit status && rm x\nEOF",
+            "cat 3<<<\"git status && rm x\"",
+        ] {
+            assert!(has_heredoc(cmd), "expected has_heredoc for {cmd:?}");
+            assert_eq!(split_command_chain(cmd), vec![cmd], "{cmd:?}");
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd:?}");
+        }
     }
 
     #[test]
