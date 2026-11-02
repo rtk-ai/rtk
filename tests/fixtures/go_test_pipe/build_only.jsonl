@@ -1,0 +1,3 @@
+{"ImportPath":"example.com/rtk-pipe-fixture/broken","Action":"build-output","Output":"# example.com/rtk-pipe-fixture/broken\n"}
+{"ImportPath":"example.com/rtk-pipe-fixture/broken","Action":"build-output","Output":"broken/broken.go:3:9: undefined: missing\n"}
+{"ImportPath":"example.com/rtk-pipe-fixture/broken","Action":"build-fail"}
