@@ -1651,6 +1651,20 @@ pub fn uninstall_with_patch_mode(
     let cursor_removed = remove_cursor_hooks(ctx)?;
     removed.extend(cursor_removed);
 
+    // 7. Remove Codex artifacts. `--uninstall` is the full-uninstall command,
+    // but it used to stop at Claude/OpenCode/Cursor, leaving ~/.codex/RTK.md
+    // and its hook behind (#1450). Collected here rather than through
+    // `uninstall_codex` so it folds into this report instead of printing a
+    // second one.
+    if codex::codex_artifacts_present(global) {
+        let codex_removed = codex::uninstall_codex_removals(global, ctx)?;
+        removed.extend(
+            codex_removed
+                .into_iter()
+                .map(|item| format!("Codex CLI: {item}")),
+        );
+    }
+
     // Report results
     if removed.is_empty() {
         println!("RTK was not installed (nothing to remove)");
@@ -1669,7 +1683,9 @@ pub fn uninstall_with_patch_mode(
             println!("  - {}", item);
         }
         if !dry_run {
-            println!("\nRestart Claude Code, OpenCode, and Cursor (if used) to apply changes.");
+            println!(
+                "\nRestart Claude Code, Codex, OpenCode, and Cursor (if used) to apply changes."
+            );
         }
     }
 
@@ -3090,6 +3106,52 @@ level = "high"
                 assert_eq!(cleaned, format!("# Config\n\n{prose}\n\nMore stuff"));
             }
         });
+    }
+
+    #[test]
+    fn test_default_uninstall_cleans_codex_artifacts() {
+        // #1450: `rtk init -g --uninstall` used to leave ~/.codex/RTK.md,
+        // its AGENTS.md reference, and the Codex hook behind.
+        let temp = TempDir::new().expect("create isolated home");
+        let codex_dir = temp.path().join("codex");
+        fs::create_dir_all(&codex_dir).unwrap();
+        fs::write(codex_dir.join(RTK_MD), "rtk awareness body\n").unwrap();
+        fs::write(codex_dir.join(AGENTS_MD), "@RTK.md\n").unwrap();
+        fs::write(
+            codex_dir.join(HOOKS_JSON),
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook codex"}]}]}}"#,
+        )
+        .unwrap();
+
+        with_claude_dir_override(&temp, |_claude_dir| {
+            crate::core::user_env::with_path("CODEX_HOME", Some(&codex_dir), || {
+                uninstall(
+                    true,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    InitContext::default(),
+                )
+                .expect("uninstall RTK");
+            });
+        });
+
+        assert!(
+            !codex_dir.join(RTK_MD).exists(),
+            "Codex RTK.md must be removed"
+        );
+        assert_eq!(
+            fs::read_to_string(codex_dir.join(AGENTS_MD)).unwrap_or_default(),
+            "",
+            "Codex AGENTS.md reference must be removed"
+        );
+        let hooks = fs::read_to_string(codex_dir.join(HOOKS_JSON)).unwrap_or_default();
+        assert!(
+            !hooks.contains("rtk hook codex"),
+            "Codex hook must be removed: {hooks}"
+        );
     }
 
     #[test]
