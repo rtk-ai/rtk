@@ -3216,6 +3216,38 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         return Ok(0);
     }
 
+    // Verbose list mode (`-v`, `-vv`, `--verbose`): the format exists to show
+    // commit hashes, upstream tracking markers and subjects, none of which the
+    // compact list filter below preserves. Pass git's output through unchanged
+    // rather than silently reducing `-vv` to the same output as `git branch -a`.
+    if branch_wants_verbose(args) {
+        let mut cmd = git_cmd(global_args);
+        cmd.arg("branch");
+        cmd.arg("--no-color");
+        for arg in args {
+            cmd.arg(arg);
+        }
+
+        let result = exec_capture(&mut cmd).context("Failed to run git branch")?;
+        if !result.success() {
+            if !result.stderr.trim().is_empty() {
+                eprint!("{}", result.stderr);
+            }
+            timer.track(
+                &tracked,
+                &format!("rtk {tracked}"),
+                &result.stdout,
+                &result.stdout,
+            );
+            return Ok(result.exit_code);
+        }
+
+        let output = result.stdout.trim_end();
+        println!("{}", output);
+        timer.track(&tracked, &format!("rtk {tracked}"), &result.stdout, output);
+        return Ok(0);
+    }
+
     // List mode: show compact branch list
     let mut cmd = git_cmd(global_args);
     cmd.arg("branch");
@@ -3254,6 +3286,17 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     );
 
     Ok(0)
+}
+
+/// True when `git branch` was asked for the verbose list format (`-v`, `-vv`,
+/// or `--verbose`), which carries metadata the compact list filter drops.
+fn branch_wants_verbose(args: &[String]) -> bool {
+    let tokens = arg_tokenizer::tokenize_grammar(args, &branch_takes_value, Dialect::Posix);
+    tokens.iter().any(|t| match t.kind {
+        TokenKind::Short => t.text.chars().any(|c| c == 'v'),
+        TokenKind::Long => t.text == "verbose",
+        _ => false,
+    })
 }
 
 fn filter_branch_output(output: &str) -> String {
@@ -5210,6 +5253,23 @@ mod tests {
             "a Latin-1 .pck is not valid UTF-8, so it must pass through byte-identically \
              (exact recovery is impossible once transcoded)"
         );
+    }
+
+    #[test]
+    fn test_branch_wants_verbose() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for v in [
+            vec!["-v"],
+            vec!["-vv"],
+            vec!["--verbose"],
+            vec!["-av"],
+            vec!["-a", "-vv"],
+        ] {
+            assert!(branch_wants_verbose(&args(&v)), "{v:?}");
+        }
+        for v in [vec!["-a"], vec!["-d", "feature"], vec!["--list"]] {
+            assert!(!branch_wants_verbose(&args(&v)), "{v:?}");
+        }
     }
 
     #[test]
