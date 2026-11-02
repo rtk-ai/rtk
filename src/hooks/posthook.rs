@@ -1868,15 +1868,27 @@ mod tests {
         assert!(line.contains("cargo test"));
     }
 
-    #[test]
-    fn test_pipeline_log_records_decision_when_output_grows() {
-        let _ = pipeline_log::set_enabled(true);
+    /// Runs `event` through the shipped posthook pipeline in a home of its
+    /// own, with the decision log on or off, and returns the hook's output
+    /// and every entry the log recorded. A home per test keeps the log marker
+    /// and file out of the scratch home every other test shares.
+    fn run_logged(event: &Value, log_on: bool) -> (Option<String>, Vec<pipeline_log::LogEntry>) {
+        let home = crate::core::test_isolation::tempdir();
+        crate::core::test_isolation::with_root(home.path(), || {
+            pipeline_log::set_enabled(log_on).expect("toggle the decision log");
+            let output = run_posthook(event);
+            pipeline_log::flush();
+            (output, pipeline_log::read_last(100, None))
+        })
+    }
+
+    fn grep_two_matches_per_file_event() -> Value {
         let mut content = String::new();
         for i in 0..40 {
             content.push_str(&format!("src/file_{i}.rs:10:fn handler_3() {{}}\n"));
             content.push_str(&format!("src/file_{i}.rs:20:fn handler_3() {{}}\n"));
         }
-        let event = serde_json::json!({
+        serde_json::json!({
             "hookEventName": "PostToolUse",
             "tool_name": "Grep",
             "tool_input": {
@@ -1887,24 +1899,41 @@ mod tests {
                 "mode": "content",
                 "content": content
             }
-        });
-        assert!(run_posthook(&event).is_none());
-        pipeline_log::flush();
-        let entries = pipeline_log::read_last(10, Some("grep-group"));
-        assert_eq!(entries.len(), 1);
+        })
+    }
+
+    #[test]
+    fn test_pipeline_log_records_decision_when_output_grows() {
+        let (output, entries) = run_logged(&grep_two_matches_per_file_event(), true);
+        assert!(
+            output.is_none(),
+            "grouping 2 matches per file is not smaller"
+        );
+        assert_eq!(entries.len(), 1, "{entries:?}");
         let entry = &entries[0];
         assert_eq!(entry.rule, "grep-group");
+        assert_eq!(entry.command.as_deref(), Some("src"));
         assert_eq!(
             entry.outcome.as_deref(),
             Some("kept as is (no smaller result)")
         );
         let rendered = pipeline_log::render(entry);
-        assert!(rendered.contains("kept as is (no smaller result)"));
+        assert!(rendered.contains("hook.after_tool.search"), "{rendered}");
+        assert!(
+            rendered.contains("kept as is (no smaller result)"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn test_pipeline_log_off_records_no_kept_as_is_decision() {
+        let (output, entries) = run_logged(&grep_two_matches_per_file_event(), false);
+        assert!(output.is_none());
+        assert!(entries.is_empty(), "log is off: {entries:?}");
     }
 
     #[test]
     fn test_pipeline_log_records_decision_when_partial_lockfile_read() {
-        let _ = pipeline_log::set_enabled(true);
         let event = serde_json::json!({
             "hookEventName": "PostToolUse",
             "tool_name": "Read",
@@ -1921,23 +1950,26 @@ mod tests {
                 }
             }
         });
-        assert!(run_posthook(&event).is_none());
-        pipeline_log::flush();
-        let entries = pipeline_log::read_last(10, Some("lockfiles"));
-        assert_eq!(entries.len(), 1);
+        let (output, entries) = run_logged(&event, true);
+        assert!(output.is_none(), "a partial lockfile cannot be summarized");
+        assert_eq!(entries.len(), 1, "{entries:?}");
         let entry = &entries[0];
         assert_eq!(entry.rule, "lockfiles");
+        assert_eq!(entry.command.as_deref(), Some("package-lock.json"));
         assert_eq!(
             entry.outcome.as_deref(),
             Some("kept as is (partial read, 757 of 966 lines)")
         );
         let rendered = pipeline_log::render(entry);
-        assert!(rendered.contains("kept as is (partial read, 757 of 966 lines)"));
+        assert!(rendered.contains("hook.after_tool.read"), "{rendered}");
+        assert!(
+            rendered.contains("kept as is (partial read, 757 of 966 lines)"),
+            "{rendered}"
+        );
     }
 
     #[test]
     fn test_pipeline_log_records_decision_when_shell_output_unchanged() {
-        let _ = pipeline_log::set_enabled(true);
         let stdout = (0..15)
             .map(|i| format!("running job task {i} with distinct description\n"))
             .collect::<String>();
@@ -1952,15 +1984,39 @@ mod tests {
                 "stderr": ""
             }
         });
-        assert!(run_posthook(&event).is_none());
-        pipeline_log::flush();
-        let entries = pipeline_log::read_last(10, Some("term-default"));
-        assert_eq!(entries.len(), 1);
+        let (output, entries) = run_logged(&event, true);
+        assert!(output.is_none());
+        assert_eq!(entries.len(), 1, "{entries:?}");
         let entry = &entries[0];
         assert_eq!(entry.rule, "term-default");
         assert_eq!(entry.outcome.as_deref(), Some("kept as is (no change)"));
         let rendered = pipeline_log::render(entry);
-        assert!(rendered.contains("kept as is (no change)"));
+        assert!(rendered.contains("kept as is (no change)"), "{rendered}");
+    }
+
+    #[test]
+    fn test_pipeline_log_records_decision_when_websearch_unchanged() {
+        let result = "Plain prose search result with nothing to convert or trim. ".repeat(12);
+        let event = serde_json::json!({
+            "hookEventName": "PostToolUse",
+            "tool_name": "WebSearch",
+            "tool_input": {
+                "query": "rtk pipeline log"
+            },
+            "tool_response": {
+                "query": "rtk pipeline log",
+                "results": [
+                    { "tool_use_id": "srvtoolu_1", "content": [] },
+                    result
+                ]
+            }
+        });
+        let (output, entries) = run_logged(&event, true);
+        assert!(output.is_none());
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        let entry = &entries[0];
+        assert_eq!(entry.rule, "web-default");
+        assert_eq!(entry.outcome.as_deref(), Some("kept as is (no change)"));
     }
 
     #[test]
