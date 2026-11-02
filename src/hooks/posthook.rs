@@ -1873,13 +1873,66 @@ mod tests {
     /// and every entry the log recorded. A home per test keeps the log marker
     /// and file out of the scratch home every other test shares.
     fn run_logged(event: &Value, log_on: bool) -> (Option<String>, Vec<pipeline_log::LogEntry>) {
+        run_logged_with(event, &test_config(), &posthook_pipeline(), log_on)
+    }
+
+    fn run_logged_with(
+        event: &Value,
+        config: &Config,
+        pipeline: &Resolved,
+        log_on: bool,
+    ) -> (Option<String>, Vec<pipeline_log::LogEntry>) {
         let home = crate::core::test_isolation::tempdir();
         crate::core::test_isolation::with_root(home.path(), || {
             pipeline_log::set_enabled(log_on).expect("toggle the decision log");
-            let output = run_posthook(event);
+            let output = run_with(event, config, pipeline);
             pipeline_log::flush();
             (output, pipeline_log::read_last(100, None))
         })
+    }
+
+    /// Recall on, in tee mode, writing to `dir`: every filtered result gains
+    /// a `[full output: <path>]` hint, so a chain that saves only a few bytes
+    /// ends up larger than the raw output once the hint is composed in.
+    fn tee_config(dir: &std::path::Path) -> Config {
+        let mut config = Config::default();
+        config.retriever.mode = crate::core::retriever::RecoveryMode::Tee;
+        config.retriever.tee_directory = Some(dir.to_path_buf());
+        config
+    }
+
+    fn bash_event(command: &str, stdout: &str) -> Value {
+        serde_json::json!({
+            "hookEventName": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": { "command": command },
+            "tool_response": { "stdout": stdout, "stderr": "" }
+        })
+    }
+
+    fn websearch_event(result: &str) -> Value {
+        serde_json::json!({
+            "hookEventName": "PostToolUse",
+            "tool_name": "WebSearch",
+            "tool_input": { "query": "rtk pipeline log" },
+            "tool_response": {
+                "query": "rtk pipeline log",
+                "results": [
+                    { "tool_use_id": "srvtoolu_1", "content": [] },
+                    result
+                ]
+            }
+        })
+    }
+
+    /// Distinct plain lines with one ANSI reset at the top: `ansi` strips four
+    /// bytes, about one token, so the filtered result is barely smaller.
+    fn one_ansi_code_lines() -> String {
+        let mut text = "\x1b[0m".to_string();
+        for i in 0..15 {
+            text.push_str(&format!("running job task {i} with distinct description\n"));
+        }
+        text
     }
 
     fn grep_two_matches_per_file_event() -> Value {
@@ -2017,6 +2070,151 @@ mod tests {
         let entry = &entries[0];
         assert_eq!(entry.rule, "web-default");
         assert_eq!(entry.outcome.as_deref(), Some("kept as is (no change)"));
+    }
+
+    #[test]
+    fn test_pipeline_log_records_decision_when_full_read_unchanged() {
+        // The partial-lockfile test's content, read in full: `lockfile`
+        // cannot summarize it, and nothing marks the read as partial.
+        let event = serde_json::json!({
+            "hookEventName": "PostToolUse",
+            "tool_name": "Read",
+            "tool_input": {
+                "file_path": "package-lock.json"
+            },
+            "tool_response": {
+                "file": {
+                    "filePath": "package-lock.json",
+                    "content": "{\n  \"name\": \"my-app\",\n  \"lockfileVersion\": 3,\n".repeat(20),
+                    "numLines": 60,
+                    "startLine": 1,
+                    "totalLines": 60
+                }
+            }
+        });
+        let (output, entries) = run_logged(&event, true);
+        assert!(output.is_none());
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        let entry = &entries[0];
+        assert_eq!(entry.rule, "lockfiles");
+        assert_eq!(entry.outcome.as_deref(), Some("kept as is (no change)"));
+        assert_eq!(entry.tokens_before, entry.tokens_after);
+    }
+
+    #[test]
+    fn test_pipeline_log_records_shadow_shell_decision_without_outcome() {
+        let pipeline = pipeline_from(
+            "[pipeline]\nextends = \"rtk:posthook\"\n[override.term-default]\nshadow = true\n",
+        );
+        let event = bash_fixture("repetitive");
+        let (output, entries) = run_logged_with(&event, &test_config(), &pipeline, true);
+        assert!(output.is_none(), "a shadow rule emits nothing");
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        let entry = &entries[0];
+        assert_eq!(entry.rule, "term-default");
+        assert!(entry.shadow);
+        assert_eq!(entry.outcome, None, "a shadow decision is a real decision");
+
+        let stdout = event["tool_response"]["stdout"]
+            .as_str()
+            .expect("fixture has stdout");
+        let stderr = event["tool_response"]["stderr"].as_str().unwrap_or("");
+        let raw = combine_streams(stdout, stderr);
+        let filtered = run_selected(
+            &pipeline,
+            Subject::Shell,
+            "Bash",
+            ContentFormat::Term,
+            "",
+            stdout,
+            0,
+            Some(false),
+        )
+        .expect("term chain applies")
+        .text;
+        assert_eq!(entry.tokens_before, Some(estimate_tokens(&raw)));
+        assert_eq!(entry.tokens_after, Some(estimate_tokens(&filtered)));
+        assert!(entry.tokens_after < entry.tokens_before, "{entry:?}");
+    }
+
+    #[test]
+    fn test_pipeline_log_records_decision_when_shell_hint_outgrows_savings() {
+        let tee_dir = crate::core::test_isolation::tempdir();
+        let stdout = one_ansi_code_lines();
+        let event = bash_event("make build", &stdout);
+        let (output, entries) = run_logged_with(
+            &event,
+            &tee_config(tee_dir.path()),
+            &posthook_pipeline(),
+            true,
+        );
+        assert!(output.is_none(), "filtered + hint is larger than raw");
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        let entry = &entries[0];
+        assert_eq!(entry.rule, "term-default");
+        assert_eq!(
+            entry.outcome.as_deref(),
+            Some("kept as is (no smaller result)")
+        );
+        assert_eq!(entry.tokens_before, Some(estimate_tokens(&stdout)));
+        assert_eq!(entry.tokens_after, entry.tokens_before);
+    }
+
+    #[test]
+    fn test_pipeline_log_records_shadow_websearch_decision_without_outcome() {
+        let pipeline = pipeline_from(
+            "[pipeline]\nextends = \"rtk:posthook\"\n[override.web-default]\nshadow = true\n",
+        );
+        let result = "\x1b[1mPlain prose\x1b[0m search result with nothing to trim. ".repeat(12);
+        let (output, entries) =
+            run_logged_with(&websearch_event(&result), &test_config(), &pipeline, true);
+        assert!(output.is_none(), "a shadow rule emits nothing");
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        let entry = &entries[0];
+        assert_eq!(entry.rule, "web-default");
+        assert!(entry.shadow);
+        assert_eq!(entry.outcome, None, "a shadow decision is a real decision");
+
+        let filtered = run_selected(
+            &pipeline,
+            Subject::Web,
+            "WebSearch",
+            ContentFormat::Web,
+            "",
+            &result,
+            0,
+            None,
+        )
+        .expect("web chain applies")
+        .text;
+        assert_eq!(entry.tokens_before, Some(estimate_tokens(&result)));
+        assert_eq!(entry.tokens_after, Some(estimate_tokens(&filtered)));
+        assert!(entry.tokens_after < entry.tokens_before, "{entry:?}");
+    }
+
+    #[test]
+    fn test_pipeline_log_records_decision_when_websearch_hint_outgrows_savings() {
+        let tee_dir = crate::core::test_isolation::tempdir();
+        let result = format!(
+            "\x1b[0m{}",
+            "Plain prose search result with nothing to convert or trim. ".repeat(12)
+        );
+        let (output, entries) = run_logged_with(
+            &websearch_event(&result),
+            &tee_config(tee_dir.path()),
+            &posthook_pipeline(),
+            true,
+        );
+        assert!(output.is_none(), "filtered + hint is larger than raw");
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        let entry = &entries[0];
+        assert_eq!(entry.rule, "web-default");
+        assert_eq!(
+            entry.outcome.as_deref(),
+            Some("kept as is (no smaller result)")
+        );
+        assert_eq!(entry.tokens_before, Some(estimate_tokens(&result)));
+        assert_eq!(entry.tokens_after, entry.tokens_before);
     }
 
     #[test]
