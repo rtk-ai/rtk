@@ -93,6 +93,15 @@ mod tests {
         assert!(!is_claude_hook_command("C:/tools/not-rtk.exe hook claude"));
     }
 
+    /// A bare `RTK` is rtk only where the file system folds case: on Windows
+    /// it matches, elsewhere it is a different binary and stays rejected.
+    #[test]
+    fn claude_hook_command_folds_bare_rtk_stem_only_on_windows() {
+        for command in ["RTK hook claude", "C:/tools/Rtk hook claude"] {
+            assert_eq!(is_claude_hook_command(command), cfg!(windows), "{command}");
+        }
+    }
+
     #[test]
     fn claude_hook_command_rejects_other_commands() {
         assert!(!is_claude_hook_command("not-rtk hook claude"));
