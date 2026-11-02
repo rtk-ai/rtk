@@ -553,4 +553,39 @@ mod tests {
             assert!(decide(cmd, PermissionVerdict::Allow, &[]), "{cmd}");
         }
     }
+
+    #[test]
+    fn an_excluded_command_with_no_filter_is_not_swapped_behind_a_wrapper_or_group() {
+        let excluded = vec!["./run-suite.sh".to_string()];
+        for cmd in [
+            "sh -c './run-suite.sh'",
+            "bash -c \"./run-suite.sh --fast\"",
+            "env X=1 ./run-suite.sh",
+            "X=1 ./run-suite.sh",
+            "time ./run-suite.sh",
+            "nice ./run-suite.sh",
+            "nohup ./run-suite.sh",
+            "command ./run-suite.sh",
+            "xargs ./run-suite.sh",
+            "( ./run-suite.sh )",
+            "(./run-suite.sh)",
+            "{ ./run-suite.sh; }",
+            "./lint.sh | xargs ./run-suite.sh",
+            "./lint.sh && time ./run-suite.sh --fast",
+        ] {
+            assert!(!decide(cmd, PermissionVerdict::Default, &excluded), "{cmd}");
+            assert!(decide(cmd, PermissionVerdict::Default, &[]), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn an_excluded_filtered_command_behind_xargs_is_not_swapped() {
+        let excluded = vec!["git".to_string()];
+        assert!(!decide(
+            "xargs git status",
+            PermissionVerdict::Default,
+            &excluded
+        ));
+        assert!(decide("xargs git status", PermissionVerdict::Default, &[]));
+    }
 }
