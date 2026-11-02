@@ -169,7 +169,7 @@ fn shell_gate(v: &Value) -> bool {
                 return false;
             }
             let ask_rule = matches!(verdict, permissions::PermissionVerdict::Ask)
-                && permissions::ask_rule_applies(cmd, permissions::Host::Claude);
+                && permissions::ask_rule_applies(cmd, permissions::Host::Claude, &transparent);
             let decision = swap_decision(verdict, ask_rule, unfiltered);
             let output = swap_output(v, &command, &rule, decision);
             let _ = writeln!(io::stdout(), "{output}");

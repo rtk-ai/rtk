@@ -78,10 +78,9 @@ pub fn check_command_for_agent(cmd: &str, host: Host, agent: Option<&str>) -> Pe
 /// Whether one of the user's `ask` rules is what makes this command ask, as
 /// opposed to a construct RTK cannot attest (a shell wrapper, a substitution).
 #[cfg(feature = "engine")]
-pub(crate) fn ask_rule_applies(cmd: &str, host: Host) -> bool {
+pub(crate) fn ask_rule_applies(cmd: &str, host: Host, prefixes: &[String]) -> bool {
     let (deny_rules, ask_rules, allow_rules) = load_rules_for(host);
-    let (_, prefixes) = crate::core::config::hook_rewrite_params();
-    ask_rule_decides(cmd, &deny_rules, &ask_rules, &allow_rules, &prefixes)
+    ask_rule_decides(cmd, &deny_rules, &ask_rules, &allow_rules, prefixes)
 }
 
 /// Whether an allow rule names this command as written.
