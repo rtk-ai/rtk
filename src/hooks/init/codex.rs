@@ -2,7 +2,9 @@
 
 use super::*;
 use crate::core::user_dirs;
-use crate::hooks::constants::{CODEX_DIR, CODEX_HOOK_COMMAND, HOOKS_JSON, PRE_TOOL_USE_KEY};
+use crate::hooks::constants::{
+    CLAUDE_PRE_MATCHER, CODEX_DIR, CODEX_HOOK_COMMAND, HOOKS_JSON, PRE_TOOL_USE_KEY,
+};
 use std::path::Component;
 
 /// The line that says an `RTK.md` is RTK's to rewrite and to remove.
@@ -444,7 +446,13 @@ fn lexically_normalized(path: &Path) -> PathBuf {
     normalized
 }
 
-pub(super) fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UninstallCodexOutcome {
+    Clean,
+    HookRefused,
+}
+
+pub(super) fn uninstall_codex(global: bool, ctx: InitContext) -> Result<UninstallCodexOutcome> {
     let InitContext { dry_run, .. } = ctx;
     let mut hook_left_in_place = None;
     let removed = if global {
@@ -481,7 +489,11 @@ pub(super) fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
         codex_uninstall_report(&removed, hook_left_in_place.as_ref(), dry_run)
     );
 
-    Ok(())
+    if hook_left_in_place.is_some() {
+        Ok(UninstallCodexOutcome::HookRefused)
+    } else {
+        Ok(UninstallCodexOutcome::Clean)
+    }
 }
 
 /// Everything `rtk init --codex --uninstall` says it did, as one block.
@@ -920,7 +932,12 @@ fn patch_codex_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
         return Ok(false);
     }
 
-    insert_hook_entry(&mut root, CODEX_HOOK_COMMAND)?;
+    insert_hook_entry(
+        &mut root,
+        PRE_TOOL_USE_KEY,
+        CLAUDE_PRE_MATCHER,
+        CODEX_HOOK_COMMAND,
+    )?;
 
     if !dry_run && let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| {
@@ -977,6 +994,20 @@ fn remove_codex_hook_from_file(path: &Path, ctx: InitContext) -> Result<bool> {
 /// Windows `rtk` path, and nothing else.
 fn is_codex_hook_command(command: &str) -> bool {
     crate::hooks::is_rtk_hook_command(command, "codex")
+}
+
+/// Returns true if Codex RTK hook is configured.
+pub fn is_configured() -> bool {
+    let Ok(codex_dir) = resolve_codex_dir() else {
+        return false;
+    };
+    let hooks_json = codex_dir.join(HOOKS_JSON);
+    if let Ok(content) = fs::read_to_string(&hooks_json)
+        && let Ok(root) = from_json_str::<serde_json::Value>(&content)
+    {
+        return codex_hook_already_present(&root);
+    }
+    false
 }
 
 #[cfg(test)]
@@ -2032,8 +2063,9 @@ mod tests {
         .expect("symlink");
 
         let _entered = test_isolation::enter(project.path());
-        uninstall_codex(false, InitContext::default())
+        let outcome = uninstall_codex(false, InitContext::default())
             .expect("uninstall still reports what it did");
+        assert!(matches!(outcome, UninstallCodexOutcome::HookRefused));
 
         assert!(
             !elsewhere.path().join("stolen.json").exists(),
@@ -2184,9 +2216,12 @@ mod tests {
         .expect("RTK.md");
 
         let _entered = test_isolation::enter(project.path());
-        let result = uninstall_codex(false, InitContext::default());
+        let outcome = uninstall_codex(false, InitContext::default());
 
-        result.expect("uninstall still cleans the project");
+        assert!(matches!(
+            outcome.expect("uninstall still cleans the project"),
+            UninstallCodexOutcome::HookRefused
+        ));
         assert_eq!(
             fs::read_to_string(elsewhere.path().join(HOOKS_JSON)).expect("read"),
             registered,

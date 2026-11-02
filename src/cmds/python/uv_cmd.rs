@@ -48,6 +48,11 @@ const MAX_PROGRAM_LINE_CHARS: usize = 500;
 const TEE_SLUG_STDOUT: &str = "uv-run-stdout";
 const TEE_SLUG_STDERR: &str = "uv-run-stderr";
 
+fn runs_unfiltered(args: &[String]) -> bool {
+    args.first().map(String::as_str) != Some("run")
+        || crate::core::runner::requests_help_args("uv", args)
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
     let args_display = display_args(args);
@@ -61,7 +66,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: {}", original_cmd);
     }
 
-    if args.first().map(String::as_str) != Some("run") {
+    if runs_unfiltered(args) {
         let status = cmd.status().context("Failed to run uv")?;
         timer.track_passthrough(&original_cmd, &tracking::passthrough_label(&original_cmd));
         return Ok(exit_code_from_status(&status, "uv"));
@@ -346,6 +351,19 @@ fn is_error_continuation(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn uv_routes_a_usage_request_to_the_unfiltered_path() {
+        let owned = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(super::runs_unfiltered(&owned(&["run", "--help"])));
+        assert!(super::runs_unfiltered(&owned(&["run", "-h"])));
+        assert!(super::runs_unfiltered(&owned(&[
+            "run", "--", "pytest", "--help"
+        ])));
+        assert!(super::runs_unfiltered(&owned(&["pip", "list"])));
+        assert!(!super::runs_unfiltered(&owned(&["run", "pytest"])));
+        assert!(!super::runs_unfiltered(&owned(&["run", "pytest", "-q"])));
+    }
+
     use super::{CAP_INVENTORY, MAX_TRACEBACK_FRAMES, filter_uv_run_output};
     use crate::core::utils::count_tokens;
 

@@ -1,6 +1,6 @@
 # RTK — Copilot Integration (VS Code Copilot Chat + Copilot CLI)
 
-**Usage**: Token-optimized CLI proxy (cuts up to 90% of bash output)
+**Usage**: Token-optimized CLI proxy
 
 ## What's automatic
 
@@ -17,7 +17,7 @@ No shell scripts, no `jq` dependency, works on Windows natively.
 rtk gain              # Token savings dashboard for this session
 rtk gain --history    # Per-command history with savings %
 rtk discover          # Scan session history for missed rtk opportunities
-rtk proxy <cmd>       # Run raw (no filtering) but still track it
+rtk bypass <cmd>       # Run raw (no filtering) but still track it
 ```
 
 ## Installation verification
@@ -27,9 +27,6 @@ rtk --version   # Should print: rtk X.Y.Z
 rtk gain        # Should show a dashboard (not "command not found")
 which rtk       # Verify correct binary path
 ```
-
-> ⚠️ **Name collision**: If `rtk gain` fails, you may have `reachingforthejack/rtk`
-> (Rust Type Kit) installed instead. Check `which rtk` and reinstall from rtk-ai/rtk.
 
 ## How the hook works
 
@@ -46,15 +43,3 @@ which rtk       # Verify correct binary path
 2. `rtk hook` detects Copilot CLI format (`toolName`/`toolArgs` keys)
 3. Returns `permissionDecision: deny` with reason: `"Token savings: use 'rtk git status' instead"`
 4. Copilot reads the reason and re-runs `rtk git status`
-
-When Copilot CLI adds `updatedInput` support, only `rtk hook` needs updating — no config changes.
-
-## Integration comparison
-
-| Tool                  | Mechanism                               | Hook output              | File                               |
-|-----------------------|-----------------------------------------|--------------------------|------------------------------------|
-| Claude Code           | `PreToolUse` hook with `updatedInput`   | Transparent rewrite      | `hooks/rtk-rewrite.sh`             |
-| VS Code Copilot Chat  | `PreToolUse` hook with `updatedInput`   | Transparent rewrite      | `.github/hooks/rtk-rewrite.json`   |
-| GitHub Copilot CLI    | `PreToolUse` deny-with-suggestion       | Denial + retry           | `.github/hooks/rtk-rewrite.json`   |
-| OpenCode              | Plugin `execute.before` (v2) / `tool.execute.before` (v1, >= 1.18.29) | Transparent rewrite | `hooks/opencode/rtk.ts`            |
-| (any)                 | Custom instructions                     | Prompt-level guidance    | `.github/copilot-instructions.md`  |

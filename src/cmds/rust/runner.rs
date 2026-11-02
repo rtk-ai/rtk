@@ -36,7 +36,8 @@ pub fn run_test(command: &[String], shell: Option<&str>, verbose: u8) -> Result<
     let program = program_name(command, shell);
     let eco = TestEcosystem::detect(&display);
     match command_from_args(command, shell).context("Failed to prepare test command")? {
-        Launch::Ready(cmd) => match run_test_cmd(cmd, "test", &display, "test", eco, verbose) {
+        Launch::Ready(cmd) => match run_test_cmd(cmd, "test", &display, "test", eco, verbose, true)
+        {
             Ok(code) => Ok(code),
             Err(error) => match spawn_failure(program, &error) {
                 Some(outcome) => Ok(run_test_unrunnable(

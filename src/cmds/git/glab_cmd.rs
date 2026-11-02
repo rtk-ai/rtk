@@ -116,47 +116,26 @@ fn filter_markdown_segment(text: &str) -> String {
 }
 
 /// State icon for MR/issue states (glab uses lowercase).
-fn state_icon(state: &str, ultra_compact: bool) -> &'static str {
-    if ultra_compact {
-        match state {
-            "opened" => "O",
-            "merged" => "M",
-            "closed" => "C",
-            _ => "?",
-        }
-    } else {
-        match state {
-            "opened" => "[open]",
-            "merged" => "[merged]",
-            "closed" => "[closed]",
-            _ => "?",
-        }
+fn state_icon(state: &str) -> &'static str {
+    match state {
+        "opened" => "[open]",
+        "merged" => "[merged]",
+        "closed" => "[closed]",
+        _ => "?",
     }
 }
 
-/// Pipeline status icon. Non-compact mode uses text tags for parity with
-/// `gh_cmd.rs` (avoids multi-byte terminal rendering quirks; aligns with the
-/// rest of the codebase). Ultra-compact keeps single-char density.
-fn pipeline_icon(status: &str, ultra_compact: bool) -> &'static str {
-    if ultra_compact {
-        match status {
-            "success" => "+",
-            "failed" => "x",
-            "canceled" | "cancelled" => "X",
-            "running" | "pending" => "~",
-            "skipped" => "-",
-            _ => "?",
-        }
-    } else {
-        match status {
-            "success" => "[ok]",
-            "failed" => "[fail]",
-            "canceled" | "cancelled" => "[cancel]",
-            "running" => "[run]",
-            "pending" => "[pend]",
-            "skipped" => "[skip]",
-            _ => "?",
-        }
+/// Pipeline status icon: text tags for parity with `gh_cmd.rs` (avoids
+/// multi-byte terminal rendering quirks; aligns with the rest of the codebase).
+fn pipeline_icon(status: &str) -> &'static str {
+    match status {
+        "success" => "[ok]",
+        "failed" => "[fail]",
+        "canceled" | "cancelled" => "[cancel]",
+        "running" => "[run]",
+        "pending" => "[pend]",
+        "skipped" => "[skip]",
+        _ => "?",
     }
 }
 
@@ -339,7 +318,6 @@ pub fn run(
     repo: Option<&str>,
     group: Option<&str>,
     verbose: u8,
-    ultra_compact: bool,
 ) -> Result<i32> {
     // clap carves `subcommand` out of the same trailing region as `args`, so the stripped `--`
     // has to be restored over the whole region — over `args` alone it lands one token off.
@@ -385,10 +363,10 @@ pub fn run(
     }
 
     match subcommand {
-        "mr" => run_mr(args, verbose, ultra_compact),
-        "issue" => run_issue(args, verbose, ultra_compact),
-        "ci" | "pipeline" => run_ci(args, verbose, ultra_compact),
-        "release" => run_release(args, verbose, ultra_compact),
+        "mr" => run_mr(args, verbose),
+        "issue" => run_issue(args, verbose),
+        "ci" | "pipeline" => run_ci(args, verbose),
+        "release" => run_release(args, verbose),
         "api" => run_api(args, verbose),
         _ => run_passthrough("glab", subcommand, args),
     }
@@ -408,14 +386,14 @@ fn split_glab_region(region: &[String]) -> Option<(&str, &[String])> {
 
 // ── MR subcommands ──────────────────────────────────────────────────────
 
-fn run_mr(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn run_mr(args: &[String], verbose: u8) -> Result<i32> {
     if args.is_empty() {
         return run_passthrough("glab", "mr", args);
     }
 
     match args[0].as_str() {
-        "list" => mr_list(&args[1..], verbose, ultra_compact),
-        "view" => mr_view(&args[1..], verbose, ultra_compact),
+        "list" => mr_list(&args[1..], verbose),
+        "view" => mr_view(&args[1..], verbose),
         "create" => mr_create(&args[1..], verbose),
         "merge" => mr_action(
             "merge",
@@ -445,25 +423,17 @@ fn run_mr(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
 }
 
 /// Format MR list JSON into compact output (pure function, testable).
-fn format_mr_list(json: &Value, ultra_compact: bool) -> String {
+fn format_mr_list(json: &Value) -> String {
     let mrs = match json.as_array() {
         Some(arr) => arr,
         None => return String::new(),
     };
     if mrs.is_empty() {
-        return if ultra_compact {
-            "No MRs\n".to_string()
-        } else {
-            "No Merge Requests\n".to_string()
-        };
+        return "No Merge Requests\n".to_string();
     }
 
     let mut filtered = String::new();
-    filtered.push_str(if ultra_compact {
-        "MRs\n"
-    } else {
-        "Merge Requests\n"
-    });
+    filtered.push_str("Merge Requests\n");
 
     let all_lines: Vec<String> = mrs
         .iter()
@@ -472,7 +442,7 @@ fn format_mr_list(json: &Value, ultra_compact: bool) -> String {
             let title = mr["title"].as_str().unwrap_or("???");
             let state = mr["state"].as_str().unwrap_or("???");
             let author = mr["author"]["username"].as_str().unwrap_or("???");
-            let icon = state_icon(state, ultra_compact);
+            let icon = state_icon(state);
             format!("  {} !{} {} ({})", icon, iid, truncate(title, 60), author)
         })
         .collect();
@@ -493,17 +463,17 @@ fn format_mr_list(json: &Value, ultra_compact: bool) -> String {
     filtered
 }
 
-fn mr_list(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn mr_list(args: &[String], _verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("glab");
     cmd.args(["mr", "list", "-F", "json"]);
     for arg in args {
         cmd.arg(arg);
     }
-    run_glab_json(cmd, "mr list", |json| format_mr_list(json, ultra_compact))
+    run_glab_json(cmd, "mr list", format_mr_list)
 }
 
 /// Format MR view JSON into compact output (pure function, testable).
-fn format_mr_view(json: &Value, ultra_compact: bool) -> String {
+fn format_mr_view(json: &Value) -> String {
     let iid = json["iid"].as_i64().unwrap_or(0);
     let title = json["title"].as_str().unwrap_or("???");
     let state = json["state"].as_str().unwrap_or("???");
@@ -513,7 +483,7 @@ fn format_mr_view(json: &Value, ultra_compact: bool) -> String {
     let source_branch = json["source_branch"].as_str().unwrap_or("???");
     let target_branch = json["target_branch"].as_str().unwrap_or("???");
 
-    let icon = state_icon(state, ultra_compact);
+    let icon = state_icon(state);
 
     let mut filtered = String::new();
     filtered.push_str(&format!("{} MR !{}: {}\n", icon, iid, title));
@@ -549,7 +519,7 @@ fn format_mr_view(json: &Value, ultra_compact: bool) -> String {
         && !pipeline.is_null()
     {
         let pipeline_status = pipeline["status"].as_str().unwrap_or("unknown");
-        let p_icon = pipeline_icon(pipeline_status, ultra_compact);
+        let p_icon = pipeline_icon(pipeline_status);
         filtered.push_str(&format!("  Pipeline: {} {}\n", p_icon, pipeline_status));
     }
 
@@ -570,7 +540,7 @@ fn format_mr_view(json: &Value, ultra_compact: bool) -> String {
     filtered
 }
 
-fn mr_view(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn mr_view(args: &[String], _verbose: u8) -> Result<i32> {
     // `glab mr view` without an identifier defaults to the MR for the current branch.
     let (mr_number_opt, extra_args) = split_identifier(args, &view_takes_value);
 
@@ -596,7 +566,7 @@ fn mr_view(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
         Some(id) => format!("mr view {}", quote_word(id)),
         None => "mr view".to_string(),
     };
-    run_glab_json(cmd, &label, |json| format_mr_view(json, ultra_compact))
+    run_glab_json(cmd, &label, format_mr_view)
 }
 
 fn mr_create(args: &[String], _verbose: u8) -> Result<i32> {
@@ -677,20 +647,20 @@ fn mr_action(
 
 // ── Issue subcommands ───────────────────────────────────────────────────
 
-fn run_issue(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn run_issue(args: &[String], verbose: u8) -> Result<i32> {
     if args.is_empty() {
         return run_passthrough("glab", "issue", args);
     }
 
     match args[0].as_str() {
-        "list" => issue_list(&args[1..], verbose, ultra_compact),
+        "list" => issue_list(&args[1..], verbose),
         "view" => issue_view(&args[1..], verbose),
         _ => run_passthrough("glab", "issue", args),
     }
 }
 
 /// Format issue list JSON into compact output (pure function, testable).
-fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
+fn format_issue_list(json: &Value) -> String {
     let issues = match json.as_array() {
         Some(arr) => arr,
         None => return String::new(),
@@ -708,9 +678,7 @@ fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
             let iid = issue["iid"].as_i64().unwrap_or(0);
             let title = issue["title"].as_str().unwrap_or("???");
             let state = issue["state"].as_str().unwrap_or("???");
-            let icon = if ultra_compact {
-                if state == "opened" { "O" } else { "C" }
-            } else if state == "opened" {
+            let icon = if state == "opened" {
                 "[open]"
             } else {
                 "[closed]"
@@ -735,15 +703,13 @@ fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
     filtered
 }
 
-fn issue_list(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn issue_list(args: &[String], _verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("glab");
     cmd.args(["issue", "list", "-F", "json"]);
     for arg in args {
         cmd.arg(arg);
     }
-    run_glab_json(cmd, "issue list", |json| {
-        format_issue_list(json, ultra_compact)
-    })
+    run_glab_json(cmd, "issue list", format_issue_list)
 }
 
 /// Format issue view JSON into compact output (pure function, testable).
@@ -811,14 +777,14 @@ fn issue_view(args: &[String], _verbose: u8) -> Result<i32> {
 
 // ── CI/Pipeline subcommands ─────────────────────────────────────────────
 
-fn run_ci(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn run_ci(args: &[String], verbose: u8) -> Result<i32> {
     if args.is_empty() {
         return run_passthrough("glab", "ci", args);
     }
 
     match args[0].as_str() {
-        "list" => ci_list(&args[1..], verbose, ultra_compact),
-        "status" => ci_status(&args[1..], verbose, ultra_compact),
+        "list" => ci_list(&args[1..], verbose),
+        "status" => ci_status(&args[1..], verbose),
         "trace" => ci_trace(&args[1..]),
         // "ci view" is an interactive TUI (tcell) — must run with inherited stdio
         _ => run_passthrough("glab", "ci", args),
@@ -826,7 +792,7 @@ fn run_ci(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
 }
 
 /// Format CI list JSON into compact output (pure function, testable).
-fn format_ci_list(json: &Value, ultra_compact: bool) -> String {
+fn format_ci_list(json: &Value) -> String {
     let pipelines = match json.as_array() {
         Some(arr) => arr,
         None => return String::new(),
@@ -843,7 +809,7 @@ fn format_ci_list(json: &Value, ultra_compact: bool) -> String {
             let id = pipeline["id"].as_i64().unwrap_or(0);
             let status = pipeline["status"].as_str().unwrap_or("???");
             let ref_name = pipeline["ref"].as_str().unwrap_or("???");
-            let icon = pipeline_icon(status, ultra_compact);
+            let icon = pipeline_icon(status);
             format!("  {} #{} {} ({})", icon, id, status, ref_name)
         })
         .collect();
@@ -863,19 +829,19 @@ fn format_ci_list(json: &Value, ultra_compact: bool) -> String {
     filtered
 }
 
-fn ci_list(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn ci_list(args: &[String], _verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("glab");
     cmd.args(["ci", "list", "-F", "json"]);
     for arg in args {
         cmd.arg(arg);
     }
-    run_glab_json(cmd, "ci list", |json| format_ci_list(json, ultra_compact))
+    run_glab_json(cmd, "ci list", format_ci_list)
 }
 
 /// Format `glab ci status` text output (English keyword parsing, raw fallback).
 /// Returns the raw input when no status keyword is recognized on any line
 /// (e.g. non-English locale).
-fn format_ci_status(raw: &str, ultra_compact: bool) -> String {
+fn format_ci_status(raw: &str) -> String {
     let mut filtered = String::new();
     let mut any_keyword_matched = false;
     for line in raw.lines() {
@@ -884,15 +850,15 @@ fn format_ci_status(raw: &str, ultra_compact: bool) -> String {
             continue;
         }
         let icon = if trimmed.contains("passed") || trimmed.contains("success") {
-            pipeline_icon("success", ultra_compact)
+            pipeline_icon("success")
         } else if trimmed.contains("failed") {
-            pipeline_icon("failed", ultra_compact)
+            pipeline_icon("failed")
         } else if trimmed.contains("running") {
-            pipeline_icon("running", ultra_compact)
+            pipeline_icon("running")
         } else if trimmed.contains("pending") {
-            pipeline_icon("pending", ultra_compact)
+            pipeline_icon("pending")
         } else if trimmed.contains("canceled") || trimmed.contains("cancelled") {
-            pipeline_icon("canceled", ultra_compact)
+            pipeline_icon("canceled")
         } else {
             ""
         };
@@ -913,7 +879,7 @@ fn format_ci_status(raw: &str, ultra_compact: bool) -> String {
     }
 }
 
-fn ci_status(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn ci_status(args: &[String], _verbose: u8) -> Result<i32> {
     // glab ci status does not support -F json — text parsing with raw fallback
     let mut cmd = resolved_command("glab");
     cmd.args(["ci", "status"]);
@@ -924,7 +890,7 @@ fn ci_status(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> 
         cmd,
         "glab",
         "ci status",
-        |stdout| format_ci_status(stdout, ultra_compact),
+        format_ci_status,
         RunOptions::stdout_only().early_exit_on_failure(),
     )
 }
@@ -998,7 +964,7 @@ fn filter_ci_trace(raw: &str) -> String {
 
 // ── Release subcommands ──────────────────────────────────────────────────
 
-fn run_release(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<i32> {
+fn run_release(args: &[String], _verbose: u8) -> Result<i32> {
     if args.is_empty() {
         return run_passthrough("glab", "release", args);
     }
@@ -1171,38 +1137,32 @@ mod tests {
 
     #[test]
     fn test_state_icon_opened() {
-        assert_eq!(state_icon("opened", false), "[open]");
-        assert_eq!(state_icon("opened", true), "O");
+        assert_eq!(state_icon("opened"), "[open]");
     }
 
     #[test]
     fn test_state_icon_merged() {
-        assert_eq!(state_icon("merged", false), "[merged]");
-        assert_eq!(state_icon("merged", true), "M");
+        assert_eq!(state_icon("merged"), "[merged]");
     }
 
     #[test]
     fn test_state_icon_closed() {
-        assert_eq!(state_icon("closed", false), "[closed]");
-        assert_eq!(state_icon("closed", true), "C");
+        assert_eq!(state_icon("closed"), "[closed]");
     }
 
     #[test]
     fn test_pipeline_icon_success() {
-        assert_eq!(pipeline_icon("success", false), "[ok]");
-        assert_eq!(pipeline_icon("success", true), "+");
+        assert_eq!(pipeline_icon("success"), "[ok]");
     }
 
     #[test]
     fn test_pipeline_icon_failed() {
-        assert_eq!(pipeline_icon("failed", false), "[fail]");
-        assert_eq!(pipeline_icon("failed", true), "x");
+        assert_eq!(pipeline_icon("failed"), "[fail]");
     }
 
     #[test]
     fn test_pipeline_icon_running() {
-        assert_eq!(pipeline_icon("running", false), "[run]");
-        assert_eq!(pipeline_icon("running", true), "~");
+        assert_eq!(pipeline_icon("running"), "[run]");
     }
 
     #[test]
@@ -1300,7 +1260,7 @@ mod tests {
     #[test]
     fn test_mr_list_token_savings() {
         let input = include_str!("../../../tests/fixtures/glab_mr_list_raw.json");
-        let output = format_mr_list(&parse_fixture(input), false);
+        let output = format_mr_list(&parse_fixture(input));
         let input_tokens = count_tokens(input);
         let output_tokens = count_tokens(&output);
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
@@ -1316,7 +1276,7 @@ mod tests {
     #[test]
     fn test_mr_list_format() {
         let input = include_str!("../../../tests/fixtures/glab_mr_list_raw.json");
-        let output = format_mr_list(&parse_fixture(input), false);
+        let output = format_mr_list(&parse_fixture(input));
         assert!(output.contains("Merge Requests"));
         assert!(output.contains("!314"));
         assert!(output.contains("[open]")); // opened
@@ -1325,19 +1285,9 @@ mod tests {
     }
 
     #[test]
-    fn test_mr_list_ultra_compact() {
-        let input = include_str!("../../../tests/fixtures/glab_mr_list_raw.json");
-        let output = format_mr_list(&parse_fixture(input), true);
-        assert!(output.starts_with("MRs\n"));
-        assert!(output.contains("O ")); // opened
-        assert!(output.contains("M ")); // merged
-        assert!(output.contains("C ")); // closed
-    }
-
-    #[test]
     fn test_issue_list_token_savings() {
         let input = include_str!("../../../tests/fixtures/glab_issue_list_raw.json");
-        let output = format_issue_list(&parse_fixture(input), false);
+        let output = format_issue_list(&parse_fixture(input));
         let input_tokens = count_tokens(input);
         let output_tokens = count_tokens(&output);
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
@@ -1353,7 +1303,7 @@ mod tests {
     #[test]
     fn test_issue_list_format() {
         let input = include_str!("../../../tests/fixtures/glab_issue_list_raw.json");
-        let output = format_issue_list(&parse_fixture(input), false);
+        let output = format_issue_list(&parse_fixture(input));
         assert!(output.contains("Issues"));
         assert!(output.contains("#156"));
         assert!(output.contains("[open]")); // opened
@@ -1364,13 +1314,13 @@ mod tests {
     fn test_format_mr_list_non_array_returns_empty() {
         // Non-array JSON (e.g. error object) returns empty — run_glab_json then
         // falls back to raw stdout through its JSON parse branch.
-        let output = format_mr_list(&Value::Object(Default::default()), false);
+        let output = format_mr_list(&Value::Object(Default::default()));
         assert!(output.is_empty());
     }
 
     #[test]
     fn test_format_issue_list_non_array_returns_empty() {
-        let output = format_issue_list(&Value::Object(Default::default()), false);
+        let output = format_issue_list(&Value::Object(Default::default()));
         assert!(output.is_empty());
     }
 
@@ -1694,25 +1644,19 @@ mod tests {
 
     #[test]
     fn test_format_mr_list_empty_array() {
-        let output = format_mr_list(&parse_fixture("[]"), false);
+        let output = format_mr_list(&parse_fixture("[]"));
         assert_eq!(output, "No Merge Requests\n");
     }
 
     #[test]
-    fn test_format_mr_list_empty_array_ultra_compact() {
-        let output = format_mr_list(&parse_fixture("[]"), true);
-        assert_eq!(output, "No MRs\n");
-    }
-
-    #[test]
     fn test_format_issue_list_empty_array() {
-        let output = format_issue_list(&parse_fixture("[]"), false);
+        let output = format_issue_list(&parse_fixture("[]"));
         assert_eq!(output, "No Issues\n");
     }
 
     #[test]
     fn test_format_ci_list_empty_array() {
-        let output = format_ci_list(&parse_fixture("[]"), false);
+        let output = format_ci_list(&parse_fixture("[]"));
         assert_eq!(output, "No Pipelines\n");
     }
 
@@ -1723,7 +1667,7 @@ mod tests {
         let json = parse_fixture(
             r#"{"iid":42,"title":"Edge","state":"opened","author":null,"web_url":"","merge_status":"unknown","description":null}"#,
         );
-        let output = format_mr_view(&json, false);
+        let output = format_mr_view(&json);
         assert!(output.contains("MR !42: Edge"));
         assert!(output.contains("???")); // author fallback
     }
@@ -1744,7 +1688,7 @@ mod tests {
     fn test_format_ci_status_non_english_fallback() {
         // Non-English locale output with no recognized keyword must fall back to raw.
         let raw = "Le pipeline est en cours d'exécution\n";
-        let output = format_ci_status(raw, false);
+        let output = format_ci_status(raw);
         // format_ci_status returns raw when no keywords match
         assert_eq!(output, raw);
     }
@@ -1776,7 +1720,7 @@ mod tests {
 
     #[test]
     fn test_format_mr_view_branches() {
-        let output = format_mr_view(&parse_fixture(MR_VIEW_FULL), false);
+        let output = format_mr_view(&parse_fixture(MR_VIEW_FULL));
         assert!(
             output.contains("feat/widget -> main"),
             "expected branches line, got:\n{}",
@@ -1786,7 +1730,7 @@ mod tests {
 
     #[test]
     fn test_format_mr_view_labels() {
-        let output = format_mr_view(&parse_fixture(MR_VIEW_FULL), false);
+        let output = format_mr_view(&parse_fixture(MR_VIEW_FULL));
         assert!(
             output.contains("Labels: enhancement, cli"),
             "expected labels line, got:\n{}",
@@ -1796,7 +1740,7 @@ mod tests {
 
     #[test]
     fn test_format_mr_view_reviewers() {
-        let output = format_mr_view(&parse_fixture(MR_VIEW_FULL), false);
+        let output = format_mr_view(&parse_fixture(MR_VIEW_FULL));
         assert!(
             output.contains("Reviewers: @bob_review, @carol_review"),
             "expected reviewers line, got:\n{}",
@@ -1815,7 +1759,7 @@ mod tests {
                 "labels":[], "reviewers":[], "description":null
             }"#,
         );
-        let output = format_mr_view(&json, false);
+        let output = format_mr_view(&json);
         assert!(!output.contains("Labels:"));
         assert!(!output.contains("Reviewers:"));
         // branches line still present
@@ -1824,7 +1768,7 @@ mod tests {
 
     #[test]
     fn test_format_mr_view_mergeable_text_tag() {
-        let output = format_mr_view(&parse_fixture(MR_VIEW_FULL), false);
+        let output = format_mr_view(&parse_fixture(MR_VIEW_FULL));
         // merge_status="can_be_merged" -> "[ok]" (text tag, no emoji)
         assert!(
             output.contains("opened | [ok]"),

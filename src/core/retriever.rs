@@ -18,7 +18,7 @@ const DEFAULT_MAX_ENTRY_BYTES: usize = 10 * 1024 * 1024;
 const DEFAULT_MAX_ENTRIES: usize = 200;
 const DEFAULT_RETENTION_DAYS: u32 = 30;
 pub const MIN_FAILURE_BYTES: usize = 500;
-const HASH_HEX_LEN: usize = 12;
+const HASH_HEX_LEN: usize = 16;
 const DEFAULT_TEE_MAX_FILES: usize = 20;
 const DEFAULT_TEE_MAX_FILE_SIZE: usize = 1_048_576;
 
@@ -464,6 +464,20 @@ fn evict(conn: &Connection, cfg: &RetrieverConfig, keep_hash: &str) {
     }
 }
 
+#[cfg(feature = "engine")]
+pub fn trim_family(cfg: &RetrieverConfig, prefix: &str, keep: usize) {
+    let _ = with_open(cfg, |conn| {
+        conn.execute(
+            "DELETE FROM recall WHERE rowid IN (
+                SELECT rowid FROM recall WHERE command LIKE ?1 || '%'
+                ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?2
+            )",
+            params![prefix, keep as i64],
+        )?;
+        Ok(())
+    });
+}
+
 pub fn store(
     cfg: &RetrieverConfig,
     content: &[u8],
@@ -620,6 +634,18 @@ fn decode(row: &Row) -> Result<Vec<u8>> {
     }
 }
 
+/// What `rtk recall <hash>` would print, without the printing: a test that
+/// follows a recovery hint sees what a caller following it sees, down to the
+/// entry's own `shown_upto`, which is where the command starts reading.
+#[cfg(test)]
+pub(crate) fn recalled_content(hash: &str) -> Option<String> {
+    let cfg = Config::load().unwrap_or_default().retriever;
+    let conn = open_existing(&cfg).ok().flatten()?;
+    let row = load_by_hash(&conn, hash).ok().flatten()?;
+    let full = decode(&row).ok()?;
+    String::from_utf8(slice_from_line(&full, row.shown_upto).to_vec()).ok()
+}
+
 pub struct RecallArgs<'a> {
     pub hash: Option<&'a str>,
     pub full: bool,
@@ -731,7 +757,7 @@ fn list_entries(conn: &Connection) -> Result<i32> {
     })?;
 
     println!(
-        "{:<14} {:<26} {:>7} {:>7} {:>9} {:>5} TRUNC",
+        "{:<18} {:<26} {:>7} {:>7} {:>9} {:>5} TRUNC",
         "HASH", "COMMAND", "LINES", "HIDDEN", "ORIG", "EXIT"
     );
     let mut n = 0;
@@ -745,7 +771,7 @@ fn list_entries(conn: &Connection) -> Result<i32> {
             command
         };
         println!(
-            "{:<14} {:<26} {:>7} {:>7} {:>9} {:>5} {}",
+            "{:<18} {:<26} {:>7} {:>7} {:>9} {:>5} {}",
             hash,
             cmd,
             total,
@@ -856,6 +882,48 @@ mod tests {
         assert_eq!(a.len(), HASH_HEX_LEN);
         assert_ne!(a, content_hash("cmd2", b"output"));
         assert_ne!(a, content_hash("cmd", b"output2"));
+    }
+
+    #[test]
+    fn test_store_keeps_outputs_sharing_a_48_bit_hash_prefix() {
+        // SHA-256("cmd\0out-25833387") and SHA-256("cmd\0out-36334097") both
+        // start with 4ce95baf880e.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        let first = store_inner(&cfg, b"out-25833387", "cmd", Some(1), 1).unwrap();
+        let second = store_inner(&cfg, b"out-36334097", "cmd", Some(1), 1).unwrap();
+        assert_eq!(first.hash, "4ce95baf880ee759");
+        assert_eq!(second.hash, "4ce95baf880e306f");
+
+        let conn = open(&cfg).unwrap();
+        for (stored, content) in [(&first, b"out-25833387"), (&second, b"out-36334097")] {
+            let row = load_by_hash(&conn, &stored.hash).unwrap().expect("row");
+            assert_eq!(decode(&row).unwrap(), content);
+        }
+    }
+
+    #[test]
+    fn test_12_char_hint_resolves_after_the_same_output_is_stored_again() {
+        // A row stored before the key was widened keeps its 12-char key; the
+        // same output stored again gets the 16-char key that starts with it.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        let stored = store_inner(&cfg, b"same output", "cmd", Some(1), 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        let old = &stored.hash[..12];
+        conn.execute(
+            "UPDATE recall SET hash = ?1 WHERE hash = ?2",
+            params![old, stored.hash],
+        )
+        .unwrap();
+        let again = store_inner(&cfg, b"same output", "cmd", Some(1), 1).unwrap();
+        assert_ne!(again.hash, old);
+
+        for hint in [old, again.hash.as_str()] {
+            let row = load_by_hash(&conn, hint).unwrap().expect("row");
+            assert_eq!(row.hash, hint);
+            assert_eq!(decode(&row).unwrap(), b"same output");
+        }
     }
 
     #[test]

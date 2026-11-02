@@ -7,7 +7,8 @@ use crate::core::arg_tokenizer::{self, Dialect, Token, TokenKind, ValueSpec};
 use crate::core::guard::never_worse;
 use crate::core::shell::{display_args, with_args};
 use crate::core::stream::{
-    self, CaptureResult, FilterMode, StdinMode, StreamFilter, exec_capture, exec_capture_stdin,
+    self, CaptureResult, FilterMode, StdinMode, StreamFilter, exec_capture_stdin,
+    exec_capture_unguarded,
 };
 use crate::core::tracking;
 use crate::core::utils::{ChildArgExt, resolved_command, strip_ansi};
@@ -711,7 +712,7 @@ pub fn run(
     if asks_for_help {
         let mut cmd = resolved_command(engine.bin());
         cmd.child_args(args);
-        let result = exec_capture(&mut cmd).context("search failed")?;
+        let result = exec_capture_unguarded(&mut cmd).context("search failed")?;
         print!("{}", result.stdout);
         if !result.stderr.is_empty() {
             eprint!("{}", result.stderr);

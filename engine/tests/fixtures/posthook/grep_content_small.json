@@ -1,0 +1,24 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "transcript_path": "/home/user/.claude/projects/example-project/00000000-0000-0000-0000-000000000000.jsonl",
+  "cwd": "/home/user/project",
+  "prompt_id": "00000000-0000-0000-0000-000000000000",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Grep",
+  "tool_input": {
+    "pattern": "process_alpha",
+    "output_mode": "content",
+    "-n": true
+  },
+  "tool_response": {
+    "mode": "content",
+    "numFiles": 0,
+    "filenames": [],
+    "content": "haystack.rs:1:fn handler_0() { process_alpha(ctx, 0); }\nhaystack.rs:8:fn handler_7() { process_alpha(ctx, 7); }\nhaystack.rs:15:fn handler_14() { process_alpha(ctx, 14); }\nhaystack.rs:22:fn handler_21() { process_alpha(ctx, 21); }\nhaystack.rs:29:fn handler_28() { process_alpha(ctx, 28); }\nhaystack.rs:36:fn handler_35() { process_alpha(ctx, 35); }\nhaystack.rs:43:fn handler_42() { process_alpha(ctx, 42); }\nhaystack.rs:50:fn handler_49() { process_alpha(ctx, 49); }\nhaystack.rs:57:fn handler_56() { process_alpha(ctx, 56); }\nhaystack.rs:64:fn handler_63() { process_alpha(ctx, 63); }\nhaystack.rs:71:fn handler_70() { process_alpha(ctx, 70); }\nhaystack.rs:78:fn handler_77() { process_alpha(ctx, 77); }\nhaystack.rs:85:fn handler_84() { process_alpha(ctx, 84); }\nhaystack.rs:92:fn handler_91() { process_alpha(ctx, 91); }\nhaystack.rs:99:fn handler_98() { process_alpha(ctx, 98); }\nhaystack.rs:106:fn handler_105() { process_alpha(ctx, 105); }\nhaystack.rs:113:fn handler_112() { process_alpha(ctx, 112); }\nhaystack.rs:120:fn handler_119() { process_alpha(ctx, 119); }\nhaystack.rs:127:fn handler_126() { process_alpha(ctx, 126); }\nhaystack.rs:134:fn handler_133() { process_alpha(ctx, 133); }\nhaystack.rs:141:fn handler_140() { process_alpha(ctx, 140); }\nhaystack.rs:148:fn handler_147() { process_alpha(ctx, 147); }\nhaystack.rs:155:fn handler_154() { process_alpha(ctx, 154); }\nhaystack.rs:162:fn handler_161() { process_alpha(ctx, 161); }\nhaystack.rs:169:fn handler_168() { process_alpha(ctx, 168); }\nhaystack.rs:176:fn handler_175() { process_alpha(ctx, 175); }\nhaystack.rs:183:fn handler_182() { process_alpha(ctx, 182); }\nhaystack.rs:190:fn handler_189() { process_alpha(ctx, 189); }\nhaystack.rs:197:fn handler_196() { process_alpha(ctx, 196); }\nhaystack.rs:204:fn handler_203() { process_alpha(ctx, 203); }\nhaystack.rs:211:fn handler_210() { process_alpha(ctx, 210); }\nhaystack.rs:218:fn handler_217() { process_alpha(ctx, 217); }\nhaystack.rs:225:fn handler_224() { process_alpha(ctx, 224); }\nhaystack.rs:232:fn handler_231() { process_alpha(ctx, 231); }\nhaystack.rs:239:fn handler_238() { process_alpha(ctx, 238); }\nhaystack.rs:246:fn handler_245() { process_alpha(ctx, 245); }\nhaystack.rs:253:fn handler_252() { process_alpha(ctx, 252); }\nhaystack.rs:260:fn handler_259() { process_alpha(ctx, 259); }\nhaystack.rs:267:fn handler_266() { process_alpha(ctx, 266); }\nhaystack.rs:274:fn handler_273() { process_alpha(ctx, 273); }\nhaystack.rs:281:fn handler_280() { process_alpha(ctx, 280); }\nhaystack.rs:288:fn handler_287() { process_alpha(ctx, 287); }\nhaystack.rs:295:fn handler_294() { process_alpha(ctx, 294); }",
+    "numLines": 43,
+    "totalLines": 43
+  },
+  "tool_use_id": "toolu_019w4JAdyVNhxWAPCZxQHS6Z",
+  "duration_ms": 18
+}

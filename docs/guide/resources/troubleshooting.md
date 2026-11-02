@@ -2,7 +2,7 @@
 title: Troubleshooting
 description: Common RTK issues and how to fix them
 sidebar:
-  order: 2
+  order: 3
 ---
 
 # Troubleshooting
@@ -46,8 +46,8 @@ rtk gain    # should now show token savings stats
 2. Initialize the hook:
    ```bash
    rtk init --global    # Claude Code
-   rtk init --global --cursor    # Cursor
-   rtk init --global --opencode  # Claude Code + OpenCode plugin
+   rtk init --global --agent cursor    # Cursor
+   rtk init --global --opencode  # OpenCode
    ```
 
 3. Restart your AI assistant.
@@ -140,7 +140,7 @@ Error: program not found
 
 **Fix:** Update to RTK v0.23.1+:
 ```bash
-cargo install --git https://github.com/rtk-ai/rtk --branch master
+cargo install --git https://github.com/rtk-ai/rtk --branch master rtk
 rtk --version    # should be 0.23.1+
 ```
 
@@ -182,7 +182,7 @@ If Rust Type Kit is published to crates.io under the name `rtk`, `cargo install 
 Always use the explicit URL, pinned to the release branch:
 
 ```bash
-cargo install --git https://github.com/rtk-ai/rtk --branch master
+cargo install --git https://github.com/rtk-ai/rtk --branch master rtk
 ```
 
 ## Does RTK break Claude's prompt cache?

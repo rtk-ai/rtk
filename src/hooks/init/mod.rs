@@ -23,28 +23,29 @@ use crate::core::test_isolation;
 use crate::core::user_dirs;
 
 mod agents_md;
-mod antigravity;
-mod claude;
-mod codex;
+pub(crate) mod antigravity;
+pub(crate) mod claude;
+pub(crate) mod codex;
 mod copilot;
-mod cursor;
-mod droid;
-mod gemini;
-mod hermes;
+pub(crate) mod cursor;
+pub(crate) mod droid;
+pub(crate) mod gemini;
+pub(crate) mod hermes;
 mod instructions_agents;
-mod opencode;
-mod pi;
-mod trae;
-mod vibe;
+pub(crate) mod opencode;
+pub(crate) mod pi;
+pub(crate) mod trae;
+pub(crate) mod vibe;
 
 // `agents_md` and `pi` hold helpers that several submodules share, so they are
-// glob-imported and reach siblings through `use super::*`; every other submodule is used only
-// from here and is imported by name.
+// glob-imported and reach siblings through `use super::*`; the remaining submodules are
+// imported by name here (and agent modules with hook probes are `pub(crate)` for `hook_check`).
 use agents_md::*;
 use claude::{
-    hook_already_present, remove_hook_from_settings, run_claude_md_mode, run_default_mode,
+    hook_already_present, hook_gaps, remove_settings_entries, run_claude_md_mode, run_default_mode,
     run_hook_only_mode,
 };
+pub use codex::UninstallCodexOutcome;
 use codex::{run_codex_mode, show_codex_config, uninstall_codex};
 use cursor::{
     cursor_hook_already_present, install_cursor_hooks, remove_cursor_hooks, resolve_cursor_dir,
@@ -57,6 +58,7 @@ use opencode::{
 use pi::*;
 
 pub use antigravity::{run_antigravity_mode, uninstall_antigravity_mode};
+pub use claude::claude_hook_gaps;
 pub(crate) use copilot::{COPILOT_HOOK_JSON, copilot_user_dir};
 pub use copilot::{run_copilot, run_copilot_global, uninstall_copilot, uninstall_copilot_global};
 pub use droid::{run_droid_mode, uninstall_droid};
@@ -160,6 +162,109 @@ pub(super) fn awareness_content(level: AwarenessLevel) -> &'static str {
         AwarenessLevel::Default => RTK_AWARENESS_DEFAULT,
         AwarenessLevel::High => RTK_AWARENESS_HIGH,
         AwarenessLevel::Full => RTK_AWARENESS_FULL,
+    }
+}
+
+/// Awareness content plus the resolved pipeline's awareness-file directives,
+/// merged in declaration order. With no directive configured this is exactly
+/// `awareness_content` — byte-identical init output. A pipeline
+/// `rtk-awareness` directive's `level` overrides the config level.
+#[cfg(not(feature = "engine"))]
+fn instructions_body(config_level: AwarenessLevel) -> String {
+    awareness_content(config_level).to_string()
+}
+
+#[cfg(feature = "engine")]
+fn instructions_body(config_level: AwarenessLevel) -> String {
+    let loaded = crate::core::pipeline_config::load();
+    instructions_body_for(config_level, &loaded.resolved)
+}
+
+#[cfg(feature = "engine")]
+fn instructions_body_for(
+    config_level: AwarenessLevel,
+    pipeline: &rtk_engine::pipeline::Resolved,
+) -> String {
+    let mut level = config_level;
+    for directive in &pipeline.directives {
+        if !directive.def.enabled {
+            continue;
+        }
+        // The built-in `rtk-awareness level = "default"` never overrides the
+        // user's `[awareness] level` in config.toml; an explicit user
+        // directive or `[override.rtk-awareness]` does.
+        let user_set = directive.scope != rtk_engine::pipeline::Scope::Builtin
+            || !directive.overridden_by.is_empty();
+        if directive.def.use_.as_deref() == Some("rtk-awareness")
+            && user_set
+            && let Some(l) = directive.def.options.get("level").and_then(|v| v.as_str())
+        {
+            match l {
+                "default" => level = AwarenessLevel::Default,
+                "high" => level = AwarenessLevel::High,
+                "full" => level = AwarenessLevel::Full,
+                _ => {}
+            }
+        }
+    }
+
+    let mut texts = vec![awareness_content(level).to_string()];
+    for directive in &pipeline.directives {
+        let def = &directive.def;
+        if !def.enabled || def.use_.as_deref() == Some("rtk-awareness") {
+            continue;
+        }
+        if let Some(channel) = def.channel.as_deref()
+            && channel != "awareness_file"
+        {
+            continue;
+        }
+        if let Some(text) = crate::core::pipeline_config::directive_text(directive) {
+            texts.push(text);
+        } else if def.file.is_some() {
+            eprintln!(
+                "rtk: directive `{}` names a file that could not be read — skipped",
+                directive.name
+            );
+        }
+    }
+    // The generated `route-tasks` directive: whenever a task instance is
+    // bound to an upstream, the agent learns the exact `rtk <task>` syntax.
+    // A task reached only by an `after_tool` route is left out — RTK calls it
+    // itself there, so telling the agent how to invoke it is pure context cost.
+    let after_tool_only: std::collections::HashSet<&str> = {
+        let mut after: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut elsewhere: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for (position, rules) in &pipeline.rules {
+            for rule in rules {
+                let Some(task) = rule.def.task.as_deref() else {
+                    continue;
+                };
+                if position.event == rtk_engine::block::Event::AfterTool {
+                    after.insert(task);
+                } else {
+                    elsewhere.insert(task);
+                }
+            }
+        }
+        after.difference(&elsewhere).copied().collect()
+    };
+    let bound: Vec<(&str, &str)> = pipeline
+        .tasks
+        .iter()
+        .filter(|(_, (task, _))| task.upstream.is_some())
+        .filter(|(name, _)| !after_tool_only.contains(name.as_str()))
+        .map(|(name, (task, _))| (name.as_str(), task.kind.as_str()))
+        .collect();
+    let route = rtk_engine::directive::route_tasks_text(&bound);
+    if !route.is_empty() {
+        texts.push(route);
+    }
+    let merged = rtk_engine::directive::merge(&texts);
+    if merged.ends_with('\n') {
+        merged
+    } else {
+        format!("{merged}\n")
     }
 }
 
@@ -303,7 +408,7 @@ rtk wget <url>          # Compact download output (65%)
 rtk gain                # View token savings statistics
 rtk gain --history      # View command history with savings
 rtk discover            # Analyze Claude Code sessions for missed RTK usage
-rtk proxy <cmd>         # Run command without filtering (for debugging)
+rtk bypass <cmd>        # Run command without filtering (for debugging)
 rtk init                # Add RTK instructions to CLAUDE.md
 rtk init --global       # Add RTK to ~/.claude/CLAUDE.md
 ```
@@ -321,7 +426,7 @@ rtk init --global       # Add RTK to ~/.claude/CLAUDE.md
 | Infrastructure | docker, kubectl | 85% |
 | Network | curl, wget | 65-70% |
 
-Overall average: **60-90% token reduction** on common development operations.
+Overall average: **60-90% less bash output** on common development operations.
 <!-- /rtk-instructions -->
 "##;
 
@@ -373,34 +478,60 @@ pub fn run(
             anyhow::bail!("Windsurf support is global-only. Use: rtk init -g --agent windsurf");
         }
 
-        if install_windsurf {
-            run_windsurf_mode(ctx)?;
-        } else if install_cline {
-            run_cline_mode(ctx)?;
-        } else {
-            // Mode selection (Claude Code / OpenCode)
-            match (install_claude, install_opencode, claude_md, hook_only) {
-                (false, true, _, _) => run_opencode_only_mode(ctx)?,
-                (true, opencode, true, _) => run_claude_md_mode(global, opencode, ctx)?,
-                (true, opencode, false, true) => {
-                    run_hook_only_mode(global, patch_mode, opencode, ctx)?
-                }
-                (true, opencode, false, false) => {
-                    run_default_mode(global, patch_mode, opencode, ctx)?
-                }
-                (false, false, _, _) => {
-                    if !install_cursor {
-                        anyhow::bail!(
-                            "at least one of install_claude or install_opencode must be true"
-                        )
+        // The OpenCode plugin is an independent target: install it before any
+        // agent so a Claude/Cursor failure cannot leave it missing, and vice
+        // versa. Its error is reported after the agent's.
+        let opencode_result = install_opencode.then(|| run_opencode_only_mode(ctx));
+        let opencode_plugin = opencode_result
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .and_then(|path| path.as_deref());
+
+        let agent_result = (|| -> Result<()> {
+            if install_windsurf {
+                run_windsurf_mode(ctx)?;
+            } else if install_cline {
+                run_cline_mode(ctx)?;
+            } else {
+                // Mode selection (Claude Code / OpenCode)
+                match (install_claude, install_opencode, claude_md, hook_only) {
+                    // The plugin was installed above, independently.
+                    (false, true, _, _) => {}
+                    (true, _, true, _) => run_claude_md_mode(global, ctx)?,
+                    (true, _, false, true) => {
+                        run_hook_only_mode(global, patch_mode, opencode_plugin, ctx)?
+                    }
+                    (true, _, false, false) => {
+                        run_default_mode(global, patch_mode, opencode_plugin, ctx)?
+                    }
+                    (false, false, _, _) => {
+                        if !install_cursor {
+                            anyhow::bail!(
+                                "at least one of install_claude or install_opencode must be true"
+                            )
+                        }
                     }
                 }
-            }
 
-            // Cursor hooks: on their own, or next to the OpenCode plugin with --opencode
-            if install_cursor {
-                install_cursor_hooks(ctx)?;
+                // Cursor hooks: on their own, or next to the OpenCode plugin with --opencode
+                if install_cursor {
+                    install_cursor_hooks(ctx)?;
+                }
             }
+            Ok(())
+        })();
+
+        match (opencode_result, agent_result) {
+            (Some(Err(opencode_error)), Err(agent_error)) => {
+                return Err(anyhow::anyhow!(
+                    "OpenCode install failed: {opencode_error:#}\nAgent install failed: {agent_error:#}"
+                ));
+            }
+            (Some(Err(error)), Ok(())) => {
+                return Err(error.context("OpenCode install failed"));
+            }
+            (_, Err(error)) => return Err(error),
+            _ => {}
         }
     }
 
@@ -423,6 +554,8 @@ pub fn run(
             eprintln!("  [warn] Failed to prepare tracking database: {e}");
         }
     }
+
+    report_pipeline_health();
 
     if dry_run {
         print_dry_run_footer();
@@ -738,6 +871,457 @@ pub(super) fn prompt_user_confirmation(prompt: &str) -> Result<bool> {
     let response = line.trim().to_lowercase();
     Ok(response == "y" || response == "yes")
 }
+/// Load + validate the pipeline at init time (init runs validate) and
+/// refresh the status channel so a fixed file clears its stale warning.
+#[cfg(not(feature = "engine"))]
+fn report_pipeline_health() {}
+
+#[cfg(feature = "engine")]
+fn report_pipeline_health() {
+    let loaded = crate::core::pipeline_config::load();
+    crate::core::pipeline_config::write_status(&loaded);
+    if loaded.diagnostics.is_empty() {
+        return;
+    }
+    println!();
+    println!("  Pipeline ({})", loaded.resolved.name);
+    for diagnostic in &loaded.diagnostics {
+        let tag = match diagnostic.severity() {
+            rtk_engine::pipeline::Severity::Error => "[error]",
+            rtk_engine::pipeline::Severity::Warning => "[warn]",
+        };
+        println!("  {tag} {}", diagnostic.render());
+    }
+    if loaded.fell_back {
+        println!("  [warn] pipeline.toml has errors — using the built-in default until fixed");
+    }
+}
+
+/// Proxy on-ramp: offer to point Claude Code at the RTK proxy for the
+/// history/cache layers. Claude Code is the one agent with a confirmed
+/// config channel (settings.json `env`); everyone else keeps the manual
+/// export line from `rtk llm-proxy start --env`.
+/// The base URL the global settings point Claude Code at, if any.
+pub(super) fn proxy_env_target() -> Option<String> {
+    let dir = resolve_claude_dir().ok()?;
+    let content = fs::read_to_string(dir.join(SETTINGS_JSON)).ok()?;
+    let root: serde_json::Value = from_json_str(strip_leading_bom(&content)).ok()?;
+    root.pointer("/env/ANTHROPIC_BASE_URL")?
+        .as_str()
+        .map(str::to_string)
+}
+
+#[cfg(feature = "engine")]
+fn verify_proxy_setup(base_url: &str, persistence: Option<&str>) {
+    for line in proxy_verification_lines(
+        base_url,
+        crate::llm_proxy::is_reachable(),
+        proxy_env_target().as_deref(),
+        persistence,
+    ) {
+        println!("{line}");
+    }
+}
+
+#[cfg(feature = "engine")]
+/// Both halves have to hold: an env var aimed at a dead daemon is not set up,
+/// and a running daemon nothing points at records nothing — the state that
+/// leaves `rtk gain` empty and looking broken.
+///
+/// Deliberately local. Verifying a real round trip would mean sending a request
+/// to the provider during `init`, and the two failures worth catching are here.
+fn proxy_verification_lines(
+    base_url: &str,
+    reachable: bool,
+    target: Option<&str>,
+    persistence: Option<&str>,
+) -> Vec<String> {
+    let aimed_here = target == Some(base_url);
+    let mut out = vec![
+        format!(
+            "  verify: daemon {}",
+            if reachable {
+                "responding".to_string()
+            } else {
+                format!("NOT responding on {}", crate::llm_proxy::DEFAULT_BIND)
+            }
+        ),
+        format!(
+            "  verify: settings.json {}",
+            match target {
+                Some(t) if aimed_here => format!("env.ANTHROPIC_BASE_URL = {t}"),
+                Some(t) => format!("env.ANTHROPIC_BASE_URL = {t} (not this daemon)"),
+                None => "env.ANTHROPIC_BASE_URL missing".to_string(),
+            }
+        ),
+    ];
+    if reachable && aimed_here {
+        out.push(
+            "  proxy: configured — restart Claude Code, then `rtk gain` shows requests".to_string(),
+        );
+        out.push(match persistence {
+            Some(p) => format!("  verify: restart persistence — {p}"),
+            None => "  [warn] nothing restarts the daemon after a reboot — rerun `rtk init -g`"
+                .to_string(),
+        });
+        out.push(
+            "  Compression: cache-breakpoint alignment — a no-op for clients that set their own, Claude Code included; CCR ships off (`rtk pipeline show rtk:proxy`)"
+                .to_string(),
+        );
+    } else {
+        out.push(
+            "  proxy: NOT fully configured — `rtk gain` will report no proxy data".to_string(),
+        );
+    }
+    out
+}
+
+/// Project scope writes the awareness block and a filters template, and stops.
+/// Registering a hook or starting a daemon from a directory you may have just
+/// cloned is the trust boundary `rtk trust` exists to hold, so that stays with
+/// `-g`. Report the global state rather than leaving the user to discover that
+/// `-g` does more — a bare `rtk init` otherwise looks like the whole setup.
+fn print_project_scope_footer() {
+    for line in project_scope_footer_lines(
+        crate::hooks::hook_check::status(),
+        proxy_env_target().is_some(),
+        crate::llm_proxy::is_reachable(),
+    ) {
+        println!("{line}");
+    }
+}
+
+fn project_scope_footer_lines(
+    hooks: crate::hooks::hook_check::HookStatus,
+    proxy_aimed: bool,
+    proxy_reachable: bool,
+) -> Vec<String> {
+    use crate::hooks::hook_check::HookStatus;
+    let hooks = match hooks {
+        HookStatus::Ok => "registered globally",
+        HookStatus::Outdated => "registered globally (outdated — run `rtk init -g`)",
+        HookStatus::Missing => "NOT registered — run `rtk init -g`",
+    };
+    let proxy = match (proxy_aimed, proxy_reachable) {
+        (true, true) => "configured and running",
+        (true, false) => "configured, daemon not running — `rtk llm-proxy start`",
+        (false, true) => "daemon running but nothing routed to it — `rtk init -g`",
+        (false, false) => "not set up — `rtk init -g`",
+    };
+    vec![
+        format!("  hooks:     {hooks}"),
+        format!("  proxy:     {proxy}"),
+    ]
+}
+
+#[cfg(feature = "engine")]
+fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitContext) -> Result<()> {
+    use std::io::{BufRead, IsTerminal};
+    // Only `PatchMode::Ask` may prompt. `--auto-patch` exists to run without a
+    // terminal, and neither it nor `--no-patch` may adopt the proxy on the
+    // user's behalf: routing an agent's traffic through a daemon is not a
+    // "supported init change", it is a feature the user has to choose.
+    if !matches!(patch_mode, PatchMode::Ask) {
+        return Ok(());
+    }
+    if ctx.dry_run || !std::io::stdin().is_terminal() {
+        return Ok(());
+    }
+    if crate::core::user_env::var("RTK_ONRAMP_DISABLED").as_deref() == Some("1") {
+        return Ok(());
+    }
+    let base_url = format!("http://{}", crate::llm_proxy::DEFAULT_BIND);
+
+    let mut root: serde_json::Value = if settings_path.exists() {
+        let content = fs::read_to_string(settings_path)?;
+        let content = strip_leading_bom(&content);
+        if content.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            from_json_str(content)?
+        }
+    } else {
+        serde_json::json!({})
+    };
+    let already = root
+        .pointer("/env/ANTHROPIC_BASE_URL")
+        .and_then(|v| v.as_str().map(str::to_string));
+    let aimed_here = already.as_deref() == Some(base_url.as_str());
+    let autostart_present = session_start_entry_present(&root);
+    if aimed_here && autostart_present {
+        return Ok(());
+    }
+    // Routing Claude Code at a daemon that cannot be started breaks every
+    // session (#4604): only offer the proxy when its binary is installed, so
+    // the SessionStart hook can start it again after a reboot. A daemon that
+    // merely answers on the port today may not be startable tomorrow.
+    if !crate::llm_proxy::binary_available() {
+        eprintln!();
+        eprintln!(
+            "  RTK proxy not offered: rtk-proxy is not installed (`rtk llm-proxy start` says where to get it)."
+        );
+        return Ok(());
+    }
+
+    if aimed_here {
+        // The failure this flow exists to prevent: a base URL that outlives
+        // the daemon it points at. The env is set but nothing brings the
+        // daemon back after a reboot — offer only the persistence question.
+        eprintln!();
+        eprintln!(
+            "  The RTK proxy is configured in settings.json, but nothing restarts the daemon after a reboot."
+        );
+    } else {
+        eprintln!();
+        if let Some(foreign) = already.as_deref() {
+            eprintln!(
+                "  settings.json already routes Claude Code through {foreign} — another proxy or gateway."
+            );
+            eprint!("  Replace it with the RTK proxy? Your current routing stops working. [y/N] ");
+        } else {
+            eprint!(
+                "  Set up the RTK proxy (routes Claude Code's API traffic through a local daemon)? [y/N] "
+            );
+        }
+        let mut line = String::new();
+        let n = std::io::stdin().lock().read_line(&mut line)?;
+        if n == 0 || !matches!(line.trim().to_lowercase().as_str(), "y" | "yes") {
+            println!("  Skipped — enable later with `rtk init -g` or `rtk llm-proxy start --env`.");
+            return Ok(());
+        }
+    }
+
+    eprintln!("  How should the daemon come back after a reboot?");
+    eprintln!(
+        "    1) SessionStart hook — start it automatically when a Claude session begins (recommended)"
+    );
+    eprintln!("    2) Background service — `rtk llm-proxy service install`");
+    eprintln!("    3) Neither — print the export line; settings.json is not touched");
+    eprint!("  [1/2/3, default 1] ");
+    let mut choice_line = String::new();
+    let n = std::io::stdin().lock().read_line(&mut choice_line)?;
+    if n == 0 {
+        println!("  No answer — nothing changed. Re-run `rtk init -g` to decide later.");
+        return Ok(());
+    }
+    let choice = match choice_line.trim() {
+        "" | "1" => 1,
+        "2" => 2,
+        "3" => 3,
+        other => {
+            println!("  Unrecognized `{other}` — nothing changed.");
+            return Ok(());
+        }
+    };
+
+    if choice == 3 {
+        println!("  settings.json left untouched. Point a session at the daemon with:");
+        println!("    export ANTHROPIC_BASE_URL={base_url}");
+    } else {
+        {
+            let obj = root
+                .as_object_mut()
+                .context("settings.json root is not an object")?;
+            let env = obj
+                .entry("env")
+                .or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+                .context("settings.json `env` is not an object")?;
+            env.insert("ANTHROPIC_BASE_URL".into(), serde_json::json!(base_url));
+        }
+        if choice == 1 && !autostart_present {
+            insert_session_start_entry(&mut root)?;
+        }
+        let serialized = serde_json::to_string_pretty(&root)?;
+        let backup = backup_and_atomic_write(settings_path, &serialized)?;
+        println!("  settings.json: env.ANTHROPIC_BASE_URL = {base_url}");
+        if let Some(path) = backup {
+            println!("  Backup: {}", path.display());
+        }
+        if choice == 1 {
+            println!(
+                "  settings.json: SessionStart hook registered — the proxy starts with each session"
+            );
+        }
+    }
+
+    match ensure_pipeline_extends("rtk:proxy", "") {
+        PipelineChange::Created(path) => {
+            println!("  {path}: created with extends = \"rtk:proxy\"");
+        }
+        PipelineChange::AlreadyActive => {}
+        PipelineChange::ManualNeeded => {
+            println!(
+                "  Add `extends = \"rtk:proxy\"` to [pipeline] in your pipeline.toml — \
+                 without it the daemon forwards unchanged."
+            );
+        }
+    }
+
+    match crate::llm_proxy::ensure_running(crate::llm_proxy::DEFAULT_BIND) {
+        Ok(_) => println!("  rtk-proxy: running"),
+        Err(e) => {
+            println!("  [warn] rtk-proxy not started: {e}");
+            println!("  Start it manually: rtk llm-proxy start");
+        }
+    }
+    if choice == 2 {
+        let exe = std::env::current_exe().context("resolve the rtk binary path")?;
+        match std::process::Command::new(exe)
+            .args(["llm-proxy", "service", "install"])
+            .status()
+        {
+            Ok(s) if s.success() => println!("  service: installed"),
+            Ok(s) => println!("  [warn] service install exited with {s}"),
+            Err(e) => println!("  [warn] service install failed: {e}"),
+        }
+    }
+    match choice {
+        1 => verify_proxy_setup(&base_url, Some("SessionStart autostart")),
+        2 => verify_proxy_setup(&base_url, Some("background service")),
+        _ => println!("  Keep it across logins: rtk llm-proxy service install"),
+    }
+    Ok(())
+}
+
+#[cfg(feature = "engine")]
+/// True when any SessionStart entry already carries the rtk claude hook.
+fn session_start_entry_present(root: &serde_json::Value) -> bool {
+    root.pointer(&format!(
+        "/hooks/{}",
+        crate::hooks::constants::SESSION_START_KEY
+    ))
+    .and_then(|v| v.as_array())
+    .is_some_and(|arr| {
+        arr.iter().any(|entry| {
+            entry
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .is_some_and(|hs| {
+                    hs.iter().any(|h| {
+                        h.get("command")
+                            .and_then(|c| c.as_str())
+                            .is_some_and(is_claude_hook_command)
+                    })
+                })
+        })
+    })
+}
+
+#[cfg(feature = "engine")]
+/// SessionStart entries carry no matcher: the hook fires for every session.
+fn insert_session_start_entry(root: &mut serde_json::Value) -> Result<()> {
+    let obj = root
+        .as_object_mut()
+        .context("settings.json root is not an object")?;
+    let hooks = obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("settings.json `hooks` is not an object")?;
+    let arr = hooks
+        .entry(crate::hooks::constants::SESSION_START_KEY)
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .context("settings.json `SessionStart` is not an array")?;
+    arr.push(serde_json::json!({
+        "hooks": [{ "type": "command", "command": "rtk hook claude" }]
+    }));
+    Ok(())
+}
+
+#[cfg(feature = "engine")]
+enum PipelineChange {
+    Created(String),
+    AlreadyActive,
+    ManualNeeded,
+}
+
+/// Make the user pipeline extend a built-in: writes a fresh
+/// `~/.config/rtk/pipeline.toml` when none exists; never edits an existing
+/// file (the user is told what line to add instead).
+#[cfg(feature = "engine")]
+fn ensure_pipeline_extends(builtin: &str, extra_body: &str) -> PipelineChange {
+    let Some(path) = crate::core::pipeline_config::user_pipeline_path() else {
+        return PipelineChange::ManualNeeded;
+    };
+    let loaded = crate::core::pipeline_config::load();
+    if loaded.resolved.extends.iter().any(|e| e == builtin) {
+        return PipelineChange::AlreadyActive;
+    }
+    if crate::core::pipeline_config::any_user_pipeline_files() {
+        return PipelineChange::ManualNeeded;
+    }
+    let content =
+        format!("schema_version = 1\n\n[pipeline]\nextends = \"{builtin}\"\n{extra_body}");
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    match fs::write(&path, content) {
+        Ok(()) => PipelineChange::Created(path.display().to_string()),
+        Err(_) => PipelineChange::ManualNeeded,
+    }
+}
+
+#[cfg(feature = "engine")]
+/// Delegation on-ramp: offer delegated reads. Writes the
+/// adoption block only into a fresh pipeline.toml; an existing file gets the
+/// block printed for the user to merge by hand.
+fn offer_delegation_onramp(patch_mode: PatchMode, ctx: InitContext) -> Result<()> {
+    use std::io::{BufRead, IsTerminal};
+    if !matches!(patch_mode, PatchMode::Ask) {
+        return Ok(());
+    }
+    if ctx.dry_run || !std::io::stdin().is_terminal() {
+        return Ok(());
+    }
+    if crate::core::user_env::var("RTK_ONRAMP_DISABLED").as_deref() == Some("1") {
+        return Ok(());
+    }
+    let loaded = crate::core::pipeline_config::load();
+    if loaded
+        .resolved
+        .tasks
+        .values()
+        .any(|(task, _)| task.upstream.is_some())
+    {
+        return Ok(());
+    }
+
+    eprintln!();
+    eprint!("  Delegate oversize reads to a cheaper model (needs a model API key)? [y/N] ");
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    if !matches!(line.trim().to_lowercase().as_str(), "y" | "yes") {
+        println!(
+            "  Skipped — adopt later with `extends = \"rtk:delegate-reads\"` (see `rtk pipeline show rtk:delegate-reads`)."
+        );
+        return Ok(());
+    }
+
+    const ADOPTION_BODY: &str = "\n[upstream.flash]\nprovider    = \"google\"\nmodel       = \"gemini-2.5-flash\"\napi_key_env = \"GEMINI_API_KEY\"\n\n[task.bulk-read]\nupstream = \"flash\"\n\n[task.code-write]\nupstream = \"flash\"\n";
+    match ensure_pipeline_extends("rtk:delegate-reads", ADOPTION_BODY) {
+        PipelineChange::Created(path) => {
+            println!("  {path}: created with the rtk:delegate-reads adoption block");
+            crate::core::pipeline_cmd::print_auth_guidance(
+                &crate::core::pipeline_config::load().resolved,
+            );
+            println!(
+                "  Set GEMINI_API_KEY (or edit the [upstream.flash] block), then re-run `rtk init -g`."
+            );
+        }
+        PipelineChange::AlreadyActive => {}
+        PipelineChange::ManualNeeded => {
+            println!("  Merge this into your pipeline.toml:");
+            println!("    [pipeline]");
+            println!("    extends = \"rtk:delegate-reads\"");
+            for body_line in ADOPTION_BODY.lines().filter(|l| !l.is_empty()) {
+                println!("    {body_line}");
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Prompt user for consent to patch settings.json.
 pub(super) fn prompt_user_consent(settings_path: &Path) -> Result<bool> {
@@ -844,7 +1428,7 @@ pub fn uninstall(
     pi: bool,
     omp: bool,
     ctx: InitContext,
-) -> Result<()> {
+) -> Result<i32> {
     uninstall_with_patch_mode(global, gemini, codex, cursor, pi, omp, PatchMode::Ask, ctx)
 }
 
@@ -860,16 +1444,20 @@ pub fn uninstall_with_patch_mode(
     omp: bool,
     patch_mode: PatchMode,
     ctx: InitContext,
-) -> Result<()> {
+) -> Result<i32> {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
     if codex {
-        uninstall_codex(global, ctx)?;
+        let outcome = uninstall_codex(global, ctx)?;
         if dry_run {
             print_dry_run_footer();
         }
-        return Ok(());
+        let code = match outcome {
+            UninstallCodexOutcome::Clean => 0,
+            UninstallCodexOutcome::HookRefused => 2,
+        };
+        return Ok(code);
     }
 
     if cursor {
@@ -896,17 +1484,17 @@ pub fn uninstall_with_patch_mode(
         if dry_run {
             print_dry_run_footer();
         }
-        return Ok(());
+        return Ok(0);
     }
 
     if pi {
         uninstall_pi_with_patch_mode(global, patch_mode, ctx)?;
-        return Ok(());
+        return Ok(0);
     }
 
     if omp {
         uninstall_omp_with_patch_mode(global, patch_mode, ctx)?;
-        return Ok(());
+        return Ok(0);
     }
 
     if !global {
@@ -941,7 +1529,7 @@ pub fn uninstall_with_patch_mode(
         if dry_run {
             print_dry_run_footer();
         }
-        return Ok(());
+        return Ok(0);
     }
 
     // 1. Remove legacy hook file (if exists from old installation)
@@ -993,10 +1581,10 @@ pub fn uninstall_with_patch_mode(
         let mut claude_md_changed = false;
         let mut working_content = content.clone();
 
-        if working_content.contains(RTK_MD_REF) {
+        if has_rtk_reference(&working_content, &[RTK_MD_REF]) {
             let new_content = working_content
                 .lines()
-                .filter(|line| !line.trim().starts_with(RTK_MD_REF))
+                .filter(|line| line.trim() != RTK_MD_REF)
                 .collect::<Vec<_>>()
                 .join("\n");
 
@@ -1050,8 +1638,12 @@ pub fn uninstall_with_patch_mode(
     }
 
     // 4. Remove hook entry from settings.json
-    if remove_hook_from_settings(ctx)? {
+    let settings_removed = remove_settings_entries(ctx)?;
+    if settings_removed.hook {
         removed.push("settings.json: removed RTK hook entry".to_string());
+    }
+    if settings_removed.proxy_base_url {
+        removed.push("settings.json: removed env.ANTHROPIC_BASE_URL (RTK proxy)".to_string());
     }
 
     // 5. Remove OpenCode plugin
@@ -1090,7 +1682,7 @@ pub fn uninstall_with_patch_mode(
         print_dry_run_footer();
     }
 
-    Ok(())
+    Ok(0)
 }
 
 /// Clean up consecutive blank lines (collapse 3+ to 2)
@@ -1236,20 +1828,42 @@ pub(super) fn remove_hook_entries(
     removed
 }
 
-/// Deep-merge RTK hook entry into settings.json
-/// Creates hooks.PreToolUse structure if missing, preserves existing hooks
-pub(super) fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result<()> {
-    if !root.is_object() {
-        *root = serde_json::json!({});
-    }
-    append_hook_entry(
-        root,
-        PRE_TOOL_USE_KEY,
-        serde_json::json!({
-            "matcher": "Bash",
-            "hooks": [{"type": "command", "command": hook_command}]
-        }),
-    )
+/// Deep-merge RTK hook entry into settings.json under the given event key.
+/// Creates the hooks structure if missing, preserves existing hooks.
+pub(super) fn insert_hook_entry(
+    root: &mut serde_json::Value,
+    event_key: &str,
+    matcher: &str,
+    hook_command: &str,
+) -> Result<()> {
+    let root_obj = match root.as_object_mut() {
+        Some(obj) => obj,
+        None => {
+            *root = serde_json::json!({});
+            root.as_object_mut().expect("just-created json object")
+        }
+    };
+
+    let hooks = root_obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("hooks value is not an object")?;
+
+    let event_array = hooks
+        .entry(event_key)
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .with_context(|| format!("{event_key} value is not an array"))?;
+
+    event_array.push(serde_json::json!({
+        "matcher": matcher,
+        "hooks": [{
+            "type": "command",
+            "command": hook_command
+        }]
+    }));
+    Ok(())
 }
 
 /// Generate .rtk/filters.toml template in the current directory if not present.
@@ -1450,7 +2064,7 @@ fn show_claude_config() -> Result<()> {
     let binary_hook_registered = if settings_path.exists() {
         let content = fs::read_to_string(&settings_path).unwrap_or_default();
         if let Ok(root) = from_json_str::<serde_json::Value>(&content) {
-            hook_already_present(&root, CLAUDE_HOOK_COMMAND)
+            hook_already_present(&root, PRE_TOOL_USE_KEY, CLAUDE_HOOK_COMMAND)
         } else {
             false
         }
@@ -1572,10 +2186,28 @@ fn show_claude_config() -> Result<()> {
         let content = strip_leading_bom(&content);
         if !content.trim().is_empty() {
             if let Ok(root) = from_json_str::<serde_json::Value>(content) {
-                if hook_already_present(&root, CLAUDE_HOOK_COMMAND) {
-                    println!("[ok] settings.json: RTK hook configured");
+                let required = claude::required_claude_events();
+                let missing: Vec<&str> = required
+                    .iter()
+                    .filter(|(event, _)| !hook_already_present(&root, event, CLAUDE_HOOK_COMMAND))
+                    .map(|(event, _)| *event)
+                    .collect();
+                if required.is_empty() {
+                    println!("[--] settings.json: the active pipeline registers no hook events");
+                } else if missing.is_empty() {
+                    let gaps = hook_gaps(&root, &required);
+                    if gaps.is_empty() {
+                        let events: Vec<&str> = required.iter().map(|(event, _)| *event).collect();
+                        println!(
+                            "[ok] settings.json: RTK hooks configured ({})",
+                            events.join(" + ")
+                        );
+                    } else {
+                        println!("[warn] settings.json: {}", gaps.join("; "));
+                        println!("    Run: rtk init -g --auto-patch");
+                    }
                 } else {
-                    println!("[warn] settings.json: exists but RTK hook not configured");
+                    println!("[warn] settings.json: {} hook missing", missing.join(", "));
                     println!("    Run: rtk init -g --auto-patch");
                 }
             } else {
@@ -1698,6 +2330,55 @@ pub(super) fn with_missing_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, 
 
 #[cfg(test)]
 mod tests {
+    use crate::hooks::constants::POST_TOOL_USE_KEY;
+
+    fn settings_with(entries: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "hooks": entries })
+    }
+
+    fn rtk_entry(matcher: &str) -> serde_json::Value {
+        serde_json::json!([{ "matcher": matcher, "hooks": [{ "type": "command", "command": "rtk hook claude" }] }])
+    }
+
+    #[test]
+    fn hook_gaps_names_tools_the_installed_matcher_misses() {
+        let root = settings_with(serde_json::json!({ "PreToolUse": rtk_entry("Bash") }));
+        let required = vec![(PRE_TOOL_USE_KEY, "Bash|Read".to_string())];
+        assert_eq!(
+            hook_gaps(&root, &required),
+            vec!["PreToolUse does not cover Read"]
+        );
+    }
+
+    #[test]
+    fn hook_gaps_names_a_missing_event() {
+        let root = settings_with(serde_json::json!({ "PreToolUse": rtk_entry("Bash") }));
+        let required = vec![
+            (PRE_TOOL_USE_KEY, "Bash".to_string()),
+            (POST_TOOL_USE_KEY, "Bash".to_string()),
+        ];
+        assert_eq!(
+            hook_gaps(&root, &required),
+            vec!["PostToolUse hook missing"]
+        );
+    }
+
+    #[test]
+    fn hook_gaps_is_silent_when_covered_or_rtk_is_not_installed() {
+        let wildcard = settings_with(serde_json::json!({ "PreToolUse": rtk_entry("*") }));
+        let required = vec![(PRE_TOOL_USE_KEY, "Bash|Read".to_string())];
+        assert!(hook_gaps(&wildcard, &required).is_empty());
+        let exact = settings_with(serde_json::json!({ "PreToolUse": rtk_entry("Read|Bash") }));
+        assert!(hook_gaps(&exact, &required).is_empty());
+        let foreign = settings_with(serde_json::json!({
+            "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "other-tool" }] }]
+        }));
+        assert!(
+            hook_gaps(&foreign, &required).is_empty(),
+            "no rtk hook: not our business"
+        );
+    }
+
     use super::claude::{remove_hook_from_json, remove_legacy_hook_entries_from_json};
     use super::codex::{codex_hook_already_present, remove_codex_hook_from_json};
     use super::cursor::remove_legacy_cursor_hook_entries_from_json;
@@ -1706,7 +2387,8 @@ mod tests {
     };
     use super::*;
     use crate::hooks::constants::{
-        CODEX_HOOK_COMMAND, CURSOR_HOOK_COMMAND, TRAE_HOOK_COMMAND, TRAE_RUN_COMMAND_MATCHER,
+        CLAUDE_PRE_MATCHER, CODEX_HOOK_COMMAND, CURSOR_HOOK_COMMAND, TRAE_HOOK_COMMAND,
+        TRAE_RUN_COMMAND_MATCHER,
     };
     use tempfile::TempDir;
 
@@ -1718,6 +2400,69 @@ mod tests {
         );
         assert_eq!(awareness_content(AwarenessLevel::High), RTK_AWARENESS_HIGH);
         assert_eq!(awareness_content(AwarenessLevel::Full), RTK_AWARENESS_FULL);
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn test_instructions_body_without_directives_is_byte_identical() {
+        let (pipeline, diagnostics) = rtk_engine::pipeline::resolve(&[]);
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        for level in [
+            AwarenessLevel::Default,
+            AwarenessLevel::High,
+            AwarenessLevel::Full,
+        ] {
+            assert_eq!(
+                instructions_body_for(level, &pipeline),
+                awareness_content(level),
+                "no directives configured -> init output must not change"
+            );
+        }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn test_instructions_body_appends_directives_and_honors_level() {
+        let parsed = rtk_engine::pipeline::parse(
+            r#"
+schema_version = 1
+[[directive]]
+use = "terse-output"
+channel = "awareness_file"
+
+[[directive]]
+name = "delegate-tools"
+text = "For files over 350 lines use bulk-read."
+
+[override.rtk-awareness]
+level = "high"
+"#,
+            "u.toml",
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+        let (pipeline, diagnostics) =
+            rtk_engine::pipeline::resolve(&[rtk_engine::pipeline::SourceFile {
+                scope: rtk_engine::pipeline::Scope::User,
+                label: "u.toml".to_string(),
+                file: parsed.file.expect("parses"),
+            }]);
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let body = instructions_body_for(AwarenessLevel::Default, &pipeline);
+        assert!(
+            body.starts_with(RTK_AWARENESS_HIGH.trim_end()),
+            "[override.rtk-awareness] level=high overrides the config level"
+        );
+        // Anchored on the directive's opening line: this assertion is about
+        // declaration ORDER, so it wants the position where terse-output
+        // starts, not an arbitrary sentence inside it.
+        let terse = body
+            .find("Keep prose short")
+            .expect("terse-output text present");
+        let custom = body
+            .find("bulk-read")
+            .expect("custom directive text present");
+        assert!(terse < custom, "declaration order preserved");
+        assert!(body.ends_with('\n'));
     }
 
     #[test]
@@ -1771,8 +2516,8 @@ mod tests {
             ("full", RTK_AWARENESS_FULL),
         ] {
             assert!(
-                content.contains("rtk proxy <cmd>"),
-                "{name} must mention rtk proxy"
+                content.contains("rtk bypass <cmd>"),
+                "{name} must mention rtk bypass"
             );
         }
         for (name, content) in [("high", RTK_AWARENESS_HIGH), ("full", RTK_AWARENESS_FULL)] {
@@ -1961,7 +2706,13 @@ mod tests {
         let mut json_content = serde_json::json!({});
         let hook_command = "/Users/test/.claude/hooks/rtk-rewrite.sh";
 
-        insert_hook_entry(&mut json_content, hook_command).unwrap();
+        insert_hook_entry(
+            &mut json_content,
+            PRE_TOOL_USE_KEY,
+            CLAUDE_PRE_MATCHER,
+            hook_command,
+        )
+        .unwrap();
 
         // Should create full structure
         assert!(json_content.get("hooks").is_some());
@@ -1995,7 +2746,13 @@ mod tests {
         });
 
         let hook_command = "/Users/test/.claude/hooks/rtk-rewrite.sh";
-        insert_hook_entry(&mut json_content, hook_command).unwrap();
+        insert_hook_entry(
+            &mut json_content,
+            PRE_TOOL_USE_KEY,
+            CLAUDE_PRE_MATCHER,
+            hook_command,
+        )
+        .unwrap();
 
         let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(pre_tool_use.len(), 2); // Should have both hooks
@@ -2018,7 +2775,13 @@ mod tests {
         });
 
         let hook_command = "/Users/test/.claude/hooks/rtk-rewrite.sh";
-        insert_hook_entry(&mut json_content, hook_command).unwrap();
+        insert_hook_entry(
+            &mut json_content,
+            PRE_TOOL_USE_KEY,
+            CLAUDE_PRE_MATCHER,
+            hook_command,
+        )
+        .unwrap();
 
         // Should preserve all other keys
         assert_eq!(json_content["env"]["PATH"], "/custom/path");
@@ -2188,20 +2951,33 @@ mod tests {
             root["hooks"]["PreToolUse"][0]["hooks"][0]["command"] =
                 serde_json::json!(CLAUDE_HOOK_COMMAND);
             assert!(
-                hook_already_present(&root, CLAUDE_HOOK_COMMAND),
+                hook_already_present(&root, PRE_TOOL_USE_KEY, CLAUDE_HOOK_COMMAND),
                 "{matcher:?}"
             );
         }
-        for (matcher, expected) in [
-            (serde_json::Value::Null, true),
-            (serde_json::json!("Read, Bash"), true),
-            (serde_json::json!("Ba"), false),
-            (serde_json::json!("["), false),
+        for matcher in [
+            serde_json::Value::Null,
+            serde_json::json!("Read, Bash"),
+            serde_json::json!("Ba"),
+            serde_json::json!("["),
         ] {
-            let root = serde_json::json!({"hooks": {"PreToolUse": [
+            let mut root = serde_json::json!({"hooks": {"PreToolUse": [
                 {"matcher": matcher, "hooks": [{"command": CLAUDE_HOOK_COMMAND}]}
             ]}});
-            assert_eq!(hook_already_present(&root, CLAUDE_HOOK_COMMAND), expected);
+            assert!(hook_already_present(
+                &root,
+                PRE_TOOL_USE_KEY,
+                CLAUDE_HOOK_COMMAND
+            ));
+            assert!(claude::refresh_hook_matcher(
+                &mut root,
+                PRE_TOOL_USE_KEY,
+                CLAUDE_PRE_MATCHER
+            ));
+            assert_eq!(
+                root["hooks"]["PreToolUse"][0]["matcher"],
+                serde_json::json!(CLAUDE_PRE_MATCHER)
+            );
         }
         for matcher in [
             None,
@@ -2228,7 +3004,7 @@ mod tests {
             (TRAE_HOOK_COMMAND, TRAE_RUN_COMMAND_MATCHER),
         ] {
             let present = |root: &serde_json::Value| match command {
-                CLAUDE_HOOK_COMMAND => hook_already_present(root, command),
+                CLAUDE_HOOK_COMMAND => hook_already_present(root, PRE_TOOL_USE_KEY, command),
                 CODEX_HOOK_COMMAND => codex_hook_already_present(root),
                 _ => trae_hook_already_present(root),
             };
@@ -2237,13 +3013,15 @@ mod tests {
                 {"matcher": tool, "hooks": [{"type": "prompt", "command": command}]},
                 {"matcher": tool, "hooks": []}
             ], "Stop": [{"command": "echo stop"}]}, "user": true});
-            assert!(
-                !present(&root),
-                "inactive and prompt hooks do not count: {command}"
+            assert_eq!(
+                present(&root),
+                command == CLAUDE_HOOK_COMMAND,
+                "inactive and prompt hooks do not count; claude presence is matcher-blind: {command}"
             );
             match command {
                 CLAUDE_HOOK_COMMAND | CODEX_HOOK_COMMAND => {
-                    insert_hook_entry(&mut root, command).unwrap()
+                    insert_hook_entry(&mut root, PRE_TOOL_USE_KEY, CLAUDE_PRE_MATCHER, command)
+                        .unwrap()
                 }
                 _ => insert_trae_hook_entry(&mut root).unwrap(),
             }
@@ -2313,22 +3091,89 @@ mod tests {
 
     #[test]
     fn test_uninstall_handles_both_artifacts() {
-        let content = format!("# Config\n\n@RTK.md\n\n{}\n\nMore stuff", RTK_INSTRUCTIONS);
+        let temp = TempDir::new().expect("create isolated home");
+        with_claude_dir_override(&temp, |claude_dir| {
+            let claude_md = claude_dir.join(CLAUDE_MD);
+            let prose = "@RTK.md is where I keep my own token rules; do not delete.\n\
+                         @RTK.md.backup is a different file.\n\
+                         Read @RTK.md for details.";
+            let content = format!(
+                "# Config\n\n{prose}\n\n@RTK.md\n  @RTK.md \t\n\n{RTK_INSTRUCTIONS}\n\nMore stuff"
+            );
+            fs::write(&claude_md, content).expect("write instructions");
 
-        let after_at_removal: String = content
-            .lines()
-            .filter(|line| !line.trim().starts_with("@RTK.md"))
-            .collect::<Vec<_>>()
-            .join("\n");
+            for _ in 0..2 {
+                uninstall(
+                    true,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    InitContext::default(),
+                )
+                .expect("uninstall RTK");
+                let cleaned = fs::read_to_string(&claude_md).expect("read retained instructions");
+                assert_eq!(cleaned, format!("# Config\n\n{prose}\n\nMore stuff"));
+            }
+        });
+    }
 
-        assert!(!after_at_removal.contains("@RTK.md"));
-        assert!(after_at_removal.contains(RTK_BLOCK_START));
+    #[test]
+    fn test_uninstall_preserves_prose_without_exact_rtk_reference() {
+        let temp = TempDir::new().expect("create isolated home");
+        with_claude_dir_override(&temp, |claude_dir| {
+            let claude_md = claude_dir.join(CLAUDE_MD);
+            let content = "# My rules\r\n\r\n\r\n\
+                           @RTK.md is where I keep my own rules.\r\n\
+                           Read @RTK.md for details.\r\n";
+            fs::write(&claude_md, content).expect("write instructions");
 
-        let (final_content, did_remove) = remove_rtk_block(&after_at_removal);
-        assert!(did_remove);
-        assert!(!final_content.contains(RTK_BLOCK_START));
-        assert!(final_content.contains("# Config"));
-        assert!(final_content.contains("More stuff"));
+            uninstall(
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                InitContext::default(),
+            )
+            .expect("uninstall RTK");
+
+            assert_eq!(
+                fs::read_to_string(&claude_md).expect("read retained instructions"),
+                content
+            );
+        });
+    }
+
+    #[test]
+    fn test_uninstall_dry_run_preserves_instruction_artifacts() {
+        let temp = TempDir::new().expect("create isolated home");
+        with_claude_dir_override(&temp, |claude_dir| {
+            let claude_md = claude_dir.join(CLAUDE_MD);
+            let content = format!("# My rules\n\n@RTK.md\n\n{RTK_INSTRUCTIONS}\n");
+            fs::write(&claude_md, &content).expect("write instructions");
+
+            uninstall(
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                InitContext {
+                    dry_run: true,
+                    ..InitContext::default()
+                },
+            )
+            .expect("preview uninstall");
+
+            assert_eq!(
+                fs::read_to_string(&claude_md).expect("read retained instructions"),
+                content
+            );
+        });
     }
 
     #[test]
@@ -2367,6 +3212,7 @@ mod tests {
         assert_eq!(read_json_file(&empty).unwrap(), Some(serde_json::json!({})));
     }
 
+    #[cfg(feature = "engine")]
     #[test]
     fn test_read_json_file_errors_include_the_path() {
         let temp = TempDir::new().unwrap();

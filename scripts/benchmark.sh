@@ -187,10 +187,11 @@ fi
 # read
 # ===================
 section "read"
-bench "read" "cat src/main.rs" "$RTK read src/main.rs"
-bench "read -l minimal" "cat src/main.rs" "$RTK read src/main.rs -l minimal"
-bench "read -l aggressive" "cat src/main.rs" "$RTK read src/main.rs -l aggressive"
-bench "read -n" "cat -n src/main.rs" "$RTK read src/main.rs -n"
+# The CLI lives in src/lib.rs; src/main.rs is a 3-line shim.
+bench "read" "cat src/lib.rs" "$RTK read src/lib.rs"
+bench "read -l minimal" "cat src/lib.rs" "$RTK read src/lib.rs -l minimal"
+bench "read -l aggressive" "cat src/lib.rs" "$RTK read src/lib.rs -l aggressive"
+bench "read -n" "cat -n src/lib.rs" "$RTK read src/lib.rs -n"
 
 # ===================
 # find

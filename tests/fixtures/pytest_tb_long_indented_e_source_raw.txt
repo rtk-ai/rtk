@@ -1,0 +1,17 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________________________________ test_q ____________________________________
+
+    def test_q():
+        E = [1]
+        E += [2]
+>       assert E == [3], "list drifted"
+E       AssertionError: list drifted
+E       assert [1, 2] == [3]
+E         
+E         At index 0 diff: 1 != 3
+E         Left contains one more item: 2
+E         Use -v to get more diff
+
+test_ep.py:4: AssertionError
+1 failed in 0.01s

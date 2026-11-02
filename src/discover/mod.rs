@@ -1,5 +1,6 @@
 //! Scans AI coding sessions to find commands that could benefit from RTK filtering.
 
+pub mod fish_script;
 pub mod lexer;
 pub mod provider;
 pub mod registry;
@@ -164,11 +165,12 @@ fn estimate_hook_coverage(permission_cmd: &str, rewrite_cmd: &str, ctx: &Coverag
     if !ctx.hook_installed {
         return false;
     }
-    let verdict = permissions::check_command_with_rules(
+    let verdict = permissions::check_command_with_rules_and_prefixes(
         permission_cmd,
         &ctx.rules.deny,
         &ctx.rules.ask,
         &ctx.rules.allow,
+        &ctx.normalized_transparent_prefixes,
     );
     estimate_hook_coverage_with_verdict(permission_cmd, rewrite_cmd, verdict, ctx)
 }
@@ -186,7 +188,7 @@ fn estimate_hook_coverage_with_verdict(
     ctx: &CoverageContext,
 ) -> bool {
     ctx.hook_installed
-        && verdict != PermissionVerdict::Deny
+        && !matches!(verdict, PermissionVerdict::Deny | PermissionVerdict::Defer)
         && !lexer::contains_unattestable_construct(permission_cmd)
         && registry::rewrite_command_precompiled(
             rewrite_cmd,
@@ -286,14 +288,22 @@ fn judge_disabled_segment(
     }
 }
 
-/// Whether an already-`rtk`-prefixed command counts as coverage. `rtk proxy <cmd>`
+/// Whether an already-`rtk`-prefixed command counts as coverage. `rtk bypass <cmd>`
 /// deliberately runs the raw command unfiltered, so it must not count — that would
 /// let the audit flatter itself via its own escape hatch. This is ground truth read
 /// directly from the transcript (the model really did invoke `rtk`), not a guess.
 pub(crate) fn is_already_rtk(cmd: &str) -> bool {
     let trimmed = cmd.trim();
-    trimmed.starts_with("rtk ") && !trimmed.starts_with("rtk proxy")
+    trimmed.starts_with("rtk ")
+        && !UNFILTERED_ESCAPE_HATCHES
+            .iter()
+            .any(|hatch| trimmed.starts_with(hatch))
 }
+
+/// Spellings of the unfiltered escape hatch. `rtk proxy` is the deprecated
+/// alias of `rtk bypass` and runs exactly as unfiltered, so a transcript
+/// written before the rename must not read as covered either.
+const UNFILTERED_ESCAPE_HATCHES: &[&str] = &["rtk bypass", "rtk proxy"];
 
 /// Aggregation bucket for supported commands.
 struct SupportedBucket {
@@ -554,7 +564,7 @@ pub fn run(
                     Classification::Ignored => {
                         // Ground truth from the transcript itself — the model really
                         // did invoke `rtk` directly (excluding the deliberate
-                        // unfiltered `rtk proxy` escape hatch).
+                        // unfiltered `rtk bypass` escape hatch).
                         if is_already_rtk(part) {
                             already_rtk += 1;
                         }
@@ -727,6 +737,22 @@ mod tests {
             "grep -n foo bar.py",
             PermissionVerdict::Default,
             &test_ctx(false),
+        ));
+    }
+
+    #[test]
+    fn test_estimate_hook_coverage_false_for_deferred_wrapper() {
+        assert!(!estimate_hook_coverage_with_verdict(
+            "env bash -c 'git push'",
+            "env bash -c 'git push'",
+            PermissionVerdict::Defer,
+            &test_ctx(true),
+        ));
+        assert!(estimate_hook_coverage_with_verdict(
+            "env bash -c 'git push'",
+            "env bash -c 'git push'",
+            PermissionVerdict::Ask,
+            &test_ctx(true),
         ));
     }
 
@@ -923,10 +949,10 @@ mod tests {
     }
 
     #[test]
-    fn test_is_already_rtk_excludes_proxy_escape_hatch() {
-        // rtk#3148 secondary finding: `rtk proxy` deliberately bypasses filtering,
+    fn test_is_already_rtk_excludes_bypass_escape_hatch() {
+        // rtk#3148 secondary finding: `rtk bypass` deliberately bypasses filtering,
         // so it must not count as coverage.
-        assert!(!is_already_rtk("rtk proxy grep -n foo bar.py"));
+        assert!(!is_already_rtk("rtk bypass grep -n foo bar.py"));
     }
 
     #[test]
