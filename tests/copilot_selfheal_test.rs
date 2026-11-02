@@ -88,7 +88,7 @@ impl Sandbox {
         std::fs::write(self.global_config(), content).expect("write global config");
     }
 
-    fn run_hook(&self, payload: &str) -> (String, String, Option<i32>) {
+    fn spawn_hook(&self, payload: &str) -> std::process::Child {
         let mut child = common::rtk_command()
             .args(["hook", "copilot"])
             .current_dir(&self.project)
@@ -106,13 +106,42 @@ impl Sandbox {
             .expect("stdin")
             .write_all(payload.as_bytes())
             .expect("write payload");
-        let out = child.wait_with_output().expect("wait rtk");
-        (
-            String::from_utf8_lossy(&out.stdout).into_owned(),
-            String::from_utf8_lossy(&out.stderr).into_owned(),
-            out.status.code(),
-        )
+        child
     }
+
+    fn run_hook(&self, payload: &str) -> (String, String, Option<i32>) {
+        output_of(self.spawn_hook(payload))
+    }
+
+    /// [`Sandbox::run_hook`], or `None` when the hook has not finished after
+    /// `limit` and was killed.
+    #[cfg(unix)]
+    fn run_hook_within(
+        &self,
+        payload: &str,
+        limit: std::time::Duration,
+    ) -> Option<(String, String, Option<i32>)> {
+        let mut child = self.spawn_hook(payload);
+        let deadline = std::time::Instant::now() + limit;
+        while child.try_wait().expect("poll rtk").is_none() {
+            if std::time::Instant::now() > deadline {
+                child.kill().expect("kill rtk");
+                child.wait().expect("reap rtk");
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        Some(output_of(child))
+    }
+}
+
+fn output_of(child: std::process::Child) -> (String, String, Option<i32>) {
+    let out = child.wait_with_output().expect("wait rtk");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code(),
+    )
 }
 
 fn read(path: &Path) -> String {
@@ -396,9 +425,131 @@ fn concurrent_legacy_invocations_leave_valid_healed_configs() {
     let stray: Vec<_> = walk(&sb.project)
         .into_iter()
         .chain(walk(&sb.copilot_home))
-        .filter(|p| p.to_string_lossy().contains(".heal."))
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(".tmp"))
+        })
         .collect();
     assert!(stray.is_empty(), "temp files left behind: {stray:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn heal_writes_through_a_symlinked_global_config_and_keeps_its_mode() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let sb = Sandbox::new();
+    let real = sb.copilot_home.join("dotfiles-rtk-rewrite.json");
+    std::fs::write(&real, LEGACY_STOCK).expect("write real config");
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o640)).expect("chmod 640");
+    let mode_of = |path: &Path| {
+        std::fs::metadata(path)
+            .expect("stat config")
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    if mode_of(&real) != 0o640 {
+        eprintln!("skipping: this filesystem does not keep mode 640");
+        return;
+    }
+    symlink(&real, sb.global_config()).expect("link global config");
+
+    let (stdout, stderr, code) = sb.run_hook(LEGACY_PAYLOAD);
+
+    assert_hook_ok(LEGACY_PAYLOAD, &stdout, &stderr, code);
+    let link = std::fs::symlink_metadata(sb.global_config()).expect("lstat global config");
+    assert!(link.file_type().is_symlink(), "the link must survive");
+    assert_eq!(read(&real), CURRENT_STOCK);
+    assert_eq!(mode_of(&real), 0o640, "the heal keeps the config's mode");
+}
+
+#[cfg(unix)]
+#[test]
+fn project_config_reached_through_a_symlink_is_never_healed() {
+    use std::os::unix::fs::symlink;
+
+    for linked in ["config", "hooks dir", "github dir"] {
+        let sb = Sandbox::new();
+        let outside_github = sb.home.join("github");
+        let outside = outside_github.join("hooks");
+        std::fs::create_dir_all(&outside).expect("mkdir outside hooks");
+        let outside_config = outside.join("rtk-rewrite.json");
+        std::fs::write(&outside_config, LEGACY_STOCK).expect("write outside config");
+        let github = sb.project.join(".github");
+        let hooks_dir = github.join("hooks");
+        let link = match linked {
+            "config" => {
+                symlink(&outside_config, sb.project_config()).expect("link project config");
+                sb.project_config()
+            }
+            "hooks dir" => {
+                std::fs::remove_dir(&hooks_dir).expect("remove project hooks dir");
+                symlink(&outside, &hooks_dir).expect("link project hooks dir");
+                hooks_dir
+            }
+            _ => {
+                std::fs::remove_dir(&hooks_dir).expect("remove project hooks dir");
+                std::fs::remove_dir(&github).expect("remove project .github");
+                symlink(&outside_github, &github).expect("link project .github");
+                github
+            }
+        };
+
+        let (stdout, stderr, code) = sb.run_hook(LEGACY_PAYLOAD);
+
+        assert_hook_ok(LEGACY_PAYLOAD, &stdout, &stderr, code);
+        assert!(
+            stdout.contains("rtk git status"),
+            "{linked}: hook must keep rewriting: {stdout}"
+        );
+        let meta = std::fs::symlink_metadata(&link).expect("lstat link");
+        assert!(
+            meta.file_type().is_symlink(),
+            "{linked}: the link must survive"
+        );
+        assert_eq!(
+            read(&outside_config),
+            LEGACY_STOCK,
+            "{linked}: the link target must stay as it was"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn config_that_is_a_fifo_is_never_read() {
+    use std::os::unix::fs::symlink;
+
+    for case in ["linked project config", "project config", "global config"] {
+        let sb = Sandbox::new();
+        let fifo = match case {
+            "linked project config" => sb.home.join("rtk-rewrite.fifo"),
+            "project config" => sb.project_config(),
+            _ => sb.global_config(),
+        };
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .is_ok_and(|status| status.success());
+        if !made {
+            eprintln!("skipped {case}: mkfifo failed");
+            continue;
+        }
+        if case == "linked project config" {
+            symlink(&fifo, sb.project_config()).expect("link project config");
+        }
+
+        let (stdout, stderr, code) = sb
+            .run_hook_within(LEGACY_PAYLOAD, std::time::Duration::from_secs(10))
+            .unwrap_or_else(|| panic!("{case}: the hook did not finish within 10s"));
+
+        assert_hook_ok(LEGACY_PAYLOAD, &stdout, &stderr, code);
+        assert!(
+            stdout.contains("rtk git status"),
+            "{case}: hook must keep rewriting: {stdout}"
+        );
+    }
 }
 
 #[cfg(unix)]
