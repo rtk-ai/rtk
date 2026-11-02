@@ -208,23 +208,11 @@ fn run_forget() -> Result<()> {
         None
     };
 
-    if salt_path.exists() {
-        std::fs::remove_file(&salt_path)
-            .with_context(|| format!("Failed to delete {}", salt_path.display()))?;
-    }
-
-    if marker_path.exists() {
-        let _ = std::fs::remove_file(&marker_path);
-    }
-
-    // Purge local tracking database (GDPR Art. 17 — right to erasure applies to local data too)
+    // Purge the salt, marker and local tracking database (GDPR Art. 17 —
+    // right to erasure applies to local data too). The hash was computed
+    // above, before the salt disappeared.
     let db_path = super::user_dirs::data_under(".").join(super::constants::HISTORY_DB);
-    if db_path.exists() {
-        match std::fs::remove_file(&db_path) {
-            Ok(()) => println!("Local tracking database deleted: {}", db_path.display()),
-            Err(e) => eprintln!("rtk: could not delete {}: {}", db_path.display(), e),
-        }
-    }
+    erase_local_telemetry_files(&salt_path, &marker_path, &db_path)?;
 
     // Send server-side erasure request
     if let Some(hash) = device_hash {
@@ -234,14 +222,47 @@ fn run_forget() -> Result<()> {
             }
             Err(e) => {
                 eprintln!("rtk: could not reach server: {}", e);
-                eprintln!("  To complete erasure, email contact@rtk-ai.app");
-                eprintln!("  with your device hash: {}", hash);
+                eprintln!("{}", erasure_failure_hint(&hash));
             }
         }
     }
 
     println!("Local telemetry data deleted. Telemetry disabled.");
     Ok(())
+}
+
+/// Delete the on-device telemetry state. Split out of [`run_forget`] so the
+/// deletion rules are covered without a network round trip.
+fn erase_local_telemetry_files(
+    salt_path: &std::path::Path,
+    marker_path: &std::path::Path,
+    db_path: &std::path::Path,
+) -> Result<()> {
+    if salt_path.exists() {
+        std::fs::remove_file(salt_path)
+            .with_context(|| format!("Failed to delete {}", salt_path.display()))?;
+    }
+
+    if marker_path.exists() {
+        let _ = std::fs::remove_file(marker_path);
+    }
+
+    if db_path.exists() {
+        match std::fs::remove_file(db_path) {
+            Ok(()) => println!("Local tracking database deleted: {}", db_path.display()),
+            Err(e) => eprintln!("rtk: could not delete {}: {}", db_path.display(), e),
+        }
+    }
+
+    Ok(())
+}
+
+/// The manual fallback shown when the erasure request cannot reach the server.
+/// The hash is printed in full: a truncated one cannot be matched server-side.
+fn erasure_failure_hint(device_hash: &str) -> String {
+    format!(
+        "  To complete erasure, email contact@rtk-ai.app\n  with your device hash: {device_hash}"
+    )
 }
 
 fn send_erasure_request(device_hash: &str) -> Result<()> {
@@ -407,6 +428,42 @@ mod tests {
             device_hash_line(true, false, true, Some(true), Some(&long)),
             malformed
         );
+    }
+
+    #[test]
+    fn erase_local_telemetry_removes_salt_marker_and_database() {
+        let temp = tempfile::tempdir().unwrap();
+        let salt = temp.path().join(".device_salt");
+        let marker = temp.path().join(".telemetry_last_ping");
+        let db = temp.path().join("history.db");
+        std::fs::write(&salt, SAMPLE_HASH).unwrap();
+        std::fs::write(&marker, b"").unwrap();
+        std::fs::write(&db, b"sqlite").unwrap();
+
+        erase_local_telemetry_files(&salt, &marker, &db).unwrap();
+
+        assert!(!salt.exists(), "salt must be deleted");
+        assert!(!marker.exists(), "ping marker must be deleted");
+        assert!(!db.exists(), "local tracking database must be deleted");
+    }
+
+    #[test]
+    fn erase_local_telemetry_tolerates_missing_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let salt = temp.path().join(".device_salt");
+        let marker = temp.path().join(".telemetry_last_ping");
+        let db = temp.path().join("history.db");
+
+        // A user who never opted in has no salt and may have no database.
+        erase_local_telemetry_files(&salt, &marker, &db).unwrap();
+        assert!(!salt.exists());
+    }
+
+    #[test]
+    fn erasure_failure_hint_prints_the_full_device_hash() {
+        let hint = erasure_failure_hint(SAMPLE_HASH);
+        assert!(hint.contains(SAMPLE_HASH), "full hash required: {hint}");
+        assert!(!hint.contains("..."), "hash must not be truncated: {hint}");
     }
 
     #[test]
