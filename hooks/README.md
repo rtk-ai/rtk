@@ -4,7 +4,7 @@
 
 **Deployed hook artifacts** — the files and agent-specific configuration installed on user machines by `rtk init`. External scripts and plugins are thin delegates to `rtk rewrite`; native processors such as Codex call the same Rust rewrite registry directly. Zero filtering logic is duplicated in this directory.
 
-Contains per-agent hook scripts and configuration files for 13 supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, Oh My Pi, Mistral Vibe, Trae, Google Antigravity). `rtk init` installs them.
+Contains per-agent hook scripts and configuration files for the supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, Oh My Pi, Mistral Vibe, Trae, Google Antigravity). `rtk init` installs them.
 
 Does **not** own: hook installation/uninstallation (that's `src/hooks/init/`), the rewrite pattern registry (that's `discover/registry`), or integrity verification (that's `src/hooks/integrity.rs`).
 
@@ -32,7 +32,7 @@ Agent runs command (e.g., "cargo test --nocapture")
   -> Filtered output reaches LLM
 ```
 
-All rewrite logic lives in the `rtk` binary. External hook scripts call `rtk rewrite`; native Rust hook processors call the registry directly. This keeps one source of truth for all 70+ rewrite patterns.
+All rewrite logic lives in the `rtk` binary. External hook scripts call `rtk rewrite`; native Rust hook processors call the registry directly. This keeps one source of truth for all rewrite patterns.
 
 ## Directory Structure
 
@@ -306,10 +306,13 @@ if (tool === "bash" || tool === "shell") {
 
 ### Hermes (Python Plugin)
 
-Mutates `args["command"]` in-place via the `pre_tool_call` hook:
+Mutates `args["command"]` in place and returns no directive, so on Hermes v2026.8.16 (0.20.2) and later another plugin's `modify` directive that sets `command` replaces the rewrite. The adapter uses a 5-second default rewrite timeout, configurable through `RTK_HERMES_TIMEOUT` (see [timeout limits](hermes/README.md#how-it-works)). Simplified success path:
 
 ```python
-result = subprocess.run(["rtk", "rewrite", command], capture_output=True, text=True, timeout=2)
+result = subprocess.run(
+    ["rtk", "rewrite", command], shell=False, stdin=subprocess.DEVNULL,
+    capture_output=True, text=True, timeout=_rewrite_timeout(),
+)
 rewritten = result.stdout.strip()
 if result.returncode in {0, 3} and rewritten and rewritten != command:
     args["command"] = rewritten
