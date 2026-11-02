@@ -406,3 +406,38 @@ fn captured_build_failure_has_an_exact_summary_without_raw_json() {
         );
     }
 }
+
+#[test]
+fn captured_cold_cache_build_failure_is_summarized_past_its_build_records() {
+    let input = include_str!("fixtures/go_test_pipe/cold_build_failure.jsonl");
+    // The download line comes first, so auto-detection must scan past it and
+    // the build records rather than match the leading `{` heuristic.
+    assert!(input.starts_with("go: downloading "));
+    for auto in [false, true] {
+        assert_eq!(
+            pipe_mode(input, auto),
+            concat!(
+                "Go test: 1 passed, 1 failed in 2 packages\n",
+                "\nbroken [build failed]\n",
+                "  broken/b.go:3:23: undefined: missing\n",
+                "go: downloading github.com/google/go-cmp v0.7.0\n",
+            )
+        );
+    }
+}
+
+#[test]
+fn captured_stream_after_other_go_command_output_is_not_auto_detected() {
+    let input = include_str!("fixtures/go_test_pipe/finding_module.jsonl");
+    assert!(input.starts_with("go: finding module for package "));
+    assert_eq!(pipe_mode(input, true), input);
+    assert_eq!(
+        pipe(input),
+        concat!(
+            "Go test: 1 passed in 1 packages\n",
+            "go: finding module for package github.com/google/go-cmp/cmp\n",
+            "go: downloading github.com/google/go-cmp v0.7.0\n",
+            "go: found github.com/google/go-cmp/cmp in github.com/google/go-cmp v0.7.0\n",
+        )
+    );
+}

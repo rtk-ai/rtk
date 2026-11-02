@@ -32,6 +32,10 @@ bash tests/fixtures/go_test_pipe/capture_legacy.sh
 | `build_only.jsonl` | `go build -json` for the broken package, not a test report |
 | `legacy_core.jsonl` | Go 1.24.6 lifecycle/parallel/skip/benchmark capture |
 | `legacy_bench.jsonl` | Go 1.24.6 non-chatty logging benchmark emitting `Action: bench` |
+| `build_failure.jsonl` | Captured by hand (below): `go test -json` for a package that does not compile |
+| `cold_build_failure.jsonl` | Captured by hand (below): `go test -json ./... 2>&1` with a fresh module cache and a package that does not compile |
+| `finding_module.jsonl` | Captured by hand (below): `go test -json ./... 2>&1` with `GOFLAGS=-mod=mod` resolving a missing requirement |
+| `quoted.diff` | Not a producer stream (below): a unified diff quoting `failure.jsonl` |
 
 The modern capture script downloads pinned `golang.org/x/text v0.21.0` and
 `golang.org/x/sync v0.10.0` only into disposable capture caches, to obtain genuine
@@ -48,7 +52,7 @@ handling decisions (`start`, `output`, `skip`, `pause`, `cont`, `bench`).
 This does not change the runner or claim a partial stream proves a complete run;
 existing incomplete-stream summary semantics remain outside this fix (#4693).
 
-## Round 2 regression captures
+## Build-failure and quoted-input captures
 
 `build_failure.jsonl` was captured with official Go 1.27.3 on Linux using
 `go test -json ./broken` (exit 1), in module `example.com/rtk-round2` with
@@ -67,3 +71,43 @@ recognized lifecycle/frame/build records must not leak into a raw JSON suffix.
 `"Elapsed":0` replaced by `"Elapsed":0.001`. It is not a producer stream: all
 context, hunk headers and changed records must survive auto-detection verbatim,
 as must the Markdown example in the CLI regression test.
+
+`cold_build_failure.jsonl` and `finding_module.jsonl` were captured with official
+Go 1.27.1 on Linux using `go test -json ./... 2>&1` with `GOTOOLCHAIN=local` and an
+empty `GOMODCACHE`. Both modules have `dep/d_test.go`:
+
+```go
+package dep
+
+import (
+	"testing"
+
+	"github.com/google/go-cmp/cmp"
+)
+
+func TestDiff(t *testing.T) {
+	if d := cmp.Diff(1, 1); d != "" {
+		t.Fatal(d)
+	}
+}
+```
+
+For `cold_build_failure.jsonl`, `go.mod` declares `example.com/rtk-pipe-cold`,
+`go 1.27` and `require github.com/google/go-cmp v0.7.0` with its `go.sum`, and
+the module also has the `broken/b.go` above plus `broken/b_test.go`:
+
+```go
+package broken
+
+import "testing"
+
+func TestNever(t *testing.T) {}
+```
+
+The in-package test (not `package broken_test`) gives the
+`broken [….broken.test]` import path. For `finding_module.jsonl`, `go.mod` declares only
+`example.com/rtk-pipe-finding` and `go 1.27`, and the run sets
+`GOFLAGS=-mod=mod`, so the go command resolves the requirement first.
+
+Auto-detection looks past the download line and the build records to the first
+test event, and stops at any other go command output.
