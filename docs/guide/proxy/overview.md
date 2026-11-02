@@ -67,7 +67,7 @@ Two independent ways in. `rtk init` configures your agent once and persists it; 
 
 Codex has no environment variable for its base URL, and Vibe has none for its provider table, so neither can be routed by `--env`; the launcher and the guided setup use the channel each agent actually reads.
 
-The daemon records each request under a client name, from the `x-rtk-client` header when one is sent and from the `User-Agent` otherwise. Vibe needs the header: its main chat turn sends the Mistral SDK's default `User-Agent`, the same as any other program using that SDK, so `rtk init -g --agent vibe` adds `x-rtk-client = "vibe"` to the provider's `extra_headers`, next to any headers you already set there. The daemon strips the header before forwarding.
+The daemon records each request under a client name, from the `x-rtk-client` header when one is sent and from the `User-Agent` otherwise. Vibe needs the header: its main chat turn sends the Mistral SDK's default `User-Agent`, the same as any other program using that SDK, so `rtk init -g --agent vibe` adds `x-rtk-client = "vibe"` to the provider's `extra_headers`, next to any headers you already set there; re-running it also adds the header to a provider an earlier init already routed. The daemon strips the header before forwarding.
 
 ### `rtk init -g` — the guided setup
 
