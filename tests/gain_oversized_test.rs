@@ -38,9 +38,13 @@ fn gain_split(args: &[&str], home: &Path) -> (String, String) {
     // `rtk_command` clears the inherited `RTK_*` and agent-home variables and
     // pins rtk's own paths; `isolating_env` then moves them onto this test's
     // temporary home. `LC_ALL` is this test's to set: it reads rtk's own
-    // wording, not a native tool's.
+    // wording, not a native tool's. The temporary home is also the working
+    // directory, so `-p` scopes to the project the fixture recorded into.
     let mut cmd = common::rtk_command();
-    cmd.args(args).envs(isolating_env(home)).env("LC_ALL", "C");
+    cmd.args(args)
+        .current_dir(home)
+        .envs(isolating_env(home))
+        .env("LC_ALL", "C");
     let output = cmd.output().expect("spawn rtk gain");
     assert!(
         output.status.success(),
@@ -58,7 +62,7 @@ fn gain_split(args: &[&str], home: &Path) -> (String, String) {
 /// file larger than the ~30,000-char agent cap, booked at the raw file's size.
 ///
 /// `rtk read` applies no line window unless one is asked for, so the row it
-/// books is the whole file — 41,000 bytes, ~10,250 tokens.
+/// books is the whole file — 37,000 bytes, ~9,250 tokens.
 fn oversized_only_home() -> TempDir {
     let tmp = tempfile::tempdir().expect("tempdir");
     let mut content = String::new();
@@ -76,6 +80,7 @@ fn oversized_only_home() -> TempDir {
     let output = cmd
         .arg("read")
         .arg(&big)
+        .current_dir(tmp.path())
         .envs(isolating_env(tmp.path()))
         .env("LC_ALL", "C")
         .output()
@@ -150,6 +155,47 @@ fn oversized_only_tracker_reports_no_daily_data_rather_than_no_tracking_data() {
     assert!(
         stdout.contains("No daily data available."),
         "the capped daily table is genuinely empty, and must say so: {stdout}"
+    );
+    assert!(
+        stdout.contains("Excluded:") && stdout.contains("1 oversized outputs"),
+        "the daily view must name the exclusion that emptied its table: {stdout}"
+    );
+}
+
+#[test]
+fn oversized_only_tracker_names_the_exclusion_in_every_period_view() {
+    let home = oversized_only_home();
+    for flag in ["--weekly", "--monthly", "--all"] {
+        let (stdout, _) = gain_split(&["gain", flag], home.path());
+        assert!(
+            !stdout.contains("No tracking data yet."),
+            "`rtk gain {flag}` must not fall back to the empty state: {stdout}"
+        );
+        assert!(
+            stdout.contains("Excluded:") && stdout.contains("1 oversized outputs"),
+            "`rtk gain {flag}` must name the exclusion: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn oversized_only_project_is_not_an_empty_database() {
+    // `-p` scopes the summary to the working directory, which is where the
+    // fixture recorded its one oversized row.
+    let home = oversized_only_home();
+    let (stdout, _) = gain_split(&["gain", "-p"], home.path());
+
+    assert!(
+        !stdout.contains("No tracking data yet."),
+        "a project whose rows are all oversized must not read as empty: {stdout}"
+    );
+    assert!(
+        stdout.contains("RTK Token Savings (Project Scope)"),
+        "the project-scoped headline must be rendered: {stdout}"
+    );
+    assert!(
+        stdout.contains("Excluded:") && stdout.contains("1 oversized outputs"),
+        "the project's exclusion must be named: {stdout}"
     );
 }
 

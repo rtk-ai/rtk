@@ -755,15 +755,7 @@ pub fn run(
             ),
         );
         print_efficiency_meter(summary.avg_savings_pct);
-        if summary.oversized_excluded > 0 {
-            print_kpi(
-                "Excluded",
-                format!(
-                    "{} oversized outputs (input past the ~30k-char agent cap)",
-                    summary.oversized_excluded
-                ),
-            );
-        }
+        print_oversized_excluded(summary.oversized_excluded);
         for gap in crate::hooks::init::claude_hook_gaps() {
             print_kpi(
                 "Hook needed",
@@ -1127,7 +1119,24 @@ pub fn run(
         print_monthly(&tracker, project_scope.as_deref())?; // changed: pass project scope
     }
 
+    // The period tables apply the same headline cap, so a tracker whose rows
+    // are all oversized prints only "No daily data available." here. Name the
+    // exclusion, as the summary view does, so that does not read as nothing
+    // having been tracked.
+    print_oversized_excluded(summary.oversized_excluded);
+
     Ok(())
+}
+
+/// The `Excluded:` KPI: rows left out of the capped aggregates. Prints nothing
+/// when no row was excluded.
+fn print_oversized_excluded(count: usize) {
+    if count > 0 {
+        print_kpi(
+            "Excluded",
+            format!("{count} oversized outputs (input past the ~30k-char agent cap)"),
+        );
+    }
 }
 
 #[cfg(feature = "engine")]
