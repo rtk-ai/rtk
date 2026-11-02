@@ -2553,7 +2553,7 @@ fn run_log(
 
     // Post-process: truncate long messages, cap lines only if RTK set the default
     let filtered = match &user_lines {
-        Some(lines) => shown_user_log_lines(lines, limit, user_set_limit).join("\n"),
+        Some(lines) => render_user_log_lines(lines, limit, user_set_limit),
         None => filter_log_output(shown_raw, limit, user_set_limit),
     };
     let filtered = never_worse(shown_raw, &filtered).to_string();
@@ -2904,6 +2904,19 @@ fn shown_user_log_lines(lines: &[String], limit: usize, user_set_limit: bool) ->
     }
 }
 
+/// Render the shown user-format lines, with a visible marker when the limit
+/// cut some of them off. A cap the reader cannot see reads as complete output:
+/// `git log` on a 252-commit branch looked like a 50-commit branch (#2204).
+fn render_user_log_lines(lines: &[String], limit: usize, user_set_limit: bool) -> String {
+    let shown = shown_user_log_lines(lines, limit, user_set_limit);
+    let mut text = shown.join("\n");
+    let omitted = lines.len().saturating_sub(shown.len());
+    if omitted > 0 {
+        text.push_str(&format!("\n... +{omitted} more lines (use -n to see more)"));
+    }
+    text
+}
+
 /// When `user_set_limit` is true, the user explicitly passed `-N` to git log,
 /// so we skip line capping (git already returns exactly N commits) and use a
 /// wider truncation threshold (120 chars) to preserve commit context that LLMs
@@ -2914,6 +2927,7 @@ pub(crate) fn filter_log_output(output: &str, limit: usize, user_set_limit: bool
     // RTK injected format: split output into commit blocks separated by ---END---
     let commits: Vec<&str> = output.split(LOG_ENTRY_MARKER).collect();
     let max_commits = if user_set_limit { commits.len() } else { limit };
+    let total_commits = commits.iter().filter(|b| !b.trim().is_empty()).count();
 
     let mut result = Vec::new();
     for block in commits.iter().take(max_commits) {
@@ -2951,6 +2965,13 @@ pub(crate) fn filter_log_output(output: &str, limit: usize, user_set_limit: bool
             }
             result.push(entry);
         }
+    }
+
+    let omitted_commits = total_commits.saturating_sub(result.len());
+    if omitted_commits > 0 {
+        result.push(format!(
+            "... +{omitted_commits} more commits (use -n to see more)"
+        ));
     }
 
     result.join("\n").trim().to_string()
@@ -6280,7 +6301,11 @@ A  added.rs
             .collect::<Vec<_>>()
             .join("\n");
         let result = filter_log_output(&output, 5, false);
-        assert_eq!(result.lines().count(), 5);
+        assert_eq!(result.lines().count(), 6);
+        assert!(
+            result.contains("+15 more commits"),
+            "silent truncation is the bug: {result}"
+        );
     }
 
     #[test]
@@ -8003,9 +8028,12 @@ no changes added to commit (use "git add" and/or "git commit -a")
         let result = shown_user_log_lines(&lines, 3, true);
         assert_eq!(result.len(), 5);
 
-        // user_set_limit=false means cap at limit
+        // user_set_limit=false means cap at limit, and the cap is now visible.
         let result = shown_user_log_lines(&lines, 3, false);
         assert_eq!(result.len(), 3);
+        let rendered = render_user_log_lines(&lines, 3, false);
+        assert_eq!(rendered.lines().count(), 4);
+        assert!(rendered.contains("+2 more lines"), "{rendered}");
     }
 
     /// Regression test: `git branch <name>` must create, not list.
