@@ -694,6 +694,8 @@ fn resolve_atomic_target(path: &Path) -> PathBuf {
 
 /// Atomic write using tempfile + rename
 /// Prevents corruption on crash/interrupt
+/// Flushed to disk before the rename where the filesystem can sync; a sync that
+/// reports lost data fails the write.
 /// Follows symlinks so the link itself is preserved.
 /// An existing file keeps who can reach it (see [`FileAccess`]): on Unix, when
 /// RTK and its owner can read it, its rwx bits, group and ACL (Linux, macOS);
@@ -750,6 +752,10 @@ fn write_via_temp(target: &Path, content: &[u8], access: Option<&FileAccess>) ->
         .write_all(content)
         .with_context(|| format!("Failed to write {} bytes to temp file", content.len()))?;
 
+    // On disk before the rename where the filesystem can sync, so a crash
+    // cannot leave the target empty
+    sync_to_disk(temp_file.as_file()).context("Failed to flush temp file to disk")?;
+
     if let Some(access) = access {
         access
             .after_write(temp_file.as_file())
@@ -766,6 +772,31 @@ fn write_via_temp(target: &Path, content: &[u8], access: Option<&FileAccess>) ->
     temp_path.disable_cleanup(true);
 
     Ok(())
+}
+
+/// `sync_all`, failing only when the content did not reach the disk: some network
+/// filesystems report a failed write only when it is synced. Any other failure,
+/// such as a filesystem that cannot sync, is no error.
+fn sync_to_disk(file: &fs::File) -> std::io::Result<()> {
+    match file.sync_all() {
+        Err(error) if lost_write(&error) => Err(error),
+        _ => Ok(()),
+    }
+}
+
+fn lost_write(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    let lost = matches!(
+        error.kind(),
+        ErrorKind::StorageFull | ErrorKind::QuotaExceeded | ErrorKind::StaleNetworkFileHandle
+    );
+    #[cfg(unix)]
+    let lost = lost || error.raw_os_error() == Some(libc::EIO);
+    // ERROR_NETNAME_DELETED, ERROR_LOST_WRITEBEHIND_DATA and ERROR_IO_DEVICE,
+    // which std files under no `ErrorKind`.
+    #[cfg(windows)]
+    let lost = lost || matches!(error.raw_os_error(), Some(64 | 596 | 1117));
+    lost
 }
 
 /// Read a JSON file with path-aware errors. Missing files return `None` and
@@ -4517,5 +4548,38 @@ level = "high"
         );
         assert_eq!(fs::read_to_string(&backup).expect("read backup"), "current");
         assert_eq!(fs::read_to_string(&path).expect("read file"), "new");
+    }
+
+    #[test]
+    fn test_only_a_lost_write_fails_the_sync() {
+        use std::io::{Error, ErrorKind};
+
+        assert!(lost_write(&Error::from(ErrorKind::StorageFull)));
+        assert!(lost_write(&Error::from(ErrorKind::QuotaExceeded)));
+        assert!(lost_write(&Error::from(ErrorKind::StaleNetworkFileHandle)));
+        assert!(!lost_write(&Error::from(ErrorKind::Unsupported)));
+        assert!(!lost_write(&Error::from(ErrorKind::InvalidInput)));
+        #[cfg(unix)]
+        let (lost, excused) = (
+            [libc::EIO, libc::ENOSPC, libc::EDQUOT, libc::ESTALE],
+            [
+                libc::ENOTSUP,
+                libc::EOPNOTSUPP,
+                libc::ENOTTY,
+                libc::ENOSYS,
+                libc::EINVAL,
+            ],
+        );
+        // ERROR_DISK_FULL, ERROR_HANDLE_DISK_FULL, ERROR_DISK_QUOTA_EXCEEDED,
+        // ERROR_NETNAME_DELETED, ERROR_LOST_WRITEBEHIND_DATA, ERROR_IO_DEVICE;
+        // ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED, ERROR_INVALID_PARAMETER.
+        #[cfg(windows)]
+        let (lost, excused) = ([112, 39, 1295, 64, 596, 1117], [1, 50, 87]);
+        for code in lost {
+            assert!(lost_write(&Error::from_raw_os_error(code)), "{code}");
+        }
+        for code in excused {
+            assert!(!lost_write(&Error::from_raw_os_error(code)), "{code}");
+        }
     }
 }
