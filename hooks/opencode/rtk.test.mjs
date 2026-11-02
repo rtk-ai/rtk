@@ -1,9 +1,11 @@
 import test, { after, before } from "node:test"
 import assert from "node:assert/strict"
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { execSync } from "node:child_process"
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { delimiter, join } from "node:path"
+import { delimiter, dirname, join } from "node:path"
 import RtkOpenCodePlugin, {
+  candidateRtkDirs,
   probeRtkHookOpencode,
   resolveRtkPath,
   runHookOpencode,
@@ -40,6 +42,8 @@ const fs = require("fs")
 const [sub, ...rest] = process.argv.slice(2)
 
 if (rest[0] === "--help") {
+  // marks a run from a shell command, so a test can count which rtk ran
+  console.log("rtk-mock")
   if (process.env.MOCK_PROBE_LOG) fs.appendFileSync(process.env.MOCK_PROBE_LOG, "probe\\n")
   // pre-#4349 rtk has no such subcommand and answers like clap does: exit 2
   process.exit(process.env.MOCK_NO_SUB ? 2 : 0)
@@ -211,7 +215,7 @@ test("argv is exact and shell-free, and the agent is forwarded", async () => {
   }
 })
 
-test("an rtk without `hook opencode` registers nothing", async () => {
+test("an rtk without `hook opencode` registers nothing", async (t) => {
   const warnings = []
   const realWarn = console.warn
   console.warn = (message) => warnings.push(String(message))
@@ -223,10 +227,17 @@ test("an rtk without `hook opencode` registers nothing", async () => {
     process.env.USERPROFILE = emptyDir
     delete process.env.RTK_BIN
     _resetCachedRtkPath()
-    assert.equal(resolveRtkPath(), null)
-    assert.deepEqual(await captureSetup().then((c) => c.names), [])
-    assert.deepEqual(await captureSetup().then((c) => c.shellHooks), [])
-    assert.deepEqual((await captureServer()).names, [])
+    // The system-wide candidates (Homebrew, /usr/local/bin, …) cannot be
+    // redirected; a machine with rtk installed there has nothing to assert here.
+    const systemRtk = candidateRtkDirs().map((d) => join(d, BIN)).find((p) => existsSync(p))
+    if (systemRtk) {
+      t.diagnostic(`(a) skipped: ${systemRtk} exists`)
+    } else {
+      assert.equal(resolveRtkPath(), null)
+      assert.deepEqual(await captureSetup().then((c) => c.names), [])
+      assert.deepEqual(await captureSetup().then((c) => c.shellHooks), [])
+      assert.deepEqual((await captureServer()).names, [])
+    }
 
     // (b) an rtk too old for the subcommand: `hook opencode --help` exits 2.
     process.env.PATH = `${mockDir}${delimiter}${savedPath}`
@@ -411,12 +422,6 @@ test("candidate probing and shell PATH injection for rtk outside PATH (#4462)", 
     _resetCachedRtkPath()
     assert.equal(resolveRtkPath(), mockBin())
     rmSync(decoyDir, { recursive: true, force: true })
-
-    // 6. Permission preservation: rewritten string matches "rtk *" glob
-    // OpenCode matches full command string; by returning "rtk ls -la" without absolute path prefix,
-    // OpenCode's permissions rules for "rtk *" evaluate consistently whether rtk was on PATH or in candidate dir (#4195, #4462)
-    const cmd = await tryRewriteCommand("shell", "ls -la")
-    assert.ok(cmd.startsWith("rtk "))
   } finally {
     process.env.PATH = `${mockDir}${delimiter}${savedPath}`
     process.env.HOME = emptyDir
@@ -425,5 +430,154 @@ test("candidate probing and shell PATH injection for rtk outside PATH (#4462)", 
     _resetCachedRtkPath()
     rmSync(customHome, { recursive: true, force: true })
     rmSync(customDir, { recursive: true, force: true })
+  }
+})
+
+// A mock rtk that `cd`, `&&` and `;` can reach: the binary plus the `hook`
+// script it runs, as in `before()`.
+function installRtk(dir) {
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, "package.json"), '{"type":"commonjs"}')
+  writeFileSync(join(dir, "hook"), MOCK)
+  installMockBin(join(dir, BIN))
+  return join(dir, BIN)
+}
+
+// The PATH a launcher that lacks rtk's directory hands OpenCode: the system
+// dirs on POSIX (for `env`), nothing rtk-related on Windows, where cmd's
+// builtins need no PATH.
+const launcherPath = () => (process.platform === "win32" ? emptyDir : "/usr/bin:/bin")
+// Windows hands a GUI-launched process `Path`, not `PATH`.
+const PATH_KEY = process.platform === "win32" ? "Path" : "PATH"
+function setLauncherPath() {
+  delete process.env.PATH
+  process.env[PATH_KEY] = launcherPath()
+}
+
+// Where `rtk hook opencode` puts rtk in a rewrite: not only at the start
+// (the rows in the #4507 review). `env` stands for wrappers like `timeout`
+// that exec rtk off the PATH they inherit. Each run of the mock prints one
+// `rtk-mock`.
+const H = "rtk hook opencode --help"
+const SHAPES =
+  process.platform === "win32"
+    ? [[H, 1], [`cd . && ${H}`, 1], [`${H} && ${H}`, 2], [`${H} & ${H}`, 2]]
+    : [[H, 1], [`cd . && ${H}`, 1], [`FOO=1 ${H}`, 1], [`${H} && ${H}`, 2], [`${H}; ${H}`, 2], [`env ${H}`, 1]]
+
+// What OpenCode 1.x does with the `shell.env` output: spread it over its own
+// environment and spawn the command through a shell. `cwd` holds the mock's
+// `hook` script but no rtk, because cmd.exe looks in the current directory
+// before PATH.
+function runInShell(command, shellEnv, cwd) {
+  try {
+    return execSync(command, {
+      cwd,
+      env: { ...process.env, ...shellEnv },
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    })
+  } catch (error) {
+    return String(error.stdout ?? "")
+  }
+}
+
+test("rtk outside PATH: every rtk of a rewrite runs in the shell the hooks set up (#4462)", async () => {
+  const home = mkdtempSync(join(tmpdir(), "rtk-opencode-home-"))
+  const elsewhere = mkdtempSync(join(tmpdir(), "rtk-opencode-custom-"))
+  const shellCwd = mkdtempSync(join(tmpdir(), "rtk-opencode-cwd-"))
+  writeFileSync(join(shellCwd, "package.json"), '{"type":"commonjs"}')
+  writeFileSync(join(shellCwd, "hook"), MOCK)
+  const installs = [
+    ["~/.cargo/bin", () => installRtk(join(home, ".cargo", "bin"))],
+    ["~/.local/bin", () => installRtk(join(home, ".local", "bin"))],
+    ["RTK_BIN", () => (process.env.RTK_BIN = installRtk(elsewhere))],
+  ]
+  try {
+    process.env.HOME = home
+    process.env.USERPROFILE = home
+    for (const [where, install] of installs) {
+      rmSync(join(home, ".cargo"), { recursive: true, force: true })
+      rmSync(join(home, ".local"), { recursive: true, force: true })
+      delete process.env.RTK_BIN
+      const bin = install()
+      setLauncherPath()
+      _resetCachedRtkPath()
+      assert.equal(resolveRtkPath(), bin, where)
+
+      // OpenCode hands both hooks an env without PATH: the hook has to carry
+      // OpenCode's own PATH over, not replace it with rtk's directory alone,
+      // and under the key OpenCode's environment already uses, so spreading
+      // one over the other leaves a single PATH.
+      const { shellHook } = await captureSetup()
+      const v2 = { env: {} }
+      shellHook(v2)
+      const { hooks } = await captureServer()
+      const v1 = { env: {} }
+      hooks["shell.env"]({ cwd: mockDir }, v1)
+      assert.deepEqual(v1.env, v2.env, where)
+      assert.deepEqual(v2.env, { [PATH_KEY]: `${launcherPath()}${delimiter}${dirname(bin)}` }, where)
+
+      for (const [command, runs] of SHAPES) {
+        const out = runInShell(command, v2.env, shellCwd)
+        assert.equal(out.split("rtk-mock").length - 1, runs, `${where}: ${command}\n${out}`)
+      }
+    }
+  } finally {
+    process.env.PATH = `${mockDir}${delimiter}${savedPath}`
+    process.env.HOME = emptyDir
+    process.env.USERPROFILE = emptyDir
+    delete process.env.RTK_BIN
+    _resetCachedRtkPath()
+    rmSync(home, { recursive: true, force: true })
+    rmSync(elsewhere, { recursive: true, force: true })
+    rmSync(shellCwd, { recursive: true, force: true })
+  }
+})
+
+test("OpenCode judges rtk's answer as rtk judged it, wherever rtk lives (#4195, #4462)", async () => {
+  // `rtk hook opencode` only answers a rewrite whose verdict under OpenCode's
+  // rules (`rtk *` included) matches the typed command's. OpenCode then
+  // evaluates whatever string the hook leaves, so that string has to be rtk's
+  // answer byte for byte, the same one an rtk on PATH gets, and never an
+  // absolute path that a rule naming `rtk` no longer matches.
+  const home = mkdtempSync(join(tmpdir(), "rtk-opencode-home-"))
+  const elsewhere = mkdtempSync(join(tmpdir(), "rtk-opencode-custom-"))
+  const commands = ["ls -la", "cd sub && ls -la", "ls -la && git status", "unchanged"]
+  const expected = ["rtk ls -la", "cd sub && rtk ls -la", "rtk ls -la && rtk git status", "unchanged"]
+  const installs = [
+    ["PATH", () => (process.env.PATH = mockDir)],
+    ["~/.cargo/bin", () => installRtk(join(home, ".cargo", "bin"))],
+    ["RTK_BIN", () => (process.env.RTK_BIN = installRtk(elsewhere))],
+  ]
+  try {
+    process.env.HOME = home
+    process.env.USERPROFILE = home
+    for (const [where, install] of installs) {
+      rmSync(join(home, ".cargo"), { recursive: true, force: true })
+      delete process.env.RTK_BIN
+      process.env.PATH = emptyDir
+      install()
+      _resetCachedRtkPath()
+
+      const { hook } = await captureSetup()
+      const { hooks } = await captureServer()
+      for (const [i, command] of commands.entries()) {
+        const v2 = v2Event(command)
+        await hook(v2)
+        assert.equal(v2.input.command, expected[i], `${where}, 2.x: ${command}`)
+        const v1 = v1Output(command)
+        await hooks["tool.execute.before"](v1Input, v1)
+        assert.equal(v1.args.command, expected[i], `${where}, 1.x: ${command}`)
+      }
+    }
+  } finally {
+    process.env.PATH = `${mockDir}${delimiter}${savedPath}`
+    process.env.HOME = emptyDir
+    process.env.USERPROFILE = emptyDir
+    delete process.env.RTK_BIN
+    _resetCachedRtkPath()
+    rmSync(home, { recursive: true, force: true })
+    rmSync(elsewhere, { recursive: true, force: true })
   }
 })

@@ -80,25 +80,29 @@ export function resolveRtkPath(): string | null {
   if (pathMatch) return (cachedRtkPath = pathMatch)
 
   // 3. Candidate directories outside system PATH (#4462)
+  const candidateMatch = probeDirsForRtk(candidateRtkDirs(), exts)
+  if (candidateMatch) return (cachedRtkPath = candidateMatch)
+
+  return (cachedRtkPath = null)
+}
+
+/** Install directories probed when rtk is on neither `RTK_BIN` nor `PATH`. */
+export function candidateRtkDirs(): string[] {
   const home = homedir()
-  const candidateDirs: string[] = [
+  const dirs: string[] = [
     join(home, ".cargo", "bin"),
-    join(home, ".local", "bin"),
+    join(home, ".local", "bin"), // install.sh's default INSTALL_DIR
     "/opt/homebrew/bin",
     "/usr/local/bin",
     "/usr/bin",
   ]
 
   if (process.platform === "win32") {
-    if (process.env.LOCALAPPDATA) candidateDirs.push(join(process.env.LOCALAPPDATA, "cargo", "bin"))
-    if (process.env.ProgramFiles) candidateDirs.push(join(process.env.ProgramFiles, "rtk"))
-    if (process.env["ProgramFiles(x86)"]) candidateDirs.push(join(process.env["ProgramFiles(x86)"], "rtk"))
+    if (process.env.LOCALAPPDATA) dirs.push(join(process.env.LOCALAPPDATA, "cargo", "bin"))
+    if (process.env.ProgramFiles) dirs.push(join(process.env.ProgramFiles, "rtk"))
+    if (process.env["ProgramFiles(x86)"]) dirs.push(join(process.env["ProgramFiles(x86)"], "rtk"))
   }
-
-  const candidateMatch = probeDirsForRtk(candidateDirs, exts)
-  if (candidateMatch) return (cachedRtkPath = candidateMatch)
-
-  return (cachedRtkPath = null)
+  return dirs
 }
 
 /**
@@ -107,7 +111,11 @@ export function resolveRtkPath(): string | null {
  * Appending rather than prepending ensures no other command resolves differently.
  */
 export function appendRtkDirToPath(env: Record<string, any>, rtkDir: string): void {
-  const pathKey = Object.keys(env).find((k) => k.toUpperCase() === "PATH") ?? "PATH"
+  // Windows names it `Path` and matches it case-insensitively. Reuse the key the
+  // environment already has, so `{ ...process.env, ...env }` carries one PATH
+  // rather than two that differ only in case.
+  const isPathKey = (k: string) => (process.platform === "win32" ? k.toUpperCase() === "PATH" : k === "PATH")
+  const pathKey = Object.keys(env).find(isPathKey) ?? Object.keys(process.env).find(isPathKey) ?? "PATH"
   const currentPath = env[pathKey] ?? process.env[pathKey] ?? ""
   if (currentPath) {
     const parts = currentPath.split(delimiter)
