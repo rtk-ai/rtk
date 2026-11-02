@@ -242,8 +242,6 @@ fn swappable(
                 && !crate::discover::fish_script::is_unambiguous_fish(cmd)
                 && !runs_rtk(cmd)
                 && !cmd.contains(['\n', '\r', '\\'])
-                && !registry::has_heredoc(cmd)
-                && !cmd.contains("$((")
                 && !registry::chain_mentions_excluded(cmd, excluded)
                 && registry::rewrite_command(cmd, &[], transparent).is_none()
                 && sh_can_run(cmd, program_exists)
@@ -616,6 +614,33 @@ mod tests {
         }
         assert!(decide(
             "./lint.sh && ./run-suite.sh",
+            PermissionVerdict::Default,
+            &[]
+        ));
+    }
+
+    #[test]
+    fn a_here_string_or_heredoc_is_not_swapped() {
+        for cmd in [
+            "./run-suite.sh <<<hello",
+            "./run-suite.sh <<< 'abc'",
+            "grep x <<<\"$d\"",
+            "./run-suite.sh <<EOF\nx\nEOF",
+            "./run-suite.sh <<-'EOF'\n\tx\nEOF",
+        ] {
+            assert!(!decide(cmd, PermissionVerdict::Default, &[]), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn an_arithmetic_expansion_is_not_swapped_but_a_quoted_literal_is() {
+        assert!(!decide(
+            "./run-suite.sh $((1+2))",
+            PermissionVerdict::Default,
+            &[]
+        ));
+        assert!(decide(
+            "./run-suite.sh '$((x))'",
             PermissionVerdict::Default,
             &[]
         ));
