@@ -1,0 +1,14 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________________________ test_comment _________________________________
+test_cm.py:10: in test_comment
+    fail()  # see app.py:12
+    ^^^^^^
+mylib/conf.py:2: in fail
+    raise ValueError("bad config\nline two\nline three")
+E   ValueError: bad config
+E   line two
+E   line three
+----------------------------- Captured stdout call -----------------------------
+_cache warm
+1 failed in 0.01s

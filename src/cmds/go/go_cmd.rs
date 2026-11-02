@@ -3,7 +3,7 @@
 use crate::core::guard::never_worse;
 use crate::core::runner;
 use crate::core::shell::{display_args, quote_word};
-use crate::core::stream::{CaptureResult, exec_capture};
+use crate::core::stream::{CaptureResult, exec_capture, exec_capture_unguarded};
 use crate::core::tracking;
 use crate::core::truncate::CAP_ERRORS;
 use crate::core::utils::{resolved_command, truncate};
@@ -47,7 +47,16 @@ struct PackageResult {
     fuzz_summary: Option<String>,
 }
 
+fn forwarded_help(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
+    let mut forwarded = vec![OsString::from(subcommand)];
+    forwarded.extend(args.iter().map(OsString::from));
+    crate::core::runner::run_passthrough("go", &forwarded, verbose)
+}
+
 pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
+    if crate::core::runner::requests_help_args("go", args) {
+        return forwarded_help("test", args, verbose);
+    }
     let mut cmd = resolved_command("go");
     cmd.arg("test");
 
@@ -85,6 +94,9 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
 }
 
 pub fn run_build(args: &[String], verbose: u8) -> Result<i32> {
+    if crate::core::runner::requests_help_args("go", args) {
+        return forwarded_help("build", args, verbose);
+    }
     let mut cmd = resolved_command("go");
     cmd.arg("build");
 
@@ -106,6 +118,9 @@ pub fn run_build(args: &[String], verbose: u8) -> Result<i32> {
 }
 
 pub fn run_vet(args: &[String], verbose: u8) -> Result<i32> {
+    if crate::core::runner::requests_help_args("go", args) {
+        return forwarded_help("vet", args, verbose);
+    }
     let mut cmd = resolved_command("go");
     cmd.arg("vet");
 
@@ -176,7 +191,7 @@ fn detect_go_tool_golangci_version() -> u32 {
     let mut cmd = resolved_command("go");
     cmd.arg("tool").arg("golangci-lint").arg("--version");
 
-    match exec_capture(&mut cmd) {
+    match exec_capture_unguarded(&mut cmd) {
         Ok(captured) => {
             let version_text = if captured.stdout.trim().is_empty() {
                 &captured.stderr

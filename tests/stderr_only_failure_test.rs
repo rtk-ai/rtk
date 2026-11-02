@@ -189,6 +189,92 @@ exit 2"#,
     );
 }
 
+#[test]
+fn the_k8s_alias_sees_the_boundary_the_caller_typed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fake_tool(dir.path(), "kubectl", r#"echo "ARGS: $*""#);
+
+    let out = rtk_with(dir.path(), &["kubectl", "pods", "--", "--help"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("ARGS: pods -- --help"),
+        "the boundary was lost; got: {stdout}"
+    );
+
+    let out = rtk_with(dir.path(), &["kubectl", "pods", "--help"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("get pods") && stdout.contains("--help"),
+        "a plain request should forward to get pods; got: {stdout}"
+    );
+}
+
+#[test]
+fn dotnet_help_is_forwarded_without_the_injected_binlog() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fake_tool(
+        dir.path(),
+        "dotnet",
+        r#"case "$*" in
+  *-bl:*|*--report*) echo "MSBUILD : error MSB1025: an injected flag reached the tool" >&2; exit 1;;
+esac
+for a in "$@"; do
+  case "$a" in
+    --help|-h|-\?|/\?) echo "Usage: dotnet [options]"; echo "  -c, --configuration <CONFIG>"; exit 0;;
+  esac
+done
+echo "Build succeeded."
+exit 0"#,
+    );
+
+    for sub in ["build", "test", "format"] {
+        for flag in ["--help", "-h", "-?", "/?"] {
+            let out = rtk_with(dir.path(), &["dotnet", sub, flag]);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                stdout.contains("Usage: dotnet"),
+                "dotnet {sub} {flag} did not return the usage; stdout: {stdout} stderr: {stderr}"
+            );
+            assert!(
+                !stderr.contains("MSB1025"),
+                "dotnet {sub} {flag} reached the tool with an injected flag"
+            );
+            assert_eq!(out.status.code(), Some(0), "exit code for {sub} {flag}");
+        }
+    }
+}
+
+#[test]
+fn go_tool_golangci_lint_probe_does_not_answer_for_the_lint_run() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let issues = r#"{"Issues":[{"FromLinter":"errcheck","Text":"unchecked","Pos":{"Filename":"main.go","Line":1,"Column":1},"SourceLines":["x()"],"Severity":""}]}"#;
+    fake_tool(
+        dir.path(),
+        "go",
+        &format!(
+            r#"if [ "$1" = "tool" ] && [ "$3" = "--version" ]; then
+  echo "golangci-lint has version 2.13.1"
+  exit 0
+fi
+echo '{issues}'
+exit 1"#
+        ),
+    );
+
+    let out = rtk_with(dir.path(), &["go", "tool", "golangci-lint", "run"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        !stdout.contains("has version"),
+        "the probe answered for the run; got: {stdout}"
+    );
+    assert!(
+        stdout.contains("errcheck"),
+        "expected the lint result; got: {stdout}"
+    );
+}
+
 /// golangci-lint exits 1 when it merely found lint issues. RTK reports them and
 /// returns 0, so the linter running successfully does not fail a build.
 #[test]

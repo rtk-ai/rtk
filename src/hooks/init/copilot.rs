@@ -35,7 +35,7 @@ pub(crate) const COPILOT_HOOK_JSON: &str = r#"{
 const COPILOT_INSTRUCTIONS: &str = r#"<!-- rtk-instructions v2 -->
 # RTK — Token-Optimized CLI
 
-**rtk** is a CLI proxy that filters and compresses command outputs, saving 60-90% tokens.
+**rtk** is a CLI proxy that filters and compresses command outputs, cutting 60-90% of bash output.
 
 ## Rule
 
@@ -56,7 +56,7 @@ kubectl get pods           rtk kubectl get pods
 rtk gain              # Token savings dashboard
 rtk gain --history    # Per-command savings history
 rtk discover          # Find missed rtk opportunities
-rtk proxy <cmd>       # Run raw (no filtering) but track usage
+rtk bypass <cmd>      # Run raw (no filtering) but track usage
 ```
 <!-- /rtk-instructions -->
 "#;

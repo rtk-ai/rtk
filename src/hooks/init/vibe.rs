@@ -195,7 +195,7 @@ match = "{match_glob}"
 command = "{command}"
 timeout = 10.0
 strict = false
-description = "Rewrite bash commands through the rtk proxy to save tokens."
+description = "Rewrite bash commands through rtk to save tokens."
 "#,
         name = VIBE_HOOK_NAME,
         match_glob = VIBE_BASH_MATCH,
@@ -355,6 +355,20 @@ fn strip_vibe_rtk_entry(content: &str) -> Option<String> {
     Some(out)
 }
 
+/// Returns true if Vibe CLI RTK hook is configured.
+pub fn is_configured() -> bool {
+    let Ok(vibe_dir) = resolve_vibe_dir() else {
+        return false;
+    };
+    let hooks_path = vibe_dir.join(VIBE_HOOKS_FILE);
+    if let Ok(content) = fs::read_to_string(&hooks_path)
+        && vibe_hooks_toml_has_rtk(&content)
+    {
+        return true;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,5 +509,126 @@ mod tests {
         uninstall_vibe_at(&vibe_dir, InitContext::default()).unwrap();
 
         assert!(!vibe_dir.join(VIBE_HOOKS_FILE).exists());
+    }
+}
+
+#[cfg(test)]
+mod onramp_report_tests {
+    use super::*;
+    use crate::hooks::hook_check::HookStatus;
+
+    #[cfg(feature = "engine")]
+    const BASE: &str = "http://127.0.0.1:8080";
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn a_daemon_nothing_points_at_is_not_configured() {
+        let lines = proxy_verification_lines(BASE, true, None, None).join("\n");
+        assert!(lines.contains("env.ANTHROPIC_BASE_URL missing"), "{lines}");
+        assert!(lines.contains("NOT fully configured"), "{lines}");
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn an_env_var_aimed_at_a_dead_daemon_is_not_configured() {
+        let lines = proxy_verification_lines(BASE, false, Some(BASE), None).join("\n");
+        assert!(lines.contains("NOT responding"), "{lines}");
+        assert!(lines.contains("NOT fully configured"), "{lines}");
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn an_env_var_aimed_elsewhere_is_named_rather_than_accepted() {
+        let other = "http://127.0.0.1:9999";
+        let lines = proxy_verification_lines(BASE, true, Some(other), None).join("\n");
+        assert!(lines.contains("not this daemon"), "{lines}");
+        assert!(lines.contains("NOT fully configured"), "{lines}");
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn configured_state_warns_when_nothing_restarts_the_daemon() {
+        let lines = proxy_verification_lines(BASE, true, Some(BASE), None).join("\n");
+        assert!(lines.contains("nothing restarts the daemon"), "{lines}");
+        let lines =
+            proxy_verification_lines(BASE, true, Some(BASE), Some("SessionStart autostart"))
+                .join("\n");
+        assert!(
+            lines.contains("restart persistence — SessionStart autostart"),
+            "{lines}"
+        );
+        assert!(!lines.contains("nothing restarts"), "{lines}");
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn session_start_entry_roundtrip() {
+        let mut root = serde_json::json!({});
+        assert!(!session_start_entry_present(&root));
+        insert_session_start_entry(&mut root).expect("insert");
+        assert!(session_start_entry_present(&root));
+        let entry = root
+            .pointer("/hooks/SessionStart/0/hooks/0/command")
+            .and_then(|v| v.as_str())
+            .expect("command written");
+        assert_eq!(entry, "rtk hook claude");
+        assert!(
+            root.pointer("/hooks/SessionStart/0/matcher").is_none(),
+            "SessionStart entries carry no matcher"
+        );
+        assert!(claude::remove_hook_from_json(&mut root));
+        assert!(!session_start_entry_present(&root));
+        assert!(
+            root.get("hooks").is_none(),
+            "uninstall must drop the emptied hooks object: {root}"
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn foreign_session_start_hooks_survive_uninstall() {
+        let mut root = serde_json::json!({
+            "hooks": { "SessionStart": [
+                { "hooks": [{ "type": "command", "command": "my-own-tool --hello" }] }
+            ]}
+        });
+        insert_session_start_entry(&mut root).expect("insert");
+        assert!(claude::remove_hook_from_json(&mut root));
+        let arr = root
+            .pointer("/hooks/SessionStart")
+            .and_then(|v| v.as_array())
+            .expect("foreign entry must survive");
+        assert_eq!(arr.len(), 1, "{root}");
+        assert!(arr[0].to_string().contains("my-own-tool"), "{root}");
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn both_halves_holding_is_the_only_configured_state() {
+        let lines = proxy_verification_lines(BASE, true, Some(BASE), None).join("\n");
+        assert!(lines.contains("proxy: configured"), "{lines}");
+        assert!(!lines.contains("NOT"), "{lines}");
+        // The prompt must not promise what rtk:proxy does not enable.
+        assert!(lines.contains("CCR ships off"), "{lines}");
+    }
+
+    #[test]
+    fn the_project_footer_reports_global_state_and_points_at_g() {
+        let missing = project_scope_footer_lines(HookStatus::Missing, false, false).join("\n");
+        assert!(missing.contains("NOT registered"), "{missing}");
+        assert!(missing.contains("not set up"), "{missing}");
+        assert_eq!(missing.matches("rtk init -g").count(), 2, "{missing}");
+
+        let done = project_scope_footer_lines(HookStatus::Ok, true, true).join("\n");
+        assert!(done.contains("registered globally"), "{done}");
+        assert!(done.contains("configured and running"), "{done}");
+        assert!(!done.contains("rtk init -g"), "{done}");
+    }
+
+    /// The state that leaves `rtk gain` empty: daemon up, nothing aimed at it.
+    #[test]
+    fn a_running_but_unused_daemon_is_called_out_in_project_scope() {
+        let lines = project_scope_footer_lines(HookStatus::Ok, false, true).join("\n");
+        assert!(lines.contains("nothing routed to it"), "{lines}");
     }
 }

@@ -1,0 +1,6 @@
+# clap's derive-expanded parser overflows the 2 MiB stack cargo gives test
+# threads in a debug build. This raises the floor for every cargo-spawned
+# process, CI and local alike; release builds never needed it (optimized
+# frames, main thread).
+[env]
+RUST_MIN_STACK = "8388608"

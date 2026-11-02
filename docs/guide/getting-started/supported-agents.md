@@ -21,25 +21,25 @@ Agent runs "cargo test"
   -> Calls rtk rewrite "cargo test"
   -> Returns "rtk cargo test"
   -> Agent executes filtered command
-  -> LLM reads up to 90% fewer bash output bytes
+  -> LLM reads the condensed output
 ```
 
 ## Supported agents
 
 | Agent | Integration tier | Can rewrite transparently? |
 |-------|-----------------|---------------------------|
-| Claude Code | Shell hook (`PreToolUse`) | Yes |
+| Claude Code | Rust binary (`PreToolUse`, `rtk hook claude`) | Yes |
 | Trae | Rust binary (`PreToolUse`, matcher `RunCommand`) | Yes |
-| VS Code Copilot Chat | Shell hook (`PreToolUse`) | Yes |
-| GitHub Copilot CLI | Shell hook (`PreToolUse`) | Yes |
-| Cursor | Shell hook (`preToolUse`) | Yes |
+| VS Code Copilot Chat | Rust binary (`PreToolUse`, `rtk hook copilot`) | Yes |
+| GitHub Copilot CLI | Rust binary (`PreToolUse`, `rtk hook copilot`) | Yes |
+| Cursor | Rust binary (`preToolUse`, `rtk hook cursor`) | Yes |
 | Gemini CLI | Rust binary (`BeforeTool`) | Yes |
-| OpenCode | TypeScript plugin (`tool.execute.before`) | Yes |
+| OpenCode | TypeScript plugin (`execute.before` in 2.0, `tool.execute.before` in 1.x >= 1.18.29) | Yes |
 | OpenClaw | TypeScript plugin (`before_tool_call`) | Yes |
 | Pi | TypeScript extension (`tool_call` event) | Yes |
 | Oh My Pi (OMP) | TypeScript extension (`tool_call` event, shared with Pi) | Yes |
 | Hermes | Python plugin (`terminal` command mutation) | Yes |
-| Factory Droid | Shell hook (`PreToolUse`, matcher `Execute`) | Yes |
+| Factory Droid | Rust binary (`PreToolUse`, matcher `Execute`) | Yes |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
 | Codex CLI | Rust binary (`PreToolUse`) | Yes |
@@ -51,6 +51,12 @@ Agents that rewrite transparently receive the awareness file selected by `awaren
 `config.toml` (`default` says nothing about RTK). Rules-file agents cannot rewrite, so the agent
 must prefix `rtk` itself; they always receive the `full` awareness file and `rtk init` says so.
 See [Configuration](configuration.md#awareness-level).
+
+:::note[How much of a pipeline reaches your agent?]
+Command rewriting works on almost every agent here. Compressing tool *output*
+after the fact depends on whether the agent lets a hook replace it — eight do.
+See [Agent Coverage](../resources/agent-coverage.md) for the per-agent table.
+:::
 
 ## Installation by agent
 
@@ -107,7 +113,7 @@ rtk init --global --copilot   # user-scoped (~/.copilot/hooks/, respects $COPILO
 
 Project-scoped writes `.github/hooks/rtk-rewrite.json` — a single `PreToolUse` entry shared by both hosts, each getting transparent rewrite via `updatedInput` — plus the RTK block in `.github/copilot-instructions.md`. User-scoped writes the same hook config to `~/.copilot/hooks/rtk-rewrite.json` and the RTK block to `~/.copilot/copilot-instructions.md` (both respect `$COPILOT_HOME` if set).
 
-Earlier `rtk` versions also registered a second, camelCase `preToolUse` entry for Copilot CLI's native schema. Copilot CLI treats `PreToolUse`/`preToolUse` as independent hooks and runs both sequentially for the same tool call — a redundant process spawn with no behavioral benefit, since Copilot CLI honors the single `PreToolUse` schema on its own. Re-run `rtk init --copilot` (or `--global --copilot`) to upgrade an existing install to the single-hook config.
+Earlier `rtk` versions also registered a second, camelCase `preToolUse` entry, which made Copilot CLI run the hook twice per tool call. Re-run `rtk init --copilot` (or `--global --copilot`) to upgrade an existing install to the single-hook config.
 
 Uninstall:
 
@@ -130,8 +136,7 @@ rtk init --global --gemini
 rtk init --global --opencode
 ```
 
-Installs the Claude Code setup and creates `~/.config/opencode/plugins/rtk.ts`.
-The plugin uses the `tool.execute.before` hook.
+Installs the Claude Code setup and creates `~/.config/opencode/plugins/rtk.ts`. The plugin registers both OpenCode 2.0 (`execute.before`) and OpenCode 1.x (`tool.execute.before`) hooks, in one default export carrying both entrypoints. That shape is supported from OpenCode 1.18.29, the floor OpenCode documents for it; with an older OpenCode, when it can read `opencode --version`, `rtk init` writes nothing and says so.
 
 ### Pi
 
@@ -191,7 +196,7 @@ Plugin in the `openclaw/` directory. Uses the `before_tool_call` hook, delegates
 
 **Permissions.** RTK keeps the deny gate; OpenClaw owns approval. The plugin runs `rtk rewrite` with `RTK_REWRITE_HOST=openclaw`, which tells RTK that this host applies its own exec policy (`tools.exec.mode`, `security`, `ask`) to whatever the hook returns. RTK therefore does not prompt for a command that matched **no** rule, instead of raising a second approval derived from Claude Code's `settings.json` on a runtime that never opted into it ([#3908](https://github.com/rtk-ai/rtk/issues/3908)).
 
-A command matching a `permissions.deny` rule in those same Claude Code settings files is still refused, and the plugin blocks the tool call — naming the host only relaxes a *default* ask. As in Claude Code, a rule matches the command as written rather than every way of invoking the program (`Bash(git push *)` does not stop `git -C . push`), so a deny rule is not a security boundary. A command matching a `permissions.ask` rule you wrote still prompts when RTK rewrites it, because RTK keeps returning exit 3 for it. Commands containing a command substitution or a redirect to a file are never rewritten, on any host.
+A command matching a `permissions.deny` rule in those same Claude Code settings files is still refused, and the plugin blocks the tool call — naming the host only relaxes a *default* ask. As in Claude Code, a deny or ask rule matches the command as written and the command behind any leading assignment or wrapper (`HUSKY=0`, `timeout 30`, `nohup`, `command`, ...), each layer in turn, but not every way of invoking the program (`Bash(git push *)` does not stop `git -C . push` or `env -i git push`), so a deny rule is not a security boundary. Allow rules match the command as written. A command matching a `permissions.ask` rule you wrote still prompts when RTK rewrites it, because RTK keeps returning exit 3 for it. Commands containing a command substitution or a redirect to a file are never rewritten, on any host.
 
 The exec tool's own checks see the rewritten command. OpenClaw carries hook adjustments forward into the parameters passed to the exec tool, so `tools.exec.mode`, `tools.exec.security`, `tools.exec.ask` and the exec-approvals allowlist are all matched against `rtk git push`, not `git push`; write those rules against the `rtk` form. That was already true before the permission change. A trusted tool policy (`api.registerTrustedToolPolicy(...)`) is the exception: OpenClaw runs trusted policies before ordinary `before_tool_call` hooks, so one of those still sees the original command.
 
@@ -203,7 +208,7 @@ No minimum rtk version: an rtk that predates `RTK_REWRITE_HOST` ignores it and k
 rtk init --agent hermes
 ```
 
-Creates `~/.hermes/plugins/rtk-rewrite/` and enables it through `plugins.enabled` in the Hermes config. Hermes loads Python plugins, so the plugin entrypoint is Python, but it is only a thin adapter. It mutates the Hermes `terminal` tool `command` before execution and delegates all rewrite decisions to Rust through `rtk rewrite`. The repository source and tests for that adapter live in `hooks/hermes/`; only installed runtime files use the `~/.hermes/plugins/rtk-rewrite/` path.
+Creates `~/.hermes/plugins/rtk-rewrite/` and enables it through `plugins.enabled` in the Hermes config. Hermes loads Python plugins, so the plugin entrypoint is Python, but it is only a thin adapter. It mutates the Hermes `terminal` tool `command` before execution and delegates all rewrite decisions to `rtk rewrite`.
 
 The plugin fails open. If `rtk` is missing at load time, the hook is not registered. If `rtk rewrite` errors, the tool is not `terminal`, the payload has no string `command`, or the plugin raises an exception, Hermes runs the original command unchanged. The same `rtk rewrite` limitations apply: already-prefixed `rtk` commands, compound shell commands, heredocs, and commands without filters are not rewritten.
 
@@ -299,9 +304,9 @@ rtk init -g --agent vibe --hook-only    # skip the ~/.vibe/prompts/rtk.md prompt
 
 Installs a `pre_tool` hook entry (`match = "bash"`, `command = "rtk hook vibe"`, `strict = false`) into `~/.vibe/hooks.toml`, following the contract at [docs.mistral.ai/vibe/code/cli/hooks](https://docs.mistral.ai/vibe/code/cli/hooks). Vibe invokes the native `rtk hook vibe` binary before every bash tool call; RTK reads Vibe's stdin JSON payload and emits `{"hook_specific_output": {"tool_input": {"command": "rtk ..."}}}` to rewrite the command in place. The Vibe UI surfaces `[rtk-rewrite] rtk: rewrote to \`…\`` via RTK's `system_message` field so the rewrite is visible.
 
-Unlike Droid, Vibe does not yet expose a denylist / allowlist surface in `hooks.toml` for RTK to honor. RTK therefore rewrites every bash command it knows how to compress and defers to Vibe's own permission prompt on the rewritten command; commands RTK doesn't handle pass through unchanged. `strict = false` ensures a hook crash degrades to a warning rather than blocking the tool call.
+Unlike Droid, Vibe does not expose a denylist / allowlist surface in `hooks.toml` for RTK to honor. RTK therefore rewrites every bash command it knows how to compress and defers to Vibe's own permission prompt on the rewritten command; commands RTK doesn't handle pass through unchanged. `strict = false` ensures a hook crash degrades to a warning rather than blocking the tool call.
 
-Alongside the hook, RTK drops a system prompt at `~/.vibe/prompts/rtk.md` describing the RTK conventions to Vibe as a belt-and-suspenders fallback. Use `--hook-only` to skip it.
+Alongside the hook, RTK drops a system prompt at `~/.vibe/prompts/rtk.md` describing the RTK conventions to Vibe as a fallback. Use `--hook-only` to skip it.
 
 Install is global-only (Vibe's hook registry is user-scoped). Re-running the installer is a no-op; the RTK entry is detected by its `name = "rtk-rewrite"` field and never duplicated.
 
@@ -317,7 +322,7 @@ Strips only RTK's `[[hooks]]` block and the `~/.vibe/prompts/rtk.md` file. Any o
 
 | Tier | Mechanism | How rewrites work |
 |------|-----------|------------------|
-| **Full hook** | Shell script or Rust binary, intercepts via agent API | Transparent — agent never sees the raw command |
+| **Full hook** | Rust binary command (or a thin wrapper around one), intercepts via agent API | Transparent — agent never sees the raw command |
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
@@ -325,9 +330,11 @@ Rules file integrations (Cline, Windsurf, Kilo Code) rely on the model following
 
 ## Windows support
 
-Since v0.37.2, `rtk init -g` registers the native `rtk hook claude` command on Windows, so Claude Code gets full auto-rewrite without a Unix shell. Setups created before v0.37.2 used CLAUDE.md injection and have no hook; re-running `rtk init -g` migrates them, and adds the hook once you answer `y` to the `settings.json` prompt (or pass `--auto-patch`).
+Since v0.37.2 the hooks for Claude Code, Cursor, Copilot, Codex, Trae, Factory Droid and Mistral Vibe are native binary commands (`rtk hook <agent>`), so auto-rewrite works on native Windows — no Unix shell, bash or jq required. `rtk init -g` installs the native hook on Windows exactly as on Linux and macOS, and adds it to Claude Code's `settings.json` once you answer `y` to the prompt (or pass `--auto-patch`).
 
-Integrations that install a shell wrapper script (such as Gemini) still need a Unix shell. For those, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install), where they work identically to Linux. Native Rust hook integrations such as Trae do not depend on a shell script.
+The Gemini CLI hook is a small bash wrapper around `rtk hook gemini`, so it needs a bash available; [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) behaves identically to Linux.
+
+Setups created before v0.37.2 used CLAUDE.md injection with no hook, or the legacy `rtk-rewrite.sh` shell hook. Re-run `rtk init -g` to migrate them to the native binary hook.
 
 ## Graceful degradation
 

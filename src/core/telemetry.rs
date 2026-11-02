@@ -330,7 +330,7 @@ fn get_enriched_stats(tracker: &tracking::Tracker) -> EnrichedStats {
     }
 }
 
-/// Build meta-command usage counts (gain, discover, proxy, verify, learn, init).
+/// Build meta-command usage counts (gain, discover, bypass, verify, learn, init).
 fn recall_mode_label() -> &'static str {
     use crate::core::retriever::RecoveryMode;
     match crate::core::config::Config::load()
@@ -433,7 +433,7 @@ fn build_recall_stats(stats: &[crate::core::retriever::RecallStat]) -> serde_jso
 }
 
 fn build_meta_usage(tracker: &tracking::Tracker) -> serde_json::Value {
-    let meta_cmds = ["gain", "discover", "proxy", "verify", "learn", "init"];
+    let meta_cmds = ["gain", "discover", "bypass", "verify", "learn", "init"];
     let mut usage = serde_json::Map::new();
     for meta in &meta_cmds {
         let count = tracker.count_meta_command(meta).unwrap_or(0);

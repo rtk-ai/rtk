@@ -413,6 +413,15 @@ fn unwritable_hooks_dir_never_breaks_the_hook() {
     perms.set_mode(0o555);
     std::fs::set_permissions(&hooks_dir, perms.clone()).expect("chmod");
 
+    let probe = hooks_dir.join(".rtk-perm-probe");
+    if std::fs::write(&probe, b"x").is_ok() {
+        let _ = std::fs::remove_file(&probe);
+        perms.set_mode(0o755);
+        let _ = std::fs::set_permissions(&hooks_dir, perms);
+        eprintln!("skipped: filesystem does not enforce write permissions (running as root?)");
+        return;
+    }
+
     let (stdout, stderr, code) = sb.run_hook(LEGACY_PAYLOAD);
 
     perms.set_mode(0o755);

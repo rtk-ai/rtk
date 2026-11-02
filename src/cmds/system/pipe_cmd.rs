@@ -49,7 +49,7 @@ fn git_status_wrapper(input: &str) -> String {
 }
 
 fn git_log_wrapper(input: &str) -> String {
-    crate::cmds::git::git_cmd::filter_log_output(input, 50, false, false)
+    crate::cmds::git::git_cmd::filter_log_output(input, 50, false)
 }
 
 fn git_diff_wrapper(input: &str) -> String {

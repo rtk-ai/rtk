@@ -3,6 +3,7 @@ pub const HISTORY_DB: &str = "history.db";
 pub const RECALL_DB: &str = "recall.db";
 pub const CONFIG_TOML: &str = "config.toml";
 pub const FILTERS_TOML: &str = "filters.toml";
+pub const PIPELINE_TOML: &str = "pipeline.toml";
 pub const TRUSTED_FILTERS_JSON: &str = "trusted_filters.json";
 pub const DEFAULT_HISTORY_DAYS: i64 = 90;
 
@@ -14,6 +15,7 @@ pub const RTK_META_COMMANDS: &[&str] = &[
     "learn",
     "init",
     "config",
+    "bypass",
     "proxy",
     "recall",
     "run",
@@ -30,6 +32,13 @@ pub const RTK_META_COMMANDS: &[&str] = &[
     "smart",
     "deps",
     "json",
+    "llm-proxy",
+    "pipeline",
+    "methods",
+    "tasks",
+    "plugins",
+    "test",
+    "format",
     // `err` and `summary` name no real binary, and since they grew `--shell`
     // they have a flag to get wrong. Falling through would try to exec a
     // program called `err` instead of reporting the flag error (#4125 review).

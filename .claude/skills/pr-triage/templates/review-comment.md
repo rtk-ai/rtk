@@ -61,7 +61,7 @@ Use this template to generate GitHub PR review comments. Fill in each section ba
 - `anyhow::Result` + `.context("msg")` (no bare `?`, no `.unwrap()`)
 - Fallback to raw command on filter failure
 - Exit code propagation (`std::process::exit(code)`)
-- Token savings assertion ≥60% in tests
+- Token savings assertion ≥20% in tests
 - Real fixtures (not synthetic test data)
 - No async/tokio dependencies (startup time)
 

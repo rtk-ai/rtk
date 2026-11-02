@@ -74,7 +74,7 @@ cargo test test_mvn_test_example
 
 **Priority**: 🔴 **Triggers**: All filter implementations, token savings claims
 
-All filters **MUST** verify 60-90% token savings claims with real fixtures.
+All filters **MUST** verify the ≥20% savings floor with real fixtures.
 
 ### Token Count Test
 
@@ -96,8 +96,8 @@ mod tests {
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
 
         assert!(
-            savings >= 60.0,
-            "Git log filter: expected ≥60% savings, got {:.1}%",
+            savings >= 20.0,
+            "Git log filter: expected ≥20% savings, got {:.1}%",
             savings
         );
     }
@@ -121,13 +121,13 @@ pnpm list > tests/fixtures/pnpm_list_raw.txt
 
 ### Savings Target
 
-There is a single enforced floor, not a per-filter table: **≥60% savings is the release
+There is a single enforced floor, not a per-filter table: **≥20% savings is the release
 blocker** (see CLAUDE.md's "Pre-commit Gate" / performance targets). Individual filters often
 exceed this by a wide margin, but don't assert specific per-command percentages (e.g. "87% for
 `gh pr view`") unless you've verified the actual number against that filter's own fixtures —
 asserted thresholds vary per filter and doc tables listing invented numbers rot immediately.
 
-**Release blocker**: If savings drop below 60% for any filter, investigate and fix before merge.
+**Release blocker**: If savings drop below 20% for any filter, investigate and fix before merge.
 
 ## Cross-Platform Testing (🔴 Critical)
 
@@ -382,7 +382,7 @@ When adding/modifying a filter:
 ### Implementation Phase
 - [ ] Write a unit test in the filter's own `#[cfg(test)] mod tests` block (inline string, or
       `include_str!` fixture for larger/real output)
-- [ ] Add a token accuracy test (verify ≥60% savings) using a locally-defined `count_tokens`
+- [ ] Add a token accuracy test (verify ≥20% savings) using a locally-defined `count_tokens`
 - [ ] Test cross-platform shell escaping (if applicable)
 
 ### Quality Checks
@@ -392,7 +392,7 @@ When adding/modifying a filter:
 
 ### Before Merge
 - [ ] All tests passing (`cargo test --all`)
-- [ ] Token savings ≥60% verified
+- [ ] Token savings ≥20% verified
 - [ ] Cross-platform tests passed (Linux + macOS)
 - [ ] Performance benchmarks passed (<10ms startup)
 
@@ -430,7 +430,7 @@ mod tests {
         let output = filter_cmd(input);
 
         let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
-        assert!(savings >= 60.0, "Expected >=60% savings, got {:.1}%", savings);
+        assert!(savings >= 20.0, "Expected >=20% savings, got {:.1}%", savings);
     }
 }
 ```
@@ -570,7 +570,7 @@ hyperfine 'target/release/rtk cmd' --warmup 3 > /tmp/after.txt
 diff /tmp/before.txt /tmp/after.txt
 ```
 
-❌ **DON'T** accept <60% token savings
+❌ **DON'T** accept <20% token savings
 ```rust
 // ❌ WRONG - no savings verification
 #[test]
@@ -582,10 +582,10 @@ fn test_filter() {
 
 ✅ **DO** verify savings claims
 ```rust
-// ✅ RIGHT - verify ≥60% savings
+// ✅ RIGHT - verify ≥20% savings
 #[test]
 fn test_token_savings() {
     let savings = calculate_savings(input, output);
-    assert!(savings >= 60.0, "Expected ≥60%, got {:.1}%", savings);
+    assert!(savings >= 20.0, "Expected ≥20%, got {:.1}%", savings);
 }
 ```

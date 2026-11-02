@@ -262,7 +262,7 @@ where
     )
 }
 
-pub fn run(subcommand: &str, args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
+pub fn run(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
     // clap carves `subcommand` out of the same trailing region as `args`, so the stripped `--`
     // has to be restored over the whole region — over `args` alone it lands one token off.
     let mut region: Vec<String> = Vec::with_capacity(args.len() + 1);
@@ -292,10 +292,10 @@ pub fn run(subcommand: &str, args: &[String], verbose: u8, ultra_compact: bool) 
     }
 
     match subcommand {
-        "pr" => run_pr(args, verbose, ultra_compact),
-        "issue" => run_issue(args, verbose, ultra_compact),
-        "run" => run_workflow(args, verbose, ultra_compact),
-        "repo" => run_repo(args, verbose, ultra_compact),
+        "pr" => run_pr(args, verbose),
+        "issue" => run_issue(args, verbose),
+        "run" => run_workflow(args, verbose),
+        "repo" => run_repo(args, verbose),
         "api" => run_api(args, verbose),
         _ => {
             // Unknown subcommand, pass through
@@ -316,16 +316,16 @@ fn split_gh_region(region: &[String]) -> Option<(&str, &[String])> {
     }
 }
 
-fn run_pr(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn run_pr(args: &[String], verbose: u8) -> Result<i32> {
     if args.is_empty() {
         return run_passthrough("gh", "pr", args);
     }
 
     match args[0].as_str() {
-        "list" => list_prs(&args[1..], verbose, ultra_compact),
-        "view" => view_pr(&args[1..], verbose, ultra_compact),
-        "checks" => pr_checks(&args[1..], verbose, ultra_compact),
-        "status" => pr_status(&args[1..], verbose, ultra_compact),
+        "list" => list_prs(&args[1..], verbose),
+        "view" => view_pr(&args[1..], verbose),
+        "checks" => pr_checks(&args[1..], verbose),
+        "status" => pr_status(&args[1..], verbose),
         "create" => pr_create(&args[1..], verbose),
         "merge" => pr_merge(&args[1..], verbose),
         "diff" => pr_diff(&args[1..], verbose),
@@ -335,7 +335,7 @@ fn run_pr(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
     }
 }
 
-fn list_prs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn list_prs(args: &[String], _verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("gh");
     cmd.args([
         "pr",
@@ -346,27 +346,19 @@ fn list_prs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
     for arg in args {
         cmd.arg(arg);
     }
-    run_gh_json(cmd, "pr list", |json| format_pr_list(json, ultra_compact))
+    run_gh_json(cmd, "pr list", format_pr_list)
 }
 
-fn format_pr_list(json: &Value, ultra_compact: bool) -> String {
+fn format_pr_list(json: &Value) -> String {
     let prs = match json.as_array() {
         Some(prs) => prs,
         None => return String::new(),
     };
     if prs.is_empty() {
-        return if ultra_compact {
-            "No PRs\n".to_string()
-        } else {
-            "No Pull Requests\n".to_string()
-        };
+        return "No Pull Requests\n".to_string();
     }
     let mut out = String::new();
-    out.push_str(if ultra_compact {
-        "PRs\n"
-    } else {
-        "Pull Requests\n"
-    });
+    out.push_str("Pull Requests\n");
     let all_lines: Vec<String> = prs
         .iter()
         .map(|pr| {
@@ -374,7 +366,7 @@ fn format_pr_list(json: &Value, ultra_compact: bool) -> String {
             let title = pr["title"].as_str().unwrap_or("???");
             let state = pr["state"].as_str().unwrap_or("???");
             let author = pr["author"]["login"].as_str().unwrap_or("???");
-            let icon = state_icon(state, ultra_compact);
+            let icon = state_icon(state);
             format!(
                 "  {} #{} {} ({})",
                 icon,
@@ -399,21 +391,12 @@ fn format_pr_list(json: &Value, ultra_compact: bool) -> String {
     out
 }
 
-fn state_icon(state: &str, ultra_compact: bool) -> &'static str {
-    if ultra_compact {
-        match state {
-            "OPEN" => "O",
-            "MERGED" => "M",
-            "CLOSED" => "C",
-            _ => "?",
-        }
-    } else {
-        match state {
-            "OPEN" => "[open]",
-            "MERGED" => "[merged]",
-            "CLOSED" => "[closed]",
-            _ => "[unknown]",
-        }
+fn state_icon(state: &str) -> &'static str {
+    match state {
+        "OPEN" => "[open]",
+        "MERGED" => "[merged]",
+        "CLOSED" => "[closed]",
+        _ => "[unknown]",
     }
 }
 
@@ -442,7 +425,7 @@ fn pr_status_json_fields() -> &'static str {
     "number,title,reviewDecision,statusCheckRollup"
 }
 
-fn view_pr(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn view_pr(args: &[String], _verbose: u8) -> Result<i32> {
     // `gh pr view` without an identifier defaults to the PR for the current branch.
     let (pr_number_opt, extra_args) = split_identifier(args, &view_takes_value);
     if should_passthrough_pr_view(&extra_args) {
@@ -468,10 +451,10 @@ fn view_pr(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
         Some(id) => format!("pr view {}", quote_word(id)),
         None => "pr view".to_string(),
     };
-    run_gh_json(cmd, &label, |json| format_pr_view(json, ultra_compact))
+    run_gh_json(cmd, &label, format_pr_view)
 }
 
-fn format_pr_view(json: &Value, ultra_compact: bool) -> String {
+fn format_pr_view(json: &Value) -> String {
     let mut out = String::new();
     let number = json["number"].as_i64().unwrap_or(0);
     let title = json["title"].as_str().unwrap_or("???");
@@ -480,7 +463,7 @@ fn format_pr_view(json: &Value, ultra_compact: bool) -> String {
     let url = json["url"].as_str().unwrap_or("");
     let mergeable = json["mergeable"].as_str().unwrap_or("UNKNOWN");
 
-    let icon = state_icon(state, ultra_compact);
+    let icon = state_icon(state);
     out.push_str(&format!("{} PR #{}: {}\n", icon, number, title));
     out.push_str(&format!("  {}\n", author));
 
@@ -524,17 +507,9 @@ fn format_pr_view(json: &Value, ultra_compact: bool) -> String {
                     || c["state"].as_str() == Some("FAILURE")
             })
             .count();
-        if ultra_compact {
-            if failed > 0 {
-                out.push_str(&format!("  [x]{}/{}  {} fail\n", passed, total, failed));
-            } else {
-                out.push_str(&format!("  {}/{}\n", passed, total));
-            }
-        } else {
-            out.push_str(&format!("  Checks: {}/{} passed\n", passed, total));
-            if failed > 0 {
-                out.push_str(&format!("  [warn] {} checks failed\n", failed));
-            }
+        out.push_str(&format!("  Checks: {}/{} passed\n", passed, total));
+        if failed > 0 {
+            out.push_str(&format!("  [warn] {} checks failed\n", failed));
         }
     }
 
@@ -557,7 +532,7 @@ fn format_pr_view(json: &Value, ultra_compact: bool) -> String {
     out
 }
 
-fn pr_checks(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<i32> {
+fn pr_checks(args: &[String], _verbose: u8) -> Result<i32> {
     // `gh pr checks` without an identifier defaults to the PR for the current branch.
     let (pr_number_opt, extra_args) = split_identifier(args, &pr_checks_takes_value);
     let mut cmd = resolved_command("gh");
@@ -673,7 +648,7 @@ fn parse_pr_check_line(line: &str) -> Option<(&str, &str, PrCheckStatus)> {
     (!name.is_empty()).then_some((name, link, status))
 }
 
-fn pr_status(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<i32> {
+fn pr_status(args: &[String], _verbose: u8) -> Result<i32> {
     if should_passthrough_pr_status(args) {
         let mut passthrough_args = Vec::with_capacity(args.len() + 1);
         passthrough_args.push("status".to_string());
@@ -752,30 +727,28 @@ fn format_pr_status_entry(pr: &Value) -> String {
     out
 }
 
-fn run_issue(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn run_issue(args: &[String], verbose: u8) -> Result<i32> {
     if args.is_empty() {
         return run_passthrough("gh", "issue", args);
     }
 
     match args[0].as_str() {
-        "list" => list_issues(&args[1..], verbose, ultra_compact),
+        "list" => list_issues(&args[1..], verbose),
         "view" => view_issue(&args[1..], verbose),
         _ => run_passthrough("gh", "issue", args),
     }
 }
 
-fn list_issues(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn list_issues(args: &[String], _verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("gh");
     cmd.args(["issue", "list", "--json", "number,title,state,author"]);
     for arg in args {
         cmd.arg(arg);
     }
-    run_gh_json(cmd, "issue list", |json| {
-        format_issue_list(json, ultra_compact)
-    })
+    run_gh_json(cmd, "issue list", format_issue_list)
 }
 
-fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
+fn format_issue_list(json: &Value) -> String {
     let issues = match json.as_array() {
         Some(issues) => issues,
         None => return String::new(),
@@ -791,9 +764,7 @@ fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
             let number = issue["number"].as_i64().unwrap_or(0);
             let title = issue["title"].as_str().unwrap_or("???");
             let state = issue["state"].as_str().unwrap_or("???");
-            let icon = if ultra_compact {
-                if state == "OPEN" { "O" } else { "C" }
-            } else if state == "OPEN" {
+            let icon = if state == "OPEN" {
                 "[open]"
             } else {
                 "[closed]"
@@ -877,19 +848,19 @@ fn format_issue_view(json: &Value) -> String {
     out
 }
 
-fn run_workflow(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn run_workflow(args: &[String], verbose: u8) -> Result<i32> {
     if args.is_empty() {
         return run_passthrough("gh", "run", args);
     }
 
     match args[0].as_str() {
-        "list" => list_runs(&args[1..], verbose, ultra_compact),
+        "list" => list_runs(&args[1..], verbose),
         "view" => view_run(&args[1..], verbose),
         _ => run_passthrough("gh", "run", args),
     }
 }
 
-fn list_runs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn list_runs(args: &[String], _verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("gh");
     cmd.args([
         "run",
@@ -901,41 +872,27 @@ fn list_runs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> 
     for arg in args {
         cmd.arg(arg);
     }
-    run_gh_json(cmd, "run list", |json| format_run_list(json, ultra_compact))
+    run_gh_json(cmd, "run list", format_run_list)
 }
 
-fn format_run_list(json: &Value, ultra_compact: bool) -> String {
+fn format_run_list(json: &Value) -> String {
     let runs = match json.as_array() {
         Some(runs) => runs,
         None => return String::new(),
     };
     let mut out = String::new();
-    out.push_str(if ultra_compact {
-        "Runs\n"
-    } else {
-        "Workflow Runs\n"
-    });
+    out.push_str("Workflow Runs\n");
     for run in runs {
         let id = run["databaseId"].as_i64().unwrap_or(0);
         let name = run["name"].as_str().unwrap_or("???");
         let status = run["status"].as_str().unwrap_or("???");
         let conclusion = run["conclusion"].as_str().unwrap_or("");
-        let icon = if ultra_compact {
-            match conclusion {
-                "success" => "[ok]",
-                "failure" => "[x]",
-                "cancelled" => "X",
-                _ if status == "in_progress" => "~",
-                _ => "?",
-            }
-        } else {
-            match conclusion {
-                "success" => "[ok]",
-                "failure" => "[FAIL]",
-                "cancelled" => "[X]",
-                _ if status == "in_progress" => "[time]",
-                _ => "[pending]",
-            }
+        let icon = match conclusion {
+            "success" => "[ok]",
+            "failure" => "[FAIL]",
+            "cancelled" => "[X]",
+            _ if status == "in_progress" => "[time]",
+            _ => "[pending]",
         };
         out.push_str(&format!("  {} {} [{}]\n", icon, truncate(name, 50), id));
     }
@@ -1012,7 +969,7 @@ fn format_run_view(stdout: &str, run_id: &str) -> String {
     out
 }
 
-fn run_repo(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<i32> {
+fn run_repo(args: &[String], _verbose: u8) -> Result<i32> {
     let (subcommand, rest_args) = if args.is_empty() {
         ("view", args)
     } else {
@@ -1910,7 +1867,7 @@ ___
             "mergeable": "MERGEABLE",
             "body": body,
         });
-        let out = format_pr_view(&json, false);
+        let out = format_pr_view(&json);
         assert!(
             out.contains("(body contained only badges/images/comments)"),
             "expected fallback note when body filters to empty, got:\n{}",
@@ -1930,7 +1887,7 @@ ___
             "mergeable": "MERGEABLE",
             "body": "## Summary\nFix the thing.\n",
         });
-        let out = format_pr_view(&json, false);
+        let out = format_pr_view(&json);
         assert!(
             !out.contains("(body contained only badges/images/comments)"),
             "fallback note should not fire when body has real content, got:\n{}",
@@ -1952,7 +1909,7 @@ ___
             "mergeable": "MERGEABLE",
             "body": "",
         });
-        let out = format_pr_view(&json, false);
+        let out = format_pr_view(&json);
         assert!(!out.contains("(body contained only badges/images/comments)"));
     }
 
