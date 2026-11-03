@@ -14,7 +14,8 @@ def main():
     resp = ev.get("tool_response")
     if isinstance(resp, dict):
         resp = resp.get("content", resp)
-    text = resp if isinstance(resp, str) else "\n".join(b.get("text", "") for b in resp if isinstance(b, dict)) if isinstance(resp, list) else ""
+    text = resp if isinstance(resp, str) else "\n".join(str(b.get("text") or "") for b in resp if isinstance(b, dict)) if isinstance(resp, list) else ""
+
     try:
         data = json.loads(text)
     except ValueError:

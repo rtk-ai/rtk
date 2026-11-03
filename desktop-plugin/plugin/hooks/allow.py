@@ -31,10 +31,13 @@ def main():
         ev = json.load(sys.stdin)
     except ValueError:
         return
-    name = ev.get("tool_name") or ""
+    if not isinstance(ev, dict):
+        return
+    name = str(ev.get("tool_name") or "")
     if "plugin_rtk_rtk-desktop__" not in name:
         return
-    tool, args = name.rsplit("__", 1)[-1], ev.get("tool_input") or {}
+    tool, args = name.rsplit("__", 1)[-1], pl.tool_input(ev)
+
     if not allowed(tool, args):
         log(ev, tool, "ask")
         return

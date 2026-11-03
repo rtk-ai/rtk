@@ -107,7 +107,7 @@ def main():
         return
     if not isinstance(ev, dict):
         return
-    command = (ev.get("tool_input") or {}).get("command") or ""
+    command = pl.command_of(ev)
     resp = ev.get("tool_response")
     if isinstance(resp, dict):
         resp = resp.get("content", [resp])
@@ -150,6 +150,11 @@ def main():
         log(ev, "skip-ratio", name, len(text), len(filtered), command)
         pipeline_rules(ev, command, text)
         return
+    if text.count("\n") >= 20 and len(filtered.strip().splitlines()) <= 1 and not re.search(r"\d", filtered):
+        log(ev, "skip-floor", name, len(text), len(filtered), command)
+        pipeline_rules(ev, command, text)
+        return
+
     tag = f"[rtk: {kb(len(text))} -> {kb(len(filtered))} (-{100 - 100 * len(filtered) // len(text)}%)"
     if note:
         tag += f"; output was cut off at {kb(len(text))} before compression, counts cover only that part"

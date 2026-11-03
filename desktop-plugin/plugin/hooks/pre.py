@@ -34,7 +34,9 @@ def main():
         ev = json.loads(sys.stdin.read())
     except ValueError:
         return
-    tool = ev.get("tool_name", "")
+    if not isinstance(ev, dict):
+        return
+    tool = str(ev.get("tool_name") or "")
     os.makedirs(pl.STATE, exist_ok=True)
     off = pl.is_off()
     if not off:
@@ -44,7 +46,7 @@ def main():
             pass
     fed, asked, goal, calls = dict(ev), True, "", []
     if tool == pl.DEV:
-        fed.update(tool_name="Bash", tool_input=dict(ev.get("tool_input") or {}, command=pl.norm((ev.get("tool_input") or {}).get("command"))))
+        fed.update(tool_name="Bash", tool_input=dict(pl.tool_input(ev), command=pl.norm(pl.command_of(ev))))
     try:
         tp = ev.get("transcript_path")
         if tp and os.path.isfile(tp):
@@ -53,7 +55,8 @@ def main():
     except Exception:
         pass
     setup = pl.read_json(pl.SETUP, {})
-    command = (fed.get("tool_input") or {}).get("command") or ""
+    command = pl.command_of(fed)
+
     if not off and not asked and not setup.get("done") and not setup.get("hide") and calls and LOOK.search(command) and tool in LOOKS and not ev.get("agent_id"):
         setup["hide"] = [ev.get("tool_use_id")]
         with open(pl.SETUP, "w") as fh:

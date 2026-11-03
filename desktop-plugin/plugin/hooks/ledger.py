@@ -46,20 +46,21 @@ def text_of(content):
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return "\n".join(b.get("text") or "" for b in content if isinstance(b, dict) and b.get("type") == "text")
+        return "\n".join(b["text"] for b in content if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str))
     return ""
+
 
 
 def cost_of(model, u):
     p = next((v for key, v in pl.PRICES.items() if key in (model or "")), None)
     if not p:
         return 0.0
-    cc = u.get("cache_creation") or {}
+    cc = u.get("cache_creation") if isinstance(u.get("cache_creation"), dict) else {}
     w1h, w5m = cc.get("ephemeral_1h_input_tokens"), cc.get("ephemeral_5m_input_tokens")
     if w1h is None and w5m is None:
         w1h, w5m = u.get("cache_creation_input_tokens", 0), 0
-    row = (u.get("input_tokens", 0), w5m or 0, w1h or 0, u.get("cache_read_input_tokens", 0), u.get("output_tokens", 0))
-    return sum((a or 0) * b for a, b in zip(row, p)) / 1e6
+    row = (u.get("input_tokens", 0), w5m, w1h, u.get("cache_read_input_tokens", 0), u.get("output_tokens", 0))
+    return sum(pl.n_of(a) * b for a, b in zip(row, p)) / 1e6
 
 
 def read_transcript(path):
@@ -71,13 +72,13 @@ def read_transcript(path):
             e = json.loads(line)
         except ValueError:
             continue
-        if e.get("type") not in ("user", "assistant"):
+        if not isinstance(e, dict) or e.get("type") not in ("user", "assistant"):
             continue
         if e.get("isSidechain"):
             sub = True
-        if e.get("timestamp") and (not first or e["timestamp"] < first):
+        if isinstance(e.get("timestamp"), str) and (not first or e["timestamp"] < first):
             first = e["timestamp"]
-        m = e.get("message") or {}
+        m = e.get("message") if isinstance(e.get("message"), dict) else {}
         c = m.get("content")
         if e.get("type") == "user" and isinstance(c, list):
             for b in c:
@@ -88,20 +89,21 @@ def read_transcript(path):
                 for b in c:
                     if isinstance(b, dict) and b.get("type") == "tool_use":
                         if b.get("name") in ("Agent", "Task"):
-                            i = b.get("input") or {}
+                            i = b.get("input") if isinstance(b.get("input"), dict) else {}
                             agents.append((str(i.get("subagent_type") or "helper"), str(i.get("model") or "default")))
+
                         if b.get("name") == pl.DEV:
                             dev += 1
             t = text_of(c)
             if t.strip():
                 last_text = t
             u = m.get("usage")
-            if u:
+            if isinstance(u, dict):
                 old = msgs.get(m.get("id"))
-                if not old or (u.get("output_tokens") or 0) >= (old[1].get("output_tokens") or 0):
-                    msgs[m.get("id")] = (m.get("model") or "?", u)
+                if not old or pl.n_of(u.get("output_tokens")) >= pl.n_of(old[1].get("output_tokens")):
+                    msgs[m.get("id")] = (str(m.get("model") or "?"), u)
     for model, u in msgs.values():
-        out[model] += u.get("output_tokens") or 0
+        out[model] += pl.n_of(u.get("output_tokens"))
     cost = collections.defaultdict(float)
     for model, u in msgs.values():
         cost[model] += cost_of(model, u)
@@ -132,7 +134,9 @@ def rules_fired():
 
 
 def build(session):
+    session = str(session or "x")
     files = [read_transcript(p) for p in pl.transcripts()]
+
     mains, subs = [f for f in files if not f["sub"]], sorted((f for f in files if f["sub"]), key=lambda f: f["first"])
     agents = [a for f in mains for a in f["agents"]]
     by_model = collections.defaultdict(float)

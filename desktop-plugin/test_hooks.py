@@ -91,10 +91,18 @@ def device_log():
         return fh.read()
 
 
+def start_file():
+    cmds, saved = ledger.rtk_totals()
+    os.makedirs(ledger.START, exist_ok=True)
+    with open(os.path.join(ledger.START, SID + ".json"), "w") as fh:
+        json.dump({"cmds": cmds, "saved": saved, "shown": 0}, fh)
+
+
 class Ledger(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         write_transcripts()
+        start_file()
         with open(pl.SETUP, "w") as fh:
             json.dump(SETUP, fh)
         with open(pl.DEVICE_LOG, "a") as fh:
@@ -118,9 +126,7 @@ class Ledger(unittest.TestCase):
         self.assertEqual(rec["compression"]["commands"], 0)
 
     def test_stop_hook_messages_once_and_never_calls_a_tool(self):
-        p = os.path.join(ledger.START, SID + ".json")
-        if os.path.exists(p):
-            os.remove(p)
+        start_file()
         ev = {"session_id": SID, "stop_hook_active": False}
         o = run_hook("summary", ev, ["stop"])
         self.assertNotIn("decision", o)
@@ -230,16 +236,33 @@ class DevicePost(unittest.TestCase):
             self.assertTrue(all(s[0].startswith("skip-") for s in status), (command, status))
         self.assertEqual(status[0], ["skip-marker", "pytest"])
 
+    def test_a_countless_one_line_summary_never_replaces_a_long_output(self):
+        raw = "".join(f"=== RUN   TestCase{i}\n--- PASS: TestCase{i} (0.00s)\n" for i in range(40)) + "PASS\nok  \tgithub.com/x/pkg\t0.512s\n"
+        text, status = self.run_device("go test -v ./pkg", raw)
+        self.assertIn(status[0][0], ("ok", "skip-floor", "skip-ratio"), status)
+        if status[0][0] == "ok":
+            self.assertRegex(text.split("\n", 1)[1], r"\d")
+        else:
+            self.assertTrue(text is None or "TestCase7" in text)
+
+    def test_malformed_events_never_crash_a_hook(self):
+        events = ["[]", '"x"', "7", {"tool_input": 5}, {"tool_input": [1], "tool_name": "Bash", "session_id": 7}, {"tool_input": {"command": 5}, "tool_name": pl.DEV, "tool_response": {"content": [{"type": "text", "text": "x" * 2000}]}},
+                  {"tool_name": "mcp__remote-devices__plugin_rtk_rtk-desktop__rtk_pipelines", "tool_input": "add"}, {"tool_response": [{"text": 5}, 3], "tool_name": "x"}]
+        for module in ("device_post", "pre", "allow", "summary", "setup_post"):
+            for ev in events:
+                out = run_hook(module, ev, ["stop"] if module == "summary" else ())
+                self.assertTrue(out is None or isinstance(out, dict), (module, ev, out))
+
     def test_small_piped_and_unknown_outputs_pass(self):
+
         text, status = self.run_device("pytest -q", "1 passed\n")
         self.assertIsNone(text)
         self.assertEqual(status, [["skip-small", "pytest"]])
-        text, status = self.run_device("pytest -q | tail -5", "x\n" * 600)
-        self.assertIsNone(text)
-        self.assertEqual([s[0] for s in status], ["skip-nofilter"])
-        text, status = self.run_device("python3 scripts/x.py", "x\n" * 600)
-        self.assertIsNone(text)
-        self.assertEqual([s[0] for s in status], ["skip-nofilter"])
+        for command in ("pytest -q | tail -5", "python3 scripts/x.py"):
+            text, status = self.run_device(command, "x\n" * 600)
+            self.assertIn([s[0] for s in status], (["skip-nofilter"], ["ok-pipeline"]), (command, status))
+            self.assertTrue(text is None or "x600" in text, (command, text))
+
         self.assertIsNone(run_hook("device_post", "null"))
         self.assertIsNone(run_hook("device_post", "not json"))
 

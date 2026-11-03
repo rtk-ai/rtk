@@ -6,7 +6,8 @@ STATE = os.environ.get("RTK_COWORK_STATE") or "/tmp/rtk-cowork"
 OFF_CFG = os.path.join(STATE, "cfg-off")
 LABELS = os.path.join(STATE, "labels.json")
 SETUP = os.path.join(STATE, "setup.json")
-DEVICE_LOG = "/tmp/rtk-cowork-device.log"
+DEVICE_LOG = STATE + "-device.log"
+
 DEV = "mcp__remote-devices__device_bash"
 DEFAULTS = ("default-bash-compress", "explore-first")
 HIDDEN = re.compile(r"^(ToolSearch$|mcp__(remote-devices__)?plugin_rtk(-cowork)?_|mcp__remote-devices__get_device_info$)")
@@ -122,8 +123,23 @@ def apply_setup(data):
     return failed
 
 
+def n_of(v):
+    return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0
+
+
 def norm(cmd):
-    return re.sub(r"^(\s*cd [^\n;&|]+?)[ \t]*\n\s*", r"\1 && ", cmd or "")
+    return re.sub(r"^(\s*cd [^\n;&|]+?)[ \t]*\n\s*", r"\1 && ", cmd if isinstance(cmd, str) else "")
+
+
+def tool_input(ev):
+    ti = ev.get("tool_input") if isinstance(ev, dict) else None
+    return ti if isinstance(ti, dict) else {}
+
+
+def command_of(ev):
+    c = tool_input(ev).get("command")
+    return c if isinstance(c, str) else ""
+
 
 
 def history_command(cmd):
@@ -146,12 +162,12 @@ def present(src, sid, skip_id):
                 e = json.loads(line)
             except ValueError:
                 continue
-            if e.get("type") not in ("user", "assistant"):
+            if not isinstance(e, dict) or e.get("type") not in ("user", "assistant") or not isinstance(e.get("message"), dict):
                 continue
-            c = (e.get("message") or {}).get("content")
+            c = e["message"].get("content")
             if e.get("type") == "user" and not e.get("isMeta"):
-                for text in [c] if isinstance(c, str) else [b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text"] if isinstance(c, list) else []:
-                    if text.strip() and not text.lstrip().startswith("<"):
+                for text in [c] if isinstance(c, str) else [b.get("text") for b in c if isinstance(b, dict) and b.get("type") == "text"] if isinstance(c, list) else []:
+                    if isinstance(text, str) and text.strip() and not text.lstrip().startswith("<"):
                         goal = text
             if isinstance(c, list):
                 kept = []
@@ -162,14 +178,15 @@ def present(src, sid, skip_id):
                             asked_setup = True
                         if b.get("id") == skip_id or b.get("id") in hide or HIDDEN.match(n):
                             continue
+                        inp = b.get("input") if isinstance(b.get("input"), dict) else {}
                         if n == DEV:
-                            cmd = norm((b.get("input") or {}).get("command"))
+                            cmd = norm(inp.get("command"))
                             b = dict(b, name="Edit", input={"file_path": "file"}) if WRITES.search(cmd) else dict(b, name="Bash", input={"command": history_command(cmd)})
                         elif n == "Bash":
-                            b = dict(b, input=dict(b.get("input") or {}, command=history_command(str((b.get("input") or {}).get("command") or ""))))
+                            b = dict(b, input=dict(inp, command=history_command(str(inp.get("command") or ""))))
                         elif n == LIST_DIR:
                             b = dict(b, name="Bash", input={"command": "ls"})
-                        i = b.get("input") or {}
+                        i = b.get("input") if isinstance(b.get("input"), dict) else {}
                         seen_calls.append((b.get("name"), str(i.get("command") or i.get("file_path") or i.get("pattern") or "")))
                     kept.append(b)
                 if c and not kept:
@@ -223,11 +240,11 @@ def report():
                 e = json.loads(line)
             except ValueError:
                 continue
-            if e.get("type") not in ("user", "assistant"):
+            if not isinstance(e, dict) or e.get("type") not in ("user", "assistant"):
                 continue
-            if e.get("timestamp"):
+            if isinstance(e.get("timestamp"), str):
                 stamps.append(e["timestamp"])
-            m = e.get("message") or {}
+            m = e.get("message") if isinstance(e.get("message"), dict) else {}
             who = "sub" if e.get("isSidechain") or "/subagents/" in path else "main"
             if e.get("type") == "assistant" and isinstance(m.get("content"), list):
                 for b in m["content"]:
@@ -236,24 +253,25 @@ def report():
                         if key in seen:
                             continue
                         seen.add(key)
-                        calls[(who, b.get("name"))] += 1
+                        calls[(who, str(b.get("name") or "?"))] += 1
                         if b.get("name") in ("Agent", "Task"):
-                            i = b.get("input") or {}
+                            i = b.get("input") if isinstance(b.get("input"), dict) else {}
                             agents[f"{i.get('subagent_type', '?')} on {i.get('model', 'default')}"] += 1
+
             u = m.get("usage")
-            if e.get("type") == "assistant" and u:
+            if e.get("type") == "assistant" and isinstance(u, dict):
                 old = messages.get(m.get("id"))
-                if not old or (u.get("output_tokens") or 0) >= (old[1].get("output_tokens") or 0):
-                    messages[m.get("id")] = (m.get("model", "?"), u)
+                if not old or n_of(u.get("output_tokens")) >= n_of(old[1].get("output_tokens")):
+                    messages[m.get("id")] = (str(m.get("model") or "?"), u)
     for model, u in messages.values():
-        cc = u.get("cache_creation") or {}
+        cc = u.get("cache_creation") if isinstance(u.get("cache_creation"), dict) else {}
         w1h = cc.get("ephemeral_1h_input_tokens")
         w5m = cc.get("ephemeral_5m_input_tokens")
         if w1h is None and w5m is None:
             w1h, w5m = u.get("cache_creation_input_tokens", 0), 0
         row = usage[model]
-        for i, v in enumerate((u.get("input_tokens", 0), w5m or 0, w1h or 0, u.get("cache_read_input_tokens", 0), u.get("output_tokens", 0))):
-            row[i] += v or 0
+        for i, v in enumerate((u.get("input_tokens", 0), w5m, w1h, u.get("cache_read_input_tokens", 0), u.get("output_tokens", 0))):
+            row[i] += n_of(v)
 
     def k(n):
         return f"{n / 1e6:.2f}M" if n >= 1e6 else f"{n / 1e3:.1f}K" if n >= 1e3 else str(n)
@@ -277,8 +295,9 @@ def report():
         try:
             d = time.mktime(time.strptime(t1[:19], "%Y-%m-%dT%H:%M:%S")) - time.mktime(time.strptime(t0[:19], "%Y-%m-%dT%H:%M:%S"))
             head.append(f"wall-clock {int(d // 60)}m{int(d % 60):02d}s")
-        except ValueError:
+        except (ValueError, OverflowError):
             pass
+
     out = ["## RTK report", "- " + " · ".join(head)]
     if setup.get("failed"):
         out.append("- ⚠️ could not install: " + ", ".join(setup["failed"]))
@@ -320,9 +339,13 @@ def report():
                     content = (json.loads(line).get("message") or {}).get("content") or []
                 except (ValueError, AttributeError):
                     continue
+                if not isinstance(content, list):
+                    continue
                 for b in content:
+
                     if isinstance(b, dict) and b.get("type") == "tool_use":
-                        seen_by_rtk.append(f"{b.get('name')} {str((b.get('input') or {}).get('command') or '')[:48]}".strip())
+                        inp = b.get('input') if isinstance(b.get('input'), dict) else {}
+                        seen_by_rtk.append(f"{b.get('name')} {str(inp.get('command') or '')[:48]}".strip())
         out.append("- rtk sees: " + " · ".join(f"`{s}`" for s in seen_by_rtk[:4]))
     log = subprocess.run([rtk(), "pipeline", "log", "show"], capture_output=True, text=True).stdout
     lines = dict.fromkeys(l.rstrip() for l in log.splitlines())

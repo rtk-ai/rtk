@@ -24,7 +24,10 @@ def main():
         ev = json.load(sys.stdin)
     except Exception:
         return
-    session = ev.get("session_id") or "x"
+    if not isinstance(ev, dict):
+        return
+    session = str(ev.get("session_id") or "x")
+
     os.makedirs(ledger.START, exist_ok=True)
     path = os.path.join(ledger.START, pl.safe(session) + ".json")
     if mode == "start":
