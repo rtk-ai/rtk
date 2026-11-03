@@ -2112,10 +2112,18 @@ fn rewrite_command_part(rule: &RtkRule, cmd_part: &str) -> Option<String> {
     // Try each rewrite prefix (longest first) with word-boundary check
     for &prefix in rule.rewrite_prefixes {
         if let Some(rest) = strip_word_prefix(strip_target, prefix) {
-            let rewritten = if rest.is_empty() {
-                rule.rtk_cmd.to_string()
+            // `rtk lint` reads the linter from its first argument, so dropping
+            // `eslint`/`biome` would make a path the linter name (#4963).
+            let tool = tool_portion(prefix, rule);
+            let rtk_cmd = if rule.rtk_cmd == "rtk lint" && tool != "lint" {
+                format!("{} {}", rule.rtk_cmd, tool)
             } else {
-                format!("{} {}", rule.rtk_cmd, rest)
+                rule.rtk_cmd.to_string()
+            };
+            let rewritten = if rest.is_empty() {
+                rtk_cmd
+            } else {
+                format!("{} {}", rtk_cmd, rest)
             };
             return Some(rewritten);
         }
@@ -6530,9 +6538,34 @@ mod tests {
             "lint",
         ];
         for command in commands {
+            let tool = command.rsplit(' ').next().unwrap_or_default();
+            let expected = if tool == "lint" {
+                "rtk lint".to_string()
+            } else {
+                format!("rtk lint {}", tool)
+            };
             assert_eq!(
                 rewrite_command_no_prefixes(command, &[]),
-                Some("rtk lint".into()),
+                Some(expected),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_lint_keeps_linter_before_path() {
+        // #4963: dropping `eslint` made `rtk lint` take the path as the linter.
+        for (command, expected) in [
+            ("npx eslint dev-slots", "rtk lint eslint dev-slots"),
+            ("eslint dev-slots", "rtk lint eslint dev-slots"),
+            ("pnpm exec eslint src --fix", "rtk lint eslint src --fix"),
+            ("npx biome check src", "rtk lint biome check src"),
+            ("npm run lint", "rtk lint"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected.into()),
                 "Failed for command: {}",
                 command
             );
