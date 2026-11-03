@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json, os, re, shlex, subprocess, sys, time
+import json, os, re, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pipeline as pl
@@ -7,39 +7,44 @@ import pipeline as pl
 RUN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run.sh")
 
 FILTERS = [
-    (r"git\s+status\b", "git-status"),
-    (r"(grep|egrep)\b", "grep"),
-    (r"rg\b", "rg"),
-    (r"find\b", "find"),
-    (r"fd\b", "fd"),
-    (r"(python3?\s+-m\s+)?pytest\b", "pytest"),
-    (r"cargo\s+test\b", "cargo-test"),
-    (r"go\s+test\b", "go-test"),
-    (r"go\s+build\b", "go-build"),
-    (r"(npx\s+)?tsc\b", "tsc"),
-    (r"(npx\s+)?vitest\b", "vitest"),
-    (r"(python3?\s+-m\s+)?mypy\b", "mypy"),
-    (r"ruff\s+check\b", "ruff-check"),
+    (r"git\s+status\b", "git-status", None),
+    (r"(grep|egrep)\b", "grep", None),
+    (r"rg\b", "rg", None),
+    (r"find\b", "find", None),
+    (r"fd\b", "fd", None),
+    (r"(python3?\s+-m\s+)?pytest\b", "pytest", r"\d+ (passed|failed|errors?|skipped|xfailed|xpassed|deselected)\b|^(FAILED|ERROR) |^E  "),
+    (r"cargo\s+test\b", "cargo-test", r"^test result:|^running \d+ tests?$|^test \S+ \.\.\. "),
+    (r"go\s+test\b", "go-test", r"^(ok|FAIL|PASS)\b|^--- (PASS|FAIL|SKIP)|^=== RUN|no test files"),
+    (r"go\s+build\b", "go-build", r"^# |\.go:\d+:"),
+    (r"(npx\s+)?tsc\b", "tsc", r"error TS\d+"),
+    (r"(npx\s+)?vitest\b", "vitest", r"Test Files|Tests\s+\d+|[✓✗×]|\b(FAIL|PASS)\b"),
+    (r"(python3?\s+-m\s+)?mypy\b", "mypy", r"^Success:|: error:|^Found \d+ errors?"),
+    (r"ruff\s+check\b", "ruff-check", r"^All checks passed|^Found \d+ errors?|^\S+:\d+:\d+: [A-Z]+\d+"),
 ]
+LISTING = re.compile(r"(^|\s)(-h|--help|--version|--collect-only|--co|--fixtures|--markers|--list|-list|--listFiles|--listFilesOnly|--showConfig|--explainFiles|--show-files|--show-settings|--reporter[= ]json|--json)(=|\s|$)")
 MIN_BYTES = 1024
 MAX_RATIO = 0.8
 
 
 def pick_filter(command):
     cmd = command.strip()
-    cmd = re.sub(r'^cd\s+("[^"]*"|\'[^\']*\'|\S+)\s*&&\s*', "", cmd)
+    cmd = re.sub(r'^cd\s+("[^"]*"|\'[^\']*\'|\S+)\s*(&&|;)\s*', "", cmd)
     if re.search(r"&&|\|\||;|\||>|<|`|\$\(", cmd):
-        return None
-    for pat, name in FILTERS:
+        return None, None
+    for pat, name, marker in FILTERS:
         if re.match(pat, cmd):
-            return name
-    return None
+            return (None, None) if LISTING.search(cmd) else (name, marker)
+    return None, None
 
 
-LOG = "/tmp/rtk-cowork-device.log"
+def looks_like(marker, text):
+    return not marker or re.search(marker, text, re.M) is not None
+
+
 TRUNC = re.compile(r"\n?\[output truncated[^\]]*\]\s*$")
 
 SAVED = re.compile(r"Output has been saved to (/\S+?\.(?:txt|json))")
+
 
 def load_saved(path):
     root = os.path.realpath(os.path.expanduser("~/.claude"))
@@ -59,15 +64,18 @@ def load_saved(path):
         pass
     return [{"type": "text", "text": data}]
 
+
 def kb(n):
     return f"{n / 1024:.0f} KB" if n >= 1024 else f"{n} B"
 
+
 def log(ev, status, name="", raw=0, filtered=0, command=""):
     try:
-        with open(LOG, "a") as fh:
+        with open(pl.DEVICE_LOG, "a") as fh:
             fh.write(f"{ev.get('session_id', '')}\t{time.strftime('%H:%M:%S')}\t{status}\t{name}\t{raw}\t{filtered}\t{' '.join(command.split())[:120]}\n")
     except Exception:
         pass
+
 
 def pipeline_rules(ev, command, text):
     if pl.is_off():
@@ -78,7 +86,7 @@ def pipeline_rules(ev, command, text):
         tp = ev.get("transcript_path")
         if tp and os.path.isfile(tp):
             fed["transcript_path"] = pl.present(tp, ev.get("session_id") or "x", None)[0]
-        r = subprocess.run(["sh", RUN], input=json.dumps(fed), capture_output=True, text=True, timeout=110, env=pl.rtk_env())
+        r = subprocess.run(["sh", RUN], input=json.dumps(fed), capture_output=True, text=True, timeout=80, env=pl.rtk_env())
         new = (json.loads(r.stdout).get("hookSpecificOutput") or {}).get("updatedToolOutput") if r.stdout.strip() else None
     except Exception:
         log(ev, "skip-error", "", len(text), 0, command)
@@ -97,16 +105,16 @@ def main():
         ev = json.load(sys.stdin)
     except Exception:
         return
+    if not isinstance(ev, dict):
+        return
     command = (ev.get("tool_input") or {}).get("command") or ""
     resp = ev.get("tool_response")
     if isinstance(resp, dict):
         resp = resp.get("content", [resp])
-    saved = None
     if isinstance(resp, str):
         m = SAVED.search(resp)
         if m:
-            saved = m.group(1)
-            resp = load_saved(saved)
+            resp = load_saved(m.group(1))
             if resp is None:
                 log(ev, "skip-saved", command=command)
                 return
@@ -120,17 +128,20 @@ def main():
     m = TRUNC.search(text)
     if m:
         note, text = m.group(0).strip(), text[:m.start()]
-    name = pick_filter(pl.norm(command))
+    name, marker = pick_filter(pl.norm(command))
     if len(text) < MIN_BYTES:
         log(ev, "skip-small", name or "", len(text), 0, command)
         return
     if not name:
         pipeline_rules(ev, command, text)
         return
-    rtk = os.path.join(os.environ.get("CLAUDE_PLUGIN_ROOT", ""), "runtime", "rtk")
+    if not looks_like(marker, text):
+        log(ev, "skip-marker", name, len(text), 0, command)
+
+        pipeline_rules(ev, command, text)
+        return
     try:
-        out = subprocess.run([rtk, "pipe", "-f", name], input=text, capture_output=True,
-                             text=True, timeout=20)
+        out = subprocess.run([pl.rtk(), "pipe", "-f", name], input=text, capture_output=True, text=True, timeout=20)
     except Exception:
         log(ev, "skip-error", name, len(text), 0, command)
         return
@@ -148,6 +159,7 @@ def main():
         "hookEventName": "PostToolUse",
         "updatedMCPToolOutput": [{"type": "text", "text": filtered}],
     }}))
+
 
 if __name__ == "__main__":
     main()
