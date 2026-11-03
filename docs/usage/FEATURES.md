@@ -131,6 +131,7 @@ rtk read - [options]          # Read from stdin
 | `--max-lines` | `-m` | unlimited | Structural preview capped at N lines (signatures and imports, not the first N) |
 | `--head-lines` | | unlimited | Keep only the first N lines, byte-exact |
 | `--tail-lines` | | unlimited | Keep only the last N lines, byte-exact |
+| `--range` | | whole file | Keep only lines START,END (1-based, inclusive), byte-exact — the `sed -n 'START,ENDp'` equivalent |
 | `--line-numbers` | `-n` | no | Show line numbers |
 
 **Filtering levels:**

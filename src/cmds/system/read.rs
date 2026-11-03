@@ -9,12 +9,42 @@ use std::borrow::Cow;
 use std::fs;
 use std::io::{self, Read as IoRead, Write};
 use std::path::Path;
+use std::str::FromStr;
+
+/// Lines `start..=end`, 1-based and inclusive: what `sed -n 'START,ENDp'`
+/// prints. `--head-lines N` is the range `1,N`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LineRange {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl LineRange {
+    pub fn head(n: usize) -> Self {
+        Self { start: 1, end: n }
+    }
+}
+
+impl FromStr for LineRange {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let invalid = || format!("expected START,END with 1 <= START <= END, got '{s}'");
+        let (start, end) = s.split_once(',').ok_or_else(invalid)?;
+        let start: usize = start.trim().parse().map_err(|_| invalid())?;
+        let end: usize = end.trim().parse().map_err(|_| invalid())?;
+        if start == 0 || start > end {
+            return Err(invalid());
+        }
+        Ok(Self { start, end })
+    }
+}
 
 pub fn run(
     file: &Path,
     level: FilterLevel,
     max_lines: Option<usize>,
-    head_lines: Option<usize>,
+    lines: Option<LineRange>,
     tail_lines: Option<usize>,
     line_numbers: bool,
     verbose: u8,
@@ -25,7 +55,7 @@ pub fn run(
     // `hook.before_tool.read` rules before printing. A deny/route rule prints
     // its message instead of the file — covering `cat big.java` too, since
     // the rewrite turns it into `rtk read big.java`.
-    let whole_file = max_lines.is_none() && head_lines.is_none() && tail_lines.is_none();
+    let whole_file = max_lines.is_none() && lines.is_none() && tail_lines.is_none();
     if let Some(decision) = crate::core::pipeline_config::before_read_decision(file, whole_file) {
         println!("{}", decision.message);
         use std::io::Write;
@@ -42,16 +72,17 @@ pub fn run(
     // which is reachable now that `head -n N` rewrites to this.
     if level == FilterLevel::None
         && !line_numbers
-        && let Some(head) = head_lines
+        && let Some(range) = lines
     {
-        let window = read_head_lines(file, head)?;
+        let window = read_head_lines(file, range.end)?;
+        let window = range_window(&window, range);
         io::stdout()
             .lock()
-            .write_all(&window)
+            .write_all(window)
             .context("Failed to write line window")?;
         // The user asked for these lines, so the baseline is the window itself
         // (what `head -n N` would have printed), not the rest of the file.
-        let window = String::from_utf8_lossy(&window);
+        let window = String::from_utf8_lossy(window);
         timer.track(&cat_label(file), "rtk read", &window, &window);
         return Ok(());
     }
@@ -59,14 +90,8 @@ pub fn run(
     // Read file content
     let bytes =
         fs::read(file).with_context(|| format!("Failed to read file: {}", file.display()))?;
-    if let Some(window) = raw_byte_window(
-        &bytes,
-        level,
-        max_lines,
-        head_lines,
-        tail_lines,
-        line_numbers,
-    ) {
+    if let Some(window) = raw_byte_window(&bytes, level, max_lines, lines, tail_lines, line_numbers)
+    {
         io::stdout()
             .lock()
             .write_all(window)
@@ -118,7 +143,7 @@ pub fn run(
         );
     }
 
-    let windowed = apply_line_window(&filtered, max_lines, head_lines, tail_lines);
+    let windowed = apply_line_window(&filtered, max_lines, lines, tail_lines);
     let window_cut = windowed != filtered;
     filtered = windowed;
 
@@ -136,7 +161,7 @@ pub fn run(
         &cat_label(file),
         "rtk read",
         &tracking_baseline(&raw, shown, window_cut, || {
-            windowed_raw(&content, max_lines, head_lines, tail_lines, line_numbers)
+            windowed_raw(&content, max_lines, lines, tail_lines, line_numbers)
         }),
         shown,
     );
@@ -146,7 +171,7 @@ pub fn run(
 pub fn run_stdin(
     level: FilterLevel,
     max_lines: Option<usize>,
-    head_lines: Option<usize>,
+    lines: Option<LineRange>,
     tail_lines: Option<usize>,
     line_numbers: bool,
     verbose: u8,
@@ -163,14 +188,8 @@ pub fn run_stdin(
         .lock()
         .read_to_end(&mut bytes)
         .context("Failed to read from stdin")?;
-    if let Some(window) = raw_byte_window(
-        &bytes,
-        level,
-        max_lines,
-        head_lines,
-        tail_lines,
-        line_numbers,
-    ) {
+    if let Some(window) = raw_byte_window(&bytes, level, max_lines, lines, tail_lines, line_numbers)
+    {
         io::stdout()
             .lock()
             .write_all(window)
@@ -206,7 +225,7 @@ pub fn run_stdin(
         );
     }
 
-    let windowed = apply_line_window(&filtered, max_lines, head_lines, tail_lines);
+    let windowed = apply_line_window(&filtered, max_lines, lines, tail_lines);
     let window_cut = windowed != filtered;
     let filtered = windowed;
 
@@ -225,7 +244,7 @@ pub fn run_stdin(
         "cat - (stdin)",
         "rtk read -",
         &tracking_baseline(&raw, shown, window_cut, || {
-            windowed_raw(&content, max_lines, head_lines, tail_lines, line_numbers)
+            windowed_raw(&content, max_lines, lines, tail_lines, line_numbers)
         }),
         shown,
     );
@@ -290,11 +309,11 @@ fn tracking_baseline<'a>(
 fn windowed_raw(
     content: &str,
     max_lines: Option<usize>,
-    head_lines: Option<usize>,
+    lines: Option<LineRange>,
     tail_lines: Option<usize>,
     line_numbers: bool,
 ) -> String {
-    let windowed = apply_line_window(content, max_lines, head_lines, tail_lines);
+    let windowed = apply_line_window(content, max_lines, lines, tail_lines);
     if line_numbers {
         format_with_line_numbers(&windowed)
     } else {
@@ -305,10 +324,10 @@ fn windowed_raw(
 fn apply_line_window(
     content: &str,
     max_lines: Option<usize>,
-    head_lines: Option<usize>,
+    lines: Option<LineRange>,
     tail_lines: Option<usize>,
 ) -> String {
-    if let Some(window) = byte_line_window(content.as_bytes(), head_lines, tail_lines) {
+    if let Some(window) = byte_line_window(content.as_bytes(), lines, tail_lines) {
         return String::from_utf8_lossy(window).into_owned();
     }
 
@@ -382,6 +401,13 @@ fn head_window(content: &[u8], n: usize) -> &[u8] {
     content
 }
 
+/// Lines `range.start..=range.end`: the head window up to `end` with its first
+/// `start - 1` lines dropped, byte-sliced like `head_window`.
+fn range_window(content: &[u8], range: LineRange) -> &[u8] {
+    let window = head_window(content, range.end);
+    &window[head_window(window, range.start - 1).len()..]
+}
+
 /// Last `n` lines, byte-sliced for the same fidelity reasons as `head_window`.
 /// A trailing newline terminates the final line instead of starting a new one,
 /// so it is excluded before counting separators backwards — otherwise `n` would
@@ -415,24 +441,23 @@ fn raw_byte_window(
     content: &[u8],
     level: FilterLevel,
     max_lines: Option<usize>,
-    head_lines: Option<usize>,
+    lines: Option<LineRange>,
     tail_lines: Option<usize>,
     line_numbers: bool,
 ) -> Option<&[u8]> {
     if level != FilterLevel::None || line_numbers {
         return None;
     }
-    byte_line_window(content, head_lines, tail_lines)
-        .or_else(|| max_lines.is_none().then_some(content))
+    byte_line_window(content, lines, tail_lines).or_else(|| max_lines.is_none().then_some(content))
 }
 
 fn byte_line_window(
     content: &[u8],
-    head_lines: Option<usize>,
+    lines: Option<LineRange>,
     tail_lines: Option<usize>,
 ) -> Option<&[u8]> {
-    if let Some(head) = head_lines {
-        Some(head_window(content, head))
+    if let Some(range) = lines {
+        Some(range_window(content, range))
     } else {
         tail_lines.map(|tail| tail_window(content, tail))
     }
@@ -635,7 +660,10 @@ fn main() {{
     #[test]
     fn test_windowed_raw_head_lines_windows_the_raw_side() {
         let input = "alpha\nbravo\ncharlie\ndelta\n";
-        assert_eq!(windowed_raw(input, None, Some(1), None, false), "alpha\n");
+        assert_eq!(
+            windowed_raw(input, None, Some(LineRange::head(1)), None, false),
+            "alpha\n"
+        );
     }
 
     #[test]
@@ -663,7 +691,10 @@ fn main() {{
     #[test]
     fn test_head_window_matches_native_head() {
         let input = "1\n2\n3\n4\n5\n";
-        assert_eq!(apply_line_window(input, None, Some(3), None), "1\n2\n3\n");
+        assert_eq!(
+            apply_line_window(input, None, Some(LineRange::head(3)), None),
+            "1\n2\n3\n"
+        );
     }
 
     /// The defect this window exists to fix: `--max-lines N` keeps only about
@@ -675,7 +706,7 @@ fn main() {{
             .collect::<Vec<_>>()
             .join("\n")
             + "\n";
-        let head = apply_line_window(&input, None, Some(10), None);
+        let head = apply_line_window(&input, None, Some(LineRange::head(10)), None);
         assert_eq!(head.lines().count(), 10);
         assert_eq!(head.lines().last(), Some("10"));
     }
@@ -683,35 +714,95 @@ fn main() {{
     #[test]
     fn test_head_window_single_line() {
         let input = "1\n2\n3\n";
-        assert_eq!(apply_line_window(input, None, Some(1), None), "1\n");
+        assert_eq!(
+            apply_line_window(input, None, Some(LineRange::head(1)), None),
+            "1\n"
+        );
     }
 
     #[test]
     fn test_head_window_zero_is_empty() {
-        assert_eq!(apply_line_window("a\nb\n", None, Some(0), None), "");
+        assert_eq!(
+            apply_line_window("a\nb\n", None, Some(LineRange::head(0)), None),
+            ""
+        );
     }
 
     #[test]
     fn test_head_window_n_exceeds_line_count() {
         let input = "a\nb\n";
-        assert_eq!(apply_line_window(input, None, Some(99), None), input);
+        assert_eq!(
+            apply_line_window(input, None, Some(LineRange::head(99)), None),
+            input
+        );
     }
 
     #[test]
     fn test_head_window_empty_input() {
-        assert_eq!(apply_line_window("", None, Some(5), None), "");
+        assert_eq!(
+            apply_line_window("", None, Some(LineRange::head(5)), None),
+            ""
+        );
     }
 
     #[test]
     fn test_head_window_unterminated_final_line() {
-        assert_eq!(apply_line_window("a\nb\nc", None, Some(3), None), "a\nb\nc");
+        assert_eq!(
+            apply_line_window("a\nb\nc", None, Some(LineRange::head(3)), None),
+            "a\nb\nc"
+        );
     }
 
     #[test]
     fn test_head_window_preserves_crlf() {
         assert_eq!(
-            apply_line_window("a\r\nb\r\nc\r\n", None, Some(2), None),
+            apply_line_window("a\r\nb\r\nc\r\n", None, Some(LineRange::head(2)), None),
             "a\r\nb\r\n"
+        );
+    }
+
+    #[test]
+    fn test_line_range_parses_start_end() {
+        assert_eq!(
+            "200,260".parse(),
+            Ok(LineRange {
+                start: 200,
+                end: 260
+            })
+        );
+        assert_eq!("3,3".parse(), Ok(LineRange { start: 3, end: 3 }));
+        for bad in ["", "5", "0,3", "4,2", "a,b", "1,", ",3", "1,2,3"] {
+            assert!(bad.parse::<LineRange>().is_err(), "accepted {bad:?}");
+        }
+    }
+
+    /// `sed -n 'START,ENDp'`: inclusive on both ends, byte-exact, and a range
+    /// running past the end of the file keeps what is there.
+    #[test]
+    fn test_range_window_matches_sed_n_p() {
+        let input = "1\n2\n3\n4\n5\n";
+        let range = |start, end| Some(LineRange { start, end });
+        assert_eq!(
+            apply_line_window(input, None, range(2, 4), None),
+            "2\n3\n4\n"
+        );
+        assert_eq!(apply_line_window(input, None, range(3, 3), None), "3\n");
+        assert_eq!(apply_line_window(input, None, range(4, 99), None), "4\n5\n");
+        assert_eq!(apply_line_window(input, None, range(6, 9), None), "");
+        assert_eq!(
+            apply_line_window("a\r\nb\r\nc", None, range(2, 3), None),
+            "b\r\nc"
+        );
+        assert_eq!(
+            raw_byte_window(
+                input.as_bytes(),
+                FilterLevel::None,
+                None,
+                range(2, 3),
+                None,
+                false
+            ),
+            Some(&b"2\n3\n"[..])
         );
     }
 
@@ -749,7 +840,7 @@ fn main() {{
     #[test]
     fn test_head_window_mixed_line_endings() {
         assert_eq!(
-            apply_line_window("a\r\nb\nc\r\n", None, Some(2), None),
+            apply_line_window("a\r\nb\nc\r\n", None, Some(LineRange::head(2)), None),
             "a\r\nb\n"
         );
     }
@@ -766,7 +857,7 @@ fn main() {{
     fn test_windows_preserve_multibyte_utf8() {
         let input = "héllo\n日本語\nثالث\n";
         assert_eq!(
-            apply_line_window(input, None, Some(2), None),
+            apply_line_window(input, None, Some(LineRange::head(2)), None),
             "héllo\n日本語\n"
         );
         assert_eq!(
@@ -777,7 +868,10 @@ fn main() {{
 
     #[test]
     fn test_windows_on_blank_lines_only() {
-        assert_eq!(apply_line_window("\n\n\n", None, Some(2), None), "\n\n");
+        assert_eq!(
+            apply_line_window("\n\n\n", None, Some(LineRange::head(2)), None),
+            "\n\n"
+        );
         assert_eq!(apply_line_window("\n\n\n", None, None, Some(2)), "\n\n");
     }
 
@@ -823,7 +917,14 @@ fn main() {{
     fn test_raw_byte_window_keeps_line_windows() {
         let input: &[u8] = b"alpha\nbravo\ncharlie\n";
         assert_eq!(
-            raw_byte_window(input, FilterLevel::None, None, Some(1), None, false),
+            raw_byte_window(
+                input,
+                FilterLevel::None,
+                None,
+                Some(LineRange::head(1)),
+                None,
+                false
+            ),
             Some(&b"alpha\n"[..])
         );
         assert_eq!(

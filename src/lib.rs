@@ -213,6 +213,10 @@ enum Commands {
         /// Keep only last N lines
         #[arg(long, conflicts_with_all = ["max_lines", "head_lines"])]
         tail_lines: Option<usize>,
+        /// Keep only lines START through END, 1-based and inclusive, like
+        /// `sed -n 'START,ENDp'` (e.g. --range 200,260)
+        #[arg(long, value_name = "START,END", conflicts_with_all = ["max_lines", "head_lines", "tail_lines"])]
+        range: Option<read::LineRange>,
         /// Show line numbers
         #[arg(short = 'n', long)]
         line_numbers: bool,
@@ -2560,8 +2564,10 @@ fn run_cli() -> Result<i32> {
             max_lines,
             head_lines,
             tail_lines,
+            range,
             line_numbers,
         } => {
+            let lines = range.or(head_lines.map(read::LineRange::head));
             let mut had_error = false;
             let mut stdin_seen = false;
             for file in &files {
@@ -2574,7 +2580,7 @@ fn run_cli() -> Result<i32> {
                     read::run_stdin(
                         level,
                         max_lines,
-                        head_lines,
+                        lines,
                         tail_lines,
                         line_numbers,
                         cli.verbose,
@@ -2584,7 +2590,7 @@ fn run_cli() -> Result<i32> {
                         file,
                         level,
                         max_lines,
-                        head_lines,
+                        lines,
                         tail_lines,
                         line_numbers,
                         cli.verbose,
