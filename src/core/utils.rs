@@ -609,7 +609,20 @@ pub fn resolve_binary(name: &str) -> Result<PathBuf> {
 pub fn resolved_command(name: &str) -> Command {
     #[allow(unused_mut)]
     let mut cmd = match resolve_binary(name) {
-        Ok(path) => Command::new(path),
+        Ok(path) => {
+            #[allow(unused_mut)]
+            let mut c = Command::new(path);
+            // Execute the resolved path, but keep argv[0] as the bare name the
+            // caller used: a tool prints argv[0] in its diagnostics and usage
+            // ("grep: ..." / "Usage: ls ..."), and `/usr/bin/grep: ...` is not
+            // the native output (#4820).
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                c.arg0(name);
+            }
+            c
+        }
         Err(e) => {
             // On Windows, resolution failure likely means a .CMD/.BAT wrapper
             // wasn't found — always warn so users have a signal.
@@ -1220,6 +1233,20 @@ mod tests {
             output.status.success(),
             "cargo --version should succeed via resolved_command"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_resolved_command_keeps_the_bare_name_as_argv0() {
+        // #4820: the resolved absolute path is what gets executed, but the tool
+        // must still see itself as `sh`, not `/bin/sh`, so its own messages
+        // ("grep: ...", "Usage: ls ...") match the native output.
+        let output = resolved_command("sh")
+            .args(["-c", "printf '%s' \"$0\""])
+            .output()
+            .expect("resolved_command('sh') should execute");
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "sh");
     }
 
     // ===== tool_exists tests (issue #212) =====
