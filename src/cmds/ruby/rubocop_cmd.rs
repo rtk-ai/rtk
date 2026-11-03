@@ -5,6 +5,7 @@
 //! when the user specifies a custom format, or when injected JSON output fails
 //! to parse.
 
+use crate::core::arg_tokenizer;
 use crate::core::runner;
 use crate::core::shell::display_args;
 use crate::core::utils::ruby_exec;
@@ -51,16 +52,29 @@ struct RubocopSummary {
 
 // ── Public entry point ───────────────────────────────────────────────────────
 
+fn user_boundary(args: &[String]) -> usize {
+    arg_tokenizer::injection_point(&arg_tokenizer::tokenize(args), args.len())
+}
+
+fn is_autocorrect_flag(args: &[String]) -> bool {
+    let boundary = user_boundary(args);
+    args[..boundary]
+        .iter()
+        .any(|a| a == "-a" || a == "-A" || a == "--auto-correct" || a == "--auto-correct-all")
+}
+
+fn has_format_flag(args: &[String]) -> bool {
+    let boundary = user_boundary(args);
+    args[..boundary]
+        .iter()
+        .any(|a| a.starts_with("--format") || a.starts_with("-f"))
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = ruby_exec("rubocop");
 
-    let is_autocorrect = args
-        .iter()
-        .any(|a| a == "-a" || a == "-A" || a == "--auto-correct" || a == "--auto-correct-all");
-
-    let has_format = args
-        .iter()
-        .any(|a| a.starts_with("--format") || a.starts_with("-f"));
+    let is_autocorrect = is_autocorrect_flag(args);
+    let has_format = has_format_flag(args);
 
     if !has_format && !is_autocorrect {
         cmd.arg("--format").arg("json");
@@ -635,5 +649,19 @@ mod tests {
             "should show +2 more files overflow: {}",
             result
         );
+    }
+
+    #[test]
+    fn test_rubocop_option_detection_stops_at_double_dash() {
+        let args = |items: &[&str]| -> Vec<String> { items.iter().map(|s| s.to_string()).collect() };
+        assert!(has_format_flag(&args(&["-f", "simple"])));
+        assert!(has_format_flag(&args(&["--format=simple", "--", "app.rb"])));
+        assert!(!has_format_flag(&args(&["--", "-foo.rb"])));
+        assert!(!has_format_flag(&args(&["--", "--format", "simple"])));
+
+        assert!(is_autocorrect_flag(&args(&["-a", "--", "app.rb"])));
+        assert!(is_autocorrect_flag(&args(&["--auto-correct-all"])));
+        assert!(!is_autocorrect_flag(&args(&["--", "-a"])));
+        assert!(!is_autocorrect_flag(&args(&["--", "--auto-correct"])));
     }
 }
