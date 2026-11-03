@@ -1,0 +1,11 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________ test_collecting_metrics ____________________________
+test_metrics.py:5: in test_collecting_metrics
+    collect([])
+mylib/metrics.py:3: in collect
+    raise ValueError("no samples\nsource: metrics\nwindow: 5m")
+E   ValueError: no samples
+E   source: metrics
+E   window: 5m
+1 failed in 0.01s

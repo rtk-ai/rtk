@@ -722,6 +722,9 @@ pub fn run_streamed(
 
 const MAX_RUNNER_FAILURES: usize = CAP_WARNINGS;
 const MAX_RUNNER_LINES: usize = CAP_LIST;
+/// Rows of bun's `--coverage` table. A wide repo prints one per file, so the
+/// table is the one part of the summary that grows without bound.
+const MAX_BUN_COVERAGE_ROWS: usize = CAP_LIST;
 
 static ERROR_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
@@ -1140,6 +1143,23 @@ fn deno_output_fence(trimmed: &str) -> Option<bool> {
 /// prefix also matches anything a test logs starting with those characters.
 static BUN_RAN_FOOTER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^Ran \d+ test").unwrap());
 
+/// Bun's `--bail` abort notice, "Bailed out after 1 failure". Without it the
+/// run reads as a complete pass of however many tests ran before the abort,
+/// since bun prints no count lines when it bails.
+static BUN_BAILED_OUT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^Bailed out after \d+ failure").unwrap());
+
+/// Snapshot reporting: "snapshots: +1 added", and the "1 snapshots, 4 expect()
+/// calls" variant bun prints in place of the plain expect() line.
+static BUN_SNAPSHOT_LINE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(?:snapshots:\s|\d+ snapshots?,)").unwrap());
+
+/// Header of the `--coverage` table, "File | % Funcs | % Lines | Uncovered Line #s".
+/// The table is tracked from this fixed header rather than by counting column
+/// separators: a source frame containing `||` would read as a row otherwise.
+static BUN_COVERAGE_HEADER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^File\s*\|.*%\s*Funcs").unwrap());
+
 /// Bun's failure markers carry the test's duration: "(fail) name [1.86ms]",
 /// "✗ name [200.27ms]". Without that suffix a line a test merely logged
 /// would read as a marker, manufacturing a failure on a green run.
@@ -1197,6 +1217,8 @@ fn extract_test_summary(output: &str, eco: TestEcosystem) -> String {
     let mut in_failures_list = false;
     let mut in_test_output = false;
     let mut in_ts_error = false;
+    let mut in_bun_coverage = false;
+    let mut bun_coverage: Vec<String> = Vec::new();
     let mut blocks = FailureBlocks::default();
 
     for line in lines.iter() {
@@ -1245,10 +1267,30 @@ fn extract_test_summary(output: &str, eco: TestEcosystem) -> String {
 
             TestEcosystem::Bun => {
                 let trimmed = line.trim_start();
+                // The `--coverage` table was asked for by name, so it survives
+                // up to the row cap. It runs from its header to the next blank
+                // line, and is buffered whole because which rows to keep is a
+                // decision about the table, not about one line.
+                if BUN_COVERAGE_HEADER.is_match(trimmed) {
+                    in_bun_coverage = true;
+                }
+                if in_bun_coverage {
+                    if trimmed.is_empty() {
+                        in_bun_coverage = false;
+                        push_coverage_table(&mut result, &mut bun_coverage);
+                    } else {
+                        bun_coverage.push(line.to_string());
+                        continue;
+                    }
+                }
                 // Anchored count lines (" 6 pass", " 4 fail") and the "Ran N tests"
                 // footer. A loose `contains(" fail")` also matches bun's echoed
                 // source context when a test NAME contains "fails".
-                if is_bun_count_line(trimmed) || BUN_RAN_FOOTER.is_match(trimmed) {
+                if is_bun_count_line(trimmed)
+                    || BUN_RAN_FOOTER.is_match(trimmed)
+                    || BUN_BAILED_OUT.is_match(trimmed)
+                    || BUN_SNAPSHOT_LINE.is_match(trimmed)
+                {
                     result.push(line.to_string());
                 }
                 if BUN_FAILURE_MARKER.is_match(trimmed) {
@@ -1314,6 +1356,10 @@ fn extract_test_summary(output: &str, eco: TestEcosystem) -> String {
         }
     }
 
+    // A table that ran to EOF never saw its closing blank line. Bun always
+    // prints the counts after it, so this only catches a truncated capture.
+    push_coverage_table(&mut result, &mut bun_coverage);
+
     blocks.close(None);
     failure_lines.append(&mut blocks.kept);
 
@@ -1365,6 +1411,91 @@ fn extract_test_summary(output: &str, eco: TestEcosystem) -> String {
     }
 
     output
+}
+
+/// A line of bun's coverage table that is not a per-file row: the header, the
+/// rules around it, and the `All files` aggregate. These carry the repo-wide
+/// numbers and the columns, so they are never what the cap drops.
+fn is_coverage_structure(line: &str) -> bool {
+    let trimmed = line.trim();
+    BUN_COVERAGE_HEADER.is_match(trimmed)
+        || trimmed.starts_with("All files")
+        || (!trimmed.is_empty() && trimmed.chars().all(|c| c == '-' || c == '|'))
+}
+
+/// True when a coverage row reports less than full coverage. The two numeric
+/// columns are `% Funcs` and `% Lines`; a row whose numbers will not parse is
+/// treated as a gap, since dropping it is the one outcome that loses a finding.
+fn coverage_row_has_gap(line: &str) -> bool {
+    let mut cols = line.split('|').skip(1);
+    let mut full = 0;
+    for _ in 0..2 {
+        match cols.next().map(|c| c.trim().parse::<f64>()) {
+            Some(Ok(pct)) if pct >= 100.0 => full += 1,
+            Some(Ok(_)) => return true,
+            _ => return true,
+        }
+    }
+    full != 2
+}
+
+/// Emit the buffered coverage table under the row cap and clear the buffer.
+///
+/// Bun sorts the table by path, so a plain head of it keeps whichever files
+/// come first alphabetically. Nobody passes `--coverage` to read the files that
+/// are already covered, so past the cap the rows that keep their place are the
+/// ones reporting a gap, in bun's own order. What is dropped is announced and
+/// written out, so it stays reachable instead of being lost.
+fn push_coverage_table(result: &mut Vec<String>, table: &mut Vec<String>) {
+    if table.is_empty() {
+        return;
+    }
+    if table.len() <= MAX_BUN_COVERAGE_ROWS {
+        result.append(table);
+        return;
+    }
+
+    // Three passes in priority order: the table's own structure, then the rows
+    // reporting a gap, then whatever still fits, each in bun's order.
+    let mut keep = vec![false; table.len()];
+    let mut budget = MAX_BUN_COVERAGE_ROWS;
+    for pass in 0..3 {
+        for (i, line) in table.iter().enumerate() {
+            if budget == 0 {
+                break;
+            }
+            if keep[i] {
+                continue;
+            }
+            let wanted = match pass {
+                0 => is_coverage_structure(line),
+                1 => coverage_row_has_gap(line),
+                _ => true,
+            };
+            if wanted {
+                keep[i] = true;
+                budget -= 1;
+            }
+        }
+    }
+
+    // Draining leaves the buffer empty, so a second call cannot repeat a table.
+    let mut hidden: Vec<String> = Vec::new();
+    for (i, line) in table.drain(..).enumerate() {
+        if keep[i] {
+            result.push(line);
+        } else {
+            hidden.push(line);
+        }
+    }
+
+    result.push(format!("... +{} more files", hidden.len()));
+    // Offset 1: what is written is exactly what was dropped, not the whole
+    // table, so "the remaining lines" is the literal truth in both modes.
+    if let Some(hint) = crate::core::tee::force_tee_tail_hint(&hidden.join("\n"), "bun-coverage", 1)
+    {
+        result.push(hint);
+    }
 }
 
 /// True for bun's summary count lines: " 6 pass", " 4 fail", " 2 skip", " 1 todo",
@@ -1981,6 +2112,296 @@ mod err_test_runner_tests {
                 assert!(!out.contains(logged), "{eco:?} leaked {logged}: {out}");
             }
         }
+    }
+
+    /// Lines of the coverage table in a raw bun run: from the header to the
+    /// blank line that closes it.
+    fn coverage_table_lines(raw: &str) -> usize {
+        raw.lines()
+            .skip_while(|l| !BUN_COVERAGE_HEADER.is_match(l.trim()))
+            .take_while(|l| !l.trim().is_empty())
+            .count()
+    }
+
+    /// Table lines in a filtered summary: the rows carry the column rule, and
+    /// the overflow notice and the counts never do.
+    fn shown_table_lines(out: &str) -> usize {
+        out.lines().filter(|l| l.contains('|')).count()
+    }
+
+    /// The coverage table of a raw bun run, header to closing rule.
+    fn coverage_table_of(raw: &str) -> Vec<&str> {
+        raw.lines()
+            .skip_while(|l| !BUN_COVERAGE_HEADER.is_match(l.trim()))
+            .take_while(|l| !l.trim().is_empty())
+            .collect()
+    }
+
+    /// The table lines of a filtered summary, with the two-space indent the
+    /// summary adds stripped back off, ready to compare with bun's own.
+    fn shown_table_of(out: &str) -> Vec<&str> {
+        out.lines()
+            .filter(|l| l.contains('|'))
+            .map(|l| l.strip_prefix("  ").unwrap_or(l))
+            .collect()
+    }
+
+    /// `--bail` aborts the run, and bun prints no count lines when it does.
+    /// Without the notice the summary reads as a complete run of however many
+    /// tests happened to execute before the abort.
+    #[test]
+    fn test_bun_bail_notice_survives() {
+        let out = extract_test_summary(
+            include_str!("../../tests/fixtures/bun_test_bail_raw.txt"),
+            TestEcosystem::Bun,
+        );
+        assert!(out.contains("Bailed out after 1 failure"), "{out}");
+        assert!(out.contains("Ran 2 tests"), "{out}");
+        assert!(out.contains("wrong sum"), "{out}");
+    }
+
+    /// The coverage table is the answer to `--coverage`; dropping it means the
+    /// flag silently does nothing.
+    #[test]
+    fn test_bun_coverage_table_survives() {
+        let out = extract_test_summary(
+            include_str!("../../tests/fixtures/bun_test_coverage_raw.txt"),
+            TestEcosystem::Bun,
+        );
+        assert!(out.contains("% Funcs") && out.contains("% Lines"), "{out}");
+        assert!(out.contains("All files"), "{out}");
+        assert!(out.contains("src/math.ts"), "{out}");
+        // Column alignment is the table; the rows go through untrimmed.
+        assert!(out.contains("-------------|---------|"), "{out}");
+        // The counts still come through alongside it
+        assert!(out.contains("2 fail"), "{out}");
+        // A table this small is under the cap, so nothing is announced as dropped.
+        assert!(!out.contains("more files"), "{out}");
+    }
+
+    /// Bun sorts the table by path, so a plain head of it keeps whichever files
+    /// come first alphabetically. This run is 40 covered files plus `src/zeta.ts`
+    /// at 50% funcs, last in the sort: the row the flag was passed for.
+    #[test]
+    fn test_bun_coverage_table_is_capped_and_keeps_the_gap() {
+        let raw = include_str!("../../tests/fixtures/bun_test_coverage_wide_raw.txt");
+        let out = extract_test_summary(raw, TestEcosystem::Bun);
+
+        let table_lines = coverage_table_lines(raw);
+        assert!(table_lines > MAX_BUN_COVERAGE_ROWS, "fixture under the cap");
+
+        // Exactly the cap is shown: one fewer or three more both have to fail.
+        assert_eq!(
+            shown_table_lines(&out),
+            MAX_BUN_COVERAGE_ROWS,
+            "cap not held:\n{out}"
+        );
+        // The notice appears once, and accounts for every line not shown.
+        assert_eq!(out.matches("more files").count(), 1, "{out}");
+        assert!(
+            out.contains(&format!(
+                "... +{} more files",
+                table_lines - MAX_BUN_COVERAGE_ROWS
+            )),
+            "{out}"
+        );
+        // The structure and the gap row survive; covered files give way to it.
+        assert!(out.contains("% Funcs"), "{out}");
+        assert!(out.contains("All files    |   98.78"), "{out}");
+        assert!(
+            out.contains("src/zeta.ts |   50.00 |   33.33 | 5-8"),
+            "{out}"
+        );
+        assert!(!out.contains("src/f39.ts"), "{out}");
+        // And the counts outside the table are untouched by any of it.
+        assert!(out.contains("41 pass"), "{out}");
+        assert!(out.contains("Ran 41 tests"), "{out}");
+    }
+
+    /// A 16-file project is exactly 20 table lines, which is the cap: the
+    /// table is whole, so there is nothing to announce.
+    #[test]
+    fn test_bun_coverage_table_at_the_cap_announces_nothing() {
+        let raw = include_str!("../../tests/fixtures/bun_test_coverage_at_cap_raw.txt");
+        assert_eq!(coverage_table_lines(raw), MAX_BUN_COVERAGE_ROWS, "fixture");
+
+        let out = extract_test_summary(raw, TestEcosystem::Bun);
+        assert_eq!(shown_table_of(&out), coverage_table_of(raw), "{out}");
+        assert!(!out.contains("more files"), "nothing was dropped:\n{out}");
+    }
+
+    /// When every row reports a gap there is nothing cheaper to drop, so the
+    /// cap falls back to bun's own order. The structure still comes first:
+    /// both rules and the aggregate are what make the rest readable.
+    #[test]
+    fn test_bun_coverage_cap_keeps_bun_order_when_every_row_has_a_gap() {
+        let raw = include_str!("../../tests/fixtures/bun_test_coverage_all_partial_raw.txt");
+        let table = coverage_table_of(raw);
+        assert!(table.len() > MAX_BUN_COVERAGE_ROWS, "fixture under the cap");
+
+        let out = extract_test_summary(raw, TestEcosystem::Bun);
+
+        // Bun's first 19 lines, then the closing rule it printed last.
+        let mut expected: Vec<&str> = table[..MAX_BUN_COVERAGE_ROWS - 1].to_vec();
+        expected.push(table[table.len() - 1]);
+        assert_eq!(shown_table_of(&out), expected, "{out}");
+
+        assert_eq!(out.matches("more files").count(), 1, "{out}");
+        assert!(
+            out.contains(&format!(
+                "... +{} more files",
+                table.len() - MAX_BUN_COVERAGE_ROWS
+            )),
+            "{out}"
+        );
+    }
+
+    /// Following the hint has to return the dropped rows themselves, all of
+    /// them and in order. Which mode is active decides what the hint names, so
+    /// the test follows whichever one it got.
+    #[test]
+    fn test_bun_hidden_coverage_rows_are_recoverable() {
+        let raw = include_str!("../../tests/fixtures/bun_test_coverage_wide_raw.txt");
+        let table = coverage_table_of(raw);
+
+        // A root of its own: the entry this writes is the one it reads back.
+        let home = crate::core::test_isolation::tempdir();
+        let (out, recovered) = crate::core::test_isolation::with_root(home.path(), || {
+            let out = extract_test_summary(raw, TestEcosystem::Bun);
+            let recovered = follow_recovery_hint(&out);
+            (out, recovered)
+        });
+
+        let shown = shown_table_of(&out);
+        let hidden: Vec<&str> = table
+            .iter()
+            .filter(|l| !shown.contains(*l))
+            .copied()
+            .collect();
+        assert_eq!(
+            hidden.len(),
+            table.len() - MAX_BUN_COVERAGE_ROWS,
+            "the cap dropped something other than what it announced:\n{out}"
+        );
+
+        assert_eq!(
+            recovered.lines().collect::<Vec<_>>(),
+            hidden,
+            "what the hint returns is not the rows that were dropped"
+        );
+    }
+
+    /// Reads back what a recovery hint names, the way a caller following it
+    /// would: the recall entry, or the file the tee branch wrote.
+    fn follow_recovery_hint(out: &str) -> String {
+        let hint = out
+            .lines()
+            .find(|l| l.contains("rtk recall ") || l.contains("tail -n +1 "))
+            .unwrap_or_else(|| panic!("no recovery hint for the hidden rows:\n{out}"));
+
+        if let Some(rest) = hint.split("rtk recall ").nth(1) {
+            let hash = rest.trim_end_matches(']').trim();
+            return crate::core::retriever::recalled_content(hash)
+                .unwrap_or_else(|| panic!("the hint names recall entry {hash}, which is gone"));
+        }
+
+        let rest = hint
+            .split("tail -n +1 ")
+            .nth(1)
+            .unwrap_or_else(|| panic!("unreadable hint: {hint}"));
+        // Tee mode prints the path under `~`, which is the test's own root here.
+        let shown = rest.trim_end_matches(']').trim().trim_matches('"');
+        let path = match shown
+            .strip_prefix("~/")
+            .or_else(|| shown.strip_prefix("$HOME/"))
+        {
+            Some(tail) => crate::core::user_dirs::home()
+                .unwrap_or_else(|| panic!("no home to resolve {shown} against"))
+                .join(tail),
+            None => std::path::PathBuf::from(shown),
+        };
+        std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!("the hint names {}, which did not open: {e}", path.display())
+        })
+    }
+
+    /// A source frame with `||` in it must not read as a table row: that is
+    /// what tracking the table by header rather than by column count buys.
+    #[test]
+    fn test_bun_source_frame_with_pipes_is_not_coverage() {
+        let raw = concat!(
+            "bun test v1.3.14 (0d9b296a)\n",
+            "\n",
+            "app.test.ts:\n",
+            "3 | const name = user.name || user.nick || \"anon\";\n",
+            "                            ^\n",
+            "error: expect(received).toBe(expected)\n",
+            "Expected: \"anon\"\n",
+            "Received: \"nick\"\n",
+            "      at <anonymous> (/home/user/project/app.test.ts:3:20)\n",
+            "(fail) resolves the name [0.21ms]\n",
+            "\n",
+            " 0 pass\n",
+            " 1 fail\n",
+            "Ran 1 tests across 1 file. [8.00ms]\n",
+        );
+        let out = extract_test_summary(raw, TestEcosystem::Bun);
+        assert!(out.contains("resolves the name"), "{out}");
+        assert!(out.contains("Expected: \"anon\""), "{out}");
+        assert!(out.contains("Received: \"nick\""), "{out}");
+        assert!(!out.contains("% Funcs"), "no table here:\n{out}");
+    }
+
+    /// Snapshot reporting: the "+1 added" line and the count variant that
+    /// replaces the plain expect() line.
+    #[test]
+    fn test_bun_snapshot_lines_survive() {
+        let added = extract_test_summary(
+            include_str!("../../tests/fixtures/bun_test_snapshot_raw.txt"),
+            TestEcosystem::Bun,
+        );
+        assert!(added.contains("snapshots: +1 added"), "{added}");
+
+        let counted = extract_test_summary(
+            include_str!("../../tests/fixtures/bun_test_coverage_raw.txt"),
+            TestEcosystem::Bun,
+        );
+        assert!(counted.contains("1 snapshots,"), "{counted}");
+        // The same mixed run carries skip and todo alongside the snapshot line.
+        assert!(added.contains("1 skip"), "{added}");
+        assert!(added.contains("1 todo"), "{added}");
+    }
+
+    /// A run killed mid-flight (SIGKILL) prints the banner and nothing else:
+    /// no counts, no markers. The raw-tail fallback has to surface that, or an
+    /// aborted run reads as a silent success.
+    #[test]
+    fn test_bun_killed_run_is_not_reported_as_a_pass() {
+        let out = extract_test_summary(
+            include_str!("../../tests/fixtures/bun_test_crash_raw.txt"),
+            TestEcosystem::Bun,
+        );
+        assert!(out.contains("bun test v1.3.14"), "{out}");
+        assert!(!out.contains("pass"), "{out}");
+        assert!(!out.contains("SUMMARY:"), "{out}");
+    }
+
+    /// 40 failures in one run: the cap keeps ten and counts the rest, and the
+    /// footer still says how many tests actually ran.
+    #[test]
+    fn test_bun_failure_cap_counts_what_it_drops() {
+        let raw = include_str!("../../tests/fixtures/bun_test_many_failures_raw.txt");
+        let out = extract_test_summary(raw, TestEcosystem::Bun);
+        assert!(out.contains("(fail) case 0"), "{out}");
+        assert!(
+            out.contains(&format!("+{} more failures", 40 - MAX_RUNNER_FAILURES)),
+            "{out}"
+        );
+        assert!(out.contains("40 fail"), "{out}");
+        assert!(out.contains("Ran 40 tests"), "{out}");
+
+        let savings = 100.0 - (count_tokens(&out) as f64 / count_tokens(raw) as f64 * 100.0);
+        assert!(savings >= 60.0, "got {savings:.1}%");
     }
 
     /// One red run per runtime carrying every failure shape at once.

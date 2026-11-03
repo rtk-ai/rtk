@@ -1,0 +1,11 @@
+go: finding module for package github.com/google/go-cmp/cmp
+go: downloading github.com/google/go-cmp v0.7.0
+go: found github.com/google/go-cmp/cmp in github.com/google/go-cmp v0.7.0
+{"Time":"2026-11-02T13:19:55.28475031Z","Action":"start","Package":"example.com/rtk-pipe-finding/dep"}
+{"Time":"2026-11-02T13:19:55.286241792Z","Action":"run","Package":"example.com/rtk-pipe-finding/dep","Test":"TestDiff"}
+{"Time":"2026-11-02T13:19:55.286270212Z","Action":"output","Package":"example.com/rtk-pipe-finding/dep","Test":"TestDiff","Output":"=== RUN   TestDiff\n","OutputType":"frame"}
+{"Time":"2026-11-02T13:19:55.286289532Z","Action":"output","Package":"example.com/rtk-pipe-finding/dep","Test":"TestDiff","Output":"--- PASS: TestDiff (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-11-02T13:19:55.286293162Z","Action":"pass","Package":"example.com/rtk-pipe-finding/dep","Test":"TestDiff","Elapsed":0}
+{"Time":"2026-11-02T13:19:55.286297432Z","Action":"output","Package":"example.com/rtk-pipe-finding/dep","Output":"PASS\n","OutputType":"frame"}
+{"Time":"2026-11-02T13:19:55.286609771Z","Action":"output","Package":"example.com/rtk-pipe-finding/dep","Output":"ok  \texample.com/rtk-pipe-finding/dep\t0.002s\n"}
+{"Time":"2026-11-02T13:19:55.28680449Z","Action":"pass","Package":"example.com/rtk-pipe-finding/dep","Elapsed":0.002}
