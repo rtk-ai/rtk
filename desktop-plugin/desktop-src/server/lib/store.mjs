@@ -26,9 +26,16 @@ export class Store {
     try { fs.appendFileSync(this.path("server.log"), `${stamp()} ${msg}\n`); } catch {}
   }
   readJson(name, dflt) {
-    try { return JSON.parse(fs.readFileSync(this.path(name), "utf8")); } catch { return dflt; }
+    let text;
+    try { text = fs.readFileSync(this.path(name), "utf8"); } catch { return dflt; }
+    try { return JSON.parse(text); } catch (e) { this.log(`${name} is not valid JSON (${e.message}), using the default`); return dflt; }
   }
-  writeJson(name, value) { fs.writeFileSync(this.path(name), JSON.stringify(value)); }
+  writeJson(name, value) {
+    const tmp = this.path(`${name}.${process.pid}.tmp`);
+    fs.writeFileSync(tmp, JSON.stringify(value));
+    fs.renameSync(tmp, this.path(name));
+  }
+
   readText(name) {
     try { return fs.readFileSync(this.path(name), "utf8"); } catch { return ""; }
   }

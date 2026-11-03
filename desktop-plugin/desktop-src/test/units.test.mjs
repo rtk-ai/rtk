@@ -1,16 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { dataDir, Store } from "../server/lib/store.mjs";
 import { candidates, findInstalled } from "../server/lib/rtklocal.mjs";
 import { parseToml, pipelineName, layaQuestions, row, usesLaya, handsOff } from "../server/lib/pipelines.mjs";
-import { recordTask, allTasks, gainText, taskText } from "../server/lib/ledger.mjs";
-import { pipelineUrl } from "../server/lib/github.mjs";
+import { recordTask, allTasks, gainText, taskText, validRecord, cell } from "../server/lib/ledger.mjs";
+import { allowedUrl, get, pipelineUrl } from "../server/lib/github.mjs";
+import { npmCommand } from "../server/lib/laya.mjs";
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "rtk-desktop-test-"));
-const HERE = path.dirname(new URL(import.meta.url).pathname);
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 test("data dir per OS", () => {
   assert.equal(dataDir("darwin", {}, "/Users/u"), "/Users/u/Library/Application Support/rtk-desktop");
@@ -38,7 +41,91 @@ test("installed rtk candidates follow the OS, and the first one answering --vers
 test("pipeline sources", () => {
   assert.equal(pipelineUrl("github:o/r"), "https://raw.githubusercontent.com/o/r/HEAD/pipeline.toml");
   assert.equal(pipelineUrl("https://github.com/o/r@abc123"), "https://raw.githubusercontent.com/o/r/abc123/pipeline.toml");
+  assert.equal(pipelineUrl("github:o/r@release/v1.2"), "https://raw.githubusercontent.com/o/r/release/v1.2/pipeline.toml");
   assert.equal(pipelineUrl("laya-tiered"), null);
+  assert.equal(pipelineUrl("github:o/r@../../evil/repo/main"), null);
+  assert.equal(pipelineUrl("github:o/r@./main"), null);
+  assert.equal(pipelineUrl("github:../.."), null);
+  assert.ok(allowedUrl(new URL("https://raw.githubusercontent.com/o/r/HEAD/pipeline.toml")));
+  assert.ok(allowedUrl(new URL("http://127.0.0.1:8080/x")));
+  assert.ok(!allowedUrl(new URL("http://example.com/x")));
+  assert.ok(!allowedUrl(new URL("ftp://example.com/x")));
+});
+
+test("downloads stay on https, stop at the size cap and give up on redirect loops", async (t) => {
+  const srv = http.createServer((req, res) => {
+    res.on("error", () => {});
+    if (req.url === "/small") return res.end("ok " + req.headers["user-agent"]);
+    if (req.url === "/hop") { res.writeHead(302, { location: "/small" }); return res.end(); }
+    if (req.url === "/down") { res.writeHead(302, { location: "http://example.com/x" }); return res.end(); }
+    if (req.url === "/loop") { res.writeHead(302, { location: "/loop" }); return res.end(); }
+    if (req.url === "/big") {
+      res.writeHead(200, { "content-type": "text/plain" });
+      let n = 0;
+      const pump = () => { while (n < 64 && res.write("x".repeat(65536))) n++; if (n < 64) res.once("drain", pump); else res.end(); };
+      return pump();
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  t.after(() => { srv.closeAllConnections(); srv.close(); });
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  assert.equal(await get(base + "/small"), "ok rtk-desktop");
+  assert.equal(await get(base + "/hop"), "ok rtk-desktop");
+  await assert.rejects(get(base + "/big", { max: 100000 }), /too large \(over 100000 bytes\)/);
+  await assert.rejects(get(base + "/down"), /refused http:\/\/example\.com/);
+  await assert.rejects(get(base + "/loop"), /too many redirects/);
+  await assert.rejects(get("http://example.com/x"), /refused http:\/\/example\.com/);
+  await assert.rejects(get(base + "/missing"), /HTTP 404/);
+});
+
+test("npm command line per OS", () => {
+  const win = npmCommand("win32", "C:\\Program Files\\nodejs", ["install", "--no-audit", "@receptron/laya"], { ComSpec: "C:\\Windows\\System32\\cmd.exe" });
+  assert.equal(win.file, "C:\\Windows\\System32\\cmd.exe");
+  assert.deepEqual(win.args, ["/d", "/s", "/c", '""C:\\Program Files\\nodejs\\npm.cmd" "install" "--no-audit" "@receptron/laya""']);
+  assert.equal(win.options.windowsVerbatimArguments, true);
+  assert.deepEqual(npmCommand("darwin", "/opt/homebrew/bin", ["init", "-y"]), { file: "/opt/homebrew/bin/npm", args: ["init", "-y"], options: {} });
+});
+
+test("toml reader handles comments, multi-line strings, quoted names and arrays", () => {
+  const toml = [
+    "[pipeline] # the header",
+    'name = "demo" # trailing',
+    "tags = [\"a, b\", \"c#d\", 'e']   # commas and hashes inside strings",
+    "nested = [[1, 2], [3]]",
+    "n = 1_000",
+    "neg = -2.5",
+    '[classifier."kind"]',
+    'question = "choice"',
+    'text = """',
+    'line one "quoted"',
+    "line two \\",
+    "   joined",
+    '"""',
+    "lit = '''",
+    "raw \\n kept",
+    "'''",
+    '# provider = "laya"',
+    "[upstream.x]",
+    'provider = "laya"',
+    "[[hook.before_tool.shell]]",
+    'action = "deny"',
+    "",
+  ].join("\n");
+  const sec = parseToml(toml);
+  assert.equal(sec.pipeline.name, "demo");
+  assert.deepEqual(sec.pipeline.tags, ["a, b", "c#d", "e"]);
+  assert.deepEqual(sec.pipeline.nested, [[1, 2], [3]]);
+  assert.equal(sec.pipeline.n, 1000);
+  assert.equal(sec.pipeline.neg, -2.5);
+  assert.equal(sec["classifier.kind"].question, "choice");
+  assert.equal(sec["classifier.kind"].text, 'line one "quoted"\nline two joined\n');
+  assert.equal(sec["classifier.kind"].lit, "raw \\n kept\n");
+  assert.ok(usesLaya(toml) && handsOff(toml));
+  assert.ok(!usesLaya('# provider = "laya"\n[pipeline]\nname = "x"\n'));
+  assert.ok(!handsOff('[pipeline]\nname = "x"\n# action = "deny"\n'));
+  assert.equal(pipelineName('# [pipeline]\n# name = "wrong"\n[pipeline]\nname = "right"\n'), "right");
 });
 
 test("toml reader and Laya questions on a copy of the published laya-tiered", () => {
@@ -91,3 +178,30 @@ test("task records and the gain text", () => {
   assert.match(gainText([], null, null, null), /\n⚠️ The record of this task did not arrive\.\n\n\| \| On this computer \|\n\|---\|---\|\n\| Claude Code \| rtk is not installed here, so no history \|\n\| Desktop tasks \| none recorded yet \|\n/);
   assert.match(gainText([], null, { path: "/x/rtk", version: "0.9.0" }, null), /rtk 0\.9\.0 at \/x\/rtk did not answer/);
 });
+
+test("records are bounded and table cells are flattened", () => {
+  assert.ok(validRecord({ v: 1, sid: "a", delegation: { helpers: [] } }));
+  assert.ok(!validRecord({ v: 1, sid: "a", delegation: { helpers: Array.from({ length: 51 }, () => ({})) } }));
+  assert.ok(!validRecord({ v: 1, sid: "a", delegation: { helpers: "many" } }));
+  assert.ok(!validRecord({ v: 1, sid: "a", pad: "x".repeat(70000) }));
+  assert.ok(!validRecord([1]));
+  assert.equal(cell("a|b\nc"), "a b c");
+  const text = taskText({ v: 1, sid: "a", pipelines: ["p|q"], laya: { "k|": "v\n" }, delegation: { helpers: [{ type: "Explore|x", model: "haiku\n5.5", read: 1, kept: 1, usd: "nope" }] }, rules: { "r|s": 2 } });
+  assert.ok(!/\|q|Explore\|x|haiku\n|k\||r\|s/.test(text), text);
+  assert.match(text, /pipelines: p q · Laya: k=v \|/);
+
+  assert.match(text, /Explore x on haiku 5\.5 read ~1, reported ~0/);
+  assert.match(text, /helper cost \$0\.00 \|\n\| 📏 Rules \| r s ×2 \|$/);
+});
+
+test("store writes are atomic and corrupt files fall back to the default", () => {
+  const store = new Store(tmp());
+  store.writeJson("a.json", { x: 1 });
+  assert.deepEqual(store.readJson("a.json", null), { x: 1 });
+  assert.deepEqual(fs.readdirSync(store.dir).filter((f) => f.endsWith(".tmp")), []);
+  fs.writeFileSync(store.path("b.json"), "{not json");
+  assert.deepEqual(store.readJson("b.json", [1]), [1]);
+  assert.match(store.readText("server.log"), /b\.json is not valid JSON/);
+  assert.equal(store.readJson("missing.json", "d"), "d");
+});
+

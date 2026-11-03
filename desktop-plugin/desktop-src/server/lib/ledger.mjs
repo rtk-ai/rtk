@@ -9,9 +9,16 @@ export function readTasks(store) {
   return rows;
 }
 
+export const MAX_RECORD = 65536;
+
 export function validRecord(rec) {
-  return !!rec && typeof rec === "object" && /^[\w-]{1,80}$/.test(String(rec.sid || "")) && rec.v === 1;
+  if (!rec || typeof rec !== "object" || Array.isArray(rec) || !/^[\w-]{1,80}$/.test(String(rec.sid || "")) || rec.v !== 1) return false;
+  const helpers = (rec.delegation || {}).helpers;
+  if (helpers !== undefined && (!Array.isArray(helpers) || helpers.length > 50)) return false;
+  try { return JSON.stringify(rec).length <= MAX_RECORD; } catch { return false; }
 }
+
+export const cell = (s) => String(s ?? "").replace(/[|\r\n]+/g, " ").trim();
 
 export function recordTask(store, rec) {
   if (!validRecord(rec)) return false;
@@ -52,14 +59,15 @@ export function taskText(rec) {
   const helpers = dl.helpers || [];
   if (!helpers.length) rows.push(["🤝 Delegation", "none"]);
   helpers.forEach((h, i) => rows.push([i ? "" : "🤝 Delegation",
-    `${h.type} on ${h.model} read ~${fmt(h.read || 0)}${h.wrote ? `, produced ~${fmt(h.wrote)}` : ""}, reported ~${fmt(h.report || 0)}: **~${fmt(h.kept || 0)} tokens kept out of the main context**, helper cost ${usd(h.usd || 0)}`]));
+    `${cell(h.type)} on ${cell(h.model)} read ~${fmt(h.read || 0)}${h.wrote ? `, produced ~${fmt(h.wrote)}` : ""}, reported ~${fmt(h.report || 0)}: **~${fmt(h.kept || 0)} tokens kept out of the main context**, helper cost ${usd(Number(h.usd) || 0)}`]));
   const spent = Object.entries(cost.by_model || {}).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
-  if (spent.length) rows.push(["💵 Cost", spent.map(([m, v]) => `${m} ${usd(v)}`).join(", ") + " (API list prices, estimate)"]);
+  if (spent.length) rows.push(["💵 Cost", spent.map(([m, v]) => `${cell(m)} ${usd(Number(v) || 0)}`).join(", ") + " (API list prices, estimate)"]);
   const rules = Object.entries(rec.rules || {});
-  if (rules.length) rows.push(["📏 Rules", rules.map(([r, n]) => `${r} ×${n}`).join(", ")]);
-  const ctx = [rec.off ? "pipelines off" : `pipelines: ${(rec.pipelines || []).join(", ") || "none"}`];
+  if (rules.length) rows.push(["📏 Rules", rules.map(([r, n]) => `${cell(r)} ×${Number(n) || 0}`).join(", ")]);
+  const ctx = [rec.off ? "pipelines off" : `pipelines: ${(Array.isArray(rec.pipelines) ? rec.pipelines : []).map(cell).join(", ") || "none"}`];
   const laya = Object.entries(rec.laya || {});
-  if (laya.length) ctx.push("Laya: " + laya.map(([q, a]) => `${q}=${a}`).join(", "));
+  if (laya.length) ctx.push("Laya: " + laya.map(([q, a]) => `${cell(q)}=${cell(a)}`).join(", "));
+
   return table(`This task · ${ctx.join(" · ")}`, rows);
 }
 

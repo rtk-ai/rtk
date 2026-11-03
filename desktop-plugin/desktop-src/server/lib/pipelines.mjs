@@ -6,40 +6,119 @@ import { get, pipelineUrl } from "./github.mjs";
 export const ALLOWLIST = "rtk-ai/pipelines";
 const TTL = 3600 * 1000;
 
+function multiline(body, literal) {
+  const s = body.replace(/^\r?\n/, "");
+  if (literal) return s;
+  let out = "";
+  const joined = s.replace(/\\\r?\n[ \t\r\n]*/g, "");
+  for (let i = 0; i < joined.length; i++) {
+    const c = joined[i];
+    if (c === "\\" && i + 1 < joined.length) out += c + joined[++i];
+    else if (c === '"') out += '\\"';
+    else if (c === "\n") out += "\\n";
+    else if (c === "\r") out += "\\r";
+    else if (c === "\t") out += "\\t";
+    else out += c;
+  }
+  try { return JSON.parse(`"${out}"`); } catch { return joined; }
+}
+
+export function logicalLines(text) {
+  const lines = [];
+  const n = text.length;
+  let cur = "", i = 0;
+  while (i < n) {
+    const c = text[i];
+    if (c === "#") { while (i < n && text[i] !== "\n") i++; continue; }
+    if (c === "\n") { lines.push(cur); cur = ""; i++; continue; }
+    const q3 = text.startsWith('"""', i) ? '"""' : text.startsWith("'''", i) ? "'''" : null;
+    if (q3) {
+      const end = text.indexOf(q3, i + 3);
+      cur += JSON.stringify(multiline(end < 0 ? text.slice(i + 3) : text.slice(i + 3, end), q3 === "'''"));
+      i = end < 0 ? n : end + 3;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      let j = i + 1;
+      while (j < n && text[j] !== c && text[j] !== "\n") j += c === '"' && text[j] === "\\" ? 2 : 1;
+      cur += text.slice(i, Math.min(j + 1, n));
+      i = j + 1;
+      continue;
+    }
+    cur += c;
+    i++;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+export const clean = (toml) => logicalLines(String(toml || "")).join("\n");
+
+const unquote = (s) => s.trim().replace(/^"(.*)"$/, "$1").replace(/^'(.*)'$/, "$1");
+
 export function parseToml(text) {
   const sections = {};
   let cur = null;
-  for (const raw of text.split("\n")) {
+  for (const raw of logicalLines(text)) {
     const s = raw.trim();
+    if (!s) continue;
     let m;
-    if ((m = /^\[([^\[\]]+)\]$/.exec(s))) { cur = m[1].trim(); sections[cur] = sections[cur] || {}; continue; }
     if (s.startsWith("[[")) { cur = null; continue; }
-    if (!cur || !(m = /^("?[\w.-]+"?)\s*=\s*(.*)$/.exec(s))) continue;
-    const key = m[1].replace(/^"|"$/g, "");
+    if ((m = /^\[(.+)\]$/.exec(s))) { cur = m[1].split(".").map(unquote).join("."); sections[cur] = sections[cur] || {}; continue; }
+    if (!cur || !(m = /^("(?:[^"\\]|\\.)*"|'[^']*'|[\w.-]+)\s*=\s*(.*)$/.exec(s))) continue;
     const v = value(m[2]);
-    if (v !== undefined) sections[cur][key] = v;
+    if (v !== undefined) sections[cur][unquote(m[1])] = v;
   }
   return sections;
 }
 
-function value(s) {
+function closing(s) {
+  let depth = 0, q = null;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (q) { if (c === "\\" && q === '"') i++; else if (c === q) q = null; continue; }
+    if (c === '"' || c === "'") q = c;
+    else if (c === "[") depth++;
+    else if (c === "]" && --depth === 0) return i;
+  }
+  return s.length;
+}
+
+function splitTop(s) {
+  const out = [];
+  let depth = 0, q = null, cur = "";
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (q) { cur += c; if (c === "\\" && q === '"') cur += s[++i] ?? ""; else if (c === q) q = null; continue; }
+    if (c === '"' || c === "'") q = c;
+    else if (c === "[") depth++;
+    else if (c === "]") depth--;
+    else if (c === "," && depth === 0) { out.push(cur); cur = ""; continue; }
+    cur += c;
+  }
+  if (cur.trim()) out.push(cur);
+  return out;
+}
+
+function value(raw) {
+  const s = raw.trim();
   let m;
   if ((m = /^"((?:[^"\\]|\\.)*)"/.exec(s))) { try { return JSON.parse('"' + m[1] + '"'); } catch { return m[1]; } }
   if ((m = /^'([^']*)'/.exec(s))) return m[1];
-  if ((m = /^\[(.*)\]/.exec(s))) return m[1].split(",").map((x) => value(x.trim())).filter((x) => x !== undefined);
+  if (s.startsWith("[")) return splitTop(s.slice(1, closing(s))).map(value).filter((x) => x !== undefined);
   if ((m = /^(true|false)\b/.exec(s))) return m[1] === "true";
-  if ((m = /^(-?\d+(?:\.\d+)?)/.exec(s))) return Number(m[1]);
+  if ((m = /^[-+]?\d[\d_]*(\.\d[\d_]*)?([eE][-+]?\d+)?/.exec(s))) return Number(m[0].replace(/_/g, ""));
   return undefined;
 }
 
 export function pipelineName(toml) {
-  const m = /^\[pipeline\]\s*$([^]*?)^\[/m.exec(toml + "\n[");
+  const m = /^\[pipeline\]\s*$([^]*?)^\[/m.exec(clean(toml) + "\n[");
   const n = m && /^\s*name\s*=\s*"([\w.-]+)"/m.exec(m[1]);
   return n ? n[1] : null;
 }
 
-export const usesLaya = (toml) => /provider\s*=\s*"laya"/.test(toml);
-export const handsOff = (toml) => /action\s*=\s*"(deny|route)"/.test(toml);
+export const usesLaya = (toml) => /provider\s*=\s*"laya"/.test(clean(toml));
+export const handsOff = (toml) => /action\s*=\s*"(deny|route)"/.test(clean(toml));
 
 export function layaQuestions(toml) {
   const sec = parseToml(toml);
@@ -115,7 +194,7 @@ export class Pipelines {
     if (/^[\w.-]+$/.test(src)) {
       const e = (await this.allowlist()).find((x) => x.name === src);
       if (!e) throw new Error(`${src} is not on the reviewed list (/rtk-pipelines-search shows it); use github:owner/repo for an unreviewed pipeline`);
-      return { toml: await get(`https://raw.githubusercontent.com/${e.owner}/${e.repo}/${e.sha}/pipeline.toml`), source: `github:${e.owner}/${e.repo}@${e.sha.slice(0, 7)}` };
+      return { toml: await get(`https://raw.githubusercontent.com/${e.owner}/${e.repo}/${e.sha}/pipeline.toml`), source: `github:${e.owner}/${e.repo}@${e.sha.slice(0, 7)}`, reviewed: true };
     }
     const gh = pipelineUrl(src);
     if (gh) return { toml: await get(gh), source: src };
@@ -124,12 +203,15 @@ export class Pipelines {
     throw new Error("use a pipeline name, github:owner/repo, a https:// URL or a file path");
   }
 
+  sources() { const s = this.store.readJson("sources.json", {}); return s && typeof s === "object" && !Array.isArray(s) ? s : {}; }
+
   async add(source) {
-    const { toml, source: src } = await this.fetchSource(source);
+    const { toml, source: src, reviewed } = await this.fetchSource(source);
     const name = pipelineName(toml);
     if (!name) return "That file is not an rtk pipeline: it has no [pipeline] name.";
     fs.mkdirSync(this.dir, { recursive: true });
     fs.writeFileSync(`${this.dir}/${name}.toml`, toml);
+    this.store.writeJson("sources.json", { ...this.sources(), [name]: { source: src, reviewed: !!reviewed } });
     const names = this.active();
     const notes = [];
     if (!names.includes(name)) names.push(name);
@@ -139,8 +221,9 @@ export class Pipelines {
     }
     this.setActive(names);
     if (usesLaya(toml)) notes.push("it uses Laya, which RTK starts on this computer" + (this.laya.findNode() ? "" : " once Node.js 20+ is installed"));
-    if (/provider\s*=\s*"anthropic"/.test(toml)) notes.push("rules that call a model directly stay silent without an API key");
-    const rules = (toml.match(/^\[\[hook\./gm) || []).length;
+    if (/provider\s*=\s*"anthropic"/.test(clean(toml))) notes.push("rules that call a model directly stay silent without an API key");
+    if (!reviewed) notes.push("nobody at RTK has reviewed this pipeline, so read it before you trust its rules");
+    const rules = (clean(toml).match(/^\[\[hook\./gm) || []).length;
     return `✅ Added **${name}** from ${src} (${rules} rules). ${this.list()}${notes.length ? " Note: " + notes.join("; ") + "." : ""}`;
   }
 
@@ -149,6 +232,8 @@ export class Pipelines {
     if (!names.includes(name)) return `⚠️ ${name} is not in use. ${this.list()}`;
     names.splice(names.indexOf(name), 1);
     this.setActive(names);
+    const sources = this.sources();
+    if (name in sources) { delete sources[name]; this.store.writeJson("sources.json", sources); }
     return `✅ Removed **${name}**. ${this.list()}`;
   }
 
@@ -157,7 +242,11 @@ export class Pipelines {
     return `✅ Back to the defaults: **${DEFAULTS.join("**, **")}**.`;
   }
 
-  list() { const n = this.active(); return n.length ? `New tasks use: **${n.join("**, **")}**.` : "New tasks use no pipelines."; }
+  list() {
+    const n = this.active(), sources = this.sources();
+    const show = (x) => `**${x}**` + (!DEFAULTS.includes(x) && sources[x] && !sources[x].reviewed ? ` (unreviewed, from ${sources[x].source})` : "");
+    return n.length ? `New tasks use: ${n.map(show).join(", ")}.` : "New tasks use no pipelines.";
+  }
 
   async search(query) {
     const q = String(query || "").trim().toLowerCase();
@@ -187,11 +276,12 @@ export class Pipelines {
       if (DEFAULTS.includes(e.name)) continue;
       let what = [];
       try {
-        const toml = await this.reviewedToml(e);
+        const toml = clean(await this.reviewedToml(e));
         if (usesLaya(toml)) what.push("Laya, a classifier on your computer, labels each task");
         if (/haiku/i.test(toml)) what.push("searches go to a Haiku helper");
         if (/sonnet/i.test(toml)) what.push("implementations go to a Sonnet helper");
         if (/provider\s*=\s*"anthropic"/.test(toml)) what.push("some rules call a model directly (needs an API key)");
+
         if (usesLaya(toml)) what.push("needs Node.js 20+ for Laya");
       } catch (err) { this.store.log(`reviewed ${e.name}: ${err.message}`); }
       const bench = e.cost && e.cost.baseline && e.cost.pipeline ? `cost ${pct(e.cost.baseline, e.cost.pipeline)}% vs ${e.baseline || "stock"}` + (e.quality && e.quality.baseline != null ? `, ${e.quality.metric || "quality"} ${e.quality.baseline} → ${e.quality.pipeline}` : "") + ` (${[e.suite, e.model, e.trials && e.trials + " trials/arm"].filter(Boolean).join(", ")})` : "no benchmark published";
