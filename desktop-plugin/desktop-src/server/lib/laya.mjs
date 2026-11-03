@@ -6,6 +6,13 @@ import { spawn, spawnSync } from "node:child_process";
 export const IDLE = 1800;
 export const PORT = 41733;
 
+export function npmCommand(platform, bin, args, env = process.env) {
+  if (platform !== "win32") return { file: path.posix.join(bin, "npm"), args, options: {} };
+  const line = [path.win32.join(bin, "npm.cmd"), ...args].map((a) => `"${a}"`).join(" ");
+
+  return { file: env.ComSpec || "cmd.exe", args: ["/d", "/s", "/c", `"${line}"`], options: { windowsVerbatimArguments: true } };
+}
+
 export class Laya {
   constructor(store, { platform = process.platform, env = process.env, home = os.homedir(), src = null } = {}) {
     this.store = store;
@@ -70,6 +77,20 @@ export class Laya {
 
   installed() { return fs.existsSync(path.join(this.dir, ".installed")); }
   firstRun() { return !this.installed() || !fs.existsSync(path.join(this.home, ".cache", "receptron-laya")); }
+  installFailed() {
+    try { return fs.readFileSync(path.join(this.dir, ".install-failed"), "utf8").trim(); } catch { return ""; }
+  }
+
+  npm(bin, args, timeout, env, out) {
+    const c = npmCommand(this.platform, bin, args, env);
+    return new Promise((resolve) => {
+      let p;
+      try { p = spawn(c.file, c.args, { cwd: this.dir, env, stdio: ["ignore", out, out], ...c.options }); } catch (e) { return resolve({ status: null, error: e.message }); }
+      const timer = setTimeout(() => { try { p.kill(); } catch {} }, timeout);
+      p.on("error", (e) => { clearTimeout(timer); resolve({ status: null, error: e.message }); });
+      p.on("exit", (code, signal) => { clearTimeout(timer); resolve({ status: code, error: signal ? `npm ${signal}` : "" }); });
+    });
+  }
 
   async boot() {
     try {
@@ -77,22 +98,30 @@ export class Laya {
       const node = this.findNode();
       if (!node) throw new Error("Node.js 20+ not found on this computer");
       const bin = path.dirname(node);
-      const env = { ...this.env, PATH: [bin, this.env.PATH || ""].join(this.platform === "win32" ? ";" : ":"), ONNXRUNTIME_NODE_INSTALL: "skip", LAYA_PORT: String(this.port) };
+      const env = { ...this.env, PATH: [bin, this.env.PATH || ""].join(this.platform === "win32" ? ";" : ":"), ONNXRUNTIME_NODE_INSTALL: "skip", LAYA_PORT: String(this.port), LAYA_EXIT_WITH_PARENT: "1" };
       fs.mkdirSync(this.dir, { recursive: true });
       if (this.src) fs.copyFileSync(this.src, path.join(this.dir, "server.mjs"));
       const out = fs.openSync(this.logPath, "a");
-      if (!this.installed()) {
-        this.phase = "installing @receptron/laya";
-        const npm = path.join(bin, this.platform === "win32" ? "npm.cmd" : "npm");
-        const run = (args, timeout) => spawnSync(npm, args, { cwd: this.dir, env, stdio: ["ignore", out, out], timeout, shell: this.platform === "win32" });
-        if (!fs.existsSync(path.join(this.dir, "package.json"))) run(["init", "-y"], 60000);
-        const r = run(["install", "--no-audit", "--no-fund", "@receptron/laya"], 900000);
-        if (r.status !== 0) throw new Error("npm install failed (see laya.log)");
-        fs.writeFileSync(path.join(this.dir, ".installed"), new Date().toISOString() + "\n");
+      try {
+        if (!this.installed()) {
+          this.phase = "installing @receptron/laya";
+          if (!fs.existsSync(path.join(this.dir, "package.json"))) await this.npm(bin, ["init", "-y"], 60000, env, out);
+          const r = await this.npm(bin, ["install", "--no-audit", "--no-fund", "@receptron/laya"], 900000, env, out);
+          if (r.status !== 0) {
+            const why = `npm install failed${r.error ? ` (${r.error})` : ""}, see laya.log`;
+            fs.writeFileSync(path.join(this.dir, ".install-failed"), why + "\n");
+            throw new Error(why);
+          }
+          fs.rmSync(path.join(this.dir, ".install-failed"), { force: true });
+          fs.writeFileSync(path.join(this.dir, ".installed"), new Date().toISOString() + "\n");
+        }
+        this.phase = "loading model (first time downloads ~1.7 GB)";
+        this.proc = spawn(node, ["server.mjs"], { cwd: this.dir, env, stdio: ["pipe", out, out] });
+        this.proc.on("error", () => { this.proc = null; });
+        this.proc.on("exit", () => { this.proc = null; if (this.phase === "up") this.phase = "stopped"; });
+      } finally {
+        fs.closeSync(out);
       }
-      this.phase = "loading model (first time downloads ~1.7 GB)";
-      this.proc = spawn(node, ["server.mjs"], { cwd: this.dir, env, stdio: ["ignore", out, out] });
-      this.proc.on("exit", () => { if (this.phase !== "stopped") this.phase = "stopped"; this.proc = null; });
       for (let i = 0; i < 720; i++) {
         if (await this.up()) { this.phase = "up"; this.store.log("laya up"); return; }
         if (!this.proc) throw new Error("laya exited (see laya.log)");
@@ -106,12 +135,14 @@ export class Laya {
     }
   }
 
-  start() {
-    if (this.phase === "stopped" || this.phase === "failed") {
-      this.phase = "starting";
-      this.error = "";
-      this.boot();
-    }
+  start(retry = false) {
+    if (this.phase !== "stopped" && this.phase !== "failed") return;
+    const failed = this.installFailed();
+    if (failed && !retry) { this.phase = "failed"; this.error = failed; return; }
+    if (failed) fs.rmSync(path.join(this.dir, ".install-failed"), { force: true });
+    this.phase = "starting";
+    this.error = "";
+    this.boot();
   }
 
   stop() {

@@ -113,20 +113,23 @@ async function call(name, args) {
   }
   if (name === "rtk_laya") {
     const act = args.action || "status";
-    if (act === "on") { fs.rmSync(store.path("laya-off"), { force: true }); laya.used = Date.now(); laya.start(); }
+    if (act === "on") { fs.rmSync(store.path("laya-off"), { force: true }); laya.used = Date.now(); laya.start(true); }
     if (act === "off") { store.append("laya-off", "off"); laya.stop(); }
+    if (act === "status" && !laya.off() && (laya.phase === "failed" || laya.installFailed()) && laya.findNode()) { laya.used = Date.now(); laya.start(true); await laya.waitUp(6); }
     return text(await laya.status());
   }
   if (name === "rtk_status") return text(await status());
-  throw new Error(`unknown tool ${name}`);
+  throw Object.assign(new Error(`unknown tool ${name}`), { code: -32602 });
 }
+
+const PROTOCOLS = ["2024-11-05", "2025-03-26", "2025-06-18"];
 
 async function handle(msg) {
   const m = msg.method, p = msg.params || {};
   if (m === "initialize") {
     store.log(`initialize client=${JSON.stringify(p.clientInfo)} os=${platform}/${arch} node=${process.versions.node}`);
     state.local = (p.clientInfo || {}).name === "claude-code";
-    return { protocolVersion: p.protocolVersion || "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "rtk-desktop", version: VERSION } };
+    return { protocolVersion: PROTOCOLS.includes(p.protocolVersion) ? p.protocolVersion : PROTOCOLS[PROTOCOLS.length - 1], capabilities: { tools: {} }, serverInfo: { name: "rtk-desktop", version: VERSION } };
   }
   if (m === "tools/list") return { tools: state.local ? [] : TOOLS };
   if (m === "ping") return {};
@@ -149,17 +152,18 @@ export function main() {
   rl.on("line", async (line) => {
     let msg;
     try { msg = JSON.parse(line); } catch { return; }
-    if (msg.id === undefined || msg.id === null) return;
+    if (!msg || typeof msg !== "object" || Array.isArray(msg) || msg.id === undefined || msg.id === null) return;
     let out;
     try {
       const res = await handle(msg);
       out = res === undefined ? { jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "method not found" } } : { jsonrpc: "2.0", id: msg.id, result: res };
     } catch (e) {
       store.log(`error ${e.stack || e.message}`);
-      out = { jsonrpc: "2.0", id: msg.id, error: { code: -32603, message: e.message } };
+      out = { jsonrpc: "2.0", id: msg.id, error: { code: e.code || -32603, message: e.message } };
     }
-    process.stdout.write(JSON.stringify(out) + "\n");
+    try { process.stdout.write(JSON.stringify(out) + "\n"); } catch (e) { store.log(`stdout write failed: ${e.message}`); }
   });
+
   const bye = () => { laya.stop(); process.exit(0); };
   rl.on("close", bye);
   process.on("SIGTERM", bye);

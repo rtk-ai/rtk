@@ -35,3 +35,9 @@ const server = createServer((req, res) => {
 });
 const HOST = process.env.LAYA_HOST ?? "127.0.0.1";
 server.listen(PORT, HOST, () => console.log(`laya: listening on ${HOST}:${PORT}/v1/systemone`));
+if (process.env.LAYA_EXIT_WITH_PARENT === "1") {
+  process.stdin.on("end", () => { console.log("laya: parent gone, exiting"); process.exit(0); });
+  process.stdin.on("error", () => process.exit(0));
+  process.stdin.resume();
+}
+
