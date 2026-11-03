@@ -2,6 +2,7 @@
 set -e
 ORIG=$(pwd)
 cd "$(dirname "$0")"
+SRC=$(pwd)
 VERSION=""; RTK=""; OUT="dist"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -16,15 +17,24 @@ case "$RTK" in "") RTK=".rtk-musl/rtk" ;; /*) ;; *) RTK="$ORIG/$RTK" ;; esac
 case "$OUT" in /*) ;; *) OUT="$ORIG/$OUT" ;; esac
 [ -f "$RTK" ] || { echo "no rtk binary at $RTK: pass --rtk with a Linux x86_64 musl build (see README.md)" >&2; exit 2; }
 command -v node >/dev/null || { echo "node is needed to check the service" >&2; exit 2; }
+command -v python3 >/dev/null || { echo "python3 is needed to stamp the version" >&2; exit 2; }
 command -v zip >/dev/null || { echo "zip is needed" >&2; exit 2; }
+MAGIC=$(head -c 4 "$RTK" | od -An -tx1 | tr -d ' \n')
+MACHINE=$(dd if="$RTK" bs=1 skip=18 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')
+[ "$MAGIC" = 7f454c46 ] && [ "$MACHINE" = 3e ] || { echo "$RTK is not a Linux x86_64 binary (the task workspace needs one)" >&2; exit 2; }
 
-node --check desktop-src/server/index.mjs
+for f in desktop-src/server/*.mjs desktop-src/server/lib/*.mjs desktop-src/laya/*.mjs; do node --check "$f"; done
 RTK=$(cd "$(dirname "$RTK")" && pwd)/$(basename "$RTK")
-rm -rf "$OUT"
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
+case "$OUT" in
+  "$ORIG"|"$SRC"|"$HOME"|/) echo "refusing to build into $OUT: give --out a directory of its own" >&2; exit 2 ;;
+esac
 STAGE="$OUT/rtk"
 BUNDLE="$OUT/rtk-desktop"
+rm -rf "$STAGE" "$BUNDLE"
+rm -f "$OUT"/rtk-desktop-plugin-*.zip "$OUT"/rtk-desktop-plugin-*.zip.sha256
+
 
 cp -R plugin "$STAGE"
 cp -R desktop-src "$BUNDLE"

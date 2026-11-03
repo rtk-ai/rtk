@@ -11,7 +11,8 @@ The **rtk** plugin brings RTK to Claude Desktop's Cowork tasks. Users get it as 
 | `test_hooks.py` | Tests of the hooks against a real `rtk` binary (`RTK_BIN`). |
 | `build.sh` | Builds the zip: stages `plugin/`, sets the version, adds the bundle, the licenses and `runtime/rtk`. |
 
-Two pieces are never committed: `plugin/runtime/rtk`, the Linux x86_64 musl `rtk` the task workspace runs (Cowork's workspace is Linux whatever the user's computer is), and the built bundle. The release workflow adds the `rtk` it just built, so the plugin always bundles the rtk it was released with and carries its version.
+Two pieces are never committed: the Linux x86_64 musl `rtk` the task workspace runs (Cowork's workspace is Linux whatever the user's computer is) and the built bundle; `build.sh` stages both under `dist/`. The release workflow adds the `rtk` it just built, so the plugin always bundles the rtk it was released with and carries its version.
+
 
 ## Build and test
 

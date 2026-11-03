@@ -8,7 +8,8 @@ RTK cuts what Claude reads and routes work to cheaper models. This plugin brings
 
 ## Install
 
-Claude Desktop: open **Customize › Plugins › Add › Add marketplace**, enter `rtk-ai/claude-plugins`, install **rtk**, then quit and reopen Desktop; updates come by themselves. Prefer a file? [Download the plugin](https://github.com/rtk-ai/rtk/releases/latest/download/rtk-desktop-plugin.zip) and use **Add › Upload plugin**. Claude Code users do not need this plugin: `rtk init -g` sets up RTK there, and the plugin stays inert in Claude Code sessions. Nothing else to install: the plugin bundles rtk 1.1.0 for the task workspace and runs its small service with Node.js on your computer. In any task, `/rtk-setup` shows what is in place, what to expect, and asks which pipelines to use; your first task ends with a one-line reminder of it. If rtk is installed on your computer, its own savings history appears in `/rtk-gain` too.
+Claude Desktop: open **Customize › Plugins › Add › Add marketplace**, enter `rtk-ai/claude-plugins`, install **rtk**, then quit and reopen Desktop; updates come by themselves. Prefer a file? [Download the plugin](https://github.com/rtk-ai/rtk/releases/latest/download/rtk-desktop-plugin.zip) and use **Add › Upload plugin**. Claude Code users do not need this plugin: `rtk init -g` sets up RTK there, and the plugin stays inert in Claude Code sessions. Nothing else to install: the plugin bundles rtk for the task workspace and runs its small service with Node.js on your computer.
+ In any task, `/rtk-setup` shows what is in place, what to expect, and asks which pipelines to use; your first task ends with a one-line reminder of it. If rtk is installed on your computer, its own savings history appears in `/rtk-gain` too.
 
 ## Commands
 
